@@ -560,6 +560,12 @@
        ((string? syms)
         (keymap-index (string->keymap-index syms)))
        ((pair? syms)
+        ;; NOTE: the field accessors of <keymap-index-type> are
+        ;; shadowed by the loop variables below, so aliases are bound
+        ;; here, outside of the named let.
+        ;;--------------------------------------------------------------
+        (let* ((%keymod mod-index)
+               (%keychar char-index))
         (let loop
             ((mod-index 0)
              (syms syms))
@@ -571,6 +577,18 @@
               (cond
                ((or (char? sym) (string? sym))
                 (make<keymap-index> mod-index sym (loop 0 next)))
+               ((pair? sym)
+                ;; A nested list is one key of the chord, written as
+                ;; its own list of modifiers and a terminating
+                ;; character, e.g. `(((ctrl #\x) (ctrl #\c)) . action)`
+                ;; for the Emacs chord C-x C-c. This form matches the
+                ;; key indexes accumulated by
+                ;; `MODAL-LOOKUP-STATE-STEP!` from real key events,
+                ;; which carry the modifier state of each key.
+                (let ((sub (keymap-index sym)))
+                  (make<keymap-index>
+                   (%keymod sub) (%keychar sub)
+                   (loop 0 next))))
                ((symbol? sym)
                 (let ((mod (modifier->integer sym)))
                   (cond
@@ -578,8 +596,7 @@
                    (else
                     (error "unknown keymap-index modifier symbol" sym)))))
                (else
-                (error "keymap index must be composed of symbols or characters" sym))))))))))
-
+                (error "keymap index must be composed of symbols or characters" sym)))))))))))
 
     (define (string->keymap-index str)
       ;; Emacs uses the ASCII protocol to represent control characters and

@@ -154,3 +154,123 @@
 
 ;;--------------------------------------------------------------------
 (test-end "schemacs_editor_engine")
+
+;;--------------------------------------------------------------------
+;; 3. regression tests: cursor motion, navigation, and line breaks
+;;
+;; These exercise the procedures which navigate and edit the text
+;; editor buffer, including round-trips through `text-load-port` and
+;; `text-dump-port`, and CRLF-protocol files.
+
+(test-begin "schemacs_editor_engine_motion")
+
+;; Round-trip a buffer whose last line has no terminating line break.
+(test-equal "AAA\nBBB\nno-newline"
+  (let ((ed (new-text-editor)))
+    (text-editor-insert ed "AAA\nBBB\nno-newline")
+    (text-editor-to-string ed)))
+
+;; Round-trip a buffer with empty lines.
+(test-equal "AAA\n\nBBB\n\n"
+  (let ((ed (new-text-editor)))
+    (text-editor-insert ed "AAA\n\nBBB\n\n")
+    (text-editor-to-string ed)))
+
+;; Move the cursor to the start of the buffer, insert text, jump to a
+;; middle line, insert, move to the end, insert. Verify nothing is
+;; lost or misplaced.
+(test-equal "SAAA\nB1BB\nCCC\nDDD\nE"
+  (let ((ed (new-text-editor)))
+    (text-editor-insert ed "AAA\nBBB\nCCC\nDDD\n")
+    (text-editor-move-cursor ed -100)
+    (text-editor-insert ed "S")
+    (text-editor-set-cursor ed 1 1)
+    (text-editor-insert ed "1")
+    (text-editor-move-cursor ed 100)
+    (text-editor-insert ed "E")
+    (text-editor-to-string ed)))
+
+;; A line break in the middle of a line splits the line, keeping the
+;; characters after the cursor on the new current line.
+(test-equal "HELLOW\nORLD\n"
+  (let ((ed (new-text-editor)))
+    (text-editor-insert ed "HELLOWORLD\n")
+    (text-editor-move-cursor ed -5)
+    (text-editor-insert ed "\n")
+    (text-editor-to-string ed)))
+
+;; Editing the last line of a buffer which does not end in a line
+;; break must not introduce a line break.
+(test-equal "aaa\nbbb\nc!cc"
+  (let ((ed (new-text-editor)))
+    (text-editor-insert ed "aaa\nbbb\n")
+    (text-editor-insert ed "ccc")
+    (text-editor-move-cursor ed -2)
+    (text-editor-insert ed "!")
+    (text-editor-to-string ed)))
+
+;; A CRLF-protocol file must round-trip, including after edits.
+(test-equal "one\r\ntwo\r\nthrXee\r\n"
+  (let ((ed (new-text-editor line-break-crlf)))
+    (text-editor-insert ed "one\r\ntwo\r\nthree\r\n")
+    (text-editor-move-cursor ed -4)
+    (text-editor-insert ed "X")
+    (text-editor-to-string ed)))
+
+;; A mid-line break in a CRLF-protocol file splits into two CRLF
+;; lines.
+(test-equal "HELLO\r\nWORLD\r\n"
+  (let ((ed (new-text-editor line-break-crlf)))
+    (text-editor-insert ed "HELLOWORLD\r\n")
+    (text-editor-move-cursor ed -7)
+    (text-editor-insert ed "\r\n")
+    (text-editor-to-string ed)))
+
+;; Cursor motion: the character index tracks the position after a
+;; sequence of moves and inserts.
+(test-assert
+ (let ((ed (new-text-editor)))
+   (text-editor-insert ed "alpha\nbeta\ngamma\n")
+   ;; move to start
+   (text-editor-move-cursor ed -100)
+   (let ((start (text-editor-get-cursor ed)))
+     (text-editor-set-cursor ed 1 2)
+     (let ((mid (text-editor-get-cursor ed)))
+       (and (= 0 start) (= 8 mid))))))
+
+;; Deleting characters within a line.
+(test-equal "hello\n"
+  (let ((ed (new-text-editor)))
+    (text-editor-insert ed "hello world\n")
+    (text-editor-move-cursor ed -100)
+    (text-editor-move-cursor ed 5)
+    (text-editor-delete-from-cursor ed 6)
+    (text-editor-to-string ed)))
+
+;; Backward delete at the start of a line merges with the line before,
+;; and leaves the cursor where the line break was.
+(test-equal "alphabeta\ngamma\n"
+  (let ((ed (new-text-editor)))
+    (text-editor-insert ed "alpha\nbeta\ngamma\n")
+    (text-editor-set-cursor ed 1 0)
+    (text-editor-delete-from-cursor ed -1)
+    (text-editor-to-string ed)))
+
+;; Forward delete past the end of a line merges with the next line,
+;; counting the line break as one deleted character.
+(test-equal "alphata\ngamma\n"
+  (let ((ed (new-text-editor)))
+    (text-editor-insert ed "alpha\nbeta\ngamma\n")
+    (text-editor-set-cursor ed 0 5)
+    (text-editor-delete-from-cursor ed 3)
+    (text-editor-to-string ed)))
+
+;; A deletion spanning multiple lines merges and deletes.
+(test-equal "alphagamma\n"
+  (let ((ed (new-text-editor)))
+    (text-editor-insert ed "alpha\nbeta\ngamma\n")
+    (text-editor-set-cursor ed 0 5)
+    (text-editor-delete-from-cursor ed 6)
+    (text-editor-to-string ed)))
+
+(test-end "schemacs_editor_engine_motion")

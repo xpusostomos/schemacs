@@ -60,6 +60,7 @@
           gap-buffer-ref-before       gap-buffer-ref-after
           gap-buffer-cursor-to-start  gap-buffer-cursor-to-end
           gap-buffer-insert-before    gap-buffer-insert-after
+          gap-buffer-delete
           gap-buffer-minimum          set!gap-buffer-minimum
           gap-buffer-maximum          set!gap-buffer-maximum
           gap-buffer-cursor           gap-buffer-weight
@@ -80,7 +81,7 @@
    text-line-inner-size  text-line-outer-size
    write-text-line  text-line-for-each
    text-line-ref    text-line-code-ref
-   text-line->string  show-text-line
+   text-line->string  text-line-inner->string  show-text-line
 
    ;; The text editor data type
    new-text-editor  text-editor-type?
@@ -88,6 +89,8 @@
    text-editor-char-count
    text-load-port  text-dump-port  text-editor-to-string
    text-editor-insert
+   text-editor-delete-from-cursor
+   text-editor-copy-string
 
    ;; Changing the line-break protocol for the editor
    text-editor-set-line-break!
@@ -102,6 +105,7 @@
    text-editor-cursor-line
    text-editor-cursor-column
    text-editor-cursor-location
+   text-editor-line-count
    text-editor-get-start-of-line
    text-editor-get-end-of-line
    text-editor-get-line-column
@@ -211,16 +215,18 @@
             )))
         state-1
         )
+      ;; NOTE: `<line-break-type>` fields are in the order (bv str
+       ;; to-port ins-char), so the bytevector comes first.
       (make<line-break>
-       (let ((str (make-string 2)))
-         (string-set! str 0 break-ch0)
-         (string-set! str 1 break-ch1)
-         str
-         )
        (let ((bv (make-bytevector 2)))
          (bytevector-u8-set! bv 0 (char->integer break-ch0))
          (bytevector-u8-set! bv 1 (char->integer break-ch1))
          bv
+         )
+       (let ((str (make-string 2)))
+         (string-set! str 0 break-ch0)
+         (string-set! str 1 break-ch1)
+         str
          )
        (lambda (port)
          (write-char break-ch0 port)
@@ -453,9 +459,25 @@
            ))))
 
     (define (text-line->string line)
+      ;; The "file form" of a line: the line contents INCLUDING its
+      ;; terminating line break, exactly as `write-text-line` writes
+      ;; it to a file.
+      ;;--------------------------------------------------------------
       (call-with-port (open-output-string)
         (lambda (port)
           (write-text-line line port)
+          (get-output-string port)
+          )))
+
+    (define (text-line-inner->string line)
+      ;; The "display form" of a line: the line contents WITHOUT its
+      ;; terminating line break. This is what a display layer should
+      ;; draw; the line break is part of the file, not part of the
+      ;; line's visible contents.
+      ;;--------------------------------------------------------------
+      (call-with-port (open-output-string)
+        (lambda (port)
+          (text-line-for-each (lambda (c) (write-char c port)) line)
           (get-output-string port)
           )))
 
@@ -696,47 +718,137 @@
         (make<text-line> vec #f #f lo hi lbrk iface)
         ))
 
-    (define (text-editor-line-editor-unfreeze ed)
-      (when (text-editor-line-moved ed)
-        (let*((line-ed  (text-editor-line-editor ed))
-              (col-num  (text-editor-column ed))
-              (lines    (text-editor-lines ed))
-              (line-num (gap-buffer-cursor lines))
-              (line
-               (if (<= line-num 0) #f (gap-buffer-ref lines (- line-num 1)))
-               )
-              (size (or (and line (text-line-inner-size line)) 0))
+    ;;----------------------------------------------------------------
+    ;; Current-line checkout / write-back
+    ;;
+    ;; The canonical data model: the lines gap-buffer contains one
+    ;; element for EVERY line of the buffer, so
+    ;; `(GAP-BUFFER-REF LINES I)` is always line `I`. The line
+    ;; currently under the cursor (whose index is the gap-buffer
+    ;; cursor) is "checked out" into the line editor, which holds the
+    ;; live copy of that line, while the gap-buffer element at the
+    ;; cursor index holds a possibly-stale copy of the same line. The
+    ;; gap-buffer cursor may also point one past the last element, in
+    ;; which case the current line is a new, empty line (like the line
+    ;; that follows the final newline of a file).
+    ;;
+    ;; `TEXT-EDITOR-LOAD-CURRENT-LINE` copies the line at the cursor
+    ;; into the line editor. `TEXT-EDITOR-WRITE-BACK` freezes the line
+    ;; editor into a <text-line-type> and stores it back into the gap
+    ;; buffer when the line editor has been modified. Navigation
+    ;; procedures write back before moving the gap-buffer cursor, so
+    ;; the stale copy is refreshed whenever the cursor leaves a
+    ;; modified line.
+    ;;----------------------------------------------------------------
+
+    (define (text-editor-load-current-line ed)
+      ;; Load the line at the lines gap-buffer cursor into the line
+      ;; editor, placing the line editor cursor at the column stored
+      ;; in the `text-editor-column` field (clamped to the line). If
+      ;; the gap-buffer cursor is at or past the end of the lines
+      ;; gap-buffer, the current line is a new empty line and the line
+      ;; editor is simply cleared. The stale copy in the gap buffer is
+      ;; left in place; it is identical to the loaded content.
+      ;;--------------------------------------------------------------
+      (let*((line-ed   (text-editor-line-editor ed))
+            (lines     (text-editor-lines ed))
+            (line-num  (gap-buffer-cursor lines))
+            (line
+             (if (< line-num (gap-buffer-weight lines))
+                 (gap-buffer-ref lines line-num)
+                 #f))
+            (size      (or (and line (text-line-inner-size line)) 0))
+            (col-num   (max 0 (min (text-editor-column ed) size)))
+            )
+        ;; NOTE: the `text-editor-column` field is an input here and
+        ;; is deliberately not written back: the clamped column must
+        ;; not clobber the field during transient states (such as
+        ;; freezing the line editor while the lines gap-buffer is
+        ;; momentarily empty).
+        ;; Clear the current line editor, and size it to fit the line.
+        (gap-buffer-clear line-ed)
+        (gap-buffer-allocate line-ed size)
+        ;; First loop, fill the line editor before-region with the
+        ;; characters before the cursor column.
+        (let loop ((i 0))
+          (cond
+           ((< i col-num)
+            (gap-buffer-insert-before line-ed (text-line-code-ref line i))
+            (loop (+ 1 i))
+            )
+           (else (values))
+           ))
+        ;; Second loop, fill the line editor after-region from the end
+        ;; of the line backwards. Each `GAP-BUFFER-INSERT-AFTER` lands
+        ;; at the line editor cursor, so iterating backwards leaves
+        ;; the characters in their original order after the cursor.
+        (let loop ((i size))
+          (cond
+           ((< col-num i)
+            (gap-buffer-insert-after
+             line-ed (text-line-code-ref line (- i 1))
+             )
+            (loop (- i 1))
+            )
+           (else (values))
+           ))
+        (set!text-editor-line-changed ed #f)
+        (set!text-editor-line-moved ed #f)
+        ))
+
+    (define (text-editor-write-back ed)
+      ;; If the line editor has been modified since the current line
+      ;; was loaded (`text-editor-line-changed`), freeze the entire
+      ;; contents of the line editor into a <text-line-type> and store
+      ;; it into the lines gap-buffer at the gap-buffer cursor,
+      ;; replacing the stale copy of the current line. If the current
+      ;; line is a new line past the end of the gap-buffer, the frozen
+      ;; line is appended and the gap-buffer cursor advances, making
+      ;; the (now empty) next line the current line. The absolute
+      ;; position of the cursor is preserved.
+      ;;--------------------------------------------------------------
+      (when (text-editor-line-changed ed)
+        (let*((lines     (text-editor-lines ed))
+              (line-ed   (text-editor-line-editor ed))
+              (cdf       (text-editor-cdf ed))
+              (line-num  (gap-buffer-cursor lines))
+              (weight    (gap-buffer-weight lines))
+              (col-num   (gap-buffer-cursor line-ed))
+              ;; The frozen line keeps the line-break protocol of the
+              ;; line it replaces, so that editing a CRLF file, for
+              ;; example, does not silently rewrite line breaks. A new
+              ;; line past the end of the gap-buffer carries no line
+              ;; break: it is only given one if a line break is typed
+              ;; on it, which `TEXT-EDITOR-FORCE-LINE-BREAK` handles.
+              (lbrk
+               (if (< line-num weight)
+                   (text-line-break (gap-buffer-ref lines line-num))
+                   #f))
               )
-          ;; Clear the current line editor, and size it to fit the new line.
-          (gap-buffer-clear line-ed)
-          (gap-buffer-allocate line-ed size)
-          ;; First loop, fill the line editor from the start of the line.
-          (let loop ((i 0))
+          ;; Capture the whole line: move the line editor cursor to
+          ;; the end of the line editor, then freeze everything before
+          ;; it.
+          (gap-buffer-cursor-to-end line-ed)
+          (let ((line (line-editor-freeze-line-before line-ed lbrk)))
+            (cdf-invalidate! cdf line-num)
             (cond
-             ((< i col-num)
-              (gap-buffer-insert-before
-               line-ed (text-line-code-ref line i)
-               )
-              (loop (+ 1 i))
+             ((< line-num weight)
+              ;; Replace the stale copy of the current line.
+              (gap-buffer-delete lines 1)
+              (gap-buffer-insert-after lines line)
+              (gap-buffer-set-cursor lines line-num)
               )
-             (else (values))
-             ))
-          ;; Second loop, fill the line editor from the end of the line.
-          (let loop ((i size))
-            (cond
-             ((<= col-num i)
-              (let ((i (- i 1)))
-                (gap-buffer-insert-after
-                 line-ed (text-line-code-ref line i)
-                 )
-                (loop i)
-                ))
-             (else (values))
-             ))
-          ;; Be sure to reset the `text-editor-line-changed`
-          (set!text-editor-line-changed ed #f)
-          (set!text-editor-line-moved ed #f)
-          )))
+             (else
+              ;; The current line is a new line past the end of the
+              ;; lines gap-buffer: append it as a committed line, and
+              ;; advance to the new empty line after it.
+              (gap-buffer-insert-after lines line)
+              (gap-buffer-set-cursor lines (+ 1 line-num))
+              ))
+            (gap-buffer-clear line-ed)
+            (set!text-editor-column ed col-num)
+            (text-editor-load-current-line ed)
+            ))))
 
     (define (line-editor-char-range ref foreach line-ed)
       (let*((lo (ref line-ed #f))
@@ -754,7 +866,16 @@
         (values lo hi)
         ))
 
-    (define (line-editor-freeze-part calc-frozen-size ref foreach foreach/index)
+    (define (line-editor-freeze-part calc-frozen-size ref foreach foreach/index index-base)
+      ;; Creates a procedure which freezes part of a line editor gap
+      ;; buffer into a <text-line-type>. `CALC-FROZEN-SIZE` computes
+      ;; the number of characters to freeze from the gap-buffer weight
+      ;; and cursor; `REF`, `FOREACH` and `FOREACH/INDEX` read the
+      ;; part of the line editor to freeze (before or after the
+      ;; cursor); `INDEX-BASE` gives the logical index at which the
+      ;; frozen part starts (0 for the before-cursor part, the cursor
+      ;; for the after-cursor part), so that the frozen sequence is
+      ;; indexed from zero.
       (lambda (line-ed lbrk)
         (let*((weight (gap-buffer-weight line-ed))
               (cursor (gap-buffer-cursor line-ed))
@@ -766,8 +887,12 @@
               (let*((iface    (%line-editor-pre-freeze lo hi))
                     (vec      ((iface-make-sequence iface) frozen-size))
                     (seq-set! (iface-sequence-set! iface))
+                    (base     (index-base cursor))
                     )
-                (foreach/index (lambda (i n) (seq-set! vec i (- n lo))) line-ed)
+                (foreach/index
+                 (lambda (i n) (seq-set! vec (- i base) (- n lo)))
+                 line-ed
+                 )
                 (make<text-line> vec #f #f lo hi lbrk iface)
                 )))
            (else (make<text-line> #f #f #f #f #f lbrk #f))
@@ -779,6 +904,7 @@
        gap-buffer-ref-before
        gap-buffer-for-each-before
        gap-buffer-for-each-before/index
+       (lambda (_cursor) 0)
        ))
 
     (define (line-editor-freeze-line-after line-ed lbrk)
@@ -793,6 +919,7 @@
                gap-buffer-ref-after
                gap-buffer-for-each-after
                gap-buffer-for-each-after/index
+               (lambda (cursor) cursor)
                )))
        (freeze line-ed lbrk)
        ))))
@@ -802,38 +929,82 @@
 
     (define (text-editor-force-line-break ed)
       ;; Forces a line break regardless of whether an actual line
-      ;; breaking character has been inserted. This will create a new
-      ;; <text-line-type> object by freezing all characters in the
-      ;; line edtior before the cursor and pushing the
-      ;; <text-line-type> object to the buffer before the line
-      ;; cursor. The characters after the line editor cursor remain
-      ;; buffered in the line editor, this way, if a line break occurs
-      ;; while the line editor cursor is in the middle of a line, only
-      ;; the characters before the cursor are frozen and buffered, the
-      ;; line editor characters after the cursor remain on the same
-      ;; line as the cursor.
+      ;; breaking character has been inserted. The characters in the
+      ;; line editor before the cursor are frozen into a
+      ;; <text-line-type> which replaces the stale copy of the current
+      ;; line in the lines gap-buffer, and the characters after the
+      ;; cursor remain in the line editor as the new current line (the
+      ;; line after the break), with the line editor cursor at column
+      ;; zero. A snapshot of the characters after the cursor is stored
+      ;; in the gap-buffer as the (identical) copy of the new current
+      ;; line, so that the invariant "the gap-buffer contains one
+      ;; element for every line of the buffer" is preserved, and the
+      ;; gap-buffer cursor is advanced to point at the new current
+      ;; line.
+      ;;--------------------------------------------------------------
       (let*((line-ed (text-editor-line-editor ed))
+            (lines   (text-editor-lines ed))
+            (cdf     (text-editor-cdf ed))
+            (cur     (gap-buffer-cursor lines))
+            (weight  (gap-buffer-weight lines))
+            (lbrk    (text-editor-line-break ed))
+            ;; The line after the break inherits the line-break
+            ;; protocol of the line it was split from; but if the
+            ;; after-break part is empty and no lines follow the
+            ;; current line (the cursor is at the end of the lines
+            ;; gap-buffer), the new line has no line break at all.
+            (after-lbrk
+             (if (< cur weight)
+                 (text-line-break (gap-buffer-ref lines cur))
+                 #f))
+            ;; snapshot of the line after the break, before clearing
+            (after
+             (line-editor-freeze-line-after line-ed after-lbrk))
+            ;; the line before the break, terminated by the line
+            ;; break that was just typed
             (line
-             (line-editor-freeze-line-before
-              line-ed (text-editor-line-break ed)
-              ))
-            (lines (text-editor-lines ed))
-            (cur (gap-buffer-cursor lines))
-            (cdf (text-editor-cdf ed))
+             (line-editor-freeze-line-before line-ed lbrk))
             (sum (cdf-invalidate! cdf cur))
             )
-        ;; insert the line into the line buffer
-        (gap-buffer-insert-before (text-editor-lines ed) line)
-        ;; insert the next running total into the CDF buffer, if the
-        ;; CDF is up-to-date. If not, do nothing, the CDF buffer will
-        ;; have to be brought up-to-date later.
+        ;; Replace the stale copy of the current line with the
+        ;; before-break part. If the current line is a new line past
+        ;; the end of the gap-buffer there is no stale copy to remove.
+        (when (< cur (gap-buffer-weight lines))
+          (gap-buffer-delete lines 1)
+          )
+        ;; Insert the after-break snapshot first, then the
+        ;; before-break line: each `GAP-BUFFER-INSERT-AFTER` lands at
+        ;; the gap-buffer cursor, so this order leaves the snapshot at
+        ;; the cursor position (+ 1 cur).
+        (gap-buffer-insert-after lines after)
+        (gap-buffer-insert-after lines line)
+        ;; advance the cursor to the new current line (the
+        ;; after-break part), and record the new committed line's
+        ;; running total in the CDF, if the CDF is up-to-date.
+        (gap-buffer-set-cursor lines (+ 1 cur))
         (when sum (cdf-push cdf (text-line-outer-size line)))
+        ;; The line editor keeps only the characters after the break,
+        ;; with the cursor at column zero.
         (gap-buffer-clear-before line-ed)
-        (set!text-editor-line-changed
-         ed (< 0 (gap-buffer-weight line-ed))
-         )
-        line
+        (set!text-editor-line-changed ed #f)
+        after
         ))
+
+    (define (text-editor-copy-string ed start end)
+      ;; Copy the buffer contents between the character indices START
+      ;; (inclusive) and END (exclusive) into a string. Arguments may
+      ;; be given in either order; the empty range returns "".
+      ;;--------------------------------------------------------------
+      (let ((start (min start end))
+            (end (max start end)))
+        (call-with-port (open-output-string)
+          (lambda (port)
+            (let loop ((i start))
+              (when (< i end)
+                (let ((c (text-editor-get-char-index ed i)))
+                  (when c (write-char c port)))
+                (loop (+ 1 i))))
+            (get-output-string port)))))
 
     (define (text-editor-insert ed thing)
       (cond
@@ -843,8 +1014,14 @@
          thing
          ))
        ((string? thing)
-        (string-for-each (%text-editor-insert-char ed) thing)
-        )
+        ;; NOTE: the insert-char procedure must be re-read for every
+        ;; character, because the line-break state machine sets
+        ;; `text-editor-insert-char` when it transitions states.
+        ;;--------------------------------------------------------------
+        (string-for-each
+         (lambda (c) ((%text-editor-insert-char ed) c))
+         thing
+         ))
        ((char? thing)
         ((%text-editor-insert-char ed) thing)
         )
@@ -855,7 +1032,6 @@
        ))
 
     (define (text-editor-force-insert-char ed ch)
-      (text-editor-line-editor-unfreeze ed)
       (let ((line-ed (text-editor-line-editor ed))
             (chi (char->integer ch))
             )
@@ -865,6 +1041,196 @@
         (set!text-editor-line-changed ed #t)
         ch
         ))
+
+    ;; Deleting text
+
+    (define (%text-editor-line-inner-size ed line-num)
+      ;; The number of characters in the line at line index LINE-NUM,
+      ;; not counting its line break. Returns false when LINE-NUM is
+      ;; past the end of the lines gap-buffer.
+      (let ((lines (text-editor-lines ed)))
+        (if (< line-num (gap-buffer-weight lines))
+            (or (text-line-inner-size (gap-buffer-ref lines line-num)) 0)
+            #f)))
+
+    (define (%text-editor-freeze-editor-with ed lbrk)
+      ;; Freeze the whole line editor into a <text-line-type> carrying
+      ;; the line break LBRK, then restore the line editor contents
+      ;; and cursor position. The frozen line is returned but not
+      ;; stored anywhere.
+      ;;--------------------------------------------------------------
+      (let* ((lines   (text-editor-lines ed))
+             (line-ed (text-editor-line-editor ed))
+             (col-num (gap-buffer-cursor line-ed)))
+        (gap-buffer-cursor-to-end line-ed)
+        (let ((line (line-editor-freeze-line-before line-ed lbrk)))
+          (gap-buffer-clear line-ed)
+          (set!text-editor-column ed col-num)
+          (text-editor-load-current-line ed)
+          line
+          )))
+
+    (define (%text-editor-merge-next-line! ed)
+      ;; Merge the line after the current line into the current line,
+      ;; deleting the line break between them (one character). The
+      ;; merged line inherits the line break of the (former) next
+      ;; line. The line editor keeps the merged line contents with the
+      ;; cursor at the former end of the current line. Returns 1, the
+      ;; number of characters deleted.
+      ;;--------------------------------------------------------------
+      (let* ((lines (text-editor-lines ed))
+             (line-ed (text-editor-line-editor ed))
+             (cdf (text-editor-cdf ed))
+             (k (gap-buffer-cursor lines))
+             (col-num (gap-buffer-cursor line-ed))
+             (next (gap-buffer-ref lines (+ 1 k)))
+             (next-lbrk (text-line-break next)))
+        ;; append the next line's characters to the line editor
+        (gap-buffer-cursor-to-end line-ed)
+        (text-line-for-each
+         (lambda (ch) (text-editor-force-insert-char ed ch))
+         next
+         )
+        ;; restore the line editor cursor to the former end of the
+        ;; current line (where the deleted line break was)
+        (gap-buffer-set-cursor line-ed col-num)
+        ;; delete the stale copies of both lines and store the merged
+        ;; contents as the new stale copy of the merged line
+        (gap-buffer-delete lines 2)
+        (let ((merged (%text-editor-freeze-editor-with ed next-lbrk)))
+          (gap-buffer-insert-after lines merged)
+          (gap-buffer-set-cursor lines k)
+          (cdf-invalidate! cdf k)
+          )
+        (text-editor-load-current-line ed)
+        1))
+
+    (define (%text-editor-merge-previous-line! ed)
+      ;; Merge the current line into the line before it, deleting the
+      ;; line break between them (one character). The merged line
+      ;; keeps the current line's line-break protocol (the break that
+      ;; terminated the merged-away tail line), and the cursor ends up
+      ;; at the former end of the previous line (where the break was).
+      ;;--------------------------------------------------------------
+      (let* ((lines (text-editor-lines ed))
+             (line-ed (text-editor-line-editor ed))
+             (cdf (text-editor-cdf ed))
+             (k (gap-buffer-cursor lines))
+             (weight (gap-buffer-weight lines))
+             (prev-size (%text-editor-line-inner-size ed (- k 1)))
+             ;; the merged line's line-break protocol is the tail
+             ;; line's line break; at the end of the buffer the
+             ;; current line is a new line with no line break and no
+             ;; stale copy, so the merged line ends up with none
+             (tail-lbrk
+              (if (< k weight)
+                  (text-line-break (gap-buffer-ref lines k))
+                  #f))
+             ;; the number of stale copies to delete: two (the
+             ;; previous line's and the current line's) except at the
+             ;; end of the buffer, where only the previous line's
+             ;; stale copy exists
+             (stale-count (if (< k weight) 2 1)))
+        ;; capture the current line's characters, move the gap-buffer
+        ;; cursor to the previous line, and load it into the line
+        ;; editor with the cursor at its end.
+        (let ((current-string
+               (call-with-port (open-output-string)
+                 (lambda (port)
+                   (gap-buffer-for-each
+                    (lambda (n) (write-char (integer->char n) port))
+                    line-ed)
+                   (get-output-string port)))))
+          (text-editor-set-cursor ed (- k 1) prev-size)
+          (string-for-each
+           (lambda (c) (text-editor-force-insert-char ed c))
+           current-string
+           )
+          ;; delete the stale copies and store the merged contents as
+          ;; the new stale copy of the merged line
+          (gap-buffer-delete lines stale-count)
+          (let ((merged (%text-editor-freeze-editor-with ed tail-lbrk)))
+            (gap-buffer-insert-after lines merged)
+            (gap-buffer-set-cursor lines (- k 1))
+            (cdf-invalidate! cdf (- k 1))
+            )
+          (text-editor-load-current-line ed)
+          1)))
+
+    (define (text-editor-delete-from-cursor ed n)
+      ;; Delete N characters at the text editor cursor. Positive N
+      ;; deletes characters after the cursor (forward), negative N
+      ;; deletes characters before the cursor. Deletion is clamped to
+      ;; the bounds of the buffer. Deleting across a line boundary
+      ;; merges the two lines. Returns the number of characters
+      ;; deleted.
+      ;;--------------------------------------------------------------
+      (cond
+       ((= n 0) 0)
+       ((< n 0) (%text-editor-delete-backward ed (- n)))
+       (else (%text-editor-delete-forward ed n))))
+
+    (define (%text-editor-delete-forward ed n)
+      (let* ((lines (text-editor-lines ed))
+             (line-ed (text-editor-line-editor ed))
+             (col (gap-buffer-cursor line-ed))
+             (avail (- (gap-buffer-weight line-ed) col))
+             )
+        (cond
+         ((<= n avail)
+          ;; delete within the current line
+          (gap-buffer-delete line-ed n)
+          (text-editor-add-char-count ed (- n))
+          (set!text-editor-line-changed ed #t)
+          n)
+         ((< 0 avail)
+          ;; delete to the end of the current line, then continue
+          (gap-buffer-delete line-ed avail)
+          (text-editor-add-char-count ed (- avail))
+          (set!text-editor-line-changed ed #t)
+          (+ avail (%text-editor-delete-forward ed (- n avail))))
+         ((< (+ 1 (gap-buffer-cursor lines)) (gap-buffer-weight lines))
+          ;; the cursor is at the end of the line: delete the line
+          ;; break by merging with the next line, then continue
+          (+ (%text-editor-merge-next-line! ed)
+             (%text-editor-delete-forward ed (- n 1))))
+         ;; the cursor is at the end of the last line: delete the
+         ;; current line's own terminating line break, if it has one
+         ;; (as GNU Emacs does)
+         (else
+          (let* ((stale
+                  (and (< (gap-buffer-cursor lines)
+                          (gap-buffer-weight lines))
+                       (gap-buffer-ref lines (gap-buffer-cursor lines))))
+                 (lbrk (and stale (text-line-break stale))))
+            (if lbrk
+                (let ((size (line-break-size lbrk)))
+                  (set!text-line-break stale #f)
+                  (text-editor-add-char-count ed (- size))
+                  (set!text-editor-line-changed ed #t)
+                  size)
+                0))
+          ))))
+
+    (define (%text-editor-delete-backward ed n)
+      (let* ((lines (text-editor-lines ed))
+             (line-ed (text-editor-line-editor ed))
+             (col (gap-buffer-cursor line-ed))
+             )
+        (cond
+         ((<= n col)
+          (gap-buffer-delete line-ed (- n))
+          (text-editor-add-char-count ed (- n))
+          (set!text-editor-column ed (- col n))
+          (set!text-editor-line-changed ed #t)
+          n)
+         ((< 0 (gap-buffer-cursor lines))
+          ;; at the start of a line which has a line before it: the
+          ;; deleted character is the line break; merge the lines.
+          (+ (%text-editor-merge-previous-line! ed)
+             (%text-editor-delete-backward ed (- n 1))))
+         (else 0)
+         )))
 
     (define (text-editor-insert-from-port-until until ed port)
       (let loop ((next (read-char port)))
@@ -890,7 +1256,12 @@
             )
         (cond
          (changed
-          (let ((end (max 0 (- line 1))))
+          ;; The line editor holds the live contents of the current
+          ;; line, whose stale copy sits at the gap-buffer cursor. All
+          ;; committed lines before the cursor are written, then the
+          ;; line editor's characters before its cursor; the
+          ;; `text-editor-dump-after` companion writes the rest.
+          (let ((end line))
             (gap-buffer-for-each-before/index
              (lambda (i text-line)
                (when (< i end) (write-text-line text-line port))
@@ -918,9 +1289,24 @@
           (gap-buffer-for-each-after
            (lambda (ch) (write-char (integer->char ch) port))
            (text-editor-line-editor ed)
-           ))
-        (gap-buffer-for-each-after
-         (lambda (text-line) (write-text-line text-line port))
+           )
+          ;; The current line's terminating line break is stored in
+          ;; its stale copy in the gap-buffer (the line editor holds
+          ;; only the line contents, not its break), so it must be
+          ;; written here explicitly.
+          (when (< line (gap-buffer-weight line-gb))
+            (let ((lbrk (text-line-break (gap-buffer-ref line-gb line))))
+              (when lbrk ((line-break-write-to-port lbrk) port))
+              )))
+        ;; Write the committed lines after the gap-buffer cursor. When
+        ;; the line editor has been modified, the gap-buffer element
+        ;; at the cursor holds the stale copy of the current line,
+        ;; which the line editor contents replace, so it is skipped.
+        (gap-buffer-for-each-after/index
+         (lambda (i text-line)
+           (unless (and changed (= i line))
+             (write-text-line text-line port)
+             ))
          line-gb
          )))
 
@@ -1010,27 +1396,15 @@
       )
 
     (define (text-editor-line-editor-ref ed offset)
-      ;; Used to get the character on the current line. Checks if the
-      ;; line has been edited first, then decides whether to lookup
-      ;; the character from the line buffer or from the text line
-      ;; under the cursor.
+      ;; Used to get the character on the current line. The line
+      ;; editor always holds the contents of the current line, so the
+      ;; character is read directly from the line editor. Returns
+      ;; false when the offset is past the end of the line.
       ;;--------------------------------------------------------------
-      (let*((lines (text-editor-lines ed))
-            (line-cur (gap-buffer-cursor lines))
-            )
-        (cond
-         ;; Under two conditions do we read from the line editor: (1)
-         ;; if the cursor is at zero, which means the line editor is
-         ;; editing a line at the beginning of the buffer, or (2) if
-         ;; the line editor contains changes from the text-line in the
-         ;; line buffer.
-         ((or (= 0 line-cur) (text-editor-line-changed ed))
-          (integer->char (gap-buffer-ref (text-editor-line-editor ed) offset))
-          )
-         ;; Otherwise we read from the text line in the line buffer
-         (else
-          (text-line-ref (gap-buffer-ref lines (- line-cur 1)) offset)
-          ))))
+      (let ((line-ed (text-editor-line-editor ed)))
+        (and (< offset (gap-buffer-weight line-ed))
+             (integer->char (gap-buffer-ref line-ed offset))
+             )))
 
     (define (text-editor-get-cursor ed)
       ;; Check if the CDF needs updating, and if so, recompute all
@@ -1057,27 +1431,42 @@
         ))
 
     (define (text-editor-move-cursor ed move-by)
-      (let*-values
-          (((lines) (text-editor-lines ed))
-           ((ch-index) (text-editor-get-cursor ed))
-           ((line-num-before _old-offset)
-            (text-editor-index-line-offset ed ch-index)
+      ;; Move the text editor cursor to the position
+      ;; `(+ (TEXT-EDITOR-GET-CURSOR ED) MOVE-BY)`, clamped to the
+      ;; bounds of the buffer. When the target position is on a
+      ;; different line than the current cursor position, the current
+      ;; line is written back into the lines gap-buffer, the
+      ;; gap-buffer cursor is moved to the target line, and the
+      ;; target line is loaded into the line editor. The remembered
+      ;; column (`text-editor-column`) is updated to the target
+      ;; column.
+      ;;--------------------------------------------------------------
+      (let*((ch-index0 (text-editor-get-cursor ed))
+            (count (text-editor-char-count ed))
+            (target (max 0 (min count (+ ch-index0 move-by))))
+            (delta (- target ch-index0))
             )
-           ((cdf-cur offset)
-            (text-editor-index-line-offset ed (+ ch-index move-by))
-            )
-           ;; First set the cursor position according to the value
-           ;; computed from the CDF.
-           (() (gap-buffer-set-cursor lines cdf-cur))
-           ((line-num-after)  (gap-buffer-cursor lines))
-           )
-        ;; Then make a note that the text editor line changed and
-        ;; needs to be reset.
-        (unless (= line-num-before line-num-after)
-          (set!text-editor-line-moved ed #t)
-          (set!text-editor-column ed offset)
-          (gap-buffer-clear (text-editor-line-editor ed))
-          )))
+        (cond
+         ((= 0 delta) (values))
+         (else
+          (text-editor-write-back ed)
+          (let*-values
+              (((t-line t-col) (text-editor-index-line-offset ed target))
+               ((lines) (text-editor-lines ed))
+               ((line-ed) (text-editor-line-editor ed))
+               ((line-num) (gap-buffer-cursor lines)))
+            (cond
+             ;; Same line: the line editor is already loaded, just
+             ;; move its cursor to the target column.
+             ((= t-line line-num)
+              (gap-buffer-set-cursor line-ed t-col)
+              (set!text-editor-column ed t-col)
+              )
+             (else
+              (gap-buffer-set-cursor lines t-line)
+              (set!text-editor-column ed t-col)
+              (text-editor-load-current-line ed)
+              )))))))
 
     (define text-editor-set-cursor
       (case-lambda
@@ -1098,38 +1487,53 @@
            index
            ))))
        ((ed line-num column-num)
+        ;; Move the cursor to the given zero-based line index and
+        ;; column. Writing back any modified line first preserves the
+        ;; buffer contents; the target line is then loaded into the
+        ;; line editor with the cursor at the given column (clamped
+        ;; to the line by `TEXT-EDITOR-LOAD-CURRENT-LINE`). A line
+        ;; index of the lines gap-buffer weight addresses the new
+        ;; empty line past the end of the buffer.
         (let ((lines (text-editor-lines ed)))
-          (gap-buffer-set-cursor lines line-num)
-          (set!text-editor-line-moved ed #t)
-          (gap-buffer-clear (text-editor-line-editor ed))
+          (text-editor-write-back ed)
+          (gap-buffer-set-cursor
+           lines (max 0 (min line-num (gap-buffer-weight lines)))
+           )
           (set!text-editor-column ed column-num)
+          (text-editor-load-current-line ed)
           ))))
 
     (define (text-editor-index-line-offset ed ch-index)
       ;; This function is used to update the CDF and to return the
-      ;; line number, and character index offset of that line, for the
-      ;; character index `CH-INDEX` relative to the start of the text
-      ;; buffer. Returns two values: (1) the line index to which the
-      ;; `CH-INDEX` is pointing, and (2) the character offset of that
-      ;; line.
+      ;; line number, and the character offset (column) of the
+      ;; character index `CH-INDEX` within its line. Returns two
+      ;; values: (1) the zero-based line index to which the
+      ;; `CH-INDEX` is pointing, and (2) the zero-based column of the
+      ;; character within that line.
+      ;;
+      ;; First, write back any modified line editor contents, so the
+      ;; gap-buffer and CDF reflect the true buffer contents, then
+      ;; fill the CDF until it covers `CH-INDEX`, and binary-search it
+      ;; with `CDF-FIND`, which returns the line index and the start
+      ;; offset of that line. `CDF-FIND` returns false values when
+      ;; `CH-INDEX` is at or past the end of the last committed line,
+      ;; in which case the character is on the current (new, empty)
+      ;; line whose index is the lines gap-buffer weight.
       ;;--------------------------------------------------------------
       (let*((lines (text-editor-lines ed))
             (cdf (text-editor-cdf ed))
-            (cdf-max (cdf-maximum cdf))
+            (_write-back (text-editor-write-back ed))
+            (_fill (cdf-fill cdf (text-editor-make-cdf-fill-until lines ch-index)))
             )
-        (cond
-         ((< ch-index cdf-max) (cdf-find cdf ch-index))
-         (else
-          (cdf-fill cdf (text-editor-make-cdf-fill-until lines ch-index))
-          (let((cdf-cur (cdf-cursor cdf)))
+        (call-with-values
+            (lambda () (cdf-find cdf ch-index))
+          (lambda (i lo)
             (cond
-             ((<= cdf-cur 0) (values 0 0))
+             (i (values i (- ch-index lo)))
              (else
-              (let*((cdf-cur (- cdf-cur 1))
-                    (offset (cdf-ref cdf cdf-cur))
-                    )
-                (values cdf-cur (+ 1 (- ch-index offset)))
-                ))))))))
+              (values (gap-buffer-weight lines)
+                      (max 0 (- ch-index (cdf-maximum cdf))))
+              ))))))
 
     (define (text-editor-get-char-index ed ch-index)
       ;; Get the character at the given index `CH-INDEX`. This
@@ -1137,18 +1541,14 @@
       ;;--------------------------------------------------------------
       (let*-values
           (((cdf-cur offset) (text-editor-index-line-offset ed ch-index))
-           ((line-offset) (- ch-index offset))
            ((lines) (text-editor-lines ed))
            )
         (cond
-         ((= cdf-cur (gap-buffer-cursor lines))
-          (integer->char
-           (gap-buffer-ref (text-editor-line-editor ed) line-offset)
-           ))
-         (else
-          (let ((line (gap-buffer-ref lines cdf-cur)))
-            (text-line-ref line line-offset)
-            )))))
+         ((< cdf-cur (gap-buffer-weight lines))
+          (text-line-ref (gap-buffer-ref lines cdf-cur) offset)
+          )
+         (else #f)
+         )))
 
     (define (%text-editor-get-line-column ed ch-index)
       (cond
@@ -1175,40 +1575,47 @@
        ))
 
     (define (text-editor-get-end-of-line ed)
+      ;; Get the character index of the end of the current line. The
+      ;; line editor always holds the current line's contents, so this
+      ;; is the start of the current line plus the number of
+      ;; characters in the line editor.
+      ;;--------------------------------------------------------------
       (text-editor-get-cursor ed)
       (let*((lines (text-editor-lines ed))
             (line-num (gap-buffer-cursor lines))
             (cdf (text-editor-cdf ed))
             )
-        (cond
-         ;; First check if the current line editor contains recently
-         ;; added characters. If not, we need the CDF for the current
-         ;; line cursor.
-         ((text-editor-line-moved ed)
-          (cond
-           ((< 0 line-num) (cdf-ref cdf (- line-num 1)))
-           (else 0)
-           ))
-         ;; Otherwise we need the CDF for the previous line, and then
-         ;; add the number of characters in the current line editor.
-         (else
-          (+ (cond
-              ((< 1 line-num) (cdf-ref cdf (- line-num 2)))
-              (else 0)
-              )
-             (gap-buffer-weight (text-editor-line-editor ed))
-             )))))
+        (+ (cond
+            ((< 0 line-num) (cdf-ref cdf (- line-num 1)))
+            (else 0)
+            )
+           (gap-buffer-weight (text-editor-line-editor ed))
+           )))
+
+    (define (text-editor-line-count ed)
+      ;; The total number of lines in the buffer. The lines gap-buffer
+      ;; contains one element for every line of the buffer, except
+      ;; that when the gap-buffer cursor points past the last
+      ;; committed line, the current line is a new empty line which is
+      ;; not yet buffered, so one more line is counted.
+      ;;--------------------------------------------------------------
+      (let* ((lines (text-editor-lines ed))
+             (line-num (gap-buffer-cursor lines))
+             (weight (gap-buffer-weight lines)))
+        (if (= line-num weight) (+ 1 weight) weight)))
 
     (define (text-editor-get-start-of-line ed)
+      ;; Get the character index of the start of the current line:
+      ;; the running total of the CDF for the line before the current
+      ;; line, which `TEXT-EDITOR-GET-CURSOR` has ensured is filled.
+      ;;--------------------------------------------------------------
       (text-editor-get-cursor ed)
       (let*((lines (text-editor-lines ed))
             (line-num (gap-buffer-cursor lines))
             (cdf (text-editor-cdf ed))
             )
         (cond
-         ;; The start of line is always the value of the CDF index of
-         ;; the line before the line cursor.
-         ((< 1 line-num) (cdf-ref cdf (- line-num 2)))
+         ((< 0 line-num) (cdf-ref cdf (- line-num 1)))
          ;; If the cursor is at the beginning of the buffer, the
          ;; start-of-line is always zero.
          (else 0)
