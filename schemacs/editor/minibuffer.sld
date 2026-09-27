@@ -39,19 +39,22 @@
     ;; a completion is tried.
     (only (guile) string-prefix?)
     (only (schemacs editor command)
-          new-command new-count-command)
+          new-command new-count-command run-command)
     (only (schemacs editor engine)
           new-text-editor text-editor-char-count text-editor-cursor-column
           text-editor-delete-from-cursor text-editor-insert
           text-editor-set-cursor text-editor-to-string
           text-editor-undo-disable!)
+    ;; `logior' is Guile's: the bitset is three bit flags.
+    (only (guile) logior)
     (only (schemacs editor frame)
           *current-frame* *echo-area-buffer* *echo-area-prompt* *minibuffer*
           set!ncurses-frame-message)
     ;; `try-completion' and `all-completions' are `minibuf.c''s and live in
     ;; `(schemacs editor minibuf)'; this library is `minibuffer.el' and uses
     ;; them rather than defining them.
-    (only (schemacs editor minibuf) all-completions try-completion)
+    (only (schemacs editor minibuf)
+          all-completions test-completion try-completion)
     ;; `caddr' is `(scheme cxr)'s: a style's entry in
     ;; `completion-styles-alist' is a four-element list.
     (only (scheme cxr) caddr)
@@ -69,6 +72,7 @@
   (export
    *minibuffer-completion-table*
    *completion-styles*
+   completion--do-completion
    completion--nth-completion
    completion-all-completions
    completion-basic-all-completions
@@ -78,6 +82,14 @@
    completion-substring-all-completions
    completion-substring-try-completion
    completion-try-completion
+   completing-read
+   minibuffer--bitset
+   minibuffer-complete-and-exit
+   minibuffer-complete-word
+   minibuffer-local-must-match-map
+   *completion-auto-help*
+   *minibuffer-completion-confirm*
+   *minibuffer-completion-predicate*
    common-prefix
    completion-candidates-message
    file-name-history
@@ -372,26 +384,31 @@
             (loop (cdr rest)
                   (string-append acc (if (string=? acc "") "" "  ") (car rest))))))
 
-    (define (minibuffer-completion-help)
+    (define minibuffer-completion-help
       ;; GNU Emacs's `minibuffer-completion-help': show what the text
-      ;; could complete to.
+      ;; could complete to. A command, because `?' is bound to it.
       ;;--------------------------------------------------------------
-      (let* ((typed (or (minibuffer-contents) ""))
-             (candidates (completion-all-completions
-                          typed (*minibuffer-completion-table*) #f
-                          (string-length typed))))
-        (set!ncurses-frame-message
-         (*current-frame*)
-         (cond
-          ((not candidates) "No match")
-          ;; The answer is a dotted list whose last cdr is the base size,
-          ;; so the candidates are what is before it - see
-          ;; `completion-all-completions'.
-          (else (completion-candidates-message
-                 (let loop ((rest candidates) (acc '()))
-                   (if (not (pair? rest))
-                       (reverse acc)
-                       (loop (cdr rest) (cons (car rest) acc))))))))))
+      (new-command
+       "minibuffer-completion-help"
+       (lambda ()
+		 (let* ((typed (or (minibuffer-contents) ""))
+				(candidates (completion-all-completions
+							 typed (*minibuffer-completion-table*) #f
+							 (string-length typed))))
+           (set!ncurses-frame-message
+			(*current-frame*)
+			(cond
+			 ((not candidates) "No match")
+			 ;; The answer is a dotted list whose last cdr is the base size,
+			 ;; so the candidates are what is before it - see
+			 ;; `completion-all-completions'.
+			 (else (completion-candidates-message
+					(let loop ((rest candidates) (acc '()))
+					  (if (not (pair? rest))
+						  (reverse acc)
+						  (loop (cdr rest) (cons (car rest) acc))))))))))
+       (lambda () #f)
+       "Show the possible completions of the text in the minibuffer."))
 
     (define minibuffer-complete
       ;; GNU Emacs's `minibuffer-complete': complete as far as the text
@@ -414,7 +431,7 @@
              (set!ncurses-frame-message (*current-frame*) "Complete, but not unique"))
             ((not completion)
              (set!ncurses-frame-message (*current-frame*) "No match"))
-            ((string=? (car completion) typed) (minibuffer-completion-help))
+            ((string=? (car completion) typed) (run-command minibuffer-completion-help))
             (else
              ;; What is inserted is the part of the completion that is
              ;; past what was typed - a *substring* completion can differ
@@ -425,21 +442,6 @@
                 (substring new (length (common-prefix (list typed new))))))))))
        (lambda () #f)
        "Complete the text in the minibuffer as far as it can be (bound to TAB)."))
-
-    (define minibuffer-local-completion-map
-      ;; GNU Emacs's `minibuffer-local-completion-map', whose parent is
-      ;; `minibuffer-local-map'. TAB completes; RET leaves the minibuffer
-      ;; as it does there rather than running Emacs's
-      ;; `minibuffer-completion-exit', because nothing here selects a
-      ;; completion to put in the text first.
-      ;;--------------------------------------------------------------
-      (apply km:keymap
-             '*minibuffer-local-completion-map*
-             (append
-              (list (km:alist->keymap-layer
-                     `(((ctrl #\i) . ,minibuffer-complete)
-                       ((#\?) . ,minibuffer-completion-help))))
-              (km:keymap->layers-list minibuffer-local-map))))
 
     (define (read-char-from-minibuffer prompt)
       ;; GNU Emacs's `read-char-from-minibuffer': ask a question whose
@@ -668,4 +670,239 @@
          ((and (null? (cdr all)) (string=? (car all) beforepoint)) #t)
          ((null? (cdr all)) (cons (car all) (string-length (car all))))
          (else (cons (common-prefix all) (string-length (common-prefix all)))))))
+    ;;----------------------------------------------------------------
+    ;; Doing a completion, and what RET does about it
+
+    (define *minibuffer-completion-predicate*
+      ;; GNU Emacs's `minibuffer-completion-predicate': the filter the
+      ;; completion commands pass to the table. `completing-read' binds it
+      ;; from its PREDICATE argument.
+      ;;--------------------------------------------------------------
+      (make-parameter #f))
+
+    (define *minibuffer-completion-confirm*
+      ;; GNU Emacs's `minibuffer-completion-confirm': whether RET may
+      ;; leave the minibuffer holding something that is *not* a valid
+      ;; completion. #f means it may not, `confirm' means it asks first,
+      ;; and anything else means it may.
+      ;;--------------------------------------------------------------
+      (make-parameter #f))
+
+    (define *completion-auto-help*
+      ;; GNU Emacs's `completion-auto-help': whether a completion that
+      ;; cannot go further shows the candidates on its own.
+      ;;--------------------------------------------------------------
+      (make-parameter #t))
+
+    (define (minibuffer--bitset modified completions exact)
+      ;; GNU Emacs's `minibuffer--bitset': what a completion did, as three
+      ;; bits - M (the text was *modified*), C (there were completions at
+      ;; all) and E (what is there now is an *exact* match).
+      ;;
+      ;; 001 was already an exact and unique completion
+      ;; 011 was already an exact completion
+      ;; 110 some completion happened, but is not exact
+      ;; 111 completed to an exact completion
+      ;; 000 (and 010) nothing to do
+      ;;--------------------------------------------------------------
+      (logior (if modified 4 0) (if completions 2 0) (if exact 1 0)))
+
+    (define (completion--replace completion)
+      ;; GNU Emacs's `completion--replace': rewrite what has been typed as
+      ;; COMPLETION, with point at the end of it. Emacs replaces the text
+      ;; between BEG and END, which here is the whole of what was typed.
+      ;;--------------------------------------------------------------
+      (let ((mb (*minibuffer*)))
+        (when mb
+          (let ((ed (minibuffer-editor mb)))
+            (text-editor-set-cursor ed 0)
+            (text-editor-delete-from-cursor ed (text-editor-char-count ed))
+            (text-editor-insert ed completion)))))
+
+    (define (completion--do-completion string table predicate point)
+      ;; GNU Emacs's `completion--do-completion': complete STRING, put the
+      ;; result in the minibuffer, and answer the bitset saying what
+      ;; happened.
+      ;;
+      ;; The two messages it can leave are Emacs's, and they are what the
+      ;; user sees when TAB does not simply fill the rest in:
+      ;; "Complete, but not unique" when what is there now is a valid
+      ;; completion that others also match, and the list of candidates
+      ;; when it is not a valid completion at all.
+      ;;
+      ;; Not ported: the `completion-cycle-threshold' cycling, the
+      ;; metadata (`completion--field-metadata'), and
+      ;; `completion-auto-help''s `lazy' mode.
+      ;;--------------------------------------------------------------
+      (let ((comp (completion-try-completion string table predicate point)))
+        (cond
+         ((not comp)
+          (set!ncurses-frame-message (*current-frame*) "No match")
+          (minibuffer--bitset #f #f #f))
+         ((eq? comp #t)
+          (set!ncurses-frame-message (*current-frame*) "Sole completion")
+          (minibuffer--bitset #f #f #t))
+         (else
+          (let* ((completion (car comp))
+                 ;; "completed" excludes a change of *case* alone, which
+                 ;; is rewritten in the buffer but is not a completion.
+                 (completed (not (string-ci=? completion string)))
+                 (unchanged (string=? completion string))
+                 (exact (test-completion completion table predicate)))
+            (unless unchanged (completion--replace completion))
+            (cond
+             ((not exact)
+              (if (*completion-auto-help*)
+                  (run-command minibuffer-completion-help)
+                  (set!ncurses-frame-message (*current-frame*)
+                                             "Next char not unique")))
+             (else
+              (set!ncurses-frame-message (*current-frame*)
+                                         "Complete, but not unique")))
+            (minibuffer--bitset completed #t exact))))))
+
+    (define minibuffer-complete-and-exit
+      ;; GNU Emacs's `minibuffer-complete-and-exit' (RET in a
+      ;; `require-match' minibuffer): leave if what is typed is a valid
+      ;; completion, and otherwise complete it and say why it did not.
+      ;;
+      ;; The bitset is what decides, and the cases are Emacs's: an exact
+      ;; (and unique) completion leaves; a completion that reached an
+      ;; exact match leaves unless `minibuffer-completion-confirm' says to
+      ;; ask first; and anything else stays put.
+      ;;--------------------------------------------------------------
+      (new-command
+       "minibuffer-complete-and-exit"
+       (lambda ()
+         (let* ((typed (or (minibuffer-contents) ""))
+                (bits (completion--do-completion
+                       typed (*minibuffer-completion-table*)
+                       (*minibuffer-completion-predicate*)
+                       (string-length typed))))
+           (cond
+            ((or (= bits 1) (= bits 3)) (run-command exit-minibuffer))
+            ((= bits 7)
+             (if (*minibuffer-completion-confirm*)
+                 (set!ncurses-frame-message (*current-frame*) "Confirm")
+                 (run-command exit-minibuffer)))
+            (else #f))))
+       (lambda () #f)
+       "Exit the minibuffer, if what is typed is a valid completion."))
+
+    (define (completion--try-word-completion string table predicate point)
+      ;; GNU Emacs's `completion--try-word-completion': complete the text
+      ;; and then a space, then a hyphen - so that completing a word in a
+      ;; sentence moves on to the next one. It is what SPC does in a
+      ;; completing minibuffer.
+      ;;--------------------------------------------------------------
+      (let loop ((suffixes '(" " "-")))
+        (cond
+         ((null? suffixes)
+          (completion-try-completion string table predicate point))
+         (else
+          (let ((candidate (completion-try-completion
+                            (string-append string (car suffixes))
+                            table predicate
+                            (+ point (string-length (car suffixes))))))
+            (cond
+             ((and (pair? candidate) (string=? (car candidate)
+                                               (string-append string (car suffixes))))
+              candidate)
+             (else (loop (cdr suffixes)))))))))
+
+    (define minibuffer-complete-word
+      ;; GNU Emacs's `minibuffer-complete-word' (SPC): complete at most a
+      ;; single word.
+      ;;--------------------------------------------------------------
+      (new-command
+       "minibuffer-complete-word"
+       (lambda ()
+         (let* ((typed (or (minibuffer-contents) ""))
+                (comp (completion--try-word-completion
+                       typed (*minibuffer-completion-table*)
+                       (*minibuffer-completion-predicate*)
+                       (string-length typed))))
+           (cond
+            ((and (pair? comp) (not (string=? (car comp) typed)))
+             (completion--replace (car comp)))
+            ((not comp)
+             (set!ncurses-frame-message (*current-frame*) "No match"))
+            (else (run-command minibuffer-completion-help)))))
+       (lambda () #f)
+       "Complete the minibuffer contents at most a single word (SPC)."))
+
+    ;;----------------------------------------------------------------
+    ;; Reading with completion
+
+    (define (list-ref-or list index default)
+      ;; The INDEXth of LIST, or DEFAULT when it is not there. Emacs's
+      ;; optional arguments are `&optional' and a Scheme function has to
+      ;; pick them out of a rest list.
+      ;;--------------------------------------------------------------
+      (let loop ((rest list) (n index))
+        (cond ((null? rest) default)
+              ((= n 0) (car rest))
+              (else (loop (cdr rest) (- n 1))))))
+
+    (define (completing-read prompt collection . args)
+      ;; GNU Emacs's `completing-read': read a string in the minibuffer,
+      ;; completing against COLLECTION.
+      ;;
+      ;;   (completing-read PROMPT COLLECTION &optional PREDICATE
+      ;;                    REQUIRE-MATCH INITIAL-INPUT HISTORY DEF)
+      ;;
+      ;; REQUIRE-MATCH is the argument that changes what RET does: with it
+      ;; the minibuffer will not be left holding something that is not a
+      ;; valid completion, which is the whole difference between
+      ;; `minibuffer-local-completion-map' and
+      ;; `minibuffer-local-must-match-map'.
+      ;;--------------------------------------------------------------
+      (let ((predicate (list-ref-or args 0 #f))
+            (require-match (list-ref-or args 1 #f))
+            (initial (list-ref-or args 2 #f))
+            (history (list-ref-or args 3 minibuffer-history))
+            (default (list-ref-or args 4 #f)))
+        (parameterize ((*minibuffer-completion-table* collection)
+                       (*minibuffer-completion-predicate* predicate)
+                       (*minibuffer-completion-confirm*
+                        (if (or (eq? require-match 'confirm)
+                                (eq? require-match 'confirm-after-completion))
+                            #t
+                            #f)))
+          (read-from-minibuffer
+           prompt initial
+           (if require-match
+               minibuffer-local-must-match-map
+               minibuffer-local-completion-map)
+           history default))))
+    (define minibuffer-local-completion-map
+      ;; GNU Emacs's `minibuffer-local-completion-map', whose parent is
+      ;; `minibuffer-local-map'. TAB completes; RET leaves the minibuffer
+      ;; as it does there rather than running Emacs's
+      ;; `minibuffer-completion-exit', because nothing here selects a
+      ;; completion to put in the text first.
+      ;;--------------------------------------------------------------
+      (apply km:keymap
+             '*minibuffer-local-completion-map*
+             (append
+              (list (km:alist->keymap-layer
+                     `(((ctrl #\i) . ,minibuffer-complete)
+                       ((#\space) . ,minibuffer-complete-word)
+                       ((#\?) . ,minibuffer-completion-help))))
+              (km:keymap->layers-list minibuffer-local-map))))
+
+
+    (define minibuffer-local-must-match-map
+      ;; GNU Emacs's `minibuffer-local-must-match-map', whose parent is
+      ;; `minibuffer-local-completion-map': RET completes and exits rather
+      ;; than leaving with whatever is typed, and C-j does the same.
+      ;;--------------------------------------------------------------
+      (apply km:keymap
+             '*minibuffer-local-must-match-map*
+             (append
+              (list (km:alist->keymap-layer
+                     `(((ctrl #\m) . ,minibuffer-complete-and-exit)
+                       ((ctrl #\j) . ,minibuffer-complete-and-exit))))
+              (km:keymap->layers-list minibuffer-local-completion-map))))
+
     ))

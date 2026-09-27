@@ -44,7 +44,11 @@
  ;; `try-completion' and `all-completions' are `minibuf.c''s.
  (only (schemacs editor minibuf) all-completions try-completion)
  (only (schemacs editor minibuffer)
-       make<minibuffer> minibuffer-contents
+       completion--do-completion make<minibuffer>
+       minibuffer--bitset minibuffer-complete minibuffer-complete-and-exit
+       minibuffer-complete-word minibuffer-completion-help
+       minibuffer-local-must-match-map
+       minibuffer-contents
        minibuffer-cursor-column minibuffer-history
        minibuffer-local-completion-map minibuffer-local-map minibufferp)
  (only (schemacs editor simple)
@@ -683,6 +687,68 @@
       (list (bound-in minibuffer-local-map (list (list 'ctrl #\f)))
             (text-editor-get-cursor mb-ed)
             (text-editor-get-cursor ed)))))
+
+;; The completion keymaps: TAB completes, SPC completes one word, `?'
+;; lists the candidates, and RET in the `require-match' map completes and
+;; *exits* rather than leaving with whatever is typed - which is the whole
+;; difference between the two maps, and the reason `completing-read' takes
+;; a REQUIRE-MATCH argument.
+(test-equal '(#t #t #t #t)
+  (list (command-named? (bound-in minibuffer-local-completion-map
+                                  (list 'ctrl #\i))
+                        "minibuffer-complete")
+        (command-named? (bound-in minibuffer-local-completion-map
+                                  (list #\space))
+                        "minibuffer-complete-word")
+        (command-named? (bound-in minibuffer-local-must-match-map
+                                  (list 'ctrl #\m))
+                        "minibuffer-complete-and-exit")
+        (command-named? (bound-in minibuffer-local-completion-map (list #\?))
+                        "minibuffer-completion-help")))
+
+;; `minibuffer--bitset': M (modified), C (there were completions) and E
+;; (what is there now is exact), which is what `minibuffer-complete-and-exit'
+;; reads to decide whether RET may leave.
+(test-equal '(0 1 3 7)
+  (list (minibuffer--bitset #f #f #f)
+        (minibuffer--bitset #f #f #t)
+        (minibuffer--bitset #f #t #t)
+        (minibuffer--bitset #t #t #t)))
+
+;; Driving a completion: what was typed stays, nothing more can be added,
+;; and the bitset says there were completions but is not exact - so RET
+;; would refuse to leave.
+(test-equal '("ap" 2)
+  (let* ((ed (new-text-editor))
+         (frame (test-frame ed))
+         (mb-ed (new-text-editor))
+         (mb (make<minibuffer> mb-ed "Fruit: " minibuffer-local-completion-map
+                              #f minibuffer-history 0 #f)))
+    (text-editor-insert mb-ed "ap")
+    (parameterize ((*current-frame* frame)
+                   (*minibuffer* mb)
+                   (*echo-area-buffer* mb-ed)
+                   (*current-keymap* minibuffer-local-completion-map))
+      (let ((bits (completion--do-completion
+                   "ap" (table-of '("apple" "apricot")) #f 2)))
+        (list (minibuffer-contents) bits)))))
+
+;; ...and when what is typed is already the only candidate, `try-completion'
+;; answers #t, the bitset is 1, and RET leaves - the "sole completion" case.
+(test-equal '("apple" 1)
+  (let* ((ed (new-text-editor))
+         (frame (test-frame ed))
+         (mb-ed (new-text-editor))
+         (mb (make<minibuffer> mb-ed "Fruit: " minibuffer-local-completion-map
+                              #f minibuffer-history 0 #f)))
+    (text-editor-insert mb-ed "apple")
+    (parameterize ((*current-frame* frame)
+                   (*minibuffer* mb)
+                   (*echo-area-buffer* mb-ed)
+                   (*current-keymap* minibuffer-local-completion-map))
+      (let ((bits (completion--do-completion
+                   "apple" (table-of '("apple")) #f 5)))
+        (list (minibuffer-contents) bits)))))
 
 (test-end "schemacs_ncurses_editor_minibuffer")
 

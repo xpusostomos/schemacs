@@ -65,9 +65,8 @@
           *default-keymap*)
     ;; Every command here prompts.
     (only (schemacs editor minibuffer)
+          completing-read
           file-name-history
-          *minibuffer-completion-table*
-          minibuffer-local-completion-map
           read-char-from-minibuffer
           read-from-minibuffer
           yes-or-no-p)
@@ -480,15 +479,19 @@
       ;; A name that does not exist yet is allowed, as Emacs allows it -
       ;; that is how a file is created.
       ;;--------------------------------------------------------------
-      (parameterize ((*minibuffer-completion-table* file-name-completion-table))
-        ;; the default is the file the buffer already visits, so RET keeps
-        ;; the name it has - GNU Emacs's `read-file-name' passes its
-        ;; `default-filename', which `read-file-name-default' takes from
-        ;; `buffer-file-name'
-        (read-from-minibuffer prompt (default-directory)
-                              minibuffer-local-completion-map
-                              file-name-history
-                              (buffer-file-name (current-buffer)))))
+      ;; `completing-read', not `read-from-minibuffer': that is the point
+      ;; of this function in Emacs - it is `completing-read' with a file
+      ;; name table and a file name history, and everything else about it
+      ;; (what RET does, what the candidates are) is that function's.
+      ;;
+      ;; REQUIRE-MATCH is nil: a name that does not exist yet is allowed,
+      ;; as Emacs allows it - that is how a file is created. The default
+      ;; is the file the buffer already visits, so RET keeps the name it
+      ;; has.
+      (completing-read prompt file-name-completion-table #f #f
+                       (default-directory)
+                       file-name-history
+                       (buffer-file-name (current-buffer))))
 
     ;;----------------------------------------------------------------
     ;; Final newlines
