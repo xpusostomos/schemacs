@@ -17,8 +17,8 @@
     (scheme base)
     ;; The terminal.
     (only (ncurses curses)
-          curs-set endwin idcok! idlok! initscr keypad! noecho! nonl! raw!
-          scrollok! stdscr)
+          curs-set endwin has-colors? idcok! idlok! initscr keypad! noecho!
+          nonl! raw! scrollok! start-color! stdscr)
     (only (schemacs editor engine)
           new-text-editor set!text-editor-buffer-name)
     (only (schemacs editor frame) *current-frame* new-frame)
@@ -68,6 +68,11 @@
           (nonl!)
           (keypad! (stdscr) #t)
           (scrollok! (stdscr) #f)
+          ;; Colours have to be started before a pair can be defined, and
+          ;; asking first keeps a monochrome terminal from being told to do
+          ;; something it cannot. `(schemacs editor xdisp)' defines the
+          ;; pairs the faces ask for.
+          (when (has-colors?) (start-color!))
           ;; disable the insert/delete-character optimizations: they
           ;; corrupt the display when lines merge (ncurses tracks a
           ;; virtual screen the terminal no longer matches)

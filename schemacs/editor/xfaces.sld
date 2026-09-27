@@ -36,7 +36,10 @@
     (scheme base)
     (scheme char)
     (only (schemacs editor faces)
-          *face-attributes* *undefined-face-attribute*))
+          *face-attributes* *undefined-face-attribute*)
+    ;; What a colour *name* means on this terminal - which is not its own
+    ;; business, and lives where Emacs has it, in `tty-colors.el'.
+    (only (schemacs editor tty-colors) tty-color-desc))
 
   (export
    attribute-value
@@ -51,7 +54,6 @@
    tty-slant-number
    tty-weight-number
    *face-attribute-names*
-   *tty-colors*
    *tty-slant-table*
    *tty-weight-table*
    )
@@ -208,30 +210,15 @@
       (let ((entry (assq slant *tty-slant-table*)))
         (if entry (cdr entry) 100)))
 
-    (define *tty-colors*
-      ;; The colours a terminal can be asked for by name, as
-      ;; `(NAME . INDEX)'. GNU Emacs builds this from terminfo when the
-      ;; terminal is opened (`init_tty') and lets a face define more
-      ;; (`tty-color-define'); these are the ANSI names, which is what an
-      ;; ncurses terminal has, and the table a `tty-color-define' would
-      ;; add to.
-      ;;--------------------------------------------------------------
-      (make-parameter
-       '(("black" . 0) ("red" . 1) ("green" . 2) ("yellow" . 3)
-         ("blue" . 4) ("magenta" . 5) ("cyan" . 6) ("white" . 7)
-         ("brightblack" . 8) ("brightred" . 9) ("brightgreen" . 10)
-         ("brightyellow" . 11) ("brightblue" . 12)
-         ("brightmagenta" . 13) ("brightcyan" . 14) ("brightwhite" . 15))))
-
     (define (map-tty-color name)
-      ;; GNU Emacs's `map_tty_color': the index of the terminal colour
-      ;; called NAME, or #f when the terminal has no such colour - in
-      ;; which case Emacs approximates it against the colours the
-      ;; terminal *does* have (`tty-color-approximate'), which needs the
-      ;; terminal's own table and is not done here.
+      ;; GNU Emacs's `map_tty_color': the index of the terminal colour to
+      ;; draw NAME with. Emacs answers with the terminal's own colour when
+      ;; it has one by that name and the *nearest* one when it has not -
+      ;; and it usually has not, because almost nothing a face spec names
+      ;; (`grey75', `magenta4', `lightskyblue1') is an ANSI colour. That
+      ;; approximation is `tty-colors'' business.
       ;;--------------------------------------------------------------
-      (let ((entry (assoc (string-downcase name) (*tty-colors*))))
-        (and entry (cdr entry))))
+      (tty-color-desc name))
 
     (define (tty-capable-p options)
       ;; GNU Emacs's `tty_capable_p': whether the terminal can show the

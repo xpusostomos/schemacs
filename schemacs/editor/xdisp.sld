@@ -53,6 +53,16 @@
          window-top-line)
     (only (schemacs editor disp-table)
          current-line-display-column expand-line-display)
+    ;; The `face' text property, and the faces themselves. A face reaches
+    ;; the display through these three libraries and no others: the
+    ;; property says which faces are in effect, `xfaces' merges them and
+    ;; folds them down, and this file turns that into terminal attributes.
+    (only (schemacs editor textprop) get-text-property)
+    (only (schemacs editor xfaces)
+          attribute-value face-attributes-empty face-realized-attributes
+          merge-face-ref merge-face-vectors realize-tty-face)
+    ;; `logior' is Guile's, not R7RS's: the attributes are bit flags.
+    (only (guile) logior)
     )
 
   (export
@@ -380,6 +390,84 @@
        (expand-line-display (substring line 0 (min col (string-length line)))
                             10000)))
 
+    ;;----------------------------------------------------------------
+    ;; Faces
+
+    (define *tty-color-pairs*
+      ;; The colour pairs made so far, as `((FOREGROUND . BACKGROUND) .
+      ;; PAIR)'. Emacs keeps the same table on the frame (`tty_face_1'
+      ;; makes a pair per combination a face asks for), because a
+      ;; terminal has only so many and they have to be shared.
+      ;;--------------------------------------------------------------
+      (make-parameter '()))
+
+    (define (tty-color-pair foreground background)
+      ;; The ncurses colour-pair number for FOREGROUND and BACKGROUND,
+      ;; making the pair the first time it is asked for. A missing colour
+      ;; is #f and becomes -1, which is how ncurses spells "the
+      ;; terminal's own default". 0 means no pair at all.
+      ;;--------------------------------------------------------------
+      (cond
+       ((and (not foreground) (not background)) 0)
+       ((not (has-colors?)) 0)
+       (else
+        (let* ((key (cons foreground background))
+               (entry (assoc key (*tty-color-pairs*))))
+          (cond
+           (entry (cdr entry))
+           (else
+            (let ((n (+ 1 (length (*tty-color-pairs*)))))
+              (init-pair! n (if foreground foreground -1)
+                          (if background background -1))
+              (*tty-color-pairs* (cons (cons key n) (*tty-color-pairs*)))
+              n)))))))
+
+    (define (tty-face-attribute face)
+      ;; A realized tty face as one ncurses attribute number: the bit
+      ;; flags `term.c' would turn into escape sequences, which is all a
+      ;; terminal can be told. The colour pair is made here, on first use.
+      ;;--------------------------------------------------------------
+      (let ((foreground (attribute-value face ':foreground))
+            (background (attribute-value face ':background)))
+        (let ((bits 0))
+          (when (attribute-value face ':bold)
+            (set! bits (logior bits A_BOLD)))
+          (when (attribute-value face ':underline)
+            (set! bits (logior bits A_UNDERLINE)))
+          (when (attribute-value face ':reverse)
+            (set! bits (logior bits A_REVERSE)))
+          (let ((pair (tty-color-pair (if (number? foreground) foreground #f)
+                                      (if (number? background) background #f))))
+            (if (> pair 0) (logior bits (color-pair pair)) bits)))))
+
+    (define (face->attribute face-name)
+      ;; The ncurses attribute number for a *named* face: GNU Emacs's
+      ;; `face_at_buffer_position' where the face is known by name, which
+      ;; is what the mode line and the echo area need.
+      ;;--------------------------------------------------------------
+      (tty-face-attribute
+       (realize-tty-face
+        (merge-face-vectors (face-realized-attributes face-name)
+                            (face-realized-attributes 'default)))))
+
+    (define (face-at-buffer-position ed position)
+      ;; The ncurses attribute number for the face in effect at POSITION
+      ;; in ED: GNU Emacs's `face_at_buffer_position'. The `face' text
+      ;; property there - a face name, a property list, or a list of
+      ;; either - is merged with the `default' face and folded down to
+      ;; what the terminal can draw.
+      ;;
+      ;; Emacs caches the realized face against the position, because
+      ;; this runs per character; a cache is worth adding when the
+      ;; renderer starts asking per character rather than per run.
+      ;;--------------------------------------------------------------
+      (tty-face-attribute
+       (realize-tty-face
+        (merge-face-ref (get-text-property position 'face ed)
+                        (merge-face-vectors
+                         (face-realized-attributes 'default)
+                         (face-attributes-empty))))))
+
     (define (draw-match row x0 line display-string line-start len start end
                         point width)
       ;; Draw the part of the search match [START, END) that falls on this
@@ -393,15 +481,16 @@
              (x (display-column-of line col))
              (y (display-column-of line to)))
         (when (and (< x width) (< x y))
-          (attr-on! (stdscr)
-                    (if (and (<= start point) (<= point end))
-                        A_REVERSE A_BOLD))
-          (addstr (stdscr)
-                  (substring display-string x
-                             (min y (string-length display-string)))
-                  #:y row #:x (+ x0 x))
-          (attr-off! (stdscr) A_REVERSE)
-          (attr-off! (stdscr) A_BOLD))))
+          (let ((attribute
+                 (face->attribute
+                  (if (and (<= start point) (<= point end))
+                      'isearch 'lazy-highlight))))
+            (attr-on! (stdscr) attribute)
+            (addstr (stdscr)
+                    (substring display-string x
+                               (min y (string-length display-string)))
+                    #:y row #:x (+ x0 x))
+            (attr-off! (stdscr) attribute)))))
 
     (define (highlight-matches window row line display-string line-start width
                                pattern case-fold?)
@@ -496,13 +585,19 @@
                     (+ line-start
                        (or (line-outer-size ed line-index) 0)))
               )))
-        ;; the mode line, on the window's last row
-        (attr-on! (stdscr) A_REVERSE)
-        (addstr (stdscr)
-                (pad-line (truncate-line (mode-line-string window) width) width)
-                #:y (+ (window-top window) (window-height window) -1)
-                #:x x0)
-        (attr-off! (stdscr) A_REVERSE)
+        ;; the mode line, on the window's last row. The face is Emacs's
+        ;; `mode-line' for the selected window and `mode-line-inactive'
+        ;; for the others - and on a terminal `mode-line' is
+        ;; `:inverse-video t', which is what this used to hardcode.
+        (let ((attribute (face->attribute (if (eq? window (selected-window))
+                                              'mode-line
+                                              'mode-line-inactive))))
+          (attr-on! (stdscr) attribute)
+          (addstr (stdscr)
+                  (pad-line (truncate-line (mode-line-string window) width) width)
+                  #:y (+ (window-top window) (window-height window) -1)
+                  #:x x0)
+          (attr-off! (stdscr) attribute))
         ;; the vertical border between this window and the one to its
         ;; right: GNU Emacs draws it down every row of the windows,
         ;; their mode lines included
