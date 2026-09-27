@@ -48,6 +48,10 @@
     (only (schemacs editor frame)
           *current-frame* *echo-area-buffer* *echo-area-prompt* *minibuffer*
           set!ncurses-frame-message)
+    ;; `try-completion' and `all-completions' are `minibuf.c''s and live in
+    ;; `(schemacs editor minibuf)'; this library is `minibuffer.el' and uses
+    ;; them rather than defining them.
+    (only (schemacs editor minibuf) all-completions try-completion)
     ;; The recursive edit the minibuffer is read by: the same command loop,
     ;; called again.
     (only (schemacs editor keyboard)
@@ -60,7 +64,6 @@
 
   (export
    *minibuffer-completion-table*
-   all-completions
    common-prefix
    completion-candidates-message
    file-name-history
@@ -82,7 +85,6 @@
    previous-history-element
    read-char-from-minibuffer
    read-from-minibuffer
-   try-completion
    yes-or-no-p
    )
 
@@ -344,45 +346,6 @@
       ;; `minibuffer-completion-table'.
       ;;--------------------------------------------------------------
       (make-parameter #f))
-
-    (define (all-completions string table)
-      ;; GNU Emacs's `all-completions': the candidates that STRING is a
-      ;; prefix of.
-      ;;--------------------------------------------------------------
-      (let loop ((candidates (if table (table string) '())) (acc '()))
-        (cond
-         ((null? candidates) (reverse acc))
-         ((string-prefix? string (car candidates))
-          (loop (cdr candidates) (cons (car candidates) acc)))
-         (else (loop (cdr candidates) acc)))))
-
-    (define (common-prefix strings)
-      ;; The longest prefix every one of STRINGS begins with.
-      ;;--------------------------------------------------------------
-      (let loop ((i 0))
-        (if (and (< i (string-length (car strings)))
-                 (let all ((rest (cdr strings)))
-                   (cond
-                    ((null? rest) #t)
-                    ((and (< i (string-length (car rest)))
-                          (char=? (string-ref (car rest) i)
-                                  (string-ref (car strings) i)))
-                     (all (cdr rest)))
-                    (else #f))))
-            (loop (+ 1 i))
-            (substring (car strings) 0 i))))
-
-    (define (try-completion string table)
-      ;; GNU Emacs's `try-completion'. Returns #t when STRING is itself
-      ;; one of the candidates, otherwise what it can be completed to
-      ;; (which is STRING when it cannot be completed at all), or #f
-      ;; when nothing matches.
-      ;;--------------------------------------------------------------
-      (let ((candidates (all-completions string table)))
-        (cond
-         ((null? candidates) #f)
-         ((and (null? (cdr candidates)) (string=? string (car candidates))) #t)
-         (else (common-prefix candidates)))))
 
     (define (completion-candidates-message candidates)
       ;; How the candidates are shown when there is nothing to complete:

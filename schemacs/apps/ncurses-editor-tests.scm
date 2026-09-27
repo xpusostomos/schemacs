@@ -41,11 +41,12 @@
        file-name-completion-table file-name-directory-part
        file-name-nondirectory-part find-file note-file-read-only!
        save-answer-char->decision)
+ ;; `try-completion' and `all-completions' are `minibuf.c''s.
+ (only (schemacs editor minibuf) all-completions try-completion)
  (only (schemacs editor minibuffer)
-       all-completions make<minibuffer> minibuffer-contents
+       make<minibuffer> minibuffer-contents
        minibuffer-cursor-column minibuffer-history
-       minibuffer-local-completion-map minibuffer-local-map minibufferp
-       try-completion)
+       minibuffer-local-completion-map minibuffer-local-map minibufferp)
  (only (schemacs editor simple)
        *kill-buffer* *last-change-was-undo* *last-command* read-only-mode
        *last-command-kill* *pending-undo-list* *this-command-kill*
@@ -592,7 +593,11 @@
 ;; `try-completion' is GNU Emacs's: the candidates the text matches, the
 ;; longest prefix they share, #t when the text is already a candidate, and
 ;; #f when nothing matches.
-(define (table-of names) (lambda (string) names))
+;; A completion table is a *list* of candidates in the simplest form
+;; Emacs allows, and that is what `file-name-completion-table' answers too.
+;; (The function form takes three arguments, `(STRING PREDICATE ACTION)',
+;; not one - see `(schemacs editor minibuf)'.)
+(define (table-of names) names)
 (define fruit (table-of '("apple" "apricot" "banana")))
 
 (test-equal '(("apple" "apricot") ())
