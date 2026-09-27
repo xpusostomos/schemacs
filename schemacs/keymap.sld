@@ -1385,14 +1385,40 @@
     (define (new-modal-lookup-state km)
       ;; Construct a new <modal-lookup-state-type> with either a
       ;; <keymap-type> argument or a list of <keymap-type> arguments.
+      ;;
+      ;; A list is a *precedence order*: the first keymap that binds the
+      ;; key wins, and one that does not falls through to the next. It is
+      ;; what GNU Emacs's `read_key_sequence' does with the buffer's local
+      ;; map and then `global-map', and what this library's docstring has
+      ;; always promised - the list case was documented and not
+      ;; implemented, so the callers that passed a list (the window frame
+      ;; key dispatchers) got an error instead.
+      ;;
+      ;; The keymaps become the layers of one keymap, in order. That is
+      ;; the same lookup - a keymap tries its layers in turn - and it has
+      ;; the property a list of separate maps needs: a *prefix* in one map
+      ;; does not stop a longer sequence being found in the next. With a
+      ;; local map binding C-x as an empty prefix and a global map binding
+      ;; C-x C-f, the lookup of C-x C-f is `find-file', which is what a
+      ;; terminal Emacs answers to `(key-binding "\C-x\C-f")' for the same
+      ;; two maps. A key bound in both is the first map's.
+      ;;--------------------------------------------------------------
       (cond
        ((keymap-type? km)
         (make<modal-lookup-state-type> km '()))
        ((or (keymap-layer-type? km)
             (keymap-index-predicate-type? km))
         (make<modal-lookup-state-type> (keymap km) '()))
+       ((and (list? km) (pair? km)
+             (let all ((rest km))
+               (cond ((null? rest) #t)
+                     ((keymap-type? (car rest)) (all (cdr rest)))
+                     (else #f))))
+        (make<modal-lookup-state-type> (apply keymap '*keymaps* km) '()))
+       ((null? km)
+        (error "no keymap to look a key sequence up in"))
        (else
-        (error "argument must be a <keymap-type>" km))))
+        (error "argument must be a <keymap-type> or a list of them" km))))
 
     (define (modal-lookup-state-key-index state)
       (reverse-list->keymap-index (modal-lookup-state-index-stack state)))

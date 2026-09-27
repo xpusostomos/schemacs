@@ -10,7 +10,7 @@
 ;;------------------------------------------------------------------
 (setenv "GUILE_WARN_DEPRECATED" "no")
 
-(import (schemacs apps ncurses-editor))
+(import (schemacs ui platform ncurses))
 
 (let ((args (if (> (length (command-line)) 1)
                 (cdr (command-line))

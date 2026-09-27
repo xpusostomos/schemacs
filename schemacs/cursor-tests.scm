@@ -1,7 +1,10 @@
 (import
   (scheme base)
   (srfi 64) ;;testing
-  (srfi 69)
+  ;; SRFI 69 is here for `hash-table-ref' and the like; `alist->hash-table'
+  ;; is the project's own, so it is not taken from SRFI 69 as well -
+  ;; importing a name from two places is what Guile warns about.
+  (except (srfi 69) alist->hash-table)
   (schemacs cursor)
   (only (schemacs lens) lens-set view)
   (only (schemacs hash-table) alist->hash-table)

@@ -1,0 +1,591 @@
+(define-library (schemacs editor xdisp)
+  ;; This library mirrors GNU Emacs's `xdisp.c': the redisplay. It draws
+  ;; each window's rows of text, its mode line and the vertical border
+  ;; beside it, then the echo area, then places the terminal cursor. What
+  ;; it draws is derived entirely from state it can reach without knowing
+  ;; about editing: the buffers the windows show, where their points are,
+  ;; and the frame's echo area.
+  ;;
+  ;; Two things make that true, and both are why this library comes when
+  ;; it does. The echo area's buffer and prompt are read from the frame
+  ;; (`*echo-area-buffer*', `*echo-area-prompt*'), which is where GNU
+  ;; Emacs keeps them, so the renderer has nothing to ask a minibuffer.
+  ;; And what to draw as a search match arrives in `*search-highlight*',
+  ;; which the search commands publish - in Emacs the same fact is the
+  ;; `isearch' and `lazy-highlight' faces on the match. A renderer that
+  ;; imported the minibuffer and the search would sit in a cycle with
+  ;; them, and this is the knot the layout plan cuts here.
+  ;;
+  ;; See LAYOUT-PLAN.txt for the rule this library is a step of.
+
+  (import
+    (scheme base)
+    (scheme char)
+    ;; `display' is not in `(scheme base)' - it is `(scheme write)'s - and
+    ;; `caddr' is `(scheme cxr)'s. The mode line's evaluator uses both, and
+    ;; neither is missed until a mode line is drawn.
+    (only (scheme write) display)
+    (only (scheme cxr) caddr)
+    (ncurses curses)
+    ;; The mode line reads a line and column out of the engine, which
+    ;; answers with one of these.
+    (only (schemacs ui text-buffer-impl)
+          text-location-type? text-location-line text-location-column)
+
+    (only (schemacs editor engine)
+         string-search-forward text-editor-buffer-name
+         text-editor-char-count text-editor-file-name
+         text-editor-cursor-column text-editor-cursor-line
+         text-editor-get-cursor text-editor-get-end-of-line
+         text-editor-get-line-column text-editor-get-start-of-line
+         text-editor-line-count text-editor-line-editor-ref
+         text-editor-line-outer-size text-editor-modified?
+         text-editor-read-only? text-editor-text-line-ref
+         text-editor-to-string text-line-inner->string)
+    (only (schemacs editor frame)
+         *echo-area-buffer* *echo-area-prompt* frame-height frame-width
+         ncurses-frame-message ncurses-frame-selected-window
+         sync-frame-size! window-body-height
+         window-body-width window-buffer window-height window-left
+         window-list
+         selected-window set!window-top-line window-point window-right-border?
+         window-top
+         window-top-line)
+    (only (schemacs editor disp-table)
+         current-line-display-column expand-line-display)
+    )
+
+  (export
+   ;; The search highlight is the search commands' to set, so it is
+   ;; exported; `render!' and the mode line are what the rest calls.
+   *search-highlight*
+   cursor-screen-position
+   *mode-line-format*
+   format-mode-line
+   mode-line-string
+   render!
+   status-string
+   )
+
+  (begin
+
+    (define *search-highlight*
+      ;; What the renderer should draw as search matches, or false when
+      ;; nothing should be: a pair of the search string and whether the
+      ;; search folds case.
+      ;;
+      ;; The matching itself lives with the search commands - this is a
+      ;; *display* fact, and it is here because the display layer must not
+      ;; have to know who set it. In GNU Emacs the same fact is a text
+      ;; property: isearch puts the `isearch\' face on the match point is
+      ;; on and the `lazy-highlight\' face on the others, and `xdisp.c\'
+      ;; draws whatever faces it finds. This editor has no text properties
+      ;; and no overlays yet, so isearch publishes what it found here and
+      ;; the renderer draws it.
+      ;;--------------------------------------------------------------
+      (make-parameter #f))
+    (define (ncurses-line-string ed i)
+      ;; Get the displayable contents of line I (not including its
+      ;; line break) as a string, or #f when I is past the end of the
+      ;; buffer. The current line is read from the line editor, which
+      ;; holds the live copy of the line under the cursor; every other
+      ;; line is read from the lines gap-buffer.
+      ;;--------------------------------------------------------------
+      (cond
+       ((= i (text-editor-cursor-line ed))
+        ;; The live current line: the line editor's characters, from
+        ;; the start of the line to the end of the line.
+        (call-with-port (open-output-string)
+          (lambda (port)
+            (let* ((start (text-editor-get-start-of-line ed))
+                   (end   (text-editor-get-end-of-line ed))
+                   (len   (- end start)))
+              (let loop ((j 0))
+                (when (< j len)
+                  (let ((ch (text-editor-line-editor-ref ed j)))
+                    (when ch (write-char ch port)))
+                  (loop (+ 1 j)))))
+            (get-output-string port))))
+       ((< i (text-editor-line-count ed))
+        ;; the display form of the line: its contents WITHOUT the
+        ;; terminating line break
+        (text-line-inner->string (text-editor-text-line-ref ed i)))
+       (else #f)))
+
+    (define (truncate-line str width)
+      (let ((len (string-length str)))
+        (cond
+         ((<= len width) str)
+         ((<= width 0) "")
+         (else (substring str 0 width)))))
+
+    (define (pad-line str width)
+      (let ((len (string-length str)))
+        (cond
+         ((< width len) (truncate-line str width))
+         (else (string-append str (make-string (- width len) #\space))))))
+
+    (define (scroll-to-cursor! window)
+      ;; Adjust WINDOW's top line so that its point is visible, as GNU
+      ;; Emacs's redisplay does before drawing each window.
+      ;;--------------------------------------------------------------
+      (let* ((ed (window-buffer window))
+             (cursor-line (text-editor-cursor-line ed))
+             (vheight (window-body-height window)))
+        (cond
+         ((< cursor-line (window-top-line window))
+          (set!window-top-line window cursor-line))
+         ((>= cursor-line (+ (window-top-line window) vheight))
+          (set!window-top-line
+           window (+ 1 (- cursor-line vheight)))
+           ))))
+
+    (define *mode-line-format*
+      ;; GNU Emacs's `mode-line-format': the template a window's mode line is
+      ;; drawn from, evaluated by `FORMAT-MODE-LINE' below.
+      ;;
+      ;; The default is GNU Emacs's own for the parts this editor can show:
+      ;; `mode-line-modified' (`("%1*" "%1+")' in `bindings.el', which is the
+      ;; two-cell `--', `**' or `%%'), the buffer name in a twelve-wide field
+      ;; (`mode-line-buffer-identification', `("%12b")'), then the line and
+      ;; column of the window's own point (`mode-line-position').
+      ;;
+      ;; Emacs's default also names variables in the format - `mode-line-mule-info',
+      ;; `mode-line-position', `mode-line-modes' and so on - and a symbol in
+      ;; the format is evaluated at display time. This editor has no variable
+      ;; registry yet, so a symbol here resolves to nothing, exactly as an
+      ;; unbound variable does in Emacs; the default therefore spells out what
+      ;; it shows rather than naming it. When the elisp layer brings a variable
+      ;; registry, the names go back in.
+      ;;--------------------------------------------------------------
+      (make-parameter
+       (list (list "%1*" "%1+")
+             " "
+             "%12b"
+             " -- L" "%l" " C" "%c")))
+
+    (define (mode-line-construct spec window)
+      ;; The text one `%'-construct stands for: GNU Emacs's
+      ;; `decode_mode_spec'. SPEC is the character after the `%'.
+      ;;
+      ;; The constructs this editor can answer are the ones about the buffer
+      ;; and the window's point. The rest - the percentages of the buffer
+      ;; above or below the window (`%p', `%P', `%o', `%q'), the coding
+      ;; systems (`%z', `%Z'), the process (`%s') and the recursion depth
+      ;; (`%[', `%]') - are printed as they stand, which is what Emacs does
+      ;; with a construct it does not recognise either.
+      ;;--------------------------------------------------------------
+      (let* ((ed (window-buffer window))
+             (at (text-editor-get-line-column ed (window-point window))))
+        (case spec
+          ((#\%) "%")
+          ((#\b) (or (text-editor-buffer-name ed) "*scratch*"))
+          ((#\f) (or (text-editor-file-name ed) ""))
+          ((#\l) (number->string (text-location-line at)))
+          ;; `%c' counts from zero - "the leftmost column is displayed as
+          ;; zero", which a terminal Emacs confirms: `(format-mode-line "%c")'
+          ;; at the start of a line is "0". The engine counts from one, as it
+          ;; must for a screen position, so the construct subtracts.
+          ((#\c) (number->string (- (text-location-column at) 1)))
+          ;; `%C' is `%c' counting from one rather than zero
+          ((#\C) (number->string (text-location-column at)))
+          ;; `%*' is `%' read-only, `*' modified, `-' neither; `%+' is `*'
+          ;; modified, `%' read-only, `-' neither; `%&' is `*' modified
+          ((#\*) (if (text-editor-read-only? ed)
+                     "%"
+                     (if (text-editor-modified? ed) "*" "-")))
+          ((#\+) (if (text-editor-modified? ed)
+                     "*"
+                     (if (text-editor-read-only? ed) "%" "-")))
+          ((#\&) (if (text-editor-modified? ed) "*" "-"))
+          ((#\i) (number->string (text-editor-char-count ed)))
+          ((#\I) (let ((n (text-editor-char-count ed)))
+                   (cond ((< n 10000) (number->string n))
+                         ((< n 10000000)
+                          (string-append (number->string (quotient n 1000)) "k"))
+                         (else
+                          (string-append (number->string (quotient n 1000000))
+                                         "M")))))
+          ;; `%-' is "enough dashes to fill the mode line": how many is only
+          ;; known when the line is placed, so the drawing code pads instead
+          ((#\-) "")
+          (else (string #\% spec)))))
+
+    (define (number-in-field? text)
+      ;; Whether TEXT is a number, which is what decides which side a field
+      ;; pads on. Measured from a terminal Emacs: `%6l' at the first line is
+      ;; "     1" - a number is padded on the *left*, so that the digits line
+      ;; up as point moves - and `%12b' is "probe       ", padded on the
+      ;; right. The test is Emacs's: a leading digit or a minus sign.
+      ;;--------------------------------------------------------------
+      (and (> (string-length text) 0)
+           (or (char-numeric? (string-ref text 0))
+               (char=? (string-ref text 0) #\-))))
+
+    (define (pad-mode-line-field text width)
+      ;; TEXT in a field WIDTH wide, in the `%N<spec>' form: GNU Emacs pads a
+      ;; number on the left and anything else on the right. A text longer than
+      ;; the field is cut to it.
+      ;;--------------------------------------------------------------
+      (let ((len (string-length text)))
+        (cond
+         ((= len width) text)
+         ((> len width) (substring text 0 width))
+         ((number-in-field? text)
+          (string-append (make-string (- width len) #\space) text))
+         (else (string-append text (make-string (- width len) #\space))))))
+
+    (define (pad-mode-line-element text width)
+      ;; TEXT in the field of an `(N ...)' element. This is a different
+      ;; mechanism from `%N<spec>' and it pads differently: measured from the
+      ;; same terminal Emacs, `(6 "%l")' at the first line is "1     " where
+      ;; `%6l' is "     1". The element form is a *precision* - the text is
+      ;; laid out to that width and short text simply does not fill it - so
+      ;; the padding goes on the right whatever the text is.
+      ;;--------------------------------------------------------------
+      (let ((len (string-length text)))
+        (if (>= len width)
+            (substring text 0 width)
+            (string-append text (make-string (- width len) #\space)))))
+
+    (define (expand-mode-line-string str window)
+      ;; STR with its `%'-constructs expanded: GNU Emacs's processing of a
+      ;; string in a mode line. A `%' followed by digits is a field width, as
+      ;; in `%12b'; a `%' followed by anything else is a construct. A `%' at
+      ;; the very end is a literal `%'.
+      ;;--------------------------------------------------------------
+      (call-with-port (open-output-string)
+        (lambda (port)
+          (let loop ((i 0) (width #f))
+            (when (< i (string-length str))
+              (let ((c (string-ref str i)))
+                (cond
+                 ((and (char=? c #\%) (not width))
+                  (loop (+ 1 i) 'pending))
+                 ((eq? width 'pending)
+                  (if (char-numeric? c)
+                      (loop (+ 1 i) (- (char->integer c) (char->integer #\0)))
+                      (let ((text (mode-line-construct c window)))
+                        (display (if width text text) port)
+                        (loop (+ 1 i) #f))))
+                 ((integer? width)
+                  (if (char-numeric? c)
+                      (loop (+ 1 i) (+ (* 10 width)
+                                       (- (char->integer c) (char->integer #\0))))
+                      (begin
+                        (display (pad-mode-line-field
+                                  (mode-line-construct c window) width)
+                                 port)
+                        (loop (+ 1 i) #f))))
+                 (else
+                  (write-char c port)
+                  (loop (+ 1 i) #f))))))
+          (get-output-string port))))
+
+    (define (format-mode-line format . args)
+      ;; GNU Emacs's `format-mode-line': the mode line FORMAT produces for a
+      ;; window, WINDOW being the second argument or the selected window.
+      ;;
+      ;; A construct is a string (its `%'-constructs expanded), a list (each
+      ;; element processed in turn, so a list whose car is an integer pads the
+      ;; rest to that width, and `(:eval FORM)' is evaluated), a symbol (whose
+      ;; value is used - and this editor has no variable registry, so every
+      ;; symbol is unbound and yields nothing, as an unbound variable does in
+      ;; Emacs), or nil (nothing at all).
+      ;;--------------------------------------------------------------
+      (let ((window (if (pair? args) (car args) (selected-window))))
+        (let process ((construct format))
+          (cond
+           ((not construct) "")
+           ((string? construct) (expand-mode-line-string construct window))
+           ((integer? construct) "")
+           ((symbol? construct) "")
+           ((pair? construct)
+            (cond
+             ;; `(:propertize ELT PROPS...)' - the properties have nowhere to
+             ;; go, so the element is processed as it stands - and
+             ;; `(:eval FORM)'. Emacs's `:eval' holds a *form* to evaluate,
+             ;; because Emacs has an evaluator under it; here it holds a
+             ;; procedure of no arguments, which is the same thing without
+             ;; one. The elisp layer is where the two will meet.
+             ((and (memq (car construct) '(:eval :propertize))
+                   (pair? (cdr construct)))
+              ;; `:eval' is self-evaluating in Emacs Lisp; in Scheme it is a
+          ;; symbol, and this is a reference to it
+          (if (eq? (car construct) ':eval)
+                  (process ((cadr construct)))
+                  (process (cadr construct))))
+             ;; a symbol first is a condition on that symbol's value
+             ((symbol? (car construct))
+              (process (if (and (pair? (cdr construct))
+                                (pair? (cddr construct)))
+                           (caddr construct)
+                           #f)))
+             ;; an integer first is a width
+             ((integer? (car construct))
+              (let ((width (car construct))
+                    (rest (if (pair? (cdr construct)) (cadr construct) #f)))
+                (let ((text (process rest)))
+                  (if (< width 0)
+                      (if (> (string-length text) (- width))
+                          (substring text 0 (- width))
+                          text)
+                      (pad-mode-line-element text width)))))
+             (else (apply string-append (map process construct)))))
+           (else "")))))
+
+    (define (mode-line-string window)
+      ;; The window's mode line: GNU Emacs's `MODE-LINE-STRING' is what
+      ;; its format produces for this window, which is the whole of it -
+      ;; there is no hand-rolled string here any more. What the format
+      ;; says, and what it may say, is in `*MODE-LINE-FORMAT*'.
+      ;;
+      ;; The name is the buffer's, not the file's: Emacs names a buffer
+      ;; visiting a file after the file without its directory (that is
+      ;; what `create-file-buffer' does), and names a buffer with no file
+      ;; of its own - so a window can show "*Completions*", which visits
+      ;; nothing.
+      ;;
+      ;; The hand-rolled indicator that used to be here is gone with it:
+      ;; it reported `%%' for any read-only buffer, so a buffer that was
+      ;; both modified and read-only showed `%%' when Emacs shows `%*'.
+      ;; That is what `%1*' followed by `%1+' gives - see
+      ;; ENGINE-FINDINGS.txt.
+      ;;
+      ;; The position is per window because point is: two windows on the
+      ;; same buffer are at different places in it, and each mode line
+      ;; says where its own window is.
+      ;;--------------------------------------------------------------
+      (format-mode-line (*mode-line-format*) window))
+
+    (define (status-string frame)
+      ;; The mode line of the selected window, which is the one the
+      ;; frame is about.
+      ;;--------------------------------------------------------------
+      (mode-line-string (ncurses-frame-selected-window frame)))
+
+    (define (line-outer-size ed line-index)
+      ;; How many characters line LINE-INDEX advances the buffer's
+      ;; character index by - its contents plus its line break, which is
+      ;; what the CDF counts, and so what the next line's first character
+      ;; is offset by.
+      ;;--------------------------------------------------------------
+      (text-editor-line-outer-size ed line-index))
+
+    (define (display-column-of line col)
+      ;; The screen column at which buffer column COL of LINE is drawn,
+      ;; which is where a search match has to be drawn.
+      ;;--------------------------------------------------------------
+      (string-length
+       (expand-line-display (substring line 0 (min col (string-length line)))
+                            10000)))
+
+    (define (draw-match row x0 line display-string line-start len start end
+                        point width)
+      ;; Draw the part of the search match [START, END) that falls on this
+      ;; line over the text already drawn there: in reverse video when
+      ;; point is inside the match (GNU Emacs's `isearch' face) and in
+      ;; bold otherwise (`lazy-highlight'). ROW is the screen row and X0
+      ;; the screen column the window's text starts at.
+      ;;--------------------------------------------------------------
+      (let* ((col (max 0 (- start line-start)))
+             (to (min len (- end line-start)))
+             (x (display-column-of line col))
+             (y (display-column-of line to)))
+        (when (and (< x width) (< x y))
+          (attr-on! (stdscr)
+                    (if (and (<= start point) (<= point end))
+                        A_REVERSE A_BOLD))
+          (addstr (stdscr)
+                  (substring display-string x
+                             (min y (string-length display-string)))
+                  #:y row #:x (+ x0 x))
+          (attr-off! (stdscr) A_REVERSE)
+          (attr-off! (stdscr) A_BOLD))))
+
+    (define (highlight-matches window row line display-string line-start width
+                               pattern case-fold?)
+      ;; Draw the search matches that fall on this line over the line that
+      ;; has just been drawn, so that what was found can be seen.
+      ;;
+      ;; The matching is done on the line's own text rather than through
+      ;; the buffer: a buffer search re-reads the text from where it
+      ;; starts, and a screenful of rows each searching a large buffer
+      ;; costs far more than the drawing is worth - enough to look like a
+      ;; hang. Only matches that lie wholly within the line are drawn, so
+      ;; a search string containing a line break (typed as C-j) finds its
+      ;; match and moves point, but nothing is highlighted for it.
+      ;;--------------------------------------------------------------
+      (let* ((ed (window-buffer window))
+             (row (+ row (window-top window)))
+             (x0 (window-left window))
+             (len (string-length line))
+             (point (text-editor-get-cursor ed))
+             (plen (string-length pattern)))
+        (let loop ((at 0))
+          (let ((found (string-search-forward line pattern at case-fold?)))
+            (when (and found (<= (+ found plen) len))
+              (draw-match row x0 line display-string line-start len
+                          (+ line-start found) (+ line-start found plen)
+                          point width)
+              ;; on to the next match, starting inside this one so that
+              ;; overlapping matches are found too, as a repeated search
+              ;; finds them
+              (loop (+ 1 found)))))))
+
+    (define (cursor-screen-position window)
+      ;; Where on the screen WINDOW's point belongs, as a pair, or #f
+      ;; when it is scrolled out of view. In frame coordinates: the
+      ;; window's own rows start below its top.
+      ;;
+      ;; It is the *window's* point that is placed, and only the
+      ;; selected window shows a cursor - a terminal has one cursor, as
+      ;; GNU Emacs draws only the selected window's.
+      ;;
+      ;; Point is always on a line the buffer really has - the engine
+      ;; reports the end of a buffer whose last line has no break after
+      ;; it as the end of that line, not as an empty line past it (see
+      ;; `TEXT-EDITOR-INDEX-LINE-OFFSET'), which is where GNU Emacs puts
+      ;; `point-max' too. A line break at the end of the buffer *does*
+      ;; start an empty line, and that line gets a row of its own.
+      ;;--------------------------------------------------------------
+      (let* ((ed (window-buffer window))
+             (line (text-editor-cursor-line ed))
+             (column (text-editor-cursor-column ed))
+             (line-string (ncurses-line-string ed line))
+             (width (window-body-width window))
+             (vheight (window-body-height window))
+             (screen-row (- line (window-top-line window))))
+        (when (and line-string
+                   (>= screen-row 0) (< screen-row vheight))
+          (cons (+ screen-row (window-top window))
+                (+ (window-left window)
+                   (min (current-line-display-column ed column)
+                        (- width 1)))))))
+
+    (define (render-window! window)
+      ;; Draw one window: its rows of text within its rectangle, then its
+      ;; mode line along its last row.
+      ;;--------------------------------------------------------------
+      (let* ((ed (window-buffer window))
+             (width (window-body-width window))
+             (x0 (window-left window))
+             (vheight (window-body-height window))
+             (border (and (window-right-border? window) (+ x0 width)))
+             (highlight (*search-highlight*)))
+        ;; rows of text. Each row's line starts LINE-START characters
+        ;; into the buffer, which is what lets a search match be found in
+        ;; buffer terms and then drawn in screen terms.
+        (let loop ((row 0) (line-start 0))
+          (when (< row vheight)
+            (let* ((line-index (+ (window-top-line window) row))
+                   (line-string (ncurses-line-string ed line-index)))
+              (when line-string
+                (let ((display (expand-line-display line-string width)))
+                  (addstr (stdscr) display
+                          #:y (+ row (window-top window)) #:x x0)
+                  ;; the characters the current search matched, drawn over
+                  ;; the line: the match point is in reverse video (GNU
+                  ;; Emacs's `isearch' face) and the other matches in view
+                  ;; in bold (`lazy-highlight')
+                  (when highlight
+                    (highlight-matches window row line-string display
+                                       line-start width (car highlight)
+                                       (cdr highlight)))))
+              (loop (+ 1 row)
+                    (+ line-start
+                       (or (line-outer-size ed line-index) 0)))
+              )))
+        ;; the mode line, on the window's last row
+        (attr-on! (stdscr) A_REVERSE)
+        (addstr (stdscr)
+                (pad-line (truncate-line (mode-line-string window) width) width)
+                #:y (+ (window-top window) (window-height window) -1)
+                #:x x0)
+        (attr-off! (stdscr) A_REVERSE)
+        ;; the vertical border between this window and the one to its
+        ;; right: GNU Emacs draws it down every row of the windows,
+        ;; their mode lines included
+        (when border
+          (let loop ((row (window-top window))
+                     (end (+ (window-top window) (window-height window))))
+            (when (< row end)
+              (addstr (stdscr) "|" #:y row #:x border)
+              (loop (+ 1 row) end))))))
+
+    (define (render! frame)
+      ;; Draw every window, then the echo area, then place the terminal
+      ;; cursor at the selected window's point. Each window has its own
+      ;; mode line, as GNU Emacs gives each window one; the echo area
+      ;; belongs to the frame and is drawn last, over the bottom row.
+      ;;--------------------------------------------------------------
+      (sync-frame-size! frame)
+      (let ((width (frame-width frame))
+            (height (frame-height frame))
+            ;; the *leaves*: a window that holds children shows no buffer
+            ;; and has no mode line of its own, so what is drawn is the
+            ;; windows at the bottom of the tree
+            (windows (window-list frame)))
+        (erase (stdscr))
+        ;; Only the selected window is scrolled to show its point here:
+        ;; it is the one point moves in, and its buffer is the one
+        ;; commands act on. A window that is not selected keeps the view
+        ;; it had, as GNU Emacs leaves a window's start alone until it
+        ;; is displayed with its own point.
+        (let ((selected (ncurses-frame-selected-window frame)))
+          (when selected (scroll-to-cursor! selected)))
+        (for-each render-window! windows)
+        ;; Echo area: the minibuffer when one is active, exactly as GNU
+        ;; Emacs draws it (the minibuffer *is* the echo area while it is
+        ;; being read), otherwise whatever message is pending.
+        (let ((reading (*echo-area-buffer*)))
+          (cond
+           ;; While a minibuffer is being read its line is the prompt and
+           ;; what has been typed, with any pending message appended after
+           ;; it - which is what Emacs's `minibuffer-message' does, and it
+           ;; is where the completion candidates have to go or they would
+           ;; hide the very text being completed.
+           ;;
+           ;; The buffer and its prompt come from the frame, which is
+           ;; where GNU Emacs keeps them too (`echo_area_buffer[0]', and
+           ;; the prompt as text in that buffer). Nothing here knows what
+           ;; a minibuffer is: it draws a buffer that happens to have a
+           ;; prompt beside it, which is what the echo area is.
+           (reading
+            (addstr (stdscr)
+                    (truncate-line (string-append (or (*echo-area-prompt*) "")
+                                                  (text-editor-to-string reading)
+                                                  (ncurses-frame-message frame))
+                                   width)
+                    #:y (- height 1) #:x 0))
+           (else
+            (addstr (stdscr)
+                    (truncate-line (ncurses-frame-message frame) width)
+                    #:y (- height 1) #:x 0))))
+        ;; force a full repaint: partial-update optimizations (scroll
+        ;; regions, insert/delete character) desync the physical
+        ;; terminal when lines merge
+        (clearok! (stdscr) #t)
+        ;; Place the terminal cursor: in the minibuffer while one is
+        ;; active (Emacs's `cursor-in-echo-area'), else at the selected
+        ;; window's point - the only window whose cursor is drawn, there
+        ;; being one cursor on a terminal.
+        (let ((reading (*echo-area-buffer*)))
+          (if reading
+              ;; At point in the input, where Emacs's `cursor-in-echo-area'
+              ;; leaves it: a message is shown after the input, and it must
+              ;; not drag the cursor along with it - a long one (the
+              ;; completion candidates, say) would pin the cursor to the
+              ;; right edge of the screen whatever point did.
+              (move (stdscr) (- height 1)
+                    (min (+ (string-length (or (*echo-area-prompt*) ""))
+                            (text-editor-cursor-column reading))
+                         (- width 1)))
+              (let ((selected (ncurses-frame-selected-window frame)))
+                (when selected
+                  (let ((at (cursor-screen-position selected)))
+                    (when at (move (stdscr) (car at) (cdr at))))))))
+        (refresh (stdscr))
+        ))
+
+    ))

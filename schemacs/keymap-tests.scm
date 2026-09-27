@@ -438,4 +438,64 @@
 (test-equal '(#f fail (#\c #\c))
   (lookup-modal! '(#\c)))
 
+
+;;--------------------------------------------------------------------
+;; A list of keymaps: what a key sequence is looked up in, in order.
+;;
+;; GNU Emacs's `read_key_sequence' searches the buffer's local map and
+;; then `global-map'. This library's `new-modal-lookup-state' has always
+;; documented that it takes "a <keymap-type> argument or a list of
+;; <keymap-type> arguments", and until now it took only the one - the
+;; callers that passed a list got an error. These are the four things the
+;; list has to do, and the first and last of them were measured from a
+;; terminal Emacs with `(key-binding ...)' for the same maps.
+
+(test-begin "schemacs_keymap_precedence")
+
+(define (one-key-map name key command)
+  (keymap name (keymap-layer (map-key (list key) command))))
+
+(define precedence-local
+  (keymap '*prec-local* (keymap-layer (map-key (list (list 'ctrl #\a)) 'local-command))))
+(define precedence-global
+  (keymap '*prec-global*
+          (keymap-layer (map-key (list (list 'ctrl #\f)) 'global-command)
+                        (map-key (list (list 'ctrl #\x) (list 'ctrl #\f)) 'find-file))))
+
+(define (lookup-in keymaps key-path)
+  (let ((r (keymap-lookup
+            (modal-lookup-state-keymap (new-modal-lookup-state keymaps))
+            (keymap-index key-path))))
+    (if (keymap-type? r) 'keymap r)))
+
+;; a list is accepted at all
+(test-equal #t (modal-lookup-state-type?
+                (new-modal-lookup-state (list precedence-local precedence-global))))
+
+;; the first keymap that binds the key wins
+(test-equal '(local-command global-command)
+  (list (lookup-in (list precedence-local precedence-global)
+                   (list (list 'ctrl #\a)))
+        (lookup-in (list precedence-local precedence-global)
+                   (list (list 'ctrl #\f)))))
+
+;; a key the first keymap does not bind is found in the next
+(test-equal 'global-command
+  (lookup-in (list (one-key-map '*empty* (list 'meta #\z) 'unused)
+                   precedence-global)
+             (list (list 'ctrl #\f))))
+
+;; and a *prefix* in the first keymap does not stop the next keymap's
+;; longer sequence being found: Emacs answers `find-file' for
+;; `(key-binding "\C-x\C-f")' when the local map binds C-x as a prefix
+;; and nothing under it
+(test-equal 'find-file
+  (lookup-in (list (keymap '*prec-prefix*
+                           (keymap-layer (map-key (list (list 'ctrl #\x))
+                                                  (keymap-layer))))
+                   precedence-global)
+             (list (list 'ctrl #\x) (list 'ctrl #\f))))
+
+(test-end "schemacs_keymap_precedence")
+
 (test-end "schemacs_keymap")

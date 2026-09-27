@@ -16,6 +16,22 @@ SCHEME_LIBRARIES := \
   ./schemacs/lens/bin-hash-table.sld \
   ./schemacs/lexer.sld \
   ./schemacs/editor/command.sld \
+  ./schemacs/weak.sld \
+  ./schemacs/editor/engine.sld \
+  ./schemacs/editor/frame.sld \
+  ./schemacs/editor/disp-table.sld \
+  ./schemacs/editor/files.sld \
+  ./schemacs/editor/simple.sld \
+  ./schemacs/editor/xdisp.sld \
+  ./schemacs/editor/isearch.sld \
+  ./schemacs/editor/window.sld \
+  ./schemacs/editor/keymap.sld \
+  ./schemacs/editor/keyboard.sld \
+  ./schemacs/editor/minibuffer.sld \
+  ./schemacs/editor/buffer.sld \
+  ./schemacs/editor/tabulated-list.sld \
+  ./schemacs/editor/buff-menu.sld \
+  ./schemacs/ui/platform/ncurses.sld \
   ./schemacs/keymap.sld \
   ./schemacs/bit-stack.sld \
   ./schemacs/elisp-eval/pretty.sld \

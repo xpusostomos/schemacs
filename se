@@ -1,5 +1,9 @@
+#!/bin/bash
+#--------------------------
+# se - the schemacs editor
+#--------------------------
 
-DIR=`dirname $0`
+DIR=$(dirname $0)
 export GUILE_WARN_DEPRECATED=no
-exec guile --r7rs -L $DIR -s main-ncurses.scm "$@"
-#bash -x ./guile.sh -s main-ncurses.scm "$@"
+exec guile --r7rs -L $DIR -s $DIR/main-ncurses.scm "$@"
+

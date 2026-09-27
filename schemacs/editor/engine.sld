@@ -1,16 +1,22 @@
 (define-library (schemacs editor engine)
-  ;; This library defines a text editor engine for buffering and
-  ;; editing files. This library is intended to be used as a fallback
-  ;; for Scheme platforms that do not already provide a text editor,
-  ;; or at least platforms for which their text editor API is not well
-  ;; suited as an implementation for the `(schemacs editor-impl)` API.
-  ;; Whenever possible, Schemacs implementations should make use of
-  ;; the platform-specific file editor infrastructure instead of this
-  ;; library.
+  ;; This library mirrors GNU Emacs's `buffer.c' + `insdel.c' +
+  ;; `marker.c' + `search.c': the buffer and its text (a gap buffer of
+  ;; lines), inserting into it and deleting from it, the markers that
+  ;; follow edits, and searching over it.
+  ;;
+  ;; It is four Emacs files in one library, which the rule in
+  ;; LAYOUT-PLAN.txt does not ask for - the rule is one library per
+  ;; mirrored file. It is that way because it was written before the rule
+  ;; and split later: a marker subsystem gets its own `marker.sld' when
+  ;; markers are next worked on, and the same for overlays and regexp
+  ;; search. Until then this header says which four files it stands for.
+  ;;
+  ;; See LAYOUT-PLAN.txt for the rule this library predates.
   ;;------------------------------------------------------------------
   (import
     (scheme base)
     (scheme case-lambda)
+    (only (scheme char) char-downcase)  ; for case-folding searches
     (only (scheme write) display write) ;;DEBUG
     (scheme case-lambda)
     (only (schemacs vector)
@@ -21,6 +27,8 @@
           vbal-type?  vbal->alist  alist->vbal
           )
     ;;(only (schemacs lexer) make<source-file-location>)
+    (only (schemacs weak)
+          new-weak-set  weak-set-add!  weak-set-delete!  weak-set-for-each)
     (only (schemacs editor cdf)
           new-cdf  cdf-cursor  cdf-maximum  cdf-ref
           cdf-fill  cdf-invalidate!  cdf-push  cdf-find
@@ -92,6 +100,37 @@
    text-editor-delete-from-cursor
    text-editor-copy-string
 
+   ;; Undo
+   text-editor-undo-list  set!text-editor-undo-list
+   text-editor-undo  text-editor-undo-boundary!
+   text-editor-undo-disable!  text-editor-undo-enable!
+   text-editor-undo-recording?
+   *undo-limit*
+   undo-insertion-entry?  undo-deletion-entry?  undo-modified-entry?
+
+   ;; Whether the buffer has changed since it was last saved
+   text-editor-modified?  text-editor-set-modified!
+   text-editor-save-token
+
+   ;; Whether the buffer refuses to be changed
+   text-editor-read-only?  text-editor-set-read-only!
+
+   ;; Searching, and the mark
+   text-editor-search-forward  text-editor-search-backward
+   string-search-forward
+   text-editor-mark  set!text-editor-mark
+
+   ;; The buffer's identity: its name and the file it visits
+   text-editor-buffer-name  set!text-editor-buffer-name
+   text-editor-file-name    set!text-editor-file-name
+
+   ;; Markers: positions that follow the text
+   new-marker  copy-marker  marker-type?
+   marker-position  marker-buffer  marker-insertion-type
+   set-marker!  set-marker-insertion-type!
+   mark-marker
+   text-editor-markers
+
    ;; Changing the line-break protocol for the editor
    text-editor-set-line-break!
    line-break-newline  line-break-return
@@ -115,6 +154,7 @@
    text-editor-get-char-index
    text-editor-line-editor-ref
    text-editor-text-line-ref
+   text-editor-line-outer-size
    text-editor  show-text-editor
 
    run-editor-engine
@@ -541,7 +581,9 @@
     (define-record-type <text-editor-type>
       (make<text-editor>
        lines  count  line-ed  line-ch  moved  column
-       cdf  ins-char  lbrk  textprops
+       cdf  ins-char  lbrk  textprops  undo
+       modified  save-token  read-only  mark  markers
+       name  file-name
        )
       text-editor-type?
       (lines      text-editor-lines         set!text-editor-lines)
@@ -580,6 +622,64 @@
       ;; span multiple <text-line-type> values. This is useful for
       ;; syntax coloring as you can declare all characters between any
       ;; two (line,colunm) coordinates to have a particular tag.
+      (undo       text-editor-undo-list     set!text-editor-undo-list)
+      ;; ^ The buffer's undo list, GNU Emacs's `buffer-undo-list'. A
+      ;; list, newest entry first, of the edits that can be undone; or
+      ;; false, which is Emacs's `t', meaning that the recording of
+      ;; undo information is disabled. The empty list is Emacs's `nil':
+      ;; recording is enabled but there is nothing to undo. See the
+      ;; "Undo" section below for the entry formats.
+      (modified   text-editor-modified-flag set!text-editor-modified-flag)
+      ;; ^ Whether the buffer has been changed since it was last saved
+      ;; or visited, GNU Emacs's `buffer-modified-p'. It is cleared by
+      ;; saving and by undoing back past every change made since the
+      ;; last save.
+      (save-token text-editor-save-token    set!text-editor-save-token)
+      ;; ^ Identifies the state the buffer was last in sync with its
+      ;; file. It is an integer that counts up every time the buffer is
+      ;; marked unmodified, and it is what the `(t . TOKEN)' undo entry
+      ;; records: undoing back to that entry makes the buffer
+      ;; unmodified again, but only while the token still matches,
+      ;; which is false once the buffer has been saved in the meantime.
+      ;; Emacs records the visited file's modification time there
+      ;; instead and compares it with `visited-file-modtime'; the
+      ;; engine has no file or clock, so it numbers its saves.
+      (mark       %mark-marker           set!%mark-marker)
+      ;; ^ The buffer's mark, GNU Emacs's `mark': a <marker-type>, which
+      ;; is what makes it survive the text around it changing. It points
+      ;; nowhere until the mark is set. `TEXT-EDITOR-MARK' is the
+      ;; accessor Lisp would see - the position, as Emacs's `(mark)' -
+      ;; so this slot is private.
+      (markers    text-editor-markers    set!text-editor-markers)
+      ;; ^ The buffer's markers: GNU Emacs's marker chain, which the
+      ;; insert and delete procedures adjust so that a marker goes on
+      ;; pointing at the same character as the text around it moves.
+      ;; It holds them weakly, so a marker that nothing else refers to
+      ;; is collected and drops out of the chain by itself - see the
+      ;; "Markers" section below for why.
+      (read-only  text-editor-read-only-flag set!text-editor-read-only-flag)
+      ;; ^ Whether the buffer refuses to be changed, GNU Emacs's
+      ;; `buffer-read-only'. The insert and delete procedures signal an
+      ;; error while it is set, so nothing can change the text by
+      ;; accident - including undo, which is why the undo procedure
+      ;; refuses too. It is independent of the modified flag: a buffer
+      ;; can be read-only and modified at once.
+      (name       text-editor-buffer-name set!text-editor-buffer-name)
+      ;; ^ The buffer's name, GNU Emacs's `buffer-name': what the mode
+      ;; line shows, and what distinguishes one buffer from another in
+      ;; the messages that name them. A buffer visiting a file is named
+      ;; after the file, without its directory (Emacs's
+      ;; `create-file-buffer' uses `file-name-nondirectory'), and a
+      ;; buffer with no file has a name of its own - "*scratch*",
+      ;; "*Completions*". The default is Emacs's for a buffer made by
+      ;; `generate-new-buffer'.
+      (file-name  text-editor-file-name    set!text-editor-file-name)
+      ;; ^ The file the buffer visits, GNU Emacs's `buffer-file-name',
+      ;; or false when it visits none. It is the path the buffer was
+      ;; read from and the one `save-buffer' writes back to - which is
+      ;; why it is the buffer's and not the window's: two windows can
+      ;; show the same buffer, and a window can show a buffer that
+      ;; visits no file at all.
       )
 
     (define *init-text-editor-line-count* (make-parameter 4096))
@@ -615,6 +715,18 @@
                         0 line #f #f 0
                         (new-cdf u64vector-sequence-iface size)
                         #f lbrk props
+                        ;; A newly created buffer records undo
+                        ;; information from the start, as in GNU Emacs,
+                        ;; is unmodified (there is no file it could
+                        ;; differ from), writable, and has no mark set.
+                        '() #f 0 #f
+                        ;; The mark, pointing nowhere until it is set,
+                        ;; and an empty marker chain.
+                        (make<marker> #f 0 #f)
+                        (new-weak-set)
+                        ;; Named as `generate-new-buffer' names a
+                        ;; buffer it makes, and visiting no file.
+                        "Untitled" #f
                         ))))
              ((line-break-setup-editor! lbrk) ed)
              ed
@@ -803,9 +915,11 @@
       ;; it into the lines gap-buffer at the gap-buffer cursor,
       ;; replacing the stale copy of the current line. If the current
       ;; line is a new line past the end of the gap-buffer, the frozen
-      ;; line is appended and the gap-buffer cursor advances, making
-      ;; the (now empty) next line the current line. The absolute
-      ;; position of the cursor is preserved.
+      ;; line is appended, and the cursor stays on it - the appended
+      ;; line carries no line break, so no line follows it, and the end
+      ;; of the buffer is the end of that line. The cursor is left at
+      ;; the column the line was being edited at, which preserves its
+      ;; absolute position.
       ;;--------------------------------------------------------------
       (when (text-editor-line-changed ed)
         (let*((lines     (text-editor-lines ed))
@@ -840,10 +954,32 @@
               )
              (else
               ;; The current line is a new line past the end of the
-              ;; lines gap-buffer: append it as a committed line, and
-              ;; advance to the new empty line after it.
+              ;; lines gap-buffer: append it as a committed line and
+              ;; stay on it.
+              ;;
+              ;; It carries no line break - a break typed on such a
+              ;; line is dealt with by `TEXT-EDITOR-FORCE-LINE-BREAK',
+              ;; which commits both halves - so no line follows it: the
+              ;; buffer's last line is the last line it has, and the end
+              ;; of the buffer is the end of that line, which is where
+              ;; GNU Emacs puts `point-max'. Advancing to an empty line
+              ;; after it would be advancing onto a line the buffer does
+              ;; not have, and the engine would then answer two ways
+              ;; about where the cursor is: `TEXT-EDITOR-INDEX-LINE-OFFSET'
+              ;; reports such a position as the end of the last line,
+              ;; while the line editor would be holding an empty line.
+              ;; The delete procedures read the line editor, which is
+              ;; how a backwards deletion at the end of a buffer came to
+              ;; delete one character fewer than it reported.
+              ;;
+              ;; Staying on the line also preserves the cursor exactly:
+              ;; `TEXT-EDITOR-LOAD-CURRENT-LINE' below reloads this line
+              ;; with the line editor cursor at the column it was being
+              ;; edited at, whereas the empty line after it would put
+              ;; the cursor at the end of the buffer whatever column it
+              ;; had been at.
               (gap-buffer-insert-after lines line)
-              (gap-buffer-set-cursor lines (+ 1 line-num))
+              (gap-buffer-set-cursor lines line-num)
               ))
             (gap-buffer-clear line-ed)
             (set!text-editor-column ed col-num)
@@ -1006,7 +1142,589 @@
                 (loop (+ 1 i))))
             (get-output-string port)))))
 
+    ;;----------------------------------------------------------------
+    ;; Undo
+    ;;
+    ;; The buffer's undo list is GNU Emacs's `buffer-undo-list': a list
+    ;; of the edits that can be undone, NEWEST ENTRY FIRST. The entry
+    ;; formats are Emacs's exactly, and the mnemonic is the reverse of
+    ;; the obvious one:
+    ;;
+    ;;   (BEG . END)   text was INSERTED, and now occupies the
+    ;;                 characters BEG up to END. Undoing deletes it.
+    ;;
+    ;;   (TEXT . POS)  TEXT was DELETED from the buffer. `(abs POS)` is
+    ;;                 the position to reinsert it at; POS is positive
+    ;;                 when point was at the beginning of the deleted
+    ;;                 text, negative when it was at the end, which is
+    ;;                 what tells undo where to leave point.
+    ;;
+    ;;   <integer>     a previous value of point. Undoing moves point
+    ;;                 there. (Not recorded yet: this buffer has no
+    ;;                 markers, and the sign of a deletion's POS
+    ;;                 already puts point where it belongs.)
+    ;;
+    ;;   ()            a boundary (Emacs's `nil'). The entries between
+    ;;                 two boundaries are a "change group", which is
+    ;;                 what one undo command undoes.
+    ;;
+    ;; There is no separate redo list. Undoing is itself an edit: it
+    ;; runs the ordinary insert and delete primitives, which push the
+    ;; inverse entries onto the front of this same list, and those ARE
+    ;; the redo records. mg's `undo.c' does the same thing, and says so
+    ;; in its comment: "Only when we undo a deletion, the insertion
+    ;; will be recorded just as if it was typed on the keyboard.
+    ;; Resulting in the inverse operation being saved in the list."
+    ;;
+    ;; Entries are recorded by the two public mutators below, and only
+    ;; by them. The internal procedures that shuffle lines when a line
+    ;; break is inserted or deleted (the merge helpers, `write-back',
+    ;; `load-current-line') re-insert text through
+    ;; `text-editor-force-insert-char', not through the public API, so
+    ;; they record nothing - which is what we want, since they change
+    ;; how the buffer is stored rather than what it contains.
+    ;;------------------------------------------------------------------
+
+    (define *undo-limit*
+      ;; A simplified stand-in for Emacs's `undo-limit': the greatest
+      ;; number of entries kept in an undo list. When it is exceeded,
+      ;; whole oldest change groups are discarded, never part of a
+      ;; group. Emacs's real policy is three-tiered (soft, strong and
+      ;; outer limits, measured in bytes) and is not implemented.
+      ;;--------------------------------------------------------------
+      (make-parameter 5000))
+
+    (define (text-editor-undo-recording? ed)
+      ;; Whether edits to ED are being recorded for undo. Emacs calls
+      ;; this state `buffer-undo-list' being other than `t'.
+      ;;--------------------------------------------------------------
+      (list? (text-editor-undo-list ed)))
+
+    (define (text-editor-undo-disable! ed)
+      ;; Stop recording undo information for ED (Emacs's
+      ;; `buffer-disable-undo', which sets `buffer-undo-list' to `t').
+      ;; The list is dropped: there is nothing left to undo.
+      ;;--------------------------------------------------------------
+      (set!text-editor-undo-list ed #f))
+
+    (define (text-editor-undo-enable! ed)
+      ;; Start recording undo information for ED again, discarding any
+      ;; undo information already recorded (Emacs's
+      ;; `buffer-enable-undo', which sets `buffer-undo-list' to `nil').
+      ;;--------------------------------------------------------------
+      (set!text-editor-undo-list ed '()))
+
+    (define (text-editor-undo-boundary! ed)
+      ;; Place a boundary in ED's undo list (Emacs's `undo-boundary').
+      ;; The undo command stops at a boundary, so the entries between
+      ;; two boundaries are undone together. A boundary is never
+      ;; recorded twice in a row, and never at the very front of an
+      ;; empty list, the way mg's `undo_add_boundary' refuses to.
+      ;;--------------------------------------------------------------
+      (let ((list (text-editor-undo-list ed)))
+        (when (and (list? list)
+                   (pair? list)
+                   (not (null? (car list))))
+          (set!text-editor-undo-list ed (cons '() list)))))
+
+    (define (undo-modified-entry? entry)
+      ;; Whether ENTRY is the mark of where the buffer was last in sync
+      ;; with its file - GNU Emacs's `(t . TIME-FLAG)'.
+      ;;--------------------------------------------------------------
+      (and (pair? entry) (eq? (car entry) 't)))
+
+    ;;----------------------------------------------------------------
+    ;; Markers
+    ;;
+    ;; A marker is a position in a buffer that follows the text: insert
+    ;; or delete anywhere and the marker goes on pointing at the same
+    ;; character, because its index is adjusted by the change. It is
+    ;; GNU Emacs's marker (marker.c), and it is what a position that
+    ;; must not go stale has to be - the mark, a window's point, and
+    ;; (later) the bounds of an overlay.
+    ;;
+    ;; Positions that must NOT move are plain integers, and that is not
+    ;; an accident: Emacs's `region-beginning' returns an integer, so
+    ;; code that binds it gets a fixed anchor, while the mark and
+    ;; window points are markers and do follow the text. The engine
+    ;; supplies both kinds; a buffer's own cursor is the integer kind,
+    ;; because it is the current position and the insert and delete
+    ;; procedures move it themselves.
+    ;;
+    ;; Each buffer holds its markers in a chain (`text-editor-markers')
+    ;; that the insert and delete procedures walk. GNU Emacs's chain
+    ;; does not keep its markers alive - its collector prunes the chain
+    ;; while sweeping, so an unreachable marker is collected and its
+    ;; place in the chain goes with it. A Scheme implementation cannot
+    ;; hook its collector's sweep, so the chain holds its markers
+    ;; weakly instead (`(schemacs weak)'), which comes to the same
+    ;; thing: a marker that nothing else refers to is collected, and it
+    ;; stops being adjusted.
+
+    (define-record-type <marker-type>
+      (make<marker> buffer index insertion-type)
+      marker-type?
+      (buffer     marker-buffer           set!marker-buffer)
+      ;; ^ The <text-editor-type> this marker points into, or false
+      ;; when it points nowhere - GNU Emacs's "marker points nowhere",
+      ;; which is what a marker made by `MAKE-MARKER' is, and what one
+      ;; is left as when its buffer is killed or its position is set to
+      ;; false.
+      (index      %marker-index           set!%marker-index)
+      ;; ^ The character index within that buffer. Only meaningful
+      ;; while the marker has one.
+      (insertion-type marker-insertion-type set!marker-insertion-type)
+      ;; ^ GNU Emacs's marker insertion type: whether the marker
+      ;; advances past text inserted exactly at it. False - the default,
+      ;; and what Emacs gives a marker made by `MAKE-MARKER' - leaves
+      ;; the marker where it is and lets the inserted text follow it;
+      ;; true moves the marker past the insertion. Text inserted on
+      ;; either side of the marker moves it whichever way the text went,
+      ;; whatever the type.
+      )
+
+    (define (marker-position marker)
+      ;; Where MARKER points, as a character index, or false when it
+      ;; points nowhere. GNU Emacs's `marker-position'.
+      ;;--------------------------------------------------------------
+      (and (marker-buffer marker) (%marker-index marker)))
+
+    (define (new-marker)
+      ;; A marker that points nowhere, GNU Emacs's `make-marker'.
+      ;;--------------------------------------------------------------
+      (make<marker> #f 0 #f))
+
+    (define (copy-marker ed index . insertion-type)
+      ;; A new marker at character index INDEX of ED, GNU Emacs's
+      ;; `copy-marker'. It is added to ED's chain, so it follows the
+      ;; text from here on.
+      ;;--------------------------------------------------------------
+      (let ((marker (make<marker> ed index
+                                (and (pair? insertion-type) (car insertion-type)))))
+        (weak-set-add! (text-editor-markers ed) marker)
+        marker))
+
+    (define (set-marker! marker position . buffer)
+      ;; Point MARKER at POSITION, or nowhere when POSITION is false:
+      ;; GNU Emacs's `set-marker'. A marker that points nowhere is in no
+      ;; buffer's chain and follows nothing, and one that is set
+      ;; nowhere loses its buffer; a marker being given a position it
+      ;; has no buffer for needs one, as in Emacs.
+      ;;--------------------------------------------------------------
+      (let ((ed (cond ((pair? buffer) (car buffer))
+                      (else (marker-buffer marker)))))
+        (cond
+         (position
+          (unless ed
+            (error "set-marker! needs a buffer for a marker that points nowhere"))
+          (set!marker-buffer marker ed)
+          (set!%marker-index marker position)
+          (weak-set-add! (text-editor-markers ed) marker))
+         (else
+          (when ed
+            (weak-set-delete! (text-editor-markers ed) marker))
+          (set!marker-buffer marker #f)
+          (set!%marker-index marker 0)))
+        marker))
+
+    (define (set-marker-insertion-type! marker type)
+      (set!marker-insertion-type marker (and type #t))
+      type)
+
+    (define (for-each-marker ed proc)
+      ;; Apply PROC to every marker in ED's chain. A marker that has
+      ;; been collected is simply no longer in it.
+      ;;--------------------------------------------------------------
+      (weak-set-for-each proc (text-editor-markers ed)))
+
+    (define (adjust-markers-for-insertion! ed position delta)
+      ;; Move the markers of ED for DELTA characters inserted at
+      ;; POSITION: GNU Emacs's `adjust_markers_for_insert'. A marker
+      ;; after the insertion moves with the text that follows it; one
+      ;; exactly at POSITION moves only if its insertion type says so
+      ;; (see the type's note above).
+      ;;--------------------------------------------------------------
+      (for-each-marker
+       ed
+       (lambda (marker)
+         (let ((index (%marker-index marker)))
+           (when (or (> index position)
+                     (and (= index position) (marker-insertion-type marker)))
+             (set!%marker-index marker (+ index delta)))))))
+
+    (define (adjust-markers-for-deletion! ed start end)
+      ;; Move the markers of ED for the characters in [START, END)
+      ;; having been deleted: GNU Emacs's `adjust_markers_for_delete'.
+      ;; Markers after the deleted text move back by its length; the
+      ;; ones inside it - whose character is gone - are left at its
+      ;; start, which is where Emacs leaves them.
+      ;;--------------------------------------------------------------
+      (for-each-marker
+       ed
+       (lambda (marker)
+         (let ((index (%marker-index marker)))
+           (cond
+            ((>= index end) (set!%marker-index marker (- index (- end start))))
+            ((> index start) (set!%marker-index marker start)))))))
+
+    (define (mark-marker ed)
+      ;; The buffer's mark as the marker it is, GNU Emacs's
+      ;; `mark-marker': the same marker object every time, so that
+      ;; setting the mark moves it rather than replacing it.
+      ;;--------------------------------------------------------------
+      (%mark-marker ed))
+
+    (define (text-editor-mark ed)
+      ;; Where the buffer's mark is, as a character index, or false when
+      ;; it has not been set: GNU Emacs's `(mark)'. The mark is a marker
+      ;; (see `MARK-MARKER'), so it follows the text: set it, edit
+      ;; before it, and it is still on the character it was put on.
+      ;;--------------------------------------------------------------
+      (marker-position (%mark-marker ed)))
+
+    (define (set!text-editor-mark ed position)
+      ;; Put the buffer's mark at POSITION, or leave it unset when
+      ;; POSITION is false.
+      ;;--------------------------------------------------------------
+      (set-marker! (%mark-marker ed) (and position position) ed))
+
+    (define (text-editor-modified? ed)
+      ;; Whether the buffer has been changed since it was last saved or
+      ;; visited. GNU Emacs's `buffer-modified-p'.
+      ;;--------------------------------------------------------------
+      (text-editor-modified-flag ed))
+
+    (define (text-editor-set-modified! ed flag)
+      ;; Set whether ED is modified, GNU Emacs's
+      ;; `set-buffer-modified-p'. Marking a buffer modified records
+      ;; where it was last in sync with its file, so that undoing back
+      ;; past every change made since then can mark it unmodified
+      ;; again; marking it unmodified (saving it) starts a new such
+      ;; point, which is why an older mark no longer counts - the
+      ;; buffer saved in the meantime is not the buffer that mark
+      ;; describes.
+      ;;--------------------------------------------------------------
+      (cond
+       (flag
+        (unless (text-editor-modified? ed)
+          (%undo-record! ed (cons 't (text-editor-save-token ed)))
+          (set!text-editor-modified-flag ed #t)))
+       (else
+        (when (text-editor-modified? ed)
+          (set!text-editor-modified-flag ed #f)
+          (set!text-editor-save-token ed (+ 1 (text-editor-save-token ed)))))))
+
+    (define (%text-editor-note-change! ed)
+      ;; Note that ED is about to be changed. This goes BEFORE the
+      ;; change is recorded, so that the mark of the last save sits
+      ;; below the change's own entry in the list and is reached after
+      ;; the change has been undone.
+      ;;--------------------------------------------------------------
+      (text-editor-set-modified! ed #t))
+
+    (define (undo-insertion-entry? entry)
+      ;; Whether ENTRY records an insertion, that is, whether it is a
+      ;; pair of two integers - Emacs's `(BEG . END)'.
+      ;;--------------------------------------------------------------
+      (and (pair? entry)
+           (integer? (car entry))
+           (integer? (cdr entry))))
+
+    (define (undo-deletion-entry? entry)
+      ;; Whether ENTRY records a deletion, that is, whether it is a
+      ;; pair of a string and an integer - Emacs's `(TEXT . POS)'.
+      ;;--------------------------------------------------------------
+      (and (pair? entry)
+           (string? (car entry))
+           (integer? (cdr entry))))
+
+    (define (%undo-record! ed entry)
+      ;; Add ENTRY to the front of ED's undo list.
+      ;;--------------------------------------------------------------
+      (when (text-editor-undo-recording? ed)
+        (set!text-editor-undo-list ed (cons entry (text-editor-undo-list ed)))
+        (%undo-truncate! ed)))
+
+    (define (%undo-record-insertion! ed beg end)
+      ;; Record that the characters BEG up to END were just inserted.
+      ;; An insertion that abuts the previous one extends it rather
+      ;; than adding an entry, so a run of adjacent insertions is one
+      ;; entry - Emacs's `record_insert', and mg's rule that "if the
+      ;; newest record is an INSERT whose end exactly abuts the new
+      ;; insertion, just grow it".
+      ;;--------------------------------------------------------------
+      (when (and (text-editor-undo-recording? ed) (< beg end))
+        (let ((list (text-editor-undo-list ed)))
+          (if (and (pair? list)
+                   (undo-insertion-entry? (car list))
+                   (= (cdr (car list)) beg))
+              (set-cdr! (car list) end)
+              (set!text-editor-undo-list ed (cons (cons beg end) list))))
+        (%undo-truncate! ed)))
+
+    (define (%undo-record-deletion! ed text pos)
+      ;; Record that TEXT was just deleted. POS is positive when point
+      ;; was at the beginning of the deleted text and negative when it
+      ;; was at the end, which is what `text-editor-undo' needs in
+      ;; order to put point back where it was.
+      ;;--------------------------------------------------------------
+      (when (and (text-editor-undo-recording? ed)
+                 (< 0 (string-length text)))
+        (%undo-record! ed (cons text pos))))
+
+    (define (%undo-truncate! ed)
+      ;; Keep the undo list within `*undo-limit*' by discarding whole
+      ;; oldest change groups.
+      ;;--------------------------------------------------------------
+      (let loop ((list (text-editor-undo-list ed)) (guard 0))
+        (when (and (list? list)
+                   (< (*undo-limit*) (length list))
+                   ;; the guard bounds the work if dropping ever failed
+                   ;; to shorten the list
+                   (< guard 1000))
+          (let ((kept (%undo-drop-oldest-group list)))
+            (if (eq? kept list)
+                ;; The list is one change group too big to keep, and a
+                ;; group cannot be split. Drop it, but keep recording:
+                ;; an empty list is Emacs's `nil' (nothing to undo yet),
+                ;; not `t' (undo disabled).
+                (set!text-editor-undo-list ed '())
+                (begin
+                  (set!text-editor-undo-list ed kept)
+                  (loop kept (+ guard 1))))))))
+
+    (define (%undo-drop-oldest-group list)
+      ;; LIST with its oldest change group removed. The list is newest
+      ;; first, so the oldest group is the run of entries after the LAST
+      ;; boundary; that run, and the boundary that opens it, are what
+      ;; goes. Returns LIST unchanged when it holds a single group,
+      ;; which cannot be dropped without dropping everything.
+      ;;--------------------------------------------------------------
+      (let ((len (length list)))
+        (let loop ((i 0) (node list) (last-boundary #f))
+          (if (or (>= i len) (not (pair? node)))
+              (if last-boundary
+                  (let take ((k 0) (node list) (acc '()))
+                    (if (>= k last-boundary)
+                        (reverse acc)
+                        (take (+ k 1) (cdr node) (cons (car node) acc))))
+                  list)
+              (if (null? (car node))
+                  (loop (+ i 1) (cdr node) i)   ; remember this boundary
+                  (loop (+ i 1) (cdr node) last-boundary))))))
+
+    (define (text-editor-undo ed list arg)
+      ;; Undo ARG change groups from the front of LIST, applying the
+      ;; inverse of each entry, and return what remains of LIST. This
+      ;; is GNU Emacs's `primitive-undo', and it returns what Emacs's
+      ;; does, so that the caller can keep the returned tail as
+      ;; `pending-undo-list' and thereby walk further and further back
+      ;; over a run of undo commands.
+      ;;
+      ;; A group ends at a boundary, which is consumed but does not
+      ;; itself undo anything - so a list whose front is a boundary
+      ;; gives back the same list with that boundary removed, which is
+      ;; what Emacs means by "get rid of initial undo boundary".
+      ;;
+      ;; Because the inverse operations run the ordinary insert and
+      ;; delete primitives, they record their own inverses on the front
+      ;; of ED's undo list, and that is how redo works.
+      ;;
+      ;; A read-only buffer cannot be undone: undoing is an edit like
+      ;; any other, and GNU Emacs's `undo' has the `*' in its
+      ;; interactive spec that refuses before it does anything. Refusing
+      ;; here rather than part way through matters, since a half-undone
+      ;; change would be worse than none.
+      ;;--------------------------------------------------------------
+      (when (text-editor-read-only? ed)
+        (error "Buffer is read-only"))
+      (let loop ((list list) (arg arg) (opening? #t))
+        (if (or (<= arg 0) (not (pair? list)))
+            list
+            (let ((entry (car list))
+                  (rest (cdr list)))
+              (cond
+               ;; a boundary ends the group
+               ((null? entry) (loop rest (- arg 1) #t))
+               ;; Undoing back past the mark of the last save makes the
+               ;; buffer unmodified again, which is what tells the user
+               ;; there is nothing left to save. The mark only counts
+               ;; while it still describes the current save: a buffer
+               ;; saved since then is not the buffer this mark was made
+               ;; for. It does not end the group (GNU Emacs).
+               ((undo-modified-entry? entry)
+                (when (= (cdr entry) (text-editor-save-token ed))
+                  (text-editor-set-modified! ed #f))
+                (loop rest arg #f))
+               (else
+                ;; The entries the undo is about to create, by running
+                ;; the ordinary insert and delete primitives, must form
+                ;; a change group of their own - otherwise undoing them
+                ;; again would swallow the very entries being undone
+                ;; here. One boundary before the group's first entry
+                ;; separates them from everything older, and the
+                ;; boundary below already separates them from the
+                ;; group being undone. mg's undo brackets its inverse
+                ;; operations the same way.
+                (when opening? (text-editor-undo-boundary! ed))
+                (cond
+                 ((undo-insertion-entry? entry)
+                  (let ((beg (car entry))
+                        (end (cdr entry)))
+                    ;; Move point first, so that undoing this undo does
+                    ;; not send point back to where it is now (Emacs's
+                    ;; comment in `primitive-undo').
+                    (text-editor-set-cursor ed beg)
+                    (text-editor-delete-from-cursor ed (- end beg))))
+                 ((undo-deletion-entry? entry)
+                  (let* ((text (car entry))
+                         (pos (cdr entry))
+                         (at (abs pos)))
+                    (text-editor-set-cursor ed at)
+                    (text-editor-insert ed text)
+                    ;; POS was positive when point was at the beginning
+                    ;; of the deleted text and negative when it was at
+                    ;; the end; undo puts point back on the side it was
+                    ;; on (Emacs's rule for the sign of POS).
+                    (text-editor-set-cursor
+                     ed (if (< pos 0) (+ at (string-length text)) at)))))
+                (loop rest arg #f)))))))
+
+    (define (text-editor-read-only? ed)
+      ;; Whether ED refuses to be changed. GNU Emacs's
+      ;; `buffer-read-only'.
+      ;;--------------------------------------------------------------
+      (text-editor-read-only-flag ed))
+
+    (define (text-editor-set-read-only! ed flag)
+      ;; Set whether ED refuses to be changed: the variable GNU Emacs
+      ;; keeps as `buffer-read-only', and that its `read-only-mode'
+      ;; toggles.
+      ;;--------------------------------------------------------------
+      (set!text-editor-read-only-flag ed (and flag #t)))
+
+    ;;----------------------------------------------------------------
+    ;; Searching
+    ;;
+    ;; GNU Emacs's `search-forward' and `search-backward' (mg's
+    ;; forwsrch/backsrch): a literal search over the buffer's
+    ;; characters, in which a line break counts as a single #\newline,
+    ;; whichever line-break protocol the buffer uses. Both references
+    ;; leave point at the far end of the match - past it when searching
+    ;; forward, at its start when searching backward - and these
+    ;; procedures return that position, so a caller can put its cursor
+    ;; where Emacs would have left point.
+    ;;
+    ;; Case folding is the caller's decision, passed in: in Emacs the
+    ;; rule that an upper-case letter in the search string turns folding
+    ;; off (`search-upper-case') belongs to isearch, not to
+    ;; `search-forward', which only obeys `case-fold-search'.
+    ;;------------------------------------------------------------------
+
+    (define (string-search-forward haystack needle from case-fold?)
+      ;; The index of the first occurrence of NEEDLE in the string
+      ;; HAYSTACK at or after FROM, or #f. With CASE-FOLD? the comparison
+      ;; ignores case, the way mg's `eq' macro does with its `xcase'
+      ;; argument. This is the rule the buffer searches below use, and it
+      ;; is exported so that a caller which already holds the text - the
+      ;; renderer drawing search matches, say - can apply the same rule
+      ;; without asking the buffer for it again.
+      ;; The index of the first occurrence of NEEDLE in HAYSTACK at or
+      ;; after FROM, or #f. With CASE-FOLD? the comparison ignores case,
+      ;; the way mg's `eq' macro does with its `xcase' argument.
+      ;;--------------------------------------------------------------
+      (let ((n (string-length haystack))
+            (m (string-length needle)))
+        (let loop ((i from))
+          (cond
+           ((> (+ i m) n) #f)
+           ((%string-match-at? haystack needle i case-fold?)
+            i)
+           (else (loop (+ 1 i)))))))
+
+    (define (%string-search-backward haystack needle from case-fold?)
+      ;; The index of the last occurrence of NEEDLE in HAYSTACK that
+      ;; begins at or before FROM, or #f.
+      ;;--------------------------------------------------------------
+      (let ((m (string-length needle)))
+        (let loop ((i (min from (- (string-length haystack) m))))
+          (cond
+           ((< i 0) #f)
+           ((%string-match-at? haystack needle i case-fold?) i)
+           (else (loop (- i 1)))))))
+
+    (define (%string-match-at? haystack needle at case-fold?)
+      ;; Whether NEEDLE occurs in HAYSTACK at index AT.
+      ;;--------------------------------------------------------------
+      (let ((m (string-length needle)))
+        (let loop ((j 0))
+          (cond
+           ((>= j m) #t)
+           ((char=? (%fold (string-ref haystack (+ at j)) case-fold?)
+                    (%fold (string-ref needle j) case-fold?))
+            (loop (+ 1 j)))
+           (else #f)))))
+
+    (define (%fold c case-fold?)
+      (if case-fold? (char-downcase c) c))
+
+    (define (text-editor-search-forward ed string start case-fold?)
+      ;; Search forward from the character index START for STRING.
+      ;; Returns the index just past the match, which is where GNU
+      ;; Emacs's `search-forward' leaves point, or #f when STRING does
+      ;; not occur there. An empty STRING finds nothing, as it does for
+      ;; mg's `is_find', rather than matching everywhere as Emacs's
+      ;; `search-forward' does - an empty search string means "no search
+      ;; yet" to the incremental search that wants this.
+      ;;--------------------------------------------------------------
+      (and (< 0 (string-length string))
+           (let ((found (string-search-forward
+                         (text-editor-copy-string
+                          ed start (text-editor-char-count ed))
+                         string 0 case-fold?)))
+             (and found (+ start found (string-length string))))))
+
+    (define (text-editor-search-backward ed string start case-fold?)
+      ;; Search backward from the character index START for STRING.
+      ;; Returns the index of the start of the match, which is where GNU
+      ;; Emacs's `search-backward' leaves point, or #f when STRING does
+      ;; not occur before START. An empty STRING finds nothing.
+      ;;--------------------------------------------------------------
+      (and (< 0 (string-length string))
+           (let* ((text (text-editor-copy-string ed 0 start))
+                  (found (%string-search-backward
+                          text string (- (string-length text)
+                                         (string-length string))
+                          case-fold?)))
+             found)))
+
     (define (text-editor-insert ed thing)
+      ;; Insert THING at the cursor. The insertion is recorded in the
+      ;; buffer's undo list as the range of characters it now occupies,
+      ;; and marks the buffer modified. Nothing is inserted into a
+      ;; read-only buffer; that is an error, as it is in GNU Emacs.
+      ;;--------------------------------------------------------------
+      (when (text-editor-read-only? ed)
+        (error "Buffer is read-only"))
+      (let ((beg (text-editor-get-cursor ed)))
+        (%text-editor-insert ed thing)
+        (let ((end (text-editor-get-cursor ed)))
+          ;; Inserting nothing is not a change, so it marks the buffer
+          ;; modified only if the cursor actually moved. The mark of the
+          ;; last save is recorded first, so that it lies under the
+          ;; insertion's own entry.
+          (when (< beg end)
+            ;; The text is in, so the markers after it move with it.
+            ;; Doing it here - once for the whole insertion, from where
+            ;; the cursor ended up - covers every way text gets in:
+            ;; characters, strings, whole lines, a line break typed or
+            ;; forced by the line-break state machine, and an insertion
+            ;; replayed by undo, which comes back through here.
+            (adjust-markers-for-insertion! ed beg (- end beg))
+            (%text-editor-note-change! ed)
+            (%undo-record-insertion! ed beg end)))))
+
+    (define (%text-editor-insert ed thing)
       (cond
        ((text-line-type? thing)
         (text-line-for-each
@@ -1164,11 +1882,51 @@
       ;; the bounds of the buffer. Deleting across a line boundary
       ;; merges the two lines. Returns the number of characters
       ;; deleted.
+      ;;
+      ;; The deleted text is captured first, and recorded in the
+      ;; buffer's undo list. The deletion is clamped, so what is
+      ;; recorded is whatever was really there to delete: a request to
+      ;; delete 100 characters at the end of a 3-character buffer
+      ;; records 3, and reinserts 3.
+      ;;
+      ;; Nothing is deleted from a read-only buffer; that is an error,
+      ;; as it is in GNU Emacs.
       ;;--------------------------------------------------------------
+      (when (and (not (= n 0)) (text-editor-read-only? ed))
+        (error "Buffer is read-only"))
       (cond
        ((= n 0) 0)
-       ((< n 0) (%text-editor-delete-backward ed (- n)))
-       (else (%text-editor-delete-forward ed n))))
+       (else
+        (let* ((cursor (text-editor-get-cursor ed))
+               (text (text-editor-copy-string ed cursor (+ cursor n)))
+               (deleted (cond
+                         ((< n 0) (%text-editor-delete-backward ed (- n)))
+                         (else (%text-editor-delete-forward ed n)))))
+          (when (< 0 deleted)
+            ;; The markers in what was deleted are left at its start,
+            ;; and the ones after it move back. A backward delete took
+            ;; the text before the cursor, so the deleted range began
+            ;; DELETED characters before it; a forward delete took the
+            ;; text after it, so the range began at it.
+            (let ((beg (if (< n 0) (- cursor deleted) cursor)))
+              (adjust-markers-for-deletion! ed beg (+ beg deleted)))
+            (%text-editor-note-change! ed)
+            ;; A forward delete removes the text after point, so point
+            ;; was at its beginning and POS is positive; a backward
+            ;; delete removes the text before point, so point was at its
+            ;; end and POS is negative. In both cases `(abs POS)` is
+            ;; where the text has to go back, and the sign is what tells
+            ;; the undo which side of it to leave point on.
+            (%undo-record-deletion!
+             ed
+             (if (< deleted (string-length text))
+                 (if (< n 0)
+                     (substring text (- (string-length text) deleted)
+                                (string-length text))
+                     (substring text 0 deleted))
+                 text)
+             (if (< n 0) (- deleted cursor) cursor)))
+          deleted))))
 
     (define (%text-editor-delete-forward ed n)
       (let* ((lines (text-editor-lines ed))
@@ -1377,13 +2135,20 @@
     (define (text-editor-make-cdf-fill-until lines accum-max-value)
       ;; Creates a closure that acts as a generator of lines in the
       ;; `LINES` gap buffer and continues until the end of the buffer
-      ;; is reached or until the accumulator matches or exceeds that
-      ;; of `ACCUM-MAX-VALUE`.
+      ;; is reached or until the accumulator exceeds `ACCUM-MAX-VALUE`.
+      ;;
+      ;; The accumulator is the CDF value of the line *before* the one
+      ;; being generated, so generation must continue while it is less
+      ;; than or EQUAL to the target: the line whose bucket starts at
+      ;; the accumulator is the line the target index falls on. Testing
+      ;; `<` instead left that line's bucket unfilled, so `CDF-FIND`
+      ;; saw the target as out of bounds and every character index that
+      ;; begins a line - index 0 above all - was unresolvable.
       ;;--------------------------------------------------------------
       (let ((weight (gap-buffer-weight lines)))
         (lambda (cursor accum)
           (cond
-           ((and (< accum accum-max-value) (< cursor weight))
+           ((and (<= accum accum-max-value) (< cursor weight))
             (text-line-outer-size (gap-buffer-ref lines cursor))
             )
            (else #f)
@@ -1394,6 +2159,22 @@
       ;;--------------------------------------------------------------
       (gap-buffer-ref (text-editor-lines ed) offset)
       )
+
+    (define (text-editor-line-outer-size ed line-index)
+      ;; How many characters line LINE-INDEX advances the buffer's
+      ;; character index by: its contents plus its line break, which is
+      ;; the unit the CDF counts lines in. Zero for a line the buffer
+      ;; does not hold - the empty line past the end of the buffer, which
+      ;; is the only line a brand new buffer has.
+      ;;
+      ;; This exists because `TEXT-EDITOR-LINE-COUNT' counts that last
+      ;; empty line, while the lines gap-buffer does not hold it yet, so
+      ;; `TEXT-EDITOR-TEXT-LINE-REF' cannot be asked for it.
+      ;;--------------------------------------------------------------
+      (let ((lines (text-editor-lines ed)))
+        (if (< line-index (gap-buffer-weight lines))
+            (text-line-outer-size (gap-buffer-ref lines line-index))
+            0)))
 
     (define (text-editor-line-editor-ref ed offset)
       ;; Used to get the character on the current line. The line
@@ -1491,14 +2272,24 @@
         ;; column. Writing back any modified line first preserves the
         ;; buffer contents; the target line is then loaded into the
         ;; line editor with the cursor at the given column (clamped
-        ;; to the line by `TEXT-EDITOR-LOAD-CURRENT-LINE`). A line
-        ;; index of the lines gap-buffer weight addresses the new
-        ;; empty line past the end of the buffer.
-        (let ((lines (text-editor-lines ed)))
+        ;; to the line by `TEXT-EDITOR-LOAD-CURRENT-LINE').
+        ;;
+        ;; The new empty line past the end of the buffer is only
+        ;; addressable when the buffer's last line ends in a line
+        ;; break - that break is what starts it. Without one the last
+        ;; line the buffer holds is the last line there is, and the
+        ;; end of the buffer is the end of that line, which is where
+        ;; GNU Emacs puts `point-max': moving past it, as `next-line'
+        ;; does at the last line, stays on the last line rather than
+        ;; onto a line that does not exist.
+        (let* ((lines (text-editor-lines ed)))
           (text-editor-write-back ed)
-          (gap-buffer-set-cursor
-           lines (max 0 (min line-num (gap-buffer-weight lines)))
-           )
+          (let* ((weight (gap-buffer-weight lines))
+                 (last (if (and (< 0 weight)
+                                (text-line-break (gap-buffer-ref lines (- weight 1))))
+                           weight
+                           (- weight 1))))
+            (gap-buffer-set-cursor lines (max 0 (min line-num last))))
           (set!text-editor-column ed column-num)
           (text-editor-load-current-line ed)
           ))))
@@ -1517,8 +2308,25 @@
       ;; with `CDF-FIND`, which returns the line index and the start
       ;; offset of that line. `CDF-FIND` returns false values when
       ;; `CH-INDEX` is at or past the end of the last committed line,
-      ;; in which case the character is on the current (new, empty)
-      ;; line whose index is the lines gap-buffer weight.
+      ;; which is one of two positions:
+      ;;
+      ;;  - the current line, when it is a new, empty line past every
+      ;;    committed one (the lines gap-buffer cursor is at its
+      ;;    weight). That is a line of its own - the empty line a
+      ;;    brand new buffer has, and the one a line break at the end
+      ;;    of the buffer starts - so the index is on it, at the
+      ;;    column the CDF does not reach;
+      ;;
+      ;;  - the end of the last committed line, when that line has no
+      ;;    line break after it. That is NOT a line of its own: the
+      ;;    buffer's line count has no such line, and GNU Emacs puts
+      ;;    `point-max' at the end of the last line here. Reporting a
+      ;;    phantom line instead is what left point at the end of a
+      ;;    buffer that does not end in a newline on an empty line
+      ;;    past it, so that `C-e' then `C-a' could not reach the
+      ;;    beginning of the line at all (`beginning-of-line' moved
+      ;;    point to the start of the empty line - the same place),
+      ;;    and the mode line read `L2 C1' for a file of one line.
       ;;--------------------------------------------------------------
       (let*((lines (text-editor-lines ed))
             (cdf (text-editor-cdf ed))
@@ -1531,9 +2339,17 @@
             (cond
              (i (values i (- ch-index lo)))
              (else
-              (values (gap-buffer-weight lines)
-                      (max 0 (- ch-index (cdf-maximum cdf))))
-              ))))))
+              (let ((weight (gap-buffer-weight lines))
+                    (line-num (gap-buffer-cursor lines)))
+                (if (= line-num weight)
+                    (values weight
+                            (max 0 (- ch-index (cdf-maximum cdf))))
+                    (let ((outer (text-line-outer-size
+                                  (gap-buffer-ref lines (- weight 1)))))
+                      (values (- weight 1)
+                              (max 0 (- ch-index
+                                        (- (cdf-maximum cdf) outer))))))
+                )))))))
 
     (define (text-editor-get-char-index ed ch-index)
       ;; Get the character at the given index `CH-INDEX`. This
@@ -1597,7 +2413,10 @@
       ;; contains one element for every line of the buffer, except
       ;; that when the gap-buffer cursor points past the last
       ;; committed line, the current line is a new empty line which is
-      ;; not yet buffered, so one more line is counted.
+      ;; not yet buffered, so one more line is counted. That is a line
+      ;; the buffer really has, because it is a line break at the end of
+      ;; the buffer that starts it: a last line with no break after it
+      ;; is the last line there is (see `TEXT-EDITOR-WRITE-BACK').
       ;;--------------------------------------------------------------
       (let* ((lines (text-editor-lines ed))
              (line-num (gap-buffer-cursor lines))

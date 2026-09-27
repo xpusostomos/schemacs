@@ -4,6 +4,14 @@
   ;; This data structure is specifically designed for use with the
   ;; Schemacs text editor engine, but may be of use in other places as
   ;; well, so it is provided as a library.
+  ;;
+  ;; It mirrors no Emacs file. GNU Emacs answers the question the CDF
+  ;; answers - which line and column a buffer position is on, and what
+  ;; the position of a line is - by keeping intervals over the buffer
+  ;; (`intervals.c') and by walking the gap; the CDF is this project's
+  ;; way of answering it in one lookup. It is here because the engine
+  ;; uses it, and it is named after what it is rather than after a file
+  ;; in Emacs, since there is no such file.
   ;;------------------------------------------------------------------
 
   (import

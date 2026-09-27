@@ -21,7 +21,11 @@
     (guile
 
      (import
-       (rename (srfi 43)
+       ;; Only `VECTOR-FOLD' is wanted from SRFI 43: its other bindings
+       ;; are the ones `(SCHEME BASE)' already provides - `VECTOR-COPY'
+       ;; among them - and importing them from both made Guile warn
+       ;; that `(schemacs vector)' had imported one name twice.
+       (rename (only (srfi 43) vector-fold)
                (vector-fold old-vector-fold)
                ))
      (begin
