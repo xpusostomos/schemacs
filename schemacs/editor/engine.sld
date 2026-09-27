@@ -108,6 +108,12 @@
    *undo-limit*
    undo-insertion-entry?  undo-deletion-entry?  undo-modified-entry?
 
+   ;; The root of the buffer's text-property interval tree. GNU Emacs
+   ;; keeps this on the buffer too (`BVAR (buf, intervals)'); the tree
+   ;; and the operations on it are `(schemacs editor intervals)', which
+   ;; mirrors `intervals.c'.
+   text-editor-text-props  set!text-editor-text-props
+
    ;; Whether the buffer has changed since it was last saved
    text-editor-modified?  text-editor-set-modified!
    text-editor-save-token
