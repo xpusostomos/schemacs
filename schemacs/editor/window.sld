@@ -30,15 +30,17 @@
     (only (schemacs editor command)
           new-command new-count-command uarg->integer)
     (only (schemacs editor engine)
-          copy-marker new-text-editor set!text-editor-buffer-name
+          copy-marker new-text-editor set-marker! set!text-editor-buffer-name
           set!text-editor-file-name text-editor-buffer-name
-          text-editor-get-cursor text-editor-modified? text-editor-set-cursor)
+          text-editor-get-cursor text-editor-modified? text-editor-set-cursor
+          text-editor-type?)
     ;; `define-key' and the global map: the window keys are stated here,
     ;; beside the commands they run.
     (only (schemacs editor keymap)
          define-key
          *default-keymap*)
     (only (schemacs editor frame)
+          %window-point
           *current-frame* current-editor frame-height frame-width
           make<ncurses-window> ncurses-frame-quit-cont
           ncurses-frame-selected-window ncurses-frame-windows select-window
@@ -50,8 +52,11 @@
           window-edges window-height window-left window-list window-parent
           window-top window-top-line window-width)
     ;; `display-buffer' puts what it shows in the buffer list's
-    ;; most-recently-used order, which is Emacs's `record_buffer'.
-    (only (schemacs editor buffer) record-buffer!)
+    ;; most-recently-used order, which is Emacs's `record_buffer';
+    ;; `pop-to-buffer' makes a buffer current by name when a string is
+    ;; what it was given, and `switch-to-buffer' does the same.
+    (only (schemacs editor buffer)
+          get-buffer-create record-buffer! set-buffer)
     )
 
   (export
@@ -63,11 +68,16 @@
    get-buffer-window
    list-substitute
    list-without
+   other-window
    other-window-command
+   pop-to-buffer
+   pop-to-buffer-same-window
    split-window-below
    split-window-below-command
    split-window-right
    split-window-right-command
+   switch-to-buffer
+   switch-to-buffer-other-window
    window-absorb!
    window-min-height
    window-min-width
@@ -258,58 +268,170 @@
               ((eq? (window-buffer (car rest)) buffer) (car rest))
               (else (loop (cdr rest))))))
 
-    (define (display-buffer buffer)
-      ;; Show BUFFER in some window without selecting it: GNU Emacs's
-      ;; `display-buffer', which is how a command puts something on the
-      ;; screen for the user to look at while the command's own window and
-      ;; point stay where they are. `list-buffers' is what it is for here.
-      ;;
-      ;; Emacs's `display-buffer' takes an *action* - a list of functions
-      ;; tried in order, `display-buffer-reuse-window',
-      ;; `display-buffer-below-selected' and a dozen more - customizable per
-      ;; caller and per buffer name. There is one policy here, which is what
-      ;; Emacs's default action does for a buffer like this one:
-      ;;
-      ;;  1. a window already showing BUFFER is used and left alone, so that
-      ;;     a list being refreshed does not jump around;
-      ;;  2. otherwise the selected window is split below and the new window
-      ;;     shows it - `display-buffer-below-selected';
-      ;;  3. when the frame is too short to split, the selected window shows
-      ;;     it instead, which is Emacs's fallback for the same case
-      ;;     (`display-buffer-use-some-window', with one window to use).
-      ;;
-      ;; The new window takes a third of the frame, as Emacs's default action
-      ;; does, but never less than `window-min-height'.
-      ;;
-      ;; A window that starts showing a buffer takes the buffer's own point,
-      ;; which is what Emacs's `set_window_buffer' does with
-      ;; `(set-marker w->pointm (buffer's point) buffer)'. It matters for a
-      ;; buffer that has been put in order before being shown - the Buffer
-      ;; Menu moves point onto its first line as it draws - where leaving the
-      ;; window's point at the beginning would put it back on the titles.
+    (define (display-buffer--inhibit-same-window? action)
+      ;; Whether ACTION refuses the selected window. GNU Emacs's
+      ;; `display-buffer' reads that two ways: a non-list ACTION means
+      ;; `inhibit-same-window' outright - which is what `pop-to-buffer''s
+      ;; second argument is, and so what `switch-to-buffer-other-window'
+      ;; passes - and an action alist may say it in an
+      ;; `inhibit-same-window' entry, which is how Emacs's
+      ;; `Buffer-menu-other-window' binds `display-buffer-overriding-action'.
       ;;--------------------------------------------------------------
-      (or (get-buffer-window buffer)
-          (let* ((window (selected-window))
-                 (height (window-height window))
-                 (want (max window-min-height
-                            (min (- height window-min-height)
-                                 (floor-quotient height 3)))))
-            (if (< height (* 2 window-min-height))
-                ;; no room to split: the selected window shows it, which is
-                ;; Emacs's `display-buffer-use-some-window' fallback
-                (begin
-                  (set!window-buffer window buffer)
-                  (set!window-top-line window 0)
-                  (set-window-point! window (text-editor-get-cursor buffer))
+      (cond ((not action) #f)
+            ((not (list? action)) #t)
+            (else
+             (let ((entry (assq 'inhibit-same-window (cdr action))))
+               (and entry (cdr entry) #t)))))
+
+    (define (display-buffer buffer . args)
+      ;; Show BUFFER in some window without selecting it, and answer with
+      ;; that window, or false when there is none: GNU Emacs's
+      ;; `display-buffer'.
+      ;;
+      ;; Emacs's second argument, ACTION, is a list of *action functions*
+      ;; tried in order, each answering a window or nil, customizable per
+      ;; caller and per buffer name through `display-buffer-alist'. There
+      ;; is one policy here, which is what Emacs's default action comes to
+      ;; for a buffer like the ones this editor displays, tried in the
+      ;; order Emacs tries them:
+      ;;
+      ;;  1. `display-buffer-reuse-window' - a window already showing
+      ;;     BUFFER, unless ACTION refuses the selected one;
+      ;;  2. `display-buffer-use-some-window' - some other window, showing
+      ;;     something else. Emacs reaches this whenever there is another
+      ;;     window to use, and it is why `C-x C-b' in a frame that already
+      ;;     has two windows replaces what is in the other one rather than
+      ;;     splitting again and leaving three;
+      ;;  3. `display-buffer-pop-up-window' - split the selected window
+      ;;     below and use the new one. This is the only choice when the
+      ;;     frame has one window.
+      ;;
+      ;; The new window takes a third of the frame, as Emacs's default
+      ;; action does, but never less than `window-min-height'.
+      ;;
+      ;; A window that starts showing a buffer takes the buffer's own
+      ;; point, which is what Emacs's `set_window_buffer' does with
+      ;; `(set-marker w->pointm (buffer's point) buffer)'. It matters for
+      ;; a buffer that has been put in order before being shown - the
+      ;; Buffer Menu moves point onto its first line as it draws - where
+      ;; leaving the window's point at the beginning would put it back on
+      ;; the titles.
+      ;;--------------------------------------------------------------
+      (let ((refuse-selected
+             (display-buffer--inhibit-same-window?
+              (if (pair? args) (car args) #f))))
+        (let ((showing
+               ;; 1. a window that shows BUFFER already
+               (let loop ((rest (window-list)))
+                 (cond ((null? rest) #f)
+                       ((and (eq? (window-buffer (car rest)) buffer)
+                             (not (and refuse-selected
+                                       (eq? (car rest) (selected-window)))))
+                        (car rest))
+                       (else (loop (cdr rest))))))
+              (other
+               ;; 2. any other window
+               (let loop ((rest (window-list)))
+                 (cond ((null? rest) #f)
+                       ((not (eq? (car rest) (selected-window))) (car rest))
+                       (else (loop (cdr rest)))))))
+          (cond
+           (showing (record-buffer! buffer) showing)
+           (other (set!window-buffer other buffer)
+                  (set!window-top-line other 0)
+                  (set-window-point! other (text-editor-get-cursor buffer))
                   (record-buffer! buffer)
-                  window)
-                ;; split below, and the new window shows it
-                (let ((new (split-window-below window (- want))))
-                  (set!window-buffer new buffer)
-                  (set!window-top-line new 0)
-                  (set-window-point! new (text-editor-get-cursor buffer))
-                  (record-buffer! buffer)
-                  new)))))
+                  other)
+           (else
+            (let* ((window (selected-window))
+                   (height (window-height window))
+                   (want (max window-min-height
+                              (min (- height window-min-height)
+                                   (floor-quotient height 3)))))
+              (if (< height (* 2 window-min-height))
+                  ;; no room to split: the selected window shows it, which
+                  ;; is Emacs's `display-buffer-use-some-window' fallback
+                  (begin
+                    (set!window-buffer window buffer)
+                    (set!window-top-line window 0)
+                    (set-window-point! window (text-editor-get-cursor buffer))
+                    (record-buffer! buffer)
+                    window)
+                  ;; split below, and the new window shows it
+                  (let ((new (split-window-below window (- want))))
+                    (set!window-buffer new buffer)
+                    (set!window-top-line new 0)
+                    (set-window-point! new (text-editor-get-cursor buffer))
+                    (record-buffer! buffer)
+                    new))))))))
+
+    (define (display-buffer--buffer-or-name thing)
+      ;; THING as a buffer, making one when it is a name no buffer has:
+      ;; GNU Emacs's `window-normalize-buffer-to-switch-to', which is what
+      ;; makes `C-x b newname' give a new buffer rather than an error.
+      ;;--------------------------------------------------------------
+      (cond ((text-editor-type? thing) thing)
+            ((string? thing) (get-buffer-create thing))
+            (else (error "not a buffer or a buffer name" thing))))
+
+    (define (pop-to-buffer buffer-or-name . args)
+      ;; Show BUFFER-OR-NAME in some window and select that window: GNU
+      ;; Emacs's `pop-to-buffer'. ACTION is Emacs's second argument, passed
+      ;; to `display-buffer'; NORECORD says not to put the buffer at the
+      ;; front of the recently-selected list.
+      ;;--------------------------------------------------------------
+      (let* ((action (if (pair? args) (car args) #f))
+             (norecord (if (and (pair? args) (pair? (cdr args)))
+                           (cadr args)
+                           #f))
+             (buffer (display-buffer--buffer-or-name buffer-or-name))
+             (window (display-buffer buffer action)))
+        ;; Emacs falls back to making the buffer current when
+        ;; `display-buffer' found no window at all.
+        (if window (select-window window) (set-buffer buffer))
+        (unless norecord (record-buffer! buffer))
+        buffer))
+
+    (define (pop-to-buffer-same-window buffer . args)
+      ;; Show BUFFER in some window, preferring the selected one: GNU
+      ;; Emacs's `pop-to-buffer-same-window', which is `pop-to-buffer' with
+      ;; an action that allows the selected window.
+      ;;--------------------------------------------------------------
+      (pop-to-buffer buffer '(nil (inhibit-same-window . #f))
+                     (if (pair? args) (car args) #f)))
+
+    (define (switch-to-buffer buffer-or-name . args)
+      ;; Display BUFFER-OR-NAME in the *selected* window: GNU Emacs's
+      ;; `switch-to-buffer'. The window shows it from its first line, and
+      ;; the window's point is the buffer's - a window is a view of a
+      ;; buffer, not a copy of it.
+      ;;
+      ;; The argument may be a buffer or a name, as in Emacs, and a name
+      ;; with no buffer behind it makes one - Emacs's `switch-to-buffer'
+      ;; does that too, so `C-x b newname RET' gives a new buffer rather
+      ;; than an error. The buffer becomes the most recently used one,
+      ;; which is Emacs's `record_buffer', unless NORECORD says otherwise;
+      ;; Emacs's third argument, FORCE-SAME-WINDOW, is about minibuffer and
+      ;; dedicated windows, which are not modelled here.
+      ;;--------------------------------------------------------------
+      (let* ((norecord (if (pair? args) (car args) #f))
+             (buffer (display-buffer--buffer-or-name buffer-or-name))
+             (window (selected-window)))
+        (set!window-buffer window buffer)
+        (set!window-top-line window 0)
+        (set-marker! (%window-point window) (text-editor-get-cursor buffer)
+                     buffer)
+        (unless norecord (record-buffer! buffer))
+        buffer))
+
+    (define (switch-to-buffer-other-window buffer-or-name . args)
+      ;; Select BUFFER-OR-NAME in another window: GNU Emacs's
+      ;; `switch-to-buffer-other-window', which is `pop-to-buffer' with an
+      ;; ACTION that refuses the selected window - so the buffer goes in
+      ;; the other window and *that* window is selected, which is what
+      ;; leaves the Buffer Menu where it was.
+      ;;--------------------------------------------------------------
+      (pop-to-buffer buffer-or-name #t (if (pair? args) (car args) #f)))
 
 
     (define (window-absorb! taker gone)
@@ -365,7 +487,9 @@
               (set!ncurses-frame-windows
                frame (list-without window (ncurses-frame-windows frame))))
           (when (eq? window selected)
-            (select-window (car (window-list frame))))
+            (begin (select-window (car (window-list frame)))
+                   (record-buffer!
+                    (window-buffer (car (window-list frame))))))
           (set!window-parent window #f)
           (set!window-children window '())
           window))))
@@ -376,6 +500,7 @@
       ;;--------------------------------------------------------------
       (let ((frame (*current-frame*)))
         (select-window window)
+        (record-buffer! (window-buffer window))
         (set!window-top window 0)
         (set!window-left window 0)
         (set!window-height window (max 1 (- (frame-height frame) 1)))
@@ -446,17 +571,37 @@ windows it was combined with."))
         ((window) (delete-other-windows window)))
        "Make the selected window the only window on the frame."))
 
+    ;; Selecting a window in GNU Emacs also puts its buffer at the front of
+    ;; the buffer list, which is what makes the Buffer Menu list the buffers
+    ;; in the order they were last looked at. That is `record_buffer' in
+    ;; `window.c', which reaches into buffer.c's alist because in C the two
+    ;; halves are one program; here they are two libraries and
+    ;; `(select-window)' is in `(schemacs editor frame)', which cannot reach
+    ;; the buffer list - the buffer library imports it - so the window
+    ;; commands below record for themselves. `pop-to-buffer' and
+    ;; `switch-to-buffer' do it with their own NORECORD argument.
+
+    (define (other-window count)
+      ;; Select the COUNT-th window on from the selected one, cycling
+      ;; round the frame's windows: GNU Emacs's `other-window'. A negative
+      ;; COUNT goes the other way, which is how a command that has just
+      ;; moved to a window it made gets back to the one it came from.
+      ;;--------------------------------------------------------------
+      (let* ((windows (window-list))
+             (n (length windows))
+             (at (window-position (selected-window) windows))
+             (window (list-ref windows (modulo (+ at count) n))))
+        (select-window window)
+        (record-buffer! (window-buffer window))
+        window))
+
     (define other-window-command
       ;; GNU Emacs's `other-window': select the next window, or the
       ;; COUNT-th one on, cycling round the frame's windows.
       ;;--------------------------------------------------------------
       (new-count-command
        "other-window"
-       (lambda (count)
-         (let* ((windows (window-list))
-                (n (length windows))
-                (at (window-position (selected-window) windows)))
-           (select-window (list-ref windows (modulo (+ at count) n)))))
+       (lambda (count) (other-window count))
        "Select the next window, COUNT windows on."))
 
     ;; The window keys, on the ones GNU Emacs binds them to.

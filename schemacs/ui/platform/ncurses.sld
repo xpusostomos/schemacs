@@ -21,13 +21,15 @@
           scrollok! stdscr)
     (only (schemacs editor engine)
           new-text-editor set!text-editor-buffer-name)
-    (only (schemacs editor frame) new-frame)
-    ;; Everything this needs of the editor: visiting the file named on the
-    ;; command line, and then running the command loop.
+    (only (schemacs editor frame) *current-frame* new-frame)
+    ;; Everything this needs of the editor: the buffers named on the
+    ;; command line - which is `startup.el''s job, not this one's - and
+    ;; then the command loop.
     ;; The first buffer is made through the buffer list, so that it is a
     ;; buffer the editor can find again by name - `buffer.c'.
-    (only (schemacs editor buffer) get-buffer-create)
-    (only (schemacs editor files) find-file note-file-read-only!)
+    (only (schemacs editor buffer) *scratch-buffer-name* get-buffer-create)
+    (only (schemacs editor files) note-file-read-only!)
+    (only (schemacs editor startup) command-line-1)
     (only (schemacs editor keyboard) event-loop)
     ;; And the libraries that carry key bindings, imported for that alone:
     ;; a binding is installed when the library that states it is loaded
@@ -81,28 +83,30 @@
     ;; Main entry
 
     (define (main-ncurses . args)
-      ;; With a file argument, load the file; with no arguments, start
-      ;; with an empty unnamed buffer (the scratch buffer).
+      ;; The editor's entry point: GNU Emacs's `command-line'. There is
+      ;; always a `*scratch*' buffer - Emacs makes one before it looks at
+      ;; the command line, and every file named is visited after it - and
+      ;; what the names on the command line do is `startup.el''s, which is
+      ;; `command-line-1'.
       ;;------------------------------------------------------------------
-      (let ((ed (if (pair? args)
-                    (find-file (car args))
-                    ;; no file named: the scratch buffer, which visits
-                    ;; nothing and is named as GNU Emacs names it
-                    (get-buffer-create "*scratch*"))))
+      (let ((scratch (get-buffer-create *scratch-buffer-name*)))
         (with-terminal
          (lambda ()
            ;; The frame is made once the terminal is open, because its
            ;; size is the terminal's - a frame is a display of a
            ;; terminal, and knows how big that is.
-           (let ((frame (new-frame ed)))
-             ;; The file's line-break convention needs no installing
-             ;; here: `find-file' recorded it on the buffer it visited,
-             ;; where saving reads it back.
-             ;;
-             ;; as `find-file-command' does, so that a file named on the
-             ;; command line that cannot be written says so too
-             (note-file-read-only! frame)
-             (event-loop frame))
-           ))))
+           (let ((frame (new-frame scratch)))
+             ;; The frame is the selected frame from here on, which is GNU
+             ;; Emacs's `select-frame' - `frame-initialize' calls it as soon
+             ;; as the first frame is made. It matters before the command
+             ;; loop starts: `command-line-1' shows the files named on the
+             ;; command line in the *selected* window, so it has to be
+             ;; current before it runs.
+             (parameterize ((*current-frame* frame))
+               (command-line-1 args)
+               ;; as `find-file-command' does, so that a file named on the
+               ;; command line that cannot be written says so too
+               (note-file-read-only! frame)
+               (event-loop frame)))))))
 
     ))

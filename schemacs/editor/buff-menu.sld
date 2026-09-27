@@ -29,12 +29,12 @@
   ;;
   ;; Not ported, with what each would need: `Buffer-menu-visit-tags-table'
   ;; (a tags table), `Buffer-menu-view' and `-view-other-window'
-  ;; (`view-mode'), `Buffer-menu-1-window' and `-2-window' (arranging the
-  ;; frame's windows for a set of marked buffers), the isearch and
-  ;; multi-occur commands over marked buffers, `Buffer-menu-filter-*'
-  ;; (regexps over the list), and the `-other-window' variants (they need
-  ;; `switch-to-buffer-other-window', which is `window.el''s and not here
-  ;; yet).
+  ;; (`view-mode'), `Buffer-menu-1-window' and `-2-window' and
+  ;; `Buffer-menu-select' (arranging the frame's windows for a set of
+  ;; marked buffers), the unmark-all and mark-backwards commands, the
+  ;; files-only and show-internal toggles, the isearch and multi-occur
+  ;; commands over marked buffers, and `Buffer-menu-filter-*' (regexps over
+  ;; the list).
   ;;
   ;; See LAYOUT-PLAN.txt for the rule this library is a step of.
 
@@ -70,11 +70,12 @@
           kill-buffer set!buffer-local-keymap set!buffer-name
           with-current-buffer)
     (only (schemacs editor window)
-          delete-window display-buffer get-buffer-window)
+          delete-window display-buffer get-buffer-window
+          switch-to-buffer switch-to-buffer-other-window)
     ;; `Buffer-menu-execute' saves the buffers marked `s' with
     ;; `save-buffer', as Emacs's does - in the buffer, so it writes that
     ;; buffer's own file.
-    (only (schemacs editor files) save-buffer switch-to-buffer!)
+    (only (schemacs editor files) save-buffer)
     (only (schemacs editor tabulated-list)
           *tabulated-list-entries* *tabulated-list-format*
           tabulated-list-get-id tabulated-list-print)
@@ -91,7 +92,9 @@
    Buffer-menu-redraw!
    Buffer-menu-mark
    Buffer-menu-not-modified
+   Buffer-menu-other-window
    Buffer-menu-save
+   Buffer-menu-switch-other-window
    Buffer-menu-this-window
    Buffer-menu-toggle-read-only
    Buffer-menu-unmark
@@ -309,7 +312,7 @@
       (new-command
        "buffer-menu"
        (lambda ()
-         (switch-to-buffer! (*current-frame*) (list-buffers-noselect)))
+         (switch-to-buffer (list-buffers-noselect)))
        (lambda () #f)
        "Switch to the Buffer Menu."))
 
@@ -456,9 +459,44 @@
        (lambda ()
          (let ((buffer (Buffer-menu-buffer)))
            (when buffer
-             (switch-to-buffer! (*current-frame*) buffer))))
+             (switch-to-buffer buffer))))
        (lambda () #f)
        "Select the buffer on this line (RET)."))
+
+    (define Buffer-menu-other-window
+      ;; GNU Emacs's `Buffer-menu-other-window' (o): show the buffer on
+      ;; this line in the *other* window and select that window, so that
+      ;; the Buffer Menu is left where it is - which is the point of the
+      ;; command, and what makes it different from RET.
+      ;;
+      ;; Emacs binds `display-buffer-overriding-action' to an action that
+      ;; refuses the selected window for the call; this library states the
+      ;; same thing by passing the action to `display-buffer' directly,
+      ;; there being no such variable here.
+      ;;--------------------------------------------------------------
+      (new-command
+       "Buffer-menu-other-window"
+       (lambda ()
+         (let ((buffer (Buffer-menu-buffer)))
+           (when buffer
+             (switch-to-buffer-other-window buffer))))
+       (lambda () #f)
+       "Select the buffer on this line in the other window (o)."))
+
+    (define Buffer-menu-switch-other-window
+      ;; GNU Emacs's `Buffer-menu-switch-other-window' (C-o): make the
+      ;; other window show the buffer on this line, but leave point in the
+      ;; Buffer Menu - so the menu stays selected and more lines can be
+      ;; looked at without coming back.
+      ;;--------------------------------------------------------------
+      (new-command
+       "Buffer-menu-switch-other-window"
+       (lambda ()
+         (let ((buffer (Buffer-menu-buffer)))
+           (when buffer
+             (display-buffer buffer '(nil (inhibit-same-window . #t))))))
+       (lambda () #f)
+       "Show the buffer on this line in the other window (C-o)."))
 
     (define Buffer-menu-execute
       ;; GNU Emacs's `Buffer-menu-execute' (x): do what the marks say -
@@ -577,14 +615,13 @@
     (define buffer-menu-mode-map
       ;; GNU Emacs's `Buffer-menu-mode-map', with the keys read from a
       ;; terminal Emacs: q, d, k, C-k, x, u, m, s, b, ~, %, g, RET, f, e,
-      ;; n, SPC and p. The ones Emacs binds that are not here are the ones
-      ;; whose commands are not ported - `t' (`Buffer-menu-visit-tags-table'),
-      ;; the other-window and view commands, `1' and `2' and `v' (they
-      ;; arrange the frame's windows, and `2' and `v' need
-      ;; `switch-to-buffer-other-window', which `window.el' does not have
-      ;; here yet), the unmark-all and mark-backwards commands, the
-      ;; files-only and show-internal toggles, and the isearch and
-      ;; multi-occur commands over marked buffers.
+      ;; o, C-o, n, SPC and p. The ones Emacs binds that are not here are
+      ;; the ones whose commands are not ported - `t'
+      ;; (`Buffer-menu-visit-tags-table'), the view commands, `1' and `2'
+      ;; and `v' (they arrange the frame's windows), the unmark-all and
+      ;; mark-backwards commands, the files-only and show-internal
+      ;; toggles, and the isearch and multi-occur commands over marked
+      ;; buffers.
       ;;--------------------------------------------------------------
       (let ((map (km:keymap '*buffer-menu-mode-map*)))
         (define (bind! key command)
@@ -610,6 +647,8 @@
         (bind! (list 'ctrl #\m) Buffer-menu-this-window)
         (bind! #\f Buffer-menu-this-window)
         (bind! #\e Buffer-menu-this-window)
+        (bind! #\o Buffer-menu-other-window)
+        (bind! (list 'ctrl #\o) Buffer-menu-switch-other-window)
         (bind! #\n Buffer-menu-next-line)
         (bind! #\space Buffer-menu-next-line)
         (bind! #\p Buffer-menu-previous-line)

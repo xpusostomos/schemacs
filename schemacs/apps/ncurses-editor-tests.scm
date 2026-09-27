@@ -40,7 +40,7 @@
        *require-final-newline* ensure-final-newline-on-visit
        file-name-completion-table file-name-directory-part
        file-name-nondirectory-part find-file note-file-read-only!
-       save-answer-char->decision switch-to-buffer!)
+       save-answer-char->decision)
  (only (schemacs editor minibuffer)
        all-completions make<minibuffer> minibuffer-contents
        minibuffer-cursor-column minibuffer-history
@@ -54,7 +54,8 @@
        *search-case-fold?* *search-pattern* isearch-find isearch-message)
  (only (schemacs editor window)
        delete-window delete-other-windows get-buffer-window
-       other-window-command split-window-below split-window-right)
+       other-window-command split-window-below split-window-right
+       switch-to-buffer)
  (only (schemacs editor xdisp)
        *mode-line-format* cursor-screen-position format-mode-line
        mode-line-string status-string)
@@ -336,10 +337,6 @@
                  (*kill-buffer-query-functions* '()))
    (let ((ed (find-file path)))
     (let ((frame (test-frame ed)))
-      ;; as `find-file-command' does: the file's buffer is shown in the
-      ;; selected window. The line-break convention is the buffer's own -
-      ;; `find-file' recorded it there - so there is nothing to adopt.
-      (switch-to-buffer! frame ed)
       (parameterize ((*current-frame* frame)
                      (*search-pattern* #f)
                      (*search-case-fold?* #t)
@@ -349,6 +346,12 @@
                      (*last-command* #f)
                      (*pending-undo-list* #f)
                      (*last-change-was-undo* #f))
+        ;; as `find-file-command' does: the file's buffer is shown in the
+        ;; selected window - inside the frame binding, because
+        ;; `switch-to-buffer' acts on the selected window, as in Emacs. The
+        ;; line-break convention is the buffer's own - `find-file' recorded
+        ;; it there - so there is nothing to adopt.
+        (switch-to-buffer ed)
         ;; what `find-file-command' does after installing the new buffer
         (note-file-read-only! frame)
         (thunk frame)
@@ -416,7 +419,7 @@
              (lambda (port) (display "c\nd\n" port)))
            (find-file "/tmp/fe-lf.txt")
            ;; back to the CRLF buffer, change it, and save it
-           (switch-to-buffer! frame (get-buffer "fe-crlf.txt"))
+           (switch-to-buffer (get-buffer "fe-crlf.txt"))
            (type frame #\X)
            (type frame (integer->char 24) save-key)))))
 

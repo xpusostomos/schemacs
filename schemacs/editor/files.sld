@@ -25,9 +25,7 @@
     (scheme file)
     (only (scheme write) display)
     (only (schemacs editor engine)
-          text-editor-type?
           line-break-newline line-break-crlf line-break-return
-          set-marker!
           set!text-editor-buffer-name set!text-editor-file-name
           text-editor-buffer-name text-editor-char-count
           text-editor-file-name text-editor-get-char-index text-editor-get-cursor
@@ -36,16 +34,16 @@
           text-editor-set-read-only! text-editor-to-string
           text-editor-undo-disable! text-editor-undo-enable!)
     (only (schemacs editor frame)
-          %window-point
           *current-frame* current-editor
           ncurses-frame-editor ncurses-frame-quit-cont
-          ncurses-frame-selected-window
           set!ncurses-frame-editor
-          set!ncurses-frame-message
-          set!window-buffer set!window-top-line)
+          set!ncurses-frame-message)
     ;; The commands here install their own keys, as files.el does.
     (only (schemacs editor command)
           new-command run-command)
+    ;; `switch-to-buffer' is `window.el''s, and not this file's: it shows a
+    ;; buffer in the selected window, which is a window operation.
+    (only (schemacs editor window) switch-to-buffer)
     ;; Buffers by name, and killing one: `buffer.c'. `BUFFER-FILE-NAME' and
     ;; the buffer-local store are what `save-buffer' writes and what the
     ;; visited file's line-break convention is kept in.
@@ -106,7 +104,6 @@
    save-buffer-command
    save-buffers-kill-terminal
    save-some-buffers
-   switch-to-buffer!
    y-or-n-p
    )
 
@@ -182,33 +179,6 @@
       (or (not (access? path W_OK))
           (zero? (logand (stat:mode (stat path)) #o222))))
 
-    (define (switch-to-buffer! frame buffer-or-name)
-      ;; Display a buffer in the frame's selected window: GNU Emacs's
-      ;; `switch-to-buffer'. The window shows it from its first line, and
-      ;; the window's point is the buffer's - a window is a view of a
-      ;; buffer, not a copy of it.
-      ;;
-      ;; The argument may be a buffer or a name, as in Emacs, and a name
-      ;; with no buffer behind it makes one - Emacs's `switch-to-buffer'
-      ;; does that too, so `C-x b newname RET' gives a new buffer rather
-      ;; than an error. The buffer becomes the most recently used one,
-      ;; which is Emacs's `record_buffer' (without its NORECORD argument,
-      ;; which nothing here needs yet).
-      ;;--------------------------------------------------------------
-      (let* ((buffer (cond ((text-editor-type? buffer-or-name) buffer-or-name)
-                           ((string? buffer-or-name)
-                            (get-buffer-create buffer-or-name))
-                           (else (error
-                                  "switch-to-buffer! wants a buffer or a name"
-                                  buffer-or-name))))
-             (window (ncurses-frame-selected-window frame)))
-        (set!window-buffer window buffer)
-        (set!window-top-line window 0)
-        (set-marker! (%window-point window) (text-editor-get-cursor buffer)
-                     buffer)
-        (record-buffer! buffer)
-        buffer))
-
     (define (find-buffer-visiting path)
       ;; The buffer visiting PATH, or false: GNU Emacs's
       ;; `find-buffer-visiting'. It is `files.el''s rather than
@@ -247,7 +217,7 @@
                      frame (string-append
                             "; find-file: error loading " path))
                     #f))
-             (switch-to-buffer! frame (find-file path))
+             (switch-to-buffer (find-file path))
              (set!ncurses-frame-message frame "")
              (note-file-read-only! frame)
              path)))
