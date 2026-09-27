@@ -52,6 +52,10 @@
     ;; `(schemacs editor minibuf)'; this library is `minibuffer.el' and uses
     ;; them rather than defining them.
     (only (schemacs editor minibuf) all-completions try-completion)
+    ;; `caddr' is `(scheme cxr)'s: a style's entry in
+    ;; `completion-styles-alist' is a four-element list.
+    (only (scheme cxr) caddr)
+
     ;; The recursive edit the minibuffer is read by: the same command loop,
     ;; called again.
     (only (schemacs editor keyboard)
@@ -64,6 +68,16 @@
 
   (export
    *minibuffer-completion-table*
+   *completion-styles*
+   completion--nth-completion
+   completion-all-completions
+   completion-basic-all-completions
+   completion-basic-try-completion
+   completion-boundaries
+   completion-styles-alist
+   completion-substring-all-completions
+   completion-substring-try-completion
+   completion-try-completion
    common-prefix
    completion-candidates-message
    file-name-history
@@ -362,13 +376,22 @@
       ;; GNU Emacs's `minibuffer-completion-help': show what the text
       ;; could complete to.
       ;;--------------------------------------------------------------
-      (let ((candidates (all-completions (or (minibuffer-contents) "")
-                                         (*minibuffer-completion-table*))))
+      (let* ((typed (or (minibuffer-contents) ""))
+             (candidates (completion-all-completions
+                          typed (*minibuffer-completion-table*) #f
+                          (string-length typed))))
         (set!ncurses-frame-message
          (*current-frame*)
-         (if (null? candidates)
-             "No match"
-             (completion-candidates-message candidates)))))
+         (cond
+          ((not candidates) "No match")
+          ;; The answer is a dotted list whose last cdr is the base size,
+          ;; so the candidates are what is before it - see
+          ;; `completion-all-completions'.
+          (else (completion-candidates-message
+                 (let loop ((rest candidates) (acc '()))
+                   (if (not (pair? rest))
+                       (reverse acc)
+                       (loop (cdr rest) (cons (car rest) acc))))))))))
 
     (define minibuffer-complete
       ;; GNU Emacs's `minibuffer-complete': complete as far as the text
@@ -379,15 +402,27 @@
        "minibuffer-complete"
        (lambda ()
          (let* ((typed (or (minibuffer-contents) ""))
-                (completion (try-completion typed (*minibuffer-completion-table*))))
+                ;; `completion-try-completion' rather than
+                ;; `try-completion', because a *style* decides how to
+                ;; complete: the answer is #t, #f, or a pair of the new
+                ;; text and where point goes in it.
+                (completion (completion-try-completion
+                             typed (*minibuffer-completion-table*) #f
+                             (string-length typed))))
            (cond
             ((eq? completion #t)
              (set!ncurses-frame-message (*current-frame*) "Complete, but not unique"))
             ((not completion)
              (set!ncurses-frame-message (*current-frame*) "No match"))
-            ((string=? completion typed) (minibuffer-completion-help))
+            ((string=? (car completion) typed) (minibuffer-completion-help))
             (else
-             (minibuffer-insert! (substring completion (string-length typed)))))))
+             ;; What is inserted is the part of the completion that is
+             ;; past what was typed - a *substring* completion can differ
+             ;; from the text before the end, so the common prefix is what
+             ;; stays put.
+             (let ((new (car completion)))
+               (minibuffer-insert!
+                (substring new (length (common-prefix (list typed new))))))))))
        (lambda () #f)
        "Complete the text in the minibuffer as far as it can be (bound to TAB)."))
 
@@ -433,4 +468,204 @@
            (else (set!ncurses-frame-message frame "Please answer yes or no.")
                  (loop))))))
 
+    ;;----------------------------------------------------------------
+    ;; The completion styles
+    ;;
+    ;; GNU Emacs's `completion-styles': a *list* of ways to complete,
+    ;; tried in turn, and the first one that finds anything wins. That
+    ;; is what makes `basic' (prefix) and `substring' both available
+    ;; without either having to know about the other.
+
+    (define *completion-styles*
+      ;; GNU Emacs's `completion-styles'. Emacs's default is
+      ;; `(basic partial-completion emacs22)'; `partial-completion' is
+      ;; the PCM pattern engine and `emacs22' is prefix completion on the
+      ;; text before point, which for a minibuffer whose point is at the
+      ;; end is what `basic' already is. The two styles this library has
+      ;; are the first and the one most people reach for, so the default
+      ;; is those.
+      ;;--------------------------------------------------------------
+      (make-parameter '(basic substring)))
+
+    (define (completion-styles-alist)
+      ;; GNU Emacs's `completion-styles-alist': each style as
+      ;; `(NAME TRY-COMPLETION ALL-COMPLETIONS DESCRIPTION)'. Emacs
+      ;; builds it once as a variable; it is built here each time because
+      ;; the two procedures are defined below it.
+      ;;--------------------------------------------------------------
+      (list (list 'basic
+                  completion-basic-try-completion
+                  completion-basic-all-completions
+                  "Completion of the prefix before point.")
+            (list 'substring
+                  completion-substring-try-completion
+                  completion-substring-all-completions
+                  "Completion of the string taken as a substring.")))
+
+    (define (completion--some string table predicate point nth)
+      ;; The `seq-some' of GNU Emacs's `completion--nth-completion': try
+      ;; each style in turn and answer `(RESULT . STYLE)' for the first
+      ;; that finds anything, or #f when none does.
+      ;;
+      ;; NTH picks which of a style's two functions to call - 1 for
+      ;; `completion-try-completion', 2 for `completion-all-completions' -
+      ;; which is how one list of styles serves both questions.
+      ;;--------------------------------------------------------------
+      (let loop ((rest (*completion-styles*)))
+        (cond
+         ((null? rest) #f)
+         (else
+          (let ((entry (assq (car rest) (completion-styles-alist))))
+            (if (not entry)
+                (error "Invalid completion style" (car rest))
+                (let ((probe ((if (= nth 1) (cadr entry) (caddr entry))
+                              string table predicate point)))
+                  (if probe (cons probe (car rest)) (loop (cdr rest))))))))))
+
+    (define (completion--nth-completion nth string table predicate point)
+      ;; GNU Emacs's `completion--nth-completion': the answer from the
+      ;; first style that finds anything. Emacs also lets a *table* be
+      ;; quoted and unquoted around the styles and lets a style adjust
+      ;; the completion metadata; neither has any meaning here yet.
+      ;;--------------------------------------------------------------
+      (let ((result-and-style (completion--some string table predicate point nth)))
+        (and result-and-style (car result-and-style))))
+
+    (define (completion-try-completion string table predicate point)
+      ;; GNU Emacs's `completion-try-completion': what STRING can be
+      ;; completed to. The answer is #f for nothing, #t for "STRING is
+      ;; already the only completion", or `(NEWSTRING . NEWPOINT)' - a
+      ;; *pair*, because a style may need to put point somewhere other
+      ;; than the end of the new text.
+      ;;--------------------------------------------------------------
+      (completion--nth-completion 1 string table predicate point))
+
+    (define (completion-all-completions string table predicate point)
+      ;; GNU Emacs's `completion-all-completions': the candidates, with
+      ;; the *base size* in the last cdr - the length of the text the
+      ;; completion starts from, which is what tells a caller how much of
+      ;; what was typed the completion replaces. `(cdr (last ANSWER))' is
+      ;; how Emacs reads it back, so the answer is a dotted list.
+      ;;--------------------------------------------------------------
+      (completion--nth-completion 2 string table predicate point))
+
+    (define (completion-boundaries string table predicate afterpoint)
+      ;; GNU Emacs's `completion-boundaries', which asks a table where the
+      ;; text it is completing *begins and ends* - the answer is
+      ;; `(START . END)' within the string. A plain list of candidates has
+      ;; no opinion, so the default is the whole string; Emacs has the same
+      ;; default for a table with no metadata, and the file-name table is
+      ;; the one that answers otherwise.
+      ;;--------------------------------------------------------------
+      (cons 0 0))
+
+    (define (common-prefix strings)
+      ;; The longest prefix every one of STRINGS begins with. This is not
+      ;; an Emacs function: Emacs gets the same answer as a side effect of
+      ;; merging the completed pattern (`completion-pcm--merge-try'), and
+      ;; this is what stands in for that until the PCM engine is here.
+      ;;--------------------------------------------------------------
+      (let loop ((i 0))
+        (if (and (< i (string-length (car strings)))
+                 (let all ((rest (cdr strings)))
+                   (cond
+                    ((null? rest) #t)
+                    ((and (< i (string-length (car rest)))
+                          (char=? (string-ref (car rest) i)
+                                  (string-ref (car strings) i)))
+                     (all (cdr rest)))
+                    (else #f))))
+            (loop (+ 1 i))
+            (substring (car strings) 0 i))))
+
+    ;;----------------------------------------------------------------
+    ;; The styles themselves
+
+    (define (completion-basic-try-completion string table predicate point)
+      ;; GNU Emacs's `completion-basic-try-completion': prefix completion.
+      ;;
+      ;; Emacs also completes the text *after* point here - the second half
+      ;; of `basic', which is what makes completing "foo_bar" with point
+      ;; after the underscore complete both halves. A minibuffer prompt has
+      ;; point at the end and no afterpoint, so what is left is the C's
+      ;; `try-completion', with point at the end of what it found.
+      ;;--------------------------------------------------------------
+      (let* ((beforepoint (substring string 0 point))
+             (completion (try-completion beforepoint table predicate)))
+        (if (not (string? completion))
+            completion
+            (cons completion (string-length completion)))))
+
+    (define (completion-basic-all-completions string table predicate point)
+      ;; GNU Emacs's `completion-basic-all-completions`: the prefix
+      ;; matches, with the base size in the last cdr.
+      ;;--------------------------------------------------------------
+      (let* ((beforepoint (substring string 0 point))
+             (all (all-completions beforepoint table predicate)))
+        (if (null? all)
+            #f
+            (append all 0))))
+
+    (define (completion-substring-candidates string table predicate)
+      ;; The candidates STRING appears in *anywhere*: what the `substring'
+      ;; style means by completing. Emacs gets there through its PCM
+      ;; pattern engine, which is a general glob matcher shared with
+      ;; `partial-completion' and `flex'; the meaning is this, and this is
+      ;; what it is built on when that engine arrives.
+      ;;--------------------------------------------------------------
+      (let loop ((rest (if (procedure? table)
+                           (table string predicate #t)
+                           table))
+                 (acc '()))
+        (cond
+         ((not (pair? rest)) (reverse acc))
+         (else
+          (let ((candidate (if (pair? (car rest)) (car (car rest)) (car rest))))
+            (cond
+             ((not (string? candidate))
+              (loop (cdr rest) acc))
+             ((not (or (not predicate) (predicate candidate)))
+              (loop (cdr rest) acc))
+             ((substring? string candidate)
+              (loop (cdr rest) (cons candidate acc)))
+             (else (loop (cdr rest) acc))))))))
+
+    (define (substring? needle haystack)
+      ;; Whether NEEDLE occurs anywhere in HAYSTACK - the test the
+      ;; `substring' style is named for.
+      ;;--------------------------------------------------------------
+      (let ((n (string-length needle))
+            (h (string-length haystack)))
+        (let loop ((i 0))
+          (cond ((> (+ i n) h) #f)
+                ((string=? needle (substring haystack i (+ i n))) #t)
+                (else (loop (+ 1 i)))))))
+
+    (define (completion-substring-all-completions string table predicate point)
+      ;; GNU Emacs's `completion-substring-all-completions'.
+      ;;--------------------------------------------------------------
+      (let* ((beforepoint (substring string 0 point))
+             (all (completion-substring-candidates beforepoint table predicate)))
+        (if (null? all)
+            #f
+            (append all 0))))
+
+    (define (completion-substring-try-completion string table predicate point)
+      ;; GNU Emacs's `completion-substring-try-completion'.
+      ;;
+      ;; A substring match is not a *prefix* of what was typed, so the
+      ;; answer is the match itself rather than a longer version of the
+      ;; input: completing "oo" against `("foo")' gives "foo" and point 3,
+      ;; where prefix completion would give nothing at all. Emacs merges
+      ;; the pattern to get there; with several matches it answers the
+      ;; longest prefix they agree on, which is what a caller does with
+      ;; it anyway.
+      ;;--------------------------------------------------------------
+      (let* ((beforepoint (substring string 0 point))
+             (all (completion-substring-candidates beforepoint table predicate)))
+        (cond
+         ((null? all) #f)
+         ((and (null? (cdr all)) (string=? (car all) beforepoint)) #t)
+         ((null? (cdr all)) (cons (car all) (string-length (car all))))
+         (else (cons (common-prefix all) (string-length (common-prefix all)))))))
     ))
