@@ -69,8 +69,10 @@
           buffer-name bury-buffer current-buffer get-buffer-create
           kill-buffer set!buffer-local-keymap set!buffer-name
           with-current-buffer)
+    ;; `quit-window' is `window.el''s and lives in `(schemacs editor
+    ;; window)'; this library binds it and does not define it.
     (only (schemacs editor window)
-          delete-window display-buffer get-buffer-window
+          delete-window display-buffer get-buffer-window quit-window
           switch-to-buffer switch-to-buffer-other-window)
     ;; `Buffer-menu-execute' saves the buffers marked `s' with
     ;; `save-buffer', as Emacs's does - in the buffer, so it writes that
@@ -109,7 +111,6 @@
    list-buffers
    list-buffers--refresh
    list-buffers-noselect
-   quit-window
    )
 
   (begin
@@ -561,20 +562,6 @@
                   (else "No buffers marked for deletion or saving")))))
        (lambda () #f)
        "Save and kill the buffers marked in the Buffer Menu (x)."))
-
-    (define (quit-window)
-      ;; GNU Emacs's `quit-window' (q in the Buffer Menu), which is
-      ;; `window.el''s: take this window off the frame and bury the buffer
-      ;; it was showing. A frame's only window cannot be removed, and then
-      ;; the buffer is just buried.
-      ;;--------------------------------------------------------------
-      (let* ((frame (*current-frame*))
-             (window (ncurses-frame-selected-window frame))
-             (buffer (window-buffer window)))
-        (bury-buffer buffer)
-        (if (> (length (window-list)) 1)
-            (delete-window window)
-            #f)))
 
     (define Buffer-menu-quit
       (new-command

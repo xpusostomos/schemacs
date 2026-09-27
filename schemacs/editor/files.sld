@@ -44,6 +44,9 @@
     ;; `switch-to-buffer' is `window.el''s, and not this file's: it shows a
     ;; buffer in the selected window, which is a window operation.
     (only (schemacs editor window) switch-to-buffer)
+    ;; The file-name table is a *function* table, so it answers
+    ;; `try-completion' and `all-completions' itself - `minibuf.c''s.
+    (only (schemacs editor minibuf) all-completions try-completion)
     ;; Buffers by name, and killing one: `buffer.c'. `BUFFER-FILE-NAME' and
     ;; the buffer-local store are what `save-buffer' writes and what the
     ;; visited file's line-break convention is kept in.
@@ -449,13 +452,23 @@
            (with-exception-handler (lambda (e) 'none)
              (lambda () (stat:type (stat path))))))
 
-    (define (file-name-completion-table name)
-      ;; The file names NAME could complete to: GNU Emacs's
-      ;; `read-file-name-internal'. Directories are offered with a
-      ;; trailing slash so that completing one descends into it.
+    (define (file-name-completion-table string predicate action)
+      ;; The file names STRING could complete to: GNU Emacs's
+      ;; `read-file-name-internal'.
+      ;;
+      ;; It is a *function* table - called with `(STRING PREDICATE
+      ;; ACTION)' - because which names are candidates depends on STRING,
+      ;; and the caller says which of the three questions it is asking:
+      ;; ACTION is #f for what STRING can be completed to, and anything
+      ;; else for the candidates themselves. That is Emacs's signature, and
+      ;; a table that took only STRING would be the old one-argument form
+      ;; this project used before `(schemacs editor minibuf)' existed.
+      ;;
+      ;; Directories are offered with a trailing slash so that completing
+      ;; one descends into it.
       ;;--------------------------------------------------------------
-      (let* ((dir-part (file-name-directory-part name))
-             (name-part (file-name-nondirectory-part name))
+      (let* ((dir-part (file-name-directory-part string))
+             (name-part (file-name-nondirectory-part string))
              (dir (if (string=? dir-part "")
                       (default-directory)
                       (if (char=? (string-ref dir-part 0) #\/)
@@ -463,7 +476,13 @@
                           (string-append (default-directory) dir-part)))))
         (let loop ((entries (directory-entries dir name-part)) (acc '()))
           (if (null? entries)
-              (reverse acc)
+              (let ((candidates (reverse acc)))
+                (if (eq? action #f)
+                    (try-completion string candidates predicate)
+                    ;; ACTION is #t for the list, or a function for the
+                    ;; candidates PREDICATE accepts - and `all-completions'
+                    ;; answers both.
+                    (all-completions string candidates predicate)))
               (let ((entry (car entries)))
                 (loop (cdr entries)
                       (cons (string-append

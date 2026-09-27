@@ -41,12 +41,26 @@
     (only (schemacs editor command)
           new-command new-count-command run-command)
     (only (schemacs editor engine)
-          new-text-editor text-editor-char-count text-editor-cursor-column
-          text-editor-delete-from-cursor text-editor-insert
-          text-editor-set-cursor text-editor-to-string
+          new-text-editor text-editor-char-count text-editor-copy-string
+          text-editor-cursor-column text-editor-delete-from-cursor
+          text-editor-get-end-of-line text-editor-get-start-of-line
+          text-editor-insert text-editor-set-cursor
+          text-editor-set-read-only! text-editor-to-string
           text-editor-undo-disable!)
     ;; `logior' is Guile's: the bitset is three bit flags.
     (only (guile) logior)
+    ;; The `*Completions*' buffer is filled with the `face' text property
+    ;; and shown in a window. (`keymap' above is `(schemacs keymap)''s,
+    ;; which the completion map is built with - this library's `km:' names
+    ;; are the keymap library's, not this one's.)
+    (only (schemacs editor textprop) put-text-property)
+    (only (schemacs editor buffer)
+          buffer-default-directory current-buffer get-buffer-create
+          buffer-local-keymap set!buffer-local-keymap set!buffer-default-directory
+          with-current-buffer)
+    ;; `getcwd' is Guile's, for a buffer that has no `default-directory'.
+    (only (guile) getcwd)
+    (only (schemacs editor window) display-buffer quit-window)
     (only (schemacs editor frame)
           *current-frame* *echo-area-buffer* *echo-area-prompt* *minibuffer*
           set!ncurses-frame-message)
@@ -66,13 +80,16 @@
     ;; The global map `minibuffer-local-map' is built from, and the local
     ;; map it becomes while it is read.
     (only (schemacs editor keymap)
-          *current-keymap* *default-keymap*)
+          define-key *current-keymap* *default-keymap*)
     )
 
   (export
    *minibuffer-completion-table*
    *completion-styles*
+   choose-completion
    completion--do-completion
+   completion-list-mode-map
+   display-completion-list
    completion--nth-completion
    completion-all-completions
    completion-basic-all-completions
@@ -231,6 +248,18 @@
         (let ((mb (make<minibuffer>
                    ed prompt (or keymap minibuffer-local-map) default
                    (or history minibuffer-history) 0 #f)))
+          ;; The minibuffer inherits the *asking* buffer's
+          ;; `default-directory', as Emacs's does: a relative name typed in
+          ;; the prompt is relative to the buffer that asked, not to the
+          ;; minibuffer.
+          ;;
+          ;; It has to be copied here and not read later, because while the
+          ;; prompt is being read `current-buffer' is the *minibuffer*, and
+          ;; asking it then answers the process's directory instead - so
+          ;; completing a file name offered the editor's own directory
+          ;; rather than the one being typed about.
+          (set!buffer-default-directory
+           ed (or (buffer-default-directory (current-buffer)) (getcwd)))
           (parameterize ((*minibuffer* mb)
                          (*echo-area-buffer* ed)
                          (*echo-area-prompt* prompt)
@@ -387,26 +416,39 @@
     (define minibuffer-completion-help
       ;; GNU Emacs's `minibuffer-completion-help': show what the text
       ;; could complete to. A command, because `?' is bound to it.
+      ;;
+      ;; The candidates go in a `*Completions*' window, which is what
+      ;; Emacs does and what this used to fake with one long line in the
+      ;; echo area - the comment that said "this editor has one window and
+      ;; no buffer list yet" stopped being true when `display-buffer'
+      ;; arrived.
+      ;;
+      ;; Showing the window must not take point out of the prompt, which
+      ;; is why it is `display-buffer' and not `pop-to-buffer': the
+      ;; minibuffer is being read by a recursive edit, and the completion
+      ;; commands act on it again as soon as this returns.
       ;;--------------------------------------------------------------
       (new-command
        "minibuffer-completion-help"
        (lambda ()
-		 (let* ((typed (or (minibuffer-contents) ""))
-				(candidates (completion-all-completions
-							 typed (*minibuffer-completion-table*) #f
-							 (string-length typed))))
-           (set!ncurses-frame-message
-			(*current-frame*)
-			(cond
-			 ((not candidates) "No match")
-			 ;; The answer is a dotted list whose last cdr is the base size,
-			 ;; so the candidates are what is before it - see
-			 ;; `completion-all-completions'.
-			 (else (completion-candidates-message
-					(let loop ((rest candidates) (acc '()))
-					  (if (not (pair? rest))
-						  (reverse acc)
-						  (loop (cdr rest) (cons (car rest) acc))))))))))
+         (let* ((typed (or (minibuffer-contents) ""))
+                (candidates (completion-all-completions
+                             typed (*minibuffer-completion-table*)
+                             (*minibuffer-completion-predicate*)
+                             (string-length typed))))
+           (cond
+            ((not candidates)
+             (set!ncurses-frame-message (*current-frame*) "No match"))
+            (else
+             ;; The answer is a dotted list whose last cdr is the base
+             ;; size, so the candidates are what is before it.
+             (display-buffer
+              (display-completion-list
+               (let loop ((rest candidates) (acc '()))
+                 (if (not (pair? rest))
+                     (reverse acc)
+                     (loop (cdr rest) (cons (car rest) acc))))
+               typed))))))
        (lambda () #f)
        "Show the possible completions of the text in the minibuffer."))
 
@@ -438,8 +480,10 @@
              ;; from the text before the end, so the common prefix is what
              ;; stays put.
              (let ((new (car completion)))
+               ;; `string-length', not `length': the common prefix is a
+               ;; *string*, and `length' wants a list.
                (minibuffer-insert!
-                (substring new (length (common-prefix (list typed new))))))))))
+                (substring new (string-length (common-prefix (list typed new))))))))))
        (lambda () #f)
        "Complete the text in the minibuffer as far as it can be (bound to TAB)."))
 
@@ -904,5 +948,97 @@
                      `(((ctrl #\m) . ,minibuffer-complete-and-exit)
                        ((ctrl #\j) . ,minibuffer-complete-and-exit))))
               (km:keymap->layers-list minibuffer-local-completion-map))))
+
+    ;;----------------------------------------------------------------
+    ;; The *Completions* buffer
+
+    (define (display-completion-list completions common-substring)
+      ;; GNU Emacs's `display-completion-list': fill the `*Completions*'
+      ;; buffer with COMPLETIONS, one per line, and answer with it.
+      ;;
+      ;; Two departures from Emacs, both because of what this project has:
+      ;;
+      ;;  * **One candidate per line.** Emacs lays them out in columns to
+      ;;    fit the window (`completions-format' is `horizontal'), which
+      ;;    is a display concern wanting the window's width; this is
+      ;;    Emacs's `one-column' format.
+      ;;  * **The faces go on here**, not in `completion-hilit-commonality'
+      ;;    as in Emacs - because Emacs highlights the candidate
+      ;;    *strings*, and a string here cannot carry a property. A face
+      ;;    lives on buffer text, which is also where the renderer reads
+      ;;    it, so this is where it has to be put.
+      ;;--------------------------------------------------------------
+      (let ((buffer (get-buffer-create "*Completions*")))
+        (with-current-buffer buffer
+          (set!buffer-local-keymap buffer completion-list-mode-map)
+          (text-editor-set-read-only! buffer #f)
+          (text-editor-set-cursor buffer 0)
+          (text-editor-delete-from-cursor buffer (text-editor-char-count buffer))
+          (for-each
+           (lambda (candidate)
+             (let ((start (text-editor-char-count buffer))
+                   (matched (min (string-length common-substring)
+                                 (string-length candidate))))
+               (text-editor-insert buffer candidate)
+               ;; `completions-common-part' on the part the pattern
+               ;; matched, and `completions-first-difference' on the
+               ;; first character past it - Emacs's
+               ;; `completion-hilit-commonality', applied to the line
+               ;; rather than to the string.
+               (put-text-property start (+ start matched)
+                                  'face 'completions-common-part buffer)
+               (when (< (+ start matched) (+ start (string-length candidate)))
+                 (put-text-property (+ start matched) (+ 1 start matched)
+                                    'face 'completions-first-difference buffer))
+               (text-editor-insert buffer "\n")))
+           completions)
+          (text-editor-set-read-only! buffer #t)
+          (text-editor-set-cursor buffer 0))
+        buffer))
+
+    (define choose-completion
+      ;; GNU Emacs's `choose-completion': take the candidate on this line
+      ;; and put it in the minibuffer that asked for the completion, then
+      ;; take the completions window away.
+      ;;
+      ;; Emacs finds the candidate's text properties to know what to
+      ;; insert; here the line point is on *is* the candidate, so the line
+      ;; is what is read - and that is why the buffer is one per line.
+      ;;--------------------------------------------------------------
+      (new-command
+       "choose-completion"
+       (lambda ()
+         (let* ((ed (current-buffer))
+                (start (text-editor-get-start-of-line ed))
+                (end (text-editor-get-end-of-line ed))
+                (candidate (text-editor-copy-string ed start end))
+                (mb (*minibuffer*)))
+           (when (and mb (> (string-length candidate) 0))
+             ;; put it in the prompt, replacing what was typed
+             (let ((mb-ed (minibuffer-editor mb)))
+               (text-editor-set-cursor mb-ed 0)
+               (text-editor-delete-from-cursor mb-ed
+                                               (text-editor-char-count mb-ed))
+               (text-editor-insert mb-ed candidate))
+             (quit-window))))
+       (lambda () #f)
+       "Select the completion on this line."))
+
+    (define completion-list-mode-map
+      ;; GNU Emacs's `completion-list-mode-map': RET selects the
+      ;; completion on the line - putting it in the minibuffer that is
+      ;; still being read - and `q' takes the window away again.
+      ;;
+      ;; Emacs also binds `n' and `p' to the ordinary line motion, which
+      ;; is not stated here because the buffer's keymap falls back to the
+      ;; global one, where those already live.
+      ;;--------------------------------------------------------------
+      (let ((map (km:keymap '*completion-list-mode-map*)))
+        (define (bind! key command)
+          (define-key map (if (list? key) key (list key)) command))
+        (bind! #\q quit-window)
+        (bind! (list 'ctrl #\m) choose-completion)
+        (bind! #\return choose-completion)
+        map))
 
     ))

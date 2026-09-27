@@ -597,10 +597,10 @@
 ;; `try-completion' is GNU Emacs's: the candidates the text matches, the
 ;; longest prefix they share, #t when the text is already a candidate, and
 ;; #f when nothing matches.
-;; A completion table is a *list* of candidates in the simplest form
-;; Emacs allows, and that is what `file-name-completion-table' answers too.
-;; (The function form takes three arguments, `(STRING PREDICATE ACTION)',
-;; not one - see `(schemacs editor minibuf)'.)
+;; A completion table is a *list* of candidates in the simplest form Emacs
+;; allows. (The other forms are a hash table and a *function* - which is
+;; what `file-name-completion-table' is, since which names are candidates
+;; depends on what has been typed - see `(schemacs editor minibuf)'.)
 (define (table-of names) names)
 (define fruit (table-of '("apple" "apricot" "banana")))
 
@@ -627,14 +627,16 @@
 
 ;; Completing a file name offers the entries of the directory, with a
 ;; slash on the ones that are directories (so completing one descends
-;; into it), and only the ones the typed text is a prefix of.
+;; into it), and only the ones the typed text is a prefix of. The table is
+;; a *function* table, so it is called with `(STRING PREDICATE ACTION)' -
+;; ACTION #t asking for the candidates.
 (test-equal '("/tmp/mbtest/alpha.txt" "/tmp/mbtest/another/")
   (begin
     (if (not (file-exists? "/tmp/mbtest")) (mkdir "/tmp/mbtest"))
     (if (not (file-exists? "/tmp/mbtest/another")) (mkdir "/tmp/mbtest/another"))
     (call-with-output-file "/tmp/mbtest/alpha.txt" (lambda (p) (display "a" p)))
     (call-with-output-file "/tmp/mbtest/beta.txt" (lambda (p) (display "b" p)))
-    (sort (file-name-completion-table "/tmp/mbtest/a")
+    (sort (file-name-completion-table "/tmp/mbtest/a" #f #t)
           (lambda (a b) (string<? a b)))))
 
 ;; With no minibuffer active there are no contents, and `minibufferp' is

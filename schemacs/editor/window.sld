@@ -56,7 +56,7 @@
     ;; `pop-to-buffer' makes a buffer current by name when a string is
     ;; what it was given, and `switch-to-buffer' does the same.
     (only (schemacs editor buffer)
-          get-buffer-create record-buffer! set-buffer)
+          bury-buffer get-buffer-create record-buffer! set-buffer)
     )
 
   (export
@@ -71,6 +71,7 @@
    other-window
    other-window-command
    pop-to-buffer
+   quit-window
    pop-to-buffer-same-window
    split-window-below
    split-window-below-command
@@ -580,6 +581,20 @@ windows it was combined with."))
     ;; the buffer list - the buffer library imports it - so the window
     ;; commands below record for themselves. `pop-to-buffer' and
     ;; `switch-to-buffer' do it with their own NORECORD argument.
+
+    (define (quit-window)
+      ;; GNU Emacs's `quit-window' (q in the Buffer Menu), which is
+      ;; `window.el''s: take this window off the frame and bury the buffer
+      ;; it was showing. A frame's only window cannot be removed, and then
+      ;; the buffer is just buried.
+      ;;--------------------------------------------------------------
+      (let* ((frame (*current-frame*))
+             (window (ncurses-frame-selected-window frame))
+             (buffer (window-buffer window)))
+        (bury-buffer buffer)
+        (if (> (length (window-list)) 1)
+            (delete-window window)
+            #f)))
 
     (define (other-window count)
       ;; Select the COUNT-th window on from the selected one, cycling

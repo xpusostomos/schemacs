@@ -1188,9 +1188,14 @@
     ;; by them. The internal procedures that shuffle lines when a line
     ;; break is inserted or deleted (the merge helpers, `write-back',
     ;; `load-current-line') re-insert text through
-    ;; `text-editor-force-insert-char', not through the public API, so
-    ;; they record nothing - which is what we want, since they change
-    ;; how the buffer is stored rather than what it contains.
+    ;; `text-editor-force-insert-char' or `%text-editor-move-char', not
+    ;; through the public API, so they record nothing - which is what we
+    ;; want, since they change how the buffer is stored rather than what
+    ;; it contains. Those two differ in the `char-count' field and
+    ;; nothing else: `text-editor-force-insert-char' counts what it puts
+    ;; in, because a character typed really is a new character, and
+    ;; `%text-editor-move-char' does not, because a character moved from
+    ;; the next line into the line editor is already counted.
     ;;------------------------------------------------------------------
 
     (define *undo-limit*
@@ -1790,6 +1795,24 @@
         ch
         ))
 
+    (define (%text-editor-move-char ed ch)
+      ;; Put CH in the line editor *without* counting it: the
+      ;; counterpart of `text-editor-force-insert-char' for the
+      ;; procedures that rearrange how the buffer is stored rather than
+      ;; change what it contains. The merge helpers below move a line's
+      ;; characters from one line structure into another, and those
+      ;; characters are already in the char count; counting them again
+      ;; inflates it by the length of every merged line.
+      ;;--------------------------------------------------------------
+      (let ((line-ed (text-editor-line-editor ed))
+            (chi (char->integer ch))
+            )
+        (gap-buffer-insert-before line-ed chi)
+        (gap-buffer-insert-min-max line-ed chi)
+        (set!text-editor-line-changed ed #t)
+        ch
+        ))
+
     ;; Deleting text
 
     (define (%text-editor-line-inner-size ed line-num)
@@ -1820,11 +1843,12 @@
 
     (define (%text-editor-merge-next-line! ed)
       ;; Merge the line after the current line into the current line,
-      ;; deleting the line break between them (one character). The
-      ;; merged line inherits the line break of the (former) next
-      ;; line. The line editor keeps the merged line contents with the
-      ;; cursor at the former end of the current line. Returns 1, the
-      ;; number of characters deleted.
+      ;; deleting the line break between them - one character on a `\n'
+      ;; buffer and two on a CR-LF one. The merged line inherits the
+      ;; line break of the (former) next line. The line editor keeps the
+      ;; merged line contents with the cursor at the former end of the
+      ;; current line. Returns the size of the line break that was
+      ;; deleted, in characters.
       ;;--------------------------------------------------------------
       (let* ((lines (text-editor-lines ed))
              (line-ed (text-editor-line-editor ed))
@@ -1832,11 +1856,17 @@
              (k (gap-buffer-cursor lines))
              (col-num (gap-buffer-cursor line-ed))
              (next (gap-buffer-ref lines (+ 1 k)))
-             (next-lbrk (text-line-break next)))
+             (next-lbrk (text-line-break next))
+             ;; the line break that goes away is the *current* line's -
+             ;; the merged line keeps NEXT's. The characters copied out
+             ;; of the next line are a rearrangement of what is already
+             ;; in the buffer and are not counted; this break is the
+             ;; only thing that has really gone.
+             (gone-lbrk (text-line-break (gap-buffer-ref lines k))))
         ;; append the next line's characters to the line editor
         (gap-buffer-cursor-to-end line-ed)
         (text-line-for-each
-         (lambda (ch) (text-editor-force-insert-char ed ch))
+         (lambda (ch) (%text-editor-move-char ed ch))
          next
          )
         ;; restore the line editor cursor to the former end of the
@@ -1850,8 +1880,10 @@
           (gap-buffer-set-cursor lines k)
           (cdf-invalidate! cdf k)
           )
+        (text-editor-add-char-count
+         ed (- (if gone-lbrk (line-break-size gone-lbrk) 0)))
         (text-editor-load-current-line ed)
-        1))
+        (if gone-lbrk (line-break-size gone-lbrk) 0)))
 
     (define (%text-editor-merge-previous-line! ed)
       ;; Merge the current line into the line before it, deleting the
@@ -1878,7 +1910,13 @@
              ;; previous line's and the current line's) except at the
              ;; end of the buffer, where only the previous line's
              ;; stale copy exists
-             (stale-count (if (< k weight) 2 1)))
+             (stale-count (if (< k weight) 2 1))
+             ;; the line break that goes away is the *previous* line's.
+             ;; The current line's characters are moved into the line
+             ;; editor rather than inserted, so they are not counted;
+             ;; this break is the only thing that has really gone.
+             (gone-lbrk (and (< 0 k)
+                             (text-line-break (gap-buffer-ref lines (- k 1))))))
         ;; capture the current line's characters, move the gap-buffer
         ;; cursor to the previous line, and load it into the line
         ;; editor with the cursor at its end.
@@ -1891,7 +1929,7 @@
                    (get-output-string port)))))
           (text-editor-set-cursor ed (- k 1) prev-size)
           (string-for-each
-           (lambda (c) (text-editor-force-insert-char ed c))
+           (lambda (c) (%text-editor-move-char ed c))
            current-string
            )
           ;; delete the stale copies and store the merged contents as
@@ -1902,8 +1940,10 @@
             (gap-buffer-set-cursor lines (- k 1))
             (cdf-invalidate! cdf (- k 1))
             )
+          (text-editor-add-char-count
+           ed (- (if gone-lbrk (line-break-size gone-lbrk) 0)))
           (text-editor-load-current-line ed)
-          1)))
+          (if gone-lbrk (line-break-size gone-lbrk) 0))))
 
     (define (text-editor-delete-from-cursor ed n)
       ;; Delete N characters at the text editor cursor. Positive N
@@ -1981,9 +2021,12 @@
           (+ avail (%text-editor-delete-forward ed (- n avail))))
          ((< (+ 1 (gap-buffer-cursor lines)) (gap-buffer-weight lines))
           ;; the cursor is at the end of the line: delete the line
-          ;; break by merging with the next line, then continue
-          (+ (%text-editor-merge-next-line! ed)
-             (%text-editor-delete-forward ed (- n 1))))
+          ;; break by merging with the next line, then continue. The
+          ;; break is one character on a `\n' buffer and two on a
+          ;; CR-LF one, so how much of N is left is what the merge
+          ;; says it took, not a fixed one.
+          (let ((gone (%text-editor-merge-next-line! ed)))
+            (+ gone (%text-editor-delete-forward ed (- n gone)))))
          ;; the cursor is at the end of the last line: delete the
          ;; current line's own terminating line break, if it has one
          ;; (as GNU Emacs does)
@@ -2016,9 +2059,12 @@
           n)
          ((< 0 (gap-buffer-cursor lines))
           ;; at the start of a line which has a line before it: the
-          ;; deleted character is the line break; merge the lines.
-          (+ (%text-editor-merge-previous-line! ed)
-             (%text-editor-delete-backward ed (- n 1))))
+          ;; deleted character is the line break; merge the lines. The
+          ;; break is one character on a `\n' buffer and two on a
+          ;; CR-LF one, so how much of N is left is what the merge
+          ;; says it took, not a fixed one.
+          (let ((gone (%text-editor-merge-previous-line! ed)))
+            (+ gone (%text-editor-delete-backward ed (- n gone)))))
          (else 0)
          )))
 

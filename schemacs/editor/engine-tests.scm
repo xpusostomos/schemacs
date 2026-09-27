@@ -1263,3 +1263,73 @@
     (text-editor-mark ed)))
 
 (test-end "schemacs_editor_engine_markers")
+
+;;--------------------------------------------------------------------
+;; 8. regression tests: the character count across a line merge
+;;
+;; `text-editor-char-count' is the buffer's size in characters, and
+;; every position in the buffer is an index into it. The two procedures
+;; that merge a line into its neighbour rearrange which line structure
+;; holds a character rather than change what the buffer contains - but
+;; they re-inserted the moved characters through
+;; `text-editor-force-insert-char', which counts what it inserts, and
+;; they never took off the line break they deleted. So the count gained
+;; a line's length on every merge and drifted further from the text
+;; with each one.
+;;
+;; The tests above check the *text* a merge leaves, and the text was
+;; always right; that is why this survived. What was wrong was the
+;; count, which nothing here was reading - until the completion window
+;; put text properties on a buffer it had just emptied and refilled,
+;; and the interval tree and the buffer disagreed about how big it was.
+
+(test-begin "schemacs_editor_engine_char_count")
+
+;; Deleting a line break forward merges the two lines, and the count
+;; loses exactly that one character - not the length of the line that
+;; moved up into the line editor.
+(test-equal '(7 7 "abcdef\n")
+  (let ((ed (new-text-editor)))
+    (text-editor-insert ed "abc\ndef\n")
+    (text-editor-set-cursor ed 0 3)
+    (text-editor-delete-from-cursor ed 1)
+    (list (text-editor-char-count ed)
+          (string-length (text-editor-to-string ed))
+          (text-editor-to-string ed))))
+
+;; ...and the same backwards, which is the path a DEL at the start of a
+;; line takes.
+(test-equal '(7 7 "abcdef\n")
+  (let ((ed (new-text-editor)))
+    (text-editor-insert ed "abc\ndef\n")
+    (text-editor-set-cursor ed 1 0)
+    (text-editor-delete-from-cursor ed -1)
+    (list (text-editor-char-count ed)
+          (string-length (text-editor-to-string ed))
+          (text-editor-to-string ed))))
+
+;; A deletion crossing several lines merges once per line break, and
+;; the count has to lose one character per merge and nothing else.
+(test-equal '(0 0 "")
+  (let ((ed (new-text-editor)))
+    (text-editor-insert ed "schemacs/\nscratch.md\nscratch-ro.md\n")
+    (text-editor-set-cursor ed 0 0)
+    (text-editor-delete-from-cursor ed 35)
+    (list (text-editor-char-count ed)
+          (string-length (text-editor-to-string ed))
+          (text-editor-to-string ed))))
+
+;; The count is what the buffer says it is for the whole round trip:
+;; emptying the buffer and typing the text back in has to bring it back
+;; to where it started.
+(test-equal '(35 0 35)
+  (let ((ed (new-text-editor)))
+    (text-editor-insert ed "schemacs/\nscratch.md\nscratch-ro.md\n")
+    (let ((full (text-editor-char-count ed)))
+      (text-editor-set-cursor ed 0)
+      (text-editor-delete-from-cursor ed (text-editor-char-count ed))
+      (let ((emptied (text-editor-char-count ed)))
+        (text-editor-insert ed "schemacs/\nscratch.md\nscratch-ro.md\n")
+        (list full emptied (text-editor-char-count ed))))))
+
+(test-end "schemacs_editor_engine_char_count")
