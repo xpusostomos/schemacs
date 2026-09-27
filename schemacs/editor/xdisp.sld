@@ -33,7 +33,7 @@
           text-location-type? text-location-line text-location-column)
 
     (only (schemacs editor engine)
-         string-search-forward text-editor-buffer-name
+         string-search-forward text-editor-buffer-name text-editor-text-props
          text-editor-char-count text-editor-file-name
          text-editor-cursor-column text-editor-cursor-line
          text-editor-get-cursor text-editor-get-end-of-line
@@ -52,7 +52,7 @@
          window-top
          window-top-line)
     (only (schemacs editor disp-table)
-         current-line-display-column expand-line-display)
+         current-line-display-column expand-line-display line-display-offsets)
     ;; The `face' text property, and the faces themselves. A face reaches
     ;; the display through these three libraries and no others: the
     ;; property says which faces are in effect, `xfaces' merges them and
@@ -70,6 +70,9 @@
    ;; exported; `render!' and the mode line are what the rest calls.
    *search-highlight*
    cursor-screen-position
+   ;; the run computation, which is what a caller can test without a
+   ;; terminal: `draw-line!' itself needs one
+   line-face-runs
    *mode-line-format*
    format-mode-line
    mode-line-string
@@ -450,6 +453,56 @@
         (merge-face-vectors (face-realized-attributes face-name)
                             (face-realized-attributes 'default)))))
 
+    (define (line-face-runs ed line-start line-string)
+      ;; LINE-STRING as maximal runs of characters that share one face:
+      ;; `(FROM TO ATTRIBUTE)' in buffer columns, ATTRIBUTE being what
+      ;; `face-at-buffer-position' answers.
+      ;;
+      ;; The runs, not the characters, are what gets drawn: a terminal is
+      ;; told "these cells are bold" once per run rather than once per
+      ;; character, which is the same reason Emacs walks faces with
+      ;; `next-single-property-change' instead of asking at every
+      ;; position.
+      ;;--------------------------------------------------------------
+      (let ((len (string-length line-string)))
+        (if (= len 0)
+            '()
+            (let loop ((i 1)
+                       (start 0)
+                       (attribute (face-at-buffer-position ed line-start))
+                       (acc '()))
+              (if (>= i len)
+                  (reverse (cons (list start len attribute) acc))
+                  (let ((a (face-at-buffer-position ed (+ line-start i))))
+                    (if (equal? a attribute)
+                        (loop (+ 1 i) start attribute acc)
+                        (loop (+ 1 i) i a (cons (list start i attribute) acc)))))))))
+
+    (define (draw-line! ed line-start line-string display screen-row x0)
+      ;; Draw one line of a window at SCREEN-ROW, X0, each run of
+      ;; characters that share a face drawn with it.
+      ;;
+      ;; A buffer with no text properties at all - which is almost every
+      ;; buffer, almost all of the time - has no faces to draw and goes
+      ;; out in one call, as it did before there were faces. The run walk
+      ;; is only taken when there is a property tree to ask.
+      ;;--------------------------------------------------------------
+      (if (not (text-editor-text-props ed))
+          (addstr (stdscr) display #:y screen-row #:x x0)
+          (let ((offsets (line-display-offsets line-string)))
+            (for-each
+             (lambda (run)
+               (let ((from (list-ref offsets (car run)))
+                     (to (list-ref offsets (cadr run)))
+                     (attribute (caddr run)))
+                 (attr-on! (stdscr) attribute)
+                 (addstr (stdscr)
+                         (substring display from
+                                    (min to (string-length display)))
+                         #:y screen-row #:x (+ x0 from))
+                 (attr-off! (stdscr) attribute)))
+             (line-face-runs ed line-start line-string)))))
+
     (define (face-at-buffer-position ed position)
       ;; The ncurses attribute number for the face in effect at POSITION
       ;; in ED: GNU Emacs's `face_at_buffer_position'. The `face' text
@@ -571,8 +624,8 @@
                    (line-string (ncurses-line-string ed line-index)))
               (when line-string
                 (let ((display (expand-line-display line-string width)))
-                  (addstr (stdscr) display
-                          #:y (+ row (window-top window)) #:x x0)
+                  (draw-line! ed line-start line-string display
+                              (+ row (window-top window)) x0)
                   ;; the characters the current search matched, drawn over
                   ;; the line: the match point is in reverse video (GNU
                   ;; Emacs's `isearch' face) and the other matches in view

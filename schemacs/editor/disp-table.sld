@@ -30,6 +30,7 @@
    char-display-glyph
    current-line-display-column
    expand-line-display
+   line-display-offsets
    )
 
   (begin
@@ -69,6 +70,24 @@
                 (display glyph port)
                 (loop (+ i 1) (+ col (string-length glyph))))))
           (get-output-string port))))
+
+    (define (line-display-offsets str)
+      ;; Where each buffer column of STR is drawn, as a list of
+      ;; LENGTH+1 screen columns - the last being the line's own display
+      ;; width. `current-line-display-column' answers the same thing for
+      ;; one column at a time; a line drawn in *runs* needs all of them at
+      ;; once, because a run has to be cut in screen cells rather than in
+      ;; buffer characters (a tab before the run has already moved the
+      ;; text along).
+      ;;--------------------------------------------------------------
+      (let loop ((i 0) (col 0) (acc '()))
+        (cond
+         ((>= i (string-length str)) (reverse (cons col acc)))
+         (else
+          (let ((glyph (char-display-glyph (string-ref str i) col)))
+            (loop (+ 1 i)
+                  (+ col (string-length glyph))
+                  (cons col acc)))))))
 
     (define (current-line-display-column ed buffer-col)
       ;; The screen column at which buffer column BUFFER-COL of the

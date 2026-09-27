@@ -3,7 +3,12 @@
  (scheme char)
  (only (srfi 64) test-assert test-equal test-begin test-end)
  (only (guile) setvbuf)
- (prefix (schemacs editor faces) f:))
+ (prefix (schemacs editor faces) f:)
+ ;; for the run walk at the end: a buffer, a property on it, and the
+ ;; computation that turns the two into runs
+ (prefix (schemacs editor xdisp) xd:)
+ (only (schemacs editor engine) new-text-editor text-editor-insert)
+ (only (schemacs editor textprop) put-text-property))
 
 ;; Unbuffered output, so a run that hangs shows where it got to.
 (setvbuf (current-output-port) 'none)
@@ -155,3 +160,70 @@
           (f:face-attribute name ':weight))))
 
 (test-end "schemacs_editor_faces")
+
+;;--------------------------------------------------------------------
+;; The run walk, which is how a face on buffer text reaches the screen
+;;
+;; `line-face-runs' is the half of it that can be tested without a
+;; terminal: it says which spans of a line share a face. `draw-line!'
+;; emits the attributes, and those primitives are the ones the pty battery
+;; covers through the mode line and the search.
+
+(test-begin "schemacs_editor_faces_runs")
+
+(define (buffer-with-face text from to face)
+  (let ((ed (new-text-editor)))
+    (text-editor-insert ed text)
+    (put-text-property from to 'face face ed)
+    ed))
+
+;; A line with no faces is one run with no attributes - the case the
+;; renderer takes the fast path for.
+(test-equal '(1 ((0 6 0)))
+  (let ((ed (new-text-editor)))
+    (text-editor-insert ed "abcdef")
+    (let ((runs (xd:line-face-runs ed 0 "abcdef")))
+      (list (length runs) runs))))
+
+;; A face on the middle of a line cuts it into three runs, and each run
+;; carries the attribute number for its face - bold, on this display.
+(test-equal 3
+  (length (xd:line-face-runs (buffer-with-face "abcdefgh" 2 5 'bold) 0
+                             "abcdefgh")))
+
+(test-equal '(#f #t #f)
+  (let ((runs (xd:line-face-runs (buffer-with-face "abcdefgh" 2 5 'bold) 0
+                                 "abcdefgh")))
+    (let loop ((rest runs) (acc '()))
+      (if (null? rest)
+          (reverse acc)
+          (loop (cdr rest) (cons (not (= 0 (caddr (car rest)))) acc))))))
+
+;; ...and the runs cover the line exactly, with no gap and no overlap.
+(test-equal '((0 2) (2 5) (5 8))
+  (map (lambda (run) (list (car run) (cadr run)))
+       (xd:line-face-runs (buffer-with-face "abcdefgh" 2 5 'bold) 0 "abcdefgh")))
+
+;; The runs are bounded by the *line*, and their positions are buffer
+;; columns offset by where the line starts - which is what makes the
+;; renderer's per-line walk work at all.
+;; The runs are bounded by the *line*, and their positions are buffer
+;; columns offset by where the line starts - which is what makes the
+;; renderer's per-line walk work at all. The attribute numbers themselves
+;; are ncurses's bit flags and are not asserted: only that the middle run
+;; is a *different* run from its neighbours.
+;; ...and the columns are offset by where the line starts. The line here
+;; is "bcd" starting at buffer column 4, and the face is on buffer column
+;; 5 - the "c" - so it is the *middle* column that is bold.
+(test-equal '((0 1) (1 2) (2 3))
+  (let ((ed (buffer-with-face "abcdefgh" 5 6 'bold)))
+    (map (lambda (run) (list (car run) (cadr run)))
+         (xd:line-face-runs ed 4 "bcd"))))
+
+(test-equal #t
+  (let* ((ed (buffer-with-face "abcdefgh" 5 6 'bold))
+         (runs (xd:line-face-runs ed 4 "bcd")))
+    (and (not (= (caddr (car runs)) (caddr (cadr runs))))
+         (not (= (caddr (cadr runs)) (caddr (caddr runs)))))))
+
+(test-end "schemacs_editor_faces_runs")
