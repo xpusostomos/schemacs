@@ -56,6 +56,8 @@
    set-text-properties
    get-text-property
    interval-of
+   next-single-property-change
+   previous-single-property-change
    put-text-property
    text-properties-at
    validate-interval-range
@@ -190,20 +192,27 @@
                 (val (cadr tail)))
             (let find ((mine (iv:interval-plist i)))
               (cond
-               ((not (and (pair? mine) (pair? (cdr mine)))) #f)
+               ((not (pair? mine)) #f)
                ((eq? (car mine) sym) (eq? (cadr mine) val))
-               (else (find (cddr mine))))))))))
+               (else (find (if (pair? (cdr mine)) (cddr mine) '()))))))))))
 
     (define (interval-has-some-properties plist i)
       ;; GNU Emacs's `interval_has_some_properties': I has one of the
       ;; property *names* in PLIST, whatever the values - which is all
       ;; `remove-text-properties' cares about.
+      ;;
+      ;; PLIST may be an *odd-length* list here: `remove-text-properties'
+      ;; is documented to take names and ignore the values, so callers
+      ;; write `(face)' or `(face nil)' and both must work. The C walks
+      ;; `while (CONSP (tail1))' and steps by two, relying on its `Fcdr'
+      ;; of nil being nil; the step below has to say the same thing,
+      ;; because Scheme's `cdr' of the empty list is an error.
       ;;--------------------------------------------------------------
       (let loop ((tail plist))
         (cond
-         ((not (and (pair? tail) (pair? (cdr tail)))) #f)
+         ((not (pair? tail)) #f)
          ((plist-member-of (iv:interval-plist i) (car tail)) #t)
-         (else (loop (cddr tail))))))
+         (else (loop (if (pair? (cdr tail)) (cddr tail) '()))))))
 
     (define *text-property-replace* 'replace)
     (define *text-property-prepend* 'prepend)
@@ -300,7 +309,7 @@
                         (cond
                          ((>= (iv:interval-length i) len)
                           (cond
-                           ((iv:interval-has-all-properties properties i)
+                           ((interval-has-all-properties properties i)
                             changed?)
                            ((= (iv:interval-length i) len)
                             (add-properties properties i set-type))
@@ -408,7 +417,7 @@
                             (let ((merged (iv:merge-interval-left i)))
                               (loop (iv:next-interval merged)
                                     (- len step) merged))
-                            (loop (iv:next-interval i) (- len step) i))))))))))))
+                            (loop (iv:next-interval i) (- len step) i)))))))))))
 
     (define (set-text-properties start end properties . args)
       ;; GNU Emacs's `set-text-properties': PROPERTIES become the whole
@@ -437,11 +446,17 @@
       ;; that every occurrence goes; a filter over the plist is the same
       ;; answer and is what this is.
       ;;--------------------------------------------------------------
+      ;; As in `interval-has-some-properties', PLIST may be an odd-length
+      ;; list of names with no values, so the walk takes the names while
+      ;; there are pairs and steps by two without assuming a value follows
+      ;; the last one.
       (let ((names (if (pair? plist)
                        (let loop ((tail plist) (acc '()))
-                         (cond ((not (and (pair? tail) (pair? (cdr tail))))
-                                (reverse acc))
-                               (else (loop (cddr tail) (cons (car tail) acc)))))
+                         (cond ((not (pair? tail)) (reverse acc))
+                               (else (loop (if (pair? (cdr tail))
+                                               (cddr tail)
+                                               '())
+                                           (cons (car tail) acc)))))
                        list)))
         (if (null? names)
             #f
@@ -461,8 +476,10 @@
       ;; in PROPERTIES off the text from START to END, leaving the others.
       ;; Answers #t when something was actually removed.
       ;;--------------------------------------------------------------
-      (let* ((buffer (if (pair? args) (car args) (current-buffer)))
-             (properties (validate-plist properties)))
+      ;; PROPERTIES is *not* run through `validate-plist': the C does not
+      ;; validate it here, precisely so that a list of names with no
+      ;; values - which is what callers write - is accepted.
+      (let* ((buffer (if (pair? args) (car args) (current-buffer))))
         (let-values (((i start end)
                       (validate-interval-range buffer start end #f)))
           (cond
@@ -510,5 +527,64 @@
                         (len (- len (iv:interval-length i))))
                     (loop next len
                           (or (remove-properties properties '() i)
-                              modified?)))))))))))
+                              modified?))))))))))))
+    ;;----------------------------------------------------------------
+    ;; Where a property changes
+
+    (define (next-single-property-change position prop . args)
+      ;; GNU Emacs's `next-single-property-change': the position of the
+      ;; next change of PROP at or after POSITION, or LIMIT when the value
+      ;; does not change again before it. With no LIMIT the search runs to
+      ;; the end of the buffer, and "no change" answers #f.
+      ;;
+      ;; This is the function a renderer walks a line with: the characters
+      ;; between one change and the next all have the same value, so they
+      ;; can be drawn in one go.
+      ;;--------------------------------------------------------------
+      (let* ((buffer (if (pair? args) (car args) (current-buffer)))
+             (limit (if (and (pair? args) (pair? (cdr args))) (cadr args) #f))
+             (length (text-editor-char-count buffer))
+             (end (or limit length)))
+        (let ((i (interval-of buffer (min position (max 0 (- length 1))))))
+          (if (not i)
+              limit
+              (let ((here (iv:textget (iv:interval-plist i) prop)))
+                (let loop ((next (iv:next-interval i)))
+                  (cond
+                   ((and next
+                         (eq? here (iv:textget (iv:interval-plist next) prop))
+                         (or (not limit) (< (iv:interval-position next) limit)))
+                    (loop (iv:next-interval next)))
+                   ((or (not next) (>= (iv:interval-position next) end)) limit)
+                   (else (iv:interval-position next)))))))))
+
+    (define (previous-single-property-change position prop . args)
+      ;; GNU Emacs's `previous-single-property-change': the position of the
+      ;; previous change of PROP before POSITION, or LIMIT.
+      ;;
+      ;; It starts with the interval holding the character *before*
+      ;; POSITION, which is why a POSITION that begins an interval steps
+      ;; back one first - otherwise a change exactly at POSITION would be
+      ;; reported as being before it.
+      ;;--------------------------------------------------------------
+      (let* ((buffer (if (pair? args) (car args) (current-buffer)))
+             (limit (if (and (pair? args) (pair? (cdr args))) (cadr args) #f))
+             (length (text-editor-char-count buffer)))
+        (let* ((at (interval-of buffer (min position (max 0 (- length 1)))))
+               (i (if (and at (= (iv:interval-position at) position))
+                      (iv:previous-interval at)
+                      at)))
+          (if (not i)
+              limit
+              (let ((here (iv:textget (iv:interval-plist i) prop)))
+                (let loop ((previous (iv:previous-interval i)))
+                  (cond
+                   ((and previous
+                         (eq? here (iv:textget (iv:interval-plist previous) prop))
+                         (or (not limit) (> (iv:interval-last-pos previous) limit)))
+                    (loop (iv:previous-interval previous)))
+                   ((or (not previous)
+                        (<= (iv:interval-last-pos previous) (or limit 0)))
+                    limit)
+                   (else (iv:interval-last-pos previous)))))))))
     ))

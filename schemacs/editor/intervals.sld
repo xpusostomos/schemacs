@@ -54,6 +54,7 @@
     ;; `get' and `put' below are Emacs's names for.
     (only (guile) symbol-property set-symbol-property!)
     (only (schemacs editor engine)
+          *text-property-offset-function*
           text-editor-char-count
           text-editor-text-props set!text-editor-text-props))
 
@@ -1215,5 +1216,13 @@
                         (loop (let ((up (interval-up balanced)))
                                 (if (interval-type? up) up #f)))))))
               tree)))
+
+    ;; Install the seam the engine calls on every edit. `intervals.c' is
+    ;; called from `insdel.c' directly in C; here the engine cannot import
+    ;; this library (this library imports the engine), so it calls
+    ;; whatever this parameter holds, and what it holds is
+    ;; `offset-intervals'. See `*text-property-offset-function*'.
+    (*text-property-offset-function*
+     (lambda (buffer start length) (offset-intervals buffer start length)))
 
     ))

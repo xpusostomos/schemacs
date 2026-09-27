@@ -108,11 +108,13 @@
    *undo-limit*
    undo-insertion-entry?  undo-deletion-entry?  undo-modified-entry?
 
-   ;; The root of the buffer's text-property interval tree. GNU Emacs
-   ;; keeps this on the buffer too (`BVAR (buf, intervals)'); the tree
-   ;; and the operations on it are `(schemacs editor intervals)', which
-   ;; mirrors `intervals.c'.
+   ;; The root of the buffer's text-property interval tree, and the
+   ;; procedure that shifts it on an edit. GNU Emacs keeps the root on the
+   ;; buffer too (`BVAR (buf, intervals)') and shifts it from `insdel.c';
+   ;; the tree and the operations on it are `(schemacs editor intervals)',
+   ;; which mirrors `intervals.c'.
    text-editor-text-props  set!text-editor-text-props
+   *text-property-offset-function*
 
    ;; Whether the buffer has changed since it was last saved
    text-editor-modified?  text-editor-set-modified!
@@ -1704,6 +1706,23 @@
                           case-fold?)))
              found)))
 
+    (define *text-property-offset-function*
+      ;; The procedure that shifts a buffer's text-property intervals when
+      ;; text is inserted or deleted at a position - GNU Emacs's
+      ;; `offset_intervals', which lives in `intervals.c' and is called
+      ;; from `insdel.c' on every edit.
+      ;;
+      ;; It is a parameter because of how the halves are split *here*.
+      ;; The engine is `buffer.c' + `insdel.c' + `marker.c' + `search.c'
+      ;; and holds the tree's root; the tree and its operations are
+      ;; `(schemacs editor intervals)', which reaches that root through
+      ;; this engine's accessors - so this engine cannot import it, and
+      ;; the call has to come in sideways. In C there is no such problem
+      ;; and this seam is what stands in for the direct call. It is #f
+      ;; until that library is loaded, which is why the callers check.
+      ;;--------------------------------------------------------------
+      (make-parameter #f))
+
     (define (text-editor-insert ed thing)
       ;; Insert THING at the cursor. The insertion is recorded in the
       ;; buffer's undo list as the range of characters it now occupies,
@@ -1727,6 +1746,11 @@
             ;; forced by the line-break state machine, and an insertion
             ;; replayed by undo, which comes back through here.
             (adjust-markers-for-insertion! ed beg (- end beg))
+            ;; The intervals move with the text for the same reason the
+            ;; markers do, and from the same place: once for the whole
+            ;; insertion, so that every way text gets in is covered.
+            (let ((offset (*text-property-offset-function*)))
+              (when offset (offset ed beg (- end beg))))
             (%text-editor-note-change! ed)
             (%undo-record-insertion! ed beg end)))))
 
@@ -1915,7 +1939,9 @@
             ;; DELETED characters before it; a forward delete took the
             ;; text after it, so the range began at it.
             (let ((beg (if (< n 0) (- cursor deleted) cursor)))
-              (adjust-markers-for-deletion! ed beg (+ beg deleted)))
+              (adjust-markers-for-deletion! ed beg (+ beg deleted))
+              (let ((offset (*text-property-offset-function*)))
+                (when offset (offset ed beg (- deleted)))))
             (%text-editor-note-change! ed)
             ;; A forward delete removes the text after point, so point
             ;; was at its beginning and POS is positive; a backward
