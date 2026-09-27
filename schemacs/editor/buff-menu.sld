@@ -10,7 +10,7 @@
   ;; seven columns and what goes in them, the filtering of which buffers
   ;; are listed, the mode and its keymap, and the commands.
   ;;
-  ;; Four substitutions, each because the thing Emacs uses is not here:
+  ;; Three substitutions, each because the thing Emacs uses is not here:
   ;;
   ;;  * **Marks are a table, not text properties.** Emacs puts a tag
   ;;    character in the buffer's text (`tabulated-list-put-tag') and
@@ -23,10 +23,6 @@
   ;;    (`Buffer-menu-use-header-line'), and this project has no header
   ;;    line yet; putting them in the text is what Emacs does when that
   ;;    variable is nil, so the layout is Emacs's with that set.
-  ;;  * **"The entry at point" is counted by line**, where Emacs reads the
-  ;;    `tabulated-list-id' text property. The list is one row per line, so
-  ;;    the line point is on is the row - which is the same answer, arrived
-  ;;    at by counting.
   ;;  * **There are no faces**, so `Buffer-menu--pretty-name' is the name
   ;;    itself; it exists in Emacs only to put a face and a mouse face on
   ;;    it.
@@ -55,23 +51,33 @@
           text-editor-file-name text-editor-buffer-name text-editor-insert
           text-editor-delete-from-cursor text-editor-undo-disable!
           text-editor-undo-enable! text-editor-get-start-of-line
-          text-editor-get-end-of-line text-editor-copy-string)
+          text-editor-get-end-of-line)
     (only (schemacs editor frame)
-          *current-frame* current-editor set!ncurses-frame-message
+          *current-frame* set!ncurses-frame-message
           ncurses-frame-selected-window frame-width window-buffer window-list)
     (only (schemacs editor keymap) define-key *default-keymap*)
     ;; The list's own keys are the buffer's, which is what the lookup
-    ;; searches first.
+    ;; searches first. `CURRENT-BUFFER' is what the commands act on, and
+    ;; it is `(current-buffer)' and not the frame's `current-editor'
+    ;; because `list-buffers-noselect' draws the list inside a
+    ;; `with-current-buffer', where the window still shows the buffer the
+    ;; list was made from - `set-buffer' is what makes the list the
+    ;; current buffer there, and `Buffer-menu-beginning' has to put
+    ;; *its* point on the first line.
     (only (schemacs editor buffer)
           buffer-list buffer-live-p buffer-local-keymap buffer-modified-p
-          buffer-name bury-buffer get-buffer-create kill-buffer
-          set!buffer-local-keymap set!buffer-name with-current-buffer)
+          buffer-name bury-buffer current-buffer get-buffer-create
+          kill-buffer set!buffer-local-keymap set!buffer-name
+          with-current-buffer)
     (only (schemacs editor window)
           delete-window display-buffer get-buffer-window)
-    (only (schemacs editor files) switch-to-buffer!)
+    ;; `Buffer-menu-execute' saves the buffers marked `s' with
+    ;; `save-buffer', as Emacs's does - in the buffer, so it writes that
+    ;; buffer's own file.
+    (only (schemacs editor files) save-buffer switch-to-buffer!)
     (only (schemacs editor tabulated-list)
           *tabulated-list-entries* *tabulated-list-format*
-          tabulated-list-print)
+          tabulated-list-get-id tabulated-list-print)
     (only (schemacs editor xdisp) format-mode-line)
     (only (guile) string-index))
 
@@ -237,7 +243,7 @@
       ;; marks with `.` - Emacs passes `(current-buffer)' from
       ;; `list-buffers-noselect'.
       ;;--------------------------------------------------------------
-      (let ((old-buffer (if (pair? args) (car args) (current-editor))))
+      (let ((old-buffer (if (pair? args) (car args) (current-buffer))))
         (let loop ((rest (buffer-list)) (entries '()))
           (cond ((null? rest) (reverse entries))
                 ((Buffer-menu--listed? (car rest))
@@ -253,7 +259,7 @@
       ;; afterwards, so that a window already showing it goes on showing
       ;; it.
       ;;--------------------------------------------------------------
-      (let ((old-buffer (current-editor))
+      (let ((old-buffer (current-buffer))
             (buffer (get-buffer-create "*Buffer List*")))
         (with-current-buffer buffer
           (set!buffer-local-keymap buffer buffer-menu-mode-map)
@@ -309,45 +315,30 @@
 
     (define (Buffer-menu-beginning)
       ;; Put point at the first buffer's line, past the titles: GNU Emacs's
-      ;; `Buffer-menu-beginning'.
+      ;; `Buffer-menu-beginning', which goes to the beginning of the buffer
+      ;; and then one line forward - the titles being a line of the text
+      ;; when `Buffer-menu-use-header-line' is nil, which is the layout
+      ;; this project has.
       ;;--------------------------------------------------------------
-      (let ((ed (current-editor)))
+      (let ((ed (current-buffer)))
         (text-editor-set-cursor ed 0)
-        (text-editor-set-cursor ed (text-editor-get-end-of-line ed))))
-
-    (define (Buffer-menu--row)
-      ;; Which row point is on, counting from the first buffer's line: the
-      ;; titles are the buffer's first line, so row 0 is the second line.
-      ;; (Emacs asks the line's `tabulated-list-id' property; there are no
-      ;; properties here, so the line is counted.)
-      ;;--------------------------------------------------------------
-      (let ((ed (current-editor))
-            (point (text-editor-get-cursor (current-editor))))
-        (let loop ((at 0) (row -1))
-          (if (>= at point)
-              (max 0 row)
-              (loop (+ 1 at)
-                    (if (and (< at (text-editor-char-count ed))
-                             (char=? (string-ref
-                                      (text-editor-copy-string ed at (+ at 1))
-                                      0)
-                                     #\newline))
-                        (+ 1 row)
-                        row))))))
+        ;; the newline ending the titles' line is the last character on it,
+        ;; so one past it is the first character of the first buffer's line
+        (text-editor-set-cursor
+         ed (min (text-editor-char-count ed)
+                 (+ 1 (text-editor-get-end-of-line ed))))))
 
     (define (Buffer-menu-buffer)
-      ;; The buffer on the line point is on: GNU Emacs's
-      ;; `Buffer-menu-buffer', which reads the `tabulated-list-id'
-      ;; property of the line. Here the line number is counted instead.
+      ;; The buffer on the line point is on, or #f when the line is not a
+      ;; buffer's: GNU Emacs's `Buffer-menu-buffer', which asks
+      ;; `tabulated-list-get-id' for the line's entry. What the entries
+      ;; carry in their ID slot is the buffer itself
+      ;; (`list-buffers--refresh'), so it is the answer.
       ;;--------------------------------------------------------------
-      (let ((entries (Buffer-menu--line-entries))
-            (row (Buffer-menu--row)))
-        (if (< row (length entries))
-            (car (list-ref entries row))
-            #f)))
+      (tabulated-list-get-id (current-buffer)))
 
     (define (Buffer-menu--move-down!)
-      (let ((ed (current-editor)))
+      (let ((ed (current-buffer)))
         (text-editor-set-cursor
          ed (min (text-editor-char-count ed)
                  (+ 1 (text-editor-get-end-of-line ed))))))
@@ -362,7 +353,7 @@
          (let ((buffer (Buffer-menu-buffer)))
            (when buffer
              (Buffer-menu--set-mark! buffer *Buffer-menu-marker-char*)
-             (Buffer-menu-redraw! (current-editor)))
+             (Buffer-menu-redraw! (current-buffer)))
            (Buffer-menu--move-down!)))
        (lambda () #f)
        "Mark the buffer on this line for display (m)."))
@@ -378,7 +369,7 @@
          (let ((buffer (Buffer-menu-buffer)))
            (when buffer
              (Buffer-menu--set-mark! buffer *Buffer-menu-del-char*)
-             (Buffer-menu-redraw! (current-editor)))
+             (Buffer-menu-redraw! (current-buffer)))
            (Buffer-menu--move-down!)))
        "Mark the buffer on this line for deletion (d)."))
 
@@ -392,7 +383,7 @@
          (let ((buffer (Buffer-menu-buffer)))
            (when buffer
              (Buffer-menu--set-mark! buffer #f)
-             (Buffer-menu-redraw! (current-editor)))
+             (Buffer-menu-redraw! (current-buffer)))
            (Buffer-menu--move-down!)))
        (lambda () #f)
        "Remove all marks from this line (u)."))
@@ -409,7 +400,7 @@
          (let ((buffer (Buffer-menu-buffer)))
            (when buffer
              (Buffer-menu--set-mark! buffer *Buffer-menu-save-char*)
-             (Buffer-menu-redraw! (current-editor)))
+             (Buffer-menu-redraw! (current-buffer)))
            (Buffer-menu--move-down!)))
        (lambda () #f)
        "Mark the buffer on this line to be saved (s)."))
@@ -423,7 +414,7 @@
        (lambda ()
          (let ((buffer (Buffer-menu-buffer)))
            (when buffer (text-editor-set-modified! buffer #f))
-           (Buffer-menu-redraw! (current-editor))))
+           (Buffer-menu-redraw! (current-buffer))))
        (lambda () #f)
        "Clear the buffer's modified flag (~)."))
 
@@ -437,7 +428,7 @@
        (lambda ()
          (let ((buffer (Buffer-menu-buffer)))
            (when buffer (bury-buffer buffer)))
-         (Buffer-menu-redraw! (current-editor)))
+         (Buffer-menu-redraw! (current-buffer)))
        (lambda () #f)
        "Bury the buffer on this line (b)."))
 
@@ -452,7 +443,7 @@
            (when buffer
              (text-editor-set-read-only! buffer
                                          (not (text-editor-read-only? buffer)))))
-         (Buffer-menu-redraw! (current-editor)))
+         (Buffer-menu-redraw! (current-buffer)))
        (lambda () #f)
        "Toggle whether the buffer on this line can be changed."))
 
@@ -471,47 +462,67 @@
 
     (define Buffer-menu-execute
       ;; GNU Emacs's `Buffer-menu-execute' (x): do what the marks say -
-      ;; kill the buffers marked for deletion, save the ones marked for
-      ;; saving - and redraw the list.
+      ;; save the buffers marked with `s', kill the ones marked with `d'
+      ;; - and redraw the list.
+      ;;
+      ;; A `>' mark means "show this buffer" and is not acted on here, so
+      ;; it is left on the line, as Emacs leaves it. A mark is taken off
+      ;; as it is acted on, and a buffer whose saving or killing did not
+      ;; happen keeps its mark.
+      ;;
+      ;; Emacs walks the list a line at a time; the marks are a table
+      ;; here and not text, so what it walks is the marks. The same marks
+      ;; and the same work either way.
       ;;
       ;; The killing asks the buffer's own question, which is
-      ;; `kill-buffer-query-functions': a refusal leaves the buffer alone.
-      ;; The saving is not done here, because saving needs the frame the
-      ;; file was visited from and that is `files.el''s business; a buffer
-      ;; marked for saving is left marked, and the echo area says so.
+      ;; `kill-buffer-query-functions': a refusal leaves the buffer alone
+      ;; - and Emacs will not kill the buffer the list is being used from
+      ;; either, which is `(not (eq buffer (current-buffer)))' there.
+      ;; Saving is `save-buffer' in the buffer, as Emacs's
+      ;; `(with-current-buffer buffer (save-buffer))' is: it writes the
+      ;; buffer's own file, not the frame's.
       ;;--------------------------------------------------------------
       (new-command
        "Buffer-menu-execute"
        (lambda ()
          (let ((frame (*current-frame*))
                (killed 0)
-               (unsaved '()))
+               (saved 0)
+               (failed '()))
            (for-each
             (lambda (buffer)
               (let ((mark (Buffer-menu--mark-of buffer)))
                 (cond
-                 ((eq? mark *Buffer-menu-del-char*)
-                  (when (and (buffer-live-p buffer) (kill-buffer buffer))
-                    (set! killed (+ 1 killed))))
                  ((eq? mark *Buffer-menu-save-char*)
-                  (set! unsaved (cons (buffer-name buffer) unsaved))))))
+                  (guard (ex (else (set! failed (cons (buffer-name buffer)
+                                                      failed))))
+                    (with-current-buffer buffer (save-buffer))
+                    (Buffer-menu--set-mark! buffer #f)
+                    (set! saved (+ 1 saved))))
+                 ((eq? mark *Buffer-menu-del-char*)
+                  (when (and (buffer-live-p buffer)
+                             (not (eq? buffer (current-buffer)))
+                             (kill-buffer buffer))
+                    (Buffer-menu--set-mark! buffer #f)
+                    (set! killed (+ 1 killed)))))))
             (Buffer-menu-marked-buffers))
-           (*Buffer-menu-marks* '())
-           (Buffer-menu-redraw! (current-editor))
+           (Buffer-menu-redraw! (current-buffer))
            (set!ncurses-frame-message
             frame
-            (cond ((pair? unsaved)
-                   (string-append "Save these buffers with C-x C-s: "
+            (cond ((pair? failed)
+                   (string-append "Error saving: "
                                   (apply string-append
                                          (map (lambda (name)
                                                 (string-append name " "))
-                                              unsaved))))
+                                              failed))))
+                  ((> saved 0)
+                   (string-append (number->string saved) " buffer(s) saved"))
                   ((> killed 0)
                    (string-append (number->string killed)
                                   " buffer(s) killed"))
                   (else "No buffers marked for deletion or saving")))))
        (lambda () #f)
-       "Kill and save the buffers marked in the Buffer Menu (x)."))
+       "Save and kill the buffers marked in the Buffer Menu (x)."))
 
     (define (quit-window)
       ;; GNU Emacs's `quit-window' (q in the Buffer Menu), which is
@@ -537,7 +548,7 @@
     (define Buffer-menu-revert
       (new-command
        "revert-buffer"
-       (lambda () (Buffer-menu-redraw! (current-editor)))
+       (lambda () (Buffer-menu-redraw! (current-buffer)))
        (lambda () #f)
        "Update the list of buffers (g)."))
 
@@ -557,7 +568,7 @@
        (lambda (count)
          (let loop ((n count))
            (when (> n 0)
-             (let ((ed (current-editor)))
+             (let ((ed (current-buffer)))
                (text-editor-set-cursor
                 ed (max 0 (- (text-editor-get-start-of-line ed) 2))))
              (loop (- n 1)))))
@@ -565,27 +576,40 @@
 
     (define buffer-menu-mode-map
       ;; GNU Emacs's `Buffer-menu-mode-map', with the keys read from a
-      ;; terminal Emacs: q, d, k, x, u, m, s, b, ~, g, RET, f, n, SPC and
-      ;; p. The ones Emacs binds that are not here are the ones whose
-      ;; commands are not ported - `t' (`Buffer-menu-visit-tags-table'),
-      ;; the other-window and view commands, the window-arrangement ones,
-      ;; and the isearch and multi-occur commands over marked buffers.
+      ;; terminal Emacs: q, d, k, C-k, x, u, m, s, b, ~, %, g, RET, f, e,
+      ;; n, SPC and p. The ones Emacs binds that are not here are the ones
+      ;; whose commands are not ported - `t' (`Buffer-menu-visit-tags-table'),
+      ;; the other-window and view commands, `1' and `2' and `v' (they
+      ;; arrange the frame's windows, and `2' and `v' need
+      ;; `switch-to-buffer-other-window', which `window.el' does not have
+      ;; here yet), the unmark-all and mark-backwards commands, the
+      ;; files-only and show-internal toggles, and the isearch and
+      ;; multi-occur commands over marked buffers.
       ;;--------------------------------------------------------------
       (let ((map (km:keymap '*buffer-menu-mode-map*)))
         (define (bind! key command)
-          (define-key map (list key) command))
+          ;; a key is a path, as `define-key' takes it: one key, which may
+          ;; be a character or a modifier and a character
+          (define-key map (if (list? key) key (list key)) command))
         (bind! #\q Buffer-menu-quit)
         (bind! #\d Buffer-menu-delete)
         (bind! #\k Buffer-menu-delete)
+        (bind! (list 'ctrl #\k) Buffer-menu-delete)
         (bind! #\x Buffer-menu-execute)
         (bind! #\u Buffer-menu-unmark)
         (bind! #\m Buffer-menu-mark)
         (bind! #\s Buffer-menu-save)
         (bind! #\b Buffer-menu-bury)
         (bind! #\~ Buffer-menu-not-modified)
+        (bind! #\% Buffer-menu-toggle-read-only)
         (bind! #\g Buffer-menu-revert)
-        (bind! #\return Buffer-menu-this-window)
+        ;; RET is `(ctrl #\m)' and not the character `#\return': a
+        ;; terminal sends the byte 13, and the keymap path for it is
+        ;; control-M. Emacs's keymap has the same key - RET and C-m are one
+        ;; key there too - which is why `(key-binding "\r")' finds it.
+        (bind! (list 'ctrl #\m) Buffer-menu-this-window)
         (bind! #\f Buffer-menu-this-window)
+        (bind! #\e Buffer-menu-this-window)
         (bind! #\n Buffer-menu-next-line)
         (bind! #\space Buffer-menu-next-line)
         (bind! #\p Buffer-menu-previous-line)

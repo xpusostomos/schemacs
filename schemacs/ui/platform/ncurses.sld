@@ -21,8 +21,7 @@
           scrollok! stdscr)
     (only (schemacs editor engine)
           new-text-editor set!text-editor-buffer-name)
-    (only (schemacs editor frame)
-          new-frame set!ncurses-frame-crlf?)
+    (only (schemacs editor frame) new-frame)
     ;; Everything this needs of the editor: visiting the file named on the
     ;; command line, and then running the command loop.
     ;; The first buffer is made through the buffer list, so that it is a
@@ -85,20 +84,21 @@
       ;; With a file argument, load the file; with no arguments, start
       ;; with an empty unnamed buffer (the scratch buffer).
       ;;------------------------------------------------------------------
-      (let-values (((ed crlf?)
-                    (if (pair? args)
-                        (find-file (car args))
-                        ;; no file named: the scratch buffer, which
-                        ;; visits nothing and is named as GNU Emacs
-                        ;; names it
-                        (values (get-buffer-create "*scratch*") #f))))
+      (let ((ed (if (pair? args)
+                    (find-file (car args))
+                    ;; no file named: the scratch buffer, which visits
+                    ;; nothing and is named as GNU Emacs names it
+                    (get-buffer-create "*scratch*"))))
         (with-terminal
          (lambda ()
            ;; The frame is made once the terminal is open, because its
            ;; size is the terminal's - a frame is a display of a
            ;; terminal, and knows how big that is.
            (let ((frame (new-frame ed)))
-             (set!ncurses-frame-crlf? frame crlf?)
+             ;; The file's line-break convention needs no installing
+             ;; here: `find-file' recorded it on the buffer it visited,
+             ;; where saving reads it back.
+             ;;
              ;; as `find-file-command' does, so that a file named on the
              ;; command line that cannot be written says so too
              (note-file-read-only! frame)

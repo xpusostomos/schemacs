@@ -37,22 +37,31 @@
           text-editor-undo-disable! text-editor-undo-enable!)
     (only (schemacs editor frame)
           %window-point
-          *current-frame* current-editor ncurses-frame-crlf?
-          ncurses-frame-editor ncurses-frame-file-path ncurses-frame-quit-cont
+          *current-frame* current-editor
+          ncurses-frame-editor ncurses-frame-quit-cont
           ncurses-frame-selected-window
-          set!ncurses-frame-crlf? set!ncurses-frame-editor
+          set!ncurses-frame-editor
           set!ncurses-frame-message
           set!window-buffer set!window-top-line)
     ;; The commands here install their own keys, as files.el does.
     (only (schemacs editor command)
           new-command run-command)
-    ;; Buffers by name, and killing one: `buffer.c'.
+    ;; Buffers by name, and killing one: `buffer.c'. `BUFFER-FILE-NAME' and
+    ;; the buffer-local store are what `save-buffer' writes and what the
+    ;; visited file's line-break convention is kept in.
     (only (schemacs editor buffer)
           *kill-buffer-query-functions*
+          buffer-default-directory
+          buffer-file-name
           buffer-list
+          buffer-local-value
+          current-buffer
           get-buffer-create
           kill-buffer
-          record-buffer!)
+          record-buffer!
+          set!buffer-default-directory
+          set!buffer-file-name
+          set-buffer-local-value!)
     (only (schemacs editor keymap)
           define-key
           *default-keymap*)
@@ -70,7 +79,7 @@
     ;; name splitting `read-file-name' completes with.
     (only (guile) access? stat stat:mode W_OK logand
           closedir getcwd opendir readdir stat:type
-          string-index string-prefix? string-rindex))
+          string-prefix? string-rindex))
 
   (export
    *require-final-newline*
@@ -97,7 +106,6 @@
    save-buffer-command
    save-buffers-kill-terminal
    save-some-buffers
-   string-has-crlf?
    switch-to-buffer!
    y-or-n-p
    )
@@ -122,17 +130,29 @@
               line-break-return))
          (else (scan (+ i 1) n)))))
 
-    (define (string-has-crlf? str)
-      ;; Whether the string's first line break is a CRLF pair (the
-      ;; file's line-break convention, the way mg and GNU Emacs
-      ;; detect it on file visit).
+    (define (buffer-file-coding-system buffer)
+      ;; The line-break convention BUFFER's file was read with, so that
+      ;; saving encodes the breaks back the way it found them: GNU Emacs's
+      ;; `buffer-file-coding-system', the buffer-local variable its
+      ;; `after-find-file' sets from what the file turned out to be.
+      ;;
+      ;; Emacs's value is a coding system - `utf-8-unix', `undecided-dos' -
+      ;; whose eol-type is the part that matters here; there are no coding
+      ;; systems yet, so what is kept is the eol-type itself, in the
+      ;; engine's vocabulary (`detect-line-break' answers with one of
+      ;; those). It is buffer-local, and not a slot on the frame, because
+      ;; one frame shows buffers visiting files with different
+      ;; conventions, and each must save in its own.
       ;;--------------------------------------------------------------
-      (let scan ((i 0) (n (string-length str)))
-        (cond
-         ((>= i n) #f)
-         ((char=? (string-ref str i) #\newline) #f)
-         ((char=? (string-ref str i) #\return) #t)
-         (else (scan (+ i 1) n)))))
+      (buffer-local-value buffer 'buffer-file-coding-system
+                          line-break-newline))
+
+    (define (set!buffer-file-coding-system buffer line-break)
+      ;; Record the convention BUFFER's file was read with: the
+      ;; `make-local-variable' half of what Emacs's `after-find-file' does
+      ;; with `buffer-file-coding-system'.
+      ;;--------------------------------------------------------------
+      (set-buffer-local-value! buffer 'buffer-file-coding-system line-break))
 
     (define (decode-dos-returns str)
       ;; Decode the file's CRLF pairs into line feeds: the carriage
@@ -227,9 +247,7 @@
                      frame (string-append
                             "; find-file: error loading " path))
                     #f))
-             (let-values (((new-ed crlf?) (find-file path)))
-               (switch-to-buffer! frame new-ed)
-               (set!ncurses-frame-crlf? frame crlf?))
+             (switch-to-buffer! frame (find-file path))
              (set!ncurses-frame-message frame "")
              (note-file-read-only! frame)
              path)))
@@ -237,28 +255,24 @@
        "Prompt for a file name and load it into the buffer."))
 
     (define save-buffer-command
+      ;; C-x C-s. All the work is `save-buffer' - GNU Emacs's
+      ;; `(interactive "p")' passes the prefix argument on to it, and
+      ;; there is nothing here for that argument to change - so what is
+      ;; left is the error message, which is this project's rather than
+      ;; Emacs's.
+      ;;--------------------------------------------------------------
       (new-command
        "save-buffer"
        (lambda ()
-         (let* ((frame (*current-frame*))
-                (path
-                 (or (ncurses-frame-file-path frame)
-                     ;; an unnamed buffer (the scratch buffer): prompt
-                     ;; for the file name and remember it
-                     (let ((name (read-file-name "File to save in: ")))
-                       (set!text-editor-file-name (ncurses-frame-editor frame)
-                                                  name)
-                       name))))
+         (let ((frame (*current-frame*)))
            (guard (ex
                    (else
                     (set!ncurses-frame-message
                      frame (string-append
-                            "; save-buffer: error writing " path))
+                            "; save-buffer: error writing "
+                            (or (buffer-file-name (current-buffer)) "")))
                     #f))
-               (save-buffer frame)
-               (set!ncurses-frame-message
-                frame (string-append "Wrote " path))
-               path)))
+             (save-buffer))))
        (lambda () #f)
        "Write the buffer back to its file."))
 
@@ -417,14 +431,14 @@
 
     (define (default-directory)
       ;; The directory a bare file name is relative to: GNU Emacs's
-      ;; `default-directory'. This editor has one buffer, so it is the
-      ;; directory of the file being visited, or the process's own.
+      ;; `default-directory', which is a buffer-local variable - each
+      ;; buffer has its own, so two windows showing two files in two
+      ;; directories prompt from the one each is in. `find-file' sets it
+      ;; on the buffer it visits, as Emacs's does; a buffer that has not
+      ;; been given one answers with the process's own directory.
       ;;--------------------------------------------------------------
-      (let ((path (and (*current-frame*)
-                       (ncurses-frame-file-path (*current-frame*)))))
-        (if (and path (string-index path #\/))
-            (substring path 0 (+ 1 (string-rindex path #\/)))
-            (string-append (getcwd) "/"))))
+      (or (buffer-default-directory (current-buffer))
+          (string-append (getcwd) "/")))
 
     (define (file-name-directory-part name)
       ;; The directory part of NAME, including the final slash, or "" for
@@ -497,10 +511,14 @@
       ;; that is how a file is created.
       ;;--------------------------------------------------------------
       (parameterize ((*minibuffer-completion-table* file-name-completion-table))
+        ;; the default is the file the buffer already visits, so RET keeps
+        ;; the name it has - GNU Emacs's `read-file-name' passes its
+        ;; `default-filename', which `read-file-name-default' takes from
+        ;; `buffer-file-name'
         (read-from-minibuffer prompt (default-directory)
                               minibuffer-local-completion-map
                               file-name-history
-                              (ncurses-frame-file-path (*current-frame*)))))
+                              (buffer-file-name (current-buffer)))))
 
     ;;----------------------------------------------------------------
     ;; Final newlines
@@ -601,12 +619,18 @@
         (set!ncurses-frame-message frame "Note: file is write protected")))
 
     (define (find-file path)
-      ;; Open a file into a new text editor buffer, the way GNU Emacs
-      ;; visits a file: the line-break convention is detected (CRLF
-      ;; or LF), every carriage return is decoded away so the buffer
-      ;; holds only line-feed breaks, and the convention is recorded
-      ;; so saving can encode the breaks back. A file that cannot be
+      ;; Open a file into a text editor buffer and answer with it, the way
+      ;; GNU Emacs's `find-file-noselect' visits a file: the line-break
+      ;; convention is detected (CRLF, CR or LF), every carriage return is
+      ;; decoded away so the buffer holds only line-feed breaks, and the
+      ;; convention is recorded on the buffer - `buffer-file-coding-system'
+      ;; - so saving can encode the breaks back. A file that cannot be
       ;; written is visited read-only, as Emacs does.
+      ;;
+      ;; The convention is the buffer's and not the caller's, which is why
+      ;; nothing but the buffer comes back: Emacs's `find-file-noselect'
+      ;; answers with the buffer too, and its caller has no second value to
+      ;; pass on.
       ;;--------------------------------------------------------------
       (let* ((contents
               (call-with-input-file path
@@ -616,7 +640,7 @@
                       (if (eof-object? c)
                           (list->string (reverse acc))
                           (loop (cons c acc))))))))
-             (crlf? (string-has-crlf? contents))
+             (line-break (detect-line-break contents))
              ;; a file already visited is one buffer, not two: Emacs's
              ;; `find-file-noselect' answers with the buffer that is
              ;; visiting the file when there is one
@@ -646,16 +670,28 @@
         ;; (a visiting buffer keeps the name it already had, which is what
         ;; Emacs does when it finds the file already in a buffer).
         (set!text-editor-file-name ed path)
+        ;; and the convention it was read with, which is the buffer's
+        ;; rather than the frame's - so that this buffer saves the way it
+        ;; was loaded however many other files have been visited since
+        (set!buffer-file-coding-system ed line-break)
+        ;; and the directory its file is in, which its relative file names
+        ;; are relative to: GNU Emacs's `default-directory', buffer-local,
+        ;; which `find-file-noselect' sets to the file's directory
+        (set!buffer-default-directory ed (file-name-directory-part path))
         ;; and point starts at the beginning of what was read, which is
         ;; where GNU Emacs's `find-file-noselect' puts it
         (text-editor-set-cursor ed 0 0)
-        (values ed crlf?)))
+        ed))
 
-    (define (encode-line-breaks str crlf?)
+    (define (encode-line-breaks str line-break)
       ;; Encode the buffer's line-feed breaks back into the file's
-      ;; line-break convention on save.
+      ;; line-break convention on save. A CRLF file gets its carriage
+      ;; returns back; the other conventions are stored as they were read -
+      ;; `decode-dos-returns' takes the carriage return out of a CR-LF pair
+      ;; and leaves every other one in the buffer - so there is nothing to
+      ;; put back.
       ;;--------------------------------------------------------------
-      (if (not crlf?)
+      (if (not (eq? line-break line-break-crlf))
           str
           (call-with-port (open-output-string)
             (lambda (port)
@@ -668,24 +704,40 @@
                str)
               (get-output-string port)))))
 
-    (define (save-buffer frame)
-      ;; Write the editor buffer back to its file, encoding the line
+    (define (save-buffer)
+      ;; Write the current buffer back to its file, encoding the line
       ;; breaks into the file's convention, and mark the buffer saved:
-      ;; from here on there is nothing in it that the file does not
-      ;; have, which is what clearing the modified flag means.
+      ;; from here on there is nothing in it that the file does not have,
+      ;; which is what clearing the modified flag means.
+      ;;
+      ;; GNU Emacs's `save-buffer', which acts on `(current-buffer)' and
+      ;; takes no argument but the prefix argument that picks the backup
+      ;; behaviour - there are no backup files here, so there is nothing
+      ;; for that to say and nothing to pass. The file written is the
+      ;; buffer's own `buffer-file-name', and the convention its own
+      ;; `buffer-file-coding-system'; a buffer visiting no file asks for
+      ;; one, which is what Emacs's `basic-save-buffer' does with
+      ;; `(read-file-name "File to save in: ")'.
       ;;--------------------------------------------------------------
-      ;; Emacs settles the buffer's final line break before writing it.
-      (ensure-final-newline-on-save! (ncurses-frame-editor frame))
-      (call-with-output-file
-          (text-editor-file-name (ncurses-frame-editor frame))
-        (lambda (port)
-          (display
-           (encode-line-breaks
-            (text-editor-to-string (ncurses-frame-editor frame))
-            (ncurses-frame-crlf? frame))
-           port))
-        )
-      (text-editor-set-modified! (ncurses-frame-editor frame) #f))
+      (let ((buffer (current-buffer))
+            (path (or (buffer-file-name (current-buffer))
+                      (let ((name (read-file-name "File to save in: ")))
+                        (set!buffer-file-name (current-buffer) name)
+                        name))))
+        ;; Emacs settles the buffer's final line break before writing it.
+        (ensure-final-newline-on-save! buffer)
+        (call-with-output-file
+            path
+          (lambda (port)
+            (display
+             (encode-line-breaks
+              (text-editor-to-string buffer)
+              (buffer-file-coding-system buffer))
+             port)))
+        (text-editor-set-modified! buffer #f)
+        (set!ncurses-frame-message (*current-frame*)
+                                   (string-append "Wrote " path))
+        path))
 
     ;;----------------------------------------------------------------
     ))

@@ -29,11 +29,16 @@
     (only (schemacs editor engine)
           text-editor-char-count text-editor-get-cursor text-editor-insert
           text-editor-delete-from-cursor text-editor-set-cursor
-          text-editor-undo-disable! text-editor-undo-enable!))
+          text-editor-get-line-column
+          text-editor-undo-disable! text-editor-undo-enable!)
+    ;; `text-editor-get-line-column' answers with one of these, and the
+    ;; line it names is what says which entry a line is.
+    (only (schemacs ui text-buffer-impl) text-location-line))
 
   (export
    tabulated-list-entries
    tabulated-list-format
+   tabulated-list-get-id
    tabulated-list-print
    tabulated-list-revert
    *tabulated-list-entries*
@@ -70,6 +75,33 @@
       ;;--------------------------------------------------------------
       (let ((entries (*tabulated-list-entries*)))
         (if (procedure? entries) (entries) entries)))
+
+    (define (tabulated-list--row ed)
+      ;; Which entry the line point is on in ED counts to, or -1 for a
+      ;; line that is not an entry's.
+      ;;
+      ;; In Emacs each entry's line carries the entry's ID and its fields
+      ;; as text properties, and the two API functions below read them off
+      ;; the line point is on. There are no text properties here, so what
+      ;; says which entry a line is is its number: the titles are the
+      ;; buffer's first line (`tabulated-list--header'), so the first
+      ;; entry is the second line and row 0 is line 2.
+      ;;--------------------------------------------------------------
+      (- (text-location-line (text-editor-get-line-column ed)) 2))
+
+    (define (tabulated-list-get-id ed)
+      ;; The ID of the entry on the line point is on in ED, or #f when
+      ;; there is no entry there - the titles' line, or a line past the
+      ;; last entry. GNU Emacs's `tabulated-list-get-id', which answers
+      ;; with the `tabulated-list-id' text property at point, which is
+      ;; nil off an entry's line.
+      ;;--------------------------------------------------------------
+      (let ((row (tabulated-list--row ed))
+            (entries (tabulated-list--entries)))
+        (if (and (>= row 0) (< row (length entries)))
+            ;; an entry is (ID . FIELDS), so its car is the ID
+            (caar (list-tail entries row))
+            #f)))
 
     (define (tabulated-list--cell text width)
       ;; TEXT in a column of WIDTH characters. A negative width means the
@@ -155,8 +187,13 @@
       (let* ((entries (tabulated-list--entries))
              (widths (tabulated-list--widths entries)))
         (text-editor-undo-disable! ed)
-        (text-editor-delete-from-cursor ed (text-editor-char-count ed))
+        ;; The buffer is emptied from its *beginning*, whatever point is
+        ;; on: GNU Emacs's `erase-buffer' here, which does not depend on
+        ;; point. Deleting forward from point instead would leave whatever
+        ;; came before it and draw the new list onto the end of the old -
+        ;; which is what a redraw with point down the list used to do.
         (text-editor-set-cursor ed 0)
+        (text-editor-delete-from-cursor ed (text-editor-char-count ed))
         (text-editor-insert ed (tabulated-list--header))
         (text-editor-insert ed "\n")
         (for-each (lambda (entry)

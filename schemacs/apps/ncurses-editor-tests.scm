@@ -18,7 +18,7 @@
        ncurses-frame-selected-window new-frame set!window-buffer
        window-internal?
        window-list
-       set!ncurses-frame-crlf? set!window-height set!window-width
+       set!window-height set!window-width
        set-window-point! window-body-width window-buffer window-edges
        window-height window-point window-right-border? window-top
        window-width)
@@ -26,12 +26,10 @@
        dispatch-key-event dispatch-ncurses-event ncurses-key->keymap-path)
  (only (schemacs editor keymap) *current-keymap* *default-keymap*)
  (only (schemacs editor buff-menu)
-       *Buffer-menu-del-char* *Buffer-menu-marks* Buffer-menu-execute
-       Buffer-menu--set-mark! list-buffers-noselect)
+       *Buffer-menu-del-char* *Buffer-menu-marks* Buffer-menu-buffer
+       Buffer-menu-execute Buffer-menu--set-mark! Buffer-menu-redraw!
+       list-buffers-noselect)
  (only (guile) string-split)
- (only (schemacs editor buff-menu)
-       *Buffer-menu-del-char* *Buffer-menu-marks* Buffer-menu-execute
-       Buffer-menu--set-mark! list-buffers-noselect)
  (only (schemacs editor command) run-command)
  (only (schemacs editor buffer)
        *buffer-list* *current-buffer* *kill-buffer-query-functions*
@@ -55,8 +53,8 @@
  (only (schemacs editor isearch)
        *search-case-fold?* *search-pattern* isearch-find isearch-message)
  (only (schemacs editor window)
-       delete-window delete-other-windows other-window-command
-       split-window-below split-window-right)
+       delete-window delete-other-windows get-buffer-window
+       other-window-command split-window-below split-window-right)
  (only (schemacs editor xdisp)
        *mode-line-format* cursor-screen-position format-mode-line
        mode-line-string status-string)
@@ -300,7 +298,7 @@
   (begin
     (call-with-output-file "/tmp/schemacs-fe-undo.txt"
       (lambda (port) (display "loaded\ntext\n" port)))
-    (let-values (((ed crlf?) (find-file "/tmp/schemacs-fe-undo.txt")))
+    (let ((ed (find-file "/tmp/schemacs-fe-undo.txt")))
       (list (text-editor-undo-list ed) (text-editor-to-string ed)))))
 
 ;; Amalgamation is bounded: a boundary goes in every
@@ -336,12 +334,12 @@
   (parameterize ((*buffer-list* '())
                  (*current-buffer* #f)
                  (*kill-buffer-query-functions* '()))
-   (let-values (((ed crlf?) (find-file path)))
+   (let ((ed (find-file path)))
     (let ((frame (test-frame ed)))
       ;; as `find-file-command' does: the file's buffer is shown in the
-      ;; selected window, and the frame adopts the file's line breaks
+      ;; selected window. The line-break convention is the buffer's own -
+      ;; `find-file' recorded it there - so there is nothing to adopt.
       (switch-to-buffer! frame ed)
-      (set!ncurses-frame-crlf? frame crlf?)
       (parameterize ((*current-frame* frame)
                      (*search-pattern* #f)
                      (*search-case-fold?* #t)
@@ -402,6 +400,25 @@
         (type frame ESC C-underscore)                  ; redo it
         (set! states (cons (substring (status-string frame) 0 2) states))))
     (reverse states)))
+
+;; The line-break convention is the buffer's own, not the frame's: the
+;; buffer visiting the CRLF file saves it with CRLF however many other
+;; files have been visited in between. It used to be a slot on the frame,
+;; so visiting an LF file after a CRLF one rewrote the CRLF file with LF -
+;; and visiting a CRLF file after an LF one the other way round. It is
+;; `buffer-file-coding-system' on the buffer now, as in Emacs.
+(test-equal "Xa\r\nb\r\n"
+  (cdr (with-file-buffer "/tmp/fe-crlf.txt" "a\r\nb\r\n"
+         (lambda (frame)
+           ;; visit an LF file - this is what used to overwrite the
+           ;; frame's idea of the convention
+           (call-with-output-file "/tmp/fe-lf.txt"
+             (lambda (port) (display "c\nd\n" port)))
+           (find-file "/tmp/fe-lf.txt")
+           ;; back to the CRLF buffer, change it, and save it
+           (switch-to-buffer! frame (get-buffer "fe-crlf.txt"))
+           (type frame #\X)
+           (type frame (integer->char 24) save-key)))))
 
 ;; The answer to "Save file X? " decides what happens: y, SPC and ! save
 ;; the buffer, and n, DEL, q, RET (and end of input) leave it alone.
@@ -1295,15 +1312,15 @@
   (parameterize ((*buffer-list* '()))
     (call-with-output-file "/tmp/fe-revisit.txt"
       (lambda (port) (display "once\n" port)))
-    (let-values (((first _) (find-file "/tmp/fe-revisit.txt")))
-      (let-values (((second __) (find-file "/tmp/fe-revisit.txt")))
+    (let ((first (find-file "/tmp/fe-revisit.txt")))
+      (let ((second (find-file "/tmp/fe-revisit.txt")))
         (list (eq? first second) (length (buffer-list)))))))
 
 ;; ... and the buffer keeps the name it was given when it was made, which
 ;; is the file without its directory.
 (test-equal "fe-revisit.txt"
   (parameterize ((*buffer-list* '()))
-    (let-values (((ed _) (find-file "/tmp/fe-revisit.txt")))
+    (let ((ed (find-file "/tmp/fe-revisit.txt")))
       (buffer-name ed))))
 
 ;; C-x k kills the buffer, and the window is given another one rather than
@@ -1471,6 +1488,136 @@
         (run-command Buffer-menu-execute)
         (list (mentions? marked "D  doomed.txt")
               (get-buffer "doomed.txt"))))))
+
+;; The keys of the list, sent the way a terminal sends them. Every test
+;; above reaches the commands directly or through their marks, so none of
+;; them ever asked which buffer a line is - and `Buffer-menu-buffer', the
+;; one function that answers that, called a helper that had gone missing.
+;; A key pressed in the list is what reaches it.
+(define (with-buffer-menu-keys extra thunk)
+  ;; A frame showing the buffer list, with the list buffer current so
+  ;; that its own keymap is the one keys are looked up in. THUNK is given
+  ;; the list buffer - named for the menu it is - and a procedure that
+  ;; sends one key event.
+  ;;
+  ;; The buffers in EXTRA are made in order, and a buffer goes to the
+  ;; front of the buffer list when it is made, so the list shows them in
+  ;; the reverse of that order: after "shown.txt", the last of EXTRA is
+  ;; the first line.
+  ;;--------------------------------------------------------------
+  (parameterize ((*buffer-list* '())
+                 (*current-buffer* #f)
+                 (*Buffer-menu-marks* '())
+                 (*kill-buffer-query-functions* '()))
+    (let* ((ed (get-buffer-create "shown.txt"))
+           (frame (test-frame ed)))
+      (parameterize ((*current-frame* frame) (*echo-area-buffer* #f))
+        (set!window-buffer (ncurses-frame-selected-window frame) ed)
+        (for-each (lambda (spec)
+                    (let ((buffer (get-buffer-create (car spec))))
+                      (when (cadr spec) (text-editor-set-read-only! buffer #t))
+                      (when (caddr spec) (text-editor-insert buffer "x"))))
+                  extra)
+        (let ((list (list-buffers-noselect)))
+          (set!window-buffer (ncurses-frame-selected-window frame) list)
+          (*current-buffer* list)
+          (thunk list (lambda (ev) (dispatch-ncurses-event frame ev))))))))
+
+;; Point starts on the first buffer's line, not on the titles' - which is
+;; what `Buffer-menu-beginning' is for - and `n' walks down a line at a
+;; time. With two buffers made after "shown.txt", the list is b.txt,
+;; a.txt, shown.txt.
+(test-equal '("b.txt" "a.txt" "shown.txt")
+  (with-buffer-menu-keys (list (list "a.txt" #f #f) (list "b.txt" #f #f))
+    (lambda (menu-buffer press!)
+      (list (buffer-name (Buffer-menu-buffer))
+            (begin (press! #\n) (buffer-name (Buffer-menu-buffer)))
+            (begin (press! #\n) (buffer-name (Buffer-menu-buffer)))))))
+
+;; Off the entries - on the titles' line - there is no buffer, as in
+;; Emacs, where the line has no `tabulated-list-id'.
+(test-equal #f
+  (with-buffer-menu-keys '()
+    (lambda (menu-buffer press!)
+      (press! #\p)
+      (Buffer-menu-buffer))))
+
+;; `m' marks the buffer on the line and steps down, so pressing it twice
+;; marks the first two lines.
+(test-equal
+  (string-append
+   "C R M Buffer             Size   Mode            File\n"
+   ">  b.txt              0      Fundamental     \n"
+   ">  a.txt              0      Fundamental     \n"
+   ".  shown.txt          0      Fundamental     \n")
+  (with-buffer-menu-keys (list (list "a.txt" #f #f) (list "b.txt" #f #f))
+    (lambda (menu-buffer press!)
+      (press! #\m)
+      (press! #\m)
+      (text-editor-to-string menu-buffer))))
+
+;; `%' toggles the read-only flag of the buffer on the line, and the R
+;; column says which way it went.
+(test-equal '(#t #t)
+  (with-buffer-menu-keys (list (list "a.txt" #f #f) (list "b.txt" #f #f))
+    (lambda (menu-buffer press!)
+      (press! #\%)
+      (list (text-editor-read-only? (get-buffer "b.txt"))
+            (mentions? (text-editor-to-string menu-buffer) "% b.txt")))))
+
+;; `s' marks a buffer for saving and `x' saves it, which is what GNU
+;; Emacs's `Buffer-menu-execute' does with `(with-current-buffer buffer
+;; (save-buffer))'. Saving writes *that buffer's* file - not the file of
+;; whatever buffer happens to be current - which is the thing a frame
+;; argument got wrong: the frame is whichever window the user is in, and
+;; the buffer to save is the one the line names.
+(test-equal
+  (list "saved\noriginal\n"
+        (string-append
+         "C R M Buffer             Size   Mode            File\n"
+         ".  bm-save.txt        15     Fundamental     /tmp/bm-save.txt\n"))
+  (parameterize ((*buffer-list* '())
+                 (*current-buffer* #f)
+                 (*Buffer-menu-marks* '())
+                 (*kill-buffer-query-functions* '()))
+    (call-with-output-file "/tmp/bm-save.txt"
+      (lambda (port) (display "original\n" port)))
+    (let* ((ed (find-file "/tmp/bm-save.txt"))
+           ;; the list is made from this buffer, so its line is marked `.`
+           (frame (test-frame ed)))
+      (parameterize ((*current-frame* frame) (*echo-area-buffer* #f))
+        (set!window-buffer (ncurses-frame-selected-window frame) ed)
+        (*current-buffer* ed)
+        (text-editor-insert ed "saved\n")
+        ;; now into the list, which becomes the current buffer - so if
+        ;; `x' saved "the current buffer" it would save the list
+        (set!window-buffer (ncurses-frame-selected-window frame)
+                           (list-buffers-noselect))
+        (*current-buffer* (get-buffer "*Buffer List*"))
+        ;; `s' marks the buffer on this line for saving, `x' does it
+        (dispatch-ncurses-event frame #\s)
+        (dispatch-ncurses-event frame #\x)
+        (list (call-with-input-file "/tmp/bm-save.txt"
+                (lambda (port)
+                  (let loop ((acc '()))
+                    (let ((c (read-char port)))
+                      (if (eof-object? c)
+                          (list->string (reverse acc))
+                          (loop (cons c acc)))))))
+              (text-editor-to-string (get-buffer "*Buffer List*")))))))
+
+;; RET shows the buffer on the line in the selected window, replacing the
+;; list. The key arrives as the byte 13 a terminal sends, which is why it
+;; is bound as C-m.
+(test-equal '("a.txt" #f)
+  (with-buffer-menu-keys (list (list "a.txt" #f #f) (list "b.txt" #f #f))
+    (lambda (menu-buffer press!)
+      (press! #\n)
+      (press! #\return)
+      (list (buffer-name (window-buffer (ncurses-frame-selected-window
+                                         (*current-frame*))))
+            ;; the list is off the frame's window, so nothing shows it
+            (get-buffer-window (get-buffer "*Buffer List*"))))))
 
 (test-end "schemacs_ncurses_editor_buffer_menu")
 

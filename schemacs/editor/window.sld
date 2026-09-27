@@ -280,6 +280,13 @@
       ;;
       ;; The new window takes a third of the frame, as Emacs's default action
       ;; does, but never less than `window-min-height'.
+      ;;
+      ;; A window that starts showing a buffer takes the buffer's own point,
+      ;; which is what Emacs's `set_window_buffer' does with
+      ;; `(set-marker w->pointm (buffer's point) buffer)'. It matters for a
+      ;; buffer that has been put in order before being shown - the Buffer
+      ;; Menu moves point onto its first line as it draws - where leaving the
+      ;; window's point at the beginning would put it back on the titles.
       ;;--------------------------------------------------------------
       (or (get-buffer-window buffer)
           (let* ((window (selected-window))
@@ -293,14 +300,14 @@
                 (begin
                   (set!window-buffer window buffer)
                   (set!window-top-line window 0)
-                  (set-window-point! window 0)
+                  (set-window-point! window (text-editor-get-cursor buffer))
                   (record-buffer! buffer)
                   window)
                 ;; split below, and the new window shows it
                 (let ((new (split-window-below window (- want))))
                   (set!window-buffer new buffer)
                   (set!window-top-line new 0)
-                  (set-window-point! new 0)
+                  (set-window-point! new (text-editor-get-cursor buffer))
                   (record-buffer! buffer)
                   new)))))
 

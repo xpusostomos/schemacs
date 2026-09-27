@@ -31,8 +31,7 @@
     (only (ncurses curses) cols endwin lines refresh stdscr)
     (only (schemacs editor engine)
           copy-marker  marker-position  set-marker!
-          text-editor-get-cursor  text-editor-set-cursor
-          text-editor-file-name)
+          text-editor-get-cursor  text-editor-set-cursor)
     ;; `suspend-frame' is a command, so it needs the command substrate,
     ;; and it states its own key as the other command libraries do.
     (only (schemacs editor command) new-command)
@@ -53,10 +52,8 @@
    make-frame-window
    make<ncurses-frame>
    make<ncurses-window>
-   ncurses-frame-crlf?
    ncurses-frame-editor
    ncurses-frame-esc-pending
-   ncurses-frame-file-path
    ncurses-frame-keymap-state
    ncurses-frame-message
    ncurses-frame-quit-cont
@@ -70,7 +67,6 @@
    set!%window-point
    set!frame-height
    set!frame-width
-   set!ncurses-frame-crlf?
    set!ncurses-frame-editor
    set!ncurses-frame-esc-pending
    set!ncurses-frame-keymap-state
@@ -294,8 +290,7 @@
     (define-record-type <ncurses-frame>
       (make<ncurses-frame>
        windows selected-window height width
-       message keymap-state quit-cont esc-pending
-       crlf?)
+       message keymap-state quit-cont esc-pending)
       ncurses-frame-type?
       (windows   ncurses-frame-windows   set!ncurses-frame-windows)
       ;; ^ The frame's windows, top to bottom. Emacs's `window-list'.
@@ -324,9 +319,14 @@
       ;; ^ Whether an ESC key was just seen: the next key event is
       ;; dispatched with the `meta` modifier (the Emacs ASCII
       ;; protocol, where ESC prefixes meta keys).
-      (crlf? ncurses-frame-crlf? set!ncurses-frame-crlf?)
-      ;; ^ Whether the file's line-break convention is CRLF: carriage
-      ;; returns are decoded away on load and encoded back on save.
+      ;;
+      ;; There was a `crlf?' slot here, holding the visited file's
+      ;; line-break convention. It is gone: the convention belongs to the
+      ;; buffer, not to the frame a buffer happens to be shown in - GNU
+      ;; Emacs keeps it in the buffer's `buffer-file-coding-system' - and
+      ;; a frame-wide one meant that saving a CRLF file after visiting an
+      ;; LF file rewrote it with LF, and the other way round. It is
+      ;; buffer-local in `(schemacs editor files)' now.
       )
 
     ;; The frame currently dispatching a key event. Commands read the
@@ -393,7 +393,7 @@
        ((editor height width)
         (let ((window (make-frame-window editor 0 (max 1 (- height 1)) 0 width)))
           (make<ncurses-frame> (list window) window height width
-                               "" #f #f #f #f)))))
+                               "" #f #f #f)))))
 
     (define min-safe-window-height 1)
     (define min-safe-window-width 2)
@@ -592,13 +592,5 @@
 
     (define (set!ncurses-frame-editor frame editor)
       (set!window-buffer (ncurses-frame-selected-window frame) editor))
-
-    (define (ncurses-frame-file-path frame)
-      ;; The file the selected window's buffer visits, or false. GNU
-      ;; Emacs's `buffer-file-name'; it is the buffer's, because two
-      ;; windows can show the same buffer and a window can show a buffer
-      ;; that visits no file.
-      ;;--------------------------------------------------------------
-      (text-editor-file-name (ncurses-frame-editor frame)))
 
     ))
