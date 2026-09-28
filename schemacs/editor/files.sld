@@ -81,7 +81,7 @@
     ;; name splitting `read-file-name' completes with.
     (only (guile) access? stat stat:mode W_OK X_OK logand logior
           closedir getcwd opendir readdir stat:type
-          string-prefix? string-rindex))
+          string-index string-prefix? string-rindex))
 
   (export
    *require-final-newline*
@@ -598,10 +598,31 @@
       ;; the candidates. GNU Emacs's `completion-file-name-table' answers
       ;; it with `file-exists-p'.
       ;;
+      ;; The fourth question is `(boundaries . SUFFIX)': where in STRING
+      ;; the text being completed *begins*, which for a file name is
+      ;; after the last slash - the directory part is not completed, the
+      ;; name after it is. That is what makes the candidates come back
+      ;; as names without their directory (`file-name-all-completions
+      ;; name realdir'), and the `*Completions*' buffer show `alpha.txt'
+      ;; where the minibuffer holds `/tmp/mbtest/alpha.txt': the styles
+      ;; hand the boundary on as the *base size*, and `choose-completion'
+      ;; replaces only what is after it.
+      ;;
       ;; Directories are offered with a trailing slash so that completing
       ;; one descends into it.
       ;;--------------------------------------------------------------
       (cond
+       ((and (pair? action) (eq? (car action) 'boundaries))
+        ;; `(boundaries START . END)': START is the length of the
+        ;; directory part - "clipping it back" to STRING's length is
+        ;; Emacs's guard for the w32 "C:" case - and END is where the next
+        ;; slash is in SUFFIX, or #f for its end.
+        (let ((start (string-length (file-name-directory-part string)))
+              (suffix (cdr action)))
+          (cons 'boundaries
+                (cons (min start (string-length string))
+                      (string-index suffix #\/)))))
+
        ((eq? action 'lambda)
         ;; is STRING itself a file? The empty string is not, whatever
         ;; `file-exists-p' would say about it - Emacs's comment on that
@@ -610,28 +631,36 @@
              (if predicate (predicate string) (file-exists-p string))))
 
        (else
-      (let* ((dir-part (file-name-directory-part string))
-             (name-part (file-name-nondirectory-part string))
-             (dir (if (string=? dir-part "")
-                      (default-directory)
-                      (if (char=? (string-ref dir-part 0) #\/)
-                          dir-part
-                          (string-append (default-directory) dir-part)))))
-        (let loop ((entries (directory-entries dir name-part)) (acc '()))
-          (if (null? entries)
-              (let ((candidates (reverse acc)))
-                (if (eq? action #f)
-                    (try-completion string candidates predicate)
-                    ;; ACTION is #t for the list, or a function for the
-                    ;; candidates PREDICATE accepts - and `all-completions'
-                    ;; answers both.
-                    (all-completions string candidates predicate)))
-              (let ((entry (car entries)))
-                (loop (cdr entries)
-                      (cons (string-append
-                             dir-part entry
-                             (if (directory-path? (string-append dir entry)) "/" ""))
-                            acc)))))))))
+        (let* ((name (file-name-nondirectory-part string))
+               (specdir (file-name-directory-part string))
+               (realdir (cond ((string=? specdir "") (default-directory))
+                              ((char=? (string-ref specdir 0) #\/) specdir)
+                              (else (string-append (default-directory) specdir))))
+               ;; `file-name-all-completions name realdir': the entries
+               ;; NAME is a prefix of, as names, a slash on the directories
+               (names (let loop ((entries (directory-entries realdir name)) (acc '()))
+                        (if (null? entries)
+                            (reverse acc)
+                            (let ((entry (car entries)))
+                              (loop (cdr entries)
+                                    (cons (string-append
+                                           entry
+                                           (if (directory-path? (string-append realdir entry))
+                                               "/" ""))
+                                          acc)))))))
+          (cond
+           ((eq? action #f)
+            ;; `file-name-completion name realdir pred', and the directory
+            ;; put back in front of what it found
+            (let ((comp (try-completion name names predicate)))
+              (if (string? comp)
+                  (string-append specdir comp)
+                  comp)))
+           (else
+            ;; ACTION is #t for the list, or a function for the
+            ;; candidates PREDICATE accepts - and `all-completions'
+            ;; answers both, with the names as Emacs answers them.
+            (all-completions name names predicate)))))))
 
     (define (read-file-name prompt)
       ;; Read a file name in the minibuffer, completing as TAB is typed:

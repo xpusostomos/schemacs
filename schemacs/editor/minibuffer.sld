@@ -63,6 +63,8 @@
           buffer-default-directory bury-buffer current-buffer get-buffer
           get-buffer-create
           buffer-local-keymap set!buffer-local-keymap set!buffer-default-directory
+          ;; `completion-base-position' is a variable local to `*Completions*'
+          buffer-local-value set-buffer-local-value!
           with-current-buffer)
     ;; `getcwd' is Guile's, for a buffer that has no `default-directory'.
     (only (guile) getcwd)
@@ -488,14 +490,25 @@
              (completion--message "No match"))
             (else
              ;; The answer is a dotted list whose last cdr is the base
-             ;; size, so the candidates are what is before it.
-             (display-buffer
-              (display-completion-list
-               (let loop ((rest candidates) (acc '()))
-                 (if (not (pair? rest))
-                     (reverse acc)
-                     (loop (cdr rest) (cons (car rest) acc))))
-               typed))))))
+             ;; size, so the candidates are what is before it - and the
+             ;; base size is how much of TYPED they leave out, which for a
+             ;; file name is its directory. Emacs records where that puts
+             ;; the completion in the minibuffer as
+             ;; `completion-base-position', a variable local to the
+             ;; `*Completions*' buffer, `(list (+ start base-size) end)';
+             ;; the minibuffer's text starts at 0 here, the prompt being
+             ;; beside it rather than in it.
+             (let* ((base-size (let loop ((rest candidates))
+                                 (if (pair? rest) (loop (cdr rest)) (or rest 0))))
+                    (all (let loop ((rest candidates) (acc '()))
+                           (if (not (pair? rest))
+                               (reverse acc)
+                               (loop (cdr rest) (cons (car rest) acc)))))
+                    (buffer (display-completion-list
+                             all (substring typed base-size (string-length typed)))))
+               (set-buffer-local-value! buffer 'completion-base-position
+                                        (list base-size (string-length typed)))
+               (display-buffer buffer))))))
        (lambda () #f)
        "Show the possible completions of the text in the minibuffer."))
 
@@ -637,15 +650,25 @@
       ;;--------------------------------------------------------------
       (completion--nth-completion 2 string table predicate point))
 
-    (define (completion-boundaries string table predicate afterpoint)
-      ;; GNU Emacs's `completion-boundaries', which asks a table where the
-      ;; text it is completing *begins and ends* - the answer is
-      ;; `(START . END)' within the string. A plain list of candidates has
-      ;; no opinion, so the default is the whole string; Emacs has the same
-      ;; default for a table with no metadata, and the file-name table is
-      ;; the one that answers otherwise.
+    (define (completion-boundaries string table predicate suffix)
+      ;; GNU Emacs's `completion-boundaries': "Return the boundaries of
+      ;; text on which COLLECTION will operate", as `(START . END)' -
+      ;; START a position in STRING, END one in SUFFIX, the text after
+      ;; point. A *function* table is asked with the action
+      ;; `(boundaries . SUFFIX)' and may answer `(boundaries START . END)';
+      ;; any other table, or any other answer, means the whole of both -
+      ;; "for file names the result is the positions delimited by the
+      ;; closest directory separators", which is `completion-file-name-table'
+      ;; answering.
       ;;--------------------------------------------------------------
-      (cons 0 0))
+      (let ((boundaries (and (procedure? table)
+                             (table string predicate (cons 'boundaries suffix)))))
+        (let ((boundaries (and (pair? boundaries)
+                               (eq? (car boundaries) 'boundaries)
+                               (pair? (cdr boundaries))
+                               (cdr boundaries))))
+          (cons (or (and boundaries (car boundaries)) 0)
+                (or (and boundaries (cdr boundaries)) (string-length suffix))))))
 
     (define (common-prefix strings)
       ;; The longest prefix every one of STRINGS begins with. This is not
@@ -686,20 +709,29 @@
 
     (define (completion-basic-all-completions string table predicate point)
       ;; GNU Emacs's `completion-basic-all-completions`: the prefix
-      ;; matches, with the base size in the last cdr.
+      ;; matches, with the *base size* in the last cdr - the START of the
+      ;; table's boundaries, which is how much of STRING the candidates
+      ;; leave out (a file name's directory). Emacs gets the candidates
+      ;; through `completion-pcm--all-completions', which for a pattern
+      ;; with no wildcards is `all-completions' on the whole text.
       ;;--------------------------------------------------------------
       (let* ((beforepoint (substring string 0 point))
+             (afterpoint (substring string point))
+             (bounds (completion-boundaries beforepoint table predicate afterpoint))
              (all (all-completions beforepoint table predicate)))
         (if (null? all)
             #f
-            (append all 0))))
+            (append all (car bounds)))))
 
-    (define (completion-substring-candidates string table predicate)
-      ;; The candidates STRING appears in *anywhere*: what the `substring'
-      ;; style means by completing. Emacs gets there through its PCM
-      ;; pattern engine, which is a general glob matcher shared with
-      ;; `partial-completion' and `flex'; the meaning is this, and this is
-      ;; what it is built on when that engine arrives.
+    (define (completion-substring-candidates string pattern table predicate)
+      ;; The candidates PATTERN appears in *anywhere*: what the `substring'
+      ;; style means by completing. PATTERN is the part of STRING after
+      ;; the table's boundary - the file name without its directory - and
+      ;; the table is asked about STRING whole, as Emacs's
+      ;; `completion-substring--all-completions' asks it. Emacs gets
+      ;; there through its PCM pattern engine, which is a general glob
+      ;; matcher shared with `partial-completion' and `flex'; the meaning
+      ;; is this, and this is what it is built on when that engine arrives.
       ;;--------------------------------------------------------------
       (let loop ((rest (if (procedure? table)
                            (table string predicate #t)
@@ -714,7 +746,7 @@
               (loop (cdr rest) acc))
              ((not (or (not predicate) (predicate candidate)))
               (loop (cdr rest) acc))
-             ((substring? string candidate)
+             ((substring? pattern candidate)
               (loop (cdr rest) (cons candidate acc)))
              (else (loop (cdr rest) acc))))))))
 
@@ -730,13 +762,18 @@
                 (else (loop (+ 1 i)))))))
 
     (define (completion-substring-all-completions string table predicate point)
-      ;; GNU Emacs's `completion-substring-all-completions'.
+      ;; GNU Emacs's `completion-substring-all-completions': the matches
+      ;; of the text after the boundary, with the base size in the last
+      ;; cdr as `completion-basic-all-completions' has it.
       ;;--------------------------------------------------------------
       (let* ((beforepoint (substring string 0 point))
-             (all (completion-substring-candidates beforepoint table predicate)))
+             (afterpoint (substring string point))
+             (bounds (completion-boundaries beforepoint table predicate afterpoint))
+             (pattern (substring beforepoint (car bounds) (string-length beforepoint)))
+             (all (completion-substring-candidates beforepoint pattern table predicate)))
         (if (null? all)
             #f
-            (append all 0))))
+            (append all (car bounds)))))
 
     (define (completion-substring-try-completion string table predicate point)
       ;; GNU Emacs's `completion-substring-try-completion'.
@@ -749,13 +786,25 @@
       ;; longest prefix they agree on, which is what a caller does with
       ;; it anyway.
       ;;--------------------------------------------------------------
+      ;;
+      ;; The answer carries the text before the boundary - the directory
+      ;; of a file name - in front, which is what
+      ;; `completion-pcm--merge-try' does with its PREFIX.
       (let* ((beforepoint (substring string 0 point))
-             (all (completion-substring-candidates beforepoint table predicate)))
+             (afterpoint (substring string point))
+             (bounds (completion-boundaries beforepoint table predicate afterpoint))
+             (prefix (substring beforepoint 0 (car bounds)))
+             (pattern (substring beforepoint (car bounds) (string-length beforepoint)))
+             (all (completion-substring-candidates beforepoint pattern table predicate)))
         (cond
          ((null? all) #f)
-         ((and (null? (cdr all)) (string=? (car all) beforepoint)) #t)
-         ((null? (cdr all)) (cons (car all) (string-length (car all))))
-         (else (cons (common-prefix all) (string-length (common-prefix all)))))))
+         ((and (null? (cdr all)) (string=? (car all) pattern)) #t)
+         (else
+          (let ((merged (string-append prefix
+                                       (if (null? (cdr all))
+                                           (car all)
+                                           (common-prefix all)))))
+            (cons merged (string-length merged)))))))
     ;;----------------------------------------------------------------
     ;; Doing a completion, and what RET does about it
 
@@ -1212,6 +1261,30 @@
           (text-editor-set-read-only! buffer #t))
         buffer))
 
+    (define (choose-completion-string choice mb base-position)
+      ;; GNU Emacs's `choose-completion-string' (`simple.el'): "insert the
+      ;; completion choice CHOICE. BASE-POSITION says where to insert
+      ;; the completion" - CHOICE replaces the minibuffer's text from
+      ;; the first position to the second, and with no BASE-POSITION the
+      ;; whole of it. For a file name the base is the end of the
+      ;; directory, so `alpha.txt' chosen in a `/tmp/mbtest/' list gives
+      ;; `/tmp/mbtest/alpha.txt'.
+      ;;
+      ;; Emacs then exits the minibuffer unless the choice is a directory
+      ;; (its boundaries end where the text does); nothing here exits on
+      ;; a choice - RET does - so that decision is not made here.
+      ;;--------------------------------------------------------------
+      (let* ((text (minibuffer-contents))
+             (start (if (pair? base-position) (car base-position) 0))
+             (end (if (and (pair? base-position) (pair? (cdr base-position)))
+                      (cadr base-position)
+                      (string-length text))))
+        (minibuffer-set-contents!
+         mb (string-append (substring text 0 (min start (string-length text)))
+                           choice
+                           (substring text (min end (string-length text))
+                                      (string-length text))))))
+
     (define choose-completion
       ;; GNU Emacs's `choose-completion': take the candidate on this line
       ;; and put it in the minibuffer that asked for the completion, then
@@ -1229,12 +1302,8 @@
                                               'completion--string ed))
                 (mb (*minibuffer*)))
            (when (and mb (> (string-length candidate) 0))
-             ;; put it in the prompt, replacing what was typed
-             (let ((mb-ed (minibuffer-editor mb)))
-               (text-editor-set-cursor mb-ed 0)
-               (text-editor-delete-from-cursor mb-ed
-                                               (text-editor-char-count mb-ed))
-               (text-editor-insert mb-ed candidate))
+             (choose-completion-string candidate mb
+                                       (buffer-local-value ed 'completion-base-position #f))
              (quit-window))))
        (lambda () #f)
        "Select the completion on this line."))
@@ -1513,9 +1582,12 @@
       (let ((candidate (completion--selected-candidate)))
         (if (not candidate)
             (error "No completion here")
-            (let ((mb (*minibuffer*)))
+            (let ((mb (*minibuffer*))
+                  (buffer (get-buffer "*Completions*")))
               (when mb
-                (minibuffer-set-contents! mb candidate))))))
+                (choose-completion-string
+                 candidate mb
+                 (buffer-local-value buffer 'completion-base-position #f)))))))
 
     (define minibuffer-next-completion
       ;; GNU Emacs's `minibuffer-next-completion'. Emacs also inserts
