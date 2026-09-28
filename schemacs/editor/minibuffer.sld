@@ -74,7 +74,8 @@
     ;; (`minibuffer-local-filename-completion-map' below), and
     ;; `with-current-buffer' and the line motion are the ordinary
     ;; commands the minibuffer's own keys fall back on.
-    (only (schemacs editor simple) self-insert-command)
+    (only (schemacs editor simple) self-insert-command
+       *this-command* *last-command*)
     (only (schemacs editor frame)
           *current-frame* *echo-area-buffer* *echo-area-prompt* *minibuffer*
           set!ncurses-frame-message set-message! set-window-point! window-list)
@@ -905,6 +906,10 @@
             ;;     valid completion: "Complete, but not unique" - the
             ;;     text will do, but it is not the only candidate.
             ;;
+            ;;   * nothing was completed and what is there *is* a
+             ;;     valid completion: "Complete, but not unique" - the
+             ;;     text will do, but it is not the only candidate.
+             ;;
             ;; Saying "Complete, but not unique" in the first case
             ;; instead is what made TAB on a name that completes in full
             ;; look like a failure.
@@ -915,6 +920,16 @@
                   (run-command minibuffer-completion-help)
                   (completion--message "Next char not unique")))
              (else
+              ;; If the last exact completion and this one were the
+              ;; same, it means we've already given a "Complete, but
+              ;; not unique" message and the user's hit TAB again, so
+              ;; now the candidates are shown as well - Emacs's
+              ;; `(when (and (eq this-command last-command)
+              ;;                 completion-auto-help) ...)', the
+              ;; second TAB on a directory with nothing typed after it.
+              (when (and (eq? (*this-command*) (*last-command*))
+                         (*completion-auto-help*))
+                (run-command minibuffer-completion-help))
               (completion--message "Complete, but not unique")))
             (minibuffer--bitset completed #t exact))))))
 
