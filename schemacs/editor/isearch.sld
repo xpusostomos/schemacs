@@ -22,6 +22,11 @@
     (scheme base)
     (scheme char)
     (scheme case-lambda)
+    ;; `caddr' and `cadddr' are `(scheme cxr)'s, not `(scheme base)''s.
+    ;; Without this the file loads and the failure waits for the first
+    ;; search that reads a match: "Unbound variable: caddr" at run time,
+    ;; which is the class of bug this project keeps meeting.
+    (only (scheme cxr) caddr cadddr)
     ;; isearch reads its keys itself, so it needs the terminal - and only
     ;; these three names of it. Guile-ncurses exports a `define-key' of its
     ;; own, so importing the whole module would put that name in the same
@@ -46,7 +51,7 @@
          new-command
           )
     (only (schemacs editor simple)
-         *kill-buffer* word-char?
+         current-kill word-char?
           )
     (only (schemacs editor xdisp)
          *search-highlight* render!
@@ -251,8 +256,10 @@
                       (isearch-search! ed new direction case-fold?)
                       #f case-fold?)))
              ((and (char? ev) (= (char->integer ev) 25))     ; C-y
-              ;; isearch-yank-kill: the kill buffer joins the search string
-              (let ((new (string-append pattern (*kill-buffer*))))
+              ;; `isearch-yank-kill': "the latest kill joins the search
+              ;; string" - Emacs's `(isearch-yank-string (current-kill 0))',
+              ;; which also moves the ring's yank pointer.
+              (let ((new (string-append pattern (current-kill 0))))
                 (loop new direction
                       (cons (list pattern (text-editor-get-cursor ed) success?)
                             states)

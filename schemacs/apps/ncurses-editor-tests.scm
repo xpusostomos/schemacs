@@ -67,7 +67,10 @@
  (only (schemacs editor command) *mark-even-if-inactive*)
  (only (schemacs editor editfns) region-beginning region-end)
  (only (schemacs editor simple)
-       *kill-buffer* *last-change-was-undo* *last-command* read-only-mode
+       *kill-do-not-save-duplicates* *kill-ring* *kill-ring-max*
+       *kill-ring-yank-pointer*
+       *last-change-was-undo* *last-command* read-only-mode
+       current-kill kill-append kill-new kill-region kill-ring-save
        *use-empty-active-region* mark mark-ring push-mark region-active-p
        set-mark use-region-p
        *last-command-kill* *pending-undo-list* *this-command-kill*
@@ -110,17 +113,19 @@
 
 (define (run-keys* text evs)
   ;; Load TEXT into a fresh buffer, run EVS over it, and return
-  ;; (buffer-contents cursor-index kill-buffer echo-message). The kill
+  ;; (buffer-contents cursor-index latest-kill echo-message). The kill
   ;; ring, the flags it works with and the undo state are module state,
   ;; so bind them fresh for every run: otherwise one test's kills leak
-  ;; into the next.
+  ;; into the next. The third element is the front of the ring - what
+  ;; `*kill-buffer*' used to be, before the ring replaced it.
   ;;--------------------------------------------------------------
   (let* ((ed (new-text-editor))
          (frame (test-frame ed)))
     (parameterize ((*current-frame* frame)
                    (*search-pattern* #f)
                    (*search-case-fold?* #t)
-                   (*kill-buffer* "")
+                   (*kill-ring* '())
+                   (*kill-ring-yank-pointer* '())
                    (*this-command-kill* #f)
                    (*last-command-kill* #f)
                    (*last-command* #f)
@@ -134,7 +139,9 @@
       (for-each (lambda (ev) (dispatch-ncurses-event frame ev)) evs)
       (list (text-editor-to-string ed)
             (text-editor-get-cursor ed)
-            (*kill-buffer*)
+            ;; the latest kill, which is the front of the ring - and
+            ;; #f when nothing has been killed yet, Elisp's `(car nil)'
+            (if (pair? (*kill-ring*)) (car (*kill-ring*)) #f)
             (ncurses-frame-message frame)))))
 
 (define (run-keys text evs)
@@ -165,7 +172,12 @@
 (define C-g (integer->char 7))
 (define C-underscore (integer->char 31))   ; C-_ and C-/ are the same byte
 (define C-x (integer->char 24))
+(define C-w (integer->char 23))
 (define ESC #\esc)
+;; M-w and M-y are *two* key events each - ESC then the letter - so they
+;; are spliced into a key list rather than passed as one.
+(define M-w (list ESC #\w))
+(define M-y (list ESC #\y))
 
 ;;--------------------------------------------------------------------
 ;; The universal argument
@@ -189,7 +201,10 @@
 
 ;; The prefix is pending state: it survives the keys of a chord and is
 ;; consumed when a command finally runs.
-(test-equal 4
+;; The *raw* prefix of a bare `C-u' is the list `(4)', which is GNU
+;; Emacs's own value for it - `universal-argument' sets `prefix-arg' to
+;; `(list 4)'. That is what lets a command tell `C-u' from `C-u 4'.
+(test-equal '(4)
   (let* ((ed (new-text-editor))
         (frame (test-frame ed)))
     (parameterize ((*current-frame* frame))
@@ -238,8 +253,11 @@
 ;; ... and the accumulated entry is what C-y brings back.
 (test-equal '("hello\nworld" . 6) (run-keys "hello\nworld" (list C-k C-k C-y)))
 
-;; A prefix argument repeats the yank.
-(test-equal '("XXXXX" . 5) (run-keys "X" (list C-k C-y C-u C-y)))
+;; `C-u C-y' is not "yank four times", which is what mg did: in Emacs a
+;; bare `C-u' means the *latest* kill - it is the list `(4)', not the
+;; number 4, so `(current-kill 0)' - and it leaves point *before* what it
+;; inserted and the mark after it.
+(test-equal '("XX" . 1) (run-keys "X" (list C-k C-y C-u C-y)))
 
 ;; Kill-line follows mg's `killline': no argument kills to the end of
 ;; the line, taking the line break when only blanks remain before it.
@@ -364,7 +382,8 @@
       (parameterize ((*current-frame* frame)
                      (*search-pattern* #f)
                      (*search-case-fold?* #t)
-                     (*kill-buffer* "")
+                     (*kill-ring* '())
+                   (*kill-ring-yank-pointer* '())
                      (*this-command-kill* #f)
                      (*last-command-kill* #f)
                      (*last-command* #f)
@@ -925,7 +944,8 @@
   (parameterize ((*current-frame* frame)
                  (*search-pattern* #f)
                  (*search-case-fold?* #t)
-                 (*kill-buffer* "")
+                 (*kill-ring* '())
+                   (*kill-ring-yank-pointer* '())
                  (*this-command-kill* #f)
                  (*last-command-kill* #f)
                  (*last-command* #f)
@@ -1516,7 +1536,8 @@
                    (*current-keymap* #f)
                    (*search-pattern* #f)
                    (*search-case-fold?* #t)
-                   (*kill-buffer* "")
+                   (*kill-ring* '())
+                   (*kill-ring-yank-pointer* '())
                    (*this-command-kill* #f)
                    (*last-command-kill* #f)
                    (*last-command* #f)
@@ -1792,7 +1813,8 @@
                    (*echo-area-prompt* prompt)
                    (*search-pattern* #f)
                    (*search-case-fold?* #t)
-                   (*kill-buffer* "")
+                   (*kill-ring* '())
+                   (*kill-ring-yank-pointer* '())
                    (*this-command-kill* #f)
                    (*last-command-kill* #f)
                    (*last-command* #f)
@@ -2181,3 +2203,112 @@
         (list pushed (text-editor-get-cursor ed) (mark #t))))))
 
 (test-end "schemacs_ncurses_editor_mark")
+
+;;--------------------------------------------------------------------
+;; The kill ring
+;;
+;; `kill-ring' is a list of strings with the yank pointer somewhere in
+;; it, and the commands over it: C-w, M-w, C-y and M-y. The parts that
+;; can be asked directly are asked directly - the ring is a value, and
+;; `current-kill''s rotation is arithmetic - and the commands are driven
+;; by their keys.
+
+(test-begin "schemacs_ncurses_editor_kill_ring")
+
+(define (with-ring thunk)
+  (parameterize ((*kill-ring* '())
+                 (*kill-ring-yank-pointer* '())
+                 (*kill-ring-max* 120)
+                 (*last-command-kill* #f) (*this-command-kill* #f)
+                 (*kill-do-not-save-duplicates* #f))
+    (thunk)))
+
+;; `kill-new' puts the text at the front and points the yank pointer at
+;; it; `kill-append' adds to that same entry rather than making another,
+;; forwards or backwards.
+(test-equal '(("abc") ("a" "b" "c" "abc"))
+  (with-ring
+   (lambda ()
+     (kill-new "a")
+     (kill-append "b" #f)                ; "a" + "b"
+     (kill-append "c" #f)
+     (let ((after-append (*kill-ring*)))
+       (kill-new "c")
+       (kill-new "b")
+       (kill-new "a")
+       (list after-append (*kill-ring*))))))
+
+(test-equal "ba"
+  (with-ring (lambda () (kill-new "a") (kill-append "b" #t) (car (*kill-ring*)))))
+
+;; `kill-ring-max' is the most the ring keeps, and the oldest go first.
+(test-equal 3
+  (with-ring
+   (lambda ()
+     (parameterize ((*kill-ring-max* 3))
+       (for-each kill-new '("a" "b" "c" "d"))
+       (length (*kill-ring*))))))
+
+;; `current-kill' counts *back* from the yank pointer and moves it, and
+;; the arithmetic wraps - which is what keeps M-y going round the ring.
+;; The answers are GNU Emacs's own, from `emacs --batch' with the same
+;; ring and pointer - the rotation moves the pointer, so the third answer
+;; is "a" and not "b", which is not what reading the code twice tells you.
+(test-equal '("d" "c" "a" "b" "b")
+  (with-ring
+   (lambda ()
+     (for-each kill-new '("a" "b" "c" "d"))
+     (list (current-kill 0) (current-kill 1) (current-kill 2)
+           (current-kill 3) (current-kill 4)))))
+
+;; ... and `do-not-move' asks without moving.
+(test-equal '("d" "d")
+  (with-ring
+   (lambda ()
+     (for-each kill-new '("a" "b" "c" "d"))
+     (list (current-kill 0 #t) (current-kill 0)))))
+
+;; An empty ring is an error rather than an empty string.
+(test-assert
+  (with-ring (lambda () (guard (e (else #t)) (current-kill 0) #f))))
+
+;; C-k twice joins the two lines into one kill, and C-y brings both back.
+(test-equal '("hello\nworld" . 6)
+  (run-keys "hello\nworld" (list C-k C-k C-y)))
+
+;; ... and C-w kills the region, which C-y then puts back where point is.
+(test-equal '("hello" . 2)
+  (run-keys "hello" (list C-SPC C-f C-f C-w C-y)))
+
+;; M-w copies it instead, so the text is still there.
+(test-equal '("hellohe" . 7)
+  (run-keys "hello" (append (list C-SPC C-f C-f) M-w (list C-e C-y))))
+
+;; C-w with an *empty* region puts the empty string in the ring and does
+;; nothing else, which is what GNU Emacs's `C-w' does with point on the
+;; mark - checked against `emacs --batch' rather than guessed at.
+(test-equal '("hello" . 0)
+  (run-keys "hello" (list C-SPC C-w)))
+
+;; A region that is not there at all is the error, in Emacs's words.
+(test-equal "The mark is not active now"
+  (cadddr (run-keys* "hello" (list C-w))))
+
+;; C-y then M-y replaces what the yank inserted with the kill before it.
+;;
+;; Reading this test takes care, because the `C-y' in the middle matters:
+;; it is *not* a kill, so the second C-k starts a *new* ring entry rather
+;; than joining the first - "if the previous command was also a kill
+;; command, the text killed this time appends". So the ring is
+;; `("\n" "hello")', C-y inserts the "\n", and M-y replaces it with the
+;; "hello" underneath it: "hellohello", with the first C-k having taken
+;; no line break, mg's `killline' rule that a break comes only when the
+;; rest of the line is blank.
+(test-equal '("hellohello" . 10)
+  (run-keys "hello\n" (append (list C-k C-y C-k C-y) M-y)))
+
+;; M-y after anything that is not a yank says so rather than guessing.
+(test-equal "Previous command was not a yank"
+  (cadddr (run-keys* "hello\n" (append (list C-k C-y C-f) M-y))))
+
+(test-end "schemacs_ncurses_editor_kill_ring")

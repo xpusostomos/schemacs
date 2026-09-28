@@ -104,6 +104,11 @@
        ;; leaves in `prefix-arg', which `prefix-numeric-value' turns
        ;; into -1 for `(interactive "p")'.
        ((eq? '- uarg) -1)
+       ;; A bare `C-u' is the list `(4)' - `(16)' for `C-u C-u' - and the
+       ;; number it means is the one in it. That is the C's
+       ;; `prefix-numeric-value': "else if (CONSP (raw) && FIXNUMP (XCAR
+       ;; (raw))) val = XCAR (raw)".
+       ((pair? uarg) (uarg->integer dflt (car uarg)))
        ((eq? #t uarg) 4)
        ((integer? uarg) uarg)
        ((number? uarg) (round uarg))

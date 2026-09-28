@@ -20,7 +20,8 @@
   (import
     (scheme base)
     (only (schemacs editor engine)
-          text-editor-get-cursor text-editor-mark)
+          text-editor-delete-from-cursor text-editor-get-cursor
+          text-editor-mark text-editor-set-cursor)
     ;; `mark-active' and `transient-mark-mode' are `buffer.c''s
     ;; variables, and `mark-even-if-inactive' is `callint.c''s, which is
     ;; where `region_limit' reads them from - the same three the C's
@@ -33,6 +34,7 @@
     )
 
   (export
+   delete-region
    region-beginning
    region-end
    region-limit
@@ -63,6 +65,23 @@
         (unless m (error "The mark is not set now, so there is no region"))
         (let ((point (text-editor-get-cursor (current-editor))))
           (if (eq? (< point m) beginning?) point m))))
+
+    (define (delete-region start end)
+      ;; GNU Emacs's `delete-region' (`editfns.c'): "delete the text
+      ;; between START and END ... without modifying the kill ring". It
+      ;; is the command `yank-pop' uses to take back what `yank'
+      ;; inserted, and the one `kill-region' uses once the text is safely
+      ;; in the ring.
+      ;;
+      ;; Emacs's `validate_region' puts the two in order and checks them
+      ;; against the buffer; the engine's cursor-and-delete does the same
+      ;; clamping.
+      ;;--------------------------------------------------------------
+      (let ((ed (current-editor)))
+        (when (> start end)
+          (let ((swap start)) (set! start end) (set! end swap)))
+        (text-editor-set-cursor ed start)
+        (text-editor-delete-from-cursor ed (- end start))))
 
     (define (region-beginning)
       ;; GNU Emacs's `region-beginning': "the integer value of point or

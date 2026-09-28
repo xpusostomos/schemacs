@@ -53,8 +53,9 @@
           buffer-local-value current-buffer mark-active set!mark-active
           set-buffer-local-value! transient-mark-mode)
     (only (schemacs editor command) *mark-even-if-inactive*)
-    (only (schemacs editor editfns) region-beginning region-end)
-    (only (schemacs editor subr) add-to-history)
+    (only (schemacs editor editfns)
+          delete-region region-beginning region-end)
+    (only (schemacs editor subr) add-to-history nthcdr)
     ;; `define-key' and the global map, which this library fills with the
     ;; bindings for the commands it defines - as simple.el does with
     ;; `(define-key global-map ...)'.
@@ -66,7 +67,9 @@
 
   (export
    %char-at %inword-at *amalgamating-count* *amalgamating-undo-limit*
-   *kill-buffer* *last-change-was-undo* *last-command* *last-command-kill*
+   *last-change-was-undo* *last-command* *last-command-kill*
+   *kill-do-not-save-duplicates* *kill-read-only-ok*
+   *kill-ring* *kill-ring-max* *kill-ring-yank-pointer*
    *pending-undo-list* *prefix-cu* *prefix-digits* *prefix-negative*
    *this-command-kill*
    amalgamating-command? backward-char backward-delete-char
@@ -74,7 +77,9 @@
    beginning-of-buffer beginning-of-line clear-prefix! delete-char
    end-of-buffer end-of-line exchange-point-and-mark forward-char
    forward-word forward-word-position keyboard-quit kill-line kill-line-chunk
-   kill-line-command kill-range kill-word next-line pending-uarg
+   copy-region-as-kill current-kill kill-append kill-line-command
+   kill-new kill-range kill-region kill-ring-save kill-word next-line
+   pending-uarg yank-pop
    ;; `newline' clashes with `(scheme base)'s output procedure, so it
    ;; is exported by rename; see the definition below.
    (rename (newline-command newline))
@@ -515,7 +520,6 @@
     ;; which is the one place a command is invoked from the keyboard.
     ;;------------------------------------------------------------------
 
-    (define *kill-buffer* (make-parameter ""))
     (define *this-command-kill* (make-parameter #f))
     (define *last-command-kill* (make-parameter #f))
 
@@ -572,20 +576,23 @@
                 (if (%inword-at ed i) (loop (- i 1) 'word) (+ i 1))))))))
 
     (define (kill-range ed start end forward?)
-      ;; Kill (cut) the text between the character indices START and
-      ;; END into the kill buffer, following mg's CFKILL protocol:
-      ;; consecutive kills accumulate, forward kills append at the
-      ;; end of the kill buffer, backward kills prepend at the front.
-      ;; Returns the killed text.
+      ;; Kill (cut) the text between the character indices START and END
+      ;; and return it. This is the shared middle of the commands that
+      ;; kill: the word kills, and `kill-line'.
+      ;;
+      ;; It was mg's, over a single kill *buffer*, and is now a thin layer
+      ;; over Emacs's kill *ring* - `kill-append' on a run of kills and
+      ;; `kill-new' to start one. The callers did not change.
+      ;;
+      ;; Emacs's rule is `(kill-append string (< end beg))' with BEG the
+      ;; mark and END point, so BEFORE-P is true when the text being
+      ;; killed lies *before* what was killed last - a backward kill.
+      ;; FORWARD? says the same thing here, the other way up.
       ;;--------------------------------------------------------------
       (let* ((text (text-editor-copy-string ed start end)))
-        (cond
-         ((not (*last-command-kill*))
-          (*kill-buffer* text))
-         ((< start end)  ;; forward kill: append at the end
-          (*kill-buffer* (string-append (*kill-buffer*) text)))
-         (else           ;; backward kill: prepend at the front
-          (*kill-buffer* (string-append text (*kill-buffer*)))))
+        (if (*last-command-kill*)
+            (kill-append text (not forward?))
+            (kill-new text))
         (*this-command-kill* #t)
         (text-editor-set-cursor ed (min start end))
         (text-editor-delete-from-cursor ed (abs (- end start)))
@@ -669,20 +676,260 @@
              (kill-range ed start end #f))))
        "Kill N words backward from point."))
 
-    (define yank
-      ;; mg's `yank` (yank.c:224) inserts the kill buffer N times.
-      (new-count-command
-       "yank"
-       (lambda (count)
-         (let ((text (*kill-buffer*)))
-           (when (> (string-length text) 0)
-             (let loop ((i 0))
-               (when (< i count)
-                 (text-editor-insert (current-editor) text)
-                 (loop (+ 1 i)))))))
-       "Insert the kill buffer at point, N times."))
-
     ;;----------------------------------------------------------------
+    ;; The kill ring
+    ;;
+    ;; GNU Emacs's `simple.el', the same banner: `kill-ring' is a *list*
+    ;; of the last `kill-ring-max' kills, most recent first, with
+    ;; `kill-ring-yank-pointer' pointing into it at the entry the next
+    ;; `yank' would use. It replaces mg's single `*kill-buffer*', whose
+    ;; CFKILL accumulation was the same idea with nowhere to rotate to -
+    ;; so there was no M-y.
+    ;;
+    ;; The rule that makes consecutive kills join is worth stating,
+    ;; because it is not where it looks. `kill-region' tests
+    ;; `(eq last-command 'kill-region)' and then **sets `this-command' to
+    ;; `kill-region'** - so a command that kills *renames itself*, and the
+    ;; next command sees a kill as the last one whatever key ran it. That
+    ;; is what `*last-command-kill*' is here: mg's flag, rotated by the
+    ;; command loop, set by everything that kills.
+    ;;--------------------------------------------------------------
+
+    (define *kill-ring*
+      ;; GNU Emacs's `kill-ring': the killed texts, most recent first.
+      ;;--------------------------------------------------------------
+      (make-parameter '()))
+
+    (define *kill-ring-yank-pointer*
+      ;; GNU Emacs's `kill-ring-yank-pointer`: a *tail* of `kill-ring',
+      ;; the entry the next `yank' takes and the place `yank-pop'
+      ;; rotates from. A tail rather than an index, as in Emacs, because
+      ;; that is what `kill-new' can set in one move.
+      ;;--------------------------------------------------------------
+      (make-parameter '()))
+
+    (define *kill-ring-max*
+      ;; GNU Emacs's `kill-ring-max': how many kills are kept. 120 on
+      ;; Emacs 31, which is where this number comes from.
+      ;;--------------------------------------------------------------
+      (make-parameter 120))
+
+    (define *kill-do-not-save-duplicates*
+      ;; GNU Emacs's `kill-do-not-save-duplicates', off by default: when
+      ;; it is on, killing text that is already the front of the ring
+      ;; does not add it again.
+      ;;--------------------------------------------------------------
+      (make-parameter #f))
+
+    (define *kill-read-only-ok*
+      ;; GNU Emacs's `kill-read-only-ok', off by default: when it is on,
+      ;; a kill from a read-only buffer puts the text in the ring and
+      ;; says so instead of signalling.
+      ;;--------------------------------------------------------------
+      (make-parameter #f))
+
+    (define (kill-new string . args)
+      ;; GNU Emacs's `kill-new': make STRING the latest kill, and point
+      ;; the yank pointer at it. REPLACE - false unless passed - replaces
+      ;; the front of the ring rather than adding a new entry, which is
+      ;; how a run of kills becomes one entry.
+      ;;
+      ;; Emacs also offers the string to the window system here
+      ;; (`interprogram-cut-function') and can pull in what another
+      ;; program has on the clipboard first; there is no window system
+      ;; yet. See REGION-PLAN.txt.
+      ;;--------------------------------------------------------------
+      (let ((replace (if (pair? args) (car args) #f)))
+        (unless (and (*kill-do-not-save-duplicates*)
+                     (equal? string (car (*kill-ring*))))
+          (if (and replace (pair? (*kill-ring*)))
+              (set-car! (*kill-ring*) string)
+              (*kill-ring* (add-to-history (*kill-ring*) string
+                                           (*kill-ring-max*) #t))))
+        (*kill-ring-yank-pointer* (*kill-ring*))
+        string))
+
+    (define (kill-append string before-p)
+      ;; GNU Emacs's `kill-append': add STRING to the latest kill, or -
+      ;; BEFORE-P - in front of it. This is the consecutive-kill case, and
+      ;; the reason two C-k's paste as two lines rather than one.
+      ;;
+      ;; Emacs decides whether to replace the front of the ring by whether
+      ;; the text being appended to came from a `yank-handler'; there is
+      ;; no `yank-handler' here, so it always replaces, which is what its
+      ;; expression comes to without one.
+      ;;--------------------------------------------------------------
+      (let ((cur (car (*kill-ring*))))
+        (kill-new (if before-p
+                      (string-append string cur)
+                      (string-append cur string))
+                  #t)))
+
+    (define (current-kill n . args)
+      ;; GNU Emacs's `current-kill': the Nth kill counting back from the
+      ;; yank pointer, which is moved to it unless DO-NOT-MOVE says not
+      ;; to. `(current-kill 0)' is "the latest kill".
+      ;;
+      ;; The ring maths is Emacs's: the pointer is a tail, and
+      ;; `(mod (- n (length pointer)) (length ring))' turns "N back from
+      ;; the pointer" into a distance from the front of the list. The
+      ;; arithmetic wraps, which is what makes M-y keep going round.
+      ;;--------------------------------------------------------------
+      (let ((do-not-move (if (pair? args) (car args) #f)))
+        (or (*kill-ring*) (error "Kill ring is empty"))
+        (let ((element (nthcdr (modulo (- n (length (*kill-ring-yank-pointer*)))
+                                       (length (*kill-ring*)))
+                               (*kill-ring*))))
+          (unless do-not-move
+            (*kill-ring-yank-pointer* element))
+          (car element))))
+
+    (define (kill-region-arguments)
+      ;; The BEG and END the region commands work on, in Emacs's order:
+      ;; the mark first, then point - "Pass mark first, then point,
+      ;; because the order matters when calling `kill-append'". It is
+      ;; Emacs's interactive form, which asks for the region and answers
+      ;; #f when there is no mark to make one from.
+      ;;
+      ;; An *empty* region is not a mistake: GNU Emacs's `C-w' with point
+      ;; on the mark puts the empty string in the kill ring and does
+      ;; nothing else, which is worth knowing before "why did my kill ring
+      ;; stop pasting?".
+      ;;--------------------------------------------------------------
+      (let ((mark (mark #f)))   ; signals when the mark is not active
+        (and mark
+             (list mark (text-editor-get-cursor (current-editor))))))
+
+    (define kill-region
+      ;; GNU Emacs's `kill-region' (C-w): delete the region and put it in
+      ;; the kill ring.
+      ;;
+      ;; A kill that runs into a read-only buffer does not lose the text:
+      ;; Emacs copies it to the ring and then signals, so that the killing
+      ;; commands can be used to *copy* out of a read-only buffer - and
+      ;; `kill-read-only-ok' turns the signal into a message.
+      ;;--------------------------------------------------------------
+      (new-command
+       "kill-region"
+       (lambda ()
+         (let ((args (kill-region-arguments)))
+           (if (not args)
+               (error "The mark is not set now, so there is no region")
+               (let* ((beg (car args))
+                      (end (cadr args))
+                      (string (text-editor-copy-string (current-editor) beg end))
+                      (read-only? (text-editor-read-only? (current-editor))))
+                 ;; The ring takes the text first, as in Emacs, so that a
+                 ;; read-only buffer still gives up its text.
+                 (if (and (not read-only?) (*last-command-kill*))
+                     (kill-append string (< end beg))
+                     (kill-new string))
+                 (*this-command-kill* #t)
+                 (set!text-editor-deactivate-mark! (current-buffer) #t)
+                 (if read-only?
+                     (unless (*kill-read-only-ok*)
+                       (error "Buffer is read-only"))
+                     (delete-region beg end))))))
+       (lambda () #f)
+       "Kill (cut) the text between point and mark."))
+
+    (define (copy-region-as-kill beg end)
+      ;; GNU Emacs's `copy-region-as-kill': put the text in the kill ring
+      ;; without deleting it. The appending rule is the kill one, so M-w
+      ;; after a kill extends that kill rather than starting a new entry.
+      ;;--------------------------------------------------------------
+      (let ((string (text-editor-copy-string (current-editor) beg end)))
+        (if (*last-command-kill*)
+            (kill-append string (< end beg))
+            (kill-new string))
+        (*this-command-kill* #t)
+        (set!text-editor-deactivate-mark! (current-buffer) #t)))
+
+    (define kill-ring-save
+      ;; GNU Emacs's `kill-ring-save' (M-w), which is `copy-region-as-kill'
+      ;; with a moment of visual feedback - Emacs's
+      ;; `indicate-copied-region', which blinks the other end of the
+      ;; region. There is no blink here, so it is the copy alone.
+      ;;--------------------------------------------------------------
+      (new-command
+       "kill-ring-save"
+       (lambda ()
+         (let ((args (kill-region-arguments)))
+           (if (not args)
+               (error "The mark is not set now, so there is no region")
+               (copy-region-as-kill (car args) (cadr args)))))
+       (lambda () #f)
+       "Save the region as if killed, but don't kill it."))
+
+    (define yank
+      ;; GNU Emacs's `yank' (C-y): insert the most recent kill at point,
+      ;; put point after it, and set the mark at the beginning of it
+      ;; **without activating it** - which is what `yank-pop' then uses to
+      ;; find the text it is to replace.
+      ;;
+      ;; With no argument it is `(current-kill 0)'; with a prefix argument
+      ;; it is the Nth kill back, and with `C-u' - the raw argument that
+      ;; is not an integer - it is also 0, but point and mark end up the
+      ;; *other* way round, so that the command repeated with C-u walks
+      ;; back through the ring.
+      ;;
+      ;; Emacs inserts through `insert-for-yank', which honours the
+      ;; `yank-handler' text property and `yank-excluded-properties';
+      ;; there are no text properties on a yank here yet.
+      ;;--------------------------------------------------------------
+      (new-command
+       "yank"
+       (lambda (arg)
+         ;; `(cond ((listp arg) 0) ((eq arg '-) -2) (t (1- arg)))' in
+         ;; Emacs: a bare `C-u' is the latest kill, `M-- C-y' is the one
+         ;; *before* the latest - which is -2 because `current-kill'
+         ;; counts back from the yank pointer, and the pointer has already
+         ;; moved to the latest - and a number is that many kills back.
+         (let ((n (cond ((not arg) 0)
+                        ((pair? arg) 0)
+                        ((eq? '- arg) -2)
+                        (else (- arg 1))))
+               (ed (current-editor)))
+           (push-mark)
+           (text-editor-insert ed (current-kill n))
+           ;; `C-u C-y' leaves point *before* what it inserted and the
+           ;; mark after it, which is like `exchange-point-and-mark' but
+           ;; does not activate the mark. Emacs asks `(consp arg)' - a
+           ;; bare `C-u' - and that is what the list is for.
+           (when (pair? arg)
+             (let ((was (mark #t)))
+               (set!text-editor-mark ed (text-editor-get-cursor ed))
+               (text-editor-set-cursor ed was)))))
+       (lambda (arg) arg)
+       "Reinsert (paste) the last stretch of killed text."
+       'uarg))
+
+    (define yank-pop
+      ;; GNU Emacs's `yank-pop' (M-y): replace what the last yank inserted
+      ;; with an older kill. It deletes the text between point and the
+      ;; mark - which `yank' left at the beginning of what it inserted -
+      ;; and inserts the next kill back in the ring.
+      ;;
+      ;; Emacs 31's `yank-pop' does something else when the command before
+      ;; it was not a yank: it reads a kill out of the ring in the
+      ;; minibuffer (`yank-from-kill-ring'). That needs the minibuffer,
+      ;; which imports *this* library, so it is not here - and the older
+      ;; Emacs behaviour is, which is to say so.
+      ;;--------------------------------------------------------------
+      (new-count-command
+       "yank-pop"
+       (lambda (count)
+         (if (not (eq? (*last-command*) yank))
+             (error "Previous command was not a yank")
+             (let* ((ed (current-editor))
+                    (before (< (text-editor-get-cursor ed) (mark #t)))
+                    (beg (if before (text-editor-get-cursor ed) (mark #t)))
+                    (end (if before (mark #t) (text-editor-get-cursor ed))))
+               (delete-region beg end)
+               (set!text-editor-mark ed (text-editor-get-cursor ed))
+               (text-editor-insert ed (current-kill count)))))
+       "Replace the just-yanked text with an older kill."))
+
     ;; Undo
     ;;
     ;; The undo list itself is a property of the buffer and lives in the
@@ -836,8 +1083,16 @@
       (cond
        ((and (not (*prefix-cu*)) (not (*prefix-digits*)))
         (and (*prefix-negative*) '-))
+       ;; A bare `C-u' - one with no digits after it - is a *list* of one
+       ;; number, which is GNU Emacs's raw value for it: `universal-argument'
+       ;; sets `prefix-arg' to `(list 4)'. That is not a detail: it is how a
+       ;; command tells `C-u' from `C-u 4', and commands do ask - `yank' takes
+       ;; the latest kill for the list and the Nth for the number, and
+       ;; `set-mark-command' only pops the mark ring for `C-u C-u', which is
+       ;; the list `(16)'. `uarg->integer' reads the number out of it, so
+       ;; everything that only wants a count is unaffected.
        ((not (*prefix-digits*))
-        (* (if (*prefix-negative*) -1 1) (expt 4 (*prefix-cu*))))
+        (list (* (if (*prefix-negative*) -1 1) (expt 4 (*prefix-cu*)))))
        (else
         (* (if (*prefix-negative*) -1 1)
            (string->number (*prefix-digits*))))))
@@ -913,14 +1168,25 @@
         (cond
          ((not uarg) #f)
          ((eq? '- uarg) "C-u -")
-         ((integer? uarg)
-          (let loop ((n uarg) (str ""))
-            (cond
-             ((and (> n 4) (= 0 (modulo n 4))) (loop (quotient n 4)
-                                                     (string-append str " C-u")))
-             ((= n 4) (string-append "C-u" str))
-             (else (string-append "C-u " (number->string uarg))))))
+         ;; Emacs's `pcase' has a clause for the *list* - `(4)' for `C-u',
+         ;; `(16)' for `C-u C-u' - and it describes it as the number it
+         ;; holds describes itself.
+         ((pair? uarg) (prefix-argument-description-of (car uarg)))
+         ((integer? uarg) (prefix-argument-description-of uarg))
          (else (string-append "C-u " (number->string uarg))))))
+
+    (define (prefix-argument-description-of n)
+      ;; What an argument of N is described as: `C-u' repeated as many
+      ;; times as N divides by 4, and N itself when it does not divide
+      ;; cleanly. Emacs writes this loop twice, once for the number and
+      ;; once inside its list clause; here it is one procedure.
+      ;;--------------------------------------------------------------
+      (let loop ((n n) (str ""))
+        (cond
+         ((and (> n 4) (= 0 (modulo n 4)))
+          (loop (quotient n 4) (string-append str " C-u")))
+         ((= n 4) (string-append "C-u" str))
+         (else (string-append "C-u " (number->string n))))))
 
     (define (show-prefix-echo!)
       ;; Describe the prefix argument, if its time has come: the echo
@@ -989,7 +1255,7 @@
             ((eq? '- uarg)
              ;; Treat -0 as just -, so that -01 will work.
              (*prefix-negative* #t)
-             (unless (zerop digit)
+             (unless (zero? digit)
                (*prefix-digits* (number->string digit))))
             (else
              (*prefix-negative* #f)
@@ -1233,7 +1499,9 @@
          ;; (`C-u C-u' is the raw argument 16 here rather than a cons,
          ;; because a repeated C-u counts up instead of making one.)
          (cond
-          ((and (integer? arg) (> arg 4)) (push-mark-command #f #f))
+          ;; `(and (consp arg) (> (prefix-numeric-value arg) 4))' in
+          ;; Emacs: only `C-u C-u' sets the mark here unconditionally.
+          ((and (pair? arg) (> (car arg) 4)) (push-mark-command #f #f))
           ((not (eq? (*last-command*) set-mark-command))
            (if arg (pop-to-mark-command) (push-mark-command #t #f)))
           (arg (pop-to-mark-command))
@@ -1351,6 +1619,9 @@
     (define-key *default-keymap*
       (list (list 'meta 'ctrl #\h)) backward-kill-word)
     (define-key *default-keymap* (list (list 'ctrl #\y)) yank)
+    (define-key *default-keymap* (list (list 'meta #\y)) yank-pop)
+    (define-key *default-keymap* (list (list 'ctrl #\w)) kill-region)
+    (define-key *default-keymap* (list (list 'meta #\w)) kill-ring-save)
 
     (define self-insert-layer
       ;; Catch all printable characters and bind them to
