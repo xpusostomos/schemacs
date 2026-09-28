@@ -437,13 +437,14 @@
       ;; to reading the file at all.
       ;;--------------------------------------------------------------
       ;;
-      ;; Read from `*current-buffer*' rather than from `(current-buffer)',
-      ;; because the fallback is the point: with no buffer set,
-      ;; `(current-buffer)' goes on to the frame's selected window, and
-      ;; with no frame either there is nothing to ask - which is what a
-      ;; `find-file' called from a script or a test has.
+      ;; `(current-buffer)' with one guard: it falls back to the frame's
+      ;; selected window, and with no frame there - which is what a
+      ;; `find-file' called from a script or a test has - there is
+      ;; nothing to ask, so the answer is the process's directory rather
+      ;; than an error on the way to reading the file.
       ;;--------------------------------------------------------------
-      (let ((buffer (*current-buffer*)))
+      (let ((buffer (or (*current-buffer*)
+                        (and (*current-frame*) (current-editor)))))
         (or (and buffer (buffer-default-directory buffer))
             (string-append (getcwd) "/"))))
 
