@@ -15,6 +15,7 @@
  (only (schemacs editor frame)
        *current-frame* *echo-area-buffer* *echo-area-prompt* *minibuffer*
        frame-height ncurses-frame-editor ncurses-frame-message
+       ncurses-frame-message-expiry set!ncurses-frame-message
        ncurses-frame-selected-window new-frame set!window-buffer
        window-internal?
        window-list
@@ -34,27 +35,32 @@
  (only (schemacs editor buffer)
        *buffer-list* *current-buffer* *kill-buffer-query-functions*
        buffer-list buffer-name get-buffer get-buffer-create
-       buffer-local-keymap set!buffer-local-keymap)
+       buffer-local-keymap set!buffer-local-keymap set!buffer-default-directory)
  (only (schemacs editor engine) text-editor-insert text-editor-read-only?)
  (only (schemacs editor files)
        *require-final-newline* ensure-final-newline-on-visit
-       file-name-completion-table file-name-directory-part
+       expand-file-name file-name-completion-table file-name-directory-part
        file-name-nondirectory-part find-file note-file-read-only!
        save-answer-char->decision)
  ;; `try-completion' and `all-completions' are `minibuf.c''s.
  (only (schemacs editor minibuf) all-completions try-completion)
  (only (schemacs editor minibuffer)
-       completion--do-completion make<minibuffer>
+       *completion-show-inline-help* *minibuffer-completing-file-name*
+       *minibuffer-message-timeout*
+       completion--do-completion completion--map-for completion--message
+       make<minibuffer>
        minibuffer--bitset minibuffer-complete minibuffer-complete-and-exit
        minibuffer-complete-word minibuffer-completion-help
+       minibuffer-local-filename-completion-map
        minibuffer-local-must-match-map
        minibuffer-contents
        minibuffer-cursor-column minibuffer-history
-       minibuffer-local-completion-map minibuffer-local-map minibufferp)
+       minibuffer-local-completion-map minibuffer-local-map minibuffer-message
+       minibuffer-set-contents! minibufferp)
  (only (schemacs editor simple)
        *kill-buffer* *last-change-was-undo* *last-command* read-only-mode
        *last-command-kill* *pending-undo-list* *this-command-kill*
-       pending-uarg)
+       pending-uarg self-insert-command)
  (only (schemacs editor isearch)
        *search-case-fold?* *search-pattern* isearch-find isearch-message)
  (only (schemacs editor window)
@@ -624,6 +630,38 @@
         (file-name-nondirectory-part "./foo.txt")
         (file-name-directory-part "/tmp/x/y")
         (file-name-nondirectory-part "/tmp/x/y")))
+
+;; `expand-file-name' joins a bare name to the directory, and resolves
+;; the `.` and `..` in whatever it is given. The expected values are GNU
+;; Emacs's own, from `(expand-file-name NAME "/home/chris/GITE/schemacs/")'
+;; - including the empty name, which expands to the directory with no
+;; trailing slash.
+(test-equal
+    '("/home/chris/GITE/schemacs/foo"
+      "/home/chris/GITE/schemacs/foo"
+      "/home/chris/GITE/foo"
+      "/home/chris/GITE/schemacs/b"
+      "/home/chris/GITE/schemacs/a/b"
+      "/abs/x"
+      "/y"
+      "/home/chris/GITE/schemacs/sub/"
+      "/home/chris/GITE/schemacs"
+      "/home/chris/GITE/schemacs/c")
+  (let ((directory "/home/chris/GITE/schemacs/"))
+    (map (lambda (name) (expand-file-name name directory))
+         '("foo" "./foo" "../foo" "a/../b" "a//b" "/abs/x" "/abs/../y"
+           "sub/" "" "a/b/../../c"))))
+
+;; ...and with no directory given it is the *current buffer's*, which is
+;; what makes a bare name typed at `C-x C-f' mean anything: Emacs puts
+;; the directory in the minibuffer, so its answer is absolute already,
+;; while this editor's prompt carries the directory beside the buffer.
+(test-equal "/tmp/somewhere/notes.txt"
+  (let ((buffer (new-text-editor)))
+    (set!text-editor-buffer-name buffer "notes.txt")
+    (set!buffer-default-directory buffer "/tmp/somewhere/")
+    (parameterize ((*current-buffer* buffer))
+      (expand-file-name "notes.txt"))))
 
 ;; Completing a file name offers the entries of the directory, with a
 ;; slash on the ones that are directories (so completing one descends
@@ -1772,3 +1810,127 @@
     (list-ref result 1)))
 
 (test-end "schemacs_ncurses_editor_minibuffer_dispatch")
+
+;;--------------------------------------------------------------------
+;; Messages, the completions window, and the selection in it
+;;
+;; Six things GNU Emacs does that this editor did not, all of them
+;; things a user sees rather than things a function returns - which is
+;; why the pty battery covers them too. What is here is the part that
+;; can be asserted without a terminal.
+
+(test-begin "schemacs_ncurses_editor_completion_ui")
+
+(define (message-frame)
+  (test-frame (new-text-editor)))
+
+;; A message shown while the minibuffer is being read is enclosed in
+;; `[...]' with a space in front, which is how Emacs marks it as the
+;; editor talking rather than as part of the answer.
+(test-equal " [No match]"
+  (let ((frame (message-frame)))
+    (parameterize ((*current-frame* frame))
+      (minibuffer-message "No match")
+      (ncurses-frame-message frame))))
+
+;; ...and a message that is already written that way is not enclosed
+;; twice: Emacs tests it with the regexp "\\` *\\[.+\\]\\'". Leading
+;; and trailing spaces count, so " x " is not already enclosed and
+;; becomes " [ x ]".
+(test-equal '(" [No match]" " [ x ]")
+  (let ((frame (message-frame)))
+    (parameterize ((*current-frame* frame))
+      (list (begin (minibuffer-message " [No match]")
+                   (ncurses-frame-message frame))
+            (begin (minibuffer-message " x ")
+                   (ncurses-frame-message frame))))))
+
+;; A message shown with `minibuffer-message' gets a timeout; one put
+;; there plainly - by the command loop clearing the echo area, or by an
+;; error report - gets none, and setting either takes the other's away.
+;; Otherwise a message that was meant to stay would inherit the timeout
+;; of the one before it and vanish early.
+(test-equal '(#t #f)
+  (let ((frame (message-frame)))
+    (parameterize ((*current-frame* frame)
+                   (*minibuffer-message-timeout* 2))
+      (minibuffer-message "No match")
+      (list (and (ncurses-frame-message-expiry frame) #t)
+            (begin (set!ncurses-frame-message frame "plain")
+                   (ncurses-frame-message-expiry frame))))))
+
+;; `completion--message' says nothing at all when
+;; `completion-show-inline-help' is off, which is what a user who has
+;; turned it off expects.
+(test-equal '(" [No match]" "")
+  (let ((frame (message-frame)))
+    (parameterize ((*current-frame* frame))
+      (list (begin (completion--message "No match")
+                   (ncurses-frame-message frame))
+            (begin (set!ncurses-frame-message frame "")
+                   (parameterize ((*completion-show-inline-help* #f))
+                     (completion--message "No match"))
+                   (ncurses-frame-message frame))))))
+
+;; Replacing the minibuffer contents replaces them. They used to be
+;; *prepended* to, because the deletion ran from the cursor - which the
+;; engine deletes forward from, at the end of the text - before the
+;; cursor was moved to the beginning. Choosing a completion then read
+;; "scratch.mdsc" and stepping through the history was wrong the same
+;; way.
+(test-equal '("apple" "orange")
+  (let* ((frame (test-frame (new-text-editor)))
+         (mb-ed (new-text-editor))
+         (mb (make<minibuffer> mb-ed "Fruit: " minibuffer-local-map
+                              #f minibuffer-history 0 #f)))
+    (text-editor-insert mb-ed "ap")
+    (parameterize ((*current-frame* frame) (*minibuffer* mb))
+      (minibuffer-set-contents! mb "apple")
+      (let ((first (minibuffer-contents)))
+        (minibuffer-set-contents! mb "orange")
+        (list first (minibuffer-contents))))))
+
+;; SPC completes a word in an ordinary completing minibuffer, and
+;; inserts a space in a file-name one - because a file name may have a
+;; space in it, which is the whole reason Emacs has
+;; `minibuffer-local-filename-completion-map'.
+(test-equal '(#t #t #f)
+  (list ;; SPC in the completion map completes a word...
+        (eq? minibuffer-complete-word
+             (km:keymap-lookup minibuffer-local-completion-map
+                               (km:keymap-index '((#\space)))))
+        ;; ...SPC in the file-name map inserts one...
+        (eq? self-insert-command
+             (km:keymap-lookup minibuffer-local-filename-completion-map
+                               (km:keymap-index '((#\space)))))
+        ;; ...and the file-name map says nothing about TAB at all.
+        (km:keymap-lookup minibuffer-local-filename-completion-map
+                          (km:keymap-index '((ctrl #\i))))))
+
+;; Layering them is what `completing-read' does while a file name is
+;; being read: SPC comes from the file-name map and everything else from
+;; the base map, which is Emacs's `make-composed-keymap' with the base as
+;; the parent.
+;; ...and it is layered only while a file name is being read, which is
+;; what `read-file-name' says by binding
+;; `minibuffer-completing-file-name'.
+(test-equal '(#t #t #t)
+  (list
+   (parameterize ((*minibuffer-completing-file-name* #t))
+     (eq? self-insert-command
+          (km:keymap-lookup
+           (completion--map-for minibuffer-local-completion-map)
+           (km:keymap-index '((#\space))))))
+   (parameterize ((*minibuffer-completing-file-name* #t))
+     (eq? minibuffer-complete
+          (km:keymap-lookup
+           (completion--map-for minibuffer-local-completion-map)
+           (km:keymap-index '((ctrl #\i))))))
+   ;; a buffer name is not a file name, and there SPC still completes a
+   ;; word - the file-name map is not layered at all
+   (eq? minibuffer-complete-word
+        (km:keymap-lookup
+         (completion--map-for minibuffer-local-completion-map)
+         (km:keymap-index '((#\space)))))))
+
+(test-end "schemacs_ncurses_editor_completion_ui")

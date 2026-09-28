@@ -38,7 +38,9 @@
     (only (schemacs editor keymap) define-key *default-keymap*)
     ;; `SIGTSTP' is raised through `kill': `(scheme base)''s `raise'
     ;; raises an exception, not a signal.
-    (only (guile) kill getpid SIGTSTP))
+    (only (guile) kill getpid SIGTSTP)
+    ;; The message timeout is a time in seconds.
+    (only (scheme time) current-second))
 
   (export
    %window-point
@@ -56,6 +58,8 @@
    ncurses-frame-esc-pending
    ncurses-frame-keymap-state
    ncurses-frame-message
+   ncurses-frame-message-expired?
+   ncurses-frame-message-expiry
    ncurses-frame-quit-cont
    ncurses-frame-selected-window
    ncurses-frame-type?
@@ -70,7 +74,9 @@
    set!ncurses-frame-editor
    set!ncurses-frame-esc-pending
    set!ncurses-frame-keymap-state
+   set-message!
    set!ncurses-frame-message
+   set!ncurses-frame-message-expiry
    set!ncurses-frame-quit-cont
    set!ncurses-frame-selected-window
    set!ncurses-frame-windows
@@ -290,7 +296,7 @@
     (define-record-type <ncurses-frame>
       (make<ncurses-frame>
        windows selected-window height width
-       message keymap-state quit-cont esc-pending)
+       message message-expiry keymap-state quit-cont esc-pending)
       ncurses-frame-type?
       (windows   ncurses-frame-windows   set!ncurses-frame-windows)
       ;; ^ The frame's windows, top to bottom. Emacs's `window-list'.
@@ -306,8 +312,18 @@
       ;; so that a window that gets resized is noticed.
       (width     frame-width              set!frame-width)
       ;; ^ The frame's width in columns, GNU Emacs's `frame-width'.
-      (message    ncurses-frame-message    set!ncurses-frame-message)
+      (message    ncurses-frame-message    set!ncurses-frame-message-text)
       ;; ^ A message string drawn in the echo area, or false.
+      (message-expiry ncurses-frame-message-expiry
+                      set!ncurses-frame-message-expiry)
+      ;; ^ When that message should be taken down again, as a time in
+      ;; seconds in the sense of `current-second', or false for a
+      ;; message that stays until the next key. GNU Emacs arms a timer
+      ;; for this (`minibuffer-message-timeout', two seconds) and also
+      ;; clears on the next input event, which is what the command loop
+      ;; does here by setting the message to "" before every command.
+      ;; This editor has no timers, so the time is kept and the command
+      ;; loop's read is given a timeout while one is pending.
       (keymap-state ncurses-frame-keymap-state set!ncurses-frame-keymap-state)
       ;; ^ A pending modal keymap lookup state, or false. It persists
       ;; between key events when a key chord (such as C-x C-s) is
@@ -328,6 +344,37 @@
       ;; LF file rewrote it with LF, and the other way round. It is
       ;; buffer-local in `(schemacs editor files)' now.
       )
+
+    (define (set!ncurses-frame-message frame text)
+      ;; Put TEXT in FRAME's echo area, taking down any timeout the
+      ;; message it replaces had. A timeout belongs to the message it
+      ;; was set with (`SET-MESSAGE!'), and a plain `message' - the
+      ;; command loop clearing the echo area, or an error being
+      ;; reported - is not meant to inherit the previous one's and
+      ;; disappear early.
+      ;;--------------------------------------------------------------
+      (set!ncurses-frame-message-text frame text)
+      (set!ncurses-frame-message-expiry frame #f))
+
+    (define (ncurses-frame-message-expired? frame)
+      ;; Whether FRAME's message has been up for as long as it was
+      ;; given. A message with no expiry - the great majority, which
+      ;; stay until the next key - is never expired.
+      ;;--------------------------------------------------------------
+      (let ((limit (ncurses-frame-message-expiry frame)))
+        (and limit (< limit (current-second)))))
+
+    (define (set-message! frame text . args)
+      ;; Put TEXT in FRAME's echo area, taking it down again after
+      ;; ARGS' first element seconds - or leaving it until the next key
+      ;; when there is none. GNU Emacs's `message' pairs a string with
+      ;; the timer `minibuffer-message' arms for it; the two are set
+      ;; together here so that a message cannot be left with the
+      ;; previous message's expiry.
+      ;;--------------------------------------------------------------
+      (set!ncurses-frame-message frame text)
+      (set!ncurses-frame-message-expiry
+       frame (and (pair? args) (car args) (+ (current-second) (car args)))))
 
     ;; The frame currently dispatching a key event. Commands read the
     ;; frame through this parameter.
@@ -393,7 +440,7 @@
        ((editor height width)
         (let ((window (make-frame-window editor 0 (max 1 (- height 1)) 0 width)))
           (make<ncurses-frame> (list window) window height width
-                               "" #f #f #f)))))
+                               "" #f #f #f #f)))))
 
     (define min-safe-window-height 1)
     (define min-safe-window-width 2)

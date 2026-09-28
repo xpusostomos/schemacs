@@ -68,6 +68,7 @@
           *default-keymap*)
     ;; Every command here prompts.
     (only (schemacs editor minibuffer)
+          *minibuffer-completing-file-name*
           completing-read
           file-name-history
           read-char-from-minibuffer
@@ -92,6 +93,7 @@
    encode-line-breaks
    ensure-final-newline-on-save!
    ensure-final-newline-on-visit
+   expand-file-name
    file-name-completion-table
    file-name-directory-part
    file-name-nondirectory-part
@@ -412,6 +414,78 @@
       (or (buffer-default-directory (current-buffer))
           (string-append (getcwd) "/")))
 
+    (define (path-segments path)
+      ;; PATH's segments, with the empty ones - from a leading or a
+      ;; repeated slash - dropped.
+      ;;--------------------------------------------------------------
+      (let loop ((i 0) (start 0) (acc '()))
+        (cond
+         ((= i (string-length path))
+          (reverse (if (< start i) (cons (substring path start i) acc) acc)))
+         ((char=? (string-ref path i) #\/)
+          (loop (+ 1 i) (+ 1 i)
+                (if (< start i) (cons (substring path start i) acc) acc)))
+         (else (loop (+ 1 i) start acc)))))
+
+    (define (join-path-segments segments)
+      ;; SEGMENTS joined with a slash between them: the tail of
+      ;; `expand-file-name' that puts a resolved path back together.
+      ;;--------------------------------------------------------------
+      (if (null? segments)
+          ""
+          (let loop ((rest (cdr segments)) (acc (car segments)))
+            (if (null? rest)
+                acc
+                (loop (cdr rest) (string-append acc "/" (car rest)))))))
+
+    (define (expand-file-name name . args)
+      ;; GNU Emacs's `expand-file-name': NAME as an absolute file name.
+      ;; A NAME with no directory of its own - one not starting with a
+      ;; slash - is relative to DEFAULT-DIRECTORY, which is the asking
+      ;; buffer's own when no other is given; either way the `.` and `..`
+      ;; segments are resolved and repeated slashes collapsed.
+      ;;
+      ;; This is what `read-file-name' answers with, which is why a bare
+      ;; name can be typed at the prompt at all: Emacs puts the directory
+      ;; *in* the minibuffer, so its answer is absolute already, while
+      ;; this editor keeps the prompt beside the buffer rather than in it
+      ;; - so what is typed has to be joined to the directory here. A
+      ;; name typed in a buffer visiting a file is relative to that
+      ;; file's directory, which is what `default-directory' says.
+      ;;
+      ;; Not implemented: `~' expansion, and the environment-variable,
+      ;; wildcard and remote-file syntaxes. Nothing here has a home
+      ;; directory to expand against yet.
+      ;;--------------------------------------------------------------
+      (let* ((default (if (pair? args) (car args) (default-directory)))
+             (full (cond
+                    ((= 0 (string-length name)) default)
+                    ((char=? (string-ref name 0) #\/) name)
+                    (else (string-append default name))))
+             ;; A trailing slash names a directory and has to survive
+             ;; the rebuilding below, which would otherwise drop it.
+             ;; An *empty* NAME is the exception, and Emacs's: it expands
+             ;; to the directory itself with no trailing slash.
+             (directory? (and (< 0 (string-length name))
+                              (< 1 (string-length full))
+                              (char=? (string-ref full
+                                                  (- (string-length full) 1))
+                                      #\/))))
+        (let resolve ((rest (path-segments full)) (acc '()))
+          (cond
+           ((null? rest)
+            (let ((path (string-append "/" (join-path-segments
+                                            (reverse acc)))))
+              (cond ((string=? path "/") path)
+                    (directory? (string-append path "/"))
+                    (else path))))
+           ((string=? (car rest) ".") (resolve (cdr rest) acc))
+           ;; a `..' takes back the segment before it, and does nothing
+           ;; at the root, which is what Emacs does with one
+           ((string=? (car rest) "..")
+            (resolve (cdr rest) (if (null? acc) acc (cdr acc))))
+           (else (resolve (cdr rest) (cons (car rest) acc)))))))
+
     (define (file-name-directory-part name)
       ;; The directory part of NAME, including the final slash, or "" for
       ;; a bare name: GNU Emacs's `file-name-directory' as we need it.
@@ -507,10 +581,25 @@
       ;; as Emacs allows it - that is how a file is created. The default
       ;; is the file the buffer already visits, so RET keeps the name it
       ;; has.
-      (completing-read prompt file-name-completion-table #f #f
-                       (default-directory)
-                       file-name-history
-                       (buffer-file-name (current-buffer))))
+      ;;
+      ;; `minibuffer-completing-file-name' is what tells
+      ;; `completing-read' to layer the file-name keymap over the
+      ;; completion map, and that map's whole job is to take SPC away
+      ;; from `minibuffer-complete-word' - a file name may have a space
+      ;; in it, and a space must insert one.
+      ;;
+      ;; The answer is put through `expand-file-name', as Emacs's
+      ;; `read-file-name-default' does with the name it read - the
+      ;; reader types a name relative to the directory in the prompt, and
+      ;; a bare name means nothing to anything that opens the file.
+      (let ((directory (default-directory)))
+        (expand-file-name
+         (parameterize ((*minibuffer-completing-file-name* #t))
+           (completing-read prompt file-name-completion-table #f #f
+                            directory
+                            file-name-history
+                            (buffer-file-name (current-buffer))))
+         directory)))
 
     ;;----------------------------------------------------------------
     ;; Final newlines

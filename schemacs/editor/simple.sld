@@ -60,6 +60,7 @@
    place-undo-boundary! previous-line read-only-mode rotate-kill-flag!
    scroll-down-command scroll-up-command self-insert-command
    self-insert-layer self-insert-tab
+   digit-argument negative-argument
    strip-undo-boundaries undo-command undo-redo-command update-prefix!
    word-char? word-run-end word-run-start yank
    )
@@ -754,22 +755,34 @@
 
     (define *prefix-cu* (make-parameter #f))
     (define *prefix-digits* (make-parameter #f))
+    ;; Whether the argument is negative. GNU Emacs carries this in the
+    ;; *value* - `prefix-arg' may be the symbol `-' - which a string of
+    ;; digits cannot spell, so it is a field of its own here. `M--' with
+    ;; nothing after it leaves `pending-uarg' answering `-', the symbol
+    ;; Emacs answers, and `M-- 5' answers -5.
+    (define *prefix-negative* (make-parameter #f))
 
     (define (clear-prefix!)
       (*prefix-cu* #f)
-      (*prefix-digits* #f))
+      (*prefix-digits* #f)
+      (*prefix-negative* #f))
 
     (define (pending-uarg)
       ;; The universal argument the next command will receive: #f when
-      ;; no prefix was typed, 4^N after N presses of C-u, or the number
-      ;; typed after C-u. Commands that declare the `uarg' interactive
-      ;; spec receive this raw value and convert it with
-      ;; `uarg->integer', the way GNU Emacs's `(interactive "p")' does.
+      ;; no prefix was typed, the symbol `-' for a bare `M--', 4^N after
+      ;; N presses of C-u, or the number typed after C-u. Commands that
+      ;; declare the `uarg' interactive spec receive this raw value and
+      ;; convert it with `uarg->integer', the way GNU Emacs's
+      ;; `(interactive "p")' does.
       ;;--------------------------------------------------------------
       (cond
-       ((not (*prefix-cu*)) #f)
-       ((not (*prefix-digits*)) (expt 4 (*prefix-cu*)))
-       (else (string->number (*prefix-digits*)))))
+       ((and (not (*prefix-cu*)) (not (*prefix-digits*)))
+        (and (*prefix-negative*) '-))
+       ((not (*prefix-digits*))
+        (* (if (*prefix-negative*) -1 1) (expt 4 (*prefix-cu*))))
+       (else
+        (* (if (*prefix-negative*) -1 1)
+           (string->number (*prefix-digits*))))))
 
     (define (update-prefix! path)
       ;; Handle C-u and digit key events while a prefix is pending.
@@ -780,14 +793,7 @@
              (eq? (car path) 'ctrl)
              (char=? (cadr path) #\u))
         (*prefix-cu* (+ 1 (or (*prefix-cu*) 0)))
-        (set!ncurses-frame-message
-         (*current-frame*)
-         (string-append
-          "C-u"
-          (or (and (*prefix-digits*)
-                   (string-append " " (*prefix-digits*)))
-              "")
-          "-"))
+        (prefix-keys-message)
         #t)
        ((and (*prefix-cu*)
              ;; Only while the prefix itself is being read. GNU Emacs
@@ -803,12 +809,95 @@
              (char-numeric? (car path)))
         (*prefix-digits*
          (string-append (or (*prefix-digits*) "") (string (car path))))
-        (set!ncurses-frame-message
-         (*current-frame*)
-         (string-append
-          "C-u " (*prefix-digits*) "-"))
+        (prefix-keys-message)
         #t)
        (else #f)))
+
+    (define (prefix-keys-message)
+      ;; What the echo area shows while an argument is being typed: the
+      ;; keys of it and a trailing dash, e.g. `C-u 8-'. GNU Emacs shows
+      ;; exactly this, from its command loop rather than from any one
+      ;; command, and it is why a half-typed argument is visible at all.
+      ;;--------------------------------------------------------------
+      (set!ncurses-frame-message
+       (*current-frame*)
+       (string-append
+        (cond ((*prefix-cu*) (string-append "C-u "
+                                            (or (*prefix-digits*) "")
+                                            (if (*prefix-negative*) "-" "")))
+              ((*prefix-digits*) (string-append (if (*prefix-negative*) "-" "")
+                                                (*prefix-digits*)))
+              (else "M--"))
+        "-")))
+
+    (define (last-command-event-digit)
+      ;; The digit the key that reached this command spelled, or #f.
+      ;; GNU Emacs's `digit-argument' reads it from
+      ;; `last-command-event', masking the modifier bits off with
+      ;; `(logand char ?\177)'. The key is re-derived here from the
+      ;; frame's keymap lookup state, the way `self-insert-command'
+      ;; re-derives its character - and the modifier bits are the
+      ;; other elements of the chord, so nothing has to be masked.
+      ;;--------------------------------------------------------------
+      (let* ((state (ncurses-frame-keymap-state (*current-frame*)))
+             (ix (and state (km:modal-lookup-state-key-index state)))
+             (path (and ix (km:keymap-index->list ix)))
+             (last (and (pair? path) (car (reverse path)))))
+        (and (char? last)
+             (char-numeric? last)
+             (- (char->integer last) (char->integer #\0)))))
+
+    (define digit-argument
+      ;; GNU Emacs's `digit-argument': a digit typed with Meta adds
+      ;; itself to the numeric argument for the next command.
+      ;; `M-3 M-5 C-n' moves down thirty-five lines.
+      ;;
+      ;; It is a command and not part of `UPDATE-PREFIX!', because in
+      ;; Emacs it is one: `esc-map' binds M-0 to M-9 to it, which is why
+      ;; M-6 is not an undefined key there. What it receives is the raw
+      ;; prefix argument, since `M-3 M-5' has to build on `M-3' rather
+      ;; than start again.
+      ;;--------------------------------------------------------------
+      (new-command
+       "digit-argument"
+       (lambda (uarg)
+         (let ((digit (or (last-command-event-digit) 0)))
+           ;; digits replace a C-u count rather than multiplying it, as
+           ;; Emacs's `universal-argument' does with `M-6' after `C-u'
+           (*prefix-cu* #f)
+           (cond
+            ((integer? uarg)
+             (let ((value (+ (* uarg 10)
+                             (if (< uarg 0) (- digit) digit))))
+               (*prefix-negative* (< value 0))
+               (*prefix-digits* (number->string (abs value)))))
+            ((eq? '- uarg)
+             ;; Treat -0 as just -, so that -01 will work.
+             (*prefix-negative* #t)
+             (unless (zerop digit)
+               (*prefix-digits* (number->string digit))))
+            (else
+             (*prefix-negative* #f)
+             (*prefix-digits* (number->string digit))))
+           (prefix-keys-message)))
+       (lambda (uarg) uarg)
+       "Add the digit of this key to the numeric argument for the next command."
+       'uarg))
+
+    (define negative-argument
+      ;; GNU Emacs's `negative-argument': M-- begins a negative numeric
+      ;; argument, and a second M-- cancels it.
+      ;;--------------------------------------------------------------
+      (new-command
+       "negative-argument"
+       (lambda (uarg)
+         (cond ((integer? uarg) (*prefix-negative* (not (< uarg 0))))
+               ((eq? '- uarg) (*prefix-negative* #f))
+               (else (*prefix-negative* #t)))
+         (prefix-keys-message))
+       (lambda (uarg) uarg)
+       "Begin a negative numeric argument for the next command."
+       'uarg))
 
     ;;----------------------------------------------------------------
     ;; The keys GNU Emacs binds these commands to
@@ -834,6 +923,18 @@
     (define-key *default-keymap* (list (list 'ctrl #\m)) newline-command)
     (define-key *default-keymap* (list (list 'ctrl #\j)) newline-command)
     (define-key *default-keymap* (list (list 'ctrl #\g)) keyboard-quit)
+    ;; The named keys a terminal sends for its arrow, home and end keys:
+    ;; GNU Emacs binds these in `global-map' too, and to the same
+    ;; commands as the control keys beside them. Keeping them separate
+    ;; from those control keys is what leaves `M-<up>' free to be
+    ;; `minibuffer-previous-completion' in a minibuffer.
+    (define-key *default-keymap* (list (list "up")) previous-line)
+    (define-key *default-keymap* (list (list "down")) next-line)
+    (define-key *default-keymap* (list (list "left")) backward-char)
+    (define-key *default-keymap* (list (list "right")) forward-char)
+    (define-key *default-keymap* (list (list "home")) beginning-of-line)
+    (define-key *default-keymap* (list (list "end")) end-of-line)
+    (define-key *default-keymap* (list (list "delete")) delete-char)
     ;; Undo, on the keys GNU Emacs binds it to. C-/ and C-_ are the same
     ;; byte (31) in a terminal, so one binding serves both. Emacs's other
     ;; redo key, C-?, cannot be bound: it is DEL, which arrives here as
@@ -855,6 +956,25 @@
       (list (list 'meta 'ctrl (integer->char 28))) beginning-of-buffer)
     (define-key *default-keymap*
       (list (list 'meta 'ctrl (integer->char 30))) end-of-buffer)
+    ;; The numeric argument, on every key GNU Emacs binds it to:
+    ;; `bindings.el' puts `digit-argument' on M-0 to M-9, on C-0 to C-9
+    ;; and on C-M-0 to C-M-9, and `negative-argument' on M--, C-- and
+    ;; C-M--. C-u is not bound because it never reaches the keymap -
+    ;; `UPDATE-PREFIX!' consumes it first, as Emacs's
+    ;; `universal-argument-map' does.
+    (let loop ((i 0))
+      (when (<= i 9)
+        (let ((digit (integer->char (+ (char->integer #\0) i))))
+          (define-key *default-keymap* (list (list 'meta digit)) digit-argument)
+          (define-key *default-keymap*
+            (list (list 'ctrl digit)) digit-argument)
+          (define-key *default-keymap*
+            (list (list 'meta 'ctrl digit)) digit-argument))
+        (loop (+ 1 i))))
+    (define-key *default-keymap* (list (list 'meta #\-)) negative-argument)
+    (define-key *default-keymap* (list (list 'ctrl #\-)) negative-argument)
+    (define-key *default-keymap*
+      (list (list 'meta 'ctrl #\-)) negative-argument)
     (define-key *default-keymap* (list (list 'meta #\f)) forward-word)
     (define-key *default-keymap* (list (list 'meta #\b)) backward-word)
     (define-key *default-keymap* (list (list 'meta #\d)) kill-word)

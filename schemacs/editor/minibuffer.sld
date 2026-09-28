@@ -38,13 +38,17 @@
     ;; it, and leaving it out reports as an unbound variable the first time
     ;; a completion is tried.
     (only (guile) string-prefix?)
+    ;; `format' fills in a message's arguments, as GNU Emacs's
+    ;; `format-message' does for `minibuffer-message'.
+    (only (guile) format)
     (only (schemacs editor command)
           new-command new-count-command run-command)
     (only (schemacs editor engine)
           new-text-editor text-editor-char-count text-editor-copy-string
-          text-editor-cursor-column text-editor-delete-from-cursor
+          text-editor-cursor-column text-editor-cursor-line
+          text-editor-delete-from-cursor text-editor-get-cursor
           text-editor-get-end-of-line text-editor-get-start-of-line
-          text-editor-insert text-editor-set-cursor
+          text-editor-insert text-editor-line-count text-editor-set-cursor
           text-editor-set-read-only! text-editor-to-string
           text-editor-undo-disable!)
     ;; `logior' is Guile's: the bitset is three bit flags.
@@ -53,17 +57,24 @@
     ;; and shown in a window. (`keymap' above is `(schemacs keymap)''s,
     ;; which the completion map is built with - this library's `km:' names
     ;; are the keymap library's, not this one's.)
-    (only (schemacs editor textprop) put-text-property)
+    (only (schemacs editor textprop) put-text-property remove-text-properties)
     (only (schemacs editor buffer)
-          buffer-default-directory current-buffer get-buffer-create
+          buffer-default-directory bury-buffer current-buffer get-buffer
+          get-buffer-create
           buffer-local-keymap set!buffer-local-keymap set!buffer-default-directory
           with-current-buffer)
     ;; `getcwd' is Guile's, for a buffer that has no `default-directory'.
     (only (guile) getcwd)
-    (only (schemacs editor window) display-buffer quit-window)
+    (only (schemacs editor window)
+          delete-window display-buffer get-buffer-window quit-window)
+    ;; `self-insert-command' is what SPC does in a file-name minibuffer
+    ;; (`minibuffer-local-filename-completion-map' below), and
+    ;; `with-current-buffer' and the line motion are the ordinary
+    ;; commands the minibuffer's own keys fall back on.
+    (only (schemacs editor simple) self-insert-command)
     (only (schemacs editor frame)
           *current-frame* *echo-area-buffer* *echo-area-prompt* *minibuffer*
-          set!ncurses-frame-message)
+          set!ncurses-frame-message set-message! set-window-point! window-list)
     ;; `try-completion' and `all-completions' are `minibuf.c''s and live in
     ;; `(schemacs editor minibuf)'; this library is `minibuffer.el' and uses
     ;; them rather than defining them.
@@ -105,7 +116,23 @@
    minibuffer-complete-word
    minibuffer-local-must-match-map
    *completion-auto-help*
+   *completion-show-inline-help*
    *minibuffer-completion-confirm*
+   *minibuffer-completing-file-name*
+   *minibuffer-exit-hook*
+   *minibuffer-message-timeout*
+   completion--map-for
+   completion--message
+   completion--selected-candidate
+   minibuffer-choose-completion
+   minibuffer-completion-exit
+   minibuffer-hide-completions
+   minibuffer-local-filename-completion-map
+   minibuffer-message
+   minibuffer-next-completion
+   minibuffer-previous-completion
+   minibuffer-restore-windows
+   next-line-completion
    *minibuffer-completion-predicate*
    common-prefix
    completion-candidates-message
@@ -210,8 +237,14 @@
       ;;--------------------------------------------------------------
       (let ((ed (minibuffer-editor mb)))
         (text-editor-undo-disable! ed)
-        (text-editor-delete-from-cursor ed (text-editor-char-count ed))
+        ;; the cursor goes to the beginning *before* the deletion: the
+        ;; engine deletes forward from the cursor, so deleting first, at
+        ;; the end where the cursor is, deletes nothing - and the text
+        ;; that was there stayed in front of the new text. Stepping
+        ;; through the history, and choosing a completion, both put the
+        ;; answer one keystroke in front of the previous one.
         (text-editor-set-cursor ed 0)
+        (text-editor-delete-from-cursor ed (text-editor-char-count ed))
         (text-editor-insert ed text)))
 
     (define (minibuffer-insert! text)
@@ -265,6 +298,14 @@
                          (*echo-area-prompt* prompt)
                          (*current-keymap* (minibuffer-keymap mb)))
             (let ((result (recursive-edit frame)))
+              ;; `minibuffer-exit-hook', which GNU Emacs runs on the way
+              ;; out however the minibuffer was left - RET, C-g, or a
+              ;; command that left of its own accord. It is what takes
+              ;; the `*Completions*' window away again, and it runs
+              ;; *before* a quit's thunk, so that the window is gone
+              ;; even though the signal about to be raised unwinds past
+              ;; everything else.
+              (for-each (lambda (hook) (hook)) (*minibuffer-exit-hook*))
               (if (procedure? result)
                   ;; a quit: run the thunk, which signals, so the signal
                   ;; travels out past the minibuffer and abandons the
@@ -438,7 +479,7 @@
                              (string-length typed))))
            (cond
             ((not candidates)
-             (set!ncurses-frame-message (*current-frame*) "No match"))
+             (completion--message "No match"))
             (else
              ;; The answer is a dotted list whose last cdr is the base
              ;; size, so the candidates are what is before it.
@@ -470,9 +511,9 @@
                              (string-length typed))))
            (cond
             ((eq? completion #t)
-             (set!ncurses-frame-message (*current-frame*) "Complete, but not unique"))
+             (completion--message "Complete, but not unique"))
             ((not completion)
-             (set!ncurses-frame-message (*current-frame*) "No match"))
+             (completion--message "No match"))
             ((string=? (car completion) typed) (run-command minibuffer-completion-help))
             (else
              ;; What is inserted is the part of the completion that is
@@ -781,10 +822,10 @@
       (let ((comp (completion-try-completion string table predicate point)))
         (cond
          ((not comp)
-          (set!ncurses-frame-message (*current-frame*) "No match")
+          (completion--message "No match")
           (minibuffer--bitset #f #f #f))
          ((eq? comp #t)
-          (set!ncurses-frame-message (*current-frame*) "Sole completion")
+          (completion--message "Sole completion")
           (minibuffer--bitset #f #f #t))
          (else
           (let* ((completion (car comp))
@@ -798,11 +839,9 @@
              ((not exact)
               (if (*completion-auto-help*)
                   (run-command minibuffer-completion-help)
-                  (set!ncurses-frame-message (*current-frame*)
-                                             "Next char not unique")))
+                  (completion--message "Next char not unique")))
              (else
-              (set!ncurses-frame-message (*current-frame*)
-                                         "Complete, but not unique")))
+              (completion--message "Complete, but not unique")))
             (minibuffer--bitset completed #t exact))))))
 
     (define minibuffer-complete-and-exit
@@ -818,6 +857,13 @@
       (new-command
        "minibuffer-complete-and-exit"
        (lambda ()
+         ;; A candidate chosen with M-<down> is taken before anything
+         ;; else is tried, which is GNU Emacs's
+         ;; `(when (completion--selected-candidate)
+         ;;    (minibuffer-choose-completion t t))' at the head of its
+         ;; `minibuffer-complete-and-exit'.
+         (when (completion--selected-candidate)
+           (minibuffer-choose-completion))
          (let* ((typed (or (minibuffer-contents) ""))
                 (bits (completion--do-completion
                        typed (*minibuffer-completion-table*)
@@ -827,7 +873,7 @@
             ((or (= bits 1) (= bits 3)) (run-command exit-minibuffer))
             ((= bits 7)
              (if (*minibuffer-completion-confirm*)
-                 (set!ncurses-frame-message (*current-frame*) "Confirm")
+                 (minibuffer-message "Confirm")
                  (run-command exit-minibuffer)))
             (else #f))))
        (lambda () #f)
@@ -870,7 +916,7 @@
             ((and (pair? comp) (not (string=? (car comp) typed)))
              (completion--replace (car comp)))
             ((not comp)
-             (set!ncurses-frame-message (*current-frame*) "No match"))
+             (completion--message "No match"))
             (else (run-command minibuffer-completion-help)))))
        (lambda () #f)
        "Complete the minibuffer contents at most a single word (SPC)."))
@@ -915,42 +961,86 @@
                             #f)))
           (read-from-minibuffer
            prompt initial
-           (if require-match
-               minibuffer-local-must-match-map
-               minibuffer-local-completion-map)
+           ;; The map to read it with. GNU Emacs layers
+           ;; `minibuffer-local-filename-completion-map' over the base
+           ;; map when `minibuffer-completing-file-name' is set, which
+           ;; `read-file-name' does - and its one job is to take SPC
+           ;; away from `minibuffer-complete-word', so that a file name
+           ;; may have a space in it. A nil binding in the layered map
+           ;; overrides the parent map it is composed with, which is
+           ;; documented in `make-composed-keymap'.
+           (completion--map-for (if require-match
+                                    minibuffer-local-must-match-map
+                                    minibuffer-local-completion-map))
            history default))))
-    (define minibuffer-local-completion-map
-      ;; GNU Emacs's `minibuffer-local-completion-map', whose parent is
-      ;; `minibuffer-local-map'. TAB completes; RET leaves the minibuffer
-      ;; as it does there rather than running Emacs's
-      ;; `minibuffer-completion-exit', because nothing here selects a
-      ;; completion to put in the text first.
-      ;;--------------------------------------------------------------
-      (apply km:keymap
-             '*minibuffer-local-completion-map*
-             (append
-              (list (km:alist->keymap-layer
-                     `(((ctrl #\i) . ,minibuffer-complete)
-                       ((#\space) . ,minibuffer-complete-word)
-                       ((#\?) . ,minibuffer-completion-help))))
-              (km:keymap->layers-list minibuffer-local-map))))
+    (define *minibuffer-completing-file-name* (make-parameter #f))
+    ;; ^ GNU Emacs's `minibuffer-completing-file-name': whether the
+    ;; minibuffer being read is reading a file name, which decides
+    ;; whether `minibuffer-local-filename-completion-map' is layered
+    ;; over the completion map. `read-file-name' binds it.
 
-
-    (define minibuffer-local-must-match-map
-      ;; GNU Emacs's `minibuffer-local-must-match-map', whose parent is
-      ;; `minibuffer-local-completion-map': RET completes and exits rather
-      ;; than leaving with whatever is typed, and C-j does the same.
+    (define (completion--map-for base)
+      ;; BASE with `minibuffer-local-filename-completion-map' layered
+      ;; over it when a file name is being read: GNU Emacs's
+      ;; `(make-composed-keymap minibuffer-local-filename-completion-map
+      ;; base-keymap)' with the base as the parent, which is what lets
+      ;; the layered map's binding for a key override the base's.
+      ;; Emacs tests `(memq minibuffer-completing-file-name '(nil
+      ;; lambda))' - a file name is being read unless the variable is
+      ;; nil.
       ;;--------------------------------------------------------------
-      (apply km:keymap
-             '*minibuffer-local-must-match-map*
-             (append
-              (list (km:alist->keymap-layer
-                     `(((ctrl #\m) . ,minibuffer-complete-and-exit)
-                       ((ctrl #\j) . ,minibuffer-complete-and-exit))))
-              (km:keymap->layers-list minibuffer-local-completion-map))))
+      (if (not (*minibuffer-completing-file-name*))
+          base
+          (apply km:keymap
+                 '*minibuffer-filename-completion-map*
+                 (append
+                  (km:keymap->layers-list minibuffer-local-filename-completion-map)
+                  (km:keymap->layers-list base)))))
 
     ;;----------------------------------------------------------------
     ;; The *Completions* buffer
+
+    (define *completions-common-substring* (make-parameter ""))
+    ;; ^ The COMMON-SUBSTRING the `*Completions*' buffer was last filled
+    ;; with, which is what says how much of each candidate matched. GNU
+    ;; Emacs keeps the same fact as the `completion-base-position' text
+    ;; property on the candidates; the line's faces have to be written
+    ;; again when the selection moves, and this is what they are written
+    ;; from.
+
+    (define (set-completion-line-faces! buffer start end highlight?)
+      ;; Write the `face' property over one candidate line: GNU Emacs's
+      ;; `completion-hilit-commonality' puts `completions-common-part'
+      ;; on the part of the candidate the pattern matched and
+      ;; `completions-first-difference' on the first character past it,
+      ;; and the line carries the selection face as well when
+      ;; HIGHLIGHT?.
+      ;;
+      ;; The whole line is written at once, rather than adding to
+      ;; whatever is there, so that taking the selection off a line
+      ;; leaves the highlighting it had rather than a line with no
+      ;; faces at all.
+      ;;--------------------------------------------------------------
+      (remove-text-properties start end '(face) buffer)
+      (let* ((candidate (text-editor-copy-string buffer start end))
+             (matched (min (string-length (*completions-common-substring*))
+                           (string-length candidate))))
+        (when highlight?
+          (put-text-property start end 'face 'completions-highlight buffer))
+        (when (< 0 matched)
+          (put-text-property
+           start (+ start matched) 'face
+           (if highlight?
+               '(completions-common-part completions-highlight)
+               'completions-common-part)
+           buffer))
+        (when (< (+ start matched) end)
+          (put-text-property
+           (+ start matched) (+ 1 start matched) 'face
+           (if highlight?
+               '(completions-first-difference completions-highlight)
+               'completions-first-difference)
+           buffer))))
 
     (define (display-completion-list completions common-substring)
       ;; GNU Emacs's `display-completion-list': fill the `*Completions*'
@@ -969,27 +1059,26 @@
       ;;    it, so this is where it has to be put.
       ;;--------------------------------------------------------------
       (let ((buffer (get-buffer-create "*Completions*")))
+        ;; the list is about to be thrown away, so the selection in it
+        ;; is too: the recorded range would point into the new list.
+        (clear-completions-selection!)
         (with-current-buffer buffer
           (set!buffer-local-keymap buffer completion-list-mode-map)
           (text-editor-set-read-only! buffer #f)
           (text-editor-set-cursor buffer 0)
           (text-editor-delete-from-cursor buffer (text-editor-char-count buffer))
+          (*completions-common-substring* common-substring)
           (for-each
            (lambda (candidate)
-             (let ((start (text-editor-char-count buffer))
-                   (matched (min (string-length common-substring)
-                                 (string-length candidate))))
+             (let ((start (text-editor-char-count buffer)))
                (text-editor-insert buffer candidate)
                ;; `completions-common-part' on the part the pattern
                ;; matched, and `completions-first-difference' on the
                ;; first character past it - Emacs's
                ;; `completion-hilit-commonality', applied to the line
                ;; rather than to the string.
-               (put-text-property start (+ start matched)
-                                  'face 'completions-common-part buffer)
-               (when (< (+ start matched) (+ start (string-length candidate)))
-                 (put-text-property (+ start matched) (+ 1 start matched)
-                                    'face 'completions-first-difference buffer))
+               (set-completion-line-faces!
+                buffer start (+ start (string-length candidate)) #f)
                (text-editor-insert buffer "\n")))
            completions)
           (text-editor-set-read-only! buffer #t)
@@ -1040,5 +1129,332 @@
         (bind! (list 'ctrl #\m) choose-completion)
         (bind! #\return choose-completion)
         map))
+
+    ;;----------------------------------------------------------------
+    ;; Messages in the echo area while the minibuffer is being read
+    ;;
+    ;; GNU Emacs's `minibuffer-message' (minibuffer.el:813) and the
+    ;; timer it arms. The echo area itself is drawn by the display
+    ;; layer; what is here is what a message put there *says* and how
+    ;; long it stays.
+
+    (define *minibuffer-message-timeout*
+      ;; GNU Emacs's `minibuffer-message-timeout': how long a message
+      ;; shown while the minibuffer is being read stays in the echo
+      ;; area, in seconds, or #f for one that stays until the next key.
+      ;; Emacs's default is two, set in `keyboard.c'.
+      ;;--------------------------------------------------------------
+      (make-parameter 2))
+
+    (define *completion-show-inline-help*
+      ;; GNU Emacs's `completion-show-inline-help': whether the
+      ;; completion commands say what they found in the echo area.
+      ;;--------------------------------------------------------------
+      (make-parameter #t))
+
+    (define (message-enclosed? message)
+      ;; Whether MESSAGE is already written the way this function
+      ;; writes one - some spaces, then `[...]' - which is the test GNU
+      ;; Emacs makes with the regexp `"\\` *\\[.+\\]\\'"' before
+      ;; enclosing it again.
+      ;;--------------------------------------------------------------
+      (let loop ((i 0))
+        (cond
+         ((= i (string-length message)) #f)
+         ((char=? (string-ref message i) #\space) (loop (+ 1 i)))
+         ((char=? (string-ref message i) #\[)
+          (and (< 2 (- (string-length message) i))
+               (char=? (string-ref message (- (string-length message) 1))
+                       #\])))
+         (else #f))))
+
+    (define (minibuffer-message message . args)
+      ;; GNU Emacs's `minibuffer-message': show MESSAGE at the end of
+      ;; what has been typed, without hiding it, and take it down again
+      ;; after `minibuffer-message-timeout' seconds or at the next key,
+      ;; whichever comes first. It is enclosed in `[...]' with a space
+      ;; in front, which is Emacs's mark that this is something the
+      ;; editor is saying and not part of the answer - so "No match"
+      ;; reads " [No match]" after the prompt.
+      ;;
+      ;; Called when no minibuffer is being read, it is `message' and
+      ;; the echo area is drawn as usual; the timeout is the same,
+      ;; since the command loop takes messages down between commands
+      ;; either way.
+      ;;--------------------------------------------------------------
+      (let ((text (if (and (not (pair? args)) (message-enclosed? message))
+                      message
+                      (string-append " [" message "]"))))
+        (set-message! (*current-frame*)
+                      (if (pair? args) (apply format #f text args) text)
+                      (and (*minibuffer-message-timeout*)
+                           (*minibuffer-message-timeout*)))))
+
+    (define (completion--message msg)
+      ;; GNU Emacs's `completion--message': the "No match", "Sole
+      ;; completion" and "Complete, but not unique" messages of the
+      ;; completion commands, said only when
+      ;; `completion-show-inline-help' allows it.
+      ;;--------------------------------------------------------------
+      (when (*completion-show-inline-help*) (minibuffer-message msg)))
+
+    ;;----------------------------------------------------------------
+    ;; The completions window, on the way out
+    ;;
+    ;; GNU Emacs removes the `*Completions*' window when the minibuffer
+    ;; exits, whatever took it out of the minibuffer - RET, C-g, or a
+    ;; command that left on its own. Two functions do it there and it
+    ;; does the second one here; see `MINIBUFFER-RESTORE-WINDOWS' below
+    ;; for why.
+
+    (define (completions-window)
+      ;; The window showing the `*Completions*' buffer, or #f when it
+      ;; is not on the screen: the window half of GNU Emacs's
+      ;; `minibuffer--completions-visible'.
+      ;;--------------------------------------------------------------
+      (let ((buffer (get-buffer "*Completions*")))
+        (and buffer (get-buffer-window buffer))))
+
+    (define (minibuffer-hide-completions)
+      ;; GNU Emacs's `minibuffer-hide-completions': get rid of an
+      ;; out-of-date `*Completions*' buffer. Emacs buries the buffer in
+      ;; the window; the window itself goes when the window
+      ;; configuration is restored on the way out of the minibuffer,
+      ;; and this project has no window configurations, so the window
+      ;; is taken away here as well. Leaving it would leave the frame
+      ;; split after the completion was over.
+      ;;
+      ;; The buffer stays alive - buried, where `C-x b' can reach it -
+      ;; because that is what Emacs does with it.
+      ;;--------------------------------------------------------------
+      (let ((buffer (get-buffer "*Completions*")))
+        (when buffer
+          (let ((window (get-buffer-window buffer)))
+            ;; A sole window cannot be deleted, and must not be: if the
+            ;; completions buffer was put in the frame's only window,
+            ;; burying it is all there is to do.
+            (when (and window (< 1 (length (window-list))))
+              (delete-window window)))
+          (bury-buffer buffer))))
+
+    (define (minibuffer-restore-windows)
+      ;; GNU Emacs's `minibuffer-restore-windows', which is on
+      ;; `minibuffer-exit-hook'. In Emacs it is the *second* of two
+      ;; routes: when `read-minibuffer-restore-windows' is nil the hook
+      ;; removes at least the `*Completions*' window, and when it is
+      ;; non-nil - the default - `read_minibuffer' instead restores the
+      ;; window configuration it recorded on the way in, which removes
+      ;; it just as surely. This project has no window configurations,
+      ;; so it takes the first route for every exit, and that is
+      ;; equivalent for the window this is about.
+      ;;--------------------------------------------------------------
+      (minibuffer-hide-completions))
+
+    (define *minibuffer-exit-hook* (make-parameter (list minibuffer-restore-windows)))
+    ;; ^ GNU Emacs's `minibuffer-exit-hook': run when a minibuffer is
+    ;; left. It is a `make-parameter' holding the list of procedures
+    ;; rather than a global list, so a caller can bind it the way Emacs
+    ;; lets a caller add to it.
+
+    ;;----------------------------------------------------------------
+    ;; Moving through the completions
+    ;;
+    ;; GNU Emacs's `minibuffer-next-completion' and its neighbours: the
+    ;; cursor moves through the `*Completions*' buffer while point stays
+    ;; in the minibuffer, and RET then takes the candidate it is on.
+    ;; Emacs lays the candidates out in columns and moves a "line" or a
+    ;; "column" through them; this editor puts one candidate on each
+    ;; line, so the two are the same move.
+
+    (define *completions-highlight-range* #f)
+    ;; ^ The range of the completions buffer currently carrying the
+    ;; `completions-highlight' face, or #f: what has to have the face
+    ;; taken off it when the selection moves. GNU Emacs marks the
+    ;; selected candidate with a `cursor-face' text property and lets
+    ;; the display decide; this editor's display reads `face', so the
+    ;; selection is written as a face here and the old one has to be
+    ;; cleared by hand.
+
+    (define (clear-completions-selection!)
+      ;; Take the selection face off whatever had it: GNU Emacs's
+      ;; `completions--clear-selection' is where point is moved off the
+      ;; candidate, and this is the face that says which candidate that
+      ;; was.
+      ;;--------------------------------------------------------------
+      (when *completions-highlight-range*
+        (let* ((buffer (get-buffer "*Completions*"))
+               (range *completions-highlight-range*))
+          (when buffer
+            ;; put the line's own highlighting back, not nothing
+            (set-completion-line-faces! buffer (car range) (cdr range) #f)))
+        (set! *completions-highlight-range* #f)))
+
+    (define (show-completions-selection! buffer)
+      ;; Put the selection face on the line point is on, so that moving
+      ;; through the candidates is something that can be seen. GNU
+      ;; Emacs puts a `cursor-face' property there and lets the display
+      ;; decide; this editor's display reads `face'.
+      ;;--------------------------------------------------------------
+      (clear-completions-selection!)
+      (let* ((start (text-editor-get-start-of-line buffer))
+             (end (text-editor-get-end-of-line buffer)))
+        (when (< start end)
+          (set-completion-line-faces! buffer start end #t)
+          (set! *completions-highlight-range* (cons start end)))))
+
+    (define (next-line-completion n)
+      ;; GNU Emacs's `next-line-completion' as this editor's layout
+      ;; makes it: move N lines in the `*Completions*' buffer. Point
+      ;; stays where it is in the minibuffer - it is the completions
+      ;; window's point that moves - and the ends are clamped rather
+      ;; than wrapped, which is what `completion-auto-wrap' being nil
+      ;; means.
+      ;;--------------------------------------------------------------
+      (let ((buffer (get-buffer "*Completions*"))
+            (window (completions-window)))
+        (when (and buffer window)
+          (let* ((last (max 0 (- (text-editor-line-count buffer) 1)))
+                 (target (max 0 (min (+ (text-editor-cursor-line buffer) n)
+                                     last))))
+            (text-editor-set-cursor buffer target 0)
+            ;; the window is a view of the buffer, so its point follows
+            (set-window-point! window (text-editor-get-cursor buffer))
+            (show-completions-selection! buffer)))))
+
+    (define (completion--selected-candidate)
+      ;; GNU Emacs's `completion--selected-candidate': the candidate the
+      ;; completions window's point is on, or #f when there is none.
+      ;; Emacs reads the `completion--string' text property the
+      ;; candidate was written with; here the candidate *is* the line,
+      ;; which is why the buffer is filled one per line.
+      ;;--------------------------------------------------------------
+      (let ((buffer (and (completions-window) (get-buffer "*Completions*"))))
+        (and buffer
+             (let* ((start (text-editor-get-start-of-line buffer))
+                    (end (text-editor-get-end-of-line buffer))
+                    (text (text-editor-copy-string buffer start end)))
+               (and (< 0 (string-length text)) text)))))
+
+    (define (minibuffer-choose-completion . args)
+      ;; GNU Emacs's `minibuffer-choose-completion': put the candidate
+      ;; the completions window's point is on into the minibuffer that
+      ;; is being read, without leaving it.
+      ;;
+      ;; The prefix argument says not to exit the minibuffer
+      ;; (NO-EXIT) and not to quit the completions window (NO-QUIT);
+      ;; nothing here exits the minibuffer of its own accord, so
+      ;; NO-EXIT has nothing to do, and the window is left to the
+      ;; minibuffer's own exit.
+      ;;--------------------------------------------------------------
+      (let ((candidate (completion--selected-candidate)))
+        (if (not candidate)
+            (error "No completion here")
+            (let ((mb (*minibuffer*)))
+              (when mb
+                (minibuffer-set-contents! mb candidate))))))
+
+    (define minibuffer-next-completion
+      ;; GNU Emacs's `minibuffer-next-completion'. Emacs also inserts
+      ;; the candidate here when `minibuffer-completion-auto-choose' is
+      ;; set; it is nil by default and nil here, so the move is all it
+      ;; does and RET is what takes the candidate.
+      ;;--------------------------------------------------------------
+      (new-count-command
+       "minibuffer-next-completion"
+       (lambda (count) (next-line-completion count))
+       "Move to the next item in the completions window."))
+
+    (define minibuffer-previous-completion
+      ;; GNU Emacs's `minibuffer-previous-completion'.
+      ;;--------------------------------------------------------------
+      (new-count-command
+       "minibuffer-previous-completion"
+       (lambda (count) (next-line-completion (- count)))
+       "Move to the previous item in the completions window."))
+
+    (define minibuffer-completion-exit
+      ;; GNU Emacs's `minibuffer-completion-exit': insert the selected
+      ;; completion if there is one, then leave the minibuffer. It is
+      ;; what RET is bound to in a completing minibuffer, and it is why
+      ;; moving through the candidates with M-<down> and then pressing
+      ;; RET takes the one moved to.
+      ;;--------------------------------------------------------------
+      (new-command
+       "minibuffer-completion-exit"
+       (lambda ()
+         (when (completion--selected-candidate)
+           (minibuffer-choose-completion))
+         (exit-recursive-edit #f))
+       (lambda () (exit-recursive-edit #f))
+       "Accept what has been typed, taking the selected completion first."))
+
+    (define minibuffer-local-filename-completion-map
+      ;; GNU Emacs's `minibuffer-local-filename-completion-map', which
+      ;; `read-file-name' layers over `minibuffer-local-completion-map'
+      ;; when `minibuffer-completing-file-name' is set. Its whole
+      ;; purpose is one thing: SPC must not complete a word in a file
+      ;; name, because a file name may have a space in it. Emacs writes
+      ;; `"SPC" nil', which shadows the completion map's binding and
+      ;; falls through to the global self-insert binding - a nil
+      ;; binding in a composed keymap overriding its parent, which is
+      ;; documented in `make-composed-keymap'.
+      ;;
+      ;; This keymap machinery's layers fall through on a nil action
+      ;; rather than shadowing, so the same result is written as what
+      ;; it comes to: SPC runs `self-insert-command'. That is a
+      ;; departure in what the map *says* and not in what a key does,
+      ;; and it is the honest way to say it while a layer cannot hold
+      ;; "bound to nothing".
+      ;;--------------------------------------------------------------
+      (km:keymap
+       '*minibuffer-local-filename-completion-map*
+       (km:alist->keymap-layer
+        `(((#\space) . ,self-insert-command)))))
+
+    (define minibuffer-local-completion-map
+      ;; GNU Emacs's `minibuffer-local-completion-map', whose parent is
+      ;; `minibuffer-local-map'. TAB completes, SPC completes a word, `?'
+      ;; lists the candidates, and RET is `minibuffer-completion-exit' -
+      ;; which takes the candidate chosen with M-<down> if there is one
+      ;; and otherwise leaves the minibuffer with what is typed.
+      ;;
+      ;; M-<up> and M-<down> move through the candidates, and M-RET takes
+      ;; the one moved to without leaving. These are Emacs's own keys for
+      ;; these commands, from `minibuffer-local-completion-map' in
+      ;; minibuffer.el.
+      ;;
+      ;; The map is defined down here, after the commands it names, for
+      ;; the reason Emacs keeps its completion maps at the end of
+      ;; minibuffer.el too: a keymap is built when it is defined, so every
+      ;; command it binds has to exist by then.
+      ;;--------------------------------------------------------------
+      (apply km:keymap
+             '*minibuffer-local-completion-map*
+             (append
+              (list (km:alist->keymap-layer
+                     `(((ctrl #\i) . ,minibuffer-complete)
+                       ((#\space) . ,minibuffer-complete-word)
+                       ((#\?) . ,minibuffer-completion-help)
+                       ((ctrl #\m) . ,minibuffer-completion-exit)
+                       ((meta "up") . ,minibuffer-previous-completion)
+                       ((meta "down") . ,minibuffer-next-completion)
+                       ((meta ctrl #\m) . ,minibuffer-choose-completion))))
+              (km:keymap->layers-list minibuffer-local-map))))
+
+
+    (define minibuffer-local-must-match-map
+      ;; GNU Emacs's `minibuffer-local-must-match-map', whose parent is
+      ;; `minibuffer-local-completion-map': RET completes and exits rather
+      ;; than leaving with whatever is typed, and C-j does the same. RET
+      ;; still takes a chosen candidate first, since
+      ;; `minibuffer-complete-and-exit' does that itself.
+      ;;--------------------------------------------------------------
+      (apply km:keymap
+             '*minibuffer-local-must-match-map*
+             (append
+              (list (km:alist->keymap-layer
+                     `(((ctrl #\m) . ,minibuffer-complete-and-exit)
+                       ((ctrl #\j) . ,minibuffer-complete-and-exit))))
+              (km:keymap->layers-list minibuffer-local-completion-map))))
 
     ))

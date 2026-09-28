@@ -90,6 +90,10 @@
       ;;--------------------------------------------------------------
       (cond
        ((eq? #f uarg) dflt)
+       ;; A bare `M--' leaves the raw value `-' - the symbol GNU Emacs
+       ;; leaves in `prefix-arg', which `prefix-numeric-value' turns
+       ;; into -1 for `(interactive "p")'.
+       ((eq? '- uarg) -1)
        ((eq? #t uarg) 4)
        ((integer? uarg) uarg)
        ((number? uarg) (round uarg))

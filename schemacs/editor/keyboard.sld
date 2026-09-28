@@ -41,13 +41,15 @@
     ;; own, which would collide with the keymap library's.
     (only (ncurses curses)
           ERR KEY_BACKSPACE KEY_DC KEY_DOWN KEY_END KEY_HOME KEY_LEFT
-          KEY_RESIZE KEY_RIGHT KEY_UP getch stdscr)
+          KEY_RESIZE KEY_RIGHT KEY_UP getch stdscr timeout!)
     (only (schemacs editor command)
           command-interactive-spec command-type? run-command)
     (only (schemacs editor frame)
           *current-frame* ncurses-frame-esc-pending ncurses-frame-keymap-state
+          ncurses-frame-message-expired? ncurses-frame-message-expiry
           ncurses-frame-quit-cont set!ncurses-frame-esc-pending
           set!ncurses-frame-keymap-state set!ncurses-frame-message
+          set!ncurses-frame-message-expiry
           set!ncurses-frame-quit-cont)
     ;; The global map the lookup falls back on, and the local map a
     ;; minibuffer or a mode binds to have its own keys.
@@ -92,8 +94,18 @@
     (define (ncurses-key->keymap-path ev)
       ;; Convert an ncurses key event to a keymap path: a list of
       ;; modifier symbols and characters (or #f when the event cannot
-      ;; be converted). Keypad keys (arrow keys etc.) are mapped to
-      ;; their Emacs control-key equivalents.
+      ;; be converted).
+      ;;
+      ;; A keypad key becomes a *named* key - `("up")', `("down")',
+      ;; `("home")' and the rest - which is what GNU Emacs sees a
+      ;; terminal arrow key as. They used to be folded onto the control
+      ;; key that moves the same way (KEY_UP to `(ctrl #\p)' and so on),
+      ;; which is what a terminal does when it has no arrow keys; the
+      ;; cost is that `M-<up>' - a key of its own in Emacs's
+      ;; `minibuffer-local-completion-map' - arrived as M-C-p and could
+      ;; not be bound. The control keys are still bound to the same
+      ;; commands, so folding them is no longer a behaviour anything
+      ;; depends on.
       ;;--------------------------------------------------------------
       (cond
        ((char? ev)
@@ -113,13 +125,16 @@
            (else #f))))
        ((integer? ev)
         (cond
-         ((= ev KEY_LEFT)  (list 'ctrl #\b))
-         ((= ev KEY_RIGHT) (list 'ctrl #\f))
-         ((= ev KEY_UP)    (list 'ctrl #\p))
-         ((= ev KEY_DOWN)  (list 'ctrl #\n))
-         ((= ev KEY_HOME)  (list 'ctrl #\a))
-         ((= ev KEY_END)   (list 'ctrl #\e))
-         ((= ev KEY_DC)    (list 'ctrl #\d))
+         ((= ev KEY_LEFT)  (list "left"))
+         ((= ev KEY_RIGHT) (list "right"))
+         ((= ev KEY_UP)    (list "up"))
+         ((= ev KEY_DOWN)  (list "down"))
+         ((= ev KEY_HOME)  (list "home"))
+         ((= ev KEY_END)   (list "end"))
+         ((= ev KEY_DC)    (list "delete"))
+         ;; DEL and BS are the same event in a terminal, and Emacs reads
+         ;; that byte as `C-h' - which is why both spellings of the
+         ;; backspace key land on the same binding here.
          ((= ev KEY_BACKSPACE) (list 'ctrl #\h))
          ((= ev KEY_RESIZE) (list 'resize))
          (else #f)))
@@ -289,9 +304,9 @@
            frame
            (string-append
             "; unhandled event: "
-            (if (integer? ev)
-                (number->string ev)
-                (string ev))))))))
+            (cond ((integer? ev) (number->string ev))
+                  ((char? ev) (string ev))
+                  (else "#f"))))))))
 
     ;;----------------------------------------------------------------
     ;; The command loop, and recursive edits
@@ -327,10 +342,40 @@
 
     (define *recursive-edit-exit* (make-parameter #f))
 
+    (define message-read-timeout
+      ;; How long the key read may wait when the echo area holds nothing
+      ;; that changes on its own. Giving up keeps the read from blocking
+      ;; forever on a message that has to be taken down.
+      ;;--------------------------------------------------------------
+      100)
+
+    (define (key-event? ev)
+      ;; Whether a read produced a key. guile-ncurses's `getch' answers
+      ;; `#f' whenever there was nothing to read - a timed-out read, a
+      ;; non-blocking read with no input, and the end of input alike -
+      ;; so a key is a character or an integer that is not `ERR'.
+      ;;
+      ;; The distinction this loses is end of input against a timeout.
+      ;; It is recovered by the caller from the *timeout*: a blocking
+      ;; read only comes back with nothing at the end of input, so the
+      ;; editor is left then and not otherwise.
+      ;;--------------------------------------------------------------
+      (or (char? ev) (and (integer? ev) (not (= ev ERR)))))
+
     (define (command-loop frame)
       ;; Read key events and dispatch them, until something leaves this
       ;; level with `exit-recursive-edit' - or, at the outermost level,
       ;; until the editor is quit.
+      ;;
+      ;; The read is given a timeout while a message that times out is
+      ;; on the screen, and none otherwise. That is this editor's stand
+      ;; in for the timer GNU Emacs arms in `minibuffer-message': with
+      ;; no timeout the read would block in `getch' and the message
+      ;; would stay up until the user typed, which is how "No match"
+      ;; used to sit in the echo area for as long as you looked at it.
+      ;; The timeout costs nothing while nothing is pending, which is
+      ;; why it is armed and disarmed rather than always on - and it is
+      ;; why end of input is still noticed at once.
       ;;--------------------------------------------------------------
       (call/cc
        (lambda (exit)
@@ -338,15 +383,37 @@
            ;; draw before the first key is read: a prompt that appears only
            ;; after a key is typed looks like nothing happened
            (render! frame)
-           (let loop ()
-             (let ((ev (getch (stdscr))))
-               ;; ERR (-1) means end of input: leave the editor.
-               (when (and (integer? ev) (= ev ERR))
-                 (let ((quit (ncurses-frame-quit-cont frame)))
-                   (when quit (quit 'eof))))
-               (dispatch-ncurses-event frame ev)
-               (render! frame))
-             (loop))))))
+           (let ((armed #f))
+             (let loop ()
+               (let ((want (if (ncurses-frame-message-expiry frame)
+                               message-read-timeout
+                               -1)))
+                 (unless (eqv? want armed)
+                   (timeout! (stdscr) want)
+                   (set! armed want)))
+               (let ((ev (getch (stdscr))))
+                 (cond
+                  ;; Nothing to read, with a message pending that times
+                  ;; out: take the message down once its time is up and
+                  ;; draw again. Until then there is nothing to do - and
+                  ;; nothing to read is also what the end of input looks
+                  ;; like, which is why the editor is not left here.
+                  ((and (not (key-event? ev))
+                        (ncurses-frame-message-expiry frame))
+                   (when (ncurses-frame-message-expired? frame)
+                     (set!ncurses-frame-message frame "")
+                     (set!ncurses-frame-message-expiry frame #f)
+                     (render! frame)))
+                  ;; Nothing to read on a *blocking* read is the end of
+                  ;; input - guile-ncurses answers #f for that too - so
+                  ;; leave the editor.
+                  ((not (key-event? ev))
+                   (let ((quit (ncurses-frame-quit-cont frame)))
+                     (when quit (quit 'eof))))
+                  (else
+                   (dispatch-ncurses-event frame ev)
+                   (render! frame))))
+               (loop)))))))
 
     (define (recursive-edit frame)
       ;; Enter a nested command loop and return what leaving it produced:
