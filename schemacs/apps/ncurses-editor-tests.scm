@@ -50,6 +50,7 @@
  ;; `try-completion' and `all-completions' are `minibuf.c''s.
  (only (schemacs editor minibuf) all-completions try-completion)
  (only (schemacs editor minibuffer)
+       completion-all-completions completion-boundaries
        *completion-show-inline-help* *completions-header-format*
        completion-setup-function completions-header-string
        display-completion-list
@@ -713,8 +714,10 @@
 ;; slash on the ones that are directories (so completing one descends
 ;; into it), and only the ones the typed text is a prefix of. The table is
 ;; a *function* table, so it is called with `(STRING PREDICATE ACTION)' -
-;; ACTION #t asking for the candidates.
-(test-equal '("/tmp/mbtest/alpha.txt" "/tmp/mbtest/another/")
+;; ACTION #t asking for the candidates. They come back as *names*, not
+;; paths: GNU Emacs's `completion-file-name-table' answers with
+;; `file-name-all-completions', and `*Completions*' lists `alpha.txt'.
+(test-equal '("alpha.txt" "another/")
   (begin
     (if (not (file-exists? "/tmp/mbtest")) (mkdir "/tmp/mbtest"))
     (if (not (file-exists? "/tmp/mbtest/another")) (mkdir "/tmp/mbtest/another"))
@@ -722,6 +725,18 @@
     (call-with-output-file "/tmp/mbtest/beta.txt" (lambda (p) (display "b" p)))
     (sort (file-name-completion-table "/tmp/mbtest/a" #f #t)
           (lambda (a b) (string<? a b)))))
+
+;; The directory is not lost: `try-completion' (ACTION #f) puts it back in
+;; front of what it completed, and the table's boundaries say where the
+;; name begins - which the styles pass on as the base size in the last
+;; cdr of `completion-all-completions', so a chosen name is put back
+;; after the directory.
+(test-equal '("/tmp/mbtest/alpha.txt" (12 . 0) 12)
+  (let ((all (completion-all-completions "/tmp/mbtest/al"
+                                         file-name-completion-table #f 14)))
+    (list (file-name-completion-table "/tmp/mbtest/al" #f #f)
+          (completion-boundaries "/tmp/mbtest/al" file-name-completion-table #f "")
+          (let loop ((rest all)) (if (pair? rest) (loop (cdr rest)) rest)))))
 
 ;; With no minibuffer active there are no contents, and `minibufferp' is
 ;; false - so the renderer draws the echo area as usual.
