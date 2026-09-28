@@ -1188,7 +1188,15 @@
                          temp (+ (interval-total-length temp) length))
                         (let ((balanced (balance-possible-root-interval temp)))
                           (loop (let ((up (interval-up balanced)))
-                                  (if (interval-type? up) up #f)))))
+                                  (if (interval-type? up) up #f))))))
+                    ;; ^ the walk ends *here*, and what follows is its
+                    ;; sibling and not part of it. It used to be nested
+                    ;; inside, so the merge and the split below ran once
+                    ;; per ancestor: at position 0 of a two-level tree the
+                    ;; second ancestor split the interval the first had
+                    ;; already moved, and the tree came apart - sometimes
+                    ;; with an error, sometimes silently. The C has the
+                    ;; walk and the merge as sequential statements.
                     (let* ((pleft (if prev (interval-plist prev) '()))
                            (pright (if i (interval-plist i) '()))
                            (newplist (merge-properties-sticky pleft pright))
@@ -1205,7 +1213,7 @@
                                        prev (- position (interval-position prev)))))
                             (set!interval-plist prev newplist)
                             (when (and i (intervals-equal? prev i))
-                              (merge-interval-right prev)))))))))
+                              (merge-interval-right prev))))))))
                   ;; Otherwise: the new text is inside one run, which just
                   ;; grows.
                   (let loop ((temp i))

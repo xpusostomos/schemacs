@@ -36,7 +36,10 @@
        *buffer-list* *current-buffer* *kill-buffer-query-functions*
        buffer-list buffer-name get-buffer get-buffer-create
        buffer-local-keymap set!buffer-local-keymap set!buffer-default-directory)
- (only (schemacs editor engine) text-editor-insert text-editor-read-only?)
+ (only (schemacs editor engine) text-editor-delete-from-cursor text-editor-insert
+       text-editor-read-only? text-editor-set-cursor)
+ (only (schemacs editor intervals) set!buffer-intervals)
+ (prefix (schemacs editor intervals) iv:)
  (only (schemacs editor files)
        *require-final-newline* ensure-final-newline-on-visit
        expand-file-name file-name-completion-table file-name-directory-part
@@ -47,6 +50,7 @@
  (only (schemacs editor minibuffer)
        *completion-show-inline-help* *completions-header-format*
        completion-setup-function completions-header-string
+       display-completion-list
        *minibuffer-completing-file-name*
        *minibuffer-message-timeout*
        completion--do-completion completion--map-for completion--message
@@ -1972,5 +1976,65 @@
                  (prefix-echo-pending?))
                #t)
         (begin (clear-prefix!) (prefix-echo-pending?))))
+
+;; Filling the completions buffer writes the heading and the candidates
+;; and *then* inserts the two help lines at `point-min' - an insertion in
+;; the middle of a buffer whose text carries properties, which is where the
+;; interval code used to come apart. The help has to end up above the
+;; heading and the candidates, and the tree has to survive it.
+(test-equal (string-append
+             "Type M-RET on a completion to select it.\n"
+             "Type M-<down> or M-<up> to move point between completions.\n"
+             "\n"
+             "2 possible completions:\n"
+             "apricot.txt\n"
+             "apple.txt\n")
+  (let ((frame (message-frame)))
+    (parameterize ((*current-frame* frame))
+      (display-completion-list '("apricot.txt" "apple.txt") "ap")
+      (text-editor-to-string (get-buffer "*Completions*")))))
+
+;; ...and the interval tree that filling the buffer leaves behind is a
+;; tree: every interval's total is its own length plus its two subtrees',
+;; and no length is negative. (Positions are a *cache* - only the path the
+;; last lookup walked has them right - so they are not asserted here.)
+;;
+;; The regression test for the insert-at-`point-min' bug itself is in
+;; `intervals-tests.scm', where the tree's shape can be built exactly; the
+;; pty battery catches it too. This is the cheaper invariant, on the
+;; buffer the editor really builds.
+(define (completions-tree-ok? candidates common-substring)
+  (let ((frame (message-frame)))
+    (parameterize ((*current-frame* frame))
+      (guard (e (else #f))
+        ;; A fresh `*Completions*' each time: the buffer is reused between
+        ;; these checks, and an interval tree left over from the previous
+        ;; fill would make this a different test. Emacs's `kill-buffer'
+        ;; does the same thing (`set_buffer_intervals (b, NULL)').
+        (let ((fresh (get-buffer-create "*Completions*")))
+          (set!buffer-intervals fresh #f)
+          (text-editor-set-cursor fresh 0)
+          (text-editor-delete-from-cursor fresh (text-editor-char-count fresh)))
+        (display-completion-list candidates common-substring)
+        (let* ((buffer (get-buffer "*Completions*"))
+               (root (iv:buffer-intervals buffer))
+               (chars (text-editor-char-count buffer)))
+          ;; No interval is longer than its subtree, and a subtree's total
+          ;; is its own length plus its children's. Positions are a *cache*
+          ;; and are only trustworthy along the path the last lookup walked,
+          ;; so they are not asserted here - totals and lengths are.
+          (define (valid i)
+            (or (not (iv:interval-type? i))
+                (and (<= 0 (iv:interval-length i))
+                     (= (iv:interval-total-length i)
+                        (+ (iv:interval-length i)
+                           (if (iv:interval-type? (iv:interval-left i))
+                               (iv:interval-total-length (iv:interval-left i)) 0)
+                           (if (iv:interval-type? (iv:interval-right i))
+                               (iv:interval-total-length (iv:interval-right i)) 0)))
+                     (valid (iv:interval-left i))
+                     (valid (iv:interval-right i)))))
+          (and (valid root)
+               (= (iv:interval-total-length root) chars)))))))
 
 (test-end "schemacs_ncurses_editor_completion_ui")

@@ -1194,32 +1194,21 @@
           (text-editor-set-cursor buffer 0)
           (text-editor-delete-from-cursor buffer (text-editor-char-count buffer))
           (*completions-common-substring* common-substring)
-          ;; The help goes in *first*, and the heading and the candidates
-          ;; after it - which is the order they read in, and so the order
-          ;; the finished buffer has. Emacs writes the candidates first
-          ;; and then has `completion-setup-function' go to `point-min'
-          ;; and insert the help above them; this editor does it the
-          ;; other way round because inserting in the *middle* of a
-          ;; buffer whose text carries properties is broken - `M-<down>'
-          ;; in the completions window would find nothing selectable, and
-          ;; the insert comes back with "Wrong type argument in position 1
-          ;; (expecting struct): #f" from `offset_intervals'. An empty
-          ;; buffer has no tree to get wrong. See the note in
-          ;; AGENTS.md; the reordering is a knowing departure, and the
-          ;; finished buffer is the same either way.
+          (insert-completions-header! buffer (length completions))
+          (for-each (lambda (candidate)
+                      (insert-completion-candidate! buffer candidate))
+                    completions)
+          ;; The help goes in at the *top*, above the heading, which is
+          ;; what Emacs's `completion-setup-function' does by going to
+          ;; `point-min' and inserting there - and it leaves point just
+          ;; after the help, on the heading line, with the candidates
+          ;; below it, so the first `M-<down>' reaches the first one.
+          ;;
+          ;; This insertion in the *middle* of a buffer whose text
+          ;; carries properties is the one that used to come apart: see
+          ;; the note on `adjust-intervals-for-insertion' in
+          ;; `(schemacs editor intervals)'.
           (run-completion-setup-hook! buffer)
-          ;; Where the help insert left point, which is where Emacs leaves
-          ;; it too: `completion-setup-function' inserts at `point-min', so
-          ;; point ends up just after the help - on the heading line, with
-          ;; the candidates below it. The first `M-<down>' then reaches the
-          ;; first candidate. Restored at the end, because the heading and
-          ;; the candidates are written after it here.
-          (let ((after-help (text-editor-char-count buffer)))
-            (insert-completions-header! buffer (length completions))
-            (for-each (lambda (candidate)
-                        (insert-completion-candidate! buffer candidate))
-                      completions)
-            (text-editor-set-cursor buffer after-help))
           (text-editor-set-read-only! buffer #t))
         buffer))
 

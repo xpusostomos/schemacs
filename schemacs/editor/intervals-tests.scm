@@ -4,7 +4,8 @@
  (only (srfi 64) test-assert test-equal test-begin test-end)
  (only (schemacs editor engine)
        new-text-editor text-editor-insert text-editor-char-count
-       text-editor-text-props)
+       text-editor-set-cursor
+       text-editor-text-props text-editor-to-string)
  (prefix (schemacs editor intervals) iv:))
 
 ;; Regression tests for `(schemacs editor intervals)', which mirrors GNU
@@ -203,3 +204,81 @@
   (iv:merge-properties-sticky '(face bold front-sticky (face)) '()))
 
 (test-end "schemacs_editor_intervals")
+
+
+;;--------------------------------------------------------------------
+;; Inserting at the very beginning of a buffer that has properties
+;;
+;; `adjust_intervals_for_insertion' grows every interval above the
+;; insertion point and *then*, once, works out what the new text's
+;; properties are by merging the runs either side of it. The merge - and
+;; the split it may ask for - was nested inside the growing walk, so it
+;; ran once per ancestor instead of once: at position 0 of a tree two
+;; levels deep it ran twice, and the second time split the interval that
+;; the first split had already moved, leaving it with a negative length
+;; and a position past the end of the buffer. The tree came apart
+;; silently; the next thing to read it walked off the end and reported
+;; "Wrong type argument in position 1 (expecting struct): #f".
+;;
+;; The tree below is the shape the `*Completions*' buffer has when its
+;; help lines are inserted at `point-min', which is where this was found:
+;; the run at the front carries a property of its own, and it is not the
+;; root.
+
+(test-begin "schemacs_editor_intervals_insert_at_beginning")
+
+(define (valid-tree? ed)
+  ;; Every interval's total is its own length plus its two subtrees', and
+  ;; no length is negative - the two things Emacs's `check_interval_tree'
+  ;; asserts.
+  ;;--------------------------------------------------------------
+  (define (sub i get)
+    (let ((x (get i))) (if (iv:interval-type? x) (iv:interval-total-length x) 0)))
+  (define (walk i)
+    (or (not (iv:interval-type? i))
+        (and (<= 0 (iv:interval-length i))
+             (= (iv:interval-total-length i)
+                (+ (iv:interval-length i)
+                   (sub i iv:interval-left)
+                   (sub i iv:interval-right)))
+             (walk (iv:interval-left i))
+             (walk (iv:interval-right i)))))
+  (walk (tree-of ed)))
+
+;; A twenty-character buffer whose tree is two runs, the left one carrying
+;; a property and hanging below the root - so the growing walk has two
+;; steps, which is what the bug needed.
+(define (two-run-editor)
+  (let* ((ed (editor-of "abcdefghij0123456789"))
+         ;; `(make<interval> TOTAL-LENGTH POSITION LEFT RIGHT UP PLIST)'
+         (head (iv:make<interval> 10 0 #f #f #f '(face shadow)))
+         (root (iv:make<interval> 20 10 head #f #f '())))
+    (iv:set!interval-up head root)
+    (iv:set!interval-up root ed)
+    (iv:set!buffer-intervals ed root)
+    ed))
+
+;; The tree as built, before the insertion: two runs, 0..10 and 10..20.
+(test-equal '((0 10 (face shadow)) (10 20 ()))
+  (intervals-of (two-run-editor)))
+
+;; ...and after inserting five characters at the front: the text is
+;; longer, the tree still adds up, and it is still a tree. The runs are
+;; what the bug moved: the property run was split into pieces with a
+;; *zero-length* interval among them - `(5 10 ()) (10 15 ()) (15 15
+;; (face shadow))' - while the text came out right, which is what made it
+;; silent. The five new characters take no properties, which is what
+;; `merge_properties_sticky' answers for an insertion with nothing on its
+;; left (`face' is not front-sticky, so it is not inherited forwards).
+(test-equal '(#t 25 25 ((0 5 ()) (5 15 (face shadow)) (15 25 ()))
+              "HELLOabcdefghij0123456789")
+  (let ((ed (two-run-editor)))
+    (text-editor-set-cursor ed 0)
+    (text-editor-insert ed "HELLO")
+    (list (valid-tree? ed)
+          (iv:interval-total-length (tree-of ed))
+          (text-editor-char-count ed)
+          (intervals-of ed)
+          (text-editor-to-string ed))))
+
+(test-end "schemacs_editor_intervals_insert_at_beginning")
