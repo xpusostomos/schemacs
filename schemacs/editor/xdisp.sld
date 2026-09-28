@@ -33,6 +33,7 @@
           text-location-type? text-location-line text-location-column)
 
     (only (schemacs editor engine)
+         line-break-newline line-break-crlf line-break-return
          string-search-forward text-editor-buffer-name text-editor-text-props
          text-editor-char-count text-editor-file-name
          text-editor-cursor-column text-editor-cursor-line
@@ -52,7 +53,8 @@
          window-top
          window-top-line)
     (only (schemacs editor disp-table)
-         current-line-display-column expand-line-display line-display-offsets)
+         char-display-glyph current-line-display-column expand-line-display
+         line-display-offsets)
     ;; The `face' text property, and the faces themselves. A face reaches
     ;; the display through these three libraries and no others: the
     ;; property says which faces are in effect, `xfaces' merges them and
@@ -73,12 +75,17 @@
    ;; exported; `render!' and the mode line are what the rest calls.
    *search-highlight*
    cursor-screen-position
+   highlight-matches
    ;; the run computation, which is what a caller can test without a
    ;; terminal: `draw-line!' itself needs one
    line-face-runs
    line-end-fill-attribute
    *mode-line-format*
+   face-at-buffer-position
+   face->attribute
    format-mode-line
+   line-continuation-display?
+   line-display-width
    mode-line-string
    render!
    status-string
@@ -157,6 +164,23 @@
            window (+ 1 (- cursor-line vheight)))
            ))))
 
+    (define *mode-line-window* (make-parameter #f))
+
+    (define (mode-line-eol-desc)
+      ;; The mode-line mnemonic for the EOL convention of WINDOW's buffer:
+      ;; GNU Emacs's `mode-line-eol-desc', which reads the buffer-local
+      ;; `buffer-file-coding-system' in the window being rendered.
+      ;;--------------------------------------------------------------
+      (let* ((window (*mode-line-window*))
+             (line-break
+              (buffer-local-value (window-buffer window)
+                                  'buffer-file-coding-system
+                                  line-break-newline)))
+        (cond ((eq? line-break line-break-crlf) "(DOS)")
+              ((eq? line-break line-break-return) "(Mac)")
+              ((eq? line-break line-break-newline) ":")
+              (else ""))))
+
     (define *mode-line-format*
       ;; GNU Emacs's `mode-line-format': the template a window's mode line is
       ;; drawn from, evaluated by `FORMAT-MODE-LINE' below.
@@ -176,7 +200,9 @@
       ;; registry, the names go back in.
       ;;--------------------------------------------------------------
       (make-parameter
-       (list (list "%1*" "%1+")
+       (list (list ':eval mode-line-eol-desc)
+             " "
+             (list "%1*" "%1+")
              " "
              "%12b"
              " -- L" "%l" " C" "%c")))
@@ -302,54 +328,40 @@
     (define (format-mode-line format . args)
       ;; GNU Emacs's `format-mode-line': the mode line FORMAT produces for a
       ;; window, WINDOW being the second argument or the selected window.
-      ;;
-      ;; A construct is a string (its `%'-constructs expanded), a list (each
-      ;; element processed in turn, so a list whose car is an integer pads the
-      ;; rest to that width, and `(:eval FORM)' is evaluated), a symbol (whose
-      ;; value is used - and this editor has no variable registry, so every
-      ;; symbol is unbound and yields nothing, as an unbound variable does in
-      ;; Emacs), or nil (nothing at all).
+      ;; A construct is a string, list, symbol, or nil; `:eval' holds a
+      ;; zero-argument procedure in place of an Emacs Lisp form.
       ;;--------------------------------------------------------------
       (let ((window (if (pair? args) (car args) (selected-window))))
-        (let process ((construct format))
-          (cond
-           ((not construct) "")
-           ((string? construct) (expand-mode-line-string construct window))
-           ((integer? construct) "")
-           ((symbol? construct) "")
-           ((pair? construct)
+        (parameterize ((*mode-line-window* window))
+          (let process ((construct format))
             (cond
-             ;; `(:propertize ELT PROPS...)' - the properties have nowhere to
-             ;; go, so the element is processed as it stands - and
-             ;; `(:eval FORM)'. Emacs's `:eval' holds a *form* to evaluate,
-             ;; because Emacs has an evaluator under it; here it holds a
-             ;; procedure of no arguments, which is the same thing without
-             ;; one. The elisp layer is where the two will meet.
-             ((and (memq (car construct) '(:eval :propertize))
-                   (pair? (cdr construct)))
-              ;; `:eval' is self-evaluating in Emacs Lisp; in Scheme it is a
-          ;; symbol, and this is a reference to it
-          (if (eq? (car construct) ':eval)
-                  (process ((cadr construct)))
-                  (process (cadr construct))))
-             ;; a symbol first is a condition on that symbol's value
-             ((symbol? (car construct))
-              (process (if (and (pair? (cdr construct))
-                                (pair? (cddr construct)))
-                           (caddr construct)
-                           #f)))
-             ;; an integer first is a width
-             ((integer? (car construct))
-              (let ((width (car construct))
-                    (rest (if (pair? (cdr construct)) (cadr construct) #f)))
-                (let ((text (process rest)))
+             ((not construct) "")
+             ((string? construct) (expand-mode-line-string construct window))
+             ((integer? construct) "")
+             ((symbol? construct) "")
+             ((pair? construct)
+              (cond
+               ((and (memq (car construct) '(:eval :propertize))
+                     (pair? (cdr construct)))
+                (process (if (eq? (car construct) ':eval)
+                             ((cadr construct))
+                             (cadr construct))))
+               ((symbol? (car construct))
+                (process (if (and (pair? (cdr construct))
+                                  (pair? (cddr construct)))
+                             (caddr construct)
+                             #f)))
+               ((integer? (car construct))
+                (let* ((width (car construct))
+                       (rest (if (pair? (cdr construct)) (cadr construct) #f))
+                       (text (process rest)))
                   (if (< width 0)
                       (if (> (string-length text) (- width))
                           (substring text 0 (- width))
                           text)
-                      (pad-mode-line-element text width)))))
-             (else (apply string-append (map process construct)))))
-           (else "")))))
+                      (pad-mode-line-element text width))))
+               (else (apply string-append (map process construct)))))
+             (else ""))))))
 
     (define (mode-line-string window)
       ;; The window's mode line: GNU Emacs's `MODE-LINE-STRING' is what
@@ -373,7 +385,8 @@
       ;; same buffer are at different places in it, and each mode line
       ;; says where its own window is.
       ;;--------------------------------------------------------------
-      (format-mode-line (*mode-line-format*) window))
+      (parameterize ((*mode-line-window* window))
+        (format-mode-line (*mode-line-format*) window)))
 
     (define (status-string frame)
       ;; The mode line of the selected window, which is the one the
@@ -504,18 +517,48 @@
                          #:y screen-row #:x (+ x0 from))
                  (attr-off! (stdscr) attribute)))
              (line-face-runs ed line-start line-string))))
-      ;; xdisp.c extends faces into empty cells at the end of a line. A
-      ;; full-width row takes the separate continuation-glyph path, which
-      ;; this renderer does not yet implement.
-      (let ((fill (line-end-fill-attribute ed line-start line-string
-                                           display width)))
-        (when fill
-          (attr-on! (stdscr) fill)
-          (addstr (stdscr)
-                  (make-string (- width (string-length display)) #\space)
-                  #:y screen-row
-                  #:x (+ x0 (string-length display)))
-          (attr-off! (stdscr) fill))))
+      ;; xdisp.c draws a continuation glyph when more of the logical line
+      ;; remains, with the default face. Otherwise a region may extend its
+      ;; face into empty cells at the line end.
+      (if (line-continuation-display? line-string width)
+          (draw-continuation-glyph! screen-row x0 width)
+          (let ((fill (line-end-fill-attribute ed line-start line-string
+                                               display width)))
+            (when fill
+              (attr-on! (stdscr) fill)
+              (addstr (stdscr)
+                      (make-string (- width (string-length display)) #\space)
+                      #:y screen-row
+                      #:x (+ x0 (string-length display)))
+              (attr-off! (stdscr) fill)))))
+
+    (define (line-display-width line-string)
+      ;; Count all cells, expanding tabs at each successive display column.
+      ;;--------------------------------------------------------------
+      (let loop ((i 0) (column 0))
+        (if (>= i (string-length line-string))
+            column
+            (let* ((ch (string-ref line-string i))
+                   (glyph (char-display-glyph ch column)))
+              (loop (+ i 1) (+ column (string-length glyph)))))))
+
+    (define (line-continuation-display? line-string width)
+      ;; Whether the logical line's full display width exceeds this row:
+      ;; GNU Emacs puts a special continuation glyph in the final cell.
+      ;; Tabs and control characters may occupy more than one display cell.
+      ;;--------------------------------------------------------------
+      (and (> width 0)
+           (> (line-display-width line-string) width)))
+
+    (define (draw-continuation-glyph! row x0 width)
+      ;; The continuation glyph is a special display character, not buffer
+      ;; text, and Emacs draws it with the default face even inside a region.
+      ;;--------------------------------------------------------------
+      (let ((attribute (face->attribute 'default)))
+        (move (stdscr) row (+ x0 width -1))
+        (attr-on! (stdscr) attribute)
+        (addstr (stdscr) "\\")
+        (attr-off! (stdscr) attribute)))
 
     (define (line-end-fill-attribute ed line-start line-string display width)
       ;; Face used for cells after a line's text when the line-end

@@ -307,8 +307,8 @@
       ;;     below and use the new one. This is the only choice when the
       ;;     frame has one window.
       ;;
-      ;; The new window takes a third of the frame, as Emacs's default
-      ;; action does, but never less than `window-min-height'.
+      ;; A newly split window uses `split-window-sensibly's even split,
+      ;; which is the default of `split-window-below'.
       ;;
       ;; A window that starts showing a buffer takes the buffer's own
       ;; point, which is what Emacs's `set_window_buffer' does with
@@ -345,10 +345,7 @@
                   other)
            (else
             (let* ((window (selected-window))
-                   (height (window-height window))
-                   (want (max window-min-height
-                              (min (- height window-min-height)
-                                   (floor-quotient height 3)))))
+                   (height (window-height window)))
               (if (< height (* 2 window-min-height))
                   ;; no room to split: the selected window shows it, which
                   ;; is Emacs's `display-buffer-use-some-window' fallback
@@ -359,7 +356,7 @@
                     (record-buffer! buffer)
                     window)
                   ;; split below, and the new window shows it
-                  (let ((new (split-window-below window (- want))))
+                  (let ((new (split-window-below window #f)))
                     (set!window-buffer new buffer)
                     (set!window-top-line new 0)
                     (set-window-point! new (text-editor-get-cursor buffer))

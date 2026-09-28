@@ -67,7 +67,7 @@
 
   (export
    %char-at %inword-at *amalgamating-count* *amalgamating-undo-limit*
-   *last-change-was-undo* *last-command* *this-command*
+   *last-change-was-undo* *last-command* *this-command* *temporary-goal-column*
    *kill-do-not-save-duplicates* *kill-read-only-ok*
    *kill-ring* *kill-ring-max* *kill-ring-yank-pointer*
    *pending-undo-list* *prefix-cu* *prefix-digits* *prefix-negative*
@@ -162,16 +162,21 @@
        (lambda (count) (text-editor-move-cursor (current-editor) (- count)))
        "Move point N characters backward."))
 
+    (define *temporary-goal-column* (make-parameter 0))
+
     (define next-line
       (new-count-command
        "next-line"
        (lambda (count)
-         (let ((ed (current-editor)))
+         (let* ((ed (current-editor))
+                (goal (if (memq (*last-command*) (list next-line previous-line))
+                          (*temporary-goal-column*)
+                          (text-editor-cursor-column ed))))
+           (*temporary-goal-column* goal)
            (let loop ((i 0))
              (when (< i count)
                (let ((line (text-editor-cursor-line ed)))
-                 (text-editor-set-cursor
-                  ed (+ 1 line) (text-editor-cursor-column ed))
+                 (text-editor-set-cursor ed (+ 1 line) goal)
                  (cond
                   ;; There was no line to move to: point is on the last
                   ;; line, and the engine will not leave it. Emacs moves
@@ -189,12 +194,15 @@
       (new-count-command
        "previous-line"
        (lambda (count)
-         (let ((ed (current-editor)))
+         (let* ((ed (current-editor))
+                (goal (if (memq (*last-command*) (list next-line previous-line))
+                          (*temporary-goal-column*)
+                          (text-editor-cursor-column ed))))
+           (*temporary-goal-column* goal)
            (let loop ((i 0))
              (when (< i count)
                (let ((line (text-editor-cursor-line ed)))
-                 (text-editor-set-cursor
-                  ed (- line 1) (text-editor-cursor-column ed))
+                 (text-editor-set-cursor ed (- line 1) goal)
                  (cond
                   ((= line (text-editor-cursor-line ed))
                    (text-editor-set-cursor

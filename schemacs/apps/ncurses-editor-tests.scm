@@ -8,10 +8,12 @@
  (only (srfi 64) test-assert test-equal test-begin test-end)
  (only (schemacs editor engine)
        new-text-editor set!text-editor-buffer-name set!text-editor-mark
-       text-editor-char-count text-editor-get-cursor text-editor-insert
+       text-editor-char-count text-editor-cursor-column text-editor-get-cursor text-editor-insert
+       text-editor-text-props
        text-editor-mark text-editor-move-cursor text-editor-set-cursor
        text-editor-set-modified! text-editor-set-read-only!
-       text-editor-to-string text-editor-undo-list)
+       text-editor-to-string text-editor-undo-list
+       line-break-newline line-break-crlf line-break-return string-search-forward)
  (only (schemacs editor frame)
        *current-frame* *echo-area-buffer* *echo-area-prompt* *minibuffer*
        frame-height ncurses-frame-editor ncurses-frame-message
@@ -30,11 +32,11 @@
        *Buffer-menu-del-char* *Buffer-menu-marks* Buffer-menu-buffer
        Buffer-menu-execute Buffer-menu--set-mark! Buffer-menu-redraw!
        list-buffers-noselect)
- (only (guile) string-split)
+ (only (guile) string-prefix? string-split)
  (only (schemacs editor command) run-command)
  (only (schemacs editor buffer)
        *buffer-list* *current-buffer* *kill-buffer-query-functions*
-       buffer-list buffer-name get-buffer get-buffer-create
+       buffer-list buffer-name get-buffer get-buffer-create set-buffer-local-value!
        buffer-local-keymap set!buffer-local-keymap set!buffer-default-directory)
  (only (schemacs editor engine) text-editor-delete-from-cursor text-editor-insert
        text-editor-read-only? text-editor-set-cursor)
@@ -81,12 +83,13 @@
  (only (schemacs editor isearch)
        *search-case-fold?* *search-pattern* isearch-find isearch-message)
  (only (schemacs editor window)
-       delete-window delete-other-windows get-buffer-window
+       delete-window delete-other-windows display-buffer get-buffer-window
        other-window-command split-window-below split-window-right
        switch-to-buffer)
  (only (schemacs editor xdisp)
        *mode-line-format* cursor-screen-position format-mode-line
-       mode-line-string status-string)
+       line-continuation-display? line-display-width
+       line-face-runs mode-line-string status-string)
  (only (schemacs editor command)
        command-name command-type?)
  )
@@ -411,12 +414,20 @@
 
 (define save-key (integer->char 19))   ; C-x C-s
 
-;; A buffer just visited is unmodified: the status line starts with the
-;; two cells GNU Emacs's mode line uses for that, `--'.
+(define (mode-line-modification-indicator mode-line)
+  (let ((offset (if (or (string-prefix? "(DOS) " mode-line)
+                        (string-prefix? "(Mac) " mode-line)
+                        (string-prefix? ": " mode-line))
+                    2
+                    0)))
+    (substring mode-line offset (+ offset 2))))
+
+;; A buffer just visited is unmodified: the mode-line modification field is
+;; `--', after the EOL mnemonic as in GNU Emacs.
 (test-equal "--"
-  (substring (car (with-file-buffer "/tmp/fe-mod.txt" "orig\n"
-                    (lambda (frame) #f)))
-             0 2))
+  (mode-line-modification-indicator
+   (car (with-file-buffer "/tmp/fe-mod.txt" "orig\n"
+          (lambda (frame) #f)))))
 
 ;; Typing marks it modified (`**'), and saving marks it unmodified again
 ;; while actually writing the file.
@@ -424,12 +435,12 @@
   (append
    (let ((result (with-file-buffer "/tmp/fe-mod.txt" "orig\n"
                    (lambda (frame) (type frame #\X)))))
-     (list (substring (car result) 0 2) (cdr result)))
+     (list (mode-line-modification-indicator (car result)) (cdr result)))
    (let ((result (with-file-buffer "/tmp/fe-mod.txt" "orig\n"
                    (lambda (frame)
                      (type frame #\X)
                      (type frame (integer->char 24) save-key)))))
-     (list (substring (car result) 0 2) (cdr result)))))
+     (list (mode-line-modification-indicator (car result)) (cdr result)))))
 
 ;; Undoing back to the saved state makes the buffer unmodified again,
 ;; and redoing makes it modified again - the status line follows.
@@ -439,11 +450,14 @@
       (lambda (frame)
         (type frame #\X (integer->char 24) save-key)   ; save "Xorig"
         (type frame #\Y)                               ; "YXorig"
-        (set! states (cons (substring (status-string frame) 0 2) states))
+        (set! states (cons (mode-line-modification-indicator
+                            (status-string frame)) states))
         (type frame C-underscore)                      ; undo the Y
-        (set! states (cons (substring (status-string frame) 0 2) states))
+        (set! states (cons (mode-line-modification-indicator
+                            (status-string frame)) states))
         (type frame ESC C-underscore)                  ; redo it
-        (set! states (cons (substring (status-string frame) 0 2) states))))
+        (set! states (cons (mode-line-modification-indicator
+                            (status-string frame)) states))))
     (reverse states)))
 
 ;; The line-break convention is the buffer's own, not the frame's: the
@@ -498,7 +512,8 @@
                            (set! buffer (text-editor-to-string
                                          (ncurses-frame-editor frame))))
                          opts)))
-      (list (substring (car result) 0 2) message (cdr result) buffer))))
+      (list (mode-line-modification-indicator (car result))
+            message (cdr result) buffer))))
 
 ;; Visiting a file that cannot be written makes the buffer read-only,
 ;; and the status line says so with GNU Emacs's `%%' - along with the
@@ -879,6 +894,25 @@
     (text-editor-move-cursor ed 100)
     (cursor-screen-position (window-of frame))))
 
+;; A vertical run keeps its original goal after a short line clamps point;
+;; an intervening command starts a new run from its resulting column.
+(test-equal '(4 0)
+  (let* ((ed (new-text-editor))
+         (frame (test-frame ed))
+         (run (lambda (keys)
+                (parameterize ((*current-frame* frame)
+                               (*last-command* #f)
+                               (*this-command* #f))
+                  (for-each (lambda (key) (dispatch-ncurses-event frame key))
+                            keys)))))
+    (text-editor-insert ed "abcdef\nxy\nabcdef")
+    (text-editor-set-cursor ed 0 4)
+    (run (list C-n C-n))
+    (let ((returned (text-editor-cursor-column ed)))
+      (text-editor-set-cursor ed 0 4)
+      (run (list C-n C-a C-n))
+      (list returned (text-editor-cursor-column ed)))))
+
 ;; The minibuffer draws the cursor at the prompt, then what has been
 ;; typed up to point - and at the end of it, after the last character.
 (test-equal '(11 14 13 11)
@@ -1092,7 +1126,7 @@
 ;; made with, column 0. Both windows said `C1' before this: the split
 ;; window and the new one were reading the same point, which is the bug
 ;; the two different numbers are here to catch.
-(test-equal '("** alpha.txt    -- L1 C3" "** alpha.txt    -- L1 C0")
+(test-equal '(": ** alpha.txt    -- L1 C3" ": ** alpha.txt    -- L1 C0")
   (let* ((frame (frame-with "alpha\nbeta\n"))
          (ed (ncurses-frame-editor frame)))
     (set!text-editor-buffer-name ed "alpha.txt")
@@ -1355,6 +1389,25 @@
           ;; a construct that is not implemented is printed as it stands
           (format-in frame "%y"))))
 
+;; A DOS-coded buffer shows Emacs's mode-line EOL mnemonic, independently
+;; of a Unix-coded buffer displayed in the same frame.
+(test-equal '(#t #t #t)
+  (let* ((frame (new-frame (new-text-editor) 24 80))
+         (window (selected-window-of frame))
+         (dos (new-text-editor))
+         (unix (new-text-editor)))
+    (text-editor-insert dos "dos\n")
+    (text-editor-insert unix "unix\n")
+    (set-buffer-local-value! dos 'buffer-file-coding-system line-break-crlf)
+    (set-buffer-local-value! unix 'buffer-file-coding-system line-break-newline)
+    (set!window-buffer window dos)
+    (let ((dos-mode (format-in frame (*mode-line-format*))))
+      (set!window-buffer window unix)
+      (let ((unix-mode (format-in frame (*mode-line-format*))))
+        (list (and (string-search-forward dos-mode "(DOS)" 0 #f) #t)
+              (not (string-search-forward unix-mode "(DOS)" 0 #f))
+              (and (string-search-forward dos-mode "(DOS) **" 0 #f) #t))))))
+
 ;; The default format is the editor's mode line, and it says the buffer,
 ;; its own window's position and its modification state.
 (test-equal #t
@@ -1364,10 +1417,19 @@
     (text-editor-insert ed "X")
     ;; point is where the insert left it, one character in, and `%c'
     ;; counts from zero - so C1, not C0
-    (string=? "** probe.txt    -- L1 C1"
+    (string=? ": ** probe.txt    -- L1 C1"
               (format-in frame (*mode-line-format*)))))
 
 (test-end "schemacs_ncurses_editor_mode_line_format")
+
+;; display-buffer's popup split uses the same even split as C-x 2 rather
+;; than reserving an arbitrary one-third for the new buffer.
+(test-equal '((0 12) (12 11))
+  (let ((frame (frame-with "alpha\nbeta\n"))
+        (popup (new-text-editor)))
+    (parameterize ((*current-frame* frame))
+      (display-buffer popup)
+      (window-rects frame))))
 
 (test-end "schemacs_ncurses_editor_windows")
 

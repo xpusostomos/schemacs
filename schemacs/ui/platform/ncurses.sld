@@ -17,11 +17,15 @@
     (scheme base)
     ;; The terminal.
     (only (ncurses curses)
-          curs-set endwin has-colors? idcok! idlok! initscr keypad! noecho!
+          colors curs-set endwin has-colors? idcok! idlok! initscr keypad! noecho!
           nonl! raw! scrollok! start-color! stdscr)
     (only (schemacs editor engine)
           new-text-editor set!text-editor-buffer-name)
     (only (schemacs editor frame) *current-frame* new-frame)
+    (only (schemacs editor faces)
+          *display-color-cells* *display-type* *frame-background-mode*
+          face-list face-spec-recalc)
+    (only (guile) getenv string-prefix? string-split)
     ;; Everything this needs of the editor: the buffers named on the
     ;; command line - which is `startup.el''s job, not this one's - and
     ;; then the command loop.
@@ -54,6 +58,36 @@
 
     ;; Terminal setup
 
+    (define (terminal-background-mode)
+      ;; Match Emacs's TTY default: xterm-like terminals are light and other
+      ;; terminals dark. rxvt's COLORFGBG can report the actual background,
+      ;; as `rxvt-colorfgbg-background-mode' does.
+      ;;--------------------------------------------------------------
+      (let* ((term (or (getenv "TERM") ""))
+             (colorfgbg (getenv "COLORFGBG"))
+             (fields (and colorfgbg (string-split colorfgbg #\;)))
+             (background (and fields (pair? fields) (car (reverse fields))))
+             (index (and background (string->number background))))
+        (cond
+         ((and index (<= 0 index) (< index 8))
+          (if (<= index 6) 'dark 'light))
+         ((or (string-prefix? "xterm" term)
+              (string-prefix? "rxvt" term)
+              (string-prefix? "dtterm" term)
+              (string-prefix? "eterm" term))
+          'light)
+         (else 'dark))))
+
+    (define (initialize-display-faces!)
+      ;; Ask ncurses after `initscr', when terminal capabilities are known,
+      ;; then choose each face's Emacs spec against those capabilities.
+      ;;--------------------------------------------------------------
+      (*display-type* (if (has-colors?) 'color 'mono))
+      (*display-color-cells* (if (has-colors?) (max 1 (colors)) 0))
+      (unless (*frame-background-mode*)
+        (*frame-background-mode* (terminal-background-mode)))
+      (for-each face-spec-recalc (face-list)))
+
     (define (with-terminal thunk)
       ;; Run THUNK with the terminal in curses mode, restoring the
       ;; terminal even if THUNK raises an error.
@@ -73,6 +107,7 @@
           ;; something it cannot. `(schemacs editor xdisp)' defines the
           ;; pairs the faces ask for.
           (when (has-colors?) (start-color!))
+          (initialize-display-faces!)
           ;; disable the insert/delete-character optimizations: they
           ;; corrupt the display when lines merge (ncurses tracks a
           ;; virtual screen the terminal no longer matches)

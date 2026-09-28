@@ -65,6 +65,14 @@
   (with-display (lambda () (f:face-attribute 'mode-line ':inverse-video))
                 1 'mono #f))
 
+;; The region face remains the official Emacs definition: dark 16-colour
+;; displays select blue3, while the eight-colour fallback selects blue.
+(test-equal '("blue3" "blue")
+  (list (with-display (lambda () (f:face-attribute 'region ':background))
+                      256 'color 'dark)
+        (with-display (lambda () (f:face-attribute 'region ':background))
+                      8 'color #f)))
+
 ;; With 8 colours but the display's background unknown, the colour branches
 ;; that ask about the background still fail, so it is the `(t ...)' branch
 ;; even though the terminal has colour to offer.
