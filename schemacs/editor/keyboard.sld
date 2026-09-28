@@ -42,6 +42,8 @@
     (only (ncurses curses)
           ERR KEY_BACKSPACE KEY_DC KEY_DOWN KEY_END KEY_HOME KEY_LEFT
           KEY_RESIZE KEY_RIGHT KEY_UP getch keyname stdscr timeout!)
+    (only (schemacs editor engine)
+          text-editor-deactivate-mark set!text-editor-deactivate-mark!)
     (only (schemacs editor command)
           command-interactive-spec command-type? run-command)
     (only (schemacs editor frame)
@@ -60,11 +62,11 @@
     ;; The keys the current buffer has of its own - what gives a buffer
     ;; like `*Completions*' its own bindings - and which buffer is current.
     (only (schemacs editor buffer)
-          buffer-local-keymap
-          current-buffer)
+          buffer-local-keymap buffer-local-value current-buffer
+          mark-active set!mark-active)
     (only (schemacs editor simple)
           *last-change-was-undo* *last-command* *this-command*
-          clear-prefix! pending-uarg place-undo-boundary!
+          deactivate-mark clear-prefix! pending-uarg place-undo-boundary!
           prefix-echo-pending? show-prefix-echo!
           undo-command undo-redo-command update-prefix!)
     ;; `render!' after every key: the loop is what drives the display.
@@ -210,7 +212,11 @@
       ;; `last-change-was-undo', which is how a redo knows there is
       ;; something to redo.
       ;;--------------------------------------------------------------
-      (let ((uarg (pending-uarg)))
+      (let* ((uarg (pending-uarg))
+             (buffer (current-buffer)))
+        ;; Emacs clears its buffer-local deferred flag before every command;
+        ;; edits and region commands may set it again while they run.
+        (set!text-editor-deactivate-mark! buffer #f)
         ;; `this_command' is what is running - and a command may *change*
         ;; it (`kill-region' renames itself to itself, `yank-pop' says
         ;; `yank'), which is why the promotion to `last-command' reads it
@@ -235,6 +241,12 @@
                 (run-command action)))
            ((procedure? action) (action))
            (else (error "not a command" action))))
+        ;; Commands such as `kill-ring-save' set the buffer's deferred
+        ;; `deactivate-mark' flag. Apply it after the command, as Emacs does,
+        ;; so later motion does not extend the copied region.
+        (when (text-editor-deactivate-mark buffer)
+          (set!text-editor-deactivate-mark! buffer #f)
+          (deactivate-mark))
         (*last-command* (*this-command*))))
 
     (define (report-command-error! frame ex)

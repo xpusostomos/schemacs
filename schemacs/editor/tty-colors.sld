@@ -22,28 +22,44 @@
   ;; that is not a hypothetical, it is what happened when this library was
   ;; missing.
   ;;
-  ;; Not ported: `tty-color-define' and the other mutators of the
-  ;; terminal's table, the `tty-color-mode' variable, and reading the
-  ;; terminal's real colours - Emacs builds them from terminfo's `initc'
-  ;; at startup, and ncurses offers no way to ask, so the ANSI sixteen are
-  ;; what is here.
+  ;; Not ported: `tty-color-mode-alist' (it is `term.c''s to read),
+  ;; `tty-color-gray-shades', and `color-values-from-color-spec' (the
+  ;; "#RRGGBB" spelling, which is `xfaces.c''s). What a terminal *has* is
+  ;; not decided here: `tty-register-default-colors' gives it the eight,
+  ;; and `term/xterm.el' registers the rest for an xterm.
   ;;
   ;; See FACES-PLAN.txt for the plan this library is a step of.
 
   (import
     (scheme base)
     (scheme char)
+    ;; `sqrt' and `acos' are `(scheme inexact)''s: the gray-diagonal test
+    ;; is an angle.
+    (scheme inexact)
     ;; `caddr' is `(scheme cxr)'s and not `(scheme base)'s, and it is not
     ;; missed until a colour is looked up.
     (only (scheme cxr) caddr)
-    ;; `ash' is Guile's: the metric shifts rather than divides, as the C
-    ;; does, so that the integer arithmetic matches.
-    (only (guile) ash))
+    ;; `ash' and `logior' are Guile's: Emacs compares 8-bit components,
+    ;; and a 24-bit pixel is three of them packed.
+    (only (guile) ash logior)
+    ;; `tty-color-24bit' asks how many colours the display has.
+    (only (schemacs editor faces) *display-color-cells*))
 
   (export
-   color-distance
-   color-name-rgb
+   tty-standard-colors
+   tty-color-alist
+   tty-modify-color-alist
+   tty-register-default-colors
+   tty-color-canonicalize
+   tty-color-24bit
+   tty-color-define
+   tty-color-clear
+   tty-color-off-gray-diag
    tty-color-approximate
+   tty-color-standard-values
+   tty-color-translate
+   tty-color-by-index
+   tty-color-values
    tty-color-desc
    *color-name-rgb-alist*
    *tty-colors*
@@ -51,87 +67,196 @@
 
   (begin
 
-    (define *tty-colors*
-      ;; The colours this terminal has, as `(INDEX NAME R G B)'. This is
-      ;; GNU Emacs's `tty-color-alist' - and, at eight, its
-      ;; `tty-standard-colors' exactly, which is the table a terminal
-      ;; without `initc' has.
-      ;;
-      ;; Emacs gets more when the terminal declares them (a 256-colour
-      ;; xterm) by asking terminfo at startup; ncurses does not expose
-      ;; that, so eight is what this has. It matters for the
-      ;; approximation: with a bright-black grey in the list, `magenta4'
-      ;; is marginally nearer that grey than it is to magenta, and faces
-      ;; asking for magenta come out grey.
+    (define tty-standard-colors
+      ;; GNU Emacs's `tty-standard-colors': "An alist of 8 standard tty
+      ;; colors, their indices and RGB values", each `(NAME INDEX R G B)'.
       ;;--------------------------------------------------------------
-      (make-parameter
-       '((0 "black" 0 0 0)
-         (1 "red" 65535 0 0)
-         (2 "green" 0 65535 0)
-         (3 "yellow" 65535 65535 0)
-         (4 "blue" 0 0 65535)
-         (5 "magenta" 65535 0 65535)
-         (6 "cyan" 0 65535 65535)
-         (7 "white" 65535 65535 65535))))
+      '(("black"   0     0     0     0)
+        ("red"     1 65535     0     0)
+        ("green"   2     0 65535     0)
+        ("yellow"  3 65535 65535     0)
+        ("blue"    4     0     0 65535)
+        ("magenta" 5 65535     0 65535)
+        ("cyan"    6     0 65535 65535)
+        ("white"   7 65535 65535 65535)))
 
-    (define (color-name-rgb name)
-      ;; The RGB of the colour called NAME, as `(R G B)', or #f when no
-      ;; colour has that name. Emacs's `color-name-rgb-alist' lookup.
+    (define *tty-colors*
+      ;; GNU Emacs's `tty-defined-color-alist' (a variable of `xfaces.c'):
+      ;; the colours this terminal has, as `(NAME INDEX R G B)', which
+      ;; `tty-color-alist' answers with. `tty-register-default-colors'
+      ;; fills it with the standard eight at startup, and a terminal's own
+      ;; initialization - `term/xterm.el''s `xterm-register-default-colors'
+      ;; - replaces them with what that terminal has.
+      ;;
+      ;; It starts as the eight rather than empty, as Emacs's does not, so
+      ;; that a face realized before any terminal is opened - which is
+      ;; what the tests do - still has colours to approximate against.
       ;;--------------------------------------------------------------
-      (let ((entry (assoc (string-downcase name) *color-name-rgb-alist*)))
+      (make-parameter tty-standard-colors))
+
+    (define (tty-color-alist . _frame)
+      ;; GNU Emacs's `tty-color-alist': the colours FRAME's terminal
+      ;; supports. There is one terminal here, so FRAME is not consulted.
+      ;;--------------------------------------------------------------
+      (*tty-colors*))
+
+    (define (tty-modify-color-alist elt . _frame)
+      ;; GNU Emacs's `tty-modify-color-alist': put ELT, `(NAME INDEX R G
+      ;; B)', into the alist - in place of the entry with that name if
+      ;; there is one, else at the end: "Keep the colors in the order they
+      ;; are registered."
+      ;;--------------------------------------------------------------
+      (let ((entry (assoc (car elt) (tty-color-alist))))
+        (*tty-colors*
+         (if entry
+             (map (lambda (e) (if (eq? e entry) elt e)) (*tty-colors*))
+             (append (*tty-colors*) (list elt))))
+        (*tty-colors*)))
+
+    (define (tty-register-default-colors)
+      ;; GNU Emacs's `tty-register-default-colors': the standard eight.
+      ;; Emacs then clears the face cache, because realized faces hold
+      ;; colour indices; faces are realized at each draw here, so there is
+      ;; no cache to clear.
+      ;;--------------------------------------------------------------
+      (for-each (lambda (color)
+                  (tty-color-define (car color) (cadr color) (cddr color)))
+                tty-standard-colors))
+
+    (define (tty-color-canonicalize color)
+      ;; GNU Emacs's `tty-color-canonicalize': "all-lower case, with any
+      ;; blanks removed".
+      ;;--------------------------------------------------------------
+      (list->string
+       (let loop ((chars (string->list (string-downcase color))))
+         (cond ((null? chars) '())
+               ((char=? (car chars) #\space) (loop (cdr chars)))
+               (else (cons (car chars) (loop (cdr chars))))))))
+
+    (define (tty-color-24bit rgb . _display)
+      ;; GNU Emacs's `tty-color-24bit': RGB as a pixel value on a 24-bit
+      ;; terminal, and #f on any other.
+      ;;--------------------------------------------------------------
+      (and rgb
+           (= (*display-color-cells*) 16777216)
+           (let ((r (ash (car rgb) -8))
+                 (g (ash (cadr rgb) -8))
+                 (b (ash (caddr rgb) -8)))
+             (logior (ash r 16) (ash g 8) b))))
+
+    (define (tty-color-define name index . args)
+      ;; GNU Emacs's `tty-color-define': NAME is the colour's name, INDEX
+      ;; what the terminal is sent to show it, and RGB - optional - its
+      ;; components, each 0..65535. A colour defined without RGB is never
+      ;; used to approximate another.
+      ;;--------------------------------------------------------------
+      (let ((rgb (if (pair? args) (car args) #f)))
+        (when (or (not (string? name))
+                  (not (integer? index))
+                  (and rgb (or (not (list? rgb)) (not (= (length rgb) 3)))))
+          (error "Invalid specification for tty color" name))
+        (tty-modify-color-alist
+         (append (list (tty-color-canonicalize name)
+                       (or (tty-color-24bit rgb) index))
+                 (or rgb '())))))
+
+    (define (tty-color-clear . _frame)
+      ;; GNU Emacs's `tty-color-clear'.
+      ;;--------------------------------------------------------------
+      (*tty-colors* '()))
+
+    (define (tty-color-off-gray-diag r g b)
+      ;; GNU Emacs's `tty-color-off-gray-diag': the angle between the
+      ;; colour and the gray diagonal of the RGB cube, which is where the
+      ;; colours whose three components are equal lie.
+      ;;--------------------------------------------------------------
+      (let ((mag (sqrt (* 3 (+ (* r r) (* g g) (* b b))))))
+        (if (< mag 1) 0 (acos (/ (+ r g b) mag)))))
+
+    (define (tty-color-approximate rgb . _frame)
+      ;; GNU Emacs's `tty-color-approximate': the entry of `tty-color-alist'
+      ;; nearest RGB, "a list of three integers in the 0..65535 range".
+      ;; The distance is the plain one between 8-bit components, and a
+      ;; colour that is itself off the gray diagonal is not approximated
+      ;; by a gray - "(The number 0.065 is an empirical ad-hoc'ery.)"
+      ;;--------------------------------------------------------------
+      (let ((r (ash (car rgb) -8))
+            (g (ash (cadr rgb) -8))
+            (b (ash (caddr rgb) -8)))
+        (let loop ((candidates (tty-color-alist))
+                   (best-distance 195076)   ; 3 * 255^2 + 15
+                   (best-color #f))
+          (if (null? candidates)
+              best-color
+              (let* ((candidate (car candidates))
+                     (try-rgb (cddr candidate))
+                     (favor-non-gray (>= (tty-color-off-gray-diag r g b) 0.065)))
+                ;; a colour whose RGB is unknown is never an approximation
+                (if (null? try-rgb)
+                    (loop (cdr candidates) best-distance best-color)
+                    (let* ((try-r (ash (car try-rgb) -8))
+                           (try-g (ash (cadr try-rgb) -8))
+                           (try-b (ash (caddr try-rgb) -8))
+                           (dif-r (- r try-r))
+                           (dif-g (- g try-g))
+                           (dif-b (- b try-b))
+                           (dist (+ (* dif-r dif-r) (* dif-g dif-g) (* dif-b dif-b))))
+                      (if (and (< dist best-distance)
+                               ;; the candidate is on the gray diagonal if
+                               ;; its components are all equal
+                               (or (not (= try-r try-g))
+                                   (not (= try-g try-b))
+                                   (not favor-non-gray)))
+                          (loop (cdr candidates) dist candidate)
+                          (loop (cdr candidates) best-distance best-color)))))))))
+
+    (define (tty-color-standard-values color)
+      ;; GNU Emacs's `tty-color-standard-values': the RGB of COLOR by its
+      ;; standard definition, whatever the terminal can show. Emacs tries
+      ;; `color-values-from-color-spec' first - "#RRGGBB" and "rgb:R/G/B",
+      ;; which are `xfaces.c''s and not ported - and then the name table.
+      ;;--------------------------------------------------------------
+      (let ((entry (assoc color *color-name-rgb-alist*)))
         (and entry (cdr entry))))
 
-    (define (color-distance rgb1 rgb2)
-      ;; GNU Emacs's `color_distance' in `xfaces.c': the "Colour metric"
-      ;; from a paper by Thiadmer Riemersma, which weights the red and
-      ;; blue channels by the *mean of the two reds* so that a colour is
-      ;; judged against a colour of similar brightness rather than by raw
-      ;; distance.
-      ;;
-      ;; The weighting matters: by plain sum of squares a dark magenta
-      ;; (`magenta4', which several of the standard specs ask for) is
-      ;; nearer a mid grey than it is to magenta, and a face that asked
-      ;; for magenta is drawn grey. Emacs uses this formula for exactly
-      ;; that reason.
+    (define (tty-color-translate color . _frame)
+      ;; GNU Emacs's `tty-color-translate': the terminal index for COLOR,
+      ;; or #f.
       ;;--------------------------------------------------------------
-      (let* ((r (- (car rgb1) (car rgb2)))
-             (g (- (cadr rgb1) (cadr rgb2)))
-             (b (- (caddr rgb1) (caddr rgb2)))
-             (r-mean (ash (+ (car rgb1) (car rgb2)) -1)))
-        (ash (+ (ash (* (+ (* 2 65536) r-mean) r r) -16)
-                (* 4 g g)
-                (ash (* (- (+ (* 2 65536) 65535) r-mean) b b) -16))
-             -16)))
+      (let ((desc (tty-color-desc color)))
+        (and desc (cadr desc))))
 
-    (define (tty-color-approximate name)
-      ;; GNU Emacs's `tty-color-approximate': the index of the colour this
-      ;; terminal has that is nearest to the colour NAME means, or #f when
-      ;; the name means nothing.
+    (define (tty-color-by-index idx . _frame)
+      ;; GNU Emacs's `tty-color-by-index': the entry with index IDX. Emacs
+      ;; walks the whole list and keeps the last match, and so does this.
       ;;--------------------------------------------------------------
-      (let ((rgb (color-name-rgb name)))
-        (if (not rgb)
-            #f
-            (let loop ((rest (*tty-colors*)) (best #f) (best-distance #f))
-              (cond
-               ((null? rest) (and best (car best)))
-               (else
-                (let* ((entry (car rest))
-                       (distance (color-distance rgb (cddr entry))))
-                  (if (or (not best-distance) (< distance best-distance))
-                      (loop (cdr rest) entry distance)
-                      (loop (cdr rest) best best-distance)))))))))
+      (and idx
+           (let loop ((colors (tty-color-alist)) (found #f))
+             (cond ((null? colors) found)
+                   ((eqv? idx (cadr (car colors))) (loop (cdr colors) (car colors)))
+                   (else (loop (cdr colors) found))))))
 
-    (define (tty-color-desc name)
-      ;; The index of the colour NAME on this terminal: its own index when
-      ;; the terminal has a colour by that name, and the nearest one it
-      ;; has when it does not - which is the whole point of the
-      ;; approximation, since almost no name in a face spec is an ANSI
-      ;; name.
+    (define (tty-color-values color . _frame)
+      ;; GNU Emacs's `tty-color-values': the RGB the terminal will show
+      ;; for COLOR, which is the approximation's when COLOR itself is not
+      ;; supported.
       ;;--------------------------------------------------------------
-      (let ((entry (assoc (string-downcase name) (*tty-colors*))))
-        (cond
-         (entry (car entry))
-         (else (tty-color-approximate name)))))
+      (let ((desc (tty-color-desc color)))
+        (and desc (cddr desc))))
+
+    (define (tty-color-desc color . _frame)
+      ;; GNU Emacs's `tty-color-desc': COLOR's `(NAME INDEX R G B)' on this
+      ;; terminal - its own entry when the terminal has it, else the
+      ;; nearest one it does have.
+      ;;--------------------------------------------------------------
+      (and (string? color)
+           (let ((color (tty-color-canonicalize color)))
+             (or (assoc color (tty-color-alist))
+                 (let ((rgb (tty-color-standard-values color)))
+                   (and rgb
+                        (let ((pixel (tty-color-24bit rgb)))
+                          (or (and pixel (cons color (cons pixel rgb)))
+                              (tty-color-approximate rgb)))))))))
 
     (define *color-name-rgb-alist*
       ;; GNU Emacs's `color-name-rgb-alist' in `tty-colors.el': every

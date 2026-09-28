@@ -65,8 +65,8 @@
   (with-display (lambda () (f:face-attribute 'mode-line ':inverse-video))
                 1 'mono #f))
 
-;; The region face remains the official Emacs definition: dark 16-colour
-;; displays select blue3, while the eight-colour fallback selects blue.
+;; `region' is Emacs's spec as it stands: `blue3' on a dark display with
+;; 16 colours or more, and `blue' with a white foreground on eight.
 (test-equal '("blue3" "blue")
   (list (with-display (lambda () (f:face-attribute 'region ':background))
                       256 'color 'dark)

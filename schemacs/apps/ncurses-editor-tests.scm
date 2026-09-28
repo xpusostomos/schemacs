@@ -2338,7 +2338,27 @@
 (test-equal '("hello" . 2)
   (run-keys "hello" (list C-SPC C-f C-f C-w C-y)))
 
-;; M-w copies it instead, so the text is still there.
+;; M-w copies the selected text, then consumes the deferred mark flag
+;; before the following motion; the region does not grow after the copy.
+(test-equal '("he" #f 3)
+  (with-mark-frame "hello"
+    (lambda (frame ed)
+      (keys! frame C-SPC C-f C-f)
+      (apply keys! (cons frame M-w))
+      (let ((copied (car (*kill-ring*))))
+        (keys! frame C-f)
+        (list copied (mark-active) (text-editor-cursor-column ed))))))
+
+;; M-w copies it instead, so the text is still there. The command loop
+;; consumes the deferred deactivation flag before subsequent point motion.
+(test-equal '(#f 3)
+  (with-mark-frame "hello"
+    (lambda (frame ed)
+      (keys! frame C-SPC C-f C-f)
+      (apply keys! (cons frame M-w))
+      (keys! frame C-f)
+      (list (mark-active) (text-editor-cursor-column ed)))))
+
 (test-equal '("hellohe" . 7)
   (run-keys "hello" (append (list C-SPC C-f C-f) M-w (list C-e C-y))))
 

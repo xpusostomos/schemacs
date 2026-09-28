@@ -18,14 +18,19 @@
     ;; The terminal.
     (only (ncurses curses)
           colors curs-set endwin has-colors? idcok! idlok! initscr keypad! noecho!
-          nonl! raw! scrollok! start-color! stdscr)
+          nonl! raw! scrollok! start-color! stdscr use-default-colors)
     (only (schemacs editor engine)
           new-text-editor set!text-editor-buffer-name)
     (only (schemacs editor frame) *current-frame* new-frame)
+    ;; `startup.el' registers the eight standard colours before the
+    ;; terminal's own initialization runs; `term/xterm.el' is that
+    ;; initialization for an xterm.
+    (only (schemacs editor tty-colors) tty-register-default-colors)
+    (only (schemacs editor xterm) terminal-init-xterm)
     (only (schemacs editor faces)
           *display-color-cells* *display-type* *frame-background-mode*
           face-list face-spec-recalc)
-    (only (guile) getenv string-prefix? string-split)
+    (only (guile) getenv string-prefix?)
     ;; Everything this needs of the editor: the buffers named on the
     ;; command line - which is `startup.el''s job, not this one's - and
     ;; then the command loop.
@@ -59,31 +64,35 @@
     ;; Terminal setup
 
     (define (terminal-background-mode)
-      ;; Match Emacs's TTY default: xterm-like terminals are light and other
-      ;; terminals dark. rxvt's COLORFGBG can report the actual background,
-      ;; as `rxvt-colorfgbg-background-mode' does.
+      ;; GNU Emacs's `frame--current-background-mode' when nothing has
+      ;; said what the background is - no `frame-background-mode', no
+      ;; `background-mode' terminal parameter, and a tty whose
+      ;; `background-color' is "unspecified-bg": `light' for a tty whose
+      ;; type is xterm, rxvt, dtterm or eterm, else `dark'. An xterm that
+      ;; answers `term/xterm.el''s query does not get here.
       ;;--------------------------------------------------------------
-      (let* ((term (or (getenv "TERM") ""))
-             (colorfgbg (getenv "COLORFGBG"))
-             (fields (and colorfgbg (string-split colorfgbg #\;)))
-             (background (and fields (pair? fields) (car (reverse fields))))
-             (index (and background (string->number background))))
-        (cond
-         ((and index (<= 0 index) (< index 8))
-          (if (<= index 6) 'dark 'light))
-         ((or (string-prefix? "xterm" term)
-              (string-prefix? "rxvt" term)
-              (string-prefix? "dtterm" term)
-              (string-prefix? "eterm" term))
-          'light)
-         (else 'dark))))
+      (let ((term (or (getenv "TERM") "")))
+        (if (or (string-prefix? "xterm" term)
+                (string-prefix? "rxvt" term)
+                (string-prefix? "dtterm" term)
+                (string-prefix? "eterm" term))
+            'light
+            'dark)))
 
     (define (initialize-display-faces!)
-      ;; Ask ncurses after `initscr', when terminal capabilities are known,
-      ;; then choose each face's Emacs spec against those capabilities.
+      ;; What `startup.el' does to the terminal's faces, in its order:
+      ;; `tty-register-default-colors', then
+      ;; `tty-run-terminal-initialization' - which for TERM=xterm* is
+      ;; `terminal-init-xterm' - then `frame-set-background-mode' and the
+      ;; faces realized against what all that found out. The display's
+      ;; class and colour count are ncurses's answers, which it only has
+      ;; once `initscr' has run.
       ;;--------------------------------------------------------------
       (*display-type* (if (has-colors?) 'color 'mono))
       (*display-color-cells* (if (has-colors?) (max 1 (colors)) 0))
+      (tty-register-default-colors)
+      (when (string-prefix? "xterm" (or (getenv "TERM") ""))
+        (terminal-init-xterm))
       (unless (*frame-background-mode*)
         (*frame-background-mode* (terminal-background-mode)))
       (for-each face-spec-recalc (face-list)))
@@ -106,7 +115,16 @@
           ;; asking first keeps a monochrome terminal from being told to do
           ;; something it cannot. `(schemacs editor xdisp)' defines the
           ;; pairs the faces ask for.
-          (when (has-colors?) (start-color!))
+          (when (has-colors?)
+            (start-color!)
+            ;; A face that sets only one of its colours leaves the other
+            ;; as the terminal's own - `term.c''s `turn_on_face' simply
+            ;; does not send `setaf' for `FACE_TTY_DEFAULT_COLOR'. In
+            ;; ncurses that colour is -1, and `init_pair' refuses -1
+            ;; unless this has been called: without it Emacs's `region'
+            ;; on a 16-colour dark display - `blue3' and no foreground -
+            ;; came out as pair 0, black on black.
+            (use-default-colors))
           (initialize-display-faces!)
           ;; disable the insert/delete-character optimizations: they
           ;; corrupt the display when lines merge (ncurses tracks a

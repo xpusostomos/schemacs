@@ -39,7 +39,7 @@
           *face-attributes* *undefined-face-attribute*)
     ;; What a colour *name* means on this terminal - which is not its own
     ;; business, and lives where Emacs has it, in `tty-colors.el'.
-    (only (schemacs editor tty-colors) tty-color-desc))
+    (only (schemacs editor tty-colors) tty-color-translate))
 
   (export
    attribute-value
@@ -216,9 +216,11 @@
       ;; it has one by that name and the *nearest* one when it has not -
       ;; and it usually has not, because almost nothing a face spec names
       ;; (`grey75', `magenta4', `lightskyblue1') is an ANSI colour. That
-      ;; approximation is `tty-colors'' business.
+      ;; approximation is `tty-colors'' business: `tty_lookup_color' calls
+      ;; `tty-color-desc' and takes the INDEX out of the `(NAME INDEX R G
+      ;; B)' it answers, which is `tty-color-translate'.
       ;;--------------------------------------------------------------
-      (tty-color-desc name))
+      (tty-color-translate name))
 
     (define (tty-capable-p options)
       ;; GNU Emacs's `tty_capable_p': whether the terminal can show the
