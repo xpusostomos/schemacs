@@ -63,9 +63,9 @@
           buffer-local-keymap
           current-buffer)
     (only (schemacs editor simple)
-          *last-change-was-undo* *last-command* clear-prefix!
-          pending-uarg place-undo-boundary! prefix-echo-pending?
-          rotate-kill-flag! show-prefix-echo!
+          *last-change-was-undo* *last-command* *this-command*
+          clear-prefix! pending-uarg place-undo-boundary!
+          prefix-echo-pending? show-prefix-echo!
           undo-command undo-redo-command update-prefix!)
     ;; `render!' after every key: the loop is what drives the display.
     (only (schemacs editor xdisp) render!)
@@ -211,7 +211,11 @@
       ;; something to redo.
       ;;--------------------------------------------------------------
       (let ((uarg (pending-uarg)))
-        (rotate-kill-flag!)
+        ;; `this_command' is what is running - and a command may *change*
+        ;; it (`kill-region' renames itself to itself, `yank-pop' says
+        ;; `yank'), which is why the promotion to `last-command' reads it
+        ;; again after the command rather than using ACTION.
+        (*this-command* action)
         (place-undo-boundary! action)
         (unless (or (eq? action undo-command) (eq? action undo-redo-command))
           (*last-change-was-undo* #f))
@@ -231,7 +235,7 @@
                 (run-command action)))
            ((procedure? action) (action))
            (else (error "not a command" action))))
-        (*last-command* action)))
+        (*last-command* (*this-command*))))
 
     (define (report-command-error! frame ex)
       ;; ... including a quit, which Emacs's command loop reports as
@@ -295,9 +299,10 @@
       (if (update-prefix! path)
           ;; C-u or a prefix digit was consumed. It is a command in
           ;; its own right, so like any other command it breaks a run
-          ;; of consecutive kills.
+          ;; of consecutive kills - by *being* the last command, which
+          ;; is what `kill-region' asks about.
           (begin
-            (rotate-kill-flag!)
+            (*last-command* 'kill-region)
             (set!ncurses-frame-keymap-state frame #f))
           ;; any other key: continue (or start) the keymap lookup
           (begin

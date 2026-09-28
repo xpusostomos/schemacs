@@ -67,11 +67,10 @@
 
   (export
    %char-at %inword-at *amalgamating-count* *amalgamating-undo-limit*
-   *last-change-was-undo* *last-command* *last-command-kill*
+   *last-change-was-undo* *last-command* *this-command*
    *kill-do-not-save-duplicates* *kill-read-only-ok*
    *kill-ring* *kill-ring-max* *kill-ring-yank-pointer*
    *pending-undo-list* *prefix-cu* *prefix-digits* *prefix-negative*
-   *this-command-kill*
    amalgamating-command? backward-char backward-delete-char
    backward-kill-word backward-word backward-word-position
    beginning-of-buffer beginning-of-line clear-prefix! delete-char
@@ -83,7 +82,7 @@
    ;; `newline' clashes with `(scheme base)'s output procedure, so it
    ;; is exported by rename; see the definition below.
    (rename (newline-command newline))
-   place-undo-boundary! previous-line read-only-mode rotate-kill-flag!
+   place-undo-boundary! previous-line read-only-mode
    scroll-down-command scroll-up-command self-insert-command
    self-insert-layer self-insert-tab
    *activate-mark-hook* *deactivate-mark-hook*
@@ -520,16 +519,23 @@
     ;; which is the one place a command is invoked from the keyboard.
     ;;------------------------------------------------------------------
 
-    (define *this-command-kill* (make-parameter #f))
-    (define *last-command-kill* (make-parameter #f))
-
-    (define (rotate-kill-flag!)
-      ;; mg's per-command flag rotation: the flags set by the command
-      ;; that just ran become the flags the next command reads, so a
-      ;; kill command can tell whether it continues a run of kills.
+    (define *this-command*
+      ;; The command being run: GNU Emacs's `this-command', which the
+      ;; command loop sets before a command and - this is the part that
+      ;; matters - *the command itself may set again*, and which the loop
+      ;; then makes `last-command'.
+      ;;
+      ;; That is how a kill run is joined: `kill-region' sets it to
+      ;; itself, so a command that kills is seen as `kill-region' by the
+      ;; next one whatever key ran it. It is also how `yank-pop' can be
+      ;; repeated - it sets it to `yank', so the next M-y still looks like
+      ;; one - and why the ring may be gone round and round.
+      ;;
+      ;; It replaces mg's `*this-command-kill*'/`*last-command-kill*'
+      ;; pair, which was the same idea for the one thing mg needed it
+      ;; for.
       ;;--------------------------------------------------------------
-      (*last-command-kill* (*this-command-kill*))
-      (*this-command-kill* #f))
+      (make-parameter #f))
 
     (define (word-char? c)
       ;; The word-constituent predicate, like mg's `inword`/ISWORD:
@@ -590,10 +596,12 @@
       ;; FORWARD? says the same thing here, the other way up.
       ;;--------------------------------------------------------------
       (let* ((text (text-editor-copy-string ed start end)))
-        (if (*last-command-kill*)
+        (if (eq? (*last-command*) kill-region)
             (kill-append text (not forward?))
             (kill-new text))
-        (*this-command-kill* #t)
+        ;; "Any command that calls this function is a kill command": it
+        ;; says so by becoming `kill-region' for the next one.
+        (*this-command* kill-region)
         (text-editor-set-cursor ed (min start end))
         (text-editor-delete-from-cursor ed (abs (- end start)))
         text))
@@ -821,10 +829,11 @@
                       (read-only? (text-editor-read-only? (current-editor))))
                  ;; The ring takes the text first, as in Emacs, so that a
                  ;; read-only buffer still gives up its text.
-                 (if (and (not read-only?) (*last-command-kill*))
+                 (if (and (not read-only?)
+                          (eq? (*last-command*) kill-region))
                      (kill-append string (< end beg))
                      (kill-new string))
-                 (*this-command-kill* #t)
+                 (*this-command* kill-region)
                  (set!text-editor-deactivate-mark! (current-buffer) #t)
                  (if read-only?
                      (unless (*kill-read-only-ok*)
@@ -839,10 +848,12 @@
       ;; after a kill extends that kill rather than starting a new entry.
       ;;--------------------------------------------------------------
       (let ((string (text-editor-copy-string (current-editor) beg end)))
-        (if (*last-command-kill*)
+        (if (eq? (*last-command*) kill-region)
             (kill-append string (< end beg))
             (kill-new string))
-        (*this-command-kill* #t)
+        ;; M-w does *not* rename itself: Emacs's `copy-region-as-kill' has
+        ;; no `(setq this-command ...)', so copying twice makes two
+        ;; entries where killing twice makes one.
         (set!text-editor-deactivate-mark! (current-buffer) #t)))
 
     (define kill-ring-save
@@ -899,7 +910,11 @@
            (when (pair? arg)
              (let ((was (mark #t)))
                (set!text-editor-mark ed (text-editor-get-cursor ed))
-               (text-editor-set-cursor ed was)))))
+               (text-editor-set-cursor ed was))))
+         ;; "If we do get all the way thru, make this-command indicate
+         ;; that" - which is what `yank-pop' asks about, and what makes a
+         ;; run of M-y possible.
+         (*this-command* yank))
        (lambda (arg) arg)
        "Reinsert (paste) the last stretch of killed text."
        'uarg))
@@ -927,7 +942,10 @@
                     (end (if before (mark #t) (text-editor-get-cursor ed))))
                (delete-region beg end)
                (set!text-editor-mark ed (text-editor-get-cursor ed))
-               (text-editor-insert ed (current-kill count)))))
+               (text-editor-insert ed (current-kill count))
+               ;; ... and it says `yank' as well, so the *next* M-y still
+               ;; looks like one and the ring may be gone round and round.
+               (*this-command* yank))))
        "Replace the just-yanked text with an older kill."))
 
     ;; Undo

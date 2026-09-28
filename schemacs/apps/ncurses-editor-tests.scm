@@ -69,11 +69,12 @@
  (only (schemacs editor simple)
        *kill-do-not-save-duplicates* *kill-ring* *kill-ring-max*
        *kill-ring-yank-pointer*
-       *last-change-was-undo* *last-command* read-only-mode
+       *last-change-was-undo* *last-command* *pending-undo-list*
+       read-only-mode
        current-kill kill-append kill-new kill-region kill-ring-save
        *use-empty-active-region* mark mark-ring push-mark region-active-p
        set-mark use-region-p
-       *last-command-kill* *pending-undo-list* *this-command-kill*
+       *this-command*
        *prefix-cu* *prefix-digits* *prefix-negative*
        clear-prefix! pending-uarg prefix-argument-description
        prefix-echo-pending? request-prefix-echo! self-insert-command)
@@ -126,8 +127,7 @@
                    (*search-case-fold?* #t)
                    (*kill-ring* '())
                    (*kill-ring-yank-pointer* '())
-                   (*this-command-kill* #f)
-                   (*last-command-kill* #f)
+                   (*this-command* #f)
                    (*last-command* #f)
                    (*pending-undo-list* #f)
                    (*last-change-was-undo* #f)
@@ -384,8 +384,7 @@
                      (*search-case-fold?* #t)
                      (*kill-ring* '())
                    (*kill-ring-yank-pointer* '())
-                     (*this-command-kill* #f)
-                     (*last-command-kill* #f)
+                     (*this-command* #f)
                      (*last-command* #f)
                      (*pending-undo-list* #f)
                      (*last-change-was-undo* #f))
@@ -946,8 +945,7 @@
                  (*search-case-fold?* #t)
                  (*kill-ring* '())
                    (*kill-ring-yank-pointer* '())
-                 (*this-command-kill* #f)
-                 (*last-command-kill* #f)
+                 (*this-command* #f)
                  (*last-command* #f)
                  (*pending-undo-list* #f)
                  (*last-change-was-undo* #f))
@@ -1538,8 +1536,7 @@
                    (*search-case-fold?* #t)
                    (*kill-ring* '())
                    (*kill-ring-yank-pointer* '())
-                   (*this-command-kill* #f)
-                   (*last-command-kill* #f)
+                   (*this-command* #f)
                    (*last-command* #f)
                    (*pending-undo-list* #f)
                    (*last-change-was-undo* #f))
@@ -1815,8 +1812,7 @@
                    (*search-case-fold?* #t)
                    (*kill-ring* '())
                    (*kill-ring-yank-pointer* '())
-                   (*this-command-kill* #f)
-                   (*last-command-kill* #f)
+                   (*this-command* #f)
                    (*last-command* #f)
                    (*pending-undo-list* #f)
                    (*last-change-was-undo* #f))
@@ -2101,7 +2097,7 @@
                    ;; C-SPCs in a row a toggle, so a test that inherits it
                    ;; from the test before is testing that instead.
                    (*last-command* #f)
-                   (*last-command-kill* #f) (*this-command-kill* #f))
+                   (*this-command* #f))
       (thunk frame ed))))
 
 (define (keys! frame . evs)
@@ -2219,7 +2215,7 @@
   (parameterize ((*kill-ring* '())
                  (*kill-ring-yank-pointer* '())
                  (*kill-ring-max* 120)
-                 (*last-command-kill* #f) (*this-command-kill* #f)
+                 (*this-command* #f)
                  (*kill-do-not-save-duplicates* #f))
     (thunk)))
 
@@ -2307,8 +2303,30 @@
 (test-equal '("hellohello" . 10)
   (run-keys "hello\n" (append (list C-k C-y C-k C-y) M-y)))
 
-;; M-y after anything that is not a yank says so rather than guessing.
-(test-equal "Previous command was not a yank"
-  (cadddr (run-keys* "hello\n" (append (list C-k C-y C-f) M-y))))
-
+;; Three things in the ring, and C-y M-y M-y M-y M-y: the ring goes
+;; round and round, which is what makes it a ring rather than a list with
+;; an end. That is because `yank-pop' leaves `yank' as the command behind
+;; it - `(setq this-command 'yank)' - so the next M-y still looks like it
+;; follows a yank, for as long as you keep going. The first version here
+;; did not say that, and the circling stopped after one step with "Previous
+;; command was not a yank", which is also why the message was odd: the ring
+;; is a list of texts, and the message was about the *command* that had to
+;; have gone before.
+;; the ring is newest first, so the latest kill - "three" - is what C-y
+;; takes, and the rotation goes back from there: "three", "two", "one",
+;; and then round to "three" again.
+(test-equal '("three" "two" "one" "three" "two")
+  (parameterize ((*kill-ring* '()) (*kill-ring-yank-pointer* '()))
+  (with-mark-frame ""
+    (lambda (frame ed)
+      (for-each kill-new '("one" "two" "three"))
+      (let loop ((n 0) (states '()))
+        (if (= n 5)
+            (reverse states)
+            (begin
+              ;; `keys!' takes the events as separate arguments, so the
+              ;; sequence is applied in
+              (apply keys! frame (if (= n 0) (list C-y) M-y))
+              (loop (+ n 1)
+                    (cons (text-editor-to-string ed) states)))))))))
 (test-end "schemacs_ncurses_editor_kill_ring")
