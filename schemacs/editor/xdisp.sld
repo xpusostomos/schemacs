@@ -36,7 +36,7 @@
          string-search-forward text-editor-buffer-name text-editor-text-props
          text-editor-char-count text-editor-file-name
          text-editor-cursor-column text-editor-cursor-line
-         text-editor-get-cursor text-editor-get-end-of-line
+         text-editor-get-cursor text-editor-mark text-editor-get-end-of-line
          text-editor-get-line-column text-editor-get-start-of-line
          text-editor-line-count text-editor-line-editor-ref
          text-editor-line-outer-size text-editor-modified?
@@ -58,6 +58,9 @@
     ;; property says which faces are in effect, `xfaces' merges them and
     ;; folds them down, and this file turns that into terminal attributes.
     (only (schemacs editor textprop) get-text-property)
+    (only (schemacs editor buffer)
+          *transient-mark-mode* buffer-local-value)
+    (only (schemacs editor faces) *undefined-face-attribute*)
     (only (schemacs editor xfaces)
           attribute-value face-attributes-empty face-realized-attributes
           merge-face-ref merge-face-vectors realize-tty-face)
@@ -73,6 +76,7 @@
    ;; the run computation, which is what a caller can test without a
    ;; terminal: `draw-line!' itself needs one
    line-face-runs
+   line-end-fill-attribute
    *mode-line-format*
    format-mode-line
    mode-line-string
@@ -478,16 +482,14 @@
                         (loop (+ 1 i) start attribute acc)
                         (loop (+ 1 i) i a (cons (list start i attribute) acc)))))))))
 
-    (define (draw-line! ed line-start line-string display screen-row x0)
+    (define (draw-line! ed line-start line-string display
+                        screen-row x0 width)
       ;; Draw one line of a window at SCREEN-ROW, X0, each run of
-      ;; characters that share a face drawn with it.
-      ;;
-      ;; A buffer with no text properties at all - which is almost every
-      ;; buffer, almost all of the time - has no faces to draw and goes
-      ;; out in one call, as it did before there were faces. The run walk
-      ;; is only taken when there is a property tree to ask.
+      ;; characters that share a face drawn with it. A buffer with no
+      ;; properties and no active region keeps the original fast path.
       ;;--------------------------------------------------------------
-      (if (not (text-editor-text-props ed))
+      (if (and (not (text-editor-text-props ed))
+               (not (region-face-active? ed)))
           (addstr (stdscr) display #:y screen-row #:x x0)
           (let ((offsets (line-display-offsets line-string)))
             (for-each
@@ -501,25 +503,102 @@
                                     (min to (string-length display)))
                          #:y screen-row #:x (+ x0 from))
                  (attr-off! (stdscr) attribute)))
-             (line-face-runs ed line-start line-string)))))
+             (line-face-runs ed line-start line-string))))
+      ;; xdisp.c extends faces into empty cells at the end of a line. A
+      ;; full-width row takes the separate continuation-glyph path, which
+      ;; this renderer does not yet implement.
+      (let ((fill (line-end-fill-attribute ed line-start line-string
+                                           display width)))
+        (when fill
+          (attr-on! (stdscr) fill)
+          (addstr (stdscr)
+                  (make-string (- width (string-length display)) #\space)
+                  #:y screen-row
+                  #:x (+ x0 (string-length display)))
+          (attr-off! (stdscr) fill))))
+
+    (define (line-end-fill-attribute ed line-start line-string display width)
+      ;; Face used for cells after a line's text when the line-end
+      ;; position is inside the active region. A line that ends at point-max
+      ;; has no newline position and gets no extension face in Emacs.
+      ;;--------------------------------------------------------------
+      (let* ((row-end (+ line-start (string-length line-string)))
+             (mark (text-editor-mark ed))
+             (point (text-editor-get-cursor ed))
+             (region-start (and mark (min point mark)))
+             (region-end (and mark (max point mark))))
+        (and (< (string-length display) width)
+             (region-face-active? ed)
+             region-start
+             region-end
+             (<= region-start row-end)
+             (< row-end region-end)
+             (< row-end (text-editor-char-count ed))
+             (region-face-at-position? ed row-end)
+             ;; The region face's :extend fills newline space even in the
+             ;; monochrome spec, where :extend itself is unspecified and
+             ;; inverse-video is the visible TTY attribute.
+             (let* ((attrs (merge-face-ref 'region
+                                           (merge-face-vectors
+                                            (face-realized-attributes 'default)
+                                            (face-attributes-empty))))
+                    (extend (attribute-value attrs ':extend))
+                    (inverse (attribute-value attrs ':inverse-video))
+                    (attribute (face-at-buffer-position ed (- row-end 1))))
+               (and (or (and (not (eq? extend *undefined-face-attribute*))
+                             extend)
+                        (and (not (eq? inverse *undefined-face-attribute*))
+                             inverse))
+                    (not (= attribute 0))
+                    attribute)))))
+
+    (define (region-face-active? ed)
+      (and (buffer-local-value ed 'transient-mark-mode
+                               (*transient-mark-mode*))
+           (buffer-local-value ed 'mark-active #f)
+           (text-editor-mark ed)))
+
+    (define (region-face-at-position? ed position)
+      ;; Whether POSITION is covered by ED's active region. GNU Emacs
+      ;; redisplay merges the `region' face while the mark is active and
+      ;; transient-mark-mode is enabled; the region is [min(mark, point),
+      ;; max(mark, point)). Read ED directly, as redisplay does for the
+      ;; buffer belonging to the window it is drawing.
+      ;;--------------------------------------------------------------
+      (and (buffer-local-value ed 'transient-mark-mode
+                               (*transient-mark-mode*))
+           (buffer-local-value ed 'mark-active #f)
+           (let ((mark (text-editor-mark ed)))
+             (and mark
+                  (let* ((point (text-editor-get-cursor ed))
+                         (beginning (min mark point))
+                         (end (max mark point)))
+                    (and (>= position beginning)
+                         (< position end)))))))
 
     (define (face-at-buffer-position ed position)
       ;; The ncurses attribute number for the face in effect at POSITION
       ;; in ED: GNU Emacs's `face_at_buffer_position'. The `face' text
       ;; property there - a face name, a property list, or a list of
       ;; either - is merged with the `default' face and folded down to
-      ;; what the terminal can draw.
+      ;; what the terminal can draw. `xfaces.c' merges overlays after the
+      ;; text property; the active region face follows those in Emacs's
+      ;; redisplay pipeline, and is merged here after the property face.
       ;;
       ;; Emacs caches the realized face against the position, because
       ;; this runs per character; a cache is worth adding when the
       ;; renderer starts asking per character rather than per run.
       ;;--------------------------------------------------------------
-      (tty-face-attribute
-       (realize-tty-face
-        (merge-face-ref (get-text-property position 'face ed)
-                        (merge-face-vectors
-                         (face-realized-attributes 'default)
-                         (face-attributes-empty))))))
+      (let ((attrs
+             (merge-face-ref (get-text-property position 'face ed)
+                             (merge-face-vectors
+                              (face-realized-attributes 'default)
+                              (face-attributes-empty)))))
+        (tty-face-attribute
+         (realize-tty-face
+          (if (region-face-at-position? ed position)
+              (merge-face-ref 'region attrs)
+              attrs)))))
 
     (define (draw-match row x0 line display-string line-start len start end
                         point width)
@@ -625,7 +704,7 @@
               (when line-string
                 (let ((display (expand-line-display line-string width)))
                   (draw-line! ed line-start line-string display
-                              (+ row (window-top window)) x0)
+                              (+ row (window-top window)) x0 width)
                   ;; the characters the current search matched, drawn over
                   ;; the line: the match point is in reverse video (GNU
                   ;; Emacs's `isearch' face) and the other matches in view

@@ -7,7 +7,10 @@
  ;; for the run walk at the end: a buffer, a property on it, and the
  ;; computation that turns the two into runs
  (prefix (schemacs editor xdisp) xd:)
- (only (schemacs editor engine) new-text-editor text-editor-insert)
+ (only (schemacs editor engine)
+        new-text-editor text-editor-insert text-editor-set-cursor
+        text-editor-line-outer-size set!text-editor-mark)
+ (only (schemacs editor buffer) set-buffer-local-value!)
  (only (schemacs editor textprop) put-text-property))
 
 ;; Unbuffered output, so a run that hangs shows where it got to.
@@ -225,5 +228,62 @@
          (runs (xd:line-face-runs ed 4 "bcd")))
     (and (not (= (caddr (car runs)) (caddr (cadr runs))))
          (not (= (caddr (cadr runs)) (caddr (caddr runs)))))))
+
+;; The active region is another face merged after the text property's
+;; face. These tests set the point, mark and buffer-local mark-active just
+;; as the commands do, then exercise the same per-character run walk that
+;; redisplay uses.
+(define (region-buffer text point mark active?)
+  (let ((ed (new-text-editor)))
+    (text-editor-insert ed text)
+    (text-editor-set-cursor ed point)
+    (set!text-editor-mark ed mark)
+    (when active?
+      (set-buffer-local-value! ed 'mark-active #t))
+    ed))
+
+(define (region-runs text point mark active?)
+  ;; On a monochrome terminal the region face is inverse-video, which
+  ;; makes the region's runs observable without an initialized ncurses
+  ;; color palette.
+  (with-display
+   (lambda ()
+     (xd:line-face-runs (region-buffer text point mark active?) 0 text))
+   1 'mono #f))
+
+(define region-attribute (region-runs "abcdef" 2 5 #t))
+
+(test-equal '((0 2) (2 5) (5 6))
+  (map (lambda (run) (list (car run) (cadr run))) region-attribute))
+(test-equal #t
+  (let ((runs region-attribute))
+    (and (= (caddr (car runs)) 0)
+         (not (= (caddr (car runs)) (caddr (cadr runs))))
+         (= (caddr (car runs)) (caddr (caddr runs))))))
+
+;; Reversing point and mark selects the same half-open range.
+(test-equal (map caddr region-attribute)
+  (map caddr (region-runs "abcdef" 5 2 #t)))
+
+;; Inactive, empty and unset-mark regions do not change the default face.
+(test-equal '((0 6 0)) (region-runs "abcdef" 2 5 #f))
+(test-equal '((0 6 0)) (region-runs "abcdef" 2 2 #t))
+(test-equal '((0 6 0)) (region-runs "abcdef" 2 #f #t))
+
+;; When the active region reaches the end of a line, its face fills the
+;; remaining screen cells; a final line at point-max has no newline to extend.
+(test-equal #t
+  (with-display
+   (lambda ()
+     (let* ((ed (region-buffer "ab\ncdef" 3 0 #t))
+            (attribute (xd:line-end-fill-attribute ed 0 "ab" "ab" 10)))
+       (and attribute (not (= attribute 0)))))
+   1 'mono #f))
+(test-equal #f
+  (with-display
+   (lambda ()
+     (xd:line-end-fill-attribute (region-buffer "abcdef" 3 0 #t)
+                                 0 "abcdef" "abcdef" 10))
+   1 'mono #f))
 
 (test-end "schemacs_editor_faces_runs")
