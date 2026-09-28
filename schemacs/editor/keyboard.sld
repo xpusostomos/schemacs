@@ -164,6 +164,9 @@
            ((char=? ev #\esc) (list 'ctrl #\[))
            ((or (= ci 127) (char=? ev #\backspace))
             (list 'ctrl #\h))
+           ;; NUL is C-@, and C-@ is C-SPC: one key, one byte, and the
+           ;; binding for the mark is on it.
+           ((= ci 0) (list 'ctrl #\@))
            ((and (< 0 ci) (< ci 27))
             (list 'ctrl (integer->char (+ 96 ci))))
            ((and (>= ci 28) (< ci 32))

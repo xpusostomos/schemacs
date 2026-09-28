@@ -6,10 +6,11 @@
   ;; (`kill-line' into the kill ring, `kill-region' into `kill-new'), so
   ;; they are one library here too.
   ;;
-  ;; What is *not* here yet, though it is simple.el's: the region
-  ;; commands, `mark-whole-buffer', the quit signal that `keyboard-quit'
-  ;; raises - which belongs to the command loop's error reporting - and
-  ;; the two file-visiting commands, which are files.el's in the end.
+  ;; What is *not* here yet, though it is simple.el's: the kill ring's
+  ;; commands (`kill-region', M-w, M-y) and the rest of the region
+  ;; commands, the quit signal that `keyboard-quit' raises - which belongs
+  ;; to the command loop's error reporting - and the two file-visiting
+  ;; commands, which are files.el's in the end.
   ;;
   ;; See LAYOUT-PLAN.txt for the rule this library is a step of.
 
@@ -17,10 +18,15 @@
     (scheme base)
     (scheme char)
     (scheme case-lambda)
+    ;; `caddr' is `(scheme cxr)'s, and `push-mark' takes Emacs's three
+    ;; optional arguments.
+    (only (scheme cxr) caddr)
     ;; The prefix echo is a time.
     (only (scheme time) current-second)
     (prefix (schemacs keymap) km:)
     (only (schemacs editor engine)
+         copy-marker marker-position set-marker!
+         set!text-editor-deactivate-mark! text-editor-deactivate-mark
          set!text-editor-mark text-editor-char-count text-editor-copy-string 
          text-editor-cursor-column text-editor-cursor-line 
          text-editor-delete-from-cursor text-editor-get-char-index 
@@ -37,6 +43,18 @@
          window-buffer window-top-line)
     (only (schemacs editor command)
          new-command new-count-command uarg->integer)
+    ;; The buffer-local store, for `mark-ring' - which is the buffer's
+    ;; own - and the variables that come from the libraries Emacs
+    ;; declares them in: `mark-active' and `transient-mark-mode' are
+    ;; `buffer.c''s, `mark-even-if-inactive' is `callint.c''s,
+    ;; `region-beginning' and `region-end' are `editfns.c''s, and
+    ;; `add-to-history' is `subr.el''s.
+    (only (schemacs editor buffer)
+          buffer-local-value current-buffer mark-active set!mark-active
+          set-buffer-local-value! transient-mark-mode)
+    (only (schemacs editor command) *mark-even-if-inactive*)
+    (only (schemacs editor editfns) region-beginning region-end)
+    (only (schemacs editor subr) add-to-history)
     ;; `define-key' and the global map, which this library fills with the
     ;; bindings for the commands it defines - as simple.el does with
     ;; `(define-key global-map ...)'.
@@ -63,7 +81,14 @@
    place-undo-boundary! previous-line read-only-mode rotate-kill-flag!
    scroll-down-command scroll-up-command self-insert-command
    self-insert-layer self-insert-tab
-   digit-argument negative-argument
+   *activate-mark-hook* *deactivate-mark-hook*
+   *exchange-point-and-mark-highlight-region*
+   *mark-ring-max* *use-empty-active-region*
+   activate-mark deactivate-mark digit-argument
+   mark mark-ring mark-whole-buffer negative-argument
+   pop-mark pop-to-mark-command push-mark push-mark-command
+   region-active-p set-mark set-mark-command
+   set!mark-ring use-region-p
    prefix-argument-description
    prefix-echo-pending? request-prefix-echo! show-prefix-echo!
    strip-undo-boundaries undo-command undo-redo-command update-prefix!
@@ -360,21 +385,46 @@
        "Toggle whether the buffer can be changed (bound to C-x C-q)."
        'uarg))
 
+    (define *exchange-point-and-mark-highlight-region*
+      ;; GNU Emacs's `exchange-point-and-mark-highlight-region':
+      ;; whether exchanging the point and the mark also activates the
+      ;; region. Setting it to #f swaps the meanings of C-x C-x with and
+      ;; without a prefix argument.
+      ;;--------------------------------------------------------------
+      (make-parameter #t))
+
     (define exchange-point-and-mark
-      ;; GNU Emacs's `exchange-point-and-mark' (C-x C-x): go back to
-      ;; where the mark is, leaving the mark where point was. It is how
-      ;; you return to where a search started.
+      ;; GNU Emacs's `exchange-point-and-mark' (C-x C-x): put the mark
+      ;; where point is now, and point where the mark was - which is how
+      ;; you return to where a search started. It works even when the
+      ;; mark is not active, and it *reactivates* it, so that the region
+      ;; it just went back to is the one you see.
+      ;;
+      ;; A prefix argument does the opposite: it leaves the mark
+      ;; inactive. Unless `exchange-point-and-mark-highlight-region' is
+      ;; off, in which case a prefix argument is what activates it -
+      ;; Emacs's `(xor arg ...)' below, which is the whole of that
+      ;; variable's meaning.
+      ;;--------------------------------------------------------------
       (new-command
        "exchange-point-and-mark"
-       (lambda ()
-         (let* ((ed (current-editor))
-                (mark (text-editor-mark ed))
-                (point (text-editor-get-cursor ed)))
-           (when mark
-             (text-editor-set-cursor ed mark)
-             (set!text-editor-mark ed point))))
-       (lambda () #f)
-       "Go to the mark, leaving the mark where point was (bound to C-x C-x)."))
+       (lambda (arg)
+         (let ((omark (mark #t))
+               (region-was-active (region-active-p)))
+           (if (not omark)
+               (error "No mark set in this buffer")
+               (begin
+                 (set-mark (text-editor-get-cursor (current-editor)))
+                 (text-editor-set-cursor (current-editor) omark)
+                 (if (eq? (and arg #t)
+                          (not (if (*exchange-point-and-mark-highlight-region*)
+                                   (region-active-p)
+                                   region-was-active)))
+                     (deactivate-mark)
+                     (activate-mark))))))
+       (lambda (arg) arg)
+       "Put the mark where point is now, and point where the mark is now."
+       'uarg))
 
     (define scroll-up-command
       ;; Scroll the view COUNT screenfuls down (toward the end of the
@@ -965,6 +1015,256 @@
        'uarg))
 
     ;;----------------------------------------------------------------
+    ;; The mark and the region
+    ;;
+    ;; GNU Emacs's banner of the same name in simple.el. The mark is a
+    ;; *marker* the engine keeps on the buffer (buffer.c's `BVAR (b,
+    ;; mark)'), and the region is what it makes with point - "the closest
+    ;; equivalent in Emacs to what some editors call the selection".
+    ;;
+    ;; What is *not* here is the state these work on, because Emacs
+    ;; declares it elsewhere and so does this: `transient-mark-mode' and
+    ;; `mark-active' are `buffer.c''s variables and live in
+    ;; `(schemacs editor buffer)', `mark-even-if-inactive' is
+    ;; `callint.c''s and lives in `(schemacs editor command)',
+    ;; `region-beginning' and `region-end' are `editfns.c''s and live in
+    ;; `(schemacs editor editfns)', and `add-to-history' is `subr.el''s
+    ;; and lives in `(schemacs editor subr)'.
+
+    (define *use-empty-active-region*
+      ;; GNU Emacs's `use-empty-active-region': whether an *empty*
+      ;; active region is worth acting on. Off, as in Emacs, so a
+      ;; command that would act on the region does not when point and
+      ;; mark are in the same place.
+      ;;--------------------------------------------------------------
+      (make-parameter #f))
+
+    (define (mark . args)
+      ;; GNU Emacs's `(mark)': where this buffer's mark is, or #f when it
+      ;; has never been set. In Transient Mark mode it *signals* when the
+      ;; mark is not active, unless `mark-even-if-inactive' says
+      ;; otherwise or FORCE is passed - which is why `(mark t)' is the
+      ;; spelling most callers use.
+      ;;--------------------------------------------------------------
+      (let ((force (if (pair? args) (car args) #f)))
+        (if (or force (not (transient-mark-mode))
+                (mark-active) (*mark-even-if-inactive*))
+            (text-editor-mark (current-buffer))
+            (error "The mark is not active now"))))
+
+    (define (set-mark position)
+      ;; GNU Emacs's `set-mark': put the mark at POSITION and activate
+      ;; it, or - given #f - clear it and deactivate. Emacs's docstring
+      ;; warns callers off it: "Normally, when a new mark is set, the old
+      ;; one should go on the stack. This is why most applications should
+      ;; use `push-mark', not `set-mark'."
+      ;;--------------------------------------------------------------
+      (if position
+          (begin
+            (set!text-editor-mark (current-buffer) position)
+            (activate-mark 'no-tmm))
+          (begin
+            ;; "Normally we never clear mark-active except in Transient
+            ;; Mark mode. But when we actually clear out the mark value
+            ;; too, we must clear mark-active in any mode."
+            (deactivate-mark #t)
+            (set!mark-active #f)
+            (set!text-editor-mark (current-buffer) #f))))
+
+    (define (region-active-p)
+      ;; GNU Emacs's `region-active-p': Transient Mark mode is on and the
+      ;; mark is active. Emacs asserts that the mark is set as well -
+      ;; "somehow we sometimes end up with mark-active non-nil but
+      ;; without the mark being set (bug#17324)" - and so does this.
+      ;;--------------------------------------------------------------
+      (and (transient-mark-mode) (mark-active) (mark #t) #t))
+
+    (define (use-region-p)
+      ;; GNU Emacs's `use-region-p': the region is active *and* worth
+      ;; acting on, which is what the commands that act on it ask. An
+      ;; empty region is not, unless `use-empty-active-region' says so.
+      ;; (Emacs's mouse-1 caveat is about a mouse there is not one of.)
+      ;;--------------------------------------------------------------
+      (and (region-active-p)
+           (or (< (region-beginning) (region-end))
+               (*use-empty-active-region*))))
+
+    (define *activate-mark-hook* (make-parameter '()))
+    (define *deactivate-mark-hook* (make-parameter '()))
+    ;; ^ GNU Emacs's `activate-mark-hook' and `deactivate-mark-hook'.
+
+    (define (activate-mark . args)
+      ;; GNU Emacs's `activate-mark': set `mark-active', and - unless the
+      ;; caller says not to touch it - turn Transient Mark mode on for
+      ;; this one command if it is off.
+      ;;
+      ;; "No-TMM" is Emacs's name for the second argument; here it is the
+      ;; first, since the only caller that passes it is `set-mark'.
+      ;;--------------------------------------------------------------
+      (let ((no-tmm (if (pair? args) (car args) #f)))
+        (when (mark #t)
+          (unless (region-active-p)
+            (set!mark-active #t)
+            (unless (or (transient-mark-mode) no-tmm)
+              (set-buffer-local-value! (current-buffer)
+                                       'transient-mark-mode 'lambda))
+            (for-each (lambda (hook) (hook)) (*activate-mark-hook*))))))
+
+    (define (deactivate-mark . args)
+      ;; GNU Emacs's `deactivate-mark': make the mark inactive and run
+      ;; the hook. FORCE does it even when the region was not active,
+      ;; which is what `set-mark' with no position needs.
+      ;;
+      ;; Emacs also sets the PRIMARY selection here when
+      ;; `select-active-regions' says to; there is no selection to set.
+      ;;--------------------------------------------------------------
+      (let ((force (if (pair? args) (car args) #f)))
+        (when (or (region-active-p) force)
+          ;; a temporarily-enabled Transient Mark mode goes back to what
+          ;; it was
+          (when (eq? (buffer-local-value (current-buffer)
+                                         'transient-mark-mode #f)
+                     'lambda)
+            (set-buffer-local-value! (current-buffer) 'transient-mark-mode #f))
+          (set!mark-active #f)
+          (for-each (lambda (hook) (hook)) (*deactivate-mark-hook*)))))
+
+    (define *mark-ring-max* (make-parameter 16))
+    ;; ^ GNU Emacs's `mark-ring-max': "Maximum size of mark ring."
+
+    (define (mark-ring)
+      ;; The buffer's own mark ring, most recent first: GNU Emacs's
+      ;; `mark-ring', which is buffer-local.
+      ;;--------------------------------------------------------------
+      (buffer-local-value (current-buffer) 'mark-ring '()))
+
+    (define (set!mark-ring entries)
+      (set-buffer-local-value! (current-buffer) 'mark-ring entries))
+
+    (define (push-mark . args)
+      ;; GNU Emacs's `push-mark': put the mark where LOCATION says (point
+      ;; by default), pushing the old mark onto the buffer's mark ring,
+      ;; and say "Mark set" unless NOMSG.
+      ;;
+      ;; The third argument ACTIVATE is Emacs's: the mark is activated
+      ;; when it is passed, and - when Transient Mark mode is *off* -
+      ;; always, since with no transient mark there is nothing for
+      ;; activation to do but the region is still worth having.
+      ;;--------------------------------------------------------------
+      (let ((location (if (pair? args) (car args) #f))
+            (nomsg (if (and (pair? args) (pair? (cdr args))) (cadr args) #f))
+            (activate (if (and (pair? args) (pair? (cdr args))
+                               (pair? (cddr args)))
+                          (caddr args)
+                          #f)))
+        (when (mark #t)
+          (set!mark-ring
+           (add-to-history (mark-ring)
+                           (copy-marker (current-buffer)
+                                        (text-editor-mark (current-buffer)))
+                           (*mark-ring-max*) #t)))
+        (set!text-editor-mark (current-buffer)
+                              (or location (text-editor-get-cursor
+                                            (current-editor))))
+        (unless (or nomsg (*echo-area-buffer*))
+          (set!ncurses-frame-message (*current-frame*) "Mark set"))
+        (when (or activate (not (transient-mark-mode)))
+          (set-mark (mark #t)))
+        #f))
+
+    (define (pop-mark)
+      ;; GNU Emacs's `pop-mark': take the last mark off the ring and make
+      ;; it the mark, "does not set point", and deactivate.
+      ;;--------------------------------------------------------------
+      (let ((ring (mark-ring)))
+        (when (pair? ring)
+          (set!mark-ring
+           (append (cdr ring)
+                   (list (copy-marker (current-buffer)
+                                      (text-editor-mark (current-buffer))))))
+          (set!text-editor-mark (current-buffer)
+                                (marker-position (car ring)))
+          (set-marker! (car ring) #f (current-buffer))))
+      (deactivate-mark))
+
+    (define (push-mark-command arg nomsg)
+      ;; GNU Emacs's `push-mark-command': set the mark at point, or - if
+      ;; it is already there and no prefix argument was given - just
+      ;; activate it.
+      ;;--------------------------------------------------------------
+      (let ((here (mark #t))
+            (point (text-editor-get-cursor (current-editor))))
+        (if (or arg (not here) (not (= here point)))
+            (push-mark #f nomsg #t)
+            (begin
+              (activate-mark 'no-tmm)
+              (unless nomsg
+                (set!ncurses-frame-message (*current-frame*)
+                                           "Mark activated"))))))
+
+    (define (pop-to-mark-command)
+      ;; GNU Emacs's `pop-to-mark-command': jump to the mark, and put a
+      ;; new one - off the ring - where it was.
+      ;;--------------------------------------------------------------
+      (if (not (mark #t))
+          (error "No mark set in this buffer")
+          (begin
+            (when (= (text-editor-get-cursor (current-editor)) (mark #t))
+              (set!ncurses-frame-message (*current-frame*) "Mark popped"))
+            (text-editor-set-cursor (current-editor) (mark #t))
+            (pop-mark))))
+
+    (define set-mark-command
+      ;; GNU Emacs's `set-mark-command' (C-SPC, and C-@, which is the
+      ;; same key): set the mark where point is and activate it, or - with
+      ;; a prefix argument - jump to the mark and pop a new one off the
+      ;; ring.
+      ;;
+      ;; The rest of Emacs's version is about `set-mark-command-repeat-pop'
+      ;; and the global mark ring, neither of which is here yet; what is
+      ;; here is the part C-SPC needs. Repeating C-SPC on an active region
+      ;; deactivates it, which is how the same key turns the region off.
+      ;;--------------------------------------------------------------
+      (new-command
+       "set-mark-command"
+       (lambda (arg)
+         ;; Emacs's `cond', clause for clause, less the two that are
+         ;; about `set-mark-command-repeat-pop' and the global mark ring.
+         ;; (`C-u C-u' is the raw argument 16 here rather than a cons,
+         ;; because a repeated C-u counts up instead of making one.)
+         (cond
+          ((and (integer? arg) (> arg 4)) (push-mark-command #f #f))
+          ((not (eq? (*last-command*) set-mark-command))
+           (if arg (pop-to-mark-command) (push-mark-command #t #f)))
+          (arg (pop-to-mark-command))
+          ((region-active-p)
+           (deactivate-mark)
+           (set!ncurses-frame-message (*current-frame*) "Mark deactivated"))
+          (else
+           (activate-mark)
+           (set!ncurses-frame-message (*current-frame*) "Mark activated"))))
+       (lambda (arg) arg)
+       "Set the mark where point is, and activate it; or jump to the mark."
+       'uarg))
+
+    (define mark-whole-buffer
+      ;; GNU Emacs's `mark-whole-buffer' (C-x h): point at the beginning
+      ;; and the mark at the end, with the old mark pushed first.
+      ;;
+      ;; Emacs goes to `minibuffer-prompt-end' rather than to the start of
+      ;; the buffer; the prompt is not in the buffer here, so the two are
+      ;; the same.
+      ;;--------------------------------------------------------------
+      (new-command
+       "mark-whole-buffer"
+       (lambda ()
+         (push-mark)
+         (push-mark (text-editor-char-count (current-editor)) #f #t)
+         (text-editor-set-cursor (current-editor) 0))
+       (lambda () #f)
+       "Put point at beginning and mark at end of buffer."))
+
+    ;;----------------------------------------------------------------
     ;; The keys GNU Emacs binds these commands to
     ;;
     ;; simple.el states them beside the commands, with
@@ -988,6 +1288,11 @@
     (define-key *default-keymap* (list (list 'ctrl #\m)) newline-command)
     (define-key *default-keymap* (list (list 'ctrl #\j)) newline-command)
     (define-key *default-keymap* (list (list 'ctrl #\g)) keyboard-quit)
+    ;; The mark. C-SPC and C-@ are the *same* key event on a terminal -
+    ;; both send the NUL byte - which is why one binding serves both, and
+    ;; why the event translation reads NUL as `C-@'.
+    (define-key *default-keymap* (list (list 'ctrl #\@)) set-mark-command)
+    (define-key *default-keymap* (list (list 'ctrl #\x) #\h) mark-whole-buffer)
     ;; The named keys a terminal sends for its arrow, home and end keys:
     ;; GNU Emacs binds these in `global-map' too, and to the same
     ;; commands as the control keys beside them. Keeping them separate

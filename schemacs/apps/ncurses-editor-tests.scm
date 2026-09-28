@@ -63,8 +63,13 @@
        minibuffer-cursor-column minibuffer-history
        minibuffer-local-completion-map minibuffer-local-map minibuffer-message
        minibuffer-set-contents! minibufferp)
+ (only (schemacs editor buffer) mark-active)
+ (only (schemacs editor command) *mark-even-if-inactive*)
+ (only (schemacs editor editfns) region-beginning region-end)
  (only (schemacs editor simple)
        *kill-buffer* *last-change-was-undo* *last-command* read-only-mode
+       *use-empty-active-region* mark mark-ring push-mark region-active-p
+       set-mark use-region-p
        *last-command-kill* *pending-undo-list* *this-command-kill*
        *prefix-cu* *prefix-digits* *prefix-negative*
        clear-prefix! pending-uarg prefix-argument-description
@@ -2038,3 +2043,141 @@
                (= (iv:interval-total-length root) chars)))))))
 
 (test-end "schemacs_ncurses_editor_completion_ui")
+
+;;--------------------------------------------------------------------
+;; The mark and the region
+;;
+;; The pieces Emacs spreads across four files, each tested where the
+;; thing it is about lives: `mark-active' and `transient-mark-mode' are
+;; `buffer.c''s, `region-beginning' and `region-end' are `editfns.c''s,
+;; and the commands are simple.el's.
+
+(test-begin "schemacs_ncurses_editor_mark")
+
+(define (mark-frame text)
+  ;; A frame over TEXT, so that the commands - which act on the selected
+  ;; window's buffer through `(current-buffer)' - have somewhere to act.
+  ;;--------------------------------------------------------------
+  (let* ((ed (new-text-editor))
+         (frame (test-frame ed)))
+    (text-editor-insert ed text)
+    (text-editor-set-cursor ed 0)
+    (list frame ed)))
+
+;; Run keys the way the editor does, and answer the buffer and the mark as
+;; the *test* sees them - outside the command, but with the same frame
+;; current, which is what the commands and this both resolve
+;; `(current-buffer)' through.
+(define (with-mark-frame text thunk)
+  (let* ((frame+ed (mark-frame text))
+         (frame (car frame+ed))
+         (ed (cadr frame+ed)))
+    (parameterize ((*current-frame* frame) (*buffer-list* '())
+                   (*current-buffer* #f)
+                   ;; The command-loop state, bound fresh as the other
+                   ;; harnesses here do: `*last-command*' is what makes two
+                   ;; C-SPCs in a row a toggle, so a test that inherits it
+                   ;; from the test before is testing that instead.
+                   (*last-command* #f)
+                   (*last-command-kill* #f) (*this-command-kill* #f))
+      (thunk frame ed))))
+
+(define (keys! frame . evs)
+  (for-each (lambda (ev) (dispatch-ncurses-event frame ev)) evs))
+
+(define C-SPC #\nul)   ; C-SPC and C-@ are the same byte, and both are NUL
+
+;; C-SPC sets the mark at point and activates it; a second C-SPC at once
+;; deactivates it again - the same key turning the region off.
+(test-equal '(#t #t #f #f)
+  (with-mark-frame "hello"
+    (lambda (frame ed)
+      (keys! frame C-SPC)
+      (let ((set (list (mark-active) (region-active-p))))
+        (keys! frame C-SPC)
+        (append set (list (mark-active) (region-active-p)))))))
+
+;; The region begins at whichever of point and mark is smaller, whichever
+;; order they are in: here the mark is set after point, and then point is
+;; moved back before it, so the two orders are both seen.
+(test-equal '(4 4 2 4)
+  (with-mark-frame "hello"
+    (lambda (frame ed)
+      (text-editor-set-cursor ed 4)
+      (keys! frame C-SPC)                       ; mark at 4, active
+      (let ((at-point (list (region-beginning) (region-end))))
+        (text-editor-set-cursor ed 2)
+        (append at-point (list (region-beginning) (region-end)))))))
+
+;; `use-region-p' is false for an *empty* active region unless
+;; `use-empty-active-region' says otherwise, which is what stops a
+;; command acting on a region of no characters.
+(test-equal '(#f #t)
+  (with-mark-frame "hello"
+    (lambda (frame ed)
+      (keys! frame C-SPC)                       ; an empty region: point is the mark
+      (list (use-region-p)
+            (parameterize ((*use-empty-active-region* #t)) (use-region-p))))))
+
+;; With no mark at all, asking for the region is an error and says so -
+;; and with an *inactive* mark it is the other error, which is the one
+;; that tells a command the user is not talking about a region. Commands
+;; run inside the command loop, which reports an error in the echo area
+;; rather than letting it out, so the echo area is what says so.
+;; With Transient Mark mode on and no active mark, asking for the region
+;; is `mark-inactive' - "The mark is not active now" - whether or not a
+;; mark was ever set, because that is the first test the C makes. The "not
+;; set" message is the *second*, and is reached only when the mode is off
+;; or `mark-even-if-inactive' says the mark's position is wanted anyway.
+(test-equal '("The mark is not active now"
+              "The mark is not active now"
+              "The mark is not set now, so there is no region"
+              "No mark set in this buffer")
+  (with-mark-frame "hello"
+    (lambda (frame ed)
+      ;; asked directly, so that the error is the function's rather than
+      ;; the command loop's report of it
+      (let ((unset (guard (e (else (error-object-message e)))
+                     (region-beginning))))
+        (keys! frame C-SPC C-SPC)               ; set the mark, then deactivate
+        (let ((inactive (guard (e (else (error-object-message e)))
+                          (region-beginning))))
+          (keys! frame C-SPC)                   ; set it again, then drop it
+          (push-mark #f #f)
+          (set-mark #f)
+          (let ((never-set (parameterize ((*mark-even-if-inactive* #t))
+                             (guard (e (else (error-object-message e)))
+                               (region-beginning)))))
+            ;; ...and the command that exchanges point and mark says its own
+            (keys! frame C-x C-x)
+            (list unset inactive never-set (ncurses-frame-message frame))))))))
+
+;; `mark-whole-buffer' (C-x h) puts point at the beginning and the mark
+;; at the end, and leaves the region active so that a command can act on
+;; it.
+(test-equal '(0 5 #t)
+  (with-mark-frame "hello"
+    (lambda (frame ed)
+      (keys! frame C-x #\h)
+      (list (text-editor-get-cursor ed) (mark #t) (region-active-p)))))
+
+;; The mark ring: `push-mark' puts the old mark on it, and
+;; `pop-to-mark-command' - `C-u C-SPC' - jumps back to the ring's mark and
+;; pops it. (Two C-SPCs in a row do not push: the second one turns the
+;; region off, as the test above shows.)
+(test-equal '(1 4 2)
+  (with-mark-frame "hello"
+    (lambda (frame ed)
+      (text-editor-set-cursor ed 2)
+      (keys! frame C-SPC)                       ; mark at 2
+      (text-editor-set-cursor ed 4)
+      (push-mark)                               ; mark at 4, 2 pushed on the ring
+      (let ((pushed (length (mark-ring))))
+        (text-editor-set-cursor ed 0)
+        ;; `pop-to-mark-command' jumps to the mark - 4 - and then
+        ;; `pop-mark' makes the ring's mark - 2 - the mark, which is what
+        ;; "pop a new position for mark off the ring" means.
+        (keys! frame C-u C-SPC)
+        (list pushed (text-editor-get-cursor ed) (mark #t))))))
+
+(test-end "schemacs_ncurses_editor_mark")

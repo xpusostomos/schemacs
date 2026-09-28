@@ -14,6 +14,7 @@
    command-type? make<command> new-command new-count-command
    command-name command-procedure command-doc-string
    command-interactive-spec
+   *mark-even-if-inactive*
    uarg->integer
    run-command apply-command show-command
    =>command-name*!
@@ -68,6 +69,15 @@
       (srcloc    command-source-location set!command-source-location)
       (srcstr    command-source-code     set!command-source-code)
       )
+
+    (define *mark-even-if-inactive*
+      ;; GNU Emacs's `mark-even-if-inactive', which is `callint.c''s -
+      ;; the `interactive' machinery's, because that is where an
+      ;; `interactive "r"' asks for the region and has to decide what to
+      ;; do when the mark is not active. `(mark)' and `region-beginning'
+      ;; ask it too.
+      ;;--------------------------------------------------------------
+      (make-parameter #f))
 
     (define new-command
       ;; Construct a command. The fifth argument, INTERACTIVE-SPEC, is

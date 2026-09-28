@@ -79,7 +79,9 @@
    buffer-local-keymap
    buffer-local-value
    buffer-modified-p
+   *transient-mark-mode*
    buffer-name
+   mark-active set!mark-active transient-mark-mode
    buffer-read-only?
    bufferp
    bury-buffer
@@ -276,6 +278,45 @@
 
     ;;----------------------------------------------------------------
     ;; Names
+
+    (define *transient-mark-mode*
+      ;; GNU Emacs's `transient-mark-mode', which is `buffer.c''s: whether
+      ;; the mark is *transient* - active until a command that is not a
+      ;; motion or a mark command runs - and whether the region is drawn
+      ;; while it is.
+      ;;
+      ;; It is on, as it is in an interactive Emacs, and that default is
+      ;; worth writing down because it is hidden: the C's value is nil and
+      ;; nothing in Lisp turns it on either. What does is `cus-start.el':
+      ;;
+      ;;   (transient-mark-mode editing-basics boolean nil
+      ;;                        :standard (not noninteractive))
+      ;;
+      ;; so it is on in a session and off under `--batch' - which is why
+      ;; `emacs --batch -Q' answers nil. There is no batch here to differ
+      ;; from, so it is on.
+      ;;--------------------------------------------------------------
+      (make-parameter #t))
+
+    (define (transient-mark-mode)
+      ;; The mode as the *buffer* sees it: its own value if it has one,
+      ;; else the global one. GNU Emacs turns the mode on for a single
+      ;; command by setting the buffer-local value to the symbol `lambda'
+      ;; (and `deactivate-mark' resets it), which is the one case where
+      ;; the two differ.
+      ;;--------------------------------------------------------------
+      (buffer-local-value (current-buffer) 'transient-mark-mode
+                          (*transient-mark-mode*)))
+
+    (define (mark-active)
+      ;; Whether the mark is active: GNU Emacs's `mark-active', which
+      ;; `buffer.c' declares as a per-buffer variable - each buffer has
+      ;; its own, so switching buffers does not carry the region with it.
+      ;;--------------------------------------------------------------
+      (buffer-local-value (current-buffer) 'mark-active #f))
+
+    (define (set!mark-active flag)
+      (set-buffer-local-value! (current-buffer) 'mark-active (and flag #t)))
 
     (define (buffer-name buffer)
       ;; The name of BUFFER: GNU Emacs's `buffer-name'. Emacs gives every

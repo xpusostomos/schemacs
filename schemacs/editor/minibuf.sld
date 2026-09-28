@@ -41,6 +41,8 @@
     (only (guile) hash-table? hash-for-each))
 
   (export
+   *history-delete-duplicates*
+   *history-length*
    all-completions
    compare-strings
    test-completion
@@ -59,6 +61,20 @@
       ;; `(schemacs editor buffer)''s `buffer-local-value').
       ;;--------------------------------------------------------------
       (make-parameter #f))
+
+    (define *history-delete-duplicates*
+      ;; GNU Emacs's `history-delete-duplicates' (`minibuf.c'): whether
+      ;; adding an element to a history list removes earlier copies of
+      ;; it. Off, as in Emacs.
+      ;;--------------------------------------------------------------
+      (make-parameter #f))
+
+    (define *history-length*
+      ;; GNU Emacs's `history-length' (`minibuf.c'): "maximum length of
+      ;; history lists before truncation takes place", for the lists that
+      ;; do not give one of their own. 100, as in Emacs.
+      ;;--------------------------------------------------------------
+      (make-parameter 100))
 
     (define (compare-strings string1 start1 end1 string2 start2 end2 . args)
       ;; GNU Emacs's `compare-strings', which is `fns.c''s: #t when the

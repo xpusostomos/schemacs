@@ -114,6 +114,7 @@
    ;; the tree and the operations on it are `(schemacs editor intervals)',
    ;; which mirrors `intervals.c'.
    text-editor-text-props  set!text-editor-text-props
+   text-editor-deactivate-mark  set!text-editor-deactivate-mark!
    *text-property-offset-function*
 
    ;; Whether the buffer has changed since it was last saved
@@ -591,6 +592,7 @@
        lines  count  line-ed  line-ch  moved  column
        cdf  ins-char  lbrk  textprops  undo
        modified  save-token  read-only  mark  markers
+       deactivate-mark
        name  file-name
        )
       text-editor-type?
@@ -652,6 +654,14 @@
       ;; Emacs records the visited file's modification time there
       ;; instead and compares it with `visited-file-modtime'; the
       ;; engine has no file or clock, so it numbers its saves.
+      (deactivate-mark text-editor-deactivate-mark
+                       set!text-editor-deactivate-mark!)
+      ;; ^ Whether the mark should be deactivated once this command is
+      ;; over: GNU Emacs's `deactivate-mark' variable, which the command
+      ;; loop sets to nil before each command and tests when the command
+      ;; returns. **Any buffer modification stores t in it**
+      ;; (`insdel.c''s `prepare_to_modify_buffer'), which is what makes
+      ;; the region go away when you type or yank.
       (mark       %mark-marker           set!%mark-marker)
       ;; ^ The buffer's mark, GNU Emacs's `mark': a <marker-type>, which
       ;; is what makes it survive the text around it changing. It points
@@ -732,6 +742,8 @@
                         ;; and an empty marker chain.
                         (make<marker> #f 0 #f)
                         (new-weak-set)
+                        ;; Nothing is waiting to deactivate the mark.
+                        #f
                         ;; Named as `generate-new-buffer' names a
                         ;; buffer it makes, and visiting no file.
                         "Untitled" #f
@@ -1432,8 +1444,13 @@
       ;; change is recorded, so that the mark of the last save sits
       ;; below the change's own entry in the list and is reached after
       ;; the change has been undone.
+      ;;
+      ;; A modification also asks for the mark to be deactivated, which
+      ;; is what GNU Emacs's `prepare_to_modify_buffer' does with
+      ;; `(setq deactivate-mark t)' - `insdel.c''s, where this is.
       ;;--------------------------------------------------------------
-      (text-editor-set-modified! ed #t))
+      (text-editor-set-modified! ed #t)
+      (set!text-editor-deactivate-mark! ed #t))
 
     (define (undo-insertion-entry? entry)
       ;; Whether ENTRY records an insertion, that is, whether it is a
