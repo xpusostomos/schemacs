@@ -45,7 +45,9 @@
  ;; `try-completion' and `all-completions' are `minibuf.c''s.
  (only (schemacs editor minibuf) all-completions try-completion)
  (only (schemacs editor minibuffer)
-       *completion-show-inline-help* *minibuffer-completing-file-name*
+       *completion-show-inline-help* *completions-header-format*
+       completion-setup-function completions-header-string
+       *minibuffer-completing-file-name*
        *minibuffer-message-timeout*
        completion--do-completion completion--map-for completion--message
        make<minibuffer>
@@ -60,7 +62,9 @@
  (only (schemacs editor simple)
        *kill-buffer* *last-change-was-undo* *last-command* read-only-mode
        *last-command-kill* *pending-undo-list* *this-command-kill*
-       pending-uarg self-insert-command)
+       *prefix-cu* *prefix-digits* *prefix-negative*
+       clear-prefix! pending-uarg prefix-argument-description
+       prefix-echo-pending? request-prefix-echo! self-insert-command)
  (only (schemacs editor isearch)
        *search-case-fold?* *search-pattern* isearch-find isearch-message)
  (only (schemacs editor window)
@@ -1932,5 +1936,41 @@
         (km:keymap-lookup
          (completion--map-for minibuffer-local-completion-map)
          (km:keymap-index '((#\space)))))))
+
+;; The heading line is Emacs's format string with its one `%s' filled
+;; in. Not through `format': that directive is Emacs's, and Guile spells
+;; its own `~A', so the substitution is written out - which is what keeps
+;; `completions-header-format' the same variable it is in Emacs.
+(test-equal '("2 possible completions:\n" "no 3 here\n")
+  (parameterize ((*completions-header-format* "%s possible completions:\n"))
+    (list (completions-header-string 2)
+          (parameterize ((*completions-header-format* "no %s here\n"))
+            (completions-header-string 3)))))
+
+;; The prefix argument's description, which is GNU Emacs's
+;; `universal-argument--description'. It always begins `C-u', whatever
+;; key began the argument - `M-6' included.
+(test-equal '("C-u" "C-u C-u" "C-u 6" "C-u 66" "C-u -" "C-u -6" #f)
+  (list (parameterize ((*prefix-cu* 1) (*prefix-digits* #f)) (prefix-argument-description))
+        (parameterize ((*prefix-cu* 2) (*prefix-digits* #f)) (prefix-argument-description))
+        (parameterize ((*prefix-cu* #f) (*prefix-digits* "6")) (prefix-argument-description))
+        (parameterize ((*prefix-cu* #f) (*prefix-digits* "66")) (prefix-argument-description))
+        (parameterize ((*prefix-cu* #f) (*prefix-digits* #f)
+                       (*prefix-negative* #t)) (prefix-argument-description))
+        (parameterize ((*prefix-cu* #f) (*prefix-digits* "6")
+                       (*prefix-negative* #t)) (prefix-argument-description))
+        (parameterize ((*prefix-cu* #f) (*prefix-digits* #f)
+                       (*prefix-negative* #f)) (prefix-argument-description))))
+
+;; Nothing is owed to the echo area until the keyboard has been quiet for
+;; `echo-keystrokes' - which is why `M-6' followed at once by another key
+;; shows nothing at all.
+(test-equal '(#f #t #f)
+  (list (begin (clear-prefix!) (prefix-echo-pending?))
+        (begin (parameterize ((*prefix-cu* #f) (*prefix-digits* "6"))
+                 (request-prefix-echo!)
+                 (prefix-echo-pending?))
+               #t)
+        (begin (clear-prefix!) (prefix-echo-pending?))))
 
 (test-end "schemacs_ncurses_editor_completion_ui")

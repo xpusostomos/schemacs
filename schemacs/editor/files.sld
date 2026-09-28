@@ -78,7 +78,7 @@
     ;; visited file read-only (GNU Emacs's `file-writable-p', plus the
     ;; permission bits it also consults); and the directory reading and
     ;; name splitting `read-file-name' completes with.
-    (only (guile) access? stat stat:mode W_OK logand
+    (only (guile) access? stat stat:mode W_OK X_OK logand logior
           closedir getcwd opendir readdir stat:type
           string-prefix? string-rindex))
 
@@ -94,6 +94,7 @@
    ensure-final-newline-on-save!
    ensure-final-newline-on-visit
    expand-file-name
+   file-exists-p
    file-name-completion-table
    file-name-directory-part
    file-name-nondirectory-part
@@ -179,9 +180,22 @@
       ;; (file-writable-p path))', plus its rule that a file whose
       ;; permission bits carry no write bit is read-only even for the
       ;; superuser, who is otherwise allowed to write anything.
+      ;;
+      ;; A file that is not there yet is writable when its *directory*
+      ;; is: `file-writable-p''s docstring is "can be written or
+      ;; created", and its C asks the directory when the file itself
+      ;; answers ENOENT. Without that the file that `C-x C-f' had just
+      ;; been asked to create was visited read-only - the exact opposite
+      ;; of what a file being created is for.
       ;;--------------------------------------------------------------
-      (or (not (access? path W_OK))
-          (zero? (logand (stat:mode (stat path)) #o222))))
+      (cond
+       ((not (file-exists-p path))
+        (let ((dir (file-name-directory-part path)))
+          (not (access? (if (string=? dir "") (default-directory) dir)
+                        (logior W_OK X_OK)))))
+       (else
+        (or (not (access? path W_OK))
+            (zero? (logand (stat:mode (stat path)) #o222))))))
 
     (define (find-buffer-visiting path)
       ;; The buffer visiting PATH, or false: GNU Emacs's
@@ -221,8 +235,11 @@
                      frame (string-append
                             "; find-file: error loading " path))
                     #f))
-             (switch-to-buffer (find-file path))
+             ;; the message is cleared *before* the file is visited, so
+             ;; that what `find-file' says about it - "(New file)", or
+             ;; the read-only note - is what stays in the echo area
              (set!ncurses-frame-message frame "")
+             (switch-to-buffer (find-file path))
              (note-file-read-only! frame)
              path)))
        (lambda (path) #f)
@@ -519,12 +536,27 @@
                  ((string-prefix? prefix entry) (loop (cons entry acc)))
                  (else (loop acc))))))))
 
-    (define (directory-path? path)
-      ;; Whether PATH names a directory.
+    (define (file-exists-p path)
+      ;; GNU Emacs's `file-exists-p': whether PATH names something that
+      ;; exists. Emacs's is true of a directory as well as of a file, and
+      ;; so is this.
+      ;;
+      ;; `guard', not `with-exception-handler': the exception `stat'
+      ;; raises is *non-continuable*, and a handler that returns from one
+      ;; of those re-raises it - so the `with-exception-handler' spelling
+      ;; this started as answered nothing at all and let the error out.
       ;;--------------------------------------------------------------
-      (eq? 'directory
-           (with-exception-handler (lambda (e) 'none)
-             (lambda () (stat:type (stat path))))))
+      (guard (e (else #f))
+        (stat path)
+        #t))
+
+    (define (directory-path? path)
+      ;; Whether PATH names a directory. `guard' for the same reason
+      ;; `file-exists-p' uses it: a non-continuable exception cannot be
+      ;; caught by a handler that returns.
+      ;;--------------------------------------------------------------
+      (guard (e (else #f))
+        (eq? 'directory (stat:type (stat path)))))
 
     (define (file-name-completion-table string predicate action)
       ;; The file names STRING could complete to: GNU Emacs's
@@ -533,14 +565,34 @@
       ;; It is a *function* table - called with `(STRING PREDICATE
       ;; ACTION)' - because which names are candidates depends on STRING,
       ;; and the caller says which of the three questions it is asking:
-      ;; ACTION is #f for what STRING can be completed to, and anything
-      ;; else for the candidates themselves. That is Emacs's signature, and
-      ;; a table that took only STRING would be the old one-argument form
-      ;; this project used before `(schemacs editor minibuf)' existed.
+      ;; ACTION is #f for what STRING can be completed to, `#t' for the
+      ;; candidates themselves, and anything else - Emacs sends the symbol
+      ;; `lambda' - for whether STRING is *already* one of them. That is
+      ;; Emacs's signature, and a table that took only STRING would be the
+      ;; old one-argument form this project used before
+      ;; `(schemacs editor minibuf)' existed.
+      ;;
+      ;; The third question is the one this table used to get wrong, and
+      ;; the wrong answer read as a completion that had gone as far as it
+      ;; could: `all-completions' answered it with a *list* of names, which
+      ;; is true whatever the name was, so `completion--do-completion'
+      ;; thought every name typed was a valid completion and TAB on an
+      ;; ambiguous one said "Complete, but not unique" instead of showing
+      ;; the candidates. GNU Emacs's `completion-file-name-table' answers
+      ;; it with `file-exists-p'.
       ;;
       ;; Directories are offered with a trailing slash so that completing
       ;; one descends into it.
       ;;--------------------------------------------------------------
+      (cond
+       ((eq? action 'lambda)
+        ;; is STRING itself a file? The empty string is not, whatever
+        ;; `file-exists-p' would say about it - Emacs's comment on that
+        ;; is "Not sure why it's here, but it probably doesn't harm".
+        (and (< 0 (string-length string))
+             (if predicate (predicate string) (file-exists-p string))))
+
+       (else
       (let* ((dir-part (file-name-directory-part string))
              (name-part (file-name-nondirectory-part string))
              (dir (if (string=? dir-part "")
@@ -562,7 +614,7 @@
                       (cons (string-append
                              dir-part entry
                              (if (directory-path? (string-append dir entry)) "/" ""))
-                            acc)))))))
+                            acc)))))))))
 
     (define (read-file-name prompt)
       ;; Read a file name in the minibuffer, completing as TAB is typed:
@@ -712,33 +764,46 @@
       ;; nothing but the buffer comes back: Emacs's `find-file-noselect'
       ;; answers with the buffer too, and its caller has no second value to
       ;; pass on.
+      ;;
+      ;; A name that is not there yet is *not* an error: it is how a file
+      ;; is created. Emacs visits an empty buffer for it, calls it
+      ;; `buffer-file-name' so that saving writes it there, and says
+      ;; "(New file)" - and this used to fail with an error reading a file
+      ;; that was not there, so `C-x C-f newfile.txt' could not make one.
       ;;--------------------------------------------------------------
-      (let* ((contents
-              (call-with-input-file path
-                (lambda (port)
-                  (let loop ((acc (list)))
-                    (let ((c (read-char port)))
-                      (if (eof-object? c)
-                          (list->string (reverse acc))
-                          (loop (cons c acc))))))))
+      (or
+       ;; a file already visited is one buffer, not two - and it is
+       ;; returned as it stands: Emacs's `find-file-noselect' does not
+       ;; read the file again either, and reading it into the buffer it
+       ;; is already in would *append* a second copy to it.
+       (find-buffer-visiting path)
+       (let* ((new? (not (file-exists-p path)))
+              (contents
+               (if new?
+                   ""
+                   (call-with-input-file path
+                     (lambda (port)
+                       (let loop ((acc (list)))
+                         (let ((c (read-char port)))
+                           (if (eof-object? c)
+                               (list->string (reverse acc))
+                               (loop (cons c acc)))))))))
              (line-break (detect-line-break contents))
-             ;; a file already visited is one buffer, not two: Emacs's
-             ;; `find-file-noselect' answers with the buffer that is
-             ;; visiting the file when there is one
-             (visiting (find-buffer-visiting path))
-             (ed (or visiting
-                     ;; named after the file without its directory, as
-                     ;; Emacs's `create-file-buffer' names it, and put in
-                     ;; the buffer list
-                     (get-buffer-create (file-name-nondirectory-part path)))))
+             ;; named after the file without its directory, as Emacs's
+             ;; `create-file-buffer' names it, and put in the buffer list
+             (ed (get-buffer-create (file-name-nondirectory-part path))))
         ;; Visiting a file leaves nothing to undo, as in GNU Emacs: what
         ;; is in the buffer is not an edit the user made. Re-enabling
         ;; undo discards what the load recorded.
         (text-editor-undo-disable! ed)
-        (text-editor-insert ed (ensure-final-newline-on-visit
-                                (decode-dos-returns contents)
-                                (file-write-protected? path)))
+        (unless new?
+          (text-editor-insert ed (ensure-final-newline-on-visit
+                                  (decode-dos-returns contents)
+                                  (file-write-protected? path))))
         (text-editor-undo-enable! ed)
+        ;; The echo area says what Emacs's `after-find-file' says about a
+        ;; file that was not there.
+        (when new? (set!ncurses-frame-message (*current-frame*) "(New file)"))
         ;; ... and what is in the buffer is what is in the file, so
         ;; there is nothing to save yet.
         (text-editor-set-modified! ed #f)
@@ -762,7 +827,7 @@
         ;; and point starts at the beginning of what was read, which is
         ;; where GNU Emacs's `find-file-noselect' puts it
         (text-editor-set-cursor ed 0 0)
-        ed))
+        ed)))
 
     (define (encode-line-breaks str line-break)
       ;; Encode the buffer's line-feed breaks back into the file's

@@ -17,6 +17,8 @@
     (scheme base)
     (scheme char)
     (scheme case-lambda)
+    ;; The prefix echo is a time.
+    (only (scheme time) current-second)
     (prefix (schemacs keymap) km:)
     (only (schemacs editor engine)
          set!text-editor-mark text-editor-char-count text-editor-copy-string 
@@ -29,7 +31,7 @@
          text-editor-set-read-only! text-editor-undo 
          text-editor-undo-boundary! text-editor-undo-list)
     (only (schemacs editor frame)
-         *current-frame* current-editor ncurses-frame-keymap-state 
+         *current-frame* *echo-area-buffer* current-editor ncurses-frame-keymap-state 
          selected-window set!ncurses-frame-keymap-state 
          set!ncurses-frame-message set!window-top-line window-body-height 
          window-buffer window-top-line)
@@ -47,7 +49,8 @@
   (export
    %char-at %inword-at *amalgamating-count* *amalgamating-undo-limit*
    *kill-buffer* *last-change-was-undo* *last-command* *last-command-kill*
-   *pending-undo-list* *prefix-cu* *prefix-digits* *this-command-kill*
+   *pending-undo-list* *prefix-cu* *prefix-digits* *prefix-negative*
+   *this-command-kill*
    amalgamating-command? backward-char backward-delete-char
    backward-kill-word backward-word backward-word-position
    beginning-of-buffer beginning-of-line clear-prefix! delete-char
@@ -61,6 +64,8 @@
    scroll-down-command scroll-up-command self-insert-command
    self-insert-layer self-insert-tab
    digit-argument negative-argument
+   prefix-argument-description
+   prefix-echo-pending? request-prefix-echo! show-prefix-echo!
    strip-undo-boundaries undo-command undo-redo-command update-prefix!
    word-char? word-run-end word-run-start yank
    )
@@ -765,7 +770,10 @@
     (define (clear-prefix!)
       (*prefix-cu* #f)
       (*prefix-digits* #f)
-      (*prefix-negative* #f))
+      (*prefix-negative* #f)
+      ;; ... and the description is not owed any more: the argument it
+      ;; described has been used or thrown away.
+      (*prefix-echo-due* #f))
 
     (define (pending-uarg)
       ;; The universal argument the next command will receive: #f when
@@ -793,7 +801,7 @@
              (eq? (car path) 'ctrl)
              (char=? (cadr path) #\u))
         (*prefix-cu* (+ 1 (or (*prefix-cu*) 0)))
-        (prefix-keys-message)
+        (request-prefix-echo!)
         #t)
        ((and (*prefix-cu*)
              ;; Only while the prefix itself is being read. GNU Emacs
@@ -809,26 +817,83 @@
              (char-numeric? (car path)))
         (*prefix-digits*
          (string-append (or (*prefix-digits*) "") (string (car path))))
-        (prefix-keys-message)
+        (request-prefix-echo!)
         #t)
        (else #f)))
 
-    (define (prefix-keys-message)
-      ;; What the echo area shows while an argument is being typed: the
-      ;; keys of it and a trailing dash, e.g. `C-u 8-'. GNU Emacs shows
-      ;; exactly this, from its command loop rather than from any one
-      ;; command, and it is why a half-typed argument is visible at all.
+    (define *echo-keystrokes*
+      ;; GNU Emacs's `echo-keystrokes': how long the keyboard must be
+      ;; idle, in the middle of a command, before what has been typed so
+      ;; far is echoed - the prefix argument with it.
+      ;;
+      ;; Emacs's default is one second, and the waiting is `read_char''s
+      ;; `sit_for': type on and nothing is echoed at all. That is why
+      ;; `M-6' shows nothing in Emacs: the digit argument *is* echoed,
+      ;; but only to someone who stops typing after it.
       ;;--------------------------------------------------------------
-      (set!ncurses-frame-message
-       (*current-frame*)
-       (string-append
-        (cond ((*prefix-cu*) (string-append "C-u "
-                                            (or (*prefix-digits*) "")
-                                            (if (*prefix-negative*) "-" "")))
-              ((*prefix-digits*) (string-append (if (*prefix-negative*) "-" "")
-                                                (*prefix-digits*)))
-              (else "M--"))
-        "-")))
+      (make-parameter 1))
+
+    (define *prefix-echo-due* (make-parameter #f))
+    ;; ^ When the prefix argument should be described in the echo area,
+    ;; or #f when there is nothing to describe or it has been described.
+    ;; The command loop watches this the same way it watches a message
+    ;; that times out.
+
+    (define (request-prefix-echo!)
+      ;; The prefix was just changed, so its description is owed to the
+      ;; echo area once the keyboard has been idle for `echo-keystrokes'.
+      ;;--------------------------------------------------------------
+      (*prefix-echo-due*
+       (and (*echo-keystrokes*) (+ (current-second) (*echo-keystrokes*)))))
+
+    (define (prefix-echo-pending?)
+      ;; Whether a prefix description is waiting for the keyboard to go
+      ;; quiet.
+      ;;--------------------------------------------------------------
+      (*prefix-echo-due*))
+
+    (define (prefix-argument-description)
+      ;; GNU Emacs's `universal-argument--description': what the echo
+      ;; area says about the argument being typed, or #f when there is
+      ;; none. It always begins `C-u', whatever key began the argument -
+      ;; `M-6' included, which is why an argument typed with a digit is
+      ;; echoed as `C-u 6'.
+      ;;--------------------------------------------------------------
+      (let ((uarg (pending-uarg)))
+        (cond
+         ((not uarg) #f)
+         ((eq? '- uarg) "C-u -")
+         ((integer? uarg)
+          (let loop ((n uarg) (str ""))
+            (cond
+             ((and (> n 4) (= 0 (modulo n 4))) (loop (quotient n 4)
+                                                     (string-append str " C-u")))
+             ((= n 4) (string-append "C-u" str))
+             (else (string-append "C-u " (number->string uarg))))))
+         (else (string-append "C-u " (number->string uarg))))))
+
+    (define (show-prefix-echo!)
+      ;; Describe the prefix argument, if its time has come: the echo
+      ;; area's half of `prefix-command-echo-keystrokes-functions', which
+      ;; GNU Emacs's `read_char' calls once `sit_for' has waited out
+      ;; `echo-keystrokes'.
+      ;;
+      ;; Only in the ordinary way of things, though: Emacs's `read_char'
+      ;; starts that echo "if in middle of key sequence and minibuffer
+      ;; not active" - `minibuf_level == 0' in the C - and the prefix
+      ;; description is part of the same echo. So nothing at all is said
+      ;; about the argument while a minibuffer is being read, which is
+      ;; what makes `M-6' silent at a `C-x C-f' prompt and is the reason
+      ;; it is silent there: the echo area *is* the minibuffer, and what
+      ;; it is showing is the answer being typed.
+      ;;--------------------------------------------------------------
+      (let ((due (*prefix-echo-due*)))
+        (when (and due (<= due (current-second)))
+          (*prefix-echo-due* #f)
+          (when (not (*echo-area-buffer*))
+            (let ((description (prefix-argument-description)))
+              (when description
+                (set!ncurses-frame-message (*current-frame*) description)))))))
 
     (define (last-command-event-digit)
       ;; The digit the key that reached this command spelled, or #f.
@@ -879,7 +944,7 @@
             (else
              (*prefix-negative* #f)
              (*prefix-digits* (number->string digit))))
-           (prefix-keys-message)))
+           (request-prefix-echo!)))
        (lambda (uarg) uarg)
        "Add the digit of this key to the numeric argument for the next command."
        'uarg))
@@ -894,7 +959,7 @@
          (cond ((integer? uarg) (*prefix-negative* (not (< uarg 0))))
                ((eq? '- uarg) (*prefix-negative* #f))
                (else (*prefix-negative* #t)))
-         (prefix-keys-message))
+         (request-prefix-echo!))
        (lambda (uarg) uarg)
        "Begin a negative numeric argument for the next command."
        'uarg))

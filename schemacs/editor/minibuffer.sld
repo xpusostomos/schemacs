@@ -37,7 +37,7 @@
     ;; `string-prefix?' is Guile's, not R7RS's: completion is written with
     ;; it, and leaving it out reports as an unbound variable the first time
     ;; a completion is tried.
-    (only (guile) string-prefix?)
+    (only (guile) string-contains string-prefix?)
     ;; `format' fills in a message's arguments, as GNU Emacs's
     ;; `format-message' does for `minibuffer-message'.
     (only (guile) format)
@@ -57,7 +57,8 @@
     ;; and shown in a window. (`keymap' above is `(schemacs keymap)''s,
     ;; which the completion map is built with - this library's `km:' names
     ;; are the keymap library's, not this one's.)
-    (only (schemacs editor textprop) put-text-property remove-text-properties)
+    (only (schemacs editor textprop)
+          get-text-property put-text-property remove-text-properties)
     (only (schemacs editor buffer)
           buffer-default-directory bury-buffer current-buffer get-buffer
           get-buffer-create
@@ -116,7 +117,12 @@
    minibuffer-complete-word
    minibuffer-local-must-match-map
    *completion-auto-help*
+   *completion-setup-hook*
+   *completion-show-help*
    *completion-show-inline-help*
+   *completions-header-format*
+   completion-setup-function
+   completions-header-string
    *minibuffer-completion-confirm*
    *minibuffer-completing-file-name*
    *minibuffer-exit-hook*
@@ -497,34 +503,29 @@
       ;; GNU Emacs's `minibuffer-complete': complete as far as the text
       ;; can be, and say what the candidates are when it cannot be
       ;; completed any further.
+      ;;
+      ;; Emacs's is three lines that hand the work to
+      ;; `completion-in-region', which is `completion--do-completion' -
+      ;; and this is the same, for the same reason: every message and
+      ;; every insertion comes from that one place, so the two cannot
+      ;; disagree. They did: this command had a copy of the messages of
+      ;; its own, and answered "Complete, but not unique" where the
+      ;; shared code says "Sole completion" - so pressing TAB again on a
+      ;; name that was already the only completion, which is exactly the
+      ;; case `try-completion' answers `t' for, named the wrong thing.
+      ;;
+      ;; `completion--do-completion' takes the *text*, the table and the
+      ;; predicate rather than the buffer boundaries `completion-in-region'
+      ;; would give it, which is all this editor has of that function so
+      ;; far - the region half of it is step G of COMPLETION-PLAN.txt.
       ;;--------------------------------------------------------------
       (new-command
        "minibuffer-complete"
        (lambda ()
-         (let* ((typed (or (minibuffer-contents) ""))
-                ;; `completion-try-completion' rather than
-                ;; `try-completion', because a *style* decides how to
-                ;; complete: the answer is #t, #f, or a pair of the new
-                ;; text and where point goes in it.
-                (completion (completion-try-completion
-                             typed (*minibuffer-completion-table*) #f
-                             (string-length typed))))
-           (cond
-            ((eq? completion #t)
-             (completion--message "Complete, but not unique"))
-            ((not completion)
-             (completion--message "No match"))
-            ((string=? (car completion) typed) (run-command minibuffer-completion-help))
-            (else
-             ;; What is inserted is the part of the completion that is
-             ;; past what was typed - a *substring* completion can differ
-             ;; from the text before the end, so the common prefix is what
-             ;; stays put.
-             (let ((new (car completion)))
-               ;; `string-length', not `length': the common prefix is a
-               ;; *string*, and `length' wants a list.
-               (minibuffer-insert!
-                (substring new (string-length (common-prefix (list typed new))))))))))
+         (let ((typed (or (minibuffer-contents) "")))
+           (completion--do-completion typed (*minibuffer-completion-table*)
+                                      (*minibuffer-completion-predicate*)
+                                      (string-length typed))))
        (lambda () #f)
        "Complete the text in the minibuffer as far as it can be (bound to TAB)."))
 
@@ -775,7 +776,13 @@
 
     (define *completion-auto-help*
       ;; GNU Emacs's `completion-auto-help': whether a completion that
-      ;; cannot go further shows the candidates on its own.
+      ;; cannot go further shows the candidates on its own, and it is
+      ;; true by default, as Emacs's is.
+      ;;
+      ;; Emacs's may also be the symbols `lazy', `always' and `visible',
+      ;; which change *when* the list appears; only the boolean is
+      ;; implemented here, so `lazy' - the second TAB rather than the
+      ;; first - is not among them.
       ;;--------------------------------------------------------------
       (make-parameter #t))
 
@@ -815,9 +822,8 @@
       ;; completion that others also match, and the list of candidates
       ;; when it is not a valid completion at all.
       ;;
-      ;; Not ported: the `completion-cycle-threshold' cycling, the
-      ;; metadata (`completion--field-metadata'), and
-      ;; `completion-auto-help''s `lazy' mode.
+      ;; Not ported: the `completion-cycle-threshold' cycling and the
+      ;; metadata (`completion--field-metadata').
       ;;--------------------------------------------------------------
       (let ((comp (completion-try-completion string table predicate point)))
         (cond
@@ -835,7 +841,26 @@
                  (unchanged (string=? completion string))
                  (exact (test-completion completion table predicate)))
             (unless unchanged (completion--replace completion))
+            ;; Which of the three things happened decides what is said,
+            ;; and the order of the three is Emacs's - and it is the
+            ;; order that matters most, because the first case covers
+            ;; most TAB presses:
+            ;;
+            ;;   * a completion *happened*: take any stale candidates
+            ;;     window away and say nothing at all. Nothing here is
+            ;;     wrong - the text was completed as far as it goes.
+            ;;   * nothing was completed and what is there is not a
+            ;;     valid completion: show the candidates (or say so, if
+            ;;     `completion-auto-help' is off).
+            ;;   * nothing was completed and what is there *is* a
+            ;;     valid completion: "Complete, but not unique" - the
+            ;;     text will do, but it is not the only candidate.
+            ;;
+            ;; Saying "Complete, but not unique" in the first case
+            ;; instead is what made TAB on a name that completes in full
+            ;; look like a failure.
             (cond
+             (completed (minibuffer-hide-completions))
              ((not exact)
               (if (*completion-auto-help*)
                   (run-command minibuffer-completion-help)
@@ -1042,6 +1067,105 @@
                'completions-first-difference)
            buffer))))
 
+    (define *completion-show-help*
+      ;; GNU Emacs's `completion-show-help': whether the `*Completions*'
+      ;; buffer carries the two lines that say how to use it.
+      ;;--------------------------------------------------------------
+      (make-parameter #t))
+
+    (define *completions-header-format*
+      ;; GNU Emacs's `completions-header-format': the heading line at the
+      ;; top of the list, whose one `%s' is the number of candidates, or
+      ;; #f for a list with no heading at all. Emacs puts the `shadow'
+      ;; face on it.
+      ;;--------------------------------------------------------------
+      (make-parameter "%s possible completions:\n"))
+
+    (define (completion-setup-function buffer)
+      ;; GNU Emacs's `completion-setup-function', which writes the two
+      ;; lines that say how to use the list at the top of it: the key that
+      ;; takes a candidate, and the keys that move between them.
+      ;;
+      ;; It is on `completion-setup-hook' in Emacs, and that function is
+      ;; simple.el's - but it fills the `*Completions*' buffer, and simple
+      ;; is imported *by* this library, so it lives here instead. A `.el'
+      ;; file needs no such care: it only has to be loaded once.
+      ;;
+      ;; Emacs renders the lines with `substitute-command-keys', which is
+      ;; where `\[minibuffer-choose-completion]' becomes the key it is
+      ;; bound to; the keys are written out here because nothing here
+      ;; substitutes. `display-mouse-p' is false of a terminal, which is
+      ;; why Emacs's line does not offer to click.
+      ;;--------------------------------------------------------------
+      (when (*completion-show-help*)
+        (text-editor-set-cursor buffer 0)
+        (text-editor-insert buffer "Type M-RET on a completion to select it.\n")
+        (text-editor-insert buffer
+                            (string-append
+                             "Type M-<down> or M-<up> to move point between "
+                             "completions.\n\n"))))
+
+    (define *completion-setup-hook*
+      ;; GNU Emacs's `completion-setup-hook': run at the end of
+      ;; `display-completion-list', with the completions buffer current.
+      ;;--------------------------------------------------------------
+      (make-parameter (list completion-setup-function)))
+
+    (define (run-completion-setup-hook! buffer)
+      (for-each (lambda (hook) (hook buffer)) (*completion-setup-hook*)))
+
+    (define (completions-header-string count)
+      ;; GNU Emacs's `completions-header-format' with its one `%s' - the
+      ;; number of candidates - filled in.
+      ;;
+      ;; Not through `format': the format string here is Emacs's, and its
+      ;; directive is `%s' where Guile's `format' spells one `~A'. Writing
+      ;; the substitution out keeps the variable the same variable, which
+      ;; is the point of having it - Emacs's docstring is "The format
+      ;; string may include one %s".
+      ;;--------------------------------------------------------------
+      (let* ((format-string (*completions-header-format*))
+             (text (number->string count))
+             (at (string-contains format-string "%s")))
+        (if (not at)
+            format-string
+            (string-append (substring format-string 0 at)
+                           text
+                           (substring format-string (+ at 2)
+                                      (string-length format-string))))))
+
+    (define (insert-completions-header! buffer count)
+      ;; The heading line, `N possible completions:' in the `shadow' face:
+      ;; GNU Emacs's `completions-header-format', inserted before the
+      ;; candidates.
+      ;;--------------------------------------------------------------
+      (when (*completions-header-format*)
+        (let ((start (text-editor-char-count buffer)))
+          (text-editor-insert buffer (completions-header-string count))
+          (put-text-property start (text-editor-char-count buffer)
+                             'face 'shadow buffer))))
+
+    (define (insert-completion-candidate! buffer candidate)
+      ;; One candidate on its own line, carrying what says it *is* a
+      ;; candidate and how much of it matched: GNU Emacs's
+      ;; `completion--insert' puts the `completion--string' property on
+      ;; the text it inserts, and `completion-hilit-commonality' the two
+      ;; faces.
+      ;;
+      ;; The property is what tells a candidate line from the heading and
+      ;; the help above it - Emacs reads it to answer
+      ;; `completion--selected-candidate', and this editor used to take
+      ;; any line at all for a candidate, which was the same thing only
+      ;; while every line was one.
+      ;;--------------------------------------------------------------
+      (let ((start (text-editor-char-count buffer)))
+        (text-editor-insert buffer candidate)
+        (put-text-property start (text-editor-char-count buffer)
+                           'completion--string candidate buffer)
+        (set-completion-line-faces!
+         buffer start (+ start (string-length candidate)) #f)
+        (text-editor-insert buffer "\n")))
+
     (define (display-completion-list completions common-substring)
       ;; GNU Emacs's `display-completion-list': fill the `*Completions*'
       ;; buffer with COMPLETIONS, one per line, and answer with it.
@@ -1051,7 +1175,9 @@
       ;;  * **One candidate per line.** Emacs lays them out in columns to
       ;;    fit the window (`completions-format' is `horizontal'), which
       ;;    is a display concern wanting the window's width; this is
-      ;;    Emacs's `one-column' format.
+      ;;    Emacs's `one-column' format. The lines that are not candidates
+      ;;    - the heading and the help - are why a candidate is marked
+      ;;    with a property rather than being "the line point is on".
       ;;  * **The faces go on here**, not in `completion-hilit-commonality'
       ;;    as in Emacs - because Emacs highlights the candidate
       ;;    *strings*, and a string here cannot carry a property. A face
@@ -1068,21 +1194,33 @@
           (text-editor-set-cursor buffer 0)
           (text-editor-delete-from-cursor buffer (text-editor-char-count buffer))
           (*completions-common-substring* common-substring)
-          (for-each
-           (lambda (candidate)
-             (let ((start (text-editor-char-count buffer)))
-               (text-editor-insert buffer candidate)
-               ;; `completions-common-part' on the part the pattern
-               ;; matched, and `completions-first-difference' on the
-               ;; first character past it - Emacs's
-               ;; `completion-hilit-commonality', applied to the line
-               ;; rather than to the string.
-               (set-completion-line-faces!
-                buffer start (+ start (string-length candidate)) #f)
-               (text-editor-insert buffer "\n")))
-           completions)
-          (text-editor-set-read-only! buffer #t)
-          (text-editor-set-cursor buffer 0))
+          ;; The help goes in *first*, and the heading and the candidates
+          ;; after it - which is the order they read in, and so the order
+          ;; the finished buffer has. Emacs writes the candidates first
+          ;; and then has `completion-setup-function' go to `point-min'
+          ;; and insert the help above them; this editor does it the
+          ;; other way round because inserting in the *middle* of a
+          ;; buffer whose text carries properties is broken - `M-<down>'
+          ;; in the completions window would find nothing selectable, and
+          ;; the insert comes back with "Wrong type argument in position 1
+          ;; (expecting struct): #f" from `offset_intervals'. An empty
+          ;; buffer has no tree to get wrong. See the note in
+          ;; AGENTS.md; the reordering is a knowing departure, and the
+          ;; finished buffer is the same either way.
+          (run-completion-setup-hook! buffer)
+          ;; Where the help insert left point, which is where Emacs leaves
+          ;; it too: `completion-setup-function' inserts at `point-min', so
+          ;; point ends up just after the help - on the heading line, with
+          ;; the candidates below it. The first `M-<down>' then reaches the
+          ;; first candidate. Restored at the end, because the heading and
+          ;; the candidates are written after it here.
+          (let ((after-help (text-editor-char-count buffer)))
+            (insert-completions-header! buffer (length completions))
+            (for-each (lambda (candidate)
+                        (insert-completion-candidate! buffer candidate))
+                      completions)
+            (text-editor-set-cursor buffer after-help))
+          (text-editor-set-read-only! buffer #t))
         buffer))
 
     (define choose-completion
@@ -1098,9 +1236,8 @@
        "choose-completion"
        (lambda ()
          (let* ((ed (current-buffer))
-                (start (text-editor-get-start-of-line ed))
-                (end (text-editor-get-end-of-line ed))
-                (candidate (text-editor-copy-string ed start end))
+                (candidate (get-text-property (text-editor-get-cursor ed)
+                                              'completion--string ed))
                 (mb (*minibuffer*)))
            (when (and mb (> (string-length candidate) 0))
              ;; put it in the prompt, replacing what was typed
@@ -1302,6 +1439,38 @@
           (set-completion-line-faces! buffer start end #t)
           (set! *completions-highlight-range* (cons start end)))))
 
+    (define (line-start-index buffer line)
+      ;; The character index LINE of BUFFER begins at, leaving point where
+      ;; it was. The engine answers "where the line point is on starts" and
+      ;; has no line-to-index query of its own, so point is moved there and
+      ;; back.
+      ;;--------------------------------------------------------------
+      (let ((was (text-editor-get-cursor buffer)))
+        (text-editor-set-cursor buffer line 0)
+        (let ((start (text-editor-get-cursor buffer)))
+          (text-editor-set-cursor buffer was)
+          start)))
+
+    (define (line-is-candidate? buffer line)
+      ;; Whether LINE of BUFFER is one of the candidates rather than the
+      ;; heading or the help above them.
+      ;;--------------------------------------------------------------
+      (and (get-text-property (line-start-index buffer line)
+                              'completion--string buffer)
+           #t))
+
+    (define (next-candidate-line buffer line step)
+      ;; The nearest line below (STEP 1) or above (STEP -1) LINE that is a
+      ;; candidate, or #f. The heading and the help lines are what this is
+      ;; for: moving one line at a time would land on them and make them
+      ;; look selectable.
+      ;;--------------------------------------------------------------
+      (let ((last (max 0 (- (text-editor-line-count buffer) 1))))
+        (let loop ((n (+ line step)))
+          (cond ((or (< n 0) (< last n)) #f)
+                ((line-is-candidate? buffer n) n)
+                (else (loop (+ n step)))))))
+
     (define (next-line-completion n)
       ;; GNU Emacs's `next-line-completion' as this editor's layout
       ;; makes it: move N lines in the `*Completions*' buffer. Point
@@ -1313,27 +1482,33 @@
       (let ((buffer (get-buffer "*Completions*"))
             (window (completions-window)))
         (when (and buffer window)
-          (let* ((last (max 0 (- (text-editor-line-count buffer) 1)))
-                 (target (max 0 (min (+ (text-editor-cursor-line buffer) n)
-                                     last))))
-            (text-editor-set-cursor buffer target 0)
-            ;; the window is a view of the buffer, so its point follows
-            (set-window-point! window (text-editor-get-cursor buffer))
-            (show-completions-selection! buffer)))))
+          (let ((step (if (< n 0) -1 1))
+                (left (abs n)))
+            (let loop ((left left)
+                       (line (text-editor-cursor-line buffer)))
+              (if (= left 0)
+                  (text-editor-set-cursor buffer line 0)
+                  (let ((next (next-candidate-line buffer line step)))
+                    ;; there is no candidate that way: stay where we are,
+                    ;; which is `completion-auto-wrap' being nil
+                    (if next (loop (- left 1) next) (loop 0 line))))))
+          ;; the window is a view of the buffer, so its point follows
+          (set-window-point! window (text-editor-get-cursor buffer))
+          (show-completions-selection! buffer))))
 
     (define (completion--selected-candidate)
       ;; GNU Emacs's `completion--selected-candidate': the candidate the
-      ;; completions window's point is on, or #f when there is none.
-      ;; Emacs reads the `completion--string' text property the
-      ;; candidate was written with; here the candidate *is* the line,
-      ;; which is why the buffer is filled one per line.
+      ;; completions window's point is on, or #f when there is none - a
+      ;; line of the heading or of the help is not one.
+      ;;
+      ;; Emacs reads the `completion--string' text property the candidate
+      ;; was written with, and this reads the same property, which is what
+      ;; `display-completion-list' puts on each candidate line.
       ;;--------------------------------------------------------------
       (let ((buffer (and (completions-window) (get-buffer "*Completions*"))))
         (and buffer
-             (let* ((start (text-editor-get-start-of-line buffer))
-                    (end (text-editor-get-end-of-line buffer))
-                    (text (text-editor-copy-string buffer start end)))
-               (and (< 0 (string-length text)) text)))))
+             (get-text-property (text-editor-get-cursor buffer)
+                                'completion--string buffer))))
 
     (define (minibuffer-choose-completion . args)
       ;; GNU Emacs's `minibuffer-choose-completion': put the candidate

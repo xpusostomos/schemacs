@@ -41,12 +41,13 @@
     ;; own, which would collide with the keymap library's.
     (only (ncurses curses)
           ERR KEY_BACKSPACE KEY_DC KEY_DOWN KEY_END KEY_HOME KEY_LEFT
-          KEY_RESIZE KEY_RIGHT KEY_UP getch stdscr timeout!)
+          KEY_RESIZE KEY_RIGHT KEY_UP getch keyname stdscr timeout!)
     (only (schemacs editor command)
           command-interactive-spec command-type? run-command)
     (only (schemacs editor frame)
           *current-frame* ncurses-frame-esc-pending ncurses-frame-keymap-state
-          ncurses-frame-message-expired? ncurses-frame-message-expiry
+          ncurses-frame-message ncurses-frame-message-expired?
+          ncurses-frame-message-expiry
           ncurses-frame-quit-cont set!ncurses-frame-esc-pending
           set!ncurses-frame-keymap-state set!ncurses-frame-message
           set!ncurses-frame-message-expiry
@@ -63,7 +64,8 @@
           current-buffer)
     (only (schemacs editor simple)
           *last-change-was-undo* *last-command* clear-prefix!
-          pending-uarg place-undo-boundary! rotate-kill-flag!
+          pending-uarg place-undo-boundary! prefix-echo-pending?
+          rotate-kill-flag! show-prefix-echo!
           undo-command undo-redo-command update-prefix!)
     ;; `render!' after every key: the loop is what drives the display.
     (only (schemacs editor xdisp) render!)
@@ -90,6 +92,52 @@
 
     ;;----------------------------------------------------------------
     ;; Key events
+
+    (define named-key-names
+      ;; The key at the front of an ncurses extended keyname, as the name
+      ;; this editor's keymaps use for it. The names are terminfo's:
+      ;; `kUP3' is the up key, and the `3' is the modifier.
+      ;;--------------------------------------------------------------
+      '(("UP" . "up") ("DN" . "down") ("LFT" . "left") ("RGT" . "right")
+        ("HOM" . "home") ("END" . "end") ("DC" . "delete")
+        ("IC" . "insert") ("PP" . "prior") ("NP" . "next")))
+
+    (define named-key-modifiers
+      ;; The digit ncurses puts after the key name, as the modifiers it
+      ;; stands for. The digits are xterm's `CSI 1 ; N A' numbering, which
+      ;; is the numbering terminfo's `kUP3'-style names are built from,
+      ;; and GNU Emacs reads the sequences the same way in
+      ;; `term/xterm.el' (`\e[1;3A' is `[M-up]' there).
+      ;;
+      ;; 2, 4, 6 and 8 all carry Shift, and this editor's keymaps have no
+      ;; shift modifier - `(schemacs keymap)''s modifier table has ctrl,
+      ;; meta, super, hyper and alt and no more - so those answer #f and
+      ;; the key is reported unhandled, which is where it was before.
+      ;;--------------------------------------------------------------
+      '(("3" (meta)) ("5" (ctrl)) ("7" (meta ctrl))))
+
+    (define (extended-key->keymap-path ev)
+      ;; The keymap path for an extended keycode, or #f when it is not one
+      ;; this editor knows a name for. ncurses names them from terminfo -
+      ;; `(keyname 532)' answers "kDN3" - so what is decoded is that name:
+      ;; the key, and the modifier digit after it.
+      ;;
+      ;; `keyname' can only be asked once the terminal is open, which is
+      ;; why this cannot be a table built at load time. It costs one call
+      ;; per modified key press, and nothing at all for the keys the
+      ;; constants above already cover.
+      ;;--------------------------------------------------------------
+      (let ((name (keyname ev)))
+        (and (string? name)
+             (< 2 (string-length name))
+             (char=? (string-ref name 0) #\k)
+             (let* ((base (substring name 1 (- (string-length name) 1)))
+                    (digit (string (string-ref name
+                                               (- (string-length name) 1))))
+                    (key (assoc base named-key-names))
+                    (modifiers (assoc digit named-key-modifiers)))
+               (and key modifiers
+                    (append (cadr modifiers) (list (cdr key))))))))
 
     (define (ncurses-key->keymap-path ev)
       ;; Convert an ncurses key event to a keymap path: a list of
@@ -137,7 +185,11 @@
          ;; backspace key land on the same binding here.
          ((= ev KEY_BACKSPACE) (list 'ctrl #\h))
          ((= ev KEY_RESIZE) (list 'resize))
-         (else #f)))
+         ;; Anything else: ncurses reports a key carrying a *modifier* as
+         ;; an extended keycode - one above `KEY_MAX', named from
+         ;; terminfo - and `M-<down>' arrives as the code ncurses calls
+         ;; `kDN3' rather than as anything the constants above cover.
+         (else (extended-key->keymap-path ev))))
        (else #f)))
 
     (define (dispatch-action frame action)
@@ -385,7 +437,13 @@
            (render! frame)
            (let ((armed #f))
              (let loop ()
-               (let ((want (if (ncurses-frame-message-expiry frame)
+               (let ((want (if (or (ncurses-frame-message-expiry frame)
+                                   ;; a prefix argument owes the echo
+                                   ;; area a description, and it is owed
+                                   ;; once the keyboard has been quiet
+                                   ;; for `echo-keystrokes' - so the read
+                                   ;; cannot block while that is owed
+                                   (prefix-echo-pending?))
                                message-read-timeout
                                -1)))
                  (unless (eqv? want armed)
@@ -399,11 +457,19 @@
                   ;; nothing to read is also what the end of input looks
                   ;; like, which is why the editor is not left here.
                   ((and (not (key-event? ev))
-                        (ncurses-frame-message-expiry frame))
-                   (when (ncurses-frame-message-expired? frame)
-                     (set!ncurses-frame-message frame "")
-                     (set!ncurses-frame-message-expiry frame #f)
-                     (render! frame)))
+                        (or (ncurses-frame-message-expiry frame)
+                            (prefix-echo-pending?)))
+                   (let ((drawn? #f))
+                     (when (ncurses-frame-message-expired? frame)
+                       (set!ncurses-frame-message frame "")
+                       (set!ncurses-frame-message-expiry frame #f)
+                       (set! drawn? #t))
+                     ;; the prefix description, if its second has come
+                     (let ((before (ncurses-frame-message frame)))
+                       (show-prefix-echo!)
+                       (when (not (eq? before (ncurses-frame-message frame)))
+                         (set! drawn? #t)))
+                     (when drawn? (render! frame))))
                   ;; Nothing to read on a *blocking* read is the end of
                   ;; input - guile-ncurses answers #f for that too - so
                   ;; leave the editor.
