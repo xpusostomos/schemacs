@@ -63,7 +63,8 @@
           record-buffer!
           set!buffer-default-directory
           set!buffer-file-name
-          set-buffer-local-value!)
+          set-buffer-local-value!
+          with-current-buffer)
     (only (schemacs editor keymap)
           define-key
           *default-keymap*)
@@ -100,6 +101,7 @@
    file-name-directory-part
    file-name-nondirectory-part
    file-write-protected?
+   files--buffers-needing-to-be-saved
    find-file
    find-file-command
    kill-buffer-command
@@ -289,11 +291,29 @@
          (let ((frame (*current-frame*))
                (quit! (lambda ()
                         ((ncurses-frame-quit-cont (*current-frame*)) 'quit))))
-           (case (save-some-buffers frame)
-             ((clean) (quit!))
-             (else
-              (when (yes-or-no-p frame "Modified buffers exist; exit anyway? ")
-                (quit!))))))
+           ;; The asking happens only when there is something worth
+           ;; asking about - `files--buffers-needing-to-be-saved', with
+           ;; Emacs's predicate `t'. The minibuffer and `*Completions*'
+           ;; are modified a good deal of the time and visit no file, so
+           ;; a `C-x C-c' asked right after `C-x C-f' does not offer to
+           ;; save the help buffer: there is nothing on the list.
+           (when (files--buffers-needing-to-be-saved #t)
+             (save-some-buffers frame #t))
+           ;; Then Emacs's `and' legs: without a modified file-visiting
+           ;; buffer there is nothing more to ask and it kills; with
+           ;; one, it asks whether to go ahead, and kills on "yes".
+           ;; C-g in the question abandons the whole command, and
+           ;; nothing is killed.
+           (if (let scan ((buffers (buffer-list)))
+                 (and (pair? buffers)
+                      (let ((buffer (car buffers)))
+                        (or (and (buffer-file-name buffer)
+                                 (text-editor-modified? buffer))
+                            (scan (cdr buffers))))))
+               (when (yes-or-no-p frame
+                                  "Modified buffers exist; exit anyway? ")
+                 (quit!))
+               (quit!))))
        (lambda () #f)
        "Quit the editor (bound to C-x C-c), offering to save first."))
 
@@ -372,51 +392,107 @@
     ;;------------------------------------------------------------------
 
     (define (save-answer-char->decision answer)
-      ;; What an answer to "Save file X? " means. The keys are GNU
-      ;; Emacs's: `y' or SPC saves this buffer, `!' saves it and asks
-      ;; nothing further about the buffers after it, and `n', DEL, `q'
-      ;; and RET all mean "not this one". Emacs's remaining answers - `.'
-      ;; (save this one and skip the rest), `C-r' and `d' (look at the
-      ;; buffer and its differences from the file before deciding) - need
-      ;; features this frontend does not have. C-g never arrives here: it
-      ;; abandons the whole command.
+      ;; What an answer to "Save file X? " means, in the terms the
+      ;; asking loop acts on. The keys are GNU Emacs's, from
+      ;; `map-y-or-n-p`, which `save-some-buffers` asks through: `y' or
+      ;; SPC saves this buffer and goes on to the next, `n', DEL or any
+      ;; other key leaves it and goes on, `!' saves it and saves the rest
+      ;; without asking, `q' or RET stops asking here, and `.' saves this
+      ;; one and then stops. Emacs's remaining answers - `C-r' and `d'
+      ;; (look at the buffer and its differences from the file before
+      ;; deciding) - need features this frontend does not have. C-g never
+      ;; arrives here: it abandons the whole command.
       ;;--------------------------------------------------------------
       (cond
        ((not answer) 'skip)                       ; end of input
-       ((or (char=? answer #\y)
-            (char=? answer #\space)
-            (char=? answer #\!))
-        'save)
+       ((or (char=? answer #\y) (char=? answer #\space)) 'save)
+       ((char=? answer #\!) 'save-all)
+       ((char=? answer #\.) 'save-then-quit)
+       ((or (char=? answer #\q) (char=? answer #\return)) 'quit)
        (else 'skip)))
 
-    (define (save-some-buffers frame)
-      ;; Ask whether to save the buffer, if it needs saving, and save it
-      ;; if the answer is yes. GNU Emacs's `save-some-buffers' asks this
-      ;; of each modified buffer in turn; this frontend has one buffer,
-      ;; so it asks once. Returns `clean' when nothing is left unsaved,
-      ;; or `unsaved' when the user chose not to save it.
+    (define (files--buffers-needing-to-be-saved pred)
+      ;; GNU Emacs's `files--buffers-needing-to-be-saved': the modified
+      ;; buffers worth asking about, in `buffer-list' order. What "worth"
+      ;; means is the point of the function: a buffer counts only when it
+      ;; is modified AND either visits a file or has said in advance that
+      ;; it wants to be offered (`buffer-offer-save', which the mail and
+      ;; log buffers set in Emacs). The minibuffer's own buffer and
+      ;; `*Completions*' are modified a good deal of the time and visit
+      ;; nothing, so they are never on the list - which is why a `C-x C-f'
+      ;; that never reached a file does not make `C-x C-c' ask about them.
+      ;;
+      ;; PRED is Emacs's: `t' - what both callers here pass - gives the
+      ;; whole list, and a procedure would keep only the buffers for
+      ;; which it returns true.
+      ;;
+      ;; Not ported: `buffer-base-buffer' (there are no indirect buffers)
+      ;; and `buffer-save-without-query' (no library here saves buffers
+      ;; on its own before asking about them).
       ;;--------------------------------------------------------------
-      (if (not (text-editor-modified? (current-editor)))
-          'clean
-          (let* ((ed (current-editor))
-                 (file (text-editor-file-name ed))
-                 (answer
-                  (read-char-from-minibuffer
-                   (string-append
-                    ;; GNU Emacs asks about the file it would write, and
-                    ;; about the buffer when it visits no file.
-                    (if file
-                        (string-append "Save file " file "? ")
-                        (string-append
-                         "Save buffer "
-                         (or (text-editor-buffer-name ed) "*scratch*")
-                         "? "))
-                    "(y, n, !, q, or C-g) "))))
-            (case (save-answer-char->decision answer)
-              ((save)
-               (run-command save-buffer-command)
-               (if (text-editor-modified? (current-editor)) 'unsaved 'clean))
-              (else 'unsaved)))))
+      (let loop ((buffers (buffer-list)) (kept '()))
+        (if (null? buffers)
+            (reverse kept)
+            (let ((buffer (car buffers)))
+              (loop (cdr buffers)
+                    (if (and (text-editor-modified? buffer)
+                             (or (buffer-file-name buffer)
+                                 (let ((offer (buffer-local-value
+                                               buffer 'buffer-offer-save #f)))
+                                   (or (eq? offer 'always)
+                                       (and pred offer
+                                            (< 0 (text-editor-char-count
+                                                  buffer))))))
+                             (or (not (procedure? pred))
+                                 (with-current-buffer buffer (pred))))
+                        (cons buffer kept)
+                        kept))))))
+
+    (define (save-some-buffers frame pred)
+      ;; Ask whether to save each buffer that needs saving, and save it
+      ;; if the answer is yes: GNU Emacs's `save-some-buffers', whose
+      ;; candidates are `files--buffers-needing-to-be-saved' and whose
+      ;; questions go through `map-y-or-n-p` - the answers are the ones
+      ;; `save-answer-char->decision' spells out. Emacs also saves, up
+      ;; front and without asking, any buffer that has
+      ;; `buffer-save-without-query' set; nothing in this frontend sets
+      ;; it.
+      ;;
+      ;; Each saved buffer is saved in its own right, made current for
+      ;; the save as Emacs's action is `(with-current-buffer buffer
+      ;; (save-buffer))': saving one buffer must not touch another.
+      ;;--------------------------------------------------------------
+      (let ask ((buffers (files--buffers-needing-to-be-saved pred)))
+        (if (null? buffers)
+            #f
+            (let* ((ed (car buffers))
+                   (rest (cdr buffers))
+                   (file (text-editor-file-name ed))
+                   (answer
+                    (read-char-from-minibuffer
+                     (string-append
+                      ;; GNU Emacs asks about the file it would write,
+                      ;; and about the buffer when it visits no file but
+                      ;; offered to be asked.
+                      (if file
+                          (string-append "Save file " file "? ")
+                          (string-append
+                           "Save buffer "
+                           (or (text-editor-buffer-name ed) "*scratch*")
+                           "? "))
+                      "(y, n, !, ., q, or C-g) "))))
+              (case (save-answer-char->decision answer)
+                ((save)
+                 (with-current-buffer ed (save-buffer))
+                 (ask rest))
+                ((save-all)
+                 (for-each (lambda (buffer)
+                             (with-current-buffer buffer (save-buffer)))
+                           (cons ed (reverse rest))))
+                ((save-then-quit)
+                 (with-current-buffer ed (save-buffer)))
+                ((quit) #f)
+                (else (ask rest)))))))
     ;;----------------------------------------------------------------
     ;; File names
     ;;------------------------------------------------------------------

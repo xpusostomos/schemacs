@@ -39,13 +39,16 @@
        buffer-list buffer-name get-buffer get-buffer-create set-buffer-local-value!
        buffer-local-keymap set!buffer-local-keymap set!buffer-default-directory)
  (only (schemacs editor engine) text-editor-delete-from-cursor text-editor-insert
-       text-editor-read-only? text-editor-set-cursor)
+       text-editor-read-only? text-editor-set-cursor
+       new-text-editor set!text-editor-buffer-name
+       set!text-editor-file-name text-editor-set-modified!)
  (only (schemacs editor intervals) set!buffer-intervals)
  (prefix (schemacs editor intervals) iv:)
  (only (schemacs editor files)
        *require-final-newline* ensure-final-newline-on-visit
        expand-file-name file-name-completion-table file-name-directory-part
-       file-name-nondirectory-part find-file note-file-read-only!
+       file-name-nondirectory-part files--buffers-needing-to-be-saved
+       find-file note-file-read-only!
        save-answer-char->decision)
  ;; `try-completion' and `all-completions' are `minibuf.c''s.
  (only (schemacs editor minibuf) all-completions try-completion)
@@ -480,14 +483,53 @@
            (type frame #\X)
            (type frame (integer->char 24) save-key)))))
 
-;; The answer to "Save file X? " decides what happens: y, SPC and ! save
-;; the buffer, and n, DEL, q, RET (and end of input) leave it alone.
-;; C-g is not among these: it leaves the minibuffer and signals quit, so
-;; the whole command is abandoned rather than the answer being read.
-(test-equal '(save save save skip skip skip skip skip skip)
+;; The answer to "Save file X? " decides what happens: y and SPC save the
+;; buffer, ! saves it and the rest without asking, . saves it and stops
+;; asking, n, DEL and other keys leave it and go on to the next, and q,
+;; RET (and end of input) stop asking altogether - `map-y-or-n-p', which
+;; is how GNU Emacs's `save-some-buffers' asks. C-g is not among these:
+;; it leaves the minibuffer and signals quit, so the whole command is
+;; abandoned rather than the answer being read.
+(test-equal '(save save save-all skip skip quit quit skip save-then-quit
+               skip)
   (map save-answer-char->decision
        (list #\y #\space #\! #\n (integer->char 127) #\q #\return #\z
-             #f)))
+             #\. #f)))
+
+;; `files--buffers-needing-to-be-saved' is what keeps a completing
+;; `C-x C-f' from making `C-x C-c' ask about the help window: a modified
+;; buffer counts only when it visits a file (or has `buffer-offer-save'
+;; set). The minibuffer's own buffer and `*Completions*' are modified a
+;; good deal of the time and visit nothing, so neither is ever on the
+;; list - and neither is an unmodified buffer that visits a file. The
+;; answer is in `buffer-list' order, as Emacs's is.
+(test-equal '("fe-modified.txt")
+  (parameterize ((*buffer-list*
+                  (list (cons "fe-modified.txt"
+                              (let ((ed (new-text-editor)))
+                                (set!text-editor-buffer-name ed
+                                        "fe-modified.txt")
+                                (set!text-editor-file-name ed
+                                        "/tmp/fe-modified.txt")
+                                (text-editor-set-modified! ed #t)
+                                ed))
+                        (cons "*Completions*"
+                              (let ((ed (new-text-editor)))
+                                (set!text-editor-buffer-name ed "*Completions*")
+                                (text-editor-set-modified! ed #t)
+                                ed))
+                        (cons "prompt"
+                              (let ((ed (new-text-editor)))
+                                (set!text-editor-buffer-name ed "prompt")
+                                (text-editor-insert ed "sc")
+                                ed))
+                        (cons "fe-clean.txt"
+                              (let ((ed (new-text-editor)))
+                                (set!text-editor-buffer-name ed "fe-clean.txt")
+                                (set!text-editor-file-name ed
+                                        "/tmp/fe-clean.txt")
+                                ed)))))
+    (map buffer-name (files--buffers-needing-to-be-saved #t))))
 
 (test-end "schemacs_ncurses_editor_modified")
 
