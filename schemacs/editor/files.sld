@@ -51,6 +51,7 @@
     ;; the buffer-local store are what `save-buffer' writes and what the
     ;; visited file's line-break convention is kept in.
     (only (schemacs editor buffer)
+          *current-buffer*
           *kill-buffer-query-functions*
           buffer-default-directory
           buffer-file-name
@@ -425,11 +426,26 @@
       ;; `default-directory', which is a buffer-local variable - each
       ;; buffer has its own, so two windows showing two files in two
       ;; directories prompt from the one each is in. `find-file' sets it
-      ;; on the buffer it visits, as Emacs's does; a buffer that has not
-      ;; been given one answers with the process's own directory.
+      ;; on the buffer it visits, as Emacs's does.
+      ;;
+      ;; Its *default* - what it answers with when the buffer has not
+      ;; been given one, and when there is no current buffer at all - is
+      ;; the process's own directory, which is Emacs's global value of
+      ;; the variable. The no-buffer case matters: `find-file' expands
+      ;; the name it is given against this, so a `find-file' called with
+      ;; nothing current - from a script, or a test - failed on the way
+      ;; to reading the file at all.
       ;;--------------------------------------------------------------
-      (or (buffer-default-directory (current-buffer))
-          (string-append (getcwd) "/")))
+      ;;
+      ;; Read from `*current-buffer*' rather than from `(current-buffer)',
+      ;; because the fallback is the point: with no buffer set,
+      ;; `(current-buffer)' goes on to the frame's selected window, and
+      ;; with no frame either there is nothing to ask - which is what a
+      ;; `find-file' called from a script or a test has.
+      ;;--------------------------------------------------------------
+      (let ((buffer (*current-buffer*)))
+        (or (and buffer (buffer-default-directory buffer))
+            (string-append (getcwd) "/"))))
 
     (define (path-segments path)
       ;; PATH's segments, with the empty ones - from a leading or a
@@ -771,6 +787,19 @@
       ;; "(New file)" - and this used to fail with an error reading a file
       ;; that was not there, so `C-x C-f newfile.txt' could not make one.
       ;;--------------------------------------------------------------
+      ;; The name is made absolute first, which is the first thing Emacs's
+      ;; `find-file-noselect' does - `(setq filename (abbreviate-file-name
+      ;; (expand-file-name filename)))'. A name that arrives from
+      ;; `read-file-name' is absolute already, but one that does not - a
+      ;; file named on the command line, which startup.el visits by name -
+      ;; is not, and everything below reads its *directory*: the buffer's
+      ;; `default-directory' is set from it, so `C-x C-f' in a buffer
+      ;; visiting `foo' prompted with nothing at all, the directory part
+      ;; of a bare name being the empty string. Emacs's
+      ;; `abbreviate-file-name' - which shortens a name under the home
+      ;; directory - is not implemented; there is no home directory here
+      ;; to shorten against.
+      (let ((path (expand-file-name path)))
       (or
        ;; a file already visited is one buffer, not two - and it is
        ;; returned as it stands: Emacs's `find-file-noselect' does not
@@ -827,7 +856,7 @@
         ;; and point starts at the beginning of what was read, which is
         ;; where GNU Emacs's `find-file-noselect' puts it
         (text-editor-set-cursor ed 0 0)
-        ed)))
+        ed))))
 
     (define (encode-line-breaks str line-break)
       ;; Encode the buffer's line-feed breaks back into the file's
