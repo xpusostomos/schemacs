@@ -27,6 +27,7 @@
     (only (scheme write) display)
     (only (scheme cxr) caddr)
     (ncurses curses)
+    (scheme file)
     ;; The mode line reads a line and column out of the engine, which
     ;; answers with one of these.
     (only (schemacs ui text-buffer-impl)
@@ -67,7 +68,7 @@
           attribute-value face-attributes-empty face-realized-attributes
           merge-face-ref merge-face-vectors realize-tty-face)
     ;; `logior' is Guile's, not R7RS's: the attributes are bit flags.
-    (only (guile) logior)
+    (only (guile) logior display-backtrace make-stack)
     )
 
   (export
@@ -510,12 +511,21 @@
                (let ((from (list-ref offsets (car run)))
                      (to (list-ref offsets (cadr run)))
                      (attribute (caddr run)))
-                 (attr-on! (stdscr) attribute)
-                 (addstr (stdscr)
-                         (substring display from
-                                    (min to (string-length display)))
-                         #:y screen-row #:x (+ x0 from))
-                 (attr-off! (stdscr) attribute)))
+                 ;; The line is drawn up to the window's WIDTH: a run
+                 ;; starting past the window's edge is not drawn at all,
+                 ;; and one cut by it stops at the edge - which is how
+                 ;; GNU Emacs truncates a line at the window boundary.
+                 ;; The slow (properties) path has to say so itself,
+                 ;; where the fast path hands the whole line to ncurses
+                 ;; and lets it clip.
+                 (when (< from width)
+                   (attr-on! (stdscr) attribute)
+                   (addstr (stdscr)
+                           (substring display from
+                                      (min to (min (string-length display)
+                                                   width)))
+                           #:y screen-row #:x (+ x0 from))
+                   (attr-off! (stdscr) attribute))))
              (line-face-runs ed line-start line-string))))
       ;; xdisp.c draws a continuation glyph when more of the logical line
       ;; remains, with the default face. Otherwise a region may extend its
@@ -789,7 +799,18 @@
       ;; mode line, as GNU Emacs gives each window one; the echo area
       ;; belongs to the frame and is drawn last, over the bottom row.
       ;;--------------------------------------------------------------
-      (sync-frame-size! frame)
+      ;; DEBUG: record the *draw* that kills the editor on a resize - the
+      ;; stack here is still intact, where the top-level handler's is not.
+      (guard (e (else
+                 (call-with-output-file "/tmp/schemacs-render.log"
+                   (lambda (port)
+                     (write (list 'render-crash e) port)
+                     (newline port)
+                     (write (list 'screen (lines) (cols)) port)
+                     (newline port)
+                     (display-backtrace (make-stack #t) port)))
+                 (raise e)))
+        (sync-frame-size! frame)
       (let ((width (frame-width frame))
             (height (frame-height frame))
             ;; the *leaves*: a window that holds children shows no buffer
@@ -856,6 +877,6 @@
                   (let ((at (cursor-screen-position selected)))
                     (when at (move (stdscr) (car at) (cdr at))))))))
         (refresh (stdscr))
-        ))
+        )))
 
     ))

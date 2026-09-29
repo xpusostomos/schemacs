@@ -1417,8 +1417,9 @@
       ;;--------------------------------------------------------------
       (let* ((needed (+ 1 (text-editor-line-count buffer)))
              (max-height (or (*completions-max-height*)
-                             (- (- (frame-height (*current-frame*)) 1)
-                                window-min-height))))
+                             (max 1
+                                  (- (- (frame-height (*current-frame*)) 1)
+                                     window-min-height)))))
         (min (max window-min-height needed) max-height)))
 
     (define (completion-display-window buffer)
