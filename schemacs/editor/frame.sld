@@ -581,7 +581,7 @@
            (= (window-left (car children)) (window-left (cadr children)))
            (= (window-width (car children)) (window-width (cadr children)))))
 
-    (defcommand suspend-frame ()
+    (defcommand (suspend-frame)
       ;; GNU Emacs's `suspend-frame' (C-z), which is `frame.el''s - "do
       ;; whatever is right to suspend the current frame". On a terminal
       ;; that is stopping the editor with SIGTSTP; the shell gives it back

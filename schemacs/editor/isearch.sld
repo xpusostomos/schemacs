@@ -372,12 +372,12 @@
                   (list->string (reverse acc))))))
          (else (string c)))))
 
-    (defcommand isearch-forward ()
+    (defcommand (isearch-forward)
       "Search forward incrementally (bound to C-s)."
       (interactive)
       (isearch #t))
 
-    (defcommand isearch-backward ()
+    (defcommand (isearch-backward)
       "Search backward incrementally (bound to C-r)."
       (interactive)
       (isearch #f))

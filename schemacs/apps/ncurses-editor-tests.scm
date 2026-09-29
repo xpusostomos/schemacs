@@ -201,12 +201,12 @@
 ;; the interactive specification. The record's API *is* the procedure,
 ;; so a programmatic call through the record and a direct call run the
 ;; same code, and the docstring is Guile's own copy.
-(defcommand test-doubling-command (x)
+(defcommand (test-doubling-command x)
   "Double X, for testing `defcommand'."
   (interactive "p")
   (* x 2))
 
-(defcommand test-zero-arg-command ()
+(defcommand (test-zero-arg-command)
   "A zero-argument command."
   (interactive)
   "zero")

@@ -300,7 +300,10 @@ Our library mirrors it on purpose.
 Every command is now a `defcommand` whose name is the command's Emacs
 name, bound to a plain callable procedure; the `-command` suffixes are
 gone (undo, split-window-below, find-file, save-buffer, kill-buffer,
-Buffer-menu-*, ...). The one legacy record left is
+Buffer-menu-*, ...). `defcommand` is spelled as a Scheme procedure
+definition - `(defcommand (name args ...) docstring (interactive ...)
+body ...)` - with `defun`'s *field order* kept (Emacs is the reference
+for behavior, not for Lisp's spelling). The one legacy record left is
 `self-insert-command` (simple.sld), documented there: the character it
 inserts is re-derived from keymap lookup state, which an
 `(interactive ...)` cannot say yet. Two names deviate because the host

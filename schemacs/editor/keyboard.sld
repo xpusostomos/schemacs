@@ -543,7 +543,7 @@
               (exit value)
               (error "Not in a recursive edit"))))))
 
-    (defcommand abort-recursive-edit ()
+    (defcommand (abort-recursive-edit)
       ;; Leave the innermost recursive edit and signal quit, so the
       ;; command that asked the question is abandoned: GNU Emacs's
       ;; `abort-recursive-edit', which is keyboard.c's own - a function

@@ -273,12 +273,15 @@
             record)))
 
     (define-syntax defcommand
-      ;; Define a command, GNU Emacs's `defun' with an optional
-      ;; `interactive' declaration, in the order defun expects: NAME,
-      ;; the parameter list, an optional docstring (a string), an
-      ;; optional `(interactive SPEC)', and the body:
+      ;; Define a command: a procedure definition, spelled as Scheme
+      ;; spells one - the name together with its parameter list,
+      ;; `(NAME ARG ...)' - carrying the command's docstring and its
+      ;; `interactive' declaration after the parameters, and the body
+      ;; last. That is the order `define' expects and the order GNU
+      ;; Emacs's `defun' writes them in, so a command transcribed from
+      ;; Emacs keeps its shape:
       ;;
-      ;;   (defcommand kill-region (beg end)
+      ;;   (defcommand (kill-region beg end)
       ;;     "Kill (\"cut\") text between point and mark."
       ;;     (interactive "r")
       ;;     (delete-region beg end))
@@ -287,10 +290,10 @@
       ;; (the numeric prefix), `"P"` (the raw prefix), or an *expression*
       ;; evaluated at the keypress to build the body's arguments - so a
       ;; command whose procedure is a plain function, callable from
-      ;; Lisp, can fill its arguments from the environment when a key
-      ;; reaches it:
+      ;; other Scheme code, can fill its arguments from the environment
+      ;; when a key reaches it:
       ;;
-      ;;   (defcommand delete-window (window)
+      ;;   (defcommand (delete-window window)
       ;;     "Remove WINDOW from the frame."
       ;;     (interactive (list (selected-window)))
       ;;     ...)
@@ -300,27 +303,27 @@
       ;; `register-command!', which files its record in the obarray.
       ;;--------------------------------------------------------------
       (syntax-rules (interactive)
-        ((defcommand name args (interactive) body ...)
+        ((defcommand (name . args) (interactive) body ...)
          (begin
            (define (name . args) body ...)
            (register-command! name #f)))
-        ((defcommand name args docstring (interactive) body ...)
+        ((defcommand (name . args) docstring (interactive) body ...)
          (begin
            (define (name . args) docstring body ...)
            (register-command! name #f)))
-        ((defcommand name args (interactive spec) body ...)
+        ((defcommand (name . args) (interactive spec) body ...)
          (begin
            (define (name . args) body ...)
            (register-command! name 'spec)))
-        ((defcommand name args docstring (interactive spec) body ...)
+        ((defcommand (name . args) docstring (interactive spec) body ...)
          (begin
            (define (name . args) docstring body ...)
            (register-command! name 'spec)))
-        ((defcommand name args docstring body ...)
+        ((defcommand (name . args) docstring body ...)
          (begin
            (define (name . args) docstring body ...)
            (register-command! name #f)))
-        ((defcommand name args body ...)
+        ((defcommand (name . args) body ...)
          (begin
            (define (name . args) body ...)
            (register-command! name #f)))))

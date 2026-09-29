@@ -233,7 +233,7 @@
     ;; Emacs's simple.el, and is imported below.
     ;;------------------------------------------------------------------
 
-    (defcommand find-file (path)
+    (defcommand (find-file path)
       ;; GNU Emacs's `find-file' (files.el), the command C-x C-f runs:
       ;; prompt for a file name and visit it, switching to the buffer,
       ;; exactly as Emacs's `(switch-to-buffer (find-file-noselect
@@ -267,7 +267,7 @@
     ;; the `Windows' banner is in `(schemacs editor window)' now.
     ;;------------------------------------------------------------------
 
-    (defcommand save-buffers-kill-terminal ()
+    (defcommand (save-buffers-kill-terminal)
       ;; GNU Emacs's `save-buffers-kill-emacs': offer to save what
       ;; needs saving, then - since the user may have said no - ask
       ;; whether to go ahead and lose it. Either question abandoned
@@ -302,7 +302,7 @@
             (quit!))))
 
 
-    (defcommand kill-buffer ()
+    (defcommand (kill-buffer)
       ;; C-x k runs this. GNU Emacs's `kill-buffer'. Killing a buffer
       ;; that has unsaved changes asks first: Emacs offers to kill it
       ;; anyway, not to save it (saving is offered on exit and by C-x
@@ -950,7 +950,7 @@
                str)
               (get-output-string port)))))
 
-    (defcommand save-buffer ()
+    (defcommand (save-buffer)
       ;; C-x C-s runs this. GNU Emacs's `save-buffer', which acts on
       ;; `(current-buffer)' and takes no argument but the prefix
       ;; argument that picks the backup behaviour - there are no backup
