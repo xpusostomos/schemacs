@@ -32,7 +32,7 @@
     ;; own, so importing the whole module would put that name in the same
     ;; library as `(schemacs editor keymap)'s, and the winner would be
     ;; whichever import came last.
-    (only (ncurses curses) getch KEY_BACKSPACE stdscr)
+    (only (ncurses curses) getch KEY_BACKSPACE stdscr ungetch)
     ;; `define-key' and the global map: the keys C-s and C-r are stated
     ;; here, beside the commands they run.
     (only (schemacs editor keymap)
@@ -282,13 +282,18 @@
                             states)
                       (isearch-search! ed new direction fold?)
                       #f fold?)))
-             ;; a control character the search does not use ends it and
-             ;; leaves the mark alone (mg's rule; Emacs would run the
-             ;; command instead)
+             ;; a control character the search does not use ends it and gives
+             ;; the key back to the command loop: GNU Emacs's
+             ;; `isearch-other-control-char' exits the search
+             ;; (`isearch-exit') and re-executes the key, so `C-s C-s
+             ;; C-x C-c' quits the editor instead of eating the `C-x'
+             ;; and leaving `C-c' as an undefined key. The mark is left
+             ;; alone, as it is on this exit.
              ((and (char? ev) (char<? ev #\space))
               (*search-pattern* #f)
               (*search-highlight* #f)
-              (set!ncurses-frame-message frame ""))
+              (set!ncurses-frame-message frame "")
+              (ungetch ev))
              ;; anything else (a keypad key, end of input) is not an
              ;; answer to the search
              (else
