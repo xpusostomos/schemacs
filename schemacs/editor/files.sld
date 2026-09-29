@@ -397,18 +397,20 @@
       ;; `map-y-or-n-p`, which `save-some-buffers` asks through: `y' or
       ;; SPC saves this buffer and goes on to the next, `n', DEL or any
       ;; other key leaves it and goes on, `!' saves it and saves the rest
-      ;; without asking, `q' or RET stops asking here, and `.' saves this
-      ;; one and then stops. Emacs's remaining answers - `C-r' and `d'
-      ;; (look at the buffer and its differences from the file before
-      ;; deciding) - need features this frontend does not have. C-g never
-      ;; arrives here: it abandons the whole command.
+      ;; without asking, `q', RET or ESC stops asking here, and `.'
+      ;; saves this one and then stops (Emacs: "ESC or q to exit").
+      ;; Emacs's remaining answers - `C-r' and `d' (look at the buffer
+      ;; and its differences from the file before deciding) - need
+      ;; features this frontend does not have. C-g never arrives here:
+      ;; it abandons the whole command.
       ;;--------------------------------------------------------------
       (cond
        ((not answer) 'skip)                       ; end of input
        ((or (char=? answer #\y) (char=? answer #\space)) 'save)
        ((char=? answer #\!) 'save-all)
        ((char=? answer #\.) 'save-then-quit)
-       ((or (char=? answer #\q) (char=? answer #\return)) 'quit)
+       ((or (char=? answer #\q) (char=? answer #\return)
+            (char=? answer #\esc)) 'quit)
        (else 'skip)))
 
     (define (files--buffers-needing-to-be-saved pred)

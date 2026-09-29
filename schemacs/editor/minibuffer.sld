@@ -93,7 +93,12 @@
     ;; The recursive edit the minibuffer is read by: the same command loop,
     ;; called again.
     (only (schemacs editor keyboard)
-          abort-recursive-edit exit-recursive-edit recursive-edit)
+          abort-recursive-edit exit-recursive-edit recursive-edit signal-quit)
+    ;; `read-char-from-minibuffer' reads the one key that answers it:
+    ;; the raw event, as isearch's keys are read, drawn with the
+    ;; display's `render!'.
+    (only (ncurses curses) getch KEY_BACKSPACE stdscr)
+    (only (schemacs editor xdisp) render!)
     ;; The global map `minibuffer-local-map' is built from, and the local
     ;; map it becomes while it is read.
     (only (schemacs editor keymap)
@@ -557,16 +562,27 @@
 
     (define (read-char-from-minibuffer prompt)
       ;; GNU Emacs's `read-char-from-minibuffer': ask a question whose
-      ;; answer is a single key, and return that key. Emacs reads the key
-      ;; on its own, without RET, through a special keymap; here the key
-      ;; is typed and then RET, and its first character is the answer.
-      ;; (Answering on the keystroke itself needs a keymap whose
-      ;; self-inserting layer reports the character it matched, which
-      ;; this editor's keymap machinery cannot yet do.)
+      ;; answer is a single key, and return it - `y' or `n' alone
+      ;; answers, with no RET. Emacs reads the key itself (`read-key');
+      ;; here the one event ncurses returns is read raw, as `isearch'
+      ;; reads its keys, with the prompt drawn in the echo area.
+      ;; C-g abandons the whole command, and a key the question has no
+      ;; meaning for (an arrow key, a frame resize) asks it again.
       ;;--------------------------------------------------------------
-      (let ((answer (read-from-minibuffer prompt)))
-        (and (< 0 (string-length answer))
-             (string-ref answer 0))))
+      (let ((frame (*current-frame*)))
+        (parameterize ((*echo-area-buffer* (new-text-editor))
+                       (*echo-area-prompt* prompt))
+          (render! frame)
+          (let loop ()
+            (let* ((raw (getch (stdscr)))
+                   (ev (if (and (integer? raw) (= raw KEY_BACKSPACE))
+                           #\backspace
+                           raw)))
+              (cond
+               ((and (char? ev) (= (char->integer ev) 7))
+                (signal-quit))
+               ((char? ev) ev)
+               (else (loop))))))))
 
     (define (yes-or-no-p frame prompt)
       ;; GNU Emacs's `yes-or-no-p': the whole word, then RET. Being

@@ -487,15 +487,15 @@
 ;; The answer to "Save file X? " decides what happens: y and SPC save the
 ;; buffer, ! saves it and the rest without asking, . saves it and stops
 ;; asking, n, DEL and other keys leave it and go on to the next, and q,
-;; RET (and end of input) stop asking altogether - `map-y-or-n-p', which
-;; is how GNU Emacs's `save-some-buffers' asks. C-g is not among these:
-;; it leaves the minibuffer and signals quit, so the whole command is
-;; abandoned rather than the answer being read.
-(test-equal '(save save save-all skip skip quit quit skip save-then-quit
-               skip)
+;; RET, ESC (and end of input) stop asking altogether - `map-y-or-n-p',
+;; which is how GNU Emacs's `save-some-buffers' asks ("ESC or q to
+;; exit"). C-g is not among these: it signals quit, so the whole command
+;; is abandoned rather than the answer being read.
+(test-equal '(save save save-all skip skip quit quit quit skip
+               save-then-quit skip)
   (map save-answer-char->decision
-       (list #\y #\space #\! #\n (integer->char 127) #\q #\return #\z
-             #\. #f)))
+       (list #\y #\space #\! #\n (integer->char 127) #\q #\return
+             #\esc #\z #\. #f)))
 
 ;; `files--buffers-needing-to-be-saved' is what keeps a completing
 ;; `C-x C-f' from making `C-x C-c' ask about the help window: a modified
