@@ -33,7 +33,10 @@
        Buffer-menu-execute Buffer-menu--set-mark! Buffer-menu-redraw!
        list-buffers-noselect)
  (only (guile) string-contains string-prefix? string-split)
- (only (schemacs editor command) run-command)
+ (only (schemacs editor command) run-command apply-command
+       defcommand command? command-record-of)
+ (only (schemacs editor command)
+       command-doc-string command-interactive-spec command-name)
  (only (schemacs editor buffer)
        *buffer-list* *current-buffer* *kill-buffer-query-functions*
        buffer-list buffer-name get-buffer get-buffer-create set-buffer-local-value!
@@ -189,6 +192,42 @@
 
 ;;--------------------------------------------------------------------
 ;; The universal argument
+
+(test-begin "schemacs_ncurses_editor_command")
+;; `defcommand' defines a command whose name is bound to the procedure
+;; itself - so it can be called from code with ordinary arguments, as
+;; `(kill-region 1 5)' would be - and files its `<command-type>' record
+;; in the command obarray, where `M-x' and the keymap's dispatch read
+;; the interactive specification. The record's API *is* the procedure,
+;; so a programmatic call through the record and a direct call run the
+;; same code, and the docstring is Guile's own copy.
+(defcommand test-doubling-command (x)
+  "Double X, for testing `defcommand'."
+  (interactive "p")
+  (* x 2))
+
+(defcommand test-zero-arg-command ()
+  "A zero-argument command."
+  (interactive)
+  "zero")
+
+(test-equal '(14 "zero")
+  (list (test-doubling-command 7) (test-zero-arg-command)))
+
+(test-equal '("test-doubling-command" uarg #t 28)
+  (let ((record (command-record-of test-doubling-command)))
+    (list (command-name record)
+          (command-interactive-spec record)
+          (command? test-doubling-command)
+          (apply-command record 14))))
+
+(test-equal "Double X, for testing `defcommand'."
+  (command-doc-string (command-record-of test-doubling-command)))
+
+(test-equal #f
+  (command-record-of (lambda (x) x)))
+
+(test-end "schemacs_ncurses_editor_command")
 
 (test-begin "schemacs_ncurses_editor_prefix_argument")
 

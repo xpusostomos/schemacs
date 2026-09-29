@@ -42,7 +42,8 @@
     ;; `format-message' does for `minibuffer-message'.
     (only (guile) format)
     (only (schemacs editor command)
-          new-command new-count-command run-command)
+          new-command new-count-command run-command defcommand
+          *command-table* command-value-of command-interactive-spec)
     (only (schemacs editor engine)
           new-text-editor text-editor-char-count text-editor-copy-string
           text-editor-cursor-column text-editor-cursor-line
@@ -172,6 +173,7 @@
    previous-history-element
    read-char-from-minibuffer
    read-from-minibuffer
+   execute-extended-command *extended-command-history*
    yes-or-no-p
    )
 
@@ -583,6 +585,55 @@
                 (signal-quit))
                ((char? ev) ev)
                (else (loop))))))))
+
+    (define *extended-command-history* (make<history> '()))
+    ;; ^ GNU Emacs's `extended-command-history': the names `M-x' has
+    ;; read, which `completing-read' offers as its history.
+
+    (define (command-completion-table string predicate action)
+      ;; The command names STRING could complete to, asked the way the
+      ;; table protocol asks: ACTION #f for the completion of STRING,
+      ;; `#t' for the candidates, `(boundaries . SUFFIX)' for where in
+      ;; STRING the completed text begins, and `lambda' for whether
+      ;; STRING is one of them. A command name is a flat name with no
+      ;; directory, so the boundary always begins at zero.
+      ;;--------------------------------------------------------------
+      (cond
+       ((and (pair? action) (eq? (car action) 'boundaries))
+        (cons 'boundaries (cons 0 #f)))
+       ((eq? action 'lambda)
+        (and (< 0 (string-length string))
+             (if predicate
+                 (predicate string)
+                 (and (assoc string (*command-table*)) #t))))
+       (else
+        (let ((names (map car (*command-table*))))
+          (if (eq? action #f)
+              (try-completion string names predicate)
+              (all-completions string names predicate))))))
+
+    (defcommand execute-extended-command (uarg)
+      ;; Run the command whose name is typed, read with completion
+      ;; against the command obarray. The command runs as a key would
+      ;; have run it - `C-u M-x' carries the prefix argument to it -
+      ;; with the command itself as `this-command', so that a run of
+      ;; kills from M-x amalgamates like a run of the keys. Emacs
+      ;; signals "No match" when the name read is not a command; this
+      ;; port allows the reply and reports it after.
+      "Run a command by name (bound to M-x)."
+      (interactive "P")
+      (let* ((name (completing-read "M-x " command-completion-table
+                                    #f #f #f *extended-command-history* #f))
+             (entry (assoc name (*command-table*))))
+        (if (not entry)
+            (error "No match")
+            (let ((record (cdr entry)))
+              (*this-command* (command-value-of record))
+              (if (command-interactive-spec record)
+                  (run-command record uarg)
+                  (run-command record))))))
+
+    (define-key *default-keymap* (list 'meta #\x) execute-extended-command)
 
     (define (yes-or-no-p frame prompt)
       ;; GNU Emacs's `yes-or-no-p': the whole word, then RET. Being

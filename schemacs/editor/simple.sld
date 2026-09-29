@@ -42,7 +42,7 @@
          set!ncurses-frame-message set!window-top-line window-body-height 
          window-buffer window-top-line)
     (only (schemacs editor command)
-         new-command new-count-command uarg->integer)
+         new-command new-count-command uarg->integer defcommand)
     ;; The buffer-local store, for `mark-ring' - which is the buffer's
     ;; own - and the variables that come from the libraries Emacs
     ;; declares them in: `mark-active' and `transient-mark-mode' are
@@ -372,30 +372,26 @@
        (lambda () #f)
        "Cancel the current action and clear the echo area."))
 
-    (define read-only-mode
-      ;; GNU Emacs's `read-only-mode', bound to C-x C-q (it used to be
-      ;; called `toggle-read-only'). With no argument it toggles; with
-      ;; one it turns read-only on for a positive count and off
-      ;; otherwise, which is the convention Emacs's minor modes follow.
-      ;; The buffer's text cannot be changed while it is on, and undo
-      ;; will not touch it either.
-      (new-command
-       "read-only-mode"
-       (lambda (uarg)
-         (let* ((frame (*current-frame*))
-                (ed (current-editor))
-                (on? (if uarg
-                         (< 0 (uarg->integer 1 uarg))
-                         (not (text-editor-read-only? ed)))))
-           (text-editor-set-read-only! ed on?)
-           (set!ncurses-frame-message
-            frame
-            (if on?
-                "Read-Only mode enabled in current buffer"
-                "Read-Only mode disabled in current buffer"))))
-       (lambda (flag) (text-editor-set-read-only! (current-editor) flag))
-       "Toggle whether the buffer can be changed (bound to C-x C-q)."
-       'uarg))
+    (defcommand read-only-mode (uarg)
+      ;; GNU Emacs's `read-only-mode' (it used to be called
+      ;; `toggle-read-only'). With no argument it toggles; with one it
+      ;; turns read-only on for a positive count and off otherwise,
+      ;; which is the convention Emacs's minor modes follow. The
+      ;; buffer's text cannot be changed while it is on, and undo will
+      ;; not touch it either.
+      "Toggle whether the buffer can be changed (bound to C-x C-q)."
+      (interactive "P")
+      (let* ((frame (*current-frame*))
+             (ed (current-editor))
+             (on? (if uarg
+                      (< 0 (uarg->integer 1 uarg))
+                      (not (text-editor-read-only? ed)))))
+        (text-editor-set-read-only! ed on?)
+        (set!ncurses-frame-message
+         frame
+         (if on?
+             "Read-Only mode enabled in current buffer"
+             "Read-Only mode disabled in current buffer"))))
 
     (define *exchange-point-and-mark-highlight-region*
       ;; GNU Emacs's `exchange-point-and-mark-highlight-region':
@@ -438,55 +434,51 @@
        "Put the mark where point is now, and point where the mark is now."
        'uarg))
 
-    (define scroll-up-command
+    (defcommand scroll-down-command (count)
       ;; Scroll the view COUNT screenfuls down (toward the end of the
       ;; buffer), with a two-line overlap, like mg's `forwpage`. If
       ;; the point falls outside the new window it moves to the top
       ;; of the window, column zero. Reports "End of buffer" when the
       ;; view cannot scroll further.
-      (new-count-command
-       "scroll-up-command"
-       (lambda (count)
-         (let* ((frame (*current-frame*))
-                (window (selected-window))
-                (ed (window-buffer window))
-                (vheight (window-body-height window))
-                (n (* count (max 1 (- vheight 2))))
-                (last-line (max 0 (- (text-editor-line-count ed) 1)))
-                (new-top
-                 (min (+ (window-top-line window) n) last-line)))
-           (if (<= new-top (window-top-line window))
-               (set!ncurses-frame-message frame "; End of buffer")
-               (begin
-                 (set!window-top-line window new-top)
-                 (let ((line (text-editor-cursor-line ed)))
-                   (when (or (< line new-top)
-                             (>= line (+ new-top vheight)))
-                     (text-editor-set-cursor ed new-top 0)))))))
-       "Scroll the view down N screenfuls."))
+      "Scroll the view down N screenfuls."
+      (interactive "p")
+      (let* ((frame (*current-frame*))
+             (window (selected-window))
+             (ed (window-buffer window))
+             (vheight (window-body-height window))
+             (n (* count (max 1 (- vheight 2))))
+             (last-line (max 0 (- (text-editor-line-count ed) 1)))
+             (new-top
+              (min (+ (window-top-line window) n) last-line)))
+        (if (<= new-top (window-top-line window))
+            (set!ncurses-frame-message frame "; End of buffer")
+            (begin
+              (set!window-top-line window new-top)
+              (let ((line (text-editor-cursor-line ed)))
+                (when (or (< line new-top)
+                          (>= line (+ new-top vheight)))
+                  (text-editor-set-cursor ed new-top 0)))))))
 
-    (define scroll-down-command
+    (defcommand scroll-up-command (count)
       ;; Scroll the view COUNT screenfuls up (toward the beginning of
-      ;; the buffer), the mirror of `scroll-up-command`.
-      (new-count-command
-       "scroll-down-command"
-       (lambda (count)
-         (let* ((frame (*current-frame*))
-                (window (selected-window))
-                (ed (window-buffer window))
-                (vheight (window-body-height window))
-                (n (* count (max 1 (- vheight 2))))
-                (new-top (max 0 (- (window-top-line window) n))))
-           (if (= new-top (window-top-line window))
-               (set!ncurses-frame-message frame "; Beginning of buffer")
-               (begin
-                 (set!window-top-line window new-top)
-                 (let ((line (text-editor-cursor-line ed)))
-                   (when (or (< line new-top)
-                             (>= line (+ new-top vheight)))
-                     (text-editor-set-cursor
-                      ed (+ new-top (- vheight 1)) 0)))))))
-       "Scroll the view up N screenfuls."))
+      ;; the buffer), the mirror of `scroll-up-command'.
+      "Scroll the view up N screenfuls."
+      (interactive "p")
+      (let* ((frame (*current-frame*))
+             (window (selected-window))
+             (ed (window-buffer window))
+             (vheight (window-body-height window))
+             (n (* count (max 1 (- vheight 2))))
+             (new-top (max 0 (- (window-top-line window) n))))
+        (if (= new-top (window-top-line window))
+            (set!ncurses-frame-message frame "; Beginning of buffer")
+            (begin
+              (set!window-top-line window new-top)
+              (let ((line (text-editor-cursor-line ed)))
+                (when (or (< line new-top)
+                          (>= line (+ new-top vheight)))
+                  (text-editor-set-cursor
+                   ed (+ new-top (- vheight 1)) 0)))))))
 
     (define beginning-of-buffer
       (new-command
@@ -1612,8 +1604,8 @@
     (define-key *default-keymap* (list (list 'ctrl #\x) (list 'ctrl #\x))
       exchange-point-and-mark)
     (define-key *default-keymap* (list (list 'ctrl #\i)) self-insert-tab)
-    (define-key *default-keymap* (list (list 'ctrl #\v)) scroll-up-command)
-    (define-key *default-keymap* (list (list 'meta #\v)) scroll-down-command)
+    (define-key *default-keymap* (list (list 'ctrl #\v)) scroll-down-command)
+    (define-key *default-keymap* (list (list 'meta #\v)) scroll-up-command)
     (define-key *default-keymap* (list (list 'meta #\<)) beginning-of-buffer)
     (define-key *default-keymap* (list (list 'meta #\>)) end-of-buffer)
     (define-key *default-keymap*

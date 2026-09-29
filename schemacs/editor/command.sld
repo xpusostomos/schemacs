@@ -8,7 +8,11 @@
     (scheme base)
     (scheme write)
     (scheme case-lambda)
-    (only (schemacs lens) record-unit-lens))
+    (only (schemacs lens) record-unit-lens)
+    ;; A `defcommand' name keeps its name and docstring in Guile's own
+    ;; copy, which `,describe' shows: `procedure-name' and
+    ;; `procedure-documentation' read them back for the obarray record.
+    (only (guile) procedure-name procedure-documentation))
 
   (export
    command-type? make<command> new-command new-count-command
@@ -17,6 +21,8 @@
    *mark-even-if-inactive*
    uarg->integer
    run-command apply-command show-command
+   defcommand *command-table* command? command-record-of command-value-of
+   register-command!
    =>command-name*!
    =>command-procedure*!
    =>command-doc-string*!
@@ -128,6 +134,140 @@
        impl
        docstr
        'uarg))
+
+    ;;----------------------------------------------------------------
+    ;; Defining commands with `defcommand'
+    ;;
+    ;; GNU Emacs's `defun' makes the command's name a plain *function*:
+    ;; any Lisp can call it with arguments, and the keyboard reaches it
+    ;; through the command machinery. `defcommand' is the same trick here
+    ;; - the NAME it defines is bound to the command's own procedure, so
+    ;; `(kill-region 1 5)' is an ordinary call, while everything the
+    ;; command machinery wants to know about it (its name, its docstring,
+    ;; the interactive specification and the procedure itself) is
+    ;; gathered into a `<command-type>' record in the command obarray.
+    ;;
+    ;; The obarray entry's API is the defined procedure itself, which is
+    ;; what makes the two views agree: `apply-command' on the record and
+    ;; a direct call on the name run the same code. The keymap stores
+    ;; the *procedure* (the value of the name); dispatch finds its
+    ;; record in the obarray when it needs the interactive specification.
+    ;;
+    ;; "One file to shim out later": every piece above lives here - the
+    ;; macro, the obarray, the registration. A different Scheme can
+    ;; provide the same surface (callable commands + an obarray of
+    ;; records, or of whatever it has) by re-implementing this library.
+    ;;------------------------------------------------------------------
+
+    (define *command-table* (make-parameter '()))
+    ;; ^ The command obarray: GNU Emacs's `command-obarray', an alist of
+    ;; (NAME . COMMAND-RECORD) - the record that `M-x' and the
+    ;; description commands will read, ordered most-recently-defined
+    ;; first.
+
+    (define (interactive-proc spec command)
+      ;; The command's interactive entry: a procedure that reads what a
+      ;; keyfinger supplies and calls COMMAND with it - GNU Emacs's
+      ;; `call-interactively' reading the arguments once, for the
+      ;; specifications `defcommand' knows. SPEC is `#f' (no arguments),
+      ;; `"p"' (the numeric prefix) or `"P"' (the raw prefix).
+      ;;--------------------------------------------------------------
+      (cond
+       ((not spec) (lambda () (command)))
+       ((string=? spec "p") (lambda (uarg) (command (uarg->integer 1 uarg))))
+       ((string=? spec "P") (lambda (uarg) (command uarg)))
+       (else (error "Unsupported interactive specification" spec))))
+
+    (define (register-command! command spec)
+      ;; Record COMMAND, a procedure `defcommand' has just bound, in the
+      ;; command obarray: make its `<command-type>' record - the name
+      ;; coming from the procedure itself, the docstring from Guile's
+      ;; own copy, the API being the procedure - and push it on
+      ;; `*command-table*'. The argument order (command, SPEC) is the
+      ;; expansion `defcommand' emits; SPEC is `#f', `"p"' or `"P"',
+      ;; `interactive-proc' knows what those mean.
+      ;;--------------------------------------------------------------
+      (let* ((name (symbol->string (procedure-name command)))
+             (record (new-command name
+                                  (interactive-proc spec command)
+                                  command
+                                  (procedure-documentation command)
+                                  (and spec 'uarg))))
+        (*command-table* (cons (cons name record) (*command-table*)))
+        record))
+
+    (define (command-record-of thing)
+      ;; The command record whose API is THING, or #f: how a key bound
+      ;; to a `defcommand' procedure is dispatched like one bound to a
+      ;; record. GNU Emacs keeps `commandp' the same question - "is this
+      ;; a command?" - and the answer here is "is there an obarray entry
+      ;; whose procedure this is".
+      ;;--------------------------------------------------------------
+      (and (procedure? thing)
+           (let loop ((rest (*command-table*)))
+             (cond ((null? rest) #f)
+                   ((eq? (command-api (cdar rest)) thing) (cdar rest))
+                   (else (loop (cdr rest)))))))
+
+    (define (command? thing)
+      ;; Whether THING is a command: GNU Emacs's `commandp'.
+      ;;--------------------------------------------------------------
+      (not (not (command-record-of thing))))
+
+    (define (command-value-of record)
+      ;; The value a key slot for the command held, for `*last-command*'
+      ;; and its kin: the defined procedure when the record came from a
+      ;; `defcommand' (its name on the procedure is the command's name),
+      ;; the record itself for a legacy one. This is what a comparison
+      ;; like `(eq? (*last-command*) kill-line)' sees both sides of.
+      ;;--------------------------------------------------------------
+      (let ((name (and (procedure? (command-api record))
+                       (procedure-name (command-api record)))))
+        (if (and name (equal? (symbol->string name) (command-name record)))
+            (command-api record)
+            record)))
+
+    (define-syntax defcommand
+      ;; Define NAME as a command, GNU Emacs's `defun' with an optional
+      ;; `interactive' declaration, in the order defun expects: NAME,
+      ;; the parameter list, an optional docstring (a string), an
+      ;; optional `(interactive SPEC)', and the body:
+      ;;
+      ;;   (defcommand kill-region (beg end)
+      ;;     "Kill (\"cut\") text between point and mark."
+      ;;     (interactive "r")
+      ;;     (delete-region beg end))
+      ;;
+      ;; The expansion binds NAME to a plain procedure over the
+      ;; parameter list and body - callable from anywhere - and calls
+      ;; `register-command!', which files its record in the obarray.
+      ;; SPEC is today `#f', `"p"' or `"P"'.
+      ;;--------------------------------------------------------------
+      (syntax-rules (interactive)
+        ((defcommand name args (interactive) body ...)
+         (begin
+           (define (name . args) body ...)
+           (register-command! name #f)))
+        ((defcommand name args docstring (interactive) body ...)
+         (begin
+           (define (name . args) docstring body ...)
+           (register-command! name #f)))
+        ((defcommand name args (interactive spec) body ...)
+         (begin
+           (define (name . args) body ...)
+           (register-command! name spec)))
+        ((defcommand name args docstring (interactive spec) body ...)
+         (begin
+           (define (name . args) docstring body ...)
+           (register-command! name spec)))
+        ((defcommand name args docstring body ...)
+         (begin
+           (define (name . args) docstring body ...)
+           (register-command! name #f)))
+        ((defcommand name args body ...)
+         (begin
+           (define (name . args) body ...)
+           (register-command! name #f)))))
 
     (define =>command-name*!
       (record-unit-lens command-name set!command-name '=>command-name)

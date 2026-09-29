@@ -45,7 +45,7 @@
     (only (schemacs editor engine)
           text-editor-deactivate-mark set!text-editor-deactivate-mark!)
     (only (schemacs editor command)
-          command-interactive-spec command-type? run-command)
+          command-interactive-spec command-record-of command-type? run-command)
     (only (schemacs editor frame)
           *current-frame* ncurses-frame-esc-pending ncurses-frame-keymap-state
           ncurses-frame-message ncurses-frame-message-expired?
@@ -239,7 +239,18 @@
             (if (command-interactive-spec action)
                 (run-command action uarg)
                 (run-command action)))
-           ((procedure? action) (action))
+           ((procedure? action)
+            ;; A procedure the keymap holds. It may be a
+            ;; `defcommand' - a bare procedure whose command record sits
+            ;; in the obarray - in which case it is run like the record
+            ;; it belongs to, so the interactive specification is
+            ;; honoured; otherwise it is a plain procedure to call.
+            (let ((record (command-record-of action)))
+              (if record
+                  (if (command-interactive-spec record)
+                      (run-command record uarg)
+                      (run-command record))
+                  (action))))
            (else (error "not a command" action))))
         ;; Commands such as `kill-ring-save' set the buffer's deferred
         ;; `deactivate-mark' flag. Apply it after the command, as Emacs does,

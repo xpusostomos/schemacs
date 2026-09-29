@@ -329,6 +329,32 @@ def check_mode_line_eol():
     return []
 
 
+def check_m_x():
+    """M-x reads a command name, completes it, and runs it.
+
+    `execute-extended-command' (M-x) completes the name against the
+    command obarray - the list of `defcommand' commands - and runs it
+    as a key would.  Here a name with no completion match is typed
+    whole and RET runs it (the message is observable), and a prefix
+    completes to the command.
+    """
+    path = "/tmp/pty-check-mx.txt"
+    open(path, "w").write("hello\n")
+    problems = []
+    out = drive([b"\x1b", b"x", b"read-only-mode", b"\r"], path,
+                settle=1.2, gap=0.35)
+    if "Read-Only mode enabled in current buffer" not in out:
+        problems.append("M-x read-only-mode did not run the command "
+                        "(no enabled message)")
+    out = drive([b"\x1b", b"x", b"read-on", b"\t"], path, settle=1.2, gap=0.35)
+    i = out.rfind("M-x ")
+    completed = out[i+4:i+32].split("\x1b")[0] if i >= 0 else ""
+    if completed.strip() != "read-only-mode":
+        problems.append("M-x completion: `read-on' TAB gave %r, expected "
+                        "`read-only-mode'" % completed.strip())
+    return problems
+
+
 def check_isearch_highlight():
     """Search and check the matches are drawn with something.
 
@@ -1301,6 +1327,7 @@ CHECKS = {
     "completion-resize": check_completion_resize,
     "quit-completions": check_quit_after_completion,
     "default-directory": check_default_directory,
+    "m-x": check_m_x,
     "isearch-highlight": check_isearch_highlight,
     "isearch-scroll": check_isearch_scroll,
     "isearch-quit": check_isearch_quit,
