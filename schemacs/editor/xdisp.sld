@@ -736,6 +736,32 @@
                    (min (current-line-display-column ed column)
                         (- width 1)))))))
 
+    (define (window-top-line-position ed top-line)
+      ;; The absolute buffer position of the first character of
+      ;; TOP-LINE, the window's top row. GNU Emacs's redisplay walks
+      ;; rows with absolute buffer positions; here they are anchored at
+      ;; the line point is on - the engine answers that line's start for
+      ;; free (`text-editor-get-start-of-line'), and the window is
+      ;; scrolled at most a screenful from point (`scroll-to-cursor!').
+      ;; The line sizes walked are the same `text-line-outer-size' the
+      ;; row walk itself accumulates, so the two agree exactly.
+      ;;--------------------------------------------------------------
+      (let* ((cursor-line (text-editor-cursor-line ed))
+             (anchor (text-editor-get-start-of-line ed)))
+        (if (<= top-line cursor-line)
+            ;; window is scrolled down from point: walk back to TOP-LINE
+            (let loop ((line cursor-line) (pos anchor))
+              (if (= line top-line)
+                  pos
+                  (loop (- line 1)
+                        (- pos (or (line-outer-size ed (- line 1)) 0)))))
+            ;; window scrolled above point: walk forward from it
+            (let loop ((line cursor-line) (pos anchor))
+              (if (= line top-line)
+                  pos
+                  (loop (+ line 1)
+                        (+ pos (or (line-outer-size ed line) 0))))))))
+
     (define (render-window! window)
       ;; Draw one window: its rows of text within its rectangle, then its
       ;; mode line along its last row.
@@ -749,7 +775,9 @@
         ;; rows of text. Each row's line starts LINE-START characters
         ;; into the buffer, which is what lets a search match be found in
         ;; buffer terms and then drawn in screen terms.
-        (let loop ((row 0) (line-start 0))
+        (let loop ((row 0)
+                   (line-start (window-top-line-position
+                                ed (window-top-line window))))
           (when (< row vheight)
             (let* ((line-index (+ (window-top-line window) row))
                    (line-string (ncurses-line-string ed line-index)))
