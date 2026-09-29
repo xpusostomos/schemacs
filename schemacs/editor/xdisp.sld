@@ -188,8 +188,9 @@
       ;; The default is GNU Emacs's own for the parts this editor can show:
       ;; `mode-line-modified' (`("%1*" "%1+")' in `bindings.el', which is the
       ;; two-cell `--', `**' or `%%'), the buffer name in a twelve-wide field
-      ;; (`mode-line-buffer-identification', `("%12b")'), then the line and
-      ;; column of the window's own point (`mode-line-position').
+      ;; (`mode-line-buffer-identification', `("%12b")' - a field that pads a
+      ;; short name and leaves a long one alone), then the line and column
+      ;; of the window's own point (`mode-line-position').
       ;;
       ;; Emacs's default also names variables in the format - `mode-line-mule-info',
       ;; `mode-line-position', `mode-line-modes' and so on - and a symbol in
@@ -267,13 +268,16 @@
 
     (define (pad-mode-line-field text width)
       ;; TEXT in a field WIDTH wide, in the `%N<spec>' form: GNU Emacs pads a
-      ;; number on the left and anything else on the right. A text longer than
-      ;; the field is cut to it.
+      ;; number on the left and anything else on the right. The width is a
+      ;; *floor*, not a ceiling: a text longer than the field is shown in
+      ;; full. That is `store_mode_line_noprop' (xdisp.c), which copies the
+      ;; whole string and then fills with spaces only while the count is
+      ;; below the field width - a mode line just runs longer, and the
+      ;; window edge is what cuts it off.
       ;;--------------------------------------------------------------
       (let ((len (string-length text)))
         (cond
-         ((= len width) text)
-         ((> len width) (substring text 0 width))
+         ((<= width len) text)
          ((number-in-field? text)
           (string-append (make-string (- width len) #\space) text))
          (else (string-append text (make-string (- width len) #\space))))))

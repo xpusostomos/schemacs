@@ -1473,6 +1473,17 @@
     (list (format-in frame "%6l") (format-in frame "%3l")
           (format-in frame "%12b") (format-in frame (list 6 "%l")))))
 
+;; ... and a name longer than the field is shown in full: the width of
+;; `%N<spec>' is a *floor*, not a ceiling. `store_mode_line_noprop'
+;; (xdisp.c) copies the whole string and pads with spaces only while the
+;; count is below the field width - measured from a terminal Emacs 31,
+;; where a 40-column buffer name reaches the mode line complete.
+(test-equal "verylongfilename.txt"
+  (let ((frame (frame-with "hello\n")))
+    (set!text-editor-buffer-name (ncurses-frame-editor frame)
+                                 "verylongfilename.txt")
+    (format-in frame "%12b")))
+
 ;; A format is a list of constructs, nested as deeply as it likes, and a
 ;; construct that is a procedure is called for its value: Emacs's `:eval'
 ;; holds a form because Emacs has an evaluator, and this holds the

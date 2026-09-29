@@ -525,9 +525,9 @@ def check_completions():
     problems = []
     # A second mode line is a second window: that is how the check knows the
     # completions window opened rather than the candidates going somewhere
-    # else. (The buffer's name is in that mode line as `*Completions' - the
-    # format's `%12b' truncates a thirteen-character name to twelve, which
-    # is worth one check of its own against real Emacs.)
+    # else. (The buffer's name is in that mode line as `*Completions*' -
+    # the format's `%12b' is a floor, not a ceiling: a longer name shows
+    # in full, as a terminal Emacs 31 confirms.)
     mode_lines = [r for r in screen.split("\n") if "--" in r and " L" in r]
     if len(mode_lines) != 2:
         problems.append("after `?' there are %d windows, expected 2"
@@ -1106,8 +1106,9 @@ def check_split():
     two-window frame is two mode lines on one row, and the vertical border
     between them belongs to the window on the left.
     """
-    # a short name: the mode line pads the buffer name to 12 columns, and a
-    # longer one is truncated - which is why this counts a name that fits
+    # a short name: the mode line pads the buffer name to 12 columns. A
+    # longer one runs past the field (no truncation - the window edge is
+    # what cuts it), which is why this counts a name that fits
     path = "/tmp/split.txt"
     open(path, "w").write("hello\n")
     name = "split"
