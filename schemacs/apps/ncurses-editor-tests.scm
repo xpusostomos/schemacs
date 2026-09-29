@@ -2171,6 +2171,37 @@
         (substring text (+ at (string-length after))
                    (string-length text))))))
 
+;; The layout is the *algorithm*, read from the window every time - not
+;; a fixed result, as a hard-coded three columns would be. Twelve
+;; twelve-character candidates in an 80-column frame make five columns
+;; (the window's width decides), and in a 160-column frame six: the same
+;; list, the same editor, a wider window, more columns.
+(test-equal '(5 6)
+  (let* ((names (let loop ((i 1) (acc '()))
+                  (if (> i 12)
+                      (reverse acc)
+                      (loop (+ i 1)
+                            (cons (string-append (make-string 11 #\a)
+                                                 (number->string i))
+                                  acc)))))
+         (row-names
+          (lambda (cols)
+            (let* ((frame (new-frame (new-text-editor) 24 cols))
+                   (buffer (get-buffer-create "*Completions*")))
+              (parameterize ((*current-frame* frame))
+                (display-buffer buffer)
+                (display-completion-list names "")
+                (let* ((text (text-editor-to-string buffer))
+                       (at (string-contains text "possible completions:\n"))
+                       (tail (substring text (+ at (string-length
+                                                   "possible completions:\n"))
+                                        (string-length text)))
+                       (first-row (car (string-split tail #\newline))))
+                  (length (filter (lambda (n)
+                                    (string-contains first-row n))
+                                  names))))))))
+    (list (row-names 80) (row-names 160))))
+
 ;; ...and the interval tree that filling the buffer leaves behind is a
 ;; tree: every interval's total is its own length plus its two subtrees',
 ;; and no length is negative. (Positions are a *cache* - only the path the

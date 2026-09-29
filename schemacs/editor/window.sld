@@ -75,6 +75,7 @@
    pop-to-buffer-same-window
    split-window-below
    split-window-below-command
+   split-main-window-below
    split-window-right
    split-window-right-command
    switch-to-buffer
@@ -201,6 +202,41 @@
              frame window
              (make-window-parent window new top height left width))
             new))))
+
+    (define (split-main-window-below buffer size)
+      ;; Show BUFFER in a new window at the bottom of the frame, SIZE rows
+      ;; tall and spanning the frame's whole width: GNU Emacs's
+      ;; `display-buffer-at-bottom' does `(split-window-no-error
+      ;; (window-main-window))', and with no side windows - which is all
+      ;; this editor has - the main window is the frame's root window.
+      ;; Splitting the *root* is what makes a completion list a
+      ;; full-width window at the bottom even in a frame that is divided
+      ;; left and right: the window above keeps its own arrangement and
+      ;; gives up SIZE rows at the bottom.
+      ;;--------------------------------------------------------------
+      (let* ((frame (*current-frame*))
+             (main (car (ncurses-frame-windows frame)))
+             (top (window-top main))
+             (left (window-left main))
+             (width (window-width main))
+             (total (window-height main)))
+        (when (>= size total)
+          (error "Size of new window too small" size))
+        ;; the frame's windows give up SIZE rows at the bottom
+        (absorb-into! main 'bottom (- size))
+        (let ((new (make<ncurses-window>
+                    buffer
+                    (copy-marker buffer (text-editor-get-cursor buffer))
+                    0
+                    (+ top (- total size))
+                    size
+                    left
+                    width
+                    #f '())))
+          (install-window-parent!
+           frame main
+           (make-window-parent main new top total left width))
+          new)))
 
     (define (split-window-right window size)
       (let* ((frame (*current-frame*))

@@ -47,7 +47,7 @@
           new-text-editor text-editor-char-count text-editor-copy-string
           text-editor-cursor-column text-editor-cursor-line
           text-editor-delete-from-cursor text-editor-get-cursor
-          text-editor-insert text-editor-set-cursor
+          text-editor-insert text-editor-line-count text-editor-set-cursor
           text-editor-set-read-only! text-editor-to-string
           text-editor-undo-disable!)
     ;; `logior' is Guile's: the bitset is three bit flags.
@@ -60,7 +60,7 @@
           get-text-property put-text-property remove-text-properties)
     (only (schemacs editor buffer)
           buffer-default-directory bury-buffer current-buffer get-buffer
-          get-buffer-create
+          get-buffer-create record-buffer!
           buffer-local-keymap set!buffer-local-keymap set!buffer-default-directory
           ;; `completion-base-position' is a variable local to `*Completions*'
           buffer-local-value set-buffer-local-value!
@@ -68,7 +68,8 @@
     ;; `getcwd' is Guile's, for a buffer that has no `default-directory'.
     (only (guile) getcwd)
     (only (schemacs editor window)
-          delete-window display-buffer get-buffer-window quit-window)
+          delete-window get-buffer-window quit-window
+          split-main-window-below window-min-height)
     ;; `self-insert-command' is what SPC does in a file-name minibuffer
     ;; (`minibuffer-local-filename-completion-map' below), and
     ;; `with-current-buffer' and the line motion are the ordinary
@@ -77,8 +78,8 @@
        *this-command* *last-command*)
     (only (schemacs editor frame)
           *current-frame* *echo-area-buffer* *echo-area-prompt* *minibuffer*
-          set!ncurses-frame-message set-message! set-window-point! window-list
-          window-width)
+          frame-height set!ncurses-frame-message set-message!
+          window-buffer window-height window-list window-width)
     ;; `try-completion' and `all-completions' are `minibuf.c''s and live in
     ;; `(schemacs editor minibuf)'; this library is `minibuffer.el' and uses
     ;; them rather than defining them.
@@ -121,6 +122,7 @@
    minibuffer-local-must-match-map
    *completion-auto-help*
    *completions-format*
+   *completions-max-height*
    *completion-setup-hook*
    *completion-show-help*
    *completion-show-inline-help*
@@ -474,9 +476,11 @@
       ;; arrived.
       ;;
       ;; Showing the window must not take point out of the prompt, which
-      ;; is why it is `display-buffer' and not `pop-to-buffer': the
-      ;; minibuffer is being read by a recursive edit, and the completion
-      ;; commands act on it again as soon as this returns.
+      ;; is why it is `completion-display-window' and not `pop-to-buffer':
+      ;; the minibuffer is being read by a recursive edit, and the
+      ;; completion commands act on it again as soon as this returns. The
+      ;; window itself is Emacs's for the list: a *fresh* window, fitted
+      ;; to the candidates (see `completion-display-window').
       ;;--------------------------------------------------------------
       (new-command
        "minibuffer-completion-help"
@@ -505,11 +509,18 @@
                            (if (not (pair? rest))
                                (reverse acc)
                                (loop (cdr rest) (cons (car rest) acc)))))
+                    ;; the window comes *first*, so that the fill below
+                    ;; reads the window's real width (the layout's column
+                    ;; count is a function of it) - Emacs displays the
+                    ;; buffer and then fills it, and so does this
+                    (window (completion-display-window
+                             (get-buffer-create "*Completions*")))
                     (buffer (display-completion-list
-                             all (substring typed base-size (string-length typed)))))
+                             all (substring typed base-size (string-length typed))))
+                    (window2 (completion-fit-window buffer)))
                (set-buffer-local-value! buffer 'completion-base-position
                                         (list base-size (string-length typed)))
-               (display-buffer buffer))))))
+               (record-buffer! buffer))))))
        (lambda () #f)
        "Show the possible completions of the text in the minibuffer."))
 
@@ -1390,6 +1401,69 @@
           (run-completion-setup-hook! buffer)
           (text-editor-set-read-only! buffer #t))
         buffer))
+
+    (define *completions-max-height* (make-parameter #f))
+    ;; ^ GNU Emacs's `completions-max-height': the most lines the
+    ;; `*Completions*' window may have. Nil - Emacs's default - means
+    ;; the window may grow to the frame.
+
+    (define (completion-fitted-height buffer)
+      ;; The height `completion-display-window' gives the `*Completions*'
+      ;; window, as GNU Emacs's `fit-window-to-buffer' computes it: the
+      ;; buffer's text lines plus its mode line, at least
+      ;; `window-min-height', at most `*completions-max-height*' or -
+      ;; that being nil - the frame's text area less a minimum for the
+      ;; window above.
+      ;;--------------------------------------------------------------
+      (let* ((needed (+ 1 (text-editor-line-count buffer)))
+             (max-height (or (*completions-max-height*)
+                             (- (- (frame-height (*current-frame*)) 1)
+                                window-min-height))))
+        (min (max window-min-height needed) max-height)))
+
+    (define (completion-display-window buffer)
+      ;; Put the `*Completions*' buffer in a window, and answer with the
+      ;; window: GNU Emacs's `minibuffer-completion-help' displays the
+      ;; list with `display-buffer-at-bottom' in place of
+      ;; `display-buffer-use-some-window'. Two things follow that the
+      ;; plain `display-buffer' does not do:
+      ;;
+      ;;  * the list is shown in the bottom-most window that already
+      ;;    shows it, or in a *new* window split off the frame's root -
+      ;;    `split-main-window-below', Emacs's `(split-window
+      ;;    (window-main-window))' - so the list is always a full-width
+      ;;    window at the bottom of the frame, never an unrelated window
+      ;;    taken over, and never one half of a split;
+      ;;  * the window is made before the buffer is filled, so the
+      ;;    layout can read the window's *width* - which is Emacs's
+      ;;    order too (its `body-function' fills after the window is
+      ;;    displayed). `completion-fit-window', which the caller runs
+      ;;    after filling, sizes it to the list.
+      ;;--------------------------------------------------------------
+      (let* ((windows (window-list))
+             (bottom (and (pair? windows)
+                          (list-ref windows (- (length windows) 1)))))
+        (if (and bottom (eq? (window-buffer bottom) buffer))
+            (begin (record-buffer! buffer) bottom)
+            (split-main-window-below buffer window-min-height))))
+
+    (define (completion-fit-window buffer)
+      ;; Size the `*Completions*' window to its list, and answer with it:
+      ;; GNU Emacs's `completions--fit-window-to-buffer', run by the
+      ;; display's `window-height' after the buffer is filled. A window
+      ;; whose height already fits is kept; one that does not is replaced
+      ;; by a fresh split at the fitted height - the replacement is just
+      ;; this editor's way of resizing, and nothing is drawn between the
+      ;; two.
+      ;;--------------------------------------------------------------
+      (let* ((needed (completion-fitted-height buffer))
+             (window (get-buffer-window buffer)))
+        (if (and window (= (window-height window) needed))
+            window
+            (begin
+              (when (and window (< 1 (length (window-list))))
+                (delete-window window))
+              (split-main-window-below buffer needed)))))
 
     (define (choose-completion-string choice mb base-position)
       ;; GNU Emacs's `choose-completion-string' (`simple.el'): "insert the
