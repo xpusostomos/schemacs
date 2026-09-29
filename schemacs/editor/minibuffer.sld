@@ -79,7 +79,8 @@
     (only (schemacs editor frame)
           *current-frame* *echo-area-buffer* *echo-area-prompt* *minibuffer*
           frame-height set!ncurses-frame-message set-message!
-          window-buffer window-height window-list window-width)
+          set-window-point! window-buffer window-height window-list
+          window-width)
     ;; `try-completion' and `all-completions' are `minibuf.c''s and live in
     ;; `(schemacs editor minibuf)'; this library is `minibuffer.el' and uses
     ;; them rather than defining them.
