@@ -32,7 +32,7 @@
        *Buffer-menu-del-char* *Buffer-menu-marks* Buffer-menu-buffer
        Buffer-menu-execute Buffer-menu--set-mark! Buffer-menu-redraw!
        list-buffers-noselect)
- (only (guile) string-prefix? string-split)
+ (only (guile) string-contains string-prefix? string-split)
  (only (schemacs editor command) run-command)
  (only (schemacs editor buffer)
        *buffer-list* *current-buffer* *kill-buffer-query-functions*
@@ -55,6 +55,7 @@
  (only (schemacs editor minibuffer)
        completion-all-completions completion-boundaries
        *completion-show-inline-help* *completions-header-format*
+       *completions-format*
        completion-setup-function completions-header-string
        display-completion-list
        *minibuffer-completing-file-name*
@@ -2130,11 +2131,45 @@
              "\n"
              "2 possible completions:\n"
              "apricot.txt\n"
-             "apple.txt\n")
+             "apple.txt")
   (let ((frame (message-frame)))
     (parameterize ((*current-frame* frame))
       (display-completion-list '("apricot.txt" "apple.txt") "ap")
       (text-editor-to-string (get-buffer "*Completions*")))))
+
+;; With more candidates than a single column of them, the layout Emacs's
+;; `completion--insert-strings' works out puts them on shared rows: as
+;; many `LENGTH + 2' columns as the width takes - three for six
+;; two-character candidates in 80 columns - each COLWIDTH wide, row by
+;; row. The padding to a column is literal spaces here (Emacs lets a
+;; `display' property align on redisplay), so the text is exact.
+(test-equal (string-append
+             "aa" (make-string 24 #\space) "ab" (make-string 24 #\space)
+             "ac" "\n"
+             "ad" (make-string 24 #\space) "ae" (make-string 24 #\space)
+             "af")
+  (let ((frame (message-frame)))
+    (parameterize ((*current-frame* frame))
+      (display-completion-list '("aa" "ab" "ac" "ad" "ae" "af") "")
+      (let* ((text (text-editor-to-string (get-buffer "*Completions*")))
+             (after (string-append "possible completions:\n"))
+             (at (string-contains text after)))
+        (substring text (+ at (string-length after))
+                   (string-length text))))))
+
+;; `completions-format' bound to `one-column' is Emacs's other layout:
+;; down the screen one per line, with no newline after the last
+;; (`completion--insert-one-column' ends with Emacs's `delete-char -1').
+(test-equal "aa\nab\nac"
+  (let ((frame (message-frame)))
+    (parameterize ((*current-frame* frame)
+                   (*completions-format* 'one-column))
+      (display-completion-list '("aa" "ab" "ac") "")
+      (let* ((text (text-editor-to-string (get-buffer "*Completions*")))
+             (after (string-append "possible completions:\n"))
+             (at (string-contains text after)))
+        (substring text (+ at (string-length after))
+                   (string-length text))))))
 
 ;; ...and the interval tree that filling the buffer leaves behind is a
 ;; tree: every interval's total is its own length plus its two subtrees',

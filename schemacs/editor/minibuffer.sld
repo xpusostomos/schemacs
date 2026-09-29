@@ -47,8 +47,7 @@
           new-text-editor text-editor-char-count text-editor-copy-string
           text-editor-cursor-column text-editor-cursor-line
           text-editor-delete-from-cursor text-editor-get-cursor
-          text-editor-get-end-of-line text-editor-get-start-of-line
-          text-editor-insert text-editor-line-count text-editor-set-cursor
+          text-editor-insert text-editor-set-cursor
           text-editor-set-read-only! text-editor-to-string
           text-editor-undo-disable!)
     ;; `logior' is Guile's: the bitset is three bit flags.
@@ -78,7 +77,8 @@
        *this-command* *last-command*)
     (only (schemacs editor frame)
           *current-frame* *echo-area-buffer* *echo-area-prompt* *minibuffer*
-          set!ncurses-frame-message set-message! set-window-point! window-list)
+          set!ncurses-frame-message set-message! set-window-point! window-list
+          window-width)
     ;; `try-completion' and `all-completions' are `minibuf.c''s and live in
     ;; `(schemacs editor minibuf)'; this library is `minibuffer.el' and uses
     ;; them rather than defining them.
@@ -120,6 +120,7 @@
    minibuffer-complete-word
    minibuffer-local-must-match-map
    *completion-auto-help*
+   *completions-format*
    *completion-setup-hook*
    *completion-show-help*
    *completion-show-inline-help*
@@ -141,7 +142,6 @@
    minibuffer-next-completion
    minibuffer-previous-completion
    minibuffer-restore-windows
-   next-line-completion
    *minibuffer-completion-predicate*
    common-prefix
    completion-candidates-message
@@ -907,9 +907,9 @@
             ;;     text will do, but it is not the only candidate.
             ;;
             ;;   * nothing was completed and what is there *is* a
-             ;;     valid completion: "Complete, but not unique" - the
-             ;;     text will do, but it is not the only candidate.
-             ;;
+            ;;     valid completion: "Complete, but not unique" - the
+            ;;     text will do, but it is not the only candidate.
+            ;;
             ;; Saying "Complete, but not unique" in the first case
             ;; instead is what made TAB on a name that completes in full
             ;; look like a failure.
@@ -1209,44 +1209,161 @@
           (put-text-property start (text-editor-char-count buffer)
                              'face 'shadow buffer))))
 
-    (define (insert-completion-candidate! buffer candidate)
-      ;; One candidate on its own line, carrying what says it *is* a
-      ;; candidate and how much of it matched: GNU Emacs's
-      ;; `completion--insert' puts the `completion--string' property on
-      ;; the text it inserts, and `completion-hilit-commonality' the two
-      ;; faces.
-      ;;
-      ;; The property is what tells a candidate line from the heading and
-      ;; the help above it - Emacs reads it to answer
-      ;; `completion--selected-candidate', and this editor used to take
-      ;; any line at all for a candidate, which was the same thing only
-      ;; while every line was one.
+    (define (insert-completion-cell! buffer candidate)
+      ;; The core of GNU Emacs's `completion--insert': put CANDIDATE at
+      ;; point with the `completion--string' property that says it *is*
+      ;; a candidate. (Emacs's `completion-hilit-commonality' does the
+      ;; two faces to the candidate *strings*; a string here cannot
+      ;; carry a property, so the faces go straight on the buffer text.)
       ;;--------------------------------------------------------------
       (let ((start (text-editor-char-count buffer)))
         (text-editor-insert buffer candidate)
         (put-text-property start (text-editor-char-count buffer)
                            'completion--string candidate buffer)
         (set-completion-line-faces!
-         buffer start (+ start (string-length candidate)) #f)
-        (text-editor-insert buffer "\n")))
+         buffer start (+ start (string-length candidate)) #f)))
+
+    (define (insert-completion-separator! buffer str)
+      ;; Insert the text between cells - a row break or the padding to
+      ;; the next column - and take the `completion--string' property
+      ;; back off it. Inserting text at the end of a propertized run
+      ;; lets that run's property extend over the new text here (the
+      ;; engine's `adjust-intervals-for-insertion' grows the interval
+      ;; across it), and Emacs's separators carry no property: a
+      ;; candidate's start is found again by "the character before has
+      ;; no property", which only works while the separator between two
+      ;; cells stays clean.
+      ;;--------------------------------------------------------------
+      (let ((start (text-editor-char-count buffer)))
+        (text-editor-insert buffer str)
+        (remove-text-properties start (text-editor-char-count buffer)
+                                '(completion--string) buffer)))
+
+    (define *completions-format*
+      ;; GNU Emacs's `completions-format': whether the candidates are
+      ;; laid out across the window in columns or down the screen one
+      ;; per line. `horizontal' is Emacs's default; `one-column' has no
+      ;; arithmetic of its own, and what used to be this library's whole
+      ;; layout is its `completion--insert-one-column'. Emacs's
+      ;; `vertical' arrangement and the truncation of a list taller
+      ;; than the window (`completions-max-height') are not implemented.
+      ;;--------------------------------------------------------------
+      (make-parameter 'horizontal))
+
+    (define (completion--insert-strings buffer completions)
+      ;; GNU Emacs's `completion--insert-strings': how many columns the
+      ;; window can take, and the candidates arranged in them. The
+      ;; arithmetic is Emacs's, kept with it:
+      ;;
+      ;;  * LENGTH is the widest candidate;
+      ;;  * WWIDTH is the window's width less a column, or 79 when the
+      ;;    window is not on the screen (Emacs's fallback);
+      ;;  * COLUMNS fits as many `(+ 2 LENGTH)' columns into the width
+      ;;    as it can - at least two spaces between columns - and is
+      ;;    halved against the number of candidates, so that no column
+      ;;    is given fewer than two of them;
+      ;;  * COLWIDTH is the width each column is laid out to.
+      ;;--------------------------------------------------------------
+      (when (pair? completions)
+        (let* ((count (length completions))
+               ;; ^ Emacs's `(length strings)' is read here, *before*
+               ;; LENGTH is bound below, because Scheme has one
+               ;; namespace where Emacs Lisp has two: there, `length'
+               ;; the function and LENGTH the variable coexist, and the
+               ;; count is asked without thinking about which is which.
+               (length (apply max (map string-length completions)))
+               (window (get-buffer-window buffer))
+               (wwidth (if window (- (window-width window) 1) 79))
+               (columns (min (max 1 (quotient wwidth (+ 2 length)))
+                             (max 1 (quotient count 2))))
+               (colwidth (quotient wwidth columns)))
+          (case (*completions-format*)
+            ((one-column)
+             (completion--insert-one-column buffer completions))
+            ((horizontal)
+             (completion--insert-horizontal buffer completions length
+                                            wwidth colwidth columns))
+            (else
+             (error "Unknown completion format" (*completions-format*)))))))
+
+    (define (completion--insert-horizontal buffer completions length
+                                           wwidth colwidth columns)
+      ;; GNU Emacs's `completion--insert-horizontal': the candidates in
+      ;; rows, each in its own column, each following cell padded out to
+      ;; the next `colwidth' boundary. Emacs pads with a tab carrying a
+      ;; `display' property that aligns the next character to the column
+      ;; on redisplay; this editor has no display properties, so the
+      ;; padding is literal spaces, which is what the screen shows
+      ;; either way.
+      ;;
+      ;; A candidate that would run past the window's width starts a new
+      ;; row. The column pointer advances by one `colwidth' - Emacs's
+      ;; `(* colwidth (ceiling length colwidth))' - a whole number of
+      ;; column widths, which is one, a column never being narrower than
+      ;; LENGTH + 2.
+      ;;--------------------------------------------------------------
+      (let loop ((rest completions) (column 0) (first #t) (last #f))
+        (if (null? rest)
+            #f
+            (let ((str (car rest)))
+              (if (equal? last str)
+                  ;; a (consecutive) duplicate is not shown twice
+                  (loop (cdr rest) column first last)
+                  (begin
+                    (if first
+                        #t
+                        (if (< wwidth (+ column (max colwidth
+                                                     (string-length str))))
+                            ;; no room for STR at this column: next row
+                            (begin
+                              (insert-completion-separator! buffer "\n")
+                              (set! column 0))
+                            (insert-column-padding! buffer column)))
+                    (insert-completion-cell! buffer str)
+                    (loop (cdr rest) (+ column colwidth) #f str)))))))
+
+    (define (completion--insert-one-column buffer completions)
+      ;; GNU Emacs's `completion--insert-one-column': the candidates
+      ;; down the screen, one per line, with no newline after the last -
+      ;; Emacs's `(delete-char -1)', which deletes the final one
+      ;; *backward*, so the cursor steps back across it first.
+      ;;--------------------------------------------------------------
+      (let loop ((rest completions))
+        (if (null? rest)
+            (begin
+              (text-editor-set-cursor
+               buffer (- (text-editor-char-count buffer) 1))
+              (text-editor-delete-from-cursor buffer 1))
+            (begin
+              (insert-completion-cell! buffer (car rest))
+              (insert-completion-separator! buffer "\n")
+              (loop (cdr rest))))))
+
+    (define (insert-column-padding! buffer column)
+      ;; Pad the current line out to COLUMN with spaces, so the next
+      ;; candidate starts where its column says: the `(display
+      ;; (space :align-to COLUMN))' Emacs puts on the tab between
+      ;; candidates, which its redisplay draws exactly as these spaces.
+      ;;--------------------------------------------------------------
+      (let ((at (text-editor-cursor-column buffer)))
+        (when (< at column)
+          (insert-completion-separator!
+           buffer (make-string (- column at) #\space)))))
 
     (define (display-completion-list completions common-substring)
       ;; GNU Emacs's `display-completion-list': fill the `*Completions*'
-      ;; buffer with COMPLETIONS, one per line, and answer with it.
+      ;; buffer with COMPLETIONS and answer with it.
       ;;
-      ;; Two departures from Emacs, both because of what this project has:
+      ;; The layout is Emacs's: `completion--insert-strings' works out
+      ;; how many columns fit the window and `completion--insert-horizontal'
+      ;; writes the candidates into them. The lines that are not
+      ;; candidates - the heading and the help - are why a candidate is
+      ;; marked with a property rather than being "the line point is on".
       ;;
-      ;;  * **One candidate per line.** Emacs lays them out in columns to
-      ;;    fit the window (`completions-format' is `horizontal'), which
-      ;;    is a display concern wanting the window's width; this is
-      ;;    Emacs's `one-column' format. The lines that are not candidates
-      ;;    - the heading and the help - are why a candidate is marked
-      ;;    with a property rather than being "the line point is on".
-      ;;  * **The faces go on here**, not in `completion-hilit-commonality'
-      ;;    as in Emacs - because Emacs highlights the candidate
-      ;;    *strings*, and a string here cannot carry a property. A face
-      ;;    lives on buffer text, which is also where the renderer reads
-      ;;    it, so this is where it has to be put.
+      ;; The one deliberate departure is where the faces go: `completion-
+      ;; hilit-commonality' does them to the candidate *strings* in Emacs,
+      ;; and a string here cannot carry a property, so they are put on
+      ;; the buffer text here instead - see `insert-completion-cell!'.
       ;;--------------------------------------------------------------
       (let ((buffer (get-buffer-create "*Completions*")))
         ;; the list is about to be thrown away, so the selection in it
@@ -1259,9 +1376,7 @@
           (text-editor-delete-from-cursor buffer (text-editor-char-count buffer))
           (*completions-common-substring* common-substring)
           (insert-completions-header! buffer (length completions))
-          (for-each (lambda (candidate)
-                      (insert-completion-candidate! buffer candidate))
-                    completions)
+          (completion--insert-strings buffer completions)
           ;; The help goes in at the *top*, above the heading, which is
           ;; what Emacs's `completion-setup-function' does by going to
           ;; `point-min' and inserting there - and it leaves point just
@@ -1472,9 +1587,9 @@
     ;; GNU Emacs's `minibuffer-next-completion' and its neighbours: the
     ;; cursor moves through the `*Completions*' buffer while point stays
     ;; in the minibuffer, and RET then takes the candidate it is on.
-    ;; Emacs lays the candidates out in columns and moves a "line" or a
-    ;; "column" through them; this editor puts one candidate on each
-    ;; line, so the two are the same move.
+    ;; Emacs lays the candidates out in columns and walks the cells by
+    ;; their text property; so does `move-completions' below, which is
+    ;; Emacs's `next-column-completion' for a horizontal format.
 
     (define *completions-highlight-range* #f)
     ;; ^ The range of the completions buffer currently carrying the
@@ -1500,74 +1615,98 @@
         (set! *completions-highlight-range* #f)))
 
     (define (show-completions-selection! buffer)
-      ;; Put the selection face on the line point is on, so that moving
-      ;; through the candidates is something that can be seen. GNU
-      ;; Emacs puts a `cursor-face' property there and lets the display
-      ;; decide; this editor's display reads `face'.
+      ;; Put the selection face on the cell point is on - just that
+      ;; cell, not the row, which shared its line with the cells around
+      ;; it once the candidates went into columns. GNU Emacs puts a
+      ;; `cursor-face' property there and lets the display decide; this
+      ;; editor's display reads `face'.
       ;;--------------------------------------------------------------
       (clear-completions-selection!)
-      (let* ((start (text-editor-get-start-of-line buffer))
-             (end (text-editor-get-end-of-line buffer)))
+      (let* ((start (text-editor-get-cursor buffer))
+             (end (completion--cell-end buffer start)))
         (when (< start end)
           (set-completion-line-faces! buffer start end #t)
           (set! *completions-highlight-range* (cons start end)))))
 
-    (define (line-start-index buffer line)
-      ;; The character index LINE of BUFFER begins at, leaving point where
-      ;; it was. The engine answers "where the line point is on starts" and
-      ;; has no line-to-index query of its own, so point is moved there and
-      ;; back.
+    (define (completion-start-at? buffer i)
+      ;; Whether I is the first character of a completion cell: it
+      ;; carries the `completion--string' property and the character
+      ;; before it does not. Cells are what the horizontal layout put
+      ;; on the row, and the spaces between them are what keeps this
+      ;; test from being true inside one.
       ;;--------------------------------------------------------------
-      (let ((was (text-editor-get-cursor buffer)))
-        (text-editor-set-cursor buffer line 0)
-        (let ((start (text-editor-get-cursor buffer)))
-          (text-editor-set-cursor buffer was)
-          start)))
+      (and (get-text-property i 'completion--string buffer)
+           (or (= i 0)
+               (not (get-text-property (- i 1) 'completion--string
+                                       buffer)))))
 
-    (define (line-is-candidate? buffer line)
-      ;; Whether LINE of BUFFER is one of the candidates rather than the
-      ;; heading or the help above them.
+    (define (completion-next-cell-start buffer from)
+      ;; The first completion cell start after FROM, or #f: GNU Emacs's
+      ;; `next-column-completion' founds its walk on the text property
+      ;; each candidate was written with, and so does this - an index
+      ;; kept where it is through the help insertion and the layout.
       ;;--------------------------------------------------------------
-      (and (get-text-property (line-start-index buffer line)
-                              'completion--string buffer)
-           #t))
+      (let ((last (text-editor-char-count buffer)))
+        (let loop ((i (+ from 1)))
+          (cond ((>= i last) #f)
+                ((completion-start-at? buffer i) i)
+                (else (loop (+ i 1)))))))
 
-    (define (next-candidate-line buffer line step)
-      ;; The nearest line below (STEP 1) or above (STEP -1) LINE that is a
-      ;; candidate, or #f. The heading and the help lines are what this is
-      ;; for: moving one line at a time would land on them and make them
-      ;; look selectable.
+    (define (completion-previous-cell-start buffer from)
+      ;; The last completion cell start before FROM, or #f.
       ;;--------------------------------------------------------------
-      (let ((last (max 0 (- (text-editor-line-count buffer) 1))))
-        (let loop ((n (+ line step)))
-          (cond ((or (< n 0) (< last n)) #f)
-                ((line-is-candidate? buffer n) n)
-                (else (loop (+ n step)))))))
+      (let loop ((i (- from 1)))
+        (cond ((< i 0) #f)
+              ((completion-start-at? buffer i) i)
+              (else (loop (- i 1))))))
 
-    (define (next-line-completion n)
-      ;; GNU Emacs's `next-line-completion' as this editor's layout
-      ;; makes it: move N lines in the `*Completions*' buffer. Point
-      ;; stays where it is in the minibuffer - it is the completions
-      ;; window's point that moves - and the ends are clamped rather
-      ;; than wrapped, which is what `completion-auto-wrap' being nil
-      ;; means.
+    (define (completion--cell-end buffer start)
+      ;; One past the last character of the cell START starts: GNU
+      ;; Emacs's `completion--move-to-candidate-end', which is where a
+      ;; selection face stops on its cell.
       ;;--------------------------------------------------------------
-      (let ((buffer (get-buffer "*Completions*"))
-            (window (completions-window)))
-        (when (and buffer window)
-          (let ((step (if (< n 0) -1 1))
-                (left (abs n)))
-            (let loop ((left left)
-                       (line (text-editor-cursor-line buffer)))
-              (if (= left 0)
-                  (text-editor-set-cursor buffer line 0)
-                  (let ((next (next-candidate-line buffer line step)))
-                    ;; there is no candidate that way: stay where we are,
-                    ;; which is `completion-auto-wrap' being nil
-                    (if next (loop (- left 1) next) (loop 0 line))))))
+      (let ((last (text-editor-char-count buffer))
+            (value (get-text-property start 'completion--string buffer)))
+        (let loop ((i (+ start 1)))
+          (cond ((>= i last) i)
+                ((not (equal? value (get-text-property i 'completion--string
+                                                       buffer)))
+                 i)
+                (else (loop (+ i 1)))))))
+
+    (define (move-completions n)
+      ;; Move the `*Completions*' buffer's point N candidates, through
+      ;; the cells the layout arranged them in, and mark the one that is
+      ;; on. This is GNU Emacs's `next-column-completion' for a
+      ;; `horizontal' format: the next cell is the next in the buffer,
+      ;; which is the next column of the row and then the first of the
+      ;; next. The ends are clamped rather than wrapped, which is
+      ;; `completion-auto-wrap' being nil - this editor's one-column
+      ;; navigation always worked that way.
+      ;;
+      ;; Point starts on the heading line, above the first candidate, so
+      ;; the first move finds the first cell and the moves after it walk
+      ;; the cells in display order.
+      ;;--------------------------------------------------------------
+      (let ((buffer (get-buffer "*Completions*")))
+        (when buffer
+          (let loop ((left (abs n)) (step (if (< n 0) -1 1)))
+            (if (= left 0)
+                #f
+                (let ((next (if (< step 0)
+                                (completion-previous-cell-start
+                                 buffer (text-editor-get-cursor buffer))
+                                (completion-next-cell-start
+                                 buffer (text-editor-get-cursor buffer)))))
+                  (if next
+                      (begin (text-editor-set-cursor buffer next)
+                             (loop (- left 1) step))
+                      (loop 0 step))))
           ;; the window is a view of the buffer, so its point follows
-          (set-window-point! window (text-editor-get-cursor buffer))
-          (show-completions-selection! buffer))))
+          (let ((window (completions-window)))
+            (when window
+              (set-window-point! window (text-editor-get-cursor buffer))))
+          (show-completions-selection! buffer)))))
 
     (define (completion--selected-candidate)
       ;; GNU Emacs's `completion--selected-candidate': the candidate the
@@ -1605,14 +1744,17 @@
                  (buffer-local-value buffer 'completion-base-position #f)))))))
 
     (define minibuffer-next-completion
-      ;; GNU Emacs's `minibuffer-next-completion'. Emacs also inserts
-      ;; the candidate here when `minibuffer-completion-auto-choose' is
-      ;; set; it is nil by default and nil here, so the move is all it
-      ;; does and RET is what takes the candidate.
+      ;; GNU Emacs's `minibuffer-next-completion': move through the
+      ;; candidates - the next cell of the layout, which for the
+      ;; `horizontal' format is the next column and then the first of
+      ;; the next row. Emacs also inserts the candidate here when
+      ;; `minibuffer-completion-auto-choose' is set; it is nil by
+      ;; default and nil here, so the move is all it does and RET is
+      ;; what takes the candidate.
       ;;--------------------------------------------------------------
       (new-count-command
        "minibuffer-next-completion"
-       (lambda (count) (next-line-completion count))
+       (lambda (count) (move-completions count))
        "Move to the next item in the completions window."))
 
     (define minibuffer-previous-completion
@@ -1620,7 +1762,7 @@
       ;;--------------------------------------------------------------
       (new-count-command
        "minibuffer-previous-completion"
-       (lambda (count) (next-line-completion (- count)))
+       (lambda (count) (move-completions (- count)))
        "Move to the previous item in the completions window."))
 
     (define minibuffer-completion-exit
