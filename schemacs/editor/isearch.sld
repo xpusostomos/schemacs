@@ -47,9 +47,7 @@
     (only (schemacs editor frame)
          *current-frame* current-editor set!ncurses-frame-message
           )
-    (only (schemacs editor command)
-         new-command
-          )
+    (only (schemacs editor command) defcommand)
     (only (schemacs editor simple)
          current-kill word-char?
           )
@@ -374,19 +372,15 @@
                   (list->string (reverse acc))))))
          (else (string c)))))
 
-    (define isearch-forward
-      (new-command
-       "isearch-forward"
-       (lambda () (isearch #t))
-       (lambda () (isearch #t))
-       "Search forward incrementally (bound to C-s)."))
+    (defcommand isearch-forward ()
+      "Search forward incrementally (bound to C-s)."
+      (interactive)
+      (isearch #t))
 
-    (define isearch-backward
-      (new-command
-       "isearch-backward"
-       (lambda () (isearch #f))
-       (lambda () (isearch #f))
-       "Search backward incrementally (bound to C-r)."))
+    (defcommand isearch-backward ()
+      "Search backward incrementally (bound to C-r)."
+      (interactive)
+      (isearch #f))
 
     ;; The keys GNU Emacs binds the search to, beside the commands.
     (define-key *default-keymap* (list (list 'ctrl #\s)) isearch-forward)

@@ -16,10 +16,7 @@
 
   (import
     (scheme base)
-    ;; A command is a <command-type> record here and a function in Emacs,
-    ;; so Emacs's `(list-buffers)' is `(run-command list-buffers)'.
-    (only (schemacs editor command) run-command)
-    (only (schemacs editor files) find-file)
+    (only (schemacs editor files) find-file-noselect)
     (only (schemacs editor buff-menu) list-buffers)
     (only (schemacs editor window)
           display-buffer other-window switch-to-buffer
@@ -77,7 +74,7 @@
             ;; Focus on the first buffer.
             (other-window -1))))
         (when (> count 2)
-          (run-command list-buffers))))
+          (list-buffers))))
 
     (define (command-line-1 args)
       ;; GNU Emacs's `command-line-1', for a command line of file names:
@@ -91,7 +88,7 @@
         (for-each
          (lambda (name)
            (set! displayable-buffers
-                 (cons (find-file name) displayable-buffers)))
+                 (cons (find-file-noselect name) displayable-buffers)))
          args)
         (command-line-1--display displayable-buffers)))
 

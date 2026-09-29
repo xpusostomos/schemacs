@@ -45,7 +45,8 @@
     (only (schemacs editor engine)
           text-editor-deactivate-mark set!text-editor-deactivate-mark!)
     (only (schemacs editor command)
-          command-interactive-spec command-record-of command-type? run-command)
+          command-interactive-spec command-record-of command-type? defcommand
+          run-command)
     (only (schemacs editor frame)
           *current-frame* ncurses-frame-esc-pending ncurses-frame-keymap-state
           ncurses-frame-message ncurses-frame-message-expired?
@@ -68,7 +69,7 @@
           *last-change-was-undo* *last-command* *this-command*
           deactivate-mark clear-prefix! pending-uarg place-undo-boundary!
           prefix-echo-pending? show-prefix-echo!
-          undo-command undo-redo-command update-prefix!)
+          undo undo-redo update-prefix!)
     ;; `render!' after every key: the loop is what drives the display.
     (only (schemacs editor xdisp) render!)
     )
@@ -223,7 +224,7 @@
         ;; again after the command rather than using ACTION.
         (*this-command* action)
         (place-undo-boundary! action)
-        (unless (or (eq? action undo-command) (eq? action undo-redo-command))
+        (unless (or (eq? action undo) (eq? action undo-redo))
           (*last-change-was-undo* #f))
         (clear-prefix!)
         (set!ncurses-frame-message frame "")
@@ -542,13 +543,16 @@
               (exit value)
               (error "Not in a recursive edit"))))))
 
-    (define (abort-recursive-edit)
+    (defcommand abort-recursive-edit ()
       ;; Leave the innermost recursive edit and signal quit, so the
       ;; command that asked the question is abandoned: GNU Emacs's
-      ;; `abort-recursive-edit'. It is `exit-recursive-edit' with a thunk
-      ;; whose call signals, exactly as Emacs's
-      ;; `minibuffer-quit-recursive-edit' does.
-      ;;--------------------------------------------------------------
+      ;; `abort-recursive-edit', which is keyboard.c's own - a function
+      ;; any Lisp can call, and a command at the same time, which is
+      ;; why the minibuffer map can bind it directly. It is
+      ;; `exit-recursive-edit' with a thunk whose call signals, exactly
+      ;; as Emacs's `minibuffer-quit-recursive-edit' does.
+      "Quit the innermost recursive edit and the command that asked the question."
+      (interactive)
       (exit-recursive-edit signal-quit))
 
     (define (event-loop frame)

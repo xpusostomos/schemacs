@@ -6,19 +6,21 @@
   ;; See LAYOUT-PLAN.txt for the rule this library is a step of.
   (import
     (scheme base)
+    (scheme eval)
     (scheme write)
     (scheme case-lambda)
     (only (schemacs lens) record-unit-lens)
     ;; A `defcommand' name keeps its name and docstring in Guile's own
     ;; copy, which `,describe' shows: `procedure-name' and
     ;; `procedure-documentation' read them back for the obarray record.
-    (only (guile) procedure-name procedure-documentation))
+    (only (guile) current-module procedure-name procedure-documentation))
 
   (export
    command-type? make<command> new-command new-count-command
    command-name command-procedure command-doc-string
    command-interactive-spec
    *mark-even-if-inactive*
+   current-prefix-arg
    uarg->integer
    run-command apply-command show-command
    defcommand *command-table* command? command-record-of command-value-of
@@ -82,6 +84,22 @@
       ;; `interactive "r"' asks for the region and has to decide what to
       ;; do when the mark is not active. `(mark)' and `region-beginning'
       ;; ask it too.
+      ;;--------------------------------------------------------------
+      (make-parameter #f))
+
+    (define current-prefix-arg
+      ;; Emacs's `current-prefix-arg' - callint.c's `DEFVAR_LISP', the
+      ;; raw prefix argument for the *current* command: what
+      ;; `(interactive "P")' returns, and the variable
+      ;; `split-window-below''s interactive form reads for its size. The
+      ;; command loop copies `prefix-arg' - the value
+      ;; `universal-argument' left for the next command, `pending-uarg'
+      ;; here - into it before the command runs (keyboard.c), and an
+      ;; interactive *expression* is evaluated under it, which is where
+      ;; the loop's copy is visible. `interactive-proc' binds it around
+      ;; the evaluation; a command body that wants the raw prefix asks
+      ;; with `(interactive "P")' instead, which is Emacs's "less
+      ;; clean" way.
       ;;--------------------------------------------------------------
       (make-parameter #f))
 
@@ -165,15 +183,36 @@
     ;; description commands will read, ordered most-recently-defined
     ;; first.
 
-    (define (interactive-proc spec command)
+    (define (interactive-proc spec command module)
       ;; The command's interactive entry: a procedure that reads what a
       ;; keyfinger supplies and calls COMMAND with it - GNU Emacs's
       ;; `call-interactively' reading the arguments once, for the
       ;; specifications `defcommand' knows. SPEC is `#f' (no arguments),
-      ;; `"p"' (the numeric prefix) or `"P"' (the raw prefix).
+      ;; `"p"' (the numeric prefix), `"P"' (the raw prefix), or an
+      ;; *expression* - a list, not a string - evaluated at the keypress
+      ;; to produce the argument list, which is Emacs's
+      ;; `(interactive (list ...))`: `(interactive (list
+      ;; (selected-window)))' hands COMMAND the window it is to delete.
+      ;; The expression is evaluated in COMMAND's own module - the one
+      ;; `register-command!' caught (MODULE) when the command was
+      ;; defined, which is where the names it uses are bound. Evaluating
+      ;; it where the keypress found `interactive-proc' would be wrong:
+      ;; that is the command loop's module, and the command's helpers
+      ;; are not all in it.
       ;;--------------------------------------------------------------
       (cond
        ((not spec) (lambda () (command)))
+       ;; an expression - a list - is recognised before the strings, so
+       ;; that testing a form for `"p"' does not compare a list
+       ((pair? spec)
+        (lambda (uarg)
+          ;; The command loop has copied the pending prefix into
+          ;; `current-prefix-arg' before the command's arguments are
+          ;; read; an interactive expression, like Emacs's `(interactive
+          ;; ...)', can read it for an argument (`split-window-below'
+          ;; does).
+          (parameterize ((current-prefix-arg uarg))
+            (apply command (eval spec module)))))
        ((string=? spec "p") (lambda (uarg) (command (uarg->integer 1 uarg))))
        ((string=? spec "P") (lambda (uarg) (command uarg)))
        (else (error "Unsupported interactive specification" spec))))
@@ -185,11 +224,17 @@
       ;; own copy, the API being the procedure - and push it on
       ;; `*command-table*'. The argument order (command, SPEC) is the
       ;; expansion `defcommand' emits; SPEC is `#f', `"p"' or `"P"',
-      ;; `interactive-proc' knows what those mean.
+      ;; or an interactive expression, `interactive-proc' knows what
+      ;; those mean. The module caught here is the defining module -
+      ;; the one the `defcommand' expansion runs in - and an
+      ;; interactive expression evaluates there. That module is
+      ;; `current-module' while this procedure runs, because the
+      ;; definition it is recording is still in progress.
       ;;--------------------------------------------------------------
       (let* ((name (symbol->string (procedure-name command)))
+             (module (current-module))
              (record (new-command name
-                                  (interactive-proc spec command)
+                                  (interactive-proc spec command module)
                                   command
                                   (procedure-documentation command)
                                   (and spec 'uarg))))
@@ -228,7 +273,7 @@
             record)))
 
     (define-syntax defcommand
-      ;; Define NAME as a command, GNU Emacs's `defun' with an optional
+      ;; Define a command, GNU Emacs's `defun' with an optional
       ;; `interactive' declaration, in the order defun expects: NAME,
       ;; the parameter list, an optional docstring (a string), an
       ;; optional `(interactive SPEC)', and the body:
@@ -238,10 +283,21 @@
       ;;     (interactive "r")
       ;;     (delete-region beg end))
       ;;
+      ;; SPEC is `(interactive)` (the body takes no arguments), `"p"`
+      ;; (the numeric prefix), `"P"` (the raw prefix), or an *expression*
+      ;; evaluated at the keypress to build the body's arguments - so a
+      ;; command whose procedure is a plain function, callable from
+      ;; Lisp, can fill its arguments from the environment when a key
+      ;; reaches it:
+      ;;
+      ;;   (defcommand delete-window (window)
+      ;;     "Remove WINDOW from the frame."
+      ;;     (interactive (list (selected-window)))
+      ;;     ...)
+      ;;
       ;; The expansion binds NAME to a plain procedure over the
       ;; parameter list and body - callable from anywhere - and calls
       ;; `register-command!', which files its record in the obarray.
-      ;; SPEC is today `#f', `"p"' or `"P"'.
       ;;--------------------------------------------------------------
       (syntax-rules (interactive)
         ((defcommand name args (interactive) body ...)
@@ -255,11 +311,11 @@
         ((defcommand name args (interactive spec) body ...)
          (begin
            (define (name . args) body ...)
-           (register-command! name spec)))
+           (register-command! name 'spec)))
         ((defcommand name args docstring (interactive spec) body ...)
          (begin
            (define (name . args) docstring body ...)
-           (register-command! name spec)))
+           (register-command! name 'spec)))
         ((defcommand name args docstring body ...)
          (begin
            (define (name . args) docstring body ...)

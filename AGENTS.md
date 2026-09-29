@@ -293,3 +293,44 @@ Our library mirrors it on purpose.
 - Run with `guile --no-auto-compile --r7rs -L . -s <file>`, `GUILE_WARN_DEPRECATED=no`.
 - A suite that dies at load prints "0 FAIL"; `tools/run-suites.py` requires at least
   one expected pass so that cannot pass silently.
+
+
+## The `defcommand` conversion is complete (2026-09-29)
+
+Every command is now a `defcommand` whose name is the command's Emacs
+name, bound to a plain callable procedure; the `-command` suffixes are
+gone (undo, split-window-below, find-file, save-buffer, kill-buffer,
+Buffer-menu-*, ...). The one legacy record left is
+`self-insert-command` (simple.sld), documented there: the character it
+inserts is re-derived from keymap lookup state, which an
+`(interactive ...)` cannot say yet. Two names deviate because the host
+language took them, with the why on each definition:
+
+- `insert-newline` — Emacs's `newline` clashes with `(scheme base)`'s
+  output procedure.
+- keyboard.sld's `abort-recursive-edit` — the minibuffer's C-g binds
+  this directly (it is buffer.c's command), which is why it lives in
+  `(schemacs editor keyboard)` and not in minibuffer.sld.
+
+Mechanics added to `command.sld` for this:
+
+- `current-prefix-arg` — callint.c's variable, a parameter bound to the
+  pending prefix while a command's interactive *expression* is
+  evaluated; `split-window-below`'s `(interactive (list ...))` reads it
+  for its size, exactly as Emacs's backquote form reads the variable
+  (it needs `(scheme eval)` in the import).
+- An interactive expression evaluates in the command's *defining*
+  module, which `register-command!` captures at `defcommand` expansion
+  time (`current-module` there is the defining module — it is dynamic).
+  Evaluating it at keypress time would be the command loop's module
+  and fail to find the command's helpers.
+- The obarray (`*command-table*`) name comes from `procedure-name`, so
+  defcommand keeps the name you see in M-x.
+
+Reference hazards while converting: `define-key` must come *after* the
+`defcommand`s it binds (Guile resolves a binding when the form is
+evaluated); and a defcommand being a procedure means call sites switch
+from `(run-command NAME)` to a plain `(NAME)` call. `read-elem`-style
+sliding on a balanced form is the reliable way to convert a
+`new-command` block in bulk; the lambda's closing paren must be dropped
+and the defcommand's own added back.

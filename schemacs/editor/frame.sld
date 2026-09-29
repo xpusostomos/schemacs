@@ -32,9 +32,9 @@
     (only (schemacs editor engine)
           copy-marker  marker-position  set-marker!
           text-editor-get-cursor  text-editor-set-cursor)
-    ;; `suspend-frame' is a command, so it needs the command substrate,
-    ;; and it states its own key as the other command libraries do.
-    (only (schemacs editor command) new-command)
+    ;; `suspend-frame' is a command and states its own key as the other
+    ;; command libraries do.
+    (only (schemacs editor command) defcommand)
     (only (schemacs editor keymap) define-key *default-keymap*)
     ;; `SIGTSTP' is raised through `kill': `(scheme base)''s `raise'
     ;; raises an exception, not a signal.
@@ -581,7 +581,7 @@
            (= (window-left (car children)) (window-left (cadr children)))
            (= (window-width (car children)) (window-width (cadr children)))))
 
-    (define suspend-frame
+    (defcommand suspend-frame ()
       ;; GNU Emacs's `suspend-frame' (C-z), which is `frame.el''s - "do
       ;; whatever is right to suspend the current frame". On a terminal
       ;; that is stopping the editor with SIGTSTP; the shell gives it back
@@ -601,14 +601,11 @@
       ;; `raise' because `(scheme base)''s `raise' raises an *exception*,
       ;; and `(guile)''s raises a signal; the two share a name.
       ;;--------------------------------------------------------------
-      (new-command
-       "suspend-frame"
-       (lambda ()
-         (endwin)
-         (kill (getpid) SIGTSTP)
-         (refresh (stdscr)))
-       (lambda () #f)
-       "Stop the editor and return to the shell (bound to C-z)."))
+      "Stop the editor and return to the shell (bound to C-z)."
+      (interactive)
+      (endwin)
+      (kill (getpid) SIGTSTP)
+      (refresh (stdscr)))
 
     ;; The key GNU Emacs binds it to, beside the command as the other
     ;; libraries state theirs.

@@ -40,7 +40,7 @@
           set!ncurses-frame-message)
     ;; The commands here install their own keys, as files.el does.
     (only (schemacs editor command)
-          new-command run-command)
+          run-command defcommand)
     ;; `switch-to-buffer' is `window.el''s, and not this file's: it shows a
     ;; buffer in the selected window, which is a window operation.
     (only (schemacs editor window) switch-to-buffer)
@@ -50,21 +50,29 @@
     ;; Buffers by name, and killing one: `buffer.c'. `BUFFER-FILE-NAME' and
     ;; the buffer-local store are what `save-buffer' writes and what the
     ;; visited file's line-break convention is kept in.
-    (only (schemacs editor buffer)
-          *current-buffer*
-          *kill-buffer-query-functions*
-          buffer-default-directory
-          buffer-file-name
-          buffer-list
-          buffer-local-value
-          current-buffer
-          get-buffer-create
-          kill-buffer
-          record-buffer!
-          set!buffer-default-directory
-          set!buffer-file-name
-          set-buffer-local-value!
-          with-current-buffer)
+    ;; `buffer.c''s `kill-buffer' is imported apart, because the command
+    ;; below keeps Emacs's name `kill-buffer' for the interactive entry,
+    ;; and the mechanism runs as `%kill-buffer'. (In Emacs the two are
+    ;; one function; here the mechanism - which asks
+    ;; `kill-buffer-query-functions' and leaves the buffer list - is in
+    ;; `(schemacs editor buffer)', and the command, which needs the
+    ;; minibuffer's question, is here.)
+    (rename (only (schemacs editor buffer)
+                  *current-buffer*
+                  *kill-buffer-query-functions*
+                  buffer-default-directory
+                  buffer-file-name
+                  buffer-list
+                  buffer-local-value
+                  current-buffer
+                  get-buffer-create
+                  kill-buffer
+                  record-buffer!
+                  set!buffer-default-directory
+                  set!buffer-file-name
+                  set-buffer-local-value!
+                  with-current-buffer)
+            (kill-buffer %kill-buffer))
     (only (schemacs editor keymap)
           define-key
           *default-keymap*)
@@ -103,13 +111,12 @@
    file-write-protected?
    files--buffers-needing-to-be-saved
    find-file
-   find-file-command
-   kill-buffer-command
+   find-file-noselect
+   kill-buffer
    note-file-read-only!
    read-file-name
    save-answer-char->decision
    save-buffer
-   save-buffer-command
    save-buffers-kill-terminal
    save-some-buffers
    y-or-n-p
@@ -226,49 +233,29 @@
     ;; Emacs's simple.el, and is imported below.
     ;;------------------------------------------------------------------
 
-    (define find-file-command
-      (new-command
-       "find-file"
-       (lambda ()
-         (let* ((frame (*current-frame*))
-                (path (read-file-name "Find file: ")))
-           (guard (ex
-                   (else
-                    (set!ncurses-frame-message
-                     frame (string-append
-                            "; find-file: error loading " path))
-                    #f))
-             ;; the message is cleared *before* the file is visited, so
-             ;; that what `find-file' says about it - "(New file)", or
-             ;; the read-only note - is what stays in the echo area
-             (set!ncurses-frame-message frame "")
-             (switch-to-buffer (find-file path))
-             (note-file-read-only! frame)
-             path)))
-       (lambda (path) #f)
-       "Prompt for a file name and load it into the buffer."))
-
-    (define save-buffer-command
-      ;; C-x C-s. All the work is `save-buffer' - GNU Emacs's
-      ;; `(interactive "p")' passes the prefix argument on to it, and
-      ;; there is nothing here for that argument to change - so what is
-      ;; left is the error message, which is this project's rather than
-      ;; Emacs's.
-      ;;--------------------------------------------------------------
-      (new-command
-       "save-buffer"
-       (lambda ()
-         (let ((frame (*current-frame*)))
-           (guard (ex
-                   (else
-                    (set!ncurses-frame-message
-                     frame (string-append
-                            "; save-buffer: error writing "
-                            (or (buffer-file-name (current-buffer)) "")))
-                    #f))
-             (save-buffer))))
-       (lambda () #f)
-       "Write the buffer back to its file."))
+    (defcommand find-file (path)
+      ;; GNU Emacs's `find-file' (files.el), the command C-x C-f runs:
+      ;; prompt for a file name and visit it, switching to the buffer,
+      ;; exactly as Emacs's `(switch-to-buffer (find-file-noselect
+      ;; filename))' is. That is why the visitor below is
+      ;; `find-file-noselect' and this command `find-file' - the one is
+      ;; a plain function, the other a command, as in Emacs.
+      "Prompt for a file name and load it into the buffer."
+      (interactive (list (read-file-name "Find file: ")))
+      (let ((frame (*current-frame*)))
+        (guard (ex
+                (else
+                 (set!ncurses-frame-message
+                  frame (string-append
+                         "; find-file: error loading " path))
+                 #f))
+          ;; the message is cleared *before* the file is visited, so
+          ;; that what `find-file' says about it - "(New file)", or
+          ;; the read-only note - is what stays in the echo area
+          (set!ncurses-frame-message frame "")
+          (switch-to-buffer (find-file-noselect path))
+          (note-file-read-only! frame)
+          path)))
 
     ;;----------------------------------------------------------------
     ;; The two commands that still need the minibuffer
@@ -280,105 +267,81 @@
     ;; the `Windows' banner is in `(schemacs editor window)' now.
     ;;------------------------------------------------------------------
 
-    (define save-buffers-kill-terminal
-      (new-command
-       "save-buffers-kill-terminal"
-       ;; GNU Emacs's `save-buffers-kill-emacs': offer to save what
-       ;; needs saving, then - since the user may have said no - ask
-       ;; whether to go ahead and lose it. Either question abandoned
-       ;; with C-g cancels the exit.
-       (lambda ()
-         (let ((frame (*current-frame*))
-               (quit! (lambda ()
-                        ((ncurses-frame-quit-cont (*current-frame*)) 'quit))))
-           ;; The asking happens only when there is something worth
-           ;; asking about - `files--buffers-needing-to-be-saved', with
-           ;; Emacs's predicate `t'. The minibuffer and `*Completions*'
-           ;; are modified a good deal of the time and visit no file, so
-           ;; a `C-x C-c' asked right after `C-x C-f' does not offer to
-           ;; save the help buffer: there is nothing on the list.
-           (when (files--buffers-needing-to-be-saved #t)
-             (save-some-buffers frame #t))
-           ;; Then Emacs's `and' legs: without a modified file-visiting
-           ;; buffer there is nothing more to ask and it kills; with
-           ;; one, it asks whether to go ahead, and kills on "yes".
-           ;; C-g in the question abandons the whole command, and
-           ;; nothing is killed.
-           (if (let scan ((buffers (buffer-list)))
-                 (and (pair? buffers)
-                      (let ((buffer (car buffers)))
-                        (or (and (buffer-file-name buffer)
-                                 (text-editor-modified? buffer))
-                            (scan (cdr buffers))))))
-               (when (yes-or-no-p frame
-                                  "Modified buffers exist; exit anyway? ")
-                 (quit!))
-               (quit!))))
-       (lambda () #f)
-       "Quit the editor (bound to C-x C-c), offering to save first."))
+    (defcommand save-buffers-kill-terminal ()
+      ;; GNU Emacs's `save-buffers-kill-emacs': offer to save what
+      ;; needs saving, then - since the user may have said no - ask
+      ;; whether to go ahead and lose it. Either question abandoned
+      ;; with C-g cancels the exit.
+      "Quit the editor (bound to C-x C-c), offering to save first."
+      (interactive)
+      (let ((frame (*current-frame*))
+            (quit! (lambda ()
+                     ((ncurses-frame-quit-cont (*current-frame*)) 'quit))))
+        ;; The asking happens only when there is something worth
+        ;; asking about - `files--buffers-needing-to-be-saved', with
+        ;; Emacs's predicate `t'. The minibuffer and `*Completions*'
+        ;; are modified a good deal of the time and visit no file, so
+        ;; a `C-x C-c' asked right after `C-x C-f' does not offer to
+        ;; save the help buffer: there is nothing on the list.
+        (when (files--buffers-needing-to-be-saved #t)
+          (save-some-buffers frame #t))
+        ;; Then Emacs's `and' legs: without a modified file-visiting
+        ;; buffer there is nothing more to ask and it kills; with
+        ;; one, it asks whether to go ahead, and kills on "yes".
+        ;; C-g in the question abandons the whole command, and
+        ;; nothing is killed.
+        (if (let scan ((buffers (buffer-list)))
+              (and (pair? buffers)
+                   (let ((buffer (car buffers)))
+                     (or (and (buffer-file-name buffer)
+                              (text-editor-modified? buffer))
+                         (scan (cdr buffers))))))
+            (when (yes-or-no-p frame
+                               "Modified buffers exist; exit anyway? ")
+              (quit!))
+            (quit!))))
 
 
-    (define kill-buffer-command
-      ;; GNU Emacs's `kill-buffer'. Killing a buffer that has unsaved
-      ;; changes asks first: Emacs offers to kill it anyway, not to save
-      ;; it (saving is offered on exit and by C-x C-s). Emacs then
-      ;; switches to some other buffer; this frontend has only one, so
-      ;; it falls back on an empty one, as if it had been left with
-      ;; *scratch*.
-      (new-command
-       "kill-buffer"
-       ;; GNU Emacs's `kill-buffer'. The asking is `kill-buffer-query-
-       ;; functions', which is what Emacs asks with too; the rest - taking
-       ;; the buffer out of the list, giving any window showing it another
-       ;; buffer, and answering with its name - is `(schemacs editor
-       ;; buffer)'. What used to be here was a hand-rolled version that
-       ;; made a fresh buffer and forgot the one it killed.
-       ;;
-       ;; Emacs offers to kill a modified buffer rather than to save it;
-       ;; saving is offered on exit and by C-x C-s.
-       (lambda ()
-         (let* ((frame (*current-frame*))
-                (buffer (current-editor)))
-           (let ((killed
-                  (parameterize
-                      ((*kill-buffer-query-functions*
-                        (list (lambda ()
-                                (or (not (text-editor-modified? buffer))
-                                    (yes-or-no-p
-                                     frame
-                                     (string-append
-                                      "Buffer "
-                                      (text-editor-buffer-name buffer)
-                                      " modified; kill anyway? ")))))))
-                    (kill-buffer buffer))))
-             ;; Emacs says nothing when a query function refused the kill
-             ;; and "Killed buffer" when it did not; the window has already
-             ;; been given another buffer by `kill-buffer' itself.
-             (set!ncurses-frame-message
-              frame (if killed (string-append "Killed " killed) ""))
-             killed)))
-       (lambda () #f)
-       "Kill the current buffer (bound to C-x k), asking first if it has
- unsaved changes."))
-    ;;----------------------------------------------------------------
-    ;; Keymaps
-    ;;
-    ;; The global map is built by the libraries that define the commands, so
-    ;; what is left for this file is the four bindings whose commands are
-    ;; still here. `find-file-command' and `save-buffer-command' are
-    ;; files.el's and go to `(schemacs editor files)' with the minibuffer
-    ;; move, and these lines go with them; `kill-buffer-command' is the
-    ;; buffer layer's.
-
-    (define-key *default-keymap* (list (list 'ctrl #\x) (list 'ctrl #\f))
-      find-file-command)
-    (define-key *default-keymap* (list (list 'ctrl #\x) (list 'ctrl #\s))
-      save-buffer-command)
-    (define-key *default-keymap* (list (list 'ctrl #\x) (list 'ctrl #\c))
-      save-buffers-kill-terminal)
-    (define-key *default-keymap* (list (list 'ctrl #\x) #\k)
-      kill-buffer-command)
-
+    (defcommand kill-buffer ()
+      ;; C-x k runs this. GNU Emacs's `kill-buffer'. Killing a buffer
+      ;; that has unsaved changes asks first: Emacs offers to kill it
+      ;; anyway, not to save it (saving is offered on exit and by C-x
+      ;; C-s). Emacs then switches to some other buffer; this frontend
+      ;; has only one, so it falls back on an empty one, as if it had
+      ;; been left with *scratch*.
+      ;;
+      ;; GNU Emacs's `kill-buffer'. The asking is `kill-buffer-query-
+      ;; functions', which is what Emacs asks with too; the rest - taking
+      ;; the buffer out of the list, giving any window showing it another
+      ;; buffer, and answering with its name - is `(schemacs editor
+      ;; buffer)'. What used to be here was a hand-rolled version that
+      ;; made a fresh buffer and forgot the one it killed.
+      ;;
+      ;; Emacs offers to kill a modified buffer rather than to save it;
+      ;; saving is offered on exit and by C-x C-s.
+      "Kill the current buffer (bound to C-x k), asking first if it has
+ unsaved changes."
+      (interactive)
+      (let* ((frame (*current-frame*))
+             (buffer (current-editor)))
+        (let ((killed
+               (parameterize
+                   ((*kill-buffer-query-functions*
+                     (list (lambda ()
+                             (or (not (text-editor-modified? buffer))
+                                 (yes-or-no-p
+                                  frame
+                                  (string-append
+                                   "Buffer "
+                                   (text-editor-buffer-name buffer)
+                                   " modified; kill anyway? ")))))))
+                 (%kill-buffer buffer))))
+          ;; Emacs says nothing when a query function refused the kill
+          ;; and "Killed buffer" when it did not; the window has already
+          ;; been given another buffer by `%kill-buffer' itself.
+          (set!ncurses-frame-message
+           frame (if killed (string-append "Killed " killed) ""))
+          killed)))
     ;;----------------------------------------------------------------
     ;; The two commands that still need the minibuffer, and the last
     ;; of files.el that does
@@ -875,7 +838,7 @@
       (when (text-editor-read-only? (ncurses-frame-editor frame))
         (set!ncurses-frame-message frame "Note: file is write protected")))
 
-    (define (find-file path)
+    (define (find-file-noselect path)
       ;; Open a file into a text editor buffer and answer with it, the way
       ;; GNU Emacs's `find-file-noselect' visits a file: the line-break
       ;; convention is detected (CRLF, CR or LF), every carriage return is
@@ -987,40 +950,70 @@
                str)
               (get-output-string port)))))
 
-    (define (save-buffer)
+    (defcommand save-buffer ()
+      ;; C-x C-s runs this. GNU Emacs's `save-buffer', which acts on
+      ;; `(current-buffer)' and takes no argument but the prefix
+      ;; argument that picks the backup behaviour - there are no backup
+      ;; files here, so there is nothing for that to say and nothing to
+      ;; pass. The file written is the buffer's own
+      ;; `buffer-file-name', and the convention its own
+      ;; `buffer-file-coding-system'; a buffer visiting no file asks
+      ;; for one, which is what Emacs's `basic-save-buffer' does with
+      ;; `(read-file-name "File to save in: ")'.
+      ;;
       ;; Write the current buffer back to its file, encoding the line
       ;; breaks into the file's convention, and mark the buffer saved:
-      ;; from here on there is nothing in it that the file does not have,
-      ;; which is what clearing the modified flag means.
-      ;;
-      ;; GNU Emacs's `save-buffer', which acts on `(current-buffer)' and
-      ;; takes no argument but the prefix argument that picks the backup
-      ;; behaviour - there are no backup files here, so there is nothing
-      ;; for that to say and nothing to pass. The file written is the
-      ;; buffer's own `buffer-file-name', and the convention its own
-      ;; `buffer-file-coding-system'; a buffer visiting no file asks for
-      ;; one, which is what Emacs's `basic-save-buffer' does with
-      ;; `(read-file-name "File to save in: ")'.
-      ;;--------------------------------------------------------------
-      (let ((buffer (current-buffer))
-            (path (or (buffer-file-name (current-buffer))
-                      (let ((name (read-file-name "File to save in: ")))
-                        (set!buffer-file-name (current-buffer) name)
-                        name))))
-        ;; Emacs settles the buffer's final line break before writing it.
-        (ensure-final-newline-on-save! buffer)
-        (call-with-output-file
-            path
-          (lambda (port)
-            (display
-             (encode-line-breaks
-              (text-editor-to-string buffer)
-              (buffer-file-coding-system buffer))
-             port)))
-        (text-editor-set-modified! buffer #f)
-        (set!ncurses-frame-message (*current-frame*)
-                                   (string-append "Wrote " path))
-        path))
+      ;; from here on there is nothing in it that the file does not
+      ;; have, which is what clearing the modified flag means. The
+      ;; error message around it is this project's rather than Emacs's:
+      ;; Emacs signals, and the command loop reports.
+      "Write the buffer back to its file."
+      (interactive)
+      (let ((frame (*current-frame*)))
+        (guard (ex
+                (else
+                 (set!ncurses-frame-message
+                  frame (string-append
+                         "; save-buffer: error writing "
+                         (or (buffer-file-name (current-buffer)) "")))
+                 #f))
+          (let ((buffer (current-buffer))
+                (path (or (buffer-file-name (current-buffer))
+                          (let ((name (read-file-name "File to save in: ")))
+                            (set!buffer-file-name (current-buffer) name)
+                            name))))
+            ;; Emacs settles the buffer's final line break before writing it.
+            (ensure-final-newline-on-save! buffer)
+            (call-with-output-file
+                path
+              (lambda (port)
+                (display
+                 (encode-line-breaks
+                  (text-editor-to-string buffer)
+                  (buffer-file-coding-system buffer))
+                 port)))
+            (text-editor-set-modified! buffer #f)
+            (set!ncurses-frame-message (*current-frame*)
+                                       (string-append "Wrote " path))
+            path))))
+
+    ;;----------------------------------------------------------------
+    ;; Keymaps
+    ;;
+    ;; The global map is built by the libraries that define the commands,
+    ;; so a library binds the keys of the commands it defines. These are
+    ;; the last things in the file, because the bindings hold the
+    ;; commands' values, and Guile resolves a binding when the form is
+    ;; evaluated - a `define-key' before its command's `defcommand' would
+    ;; find the name unbound.
+    (define-key *default-keymap* (list (list 'ctrl #\x) (list 'ctrl #\f))
+      find-file)
+    (define-key *default-keymap* (list (list 'ctrl #\x) (list 'ctrl #\s))
+      save-buffer)
+    (define-key *default-keymap* (list (list 'ctrl #\x) (list 'ctrl #\c))
+      save-buffers-kill-terminal)
+    (define-key *default-keymap* (list (list 'ctrl #\x) #\k)
+      kill-buffer)
 
     ;;----------------------------------------------------------------
     ))

@@ -28,7 +28,7 @@
     ;; size, which is a `case-lambda'.
     (scheme case-lambda)
     (only (schemacs editor command)
-          new-command new-count-command uarg->integer)
+          current-prefix-arg defcommand uarg->integer)
     (only (schemacs editor engine)
           copy-marker new-text-editor set-marker! set!text-editor-buffer-name
           set!text-editor-file-name text-editor-buffer-name
@@ -61,23 +61,19 @@
 
   (export
    delete-other-windows
-   delete-other-windows-command
    delete-window
-   delete-window-command
    display-buffer
    get-buffer-window
    list-substitute
    list-without
    other-window
-   other-window-command
    pop-to-buffer
    quit-window
    pop-to-buffer-same-window
+   split-window
    split-window-below
-   split-window-below-command
    split-main-window-below
    split-window-right
-   split-window-right-command
    switch-to-buffer
    switch-to-buffer-other-window
    window-absorb!
@@ -172,37 +168,80 @@
                                     (ncurses-frame-windows frame))))
         parent))
 
-    (define (split-window-below window size)
-      (let* ((frame (*current-frame*))
-             (height (window-height window))
-             (upper (cond ((not size) (floor-quotient (+ height 1) 2))
-                          ((< 0 size) size)
-                          (else (- height (abs size)))))
-             (lower (- height upper)))
-        (when (or (< upper 1) (< lower 1)
-                  (and (not size)
-                       (or (< upper window-min-height)
-                           (< lower window-min-height))))
-          (error "Size of new window too small"))
-        (let ((top (window-top window))
-              (left (window-left window))
-              (width (window-width window)))
-          (set!window-height window upper)
-          (let ((new (make<ncurses-window>
-                      (window-buffer window)
-                      (copy-marker (window-buffer window)
-                                   (text-editor-get-cursor (window-buffer window)))
-                      (window-top-line window)
-                      (+ top upper)
-                      lower
-                      left
-                      width
-                      #f '())))
-            (install-window-parent!
-             frame window
-             (make-window-parent window new top height left width))
-            new))))
-
+    (define (split-window window size horizontal)
+      ;; GNU Emacs's `split-window' - `Fsplit_window' in window.c - the
+      ;; one primitive every split is: divide the live window WINDOW in
+      ;; two, the first part SIZE rows (or columns, for a horizontal
+      ;; split) and the rest going to the new one - a positive SIZE on
+      ;; the first part, a negative one -SIZE on the second, and half
+      ;; and half (or close to it) when there is no SIZE. HORIZONTAL
+      ;; splits side by side; otherwise the new window is below.
+      ;;
+      ;; `split-window-below' and `split-window-right' - window.el's
+      ;; commands - read the argument from the keyfinger and call this;
+      ;; a bare `C-x 2' gives both halves the same height
+      ;; `window-min-height' or more, exactly as Emacs's plain
+      ;; `(split-window)' does.
+      ;;--------------------------------------------------------------
+      (if horizontal
+          (let* ((frame (*current-frame*))
+                 (width (window-width window))
+                 (left (cond ((not size) (floor-quotient (+ width 1) 2))
+                             ((< 0 size) size)
+                             (else (- width (abs size)))))
+                 (right (- width left)))
+            (when (or (< left 1) (< right 1)
+                      (and (not size)
+                           (or (< left window-min-width)
+                               (< right window-min-width))))
+              (error "Size of new window too small"))
+            (let ((top (window-top window))
+                  (start (window-left window))
+                  (height (window-height window)))
+              (set!window-width window left)
+              (let ((new (make<ncurses-window>
+                          (window-buffer window)
+                          (copy-marker (window-buffer window)
+                                       (text-editor-get-cursor (window-buffer window)))
+                          (window-top-line window)
+                          top
+                          height
+                          (+ start left)
+                          right
+                          #f '())))
+                (install-window-parent!
+                 frame window
+                 (make-window-parent window new top height start width))
+                new)))
+          (let* ((frame (*current-frame*))
+                 (height (window-height window))
+                 (upper (cond ((not size) (floor-quotient (+ height 1) 2))
+                              ((< 0 size) size)
+                              (else (- height (abs size)))))
+                 (lower (- height upper)))
+            (when (or (< upper 1) (< lower 1)
+                      (and (not size)
+                           (or (< upper window-min-height)
+                               (< lower window-min-height))))
+              (error "Size of new window too small"))
+            (let ((top (window-top window))
+                  (left (window-left window))
+                  (width (window-width window)))
+              (set!window-height window upper)
+              (let ((new (make<ncurses-window>
+                          (window-buffer window)
+                          (copy-marker (window-buffer window)
+                                       (text-editor-get-cursor (window-buffer window)))
+                          (window-top-line window)
+                          (+ top upper)
+                          lower
+                          left
+                          width
+                          #f '())))
+                (install-window-parent!
+                 frame window
+                 (make-window-parent window new top height left width))
+                new)))))
     (define (split-main-window-below buffer size)
       ;; Show BUFFER in a new window at the bottom of the frame, SIZE rows
       ;; tall and spanning the frame's whole width: GNU Emacs's
@@ -238,38 +277,7 @@
            (make-window-parent main new top total left width))
           new)))
 
-    (define (split-window-right window size)
-      (let* ((frame (*current-frame*))
-             (width (window-width window))
-             (left (cond ((not size) (floor-quotient (+ width 1) 2))
-                         ((< 0 size) size)
-                         (else (- width (abs size)))))
-             (right (- width left)))
-        (when (or (< left 1) (< right 1)
-                  (and (not size)
-                       (or (< left window-min-width)
-                           (< right window-min-width))))
-          (error "Size of new window too small"))
-        (let ((top (window-top window))
-              (start (window-left window))
-              (height (window-height window)))
-          (set!window-width window left)
-          (let ((new (make<ncurses-window>
-                      (window-buffer window)
-                      (copy-marker (window-buffer window)
-                                   (text-editor-get-cursor (window-buffer window)))
-                      (window-top-line window)
-                      top
-                      height
-                      (+ start left)
-                      right
-                      #f '())))
-            (install-window-parent!
-             frame window
-             (make-window-parent window new top height start width))
-            new))))
-
-    (define (absorb-into! window edge delta)
+        (define (absorb-into! window edge delta)
       ;; WINDOW gains DELTA at EDGE ('left, 'right, 'top or 'bottom), and so
       ;; does each of its children that reached that edge - a child that did
       ;; not is not beside what was removed, so there is no room for it there.
@@ -392,7 +400,7 @@
                     (record-buffer! buffer)
                     window)
                   ;; split below, and the new window shows it
-                  (let ((new (split-window-below window #f)))
+                  (let ((new (split-window window #f #f)))
                     (set!window-buffer new buffer)
                     (set!window-top-line new 0)
                     (set-window-point! new (text-editor-get-cursor buffer))
@@ -491,7 +499,10 @@
           (absorb-into! taker 'top (window-height gone))))
         taker))
 
-    (define (delete-window window)
+    (defcommand delete-window (window)
+      "Remove the selected window, leaving its rows or columns to the
+windows it was combined with."
+      (interactive (list (selected-window)))
       (let* ((frame (*current-frame*))
              (parent (window-parent window))
              (siblings (and parent (list-without window (window-children parent))))
@@ -528,7 +539,9 @@
           (set!window-children window '())
           window))))
 
-    (define (delete-other-windows window)
+    (defcommand delete-other-windows (window)
+      "Make the selected window the only window on the frame."
+      (interactive (list (selected-window)))
       ;; GNU Emacs's `delete-other-windows': make WINDOW the frame's
       ;; only window, filling the frame.
       ;;--------------------------------------------------------------
@@ -546,64 +559,35 @@
         (set!ncurses-frame-windows frame (list window))
         window))
 
-    (define split-window-below-command
-      ;; The command C-x 2 runs. Its prefix argument is the SIZE
-      ;; `split-window-below' takes, as a number or false when there was
-      ;; none - GNU Emacs's `(interactive "P")'.
-      ;;--------------------------------------------------------------
-      (new-command
-       "split-window-below"
-       (lambda (uarg)
-         (let ((size (uarg->integer #f uarg)))
-           ;; GNU Emacs's `split-window-below' checks this one itself,
-           ;; because `split-window' would not.
-           (when (and size (< size 0) (< (- size) window-min-height))
-             (error "Size of new window too small"))
-           (split-window-below (selected-window) size)))
-       (case-lambda
-        (() (split-window-below (selected-window) #f))
-        ((size) (split-window-below (selected-window) size))
-        ((size window) (split-window-below window size)))
-       "Split the selected window into two, one above the other."
-       'uarg))
+    (defcommand split-window-below (size window-to-split)
+      ;; GNU Emacs's `split-window-below' (window.el), the command C-x 2
+      ;; runs: split the selected window, or WINDOW-TO-SPLIT when one is
+      ;; given, in two, one above the other. An interactive call reads
+      ;; the prefix argument and the selected window itself, which is
+      ;; exactly what Emacs's own `(interactive ...)' does - it reads
+      ;; `current-prefix-arg' for the size.
+      "Split the selected window into two windows, one above the other."
+      (interactive (list (and (current-prefix-arg)
+                              (uarg->integer 1 (current-prefix-arg)))
+                         (selected-window)))
+      ;; GNU Emacs's `split-window-below' checks this one itself,
+      ;; because `split-window' would not.
+      (when (and size (< size 0) (< (- size) window-min-height))
+        (error "Size of new window too small"))
+      (split-window window-to-split size #f))
 
-    (define split-window-right-command
-      ;; The command C-x 3 runs, the mirror of `split-window-below-command'.
-      ;;--------------------------------------------------------------
-      (new-command
-       "split-window-right"
-       (lambda (uarg)
-         (let ((size (uarg->integer #f uarg)))
-           ;; GNU Emacs's `split-window-right' checks this one itself,
-           ;; because `split-window' would not.
-           (when (and size (< size 0) (< (- size) window-min-width))
-             (error "Size of new window too small"))
-           (split-window-right (selected-window) size)))
-       (case-lambda
-        (() (split-window-right (selected-window) #f))
-        ((size) (split-window-right (selected-window) size))
-        ((size window) (split-window-right window size)))
-       "Split the selected window into two, side by side."
-       'uarg))
-
-    (define delete-window-command
-      (new-command
-       "delete-window"
-       (lambda () (delete-window (selected-window)))
-       (case-lambda
-        (() (delete-window (selected-window)))
-        ((window) (delete-window window)))
-       "Remove the selected window, leaving its rows or columns to the
-windows it was combined with."))
-
-    (define delete-other-windows-command
-      (new-command
-       "delete-other-windows"
-       (lambda () (delete-other-windows (selected-window)))
-       (case-lambda
-        (() (delete-other-windows (selected-window)))
-        ((window) (delete-other-windows window)))
-       "Make the selected window the only window on the frame."))
+    (defcommand split-window-right (size window-to-split)
+      ;; GNU Emacs's `split-window-right' (window.el), the command C-x 3
+      ;; runs - the side-by-side mirror of `split-window-below'.
+      "Split the selected window into two, side by side."
+      (interactive (list (and (current-prefix-arg)
+                              (uarg->integer 1 (current-prefix-arg)))
+                         (selected-window)))
+      ;; GNU Emacs's `split-window-right' checks this one itself,
+      ;; because `split-window' would not.
+      (when (and size (< size 0) (< (- size) window-min-width))
+        (error "Size of new window too small"))
+      (split-window window-to-split size #t))
 
     ;; Selecting a window in GNU Emacs also puts its buffer at the front of
     ;; the buffer list, which is what makes the Buffer Menu list the buffers
@@ -615,12 +599,15 @@ windows it was combined with."))
     ;; commands below record for themselves. `pop-to-buffer' and
     ;; `switch-to-buffer' do it with their own NORECORD argument.
 
-    (define (quit-window)
+    (defcommand quit-window ()
       ;; GNU Emacs's `quit-window' (q in the Buffer Menu), which is
       ;; `window.el''s: take this window off the frame and bury the buffer
       ;; it was showing. A frame's only window cannot be removed, and then
-      ;; the buffer is just buried.
-      ;;--------------------------------------------------------------
+      ;; the buffer is just buried. It is window.el's plain function, and
+      ;; a command at the same time - which is why the Buffer Menu can
+      ;; bind it to q directly.
+      "Leave the selected window and bury the buffer it was showing."
+      (interactive)
       (let* ((frame (*current-frame*))
              (window (ncurses-frame-selected-window frame))
              (buffer (window-buffer window)))
@@ -629,7 +616,10 @@ windows it was combined with."))
             (delete-window window)
             #f)))
 
-    (define (other-window count)
+    (defcommand other-window (count)
+      "Select another window in cyclic ordering of windows, COUNT
+windows on from the selected one; a negative COUNT goes the other way."
+      (interactive "p")
       ;; Select the COUNT-th window on from the selected one, cycling
       ;; round the frame's windows: GNU Emacs's `other-window'. A negative
       ;; COUNT goes the other way, which is how a command that has just
@@ -643,25 +633,17 @@ windows it was combined with."))
         (record-buffer! (window-buffer window))
         window))
 
-    (define other-window-command
-      ;; GNU Emacs's `other-window': select the next window, or the
-      ;; COUNT-th one on, cycling round the frame's windows.
-      ;;--------------------------------------------------------------
-      (new-count-command
-       "other-window"
-       (lambda (count) (other-window count))
-       "Select the next window, COUNT windows on."))
 
     ;; The window keys, on the ones GNU Emacs binds them to.
     (define-key *default-keymap* (list (list 'ctrl #\x) #\2)
-      split-window-below-command)
+      split-window-below)
     (define-key *default-keymap* (list (list 'ctrl #\x) #\3)
-      split-window-right-command)
+      split-window-right)
     (define-key *default-keymap* (list (list 'ctrl #\x) #\1)
-      delete-other-windows-command)
+      delete-other-windows)
     (define-key *default-keymap* (list (list 'ctrl #\x) #\0)
-      delete-window-command)
+      delete-window)
     (define-key *default-keymap* (list (list 'ctrl #\x) #\o)
-      other-window-command)
+      other-window)
 
     ))

@@ -42,7 +42,7 @@
     ;; `format-message' does for `minibuffer-message'.
     (only (guile) format)
     (only (schemacs editor command)
-          new-command new-count-command run-command defcommand
+          run-command defcommand
           *command-table* command-value-of command-interactive-spec)
     (only (schemacs editor engine)
           new-text-editor text-editor-char-count text-editor-copy-string
@@ -359,68 +359,49 @@
        ((prompt initial keymap history default)
         (read-minibuffer-1 prompt initial keymap history default))))
 
-    (define exit-minibuffer
+    (defcommand exit-minibuffer ()
       ;; Leave the minibuffer, accepting what has been typed: GNU Emacs's
       ;; `exit-minibuffer', which is `(throw 'exit nil)'.
-      ;;--------------------------------------------------------------
-      (new-command
-       "exit-minibuffer"
-       (lambda () (exit-recursive-edit #f))
-       (lambda () (exit-recursive-edit #f))
-       "Accept what has been typed and leave the minibuffer."))
+      "Accept what has been typed and leave the minibuffer."
+      (interactive)
+      (exit-recursive-edit #f))
 
-    (define abort-minibuffer
-      ;; Leave the minibuffer and abandon the command that asked the
-      ;; question: what C-g does in a minibuffer.
-      ;;--------------------------------------------------------------
-      (new-command
-       "abort-recursive-edit"
-       (lambda () (abort-recursive-edit))
-       (lambda () (abort-recursive-edit))
-       "Quit the minibuffer and the command that asked for it."))
-
-    (define previous-history-element
+    (defcommand previous-history-element (count)
       ;; GNU Emacs's `previous-history-element': step back N entries in
       ;; the history and put that answer in the minibuffer.
-      ;;--------------------------------------------------------------
-      (new-count-command
-       "previous-history-element"
-       (lambda (count)
-         (let* ((mb (*minibuffer*))
-                (h (and mb (minibuffer-history-of mb)))
-                (entries (if h (history-entries h) '()))
-                (position (if mb (minibuffer-position mb) 0))
-                (next (min (+ position count) (length entries))))
-           ;; position 0 means what the user typed rather than an entry
-           (when mb
-             (when (= position 0)
-               (set!minibuffer-typed-content mb (minibuffer-contents mb)))
-             (when (< position next)
-               (set!minibuffer-position mb next)
-               (minibuffer-set-contents!
-                mb (list-ref entries (- next 1)))))))
-       "Step back N answers in the minibuffer history."))
+      "Step back N answers in the minibuffer history."
+      (interactive "p")
+      (let* ((mb (*minibuffer*))
+             (h (and mb (minibuffer-history-of mb)))
+             (entries (if h (history-entries h) '()))
+             (position (if mb (minibuffer-position mb) 0))
+             (next (min (+ position count) (length entries))))
+        ;; position 0 means what the user typed rather than an entry
+        (when mb
+          (when (= position 0)
+            (set!minibuffer-typed-content mb (minibuffer-contents mb)))
+          (when (< position next)
+            (set!minibuffer-position mb next)
+            (minibuffer-set-contents!
+             mb (list-ref entries (- next 1)))))))
 
-    (define next-history-element
+    (defcommand next-history-element (count)
       ;; GNU Emacs's `next-history-element': step forward N entries, and
       ;; past the most recent one back to what was typed.
-      ;;--------------------------------------------------------------
-      (new-count-command
-       "next-history-element"
-       (lambda (count)
-         (let* ((mb (*minibuffer*))
-                (h (and mb (minibuffer-history-of mb)))
-                (entries (if h (history-entries h) '()))
-                (position (if mb (minibuffer-position mb) 0))
-                (next (max 0 (- position count))))
-           (when mb
-             (when (< next position)
-               (set!minibuffer-position mb next)
-               (minibuffer-set-contents!
-                mb (if (= next 0)
-                       (or (minibuffer-typed-content mb) "")
-                       (list-ref entries (- next 1))))))))
-       "Step forward N answers in the minibuffer history."))
+      "Step forward N answers in the minibuffer history."
+      (interactive "p")
+      (let* ((mb (*minibuffer*))
+             (h (and mb (minibuffer-history-of mb)))
+             (entries (if h (history-entries h) '()))
+             (position (if mb (minibuffer-position mb) 0))
+             (next (max 0 (- position count))))
+        (when mb
+          (when (< next position)
+            (set!minibuffer-position mb next)
+            (minibuffer-set-contents!
+             mb (if (= next 0)
+                    (or (minibuffer-typed-content mb) "")
+                    (list-ref entries (- next 1))))))))
 
     (define minibuffer-local-map
       ;; GNU Emacs's `minibuffer-local-map': the minibuffer's own bindings.
@@ -440,7 +421,7 @@
        (km:alist->keymap-layer
         `(((ctrl #\m) . ,exit-minibuffer)
           ((ctrl #\j) . ,exit-minibuffer)
-          ((ctrl #\g) . ,abort-minibuffer)
+          ((ctrl #\g) . ,abort-recursive-edit)
           ((meta #\p) . ,previous-history-element)
           ((meta #\n) . ,next-history-element)))))
 
@@ -473,7 +454,7 @@
             (loop (cdr rest)
                   (string-append acc (if (string=? acc "") "" "  ") (car rest))))))
 
-    (define minibuffer-completion-help
+    (defcommand minibuffer-completion-help ()
       ;; GNU Emacs's `minibuffer-completion-help': show what the text
       ;; could complete to. A command, because `?' is bound to it.
       ;;
@@ -490,9 +471,8 @@
       ;; window itself is Emacs's for the list: a *fresh* window, fitted
       ;; to the candidates (see `completion-display-window').
       ;;--------------------------------------------------------------
-      (new-command
-       "minibuffer-completion-help"
-       (lambda ()
+      "Show the possible completions of the text in the minibuffer."
+      (interactive)
          (let* ((typed (or (minibuffer-contents) ""))
                 (candidates (completion-all-completions
                              typed (*minibuffer-completion-table*)
@@ -529,10 +509,8 @@
                (set-buffer-local-value! buffer 'completion-base-position
                                         (list base-size (string-length typed)))
                (record-buffer! buffer))))))
-       (lambda () #f)
-       "Show the possible completions of the text in the minibuffer."))
 
-    (define minibuffer-complete
+    (defcommand minibuffer-complete ()
       ;; GNU Emacs's `minibuffer-complete': complete as far as the text
       ;; can be, and say what the candidates are when it cannot be
       ;; completed any further.
@@ -551,16 +529,12 @@
       ;; predicate rather than the buffer boundaries `completion-in-region'
       ;; would give it, which is all this editor has of that function so
       ;; far - the region half of it is step G of COMPLETION-PLAN.txt.
-      ;;--------------------------------------------------------------
-      (new-command
-       "minibuffer-complete"
-       (lambda ()
-         (let ((typed (or (minibuffer-contents) "")))
-           (completion--do-completion typed (*minibuffer-completion-table*)
-                                      (*minibuffer-completion-predicate*)
-                                      (string-length typed))))
-       (lambda () #f)
-       "Complete the text in the minibuffer as far as it can be (bound to TAB)."))
+      "Complete the text in the minibuffer as far as it can be (bound to TAB)."
+      (interactive)
+      (let ((typed (or (minibuffer-contents) "")))
+        (completion--do-completion typed (*minibuffer-completion-table*)
+                                   (*minibuffer-completion-predicate*)
+                                   (string-length typed))))
 
     (define (read-char-from-minibuffer prompt)
       ;; GNU Emacs's `read-char-from-minibuffer': ask a question whose
@@ -996,7 +970,7 @@
              (completed (minibuffer-hide-completions))
              ((not exact)
               (if (*completion-auto-help*)
-                  (run-command minibuffer-completion-help)
+                  (minibuffer-completion-help)
                   (completion--message "Next char not unique")))
              (else
               ;; If the last exact completion and this one were the
@@ -1008,11 +982,10 @@
               ;; second TAB on a directory with nothing typed after it.
               (when (and (eq? (*this-command*) (*last-command*))
                          (*completion-auto-help*))
-                (run-command minibuffer-completion-help))
+                (minibuffer-completion-help))
               (completion--message "Complete, but not unique")))
             (minibuffer--bitset completed #t exact))))))
 
-    (define minibuffer-complete-and-exit
       ;; GNU Emacs's `minibuffer-complete-and-exit' (RET in a
       ;; `require-match' minibuffer): leave if what is typed is a valid
       ;; completion, and otherwise complete it and say why it did not.
@@ -1022,30 +995,28 @@
       ;; exact match leaves unless `minibuffer-completion-confirm' says to
       ;; ask first; and anything else stays put.
       ;;--------------------------------------------------------------
-      (new-command
-       "minibuffer-complete-and-exit"
-       (lambda ()
-         ;; A candidate chosen with M-<down> is taken before anything
-         ;; else is tried, which is GNU Emacs's
-         ;; `(when (completion--selected-candidate)
-         ;;    (minibuffer-choose-completion t t))' at the head of its
-         ;; `minibuffer-complete-and-exit'.
-         (when (completion--selected-candidate)
-           (minibuffer-choose-completion))
-         (let* ((typed (or (minibuffer-contents) ""))
-                (bits (completion--do-completion
-                       typed (*minibuffer-completion-table*)
-                       (*minibuffer-completion-predicate*)
-                       (string-length typed))))
-           (cond
-            ((or (= bits 1) (= bits 3)) (run-command exit-minibuffer))
-            ((= bits 7)
-             (if (*minibuffer-completion-confirm*)
-                 (minibuffer-message "Confirm")
-                 (run-command exit-minibuffer)))
-            (else #f))))
-       (lambda () #f)
-       "Exit the minibuffer, if what is typed is a valid completion."))
+    (defcommand minibuffer-complete-and-exit ()
+      ;; A candidate chosen with M-<down> is taken before anything
+      ;; else is tried, which is GNU Emacs's
+      ;; `(when (completion--selected-candidate)
+      ;;    (minibuffer-choose-completion t t))' at the head of its
+      ;; `minibuffer-complete-and-exit'.
+      "Exit the minibuffer, if what is typed is a valid completion."
+      (interactive)
+      (when (completion--selected-candidate)
+        (minibuffer-choose-completion))
+      (let* ((typed (or (minibuffer-contents) ""))
+             (bits (completion--do-completion
+                    typed (*minibuffer-completion-table*)
+                    (*minibuffer-completion-predicate*)
+                    (string-length typed))))
+        (cond
+         ((or (= bits 1) (= bits 3)) (run-command exit-minibuffer))
+         ((= bits 7)
+          (if (*minibuffer-completion-confirm*)
+              (minibuffer-message "Confirm")
+              (run-command exit-minibuffer)))
+         (else #f))))
 
     (define (completion--try-word-completion string table predicate point)
       ;; GNU Emacs's `completion--try-word-completion': complete the text
@@ -1068,26 +1039,23 @@
               candidate)
              (else (loop (cdr suffixes)))))))))
 
-    (define minibuffer-complete-word
       ;; GNU Emacs's `minibuffer-complete-word' (SPC): complete at most a
       ;; single word.
       ;;--------------------------------------------------------------
-      (new-command
-       "minibuffer-complete-word"
-       (lambda ()
-         (let* ((typed (or (minibuffer-contents) ""))
-                (comp (completion--try-word-completion
-                       typed (*minibuffer-completion-table*)
-                       (*minibuffer-completion-predicate*)
-                       (string-length typed))))
-           (cond
-            ((and (pair? comp) (not (string=? (car comp) typed)))
-             (completion--replace (car comp)))
-            ((not comp)
-             (completion--message "No match"))
-            (else (run-command minibuffer-completion-help)))))
-       (lambda () #f)
-       "Complete the minibuffer contents at most a single word (SPC)."))
+    (defcommand minibuffer-complete-word ()
+      "Complete the minibuffer contents at most a single word (SPC)."
+      (interactive)
+      (let* ((typed (or (minibuffer-contents) ""))
+             (comp (completion--try-word-completion
+                    typed (*minibuffer-completion-table*)
+                    (*minibuffer-completion-predicate*)
+                    (string-length typed))))
+        (cond
+         ((and (pair? comp) (not (string=? (car comp) typed)))
+          (completion--replace (car comp)))
+         ((not comp)
+          (completion--message "No match"))
+         (else (minibuffer-completion-help)))))
 
     ;;----------------------------------------------------------------
     ;; Reading with completion
@@ -1141,6 +1109,7 @@
                                     minibuffer-local-must-match-map
                                     minibuffer-local-completion-map))
            history default))))
+	
     (define *minibuffer-completing-file-name* (make-parameter #f))
     ;; ^ GNU Emacs's `minibuffer-completing-file-name': whether the
     ;; minibuffer being read is reading a file name, which decides
@@ -1558,7 +1527,6 @@
                            (substring text (min end (string-length text))
                                       (string-length text))))))
 
-    (define choose-completion
       ;; GNU Emacs's `choose-completion': take the candidate on this line
       ;; and put it in the minibuffer that asked for the completion, then
       ;; take the completions window away.
@@ -1567,19 +1535,17 @@
       ;; insert; here the line point is on *is* the candidate, so the line
       ;; is what is read - and that is why the buffer is one per line.
       ;;--------------------------------------------------------------
-      (new-command
-       "choose-completion"
-       (lambda ()
-         (let* ((ed (current-buffer))
-                (candidate (get-text-property (text-editor-get-cursor ed)
-                                              'completion--string ed))
-                (mb (*minibuffer*)))
-           (when (and mb (> (string-length candidate) 0))
-             (choose-completion-string candidate mb
-                                       (buffer-local-value ed 'completion-base-position #f))
-             (quit-window))))
-       (lambda () #f)
-       "Select the completion on this line."))
+    (defcommand choose-completion ()
+      "Select the completion on this line."
+      (interactive)
+      (let* ((ed (current-buffer))
+             (candidate (get-text-property (text-editor-get-cursor ed)
+                                           'completion--string ed))
+             (mb (*minibuffer*)))
+        (when (and mb (> (string-length candidate) 0))
+          (choose-completion-string candidate mb
+                                    (buffer-local-value ed 'completion-base-position #f))
+          (quit-window))))
 
     (define completion-list-mode-map
       ;; GNU Emacs's `completion-list-mode-map': RET selects the
@@ -1886,7 +1852,6 @@
                  candidate mb
                  (buffer-local-value buffer 'completion-base-position #f)))))))
 
-    (define minibuffer-next-completion
       ;; GNU Emacs's `minibuffer-next-completion': move through the
       ;; candidates - the next cell of the layout, which for the
       ;; `horizontal' format is the next column and then the first of
@@ -1895,34 +1860,31 @@
       ;; default and nil here, so the move is all it does and RET is
       ;; what takes the candidate.
       ;;--------------------------------------------------------------
-      (new-count-command
-       "minibuffer-next-completion"
-       (lambda (count) (move-completions count))
-       "Move to the next item in the completions window."))
+    (defcommand minibuffer-next-completion (count)
+      "Move to the next item in the completions window."
+      (interactive "p")
+      (move-completions count))
 
-    (define minibuffer-previous-completion
-      ;; GNU Emacs's `minibuffer-previous-completion'.
-      ;;--------------------------------------------------------------
-      (new-count-command
-       "minibuffer-previous-completion"
-       (lambda (count) (move-completions (- count)))
-       "Move to the previous item in the completions window."))
+	
+    ;; GNU Emacs's `minibuffer-previous-completion'.
+    ;;--------------------------------------------------------------
+    (defcommand minibuffer-previous-completion (count)
+      "Move to the previous item in the completions window."
+      (interactive "p")
+      (move-completions (- count)))
 
-    (define minibuffer-completion-exit
-      ;; GNU Emacs's `minibuffer-completion-exit': insert the selected
-      ;; completion if there is one, then leave the minibuffer. It is
-      ;; what RET is bound to in a completing minibuffer, and it is why
-      ;; moving through the candidates with M-<down> and then pressing
-      ;; RET takes the one moved to.
-      ;;--------------------------------------------------------------
-      (new-command
-       "minibuffer-completion-exit"
-       (lambda ()
-         (when (completion--selected-candidate)
-           (minibuffer-choose-completion))
-         (exit-recursive-edit #f))
-       (lambda () (exit-recursive-edit #f))
-       "Accept what has been typed, taking the selected completion first."))
+    ;; GNU Emacs's `minibuffer-completion-exit': insert the selected
+    ;; completion if there is one, then leave the minibuffer. It is
+    ;; what RET is bound to in a completing minibuffer, and it is why
+    ;; moving through the candidates with M-<down> and then pressing
+    ;; RET takes the one moved to.
+    ;;--------------------------------------------------------------
+    (defcommand minibuffer-completion-exit ()
+      "Accept what has been typed, taking the selected completion first."
+      (interactive)
+      (when (completion--selected-candidate)
+        (minibuffer-choose-completion))
+      (exit-recursive-edit #f))
 
     (define minibuffer-local-filename-completion-map
       ;; GNU Emacs's `minibuffer-local-filename-completion-map', which

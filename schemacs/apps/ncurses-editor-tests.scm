@@ -51,7 +51,7 @@
        *require-final-newline* ensure-final-newline-on-visit
        expand-file-name file-name-completion-table file-name-directory-part
        file-name-nondirectory-part files--buffers-needing-to-be-saved
-       find-file note-file-read-only!
+       find-file-noselect note-file-read-only!
        save-answer-char->decision)
  ;; `try-completion' and `all-completions' are `minibuf.c''s.
  (only (schemacs editor minibuf) all-completions try-completion)
@@ -92,7 +92,7 @@
        *search-case-fold?* *search-pattern* isearch-find isearch-message)
  (only (schemacs editor window)
        delete-window delete-other-windows display-buffer get-buffer-window
-       other-window-command split-window-below split-window-right
+       split-window
        switch-to-buffer)
  (only (schemacs editor xdisp)
        *mode-line-format* cursor-screen-position format-mode-line
@@ -388,7 +388,7 @@
   (begin
     (call-with-output-file "/tmp/schemacs-fe-undo.txt"
       (lambda (port) (display "loaded\ntext\n" port)))
-    (let ((ed (find-file "/tmp/schemacs-fe-undo.txt")))
+    (let ((ed (find-file-noselect "/tmp/schemacs-fe-undo.txt")))
       (list (text-editor-undo-list ed) (text-editor-to-string ed)))))
 
 ;; Amalgamation is bounded: a boundary goes in every
@@ -424,7 +424,7 @@
   (parameterize ((*buffer-list* '())
                  (*current-buffer* #f)
                  (*kill-buffer-query-functions* '()))
-   (let ((ed (find-file path)))
+   (let ((ed (find-file-noselect path)))
     (let ((frame (test-frame ed)))
       (parameterize ((*current-frame* frame)
                      (*search-pattern* #f)
@@ -517,7 +517,7 @@
            ;; frame's idea of the convention
            (call-with-output-file "/tmp/fe-lf.txt"
              (lambda (port) (display "c\nd\n" port)))
-           (find-file "/tmp/fe-lf.txt")
+           (find-file-noselect "/tmp/fe-lf.txt")
            ;; back to the CRLF buffer, change it, and save it
            (switch-to-buffer (get-buffer "fe-crlf.txt"))
            (type frame #\X)
@@ -832,7 +832,11 @@
 (define (bound-in keymap path)
   (km:keymap-lookup keymap (km:keymap-index path)))
 (define (command-named? action name)
-  (and (command-type? action) (string=? (command-name action) name)))
+  ;; Since the `defcommand' conversion the maps hold the commands'
+  ;; *procedures*, whose record - with the name - sits in the obarray;
+  ;; `command-record-of' finds it, and returns #f for a non-command.
+  (let ((record (command-record-of action)))
+    (and record (string=? (command-name record) name))))
 
 (test-equal '(#t #t #t #t #t)
   (list (command-named? (bound-in minibuffer-local-map (list 'ctrl #\m))
@@ -1136,7 +1140,7 @@
 (test-equal '((0 17) (17 6))
   (let ((frame (frame-with "alpha\nbeta\n")))
     (parameterize ((*current-frame* frame))
-      (split-window-below (selected-window-of frame) -6))
+      (split-window (selected-window-of frame) -6 #f))
     (window-rects frame)))
 
 ;; Splitting a window with no room for two signals GNU Emacs's error
@@ -1147,7 +1151,7 @@
     (set!window-height window 6)
     (parameterize ((*current-frame* frame))
       (guard (ex (else (exception-message ex)))
-        (split-window-below window #f)
+        (split-window window #f #f)
         #f))))
 
 ;; C-x o selects the next window, and each window keeps its own point:
@@ -1273,7 +1277,7 @@
           (map window-edges (window-list frame)))
         (let ((frame (frame-with "alpha\nbeta\n")))
           (parameterize ((*current-frame* frame))
-            (split-window-right (selected-window-of frame) -30))
+            (split-window (selected-window-of frame) -30 #t))
           (map window-edges (window-list frame)))))
 
 ;; With no size asked for, both windows have to be wide enough to read:
@@ -1284,7 +1288,7 @@
     (set!window-width window 18)
     (parameterize ((*current-frame* frame))
       (guard (ex (else (exception-message ex)))
-        (split-window-right window #f)
+        (split-window window #f #t)
         #f))))
 
 ;; Splitting right and below at once: the left window keeps the whole
@@ -1616,15 +1620,15 @@
   (parameterize ((*buffer-list* '()))
     (call-with-output-file "/tmp/fe-revisit.txt"
       (lambda (port) (display "once\n" port)))
-    (let ((first (find-file "/tmp/fe-revisit.txt")))
-      (let ((second (find-file "/tmp/fe-revisit.txt")))
+    (let ((first (find-file-noselect "/tmp/fe-revisit.txt")))
+      (let ((second (find-file-noselect "/tmp/fe-revisit.txt")))
         (list (eq? first second) (length (buffer-list)))))))
 
 ;; ... and the buffer keeps the name it was given when it was made, which
 ;; is the file without its directory.
 (test-equal "fe-revisit.txt"
   (parameterize ((*buffer-list* '()))
-    (let ((ed (find-file "/tmp/fe-revisit.txt")))
+    (let ((ed (find-file-noselect "/tmp/fe-revisit.txt")))
       (buffer-name ed))))
 
 ;; C-x k kills the buffer, and the window is given another one rather than
@@ -1789,7 +1793,7 @@
       (Buffer-menu--set-mark! (get-buffer "doomed.txt") *Buffer-menu-del-char*)
       (Buffer-menu-redraw! (get-buffer "*Buffer List*"))
       (let ((marked (text-editor-to-string (get-buffer "*Buffer List*"))))
-        (run-command Buffer-menu-execute)
+        (Buffer-menu-execute)
         (list (mentions? marked "D  doomed.txt")
               (get-buffer "doomed.txt"))))))
 
@@ -1886,7 +1890,7 @@
                  (*kill-buffer-query-functions* '()))
     (call-with-output-file "/tmp/bm-save.txt"
       (lambda (port) (display "original\n" port)))
-    (let* ((ed (find-file "/tmp/bm-save.txt"))
+    (let* ((ed (find-file-noselect "/tmp/bm-save.txt"))
            ;; the list is made from this buffer, so its line is marked `.`
            (frame (test-frame ed)))
       (parameterize ((*current-frame* frame) (*echo-area-buffer* #f))

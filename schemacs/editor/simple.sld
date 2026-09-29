@@ -42,7 +42,7 @@
          set!ncurses-frame-message set!window-top-line window-body-height 
          window-buffer window-top-line)
     (only (schemacs editor command)
-         new-command new-count-command uarg->integer defcommand)
+         new-command uarg->integer defcommand)
     ;; The buffer-local store, for `mark-ring' - which is the buffer's
     ;; own - and the variables that come from the libraries Emacs
     ;; declares them in: `mark-active' and `transient-mark-mode' are
@@ -79,9 +79,9 @@
    copy-region-as-kill current-kill kill-append kill-line-command
    kill-new kill-range kill-region kill-ring-save kill-word next-line
    pending-uarg yank-pop
-   ;; `newline' clashes with `(scheme base)'s output procedure, so it
-   ;; is exported by rename; see the definition below.
-   (rename (newline-command newline))
+   ;; Emacs's `newline' clashes with `(scheme base)'s output procedure,
+   ;; so the command is named `insert-newline' here; see below.
+   insert-newline
    place-undo-boundary! previous-line read-only-mode
    scroll-down-command scroll-up-command self-insert-command
    self-insert-layer self-insert-tab
@@ -95,7 +95,7 @@
    set!mark-ring use-region-p
    prefix-argument-description
    prefix-echo-pending? request-prefix-echo! show-prefix-echo!
-   strip-undo-boundaries undo-command undo-redo-command update-prefix!
+   strip-undo-boundaries undo undo-redo update-prefix!
    word-char? word-run-end word-run-start yank
    )
 
@@ -117,6 +117,10 @@
     ;; the interpreter's business (callint.c), not any one .el file's,
     ;; and the minibuffer needs it too.
 
+    ;; `self-insert-command' is the one command left on `new-command':
+    ;; the character it inserts is re-derived from the keymap lookup
+    ;; state at *interactive* time, which `(interactive ...)' cannot say
+    ;; yet - so it stays on the record form until it can.
     (define self-insert-command
       ;; The character is not an argument the dispatcher can supply: it
       ;; is re-derived from the frame's keymap lookup state, which holds
@@ -140,112 +144,92 @@
        "Insert the typed character at point."
        'uarg))
 
-    (define self-insert-tab
-      (new-count-command
-       "self-insert-tab"
-       (lambda (count)
-         (let loop ((i 0))
-           (when (< i count)
-             (text-editor-insert (current-editor) #\tab)
-             (loop (+ 1 i)))))
-       "Insert N tab characters at point."))
+    (defcommand self-insert-tab (count)
+      "Insert N tab characters at point."
+      (interactive "p")
+      (let loop ((i 0))
+        (when (< i count)
+          (text-editor-insert (current-editor) #\tab)
+          (loop (+ 1 i)))))
 
-    (define forward-char
-      (new-count-command
-       "forward-char"
-       (lambda (count) (text-editor-move-cursor (current-editor) count))
-       "Move point N characters forward."))
+    (defcommand forward-char (count)
+      "Move point N characters forward."
+      (interactive "p")
+      (text-editor-move-cursor (current-editor) count))
 
-    (define backward-char
-      (new-count-command
-       "backward-char"
-       (lambda (count) (text-editor-move-cursor (current-editor) (- count)))
-       "Move point N characters backward."))
+    (defcommand backward-char (count)
+      "Move point N characters backward."
+      (interactive "p")
+      (text-editor-move-cursor (current-editor) (- count)))
 
     (define *temporary-goal-column* (make-parameter 0))
 
-    (define next-line
-      (new-count-command
-       "next-line"
-       (lambda (count)
-         (let* ((ed (current-editor))
-                (goal (if (memq (*last-command*) (list next-line previous-line))
-                          (*temporary-goal-column*)
-                          (text-editor-cursor-column ed))))
-           (*temporary-goal-column* goal)
-           (let loop ((i 0))
-             (when (< i count)
-               (let ((line (text-editor-cursor-line ed)))
-                 (text-editor-set-cursor ed (+ 1 line) goal)
-                 (cond
-                  ;; There was no line to move to: point is on the last
-                  ;; line, and the engine will not leave it. Emacs moves
-                  ;; point to the end of the buffer there - which is the
-                  ;; end of this line, there being no line break after it
-                  ;; - and reports `end-of-buffer'.
-                  ((= line (text-editor-cursor-line ed))
-                   (text-editor-set-cursor
-                    ed (text-editor-get-end-of-line ed))
-                   (error "End of buffer"))
-                  (else (loop (+ 1 i)))))))))
-       "Move point down N lines, keeping the column."))
+    (defcommand next-line (count)
+      "Move point down N lines, keeping the column."
+      (interactive "p")
+      (let* ((ed (current-editor))
+             (goal (if (memq (*last-command*) (list next-line previous-line))
+                       (*temporary-goal-column*)
+                       (text-editor-cursor-column ed))))
+        (*temporary-goal-column* goal)
+        (let loop ((i 0))
+          (when (< i count)
+            (let ((line (text-editor-cursor-line ed)))
+              (text-editor-set-cursor ed (+ 1 line) goal)
+              (cond
+               ;; There was no line to move to: point is on the last
+               ;; line, and the engine will not leave it. Emacs moves
+               ;; point to the end of the buffer there - which is the
+               ;; end of this line, there being no line break after it
+               ;; - and reports `end-of-buffer'.
+               ((= line (text-editor-cursor-line ed))
+                (text-editor-set-cursor
+                 ed (text-editor-get-end-of-line ed))
+                (error "End of buffer"))
+               (else (loop (+ 1 i)))))))))
 
-    (define previous-line
-      (new-count-command
-       "previous-line"
-       (lambda (count)
-         (let* ((ed (current-editor))
-                (goal (if (memq (*last-command*) (list next-line previous-line))
-                          (*temporary-goal-column*)
-                          (text-editor-cursor-column ed))))
-           (*temporary-goal-column* goal)
-           (let loop ((i 0))
-             (when (< i count)
-               (let ((line (text-editor-cursor-line ed)))
-                 (text-editor-set-cursor ed (- line 1) goal)
-                 (cond
-                  ((= line (text-editor-cursor-line ed))
-                   (text-editor-set-cursor
-                    ed (text-editor-get-start-of-line ed))
-                   (error "Beginning of buffer"))
-                  (else (loop (+ 1 i)))))))))
-       "Move point up N lines, keeping the column."))
+    (defcommand previous-line (count)
+      "Move point up N lines, keeping the column."
+      (interactive "p")
+      (let* ((ed (current-editor))
+             (goal (if (memq (*last-command*) (list next-line previous-line))
+                       (*temporary-goal-column*)
+                       (text-editor-cursor-column ed))))
+        (*temporary-goal-column* goal)
+        (let loop ((i 0))
+          (when (< i count)
+            (let ((line (text-editor-cursor-line ed)))
+              (text-editor-set-cursor ed (- line 1) goal)
+              (cond
+               ((= line (text-editor-cursor-line ed))
+                (text-editor-set-cursor
+                 ed (text-editor-get-start-of-line ed))
+                (error "Beginning of buffer"))
+               (else (loop (+ 1 i)))))))))
 
-    (define beginning-of-line
-      (new-command
-       "beginning-of-line"
-       (lambda () (text-editor-set-cursor (current-editor)
-                                          (text-editor-get-start-of-line
-                                           (current-editor))))
-       (lambda () (text-editor-set-cursor (current-editor)
-                                          (text-editor-get-start-of-line
-                                           (current-editor))))
-       "Move point to the beginning of the current line."))
+    (defcommand beginning-of-line ()
+      "Move point to the beginning of the current line."
+      (interactive)
+      (text-editor-set-cursor (current-editor)
+                              (text-editor-get-start-of-line
+                               (current-editor))))
 
-    (define end-of-line
-      (new-command
-       "end-of-line"
-       (lambda () (text-editor-set-cursor (current-editor)
-                                          (text-editor-get-end-of-line
-                                           (current-editor))))
-       (lambda () (text-editor-set-cursor (current-editor)
-                                          (text-editor-get-end-of-line
-                                           (current-editor))))
-       "Move point to the end of the current line."))
+    (defcommand end-of-line ()
+      "Move point to the end of the current line."
+      (interactive)
+      (text-editor-set-cursor (current-editor)
+                              (text-editor-get-end-of-line
+                               (current-editor))))
 
-    (define delete-char
-      (new-count-command
-       "delete-char"
-       (lambda (count)
-         (text-editor-delete-from-cursor (current-editor) count))
-       "Delete N characters after point."))
+    (defcommand delete-char (count)
+      "Delete N characters after point."
+      (interactive "p")
+      (text-editor-delete-from-cursor (current-editor) count))
 
-    (define backward-delete-char
-      (new-count-command
-       "backward-delete-char"
-       (lambda (count)
-         (text-editor-delete-from-cursor (current-editor) (- count)))
-       "Delete N characters before point."))
+    (defcommand backward-delete-char (count)
+      "Delete N characters before point."
+      (interactive "p")
+      (text-editor-delete-from-cursor (current-editor) (- count)))
 
     (define (kill-line-chunk ed uarg)
       ;; How many characters `kill-line' removes from point, and in
@@ -327,50 +311,40 @@
          ((cdr chunk+dir) (kill-range ed start (+ start chunk) #t))
          (else (kill-range ed (- start chunk) start #f)))))
 
-    (define kill-line
+    (defcommand kill-line (uarg)
       ;; mg's `killline'. Unlike the other count-taking commands this one
       ;; needs the raw prefix argument, because killing no lines and
       ;; killing one line are different operations.
-      (new-command
-       "kill-line"
-       (lambda (uarg) (kill-line-command uarg))
-       kill-line-command
-       "Kill N lines at point. With no argument, kill to the end of the
+      "Kill N lines at point. With no argument, kill to the end of the
  line, taking the line break when only blanks remain before it."
-       'uarg))
+      (interactive "P")
+      (kill-line-command uarg))
 
-    ;; The command GNU Emacs calls `newline'. It is defined under the
-    ;; name `NEWLINE-COMMAND' and exported as `newline', because `newline'
-    ;; is one of the names `(scheme base)' exports (it is R7RS's output
-    ;; procedure): defining it here would be a redefinition of an
-    ;; imported binding, which R7RS forbids, and Guile resolves it by
-    ;; keeping the imported one - so the definition would be silently
-    ;; lost and the keymap would end up bound to Scheme's `newline'
-    ;; instead of the command. `(rename ...)' in an export is the
-    ;; standard way to export a name that clashes with an import, and it
-    ;; is what the other commands of this shape already spell with a
-    ;; `-command' suffix. See LAYOUT-PLAN.txt.
-    (define newline-command
-      (new-count-command
-       "newline"
-       (lambda (count)
-         (let loop ((i 0))
-           (when (< i count)
-             (text-editor-insert (current-editor) #\newline)
-             (loop (+ 1 i)))))
-       "Insert N line breaks at point."))
+    ;; The command GNU Emacs calls `newline' - `simple.el' defines it
+    ;; under that name and it is what RET and C-j are bound to. The name
+    ;; is taken here, though: `newline' is one of the names `(scheme
+    ;; base)' exports (it is R7RS's output procedure), and defining it
+    ;; again would be a redefinition of an imported binding, which R7RS
+    ;; forbids - Guile would keep the imported one and the keymap would
+    ;; end up bound to Scheme's `newline' instead of the command. A
+    ;; clash with the host language is a real collision, so the command
+    ;; is named `INSERT-NEWLINE' instead.
+    (defcommand insert-newline (count)
+      "Insert N line breaks at point."
+      (interactive "p")
+      (let loop ((i 0))
+        (when (< i count)
+          (text-editor-insert (current-editor) #\newline)
+          (loop (+ 1 i)))))
 
     ;; `keyboard-quit', `read-only-mode' and
     ;; `exchange-point-and-mark' are simple.el's; they were
     ;; misfiled under the Windows and isearch banners.
-    (define keyboard-quit
-      (new-command
-       "keyboard-quit"
-       (lambda ()
-         (set!ncurses-frame-message (*current-frame*) "")
-         (set!ncurses-frame-keymap-state (*current-frame*) #f))
-       (lambda () #f)
-       "Cancel the current action and clear the echo area."))
+    (defcommand keyboard-quit ()
+      "Cancel the current action and clear the echo area."
+      (interactive)
+      (set!ncurses-frame-message (*current-frame*) "")
+      (set!ncurses-frame-keymap-state (*current-frame*) #f))
 
     (defcommand read-only-mode (uarg)
       ;; GNU Emacs's `read-only-mode' (it used to be called
@@ -401,7 +375,7 @@
       ;;--------------------------------------------------------------
       (make-parameter #t))
 
-    (define exchange-point-and-mark
+    (defcommand exchange-point-and-mark (arg)
       ;; GNU Emacs's `exchange-point-and-mark' (C-x C-x): put the mark
       ;; where point is now, and point where the mark was - which is how
       ;; you return to where a search started. It works even when the
@@ -413,26 +387,21 @@
       ;; off, in which case a prefix argument is what activates it -
       ;; Emacs's `(xor arg ...)' below, which is the whole of that
       ;; variable's meaning.
-      ;;--------------------------------------------------------------
-      (new-command
-       "exchange-point-and-mark"
-       (lambda (arg)
-         (let ((omark (mark #t))
-               (region-was-active (region-active-p)))
-           (if (not omark)
-               (error "No mark set in this buffer")
-               (begin
-                 (set-mark (text-editor-get-cursor (current-editor)))
-                 (text-editor-set-cursor (current-editor) omark)
-                 (if (eq? (and arg #t)
-                          (not (if (*exchange-point-and-mark-highlight-region*)
-                                   (region-active-p)
-                                   region-was-active)))
-                     (deactivate-mark)
-                     (activate-mark))))))
-       (lambda (arg) arg)
-       "Put the mark where point is now, and point where the mark is now."
-       'uarg))
+      "Put the mark where point is now, and point where the mark is now."
+      (interactive "P")
+      (let ((omark (mark #t))
+            (region-was-active (region-active-p)))
+        (if (not omark)
+            (error "No mark set in this buffer")
+            (begin
+              (set-mark (text-editor-get-cursor (current-editor)))
+              (text-editor-set-cursor (current-editor) omark)
+              (if (eq? (and arg #t)
+                       (not (if (*exchange-point-and-mark-highlight-region*)
+                                (region-active-p)
+                                region-was-active)))
+                  (deactivate-mark)
+                  (activate-mark))))))
 
     (defcommand scroll-down-command (count)
       ;; Scroll the view COUNT screenfuls down (toward the end of the
@@ -480,25 +449,19 @@
                   (text-editor-set-cursor
                    ed (+ new-top (- vheight 1)) 0)))))))
 
-    (define beginning-of-buffer
-      (new-command
-       "beginning-of-buffer"
-       (lambda ()
-         (let ((window (selected-window)))
-           (set!window-top-line window 0)
-           (text-editor-set-cursor (window-buffer window) 0 0)))
-       (lambda () #f)
-       "Move point to the beginning of the buffer."))
+    (defcommand beginning-of-buffer ()
+      "Move point to the beginning of the buffer."
+      (interactive)
+      (let ((window (selected-window)))
+        (set!window-top-line window 0)
+        (text-editor-set-cursor (window-buffer window) 0 0)))
 
-    (define end-of-buffer
-      (new-command
-       "end-of-buffer"
-       (lambda ()
-         (let ((ed (current-editor)))
-           (text-editor-set-cursor
-            ed (text-editor-char-count ed))))
-       (lambda () #f)
-       "Move point to the end of the buffer."))
+    (defcommand end-of-buffer ()
+      "Move point to the end of the buffer."
+      (interactive)
+      (let ((ed (current-editor)))
+        (text-editor-set-cursor
+         ed (text-editor-char-count ed))))
 
     ;;----------------------------------------------------------------
     ;; Kill ring and word motion
@@ -606,30 +569,26 @@
         (text-editor-delete-from-cursor ed (abs (- end start)))
         text))
 
-    (define forward-word
+    (defcommand forward-word (count)
       ;; mg's `forwword` (word.c:51) with its numeric-argument loop: move
       ;; N words forward, stopping at the end of the buffer.
-      (new-count-command
-       "forward-word"
-       (lambda (count)
-         (let loop ((i 0))
-           (when (< i count)
-             (text-editor-set-cursor
-              (current-editor) (forward-word-position (current-editor)))
-             (loop (+ 1 i)))))
-       "Move point N words forward, to the end of each word."))
+      "Move point N words forward, to the end of each word."
+      (interactive "p")
+      (let loop ((i 0))
+        (when (< i count)
+          (text-editor-set-cursor
+           (current-editor) (forward-word-position (current-editor)))
+          (loop (+ 1 i)))))
 
-    (define backward-word
+    (defcommand backward-word (count)
       ;; mg's `backword` (word.c:27) with its numeric-argument loop.
-      (new-count-command
-       "backward-word"
-       (lambda (count)
-         (let loop ((i 0))
-           (when (< i count)
-             (text-editor-set-cursor
-              (current-editor) (backward-word-position (current-editor)))
-             (loop (+ 1 i)))))
-       "Move point N words backward, to the start of each word."))
+      "Move point N words backward, to the start of each word."
+      (interactive "p")
+      (let loop ((i 0))
+        (when (< i count)
+          (text-editor-set-cursor
+           (current-editor) (backward-word-position (current-editor)))
+          (loop (+ 1 i)))))
 
     (define (word-run-end ed count)
       ;; The character index COUNT words forward of point, found the way
@@ -657,32 +616,28 @@
               (let ((prev (backward-word-position ed)))
                 (if (= prev pos) prev (loop (+ 1 i) prev)))))))
 
-    (define kill-word
+    (defcommand kill-word (count)
       ;; Like mg's `delfword` (word.c:397): kill from point to the end
       ;; of the next word. The N words are one kill, so they accumulate
       ;; into the kill buffer as a single entry.
-      (new-count-command
-       "kill-word"
-       (lambda (count)
-         (let* ((ed (current-editor))
-                (start (text-editor-get-cursor ed))
-                (end (word-run-end ed count)))
-           (when (< start end)
-             (kill-range ed start end #t))))
-       "Kill N words forward from point."))
+      "Kill N words forward from point."
+      (interactive "p")
+      (let* ((ed (current-editor))
+             (start (text-editor-get-cursor ed))
+             (end (word-run-end ed count)))
+        (when (< start end)
+          (kill-range ed start end #t))))
 
-    (define backward-kill-word
+    (defcommand backward-kill-word (count)
       ;; Like mg's `delbword` (word.c:453): kill from the start of the
       ;; previous word to point.
-      (new-count-command
-       "backward-kill-word"
-       (lambda (count)
-         (let* ((ed (current-editor))
-                (end (text-editor-get-cursor ed))
-                (start (word-run-start ed count)))
-           (when (< start end)
-             (kill-range ed start end #f))))
-       "Kill N words backward from point."))
+      "Kill N words backward from point."
+      (interactive "p")
+      (let* ((ed (current-editor))
+             (end (text-editor-get-cursor ed))
+             (start (word-run-start ed count)))
+        (when (< start end)
+          (kill-range ed start end #f))))
 
     ;;----------------------------------------------------------------
     ;; The kill ring
@@ -808,7 +763,7 @@
         (and mark
              (list mark (text-editor-get-cursor (current-editor))))))
 
-    (define kill-region
+    (defcommand kill-region ()
       ;; GNU Emacs's `kill-region' (C-w): delete the region and put it in
       ;; the kill ring.
       ;;
@@ -816,10 +771,8 @@
       ;; Emacs copies it to the ring and then signals, so that the killing
       ;; commands can be used to *copy* out of a read-only buffer - and
       ;; `kill-read-only-ok' turns the signal into a message.
-      ;;--------------------------------------------------------------
-      (new-command
-       "kill-region"
-       (lambda ()
+      "Kill (cut) the text between point and mark."
+      (interactive)
          (let ((args (kill-region-arguments)))
            (if (not args)
                (error "The mark is not set now, so there is no region")
@@ -835,12 +788,10 @@
                      (kill-new string))
                  (*this-command* kill-region)
                  (set!text-editor-deactivate-mark! (current-buffer) #t)
-                 (if read-only?
-                     (unless (*kill-read-only-ok*)
-                       (error "Buffer is read-only"))
-                     (delete-region beg end))))))
-       (lambda () #f)
-       "Kill (cut) the text between point and mark."))
+                (if read-only?
+                    (unless (*kill-read-only-ok*)
+                      (error "Buffer is read-only"))
+                    (delete-region beg end))))))
 
     (define (copy-region-as-kill beg end)
       ;; GNU Emacs's `copy-region-as-kill': put the text in the kill ring
@@ -856,23 +807,19 @@
         ;; entries where killing twice makes one.
         (set!text-editor-deactivate-mark! (current-buffer) #t)))
 
-    (define kill-ring-save
+    (defcommand kill-ring-save ()
       ;; GNU Emacs's `kill-ring-save' (M-w), which is `copy-region-as-kill'
       ;; with a moment of visual feedback - Emacs's
       ;; `indicate-copied-region', which blinks the other end of the
       ;; region. There is no blink here, so it is the copy alone.
-      ;;--------------------------------------------------------------
-      (new-command
-       "kill-ring-save"
-       (lambda ()
-         (let ((args (kill-region-arguments)))
-           (if (not args)
-               (error "The mark is not set now, so there is no region")
-               (copy-region-as-kill (car args) (cadr args)))))
-       (lambda () #f)
-       "Save the region as if killed, but don't kill it."))
+      "Save the region as if killed, but don't kill it."
+      (interactive)
+      (let ((args (kill-region-arguments)))
+        (if (not args)
+            (error "The mark is not set now, so there is no region")
+            (copy-region-as-kill (car args) (cadr args)))))
 
-    (define yank
+    (defcommand yank (arg)
       ;; GNU Emacs's `yank' (C-y): insert the most recent kill at point,
       ;; put point after it, and set the mark at the beginning of it
       ;; **without activating it** - which is what `yank-pop' then uses to
@@ -887,39 +834,34 @@
       ;; Emacs inserts through `insert-for-yank', which honours the
       ;; `yank-handler' text property and `yank-excluded-properties';
       ;; there are no text properties on a yank here yet.
-      ;;--------------------------------------------------------------
-      (new-command
-       "yank"
-       (lambda (arg)
-         ;; `(cond ((listp arg) 0) ((eq arg '-) -2) (t (1- arg)))' in
-         ;; Emacs: a bare `C-u' is the latest kill, `M-- C-y' is the one
-         ;; *before* the latest - which is -2 because `current-kill'
-         ;; counts back from the yank pointer, and the pointer has already
-         ;; moved to the latest - and a number is that many kills back.
-         (let ((n (cond ((not arg) 0)
-                        ((pair? arg) 0)
-                        ((eq? '- arg) -2)
-                        (else (- arg 1))))
-               (ed (current-editor)))
-           (push-mark)
-           (text-editor-insert ed (current-kill n))
-           ;; `C-u C-y' leaves point *before* what it inserted and the
-           ;; mark after it, which is like `exchange-point-and-mark' but
-           ;; does not activate the mark. Emacs asks `(consp arg)' - a
-           ;; bare `C-u' - and that is what the list is for.
-           (when (pair? arg)
-             (let ((was (mark #t)))
-               (set!text-editor-mark ed (text-editor-get-cursor ed))
-               (text-editor-set-cursor ed was))))
-         ;; "If we do get all the way thru, make this-command indicate
-         ;; that" - which is what `yank-pop' asks about, and what makes a
-         ;; run of M-y possible.
-         (*this-command* yank))
-       (lambda (arg) arg)
-       "Reinsert (paste) the last stretch of killed text."
-       'uarg))
+      "Reinsert (paste) the last stretch of killed text."
+      (interactive "P")
+      ;; `(cond ((listp arg) 0) ((eq arg '-) -2) (t (1- arg)))' in
+      ;; Emacs: a bare `C-u' is the latest kill, `M-- C-y' is the one
+      ;; *before* the latest - which is -2 because `current-kill'
+      ;; counts back from the yank pointer, and the pointer has already
+      ;; moved to the latest - and a number is that many kills back.
+      (let ((n (cond ((not arg) 0)
+                     ((pair? arg) 0)
+                     ((eq? '- arg) -2)
+                     (else (- arg 1))))
+            (ed (current-editor)))
+        (push-mark)
+        (text-editor-insert ed (current-kill n))
+        ;; `C-u C-y' leaves point *before* what it inserted and the
+        ;; mark after it, which is like `exchange-point-and-mark' but
+        ;; does not activate the mark. Emacs asks `(consp arg)' - a
+        ;; bare `C-u' - and that is what the list is for.
+        (when (pair? arg)
+          (let ((was (mark #t)))
+            (set!text-editor-mark ed (text-editor-get-cursor ed))
+            (text-editor-set-cursor ed was))))
+      ;; "If we do get all the way thru, make this-command indicate
+      ;; that" - which is what `yank-pop' asks about, and what makes a
+      ;; run of M-y possible.
+      (*this-command* yank))
 
-    (define yank-pop
+    (defcommand yank-pop (count)
       ;; GNU Emacs's `yank-pop' (M-y): replace what the last yank inserted
       ;; with an older kill. It deletes the text between point and the
       ;; mark - which `yank' left at the beginning of what it inserted -
@@ -930,23 +872,20 @@
       ;; minibuffer (`yank-from-kill-ring'). That needs the minibuffer,
       ;; which imports *this* library, so it is not here - and the older
       ;; Emacs behaviour is, which is to say so.
-      ;;--------------------------------------------------------------
-      (new-count-command
-       "yank-pop"
-       (lambda (count)
-         (if (not (eq? (*last-command*) yank))
-             (error "Previous command was not a yank")
-             (let* ((ed (current-editor))
-                    (before (< (text-editor-get-cursor ed) (mark #t)))
-                    (beg (if before (text-editor-get-cursor ed) (mark #t)))
-                    (end (if before (mark #t) (text-editor-get-cursor ed))))
-               (delete-region beg end)
-               (set!text-editor-mark ed (text-editor-get-cursor ed))
-               (text-editor-insert ed (current-kill count))
-               ;; ... and it says `yank' as well, so the *next* M-y still
-               ;; looks like one and the ring may be gone round and round.
-               (*this-command* yank))))
-       "Replace the just-yanked text with an older kill."))
+      "Replace the just-yanked text with an older kill."
+      (interactive "p")
+      (if (not (eq? (*last-command*) yank))
+          (error "Previous command was not a yank")
+          (let* ((ed (current-editor))
+                 (before (< (text-editor-get-cursor ed) (mark #t)))
+                 (beg (if before (text-editor-get-cursor ed) (mark #t)))
+                 (end (if before (mark #t) (text-editor-get-cursor ed))))
+            (delete-region beg end)
+            (set!text-editor-mark ed (text-editor-get-cursor ed))
+            (text-editor-insert ed (current-kill count))
+            ;; ... and it says `yank' as well, so the *next* M-y still
+            ;; looks like one and the ring may be gone round and round.
+            (*this-command* yank))))
 
     ;; Undo
     ;;
@@ -1006,54 +945,50 @@
       (let loop ((list list))
         (if (and (pair? list) (null? (car list))) (loop (cdr list)) list)))
 
-    (define undo-command
+    (defcommand undo (count)
       ;; GNU Emacs's `undo'. Repeating it undoes further back, and when
       ;; it reaches the end of the undo list the next one reports that
       ;; there is nothing left.
-      (new-count-command
-       "undo"
-       (lambda (count)
-         (let* ((frame (*current-frame*))
-                (ed (current-editor))
-                (pending
-                 (if (eq? (*last-command*) undo-command)
-                     ;; continue the run
-                     (*pending-undo-list*)
-                     ;; start a new run, from the front of the list
-                     (strip-undo-boundaries (text-editor-undo-list ed)))))
-           (if (not (list? pending))
-               (set!ncurses-frame-message frame "No further undo information")
-               (let ((rest (text-editor-undo ed pending count)))
-                 ;; Emacs sets `pending-undo-list' to t once the run has
-                 ;; reached the end; false is that state here, and it is
-                 ;; what makes the next undo report that it is finished.
-                 (*pending-undo-list* (if (null? rest) #f rest))
-                 (*last-change-was-undo* #t)
-                 (set!ncurses-frame-message frame "Undo")))))
-       "Undo some previous changes."))
+      "Undo some previous changes."
+      (interactive "p")
+      (let* ((frame (*current-frame*))
+             (ed (current-editor))
+             (pending
+              (if (eq? (*last-command*) undo)
+                  ;; continue the run
+                  (*pending-undo-list*)
+                  ;; start a new run, from the front of the list
+                  (strip-undo-boundaries (text-editor-undo-list ed)))))
+        (if (not (list? pending))
+            (set!ncurses-frame-message frame "No further undo information")
+            (let ((rest (text-editor-undo ed pending count)))
+              ;; Emacs sets `pending-undo-list' to t once the run has
+              ;; reached the end; false is that state here, and it is
+              ;; what makes the next undo report that it is finished.
+              (*pending-undo-list* (if (null? rest) #f rest))
+              (*last-change-was-undo* #t)
+              (set!ncurses-frame-message frame "Undo")))))
 
-    (define undo-redo-command
+    (defcommand undo-redo (count)
       ;; GNU Emacs's `undo-redo': undo the undos. The records an undo
       ;; created are ordinary undo entries sitting at the front of the
       ;; list, so redoing one is undoing it - that is the whole of the
       ;; redo mechanism, and why there is no redo list.
-      (new-count-command
-       "undo-redo"
-       (lambda (count)
-         (let ((frame (*current-frame*)))
-           (if (not (*last-change-was-undo*))
-               (set!ncurses-frame-message frame "No undone changes to redo")
-               (let* ((ed (current-editor))
-                      (list (strip-undo-boundaries
-                             (text-editor-undo-list ed))))
-                 (if (not (pair? list))
-                     (set!ncurses-frame-message
-                      frame "No undone changes to redo")
-                     (begin
-                       (text-editor-undo ed list count)
-                       (*last-change-was-undo* #t)
-                       (set!ncurses-frame-message frame "Redo")))))))
-       "Redo the last undone change, or the last COUNT undone changes."))
+      "Redo the last undone change, or the last COUNT undone changes."
+      (interactive "p")
+      (let ((frame (*current-frame*)))
+        (if (not (*last-change-was-undo*))
+            (set!ncurses-frame-message frame "No undone changes to redo")
+            (let* ((ed (current-editor))
+                   (list (strip-undo-boundaries
+                          (text-editor-undo-list ed))))
+              (if (not (pair? list))
+                  (set!ncurses-frame-message
+                   frame "No undone changes to redo")
+                  (begin
+                    (text-editor-undo ed list count)
+                    (*last-change-was-undo* #t)
+                    (set!ncurses-frame-message frame "Redo")))))))
 
     ;;----------------------------------------------------------------
     ;; Prefix arguments
@@ -1246,7 +1181,7 @@
              (char-numeric? last)
              (- (char->integer last) (char->integer #\0)))))
 
-    (define digit-argument
+    (defcommand digit-argument (uarg)
       ;; GNU Emacs's `digit-argument': a digit typed with Meta adds
       ;; itself to the numeric argument for the next command.
       ;; `M-3 M-5 C-n' moves down thirty-five lines.
@@ -1256,10 +1191,8 @@
       ;; M-6 is not an undefined key there. What it receives is the raw
       ;; prefix argument, since `M-3 M-5' has to build on `M-3' rather
       ;; than start again.
-      ;;--------------------------------------------------------------
-      (new-command
-       "digit-argument"
-       (lambda (uarg)
+      "Add the digit of this key to the numeric argument for the next command."
+      (interactive "P")
          (let ((digit (or (last-command-event-digit) 0)))
            ;; digits replace a C-u count rather than multiplying it, as
            ;; Emacs's `universal-argument' does with `M-6' after `C-u'
@@ -1278,25 +1211,17 @@
             (else
              (*prefix-negative* #f)
              (*prefix-digits* (number->string digit))))
-           (request-prefix-echo!)))
-       (lambda (uarg) uarg)
-       "Add the digit of this key to the numeric argument for the next command."
-       'uarg))
+          (request-prefix-echo!)))
 
-    (define negative-argument
+    (defcommand negative-argument (uarg)
       ;; GNU Emacs's `negative-argument': M-- begins a negative numeric
       ;; argument, and a second M-- cancels it.
-      ;;--------------------------------------------------------------
-      (new-command
-       "negative-argument"
-       (lambda (uarg)
-         (cond ((integer? uarg) (*prefix-negative* (not (< uarg 0))))
-               ((eq? '- uarg) (*prefix-negative* #f))
-               (else (*prefix-negative* #t)))
-         (request-prefix-echo!))
-       (lambda (uarg) uarg)
-       "Begin a negative numeric argument for the next command."
-       'uarg))
+      "Begin a negative numeric argument for the next command."
+      (interactive "P")
+      (cond ((integer? uarg) (*prefix-negative* (not (< uarg 0))))
+            ((eq? '- uarg) (*prefix-negative* #f))
+            (else (*prefix-negative* #t)))
+      (request-prefix-echo!))
 
     ;;----------------------------------------------------------------
     ;; The mark and the region
@@ -1498,7 +1423,7 @@
             (text-editor-set-cursor (current-editor) (mark #t))
             (pop-mark))))
 
-    (define set-mark-command
+    (defcommand set-mark-command (arg)
       ;; GNU Emacs's `set-mark-command' (C-SPC, and C-@, which is the
       ;; same key): set the mark where point is and activate it, or - with
       ;; a prefix argument - jump to the mark and pop a new one off the
@@ -1508,10 +1433,8 @@
       ;; and the global mark ring, neither of which is here yet; what is
       ;; here is the part C-SPC needs. Repeating C-SPC on an active region
       ;; deactivates it, which is how the same key turns the region off.
-      ;;--------------------------------------------------------------
-      (new-command
-       "set-mark-command"
-       (lambda (arg)
+      "Set the mark where point is, and activate it; or jump to the mark."
+      (interactive "P")
          ;; Emacs's `cond', clause for clause, less the two that are
          ;; about `set-mark-command-repeat-pop' and the global mark ring.
          ;; (`C-u C-u' is the raw argument 16 here rather than a cons,
@@ -1529,26 +1452,19 @@
           (else
            (activate-mark)
            (set!ncurses-frame-message (*current-frame*) "Mark activated"))))
-       (lambda (arg) arg)
-       "Set the mark where point is, and activate it; or jump to the mark."
-       'uarg))
 
-    (define mark-whole-buffer
+    (defcommand mark-whole-buffer ()
       ;; GNU Emacs's `mark-whole-buffer' (C-x h): point at the beginning
       ;; and the mark at the end, with the old mark pushed first.
       ;;
       ;; Emacs goes to `minibuffer-prompt-end' rather than to the start of
       ;; the buffer; the prompt is not in the buffer here, so the two are
       ;; the same.
-      ;;--------------------------------------------------------------
-      (new-command
-       "mark-whole-buffer"
-       (lambda ()
-         (push-mark)
-         (push-mark (text-editor-char-count (current-editor)) #f #t)
-         (text-editor-set-cursor (current-editor) 0))
-       (lambda () #f)
-       "Put point at beginning and mark at end of buffer."))
+      "Put point at beginning and mark at end of buffer."
+      (interactive)
+      (push-mark)
+      (push-mark (text-editor-char-count (current-editor)) #f #t)
+      (text-editor-set-cursor (current-editor) 0))
 
     ;;----------------------------------------------------------------
     ;; The keys GNU Emacs binds these commands to
@@ -1571,8 +1487,8 @@
     (define-key *default-keymap* (list (list 'ctrl #\d)) delete-char)
     (define-key *default-keymap* (list (list 'ctrl #\h)) backward-delete-char)
     (define-key *default-keymap* (list (list 'ctrl #\k)) kill-line)
-    (define-key *default-keymap* (list (list 'ctrl #\m)) newline-command)
-    (define-key *default-keymap* (list (list 'ctrl #\j)) newline-command)
+    (define-key *default-keymap* (list (list 'ctrl #\m)) insert-newline)
+    (define-key *default-keymap* (list (list 'ctrl #\j)) insert-newline)
     (define-key *default-keymap* (list (list 'ctrl #\g)) keyboard-quit)
     ;; The mark. C-SPC and C-@ are the *same* key event on a terminal -
     ;; both send the NUL byte - which is why one binding serves both, and
@@ -1596,10 +1512,10 @@
     ;; redo key, C-?, cannot be bound: it is DEL, which arrives here as
     ;; backspace.
     (define-key *default-keymap*
-      (list (list 'ctrl (integer->char 31))) undo-command)
+      (list (list 'ctrl (integer->char 31))) undo)
     (define-key *default-keymap*
-      (list (list 'meta 'ctrl (integer->char 31))) undo-redo-command)
-    (define-key *default-keymap* (list (list 'ctrl #\x) #\u) undo-command)
+      (list (list 'meta 'ctrl (integer->char 31))) undo-redo)
+    (define-key *default-keymap* (list (list 'ctrl #\x) #\u) undo)
     (define-key *default-keymap* (list (list 'ctrl #\x) #\q) read-only-mode)
     (define-key *default-keymap* (list (list 'ctrl #\x) (list 'ctrl #\x))
       exchange-point-and-mark)
