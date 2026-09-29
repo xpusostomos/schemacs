@@ -1,9 +1,10 @@
 (define-library (schemacs ui platform ncurses)
-  ;; The ncurses terminal: entering and leaving curses mode, and the entry
-  ;; point that opens the editor on one. This is what GNU Emacs splits
-  ;; between `term.c` (the terminal itself) and `emacs.c`'s main plus
-  ;; `startup.el` (opening a frame on it and loading the file named on the
-  ;; command line).
+  ;; The ncurses-terminal editor's entry point. Entering and leaving
+  ;; curses mode, drawing and reading keys are `term.sld`'s - the mirror
+  ;; of GNU Emacs's `term.c` - and what is left here is the other half
+  ;; of what Emacs splits between `term.c` and `emacs.c`'s main plus
+  ;; `startup.el`: opening a frame on the terminal and loading the files
+  ;; named on the command line.
   ;;
   ;; It is the last piece out of `(schemacs apps ncurses-editor)`, which
   ;; held the whole frontend when LAYOUT-PLAN.txt was written: the editing
@@ -15,22 +16,13 @@
 
   (import
     (scheme base)
-    ;; The terminal.
-    (only (ncurses curses)
-          colors curs-set endwin has-colors? idcok! idlok! initscr keypad!
-          noecho! nonl! raw! scrollok! start-color! stdscr use-default-colors)
+    ;; Opening the terminal - curses mode, the display object, the face
+    ;; initialization - is `term.sld''s (the mirror of Emacs's term.c);
+    ;; what is left here is the entry point that opens an editor on one.
+    (only (schemacs editor term) with-terminal)
     (only (schemacs editor engine)
           new-text-editor set!text-editor-buffer-name)
     (only (schemacs editor frame) *current-frame* new-frame)
-    ;; `startup.el' registers the eight standard colours before the
-    ;; terminal's own initialization runs; `term/xterm.el' is that
-    ;; initialization for an xterm.
-    (only (schemacs editor tty-colors) tty-register-default-colors)
-    (only (schemacs editor xterm) terminal-init-xterm)
-    (only (schemacs editor faces)
-          *display-color-cells* *display-type* *frame-background-mode*
-          face-list face-spec-recalc)
-    (only (guile) getenv string-prefix?)
     ;; Everything this needs of the editor: the buffers named on the
     ;; command line - which is `startup.el''s job, not this one's - and
     ;; then the command loop.
@@ -60,82 +52,6 @@
    )
 
   (begin
-
-    ;; Terminal setup
-
-    (define (terminal-background-mode)
-      ;; GNU Emacs's `frame--current-background-mode' when nothing has
-      ;; said what the background is - no `frame-background-mode', no
-      ;; `background-mode' terminal parameter, and a tty whose
-      ;; `background-color' is "unspecified-bg": `light' for a tty whose
-      ;; type is xterm, rxvt, dtterm or eterm, else `dark'. An xterm that
-      ;; answers `term/xterm.el''s query does not get here.
-      ;;--------------------------------------------------------------
-      (let ((term (or (getenv "TERM") "")))
-        (if (or (string-prefix? "xterm" term)
-                (string-prefix? "rxvt" term)
-                (string-prefix? "dtterm" term)
-                (string-prefix? "eterm" term))
-            'light
-            'dark)))
-
-    (define (initialize-display-faces!)
-      ;; What `startup.el' does to the terminal's faces, in its order:
-      ;; `tty-register-default-colors', then
-      ;; `tty-run-terminal-initialization' - which for TERM=xterm* is
-      ;; `terminal-init-xterm' - then `frame-set-background-mode' and the
-      ;; faces realized against what all that found out. The display's
-      ;; class and colour count are ncurses's answers, which it only has
-      ;; once `initscr' has run.
-      ;;--------------------------------------------------------------
-      (*display-type* (if (has-colors?) 'color 'mono))
-      (*display-color-cells* (if (has-colors?) (max 1 (colors)) 0))
-      (tty-register-default-colors)
-      (when (string-prefix? "xterm" (or (getenv "TERM") ""))
-        (terminal-init-xterm))
-      (unless (*frame-background-mode*)
-        (*frame-background-mode* (terminal-background-mode)))
-      (for-each face-spec-recalc (face-list)))
-
-    (define (with-terminal thunk)
-      ;; Run THUNK with the terminal in curses mode, restoring the
-      ;; terminal even if THUNK raises an error.
-      ;;--------------------------------------------------------------
-      (dynamic-wind
-        (lambda ()
-          (initscr)
-          (noecho!)
-          ;; `raw!` (not `cbreak!`) so that C-c and C-z reach the
-          ;; editor's keymap instead of raising signals.
-          (raw!)
-          (nonl!)
-          (keypad! (stdscr) #t)
-          (scrollok! (stdscr) #f)
-          ;; Colours have to be started before a pair can be defined, and
-          ;; asking first keeps a monochrome terminal from being told to do
-          ;; something it cannot. `(schemacs editor xdisp)' defines the
-          ;; pairs the faces ask for.
-          (when (has-colors?)
-            (start-color!)
-            ;; A face that sets only one of its colours leaves the other
-            ;; as the terminal's own - `term.c''s `turn_on_face' simply
-            ;; does not send `setaf' for `FACE_TTY_DEFAULT_COLOR'. In
-            ;; ncurses that colour is -1, and `init_pair' refuses -1
-            ;; unless this has been called: without it Emacs's `region'
-            ;; on a 16-colour dark display - `blue3' and no foreground -
-            ;; came out as pair 0, black on black.
-            (use-default-colors))
-          (initialize-display-faces!)
-          ;; disable the insert/delete-character optimizations: they
-          ;; corrupt the display when lines merge (ncurses tracks a
-          ;; virtual screen the terminal no longer matches)
-          (idcok! (stdscr) #f)
-          (idlok! (stdscr) #f)
-          (curs-set 1)
-          )
-        thunk
-        (lambda () (endwin))
-        ))
 
     ;;----------------------------------------------------------------
     ;; Main entry

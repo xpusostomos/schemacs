@@ -41,12 +41,16 @@
     ;; own, which would collide with the keymap library's.
     (only (ncurses curses)
           ERR KEY_BACKSPACE KEY_DC KEY_DOWN KEY_END KEY_HOME KEY_LEFT
-          KEY_RESIZE KEY_RIGHT KEY_UP getch keyname stdscr timeout!)
+          KEY_RESIZE KEY_RIGHT KEY_UP keyname)
     (only (schemacs editor engine)
           text-editor-deactivate-mark set!text-editor-deactivate-mark!)
     (only (schemacs editor command)
           command-interactive-spec command-record-of command-type? defcommand
           run-command)
+    ;; Reading a key is the display's job - `getch' and its timeout
+    ;; belong to the terminal driver, and this loop calls through the
+    ;; interface.
+    (only (schemacs editor dispnew) current-display read-input-event)
     (only (schemacs editor frame)
           *current-frame* ncurses-frame-esc-pending ncurses-frame-keymap-state
           ncurses-frame-message ncurses-frame-message-expired?
@@ -467,21 +471,17 @@
            ;; draw before the first key is read: a prompt that appears only
            ;; after a key is typed looks like nothing happened
            (render! frame)
-           (let ((armed #f))
-             (let loop ()
-               (let ((want (if (or (ncurses-frame-message-expiry frame)
-                                   ;; a prefix argument owes the echo
-                                   ;; area a description, and it is owed
-                                   ;; once the keyboard has been quiet
-                                   ;; for `echo-keystrokes' - so the read
-                                   ;; cannot block while that is owed
-                                   (prefix-echo-pending?))
-                               message-read-timeout
-                               -1)))
-                 (unless (eqv? want armed)
-                   (timeout! (stdscr) want)
-                   (set! armed want)))
-               (let ((ev (getch (stdscr))))
+           (let loop ()
+             (let ((want (if (or (ncurses-frame-message-expiry frame)
+                                 ;; a prefix argument owes the echo
+                                 ;; area a description, and it is owed
+                                 ;; once the keyboard has been quiet
+                                 ;; for `echo-keystrokes' - so the read
+                                 ;; cannot block while that is owed
+                                 (prefix-echo-pending?))
+                             message-read-timeout
+                             -1)))
+             (let ((ev (read-input-event (current-display) want)))
                  (cond
                   ;; Nothing to read, with a message pending that times
                   ;; out: take the message down once its time is up and

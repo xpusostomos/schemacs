@@ -98,7 +98,9 @@
     ;; `read-char-from-minibuffer' reads the one key that answers it:
     ;; the raw event, as isearch's keys are read, drawn with the
     ;; display's `render!'.
-    (only (ncurses curses) getch KEY_BACKSPACE stdscr)
+    ;; The one key that answers the question is read from the terminal
+    ;; driver, as isearch's are.
+    (only (schemacs editor term) tty-read-char)
     (only (schemacs editor xdisp) render!)
     ;; The global map `minibuffer-local-map' is built from, and the local
     ;; map it becomes while it is read.
@@ -550,10 +552,7 @@
                        (*echo-area-prompt* prompt))
           (render! frame)
           (let loop ()
-            (let* ((raw (getch (stdscr)))
-                   (ev (if (and (integer? raw) (= raw KEY_BACKSPACE))
-                           #\backspace
-                           raw)))
+            (let ((ev (tty-read-char)))
               (cond
                ((and (char? ev) (= (char->integer ev) 7))
                 (signal-quit))

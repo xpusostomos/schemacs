@@ -32,7 +32,10 @@
     ;; own, so importing the whole module would put that name in the same
     ;; library as `(schemacs editor keymap)'s, and the winner would be
     ;; whichever import came last.
-    (only (ncurses curses) getch KEY_BACKSPACE stdscr ungetch)
+    ;; A key in the search is read from the terminal driver, as the
+    ;; prompt's keys are - the raw character, not an event for the
+    ;; keymap (isearch reads what is typed itself).
+    (only (schemacs editor term) tty-read-char tty-unget-event!)
     ;; `define-key' and the global map: the keys C-s and C-r are stated
     ;; here, beside the commands they run.
     (only (schemacs editor keymap)
@@ -194,12 +197,7 @@
            (isearch-message pattern direction success? wrapped? case-fold?
                             (text-editor-get-cursor ed) opoint))
           (render! frame)
-          (let* ((raw (getch (stdscr)))
-                 ;; the keypad sends Backspace as a key code, not as the
-                 ;; character the search's DEL key is
-                 (ev (if (and (integer? raw) (= raw KEY_BACKSPACE))
-                         #\backspace
-                         raw)))
+          (let ((ev (tty-read-char)))
             (cond
              ;; ---- keys that end the search ----
              ((and (char? ev) (char=? ev #\return))          ; isearch-exit
@@ -291,7 +289,7 @@
               (*search-pattern* #f)
               (*search-highlight* #f)
               (set!ncurses-frame-message frame "")
-              (ungetch ev))
+              (tty-unget-event! ev))
              ;; anything else (a keypad key, end of input) is not an
              ;; answer to the search
              (else

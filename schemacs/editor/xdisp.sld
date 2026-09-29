@@ -26,7 +26,15 @@
     ;; neither is missed until a mode line is drawn.
     (only (scheme write) display)
     (only (scheme cxr) caddr)
-    (ncurses curses)
+    ;; The display interface: the redisplay draws through these generics
+    ;; and never touches a terminal itself. `dispnew.sld' defines them,
+    ;; and `term.sld' answers them for the curses terminal.
+    (only (schemacs editor dispnew)
+          current-display
+          write-glyphs! clear-frame-area!
+          update-window-begin! update-window-end!
+          draw-window-cursor! flush-display!
+          realize-face)
     ;; The mode line reads a line and column out of the engine, which
     ;; answers with one of these.
     (only (schemacs ui text-buffer-impl)
@@ -56,18 +64,17 @@
          char-display-glyph current-line-display-column expand-line-display
          line-display-offsets)
     ;; The `face' text property, and the faces themselves. A face reaches
-    ;; the display through these three libraries and no others: the
-    ;; property says which faces are in effect, `xfaces' merges them and
-    ;; folds them down, and this file turns that into terminal attributes.
+    ;; the display through these libraries and no others: the property
+    ;; says which faces are in effect, `xfaces' merges them and folds
+    ;; them down, and the display realizes what that means on itself
+    ;; (`realize-face').
     (only (schemacs editor textprop) get-text-property)
     (only (schemacs editor buffer)
           *transient-mark-mode* buffer-local-value)
     (only (schemacs editor faces) *undefined-face-attribute*)
     (only (schemacs editor xfaces)
-          attribute-value face-attributes-empty face-realized-attributes
-          merge-face-ref merge-face-vectors realize-tty-face)
-    ;; `logior' is Guile's, not R7RS's: the attributes are bit flags.
-    (only (guile) logior)
+          face-attributes-empty face-realized-attributes
+          merge-face-ref merge-face-vectors)
     )
 
   (export
@@ -417,62 +424,17 @@
     ;;----------------------------------------------------------------
     ;; Faces
 
-    (define *tty-color-pairs*
-      ;; The colour pairs made so far, as `((FOREGROUND . BACKGROUND) .
-      ;; PAIR)'. Emacs keeps the same table on the frame (`tty_face_1'
-      ;; makes a pair per combination a face asks for), because a
-      ;; terminal has only so many and they have to be shared.
-      ;;--------------------------------------------------------------
-      (make-parameter '()))
-
-    (define (tty-color-pair foreground background)
-      ;; The ncurses colour-pair number for FOREGROUND and BACKGROUND,
-      ;; making the pair the first time it is asked for. A missing colour
-      ;; is #f and becomes -1, which is how ncurses spells "the
-      ;; terminal's own default". 0 means no pair at all.
-      ;;--------------------------------------------------------------
-      (cond
-       ((and (not foreground) (not background)) 0)
-       ((not (has-colors?)) 0)
-       (else
-        (let* ((key (cons foreground background))
-               (entry (assoc key (*tty-color-pairs*))))
-          (cond
-           (entry (cdr entry))
-           (else
-            (let ((n (+ 1 (length (*tty-color-pairs*)))))
-              (init-pair! n (if foreground foreground -1)
-                          (if background background -1))
-              (*tty-color-pairs* (cons (cons key n) (*tty-color-pairs*)))
-              n)))))))
-
-    (define (tty-face-attribute face)
-      ;; A realized tty face as one ncurses attribute number: the bit
-      ;; flags `term.c' would turn into escape sequences, which is all a
-      ;; terminal can be told. The colour pair is made here, on first use.
-      ;;--------------------------------------------------------------
-      (let ((foreground (attribute-value face ':foreground))
-            (background (attribute-value face ':background)))
-        (let ((bits 0))
-          (when (attribute-value face ':bold)
-            (set! bits (logior bits A_BOLD)))
-          (when (attribute-value face ':underline)
-            (set! bits (logior bits A_UNDERLINE)))
-          (when (attribute-value face ':reverse)
-            (set! bits (logior bits A_REVERSE)))
-          (let ((pair (tty-color-pair (if (number? foreground) foreground #f)
-                                      (if (number? background) background #f))))
-            (if (> pair 0) (logior bits (color-pair pair)) bits)))))
-
     (define (face->attribute face-name)
-      ;; The ncurses attribute number for a *named* face: GNU Emacs's
+      ;; The display's drawing token for a *named* face: GNU Emacs's
       ;; `face_at_buffer_position' where the face is known by name, which
-      ;; is what the mode line and the echo area need.
+      ;; is what the mode line and the echo area need. The realized
+      ;; attributes are merged here - the default face under any other -
+      ;; and the display turns them into its token
+      ;; (`realize-face' is the display side of a face).
       ;;--------------------------------------------------------------
-      (tty-face-attribute
-       (realize-tty-face
-        (merge-face-vectors (face-realized-attributes face-name)
-                            (face-realized-attributes 'default)))))
+      (realize-face (current-display)
+                    (merge-face-vectors (face-realized-attributes face-name)
+                                        (face-realized-attributes 'default))))
 
     (define (line-face-runs ed line-start line-string)
       ;; LINE-STRING as maximal runs of characters that share one face:
@@ -507,7 +469,7 @@
       ;;--------------------------------------------------------------
       (if (and (not (text-editor-text-props ed))
                (not (region-face-active? ed)))
-          (addstr (stdscr) display #:y screen-row #:x x0)
+          (write-glyphs! (current-display) display screen-row x0 #f)
           (let ((offsets (line-display-offsets line-string)))
             (for-each
              (lambda (run)
@@ -519,16 +481,14 @@
                  ;; and one cut by it stops at the edge - which is how
                  ;; GNU Emacs truncates a line at the window boundary.
                  ;; The slow (properties) path has to say so itself,
-                 ;; where the fast path hands the whole line to ncurses
-                 ;; and lets it clip.
+                 ;; where the fast path hands the whole line to the
+                 ;; display and lets it clip.
                  (when (< from width)
-                   (attr-on! (stdscr) attribute)
-                   (addstr (stdscr)
-                           (substring display from
-                                      (min to (min (string-length display)
-                                                   width)))
-                           #:y screen-row #:x (+ x0 from))
-                   (attr-off! (stdscr) attribute))))
+                   (write-glyphs!
+                    (current-display)
+                    (substring display from
+                               (min to (min (string-length display) width)))
+                    screen-row (+ x0 from) attribute))))
              (line-face-runs ed line-start line-string))))
       ;; xdisp.c draws a continuation glyph when more of the logical line
       ;; remains, with the default face. Otherwise a region may extend its
@@ -538,12 +498,10 @@
           (let ((fill (line-end-fill-attribute ed line-start line-string
                                                display width)))
             (when fill
-              (attr-on! (stdscr) fill)
-              (addstr (stdscr)
-                      (make-string (- width (string-length display)) #\space)
-                      #:y screen-row
-                      #:x (+ x0 (string-length display)))
-              (attr-off! (stdscr) fill)))))
+              (write-glyphs! (current-display)
+                             (make-string (- width (string-length display))
+                                          #\space)
+                             screen-row (+ x0 (string-length display)) fill)))))
 
     (define (line-display-width line-string)
       ;; Count all cells, expanding tabs at each successive display column.
@@ -567,11 +525,8 @@
       ;; The continuation glyph is a special display character, not buffer
       ;; text, and Emacs draws it with the default face even inside a region.
       ;;--------------------------------------------------------------
-      (let ((attribute (face->attribute 'default)))
-        (move (stdscr) row (+ x0 width -1))
-        (attr-on! (stdscr) attribute)
-        (addstr (stdscr) "\\")
-        (attr-off! (stdscr) attribute)))
+      (write-glyphs! (current-display) "\\" row (+ x0 width -1)
+                     (face->attribute 'default)))
 
     (define (line-end-fill-attribute ed line-start line-string display width)
       ;; Face used for cells after a line's text when the line-end
@@ -650,11 +605,10 @@
                              (merge-face-vectors
                               (face-realized-attributes 'default)
                               (face-attributes-empty)))))
-        (tty-face-attribute
-         (realize-tty-face
-          (if (region-face-at-position? ed position)
-              (merge-face-ref 'region attrs)
-              attrs)))))
+        (realize-face (current-display)
+                     (if (region-face-at-position? ed position)
+                         (merge-face-ref 'region attrs)
+                         attrs))))
 
     (define (draw-match row x0 line display-string line-start len start end
                         point width)
@@ -669,16 +623,14 @@
              (x (display-column-of line col))
              (y (display-column-of line to)))
         (when (and (< x width) (< x y))
-          (let ((attribute
-                 (face->attribute
-                  (if (and (<= start point) (<= point end))
-                      'isearch 'lazy-highlight))))
-            (attr-on! (stdscr) attribute)
-            (addstr (stdscr)
-                    (substring display-string x
-                               (min y (string-length display-string)))
-                    #:y row #:x (+ x0 x))
-            (attr-off! (stdscr) attribute)))))
+          (write-glyphs!
+           (current-display)
+           (substring display-string x
+                      (min y (string-length display-string)))
+           row (+ x0 x)
+           (face->attribute
+            (if (and (<= start point) (<= point end))
+                'isearch 'lazy-highlight))))))
 
     (define (highlight-matches window row line display-string line-start width
                                pattern case-fold?)
@@ -768,8 +720,12 @@
 
     (define (render-window! window)
       ;; Draw one window: its rows of text within its rectangle, then its
-      ;; mode line along its last row.
+      ;; mode line along its last row. The display is told a window
+      ;; update is beginning and ending, the bookends Emacs's
+      ;; `update_window_begin_hook' and `update_window_end_hook' give
+      ;; its graphics backends.
       ;;--------------------------------------------------------------
+      (update-window-begin! (current-display))
       (let* ((ed (window-buffer window))
              (width (window-body-width window))
              (x0 (window-left window))
@@ -805,15 +761,15 @@
         ;; `mode-line' for the selected window and `mode-line-inactive'
         ;; for the others - and on a terminal `mode-line' is
         ;; `:inverse-video t', which is what this used to hardcode.
-        (let ((attribute (face->attribute (if (eq? window (selected-window))
-                                              'mode-line
-                                              'mode-line-inactive))))
-          (attr-on! (stdscr) attribute)
-          (addstr (stdscr)
-                  (pad-line (truncate-line (mode-line-string window) width) width)
-                  #:y (+ (window-top window) (window-height window) -1)
-                  #:x x0)
-          (attr-off! (stdscr) attribute))
+        (write-glyphs! (current-display)
+                       (pad-line (truncate-line (mode-line-string window)
+                                                width)
+                                 width)
+                       (+ (window-top window) (window-height window) -1)
+                       x0
+                       (face->attribute (if (eq? window (selected-window))
+                                            'mode-line
+                                            'mode-line-inactive)))
         ;; the vertical border between this window and the one to its
         ;; right: GNU Emacs draws it down every row of the windows,
         ;; their mode lines included
@@ -821,8 +777,9 @@
           (let loop ((row (window-top window))
                      (end (+ (window-top window) (window-height window))))
             (when (< row end)
-              (addstr (stdscr) "|" #:y row #:x border)
-              (loop (+ 1 row) end))))))
+              (write-glyphs! (current-display) "|" row border #f)
+              (loop (+ 1 row) end)))))
+      (update-window-end! (current-display)))
 
     (define (render! frame)
       ;; Draw every window, then the echo area, then place the terminal
@@ -837,7 +794,7 @@
             ;; and has no mode line of its own, so what is drawn is the
             ;; windows at the bottom of the tree
             (windows (window-list frame)))
-        (erase (stdscr))
+        (clear-frame-area! (current-display))
         ;; Only the selected window is scrolled to show its point here:
         ;; it is the one point moves in, and its buffer is the one
         ;; commands act on. A window that is not selected keeps the view
@@ -863,20 +820,16 @@
            ;; a minibuffer is: it draws a buffer that happens to have a
            ;; prompt beside it, which is what the echo area is.
            (reading
-            (addstr (stdscr)
-                    (truncate-line (string-append (or (*echo-area-prompt*) "")
-                                                  (text-editor-to-string reading)
-                                                  (ncurses-frame-message frame))
-                                   width)
-                    #:y (- height 1) #:x 0))
+            (write-glyphs! (current-display)
+                           (truncate-line (string-append (or (*echo-area-prompt*) "")
+                                                         (text-editor-to-string reading)
+                                                         (ncurses-frame-message frame))
+                                          width)
+                           (- height 1) 0 #f))
            (else
-            (addstr (stdscr)
-                    (truncate-line (ncurses-frame-message frame) width)
-                    #:y (- height 1) #:x 0))))
-        ;; force a full repaint: partial-update optimizations (scroll
-        ;; regions, insert/delete character) desync the physical
-        ;; terminal when lines merge
-        (clearok! (stdscr) #t)
+            (write-glyphs! (current-display)
+                           (truncate-line (ncurses-frame-message frame) width)
+                           (- height 1) 0 #f))))
         ;; Place the terminal cursor: in the minibuffer while one is
         ;; active (Emacs's `cursor-in-echo-area'), else at the selected
         ;; window's point - the only window whose cursor is drawn, there
@@ -888,15 +841,21 @@
               ;; not drag the cursor along with it - a long one (the
               ;; completion candidates, say) would pin the cursor to the
               ;; right edge of the screen whatever point did.
-              (move (stdscr) (- height 1)
-                    (min (+ (string-length (or (*echo-area-prompt*) ""))
-                            (text-editor-cursor-column reading))
-                         (- width 1)))
+              (draw-window-cursor! (current-display)
+                                   (- height 1)
+                                   (min (+ (string-length (or (*echo-area-prompt*) ""))
+                                           (text-editor-cursor-column reading))
+                                        (- width 1)))
               (let ((selected (ncurses-frame-selected-window frame)))
                 (when selected
                   (let ((at (cursor-screen-position selected)))
-                    (when at (move (stdscr) (car at) (cdr at))))))))
-        (refresh (stdscr))
+                    (when at (draw-window-cursor! (current-display)
+                                                  (car at) (cdr at))))))))
+        ;; The screen is what was drawn: the display's flush, which for
+        ;; this terminal honours the full-repaint `clear-frame-area!'
+        ;; asked for (partial-update optimizations desync the physical
+        ;; terminal when lines merge).
+        (flush-display! (current-display))
         ))
 
     ))
