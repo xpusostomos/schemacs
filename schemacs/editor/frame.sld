@@ -32,11 +32,6 @@
     (only (schemacs editor engine)
           copy-marker  marker-position  set-marker!
           text-editor-get-cursor  text-editor-set-cursor)
-    ;; the SCHEMACS_DEBUG_TREE tree dump: `(scheme write)' for `write',
-    ;; `(scheme file)' for the log file, `getenv' for the switch.
-    (only (scheme write) display write)
-    (scheme file)
-    (only (guile) getenv)
     ;; `suspend-frame' is a command, so it needs the command substrate,
     ;; and it states its own key as the other command libraries do.
     (only (schemacs editor command) new-command)
@@ -480,34 +475,7 @@
               (set!frame-height frame new-height)
               (set!frame-width frame new-width)
               (resize-frame-windows! frame old-height old-width
-                                     new-height new-width)
-              ;; DEBUG: `SCHEMACS_DEBUG_TREE' per-resize window-tree dump,
-              ;; for chasing a crash on terminal shrink while a window is
-              ;; up (remove once confirmed).
-              (when (getenv "SCHEMACS_DEBUG_TREE")
-                (dump-frame-tree frame)))))))
-
-    (define (dump-frame-tree frame)
-      ;; The frame's window tree as a text tree, written to
-      ;; /tmp/schemacs-tree.log: a diagnostic for window-geometry bugs,
-      ;; gated off unless SCHEMACS_DEBUG_TREE is set. Each node is
-      ;; (TOP LEFT HEIGHT WIDTH), leaves also their BUFFER's name.
-      ;;--------------------------------------------------------------
-      (call-with-output-file "/tmp/schemacs-tree.log"
-        (lambda (port)
-          (let walk ((window (car (ncurses-frame-windows frame))) (depth 0))
-            (let ((pad (make-string (* 2 depth) #\space)))
-              (display pad port)
-              (write (list (window-top window) (window-left window)
-                           (window-height window) (window-width window))
-                     port)
-              (let ((children (window-children window)))
-                (if (null? children)
-                    (write (or (and (window-buffer window) #t) 'leaf)
-                           port)
-                    (for-each (lambda (child) (walk child (+ depth 1)))
-                              children)))
-              (newline port))))))
+                                     new-height new-width))))))
 
     (define (resize-frame-windows! frame old-height old-width new-height
                                    new-width)

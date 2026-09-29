@@ -17,12 +17,11 @@
     (scheme base)
     ;; The terminal.
     (only (ncurses curses)
-          colors curs-set endwin has-colors? idcok! idlok! initscr keypad! lines
-          noecho! cols nonl! raw! scrollok! start-color! stdscr use-default-colors)
+          colors curs-set endwin has-colors? idcok! idlok! initscr keypad!
+          noecho! nonl! raw! scrollok! start-color! stdscr use-default-colors)
     (only (schemacs editor engine)
           new-text-editor set!text-editor-buffer-name)
-    (only (schemacs editor frame)
-          *current-frame* frame-height frame-width new-frame)
+    (only (schemacs editor frame) *current-frame* new-frame)
     ;; `startup.el' registers the eight standard colours before the
     ;; terminal's own initialization runs; `term/xterm.el' is that
     ;; initialization for an xterm.
@@ -32,10 +31,6 @@
           *display-color-cells* *display-type* *frame-background-mode*
           face-list face-spec-recalc)
     (only (guile) getenv string-prefix?)
-    ;; the crash log in `main-ncurses': `write' for the exception,
-    ;; `call-with-output-file' for the file.
-    (only (scheme write) write)
-    (scheme file)
     ;; Everything this needs of the editor: the buffers named on the
     ;; command line - which is `startup.el''s job, not this one's - and
     ;; then the command loop.
@@ -166,28 +161,10 @@
              ;; command line in the *selected* window, so it has to be
              ;; current before it runs.
              (parameterize ((*current-frame* frame))
-               (guard (e (else
-                          ;; DEBUG: write whatever killed the editor to
-                          ;; /tmp/schemacs-crash.log before dying, so a
-                          ;; crash only a real terminal can produce is not
-                          ;; swallowed by the screen (remove when the
-                          ;; resize crash is confirmed fixed).
-                          (call-with-output-file "/tmp/schemacs-crash.log"
-                            (lambda (port)
-                              (write (list 'schemacs-crash e) port)
-                              (newline port)
-                              (write (list 'terminal
-                                           (lines) (cols)
-                                           'frame (frame-height frame)
-                                           (frame-width frame))
-                                     port)
-                              (newline port)
-                              (display-backtrace (make-stack #t) port)))
-                          (raise e)))
-                 (command-line-1 args)
-                 ;; as `find-file-command' does, so that a file named on the
-                 ;; command line that cannot be written says so too
-                 (note-file-read-only! frame)
-                 (event-loop frame))))))))
+               (command-line-1 args)
+               ;; as `find-file-command' does, so that a file named on the
+               ;; command line that cannot be written says so too
+               (note-file-read-only! frame)
+               (event-loop frame)))))))
 
     ))

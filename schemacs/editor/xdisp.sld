@@ -27,7 +27,6 @@
     (only (scheme write) display)
     (only (scheme cxr) caddr)
     (ncurses curses)
-    (scheme file)
     ;; The mode line reads a line and column out of the engine, which
     ;; answers with one of these.
     (only (schemacs ui text-buffer-impl)
@@ -68,7 +67,7 @@
           attribute-value face-attributes-empty face-realized-attributes
           merge-face-ref merge-face-vectors realize-tty-face)
     ;; `logior' is Guile's, not R7RS's: the attributes are bit flags.
-    (only (guile) logior display-backtrace make-stack)
+    (only (guile) logior)
     )
 
   (export
@@ -799,18 +798,7 @@
       ;; mode line, as GNU Emacs gives each window one; the echo area
       ;; belongs to the frame and is drawn last, over the bottom row.
       ;;--------------------------------------------------------------
-      ;; DEBUG: record the *draw* that kills the editor on a resize - the
-      ;; stack here is still intact, where the top-level handler's is not.
-      (guard (e (else
-                 (call-with-output-file "/tmp/schemacs-render.log"
-                   (lambda (port)
-                     (write (list 'render-crash e) port)
-                     (newline port)
-                     (write (list 'screen (lines) (cols)) port)
-                     (newline port)
-                     (display-backtrace (make-stack #t) port)))
-                 (raise e)))
-        (sync-frame-size! frame)
+      (sync-frame-size! frame)
       (let ((width (frame-width frame))
             (height (frame-height frame))
             ;; the *leaves*: a window that holds children shows no buffer
@@ -877,6 +865,6 @@
                   (let ((at (cursor-screen-position selected)))
                     (when at (move (stdscr) (car at) (cdr at))))))))
         (refresh (stdscr))
-        )))
+        ))
 
     ))
