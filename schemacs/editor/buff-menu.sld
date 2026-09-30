@@ -53,8 +53,8 @@
           text-editor-undo-enable! text-editor-get-start-of-line
           text-editor-get-end-of-line)
     (only (schemacs editor frame)
-          *current-frame* set!ncurses-frame-message
-          ncurses-frame-selected-window frame-width window-buffer window-list)
+          *current-frame* set!frame-message
+          frame-selected-window frame-width window-buffer window-list)
     (only (schemacs editor keymap) define-key *default-keymap*)
     ;; The list's own keys are the buffer's, which is what the lookup
     ;; searches first. `CURRENT-BUFFER' is what the commands act on, and
@@ -524,7 +524,7 @@
                     (set! killed (+ 1 killed)))))))
             (Buffer-menu-marked-buffers))
            (Buffer-menu-redraw! (current-buffer))
-           (set!ncurses-frame-message
+           (set!frame-message
             frame
             (cond ((pair? failed)
                    (string-append "Error saving: "

@@ -52,13 +52,13 @@
     ;; interface.
     (only (schemacs editor dispnew) current-display read-input-event)
     (only (schemacs editor frame)
-          *current-frame* ncurses-frame-esc-pending ncurses-frame-keymap-state
-          ncurses-frame-message ncurses-frame-message-expired?
-          ncurses-frame-message-expiry
-          ncurses-frame-quit-cont set!ncurses-frame-esc-pending
-          set!ncurses-frame-keymap-state set!ncurses-frame-message
-          set!ncurses-frame-message-expiry
-          set!ncurses-frame-quit-cont)
+          *current-frame* frame-esc-pending frame-keymap-state
+          frame-message frame-message-expired?
+          frame-message-expiry
+          frame-quit-cont set!frame-esc-pending
+          set!frame-keymap-state set!frame-message
+          set!frame-message-expiry
+          set!frame-quit-cont)
     ;; The global map the lookup falls back on, and the local map a
     ;; minibuffer or a mode binds to have its own keys.
     (only (schemacs editor keymap)
@@ -231,7 +231,7 @@
         (unless (or (eq? action undo) (eq? action undo-redo))
           (*last-change-was-undo* #f))
         (clear-prefix!)
-        (set!ncurses-frame-message frame "")
+        (set!frame-message frame "")
         ;; A command that cannot do what it was asked - editing a
         ;; read-only buffer, say - signals an error, and the command
         ;; loop reports it in the echo area and carries on, as GNU Emacs
@@ -275,7 +275,7 @@
       ;; ("Wrong type argument in position ~A: ~S"), so the text is put
       ;; together here; Emacs shows the formatted message too.
       ;;--------------------------------------------------------------
-      (set!ncurses-frame-message
+      (set!frame-message
        frame
        (cond
         ((quit-condition? ex) "Quit")
@@ -331,17 +331,17 @@
           ;; is what `kill-region' asks about.
           (begin
             (*last-command* 'kill-region)
-            (set!ncurses-frame-keymap-state frame #f))
+            (set!frame-keymap-state frame #f))
           ;; any other key: continue (or start) the keymap lookup
           (begin
             (let ((state
-                   (or (ncurses-frame-keymap-state frame)
+                   (or (frame-keymap-state frame)
                        (km:new-modal-lookup-state (lookup-keymaps)))))
               ;; NOTE: the state must be stored on the frame BEFORE the
               ;; lookup step, because commands dispatched by the step
               ;; (such as `self-insert-command`) read the key index of
               ;; the chord from the frame's state.
-              (set!ncurses-frame-keymap-state frame state)
+              (set!frame-keymap-state frame state)
               (let ((result
                      (km:modal-lookup-state-step!
                       state (km:keymap-index path)
@@ -354,7 +354,7 @@
                         ;; Emacs drops a prefix argument when the key
                         ;; sequence it precedes is not a command.
                         (clear-prefix!)
-                        (set!ncurses-frame-message
+                        (set!frame-message
                          frame
                          (string-append
                           "; undefined key: "
@@ -362,7 +362,7 @@
                             (lambda (port)
                               (write (km:keymap-index->list full-path) port)
                               (get-output-string port)))))))))
-                (set!ncurses-frame-keymap-state
+                (set!frame-keymap-state
                  frame (and result state)))))))
 
     (define (dispatch-ncurses-event frame ev)
@@ -375,20 +375,20 @@
         (cond
          ;; ESC prefixes the next key with the meta modifier
          ((and (char? ev) (char=? ev #\esc))
-          (set!ncurses-frame-esc-pending frame #t))
-         ((and path (ncurses-frame-esc-pending frame))
-          (set!ncurses-frame-esc-pending frame #f)
+          (set!frame-esc-pending frame #t))
+         ((and path (frame-esc-pending frame))
+          (set!frame-esc-pending frame #f)
           (dispatch-key-event frame (cons 'meta path))
           )
          ((and path (eq? 'resize (car path)))
-          (set!ncurses-frame-message frame "")
-          (set!ncurses-frame-esc-pending frame #f))
+          (set!frame-message frame "")
+          (set!frame-esc-pending frame #f))
          (path
-          (set!ncurses-frame-esc-pending frame #f)
+          (set!frame-esc-pending frame #f)
           (dispatch-key-event frame path))
          (else
-          (set!ncurses-frame-esc-pending frame #f)
-          (set!ncurses-frame-message
+          (set!frame-esc-pending frame #f)
+          (set!frame-message
            frame
            (string-append
             "; unhandled event: "
@@ -472,7 +472,7 @@
            ;; after a key is typed looks like nothing happened
            (render! frame)
            (let loop ()
-             (let ((want (if (or (ncurses-frame-message-expiry frame)
+             (let ((want (if (or (frame-message-expiry frame)
                                  ;; a prefix argument owes the echo
                                  ;; area a description, and it is owed
                                  ;; once the keyboard has been quiet
@@ -489,24 +489,24 @@
                   ;; nothing to read is also what the end of input looks
                   ;; like, which is why the editor is not left here.
                   ((and (not (key-event? ev))
-                        (or (ncurses-frame-message-expiry frame)
+                        (or (frame-message-expiry frame)
                             (prefix-echo-pending?)))
                    (let ((drawn? #f))
-                     (when (ncurses-frame-message-expired? frame)
-                       (set!ncurses-frame-message frame "")
-                       (set!ncurses-frame-message-expiry frame #f)
+                     (when (frame-message-expired? frame)
+                       (set!frame-message frame "")
+                       (set!frame-message-expiry frame #f)
                        (set! drawn? #t))
                      ;; the prefix description, if its second has come
-                     (let ((before (ncurses-frame-message frame)))
+                     (let ((before (frame-message frame)))
                        (show-prefix-echo!)
-                       (when (not (eq? before (ncurses-frame-message frame)))
+                       (when (not (eq? before (frame-message frame)))
                          (set! drawn? #t)))
                      (when drawn? (render! frame))))
                   ;; Nothing to read on a *blocking* read is the end of
                   ;; input - guile-ncurses answers #f for that too - so
                   ;; leave the editor.
                   ((not (key-event? ev))
-                   (let ((quit (ncurses-frame-quit-cont frame)))
+                   (let ((quit (frame-quit-cont frame)))
                      (when quit (quit 'eof))))
                   (else
                    (dispatch-ncurses-event frame ev)
@@ -525,10 +525,10 @@
       ;; lookup state is saved and restored all the same, so that a
       ;; nested loop cannot inherit or clobber the outer one's.
       ;;--------------------------------------------------------------
-      (let ((outer-state (ncurses-frame-keymap-state frame)))
-        (set!ncurses-frame-keymap-state frame #f)
+      (let ((outer-state (frame-keymap-state frame)))
+        (set!frame-keymap-state frame #f)
         (let ((result (command-loop frame)))
-          (set!ncurses-frame-keymap-state frame outer-state)
+          (set!frame-keymap-state frame outer-state)
           result)))
 
     (define exit-recursive-edit
@@ -563,7 +563,7 @@
         (render! frame)
         (call/cc
          (lambda (k)
-           (set!ncurses-frame-quit-cont frame k)
+           (set!frame-quit-cont frame k)
            (command-loop frame)))))
 
     ))

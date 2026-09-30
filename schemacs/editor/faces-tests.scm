@@ -7,6 +7,9 @@
  ;; for the run walk at the end: a buffer, a property on it, and the
  ;; computation that turns the two into runs
  (prefix (schemacs editor xdisp) xd:)
+ (prefix (schemacs editor term) term:)
+ (prefix (schemacs editor dispnew) dn:)
+ (only (oop goops) define-class make)
  (only (schemacs editor engine)
         new-text-editor text-editor-insert text-editor-set-cursor
         text-editor-line-outer-size set!text-editor-mark)
@@ -32,6 +35,14 @@
 
 (test-begin "schemacs_editor_faces")
 
+;; Rendering realizes a face on the *display* (`realize-face' is a
+;; display method), so the tests that ask what a face draws as run
+;; against a display object. A terminal display is made without opening
+;; a terminal: realizing only consults the pair table when there are
+;; colours, and `has-colors?' answers #f before `initscr' - so a
+;; display-less machine stays monochrome and no curses call is made.
+(define-class <test-display> (term:<tty-display>))
+
 (define (with-display thunk color-cells type background)
   ;; Run THUNK with the display described, then realize the standard
   ;; faces again so the specs are chosen against it.
@@ -39,7 +50,8 @@
   (parameterize ((f:*display-color-cells* color-cells)
                  (f:*display-type* type)
                  (f:*frame-background-mode* background)
-                 (f:*window-system* #f))
+                 (f:*window-system* #f)
+                 (dn:current-display (make <test-display>)))
     (for-each f:face-spec-recalc (f:face-list))
     (thunk)))
 
@@ -180,7 +192,18 @@
 ;; emits the attributes, and those primitives are the ones the pty battery
 ;; covers through the mode line and the search.
 
+;; The run walk realizes a face on the display (`face-at-buffer-position'
+;; answers what the face *draws as*), so the group, which asks that
+;; question, runs against a display object - the same one `with-display'
+;; makes, set once for the group. It has no terminal behind it, which
+;; keeps it monochrome.
+(dn:current-display (make <test-display>))
+
 (test-begin "schemacs_editor_faces_runs")
+
+;; The runs group computes realized attributes (`face-at-buffer-position'
+;; realizes on the display), so it runs against one, as documented above.
+(dn:current-display (make <test-display>))
 
 (define (buffer-with-face text from to face)
   (let ((ed (new-text-editor)))

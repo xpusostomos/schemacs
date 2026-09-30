@@ -37,9 +37,9 @@
          text-editor-set-read-only! text-editor-undo 
          text-editor-undo-boundary! text-editor-undo-list)
     (only (schemacs editor frame)
-         *current-frame* *echo-area-buffer* current-editor ncurses-frame-keymap-state 
-         selected-window set!ncurses-frame-keymap-state 
-         set!ncurses-frame-message set!window-top-line window-body-height 
+         *current-frame* *echo-area-buffer* current-editor frame-keymap-state 
+         selected-window set!frame-keymap-state 
+         set!frame-message set!window-top-line window-body-height 
          window-buffer window-top-line)
     (only (schemacs editor command)
          new-command uarg->integer defcommand)
@@ -129,7 +129,7 @@
       (new-command
        "self-insert-command"
        (lambda (uarg)
-         (let ((state (ncurses-frame-keymap-state (*current-frame*))))
+         (let ((state (frame-keymap-state (*current-frame*))))
            (when state
              (km:keymap-index-to-char
               (km:modal-lookup-state-key-index state) #f
@@ -306,7 +306,7 @@
              (chunk (car chunk+dir)))
         (cond
          ((= chunk 0)
-          (set!ncurses-frame-message (*current-frame*) "; End of buffer")
+          (set!frame-message (*current-frame*) "; End of buffer")
           #f)
          ((cdr chunk+dir) (kill-range ed start (+ start chunk) #t))
          (else (kill-range ed (- start chunk) start #f)))))
@@ -343,8 +343,8 @@
     (defcommand (keyboard-quit)
       "Cancel the current action and clear the echo area."
       (interactive)
-      (set!ncurses-frame-message (*current-frame*) "")
-      (set!ncurses-frame-keymap-state (*current-frame*) #f))
+      (set!frame-message (*current-frame*) "")
+      (set!frame-keymap-state (*current-frame*) #f))
 
     (defcommand (read-only-mode uarg)
       ;; GNU Emacs's `read-only-mode' (it used to be called
@@ -361,7 +361,7 @@
                       (< 0 (uarg->integer 1 uarg))
                       (not (text-editor-read-only? ed)))))
         (text-editor-set-read-only! ed on?)
-        (set!ncurses-frame-message
+        (set!frame-message
          frame
          (if on?
              "Read-Only mode enabled in current buffer"
@@ -420,7 +420,7 @@
              (new-top
               (min (+ (window-top-line window) n) last-line)))
         (if (<= new-top (window-top-line window))
-            (set!ncurses-frame-message frame "; End of buffer")
+            (set!frame-message frame "; End of buffer")
             (begin
               (set!window-top-line window new-top)
               (let ((line (text-editor-cursor-line ed)))
@@ -440,7 +440,7 @@
              (n (* count (max 1 (- vheight 2))))
              (new-top (max 0 (- (window-top-line window) n))))
         (if (= new-top (window-top-line window))
-            (set!ncurses-frame-message frame "; Beginning of buffer")
+            (set!frame-message frame "; Beginning of buffer")
             (begin
               (set!window-top-line window new-top)
               (let ((line (text-editor-cursor-line ed)))
@@ -960,14 +960,14 @@
                   ;; start a new run, from the front of the list
                   (strip-undo-boundaries (text-editor-undo-list ed)))))
         (if (not (list? pending))
-            (set!ncurses-frame-message frame "No further undo information")
+            (set!frame-message frame "No further undo information")
             (let ((rest (text-editor-undo ed pending count)))
               ;; Emacs sets `pending-undo-list' to t once the run has
               ;; reached the end; false is that state here, and it is
               ;; what makes the next undo report that it is finished.
               (*pending-undo-list* (if (null? rest) #f rest))
               (*last-change-was-undo* #t)
-              (set!ncurses-frame-message frame "Undo")))))
+              (set!frame-message frame "Undo")))))
 
     (defcommand (undo-redo count)
       ;; GNU Emacs's `undo-redo': undo the undos. The records an undo
@@ -978,17 +978,17 @@
       (interactive "p")
       (let ((frame (*current-frame*)))
         (if (not (*last-change-was-undo*))
-            (set!ncurses-frame-message frame "No undone changes to redo")
+            (set!frame-message frame "No undone changes to redo")
             (let* ((ed (current-editor))
                    (list (strip-undo-boundaries
                           (text-editor-undo-list ed))))
               (if (not (pair? list))
-                  (set!ncurses-frame-message
+                  (set!frame-message
                    frame "No undone changes to redo")
                   (begin
                     (text-editor-undo ed list count)
                     (*last-change-was-undo* #t)
-                    (set!ncurses-frame-message frame "Redo")))))))
+                    (set!frame-message frame "Redo")))))))
 
     ;;----------------------------------------------------------------
     ;; Prefix arguments
@@ -1069,7 +1069,7 @@
              ;; chord's, digits included. Without this the 2 of
              ;; `C-u 8 C-x 2' was taken as another digit of the prefix,
              ;; so the chord never completed and the argument became 82.
-             (not (ncurses-frame-keymap-state (*current-frame*)))
+             (not (frame-keymap-state (*current-frame*)))
              (= (length path) 1)
              (char? (car path))
              (char-numeric? (car path)))
@@ -1162,7 +1162,7 @@
           (when (not (*echo-area-buffer*))
             (let ((description (prefix-argument-description)))
               (when description
-                (set!ncurses-frame-message (*current-frame*) description)))))))
+                (set!frame-message (*current-frame*) description)))))))
 
     (define (last-command-event-digit)
       ;; The digit the key that reached this command spelled, or #f.
@@ -1173,7 +1173,7 @@
       ;; re-derives its character - and the modifier bits are the
       ;; other elements of the chord, so nothing has to be masked.
       ;;--------------------------------------------------------------
-      (let* ((state (ncurses-frame-keymap-state (*current-frame*)))
+      (let* ((state (frame-keymap-state (*current-frame*)))
              (ix (and state (km:modal-lookup-state-key-index state)))
              (path (and ix (km:keymap-index->list ix)))
              (last (and (pair? path) (car (reverse path)))))
@@ -1376,7 +1376,7 @@
                               (or location (text-editor-get-cursor
                                             (current-editor))))
         (unless (or nomsg (*echo-area-buffer*))
-          (set!ncurses-frame-message (*current-frame*) "Mark set"))
+          (set!frame-message (*current-frame*) "Mark set"))
         (when (or activate (not (transient-mark-mode)))
           (set-mark (mark #t)))
         #f))
@@ -1408,7 +1408,7 @@
             (begin
               (activate-mark 'no-tmm)
               (unless nomsg
-                (set!ncurses-frame-message (*current-frame*)
+                (set!frame-message (*current-frame*)
                                            "Mark activated"))))))
 
     (define (pop-to-mark-command)
@@ -1419,7 +1419,7 @@
           (error "No mark set in this buffer")
           (begin
             (when (= (text-editor-get-cursor (current-editor)) (mark #t))
-              (set!ncurses-frame-message (*current-frame*) "Mark popped"))
+              (set!frame-message (*current-frame*) "Mark popped"))
             (text-editor-set-cursor (current-editor) (mark #t))
             (pop-mark))))
 
@@ -1448,10 +1448,10 @@
           (arg (pop-to-mark-command))
           ((region-active-p)
            (deactivate-mark)
-           (set!ncurses-frame-message (*current-frame*) "Mark deactivated"))
+           (set!frame-message (*current-frame*) "Mark deactivated"))
           (else
            (activate-mark)
-           (set!ncurses-frame-message (*current-frame*) "Mark activated"))))
+           (set!frame-message (*current-frame*) "Mark activated"))))
 
     (defcommand (mark-whole-buffer)
       ;; GNU Emacs's `mark-whole-buffer' (C-x h): point at the beginning

@@ -46,6 +46,8 @@
    ;; terminal questions asked outside the command loop.
    tty-read-char
    tty-unget-event!
+   tty-suspend!
+   tty-resume!
    )
 
   (begin
@@ -289,6 +291,19 @@
     ;; reading of the typed key - and what they need is the bare
     ;; character, not an event for the keymap.
     ;;------------------------------------------------------------------
+
+    (define (tty-suspend!)
+      ;; Leave curses mode so the editor can be stopped: the *before*
+      ;; half of `suspend-frame''s C-z, Emacs's `reset_sys_modes' for a
+      ;; terminal. The shell stops the process; `tty-resume!' restores.
+      ;;--------------------------------------------------------------
+      (endwin))
+
+    (define (tty-resume!)
+      ;; Back from the shell: repaint the screen curses had left, the
+      ;; *after* half of C-z (`init_sys_modes').
+      ;;--------------------------------------------------------------
+      (refresh (stdscr)))
 
     (define (tty-read-char)
       ;; One key from the terminal, with the keypad's Backspace made

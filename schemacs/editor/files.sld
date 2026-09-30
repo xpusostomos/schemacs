@@ -35,9 +35,9 @@
           text-editor-undo-disable! text-editor-undo-enable!)
     (only (schemacs editor frame)
           *current-frame* current-editor
-          ncurses-frame-editor ncurses-frame-quit-cont
-          set!ncurses-frame-editor
-          set!ncurses-frame-message)
+          frame-editor frame-quit-cont
+          set!frame-editor
+          set!frame-message)
     ;; The commands here install their own keys, as files.el does.
     (only (schemacs editor command)
           run-command defcommand)
@@ -245,14 +245,14 @@
       (let ((frame (*current-frame*)))
         (guard (ex
                 (else
-                 (set!ncurses-frame-message
+                 (set!frame-message
                   frame (string-append
                          "; find-file: error loading " path))
                  #f))
           ;; the message is cleared *before* the file is visited, so
           ;; that what `find-file' says about it - "(New file)", or
           ;; the read-only note - is what stays in the echo area
-          (set!ncurses-frame-message frame "")
+          (set!frame-message frame "")
           (switch-to-buffer (find-file-noselect path))
           (note-file-read-only! frame)
           path)))
@@ -276,7 +276,7 @@
       (interactive)
       (let ((frame (*current-frame*))
             (quit! (lambda ()
-                     ((ncurses-frame-quit-cont (*current-frame*)) 'quit))))
+                     ((frame-quit-cont (*current-frame*)) 'quit))))
         ;; The asking happens only when there is something worth
         ;; asking about - `files--buffers-needing-to-be-saved', with
         ;; Emacs's predicate `t'. The minibuffer and `*Completions*'
@@ -339,7 +339,7 @@
           ;; Emacs says nothing when a query function refused the kill
           ;; and "Killed buffer" when it did not; the window has already
           ;; been given another buffer by `%kill-buffer' itself.
-          (set!ncurses-frame-message
+          (set!frame-message
            frame (if killed (string-append "Killed " killed) ""))
           killed)))
     ;;----------------------------------------------------------------
@@ -835,8 +835,8 @@
       ;; Emacs's words. Emacs warns at visit time rather than waiting
       ;; for the first edit to be refused.
       ;;--------------------------------------------------------------
-      (when (text-editor-read-only? (ncurses-frame-editor frame))
-        (set!ncurses-frame-message frame "Note: file is write protected")))
+      (when (text-editor-read-only? (frame-editor frame))
+        (set!frame-message frame "Note: file is write protected")))
 
     (define (find-file-noselect path)
       ;; Open a file into a text editor buffer and answer with it, the way
@@ -903,7 +903,7 @@
         (text-editor-undo-enable! ed)
         ;; The echo area says what Emacs's `after-find-file' says about a
         ;; file that was not there.
-        (when new? (set!ncurses-frame-message (*current-frame*) "(New file)"))
+        (when new? (set!frame-message (*current-frame*) "(New file)"))
         ;; ... and what is in the buffer is what is in the file, so
         ;; there is nothing to save yet.
         (text-editor-set-modified! ed #f)
@@ -972,7 +972,7 @@
       (let ((frame (*current-frame*)))
         (guard (ex
                 (else
-                 (set!ncurses-frame-message
+                 (set!frame-message
                   frame (string-append
                          "; save-buffer: error writing "
                          (or (buffer-file-name (current-buffer)) "")))
@@ -993,7 +993,7 @@
                   (buffer-file-coding-system buffer))
                  port)))
             (text-editor-set-modified! buffer #f)
-            (set!ncurses-frame-message (*current-frame*)
+            (set!frame-message (*current-frame*)
                                        (string-append "Wrote " path))
             path))))
 

@@ -53,7 +53,7 @@
          text-editor-to-string text-line-inner->string)
     (only (schemacs editor frame)
          *echo-area-buffer* *echo-area-prompt* frame-height frame-width
-         ncurses-frame-message ncurses-frame-selected-window
+         frame-message frame-selected-window
          sync-frame-size! window-body-height
          window-body-width window-buffer window-height window-left
          window-list
@@ -73,7 +73,7 @@
           *transient-mark-mode* buffer-local-value)
     (only (schemacs editor faces) *undefined-face-attribute*)
     (only (schemacs editor xfaces)
-          face-attributes-empty face-realized-attributes
+          attribute-value face-attributes-empty face-realized-attributes
           merge-face-ref merge-face-vectors)
     )
 
@@ -403,7 +403,7 @@
       ;; The mode line of the selected window, which is the one the
       ;; frame is about.
       ;;--------------------------------------------------------------
-      (mode-line-string (ncurses-frame-selected-window frame)))
+      (mode-line-string (frame-selected-window frame)))
 
     (define (line-outer-size ed line-index)
       ;; How many characters line LINE-INDEX advances the buffer's
@@ -800,7 +800,7 @@
         ;; commands act on. A window that is not selected keeps the view
         ;; it had, as GNU Emacs leaves a window's start alone until it
         ;; is displayed with its own point.
-        (let ((selected (ncurses-frame-selected-window frame)))
+        (let ((selected (frame-selected-window frame)))
           (when selected (scroll-to-cursor! selected)))
         (for-each render-window! windows)
         ;; Echo area: the minibuffer when one is active, exactly as GNU
@@ -823,12 +823,12 @@
             (write-glyphs! (current-display)
                            (truncate-line (string-append (or (*echo-area-prompt*) "")
                                                          (text-editor-to-string reading)
-                                                         (ncurses-frame-message frame))
+                                                         (frame-message frame))
                                           width)
                            (- height 1) 0 #f))
            (else
             (write-glyphs! (current-display)
-                           (truncate-line (ncurses-frame-message frame) width)
+                           (truncate-line (frame-message frame) width)
                            (- height 1) 0 #f))))
         ;; Place the terminal cursor: in the minibuffer while one is
         ;; active (Emacs's `cursor-in-echo-area'), else at the selected
@@ -846,7 +846,7 @@
                                    (min (+ (string-length (or (*echo-area-prompt*) ""))
                                            (text-editor-cursor-column reading))
                                         (- width 1)))
-              (let ((selected (ncurses-frame-selected-window frame)))
+              (let ((selected (frame-selected-window frame)))
                 (when selected
                   (let ((at (cursor-screen-position selected)))
                     (when at (draw-window-cursor! (current-display)

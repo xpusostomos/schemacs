@@ -48,7 +48,7 @@
          text-editor-set-cursor
           )
     (only (schemacs editor frame)
-         *current-frame* current-editor set!ncurses-frame-message
+         *current-frame* current-editor set!frame-message
           )
     (only (schemacs editor command) defcommand)
     (only (schemacs editor simple)
@@ -192,7 +192,7 @@
           ;; the display to read.
           (*search-highlight* (and (< 0 (string-length pattern))
                                    (cons pattern case-fold?)))
-          (set!ncurses-frame-message
+          (set!frame-message
            frame
            (isearch-message pattern direction success? wrapped? case-fold?
                             (text-editor-get-cursor ed) opoint))
@@ -203,10 +203,10 @@
              ((and (char? ev) (char=? ev #\return))          ; isearch-exit
               (*search-pattern* #f)
               (*search-highlight* #f)
-              (set!ncurses-frame-message frame "")
+              (set!frame-message frame "")
               (when (not (= (text-editor-get-cursor ed) opoint))
                 (set!text-editor-mark ed opoint)
-                (set!ncurses-frame-message
+                (set!frame-message
                  frame "Mark saved where search started")))
              ;; isearch-abort: give up the search if it found something,
              ;; otherwise take back what was typed until it finds again
@@ -216,7 +216,7 @@
                     (text-editor-set-cursor ed opoint)
                     (*search-pattern* #f)
                     (*search-highlight* #f)
-                    (set!ncurses-frame-message frame "Quit"))
+                    (set!frame-message frame "Quit"))
                   (let ((popped (isearch-pop-to-success ed states)))
                     (loop (car popped) direction (cdr popped) #t #f
                           case-fold?))))
@@ -288,7 +288,7 @@
              ((and (char? ev) (char<? ev #\space))
               (*search-pattern* #f)
               (*search-highlight* #f)
-              (set!ncurses-frame-message frame "")
+              (set!frame-message frame "")
               (tty-unget-event! ev))
              ;; anything else (a keypad key, end of input) is not an
              ;; answer to the search

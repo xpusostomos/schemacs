@@ -28,7 +28,12 @@
     (scheme case-lambda)
     ;; Only the names used: guile-ncurses exports a `define-key' of its
     ;; own, which would collide with the keymap library's.
-    (only (ncurses curses) cols endwin lines refresh stdscr)
+    ;; The frame is a display-neutral thing now: its size is the size
+    ;; its display reports (`sync-frame-size!' asks the interface), and
+    ;; stopping and resuming the terminal on C-z is the driver's
+    ;; business (`tty-suspend!'/`tty-resume!').
+    (only (schemacs editor dispnew) current-display screen-size)
+    (only (schemacs editor term) tty-resume! tty-suspend!)
     (only (schemacs editor engine)
           copy-marker  marker-position  set-marker!
           text-editor-get-cursor  text-editor-set-cursor)
@@ -52,34 +57,35 @@
    frame-height
    frame-width
    make-frame-window
-   make<ncurses-frame>
-   make<ncurses-window>
-   ncurses-frame-editor
-   ncurses-frame-esc-pending
-   ncurses-frame-keymap-state
-   ncurses-frame-message
-   ncurses-frame-message-expired?
-   ncurses-frame-message-expiry
-   ncurses-frame-quit-cont
-   ncurses-frame-selected-window
-   ncurses-frame-type?
-   ncurses-frame-windows
-   ncurses-window-type?
+   make<frame>
+   make<window>
+   frame-editor
+   frame-esc-pending
+   frame-keymap-state
+   frame-message
+   frame-message-expired?
+   frame-message-expiry
+   frame-quit-cont
+   frame-output
+   frame-selected-window
+   frame-type?
+   frame-windows
+   window-type?
    new-frame
    select-window
    selected-window
    set!%window-point
    set!frame-height
    set!frame-width
-   set!ncurses-frame-editor
-   set!ncurses-frame-esc-pending
-   set!ncurses-frame-keymap-state
+   set!frame-editor
+   set!frame-esc-pending
+   set!frame-keymap-state
    set-message!
-   set!ncurses-frame-message
-   set!ncurses-frame-message-expiry
-   set!ncurses-frame-quit-cont
-   set!ncurses-frame-selected-window
-   set!ncurses-frame-windows
+   set!frame-message
+   set!frame-message-expiry
+   set!frame-quit-cont
+   set!frame-selected-window
+   set!frame-windows
    set!window-buffer
    set!window-height
    set!window-left
@@ -142,10 +148,10 @@
     ;; between two children, delete gives a removed leaf's rectangle to
     ;; its sibling.
 
-    (define-record-type <ncurses-window>
-      (make<ncurses-window>
+    (define-record-type <window>
+      (make<window>
        buffer point top-line top height left width parent children)
-      ncurses-window-type?
+      window-type?
       (buffer    window-buffer      set!window-buffer)
       ;; ^ The <text-editor-type> this window shows. Emacs's
       ;; `window-buffer'.
@@ -201,7 +207,7 @@
       ;; With no frame argument the current frame's windows are walked.
       ;;--------------------------------------------------------------
       (let ((frame (if (pair? args) (car args) (*current-frame*))))
-        (let walk ((windows (if frame (ncurses-frame-windows frame) '())))
+        (let walk ((windows (if frame (frame-windows frame) '())))
           (cond ((null? windows) '())
                 ((window-internal? (car windows))
                  (append (walk (window-children (car windows)))
@@ -218,7 +224,7 @@
       ;;--------------------------------------------------------------
       (let ((frame (*current-frame*)))
         (if (and frame
-                 (eq? window (ncurses-frame-selected-window frame)))
+                 (eq? window (frame-selected-window frame)))
             (text-editor-get-cursor (window-buffer window))
             (marker-position (%window-point window)))))
 
@@ -287,21 +293,21 @@
       ;; A window filling the given rectangle, showing BUFFER with point
       ;; at its beginning: a leaf the frame holds directly.
       ;;--------------------------------------------------------------
-      (make<ncurses-window> buffer (copy-marker buffer 0)
+      (make<window> buffer (copy-marker buffer 0)
                             0 top height left width #f '()))
 
     ;;----------------------------------------------------------------
     ;; Editor state
 
-    (define-record-type <ncurses-frame>
-      (make<ncurses-frame>
+    (define-record-type <frame>
+      (make<frame>
        windows selected-window height width
-       message message-expiry keymap-state quit-cont esc-pending)
-      ncurses-frame-type?
-      (windows   ncurses-frame-windows   set!ncurses-frame-windows)
+       message message-expiry keymap-state quit-cont esc-pending output)
+      frame-type?
+      (windows   frame-windows   set!frame-windows)
       ;; ^ The frame's windows, top to bottom. Emacs's `window-list'.
-      (selected-window ncurses-frame-selected-window
-                       set!ncurses-frame-selected-window)
+      (selected-window frame-selected-window
+                       set!frame-selected-window)
       ;; ^ The window commands act on and the cursor is drawn in, Emacs's
       ;; `selected-window'. #f only before the first window is made.
       (height    frame-height             set!frame-height)
@@ -312,10 +318,10 @@
       ;; so that a window that gets resized is noticed.
       (width     frame-width              set!frame-width)
       ;; ^ The frame's width in columns, GNU Emacs's `frame-width'.
-      (message    ncurses-frame-message    set!ncurses-frame-message-text)
+      (message    frame-message    set!frame-message-text)
       ;; ^ A message string drawn in the echo area, or false.
-      (message-expiry ncurses-frame-message-expiry
-                      set!ncurses-frame-message-expiry)
+      (message-expiry frame-message-expiry
+                      set!frame-message-expiry)
       ;; ^ When that message should be taken down again, as a time in
       ;; seconds in the sense of `current-second', or false for a
       ;; message that stays until the next key. GNU Emacs arms a timer
@@ -324,14 +330,19 @@
       ;; does here by setting the message to "" before every command.
       ;; This editor has no timers, so the time is kept and the command
       ;; loop's read is given a timeout while one is pending.
-      (keymap-state ncurses-frame-keymap-state set!ncurses-frame-keymap-state)
+      (keymap-state frame-keymap-state set!frame-keymap-state)
       ;; ^ A pending modal keymap lookup state, or false. It persists
       ;; between key events when a key chord (such as C-x C-s) is
       ;; partially entered.
-      (quit-cont  ncurses-frame-quit-cont  set!ncurses-frame-quit-cont)
+      (quit-cont  frame-quit-cont  set!frame-quit-cont)
       ;; ^ An escape continuation captured by the event loop, invoked
       ;; by `save-buffers-kill-terminal` to exit the editor.
-      (esc-pending ncurses-frame-esc-pending set!ncurses-frame-esc-pending)
+      (esc-pending frame-esc-pending set!frame-esc-pending)
+      (output     frame-output     set!frame-output)
+      ;; ^ The display this frame is drawn on: Emacs's `output_data',
+      ;; which points a frame at its terminal's output data. Set when
+      ;; the frame is made (the display is the one the platform
+      ;; opened), and #f for a frame made with no display - a test.
       ;; ^ Whether an ESC key was just seen: the next key event is
       ;; dispatched with the `meta` modifier (the Emacs ASCII
       ;; protocol, where ESC prefixes meta keys).
@@ -345,7 +356,7 @@
       ;; buffer-local in `(schemacs editor files)' now.
       )
 
-    (define (set!ncurses-frame-message frame text)
+    (define (set!frame-message frame text)
       ;; Put TEXT in FRAME's echo area, taking down any timeout the
       ;; message it replaces had. A timeout belongs to the message it
       ;; was set with (`SET-MESSAGE!'), and a plain `message' - the
@@ -353,15 +364,15 @@
       ;; reported - is not meant to inherit the previous one's and
       ;; disappear early.
       ;;--------------------------------------------------------------
-      (set!ncurses-frame-message-text frame text)
-      (set!ncurses-frame-message-expiry frame #f))
+      (set!frame-message-text frame text)
+      (set!frame-message-expiry frame #f))
 
-    (define (ncurses-frame-message-expired? frame)
+    (define (frame-message-expired? frame)
       ;; Whether FRAME's message has been up for as long as it was
       ;; given. A message with no expiry - the great majority, which
       ;; stay until the next key - is never expired.
       ;;--------------------------------------------------------------
-      (let ((limit (ncurses-frame-message-expiry frame)))
+      (let ((limit (frame-message-expiry frame)))
         (and limit (< limit (current-second)))))
 
     (define (set-message! frame text . args)
@@ -372,8 +383,8 @@
       ;; together here so that a message cannot be left with the
       ;; previous message's expiry.
       ;;--------------------------------------------------------------
-      (set!ncurses-frame-message frame text)
-      (set!ncurses-frame-message-expiry
+      (set!frame-message frame text)
+      (set!frame-message-expiry
        frame (and (pair? args) (car args) (+ (current-second) (car args)))))
 
     ;; The frame currently dispatching a key event. Commands read the
@@ -436,11 +447,15 @@
       ;; tests, which have no terminal to ask.
       ;;--------------------------------------------------------------
       (case-lambda
-       ((editor) (new-frame editor (lines) (cols)))
+       ((editor)
+        ;; With no size asked for, the display's size is the answer - a
+        ;; frame is a display of a terminal, and knows how big that is.
+        (let ((size (screen-size (current-display))))
+          (new-frame editor (car size) (cdr size))))
        ((editor height width)
         (let ((window (make-frame-window editor 0 (max 1 (- height 1)) 0 width)))
-          (make<ncurses-frame> (list window) window height width
-                               "" #f #f #f #f)))))
+          (make<frame> (list window) window height width
+                       "" #f #f #f #f (current-display))))))
 
     (define min-safe-window-height 1)
     (define min-safe-window-width 2)
@@ -464,12 +479,12 @@
       ;; the rectangle it was made with, and a terminal made smaller
       ;; draws its mode line off the bottom row.
       ;;--------------------------------------------------------------
-      (let ((height (lines)))
-        (when (< 0 height)
+      (let ((size (and (current-display) (screen-size (current-display)))))
+        (when (and size (< 0 (car size)))
           (let ((old-height (frame-height frame))
                 (old-width (frame-width frame))
-                (new-height height)
-                (new-width (cols)))
+                (new-height (car size))
+                (new-width (cdr size)))
             (unless (and (= old-height new-height)
                          (= old-width new-width))
               (set!frame-height frame new-height)
@@ -492,7 +507,7 @@
       ;; The row above the echo area is the text area: the echo area has
       ;; the frame's last row, as GNU Emacs's minibuffer window does.
       ;;--------------------------------------------------------------
-      (scale-window! (car (ncurses-frame-windows frame))
+      (scale-window! (car (frame-windows frame))
                      0 0 old-width (max 1 (- old-height 1))
                      0 0 new-width (max 1 (- new-height 1))))
 
@@ -603,9 +618,9 @@
       ;;--------------------------------------------------------------
       "Stop the editor and return to the shell (bound to C-z)."
       (interactive)
-      (endwin)
+      (tty-suspend!)
       (kill (getpid) SIGTSTP)
-      (refresh (stdscr)))
+      (tty-resume!))
 
     ;; The key GNU Emacs binds it to, beside the command as the other
     ;; libraries state theirs.
@@ -614,7 +629,7 @@
     (define (selected-window)
       ;; The window commands act on: GNU Emacs's `(selected-window)'.
       ;;--------------------------------------------------------------
-      (ncurses-frame-selected-window (*current-frame*)))
+      (frame-selected-window (*current-frame*)))
 
     (define (select-window window)
       ;; Make WINDOW the selected window, the way GNU Emacs's
@@ -631,7 +646,7 @@
           (set-marker! (%window-point old)
                        (text-editor-get-cursor (window-buffer old))
                        (window-buffer old))
-          (set!ncurses-frame-selected-window frame window)
+          (set!frame-selected-window frame window)
           ;; ... and the one being selected gives the buffer its point
           (text-editor-set-cursor (window-buffer window)
                                   (marker-position (%window-point window))))
@@ -643,10 +658,10 @@
     ;; and they keep the commands that act on "the buffer" reading as
     ;; such.
 
-    (define (ncurses-frame-editor frame)
-      (window-buffer (ncurses-frame-selected-window frame)))
+    (define (frame-editor frame)
+      (window-buffer (frame-selected-window frame)))
 
-    (define (set!ncurses-frame-editor frame editor)
-      (set!window-buffer (ncurses-frame-selected-window frame) editor))
+    (define (set!frame-editor frame editor)
+      (set!window-buffer (frame-selected-window frame) editor))
 
     ))

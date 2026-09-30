@@ -16,9 +16,9 @@
        line-break-newline line-break-crlf line-break-return string-search-forward)
  (only (schemacs editor frame)
        *current-frame* *echo-area-buffer* *echo-area-prompt* *minibuffer*
-       frame-height ncurses-frame-editor ncurses-frame-message
-       ncurses-frame-message-expiry set!ncurses-frame-message
-       ncurses-frame-selected-window new-frame set!window-buffer
+       frame-height frame-editor frame-message
+       frame-message-expiry set!frame-message
+       frame-selected-window new-frame set!window-buffer
        window-internal?
        window-list
        set!window-height set!window-width
@@ -153,7 +153,7 @@
             ;; the latest kill, which is the front of the ring - and
             ;; #f when nothing has been killed yet, Elisp's `(car nil)'
             (if (pair? (*kill-ring*)) (car (*kill-ring*)) #f)
-            (ncurses-frame-message frame)))))
+            (frame-message frame)))))
 
 (define (run-keys text evs)
   ;; The buffer contents and cursor of RUN-KEYS*, which is what most
@@ -591,9 +591,9 @@
                          (lambda (frame)
                            (for-each (lambda (ev) (dispatch-ncurses-event frame ev))
                                      keys)
-                           (set! message (ncurses-frame-message frame))
+                           (set! message (frame-message frame))
                            (set! buffer (text-editor-to-string
-                                         (ncurses-frame-editor frame))))
+                                         (frame-editor frame))))
                          opts)))
       (list (mode-line-modification-indicator (car result))
             message (cdr result) buffer))))
@@ -650,7 +650,7 @@
     (parameterize ((*current-frame* frame))
       (text-editor-set-read-only! ed read-only?)
       (note-file-read-only! frame)
-      (ncurses-frame-message frame))))
+      (frame-message frame))))
 
 (test-equal '("Note: file is write protected" "")
   (list (message-after-note #t) (message-after-note #f)))
@@ -951,7 +951,7 @@
 
 (test-begin "schemacs_ncurses_editor_cursor_position")
 
-(define (window-of frame) (ncurses-frame-selected-window frame))
+(define (window-of frame) (frame-selected-window frame))
 
 ;; The frame's one window fills the frame's text area: the rows above
 ;; the echo area, all of the columns.
@@ -964,7 +964,7 @@
 ;; after the last character of the line, on the line's own row.
 (test-equal '(0 . 3)
   (let* ((frame (test-frame (new-text-editor)))
-         (ed (ncurses-frame-editor frame)))
+         (ed (frame-editor frame)))
     (text-editor-insert ed "abc")
     (text-editor-set-cursor ed 0 0)
     (text-editor-move-cursor ed 100)
@@ -974,7 +974,7 @@
 ;; forward again returns to it.
 (test-equal '((0 . 3) (0 . 2) (0 . 3))
   (let* ((frame (test-frame (new-text-editor)))
-         (ed (ncurses-frame-editor frame))
+         (ed (frame-editor frame))
          (window (window-of frame)))
     (text-editor-insert ed "abc")
     (text-editor-set-cursor ed 0 0)
@@ -989,7 +989,7 @@
 ;; the very end is drawn on that empty line, one row down.
 (test-equal '(1 . 0)
   (let* ((frame (test-frame (new-text-editor)))
-         (ed (ncurses-frame-editor frame)))
+         (ed (frame-editor frame)))
     (text-editor-insert ed "abc\n")
     (text-editor-set-cursor ed 0 0)
     (text-editor-move-cursor ed 100)
@@ -1046,7 +1046,7 @@
 (test-begin "schemacs_ncurses_editor_windows")
 
 (define (selected-window-of frame)
-  (ncurses-frame-selected-window frame))
+  (frame-selected-window frame))
 
 (define (frame-rows frame)
   ;; The rows of the frame's text area: all of them but the echo area's.
@@ -1090,7 +1090,7 @@
 (define (points frame)
   ;; Each window's point, and the buffer's own.
   (append (map window-point (window-list frame))
-          (list (text-editor-get-cursor (ncurses-frame-editor frame)))))
+          (list (text-editor-get-cursor (frame-editor frame)))))
 
 ;; A frame starts with exactly one window, filling the text area, and it
 ;; is the selected one.
@@ -1159,7 +1159,7 @@
 ;; behind holds the point it had.
 (test-equal '(#t 0 0 3)
   (let* ((frame (run-window-keys (frame-with "alpha\nbeta\n") C-x #\2))
-         (ed (ncurses-frame-editor frame)))
+         (ed (frame-editor frame)))
     ;; move point forward in the upper window, then change windows: the
     ;; upper keeps the point it had, the lower gets it as its own
     (text-editor-move-cursor ed 3)
@@ -1176,7 +1176,7 @@
 ;; window was holding.
 (test-equal '(#t 3)
   (let* ((frame (run-window-keys (frame-with "alpha\nbeta\n") C-x #\2))
-         (ed (ncurses-frame-editor frame)))
+         (ed (frame-editor frame)))
     (text-editor-move-cursor ed 3)
     (run-window-keys frame C-x #\o C-x #\o)
     (list (eq? (car (window-list frame)) (selected-window-of frame))
@@ -1229,7 +1229,7 @@
 ;; the two different numbers are here to catch.
 (test-equal '(": ** alpha.txt    -- L1 C3" ": ** alpha.txt    -- L1 C0")
   (let* ((frame (frame-with "alpha\nbeta\n"))
-         (ed (ncurses-frame-editor frame)))
+         (ed (frame-editor frame)))
     (set!text-editor-buffer-name ed "alpha.txt")
     (run-window-keys frame C-x #\2)
     (text-editor-move-cursor ed 3)
@@ -1359,7 +1359,7 @@
 ;; characters are inserted in front of it).
 (test-equal '(5 0 7 7)
   (let* ((frame (frame-with "one two three"))
-         (ed (ncurses-frame-editor frame)))
+         (ed (frame-editor frame)))
     (parameterize ((*current-frame* frame))
       ;; upper window: point at the start; lower window: point on "t" of "two"
       (run-window-keys frame C-x #\2 C-x #\o)
@@ -1379,7 +1379,7 @@
 ;; buffer has been edited in front of it.
 (test-equal '(5 7)
   (let* ((frame (frame-with "one two three"))
-         (ed (ncurses-frame-editor frame)))
+         (ed (frame-editor frame)))
     (set!text-editor-mark ed 5)
     (let ((mark-before (text-editor-mark ed)))
       (run-window-keys frame C-a #\X #\Y)     ; edit in front of the mark
@@ -1428,14 +1428,14 @@
 
 (define (format-in frame f)
   (parameterize ((*current-frame* frame))
-    (format-mode-line f (ncurses-frame-selected-window frame))))
+    (format-mode-line f (frame-selected-window frame))))
 
 ;; The constructs: the buffer name, the position, the modification state.
 ;; `%c' counts from zero - the leftmost column is displayed as 0, which is
 ;; Emacs's rule and not the engine's, whose columns start at one.
 (test-equal '("probe" "1" "0" "1" "12" "%")
   (let ((frame (frame-with "hello\nworld\n")))
-    (let ((ed (ncurses-frame-editor frame)))
+    (let ((ed (frame-editor frame)))
       (set!text-editor-buffer-name ed "probe")
       (text-editor-set-read-only! ed #t)
       (list (format-in frame "%b")
@@ -1451,7 +1451,7 @@
 ;; `%' for a read-only buffer, `%+' gives `*' for a modified one.
 (test-equal '("--" "**" "%*" "%%")
   (let* ((frame (frame-with "hello\n"))
-         (ed (ncurses-frame-editor frame))
+         (ed (frame-editor frame))
          (indicator (lambda () (format-in frame (list "%1*" "%1+")))))
     ;; visiting the text left the buffer modified, so it is cleared first
     ;; to get the third state - what an untouched buffer shows
@@ -1469,7 +1469,7 @@
 ;; different mechanism and pads on the right whatever it holds.
 (test-equal '("     1" "  1" "probe       " "1     ")
   (let ((frame (frame-with "hello\n")))
-    (set!text-editor-buffer-name (ncurses-frame-editor frame) "probe")
+    (set!text-editor-buffer-name (frame-editor frame) "probe")
     (list (format-in frame "%6l") (format-in frame "%3l")
           (format-in frame "%12b") (format-in frame (list 6 "%l")))))
 
@@ -1480,7 +1480,7 @@
 ;; where a 40-column buffer name reaches the mode line complete.
 (test-equal "verylongfilename.txt"
   (let ((frame (frame-with "hello\n")))
-    (set!text-editor-buffer-name (ncurses-frame-editor frame)
+    (set!text-editor-buffer-name (frame-editor frame)
                                  "verylongfilename.txt")
     (format-in frame "%12b")))
 
@@ -1524,7 +1524,7 @@
 ;; its own window's position and its modification state.
 (test-equal #t
   (let* ((frame (frame-with "hello\nworld\n"))
-         (ed (ncurses-frame-editor frame)))
+         (ed (frame-editor frame)))
     (set!text-editor-buffer-name ed "probe.txt")
     (text-editor-insert ed "X")
     ;; point is where the insert left it, one character in, and `%c'
@@ -1654,9 +1654,9 @@
     (with-file-buffer "/tmp/fe-kill.txt" "text\n"
       (lambda (frame)
         (type frame C-x #\k)
-        (set! shown (buffer-name (ncurses-frame-editor frame)))
+        (set! shown (buffer-name (frame-editor frame)))
         (set! names (map buffer-name (buffer-list)))
-        (set! message (ncurses-frame-message frame))))
+        (set! message (frame-message frame))))
     (list shown names message)))
 
 ;; A modified buffer is asked about first, and `n' leaves it alone: the
@@ -1665,9 +1665,9 @@
   (let ((shown #f) (still #f))
     (with-file-buffer "/tmp/fe-kill2.txt" "text\n"
       (lambda (frame)
-        (text-editor-insert (ncurses-frame-editor frame) "edited")
+        (text-editor-insert (frame-editor frame) "edited")
         (type frame C-x #\k #\n #\return)
-        (set! shown (buffer-name (ncurses-frame-editor frame)))
+        (set! shown (buffer-name (frame-editor frame)))
         (set! still (and (get-buffer "fe-kill2.txt") #t))))
     (list shown still)))
 
@@ -1716,7 +1716,7 @@
                    (*last-change-was-undo* #f))
      (let ((frame (*current-frame*))
            (buffer (get-buffer-create "*own-keys*")))
-      (set!window-buffer (ncurses-frame-selected-window frame) buffer)
+      (set!window-buffer (frame-selected-window frame) buffer)
       (when local?
         (set!buffer-local-keymap
          buffer
@@ -1725,7 +1725,7 @@
                      `(((meta #\z) . ,read-only-mode))))))
       (dispatch-key-event frame (list (list 'meta #\z)))
       (list (text-editor-read-only? buffer)
-            (ncurses-frame-message frame))))))
+            (frame-message frame))))))
 
 (test-equal '(#t "Read-Only mode enabled in current buffer")
   (press-m-z #t))
@@ -1753,7 +1753,7 @@
     (let* ((ed (get-buffer-create "shown.txt"))
            (frame (test-frame ed)))
       (parameterize ((*current-frame* frame) (*echo-area-buffer* #f))
-        (set!window-buffer (ncurses-frame-selected-window frame) ed)
+        (set!window-buffer (frame-selected-window frame) ed)
         (for-each (lambda (spec)
                     (let ((buffer (get-buffer-create (car spec))))
                       (when (cadr spec) (text-editor-set-read-only! buffer #t))
@@ -1831,14 +1831,14 @@
     (let* ((ed (get-buffer-create "shown.txt"))
            (frame (test-frame ed)))
       (parameterize ((*current-frame* frame) (*echo-area-buffer* #f))
-        (set!window-buffer (ncurses-frame-selected-window frame) ed)
+        (set!window-buffer (frame-selected-window frame) ed)
         (for-each (lambda (spec)
                     (let ((buffer (get-buffer-create (car spec))))
                       (when (cadr spec) (text-editor-set-read-only! buffer #t))
                       (when (caddr spec) (text-editor-insert buffer "x"))))
                   extra)
         (let ((list (list-buffers-noselect)))
-          (set!window-buffer (ncurses-frame-selected-window frame) list)
+          (set!window-buffer (frame-selected-window frame) list)
           (*current-buffer* list)
           (thunk list (lambda (ev) (dispatch-ncurses-event frame ev))))))))
 
@@ -1905,12 +1905,12 @@
            ;; the list is made from this buffer, so its line is marked `.`
            (frame (test-frame ed)))
       (parameterize ((*current-frame* frame) (*echo-area-buffer* #f))
-        (set!window-buffer (ncurses-frame-selected-window frame) ed)
+        (set!window-buffer (frame-selected-window frame) ed)
         (*current-buffer* ed)
         (text-editor-insert ed "saved\n")
         ;; now into the list, which becomes the current buffer - so if
         ;; `x' saved "the current buffer" it would save the list
-        (set!window-buffer (ncurses-frame-selected-window frame)
+        (set!window-buffer (frame-selected-window frame)
                            (list-buffers-noselect))
         (*current-buffer* (get-buffer "*Buffer List*"))
         ;; `s' marks the buffer on this line for saving, `x' does it
@@ -1933,7 +1933,7 @@
     (lambda (menu-buffer press!)
       (press! #\n)
       (press! #\return)
-      (list (buffer-name (window-buffer (ncurses-frame-selected-window
+      (list (buffer-name (window-buffer (frame-selected-window
                                          (*current-frame*))))
             ;; the list is off the frame's window, so nothing shows it
             (get-buffer-window (get-buffer "*Buffer List*"))))))
@@ -1993,7 +1993,7 @@
       (for-each (lambda (ev) (dispatch-ncurses-event frame ev)) evs)
       (list (text-editor-to-string mb-ed)
             (text-editor-to-string ed)
-            (ncurses-frame-message frame)))))
+            (frame-message frame)))))
 
 ;; Typing goes into the prompt, the buffer behind it is untouched, and
 ;; nothing errored.
@@ -2036,7 +2036,7 @@
   (let ((frame (message-frame)))
     (parameterize ((*current-frame* frame))
       (minibuffer-message "No match")
-      (ncurses-frame-message frame))))
+      (frame-message frame))))
 
 ;; ...and a message that is already written that way is not enclosed
 ;; twice: Emacs tests it with the regexp "\\` *\\[.+\\]\\'". Leading
@@ -2046,9 +2046,9 @@
   (let ((frame (message-frame)))
     (parameterize ((*current-frame* frame))
       (list (begin (minibuffer-message " [No match]")
-                   (ncurses-frame-message frame))
+                   (frame-message frame))
             (begin (minibuffer-message " x ")
-                   (ncurses-frame-message frame))))))
+                   (frame-message frame))))))
 
 ;; A message shown with `minibuffer-message' gets a timeout; one put
 ;; there plainly - by the command loop clearing the echo area, or by an
@@ -2060,9 +2060,9 @@
     (parameterize ((*current-frame* frame)
                    (*minibuffer-message-timeout* 2))
       (minibuffer-message "No match")
-      (list (and (ncurses-frame-message-expiry frame) #t)
-            (begin (set!ncurses-frame-message frame "plain")
-                   (ncurses-frame-message-expiry frame))))))
+      (list (and (frame-message-expiry frame) #t)
+            (begin (set!frame-message frame "plain")
+                   (frame-message-expiry frame))))))
 
 ;; `completion--message' says nothing at all when
 ;; `completion-show-inline-help' is off, which is what a user who has
@@ -2071,11 +2071,11 @@
   (let ((frame (message-frame)))
     (parameterize ((*current-frame* frame))
       (list (begin (completion--message "No match")
-                   (ncurses-frame-message frame))
-            (begin (set!ncurses-frame-message frame "")
+                   (frame-message frame))
+            (begin (set!frame-message frame "")
                    (parameterize ((*completion-show-inline-help* #f))
                      (completion--message "No match"))
-                   (ncurses-frame-message frame))))))
+                   (frame-message frame))))))
 
 ;; Replacing the minibuffer contents replaces them. They used to be
 ;; *prepended* to, because the deletion ran from the cursor - which the
@@ -2407,7 +2407,7 @@
                                (region-beginning)))))
             ;; ...and the command that exchanges point and mark says its own
             (keys! frame C-x C-x)
-            (list unset inactive never-set (ncurses-frame-message frame))))))))
+            (list unset inactive never-set (frame-message frame))))))))
 
 ;; `mark-whole-buffer' (C-x h) puts point at the beginning and the mark
 ;; at the end, and leaves the region active so that a command can act on

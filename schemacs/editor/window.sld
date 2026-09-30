@@ -42,10 +42,10 @@
     (only (schemacs editor frame)
           %window-point
           *current-frame* current-editor frame-height frame-width
-          make<ncurses-window> ncurses-frame-quit-cont
-          ncurses-frame-selected-window ncurses-frame-windows select-window
-          selected-window set!ncurses-frame-editor set!ncurses-frame-message
-          set!ncurses-frame-windows set!window-children set!window-height
+          make<window> frame-quit-cont
+          frame-selected-window frame-windows select-window
+          selected-window set!frame-editor set!frame-message
+          set!frame-windows set!window-children set!window-height
           set!window-left set!window-parent set!window-top set!window-top-line
           set!window-buffer set!window-width set-window-point!
           window-buffer window-children
@@ -147,7 +147,7 @@
       ;; one. Only leaves hold a buffer or point, which is why this one has
       ;; neither.
       ;;--------------------------------------------------------------
-      (make<ncurses-window> #f #f 0 top height left width
+      (make<window> #f #f 0 top height left width
                             (window-parent window) (list window new)))
 
     (define (install-window-parent! frame window parent)
@@ -163,9 +163,9 @@
             (set!window-children
              grandparent
              (list-substitute window (list parent) (window-children grandparent)))
-            (set!ncurses-frame-windows
+            (set!frame-windows
              frame (list-substitute window (list parent)
-                                    (ncurses-frame-windows frame))))
+                                    (frame-windows frame))))
         parent))
 
     (define (split-window window size horizontal)
@@ -199,7 +199,7 @@
                   (start (window-left window))
                   (height (window-height window)))
               (set!window-width window left)
-              (let ((new (make<ncurses-window>
+              (let ((new (make<window>
                           (window-buffer window)
                           (copy-marker (window-buffer window)
                                        (text-editor-get-cursor (window-buffer window)))
@@ -228,7 +228,7 @@
                   (left (window-left window))
                   (width (window-width window)))
               (set!window-height window upper)
-              (let ((new (make<ncurses-window>
+              (let ((new (make<window>
                           (window-buffer window)
                           (copy-marker (window-buffer window)
                                        (text-editor-get-cursor (window-buffer window)))
@@ -254,7 +254,7 @@
       ;; gives up SIZE rows at the bottom.
       ;;--------------------------------------------------------------
       (let* ((frame (*current-frame*))
-             (main (car (ncurses-frame-windows frame)))
+             (main (car (frame-windows frame)))
              (top (window-top main))
              (left (window-left main))
              (width (window-width main))
@@ -263,7 +263,7 @@
           (error "Size of new window too small" size))
         ;; the frame's windows give up SIZE rows at the bottom
         (absorb-into! main 'bottom (- size))
-        (let ((new (make<ncurses-window>
+        (let ((new (make<window>
                     buffer
                     (copy-marker buffer (text-editor-get-cursor buffer))
                     0
@@ -506,9 +506,9 @@ windows it was combined with."
       (let* ((frame (*current-frame*))
              (parent (window-parent window))
              (siblings (and parent (list-without window (window-children parent))))
-             (selected (ncurses-frame-selected-window frame)))
+             (selected (frame-selected-window frame)))
         (cond
-         ((and (not parent) (<= (length (ncurses-frame-windows frame)) 1))
+         ((and (not parent) (<= (length (frame-windows frame)) 1))
           (error "Attempt to delete minibuffer or sole ordinary window"))
          (else
           (for-each (lambda (taker) (window-absorb! taker window)) siblings)
@@ -524,13 +524,13 @@ windows it was combined with."
                          (list-substitute parent
                                           (list child)
                                           (window-children (window-parent parent))))
-                        (set!ncurses-frame-windows
+                        (set!frame-windows
                          frame
                          (list-substitute parent
                                           (list child)
-                                          (ncurses-frame-windows frame)))))))
-              (set!ncurses-frame-windows
-               frame (list-without window (ncurses-frame-windows frame))))
+                                          (frame-windows frame)))))))
+              (set!frame-windows
+               frame (list-without window (frame-windows frame))))
           (when (eq? window selected)
             (begin (select-window (car (window-list frame)))
                    (record-buffer!
@@ -556,7 +556,7 @@ windows it was combined with."
         ;; inside anything and holds nothing: the tree is one leaf.
         (set!window-parent window #f)
         (set!window-children window '())
-        (set!ncurses-frame-windows frame (list window))
+        (set!frame-windows frame (list window))
         window))
 
     (defcommand (split-window-below size window-to-split)
@@ -609,7 +609,7 @@ windows it was combined with."
       "Leave the selected window and bury the buffer it was showing."
       (interactive)
       (let* ((frame (*current-frame*))
-             (window (ncurses-frame-selected-window frame))
+             (window (frame-selected-window frame))
              (buffer (window-buffer window)))
         (bury-buffer buffer)
         (if (> (length (window-list)) 1)

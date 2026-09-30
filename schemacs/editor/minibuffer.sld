@@ -79,7 +79,7 @@
        *this-command* *last-command*)
     (only (schemacs editor frame)
           *current-frame* *echo-area-buffer* *echo-area-prompt* *minibuffer*
-          frame-height set!ncurses-frame-message set-message!
+          frame-height set!frame-message set-message!
           set-window-point! window-buffer window-height window-list
           window-width)
     ;; `try-completion' and `all-completions' are `minibuf.c''s and live in
@@ -619,7 +619,7 @@
           (cond
            ((string-ci=? answer "yes") #t)
            ((string-ci=? answer "no") #f)
-           (else (set!ncurses-frame-message frame "Please answer yes or no.")
+           (else (set!frame-message frame "Please answer yes or no.")
                  (loop))))))
 
     ;;----------------------------------------------------------------
