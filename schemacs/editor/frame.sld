@@ -32,7 +32,8 @@
     ;; business too (`suspend-display!' / `resume-display!', which
     ;; `suspend-frame' asks through the interface).
     (only (schemacs editor dispnew)
-          current-display resume-display! screen-size suspend-display!)
+          column-width current-display line-height resume-display!
+          screen-size suspend-display!)
     (only (schemacs editor engine)
           copy-marker  marker-position  set-marker!
           text-editor-get-cursor  text-editor-set-cursor)
@@ -431,6 +432,24 @@
       (or (*echo-area-buffer*)
           (window-buffer (selected-window))))
 
+    (define (display-rows-cols display)
+      ;; The display's size in character units, as `(ROWS . COLUMNS)': its
+      ;; pixel size divided by the size of one character unit. This is
+      ;; Emacs deriving `FRAME_COLS'/`FRAME_LINES' from
+      ;; `FRAME_PIXEL_WIDTH'/`FRAME_PIXEL_HEIGHT' through
+      ;; `FRAME_COLUMN_WIDTH'/`FRAME_LINE_HEIGHT'.
+      ;;
+      ;; On a terminal a character unit is one pixel, so these come out as
+      ;; the terminal's own rows and columns. They are derived rather than
+      ;; asked for so that a display whose unit is a real font - a
+      ;; windowed one - answers the same question the same way.
+      ;;--------------------------------------------------------------
+      (let* ((size (screen-size display))
+             (unit-width (max 1 (column-width display)))
+             (unit-height (max 1 (line-height display))))
+        (cons (quotient (cdr size) unit-height)
+              (quotient (car size) unit-width))))
+
     (define new-frame
       ;; A frame holding one window that fills the text area and shows
       ;; EDITOR. GNU Emacs's `frame-root-window' is the whole frame, and
@@ -443,7 +462,7 @@
        ((editor)
         ;; With no size asked for, the display's size is the answer - a
         ;; frame is a display of a terminal, and knows how big that is.
-        (let ((size (screen-size (current-display))))
+        (let ((size (display-rows-cols (current-display))))
           (new-frame editor (car size) (cdr size))))
        ((editor height width)
         (let ((window (make-frame-window editor 0 (max 1 (- height 1)) 0 width)))
@@ -472,18 +491,20 @@
       ;; the rectangle it was made with, and a terminal made smaller
       ;; draws its mode line off the bottom row.
       ;;--------------------------------------------------------------
-      (let ((size (and (current-display) (screen-size (current-display)))))
-        (when (and size (< 0 (car size)))
-          (let ((old-height (frame-height frame))
-                (old-width (frame-width frame))
-                (new-height (car size))
-                (new-width (cdr size)))
-            (unless (and (= old-height new-height)
-                         (= old-width new-width))
-              (set!frame-height frame new-height)
-              (set!frame-width frame new-width)
-              (resize-frame-windows! frame old-height old-width
-                                     new-height new-width))))))
+      (let ((display (current-display)))
+        (when display
+          (let* ((size (display-rows-cols display))
+                 (old-height (frame-height frame))
+                 (old-width (frame-width frame))
+                 (new-height (car size))
+                 (new-width (cdr size)))
+            (when (< 0 new-height)
+              (unless (and (= old-height new-height)
+                           (= old-width new-width))
+                (set!frame-height frame new-height)
+                (set!frame-width frame new-width)
+                (resize-frame-windows! frame old-height old-width
+                                       new-height new-width)))))))
 
     (define (resize-frame-windows! frame old-height old-width new-height
                                    new-width)

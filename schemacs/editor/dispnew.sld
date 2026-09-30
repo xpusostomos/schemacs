@@ -36,6 +36,8 @@
    resume-display!
    realize-face
    screen-size
+   column-width
+   line-height
    display-color-cells
    )
 
@@ -63,11 +65,22 @@
     ;; where one exists, and after the terminal calls they stand for
     ;; otherwise. All are single-dispatch on the display; the window or
     ;; buffer being drawn is an argument, never a dispatch key.
+    ;;
+    ;; Positions and sizes are in PIXELS, which is Emacs's unit too:
+    ;; xdisp.c produces glyphs carrying `pixel_width' and glyph rows
+    ;; carrying pixel x/y (dispextern.h). A text terminal is the
+    ;; degenerate case rather than a separate kind of thing - Emacs gives
+    ;; a non-window frame `column_width = 1' and `line_height = 1'
+    ;; (frame.c:1182), so on a terminal one character *is* one pixel unit
+    ;; and the pixel numbers are the row and column numbers themselves.
+    ;; `column-width' and `line-height' are the size of that unit, and
+    ;; rows and columns are derived from the pixel size through them, as
+    ;; Emacs derives `FRAME_COLS' from `FRAME_PIXEL_WIDTH'.
     ;;------------------------------------------------------------------
 
     (define-generic write-glyphs!)
-    ;; Draw a run of TEXT at row Y, column X with ATTRIBUTE: the cells
-    ;; xdisp has decided are one face. Emacs's `write_glyphs'.
+    ;; Draw a run of TEXT at pixel Y, X with ATTRIBUTE: the cells xdisp
+    ;; has decided are one face. Emacs's `write_glyphs'.
     ;; `(write-glyphs! display text y x attribute)'.
 
     (define-generic clear-frame-area!)
@@ -84,9 +97,9 @@
     ;; `update_window_end_hook'. `(update-window-end! display)'.
 
     (define-generic draw-window-cursor!)
-    ;; Put the display cursor at ROW, COLUMN (frame coordinates), which
-    ;; is where input shows itself going. Emacs's `draw_window_cursor'.
-    ;; `(draw-window-cursor! display row column)'.
+    ;; Put the display cursor at pixel ROW, COLUMN (frame coordinates),
+    ;; which is where input shows itself going. Emacs's
+    ;; `draw_window_cursor'. `(draw-window-cursor! display row column)'.
 
     (define-generic flush-display!)
     ;; Everything drawn since the last flap is now what the display
@@ -126,8 +139,19 @@
     ;; `(realize-face display face-attrs)'.
 
     (define-generic screen-size)
-    ;; The display's size in rows and columns, as `(ROWS . COLUMNS)'.
+    ;; The display's size in pixels, as `(WIDTH . HEIGHT)' - Emacs's
+    ;; frame `pixel_width' and `pixel_height'. The row and column counts
+    ;; are derived from these through `column-width' and `line-height'.
     ;; `(screen-size display)'.
+
+    (define-generic column-width)
+    ;; The width of one character unit in pixels: Emacs's
+    ;; `FRAME_COLUMN_WIDTH', which is 1 on a text terminal because one
+    ;; character there *is* one pixel. `(column-width display)'.
+
+    (define-generic line-height)
+    ;; The height of one character unit in pixels: Emacs's
+    ;; `FRAME_LINE_HEIGHT', 1 on a text terminal. `(line-height display)'.
 
     (define-generic display-color-cells)
     ;; How many colours the display can show at once - zero for a

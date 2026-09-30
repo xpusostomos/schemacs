@@ -323,9 +323,24 @@
          (else ev))))
 
     (define-method (screen-size (d <tty-display>))
-      ;; The terminal's size in rows and columns.
+      ;; The terminal's size in pixels, which for a terminal is its
+      ;; columns by its rows: one character is one pixel unit, as Emacs
+      ;; makes it with `column_width = 1' / `line_height = 1' on a
+      ;; non-window frame (`frame.c''s `make_terminal_frame').
       ;;--------------------------------------------------------------
-      (cons (lines) (cols)))
+      (cons (cols) (lines)))
+
+    (define-method (column-width (d <tty-display>))
+      ;; One character is one pixel wide on a terminal: Emacs's
+      ;; `FRAME_COLUMN_WIDTH' for a non-window frame.
+      ;;--------------------------------------------------------------
+      1)
+
+    (define-method (line-height (d <tty-display>))
+      ;; One character is one pixel tall on a terminal: Emacs's
+      ;; `FRAME_LINE_HEIGHT' for a non-window frame.
+      ;;--------------------------------------------------------------
+      1)
 
     (define-method (display-color-cells (d <tty-display>))
       ;; How many colours the terminal can show at once, 0 for a
