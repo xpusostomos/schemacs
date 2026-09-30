@@ -5,5 +5,11 @@
 
 DIR=$(dirname $0)
 export GUILE_WARN_DEPRECATED=no
-exec guile --r7rs -L $DIR -s $DIR/main-gtk.scm "$@"
+# The newer guile-cairo, built into the tree: it has the pointer bridge
+# (cairo-pointer->context) that the system package predates. First on the
+# path so it wins over the installed one.
+exec guile --r7rs \
+     -L $DIR/.guile-cairo/share/guile/site/3.0 \
+     -L $DIR \
+     -s $DIR/main-gtk.scm "$@"
 

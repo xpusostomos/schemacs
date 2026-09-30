@@ -51,13 +51,13 @@
     ;; thousands of names and importing them wholesale shadows core
     ;; bindings.
     (only (schemacs editor pgtk-names)
-          init-check! <GtkWindow> <GtkImage> <GtkContainer> <GtkWidget>
+          init-check! <GtkWindow> <GtkDrawingArea> <GtkContainer> <GtkWidget>
           widget:show-all widget:hide widget:destroy widget:queue-draw
           widget:can-focus widget:grab-focus widget:set-size-request
           widget:hexpand widget:vexpand image:pixel-size window:resizable
           widget:get-scale-factor window:resize
-          container:add image:set-from-pixbuf
-          pixbuf:new-from-data symbol->colorspace
+          container:add
+          symbol->colorspace
           connect main-iteration-do? set-prgname set-program-class
           modifier-type->number widget:get-allocated-width
           widget:get-allocated-height
@@ -606,33 +606,31 @@
                            *cell-width* *cell-height*)
           (cairo-fill cr))))
 
-    (define-method (flush-display! (d <pgtk-display>))
-      ;; Show what has been drawn: the surface becomes a pixbuf and the
-      ;; pixbuf becomes the image the window holds.
+    (define (pgtk-present! d gtk-cr)
+      ;; Paint what we have drawn into the context Gtk handed us. This is
+      ;; where the picture is put on the screen, at the moment Gtk asks
+      ;; for it, so there is no snapshot waiting to go stale and nothing
+      ;; for Gtk to scale - it is our pixels, at their own size, drawn by
+      ;; us.
+      ;;
+      ;; The context is Gtk's, wrapped by guile-gi; guile-cairo cannot use
+      ;; another library's wrapper, so the pointer is read out of it and
+      ;; wrapped again as a guile-cairo context.
       ;;--------------------------------------------------------------
       (let ((surface (pgtk-surface d))
-            (image (pgtk-image d)))
-        (when (and surface image)
-          (cairo-surface-flush surface)
-          (let* ((w (car (pgtk-surface-size d)))
-                 (h (cdr (pgtk-surface-size d)))
-                 (pb (pixbuf:new-from-data
-                      (cairo-image-surface-get-data surface)
-                      (symbol->colorspace (quote rgb)) #t 8 w h (* w 4))))
-            (image:set-from-pixbuf image pb)
-            ;; Re-assert the tiny request: setting a pixbuf raises the
-            ;; image's natural size, and with it the window's minimum, so
-            ;; a window that has been large can never be made small again.
-            (widget:set-size-request image 1 1)
-            (widget:queue-draw image)
-            (set! (pgtk-drawn-size d) (pgtk-surface-size d))
-            (pgtk-shot-maybe! d surface)
-            (pgtk-trace 'flush 'surf w h 'img
-                        (widget:get-allocated-width image)
-                        (widget:get-allocated-height image))))))
+            (cr (cairo-pointer->context (slot-ref gtk-cr 'value))))
+        (when surface
+          (cairo-set-source-surface cr surface 0 0)
+          (cairo-paint cr))))
 
-    (define *pgtk-shot-n* (make-parameter 0))
-    (define *pgtk-shot-last* (make-parameter #f))
+    (define-method (flush-display! (d <pgtk-display>))
+      ;; What has been drawn becomes visible when Gtk next asks us to
+      ;; paint: there is no buffer to hand over any more.
+      ;;--------------------------------------------------------------
+      (let ((image (pgtk-image d)))
+        (when image (widget:queue-draw image))))
+      ;; so the shot hook can still see the surface
+      #t
 
     (define (pgtk-shot-maybe! d surface)
       ;; When PGTK_SHOT names a file, write each frame to it, so what the
@@ -700,7 +698,7 @@
              (width (* columns *cell-width*))
              (height (* rows *cell-height*))
              (win (make <GtkWindow>))
-             (image (make <GtkImage>))
+             (image (make <GtkDrawingArea>))
              (d (make <pgtk-display>)))
         (set! (pgtk-window d) win)
         (set! (pgtk-image d) image)
@@ -753,6 +751,10 @@
         (widget:set-size-request image 1 1)
         (set! (widget:hexpand image) #t)
         (set! (widget:vexpand image) #t)
+        ;; Every repaint Gtk asks for is answered by painting our own
+        ;; drawing into the context it gives us, at its size.
+        (connect image (make <signal> #:name "draw")
+                 (lambda (w cr) (pgtk-present! d cr) #t))
         (container:add win image)
         ;; Key events go to the focused widget. The window's child is an
         ;; image, which cannot take focus, so the window itself must -
