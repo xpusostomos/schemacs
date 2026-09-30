@@ -36,7 +36,7 @@
           spawn-coop-repl-server poll-coop-repl-server)
     (only (system repl server) make-tcp-server-socket))
 
-  (export start-repl! poll-repl!)
+  (export poll-repl! repl-open? start-repl!)
 
   (begin
 
@@ -50,6 +50,14 @@
       (unless server
         (set! server (spawn-coop-repl-server
                       (make-tcp-server-socket #:port port)))))
+
+    (define (repl-open?)
+      ;; Whether the back door is open, so a wait can be shortened to give
+      ;; the server a turn. The wait *blocks* otherwise, and a blocked
+      ;; wait never polls: with this, a session that has opened the door
+      ;; answers promptly and one that has not is not slowed at all.
+      ;;--------------------------------------------------------------
+      (and server #t))
 
     (define (poll-repl!)
       ;; Give the server a turn, if it is open. Called from the loops that

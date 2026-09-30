@@ -291,15 +291,24 @@
     (define-method (update-window-end! (d <tty-display>))
       #t)
 
-    (define-method (draw-window-cursor! (d <tty-display>) row column cells)
+    (define-method (draw-window-cursor! (d <tty-display>) row column cells
+                                        type width text token)
       ;; The one terminal cursor, put where input shows itself going.
       ;;
-      ;; CELLS is ignored: the cursor is the terminal's own, and a
-      ;; terminal draws a cursor over a double-width character two cells
-      ;; wide without being told - it knows the character there. There is
-      ;; nothing to move it to but the character's first cell, which is
-      ;; COLUMN.
+      ;; Everything but the position and the type is ignored, and each for
+      ;; a reason: the cursor is the *terminal's* own, so a terminal draws
+      ;; a cursor over a double-width character two cells wide without
+      ;; being told (CELLS), inverts the glyph under it without being
+      ;; given it (TEXT and TOKEN), and has no bars or hollow boxes to
+      ;; draw (WIDTH). What a terminal *can* be told is whether to show
+      ;; its cursor at all, which is what `no-cursor' means - a buffer
+      ;; whose `cursor-type' is nil.
+      ;;
+      ;; Emacs's tty does the same and no more: `term.c' draws no cursor
+      ;; of its own, and its cursor handling is `tty_show_cursor' and
+      ;; `tty_hide_cursor' around the one the terminal has.
       ;;--------------------------------------------------------------
+      (curs-set (if (eq? type 'no-cursor) 0 1))
       (move (stdscr) row column))
 
     (define-method (flush-display! (d <tty-display>))

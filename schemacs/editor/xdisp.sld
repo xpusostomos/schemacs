@@ -52,14 +52,18 @@
          text-editor-read-only? text-editor-text-line-ref
          text-editor-to-string text-line-inner->string)
     (only (schemacs editor frame)
-         *echo-area-buffer* *echo-area-prompt* frame-height frame-width
+         *current-frame* *echo-area-buffer* *echo-area-prompt*
+         *frame-cursor-type* *frame-focus* frame-height frame-width
          frame-message frame-selected-window
+         ;; `w->cursor_off_p', which `internal-show-cursor' turns off and
+         ;; the cursor type is resolved against
+         window-cursor-off?
          sync-frame-size! window-body-height
          window-body-width window-buffer window-height window-left
          window-list
          selected-window set!window-top-line window-point window-right-border?
          window-top
-         window-top-line)
+         window-top-line window-width)
     (only (schemacs editor disp-table)
          char-display-cursor-width char-display-width
          current-line-display-column expand-line-display
@@ -71,7 +75,10 @@
     ;; (`realize-face').
     (only (schemacs editor textprop) get-text-property)
     (only (schemacs editor buffer)
-          *transient-mark-mode* buffer-local-value)
+          *transient-mark-mode*
+          buffer-cursor-in-non-selected-windows buffer-cursor-type
+          buffer-local-value buffer-truncate-lines buffer-word-wrap)
+
     (only (schemacs editor faces) *undefined-face-attribute*)
     (only (schemacs editor xfaces)
           attribute-value face-attributes-empty face-realized-attributes
@@ -91,12 +98,21 @@
    *mode-line-format*
    face-at-buffer-position
    face->attribute
+   ;; the cursor's type, which the tests check without a display
+   get-specified-cursor-type
+   get-window-cursor-type
    format-mode-line
+   *truncate-partial-width-windows*
    line-continuation-display?
+   line-display-rows
    line-display-width
    mode-line-string
    render!
+   scroll-to-cursor!
    status-string
+   window-line-rows
+   window-line-slices
+   window-truncates-lines?
    )
 
   (begin
@@ -163,20 +179,209 @@
          ((< width len) (truncate-line str width))
          (else (string-append str (make-string (- width len) #\space))))))
 
+    (define *truncate-partial-width-windows* (make-parameter 50))
+    ;; ^ GNU Emacs's `truncate-partial-width-windows', which `xdisp.c'
+    ;; declares and defaults to 50. Non-nil means truncate lines in
+    ;; windows narrower than the frame; an *integer* means truncate a
+    ;; partial-width window only when it is narrower than that many
+    ;; columns; nil means let `truncate-lines' decide on its own.
+    ;;
+    ;; It is here rather than in `window.sld' because `init_iterator' is
+    ;; where Emacs reads it, and `init_iterator' is `xdisp.c'.
+
+    (define (window-full-width? window)
+      ;; Whether WINDOW spans the whole frame: GNU Emacs's
+      ;; `WINDOW_FULL_WIDTH_P'. This editor's windows are tiled the same
+      ;; way, so a window is full width when it is as wide as the frame.
+      ;;--------------------------------------------------------------
+      (and (*current-frame*)
+           (= (window-width window) (frame-width (*current-frame*)))))
+
+    (define (window-truncates-lines? window)
+      ;; Whether WINDOW cuts long lines off instead of continuing them:
+      ;; the `it->line_wrap' test at the top of GNU Emacs's
+      ;; `init_iterator' (`xdisp.c':3414), which asks four things.
+      ;;
+      ;;   1. `base_face_id == DEFAULT_FACE_ID' - this is the *text*
+      ;;      area. A mode line or the echo area never wraps, and the
+      ;;      callers of this ask only about text rows.
+      ;;   2. `!it->w->hscroll' - a horizontally scrolled window cannot
+      ;;      wrap as well. There is no `hscroll' here yet, so this is
+      ;;      always true; when horizontal scrolling arrives it belongs
+      ;;      in this line.
+      ;;   3. the window is full-frame width, or
+      ;;      `truncate-partial-width-windows' lets it wrap: nil lets it,
+      ;;      `t' truncates every partial-width window, and an integer N
+      ;;      truncates one narrower than N.
+      ;;   4. `truncate-lines' is nil.
+      ;;
+      ;; and it wraps when all four hold, at a word when `word-wrap' is
+      ;; set and at the edge otherwise.
+      ;;--------------------------------------------------------------
+      (let ((ptw (*truncate-partial-width-windows*))
+            (cols (window-width window)))
+        (not (and (or (window-full-width? window)
+                      (not ptw)
+                      (and (exact-integer? ptw) (<= ptw cols)))
+                  (not (buffer-truncate-lines (window-buffer window)))))))
+
+    (define (line-display-rows line-string width wrap? word-wrap?)
+      ;; LINE-STRING as the screen rows it is drawn on, each a
+      ;; `(FIRST . LAST)' pair of *buffer* columns. One row when the line
+      ;; is truncated or short enough; several when it wraps.
+      ;;
+      ;; This is the heart of what `display_line' does in `xdisp.c': it
+      ;; produces one screen row per call, and calls itself again for the
+      ;; rest of the line. The two things it decides are where to break -
+      ;; at the window edge, or at "the space or tab character nearest to
+      ;; the right window edge" when `word-wrap' is set - and that a row
+      ;; never holds more than WIDTH cells.
+      ;;
+      ;; The column a tab expands to is measured from the start of the
+      ;; *row*, not of the line, because a wrapped row starts at screen
+      ;; column zero. That is why this cannot use `line-display-offsets',
+      ;; which measures from the start of the line.
+      ;;
+      ;; The last cell of a row that carries a marker is not text, and
+      ;; that matters to the arithmetic: `init_iterator' reduces the
+      ;; usable width by the marker's width - `it->last_visible_x -=
+      ;; it->continuation_pixel_width' (`xdisp.c':3509-3518) - and only
+      ;; when the window has no right fringe. This editor has no fringes,
+      ;; so a row holds WIDTH-1 cells and the marker takes the last one.
+      ;; Emacs on a terminal was measured doing exactly that: 100 `X' in
+      ;; an 80-column window came out 79 and `\', then 21 on the row
+      ;; below. Reserving the cell is what stops the marker from landing
+      ;; on top of the line's last character and losing it.
+      ;;--------------------------------------------------------------
+      (let ((len (string-length line-string))
+            (usable (max 1 (- width 1))))
+        (cond
+         ((or (not wrap?) (<= len 0))
+          ;; truncated, or nothing to lay out: one row, the whole line
+          (list (cons 0 len)))
+         (else
+          (let loop ((start 0) (i 0) (col 0) (space #f) (rows '()))
+            (cond
+             ((>= i len) (reverse (cons (cons start len) rows)))
+             (else
+              (let* ((c (string-ref line-string i))
+                     (w (char-display-width c col)))
+                (if (and (> (+ col w) usable) (> i start))
+                    ;; this character does not fit and the row is not
+                    ;; empty, so break here - or after the last space, if
+                    ;; word wrapping and there is one
+                    (let ((end (if (and word-wrap? space (> space start))
+                                   (+ space 1)
+                                   i)))
+                      (loop end end 0 #f (cons (cons start end) rows)))
+                    (loop start
+                          (+ i 1)
+                          (+ col w)
+                          (if (and word-wrap? (char=? c #\space)) i space)
+                          rows))))))))))
+
+    (define (window-wraps? window)
+      ;; Whether WINDOW lays a long line out over several screen rows.
+      ;;--------------------------------------------------------------
+      (not (window-truncates-lines? window)))
+
+    (define (window-line-rows window line-index)
+      ;; How many screen rows the buffer line LINE-INDEX takes in WINDOW:
+      ;; one when it is short enough or truncated, more when it wraps.
+      ;;--------------------------------------------------------------
+      (let ((line (buffer-line-string (window-buffer window) line-index)))
+        (if (not line)
+            1
+            (length (line-display-rows line
+                                       (window-body-width window)
+                                       (window-wraps? window)
+                                       (buffer-word-wrap
+                                        (window-buffer window)))))))
+
+    (define (window-line-slices window line-index)
+      ;; The `(FIRST . LAST)' buffer columns of each screen row the buffer
+      ;; line LINE-INDEX takes in WINDOW - the rows to draw, in order.
+      ;;--------------------------------------------------------------
+      (let ((line (buffer-line-string (window-buffer window) line-index)))
+        (if (not line)
+            '()
+            (line-display-rows line
+                               (window-body-width window)
+                               (window-wraps? window)
+                               (buffer-word-wrap (window-buffer window))))))
+
+    (define (rows-above window line)
+      ;; How many screen rows the lines between WINDOW's top line and
+      ;; LINE take, not counting LINE itself: what a screen row has to be
+      ;; offset by when the window's top is a *line* and the rows are not
+      ;; one per line.
+      ;;--------------------------------------------------------------
+      (let loop ((l (window-top-line window)) (used 0))
+        (if (>= l line)
+            used
+            (loop (+ l 1) (+ used (window-line-rows window l))))))
+
+    (define (rows-row-of-column rows column)
+      ;; Which of ROWS (a line's `(FIRST . LAST)' list) buffer column
+      ;; COLUMN is drawn on - the row the cursor belongs to.
+      ;;--------------------------------------------------------------
+      (let loop ((rest rows) (k 0))
+        (cond ((null? rest) 0)
+              ((< column (cdr (car rest))) k)
+              (else (loop (cdr rest) (+ k 1))))))
+
     (define (scroll-to-cursor! window)
       ;; Adjust WINDOW's top line so that its point is visible, as GNU
       ;; Emacs's redisplay does before drawing each window.
+      ;;
+      ;; "Visible" means the cursor's *screen row*, not its buffer line:
+      ;; a wrapped line is several rows tall, so a window whose top is a
+      ;; line has to be able to say that the cursor's line begins above
+      ;; it and the cursor's own row does not. A window's top is always a
+      ;; line beginning - Emacs's `start_at_line_beg', which is what
+      ;; ordinary scrolling gives - so the top is a line and its rows
+      ;; follow from it.
       ;;--------------------------------------------------------------
       (let* ((ed (window-buffer window))
+             (vheight (window-body-height window))
              (cursor-line (text-editor-cursor-line ed))
-             (vheight (window-body-height window)))
+             (top (window-top-line window)))
         (cond
-         ((< cursor-line (window-top-line window))
+         ((< cursor-line top)
+          ;; point is above the window
           (set!window-top-line window cursor-line))
-         ((>= cursor-line (+ (window-top-line window) vheight))
-          (set!window-top-line
-           window (+ 1 (- cursor-line vheight)))
-           ))))
+         (else
+          ;; walk down from the top to the cursor's line, counting rows
+          (let loop ((line top) (used 0))
+            (cond
+             ((> line cursor-line) #t)          ; visible as it stands
+             ((>= used vheight)
+              ;; the cursor's line has fallen off the bottom: back up from
+              ;; the cursor's own row until one more line will not fit
+              (let back ((l cursor-line)
+                         (need (+ 1 (rows-row-of-column
+                                     (window-line-slices window cursor-line)
+                                     (text-editor-cursor-column ed)))))
+                (if (and (> l 0)
+                         (< (+ need (window-line-rows window (- l 1))) vheight))
+                    (back (- l 1) (+ need (window-line-rows window (- l 1))))
+                    (set!window-top-line window l))))
+             (else
+              ;; the cursor's line: visible only if its own row is
+              (if (= line cursor-line)
+                  (let ((k (rows-row-of-column
+                            (window-line-slices window line)
+                            (text-editor-cursor-column ed))))
+                    (when (>= (+ used k) vheight)
+                      ;; its row is below the window, so it becomes the last
+                      (let back ((l cursor-line) (need (+ 1 k)))
+                        (if (and (> l 0)
+                                 (< (+ need (window-line-rows window (- l 1)))
+                                    vheight))
+                            (back (- l 1)
+                                  (+ need (window-line-rows window (- l 1))))
+                            (set!window-top-line window l))))))
+                  (loop (+ line 1) (+ used (window-line-rows window line))))))))))
 
     (define *mode-line-window* (make-parameter #f))
 
@@ -505,23 +710,28 @@
                    (cons (apply string-append (reverse acc)) start)
                    (loop (+ i 1) (cons (vector-ref glyphs i) acc)))))))
 
-    (define (draw-line! ed line-start line-string display
-                        screen-row x0 width)
-      ;; Draw one line of a window at SCREEN-ROW, X0, each run of
-      ;; characters that share a face drawn with it. A buffer with no
-      ;; properties and no active region keeps the original fast path.
+    (define (draw-line! ed slice-start line-string slice display
+                        screen-row x0 width more? truncated?)
+      ;; Draw one *screen row* of a line at SCREEN-ROW, X0: the buffer
+      ;; columns of SLICE (a `(FIRST . LAST)' pair), whose text is SLICE
+      ;; and whose display form is DISPLAY. LINE-STRING is the whole
+      ;; line, for the region's line-end rule.
       ;;
-      ;; The run path walks the line a *character* at a time and converts
-      ;; to screen columns only for the position, because those are the
-      ;; two different things: the fast path can hand the whole display
-      ;; string over and let the display clip, but a run has to be cut in
-      ;; cells.
+      ;; A row of a long line is one of three things, and the last cell
+      ;; says which: it *continues* on the next row (MORE?), it was *cut
+      ;; off* by the window edge (TRUNCATED?), or it is the line's last
+      ;; row. GNU Emacs marks the first with `\' and the second with
+      ;; `$' (`produce_special_glyphs', `xdisp.c':33200 and :33287) - and
+      ;; drawing `\' for a *truncated* line, which is what this did while
+      ;; there was no wrapping at all, is the marker for the other thing.
+      ;; A terminal was verified against `emacs -nw': 79 `X' then `\',
+      ;; with the rest of the line on the row below.
       ;;--------------------------------------------------------------
       (if (and (not (text-editor-text-props ed))
                (not (region-face-active? ed)))
           (write-glyphs! (current-display) display screen-row x0 #f)
-          (let ((offsets (list->vector (line-display-offsets line-string)))
-                (glyphs (list->vector (expand-line-glyphs line-string))))
+          (let ((offsets (list->vector (line-display-offsets slice)))
+                (glyphs (list->vector (expand-line-glyphs slice))))
             (for-each
              (lambda (run)
                (let ((drawn (line-glyph-run glyphs offsets
@@ -529,25 +739,25 @@
                  (when drawn
                    (write-glyphs! (current-display) (car drawn) screen-row
                                   (+ x0 (cdr drawn)) (caddr run)))))
-             (line-face-runs ed line-start line-string))))
-      ;; xdisp.c draws a continuation glyph when more of the logical line
-      ;; remains, with the default face. Otherwise a region may extend its
-      ;; face into empty cells at the line end.
+             (line-face-runs ed slice-start slice))))
+      ;; The last cell, and what the row's own width was.
       ;;
-      ;; Both need the cells the text took, which is where the fill
-      ;; starts. `display` holds no tabs or control characters - they were
+      ;; `display` holds no tabs or control characters - they were
       ;; expanded into it - so `line-display-width' of it is a sum of
       ;; character widths, and for a wide character that is 2 where a
       ;; `string-length' would say 1.
       (let ((drawn-width (line-display-width display)))
-        (if (line-continuation-display? line-string width)
-            (draw-continuation-glyph! screen-row x0 width)
-            (let ((fill (line-end-fill-attribute ed line-start line-string
-                                                 display width)))
-              (when fill
-                (write-glyphs! (current-display)
-                               (make-string (- width drawn-width) #\space)
-                               screen-row (+ x0 drawn-width) fill))))))
+        (cond
+         (more? (draw-special-glyph! screen-row x0 width "\\"))
+         (truncated? (draw-special-glyph! screen-row x0 width "$"))
+         (else
+          ;; the line's own end: a region may extend its face into the
+          ;; empty cells after the text
+          (let ((fill (line-end-fill-attribute ed slice-start slice display width)))
+            (when fill
+              (write-glyphs! (current-display)
+                             (make-string (- width drawn-width) #\space)
+                             screen-row (+ x0 drawn-width) fill)))))))
 
     (define (line-display-width line-string)
       ;; The width of LINE-STRING in screen cells: the sum of its
@@ -574,11 +784,13 @@
       (and (> width 0)
            (> (line-display-width line-string) width)))
 
-    (define (draw-continuation-glyph! row x0 width)
-      ;; The continuation glyph is a special display character, not buffer
-      ;; text, and Emacs draws it with the default face even inside a region.
+    (define (draw-special-glyph! row x0 width glyph)
+      ;; The continuation glyph (`\') or the truncation glyph (`$') in a
+      ;; row's last cell. It is a special display character, not buffer
+      ;; text, and Emacs draws it with the default face even inside a
+      ;; region - `produce_special_glyphs' uses `DEFAULT_FACE_ID'.
       ;;--------------------------------------------------------------
-      (write-glyphs! (current-display) "\\" row (+ x0 width -1)
+      (write-glyphs! (current-display) glyph row (+ x0 width -1)
                      (face->attribute 'default)))
 
     (define (line-end-fill-attribute ed line-start line-string display width)
@@ -724,6 +936,128 @@
               ;; finds them
               (loop (+ 1 found)))))))
 
+    ;;----------------------------------------------------------------
+    ;; The cursor's type
+    ;;
+    ;; How the cursor is drawn is a *type*, not a fixed box: Emacs's
+    ;; `cursor-type' names a filled box, a hollow box, a bar, a
+    ;; horizontal bar, or nothing at all, and the same variable decides
+    ;; it per buffer. `cursor-cells' below answers how WIDE the cursor
+    ;; is; these two answer *what* it is.
+    ;;------------------------------------------------------------------
+
+    (define (get-specified-cursor-type arg width)
+      ;; GNU Emacs's `get_specified_cursor_type': the cursor a
+      ;; `cursor-type' value names, as `(TYPE . WIDTH)'. WIDTH is what the
+      ;; caller already has - Emacs's C takes it by pointer and only
+      ;; overwrites it for the values that name one.
+      ;;
+      ;; The order of the C is worth keeping, because one of its cases is
+      ;; surprising: for `(CAR . CDR)' it sets the *width* from CDR
+      ;; before it looks at CAR, so `(hollow . 5)' comes out a hollow box
+      ;; five wide - CDR is read even though `hollow' names no width.
+      ;; That is Emacs's behaviour, not a transcription slip.
+      ;;--------------------------------------------------------------
+      (cond
+       ((not arg) (cons 'no-cursor width))
+       ((eq? arg 'box) (cons 'filled-box-cursor width))
+       ((eq? arg 'hollow) (cons 'hollow-box-cursor width))
+       ;; a bar's default width is 2, in the C, and is not the frame's
+       ((eq? arg 'bar) (cons 'bar-cursor 2))
+       ((eq? arg 'hbar) (cons 'hbar-cursor 2))
+       ((and (pair? arg)
+             (exact-integer? (cdr arg))
+             (<= 0 (cdr arg)))
+        (cons (cond ((eq? (car arg) 'box) 'filled-box-cursor)
+                    ((eq? (car arg) 'bar) 'bar-cursor)
+                    ((eq? (car arg) 'hbar) 'hbar-cursor)
+                    (else 'hollow-box-cursor))
+              (cdr arg)))
+       ;; "Treat anything unknown as a hollow box cursor. It was bad to
+       ;; signal an error; people have trouble fixing .Xdefaults with
+       ;; Emacs, when it has something bad in it." - xdisp.c
+       (else (cons 'hollow-box-cursor width))))
+
+    (define (get-window-cursor-type window)
+      ;; GNU Emacs's `get_window_cursor_type': what cursor to draw in
+      ;; WINDOW, as `(TYPE WIDTH ACTIVE?)'.
+      ;;
+      ;; This is the rule that makes a window that is not selected show a
+      ;; *hollow* cursor rather than a filled one, and a buffer whose
+      ;; `cursor-type' is nil show none at all.
+      ;;
+      ;; Two things the C has are left out, and named rather than
+      ;; silently dropped: a *window* may carry its own `cursor-type'
+      ;; parameter (`w->cursor_type', which this tree has no window
+      ;; parameters for), and a glyph that is an image or a widget gets a
+      ;; hollow box instead (`xwidget' and `image' glyph types, which
+      ;; this renderer does not have).
+      ;;--------------------------------------------------------------
+      (let* ((buffer (window-buffer window))
+             (selected (frame-selected-window (*current-frame*)))
+             ;; Emacs: "Detect a nonselected window or nonselected
+             ;; frame" - a frame that is not the display's highlight
+             ;; frame is treated as a non-selected one, so its cursor is
+             ;; a hollow box rather than a filled one.
+             (non-selected (or (not (eq? window selected))
+                               (not (*frame-focus*))))
+             (active? (not non-selected))
+             (wanted (buffer-cursor-type buffer))
+             (frame-cursor (*frame-cursor-type*))
+             (specified
+              (cond
+               ;; Never display a cursor in a window whose buffer asks
+               ;; for none.
+               ((not wanted) (cons 'no-cursor 1))
+               ;; `t' means "the cursor specified for the frame"
+               ((eq? wanted #t) frame-cursor)
+               (else (get-specified-cursor-type wanted 1)))))
+        (let ((shown
+               (if non-selected
+                   (let ((alt (buffer-cursor-in-non-selected-windows buffer)))
+                     (cond
+                      ;; a value of its own is a cursor type of its own
+                      ((not (eq? alt #t)) (get-specified-cursor-type alt 1))
+                      ;; `t' means the usual cursor *modified*: a filled
+                      ;; box becomes hollow, and a bar one pixel narrower
+                      (else
+                       (cons (if (eq? (car specified) 'filled-box-cursor)
+                                 'hollow-box-cursor
+                                 (car specified))
+                             (if (and (eq? (car specified) 'bar-cursor)
+                                      (> (cdr specified) 1))
+                                 (- (cdr specified) 1)
+                                 (cdr specified))))))
+                   ;; "Use normal cursor if not blinked off."
+                   (if (window-cursor-off? window)
+                       (cons 'no-cursor (cdr specified))
+                       specified))))
+          ;; the C's `active_cursor' out-parameter, which says whether the
+          ;; frame the window is on has the focus; no backend consults it
+          ;; yet (`x_draw_window_cursor' takes it and never reads it)
+          (list (car shown) (cdr shown) active?))))
+
+    (define (cursor-glyph ed)
+      ;; The buffer character ED's cursor is drawn over, and the face in
+      ;; effect there, as `(TEXT . TOKEN)'.
+      ;;
+      ;; A display that can only fill a rectangle needs both: Emacs's
+      ;; cursor does not *hide* what is under it, it redraws the glyph in
+      ;; the cursor's colours (`draw_phys_cursor_glyph' with
+      ;; `DRAW_CURSOR'), so "the text inside the cursor stays visible".
+      ;; Past the end of the line there is no character, and what is
+      ;; under the cursor is the space beyond the text - Emacs draws the
+      ;; cursor there too.
+      ;;--------------------------------------------------------------
+      (let* ((line (text-editor-cursor-line ed))
+             (column (text-editor-cursor-column ed))
+             (line-string (buffer-line-string ed line))
+             (position (text-editor-get-cursor ed)))
+        (if (and line-string (< column (string-length line-string)))
+            (cons (string (string-ref line-string column))
+                  (face-at-buffer-position ed position))
+            (cons " " (face->attribute 'default)))))
+
     (define (cursor-cells ed)
       ;; How many cells wide the cursor over ED's point is drawn: the
       ;; width of the character at point.
@@ -764,12 +1098,27 @@
              (line-string (buffer-line-string ed line))
              (width (window-body-width window))
              (vheight (window-body-height window))
-             (screen-row (- line (window-top-line window))))
+             ;; The cursor's own row is not its line's row: a wrapped
+             ;; line is several rows tall, so the rows above the cursor's
+             ;; line have to be counted too - and within its line, the
+             ;; rows before the one the cursor's column falls on.
+             (screen-row (and line-string
+                              (+ (rows-above window line)
+                                 (rows-row-of-column
+                                  (window-line-slices window line) column))))
+             ;; The column within its *row*: a continuation row starts at
+             ;; screen column zero, so the cursor's display column is
+             ;; measured from where its row begins, not the line.
+             (row-start (and line-string
+                             (let ((rows (window-line-slices window line)))
+                               (car (list-ref rows
+                                              (rows-row-of-column rows column)))))))
         (when (and line-string
                    (>= screen-row 0) (< screen-row vheight))
           (cons (+ screen-row (window-top window))
                 (+ (window-left window)
-                   (min (current-line-display-column ed column)
+                   (min (- (current-line-display-column ed column)
+                           (display-column-of line-string (or row-start 0)))
                         (- width 1)))))))
 
     (define (window-top-line-position ed top-line)
@@ -798,6 +1147,63 @@
                   (loop (+ line 1)
                         (+ pos (or (line-outer-size ed line) 0))))))))
 
+    (define (render-window-rows! window ed width x0 vheight highlight)
+      ;; Draw WINDOW's rows of text: the buffer lines from its top line
+      ;; down, each taking as many screen rows as it lays out.
+      ;;
+      ;; The rows are not buffer lines. A line that wraps takes several,
+      ;; so the walk is over the rows a line makes and the buffer line
+      ;; only advances once they are used up - `display_line' in
+      ;; `xdisp.c', which produces one row per call and calls itself for
+      ;; the rest of the line. ROW is the screen row within the window,
+      ;; LINE-START the buffer position the line begins at, which is what
+      ;; lets a search match be found in buffer terms and drawn in screen
+      ;; terms.
+      ;;--------------------------------------------------------------
+      (let loop ((row 0)
+                 (line-index (window-top-line window))
+                 (line-start (window-top-line-position
+                              ed (window-top-line window))))
+        (when (< row vheight)
+          (let* ((line-string (buffer-line-string ed line-index))
+                 (slices (window-line-slices window line-index)))
+            ;; No slices means there is no such line - the walk has run
+            ;; past the end of the buffer, and there is nothing below to
+            ;; draw.
+            (when (pair? slices)
+              (render-line-rows! window ed width x0 vheight highlight
+                                 row line-index line-start
+                                 line-string slices)
+              (loop (+ row (length slices))
+                    (+ line-index 1)
+                    (+ line-start (or (line-outer-size ed line-index) 0))))))))
+
+    (define (render-line-rows! window ed width x0 vheight highlight
+                               row line-index line-start line-string slices)
+      ;; One buffer line's screen rows, from ROW down.
+      ;;--------------------------------------------------------------
+      (let ((truncated? (and (not (window-wraps? window))
+                             (> (line-display-width line-string) width))))
+        (let rows-loop ((rest slices) (k 0))
+          (when (and (pair? rest) (< (+ row k) vheight))
+            (let* ((slice (car rest))
+                   (more? (pair? (cdr rest)))
+                   (slice-start (+ line-start (car slice)))
+                   (slice-string (substring line-string (car slice) (cdr slice)))
+                   (screen-row (+ row k (window-top window))))
+              (draw-line! ed slice-start line-string slice-string
+                          (expand-line-display slice-string width)
+                          screen-row x0 width more?
+                          (and truncated? (not more?)))
+              ;; the characters the current search matched, drawn over the
+              ;; row: the match point is in reverse video (GNU Emacs's
+              ;; `isearch' face) and the other matches in view in bold
+              ;; (`lazy-highlight')
+              (when highlight
+                (highlight-matches window k slice-string slice-start
+                                   width (car highlight) (cdr highlight))))
+            (rows-loop (cdr rest) (+ k 1))))))
+
     (define (render-window! window)
       ;; Draw one window: its rows of text within its rectangle, then its
       ;; mode line along its last row. The display is told a window
@@ -812,31 +1218,7 @@
              (vheight (window-body-height window))
              (border (and (window-right-border? window) (+ x0 width)))
              (highlight (*search-highlight*)))
-        ;; rows of text. Each row's line starts LINE-START characters
-        ;; into the buffer, which is what lets a search match be found in
-        ;; buffer terms and then drawn in screen terms.
-        (let loop ((row 0)
-                   (line-start (window-top-line-position
-                                ed (window-top-line window))))
-          (when (< row vheight)
-            (let* ((line-index (+ (window-top-line window) row))
-                   (line-string (buffer-line-string ed line-index)))
-              (when line-string
-                (let ((display (expand-line-display line-string width)))
-                  (draw-line! ed line-start line-string display
-                              (+ row (window-top window)) x0 width)
-                  ;; the characters the current search matched, drawn over
-                  ;; the line: the match point is in reverse video (GNU
-                  ;; Emacs's `isearch' face) and the other matches in view
-                  ;; in bold (`lazy-highlight')
-                  (when highlight
-                    (highlight-matches window row line-string
-                                       line-start width (car highlight)
-                                       (cdr highlight)))))
-              (loop (+ 1 row)
-                    (+ line-start
-                       (or (line-outer-size ed line-index) 0)))
-              )))
+        (render-window-rows! window ed width x0 vheight highlight)
         ;; the mode line, on the window's last row. The face is Emacs's
         ;; `mode-line' for the selected window and `mode-line-inactive'
         ;; for the others - and on a terminal `mode-line' is
@@ -921,22 +1303,33 @@
               ;; not drag the cursor along with it - a long one (the
               ;; completion candidates, say) would pin the cursor to the
               ;; right edge of the screen whatever point did.
-              (draw-window-cursor! (current-display)
-                                   (- height 1)
-                                   (min (+ (line-display-width
-                                            (or (*echo-area-prompt*) ""))
-                                           (current-line-display-column
-                                            reading
-                                            (text-editor-cursor-column reading)))
-                                        (- width 1))
-                                   (cursor-cells reading))
+              (let ((cursor (get-window-cursor-type
+                             (frame-selected-window frame))))
+                (draw-window-cursor! (current-display)
+                                     (- height 1)
+                                     (min (+ (line-display-width
+                                              (or (*echo-area-prompt*) ""))
+                                             (current-line-display-column
+                                              reading
+                                              (text-editor-cursor-column reading)))
+                                          (- width 1))
+                                     (cursor-cells reading)
+                                     (car cursor)
+                                     (cadr cursor)
+                                     (car (cursor-glyph reading))
+                                     (cdr (cursor-glyph reading))))
               (let ((selected (frame-selected-window frame)))
                 (when selected
                   (let ((at (cursor-screen-position selected)))
                     (when at
-                      (draw-window-cursor! (current-display) (car at) (cdr at)
-                                           (cursor-cells
-                                            (window-buffer selected)))))))))
+                      (let* ((buffer (window-buffer selected))
+                             (cursor (get-window-cursor-type selected))
+                             (glyph (cursor-glyph buffer)))
+                        (draw-window-cursor! (current-display)
+                                             (car at) (cdr at)
+                                             (cursor-cells buffer)
+                                             (car cursor) (cadr cursor)
+                                             (car glyph) (cdr glyph)))))))))
         ;; The screen is what was drawn: the display's flush, which for
         ;; this terminal honours the full-repaint `clear-frame-area!'
         ;; asked for (partial-update optimizations desync the physical

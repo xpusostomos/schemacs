@@ -98,16 +98,34 @@
 
     (define-generic draw-window-cursor!)
     ;; Put the display cursor at pixel ROW, COLUMN (frame coordinates),
-    ;; CELLS cells wide, which is where input shows itself going. Emacs's
-    ;; `draw_window_cursor'. `(draw-window-cursor! display row column
-    ;; cells)'.
+    ;; in the shape TYPE, over the text TEXT drawn in TOKEN's face.
+    ;; Emacs's `draw_window_cursor'. `(draw-window-cursor! display row
+    ;; column cells type width text token)'.
     ;;
-    ;; CELLS is how wide the cursor is drawn and it is the width of the
-    ;; character at point: a cursor over a double-width character is two
-    ;; cells wide, as Emacs's is - it sits on the glyph, and the glyph is
-    ;; two cells. A display whose cursor is the system's - a terminal's,
-    ;; which the terminal draws itself at whatever width it likes - may
-    ;; ignore it.
+    ;; CELLS is how many cells the *glyph* under the cursor takes: a
+    ;; cursor over a double-width character is drawn over two cells, as
+    ;; Emacs's is - it sits on the glyph, and the glyph is two cells.
+    ;; WIDTH is the cursor's own measurement, which is a different number
+    ;; and only some types use it: a bar's thickness, an hbar's height.
+    ;; Emacs carries the two as `w->phys_cursor_width' and the
+    ;; `cursor_width' out-parameter of `get_window_cursor_type'.
+    ;;
+    ;; TYPE is one of `filled-box-cursor', `hollow-box-cursor',
+    ;; `bar-cursor', `hbar-cursor' and `no-cursor' - the C's own
+    ;; `text_cursor_kinds' values, which `get-window-cursor-type'
+    ;; resolves from the buffer's `cursor-type'.
+    ;;
+    ;; TEXT and TOKEN are the character under the cursor and its face,
+    ;; and they are here because Emacs's cursor does not *hide* what is
+    ;; under it: a filled box redraws the glyph in the cursor's colours
+    ;; (`draw_phys_cursor_glyph' with `DRAW_CURSOR'), so that "the text
+    ;; inside the cursor stays visible" (`xterm.c'). A display that can
+    ;; only fill a rectangle must invert the glyph itself, and that takes
+    ;; both.
+    ;;
+    ;; A display whose cursor is the system's - a terminal's, which the
+    ;; terminal draws and inverts itself - may ignore every one of these
+    ;; but ROW and COLUMN.
 
     (define-generic flush-display!)
     ;; Everything drawn since the last flap is now what the display

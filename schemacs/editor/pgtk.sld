@@ -58,6 +58,7 @@
           window:resize
           container:add
           connect main-iteration-do? set-prgname set-program-class
+          source-remove? timeout-add
           modifier-type->number widget:get-allocated-width
           widget:get-allocated-height
           event:get-state event:get-keyval keyval-to-unicode)
@@ -78,6 +79,10 @@
     ;; How many cells a character takes - a CJK ideograph is one character
     ;; and two cells, so a run is not `string-length' wide.
     (only (schemacs editor disp-table) char-display-width)
+    ;; The frame's focus, which the window tells us about: it decides
+    ;; whether the cursor blinks and whether it is drawn hollow.
+    (only (schemacs editor frame)
+          *current-frame* *frame-focus* blink-cursor--rescan-frames)
     ;; The development back door. `poll-repl!' is a no-op unless
     ;; `main-gtk.scm' was asked to open it; this loop is the only place a
     ;; windowed editor is ever idle, so it is where the REPL gets its turn.
@@ -390,6 +395,16 @@
       ;;--------------------------------------------------------------
       (cons (ash code -32) (logand code #xFFFFFFFF)))
 
+    (define *redraw-code* -2)
+    ;; ^ What "draw the frame again" is reported as: the same device as
+    ;; `*resize-code*' below, and for the same reason - `read-input-event'
+    ;; may answer only a character or an integer, so something that is
+    ;; neither a key nor a character has to be a code the key decoder
+    ;; turns into a path. A window that gains or loses the focus needs
+    ;; one: the cursor's shape and whether it blinks both change, and
+    ;; nothing else would ask for a redisplay - the editor is sitting
+    ;; still, waiting for a key that is not coming.
+
     (define *resize-code* -1)
     ;; ^ What a resize is reported as. `read-input-event' may answer only a
     ;; character or an integer, and a resize is neither a key nor a
@@ -486,8 +501,41 @@
                    (or (not (= (car drawn) (car now)))
                        (not (= (cdr drawn) (cdr now)))))
           (pgtk-enqueue! d 'resize)))
-      (let ((deadline (and (>= timeout 0) (+ (pgtk-now-ms) timeout))))
-        (let loop ()
+      ;; The deadline is a GLib *timeout*, not a clock this loop watches.
+      ;; It pushes a sentinel onto the queue, so the loop waits in the
+      ;; main loop - where it costs nothing - and is woken by the timeout
+      ;; when the time comes. This is what `timeout-add''s priority-first
+      ;; argument order and `source-remove?' are for.
+      ;;
+      ;; Watching the clock instead means calling `main-iteration-do?' in
+      ;; its non-blocking form and going round until the time is up, which
+      ;; is a busy-wait: it burns a whole processor for the length of
+      ;; every timed read. That is what this did, and it is what made a
+      ;; blinking cursor - which arms a timed read twice a second - cost
+      ;; half a processor to do nothing. `keyboard.sld' arms the read from
+      ;; `timer-next-delay' now, so a timed read is the ordinary case and
+      ;; the busy-wait is not a rare one.
+      (let* ((deadline (and (>= timeout 0) (+ (pgtk-now-ms) timeout)))
+             (source (and deadline
+                          (timeout-add
+                           0 timeout
+                           ;; The callback is called WITH the data
+                           ;; argument, so it has to take one: a
+                           ;; zero-argument lambda raises every time the
+                           ;; timeout fires, the sentinel is never
+                           ;; enqueued, and the read blocks for ever. That
+                           ;; is what this did, and the symptom was a
+                           ;; cursor that never blinked and a REPL that
+                           ;; never answered.
+                           (lambda (data)
+                             (pgtk-enqueue! d 'pgtk-deadline)
+                             ;; #f: a one-shot source, removed once run
+                             #f)
+                           #f))))
+        (dynamic-wind
+         (lambda () #t)
+         (lambda ()
+           (let loop ()
           (let ((queue (pgtk-queue d)))
             (cond
              ((and (pair? queue) (eq? (car queue) 'pgtk-deadline))
@@ -498,26 +546,26 @@
               (let ((item (car queue)))
                 (cond
                  ((eq? item 'resize) *resize-code*)
+                 ((eq? item 'redraw) *redraw-code*)
                  ;; A modifier press is not a key: drop it and read on,
                  ;; so the caller never sees an event it cannot act on.
                  ((memv (pgtk-event-keysym item) modifier-keysyms) (loop))
                  (else (pgtk-encode-event item)))))
-             ((and deadline (>= (pgtk-now-ms) deadline))
-              #f)
              (else
               ;; Nothing yet. Give the development REPL a turn - a no-op
               ;; unless `SCHEMACS_REPL' opened it, and the only place a
-              ;; windowed editor is ever idle - then process one event,
-              ;; waiting only as long as the deadline allows.
+              ;; windowed editor is ever idle - then wait in the main
+              ;; loop. The wait *blocks* whether or not there is a
+              ;; deadline: the timeout above is what ends it, so there is
+              ;; nothing to poll for.
               (poll-repl!)
-              (if deadline
-                  (catch #t
-                    (lambda () (main-iteration-do? #f))
-                    (lambda args #f))
-                  (catch #t
-                    (lambda () (main-iteration-do? #t))
-                    (lambda args #f)))
-              (loop)))))))
+              (catch #t
+                (lambda () (main-iteration-do? #t))
+                (lambda args #f))
+              (loop))))))
+         (lambda ()
+           ;; the timeout has either fired or is no longer wanted
+           (when source (source-remove? source))))))
 
     (define-method (read-input-event (d <pgtk-display>) timeout)
       (pgtk-read-event d timeout))
@@ -528,6 +576,7 @@
       ;;--------------------------------------------------------------
       (cond
        ((eqv? ev *resize-code*) '(resize))
+       ((eqv? ev *redraw-code*) '(redraw))
        ((integer? ev) (key-event->path (pgtk-decode-event ev)))
        (else #f)))
 
@@ -591,20 +640,30 @@
       ;; A cluster is a character plus the zero-width characters after it
       ;; - a letter and its combining accent - which are drawn together so
       ;; that the accent lands on the letter and not on an empty cell.
+      ;;
+      ;; **A written cell shows only what was written.** That is what a
+      ;; terminal does - a cell holds one character and one set of
+      ;; attributes, so writing replaces what was there - and every caller
+      ;; of this assumes it. Painting instead of replacing is what made
+      ;; the continuation glyph land *on top of* the last character of a
+      ;; long line, which reads as a mangled letter rather than as the
+      ;; marker; and the same would be true of anything else drawn over
+      ;; text. So the run's cells are filled first, with the face's own
+      ;; background or with the display's when the face names none.
       ;;--------------------------------------------------------------
       (let ((cr (pgtk-cr d))
             (foreground (face-token-foreground token))
             (background (face-token-background token)))
         (when cr
-          ;; The run's own background first, so a face that paints cells
-          ;; rather than glyphs - the mode line, the region - is drawn,
-          ;; and as many *cells* wide as the run is.
-          (when background
-            (apply cairo-set-source-rgb cr background)
-            (cairo-rectangle cr (cell-x x) (cell-y y)
-                             (* *cell-width* (text-cells text))
-                             *cell-height*)
-            (cairo-fill cr))
+          ;; The run's cells first: the face's own background, so that a
+          ;; face which paints cells rather than glyphs - the mode line,
+          ;; the region - is drawn, or the frame's, which is what the
+          ;; frame was cleared to and so what a default cell shows.
+          (apply cairo-set-source-rgb cr (or background (list 1.0 1.0 1.0)))
+          (cairo-rectangle cr (cell-x x) (cell-y y)
+                           (* *cell-width* (text-cells text))
+                           *cell-height*)
+          (cairo-fill cr)
           (apply cairo-set-source-rgb cr (or foreground (list 0.0 0.0 0.0)))
           (let loop ((i 0) (col 0))
             (when (< i (string-length text))
@@ -620,17 +679,71 @@
                 (cairo-show-text cr (substring text i end))
                 (loop end (+ col (char-display-width c col)))))))))
 
-    (define-method (draw-window-cursor! (d <pgtk-display>) row column cells)
-      ;; A filled block at the cell, drawn after the text - CELLS cells
-      ;; wide, because the cursor sits on the character at point and a
-      ;; double-width character is two cells.
+    (define (cursor-box-colour) (list 0.0 0.0 0.0))
+    ;; ^ The colour the cursor is filled or outlined with. GNU Emacs's is
+    ;; the frame's `cursor-color' parameter, whose default is black
+    ;; (`x_set_cursor_color' passes `BLACK_PIX_DEFAULT (f)'), adjusted
+    ;; only if it happens to equal the frame's background - which on this
+    ;; frame, whose background is white, black does not.
+
+    (define (cursor-ink-colour token)
+      ;; The colour the glyph *under* the cursor is redrawn in. Emacs
+      ;; draws a filled-box cursor by redrawing the glyph - "so that the
+      ;; text inside the cursor stays visible" - with the face's own
+      ;; background as the ink, or the frame's background when the face
+      ;; names none (`x_set_cursor_gc' sets `xgcv.foreground =
+      ;; s->face->background'). This frame's background is white.
+      ;;--------------------------------------------------------------
+      (or (face-token-background token) (list 1.0 1.0 1.0)))
+
+    (define-method (draw-window-cursor! (d <pgtk-display>) row column cells
+                                        type width text token)
+      ;; The cursor at the cell, in the shape TYPE.
+      ;;
+      ;; A *filled box* is not a black rectangle painted over the text -
+      ;; that is what it used to be here, and it hid the character under
+      ;; the cursor. Emacs fills the box and then redraws the glyph in
+      ;; the ink colour (`draw_phys_cursor_glyph' with `DRAW_CURSOR'), so
+      ;; the character stays readable. CELLS is how many cells the glyph
+      ;; under the cursor takes, which is what the box has to cover.
+      ;;
+      ;; The box's rectangle is in cells because this display's grid is;
+      ;; a bar's WIDTH is in *pixels*, as Emacs's is - its default of 2
+      ;; is two pixels of a real font, not two cells.
       ;;--------------------------------------------------------------
       (let ((cr (pgtk-cr d)))
         (when cr
-          (cairo-set-source-rgb cr 0 0 0)
-          (cairo-rectangle cr (cell-x column) (cell-y row)
-                           (* *cell-width* (max 1 cells)) *cell-height*)
-          (cairo-fill cr))))
+          (let ((left (cell-x column))
+                (top (cell-y row))
+                (box-w (* *cell-width* (max 1 cells))))
+            (case type
+              ((no-cursor) #t)
+              ((filled-box-cursor)
+               (apply cairo-set-source-rgb cr (cursor-box-colour))
+               (cairo-rectangle cr left top box-w *cell-height*)
+               (cairo-fill cr)
+               ;; the glyph again, in the ink colour, so it is visible
+               (apply cairo-set-source-rgb cr (cursor-ink-colour token))
+               (cairo-move-to cr left (+ top (- *cell-height* 5)))
+               (cairo-show-text cr text))
+              ((hollow-box-cursor)
+               (apply cairo-set-source-rgb cr (cursor-box-colour))
+               (cairo-set-line-width cr 1)
+               (cairo-rectangle cr (+ left 0.5) (+ top 0.5)
+                                (- box-w 1) (- *cell-height* 1))
+               (cairo-stroke cr))
+              ((bar-cursor)
+               (apply cairo-set-source-rgb cr (cursor-box-colour))
+               (cairo-rectangle cr left top (max 1 width) *cell-height*)
+               (cairo-fill cr))
+              ((hbar-cursor)
+               ;; the bar sits at the foot of the cell, as Emacs's does
+               (apply cairo-set-source-rgb cr (cursor-box-colour))
+               (cairo-rectangle cr left (- (+ top *cell-height*)
+                                           (max 1 width))
+                                box-w (max 1 width))
+               (cairo-fill cr))
+              (else #t))))))
 
     (define (pgtk-present! d gtk-cr)
       ;; Paint what we have drawn into the context Gtk handed us. This is
@@ -759,6 +872,33 @@
         ;; again at the size it really is.
         (connect win (make <signal> #:name "map-event")
                  (lambda (w e) (pgtk-enqueue! d 'resize) #f))
+        ;; The window's focus, which the editor asks about twice: a
+        ;; blinking cursor only blinks while the frame is focused - GNU
+        ;; Emacs's `blink-cursor--should-blink' wants "any focused
+        ;; non-TTY frame" - and an unfocused frame's cursor is drawn
+        ;; hollow, as `get_window_cursor_type' does for a frame that is
+        ;; not the display's highlight frame. Gtk reports both; nothing
+        ;; else has to be asked.
+        ;; A focus event can arrive while the window is being destroyed -
+        ;; the teardown takes the focus away - and by then there is no
+        ;; frame to show a cursor in. Nothing to do, and doing it anyway
+        ;; is what took the editor down with a `struct-vtable' error on
+        ;; `#f'.
+        (connect win (make <signal> #:name "focus-in-event")
+                 (lambda (w e)
+                   (when (*current-frame*)
+                     (*frame-focus* #t)
+                     (blink-cursor--rescan-frames)
+                     ;; and draw again: the shape changed
+                     (pgtk-enqueue! d 'redraw))
+                   #f))
+        (connect win (make <signal> #:name "focus-out-event")
+                 (lambda (w e)
+                   (when (*current-frame*)
+                     (*frame-focus* #f)
+                     (blink-cursor--rescan-frames)
+                     (pgtk-enqueue! d 'redraw))
+                   #f))
         ;; The area must not dictate the window's size: a window's
         ;; minimum size comes from its child, so a size request as large
         ;; as the window would pin it there. A one-cell request plus

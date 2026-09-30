@@ -78,11 +78,25 @@
    switch-to-buffer-other-window
    window-absorb!
    window-min-height
+   *cursor-in-echo-area*
    window-min-width
    window-position
    )
 
   (begin
+
+    (define *cursor-in-echo-area* (make-parameter #f))
+    ;; ^ GNU Emacs's `cursor-in-echo-area', declared `DEFVAR_BOOL' in
+    ;; `dispnew.c' and so false by default: whether to put a cursor in
+    ;; the minibuffer at the end of a message there. False means the echo
+    ;; area shows its message with no cursor, which is what a window
+    ;; whose minibuffer is not being read wants.
+    ;;
+    ;; It is a parameter here rather than a variable, as this tree's
+    ;; single-valued globals are; it is with `internal-show-cursor'
+    ;; because `get_window_cursor_type' reads the two together - when
+    ;; this is true and the window is the echo area's, the cursor's type
+    ;; comes from the echo area rather than from the window.
 
     ;;----------------------------------------------------------------
     ;; Windows

@@ -20,7 +20,8 @@
        *current-frame* *echo-area-buffer* *echo-area-prompt* *minibuffer*
        frame-height frame-editor frame-message
        frame-message-expiry set!frame-message
-       frame-selected-window new-frame set!window-buffer
+       frame-selected-window new-frame set!frame-selected-window
+       set!window-buffer set!window-width
        window-internal?
        window-list
        set!window-height set!window-width
@@ -29,6 +30,11 @@
        window-width)
  (only (schemacs editor keyboard)
        dispatch-key-event dispatch-input-event)
+ ;; The cursor's type, which `xdisp.sld' resolves from the buffer's
+ ;; `cursor-type' - the tests below are its rule, not the drawing of it.
+ (only (schemacs editor xdisp)
+       *truncate-partial-width-windows* get-window-cursor-type
+       line-display-rows window-truncates-lines?)
  ;; The dispatch asks the display what a raw event means, and this is the
  ;; display it asks: a terminal object with no curses behind it, which is
  ;; all the character events these tests feed ever need (only an extended
@@ -47,8 +53,11 @@
        command-doc-string command-interactive-spec command-name)
  (only (schemacs editor buffer)
        *buffer-list* *current-buffer* *kill-buffer-query-functions*
+       buffer-cursor-in-non-selected-windows buffer-cursor-type
        buffer-list buffer-name get-buffer get-buffer-create set-buffer-local-value!
-       buffer-local-keymap set!buffer-local-keymap set!buffer-default-directory)
+       buffer-local-keymap set!buffer-local-keymap set!buffer-default-directory
+       set!buffer-cursor-in-non-selected-windows set!buffer-cursor-type
+       set!buffer-truncate-lines set!buffer-word-wrap)
  (only (schemacs editor engine) text-editor-delete-from-cursor text-editor-insert
        text-editor-read-only? text-editor-set-cursor
        new-text-editor set!text-editor-buffer-name
@@ -2610,3 +2619,201 @@
               (loop (+ n 1)
                     (cons (text-editor-to-string ed) states)))))))))
 (test-end "schemacs_ncurses_editor_kill_ring")
+
+
+(test-begin "schemacs_editor_cursor_type")
+
+;; `cursor-type' is a per-buffer variable (`buffer.c'), and what it means
+;; for the *cursor* is decided by `get_window_cursor_type' (`xdisp.c').
+;; Both are pure functions of the buffer and the frame, so they are
+;; testable without a display - and every expected value here is Emacs's
+;; own rule read off `xdisp.c', not a guess:
+;;
+;;   t               the cursor specified for the frame
+;;   nil             no cursor
+;;   box, hollow     filled and hollow boxes
+;;   bar, hbar       bars, whose default width is 2
+;;   (bar . N)       a bar N wide
+;;   anything else   a hollow box
+
+(define (cursor-type-runs-text value)
+  ;; The cursor type a `cursor-type' VALUE resolves to, as
+  ;; `(TYPE WIDTH ACTIVE?)'.
+  (let* ((ed (new-text-editor))
+         (frame (new-frame ed 24 80)))
+    (parameterize ((*current-frame* frame))
+      (set!buffer-cursor-type ed value)
+      (get-window-cursor-type (frame-selected-window frame)))))
+
+(define (cursor-type-of value) (car (cursor-type-runs-text value)))
+(define (cursor-width-of value) (cadr (cursor-type-runs-text value)))
+(define (cursor-spec-of value)
+  ;; the type and width, without the `active?' third element
+  (let ((r (cursor-type-runs-text value))) (list (car r) (cadr r))))
+
+;; the default is t, which means the frame's own cursor - a filled box
+(test-equal #t (buffer-cursor-type (new-text-editor)))
+(test-equal 'filled-box-cursor (cursor-type-of #t))
+(test-equal 1 (cursor-width-of #t))
+
+;; nil is no cursor at all, which is how a buffer turns its cursor off
+(test-equal 'no-cursor (cursor-type-of #f))
+
+(test-equal 'filled-box-cursor (cursor-type-of 'box))
+(test-equal 'hollow-box-cursor (cursor-type-of 'hollow))
+
+;; a bar and an hbar are 2 wide by default - a fact from the C, not the
+;; frame's width
+(test-equal (list 'bar-cursor 2) (cursor-spec-of 'bar))
+(test-equal (list 'hbar-cursor 2) (cursor-spec-of 'hbar))
+(test-equal (list 'bar-cursor 5) (cursor-spec-of '(bar . 5)))
+(test-equal (list 'hbar-cursor 4) (cursor-spec-of '(hbar . 4)))
+(test-equal 'filled-box-cursor (cursor-type-of '(box . 9)))
+
+;; The C sets the *width* from the cdr before it looks at the car, so
+;; `(hollow . 5)' is a hollow box five wide - Emacs's behaviour, not a
+;; transcription slip.
+(test-equal (list 'hollow-box-cursor 5) (cursor-spec-of '(hollow . 5)))
+
+;; "Treat anything unknown as a hollow box cursor" - a bad value in an
+;; .Xdefaults must not signal an error
+(test-equal 'hollow-box-cursor (cursor-type-of 'nonsense))
+(test-equal 'hollow-box-cursor (cursor-type-of '(nonsense . 3)))
+
+;; A window that is not selected shows the cursor *modified*: a filled
+;; box becomes hollow, which is `cursor-in-non-selected-windows' being t
+(test-equal 'hollow-box-cursor
+  (let* ((ed (new-text-editor))
+         (frame (new-frame ed 24 80))
+         (other (car (window-list frame))))
+    (parameterize ((*current-frame* frame))
+      (set!frame-selected-window frame #f)
+      (car (get-window-cursor-type other)))))
+
+;; and a buffer can say what its non-selected windows show instead
+(test-equal 'no-cursor
+  (let* ((ed (new-text-editor))
+         (frame (new-frame ed 24 80))
+         (other (car (window-list frame))))
+    (parameterize ((*current-frame* frame))
+      (set!buffer-cursor-in-non-selected-windows ed #f)
+      (set!frame-selected-window frame #f)
+      (car (get-window-cursor-type other)))))
+
+(test-end "schemacs_editor_cursor_type")
+
+
+(test-begin "schemacs_editor_line_wrap")
+
+;; `truncate-lines' is nil by default, so a long line *wraps* onto
+;; continuation rows. What decides that is `init_iterator' in `xdisp.c',
+;; and what it lays out is one screen row at a time; the numbers here are
+;; Emacs's own, and the last-cell rule was measured against `emacs -nw':
+;; 100 `X' in an 80-column window came out 79 and a `\', then 21 below.
+
+(define (rows-of text width wrap? word-wrap?)
+  (line-display-rows text width wrap? word-wrap?))
+
+;; a line that fits is one row, the whole line
+(test-equal (list (cons 0 5)) (rows-of "short" 80 #t #f))
+
+;; The marker's cell is reserved, so a row holds WIDTH-1 characters: that
+;; is `it->last_visible_x -= it->continuation_pixel_width' (`xdisp.c':
+;; 3509), which applies when the window has no right fringe - a
+;; terminal's case, and this editor has no fringes at all.
+(test-equal (list (cons 0 79) (cons 79 100))
+  (rows-of (make-string 100 #\X) 80 #t #f))
+(test-equal (list (cons 0 3) (cons 3 6) (cons 6 9) (cons 9 10))
+  (rows-of (make-string 10 #\X) 4 #t #f))
+
+;; truncating is one row whatever its length - `truncate-lines' non-nil
+(test-equal (list (cons 0 100)) (rows-of (make-string 100 #\X) 80 #f #f))
+
+;; Hard wrapping fills each row to the marker's cell: WIDTH-1 characters.
+(test-equal (list (cons 0 7) (cons 7 14) (cons 14 15))
+  (rows-of "aaa bbb ccc ddd" 8 #t #f))
+;; with no space in reach, word wrapping breaks at the edge as it must
+(test-equal (list (cons 0 7) (cons 7 14))
+  (rows-of "aaaaaaabbbbbbb" 8 #t #t))
+
+;; Word wrapping ends the row at the last space that *fits*, so a word is
+;; not split. The space stays at the end of the row, which is what
+;; `word-wrap' asks for - "wrapped at the space or tab character nearest
+;; to the right window edge".
+;;
+;; NOT VERIFIED AGAINST EMACS, and the test says so rather than implying
+;; otherwise. Emacs's `display_line' with `it->line_wrap == WORD_WRAP'
+;; looks *ahead* for the next break opportunity rather than back for the
+;; last space that fits, so it may well choose differently here; this is
+;; the rule this tree implements, and the check against `emacs -nw' was
+;; not made. Everything above it - the hard wrap, the reserved cell, the
+;; truncation row - was measured.
+(test-equal (list (cons 0 4) (cons 4 8) (cons 8 15))
+  (rows-of "aaa bbb ccc ddd" 8 #t #t))
+
+;; an empty line still gets a row of its own
+(test-equal (list (cons 0 0)) (rows-of "" 80 #t #f))
+
+;; Widening the window must not leave a character behind: every column of
+;; the line is in exactly one row, in order.
+(let* ((text (make-string 97 #\X))
+       (rows (rows-of text 10 #t #f)))
+  (test-equal text (apply string-append
+                          (map (lambda (r) (substring text (car r) (cdr r)))
+                               rows)))
+  (test-equal 97 (apply + (map (lambda (r) (- (cdr r) (car r))) rows))))
+
+;;------------------------------------------------------------------
+;; Which of the two a *window* does
+;;
+;; `truncate-lines' is the buffer's and `truncate-partial-width-windows'
+;; is the frame's - Emacs declares the first in `buffer.c' and the second
+;; in `xdisp.c' - and a full-width window wraps unless the buffer says
+;; otherwise.
+;;------------------------------------------------------------------
+
+(define (truncating-with setup)
+  (let* ((ed (new-text-editor))
+         (frame (new-frame ed 24 80))
+         (window (frame-selected-window frame)))
+    (parameterize ((*current-frame* frame))
+      (setup ed)
+      (window-truncates-lines? window))))
+
+(test-equal #f (truncating-with (lambda (ed) #t)))          ; the default: wraps
+(test-equal #t
+  (truncating-with (lambda (ed) (set!buffer-truncate-lines ed #t))))
+(test-equal #f
+  (truncating-with (lambda (ed) (set!buffer-word-wrap ed #t))))
+
+;; A *partial-width* window is the other question, and the value of
+;; `truncate-partial-width-windows' decides it: nil lets it wrap, t
+;; truncates every partial-width window, and an integer truncates one
+;; narrower than that many columns.
+(test-equal #t
+  (let* ((ed (new-text-editor))
+         (frame (new-frame ed 24 80))
+         (window (frame-selected-window frame)))
+    (parameterize ((*current-frame* frame)
+                   (*truncate-partial-width-windows* #t))
+      (set!window-width window 40)
+      (window-truncates-lines? window))))
+(test-equal #f
+  (let* ((ed (new-text-editor))
+         (frame (new-frame ed 24 80))
+         (window (frame-selected-window frame)))
+    (parameterize ((*current-frame* frame)
+                   (*truncate-partial-width-windows* #f))
+      (set!window-width window 40)
+      (window-truncates-lines? window))))
+;; the integer is a *width*: a window wider than it still wraps
+(test-equal #f
+  (let* ((ed (new-text-editor))
+         (frame (new-frame ed 24 80))
+         (window (frame-selected-window frame)))
+    (parameterize ((*current-frame* frame)
+                   (*truncate-partial-width-windows* 50))
+      (set!window-width window 60)
+      (window-truncates-lines? window))))
+
+(test-end "schemacs_editor_line_wrap")

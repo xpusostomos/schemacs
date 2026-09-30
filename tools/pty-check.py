@@ -308,14 +308,35 @@ def check_region_highlight():
 
 
 def check_continuation():
-    """A logical line wider than the window ends with Emacs's marker."""
+    """A line wider than the window CONTINUES on the row below.
+
+    `truncate-lines' is nil by default, so Emacs wraps: the row ends with
+    `\' - its continuation glyph - and the rest of the line is on the
+    next screen row, moving the following buffer lines down. Cutting the
+    line off instead is the *other* thing, `truncate-lines' being on, and
+    its glyph is `$' (`produce_special_glyphs', xdisp.c:33200 and :33287).
+
+    The marker alone cannot tell the two apart - a truncated 100-column
+    line and a wrapped one both show 79 `X' and a `\' - so what this
+    checks is the row *below*, which is where they differ. That is
+    exactly how this was wrong: the marker was right and the rest of the
+    line was missing.
+    """
     path = "/tmp/pty-check-continuation.txt"
     with open(path, "w") as port:
-        port.write("X" * 100 + "\n")
+        port.write("X" * 100 + "\nSECOND\n")
     rows = screen_of(drive([], path)).split("\n")
+    problems = []
     if not rows or rows[0][79:80] != "\\":
-        return ["a clipped long line did not show \\ in the last cell"]
-    return []
+        problems.append("a wrapped line did not end with \\ in its last "
+                        "cell: %r" % (rows[0][70:80] if rows else None))
+    if len(rows) < 2 or rows[1][:21] != "X" * 21:
+        problems.append("the rest of the wrapped line is not on the row "
+                        "below: %r" % (rows[1][:30] if len(rows) > 1 else None))
+    if len(rows) < 3 or "SECOND" not in rows[2]:
+        problems.append("the next buffer line did not follow the wrapped "
+                        "one: %r" % (rows[2][:30] if len(rows) > 2 else None))
+    return problems
 
 
 def check_mode_line_eol():

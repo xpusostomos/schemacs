@@ -39,17 +39,47 @@
           text-editor-get-cursor  text-editor-set-cursor)
     ;; `suspend-frame' is a command and states its own key as the other
     ;; command libraries do.
-    (only (schemacs editor command) defcommand)
+    (only (schemacs editor command) defcommand uarg->integer)
     (only (schemacs editor keymap) define-key *default-keymap*)
     ;; `SIGTSTP' is raised through `kill': `(scheme base)''s `raise'
     ;; raises an exception, not a signal.
     (only (guile) kill getpid SIGTSTP)
-    ;; The message timeout is a time in seconds.
-    (only (scheme time) current-second))
+    ;; The message timeout is a time in seconds, and so is a timer's.
+    (only (scheme time) current-second)
+    ;; `w->cursor_off_p' and the blink's timers are kept beside the
+    ;; window and the frame rather than in the window, for the reason
+    ;; `buffer.sld' gives for its own slots: the record is shared and
+    ;; changing it touches every library that makes a window.
+    (only (schemacs weak) new-weak-table weak-table-ref weak-table-set!)
+    ;; `display-graphic-p' is a question about the window system the frame
+    ;; is on, which is what the face machinery records.
+    (only (schemacs editor faces) *window-system*)
+    (only (schemacs editor timer)
+          cancel-timer run-with-idle-timer run-with-timer))
 
   (export
    %window-point
    *current-frame*
+   *blink-cursor-blinks*
+   *blink-cursor-delay*
+   *blink-cursor-interval*
+   *blink-cursor-mode*
+   *frame-cursor-type*
+   *frame-focus*
+   *pre-command-hook*
+   blink-cursor-check
+   blink-cursor-idle-timer
+   blink-cursor-timer
+   blink-cursor--rescan-frames
+   blink-cursor--should-blink
+   blink-cursor-end
+   blink-cursor-mode
+   blink-cursor-suspend
+   internal-show-cursor
+   internal-show-cursor-p
+   run-pre-command-hook!
+   set!window-cursor-off?
+   window-cursor-off?
    *minibuffer*
    *echo-area-buffer*
    *echo-area-prompt*
@@ -384,6 +414,248 @@
     ;; The frame currently dispatching a key event. Commands read the
     ;; frame through this parameter.
     (define *current-frame* (make-parameter #f))
+
+    (define *frame-cursor-type* (make-parameter (cons 'filled-box-cursor 1)))
+    ;; ^ The cursor the *frame* wants, as `(TYPE . WIDTH)', which is what
+    ;; a buffer whose `cursor-type' is `t' is asking for. GNU Emacs keeps
+    ;; it in two fields of `struct frame' - `desired_cursor' and
+    ;; `cursor_width' (`frame.h') - filled in by the frame parameter
+    ;; handler `x_set_cursor_type' from the frame's `cursor-type'
+    ;; parameter, whose default is `t' and so a filled box.
+    ;;
+    ;; This tree has no frame parameters yet, so it is a parameter - one
+    ;; frame, one value, like `*transient-mark-mode*'. It is here rather
+    ;; than in a backend because it is the frame's, as those two fields
+    ;; are: a terminal and a window system ask the same question of it.
+    ;; `(schemacs editor xdisp)''s `get-window-cursor-type' is what reads
+    ;; it.
+    ;;
+    ;; The type symbols are the C's own enum values (`text_cursor_kinds'
+    ;; in `dispextern.h') rather than the Lisp spellings a `cursor-type'
+    ;; value uses, because this is the resolved answer.
+
+    ;;----------------------------------------------------------------
+    ;; The cursor's visibility, and the blinking that turns it off and on
+    ;;
+    ;; GNU Emacs keeps the flag on the window (`w->cursor_off_p') and the
+    ;; blinking in `frame.el'. Both are here, next to the window record
+    ;; they are about, because of the import graph: `internal-show-cursor'
+    ;; is `dispnew.c''s, and it cannot live in `dispnew.sld' - that sets a
+    ;; field of a *window*, and `frame.sld' imports `dispnew.sld', so the
+    ;; other direction is a cycle. It is where a reader looking for the
+    ;; window's fields will look, which is the point.
+    ;;------------------------------------------------------------------
+
+    (define window-cursor-table (new-weak-table))
+    ;; ^ The windows whose cursor has been blinked off, standing in for
+    ;; the `bool_bf cursor_off_p : 1' that `struct window' has in Emacs.
+    ;; Beside the window rather than in it so that adding it does not
+    ;; change a record every library makes windows with.
+
+    (define (window-cursor-off? window)
+      ;; Whether WINDOW's cursor has been blinked off. GNU Emacs's
+      ;; `w->cursor_off_p', which `get_window_cursor_type' reads as "use
+      ;; normal cursor if not blinked off".
+      ;;--------------------------------------------------------------
+      (weak-table-ref window-cursor-table window #f))
+
+    (define (set!window-cursor-off? window off?)
+      (weak-table-set! window-cursor-table window (and off? #t)))
+
+    (define (internal-show-cursor window show)
+      ;; GNU Emacs's `internal-show-cursor': set WINDOW's cursor-visibility
+      ;; flag, so that the next redisplay draws a cursor there or not.
+      ;; WINDOW false means the selected window. SHOW false means do not
+      ;; show a cursor, which is how a blink hides one.
+      ;;
+      ;; Emacs also does nothing here "while redisplaying", so that a
+      ;; blink cannot change the cursor out from under the output
+      ;; routines. This editor has no such flag: the redisplay runs to
+      ;; completion between keys, and the only caller is the blink timer,
+      ;; which runs between keys too.
+      ;;--------------------------------------------------------------
+      (set!window-cursor-off? (or window (selected-window)) (not show))
+      ;; Emacs redraws when this has changed; here the caller redraws -
+      ;; the command loop redraws after a timer ran, which is what makes
+      ;; a blink visible.
+      #f)
+
+    (define (internal-show-cursor-p window)
+      ;; GNU Emacs's `internal-show-cursor-p': whether the next redisplay
+      ;; will draw a cursor in WINDOW, which false or omitted means the
+      ;; selected window. `blink-cursor-timer-function' is its caller.
+      ;;--------------------------------------------------------------
+      (not (window-cursor-off? (or window (selected-window)))))
+
+    (define *pre-command-hook* (make-parameter '()))
+    ;; ^ GNU Emacs's `pre-command-hook', which `keyboard.c' declares and
+    ;; its command loop runs before each command. It is here rather than
+    ;; in `keyboard.sld' for the same reason as the flag above: the blink
+    ;; below *writes* it and the command loop *reads* it, and
+    ;; `keyboard.sld' already imports this library - so the other
+    ;; direction would be a cycle. It is with the other frame state.
+
+    (define (run-pre-command-hook!)
+      ;; Run the hook, as the command loop does before each command.
+      ;; Emacs removes a hook function that signals, "since otherwise the
+      ;; error might happen repeatedly and make Emacs nonfunctional";
+      ;; this reports and carries on, which is what the command loop does
+      ;; with a command's own errors.
+      ;;--------------------------------------------------------------
+      (for-each (lambda (function) (function)) (*pre-command-hook*)))
+
+    ;;----------------------------------------------------------------
+    ;; blink-cursor-mode (frame.el)
+    ;;
+    ;; Emacs's is a global minor mode, on by default in an interactive
+    ;; session, and its docstring names the thing that decides where it
+    ;; belongs: "This command is effective only on graphical frames. On
+    ;; text-only terminals, cursor blinking is controlled by the
+    ;; terminal." So on a terminal this does nothing at all, which is
+    ;; right - a terminal blinks its own cursor, and there is one cursor
+    ;; for it to blink.
+    ;;
+    ;; `define-minor-mode' does not exist in this tree yet, so the mode is
+    ;; a command that toggles a variable, as `read-only-mode' is. What
+    ;; `define-minor-mode' would give it - the customize group, the
+    ;; lighter in the mode line - is named here rather than faked.
+    ;;------------------------------------------------------------------
+
+    (define *blink-cursor-mode* (make-parameter #t))
+    ;; ^ on, as Emacs has it interactively: its `:init-value' is
+    ;; `(not (or noninteractive no-blinking-cursor ...))'
+
+    (define *blink-cursor-delay* (make-parameter 0.5))
+    (define *blink-cursor-interval* (make-parameter 0.5))
+    (define *blink-cursor-blinks* (make-parameter 10))
+
+    (define blink-cursor-idle-timer #f)
+    ;; ^ started after `blink-cursor-delay' seconds of idleness
+
+    (define blink-cursor-timer #f)
+    ;; ^ the repeating one that does the blinking
+
+    (define blink-cursor-blinks-done 1)
+
+    (define *frame-focus* (make-parameter #t))
+    ;; ^ Whether the frame has the window system's focus: GNU Emacs's
+    ;; `frame-focus-state', which its backends maintain. It is a
+    ;; parameter here for the reason `*frame-cursor-type*' is - one frame,
+    ;; one value - and `pgtk.sld' sets it from Gtk's focus events.
+    ;;
+    ;; Emacs asks, and it is worth asking: "with real emacs it only blinks
+    ;; when the window has focus" (Chris). It also decides the cursor's
+    ;; *shape*: `get_window_cursor_type' treats a frame that is not the
+    ;; display's highlight frame as a non-selected one, which is a hollow
+    ;; box rather than a filled one.
+
+    (define (blink-cursor--should-blink)
+      ;; GNU Emacs's `blink-cursor--should-blink': "Returns whether we
+      ;; have any focused non-TTY frame." This editor has one frame, so
+      ;; the two questions are the kind of display it is on - which is
+      ;; what `*window-system*' records, Emacs's `display-graphic-p'
+      ;; exactly - and whether it has the focus.
+      ;;--------------------------------------------------------------
+      (and (*blink-cursor-mode*) (*window-system*) (*frame-focus*) #t))
+
+    (define (blink-cursor--rescan-frames)
+      ;; GNU Emacs's `blink-cursor--rescan-frames', which its backends
+      ;; call from `after-focus-change-function': look again, and stop
+      ;; blinking if the answer is now no. When the frame regains the
+      ;; focus, `blink-cursor-check' - which the command loop calls - is
+      ;; what starts it again.
+      ;;--------------------------------------------------------------
+      (unless (blink-cursor-check)
+        (blink-cursor-suspend)))
+
+    (define (blink-cursor--start-idle-timer)
+      ;; The 0.2 second floor is Emacs's, not a convenience: "to avoid
+      ;; erratic behavior (or downright failure to display the cursor
+      ;; during command execution) if they set blink-cursor-delay to a
+      ;; very small or even zero value".
+      ;;--------------------------------------------------------------
+      (when blink-cursor-idle-timer (cancel-timer blink-cursor-idle-timer))
+      (set! blink-cursor-idle-timer
+            (run-with-idle-timer (max 0.2 (*blink-cursor-delay*))
+                                 #t blink-cursor-start)))
+
+    (define (blink-cursor--start-timer)
+      (when blink-cursor-timer (cancel-timer blink-cursor-timer))
+      (set! blink-cursor-timer
+            (run-with-timer (*blink-cursor-interval*)
+                            (*blink-cursor-interval*)
+                            blink-cursor-timer-function)))
+
+    (define (blink-cursor-start)
+      ;; The idle timer's function: the editor has stopped being typed at,
+      ;; so start blinking. The repeating timer is set up first, "so that
+      ;; if this signals an error, blink-cursor-end is not added to
+      ;; pre-command-hook".
+      ;;--------------------------------------------------------------
+      (when (not blink-cursor-timer)
+        (set! blink-cursor-blinks-done 1)
+        (blink-cursor--start-timer)
+        (*pre-command-hook* (cons blink-cursor-end (*pre-command-hook*)))
+        (internal-show-cursor #f #f)))
+
+    (define (blink-cursor-timer-function)
+      ;; Each call is one half of a blink. Emacs stops blinking after
+      ;; `blink-cursor-blinks' of them - the cursor stays solid rather
+      ;; than blinking for ever while you read.
+      ;;--------------------------------------------------------------
+      (internal-show-cursor #f (not (internal-show-cursor-p #f)))
+      (set! blink-cursor-blinks-done (+ 1 blink-cursor-blinks-done))
+      (when (and (> (*blink-cursor-blinks*) 0)
+                 (<= (* 2 (*blink-cursor-blinks*)) blink-cursor-blinks-done))
+        (blink-cursor-end)))
+
+    (define (blink-cursor-end)
+      ;; Stop blinking, and show the cursor: installed on
+      ;; `pre-command-hook', so the first key you press after a pause
+      ;; gives you a solid cursor to type at.
+      ;;--------------------------------------------------------------
+      (*pre-command-hook*
+       (let loop ((rest (*pre-command-hook*)))
+         (cond ((null? rest) '())
+               ((eq? (car rest) blink-cursor-end) (cdr rest))
+               (else (cons (car rest) (loop (cdr rest)))))))
+      (internal-show-cursor #f #t)
+      (when blink-cursor-timer
+        (cancel-timer blink-cursor-timer)
+        (set! blink-cursor-timer #f)))
+
+    (define (blink-cursor-suspend)
+      (blink-cursor-end)
+      (when blink-cursor-idle-timer
+        (cancel-timer blink-cursor-idle-timer)
+        (set! blink-cursor-idle-timer #f)))
+
+    (define (blink-cursor-check)
+      ;; Start the idle timer if the mode is on and the frame can blink.
+      ;; Idempotent, so the command loop can call it as often as it likes:
+      ;; Emacs calls it from its focus-change and delete-frame hooks, and
+      ;; this editor has neither, so the loop is where it is called.
+      ;;--------------------------------------------------------------
+      (when (and (blink-cursor--should-blink)
+                 (not blink-cursor-idle-timer))
+        (blink-cursor--start-idle-timer))
+      (blink-cursor--should-blink))
+
+    (defcommand (blink-cursor-mode arg)
+      "Toggle cursor blinking (Blink Cursor mode)."
+      (interactive "P")
+      (let ((on? (if arg
+                     (< 0 (uarg->integer 1 arg))
+                     (not (*blink-cursor-mode*)))))
+        (*blink-cursor-mode* on?)
+        (blink-cursor-suspend)
+        (when on? (blink-cursor-check))
+        ;; Emacs's `define-minor-mode' would echo this; the mode line
+        ;; lighter it would also add is not implemented
+        (set!frame-message (*current-frame*)
+                           (if on?
+                               "Blink Cursor mode enabled"
+                               "Blink Cursor mode disabled"))))
 
     (define *minibuffer* (make-parameter #f))
     ;; ^ The minibuffer being read, or false: GNU Emacs's

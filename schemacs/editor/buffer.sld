@@ -78,10 +78,18 @@
    buffer-live-p
    buffer-local-keymap
    buffer-local-value
+   buffer-truncate-lines
+   buffer-word-wrap
    buffer-modified-p
    *transient-mark-mode*
+   buffer-cursor-in-non-selected-windows
+   buffer-cursor-type
    buffer-name
    mark-active set!mark-active transient-mark-mode
+   set!buffer-cursor-in-non-selected-windows
+   set!buffer-cursor-type
+   set!buffer-truncate-lines
+   set!buffer-word-wrap
    buffer-read-only?
    bufferp
    bury-buffer
@@ -307,6 +315,84 @@
       ;;--------------------------------------------------------------
       (buffer-local-value (current-buffer) 'transient-mark-mode
                           (*transient-mark-mode*)))
+
+    (define (buffer-cursor-type buffer)
+      ;; The cursor BUFFER wants: GNU Emacs's `cursor-type', which
+      ;; `buffer.c' declares as a per-buffer variable (so a buffer can
+      ;; turn its cursor off, or ask for a bar, without touching any
+      ;; other buffer). Emacs reads it as `BVAR (buf, cursor_type)' from
+      ;; `get_window_cursor_type', and the values are the ones its
+      ;; docstring lists:
+      ;;
+      ;;   t               use the cursor specified for the frame
+      ;;   nil             don't display a cursor
+      ;;   box             a filled box cursor
+      ;;   hollow          a hollow box cursor
+      ;;   bar             a vertical bar cursor, default width
+      ;;   (bar . WIDTH)   a vertical bar cursor of WIDTH
+      ;;   hbar            a horizontal bar cursor, default height
+      ;;   (hbar . HEIGHT) a horizontal bar cursor of HEIGHT
+      ;;   anything else   a hollow box cursor
+      ;;
+      ;; `(schemacs editor xdisp)' is what interprets them
+      ;; (`get-specified-cursor-type'), as in Emacs.
+      ;;--------------------------------------------------------------
+      (buffer-local-value buffer 'cursor-type #t))
+
+    (define (set!buffer-cursor-type buffer value)
+      (set-buffer-local-value! buffer 'cursor-type value))
+
+    (define (buffer-truncate-lines buffer)
+      ;; Whether BUFFER's long lines are cut off at the window edge
+      ;; instead of continuing onto the next screen row: GNU Emacs's
+      ;; `truncate-lines', which `buffer.c' declares as a per-buffer
+      ;; variable and which is nil by default - so a long line *wraps*,
+      ;; and `\' is what a continued row ends with.
+      ;;
+      ;; The full rule is `init_iterator' (`xdisp.c'), and
+      ;; `truncate-partial-width-windows' overrides it for a window that
+      ;; is not the full width of the frame:
+      ;;
+      ;;   | Non-nil means do not display continuation lines.  Instead,
+      ;;   | give each line of text just one screen line.
+      ;;
+      ;; A minibuffer sets it to nil, and `visual-line-mode' wants it nil
+      ;; too (it sets `word-wrap' instead).
+      ;;--------------------------------------------------------------
+      (buffer-local-value buffer 'truncate-lines #f))
+
+    (define (set!buffer-truncate-lines buffer value)
+      (set-buffer-local-value! buffer 'truncate-lines value))
+
+    (define (buffer-word-wrap buffer)
+      ;; Whether BUFFER's continuation lines break at a space near the
+      ;; window's right edge rather than at the edge itself: GNU Emacs's
+      ;; `word-wrap', another of `buffer.c''s, nil by default.
+      ;;
+      ;;   | When word-wrapping is on, continuation lines are wrapped at
+      ;;   | the space or tab character nearest to the right window edge.
+      ;;   | If nil, continuation lines are wrapped at the right screen
+      ;;   | edge.
+      ;;
+      ;; It has no effect while lines are truncated, and
+      ;; `visual-line-mode' is what usually turns it on.
+      ;;--------------------------------------------------------------
+      (buffer-local-value buffer 'word-wrap #f))
+
+    (define (set!buffer-word-wrap buffer value)
+      (set-buffer-local-value! buffer 'word-wrap value))
+
+    (define (buffer-cursor-in-non-selected-windows buffer)
+      ;; What to draw in a window that is not selected, when this buffer
+      ;; is in it: GNU Emacs's `cursor-in-non-selected-windows', another
+      ;; of `buffer.c''s. `t' means the usual cursor type modified - a
+      ;; filled box becomes hollow, a bar a narrower bar - and nil means
+      ;; no cursor at all; any other value is a cursor type of its own.
+      ;;--------------------------------------------------------------
+      (buffer-local-value buffer 'cursor-in-non-selected-windows #t))
+
+    (define (set!buffer-cursor-in-non-selected-windows buffer value)
+      (set-buffer-local-value! buffer 'cursor-in-non-selected-windows value))
 
     (define (mark-active)
       ;; Whether the mark is active: GNU Emacs's `mark-active', which

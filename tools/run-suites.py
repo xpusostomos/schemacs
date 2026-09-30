@@ -27,6 +27,7 @@ SUITES = [
     'schemacs/editor/engine-tests.scm',
     'schemacs/editor/faces-tests.scm',
     'schemacs/editor/pgtk-tests.scm',
+    'schemacs/editor/timer-tests.scm',
     'schemacs/apps/ncurses-editor-tests.scm',
 ]
 
