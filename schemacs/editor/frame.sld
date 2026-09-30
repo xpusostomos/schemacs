@@ -60,7 +60,6 @@
    make<frame>
    make<window>
    frame-editor
-   frame-esc-pending
    frame-keymap-state
    frame-message
    frame-message-expired?
@@ -78,7 +77,6 @@
    set!frame-height
    set!frame-width
    set!frame-editor
-   set!frame-esc-pending
    set!frame-keymap-state
    set-message!
    set!frame-message
@@ -302,7 +300,7 @@
     (define-record-type <frame>
       (make<frame>
        windows selected-window height width
-       message message-expiry keymap-state quit-cont esc-pending output)
+       message message-expiry keymap-state quit-cont output)
       frame-type?
       (windows   frame-windows   set!frame-windows)
       ;; ^ The frame's windows, top to bottom. Emacs's `window-list'.
@@ -337,15 +335,11 @@
       (quit-cont  frame-quit-cont  set!frame-quit-cont)
       ;; ^ An escape continuation captured by the event loop, invoked
       ;; by `save-buffers-kill-terminal` to exit the editor.
-      (esc-pending frame-esc-pending set!frame-esc-pending)
       (output     frame-output     set!frame-output)
       ;; ^ The display this frame is drawn on: Emacs's `output_data',
       ;; which points a frame at its terminal's output data. Set when
       ;; the frame is made (the display is the one the platform
       ;; opened), and #f for a frame made with no display - a test.
-      ;; ^ Whether an ESC key was just seen: the next key event is
-      ;; dispatched with the `meta` modifier (the Emacs ASCII
-      ;; protocol, where ESC prefixes meta keys).
       ;;
       ;; There was a `crlf?' slot here, holding the visited file's
       ;; line-break convention. It is gone: the convention belongs to the
@@ -455,7 +449,7 @@
        ((editor height width)
         (let ((window (make-frame-window editor 0 (max 1 (- height 1)) 0 width)))
           (make<frame> (list window) window height width
-                       "" #f #f #f #f (current-display))))))
+                       "" #f #f #f (current-display))))))
 
     (define min-safe-window-height 1)
     (define min-safe-window-width 2)

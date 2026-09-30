@@ -39,9 +39,9 @@
     (prefix (schemacs keymap) km:)
     ;; Only the names used: guile-ncurses exports a `define-key\' of its
     ;; own, which would collide with the keymap library's.
-    (only (ncurses curses)
-          ERR KEY_BACKSPACE KEY_DC KEY_DOWN KEY_END KEY_HOME KEY_LEFT
-          KEY_RESIZE KEY_RIGHT KEY_UP keyname)
+    ;; Decoding a raw event into a keymap path is the terminal driver's
+    ;; business now; this loop reads what it decoded.
+    (only (schemacs editor term) ncurses-key->keymap-path)
     (only (schemacs editor engine)
           text-editor-deactivate-mark set!text-editor-deactivate-mark!)
     (only (schemacs editor command)
@@ -52,10 +52,10 @@
     ;; interface.
     (only (schemacs editor dispnew) current-display read-input-event)
     (only (schemacs editor frame)
-          *current-frame* frame-esc-pending frame-keymap-state
+          *current-frame* frame-keymap-state
           frame-message frame-message-expired?
           frame-message-expiry
-          frame-quit-cont set!frame-esc-pending
+          frame-quit-cont
           set!frame-keymap-state set!frame-message
           set!frame-message-expiry
           set!frame-quit-cont)
@@ -100,107 +100,9 @@
     ;;----------------------------------------------------------------
     ;; Key events
 
-    (define named-key-names
-      ;; The key at the front of an ncurses extended keyname, as the name
-      ;; this editor's keymaps use for it. The names are terminfo's:
-      ;; `kUP3' is the up key, and the `3' is the modifier.
-      ;;--------------------------------------------------------------
-      '(("UP" . "up") ("DN" . "down") ("LFT" . "left") ("RGT" . "right")
-        ("HOM" . "home") ("END" . "end") ("DC" . "delete")
-        ("IC" . "insert") ("PP" . "prior") ("NP" . "next")))
-
-    (define named-key-modifiers
-      ;; The digit ncurses puts after the key name, as the modifiers it
-      ;; stands for. The digits are xterm's `CSI 1 ; N A' numbering, which
-      ;; is the numbering terminfo's `kUP3'-style names are built from,
-      ;; and GNU Emacs reads the sequences the same way in
-      ;; `term/xterm.el' (`\e[1;3A' is `[M-up]' there).
-      ;;
-      ;; 2, 4, 6 and 8 all carry Shift, and this editor's keymaps have no
-      ;; shift modifier - `(schemacs keymap)''s modifier table has ctrl,
-      ;; meta, super, hyper and alt and no more - so those answer #f and
-      ;; the key is reported unhandled, which is where it was before.
-      ;;--------------------------------------------------------------
-      '(("3" (meta)) ("5" (ctrl)) ("7" (meta ctrl))))
-
-    (define (extended-key->keymap-path ev)
-      ;; The keymap path for an extended keycode, or #f when it is not one
-      ;; this editor knows a name for. ncurses names them from terminfo -
-      ;; `(keyname 532)' answers "kDN3" - so what is decoded is that name:
-      ;; the key, and the modifier digit after it.
-      ;;
-      ;; `keyname' can only be asked once the terminal is open, which is
-      ;; why this cannot be a table built at load time. It costs one call
-      ;; per modified key press, and nothing at all for the keys the
-      ;; constants above already cover.
-      ;;--------------------------------------------------------------
-      (let ((name (keyname ev)))
-        (and (string? name)
-             (< 2 (string-length name))
-             (char=? (string-ref name 0) #\k)
-             (let* ((base (substring name 1 (- (string-length name) 1)))
-                    (digit (string (string-ref name
-                                               (- (string-length name) 1))))
-                    (key (assoc base named-key-names))
-                    (modifiers (assoc digit named-key-modifiers)))
-               (and key modifiers
-                    (append (cadr modifiers) (list (cdr key))))))))
-
-    (define (ncurses-key->keymap-path ev)
-      ;; Convert an ncurses key event to a keymap path: a list of
-      ;; modifier symbols and characters (or #f when the event cannot
-      ;; be converted).
-      ;;
-      ;; A keypad key becomes a *named* key - `("up")', `("down")',
-      ;; `("home")' and the rest - which is what GNU Emacs sees a
-      ;; terminal arrow key as. They used to be folded onto the control
-      ;; key that moves the same way (KEY_UP to `(ctrl #\p)' and so on),
-      ;; which is what a terminal does when it has no arrow keys; the
-      ;; cost is that `M-<up>' - a key of its own in Emacs's
-      ;; `minibuffer-local-completion-map' - arrived as M-C-p and could
-      ;; not be bound. The control keys are still bound to the same
-      ;; commands, so folding them is no longer a behaviour anything
-      ;; depends on.
-      ;;--------------------------------------------------------------
-      (cond
-       ((char? ev)
-        (let ((ci (char->integer ev)))
-          (cond
-           ((char=? ev #\return) (list 'ctrl #\m))
-           ((char=? ev #\newline) (list 'ctrl #\j))
-           ((char=? ev #\esc) (list 'ctrl #\[))
-           ((or (= ci 127) (char=? ev #\backspace))
-            (list 'ctrl #\h))
-           ;; NUL is C-@, and C-@ is C-SPC: one key, one byte, and the
-           ;; binding for the mark is on it.
-           ((= ci 0) (list 'ctrl #\@))
-           ((and (< 0 ci) (< ci 27))
-            (list 'ctrl (integer->char (+ 96 ci))))
-           ((and (>= ci 28) (< ci 32))
-            (list 'ctrl (integer->char ci)))
-           ((and (>= ci 32) (not (= ci 127)))
-            (list ev))
-           (else #f))))
-       ((integer? ev)
-        (cond
-         ((= ev KEY_LEFT)  (list "left"))
-         ((= ev KEY_RIGHT) (list "right"))
-         ((= ev KEY_UP)    (list "up"))
-         ((= ev KEY_DOWN)  (list "down"))
-         ((= ev KEY_HOME)  (list "home"))
-         ((= ev KEY_END)   (list "end"))
-         ((= ev KEY_DC)    (list "delete"))
-         ;; DEL and BS are the same event in a terminal, and Emacs reads
-         ;; that byte as `C-h' - which is why both spellings of the
-         ;; backspace key land on the same binding here.
-         ((= ev KEY_BACKSPACE) (list 'ctrl #\h))
-         ((= ev KEY_RESIZE) (list 'resize))
-         ;; Anything else: ncurses reports a key carrying a *modifier* as
-         ;; an extended keycode - one above `KEY_MAX', named from
-         ;; terminfo - and `M-<down>' arrives as the code ncurses calls
-         ;; `kDN3' rather than as anything the constants above cover.
-         (else (extended-key->keymap-path ev))))
-       (else #f)))
+    ;; `*esc-pending*' is keyboard.c's own state (its meta-prefix
+    ;; resolution), which is why it lives here and not on the frame.
+    (define *esc-pending* (make-parameter #f))
 
     (define (dispatch-action frame action)
       ;; Run an action reached by a key lookup. The pending prefix
@@ -375,19 +277,19 @@
         (cond
          ;; ESC prefixes the next key with the meta modifier
          ((and (char? ev) (char=? ev #\esc))
-          (set!frame-esc-pending frame #t))
-         ((and path (frame-esc-pending frame))
-          (set!frame-esc-pending frame #f)
+          (*esc-pending* #t))
+         ((and path (*esc-pending*))
+          (*esc-pending* #f)
           (dispatch-key-event frame (cons 'meta path))
           )
          ((and path (eq? 'resize (car path)))
           (set!frame-message frame "")
-          (set!frame-esc-pending frame #f))
+          (*esc-pending* #f))
          (path
-          (set!frame-esc-pending frame #f)
+          (*esc-pending* #f)
           (dispatch-key-event frame path))
          (else
-          (set!frame-esc-pending frame #f)
+          (*esc-pending* #f)
           (set!frame-message
            frame
            (string-append
@@ -438,17 +340,17 @@
       100)
 
     (define (key-event? ev)
-      ;; Whether a read produced a key. guile-ncurses's `getch' answers
-      ;; `#f' whenever there was nothing to read - a timed-out read, a
-      ;; non-blocking read with no input, and the end of input alike -
-      ;; so a key is a character or an integer that is not `ERR'.
+      ;; Whether a read produced a key. The driver's `read-input-event'
+      ;; already answers `#f' for a timed-out read, a non-blocking read
+      ;; with no input, and the end of input alike, so a key is a
+      ;; character or an integer (a keypad code) and nothing else.
       ;;
       ;; The distinction this loses is end of input against a timeout.
       ;; It is recovered by the caller from the *timeout*: a blocking
       ;; read only comes back with nothing at the end of input, so the
       ;; editor is left then and not otherwise.
       ;;--------------------------------------------------------------
-      (or (char? ev) (and (integer? ev) (not (= ev ERR)))))
+      (or (char? ev) (integer? ev)))
 
     (define (command-loop frame)
       ;; Read key events and dispatch them, until something leaves this

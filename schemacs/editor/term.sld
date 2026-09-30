@@ -48,6 +48,7 @@
    tty-unget-event!
    tty-suspend!
    tty-resume!
+   ncurses-key->keymap-path
    )
 
   (begin
@@ -141,6 +142,117 @@
         thunk
         (lambda () (endwin))
         ))
+
+    ;;----------------------------------------------------------------
+    ;; Key events: raw key -> keymap path
+    ;;
+    ;; Keyboard.sld reads keys through `read-input-event' and asks this
+    ;; file what a key means; the decode is a terminal question (what the
+    ;; keypad and terminfo say a code is), so it lives in the terminal
+    ;; driver.
+    ;;------------------------------------------------------------------
+
+    (define named-key-names
+      ;; The key at the front of an ncurses extended keyname, as the name
+      ;; this editor's keymaps use for it. The names are terminfo's:
+      ;; `kUP3' is the up key, and the `3' is the modifier.
+      ;;--------------------------------------------------------------
+      '(("UP" . "up") ("DN" . "down") ("LFT" . "left") ("RGT" . "right")
+        ("HOM" . "home") ("END" . "end") ("DC" . "delete")
+        ("IC" . "insert") ("PP" . "prior") ("NP" . "next")))
+
+    (define named-key-modifiers
+      ;; The digit ncurses puts after the key name, as the modifiers it
+      ;; stands for. The digits are xterm's `CSI 1 ; N A' numbering, which
+      ;; is the numbering terminfo's `kUP3'-style names are built from,
+      ;; and GNU Emacs reads the sequences the same way in
+      ;; `term/xterm.el' (`\e[1;3A' is `[M-up]' there).
+      ;;
+      ;; 2, 4, 6 and 8 all carry Shift, and this editor's keymaps have no
+      ;; shift modifier - `(schemacs keymap)''s modifier table has ctrl,
+      ;; meta, super, hyper and alt and no more - so those answer #f and
+      ;; the key is reported unhandled, which is where it was before.
+      ;;--------------------------------------------------------------
+      '(("3" (meta)) ("5" (ctrl)) ("7" (meta ctrl))))
+
+    (define (extended-key->keymap-path ev)
+      ;; The keymap path for an extended keycode, or #f when it is not one
+      ;; this editor knows a name for. ncurses names them from terminfo -
+      ;; `(keyname 532)' answers "kDN3" - so what is decoded is that name:
+      ;; the key, and the modifier digit after it.
+      ;;
+      ;; `keyname' can only be asked once the terminal is open, which is
+      ;; why this cannot be a table built at load time. It costs one call
+      ;; per modified key press, and nothing at all for the keys the
+      ;; constants above already cover.
+      ;;--------------------------------------------------------------
+      (let ((name (keyname ev)))
+        (and (string? name)
+             (< 2 (string-length name))
+             (char=? (string-ref name 0) #\k)
+             (let* ((base (substring name 1 (- (string-length name) 1)))
+                    (digit (string (string-ref name
+                                               (- (string-length name) 1))))
+                    (key (assoc base named-key-names))
+                    (modifiers (assoc digit named-key-modifiers)))
+               (and key modifiers
+                    (append (cadr modifiers) (list (cdr key))))))))
+
+    (define (ncurses-key->keymap-path ev)
+      ;; Convert an ncurses key event to a keymap path: a list of
+      ;; modifier symbols and characters (or #f when the event cannot
+      ;; be converted).
+      ;;
+      ;; A keypad key becomes a *named* key - `("up")', `("down")',
+      ;; `("home")' and the rest - which is what GNU Emacs sees a
+      ;; terminal arrow key as. They used to be folded onto the control
+      ;; key that moves the same way (KEY_UP to `(ctrl #\p)' and so on),
+      ;; which is what a terminal does when it has no arrow keys; the
+      ;; cost is that `M-<up>' - a key of its own in Emacs's
+      ;; `minibuffer-local-completion-map' - arrived as M-C-p and could
+      ;; not be bound. The control keys are still bound to the same
+      ;; commands, so folding them is no longer a behaviour anything
+      ;; depends on.
+      ;;--------------------------------------------------------------
+      (cond
+       ((char? ev)
+        (let ((ci (char->integer ev)))
+          (cond
+           ((char=? ev #\return) (list 'ctrl #\m))
+           ((char=? ev #\newline) (list 'ctrl #\j))
+           ((char=? ev #\esc) (list 'ctrl #\[))
+           ((or (= ci 127) (char=? ev #\backspace))
+            (list 'ctrl #\h))
+           ;; NUL is C-@, and C-@ is C-SPC: one key, one byte, and the
+           ;; binding for the mark is on it.
+           ((= ci 0) (list 'ctrl #\@))
+           ((and (< 0 ci) (< ci 27))
+            (list 'ctrl (integer->char (+ 96 ci))))
+           ((and (>= ci 28) (< ci 32))
+            (list 'ctrl (integer->char ci)))
+           ((and (>= ci 32) (not (= ci 127)))
+            (list ev))
+           (else #f))))
+       ((integer? ev)
+        (cond
+         ((= ev KEY_LEFT)  (list "left"))
+         ((= ev KEY_RIGHT) (list "right"))
+         ((= ev KEY_UP)    (list "up"))
+         ((= ev KEY_DOWN)  (list "down"))
+         ((= ev KEY_HOME)  (list "home"))
+         ((= ev KEY_END)   (list "end"))
+         ((= ev KEY_DC)    (list "delete"))
+         ;; DEL and BS are the same event in a terminal, and Emacs reads
+         ;; that byte as `C-h' - which is why both spellings of the
+         ;; backspace key land on the same binding here.
+         ((= ev KEY_BACKSPACE) (list 'ctrl #\h))
+         ((= ev KEY_RESIZE) (list 'resize))
+         ;; Anything else: ncurses reports a key carrying a *modifier* as
+         ;; an extended keycode - one above `KEY_MAX', named from
+         ;; terminfo - and `M-<down>' arrives as the code ncurses calls
+         ;; `kDN3' rather than as anything the constants above cover.
+         (else (extended-key->keymap-path ev))))
+       (else #f)))
 
     ;;----------------------------------------------------------------
     ;; The display interface, for a text terminal
