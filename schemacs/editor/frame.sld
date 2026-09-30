@@ -26,14 +26,13 @@
     ;; reports as an unbound variable at run time rather than a
     ;; syntax error at the definition (see ENGINE-FINDINGS.txt).
     (scheme case-lambda)
-    ;; Only the names used: guile-ncurses exports a `define-key' of its
-    ;; own, which would collide with the keymap library's.
-    ;; The frame is a display-neutral thing now: its size is the size
-    ;; its display reports (`sync-frame-size!' asks the interface), and
-    ;; stopping and resuming the terminal on C-z is the driver's
-    ;; business (`tty-suspend!'/`tty-resume!').
-    (only (schemacs editor dispnew) current-display screen-size)
-    (only (schemacs editor term) tty-resume! tty-suspend!)
+    ;; The frame is a display-neutral thing: its size is the size its
+    ;; display reports (`sync-frame-size!' asks the interface), and
+    ;; stopping and resuming the terminal on C-z is the display's
+    ;; business too (`suspend-display!' / `resume-display!', which
+    ;; `suspend-frame' asks through the interface).
+    (only (schemacs editor dispnew)
+          current-display resume-display! screen-size suspend-display!)
     (only (schemacs editor engine)
           copy-marker  marker-position  set-marker!
           text-editor-get-cursor  text-editor-set-cursor)
@@ -596,15 +595,15 @@
       ;; that is stopping the editor with SIGTSTP; the shell gives it back
       ;; with SIGCONT when the job is brought to the foreground.
       ;;
-      ;; The terminal is handed back first, so the screen looks the way the
-      ;; shell left it, and taken again afterwards - `endwin' and then
-      ;; `refresh', which is ncurses's idiom for the same thing. GNU Emacs
-      ;; does the same around the `SIGTSTP' it raises in `sysdep.c'.
+      ;; The display is asked to hand the terminal back first, so the
+      ;; screen looks the way the shell left it, and to take it again
+      ;; afterwards. GNU Emacs does the same around the `SIGTSTP' it
+      ;; raises in `sysdep.c', through `Fsuspend_tty' / `Fresume_tty'.
       ;;
-      ;; This is why `(schemacs ui platform ncurses)' puts the terminal in
-      ;; `raw' mode rather than `cbreak': in `raw' mode the terminal does
-      ;; not generate the stop from the key itself, so the editor decides,
-      ;; which is what Emacs does on a terminal too.
+      ;; This is why the platform puts the terminal in `raw' mode rather
+      ;; than `cbreak': in `raw' mode the terminal does not generate the
+      ;; stop from the key itself, so the editor decides, which is what
+      ;; Emacs does on a terminal too.
       ;;
       ;; Emacs's `SIGTSTP' is raised with `kill' rather than with Scheme's
       ;; `raise' because `(scheme base)''s `raise' raises an *exception*,
@@ -612,9 +611,9 @@
       ;;--------------------------------------------------------------
       "Stop the editor and return to the shell (bound to C-z)."
       (interactive)
-      (tty-suspend!)
+      (suspend-display! (current-display))
       (kill (getpid) SIGTSTP)
-      (tty-resume!))
+      (resume-display! (current-display)))
 
     ;; The key GNU Emacs binds it to, beside the command as the other
     ;; libraries state theirs.

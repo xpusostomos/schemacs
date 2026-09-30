@@ -42,13 +42,6 @@
    ;; The display object for an open terminal, for tests that want to
    ;; ask it something directly; nothing in the editor uses it by name.
    <tty-display>
-   ;; The single-key reads the prompt and search loops make, which are
-   ;; terminal questions asked outside the command loop.
-   tty-read-char
-   tty-unget-event!
-   tty-suspend!
-   tty-resume!
-   ncurses-key->keymap-path
    )
 
   (begin
@@ -146,10 +139,13 @@
     ;;----------------------------------------------------------------
     ;; Key events: raw key -> keymap path
     ;;
-    ;; Keyboard.sld reads keys through `read-input-event' and asks this
-    ;; file what a key means; the decode is a terminal question (what the
-    ;; keypad and terminfo say a code is), so it lives in the terminal
-    ;; driver.
+    ;; Keyboard.sld reads keys through `read-input-event' and asks the
+    ;; display what a key means; the decode is a terminal question (what
+    ;; the keypad and terminfo say a code is), so the answer is this
+    ;; display's method. It is the counterpart of term.c's key table -
+    ;; `struct fkey_table keys[]' and the `term_get_fkeys_1' that fills
+    ;; `input-decode-map' from it - which keyboard.c's `read_char' then
+    ;; applies.
     ;;------------------------------------------------------------------
 
     (define named-key-names
@@ -198,10 +194,10 @@
                (and key modifiers
                     (append (cadr modifiers) (list (cdr key))))))))
 
-    (define (ncurses-key->keymap-path ev)
-      ;; Convert an ncurses key event to a keymap path: a list of
-      ;; modifier symbols and characters (or #f when the event cannot
-      ;; be converted).
+    (define-method (key-event->keymap-path (d <tty-display>) ev)
+      ;; Convert one of this terminal's key events to a keymap path: a
+      ;; list of modifier symbols and characters (or #f when the event
+      ;; cannot be converted).
       ;;
       ;; A keypad key becomes a *named* key - `("up")', `("down")',
       ;; `("home")' and the rest - which is what GNU Emacs sees a
@@ -309,14 +305,22 @@
     (define-method (read-input-event (d <tty-display>) timeout)
       ;; Read one key event, TIMEOUT milliseconds allowed - a negative
       ;; TIMEOUT blocks until one is there. What comes back is what the
-      ;; eys mean to this terminal: a character, a keypad key's code, or
+      ;; keys mean to this terminal: a character, a keypad key's code, or
       ;; #f when nothing arrived - which is a timed-out read or the end
       ;; of input, the caller telling the two apart by the TIMEOUT it
       ;; asked for.
+      ;;
+      ;; The keypad's Backspace is answered as DEL (`#\backspace'), the
+      ;; character the search and the prompt know it by. The keymap
+      ;; decode reads both spellings of the byte as `C-h', so the command
+      ;; loop cannot tell the difference.
       ;;--------------------------------------------------------------
       (timeout! (stdscr) timeout)
       (let ((ev (getch (stdscr))))
-        (if (or (eqv? ev ERR) (eqv? ev #f)) #f ev)))
+        (cond
+         ((or (eqv? ev ERR) (eqv? ev #f)) #f)
+         ((and (integer? ev) (= ev KEY_BACKSPACE)) #\backspace)
+         (else ev))))
 
     (define-method (screen-size (d <tty-display>))
       ;; The terminal's size in rows and columns.
@@ -396,44 +400,25 @@
       (tty-face-attribute (realize-tty-face face-attrs)))
 
     ;;----------------------------------------------------------------
-    ;; Raw single-key reads
+    ;; Suspending and resuming the terminal
     ;;
-    ;; The prompt and search loops read one key outside the command
-    ;; loop's read - the minibuffer's y-or-n question and isearch's own
-    ;; reading of the typed key - and what they need is the bare
-    ;; character, not an event for the keymap.
+    ;; C-z hands the terminal back to whatever is around it and takes it
+    ;; again: the two halves of `suspend-frame', which are Emacs's
+    ;; `Fsuspend_tty' / `Fresume_tty' in term.c.
     ;;------------------------------------------------------------------
 
-    (define (tty-suspend!)
-      ;; Leave curses mode so the editor can be stopped: the *before*
-      ;; half of `suspend-frame''s C-z, Emacs's `reset_sys_modes' for a
-      ;; terminal. The shell stops the process; `tty-resume!' restores.
+    (define-method (suspend-display! (d <tty-display>))
+      ;; Leave curses mode so the editor can be stopped - the *before*
+      ;; half of C-z, Emacs's `reset_sys_modes' for a terminal. The
+      ;; shell stops the process; `resume-display!' restores.
       ;;--------------------------------------------------------------
       (endwin))
 
-    (define (tty-resume!)
+    (define-method (resume-display! (d <tty-display>))
       ;; Back from the shell: repaint the screen curses had left, the
       ;; *after* half of C-z (`init_sys_modes').
       ;;--------------------------------------------------------------
       (refresh (stdscr)))
-
-    (define (tty-read-char)
-      ;; One key from the terminal, with the keypad's Backspace made
-      ;; the character DEL (`#\backspace') as the search and the prompt
-      ;; know it, or #f at the end of input.
-      ;;--------------------------------------------------------------
-      (let* ((raw (getch (stdscr)))
-             (ev (if (and (integer? raw) (= raw KEY_BACKSPACE))
-                     #\backspace
-                     raw)))
-        ev))
-
-    (define (tty-unget-event! ev)
-      ;; Put a key event back on the terminal's input, to be read by the
-      ;; next read - isearch's way of re-executing the key that ended
-      ;; the search.
-      ;;--------------------------------------------------------------
-      (ungetch ev))
 
     ;;----------------------------------------------------------------
     ))

@@ -115,12 +115,18 @@
       ;; the renderer draws it.
       ;;--------------------------------------------------------------
       (make-parameter #f))
-    (define (ncurses-line-string ed i)
+    (define (buffer-line-string ed i)
       ;; Get the displayable contents of line I (not including its
       ;; line break) as a string, or #f when I is past the end of the
       ;; buffer. The current line is read from the line editor, which
       ;; holds the live copy of the line under the cursor; every other
       ;; line is read from the lines gap-buffer.
+      ;;
+      ;; This is a departure, and there is no Emacs function to mirror
+      ;; it with: xdisp.c never materialises a line as a string - it
+      ;; walks the buffer with the display iterator (`struct it'),
+      ;; fetching characters as it produces glyphs. Rendering from a
+      ;; line string is this redisplay's shortcut.
       ;;--------------------------------------------------------------
       (cond
        ((= i (text-editor-cursor-line ed))
@@ -588,7 +594,7 @@
                          (< position end)))))))
 
     (define (face-at-buffer-position ed position)
-      ;; The ncurses attribute number for the face in effect at POSITION
+      ;; The display's token for the face in effect at POSITION
       ;; in ED: GNU Emacs's `face_at_buffer_position'. The `face' text
       ;; property there - a face name, a property list, or a list of
       ;; either - is merged with the `default' face and folded down to
@@ -681,7 +687,7 @@
       (let* ((ed (window-buffer window))
              (line (text-editor-cursor-line ed))
              (column (text-editor-cursor-column ed))
-             (line-string (ncurses-line-string ed line))
+             (line-string (buffer-line-string ed line))
              (width (window-body-width window))
              (vheight (window-body-height window))
              (screen-row (- line (window-top-line window))))
@@ -740,7 +746,7 @@
                                 ed (window-top-line window))))
           (when (< row vheight)
             (let* ((line-index (+ (window-top-line window) row))
-                   (line-string (ncurses-line-string ed line-index)))
+                   (line-string (buffer-line-string ed line-index)))
               (when line-string
                 (let ((display (expand-line-display line-string width)))
                   (draw-line! ed line-start line-string display

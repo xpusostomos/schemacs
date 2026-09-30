@@ -25,7 +25,7 @@
   ;; Not ported, with what each would need: the colour tables Emacs builds
   ;; from terminfo when the terminal is opened (`init_tty') and the
   ;; approximation it falls back on (`tty-color-approximate') - what is
-  ;; here is the ANSI names, which is what an ncurses terminal has;
+  ;; here is the ANSI names, which is what a text terminal has;
   ;; `face_at_buffer_position' and the face cache (`lookup_face'), which
   ;; belong to the display (`xdisp.c') and are step D; and the X and
   ;; window-system half of the file, which has no meaning here.

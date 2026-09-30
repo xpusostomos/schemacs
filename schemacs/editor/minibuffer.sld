@@ -94,13 +94,11 @@
     ;; The recursive edit the minibuffer is read by: the same command loop,
     ;; called again.
     (only (schemacs editor keyboard)
-          abort-recursive-edit exit-recursive-edit recursive-edit signal-quit)
-    ;; `read-char-from-minibuffer' reads the one key that answers it:
-    ;; the raw event, as isearch's keys are read, drawn with the
-    ;; display's `render!'.
-    ;; The one key that answers the question is read from the terminal
-    ;; driver, as isearch's are.
-    (only (schemacs editor term) tty-read-char)
+          abort-recursive-edit exit-recursive-edit read-key-event
+          recursive-edit signal-quit)
+    ;; `read-char-from-minibuffer' reads the one key that answers it with
+    ;; the command loop's read, so a pushed-back event reaches it too;
+    ;; what it draws with is the display's `render!'.
     (only (schemacs editor xdisp) render!)
     ;; The global map `minibuffer-local-map' is built from, and the local
     ;; map it becomes while it is read.
@@ -542,8 +540,9 @@
       ;; GNU Emacs's `read-char-from-minibuffer': ask a question whose
       ;; answer is a single key, and return it - `y' or `n' alone
       ;; answers, with no RET. Emacs reads the key itself (`read-key');
-      ;; here the one event ncurses returns is read raw, as `isearch'
-      ;; reads its keys, with the prompt drawn in the echo area.
+      ;; here the key comes from the command loop's own read, so an event
+      ;; a command pushed back reaches this question too, with the prompt
+      ;; drawn in the echo area.
       ;; C-g abandons the whole command, and a key the question has no
       ;; meaning for (an arrow key, a frame resize) asks it again.
       ;;--------------------------------------------------------------
@@ -552,7 +551,7 @@
                        (*echo-area-prompt* prompt))
           (render! frame)
           (let loop ()
-            (let ((ev (tty-read-char)))
+            (let ((ev (read-key-event -1)))
               (cond
                ((and (char? ev) (= (char->integer ev) 7))
                 (signal-quit))

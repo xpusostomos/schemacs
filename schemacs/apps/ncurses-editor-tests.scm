@@ -3,6 +3,8 @@
  (scheme char)
  (scheme file)
  (only (guile) chmod mkdir sort)
+ ;; `make' is GOOPS's: the test display object is made with it.
+ (only (oop goops) make)
  (only (ice-9 exceptions) exception-message)
  (prefix (schemacs keymap) km:)
  (only (srfi 64) test-assert test-equal test-begin test-end)
@@ -26,7 +28,13 @@
        window-height window-point window-right-border? window-top
        window-width)
  (only (schemacs editor keyboard)
-       dispatch-key-event dispatch-ncurses-event ncurses-key->keymap-path)
+       dispatch-key-event dispatch-input-event)
+ ;; The dispatch asks the display what a raw event means, and this is the
+ ;; display it asks: a terminal object with no curses behind it, which is
+ ;; all the character events these tests feed ever need (only an extended
+ ;; keycode would ask the terminal's terminfo, and none is used here).
+ (only (schemacs editor dispnew) current-display key-event->keymap-path)
+ (only (schemacs editor term) <tty-display>)
  (only (schemacs editor keymap) *current-keymap* *default-keymap*)
  (only (schemacs editor buff-menu)
        *Buffer-menu-del-char* *Buffer-menu-marks* Buffer-menu-buffer
@@ -106,15 +114,28 @@
 ;; universal argument (C-u) and the kill ring.
 ;;
 ;; The tests drive the frontend the way the event loop does - as a
-;; stream of ncurses key events through `ncurses-key->keymap-path' -
-;; rather than as keymap paths, because the translation from a
-;; keystroke to a path is itself part of what can break (TAB arrives as
-;; `#\tab' but is bound as C-i, and the arrow keys arrive as integers).
-;; Only `dispatch-key-event' is called, so no terminal is opened and the
-;; whole file runs headless.
+;; stream of ncurses key events the display is asked to name, through
+;; `key-event->keymap-path' - rather than as keymap paths, because the
+;; translation from a keystroke to a path is itself part of what can
+;; break (TAB arrives as `#\tab' but is bound as C-i, and the arrow keys
+;; arrive as integers). Only `dispatch-key-event' is called, so no
+;; terminal is opened and the whole file runs headless.
 
 ;;--------------------------------------------------------------------
 ;; Harness
+
+(define *test-display*
+  ;; The display the dispatch asks what an event means. It is a terminal
+  ;; object with nothing behind it - no curses is started, so `lines',
+  ;; `getch' and the rest would fail if anything asked them - and the
+  ;; character events these tests feed need none of that: naming a
+  ;; character is a question about the terminal's key table, which
+  ;; answers without a terminal. It is the same trick `faces-tests.scm'
+  ;; uses for its display.
+  ;;--------------------------------------------------------------
+  (make <tty-display>))
+
+(current-display *test-display*)
 
 (define (test-frame ed)
   ;; A frame over a 24x80 screen with one window filling it, showing ED,
@@ -147,7 +168,7 @@
                    (*kill-buffer-query-functions* '()))
       (text-editor-insert ed text)
       (text-editor-set-cursor ed 0 0)
-      (for-each (lambda (ev) (dispatch-ncurses-event frame ev)) evs)
+      (for-each (lambda (ev) (dispatch-input-event frame ev)) evs)
       (list (text-editor-to-string ed)
             (text-editor-get-cursor ed)
             ;; the latest kill, which is the front of the ring - and
@@ -255,16 +276,16 @@
   (let* ((ed (new-text-editor))
         (frame (test-frame ed)))
     (parameterize ((*current-frame* frame))
-      (dispatch-key-event frame (ncurses-key->keymap-path C-u))
-      (dispatch-key-event frame (ncurses-key->keymap-path (integer->char 24)))
+      (dispatch-key-event frame (key-event->keymap-path (current-display) C-u))
+      (dispatch-key-event frame (key-event->keymap-path (current-display) (integer->char 24)))
       (pending-uarg))))
 
 (test-equal #f
   (let* ((ed (new-text-editor))
         (frame (test-frame ed)))
     (parameterize ((*current-frame* frame))
-      (dispatch-key-event frame (ncurses-key->keymap-path C-u))
-      (dispatch-key-event frame (ncurses-key->keymap-path #\a))
+      (dispatch-key-event frame (key-event->keymap-path (current-display) C-u))
+      (dispatch-key-event frame (key-event->keymap-path (current-display) #\a))
       (pending-uarg))))
 
 ;; An undefined key ends the chord and discards the prefix with it.
@@ -272,9 +293,9 @@
   (let* ((ed (new-text-editor))
         (frame (test-frame ed)))
     (parameterize ((*current-frame* frame))
-      (dispatch-key-event frame (ncurses-key->keymap-path C-u))
-      (dispatch-key-event frame (ncurses-key->keymap-path (integer->char 24)))
-      (dispatch-key-event frame (ncurses-key->keymap-path #\a))
+      (dispatch-key-event frame (key-event->keymap-path (current-display) C-u))
+      (dispatch-key-event frame (key-event->keymap-path (current-display) (integer->char 24)))
+      (dispatch-key-event frame (key-event->keymap-path (current-display) #\a))
       (pending-uarg))))
 
 (test-end "schemacs_ncurses_editor_prefix_argument")
@@ -454,7 +475,7 @@
                           (loop (cons c acc)))))))))))))
 
 (define (type frame . evs)
-  (for-each (lambda (ev) (dispatch-ncurses-event frame ev)) evs))
+  (for-each (lambda (ev) (dispatch-input-event frame ev)) evs))
 
 (define save-key (integer->char 19))   ; C-x C-s
 
@@ -589,7 +610,7 @@
         (buffer #f))
     (let ((result (apply with-file-buffer path contents
                          (lambda (frame)
-                           (for-each (lambda (ev) (dispatch-ncurses-event frame ev))
+                           (for-each (lambda (ev) (dispatch-input-event frame ev))
                                      keys)
                            (set! message (frame-message frame))
                            (set! buffer (text-editor-to-string
@@ -1004,7 +1025,7 @@
                 (parameterize ((*current-frame* frame)
                                (*last-command* #f)
                                (*this-command* #f))
-                  (for-each (lambda (key) (dispatch-ncurses-event frame key))
+                  (for-each (lambda (key) (dispatch-input-event frame key))
                             keys)))))
     (text-editor-insert ed "abcdef\nxy\nabcdef")
     (text-editor-set-cursor ed 0 4)
@@ -1084,7 +1105,7 @@
                  (*last-command* #f)
                  (*pending-undo-list* #f)
                  (*last-change-was-undo* #f))
-    (for-each (lambda (ev) (dispatch-ncurses-event frame ev)) evs)
+    (for-each (lambda (ev) (dispatch-input-event frame ev)) evs)
     frame))
 
 (define (points frame)
@@ -1840,7 +1861,7 @@
         (let ((list (list-buffers-noselect)))
           (set!window-buffer (frame-selected-window frame) list)
           (*current-buffer* list)
-          (thunk list (lambda (ev) (dispatch-ncurses-event frame ev))))))))
+          (thunk list (lambda (ev) (dispatch-input-event frame ev))))))))
 
 ;; Point starts on the first buffer's line, not on the titles' - which is
 ;; what `Buffer-menu-beginning' is for - and `n' walks down a line at a
@@ -1914,8 +1935,8 @@
                            (list-buffers-noselect))
         (*current-buffer* (get-buffer "*Buffer List*"))
         ;; `s' marks the buffer on this line for saving, `x' does it
-        (dispatch-ncurses-event frame #\s)
-        (dispatch-ncurses-event frame #\x)
+        (dispatch-input-event frame #\s)
+        (dispatch-input-event frame #\x)
         (list (call-with-input-file "/tmp/bm-save.txt"
                 (lambda (port)
                   (let loop ((acc '()))
@@ -1990,7 +2011,7 @@
                    (*last-command* #f)
                    (*pending-undo-list* #f)
                    (*last-change-was-undo* #f))
-      (for-each (lambda (ev) (dispatch-ncurses-event frame ev)) evs)
+      (for-each (lambda (ev) (dispatch-input-event frame ev)) evs)
       (list (text-editor-to-string mb-ed)
             (text-editor-to-string ed)
             (frame-message frame)))))
@@ -2340,7 +2361,7 @@
       (thunk frame ed))))
 
 (define (keys! frame . evs)
-  (for-each (lambda (ev) (dispatch-ncurses-event frame ev)) evs))
+  (for-each (lambda (ev) (dispatch-input-event frame ev)) evs))
 
 (define C-SPC #\nul)   ; C-SPC and C-@ are the same byte, and both are NUL
 

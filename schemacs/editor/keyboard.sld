@@ -37,20 +37,17 @@
     ;; reached.
     (only (guile) format string-index)
     (prefix (schemacs keymap) km:)
-    ;; Only the names used: guile-ncurses exports a `define-key\' of its
-    ;; own, which would collide with the keymap library's.
-    ;; Decoding a raw event into a keymap path is the terminal driver's
-    ;; business now; this loop reads what it decoded.
-    (only (schemacs editor term) ncurses-key->keymap-path)
     (only (schemacs editor engine)
           text-editor-deactivate-mark set!text-editor-deactivate-mark!)
     (only (schemacs editor command)
           command-interactive-spec command-record-of command-type? defcommand
           run-command)
-    ;; Reading a key is the display's job - `getch' and its timeout
-    ;; belong to the terminal driver, and this loop calls through the
+    ;; Reading a key, and asking the display what it means, is the
+    ;; display's job - `getch', its timeout and the terminal's own key
+    ;; table all belong to the driver, and this loop calls through the
     ;; interface.
-    (only (schemacs editor dispnew) current-display read-input-event)
+    (only (schemacs editor dispnew)
+          current-display key-event->keymap-path read-input-event)
     (only (schemacs editor frame)
           *current-frame* frame-keymap-state
           frame-message frame-message-expired?
@@ -83,13 +80,14 @@
    ;; keymap)''s, and a library that both imports and exports a name gives
    ;; its importers two of it.
    *recursive-edit-exit*
+   *unread-command-events*
    abort-recursive-edit
    command-loop
    dispatch-key-event
-   dispatch-ncurses-event
+   dispatch-input-event
    event-loop
    exit-recursive-edit
-   ncurses-key->keymap-path
+   read-key-event
    recursive-edit
    report-command-error!
    signal-quit
@@ -103,6 +101,15 @@
     ;; `*esc-pending*' is keyboard.c's own state (its meta-prefix
     ;; resolution), which is why it lives here and not on the frame.
     (define *esc-pending* (make-parameter #f))
+
+    (define *unread-command-events* (make-parameter '()))
+    ;; ^ GNU Emacs's `unread-command-events': events put back on the
+    ;; input, which the next read answers before it asks the display.
+    ;; isearch pushes the key that ended a search onto it so the command
+    ;; loop runs that key, which is what `isearch-other-control-char'
+    ;; does in `isearch.el'. It is keyboard.c's variable - the read's
+    ;; first step is `read_char''s - which is why it is here and not on
+    ;; the display.
 
     (define (dispatch-action frame action)
       ;; Run an action reached by a key lookup. The pending prefix
@@ -267,13 +274,13 @@
                 (set!frame-keymap-state
                  frame (and result state)))))))
 
-    (define (dispatch-ncurses-event frame ev)
-      ;; Handle one ncurses key event: translate it to a keymap path and
-      ;; dispatch it, applying the Emacs ASCII protocol where ESC
-      ;; prefixes the next key with the meta modifier. Events that
-      ;; cannot be translated are reported in the echo area.
+    (define (dispatch-input-event frame ev)
+      ;; Handle one input event: ask the display what it is, and dispatch
+      ;; the key it names, applying the Emacs ASCII protocol where ESC
+      ;; prefixes the next key with the meta modifier. An event the
+      ;; display has no name for is reported in the echo area.
       ;;--------------------------------------------------------------
-      (let ((path (ncurses-key->keymap-path ev)))
+      (let ((path (key-event->keymap-path (current-display) ev)))
         (cond
          ;; ESC prefixes the next key with the meta modifier
          ((and (char? ev) (char=? ev #\esc))
@@ -352,6 +359,26 @@
       ;;--------------------------------------------------------------
       (or (char? ev) (integer? ev)))
 
+    (define (read-key-event timeout)
+      ;; Read one input event for the command loop, TIMEOUT milliseconds
+      ;; allowed - a negative TIMEOUT blocks. An event put back on
+      ;; `*unread-command-events*' is answered first, which is how the
+      ;; loop runs a key a command gave back to it; otherwise the display
+      ;; is asked for one. GNU Emacs's `read_char' takes the same first
+      ;; step.
+      ;;
+      ;; This is the read every key comes through, whatever asked for it:
+      ;; the command loop, isearch's own reading, and the minibuffer's
+      ;; y-or-n question all call it, so a pushed-back key reaches
+      ;; whichever of them reads next.
+      ;;--------------------------------------------------------------
+      (let ((unread (*unread-command-events*)))
+        (if (null? unread)
+            (read-input-event (current-display) timeout)
+            (begin
+              (*unread-command-events* (cdr unread))
+              (car unread)))))
+
     (define (command-loop frame)
       ;; Read key events and dispatch them, until something leaves this
       ;; level with `exit-recursive-edit' - or, at the outermost level,
@@ -383,7 +410,7 @@
                                  (prefix-echo-pending?))
                              message-read-timeout
                              -1)))
-             (let ((ev (read-input-event (current-display) want)))
+             (let ((ev (read-key-event want)))
                  (cond
                   ;; Nothing to read, with a message pending that times
                   ;; out: take the message down once its time is up and
@@ -405,13 +432,13 @@
                          (set! drawn? #t)))
                      (when drawn? (render! frame))))
                   ;; Nothing to read on a *blocking* read is the end of
-                  ;; input - guile-ncurses answers #f for that too - so
-                  ;; leave the editor.
+                  ;; input - the read answers #f for that too - so leave
+                  ;; the editor.
                   ((not (key-event? ev))
                    (let ((quit (frame-quit-cont frame)))
                      (when quit (quit 'eof))))
                   (else
-                   (dispatch-ncurses-event frame ev)
+                   (dispatch-input-event frame ev)
                    (render! frame))))
                (loop)))))))
 

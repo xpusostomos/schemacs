@@ -27,15 +27,13 @@
     ;; search that reads a match: "Unbound variable: caddr" at run time,
     ;; which is the class of bug this project keeps meeting.
     (only (scheme cxr) caddr cadddr)
-    ;; isearch reads its keys itself, so it needs the terminal - and only
-    ;; these three names of it. Guile-ncurses exports a `define-key' of its
-    ;; own, so importing the whole module would put that name in the same
-    ;; library as `(schemacs editor keymap)'s, and the winner would be
-    ;; whichever import came last.
-    ;; A key in the search is read from the terminal driver, as the
-    ;; prompt's keys are - the raw character, not an event for the
-    ;; keymap (isearch reads what is typed itself).
-    (only (schemacs editor term) tty-read-char tty-unget-event!)
+    ;; isearch reads its keys itself, but through the command loop's read:
+    ;; a key is whatever `read-key-event' answers, which is the display's
+    ;; event when nothing was pushed back and an event put back on
+    ;; `*unread-command-events*' when something was. Reading through it is
+    ;; what lets the search give the key that ended it back to the loop.
+    (only (schemacs editor keyboard)
+          *unread-command-events* read-key-event)
     ;; `define-key' and the global map: the keys C-s and C-r are stated
     ;; here, beside the commands they run.
     (only (schemacs editor keymap)
@@ -197,7 +195,7 @@
            (isearch-message pattern direction success? wrapped? case-fold?
                             (text-editor-get-cursor ed) opoint))
           (render! frame)
-          (let ((ev (tty-read-char)))
+          (let ((ev (read-key-event -1)))
             (cond
              ;; ---- keys that end the search ----
              ((and (char? ev) (char=? ev #\return))          ; isearch-exit
@@ -289,7 +287,11 @@
               (*search-pattern* #f)
               (*search-highlight* #f)
               (set!frame-message frame "")
-              (tty-unget-event! ev))
+              ;; Give the key back to the command loop to run, which is
+              ;; what pushes it onto `unread-command-events' - Emacs's
+              ;; `isearch-other-control-char' does the same, the loop's
+              ;; read answering a pushed-back event before the display's.
+              (*unread-command-events* (cons ev (*unread-command-events*))))
              ;; anything else (a keypad key, end of input) is not an
              ;; answer to the search
              (else

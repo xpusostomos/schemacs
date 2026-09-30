@@ -31,6 +31,9 @@
    draw-window-cursor!
    flush-display!
    read-input-event
+   key-event->keymap-path
+   suspend-display!
+   resume-display!
    realize-face
    screen-size
    display-color-cells
@@ -94,6 +97,25 @@
     ;; milliseconds - a negative TIMEOUT blocks. An event's meaning is
     ;; the display's business; a keyboard reads a char, a mouse a
     ;; button. `(read-input-event display timeout)'.
+
+    (define-generic key-event->keymap-path)
+    ;; What this display says a raw event is, as a key sequence path: a
+    ;; list of modifier symbols and characters, or #f when the display
+    ;; has no name for it. The display's own key table answers, because
+    ;; only the display knows what its codes mean - the terminfo/termcap
+    ;; function-key table term.c builds from `struct fkey_table keys[]'
+    ;; and turns into `input-decode-map', which keyboard.c's `read_char'
+    ;; then applies. `(key-event->keymap-path display event)'.
+
+    (define-generic suspend-display!)
+    ;; Hand the display back to whatever is around it, so the editor
+    ;; can be stopped - and `resume-display!' take it again. Emacs's
+    ;; `Fsuspend_tty' / `Fresume_tty', which `suspend-frame' calls.
+    ;; `(suspend-display! display)'.
+
+    (define-generic resume-display!)
+    ;; Take the display back after `suspend-display!'.
+    ;; `(resume-display! display)'.
 
     (define-generic realize-face)
     ;; The display's token for a face whose realized attributes are
