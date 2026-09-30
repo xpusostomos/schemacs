@@ -291,8 +291,14 @@
     (define-method (update-window-end! (d <tty-display>))
       #t)
 
-    (define-method (draw-window-cursor! (d <tty-display>) row column)
+    (define-method (draw-window-cursor! (d <tty-display>) row column cells)
       ;; The one terminal cursor, put where input shows itself going.
+      ;;
+      ;; CELLS is ignored: the cursor is the terminal's own, and a
+      ;; terminal draws a cursor over a double-width character two cells
+      ;; wide without being told - it knows the character there. There is
+      ;; nothing to move it to but the character's first cell, which is
+      ;; COLUMN.
       ;;--------------------------------------------------------------
       (move (stdscr) row column))
 

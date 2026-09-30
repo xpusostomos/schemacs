@@ -20,6 +20,11 @@ departed from real emacs, and fix that departure. If you start improvising fixes
 you'll get subtley different behavior that will manifest itself later down the track. 
 That's not good. 
 
+There are two front ends, the ncurses one and the gtk one. That makes it 
+necessary to be very careful when you are fixing a bug to make sure you fix it
+at the right level of abstraction or you risk fixing one front end and breaking
+the other one, or at least only fixing one when maybe it should have been both.
+
 
 - `tools/syntax-check.scm` — after ANY scripted edit to a machinery
   `.scm` file, run `guile -s tools/syntax-check.scm <files>`: it runs
@@ -199,6 +204,49 @@ in `../Hyprscheme` but was missing here; it is restored.
 Name note: the capital `B` is right. `lisp/buff-menu.el` names everything
 `Buffer-menu-*`, unlike the lowercase prefix nearly every other Emacs file uses.
 Our library mirrors it on purpose.
+
+## Driving a running editor: the REPL back door
+
+**Use this before reaching for a keyboard.** A running editor can be read and
+poked from outside, in its own thread, with its own state:
+
+    SCHEMACS_REPL=37146 ./seg FILE &
+    tools/repl.py -m '(schemacs editor xdisp)' '(render! (*current-frame*))'
+
+`SCHEMACS_REPL` names a port; `main-gtk.scm` / `main-ncurses.scm` open Guile's
+REPL server there if it is set, and nothing in the editor proper knows the back
+door exists. `tools/repl.py` speaks to it (`-m MODULE` imports first;
+expressions evaluate in `(guile-user)`). It answers with the process's *real*
+state, so `(buffer-list)`, `(*current-frame*)`, a buffer's text and its mark are
+all the live values, and `(render! f)` redraws for real. `pgtk-write-screenshot!`
+writes what the window is showing to a PNG, so pixels can be checked too.
+
+It is the **cooperative** server (`(system repl coop-server)`), not
+`guile --listen`, and that is not a detail: `--listen` runs the REPL in a thread
+of its own, `make-parameter` makes a fluid, and **a fluid binding is
+thread-local** - so that thread sees the *default* of everything the editor set
+with `parameterize`. Through `--listen`, `(*current-frame*)` is `#f` and
+`(buffer-list)` is empty, which is no use at all. The cooperative server
+evaluates in the thread that polls it, and the editor polls where it waits:
+`pgtk-read-event`'s loop (so a windowed editor answers while idle) and the
+command loop in `keyboard.sld` (so a terminal one answers between keys - its
+read blocks in `getch` and there is nothing else to hang it on). Both calls are
+no-ops until `start-repl!` has run.
+
+**Why not drive the GTK backend with `wtype` and `grim`.** A keyed run goes to
+whichever window the compositor has focused, and that is not necessarily the
+editor. This was tried here: a run "proved" the region worked, and a later run
+showed the focused window was a terminal - the keys had gone to the terminal and
+the screenshot was of something else. A screenshot of the wrong window looks
+exactly like evidence, which makes the whole method worse than useless. The
+compositor is also unnecessary: `dispatch-input-event` takes the very integer
+the backend produces for a key, so the key path can be driven exactly, with no
+compositor in it at all:
+
+    (dispatch-input-event f (+ #x20 (* 4 (expt 2 32))))   ; the GTK C-SPC
+
+A `,q` recovers from an error's nested prompt; `tools/repl.py` does that
+automatically on the next call.
 
 ## Environment gotchas that keep biting
 

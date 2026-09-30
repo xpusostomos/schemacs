@@ -12,6 +12,18 @@
 ;; surface into its own public interface, so importing it wholesale
 ;; would shadow core bindings here.
 (import (only (schemacs ui platform gtk) main-gtk))
+(import (only (schemacs repl) start-repl!))
+(import (only (guile) getenv string->number))
+
+;; A back door, off unless asked for. `SCHEMACS_REPL' names a port and the
+;; editor opens Guile's cooperative REPL server on it, so a running editor
+;; can be read and poked through `tools/repl.py' - see `schemacs/repl.sld'
+;; for why it is the cooperative server and not `--listen', and `seg' for
+;; how it is usually started. Set here rather than in the editor so that
+;; nothing in the editor proper knows the back door exists.
+(let ((port (getenv "SCHEMACS_REPL")))
+  (when port
+    (start-repl! (string->number port))))
 
 (let ((args (if (> (length (command-line)) 1)
                 (cdr (command-line))

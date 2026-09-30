@@ -73,6 +73,9 @@
           undo undo-redo update-prefix!)
     ;; `render!' after every key: the loop is what drives the display.
     (only (schemacs editor xdisp) render!)
+    ;; The development back door, which the command loop gives its turn
+    ;; between keys. A no-op unless `SCHEMACS_REPL' opened it.
+    (only (schemacs repl) poll-repl!)
     )
 
   (export
@@ -401,6 +404,13 @@
            ;; after a key is typed looks like nothing happened
            (render! frame)
            (let loop ()
+             ;; Give the development REPL a turn before waiting for a key.
+             ;; A no-op unless `SCHEMACS_REPL' opened it. A terminal's read
+             ;; blocks in `getch' with nothing to hang the poll on, so
+             ;; between keys is the most a terminal can offer; the GTK
+             ;; display polls in its own loop, where it is idle far more
+             ;; often (`pgtk.sld''s `pgtk-read-event').
+             (poll-repl!)
              (let ((want (if (or (frame-message-expiry frame)
                                  ;; a prefix argument owes the echo
                                  ;; area a description, and it is owed

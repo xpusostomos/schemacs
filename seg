@@ -3,13 +3,60 @@
 # se - the schemacs editor
 #--------------------------
 
-DIR=$(dirname $0)
+DIR=$(cd "$(dirname "$0")" && pwd)
 export GUILE_WARN_DEPRECATED=no
 # The newer guile-cairo, built into the tree: it has the pointer bridge
 # (cairo-pointer->context) that the system package predates. First on the
 # path so it wins over the installed one.
+CAIRODIR=$DIR/.guile-cairo/share/guile/site/3.0
+
+# Fail loudly if the bridge is not reachable, rather than falling back to
+# the system guile-cairo and dying later with an unbound variable at the
+# first repaint - which reads as a bug in the editor, three frames away
+# from the missing directory that caused it. The check imports `(cairo)`
+# exactly as the driver does, from exactly this load path, so it tests the
+# thing it claims to test rather than the presence of a directory.
+if ! guile --no-auto-compile -L "$CAIRODIR" -c \
+     '(import (cairo)) (exit (if (defined? (quote cairo-pointer->context)) 0 1))'
+then
+    cat >&2 <<EOF
+seg: cairo-pointer->context is not available.
+
+  Looked first in: $CAIRODIR
+
+That directory is a *built copy* of a newer guile-cairo than the packaged
+one; it is what wraps the cairo context GTK hands the draw signal. Build
+it from the guile-cairo checkout (it is not committed):
+
+  cd $DIR/../guile-cairo && ./autogen.sh && ./configure --prefix=$DIR/.guile-cairo && make install
+
+See GTK-PLAN.md, "Rendering: guile-gi's cairo gap".
+EOF
+    exit 1
+fi
+
+# A back door, off unless asked for: SCHEMACS_REPL names a port, and
+# `main-gtk.scm' opens Guile's *cooperative* REPL server on it inside this
+# process. Then a running editor - with a window up, blocked in its own
+# event loop - can be asked what it is doing and told to do something else:
+
+#     SCHEMACS_REPL=37146 ./seg FILE &
+#     tools/repl.py -m '(schemacs editor xdisp)' '(render! (*current-frame*))'
+
+# For the GTK backend this is the *only* reliable way to drive it. The
+# alternative is a compositor - `wtype` to type at the window and `grim` to
+# look at it - and a keyed run goes to whichever window the compositor has
+# focused, which is not necessarily this one. A silent mis-focus then
+# produces a screenshot of something else that looks exactly like evidence,
+# and one was believed here before the mis-focus was noticed. A REPL cannot
+# mis-focus: it is the process. See AGENTS.md.
+
+# It is the *cooperative* server and not `guile --listen`, which would put
+# the REPL in a thread of its own - and a parameter binding is thread-local,
+# so that thread sees the default of everything the editor parameterized.
+# See the header of `schemacs/repl.sld`.
+
 exec guile --r7rs \
-     -L $DIR/.guile-cairo/share/guile/site/3.0 \
+     -L "$CAIRODIR" \
      -L $DIR \
      -s $DIR/main-gtk.scm "$@"
-

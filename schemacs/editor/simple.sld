@@ -1490,10 +1490,26 @@
     (define-key *default-keymap* (list (list 'ctrl #\m)) insert-newline)
     (define-key *default-keymap* (list (list 'ctrl #\j)) insert-newline)
     (define-key *default-keymap* (list (list 'ctrl #\g)) keyboard-quit)
-    ;; The mark. C-SPC and C-@ are the *same* key event on a terminal -
-    ;; both send the NUL byte - which is why one binding serves both, and
-    ;; why the event translation reads NUL as `C-@'.
+    ;; The mark. GNU Emacs binds this to TWO keys, and outside a terminal
+    ;; they are not the same key at all - `bindings.el' has both lines:
+    ;;
+    ;;     (define-key global-map "\C-@" 'set-mark-command)
+    ;;     (define-key global-map [?\C- ] 'set-mark-command)
+    ;;
+    ;; The first is the NUL byte. A terminal sends NUL for either key, so
+    ;; there one binding serves; a *window system* sends a `space' keysym
+    ;; with the control modifier for C-SPC and a `at' keysym for C-@, so
+    ;; on GTK they are two separate events - and an editor with only the
+    ;; first has a `set-mark-command' that silently does nothing when
+    ;; C-SPC is pressed. That is what the GTK backend showed: the region
+    ;; tests passed because they were driven with C-@.
+    ;;
+    ;; The event translation folds NUL to `C-@' (`term.sld'), which is
+    ;; Emacs's own `(define-key function-key-map [?\C-@] [?\C-\s])' the
+    ;; other way round - Emacs folds the terminal's byte *to* the window
+    ;; system's spelling, and calls C-SPC the advertised binding.
     (define-key *default-keymap* (list (list 'ctrl #\@)) set-mark-command)
+    (define-key *default-keymap* (list (list 'ctrl #\space)) set-mark-command)
     (define-key *default-keymap* (list (list 'ctrl #\x) #\h) mark-whole-buffer)
     ;; The named keys a terminal sends for its arrow, home and end keys:
     ;; GNU Emacs binds these in `global-map' too, and to the same

@@ -98,8 +98,16 @@
 
     (define-generic draw-window-cursor!)
     ;; Put the display cursor at pixel ROW, COLUMN (frame coordinates),
-    ;; which is where input shows itself going. Emacs's
-    ;; `draw_window_cursor'. `(draw-window-cursor! display row column)'.
+    ;; CELLS cells wide, which is where input shows itself going. Emacs's
+    ;; `draw_window_cursor'. `(draw-window-cursor! display row column
+    ;; cells)'.
+    ;;
+    ;; CELLS is how wide the cursor is drawn and it is the width of the
+    ;; character at point: a cursor over a double-width character is two
+    ;; cells wide, as Emacs's is - it sits on the glyph, and the glyph is
+    ;; two cells. A display whose cursor is the system's - a terminal's,
+    ;; which the terminal draws itself at whatever width it likes - may
+    ;; ignore it.
 
     (define-generic flush-display!)
     ;; Everything drawn since the last flap is now what the display

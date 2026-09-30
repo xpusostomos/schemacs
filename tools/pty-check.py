@@ -329,6 +329,38 @@ def check_mode_line_eol():
     return []
 
 
+def check_wide_columns():
+    """A wide character takes two columns, and the mode line says so.
+
+    A CJK character is one character and two screen columns.  The editor
+    draws the text correctly either way - the terminal knows the real
+    width - so the visible symptom of counting characters instead of
+    columns is a *position* being wrong, and the mode line's column
+    indicator (`%c', Emacs's `(current-column)') is the one that is
+    readable as text.
+
+    Point is put after the wide character (two C-f), so the screen column
+    is 3: `x' is one cell and the wide character is two.  Counting
+    characters would say 2.  The same line is checked at the start, where
+    both answers are 0, so that a mode line which never reported a column
+    at all could not pass.
+    """
+    path = "/tmp/pty-check-wide.txt"
+    with open(path, "w") as port:
+        port.write("x中y|Z\n")
+    problems = []
+    screen = screen_of(drive([], path))
+    if "L1 C0" not in screen:
+        problems.append("the mode line did not start at column 0: %s"
+                        % [row for row in screen.split("\n") if "L1" in row])
+    screen = screen_of(drive([C_f, C_f], path))
+    if "L1 C3" not in screen:
+        problems.append("after a wide character the column is not 3 "
+                        "(one cell for x, two for the CJK character): %s"
+                        % [row for row in screen.split("\n") if "L1" in row])
+    return problems
+
+
 def check_m_x():
     """M-x reads a command name, completes it, and runs it.
 
@@ -1335,6 +1367,7 @@ CHECKS = {
     "region-highlight": check_region_highlight,
     "continuation": check_continuation,
     "mode-line-eol": check_mode_line_eol,
+    "wide-columns": check_wide_columns,
     "kill-ring": check_kill_ring,
     "split": check_split,
 }

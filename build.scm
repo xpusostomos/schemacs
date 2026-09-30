@@ -43,6 +43,8 @@
     (schemacs weak)
     (schemacs editor engine)
     (schemacs editor frame)
+    (schemacs editor characters)
+    (schemacs editor character)
     (schemacs editor disp-table)
     (schemacs editor files)
     (schemacs editor simple)

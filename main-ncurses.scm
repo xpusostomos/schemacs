@@ -11,6 +11,17 @@
 (setenv "GUILE_WARN_DEPRECATED" "no")
 
 (import (schemacs ui platform ncurses))
+(import (only (schemacs repl) start-repl!))
+(import (only (guile) getenv string->number))
+
+;; The development back door, the same one `main-gtk.scm' opens and for
+;; the same reason - see `schemacs/repl.sld'. Here the command loop is the
+;; only thing that can give the server a turn: a terminal's read blocks in
+;; `getch', so this REPL answers between keys rather than while idle. It is
+;; a no-op unless `SCHEMACS_REPL' names a port.
+(let ((port (getenv "SCHEMACS_REPL")))
+  (when port
+    (start-repl! (string->number port))))
 
 (let ((args (if (> (length (command-line)) 1)
                 (cdr (command-line))

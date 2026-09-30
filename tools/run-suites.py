@@ -23,8 +23,10 @@ import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SUITES = [
+    'schemacs/editor/character-tests.scm',
     'schemacs/editor/engine-tests.scm',
     'schemacs/editor/faces-tests.scm',
+    'schemacs/editor/pgtk-tests.scm',
     'schemacs/apps/ncurses-editor-tests.scm',
 ]
 

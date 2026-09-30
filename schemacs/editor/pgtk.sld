@@ -20,8 +20,9 @@
   ;;
   ;; Drawing is done with guile-cairo, not guile-gi: guile-gi binds no
   ;; cairo primitives (no `move_to', `fill' or `paint'), while guile-cairo
-  ;; has them all. The frame is drawn into an image surface we own, and
-  ;; handed to GTK as a GdkPixbuf through a GtkImage.
+  ;; has them all. The frame is drawn into an image surface we own; when
+  ;; Gtk asks the drawing area for a repaint we paint that surface into
+  ;; the context it hands us, wrapped as a guile-cairo context.
   ;;
   ;; Positions are pixels, and a character is one pixel - the same
   ;; degenerate case a text terminal is (`term.sld''s `column-width' is
@@ -34,8 +35,7 @@
     (scheme base)
     (scheme char)
     (only (scheme write) display write)
-    (only (guile) catch resolve-module force-output ash logand open-file call-with-port
-          inexact->exact round getenv
+    (only (guile) catch ash logand inexact->exact round
           get-internal-real-time internal-time-units-per-second)
     (oop goops)
     ;; The drawing primitives, which guile-gi does not bind.
@@ -54,10 +54,9 @@
           init-check! <GtkWindow> <GtkDrawingArea> <GtkContainer> <GtkWidget>
           widget:show-all widget:hide widget:destroy widget:queue-draw
           widget:can-focus widget:grab-focus widget:set-size-request
-          widget:hexpand widget:vexpand image:pixel-size window:resizable
-          widget:get-scale-factor window:resize
+          widget:hexpand widget:vexpand window:resizable
+          window:resize
           container:add
-          symbol->colorspace
           connect main-iteration-do? set-prgname set-program-class
           modifier-type->number widget:get-allocated-width
           widget:get-allocated-height
@@ -74,14 +73,28 @@
     ;; `with-terminal' does.
     (only (schemacs editor faces)
           *display-color-cells* *display-type* *frame-background-mode*
-          face-list face-spec-recalc)
+          *window-system* face-list face-spec-recalc)
     (only (schemacs editor xfaces) attribute-value)
+    ;; How many cells a character takes - a CJK ideograph is one character
+    ;; and two cells, so a run is not `string-length' wide.
+    (only (schemacs editor disp-table) char-display-width)
+    ;; The development back door. `poll-repl!' is a no-op unless
+    ;; `main-gtk.scm' was asked to open it; this loop is the only place a
+    ;; windowed editor is ever idle, so it is where the REPL gets its turn.
+    (only (schemacs repl) poll-repl!)
     ;; A colour *name* means what `term/tty-colors.el' says it means.
     (only (schemacs editor tty-colors) tty-color-standard-values))
 
   (export
    <pgtk-display>
    with-gtk-display
+   ;; What opening a display does to the face machinery, so a test can do
+   ;; it to a display with no window and then read what it draws - which
+   ;; is how the *colour* of a face is checked without an eye on it.
+   ;; `term.sld''s `initialize-display-faces!' is the same thing for a
+   ;; terminal, and is private for the same reason: only opening a
+   ;; display should call it.
+   initialize-pgtk-faces!
    ;; The blocking read, exported for tests that drive it without a
    ;; window; nothing in the editor uses it by name.
    pgtk-read-event
@@ -299,41 +312,29 @@
 
     (define-class <pgtk-display> (<display>)
       (window  #:init-value #f #:accessor pgtk-window)
-      (image   #:init-value #f #:accessor pgtk-image)
+      ;; The drawing area: the widget Gtk asks for a repaint, and the
+      ;; widget whose allocation is the size the display draws at.
+      (area    #:init-value #f #:accessor pgtk-area)
       (surface #:init-value #f #:accessor pgtk-surface)
       (cr      #:init-value #f #:accessor pgtk-cr)
       ;; The grid, in character cells: what the redisplay thinks the
       ;; display is, and what `screen-size' answers.
       (columns #:init-value 80 #:accessor pgtk-columns)
       (rows    #:init-value 24 #:accessor pgtk-rows)
-      ;; The allocation in PIXELS, which is what the surface is made the
-      ;; size of. It is not the grid size: the grid is the allocation
-      ;; divided by a cell, so the pixel size is the larger of the two,
-      ;; and a pixbuf the same size as the widget is one Gtk will not
-      ;; scale. Making the surface the *grid* size instead leaves up to a
-      ;; cell of remainder, and Gtk stretches the pixbuf to fill it.
+      ;; The allocation in PIXELS to use when there is no widget to ask -
+      ;; a display opened without a window, as a test does. With a widget,
+      ;; `pgtk-allocation' asks it and these are never consulted.
       (pixel-width #:init-value 720 #:accessor pgtk-pixel-width)
       (pixel-height #:init-value 432 #:accessor pgtk-pixel-height)
       ;; Input events the signal handler has collected.
       (queue   #:init-value '() #:accessor pgtk-queue)
-      ;; The rendering surface's buffer, so it is not collected.
-      (buffer  #:init-value #f #:accessor pgtk-buffer)
-      (surface-size #:init-value #f #:accessor pgtk-surface-size)
       ;; The last allocation a redraw was asked for, so an unchanged one
       ;; does not ask again - which it otherwise does on every frame,
       ;; and redraws forever.
       (last-allocation #:init-value #f #:accessor pgtk-last-allocation)
       ;; The pixel size the surface was last DRAWN at, so the read can
       ;; tell when what is on screen no longer matches the window.
-      (drawn-size #:init-value #f #:accessor pgtk-drawn-size)
-      ;; Gtk's scale factor for this window. A GtkWidget's allocation is in
-      ;; LOGICAL pixels while a GdkPixbuf is in DEVICE pixels, so a buffer
-      ;; built at the allocation's size is the wrong size to hand Gtk -
-      ;; it scales it, and that scaling is what distort the text. The
-      ;; surface is therefore made at `allocation * scale' device pixels,
-      ;; with the drawing scaled to match, so one logical cell is drawn at
-      ;; the resolution the display actually has.
-      (scale #:init-value 1 #:accessor pgtk-scale))
+      (drawn-size #:init-value #f #:accessor pgtk-drawn-size))
 
     (define (pgtk-enqueue! d ev)
       ;; Put an input event on the display's queue, where the blocking
@@ -396,9 +397,12 @@
     ;; this display's that the key decoder turns into `(resize)'.
 
     (define (pgtk-ensure-surface! d)
-      ;; Make the drawing surface the size the grid now is. A surface is
-      ;; made when the display opens, and again after a resize - the old
-      ;; one is the wrong shape and would clip.
+      ;; Make the drawing surface the size the WIDGET is, in pixels - not
+      ;; the size of the grid. The grid is the allocation divided by a
+      ;; cell, so it is always up to a cell smaller; the surface is what
+      ;; is painted into the widget, so it is the larger of the two. A
+      ;; surface is made when the display opens, and again after a resize,
+      ;; because the old one is the wrong shape and would clip.
       ;;--------------------------------------------------------------
       (let* ((raw (or (pgtk-allocation d)
                       (cons (pgtk-pixel-width d) (pgtk-pixel-height d))))
@@ -406,27 +410,15 @@
              ;; size with "invalid value (typically too big)", which
              ;; describes the number's type and not its magnitude, and
              ;; sends you hunting for a size that was never the problem.
-             (logical (cons (inexact->exact (round (car raw)))
-                            (inexact->exact (round (cdr raw)))))
-             (scale (max 1 (inexact->exact (round (pgtk-scale d)))))
-             (size logical))
-        (pgtk-trace 'surface-size 'grid (pgtk-cells d) 'logical logical 'scale scale
-                    'win (widget:get-allocated-width (pgtk-window d))
-                    (widget:get-allocated-height (pgtk-window d)))
-        (unless #f
-          (let* ((surface (cairo-image-surface-create 'argb32
-                                                      (car size) (cdr size)))
-                 (cr (cairo-create surface)))
-            (cairo-select-font-face cr "monospace" 'normal 'normal)
-            (cairo-set-font-size cr *font-size*)
-            (pgtk-trace 'font 'assumed (cons *cell-width* *cell-height*)
-                        'advance-height (cairo-text-extents cr "M")
-                        'font-extents (cairo-font-extents cr)
-                        'surface (car size) (cdr size)
-                        'scale (widget:get-scale-factor (pgtk-window d)))
-            (set! (pgtk-surface d) surface)
-            (set! (pgtk-cr d) cr)
-            (set! (pgtk-surface-size d) size)))))
+             (size (cons (inexact->exact (round (car raw)))
+                         (inexact->exact (round (cdr raw))))))
+        (let* ((surface (cairo-image-surface-create 'argb32
+                                                    (car size) (cdr size)))
+               (cr (cairo-create surface)))
+          (cairo-select-font-face cr "monospace" 'normal 'normal)
+          (cairo-set-font-size cr *font-size*)
+          (set! (pgtk-surface d) surface)
+          (set! (pgtk-cr d) cr))))
 
     (define (pgtk-resize! d width height)
       ;; Take the window's new size in pixels as the grid's new size, and
@@ -446,17 +438,15 @@
       ;; What the widget is actually allocated, in pixels, asked for each
       ;; time rather than remembered.
       ;;
-      ;; Remembering is what let the text stretch: the stored size came
-      ;; from a `size-allocate' signal, and between the window changing
-      ;; and that signal being handled - or when one never came - the
-      ;; pixbuf and the widget disagreed, and Gtk scales a pixbuf to fill
-      ;; the widget it is in. Asking the widget means the two cannot
-      ;; disagree.
+      ;; Asking rather than remembering is what keeps the surface and the
+      ;; widget from disagreeing: a size remembered from a `size-allocate'
+      ;; signal is stale between the window changing and the signal being
+      ;; handled, or when no signal comes at all.
       ;;--------------------------------------------------------------
-      (let ((image (pgtk-image d)))
-        (if image
-            (let ((w (widget:get-allocated-width image))
-                  (h (widget:get-allocated-height image)))
+      (let ((area (pgtk-area d)))
+        (if area
+            (let ((w (widget:get-allocated-width area))
+                  (h (widget:get-allocated-height area)))
               (if (and (> w 0) (> h 0)) (cons w h) #f))
             #f)))
 
@@ -469,13 +459,6 @@
             (cons (max 1 (quotient (car size) *cell-width*))
                   (max 1 (quotient (cdr size) *cell-height*)))
             (cons (pgtk-columns d) (pgtk-rows d)))))
-
-    (define (pgtk-trace . args)
-      ;; Append a line to the trace file, for diagnosing what Gtk is
-      ;; actually told versus what it is drawn at.
-      ;;--------------------------------------------------------------
-      (call-with-port (open-file "/tmp/proto/trace.txt" "a")
-        (lambda (port) (write args port) (newline port))))
 
     (define (pgtk-now-ms)
       (quotient (* 1000 (get-internal-real-time))
@@ -522,8 +505,11 @@
              ((and deadline (>= (pgtk-now-ms) deadline))
               #f)
              (else
-              ;; Nothing yet. Process one event, waiting only as long as
-              ;; the deadline allows.
+              ;; Nothing yet. Give the development REPL a turn - a no-op
+              ;; unless `SCHEMACS_REPL' opened it, and the only place a
+              ;; windowed editor is ever idle - then process one event,
+              ;; waiting only as long as the deadline allows.
+              (poll-repl!)
               (if deadline
                   (catch #t
                     (lambda () (main-iteration-do? #f))
@@ -575,35 +561,75 @@
     (define-method (update-window-begin! (d <pgtk-display>)) #t)
     (define-method (update-window-end! (d <pgtk-display>)) #t)
 
+    (define (text-cells text)
+      ;; How many cells TEXT occupies in this editor's model: the sum of
+      ;; its characters' widths.
+      ;;
+      ;; `char-display-width' and not `string-length', which is the whole
+      ;; reason a run cannot simply be handed to cairo: a CJK ideograph is
+      ;; one character and two cells, so a run drawn as one string - or a
+      ;; background rectangle measured by its length - is one cell short
+      ;; for each of them.
+      ;;--------------------------------------------------------------
+      (let loop ((i 0) (col 0))
+        (if (>= i (string-length text))
+            col
+            (loop (+ i 1)
+                  (+ col (char-display-width (string-ref text i) col))))))
+
     (define-method (write-glyphs! (d <pgtk-display>) text y x token)
-      ;; Draw TEXT at cell (X, Y). The surface is ours, so the cell grid
-      ;; is exact and there is no clipping to leave to anyone else.
+      ;; Draw TEXT at cell (X, Y), a *cluster* at a time.
+      ;;
+      ;; The surface is ours, so the cell grid is exact and there is no
+      ;; clipping to leave to anyone else - but the grid is made of cells
+      ;; and a string is made of characters, and the two stop agreeing at
+      ;; the first wide character. So each cluster is placed at its own
+      ;; cell column, and the column advances by the character's width
+      ;; rather than by one. This is what the terminal does for us: it
+      ;; advances by the width it knows the character has.
+      ;;
+      ;; A cluster is a character plus the zero-width characters after it
+      ;; - a letter and its combining accent - which are drawn together so
+      ;; that the accent lands on the letter and not on an empty cell.
       ;;--------------------------------------------------------------
       (let ((cr (pgtk-cr d))
             (foreground (face-token-foreground token))
             (background (face-token-background token)))
         (when cr
           ;; The run's own background first, so a face that paints cells
-          ;; rather than glyphs - the mode line, the region - is drawn.
+          ;; rather than glyphs - the mode line, the region - is drawn,
+          ;; and as many *cells* wide as the run is.
           (when background
             (apply cairo-set-source-rgb cr background)
             (cairo-rectangle cr (cell-x x) (cell-y y)
-                             (* *cell-width* (string-length text))
+                             (* *cell-width* (text-cells text))
                              *cell-height*)
             (cairo-fill cr))
           (apply cairo-set-source-rgb cr (or foreground (list 0.0 0.0 0.0)))
-          (cairo-move-to cr (cell-x x)
-                         (+ (cell-y y) (- *cell-height* 5)))
-          (cairo-show-text cr text))))
+          (let loop ((i 0) (col 0))
+            (when (< i (string-length text))
+              (let* ((end (let scan ((j (+ i 1)))
+                            (if (and (< j (string-length text))
+                                     (= 0 (char-display-width
+                                           (string-ref text j) col)))
+                                (scan (+ j 1))
+                                j)))
+                     (c (string-ref text i)))
+                (cairo-move-to cr (cell-x (+ x col))
+                               (+ (cell-y y) (- *cell-height* 5)))
+                (cairo-show-text cr (substring text i end))
+                (loop end (+ col (char-display-width c col)))))))))
 
-    (define-method (draw-window-cursor! (d <pgtk-display>) row column)
-      ;; A filled block at the cell, drawn after the text.
+    (define-method (draw-window-cursor! (d <pgtk-display>) row column cells)
+      ;; A filled block at the cell, drawn after the text - CELLS cells
+      ;; wide, because the cursor sits on the character at point and a
+      ;; double-width character is two cells.
       ;;--------------------------------------------------------------
       (let ((cr (pgtk-cr d)))
         (when cr
           (cairo-set-source-rgb cr 0 0 0)
           (cairo-rectangle cr (cell-x column) (cell-y row)
-                           *cell-width* *cell-height*)
+                           (* *cell-width* (max 1 cells)) *cell-height*)
           (cairo-fill cr))))
 
     (define (pgtk-present! d gtk-cr)
@@ -627,27 +653,8 @@
       ;; What has been drawn becomes visible when Gtk next asks us to
       ;; paint: there is no buffer to hand over any more.
       ;;--------------------------------------------------------------
-      (let ((image (pgtk-image d)))
-        (when image (widget:queue-draw image))))
-      ;; so the shot hook can still see the surface
-      #t
-
-    (define (pgtk-shot-maybe! d surface)
-      ;; When PGTK_SHOT names a file, write each frame to it, so what the
-      ;; editor actually drew can be looked at without the compositor
-      ;; watching.
-      ;;--------------------------------------------------------------
-      (let ((path (getenv "PGTK_SHOT")))
-        (when (and path surface)
-          (let ((size (pgtk-surface-size d)))
-            (unless (equal? size (*pgtk-shot-last*))
-              (*pgtk-shot-last* size)
-              (*pgtk-shot-n* (+ 1 (*pgtk-shot-n*)))
-              (cairo-surface-flush surface)
-              (cairo-surface-write-to-png
-               surface (string-append path "-" (number->string (*pgtk-shot-n*))
-                                      "-" (number->string (car size))
-                                      "x" (number->string (cdr size)) ".png")))))))
+      (let ((area (pgtk-area d)))
+        (when area (widget:queue-draw area))))
 
     (define (pgtk-write-screenshot! d path)
       ;; Write what the display is showing to PATH as a PNG.
@@ -675,9 +682,30 @@
     (define (initialize-pgtk-faces! d)
       ;; Tell the face machinery what this display can draw, then
       ;; recompute the specs against it, as `with-terminal' does.
+      ;;
+      ;; Each of the four is the frame parameter GNU Emacs's pgtk backend
+      ;; sets, and each is a *separate* question - a face spec tests them
+      ;; in different conjuncts, so getting one wrong silently picks a
+      ;; branch written for another kind of display:
+      ;;
+      ;;   * `window-system' is `pgtk' - `pgtk_create_frame' sets it, as
+      ;;     `xfns.c' sets `x'. It is what a spec's `(type tty)' branch is
+      ;;     tested against, so leaving it #f makes every tty branch match
+      ;;     on a graphical frame: `header-line' then comes out underlined
+      ;;     and not inverse-video, which is a terminal's answer.
+      ;;   * `display-type' is `color', which is what `pgtkfns.c:2781'
+      ;;     sets explicitly - NOT the window system's name. It is what a
+      ;;     `(class color)' branch is tested against, so setting it to
+      ;;     `pgtk' makes every colour branch fail and drops the region to
+      ;;     the spec's last-resort `(#t :background "gray")' instead of
+      ;;     `lightgoldenrod2'.
+      ;;   * `display-color-cells' is the display's own answer.
+      ;;   * `frame-background-mode' is `light': this display paints the
+      ;;     default face as black on white.
       ;;--------------------------------------------------------------
+      (*window-system* 'pgtk)
       (*display-color-cells* (display-color-cells d))
-      (*display-type* 'pgtk)
+      (*display-type* 'color)
       (*frame-background-mode* 'light)
       (for-each face-spec-recalc (face-list)))
 
@@ -698,21 +726,18 @@
              (width (* columns *cell-width*))
              (height (* rows *cell-height*))
              (win (make <GtkWindow>))
-             (image (make <GtkDrawingArea>))
+             (area (make <GtkDrawingArea>))
              (d (make <pgtk-display>)))
         (set! (pgtk-window d) win)
-        (set! (pgtk-image d) image)
+        (set! (pgtk-area d) area)
         (set! (pgtk-columns d) columns)
         (set! (pgtk-rows d) rows)
         (set! (pgtk-pixel-width d) width)
         (set! (pgtk-pixel-height d) height)
-        (set! (pgtk-scale d) (widget:get-scale-factor win))
-        ;; The keys arrive here, and go on the queue the read drains.
-        ;; A toplevel window receives key events without being told to
-        ;; ask for them; setting an event mask on one crashes GTK.
-
         ;; Keys arrive here and go on the queue the read drains. The
-        ;; event is queued raw and decoded by the read.
+        ;; event is queued raw and decoded by the read. A toplevel window
+        ;; receives key events without being told to ask for them;
+        ;; setting an event mask on one crashes GTK.
         (connect win (make <signal> #:name "key-press-event")
                  (lambda (w e) (pgtk-enqueue! d e) #t))
         ;; A size is REQUESTED, not set as a default. `set-default-size'
@@ -725,41 +750,33 @@
         (window:resize win width height)
         (connect win (make <signal> #:name "size-allocate")
                  (lambda (w rect)
-                   (pgtk-trace 'allocate (widget:get-allocated-width w)
-                               (widget:get-allocated-height w))
                    (pgtk-resize! d (widget:get-allocated-width w)
                                    (widget:get-allocated-height w))
                    #t))
-        (connect win (make <signal> #:name "configure-event")
-                 (lambda (w e) (pgtk-trace 'configure) #f))
         ;; Draw again once the window has actually been mapped and
         ;; allocated: the first frame is drawn before that, and if the
-        ;; window ends up a different size the first frame's pixbuf would
-        ;; be the wrong shape - and Gtk's scaling of it is what shows as
-        ;; stretched text.
+        ;; window ends up a different size the editor should draw it
+        ;; again at the size it really is.
         (connect win (make <signal> #:name "map-event")
                  (lambda (w e) (pgtk-enqueue! d 'resize) #f))
-        ;; The image must not dictate the window's size. A GtkImage's
-        ;; natural size IS its pixbuf, and a window's minimum size comes
-        ;; from its child - so a pixbuf made the size of the allocation
-        ;; puts the window's minimum at the window's size, and the window
-        ;; can then never be made smaller. A compositor that tiles it
-        ;; smaller anyway gets a buffer it has to squash, and squashed is
-        ;; what stretched text is. A one-cell request plus expand lets the
-        ;; window be any size and gives the image the whole of it.
+        ;; The area must not dictate the window's size: a window's
+        ;; minimum size comes from its child, so a size request as large
+        ;; as the window would pin it there. A one-cell request plus
+        ;; expand lets the window be any size and gives the drawing area
+        ;; the whole of it.
         ;;--------------------------------------------------------------
-        (widget:set-size-request image 1 1)
-        (set! (widget:hexpand image) #t)
-        (set! (widget:vexpand image) #t)
+        (widget:set-size-request area 1 1)
+        (set! (widget:hexpand area) #t)
+        (set! (widget:vexpand area) #t)
         ;; Every repaint Gtk asks for is answered by painting our own
         ;; drawing into the context it gives us, at its size.
-        (connect image (make <signal> #:name "draw")
+        (connect area (make <signal> #:name "draw")
                  (lambda (w cr) (pgtk-present! d cr) #t))
-        (container:add win image)
-        ;; Key events go to the focused widget. The window's child is an
-        ;; image, which cannot take focus, so the window itself must -
-        ;; otherwise a keystroke has nowhere to be delivered and the
-        ;; editor silently never hears from the keyboard.
+        (container:add win area)
+        ;; Key events go to the focused widget. A drawing area does not
+        ;; take focus, so the window itself must - otherwise a keystroke
+        ;; has nowhere to be delivered and the editor silently never
+        ;; hears from the keyboard.
         (set! (widget:can-focus win) #t)
         (widget:show-all win)
         (widget:grab-focus win)

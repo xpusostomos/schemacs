@@ -61,8 +61,9 @@
          window-top
          window-top-line)
     (only (schemacs editor disp-table)
-         char-display-glyph current-line-display-column expand-line-display
-         line-display-offsets)
+         char-display-cursor-width char-display-width
+         current-line-display-column expand-line-display
+         expand-line-glyphs line-display-offsets)
     ;; The `face' text property, and the faces themselves. A face reaches
     ;; the display through these libraries and no others: the property
     ;; says which faces are in effect, `xfaces' merges them and folds
@@ -233,19 +234,33 @@
       ;; with a construct it does not recognise either.
       ;;--------------------------------------------------------------
       (let* ((ed (window-buffer window))
-             (at (text-editor-get-line-column ed (window-point window))))
+             (at (text-editor-get-line-column ed (window-point window)))
+             ;; The line point is on, for `%c' and `%C': Emacs's
+             ;; `current-column' is the number of *screen* columns from the
+             ;; start of the line, which is not the number of characters
+             ;; when the line holds a tab or a wide character.
+             (line (buffer-line-string ed (- (text-location-line at) 1))))
         (case spec
           ((#\%) "%")
           ((#\b) (or (text-editor-buffer-name ed) "*scratch*"))
           ((#\f) (or (text-editor-file-name ed) ""))
           ((#\l) (number->string (text-location-line at)))
-          ;; `%c' counts from zero - "the leftmost column is displayed as
-          ;; zero", which a terminal Emacs confirms: `(format-mode-line "%c")'
-          ;; at the start of a line is "0". The engine counts from one, as it
-          ;; must for a screen position, so the construct subtracts.
-          ((#\c) (number->string (- (text-location-column at) 1)))
+          ;; `%c' is GNU Emacs's `(current-column)': the *screen* column,
+          ;; counting from zero - "the leftmost column is displayed as
+          ;; zero", which a terminal Emacs confirms: `(format-mode-line
+          ;; "%c")' at the start of a line is "0". The engine's column is
+          ;; a character count, so the construct converts it through the
+          ;; line's display widths - which is what makes it 3 rather than
+          ;; 2 after a CJK character, as Emacs's is.
+          ((#\c) (number->string (if line
+                                     (display-column-of
+                                      line (- (text-location-column at) 1))
+                                     (- (text-location-column at) 1))))
           ;; `%C' is `%c' counting from one rather than zero
-          ((#\C) (number->string (text-location-column at)))
+          ((#\C) (number->string (if line
+                                     (+ 1 (display-column-of
+                                           line (- (text-location-column at) 1)))
+                                     (text-location-column at))))
           ;; `%*' is `%' read-only, `*' modified, `-' neither; `%+' is `*'
           ;; modified, `%' read-only, `-' neither; `%&' is `*' modified
           ((#\*) (if (text-editor-read-only? ed)
@@ -422,10 +437,13 @@
     (define (display-column-of line col)
       ;; The screen column at which buffer column COL of LINE is drawn,
       ;; which is where a search match has to be drawn.
+      ;;
+      ;; The prefix's *display width*, not the length of its expansion: a
+      ;; tab is several cells and a wide character is two, so the number
+      ;; of characters drawn is not the number of cells they take.
       ;;--------------------------------------------------------------
-      (string-length
-       (expand-line-display (substring line 0 (min col (string-length line)))
-                            10000)))
+      (line-display-width
+       (substring line 0 (min col (string-length line)))))
 
     ;;----------------------------------------------------------------
     ;; Faces
@@ -467,57 +485,86 @@
                         (loop (+ 1 i) start attribute acc)
                         (loop (+ 1 i) i a (cons (list start i attribute) acc)))))))))
 
+    (define (line-glyph-run glyphs offsets from to width)
+      ;; The text to write for the buffer columns [FROM, TO) of a line
+      ;; whose per-character glyphs are the vector GLYPHS and whose screen
+      ;; columns are the vector OFFSETS: `(TEXT . SCREEN-COLUMN)', or #f
+      ;; when the run starts at or past the window's WIDTH and so is not
+      ;; drawn at all.
+      ;;
+      ;; The cut is at a glyph boundary and made in *screen columns*,
+      ;; which is why this is a walk and not a `substring'. A run is a
+      ;; range of buffer characters; a character is not always one cell;
+      ;; and a glyph that would begin past the edge ends the run there -
+      ;; which is how GNU Emacs truncates a line at the window boundary.
+      ;;--------------------------------------------------------------
+      (let ((start (vector-ref offsets from)))
+        (and (< start width)
+             (let loop ((i from) (acc '()))
+               (if (or (>= i to) (>= (vector-ref offsets i) width))
+                   (cons (apply string-append (reverse acc)) start)
+                   (loop (+ i 1) (cons (vector-ref glyphs i) acc)))))))
+
     (define (draw-line! ed line-start line-string display
                         screen-row x0 width)
       ;; Draw one line of a window at SCREEN-ROW, X0, each run of
       ;; characters that share a face drawn with it. A buffer with no
       ;; properties and no active region keeps the original fast path.
+      ;;
+      ;; The run path walks the line a *character* at a time and converts
+      ;; to screen columns only for the position, because those are the
+      ;; two different things: the fast path can hand the whole display
+      ;; string over and let the display clip, but a run has to be cut in
+      ;; cells.
       ;;--------------------------------------------------------------
       (if (and (not (text-editor-text-props ed))
                (not (region-face-active? ed)))
           (write-glyphs! (current-display) display screen-row x0 #f)
-          (let ((offsets (line-display-offsets line-string)))
+          (let ((offsets (list->vector (line-display-offsets line-string)))
+                (glyphs (list->vector (expand-line-glyphs line-string))))
             (for-each
              (lambda (run)
-               (let ((from (list-ref offsets (car run)))
-                     (to (list-ref offsets (cadr run)))
-                     (attribute (caddr run)))
-                 ;; The line is drawn up to the window's WIDTH: a run
-                 ;; starting past the window's edge is not drawn at all,
-                 ;; and one cut by it stops at the edge - which is how
-                 ;; GNU Emacs truncates a line at the window boundary.
-                 ;; The slow (properties) path has to say so itself,
-                 ;; where the fast path hands the whole line to the
-                 ;; display and lets it clip.
-                 (when (< from width)
-                   (write-glyphs!
-                    (current-display)
-                    (substring display from
-                               (min to (min (string-length display) width)))
-                    screen-row (+ x0 from) attribute))))
+               (let ((drawn (line-glyph-run glyphs offsets
+                                            (car run) (cadr run) width)))
+                 (when drawn
+                   (write-glyphs! (current-display) (car drawn) screen-row
+                                  (+ x0 (cdr drawn)) (caddr run)))))
              (line-face-runs ed line-start line-string))))
       ;; xdisp.c draws a continuation glyph when more of the logical line
       ;; remains, with the default face. Otherwise a region may extend its
       ;; face into empty cells at the line end.
-      (if (line-continuation-display? line-string width)
-          (draw-continuation-glyph! screen-row x0 width)
-          (let ((fill (line-end-fill-attribute ed line-start line-string
-                                               display width)))
-            (when fill
-              (write-glyphs! (current-display)
-                             (make-string (- width (string-length display))
-                                          #\space)
-                             screen-row (+ x0 (string-length display)) fill)))))
+      ;;
+      ;; Both need the cells the text took, which is where the fill
+      ;; starts. `display` holds no tabs or control characters - they were
+      ;; expanded into it - so `line-display-width' of it is a sum of
+      ;; character widths, and for a wide character that is 2 where a
+      ;; `string-length' would say 1.
+      (let ((drawn-width (line-display-width display)))
+        (if (line-continuation-display? line-string width)
+            (draw-continuation-glyph! screen-row x0 width)
+            (let ((fill (line-end-fill-attribute ed line-start line-string
+                                                 display width)))
+              (when fill
+                (write-glyphs! (current-display)
+                               (make-string (- width drawn-width) #\space)
+                               screen-row (+ x0 drawn-width) fill))))))
 
     (define (line-display-width line-string)
-      ;; Count all cells, expanding tabs at each successive display column.
+      ;; The width of LINE-STRING in screen cells: the sum of its
+      ;; characters' widths, each tab taken to its next stop in the
+      ;; column it lands on.
+      ;;
+      ;; This is GNU Emacs's `string-width' (`character.c'), which is what
+      ;; the mode line's field widths and the continuation glyph are
+      ;; decided by. It is also the only answer that is right for a line
+      ;; holding a wide character, where counting characters gives one
+      ;; cell too few for each of them.
       ;;--------------------------------------------------------------
       (let loop ((i 0) (column 0))
         (if (>= i (string-length line-string))
             column
-            (let* ((ch (string-ref line-string i))
-                   (glyph (char-display-glyph ch column)))
-              (loop (+ i 1) (+ column (string-length glyph)))))))
+            (let ((ch (string-ref line-string i)))
+              (loop (+ i 1) (+ column (char-display-width ch column)))))))
 
     (define (line-continuation-display? line-string width)
       ;; Whether the logical line's full display width exceeds this row:
@@ -544,7 +591,7 @@
              (point (text-editor-get-cursor ed))
              (region-start (and mark (min point mark)))
              (region-end (and mark (max point mark))))
-        (and (< (string-length display) width)
+        (and (< (line-display-width display) width)
              (region-face-active? ed)
              region-start
              region-end
@@ -616,29 +663,36 @@
                          (merge-face-ref 'region attrs)
                          attrs))))
 
-    (define (draw-match row x0 line display-string line-start len start end
+    (define (draw-match row x0 glyphs offsets line-start len start end
                         point width)
       ;; Draw the part of the search match [START, END) that falls on this
       ;; line over the text already drawn there: in reverse video when
       ;; point is inside the match (GNU Emacs's `isearch' face) and in
       ;; bold otherwise (`lazy-highlight'). ROW is the screen row and X0
       ;; the screen column the window's text starts at.
+      ;;
+      ;; GLYPHS and OFFSETS are the line's, computed once by the caller
+      ;; for all its matches.
+      ;;
+      ;; The match is cut out of the line as a range of *buffer*
+      ;; characters and placed at its screen column, so a line holding a
+      ;; wide character highlights the match itself and not the two cells
+      ;; before it.
       ;;--------------------------------------------------------------
       (let* ((col (max 0 (- start line-start)))
              (to (min len (- end line-start)))
-             (x (display-column-of line col))
-             (y (display-column-of line to)))
-        (when (and (< x width) (< x y))
+             (drawn (and (> to col)
+                         (line-glyph-run glyphs offsets col to width))))
+        (when drawn
           (write-glyphs!
            (current-display)
-           (substring display-string x
-                      (min y (string-length display-string)))
-           row (+ x0 x)
+           (car drawn)
+           row (+ x0 (cdr drawn))
            (face->attribute
             (if (and (<= start point) (<= point end))
                 'isearch 'lazy-highlight))))))
 
-    (define (highlight-matches window row line display-string line-start width
+    (define (highlight-matches window row line line-start width
                                pattern case-fold?)
       ;; Draw the search matches that fall on this line over the line that
       ;; has just been drawn, so that what was found can be seen.
@@ -655,18 +709,38 @@
              (row (+ row (window-top window)))
              (x0 (window-left window))
              (len (string-length line))
+             (glyphs (list->vector (expand-line-glyphs line)))
+             (offsets (list->vector (line-display-offsets line)))
              (point (text-editor-get-cursor ed))
              (plen (string-length pattern)))
         (let loop ((at 0))
           (let ((found (string-search-forward line pattern at case-fold?)))
             (when (and found (<= (+ found plen) len))
-              (draw-match row x0 line display-string line-start len
+              (draw-match row x0 glyphs offsets line-start len
                           (+ line-start found) (+ line-start found plen)
                           point width)
               ;; on to the next match, starting inside this one so that
               ;; overlapping matches are found too, as a repeated search
               ;; finds them
               (loop (+ 1 found)))))))
+
+    (define (cursor-cells ed)
+      ;; How many cells wide the cursor over ED's point is drawn: the
+      ;; width of the character at point.
+      ;;
+      ;; Emacs puts the cursor on the glyph at point, so over a
+      ;; double-width character it is two cells wide. Past the end of the
+      ;; line there is no character to sit on, and Emacs draws a one-cell
+      ;; cursor in the space beyond it - which is what this answers there.
+      ;;--------------------------------------------------------------
+      (let* ((line (text-editor-cursor-line ed))
+             (column (text-editor-cursor-column ed))
+             (line-string (buffer-line-string ed line)))
+        (if (and line-string (< column (string-length line-string)))
+            (char-display-cursor-width
+             (string-ref line-string column)
+             (current-line-display-column ed column))
+            1)))
 
     (define (cursor-screen-position window)
       ;; Where on the screen WINDOW's point belongs, as a pair, or #f
@@ -756,7 +830,7 @@
                   ;; Emacs's `isearch' face) and the other matches in view
                   ;; in bold (`lazy-highlight')
                   (when highlight
-                    (highlight-matches window row line-string display
+                    (highlight-matches window row line-string
                                        line-start width (car highlight)
                                        (cdr highlight)))))
               (loop (+ 1 row)
@@ -849,14 +923,20 @@
               ;; right edge of the screen whatever point did.
               (draw-window-cursor! (current-display)
                                    (- height 1)
-                                   (min (+ (string-length (or (*echo-area-prompt*) ""))
-                                           (text-editor-cursor-column reading))
-                                        (- width 1)))
+                                   (min (+ (line-display-width
+                                            (or (*echo-area-prompt*) ""))
+                                           (current-line-display-column
+                                            reading
+                                            (text-editor-cursor-column reading)))
+                                        (- width 1))
+                                   (cursor-cells reading))
               (let ((selected (frame-selected-window frame)))
                 (when selected
                   (let ((at (cursor-screen-position selected)))
-                    (when at (draw-window-cursor! (current-display)
-                                                  (car at) (cdr at))))))))
+                    (when at
+                      (draw-window-cursor! (current-display) (car at) (cdr at)
+                                           (cursor-cells
+                                            (window-buffer selected)))))))))
         ;; The screen is what was drawn: the display's flush, which for
         ;; this terminal honours the full-repaint `clear-frame-area!'
         ;; asked for (partial-update optimizations desync the physical
