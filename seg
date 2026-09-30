@@ -1,0 +1,9 @@
+#!/bin/bash
+#--------------------------
+# se - the schemacs editor
+#--------------------------
+
+DIR=$(dirname $0)
+export GUILE_WARN_DEPRECATED=no
+exec guile --r7rs -L $DIR -s $DIR/main-gtk.scm "$@"
+
