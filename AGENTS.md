@@ -343,13 +343,13 @@ automatically on the next call.
   one expected pass so that cannot pass silently.
 
 
-## The `defcommand` conversion is complete (2026-09-29)
+## The `define-command` conversion is complete (2026-09-29)
 
-Every command is now a `defcommand` whose name is the command's Emacs
+Every command is now a `define-command` whose name is the command's Emacs
 name, bound to a plain callable procedure; the `-command` suffixes are
 gone (undo, split-window-below, find-file, save-buffer, kill-buffer,
-Buffer-menu-*, ...). `defcommand` is spelled as a Scheme procedure
-definition - `(defcommand (name args ...) docstring (interactive ...)
+Buffer-menu-*, ...). `define-command` is spelled as a Scheme procedure
+definition - `(define-command (name args ...) docstring (interactive ...)
 body ...)` - with `defun`'s *field order* kept (Emacs is the reference
 for behavior, not for Lisp's spelling). The one legacy record left is
 `self-insert-command` (simple.sld), documented there: the character it
@@ -371,17 +371,17 @@ Mechanics added to `command.sld` for this:
   for its size, exactly as Emacs's backquote form reads the variable
   (it needs `(scheme eval)` in the import).
 - An interactive expression evaluates in the command's *defining*
-  module, which `register-command!` captures at `defcommand` expansion
+  module, which `register-command!` captures at `define-command` expansion
   time (`current-module` there is the defining module — it is dynamic).
   Evaluating it at keypress time would be the command loop's module
   and fail to find the command's helpers.
 - The obarray (`*command-table*`) name comes from `procedure-name`, so
-  defcommand keeps the name you see in M-x.
+  define-command keeps the name you see in M-x.
 
 Reference hazards while converting: `define-key` must come *after* the
-`defcommand`s it binds (Guile resolves a binding when the form is
-evaluated); and a defcommand being a procedure means call sites switch
+`define-command`s it binds (Guile resolves a binding when the form is
+evaluated); and a define-command being a procedure means call sites switch
 from `(run-command NAME)` to a plain `(NAME)` call. `read-elem`-style
 sliding on a balanced form is the reliable way to convert a
 `new-command` block in bulk; the lambda's closing paren must be dropped
-and the defcommand's own added back.
+and the define-command's own added back.

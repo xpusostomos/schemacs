@@ -82,7 +82,10 @@
 
 ;; A resize is a code, not a key: `read-input-event' cannot answer a pair,
 ;; so the display uses one integer for it, as a terminal uses KEY_RESIZE.
-(test-equal '(resize) (path -1))
+;; A named key is a *string* in a key path - the arrows are `(list "up")' -
+;; and `keymap-index' reads a bare symbol as a modifier, which `(resize)'
+;; would be.
+(test-equal '("resize") (path -1))
 
 ;; A keysym with no name and no Unicode character is not a key this
 ;; editor can act on, and answers #f rather than inventing a name.

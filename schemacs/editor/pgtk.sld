@@ -35,7 +35,7 @@
     (scheme base)
     (scheme char)
     (only (scheme write) display write)
-    (only (guile) catch ash logand inexact->exact round open-file call-with-port
+    (only (guile) catch ash logand inexact->exact round
           get-internal-real-time internal-time-units-per-second)
     (oop goops)
     ;; The drawing primitives, which guile-gi does not bind.
@@ -395,19 +395,20 @@
       ;;--------------------------------------------------------------
       (cons (ash code -32) (logand code #xFFFFFFFF)))
 
-    (define *redraw-code* -2)
-    ;; ^ What "draw the frame again" is reported as: the same device as
-    ;; `*resize-code*' below, and for the same reason - `read-input-event'
-    ;; may answer only a character or an integer, so something that is
-    ;; neither a key nor a character has to be a code the key decoder
-    ;; turns into a path. A window that gains or loses the focus needs
-    ;; one: the cursor's shape and whether it blinks both change, and
-    ;; nothing else would ask for a redisplay - the editor is sitting
-    ;; still, waiting for a key that is not coming.
+    (define *focus-in-code* -2)
+    (define *focus-out-code* -4)
+    ;; ^ What the window system's focus events are reported as: the same
+    ;; device as `*resize-code*' and `*delete-frame-code*', and for the
+    ;; same reason - `read-input-event' may answer only a character or an
+    ;; integer, so an event that is neither a key nor a character has to
+    ;; be a code the key decoder turns into a path. Emacs's are the keys
+    ;; `(focus-in (FRAME))' and `(focus-out (FRAME))' (`keyboard.c:6281'),
+    ;; bound to their handlers in `special-event-map'
+    ;; (`keyboard.c:14620').
 
     (define *delete-frame-code* -3)
     ;; ^ What the window manager's request to close the frame is reported
-    ;; as: `*resize-code*' and `*redraw-code*' again, for the same reason
+    ;; as: `*resize-code*' again, for the same reason
     ;; and with the same shape - a key path the command loop can dispatch,
     ;; bound to a command in `files.sld' (`handle-delete-frame', which is
     ;; `frame.el''s). Gtk's `delete-event' asks whether it may destroy the
@@ -531,7 +532,8 @@
                  (let ((item (car queue)))
                    (cond
                     ((eq? item 'resize) *resize-code*)
-                    ((eq? item 'redraw) *redraw-code*)
+                    ((eq? item 'focus-in) *focus-in-code*)
+                    ((eq? item 'focus-out) *focus-out-code*)
                     ((eq? item 'delete-frame) *delete-frame-code*)
                     ((memv (pgtk-event-keysym item) modifier-keysyms)
                      (loop))
@@ -553,8 +555,9 @@
       ;; the modifier state and keysym this file builds paths from.
       ;;--------------------------------------------------------------
       (cond
-       ((eqv? ev *resize-code*) '(resize))
-       ((eqv? ev *redraw-code*) '(redraw))
+       ((eqv? ev *resize-code*) '("resize"))
+       ((eqv? ev *focus-in-code*) '("focus-in"))
+       ((eqv? ev *focus-out-code*) '("focus-out"))
        ((eqv? ev *delete-frame-code*) '("delete-frame"))
        ((integer? ev) (key-event->path (pgtk-decode-event ev)))
        (else #f)))
@@ -863,13 +866,16 @@
         ;; frame to show a cursor in. Nothing to do, and doing it anyway
         ;; is what took the editor down with a `struct-vtable' error on
         ;; `#f'.
+        ;; The window system's focus events, which Emacs delivers as the
+        ;; keys `(focus-in (FRAME))' and `(focus-out (FRAME))'
+        ;; (`keyboard.c:6281') - and whose handlers are
+        ;; `handle-focus-in'/`handle-focus-out' in `special-event-map'
+        ;; (`keyboard.c:14620'). They are dispatched like any key, so a
+        ;; user can rebind them, which is why they are not special-cased
+        ;; here.
         (connect win (make <signal> #:name "focus-in-event")
                  (lambda (w e)
-                   (when (*current-frame*)
-                     (*frame-focus* #t)
-                     (blink-cursor--rescan-frames)
-                     ;; and draw again: the shape changed
-                     (pgtk-enqueue! d 'redraw))
+                   (when (*current-frame*) (pgtk-enqueue! d 'focus-in))
                    #f))
         ;; The window manager's request to close the frame - the X
         ;; client message `WM_DELETE_WINDOW', which Gtk delivers as
@@ -880,17 +886,12 @@
         ;; no window running when the frame was closed.
         (connect win (make <signal> #:name "delete-event")
                  (lambda (w e)
-                   (call-with-port (open-file "/tmp/proto/delete.txt" "a")
-                     (lambda (p) (write 'delete-event p) (newline p)))
                    (pgtk-enqueue! d 'delete-frame)
                    ;; TRUE: Gtk must not destroy the window
                    #t))
         (connect win (make <signal> #:name "focus-out-event")
                  (lambda (w e)
-                   (when (*current-frame*)
-                     (*frame-focus* #f)
-                     (blink-cursor--rescan-frames)
-                     (pgtk-enqueue! d 'redraw))
+                   (when (*current-frame*) (pgtk-enqueue! d 'focus-out))
                    #f))
         ;; The area must not dictate the window's size: a window's
         ;; minimum size comes from its child, so a size request as large

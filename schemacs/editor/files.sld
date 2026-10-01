@@ -40,7 +40,7 @@
           set!frame-message)
     ;; The commands here install their own keys, as files.el does.
     (only (schemacs editor command)
-          run-command defcommand)
+          run-command define-command)
     ;; `switch-to-buffer' is `window.el''s, and not this file's: it shows a
     ;; buffer in the selected window, which is a window operation.
     (only (schemacs editor window) switch-to-buffer)
@@ -75,7 +75,8 @@
             (kill-buffer %kill-buffer))
     (only (schemacs editor keymap)
           define-key
-          *default-keymap*)
+          *default-keymap*
+          *special-event-map*)
     ;; Every command here prompts.
     (only (schemacs editor minibuffer)
           *minibuffer-completing-file-name*
@@ -235,7 +236,7 @@
     ;; Emacs's simple.el, and is imported below.
     ;;------------------------------------------------------------------
 
-    (defcommand (find-file path)
+    (define-command (find-file path)
       ;; GNU Emacs's `find-file' (files.el), the command C-x C-f runs:
       ;; prompt for a file name and visit it, switching to the buffer,
       ;; exactly as Emacs's `(switch-to-buffer (find-file-noselect
@@ -279,7 +280,7 @@
       (let ((current (*current-frame*)))
         (if (and current (not (eq? current frame))) (list current) '())))
 
-    (defcommand (handle-delete-frame)
+    (define-command (handle-delete-frame event)
       ;; GNU Emacs's `handle-delete-frame' (`frame.el:265'): the window
       ;; manager has asked to close FRAME. "If there is another visible
       ;; frame, delete this one; otherwise `save-buffers-kill-emacs'" -
@@ -288,15 +289,22 @@
       ;; Emacs asks about unsaved buffers before it goes. It is in this
       ;; library rather than `frame.sld' because the command it hands off
       ;; to is `save-buffers-kill-terminal', which is here.
+      ;;
+      ;; Emacs's takes the EVENT as its argument - `(interactive "e")' -
+      ;; and reads the frame from it: `(nth 1 event)' is the frame list
+      ;; `keyboard.c:6238' built, whose car is the frame. This tree's
+      ;; event is the same shape, so the frame is read from it too - and
+      ;; `frames-except' is given *that* frame, which is the one being
+      ;; closed and need not be the selected one if there were several.
       ;;--------------------------------------------------------------
       "Handle the window manager's request to close the frame."
-      (interactive)
-      (let ((others (frames-except (*current-frame*))))
+      (interactive "e")
+      (let ((others (frames-except (car (list-ref event 1)))))
         (if (pair? others)
             others
             (save-buffers-kill-terminal))))
 
-    (defcommand (save-buffers-kill-terminal)
+    (define-command (save-buffers-kill-terminal)
       ;; GNU Emacs's `save-buffers-kill-emacs': offer to save what
       ;; needs saving, then - since the user may have said no - ask
       ;; whether to go ahead and lose it. Either question abandoned
@@ -331,7 +339,7 @@
             (quit!))))
 
 
-    (defcommand (kill-buffer)
+    (define-command (kill-buffer)
       ;; C-x k runs this. GNU Emacs's `kill-buffer'. Killing a buffer
       ;; that has unsaved changes asks first: Emacs offers to kill it
       ;; anyway, not to save it (saving is offered on exit and by C-x
@@ -979,7 +987,7 @@
                str)
               (get-output-string port)))))
 
-    (defcommand (save-buffer)
+    (define-command (save-buffer)
       ;; C-x C-s runs this. GNU Emacs's `save-buffer', which acts on
       ;; `(current-buffer)' and takes no argument but the prefix
       ;; argument that picks the backup behaviour - there are no backup
@@ -1033,7 +1041,7 @@
     ;; so a library binds the keys of the commands it defines. These are
     ;; the last things in the file, because the bindings hold the
     ;; commands' values, and Guile resolves a binding when the form is
-    ;; evaluated - a `define-key' before its command's `defcommand' would
+    ;; evaluated - a `define-key' before its command's `define-command' would
     ;; find the name unbound.
     (define-key *default-keymap* (list (list 'ctrl #\x) (list 'ctrl #\f))
       find-file)
@@ -1041,11 +1049,12 @@
       save-buffer)
     (define-key *default-keymap* (list (list 'ctrl #\x) (list 'ctrl #\c))
       save-buffers-kill-terminal)
-    ;; The window manager's request to close the frame arrives as a key
-    ;; the same way a frame resize does, and is answered by the command it
-    ;; names. Emacs binds `handle-delete-frame' in `special-event-map'
-    ;; against `[delete-frame]'; here the path is a named key.
-    (define-key *default-keymap* (list "delete-frame")
+    ;; The window manager's request to close the frame arrives as the key
+    ;; event `(delete-frame (FRAME))', which `keyboard.c:6238' makes and
+    ;; `keyboard.c:14550' binds to `handle-delete-frame' in
+    ;; `special-event-map'. Here the binding is made where the command is,
+    ;; as every binding in this tree is.
+    (define-key *special-event-map* (list "delete-frame")
       handle-delete-frame)
     (define-key *default-keymap* (list (list 'ctrl #\x) #\k)
       kill-buffer)

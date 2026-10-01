@@ -43,7 +43,7 @@
     (scheme char)
     (prefix (schemacs keymap) km:)
     (only (schemacs editor command)
-          defcommand)
+          define-command)
     (only (schemacs editor engine)
           text-editor-get-cursor text-editor-set-cursor text-editor-modified?
           text-editor-set-modified! text-editor-read-only?
@@ -294,7 +294,7 @@
       (text-editor-set-read-only! buffer #t)
       (Buffer-menu-beginning))
 
-    (defcommand (list-buffers)
+    (define-command (list-buffers)
       ;; GNU Emacs's `list-buffers' (C-x C-b): show the list in another
       ;; window, leaving the selected window and point alone. Emacs
       ;; displays it without selecting it - use `C-x o' to get there, or
@@ -304,7 +304,7 @@
       "Display a list of existing buffers (bound to C-x C-b)."
       (interactive)
  (display-buffer (list-buffers-noselect)))
-    (defcommand (buffer-menu)
+    (define-command (buffer-menu)
       ;; GNU Emacs's `buffer-menu', which shows the list *and* selects it,
       ;; so that its commands act on it with no `C-x o' first.
       ;;--------------------------------------------------------------
@@ -343,7 +343,7 @@
          ed (min (text-editor-char-count ed)
                  (+ 1 (text-editor-get-end-of-line ed))))))
 
-    (defcommand (Buffer-menu-mark)
+    (define-command (Buffer-menu-mark)
       ;; GNU Emacs's `Buffer-menu-mark' (m): mark the buffer on this line
       ;; to be shown, and go on to the next one.
       ;;--------------------------------------------------------------
@@ -356,7 +356,7 @@
              (Buffer-menu--set-mark! buffer *Buffer-menu-marker-char*)
              (Buffer-menu-redraw! (current-buffer)))
            (Buffer-menu--move-down!)))
-    (defcommand (Buffer-menu-delete count)
+    (define-command (Buffer-menu-delete count)
       ;; GNU Emacs's `Buffer-menu-delete' (d, k): mark the buffer on this
       ;; line for deletion, and go on to the next one. Nothing is killed
       ;; until `Buffer-menu-execute' (x).
@@ -370,7 +370,7 @@
              (Buffer-menu--set-mark! buffer *Buffer-menu-del-char*)
              (Buffer-menu-redraw! (current-buffer)))
            (Buffer-menu--move-down!)))
-    (defcommand (Buffer-menu-unmark)
+    (define-command (Buffer-menu-unmark)
       ;; GNU Emacs's `Buffer-menu-unmark' (u): take every mark off this
       ;; line, and go on to the next one.
       ;;--------------------------------------------------------------
@@ -383,7 +383,7 @@
              (Buffer-menu--set-mark! buffer #f)
              (Buffer-menu-redraw! (current-buffer)))
            (Buffer-menu--move-down!)))
-    (defcommand (Buffer-menu-save)
+    (define-command (Buffer-menu-save)
       ;; GNU Emacs's `Buffer-menu-save' (s): mark the buffer on this line
       ;; to be saved, and go on to the next one. (Marking it says so in
       ;; the M column; `Buffer-menu-execute' does the saving, which needs
@@ -398,7 +398,7 @@
              (Buffer-menu--set-mark! buffer *Buffer-menu-save-char*)
              (Buffer-menu-redraw! (current-buffer)))
            (Buffer-menu--move-down!)))
-    (defcommand (Buffer-menu-not-modified)
+    (define-command (Buffer-menu-not-modified)
       ;; GNU Emacs's `Buffer-menu-not-modified' (~): say the buffer on this
       ;; line has not been changed, so that saving it is not offered.
       ;;--------------------------------------------------------------
@@ -409,7 +409,7 @@
          (let ((buffer (Buffer-menu-buffer)))
            (when buffer (text-editor-set-modified! buffer #f))
            (Buffer-menu-redraw! (current-buffer))))
-    (defcommand (Buffer-menu-bury)
+    (define-command (Buffer-menu-bury)
       ;; GNU Emacs's `Buffer-menu-bury' (b): move the buffer on this line
       ;; to the end of the buffer list, so that `other-buffer' does not
       ;; choose it.
@@ -421,7 +421,7 @@
          (let ((buffer (Buffer-menu-buffer)))
            (when buffer (bury-buffer buffer)))
          (Buffer-menu-redraw! (current-buffer)))
-    (defcommand (Buffer-menu-toggle-read-only)
+    (define-command (Buffer-menu-toggle-read-only)
       ;; GNU Emacs's `Buffer-menu-toggle-read-only': do in the buffer on
       ;; this line what `read-only-mode' does.
       ;;--------------------------------------------------------------
@@ -434,7 +434,7 @@
              (text-editor-set-read-only! buffer
                                          (not (text-editor-read-only? buffer)))))
          (Buffer-menu-redraw! (current-buffer)))
-    (defcommand (Buffer-menu-this-window)
+    (define-command (Buffer-menu-this-window)
       ;; GNU Emacs's `Buffer-menu-this-window' (RET, f): show the buffer on
       ;; this line in the selected window, replacing the list.
       ;;--------------------------------------------------------------
@@ -445,7 +445,7 @@
          (let ((buffer (Buffer-menu-buffer)))
            (when buffer
              (switch-to-buffer buffer))))
-    (defcommand (Buffer-menu-other-window)
+    (define-command (Buffer-menu-other-window)
       ;; GNU Emacs's `Buffer-menu-other-window' (o): show the buffer on
       ;; this line in the *other* window and select that window, so that
       ;; the Buffer Menu is left where it is - which is the point of the
@@ -463,7 +463,7 @@
          (let ((buffer (Buffer-menu-buffer)))
            (when buffer
              (switch-to-buffer-other-window buffer))))
-    (defcommand (Buffer-menu-switch-other-window)
+    (define-command (Buffer-menu-switch-other-window)
       ;; GNU Emacs's `Buffer-menu-switch-other-window' (C-o): make the
       ;; other window show the buffer on this line, but leave point in the
       ;; Buffer Menu - so the menu stays selected and more lines can be
@@ -476,7 +476,7 @@
          (let ((buffer (Buffer-menu-buffer)))
            (when buffer
              (display-buffer buffer '(nil (inhibit-same-window . #t))))))
-    (defcommand (Buffer-menu-execute)
+    (define-command (Buffer-menu-execute)
       ;; GNU Emacs's `Buffer-menu-execute' (x): do what the marks say -
       ;; save the buffers marked with `s', kill the ones marked with `d'
       ;; - and redraw the list.
@@ -538,12 +538,12 @@
                    (string-append (number->string killed)
                                   " buffer(s) killed"))
                   (else "No buffers marked for deletion or saving")))))
-    (defcommand (revert-buffer)
+    (define-command (revert-buffer)
       
       "Update the list of buffers (g)."
       (interactive)
  (Buffer-menu-redraw! (current-buffer)))
-    (defcommand (Buffer-menu-next-line count)
+    (define-command (Buffer-menu-next-line count)
       ;; GNU Emacs's list binds `n' and SPC to `next-line'.
       ;;--------------------------------------------------------------
       
@@ -552,7 +552,7 @@
 
          (let loop ((n count))
            (when (> n 0) (Buffer-menu--move-down!) (loop (- n 1)))))
-    (defcommand (Buffer-menu-previous-line count)
+    (define-command (Buffer-menu-previous-line count)
       
       "Move to the previous line (p)."
       (interactive "p")

@@ -10,7 +10,7 @@
     (scheme write)
     (scheme case-lambda)
     (only (schemacs lens) record-unit-lens)
-    ;; A `defcommand' name keeps its name and docstring in Guile's own
+    ;; A `define-command' name keeps its name and docstring in Guile's own
     ;; copy, which `,describe' shows: `procedure-name' and
     ;; `procedure-documentation' read them back for the obarray record.
     (only (guile) current-module procedure-name procedure-documentation))
@@ -20,10 +20,11 @@
    command-name command-procedure command-doc-string
    command-interactive-spec
    *mark-even-if-inactive*
+   *this-event*
    current-prefix-arg
    uarg->integer
    run-command apply-command show-command
-   defcommand *command-table* command? command-record-of command-value-of
+   define-command *command-table* command? command-record-of command-value-of
    register-command!
    =>command-name*!
    =>command-procedure*!
@@ -84,6 +85,21 @@
       ;; `interactive "r"' asks for the region and has to decide what to
       ;; do when the mark is not active. `(mark)' and `region-beginning'
       ;; ask it too.
+      ;;--------------------------------------------------------------
+      (make-parameter #f))
+
+    (define *this-event*
+      ;; Emacs's `this_command_keys' and the event the command was
+      ;; invoked by: `callint.c:287' reads the key sequence the command
+      ;; loop recorded (`keys = this_command_keys') and the
+      ;; `(interactive "e")' spec hands the command `AREF (keys,
+      ;; next_event)' (`callint.c:608') - the invoking event itself, which
+      ;; for a window-system event is the list Emacs's `make_lispy_event'
+      ;; built: `(delete-frame (FRAME))' (`keyboard.c:6238') and
+      ;; `(focus-in (FRAME))' (`keyboard.c:6281').
+      ;;
+      ;; The command loop binds it around the dispatch, and
+      ;; `interactive-proc''s `"e"' case is what reads it.
       ;;--------------------------------------------------------------
       (make-parameter #f))
 
@@ -154,11 +170,11 @@
        'uarg))
 
     ;;----------------------------------------------------------------
-    ;; Defining commands with `defcommand'
+    ;; Defining commands with `define-command'
     ;;
     ;; GNU Emacs's `defun' makes the command's name a plain *function*:
     ;; any Lisp can call it with arguments, and the keyboard reaches it
-    ;; through the command machinery. `defcommand' is the same trick here
+    ;; through the command machinery. `define-command' is the same trick here
     ;; - the NAME it defines is bound to the command's own procedure, so
     ;; `(kill-region 1 5)' is an ordinary call, while everything the
     ;; command machinery wants to know about it (its name, its docstring,
@@ -187,7 +203,7 @@
       ;; The command's interactive entry: a procedure that reads what a
       ;; keyfinger supplies and calls COMMAND with it - GNU Emacs's
       ;; `call-interactively' reading the arguments once, for the
-      ;; specifications `defcommand' knows. SPEC is `#f' (no arguments),
+      ;; specifications `define-command' knows. SPEC is `#f' (no arguments),
       ;; `"p"' (the numeric prefix), `"P"' (the raw prefix), or an
       ;; *expression* - a list, not a string - evaluated at the keypress
       ;; to produce the argument list, which is Emacs's
@@ -213,20 +229,23 @@
           ;; does).
           (parameterize ((current-prefix-arg uarg))
             (apply command (eval spec module)))))
+       ;; The invoking event, which the command loop has bound - Emacs's
+       ;; `args[i] = AREF (keys, next_event)' (`callint.c:608').
+       ((string=? spec "e") (lambda (uarg) (command (*this-event*))))
        ((string=? spec "p") (lambda (uarg) (command (uarg->integer 1 uarg))))
        ((string=? spec "P") (lambda (uarg) (command uarg)))
        (else (error "Unsupported interactive specification" spec))))
 
     (define (register-command! command spec)
-      ;; Record COMMAND, a procedure `defcommand' has just bound, in the
+      ;; Record COMMAND, a procedure `define-command' has just bound, in the
       ;; command obarray: make its `<command-type>' record - the name
       ;; coming from the procedure itself, the docstring from Guile's
       ;; own copy, the API being the procedure - and push it on
       ;; `*command-table*'. The argument order (command, SPEC) is the
-      ;; expansion `defcommand' emits; SPEC is `#f', `"p"' or `"P"',
+      ;; expansion `define-command' emits; SPEC is `#f', `"p"' or `"P"',
       ;; or an interactive expression, `interactive-proc' knows what
       ;; those mean. The module caught here is the defining module -
-      ;; the one the `defcommand' expansion runs in - and an
+      ;; the one the `define-command' expansion runs in - and an
       ;; interactive expression evaluates there. That module is
       ;; `current-module' while this procedure runs, because the
       ;; definition it is recording is still in progress.
@@ -243,7 +262,7 @@
 
     (define (command-record-of thing)
       ;; The command record whose API is THING, or #f: how a key bound
-      ;; to a `defcommand' procedure is dispatched like one bound to a
+      ;; to a `define-command' procedure is dispatched like one bound to a
       ;; record. GNU Emacs keeps `commandp' the same question - "is this
       ;; a command?" - and the answer here is "is there an obarray entry
       ;; whose procedure this is".
@@ -262,7 +281,7 @@
     (define (command-value-of record)
       ;; The value a key slot for the command held, for `*last-command*'
       ;; and its kin: the defined procedure when the record came from a
-      ;; `defcommand' (its name on the procedure is the command's name),
+      ;; `define-command' (its name on the procedure is the command's name),
       ;; the record itself for a legacy one. This is what a comparison
       ;; like `(eq? (*last-command*) kill-line)' sees both sides of.
       ;;--------------------------------------------------------------
@@ -272,7 +291,7 @@
             (command-api record)
             record)))
 
-    (define-syntax defcommand
+    (define-syntax define-command
       ;; Define a command: a procedure definition, spelled as Scheme
       ;; spells one - the name together with its parameter list,
       ;; `(NAME ARG ...)' - carrying the command's docstring and its
@@ -281,7 +300,7 @@
       ;; Emacs's `defun' writes them in, so a command transcribed from
       ;; Emacs keeps its shape:
       ;;
-      ;;   (defcommand (kill-region beg end)
+      ;;   (define-command (kill-region beg end)
       ;;     "Kill (\"cut\") text between point and mark."
       ;;     (interactive "r")
       ;;     (delete-region beg end))
@@ -293,7 +312,7 @@
       ;; other Scheme code, can fill its arguments from the environment
       ;; when a key reaches it:
       ;;
-      ;;   (defcommand (delete-window window)
+      ;;   (define-command (delete-window window)
       ;;     "Remove WINDOW from the frame."
       ;;     (interactive (list (selected-window)))
       ;;     ...)
@@ -303,27 +322,27 @@
       ;; `register-command!', which files its record in the obarray.
       ;;--------------------------------------------------------------
       (syntax-rules (interactive)
-        ((defcommand (name . args) (interactive) body ...)
+        ((define-command (name . args) (interactive) body ...)
          (begin
            (define (name . args) body ...)
            (register-command! name #f)))
-        ((defcommand (name . args) docstring (interactive) body ...)
+        ((define-command (name . args) docstring (interactive) body ...)
          (begin
            (define (name . args) docstring body ...)
            (register-command! name #f)))
-        ((defcommand (name . args) (interactive spec) body ...)
+        ((define-command (name . args) (interactive spec) body ...)
          (begin
            (define (name . args) body ...)
            (register-command! name 'spec)))
-        ((defcommand (name . args) docstring (interactive spec) body ...)
+        ((define-command (name . args) docstring (interactive spec) body ...)
          (begin
            (define (name . args) docstring body ...)
            (register-command! name 'spec)))
-        ((defcommand (name . args) docstring body ...)
+        ((define-command (name . args) docstring body ...)
          (begin
            (define (name . args) docstring body ...)
            (register-command! name #f)))
-        ((defcommand (name . args) body ...)
+        ((define-command (name . args) body ...)
          (begin
            (define (name . args) body ...)
            (register-command! name #f)))))

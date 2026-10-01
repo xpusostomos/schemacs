@@ -30,6 +30,7 @@
   (export
    *current-keymap*
    *default-keymap*
+   *special-event-map*
    add-keymap-layer!
    define-key
    )
@@ -44,6 +45,19 @@
       ;; does in every Emacs Lisp file that binds a key.
       ;;--------------------------------------------------------------
       (km:keymap '*default-keymap*))
+
+    (define *special-event-map* (km:keymap '*special-event-map*))
+    ;; ^ GNU Emacs's `special-event-map', which `keyboard.c:14153' declares
+    ;; and `keyboard.c:3113' consults *before* the ordinary lookup: the
+    ;; keymap the window system's events are looked up in. `keyboard.c'
+    ;; binds the named keys there - `delete-frame' to `handle-delete-frame'
+    ;; (`keyboard.c:14550') and `focus-in'/`focus-out' to their handlers
+    ;; (`keyboard.c:14620') - and the libraries that own those commands make
+    ;; the bindings, as they do for every other key. It is beside
+    ;; `*default-keymap*' - which Emacs also creates in `keymap.c', and
+    ;; which this tree put in this leaf for the same reason: the libraries
+    ;; that own the commands bind into it and cannot import the command
+    ;; loop.
 
     (define *current-keymap*
       ;; The keymap the command loop looks in: GNU Emacs's current local

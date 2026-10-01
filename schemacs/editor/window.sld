@@ -28,7 +28,7 @@
     ;; size, which is a `case-lambda'.
     (scheme case-lambda)
     (only (schemacs editor command)
-          current-prefix-arg defcommand uarg->integer)
+          current-prefix-arg define-command uarg->integer)
     (only (schemacs editor engine)
           copy-marker new-text-editor set-marker! set!text-editor-buffer-name
           set!text-editor-file-name text-editor-buffer-name
@@ -513,7 +513,7 @@
           (absorb-into! taker 'top (window-height gone))))
         taker))
 
-    (defcommand (delete-window window)
+    (define-command (delete-window window)
       "Remove the selected window, leaving its rows or columns to the
 windows it was combined with."
       (interactive (list (selected-window)))
@@ -553,7 +553,7 @@ windows it was combined with."
           (set!window-children window '())
           window))))
 
-    (defcommand (delete-other-windows window)
+    (define-command (delete-other-windows window)
       "Make the selected window the only window on the frame."
       (interactive (list (selected-window)))
       ;; GNU Emacs's `delete-other-windows': make WINDOW the frame's
@@ -573,7 +573,7 @@ windows it was combined with."
         (set!frame-windows frame (list window))
         window))
 
-    (defcommand (split-window-below size window-to-split)
+    (define-command (split-window-below size window-to-split)
       ;; GNU Emacs's `split-window-below' (window.el), the command C-x 2
       ;; runs: split the selected window, or WINDOW-TO-SPLIT when one is
       ;; given, in two, one above the other. An interactive call reads
@@ -590,7 +590,7 @@ windows it was combined with."
         (error "Size of new window too small"))
       (split-window window-to-split size #f))
 
-    (defcommand (split-window-right size window-to-split)
+    (define-command (split-window-right size window-to-split)
       ;; GNU Emacs's `split-window-right' (window.el), the command C-x 3
       ;; runs - the side-by-side mirror of `split-window-below'.
       "Split the selected window into two, side by side."
@@ -613,7 +613,7 @@ windows it was combined with."
     ;; commands below record for themselves. `pop-to-buffer' and
     ;; `switch-to-buffer' do it with their own NORECORD argument.
 
-    (defcommand (quit-window)
+    (define-command (quit-window)
       ;; GNU Emacs's `quit-window' (q in the Buffer Menu), which is
       ;; `window.el''s: take this window off the frame and bury the buffer
       ;; it was showing. A frame's only window cannot be removed, and then
@@ -630,7 +630,7 @@ windows it was combined with."
             (delete-window window)
             #f)))
 
-    (defcommand (other-window count)
+    (define-command (other-window count)
       "Select another window in cyclic ordering of windows, COUNT
 windows on from the selected one; a negative COUNT goes the other way."
       (interactive "p")

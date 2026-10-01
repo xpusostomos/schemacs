@@ -39,8 +39,11 @@
           text-editor-get-cursor  text-editor-set-cursor)
     ;; `suspend-frame' is a command and states its own key as the other
     ;; command libraries do.
-    (only (schemacs editor command) defcommand uarg->integer)
-    (only (schemacs editor keymap) define-key *default-keymap*)
+    (only (schemacs editor command) define-command uarg->integer)
+    ;; `special-event-map' is where the window system's events are
+    ;; bound, as Emacs's is (`keyboard.c:14550').
+    (only (schemacs editor keymap)
+          define-key *default-keymap* *special-event-map*)
     ;; `SIGTSTP' is raised through `kill': `(scheme base)''s `raise'
     ;; raises an exception, not a signal.
     (only (guile) kill getpid SIGTSTP)
@@ -641,7 +644,37 @@
         (blink-cursor--start-idle-timer))
       (blink-cursor--should-blink))
 
-    (defcommand (blink-cursor-mode arg)
+    (define-command (handle-focus-in event)
+      ;; GNU Emacs's `handle-focus-in' (`frame.el:353'): the frame has
+      ;; received the window system's focus. Emacs sets the frame
+      ;; parameter `last-focus-update' to t and runs `focus-in-hook'; this
+      ;; tree's `*frame-focus*' is what `blink-cursor--should-blink' reads
+      ;; and what `get-window-cursor-type' treats an unfocused frame by.
+      ;;
+      ;; Emacs's takes the EVENT as its argument - `(interactive "e")' -
+      ;; and reads the frame from it: `(nth 1 event)' is the frame list
+      ;; `make_lispy_focus_in' built. This tree's event is the same shape
+      ;; (`keyboard.sld' builds it), so the frame is read from it too.
+      ;;
+      ;; Emacs's takes the EVENT as its argument - `(interactive "e")' -
+      ;; and reads the frame from it. This tree has one frame, so the
+      ;; command reads `*current-frame*', which is what `interactive'
+      ;; would have to hand it: the event-argument spec is not ported.
+      ;;--------------------------------------------------------------
+      "Handle a focus-in event."
+      (interactive "e")
+      (*frame-focus* #t))
+
+    (define-command (handle-focus-out event)
+      ;; GNU Emacs's `handle-focus-out' (`frame.el:369'): the frame has
+      ;; lost the window system's focus - and like `handle-focus-in', it
+      ;; reads the frame from `*current-frame*' rather than from an event.
+      ;;--------------------------------------------------------------
+      "Handle a focus-out event."
+      (interactive "e")
+      (*frame-focus* #f))
+
+    (define-command (blink-cursor-mode arg)
       "Toggle cursor blinking (Blink Cursor mode)."
       (interactive "P")
       (let ((on? (if arg
@@ -656,6 +689,13 @@
                            (if on?
                                "Blink Cursor mode enabled"
                                "Blink Cursor mode disabled"))))
+
+    ;; the window system's events, bound where Emacs binds them - in the
+    ;; library that owns the command (`bindings.el' has
+    ;; `(define-key special-event-map ...)' and `keyboard.c:14550' does the
+    ;; same in C)
+    (define-key *special-event-map* (list "focus-in") handle-focus-in)
+    (define-key *special-event-map* (list "focus-out") handle-focus-out)
 
     (define *minibuffer* (make-parameter #f))
     ;; ^ The minibuffer being read, or false: GNU Emacs's
@@ -882,7 +922,7 @@
            (= (window-left (car children)) (window-left (cadr children)))
            (= (window-width (car children)) (window-width (cadr children)))))
 
-    (defcommand (suspend-frame)
+    (define-command (suspend-frame)
       ;; GNU Emacs's `suspend-frame' (C-z), which is `frame.el''s - "do
       ;; whatever is right to suspend the current frame". On a terminal
       ;; that is stopping the editor with SIGTSTP; the shell gives it back

@@ -48,7 +48,7 @@
        list-buffers-noselect)
  (only (guile) string-contains string-prefix? string-split)
  (only (schemacs editor command) run-command apply-command
-       defcommand command? command-record-of)
+       define-command command? command-record-of)
  (only (schemacs editor command)
        command-doc-string command-interactive-spec command-name)
  (only (schemacs editor buffer)
@@ -224,19 +224,19 @@
 ;; The universal argument
 
 (test-begin "schemacs_ncurses_editor_command")
-;; `defcommand' defines a command whose name is bound to the procedure
+;; `define-command' defines a command whose name is bound to the procedure
 ;; itself - so it can be called from code with ordinary arguments, as
 ;; `(kill-region 1 5)' would be - and files its `<command-type>' record
 ;; in the command obarray, where `M-x' and the keymap's dispatch read
 ;; the interactive specification. The record's API *is* the procedure,
 ;; so a programmatic call through the record and a direct call run the
 ;; same code, and the docstring is Guile's own copy.
-(defcommand (test-doubling-command x)
-  "Double X, for testing `defcommand'."
+(define-command (test-doubling-command x)
+  "Double X, for testing `define-command'."
   (interactive "p")
   (* x 2))
 
-(defcommand (test-zero-arg-command)
+(define-command (test-zero-arg-command)
   "A zero-argument command."
   (interactive)
   "zero")
@@ -251,7 +251,7 @@
           (command? test-doubling-command)
           (apply-command record 14))))
 
-(test-equal "Double X, for testing `defcommand'."
+(test-equal "Double X, for testing `define-command'."
   (command-doc-string (command-record-of test-doubling-command)))
 
 (test-equal #f
@@ -862,7 +862,7 @@
 (define (bound-in keymap path)
   (km:keymap-lookup keymap (km:keymap-index path)))
 (define (command-named? action name)
-  ;; Since the `defcommand' conversion the maps hold the commands'
+  ;; Since the `define-command' conversion the maps hold the commands'
   ;; *procedures*, whose record - with the name - sits in the obarray;
   ;; `command-record-of' finds it, and returns #f for a non-command.
   (let ((record (command-record-of action)))

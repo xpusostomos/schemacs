@@ -13,17 +13,135 @@
     ;; when the caller does not give one.
     (only (schemacs editor minibuf)
           *history-delete-duplicates* *history-length*)
-    ;; `delete' is Guile's - R7RS has no list `delete'.
-    (only (guile) delete)
+    ;; `delete' is Guile's - R7RS has no list `delete' - and `logand' is
+    ;; `key-parse''s control-character folding.
+    (only (guile) delete logand)
     )
 
   (export
    add-to-history
+   ignore
    kbd
    nthcdr
    )
 
   (begin
+    ;;----------------------------------------------------------------
+    ;; `kbd' - the way a key is *named*.
+    ;;
+    ;; GNU Emacs's `kbd' (`subr.el:1258') is how a user writes a key
+    ;; sequence: `(kbd "C-x C-f")', `(kbd "C-/")', `(kbd "<up>")'. It is
+    ;; `key-parse' (`keymap.el:235') doing the work, and it is the one
+    ;; place the key vocabulary is written down: every binding in Emacs
+    ;; is either a literal string/vector or a `kbd' call, and both end up
+    ;; in the same representation.
+    ;;
+    ;; Without it there is no way for a user to write a binding at all -
+    ;; the only way here was a raw path list, and the path each *front
+    ;; end* produces for a key is not the same. A terminal folds C-/ and
+    ;; C-_ into one byte where a window system sends two different
+    ;; keysyms, so a binding written against one front end's spelling
+    ;; matched only that front end - which is why C-/ and C-_ did nothing
+    ;; on the graphical one, and why C-@ and C-SPC needed two bindings.
+    ;;
+    ;; The result is this tree's key path: a list of keys, each either a
+    ;; character, a string naming a keyboard key, or a list of modifier
+    ;; symbols followed by the character or string - so `(kbd "C-x C-f")'
+    ;; is `((ctrl #\x) (ctrl #\f))' and `(kbd "C-/")' is `((ctrl #\/))'.
+    ;; `define-key' takes it and `keymap-index' reads it, so a binding
+    ;; written with `kbd' is written the way a front end is expected to
+    ;; deliver.
+    ;;----------------------------------------------------------------
+
+    (define *key-parse-modifiers*
+      ;; The modifier prefixes `key-parse' takes, with the symbols that
+      ;; name them in a key path. Emacs accumulates the same six, as bits
+      ;; on the character; here they are the path's modifier symbols.
+      '((#\A . alt)
+        (#\C . ctrl)
+        (#\H . hyper)
+        (#\M . meta)
+        (#\s . shift)
+        (#\S . super)))
+
+    (define *key-parse-named*
+      ;; The named keys `key-parse' translates, with the characters they
+      ;; stand for. These are `key-parse''s own list.
+      '(("NUL" . #\nul) ("RET" . #\return) ("LFD" . #\newline)
+        ("TAB" . #\tab) ("ESC" . #\esc) ("SPC" . #\space)
+        ("DEL" . ,(integer->char 127))))
+
+    (define (key-parse-word keys pos)
+      ;; The next word of KEYS from POS: up to the next space, but a word
+      ;; that begins with `<' runs to its `>', which is how `<up>' holds
+      ;; a space it should not be split at.
+      ;;--------------------------------------------------------------
+      (let ((end (string-length keys)))
+        (if (and (< pos end) (char=? (string-ref keys pos) #\<))
+            (let scan ((i (+ pos 1)))
+              (cond ((>= i end) end)
+                    ((char=? (string-ref keys i) #\>) (+ i 1))
+                    (else (scan (+ i 1)))))
+            (let scan ((i pos))
+              (cond ((>= i end) end)
+                    ((char-numeric? (string-ref keys i)) (scan (+ i 1)))
+                    ((char=? (string-ref keys i) #\space) i)
+                    (else (scan (+ i 1))))))))
+
+    (define (key-parse-modifiers word)
+      ;; The modifier symbols WORD prefixes and the character or named
+      ;; key they modify: `(VALUES . REST)'. `key-parse' strips the
+      ;; prefixes one at a time, so `C-M-_` is two.
+      ;;--------------------------------------------------------------
+      (let loop ((mods '()) (rest word))
+        (if (and (> (string-length rest) 2)
+                 (char=? (string-ref rest 1) #\-)
+                 (assv (string-ref rest 0) *key-parse-modifiers*))
+            (loop (cons (cdr (assv (string-ref rest 0)
+                                   *key-parse-modifiers*))
+                        mods)
+                  (substring rest 2))
+            (cons (reverse mods) rest))))
+
+    (define (parse-key word)
+      ;; One word of a `kbd' string as one key of a key path: the chord
+      ;; `(modifiers... character-or-string)'.
+      ;;--------------------------------------------------------------
+      (if (and (> (string-length word) 2)
+               (char=? (string-ref word 0) #\<)
+               (char=? (string-ref word (- (string-length word) 1)) #\>))
+          ;; `<up>' names a keyboard key, which is how a named key is
+          ;; written in a key path here - and Emacs's is a symbol in the
+          ;; vector, `up', the same thing as the string this tree uses.
+          (substring word 1 (- (string-length word) 1))
+          (let* ((mods-and-key (key-parse-modifiers word))
+                 (mods (car mods-and-key))
+                 (named (cdr mods-and-key))
+                 (found (assoc named *key-parse-named*))
+                 (char (if found (cdr found) (and (= (string-length named) 1)
+                                                 (string-ref named 0)))))
+            (cond
+             (char (if (null? mods) char (append mods (list char))))
+             (else named)))))
+
+    (define (kbd keys)
+      ;; GNU Emacs's `kbd': KEYS as this tree's key path, for `define-key'.
+      ;;--------------------------------------------------------------
+      (let loop ((rest keys) (keys '()))
+        (if (string=? rest "")
+            (reverse keys)
+            (let* ((pos (let scan ((i 0))
+                          (cond ((>= i (string-length rest)) #f)
+                                ((char=? (string-ref rest i) #\space)
+                                 (scan (+ i 1)))
+                                (else i))))
+                   (word-beg (or pos (string-length rest)))
+                   (word-end (key-parse-word rest word-beg))
+                   (word (substring rest word-beg word-end))
+                   (key (parse-key word)))
+              (loop (substring rest (min word-end (string-length rest)))
+                    (cons key keys))))))
+
     ;;----------------------------------------------------------------
     ;; `kbd' - the way a key is *named*.
     ;;
@@ -151,6 +269,20 @@
               (loop (substring rest (min word-end (string-length rest)))
                     (cons key keys))))))
 
+
+    (define (ignore . _arguments)
+      ;; GNU Emacs's `ignore' (`subr.el:501'): accept any arguments, do
+      ;; nothing, and answer nil. It is what Emacs binds keys that must be
+      ;; received but not acted on to - `[sigusr1]' in
+      ;; `special-event-map' - and it is what this tree's resize event is
+      ;; bound to: a frame resize is handled by redisplay re-framing, and
+      ;; the event only has to be dispatched for the loop to redraw.
+      ;;
+      ;; Emacs answers nil here, which this tree's `#f' is - and writing
+      ;; the word `nil' was an error, not a spelling, and is what the
+      ;; "unbound variable: nil" the echo area showed was.
+      ;;--------------------------------------------------------------
+      #f)
 
     (define (nthcdr n list)
       ;; GNU Emacs's `nthcdr': the tail of LIST after the first N

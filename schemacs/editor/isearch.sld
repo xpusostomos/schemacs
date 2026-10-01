@@ -48,7 +48,7 @@
     (only (schemacs editor frame)
          *current-frame* current-editor set!frame-message
           )
-    (only (schemacs editor command) defcommand)
+    (only (schemacs editor command) define-command)
     (only (schemacs editor simple)
          current-kill word-char?
           )
@@ -372,12 +372,12 @@
                   (list->string (reverse acc))))))
          (else (string c)))))
 
-    (defcommand (isearch-forward)
+    (define-command (isearch-forward)
       "Search forward incrementally (bound to C-s)."
       (interactive)
       (isearch #t))
 
-    (defcommand (isearch-backward)
+    (define-command (isearch-backward)
       "Search backward incrementally (bound to C-r)."
       (interactive)
       (isearch #f))

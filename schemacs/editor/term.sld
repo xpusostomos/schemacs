@@ -242,7 +242,7 @@
          ;; that byte as `C-h' - which is why both spellings of the
          ;; backspace key land on the same binding here.
          ((= ev KEY_BACKSPACE) (list 'ctrl #\h))
-         ((= ev KEY_RESIZE) (list 'resize))
+         ((= ev KEY_RESIZE) (list "resize"))
          ;; Anything else: ncurses reports a key carrying a *modifier* as
          ;; an extended keycode - one above `KEY_MAX', named from
          ;; terminfo - and `M-<down>' arrives as the code ncurses calls

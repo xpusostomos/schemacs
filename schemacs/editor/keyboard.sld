@@ -40,7 +40,8 @@
     (only (schemacs editor engine)
           text-editor-deactivate-mark set!text-editor-deactivate-mark!)
     (only (schemacs editor command)
-          command-interactive-spec command-record-of command-type? defcommand
+          *this-event*
+          command-interactive-spec command-record-of command-type? define-command
           run-command)
     ;; Reading a key, and asking the display what it means, is the
     ;; display's job - `getch', its timeout and the terminal's own key
@@ -60,7 +61,8 @@
     ;; minibuffer or a mode binds to have its own keys.
     (only (schemacs editor keymap)
           *current-keymap*
-          *default-keymap*)
+          *default-keymap*
+          *special-event-map* define-key)
     ;; The keys the current buffer has of its own - what gives a buffer
     ;; like `*Completions*' its own bindings - and which buffer is current.
     (only (schemacs editor buffer)
@@ -89,12 +91,15 @@
     (only (guile) ceiling inexact->exact)
     ;; the clock the next timer's delay is measured against
     (only (scheme time) current-second)
+    ;; `ignore' is what the special-event-map binds a key that the loop
+    ;; must receive but not act on to - the frame's resize.
+    (only (schemacs editor subr) ignore)
     )
 
   (export
-   ;; `*current-keymap*' is not re-exported: it is `(schemacs editor
-   ;; keymap)''s, and a library that both imports and exports a name gives
-   ;; its importers two of it.
+   ;; `*current-keymap*' and `*special-event-map*' are not re-exported:
+   ;; they are `(schemacs editor keymap)''s, and a library that both
+   ;; imports and exports a name gives its importers two of it.
    *recursive-edit-exit*
    *unread-command-events*
    abort-recursive-edit
@@ -182,7 +187,7 @@
                 (run-command action)))
            ((procedure? action)
             ;; A procedure the keymap holds. It may be a
-            ;; `defcommand' - a bare procedure whose command record sits
+            ;; `define-command' - a bare procedure whose command record sits
             ;; in the obarray - in which case it is run like the record
             ;; it belongs to, so the interactive specification is
             ;; honoured; otherwise it is a plain procedure to call.
@@ -224,6 +229,25 @@
                message)))
         (else "error"))))
 
+    ;; `special-event-map' is in `(schemacs editor keymap)', beside
+    ;; `*default-keymap*' - which Emacs also creates in `keymap.c', and
+    ;; which this tree put in the leaf for the same reason: the libraries
+    ;; that own the commands bind into it, and they cannot import this
+    ;; library.
+
+    ;; The frame's resize: Emacs has no resize key - a frame resize is
+    ;; handled by redisplay re-framing (`window-size-change-functions'),
+    ;; and the event only has to be dispatched for this loop to redraw,
+    ;; which is what `render!' does by re-tiling. Emacs binds keys that
+    ;; must be received but not acted on to `ignore' (`bindings.el:1757',
+    ;; `[sigusr1]' in `special-event-map'), which is what this is.
+    (define-key *special-event-map* (list "resize") ignore)
+
+    ;; `*default-keymap*' - which Emacs also creates in `keymap.c', and
+    ;; which this tree put in the leaf for the same reason: the libraries
+    ;; that own the commands bind into it, and they cannot import this
+    ;; library.
+
     (define (lookup-keymaps)
       ;; What a key sequence is looked up in, in precedence order. GNU
       ;; Emacs's `read_key_sequence' searches, in order: the current
@@ -246,11 +270,15 @@
       ;;--------------------------------------------------------------
       (let ((buffer-keys (buffer-local-keymap (current-buffer)))
             (mode-keys (*current-keymap*)))
+        ;; `special-event-map' first: `keyboard.c:3113' looks the window
+        ;; system's events up in it before the ordinary maps, which is how
+        ;; `(delete-frame (FRAME))' runs its handler rather than being read
+        ;; as an ordinary key.
         (cond ((and buffer-keys mode-keys)
-               (list buffer-keys mode-keys *default-keymap*))
-              (buffer-keys (list buffer-keys *default-keymap*))
-              (mode-keys (list mode-keys *default-keymap*))
-              (else (list *default-keymap*)))))
+               (list *special-event-map* buffer-keys mode-keys *default-keymap*))
+              (buffer-keys (list *special-event-map* buffer-keys *default-keymap*))
+              (mode-keys (list *special-event-map* mode-keys *default-keymap*))
+              (else (list *special-event-map* *default-keymap*)))))
 
     (define (dispatch-key-event frame path)
       ;; Dispatch one key event through the modal keymap lookup. The
@@ -307,7 +335,17 @@
       ;; prefixes the next key with the meta modifier. An event the
       ;; display has no name for is reported in the echo area.
       ;;--------------------------------------------------------------
-      (let ((path (key-event->keymap-path (current-display) ev)))
+      (let* ((path (key-event->keymap-path (current-display) ev))
+             ;; The event the command is handed, which Emacs reads from
+             ;; the key sequence the loop recorded (`callint.c:287') and
+             ;; `(interactive "e")' takes from it (`callint.c:608'). A
+             ;; window-system event is the list `make_lispy_event' built -
+             ;; `(delete-frame (FRAME))' and `(focus-in (FRAME))' - with
+             ;; the frame as its argument, and an ordinary key's event is
+             ;; the key itself.
+             (event (if (and (pair? path) (string? (car path)))
+                        (list (string->symbol (car path)) (list frame))
+                        path)))
         (cond
          ;; ESC prefixes the next key with the meta modifier
          ((and (char? ev) (char=? ev #\esc))
@@ -316,15 +354,10 @@
           (*esc-pending* #f)
           (dispatch-key-event frame (cons 'meta path))
           )
-         ;; A resize and a request to draw again are the same thing
-         ;; here: the command loop redraws after every event, and these
-         ;; two exist only to make an event that asks for one.
-         ((and path (memq (car path) '(resize redraw)))
-          (set!frame-message frame "")
-          (*esc-pending* #f))
          (path
           (*esc-pending* #f)
-          (dispatch-key-event frame path))
+          (parameterize ((*this-event* event))
+            (dispatch-key-event frame path)))
          (else
           (*esc-pending* #f)
           (set!frame-message
@@ -639,7 +672,7 @@
               (exit value)
               (error "Not in a recursive edit"))))))
 
-    (defcommand (abort-recursive-edit)
+    (define-command (abort-recursive-edit)
       ;; Leave the innermost recursive edit and signal quit, so the
       ;; command that asked the question is abandoned: GNU Emacs's
       ;; `abort-recursive-edit', which is keyboard.c's own - a function
