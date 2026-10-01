@@ -55,7 +55,9 @@
     (only (schemacs editor command) *mark-even-if-inactive*)
     (only (schemacs editor editfns)
           delete-region region-beginning region-end)
-    (only (schemacs editor subr) add-to-history nthcdr)
+    ;; `kbd' is how the bindings below name their keys, as
+    ;; `(define-key global-map (kbd "C-/") ...)' would in Emacs.
+    (only (schemacs editor subr) add-to-history kbd nthcdr)
     ;; `define-key' and the global map, which this library fills with the
     ;; bindings for the commands it defines - as simple.el does with
     ;; `(define-key global-map ...)'.
@@ -1523,10 +1525,34 @@
     (define-key *default-keymap* (list (list "home")) beginning-of-line)
     (define-key *default-keymap* (list (list "end")) end-of-line)
     (define-key *default-keymap* (list (list "delete")) delete-char)
-    ;; Undo, on the keys GNU Emacs binds it to. C-/ and C-_ are the same
-    ;; byte (31) in a terminal, so one binding serves both. Emacs's other
-    ;; redo key, C-?, cannot be bound: it is DEL, which arrives here as
-    ;; backspace.
+    ;; Undo, on the keys GNU Emacs binds it to - and there are *four* of
+    ;; them, not one, because the two front ends do not spell them alike.
+    ;; `bindings.el:1237-1238' has
+    ;;
+    ;;     (define-key global-map [?\C-/] 'undo)
+    ;;     (define-key global-map "\C-_" 'undo)
+    ;;
+    ;; - a *keysym* vector for C-/ and a *byte* string for C-_. In a
+    ;; terminal they are the same byte (31) and one binding serves both;
+    ;; in a window system they are two different events, so a binding
+    ;; written as the byte leaves C-/ and C-_ dead. The undo-redo keys
+    ;; are the same thing, `bindings.el:1247-1248': `[(control ??)]' is
+    ;; C-? and `[?\C-\M-_]' is C-M-_.
+    ;;
+    ;; On a terminal C-? *is* DEL, which arrives as backspace, so it
+    ;; cannot be bound there - the comment above this in the byte spelling
+    ;; was a terminal's answer, not a general one.
+    (define-key *default-keymap* (kbd "C-x u") undo)
+    (define-key *default-keymap* (kbd "C-/") undo)
+    (define-key *default-keymap* (kbd "C-_") undo)
+    (define-key *default-keymap* (kbd "C-?") undo-redo)
+    (define-key *default-keymap* (kbd "C-M-_") undo-redo)
+    ;; and the byte spelling is what a terminal delivers for *both* C-/
+    ;; and C-_, where a window system sends two different keysyms - which
+    ;; is why Emacs's `bindings.el' has `\C-_' (the byte) as well as
+    ;; `[?\C-/]' (the keysym), and why they are two bindings here and
+    ;; not one: `kbd "C-_"' names the keysym, and the terminal's byte 31
+    ;; is a different key that only the byte spelling reaches.
     (define-key *default-keymap*
       (list (list 'ctrl (integer->char 31))) undo)
     (define-key *default-keymap*

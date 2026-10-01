@@ -35,7 +35,7 @@
     (scheme base)
     (scheme char)
     (only (scheme write) display write)
-    (only (guile) catch ash logand inexact->exact round
+    (only (guile) catch ash logand inexact->exact round open-file call-with-port
           get-internal-real-time internal-time-units-per-second)
     (oop goops)
     ;; The drawing primitives, which guile-gi does not bind.
@@ -405,6 +405,17 @@
     ;; nothing else would ask for a redisplay - the editor is sitting
     ;; still, waiting for a key that is not coming.
 
+    (define *delete-frame-code* -3)
+    ;; ^ What the window manager's request to close the frame is reported
+    ;; as: `*resize-code*' and `*redraw-code*' again, for the same reason
+    ;; and with the same shape - a key path the command loop can dispatch,
+    ;; bound to a command in `files.sld' (`handle-delete-frame', which is
+    ;; `frame.el''s). Gtk's `delete-event' asks whether it may destroy the
+    ;; window, and this is the answer being "not yet": Emacs's
+    ;; `delete_event' queues `DELETE_WINDOW_EVENT' and `return TRUE' for
+    ;; exactly the same reason, the command loop then deciding whether to
+    ;; save and exit or to keep the window.
+
     (define *resize-code* -1)
     ;; ^ What a resize is reported as. `read-input-event' may answer only a
     ;; character or an integer, and a resize is neither a key nor a
@@ -494,77 +505,44 @@
       ;;--------------------------------------------------------------
       (let ((drawn (pgtk-drawn-size d))
             (now (pgtk-allocation d)))
-        ;; Whatever the signals did or did not deliver, the read is the
-        ;; one place that always runs: if what was drawn is not the
-        ;; window's size, that is a resize the editor has not acted on.
         (when (and drawn now
                    (or (not (= (car drawn) (car now)))
                        (not (= (cdr drawn) (cdr now)))))
           (pgtk-enqueue! d 'resize)))
-      ;; The deadline is a GLib *timeout*, not a clock this loop watches.
-      ;; It pushes a sentinel onto the queue, so the loop waits in the
-      ;; main loop - where it costs nothing - and is woken by the timeout
-      ;; when the time comes. This is what `timeout-add''s priority-first
-      ;; argument order and `source-remove?' are for.
-      ;;
-      ;; Watching the clock instead means calling `main-iteration-do?' in
-      ;; its non-blocking form and going round until the time is up, which
-      ;; is a busy-wait: it burns a whole processor for the length of
-      ;; every timed read. That is what this did, and it is what made a
-      ;; blinking cursor - which arms a timed read twice a second - cost
-      ;; half a processor to do nothing. `keyboard.sld' arms the read from
-      ;; `timer-next-delay' now, so a timed read is the ordinary case and
-      ;; the busy-wait is not a rare one.
       (let* ((deadline (and (>= timeout 0) (+ (pgtk-now-ms) timeout)))
              (source (and deadline
                           (timeout-add
                            0 timeout
-                           ;; The callback is called WITH the data
-                           ;; argument, so it has to take one: a
-                           ;; zero-argument lambda raises every time the
-                           ;; timeout fires, the sentinel is never
-                           ;; enqueued, and the read blocks for ever. That
-                           ;; is what this did, and the symptom was a
-                           ;; cursor that never blinked and a REPL that
-                           ;; never answered.
                            (lambda (data)
                              (pgtk-enqueue! d 'pgtk-deadline)
-                             ;; #f: a one-shot source, removed once run
-                             #f)
+                             #t)
                            #f))))
         (dynamic-wind
          (lambda () #t)
          (lambda ()
            (let loop ()
-          (let ((queue (pgtk-queue d)))
-            (cond
-             ((and (pair? queue) (eq? (car queue) 'pgtk-deadline))
-              (set! (pgtk-queue d) (cdr queue))
-              #f)
-             ((pair? queue)
-              (set! (pgtk-queue d) (cdr queue))
-              (let ((item (car queue)))
-                (cond
-                 ((eq? item 'resize) *resize-code*)
-                 ((eq? item 'redraw) *redraw-code*)
-                 ;; A modifier press is not a key: drop it and read on,
-                 ;; so the caller never sees an event it cannot act on.
-                 ((memv (pgtk-event-keysym item) modifier-keysyms) (loop))
-                 (else (pgtk-encode-event item)))))
-             (else
-              ;; Nothing yet. Give the development REPL a turn - a no-op
-              ;; unless `SCHEMACS_REPL' opened it, and the only place a
-              ;; windowed editor is ever idle - then wait in the main
-              ;; loop. The wait *blocks* whether or not there is a
-              ;; deadline: the timeout above is what ends it, so there is
-              ;; nothing to poll for.
-              (poll-repl!)
-              (catch #t
-                (lambda () (main-iteration-do? #t))
-                (lambda args #f))
-              (loop))))))
+             (let ((queue (pgtk-queue d)))
+               (cond
+                ((and (pair? queue) (eq? (car queue) 'pgtk-deadline))
+                 (set! (pgtk-queue d) (cdr queue))
+                 #f)
+                ((pair? queue)
+                 (set! (pgtk-queue d) (cdr queue))
+                 (let ((item (car queue)))
+                   (cond
+                    ((eq? item 'resize) *resize-code*)
+                    ((eq? item 'redraw) *redraw-code*)
+                    ((eq? item 'delete-frame) *delete-frame-code*)
+                    ((memv (pgtk-event-keysym item) modifier-keysyms)
+                     (loop))
+                    (else (pgtk-encode-event item)))))
+                (else
+                 (poll-repl!)
+                 (catch #t
+                   (lambda () (main-iteration-do? #t))
+                   (lambda args #f))
+                 (loop))))))
          (lambda ()
-           ;; the timeout has either fired or is no longer wanted
            (when source (source-remove? source))))))
 
     (define-method (read-input-event (d <pgtk-display>) timeout)
@@ -577,6 +555,7 @@
       (cond
        ((eqv? ev *resize-code*) '(resize))
        ((eqv? ev *redraw-code*) '(redraw))
+       ((eqv? ev *delete-frame-code*) '("delete-frame"))
        ((integer? ev) (key-event->path (pgtk-decode-event ev)))
        (else #f)))
 
@@ -892,6 +871,20 @@
                      ;; and draw again: the shape changed
                      (pgtk-enqueue! d 'redraw))
                    #f))
+        ;; The window manager's request to close the frame - the X
+        ;; client message `WM_DELETE_WINDOW', which Gtk delivers as
+        ;; `delete-event'. Emacs's `delete_event' queues the event and
+        ;; returns TRUE, so Gtk does not destroy the window: whether to
+        ;; save and exit is the command loop's decision, not the
+        ;; compositor's. Not answering this is what left a process with
+        ;; no window running when the frame was closed.
+        (connect win (make <signal> #:name "delete-event")
+                 (lambda (w e)
+                   (call-with-port (open-file "/tmp/proto/delete.txt" "a")
+                     (lambda (p) (write 'delete-event p) (newline p)))
+                   (pgtk-enqueue! d 'delete-frame)
+                   ;; TRUE: Gtk must not destroy the window
+                   #t))
         (connect win (make <signal> #:name "focus-out-event")
                  (lambda (w e)
                    (when (*current-frame*)

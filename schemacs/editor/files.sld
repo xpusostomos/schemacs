@@ -118,6 +118,8 @@
    save-answer-char->decision
    save-buffer
    save-buffers-kill-terminal
+   handle-delete-frame
+   frames-except
    save-some-buffers
    y-or-n-p
    )
@@ -266,6 +268,33 @@
     ;; `editor/minibuffer.sld'. Everything else that used to sit under
     ;; the `Windows' banner is in `(schemacs editor window)' now.
     ;;------------------------------------------------------------------
+
+    (define (frames-except frame)
+      ;; The frames other than FRAME. This editor has one frame
+      ;; (`*current-frame*'), so the scan Emacs's `handle-delete-frame'
+      ;; does before it decides the frame being closed is the last is a
+      ;; scan over that one frame - and it is the scan, not a hardcoded
+      ;; "this is the last frame", that a multi-frame editor extends.
+      ;;--------------------------------------------------------------
+      (let ((current (*current-frame*)))
+        (if (and current (not (eq? current frame))) (list current) '())))
+
+    (defcommand (handle-delete-frame)
+      ;; GNU Emacs's `handle-delete-frame' (`frame.el:265'): the window
+      ;; manager has asked to close FRAME. "If there is another visible
+      ;; frame, delete this one; otherwise `save-buffers-kill-emacs'" -
+      ;; the second of those being the logic Chris presumed, and it is
+      ;; `save-buffers-kill-emacs' rather than a bare exit, which is why
+      ;; Emacs asks about unsaved buffers before it goes. It is in this
+      ;; library rather than `frame.sld' because the command it hands off
+      ;; to is `save-buffers-kill-terminal', which is here.
+      ;;--------------------------------------------------------------
+      "Handle the window manager's request to close the frame."
+      (interactive)
+      (let ((others (frames-except (*current-frame*))))
+        (if (pair? others)
+            others
+            (save-buffers-kill-terminal))))
 
     (defcommand (save-buffers-kill-terminal)
       ;; GNU Emacs's `save-buffers-kill-emacs': offer to save what
@@ -1012,6 +1041,12 @@
       save-buffer)
     (define-key *default-keymap* (list (list 'ctrl #\x) (list 'ctrl #\c))
       save-buffers-kill-terminal)
+    ;; The window manager's request to close the frame arrives as a key
+    ;; the same way a frame resize does, and is answered by the command it
+    ;; names. Emacs binds `handle-delete-frame' in `special-event-map'
+    ;; against `[delete-frame]'; here the path is a named key.
+    (define-key *default-keymap* (list "delete-frame")
+      handle-delete-frame)
     (define-key *default-keymap* (list (list 'ctrl #\x) #\k)
       kill-buffer)
 

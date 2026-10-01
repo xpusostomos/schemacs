@@ -96,6 +96,13 @@
     (only (schemacs editor keyboard)
           abort-recursive-edit exit-recursive-edit read-key-event
           recursive-edit signal-quit)
+    ;; `key-event->keymap-path' is what the command loop asks an event to
+    ;; name itself with, and `read-char-from-minibuffer' asks the same
+    ;; thing - because a terminal hands back the character a key *is*
+    ;; while a window system hands back an integer it must be decoded
+    ;; from, and a question one key answers cannot tell those apart by
+    ;; `char?'.
+    (only (schemacs editor dispnew) current-display key-event->keymap-path)
     ;; `read-char-from-minibuffer' reads the one key that answers it with
     ;; the command loop's read, so a pushed-back event reaches it too;
     ;; what it draws with is the display's `render!'.
@@ -551,11 +558,19 @@
                        (*echo-area-prompt* prompt))
           (render! frame)
           (let loop ()
-            (let ((ev (read-key-event -1)))
+            (let ((path (key-event->keymap-path
+                         (current-display) (read-key-event -1))))
               (cond
-               ((and (char? ev) (= (char->integer ev) 7))
-                (signal-quit))
-               ((char? ev) ev)
+               ;; C-g abandons the whole command. A terminal sends the
+               ;; byte, so the path is `\'s own `(ctrl #\g)'; a window
+               ;; system sends a `g' keysym with the control modifier,
+               ;; which is the same event and so the same path.
+               ((equal? path '(ctrl #\g)) (signal-quit))
+               ;; a key the question names as one character answers it -
+               ;; `y' and `n' and the rest
+               ((and (= (length path) 1) (char? (car path)))
+                (car path))
+               ;; an arrow key, a frame resize: asks again
                (else (loop))))))))
 
     (define *extended-command-history* (make<history> '()))
