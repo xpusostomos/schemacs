@@ -34,6 +34,16 @@
   (import
     (scheme base)
     (scheme char)
+    ;; The clipboard comes through Gtk's own C functions, which
+    ;; guile-gi does not bind (see the selections section at the end).
+    ;; The pointer procedures are `(system foreign)''s; `dynamic-link'
+    ;; and `dynamic-func' are core bindings, which an R7RS library
+    ;; reaches through `(guile)' - as `frame.sld''s SIGTSTP does.
+    (only (system foreign) pointer->procedure string->pointer pointer->string
+          null-pointer? int void)
+    (only (guile) dynamic-link dynamic-func assq-ref)
+    ;; `alist-delete' removes one selection from the ownership record.
+    (only (srfi srfi-1) alist-delete)
     (only (scheme write) display write)
     (only (guile) catch ash logand inexact->exact round
           get-internal-real-time internal-time-units-per-second)
@@ -67,8 +77,9 @@
           <display> clear-frame-area! column-width current-display
           display-color-cells
           draw-window-cursor! flush-display! key-event->keymap-path
-          line-height read-input-event realize-face resume-display!
-          screen-size suspend-display! update-window-begin!
+          get-selection line-height read-input-event realize-face
+          resume-display! screen-size selection-exists? selection-owner?
+          set-selection! suspend-display! update-window-begin!
           update-window-end! write-glyphs!)
     ;; Opening a display initializes faces against it, as `term.sld''s
     ;; `with-terminal' does.
@@ -300,16 +311,24 @@
       ;;--------------------------------------------------------------
       (let ((keysym (cdr ev))
             (mods (modifier-symbols (car ev))))
-        (if (< keysym 256)
-            ;; A plain ASCII keysym is the character itself.
-            (append mods (character-path (integer->char keysym)))
-            (let* ((unicode (keyval-to-unicode keysym))
-                   (named (assoc keysym named-keysyms)))
-              (cond
-               (named (append mods (list (cdr named))))
-               ((and unicode (> unicode 0))
-                (append mods (character-path (integer->char unicode))))
-               (else #f))))))
+        (cond
+         ((< keysym 256)
+          ;; A plain ASCII keysym is the character itself.
+          (append mods (character-path (integer->char keysym))))
+         ;; Escape is the terminal's `C-[': a terminal sends byte 27 and
+         ;; `ncurses-key->keymap-path' folds it to `(ctrl #\\[)', which
+         ;; is the ESC that makes `M-w' out of `w' - and the two
+         ;; displays must name it the same way or a keymap binding one
+         ;; misses the other. Gtk sends the keysym 0xff1b.
+         ((= keysym #xff1b) (character-path #\esc))
+         (else
+          (let* ((unicode (keyval-to-unicode keysym))
+                 (named (assoc keysym named-keysyms)))
+            (cond
+             (named (append mods (list (cdr named))))
+             ((and unicode (> unicode 0))
+              (append mods (character-path (integer->char unicode))))
+             (else #f)))))))
 
     ;;----------------------------------------------------------------
     ;; The display
@@ -337,6 +356,12 @@
       ;; does not ask again - which it otherwise does on every frame,
       ;; and redraws forever.
       (last-allocation #:init-value #f #:accessor pgtk-last-allocation)
+      ;; The selections this display has asserted, as
+      ;; `((SELECTION . VALUE) ...)'. This is `pgtkselect.c''s
+      ;; `LOCAL_SELECTION' - the process's own bookkeeping of what it
+      ;; owns, which is what `pgtk-selection-owner-p' answers from, Gtk
+      ;; recording no owner for a plain `set_text'.
+      (selections #:init-value '() #:accessor pgtk-selections)
       ;; The pixel size the surface was last DRAWN at, so the read can
       ;; tell when what is on screen no longer matches the window.
       (drawn-size #:init-value #f #:accessor pgtk-drawn-size))
@@ -922,5 +947,171 @@
          (lambda ()
            (widget:destroy win)
            (current-display #f)))))
+
+    ;;----------------------------------------------------------------
+    ;; The selections
+    ;;
+    ;; `pgtk-win.el''s four `gui-backend-*' methods, which are the C
+    ;; DEFUNs of `pgtkselect.c'; `select.sld''s `gui-backend-*' reach
+    ;; them through `dispnew''s selection generics, whose dispatch is
+    ;; the display. A text terminal gets the default methods, which
+    ;; answer #f - a terminal has no selections, and so an `emacs -nw'
+    ;; kill and yank stay inside the kill ring. This display answers
+    ;; with Gtk's clipboard.
+    ;;
+    ;; Gtk's clipboard and not the raw `gdk_selection_owner_set'
+    ;; protocol `pgtkselect.c' speaks, because the clipboard *is* that
+    ;; protocol as the toolkit abstracts it, and every other GTK
+    ;; program talks to it through GtkClipboard. What is kept of the C
+    ;; is the bookkeeping: the `selections' slot above is
+    ;; `LOCAL_SELECTION' (`pgtkselect.c:116'), which
+    ;; `pgtk-selection-owner-p' answers from.
+    ;;
+    ;; The C functions come through Guile's own FFI rather than
+    ;; guile-gi, which binds no `clipboard:get': `gtk_clipboard_get''s
+    ;; GdkAtom parameter carries no GType, and guile-gi skips functions
+    ;; whose arguments it cannot map.
+    ;;
+    ;; The four generics MUST be imported from `dispnew' or the
+    ;; `define-method's below make *new* generics of their own: the
+    ;; dispatch through `select.sld' still resolves to `dispnew''s,
+    ;; whose default methods answer #f, and the clipboard silently
+    ;; receives nothing - which is what M-w did, and what this bug was.
+    ;;------------------------------------------------------------------
+
+    (define gtk-selection-lib (dynamic-link "libgtk-3.so.0"))
+    (define gdk-selection-lib (dynamic-link "libgdk-3.so.0"))
+    ;; `g_free' - GtkClipboard's text comes out as a `gchar *' that the
+    ;; caller owns (its documentation: "free the returned value"), and
+    ;; only GLib knows how. `libgobject-2.0' exports it.
+    (define gobject-selection-lib (dynamic-link "libgobject-2.0.so.0"))
+
+    (define (selection-foreign-fn lib name ret args)
+      (pointer->procedure ret (dynamic-func name lib) args))
+
+    (define gdk-atom-intern
+      (selection-foreign-fn gdk-selection-lib "gdk_atom_intern" '* (list '* int)))
+    (define gtk-clipboard-get
+      (selection-foreign-fn gtk-selection-lib "gtk_clipboard_get" '* (list '*)))
+    (define gtk-clipboard-set-text
+      (selection-foreign-fn gtk-selection-lib "gtk_clipboard_set_text"
+                            void (list '* '* int)))
+    (define gtk-clipboard-clear
+      (selection-foreign-fn gtk-selection-lib "gtk_clipboard_clear"
+                            void (list '*)))
+    (define gtk-clipboard-wait-for-text
+      (selection-foreign-fn gtk-selection-lib "gtk_clipboard_wait_for_text"
+                            '* (list '*)))
+    (define gtk-clipboard-wait-is-text-available?
+      (selection-foreign-fn gtk-selection-lib "gtk_clipboard_wait_is_text_available"
+                            int (list '*)))
+    (define g-free
+      (selection-foreign-fn gobject-selection-lib "g_free" void (list '*)))
+
+    (define (selection-atom selection)
+      ;; A selection symbol - `PRIMARY', `SECONDARY', `CLIPBOARD' - as a
+      ;; GdkAtom. GDK expects these literal upper-case names, as
+      ;; `pgtk-own-selection-internal''s docstring says: "(Those are
+      ;; literal upper-case symbol names, since that's what GDK
+      ;; expects.)"
+      ;;--------------------------------------------------------------
+      (gdk-atom-intern (string->pointer (symbol->string selection) "UTF-8") 0))
+
+    (define *selection-clipboards* (make-parameter '()))
+    ;; ^ `((SELECTION . <clipboard-pointer>) ...)'. `gtk_clipboard_get'
+    ;; answers the same object for the same atom, so this is a cache,
+    ;; not the ownership - that is the display's `selections' slot.
+
+    (define (selection-clipboard selection)
+      (or (assq-ref (*selection-clipboards*) selection)
+          (let ((clip (gtk-clipboard-get (selection-atom selection))))
+            (*selection-clipboards*
+             (cons (cons selection clip) (*selection-clipboards*)))
+            clip)))
+
+    (define-method (get-selection (d <pgtk-display>) selection target-type)
+      ;; Read SELECTION off the display, or #f when it has no text to
+      ;; give. This is `pgtk-get-selection-internal': a read blocks
+      ;; until the owner answers, whether that owner is this process or
+      ;; another program.
+      ;;
+      ;; TARGET-TYPE is a text target - `STRING', `UTF8_STRING',
+      ;; `COMPOUND_TEXT', `text/plain;charset=utf-8' - or `TIMESTAMP'.
+      ;; Gtk's clipboard keeps no timestamp, and select.el's timestamp
+      ;; comparisons only run for `window-system' `x', so that one
+      ;; answers #f; every text target is answered with the text.
+      ;;--------------------------------------------------------------
+      ;; A display opened with no window - a unit test's - has never
+      ;; initialised Gtk, and asking it would ask a dead library.
+      ;;--------------------------------------------------------------
+      (and (pgtk-window d)
+           (not (eq? target-type 'TIMESTAMP))
+           (let* ((text (gtk-clipboard-wait-for-text
+                         (selection-clipboard selection)))
+                  ;; An empty clipboard comes back as the NULL pointer,
+                  ;; which the FFI wraps as a *true* pointer object, so
+                  ;; the question is not `text' but `null-pointer?'.
+                  (has-text? (and text (not (null-pointer? text))))
+                  ;; The `gchar *' is ours to free. `pointer->string' is
+                  ;; pinned to UTF-8: the clipboard's UTF8_STRING is
+                  ;; UTF-8 whatever the locale here is. Its second
+                  ;; argument is the LENGTH - -1 for "up to the NUL" -
+                  ;; and the encoding its third.
+                  (string (and has-text? (pointer->string text -1 "UTF-8"))))
+             (when has-text? (g-free text))
+             string)))
+
+    (define-method (set-selection! (d <pgtk-display>) selection value)
+      ;; Assert SELECTION holding VALUE, or - VALUE #f - disown it,
+      ;; which is "there is no such selection". This is
+      ;; `pgtk-own-selection-internal' and
+      ;; `pgtk-disown-selection-internal' through Gtk:
+      ;; `gtk_clipboard_set_text' takes the ownership and sets the
+      ;; text, `gtk_clipboard_clear' gives it up - and disowning, as the
+      ;; C's, does nothing when we do not own the selection.
+      ;;
+      ;; VALUE is typically a string. The other simple values
+      ;; `gui-set-selection' admits - a symbol, an integer - convert at
+      ;; *request* time in the C (`selection-converter-alist', where a
+      ;; symbol becomes its name for `STRING'); here the conversion
+      ;; happens at assert time, which is the same text a reader gets.
+      ;;--------------------------------------------------------------
+      (if value
+          (let ((text (cond ((string? value) value)
+                            ((symbol? value) (symbol->string value))
+                            ((integer? value) (number->string value))
+                            (else value))))
+            (gtk-clipboard-set-text (selection-clipboard selection)
+                                    (string->pointer text "UTF-8") -1)
+            (set! (pgtk-selections d)
+                  (cons (cons selection value)
+                        (alist-delete selection (pgtk-selections d)))))
+          ;; Don't disown the selection when we're not the owner - the
+          ;; C's early return, which answers nil.
+          (when (assq selection (pgtk-selections d))
+            (gtk-clipboard-clear (selection-clipboard selection))
+            (set! (pgtk-selections d)
+                  (alist-delete selection (pgtk-selections d))))))
+
+    (define-method (selection-owner? (d <pgtk-display>) selection)
+      ;; Whether this process owns SELECTION -
+      ;; `pgtk-selection-owner-p', which answers from
+      ;; `LOCAL_SELECTION': the process's own record of what it has
+      ;; asserted, not a question to GDK.
+      ;;--------------------------------------------------------------
+      (and (pgtk-window d)
+           (and (assq selection (pgtk-selections d)) #t)))
+
+    (define-method (selection-exists? (d <pgtk-display>) selection)
+      ;; Whether SELECTION has an owner at all, whoever owns it. The C
+      ;; asks GDK (`gdk_selection_owner_get_for_display') after its own
+      ;; bookkeeping; Gtk's clipboard-level question is
+      ;; `gtk_clipboard_wait_is_text_available' - does anyone offer
+      ;; text - which is the one the text-selection layer above asks.
+      ;;--------------------------------------------------------------
+      (and (pgtk-window d)
+           (or (and (assq selection (pgtk-selections d)) #t)
+               (= 1 (gtk-clipboard-wait-is-text-available?
+                     (selection-clipboard selection))))))
 
     ))

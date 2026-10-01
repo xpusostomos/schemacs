@@ -37,10 +37,19 @@
          text-editor-set-read-only! text-editor-undo 
          text-editor-undo-boundary! text-editor-undo-list)
     (only (schemacs editor frame)
-         *current-frame* *echo-area-buffer* current-editor frame-keymap-state 
-         selected-window set!frame-keymap-state 
-         set!frame-message set!window-top-line window-body-height 
+         *current-frame* *echo-area-buffer* current-editor display-selections-p
+         frame-keymap-state
+         selected-window set!frame-keymap-state
+         set!frame-message set!window-top-line window-body-height
          window-buffer window-list window-top-line)
+    ;; The kill ring's window-system half: the cut and paste functions
+    ;; are simple.el's `interprogram-*-function' variables' defaults,
+    ;; and `deactivate-mark' sets PRIMARY through the low-level
+    ;; `gui-set-selection' and asks the ownership questions.
+    (only (schemacs editor select)
+         gui-select-text gui-selection-value gui-set-selection
+         gui-backend-selection-owner-p gui-backend-selection-exists-p
+         *saved-region-selection*)
     ;; `toggle-truncate-lines' resets the `hscroll' of every window
     ;; showing the buffer, which is `set-window-hscroll''s
     (only (schemacs editor window) set-window-hscroll!)
@@ -76,6 +85,8 @@
    *last-change-was-undo* *last-command* *this-command* *temporary-goal-column*
    *kill-do-not-save-duplicates* *kill-read-only-ok*
    *kill-ring* *kill-ring-max* *kill-ring-yank-pointer*
+   *interprogram-cut-function* *interprogram-paste-function*
+   *select-active-regions* *yank-pop-change-selection*
    *pending-undo-list* *prefix-cu* *prefix-digits* *prefix-negative*
    amalgamating-command? backward-char backward-delete-char
    backward-kill-word backward-word backward-word-position
@@ -409,7 +420,7 @@
                   (deactivate-mark)
                   (activate-mark))))))
 
-    (define *next-screen-context-lines* (make-parameter 2))
+        (define *next-screen-context-lines* (make-parameter 2))
     ;; ^ GNU Emacs's `next-screen-context-lines', which `window.c:9300'
     ;; declares as a DEFVAR_INT defaulting to 2: "Number of lines of
     ;; continuity when scrolling by screenfuls". It is what a
@@ -445,7 +456,7 @@
     ;; This tree multiplied in both cases, so `C-u 3 M-v' scrolled three
     ;; screenfuls where Emacs scrolls three *lines*.
 
-    (define (scroll-amount uarg frame window)
+    (define (scroll-amount uarg window)
       ;; The number of lines to scroll: the near-full-screen amount when
       ;; no prefix was typed, its negative for the atom `-', and exactly
       ;; the prefix's numeric value otherwise - `scroll_command''s three
@@ -468,7 +479,7 @@
              (window (selected-window))
              (ed (window-buffer window))
              (vheight (window-body-height window))
-             (n (scroll-amount uarg frame window))
+             (n (scroll-amount uarg window))
              (last-line (max 0 (- (text-editor-line-count ed) 1)))
              (new-top (min (+ (window-top-line window) n) last-line)))
         (if (<= new-top (window-top-line window))
@@ -489,7 +500,7 @@
              (window (selected-window))
              (ed (window-buffer window))
              (vheight (window-body-height window))
-             (n (scroll-amount uarg frame window))
+             (n (scroll-amount uarg window))
              (new-top (max 0 (- (window-top-line window) n))))
         (if (= new-top (window-top-line window))
             (set!frame-message frame "; Beginning of buffer")
@@ -500,8 +511,7 @@
                           (>= line (+ new-top vheight)))
                   (text-editor-set-cursor
                    ed (+ new-top (- vheight 1)) 0)))))))
-
-    (define-command (toggle-truncate-lines arg)
+(define-command (toggle-truncate-lines arg)
       "Toggle truncating of long lines for the current buffer.
 When truncating is off, long lines are folded.
 With prefix argument ARG, truncate long lines if ARG is positive,
@@ -774,6 +784,35 @@ non-nil."
       ;;--------------------------------------------------------------
       (make-parameter #f))
 
+    ;; The window-system cut and paste hooks, simple.el:5666 and :5677 -
+    ;; "Function to call to make a killed region available to other
+    ;; programs" and its paste-side counterpart, which answers "text
+    ;; cut from other programs" or nil when none has been provided.
+    ;; Their defaults are `select.el''s `gui-select-text' and
+    ;; `gui-selection-value', which this library imports; a text
+    ;; terminal's backend answers #f under them, so they are no-ops
+    ;; there, which is what `emacs -nw' does.
+    (define *interprogram-cut-function* (make-parameter gui-select-text))
+    (define *interprogram-paste-function* (make-parameter gui-selection-value))
+
+    (define *select-active-regions*
+      ;; GNU Emacs's `select-active-regions', on by default: whether an
+      ;; active region is put in the window system's PRIMARY selection -
+      ;; on deactivation (`deactivate-mark') and, on the C side, after
+      ;; each command. keyboard.c declares it (a DEFVAR_LISP defaulting
+      ;; to t, `keyboard.c:14361'), and the command-loop half that reads
+      ;; it after every command is not ported; `deactivate-mark' below
+      ;; is the only reader here.
+      ;;--------------------------------------------------------------
+      (make-parameter #t))
+
+    (define *yank-pop-change-selection*
+      ;; GNU Emacs's `yank-pop-change-selection', off by default:
+      ;; whether rotating the kill ring - usually with `yank-pop' - also
+      ;; copies the new kill to the window system selection.
+      ;;--------------------------------------------------------------
+      (make-parameter #f))
+
     (define (kill-new string . args)
       ;; GNU Emacs's `kill-new': make STRING the latest kill, and point
       ;; the yank pointer at it. REPLACE - false unless passed - replaces
@@ -781,18 +820,30 @@ non-nil."
       ;; how a run of kills becomes one entry.
       ;;
       ;; Emacs also offers the string to the window system here
-      ;; (`interprogram-cut-function') and can pull in what another
-      ;; program has on the clipboard first; there is no window system
-      ;; yet. See REGION-PLAN.txt.
+      ;; (`interprogram-cut-function'), which is what makes M-w visible
+      ;; to other programs: its default, `gui-select-text', puts the
+      ;; text on the clipboard.
+      ;;
+      ;; Not ported: `kill-transform-function' (its default is to pass
+      ;; the string through) and `menu-bar-update-yank-menu' (there is
+      ;; no menu bar), and `save-interprogram-paste-before-kill', off by
+      ;; default - the block that saves what other programs have on the
+      ;; clipboard before a kill replaces the ring.
       ;;--------------------------------------------------------------
       (let ((replace (if (pair? args) (car args) #f)))
+        ;; `equal-including-properties''s empty-ring case: in Elisp
+        ;; `(car nil)' is nil, and nil is not equal to STRING, so an
+        ;; empty ring always takes the new entry.
         (unless (and (*kill-do-not-save-duplicates*)
+                     (pair? (*kill-ring*))
                      (equal? string (car (*kill-ring*))))
           (if (and replace (pair? (*kill-ring*)))
               (set-car! (*kill-ring*) string)
               (*kill-ring* (add-to-history (*kill-ring*) string
                                            (*kill-ring-max*) #t))))
         (*kill-ring-yank-pointer* (*kill-ring*))
+        (if (*interprogram-cut-function*)
+            ((*interprogram-cut-function*) string))
         string))
 
     (define (kill-append string before-p)
@@ -804,8 +855,12 @@ non-nil."
       ;; the text being appended to came from a `yank-handler'; there is
       ;; no `yank-handler' here, so it always replaces, which is what its
       ;; expression comes to without one.
+      ;;
+      ;; An empty ring: Elisp's `cur' is nil then, and `(concat nil s)'
+      ;; is s - so the first kill-append onto an empty ring appends
+      ;; nothing.
       ;;--------------------------------------------------------------
-      (let ((cur (car (*kill-ring*))))
+      (let ((cur (if (pair? (*kill-ring*)) (car (*kill-ring*)) "")))
         (kill-new (if before-p
                       (string-append string cur)
                       (string-append cur string))
@@ -820,15 +875,50 @@ non-nil."
       ;; `(mod (- n (length pointer)) (length ring))' turns "N back from
       ;; the pointer" into a distance from the front of the list. The
       ;; arithmetic wraps, which is what makes M-y keep going round.
+      ;;
+      ;; A kill with N zero asks the window system first: if another
+      ;; program has provided text since Emacs last looked
+      ;; (`interprogram-paste-function'), that text becomes the latest
+      ;; kill and is what is yanked.
       ;;--------------------------------------------------------------
       (let ((do-not-move (if (pair? args) (car args) #f)))
-        (or (*kill-ring*) (error "Kill ring is empty"))
-        (let ((element (nthcdr (modulo (- n (length (*kill-ring-yank-pointer*)))
+        (let ((interprogram-paste (and (= n 0)
+                                       (*interprogram-paste-function*)
+                                       ((*interprogram-paste-function*)))))
+          (if interprogram-paste
+              (begin
+                ;; Disable the interprogram cut function when we add the
+                ;; new text to the kill ring, so Emacs doesn't try to own
+                ;; the selection, with identical text. Also disable the
+                ;; interprogram paste function, so that `kill-new'
+                ;; doesn't call it repeatedly.
+                (parameterize ((*interprogram-cut-function* #f)
+                               (*interprogram-paste-function* #f))
+                  ;; Emacs's `(listp interprogram-paste)': the function
+                  ;; may answer a list of strings, the first of which is
+                  ;; the paste and the rest of which join the ring.
+                  (if (pair? interprogram-paste)
+                      ;; Use `reverse' to avoid modifying external data.
+                      (for-each kill-new (reverse interprogram-paste))
+                      (kill-new interprogram-paste)))
+                (car (*kill-ring*)))
+              (begin
+                ;; Emacs's `(or kill-ring (error ...))': `'()' is true in Scheme, so
+                ;; the test has to be `pair?' - the empty ring signals
+                ;; "Kill ring is empty" and nothing else reaches the
+                ;; `modulo' below.
+                (or (pair? (*kill-ring*)) (error "Kill ring is empty"))
+                (let ((element
+                       (nthcdr (modulo (- n (length (*kill-ring-yank-pointer*)))
                                        (length (*kill-ring*)))
                                (*kill-ring*))))
-          (unless do-not-move
-            (*kill-ring-yank-pointer* element))
-          (car element))))
+                  (unless do-not-move
+                    (*kill-ring-yank-pointer* element)
+                    (when (and (*yank-pop-change-selection*)
+                               (> n 0)
+                               (*interprogram-cut-function*))
+                      ((*interprogram-cut-function*) (car element))))
+                  (car element)))))))
 
     (define (kill-region-arguments)
       ;; The BEG and END the region commands work on, in Emacs's order:
@@ -1407,11 +1497,44 @@ non-nil."
       ;; the hook. FORCE does it even when the region was not active,
       ;; which is what `set-mark' with no position needs.
       ;;
-      ;; Emacs also sets the PRIMARY selection here when
-      ;; `select-active-regions' says to; there is no selection to set.
+      ;; Deactivation also updates the primary selection according to
+      ;; `select-active-regions' - `simple.el:7084'. The var
+      ;; `saved-region-selection', if non-nil, is the text in the region
+      ;; prior to the last command modifying the buffer (`gui-select-text'
+      ;; saves it, as insdel.c does before a modification): set the
+      ;; selection to that, or to the current region. If another program
+      ;; has acquired the selection, region deactivation should not
+      ;; clobber it (Bug#11772), which is what the ownership questions in
+      ;; the second branch ask.
+      ;;
+      ;; Not ported: the check of the `deactivate-mark' *variable*'s
+      ;; `dont-save' value - the variable is the C command loop's flag,
+      ;; which this tree's loop applies itself - and
+      ;; `redisplay--update-region-highlight', the redraw being the
+      ;; command loop's here. `select-active-regions''s obsolete `only'
+      ;; value is not ported either; the temporary Transient Mark mode
+      ;; this tree knows is `lambda'.
       ;;--------------------------------------------------------------
       (let ((force (if (pair? args) (car args) #f)))
         (when (or (region-active-p) force)
+          (when (and (*select-active-regions*)
+                     (region-active-p)
+                     (display-selections-p))
+            (cond ((*saved-region-selection*)
+                   (if (gui-backend-selection-owner-p 'PRIMARY)
+                       (gui-set-selection 'PRIMARY (*saved-region-selection*)))
+                   (*saved-region-selection* #f))
+                  ((and (not (= (region-beginning) (region-end)))
+                        (or (gui-backend-selection-owner-p 'PRIMARY)
+                            (not (gui-backend-selection-exists-p 'PRIMARY))))
+                   ;; `region-extract-function''s default for a nil
+                   ;; METHOD is the region's text (`simple.el:1452');
+                   ;; there is no `filter-buffer-substring' here.
+                   (gui-set-selection 'PRIMARY
+                                      (text-editor-copy-string
+                                       (current-editor)
+                                       (region-beginning)
+                                       (region-end))))))
           ;; a temporarily-enabled Transient Mark mode goes back to what
           ;; it was
           (when (eq? (buffer-local-value (current-buffer)

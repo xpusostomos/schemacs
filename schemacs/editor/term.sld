@@ -31,7 +31,12 @@
     ;; import for that: the eight standard colors, the xterm driver for
     ;; a TERM of xterm*, and the face registry to recalc.
     (only (schemacs editor tty-colors) tty-register-default-colors)
-    (only (schemacs editor xterm) terminal-init-xterm)
+    (only (schemacs editor xterm) terminal-init-xterm
+          *xterm--set-selection* *xterm--get-selection*
+          xterm--tty-set-selection xterm--tty-get-selection)
+    ;; `tty-select-active-regions' gates the tty branch of
+    ;; `display-selections-p', which the selection methods answer for.
+    (only (schemacs editor frame) *tty-select-active-regions*)
     (only (schemacs editor faces)
           *display-color-cells* *display-type* *frame-background-mode*
           face-list face-spec-recalc)
@@ -362,6 +367,33 @@
       ;; monochrome one.
       ;;--------------------------------------------------------------
       (if (has-colors?) (max 1 (colors)) 0))
+
+    ;;----------------------------------------------------------------
+    ;; The selection: OSC 52
+    ;;
+    ;; `gui-backend-set-selection' and `gui-backend-get-selection' for
+    ;; `window-system' nil - `xterm.el''s tty methods, whose bodies are
+    ;; xterm.sld's, because the dispatch here is the display and
+    ;; xterm.sld has none. Two one-line delegations, and nothing for
+    ;; `selection-owner?' / `selection-exists?': xterm.el defines
+    ;; neither method for a terminal, so the defaults answer - #f -
+    ;; and a tty Emacs, owning no selection, has `deactivate-mark''s
+    ;; region branch always take PRIMARY. That is what Emacs's ttys do.
+    ;;--------------------------------------------------------------
+
+    (define-method (set-selection! (d <tty-display>) selection value)
+      (xterm--tty-set-selection selection value))
+
+    (define-method (get-selection (d <tty-display>) selection target-type)
+      (xterm--tty-get-selection selection target-type))
+
+    (define-method (display-selections-supported? (d <tty-display>))
+      ;; The tty branch of `display-selections-p' (`frame.el:2786'):
+      ;; `tty-select-active-regions' together with the terminal
+      ;; parameter `xterm--set-selection', which the version handler
+      ;; sets for an xterm that speaks OSC 52.
+      ;;--------------------------------------------------------------
+      (and (*tty-select-active-regions*) (*xterm--set-selection*) #t))
 
     ;;----------------------------------------------------------------
     ;; Realizing a face on a terminal

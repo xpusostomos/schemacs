@@ -23,11 +23,19 @@
   ;;
   ;; Not ported: the key maps (`xterm-function-map' - the keys come
   ;; through ncurses's terminfo lookup here), `modifyOtherKeys', the
-  ;; selection (OSC 52), the window title, the cursor updates,
-  ;; bracketed paste and focus tracking, the mouse, and
-  ;; `xterm--maybe-update-default-face', which gives the `default' face
-  ;; the exact colours the terminal reported. The rxvt hand-off at the
-  ;; top of `xterm--init' is not either: `term/rxvt.el' is not here.
+  ;; window title, the cursor updates, bracketed paste and focus
+  ;; tracking, the mouse, and `xterm--maybe-update-default-face', which
+  ;; gives the `default' face the exact colours the terminal reported.
+  ;; The rxvt hand-off at the top of `xterm--init' is not either:
+  ;; `term/rxvt.el' is not here.
+  ;;
+  ;; The selection is the OSC 52 path: `gui-backend-get-selection' and
+  ;; `gui-backend-set-selection' for `window-system' nil, which move
+  ;; text to and from the clipboard through `\e]52;' sequences. Only
+  ;; the bare-terminal branch of the set method is ported - the Device
+  ;; Control String wrapper for `screen' is not, and this tree's
+  ;; `TERM=screen*' never reaches `terminal-init-xterm' anyway. The
+  ;; method for the tty display is `term.sld''s, which delegates here.
   ;;
   ;; Emacs's `xterm--query' has an asynchronous path - when input is
   ;; pending it registers the reply's prefix in `input-decode-map' and
@@ -43,7 +51,9 @@
     ;; `(NAME INDEX (R G B))'.
     (only (scheme cxr) caddr)
     ;; `ash' and `logior' for `xterm-rgb-convert-to-16bit'; the hex is
-    ;; read with `string->number' in base 16.
+    ;; read with `string->number' in base 16. `string->utf8' and
+    ;; `utf8->string', which turn the clipboard's text into the bytes
+    ;; the OSC 52 sequence carries and back, are `(scheme base)''s.
     (only (guile) ash logior string-contains string-split)
     ;; The terminal: the query goes out on the output port, and the reply
     ;; is read one event at a time with a timeout, as
@@ -68,6 +78,16 @@
    xterm--version-handler
    *xterm--background-color*
    *xterm--foreground-color*
+   xterm-max-cut-length
+   xterm--selection-char
+   xterm--base64-encode
+   xterm--base64-decode
+   xterm--init-activate-set-selection
+   xterm--init-activate-get-selection
+   *xterm--set-selection*
+   *xterm--get-selection*
+   xterm--tty-set-selection
+   xterm--tty-get-selection
    )
 
   (begin
@@ -336,9 +356,10 @@
       ;; GNU Emacs's `xterm--version-handler':
       ;; "The reply should be: \e [ > NUMBER1 ; NUMBER2 ; NUMBER3 c".
       ;; What is kept of it is the decision it makes: whether the
-      ;; terminal is one that answers the colour queries. Emacs also
-      ;; turns on `modifyOtherKeys' for version 216 and later, which is
-      ;; not ported.
+      ;; terminal is one that answers the colour queries, and - version
+      ;; 203 was when xterm grew OSC 52 - whether it can take the
+      ;; clipboard. Emacs also turns on `modifyOtherKeys' for version
+      ;; 216 and later, which is not ported.
       ;;--------------------------------------------------------------
       (let* ((str (xterm--read-string #\c))
              (fields (string-split str #\;)))
@@ -361,7 +382,235 @@
                 ;; If version is 242 or higher, assume the xterm supports
                 ;; reporting the background color
                 (when (>= version 242)
-                  (xterm--query-colors))))))))
+                  (xterm--query-colors))
+                ;; In version 203 support for accessing the X selection was
+                ;; added.  Hterm reports itself as version 256 and supports it
+                ;; as well.  gnome-terminal doesn't and is excluded by this
+                ;; test.
+                (when (>= version 203)
+                  ;; Most xterms seem to have it disabled by default, and if it's
+                  ;; disabled, C-y will incur a timeout, so we only use it if the user
+                  ;; explicitly requests it.
+                  ;;(xterm--init-activate-get-selection)
+                  (xterm--init-activate-set-selection))))))))
+
+    ;;----------------------------------------------------------------
+    ;; The selection: OSC 52
+    ;;
+    ;; `gui-backend-get-selection' and `gui-backend-set-selection' for
+    ;; `window-system' nil (`xterm.el:1131', `xterm.el:1161'): the text
+    ;; goes to the terminal as `\e]52;c;BASE64\a', and comes back as
+    ;; the reply to `\e]52;c;?\e\\'. The gate is the terminal
+    ;; parameter `xterm--set-selection' / `xterm--get-selection' -
+    ;; `*xterm--set-selection*' / `*xterm--get-selection*' here, the
+    ;; way `*xterm--background-color*' is its parameter - and the
+    ;; version handler turns the set one on for xterm 203 and later.
+    ;; The read stays off by default: "Most xterms seem to have it
+    ;; disabled by default, and if it's disabled, C-y will incur a
+    ;; timeout, so we only use it if the user explicitly requests it."
+
+    (define xterm-max-cut-length
+      ;; GNU Emacs's `xterm-max-cut-length': "Maximum number of bytes
+      ;; to cut into xterm using the OSC 52 sequence." Terminals
+      ;; mistreat or ignore a sequence longer than their own limit.
+      ;;--------------------------------------------------------------
+      (make-parameter 100000))
+
+    (define *xterm--set-selection* (make-parameter #f))
+    (define *xterm--get-selection* (make-parameter #f))
+    ;; ^ The terminal parameters `xterm--set-selection' and
+    ;; `xterm--get-selection'.
+
+    (define *base64-alphabet*
+      ;; RFC 4648's alphabet. `data-encoding.sld' has the alphabets,
+      ;; but its one entry point, `encode-data', is a TODO stub, so the
+      ;; code below is all of it: no line breaks, `=' padding, as
+      ;; Emacs's `base64-encode-string' with `:no-line-break' makes.
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
+
+    (define (xterm--base64-value char)
+      ;; CHAR's value in `*base64-alphabet'', or #f when it has none -
+      ;; which includes the padding `='.
+      ;;--------------------------------------------------------------
+      (string-contains *base64-alphabet* (string char)))
+
+    (define (xterm--base64-encode bytevector)
+      ;; Base64 of BYTEVECTOR. Three bytes become four characters; a
+      ;; remainder of one or two pads.
+      ;;--------------------------------------------------------------
+      (let ((len (bytevector-length bytevector)))
+        (let loop ((i 0) (acc '()))
+          (if (>= i len)
+              (list->string (reverse acc))
+              (let* ((rem (- len i))
+                     (b0 (bytevector-u8-ref bytevector i))
+                     (b1 (if (> rem 1) (bytevector-u8-ref bytevector (+ i 1)) 0))
+                     (b2 (if (> rem 2) (bytevector-u8-ref bytevector (+ i 2)) 0))
+                     (n (+ (* b0 65536) (* b1 256) b2)))
+                (let* ((acc (cons (string-ref *base64-alphabet*
+                                              (quotient n 262144))
+                                  acc))
+                       (acc (cons (string-ref *base64-alphabet*
+                                              (modulo (quotient n 4096) 64))
+                                  acc))
+                       (acc (if (> rem 1)
+                                (cons (string-ref *base64-alphabet*
+                                                  (modulo (quotient n 64) 64))
+                                      acc)
+                                (cons #\= acc)))
+                       (acc (if (> rem 2)
+                                (cons (string-ref *base64-alphabet* (modulo n 64))
+                                      acc)
+                                (cons #\= acc))))
+                  (loop (+ i 3) acc)))))))
+
+    (define (xterm--base64-decode string)
+      ;; STRING's base64 as a bytevector, or #f when STRING is not
+      ;; base64 - which is how a terminal's denial (`52;c;!') comes
+      ;; back as no text at all.
+      ;;--------------------------------------------------------------
+      (let ((len (string-length string)))
+        (let loop ((i 0) (acc '()))
+          (cond
+           ((>= i len)
+            (let* ((n (length acc))
+                   (out (make-bytevector n)))
+              (let build ((j 0) (rest (reverse acc)))
+                (when (pair? rest)
+                  (bytevector-u8-set! out j (car rest))
+                  (build (+ j 1) (cdr rest))))
+              out))
+           ;; Not padded to a multiple of four.
+           ((> (+ i 4) len) #f)
+           (else
+            (let* ((v0 (xterm--base64-value (string-ref string i)))
+                   (v1 (xterm--base64-value (string-ref string (+ i 1))))
+                   (c2 (string-ref string (+ i 2)))
+                   (c3 (string-ref string (+ i 3)))
+                   (v2 (if (char=? c2 #\=)
+                           #f
+                           (xterm--base64-value c2)))
+                   (v3 (if (char=? c3 #\=)
+                           #f
+                           (xterm--base64-value c3))))
+              (cond
+               ((not (and v0 v1)) #f)
+               ;; `==': one byte, whose top six bits are V0's and whose
+               ;; bottom two are the top two of V1.
+               ((char=? c2 #\=)
+                (if (char=? c3 #\=)
+                    (loop (+ i 4)
+                          (cons (logior (ash v0 2) (quotient v1 16)) acc))
+                    #f))
+               ;; `=': two bytes.
+               ((char=? c3 #\=)
+                (loop (+ i 4)
+                      (cons (logior (ash (modulo v1 16) 4) (quotient v2 4))
+                            (cons (logior (ash v0 2) (quotient v1 16))
+                                  acc))))
+               (else
+                (loop (+ i 4)
+                      (cons (logior (ash (modulo v2 4) 6) v3)
+                            (cons (logior (ash (modulo v1 16) 4) (quotient v2 4))
+                                  (cons (logior (ash v0 2) (quotient v1 16))
+                                        acc))))))))))))
+
+    (define (xterm--selection-char type)
+      ;; GNU Emacs's `xterm--selection-char': the one-letter selection
+      ;; name an OSC 52 sequence carries.
+      ;;--------------------------------------------------------------
+      (cond ((eq? type 'PRIMARY) "p")
+            ((eq? type 'CLIPBOARD) "c")
+            (else (error "Invalid selection type" type))))
+
+    (define (xterm--init-activate-get-selection)
+      ;; GNU Emacs's `xterm--init-activate-get-selection'.
+      ;;--------------------------------------------------------------
+      (*xterm--get-selection* #t))
+
+    (define (xterm--init-activate-set-selection)
+      ;; GNU Emacs's `xterm--init-activate-set-selection'.
+      ;;--------------------------------------------------------------
+      (*xterm--set-selection* #t))
+
+    (define (xterm--tty-set-selection selection data)
+      ;; The body of `gui-backend-set-selection''s tty method
+      ;; (`xterm.el:1161'): "Copy DATA to the X selection using the
+      ;; OSC 52 escape sequence."
+      ;;
+      ;; Not ported: the Device Control String wrapper for `screen',
+      ;; which this tree never initialises for (`terminal-init-screen'
+      ;; is not here, and `TERM=screen*' does not reach
+      ;; `terminal-init-xterm') - so the bare-sequence branch only, and
+      ;; the chopping of long DCS sequences with it. A `#f' DATA -
+      ;; Emacs's "disown it" - is a no-op, where the window-system
+      ;; method disowns: an OSC 52 sequence cannot take a selection
+      ;; away, and nothing can be sent that would.
+      ;;--------------------------------------------------------------
+      (when (*xterm--set-selection*)
+        ;; A #f DATA - Emacs's "disown it" - sends nothing, and is
+        ;; checked before the string the rest expects.
+        (when data
+          (unless (string? data)
+            (error "Selection value must be a string" data))
+          (let* ((base64 (xterm--base64-encode (string->utf8 data)))
+                 (length (string-length base64)))
+            (if (> length (xterm-max-cut-length))
+                ;; Emacs warns - "Selection too long to send to terminal:
+                ;; N bytes" - and sits for two seconds; xterm.sld has no
+                ;; frame or echo area to reach, so the cut is skipped in
+                ;; silence.
+                #f
+                (xterm--send-string-to-terminal
+                 (string-append
+                  (string #\escape #\] #\5 #\2 #\;)
+                  (xterm--selection-char selection)
+                  ";" base64 (string #\bel))))))))
+
+    (define (xterm--tty-get-selection selection data-type)
+      ;; The body of `gui-backend-get-selection''s tty method
+      ;; (`xterm.el:1131'): ask with `\e]52;<char>;?', and read the
+      ;; reply - the base64 of the selection, or `!' when the terminal
+      ;; will not give it, or nothing at all when the terminal does not
+      ;; speak OSC 52. The query uses ST as its terminator to get ST as
+      ;; the reply's (bug#36879), and a reply is waited for
+      ;; `xterm-query-timeout' - the two seconds `C-y' costs on a
+      ;; terminal that stays silent, which is why the gate is off by
+      ;; default.
+      ;;--------------------------------------------------------------
+      ;; Emacs's method has a cl-defmethod context that also refuses
+      ;; the question when the terminal was initialised as `screen' -
+      ;; bug#36879 again - which here is folded into the gate: a screen
+      ;; never runs this init, so the parameter is #f, and an explicit
+      ;; override would not be second-guessed the way Emacs's is.
+      ;;--------------------------------------------------------------
+      ;; The gate answers #f, not `when''s unspecified: the method's
+      ;; caller asks "is there text?", and unspecified is true in
+      ;; Scheme - C-y would paste an empty string rather than the kill.
+      ;;--------------------------------------------------------------
+      (if (*xterm--get-selection*)
+          (begin
+            (unless (eq? data-type 'STRING)
+              (error "Unsupported data type" data-type))
+            (let ((prefix (string #\escape #\] #\5 #\2 #\;
+                                  (string-ref (xterm--selection-char selection))
+                                  #\;)))
+              (let ((reply
+                     (xterm--query (string-append prefix "?"
+                                                  (string #\escape #\\))
+                                   (list (cons prefix
+                                               ;; Read data up to the string
+                                               ;; terminator, ST.
+                                               (lambda ()
+                                                 (xterm--read-string
+                                                  #\escape #\\)))))))
+                ;; A silent terminal answers the prefix match with nothing
+                ;; readable - not a string - and a denial is `!', which is
+                ;; not base64: both come out as #f, "no text".
+                (and (string? reply)
+                     (let ((bytes (xterm--base64-decode reply)))
+                       (and bytes (utf8->string bytes)))))))
+          #f))
 
     (define (xterm--set-background-mode redc greenc bluec)
       ;; GNU Emacs's `xterm--set-background-mode': "Use the heuristic in

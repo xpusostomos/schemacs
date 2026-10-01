@@ -32,7 +32,8 @@
     ;; business too (`suspend-display!' / `resume-display!', which
     ;; `suspend-frame' asks through the interface).
     (only (schemacs editor dispnew)
-          column-width current-display line-height resume-display!
+          column-width current-display display-selections-supported?
+          line-height resume-display!
           screen-size suspend-display!)
     (only (schemacs editor engine)
           copy-marker  marker-position  set-marker!
@@ -87,6 +88,8 @@
    *echo-area-buffer*
    *echo-area-prompt*
    current-editor
+   display-selections-p
+   *tty-select-active-regions*
    frame-height
    frame-width
    make-frame-window
@@ -773,6 +776,39 @@
       ;;--------------------------------------------------------------
       (or (*echo-area-buffer*)
           (window-buffer (selected-window))))
+
+    (define *tty-select-active-regions*
+      ;; GNU Emacs's `tty-select-active-regions' (frame.el:2759): "If
+      ;; non-nil, active regions automatically set the primary selection
+      ;; on text terminals, if the terminal supports this" - the OSC 52
+      ;; path, whose support `xterm--set-selection' records. Off, as
+      ;; Emacs's is; xterm.sld's version handler turns the terminal's
+      ;; parameter on.
+      ;;--------------------------------------------------------------
+      (make-parameter #f))
+
+    (define (display-selections-p . args)
+      ;; GNU Emacs's `display-selections-p' (frame.el:2770): whether
+      ;; DISPLAY - nil meaning the selected frame's - supports
+      ;; selections, "a way to transfer text or other data between
+      ;; programs via special system buffers called `selection' or
+      ;; `clipboard'".
+      ;;
+      ;; Emacs's frame-type cond has a branch for each kind of frame:
+      ;; `pc' is MS-DOS's, of which there is none here, and the tty
+      ;; branch is `tty-select-active-regions' together with the
+      ;; terminal parameter `xterm--set-selection' - the OSC 52 path.
+      ;; The question about the terminal is a method on the display
+      ;; (`display-selections-supported?'), because importing xterm.sld
+      ;; here would pull ncurses into the GTK build. What remains is
+      ;; the window-system branch, `(memq frame-type '(x w32 ns pgtk))',
+      ;; which answers t: and `framep-on-display' is this tree's one
+      ;; window system at a time, which `*window-system*' is.
+      ;;--------------------------------------------------------------
+      (or (and (memq (*window-system*) '(x w32 ns pgtk)) #t)
+          (and (not (*window-system*))
+               (let ((d (current-display)))
+                 (and d (display-selections-supported? d))))))
 
     (define (display-rows-cols display)
       ;; The display's size in character units, as `(ROWS . COLUMNS)': its

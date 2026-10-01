@@ -31,6 +31,12 @@ necessary to be very careful when you are fixing a bug to make sure you fix it
 at the right level of abstraction or you risk fixing one front end and breaking
 the other one, or at least only fixing one when maybe it should have been both.
 
+Most of your testing should be by connecting remotely to the editor
+via the REPL and entering commands directly. Unless part of the task
+is actually testing key bindings or something, testing via the REPL
+and calling the commands directly to drive the editor is the preferred
+way to do it.
+
 
 - `tools/syntax-check.scm` — after ANY scripted edit to a machinery
   `.scm` file, run `guile -s tools/syntax-check.scm <files>`: it runs
@@ -422,3 +428,45 @@ class again, swallowed by the command loop into a key that does nothing.
 Horizontal scrolling landed 2026-10-01 (`hscroll', auto-hscroll-mode,
 scroll-left/scroll-right); GTK-PLAN.md section 11 has the details and the
 `emacs -nw' measurements the port was checked against.
+
+## The clipboard work (2026-10-01)
+
+The kill ring reaches the system clipboard on both frontends. Most of the
+machinery was already in the tree as uncommitted work when this pass began
+(`select.sld`, the `dispnew' selection generics, the GtkClipboard FFI in
+`pgtk.sld', the `interprogram-cut/paste-function' hooks in simple.sld); this
+pass fixed it, wired the build, and added the terminal half.
+
+- `select.sld' (a full port of select.el) is in build.scm and the Makefile now;
+  `x-get-clipboard' is exported.
+- `pgtk.sld' loads again - the FFI section used `int'/`void' ((system foreign))
+  and `assq-ref' ((guile)) without importing them. `gtk_clipboard_wait_for_text'
+  returns a NULL pointer for an empty clipboard, which the FFI wraps as a *true*
+  pointer - ask `null-pointer?', not `text'; and `pointer->string''s second
+  argument is the LENGTH (-1 for "up to the NUL"), the encoding its third.
+  UTF-8 is pinned on both directions, and the `gchar *' is `g_free'd.
+- simple.sld's `current-kill' now signals "Kill ring is empty" (the `(or ring
+  (error ...))` never fired - `'()' is true in Scheme), and `kill-new'/
+  `kill-append' take Elisp's `(car nil)'-is-nil reading of an empty ring.
+- keyboard.sld ports command_loop_1's else-branch (keyboard.c:1615): with the
+  mark still active after a command and `select-active-regions' on, PRIMARY is
+  set to the region after *every* command, `selection-inhibit-update-commands'
+  honoured, `saved-region-selection' cleared (keyboard.c:1647).
+- The tty half is a port of xterm.el 31 (which DOES have OSC 52 - see
+  `xterm--selection-char', the tty `gui-backend-*' methods, `xterm-max-cut-length',
+  and the version-203 activation): logic in `xterm.sld' (`xterm--tty-set-selection',
+  `xterm--tty-get-selection', hand-rolled base64 - data-encoding.sld's
+  `encode-data' is a TODO stub), the two `<tty-display>' methods in `term.sld',
+  `display-selections-supported?' in dispnew.sld, and the tty branch of
+  `display-selections-p' in frame.sld with `tty-select-active-regions'. Set is
+  on for an xterm >= 203; the read stays opt-in (`xterm--get-selection'), as
+  xterm.el keeps it.
+- tools/syntax-check.scm re-execs itself with --r7rs: Guile's default reader
+  misreads `|sym;with;semis|' (select.sld's `text/plain;charset=utf-8' target),
+  which made a clean file report a phantom unbalanced paren.
+- Tests: select-tests.scm grew the empty-ring cases and the OSC 52 write-path
+  cases (32 tests); pty-check.py grew `osc52' (C-w emits `\e]52;c;<base64>\a'
+  and no read query). Verified by hand on the desktop: `gui-set-selection' reaches
+  `wl-paste', `wl-copy' is read back through `gui-get-selection', non-ASCII both
+  ways. Deferred as in Emacs: `save-interprogram-paste-before-kill',
+  `kill-transform-function', `yank-from-kill-ring', the screen/DCS OSC 52 wrapper.

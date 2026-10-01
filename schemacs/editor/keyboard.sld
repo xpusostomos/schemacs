@@ -38,10 +38,12 @@
     (only (guile) format string-index)
     (prefix (schemacs keymap) km:)
     (only (schemacs editor engine)
+          text-editor-copy-string
           text-editor-deactivate-mark set!text-editor-deactivate-mark!)
     (only (schemacs editor command)
           *this-event*
-          command-interactive-spec command-record-of command-type? define-command
+          command-interactive-spec command-name command-record-of
+          command-type? define-command
           run-command)
     ;; Reading a key, and asking the display what it means, is the
     ;; display's job - `getch', its timeout and the terminal's own key
@@ -50,7 +52,8 @@
     (only (schemacs editor dispnew)
           current-display key-event->keymap-path read-input-event)
     (only (schemacs editor frame)
-          *current-frame* blink-cursor-check frame-keymap-state
+          *current-frame* blink-cursor-check current-editor
+          display-selections-p frame-keymap-state
           frame-message frame-message-expired?
           frame-message-expiry
           frame-quit-cont run-pre-command-hook!
@@ -67,12 +70,19 @@
     ;; like `*Completions*' its own bindings - and which buffer is current.
     (only (schemacs editor buffer)
           buffer-local-keymap buffer-local-value current-buffer
-          mark-active set!mark-active)
+          mark-active set!mark-active transient-mark-mode)
     (only (schemacs editor simple)
           *last-change-was-undo* *last-command* *this-command*
+          *select-active-regions*
           deactivate-mark clear-prefix! pending-uarg place-undo-boundary!
           prefix-echo-pending? show-prefix-echo!
           undo undo-redo update-prefix!)
+    ;; The primary selection the command loop keeps updated while the
+    ;; region stays active - the call `keyboard.c:1639' makes.
+    (only (schemacs editor select) gui-set-selection
+          *saved-region-selection*)
+    ;; The region's text, which the update is of.
+    (only (schemacs editor editfns) region-beginning region-end)
     ;; `render!' after every key: the loop is what drives the display.
     (only (schemacs editor xdisp) render!)
     ;; The development back door, which the command loop gives its turn
@@ -127,6 +137,19 @@
     ;; resolution), which is why it lives here and not on the frame.
     (define *esc-pending* (make-parameter #f))
 
+    (define *selection-inhibit-update-commands*
+      ;; GNU Emacs's `selection-inhibit-update-commands' (keyboard.c:14371):
+      ;; "List of commands which should not update the selection.
+      ;; Normally, if `select-active-regions' is non-nil and the mark
+      ;; remains active after a command (i.e. the mark was not
+      ;; deactivated), the Emacs command loop sets the selection to the
+      ;; text in the region.  However, if the command is in this list,
+      ;; the selection is not updated." The two are `handle-switch-frame'
+      ;; and `handle-select-window', window-switching commands of which
+      ;; there are none here yet - `memq' on them is harmless.
+      ;;--------------------------------------------------------------
+      (make-parameter '(handle-switch-frame handle-select-window)))
+
     (define *unread-command-events* (make-parameter '()))
     ;; ^ GNU Emacs's `unread-command-events': events put back on the
     ;; input, which the next read answers before it asks the display.
@@ -135,6 +158,19 @@
     ;; does in `isearch.el'. It is keyboard.c's variable - the read's
     ;; first step is `read_char''s - which is why it is here and not on
     ;; the display.
+
+    (define (this-command-name)
+      ;; The command's name, as `Vthis_command' is in the C: the symbol
+      ;; `define-command' bound the procedure with. A command may have
+      ;; renamed itself while it ran - `kill-region' to itself,
+      ;; `yank-pop' to `yank' - so the question is asked of
+      ;; `*this-command*' after the command, not of the key's action.
+      ;;--------------------------------------------------------------
+      (let ((cmd (*this-command*)))
+        (if (symbol? cmd)
+            cmd
+            (let ((record (command-record-of cmd)))
+              (and record (command-name record))))))
 
     (define (dispatch-action frame action)
       ;; Run an action reached by a key lookup. The pending prefix
@@ -200,10 +236,39 @@
            (else (error "not a command" action))))
         ;; Commands such as `kill-ring-save' set the buffer's deferred
         ;; `deactivate-mark' flag. Apply it after the command, as Emacs does,
-        ;; so later motion does not extend the copied region.
-        (when (text-editor-deactivate-mark buffer)
-          (set!text-editor-deactivate-mark! buffer #f)
-          (deactivate-mark))
+        ;; so later motion does not extend the copied region. Not
+        ;; deactivating - the mark still active - is keyboard.c:1615's
+        ;; else-branch: with `select-active-regions' on, PRIMARY is set to
+        ;; the region after every command, which is how a selection stays
+        ;; current for other programs while the region is being adjusted.
+        ;; The conditions are the C's: `window-system', or the tty's
+        ;; `tty-select-active-regions' with `xterm--set-selection' - both
+        ;; `display-selections-p' - with the mark really set
+        ;; (Bug#7044's check; the mark is the buffer's own here), Transient
+        ;; Mark mode on, and the command not on the inhibit list. The
+        ;; region text is what `region-extract-function''s default makes,
+        ;; which `deactivate-mark' makes too, and an empty selection is
+        ;; not set. `post-select-region-hook' is not run - no user of it.
+        (when (mark-active)
+          (if (text-editor-deactivate-mark buffer)
+              (begin
+                (set!text-editor-deactivate-mark! buffer #f)
+                (deactivate-mark))
+              (when (and (display-selections-p)
+                         (*select-active-regions*)
+                         (transient-mark-mode)
+                         (not (memq (this-command-name)
+                                    (*selection-inhibit-update-commands*))))
+                (let ((txt (text-editor-copy-string
+                            (current-editor)
+                            (region-beginning)
+                            (region-end))))
+                  (unless (= 0 (string-length txt))
+                    ;; Don't set empty selections.
+                    (gui-set-selection 'PRIMARY txt)))))
+          ;; `Vsaved_region_selection = Qnil' (keyboard.c:1647) - spent
+          ;; after every command the mark was active through.
+          (*saved-region-selection* #f))
         (*last-command* (*this-command*))))
 
     (define (report-command-error! frame ex)

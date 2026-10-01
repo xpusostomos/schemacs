@@ -39,6 +39,12 @@
    column-width
    line-height
    display-color-cells
+   ;; the selections, which `select' reads and writes through
+   get-selection
+   set-selection!
+   selection-owner?
+   selection-exists?
+   display-selections-supported?
    )
 
   (begin
@@ -182,6 +188,54 @@
     (define-generic display-color-cells)
     ;; How many colours the display can show at once - zero for a
     ;; monochrome one. `(display-color-cells display)'.
+
+    ;; The selections - `PRIMARY', `SECONDARY' and `CLIPBOARD', the
+    ;; window system's way of moving text between programs. These are
+    ;; Emacs's `gui-backend-get-selection' and friends
+    ;; (`select.el'), whose cl-defgenerics dispatch on the window
+    ;; system; here the display is the dispatch key, as
+    ;; `read-input-event' already is. The methods below are the
+    ;; cl-defgenerics' *default* methods, which answer nil: a text
+    ;; terminal has no selections - `xselect.c' never runs without a
+    ;; window system - and a backend answers them with more specific
+    ;; methods on its own display class (`pgtk-win.el''s methods for
+    ;; `window-system' pgtk, which this tree's `pgtk.sld' mirrors).
+
+    (define-generic get-selection)
+    ;; Read a selection off the display. SELECTION is a symbol -
+    ;; `PRIMARY', `SECONDARY' or `CLIPBOARD' - and TARGET-TYPE the kind
+    ;; of data asked for (`STRING', `UTF8_STRING', `TIMESTAMP'). The
+    ;; answer is the text, or #f when the selection has no text to
+    ;; give. `(get-selection display selection target-type)'.
+    (define-method (get-selection (d <display>) selection target-type) #f)
+
+    (define-generic set-selection!)
+    ;; Assert ownership of SELECTION holding VALUE, or - VALUE #f -
+    ;; disown it, which is "there is no such selection".
+    ;; `(set-selection! display selection value)'.
+    (define-method (set-selection! (d <display>) selection value) #f)
+
+    (define-generic selection-owner?)
+    ;; Whether this process owns SELECTION. Emacs's
+    ;; `gui-backend-selection-owner-p'.
+    ;; `(selection-owner? display selection)'.
+    (define-method (selection-owner? (d <display>) selection) #f)
+
+    (define-generic selection-exists?)
+    ;; Whether SELECTION has an owner at all, whoever it is. Emacs's
+    ;; `gui-backend-selection-exists-p'.
+    ;; `(selection-exists? display selection)'.
+    (define-method (selection-exists? (d <display>) selection) #f)
+
+    (define-generic display-selections-supported?)
+    ;; Whether the display can carry selections at all - the question
+    ;; `display-selections-p' asks a window-system-less display, and the
+    ;; command loop's post-command selection update with it. Emacs asks
+    ;; it of the terminal directly (`frame.el:2786''s terminal parameter
+    ;; `xterm--set-selection'); here the answer is a method, because
+    ;; frame.sld must not import xterm.sld - xterm.sld pulls ncurses
+    ;; in, and the GTK build is ncurses-free.
+    (define-method (display-selections-supported? (d <display>)) #f)
 
     ;;----------------------------------------------------------------
     ))

@@ -26,7 +26,7 @@ Each check starts `main-ncurses.scm` on a real terminal, sends keys, and
 asserts on the screen and on the files left behind. Exit status is 0 when
 every check passes.
 """
-import os, pty, select, sys, time
+import os, pty, select, sys, time, base64
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -1086,6 +1086,35 @@ def check_default_directory():
     return problems
 
 
+def check_osc52():
+    """The cut reaches the terminal as OSC 52, which is the clipboard.
+
+    An xterm that reported version 370 - which this harness answers the
+    Secondary Device Attributes query with - is one that Emacs 31 turns
+    `xterm--set-selection' on for, so `kill-new' -> `gui-select-text'
+    ends at the tty: `\\e]52;c;<base64>\\a' goes out and the terminal
+    sets its own clipboard. What is *not* sent is a read query - the
+    `xterm--get-selection' side is opt-in, because a terminal that does
+    not answer it would make every `C-y' wait out the two-second
+    timeout.
+    """
+    path = "/tmp/pty-check-osc52.txt"
+    open(path, "w").write("hello world\n")
+    problems = []
+    C_SPC = b"\x00"
+    C_w = b"\x17"
+    out = drive([C_x + C_f, path.encode(), RET, C_a, C_SPC, C_f, C_f, C_w],
+                path)
+    want = b"\x1b]52;c;" + base64.b64encode(b"he") + b"\x07"
+    if want not in out.encode("utf-8", "replace"):
+        problems.append("C-w did not send the region as OSC 52 "
+                        "(no \\e]52;c;aGU=\\a in the output)")
+    if b"\x1b]52;c;?" in out.encode("utf-8", "replace"):
+        problems.append("the editor queried the terminal for the selection "
+                        "(\\e]52;c;?) - the read side is meant to be opt-in")
+    return problems
+
+
 def check_kill_ring():
     """The region commands and the kill ring, as a screen shows them.
 
@@ -1478,6 +1507,7 @@ CHECKS = {
     "mode-line-eol": check_mode_line_eol,
     "wide-columns": check_wide_columns,
     "kill-ring": check_kill_ring,
+    "osc52": check_osc52,
     "split": check_split,
     "hscroll": check_hscroll,
 }
