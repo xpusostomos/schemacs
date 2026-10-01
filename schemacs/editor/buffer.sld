@@ -90,6 +90,12 @@
    set!buffer-cursor-type
    set!buffer-truncate-lines
    set!buffer-word-wrap
+   buffer-auto-hscroll-mode
+   set!buffer-auto-hscroll-mode
+   buffer-hscroll-margin
+   set!buffer-hscroll-margin
+   buffer-hscroll-step
+   set!buffer-hscroll-step
    buffer-read-only?
    bufferp
    bury-buffer
@@ -381,6 +387,48 @@
 
     (define (set!buffer-word-wrap buffer value)
       (set-buffer-local-value! buffer 'word-wrap value))
+
+    (define (buffer-auto-hscroll-mode buffer)
+      ;; Whether a window whose point leaves the window's horizontal view
+      ;; scrolls itself just enough to bring it back: GNU Emacs's
+      ;; `auto-hscroll-mode', which `xdisp.c' declares as a buffer-local
+      ;; DEFVAR_LISP and which is t by default - so by default Emacs
+      ;; hscrolls automatically. The value `current-line' means only the
+      ;; line point is on is scrolled (`hscrolling_current_line_p'), and
+      ;; that mode is not ported: `hscroll-window!' acts for the whole
+      ;; window whatever the value, and only nil turns the machinery off.
+      ;;--------------------------------------------------------------
+      (buffer-local-value buffer 'auto-hscroll-mode #t))
+
+    (define (set!buffer-auto-hscroll-mode buffer value)
+      (set-buffer-local-value! buffer 'auto-hscroll-mode value))
+
+    (define (buffer-hscroll-margin buffer)
+      ;; How close to the window's left or right edge point may sit before
+      ;; auto hscrolling starts scrolling: GNU Emacs's `hscroll-margin',
+      ;; a buffer-local DEFVAR_INT of `xdisp.c' whose default is 5.
+      ;;--------------------------------------------------------------
+      (buffer-local-value buffer 'hscroll-margin 5))
+
+    (define (set!buffer-hscroll-margin buffer value)
+      (set-buffer-local-value! buffer 'hscroll-margin value))
+
+    (define (buffer-hscroll-step buffer)
+      ;; How far auto hscrolling moves the view when it scrolls: GNU
+      ;; Emacs's `hscroll-step', a buffer-local DEFVAR_* of `xdisp.c'
+      ;; whose default is 0, which does not mean no scrolling - it means
+      ;; put point at the window's horizontal centre
+      ;; (`hscroll_window_tree', `xdisp.c:16851-16860': when the step is
+      ;; neither a float nor a positive integer,
+      ;; `hscroll = max (0, it.current_x - text_area_width / 2)'). An
+      ;; integer N means scroll in columns, a float a fraction of the
+      ;; window's width; those two are not ported, and any non-zero value
+      ;; acts as 0 does here.
+      ;;--------------------------------------------------------------
+      (buffer-local-value buffer 'hscroll-step 0))
+
+    (define (set!buffer-hscroll-step buffer value)
+      (set-buffer-local-value! buffer 'hscroll-step value))
 
     (define (buffer-cursor-in-non-selected-windows buffer)
       ;; What to draw in a window that is not selected, when this buffer

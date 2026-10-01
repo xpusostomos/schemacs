@@ -133,6 +133,12 @@
    window-parent
    set!window-children
    set!window-parent
+   ;; the hscroll fields of the window record, which `xdisp' and
+   ;; `window' read and write
+   %window-hscroll set!%window-hscroll
+   %window-min-hscroll set!%window-min-hscroll
+   %window-suspend-auto-hscroll? set!%window-suspend-auto-hscroll?
+   %window-old-point set!%window-old-point
    window-body-width
    window-buffer
    window-edges
@@ -181,7 +187,8 @@
 
     (define-record-type <window>
       (make<window>
-       buffer point top-line top height left width parent children)
+       buffer point top-line top height left width parent children
+       hscroll min-hscroll suspend-auto-hscroll? old-point)
       window-type?
       (buffer    window-buffer      set!window-buffer)
       ;; ^ The <text-editor-type> this window shows. Emacs's
@@ -221,6 +228,28 @@
       ;; screen: empty for a leaf. Emacs's `window-child' and
       ;; `window-next-sibling', kept as a list because that is the order a
       ;; command wants them in.
+      (hscroll   %window-hscroll    set!%window-hscroll)
+      ;; ^ How many display columns the window's lines are scrolled left
+      ;; by: a line's column is drawn at its display column less this.
+      ;; Emacs's `w->hscroll', a window-local variable - `window-hscroll'
+      ;; and `set-window-hscroll' are its Elisp face, in `window.c'.
+      (min-hscroll %window-min-hscroll set!%window-min-hscroll)
+      ;; ^ The least amount the window may be left scrolled by, which an
+      ;; interactive `scroll-left'/`scroll-right' raises to the new
+      ;; amount: Emacs's `w->min_hscroll', set at `window.c:7113' - "the
+      ;; new scroll amount becomes the lower bound for automatic
+      ;; scrolling".
+      (suspend-auto-hscroll? %window-suspend-auto-hscroll?
+                             set!%window-suspend-auto-hscroll?)
+      ;; ^ Whether auto hscrolling is suspended for this window, which
+      ;; `scroll-left'/`scroll-right' set and which clears when the
+      ;; window's point moves: Emacs's `w->suspend_auto_hscroll'
+      ;; (`xdisp.c:16756' clears it when `Fwindow_point' differs from
+      ;; `old_pointm').
+      (old-point %window-old-point  set!%window-old-point)
+      ;; ^ The window point the last redisplay saw, for that comparison.
+      ;; Emacs's `w->old_pointm', a marker there and the integer it
+      ;; holds here - the comparison is `Fequal' either way.
       )
 
     (define (window-internal? window)
@@ -325,7 +354,8 @@
       ;; at its beginning: a leaf the frame holds directly.
       ;;--------------------------------------------------------------
       (make<window> buffer (copy-marker buffer 0)
-                            0 top height left width #f '()))
+                            0 top height left width #f '()
+                            0 0 #f 0))
 
     ;;----------------------------------------------------------------
     ;; Editor state

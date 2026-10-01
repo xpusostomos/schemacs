@@ -41,6 +41,11 @@
          *default-keymap*)
     (only (schemacs editor frame)
           %window-point
+          ;; the window's own hscroll state, which `set-window-hscroll!'
+          ;; and the scroll commands maintain
+          %window-hscroll %window-min-hscroll %window-suspend-auto-hscroll?
+          set!%window-hscroll set!%window-min-hscroll
+          set!%window-suspend-auto-hscroll?
           *current-frame* current-editor frame-height frame-width
           make<window> frame-quit-cont
           frame-selected-window frame-windows select-window
@@ -50,7 +55,7 @@
           set!window-buffer set!window-width set-window-point!
           window-buffer window-children
           window-edges window-height window-left window-list window-parent
-          window-top window-top-line window-width)
+          window-body-width window-top window-top-line window-width)
     ;; `display-buffer' puts what it shows in the buffer list's
     ;; most-recently-used order, which is Emacs's `record_buffer';
     ;; `pop-to-buffer' makes a buffer current by name when a string is
@@ -81,6 +86,10 @@
    *cursor-in-echo-area*
    window-min-width
    window-position
+   window-hscroll
+   set-window-hscroll!
+   scroll-left
+   scroll-right
    )
 
   (begin
@@ -162,7 +171,8 @@
       ;; neither.
       ;;--------------------------------------------------------------
       (make<window> #f #f 0 top height left width
-                            (window-parent window) (list window new)))
+                            (window-parent window) (list window new)
+                            0 0 #f 0))
 
     (define (install-window-parent! frame window parent)
       ;; Put PARENT where WINDOW was in the tree, in WINDOW's own place in
@@ -222,7 +232,8 @@
                           height
                           (+ start left)
                           right
-                          #f '())))
+                          #f '()
+                          0 0 #f 0)))
                 (install-window-parent!
                  frame window
                  (make-window-parent window new top height start width))
@@ -251,7 +262,8 @@
                           lower
                           left
                           width
-                          #f '())))
+                          #f '()
+                          0 0 #f 0)))
                 (install-window-parent!
                  frame window
                  (make-window-parent window new top height left width))
@@ -285,7 +297,8 @@
                     size
                     left
                     width
-                    #f '())))
+                    #f '()
+                    0 0 #f 0)))
           (install-window-parent!
            frame main
            (make-window-parent main new top total left width))
@@ -648,6 +661,81 @@ windows on from the selected one; a negative COUNT goes the other way."
         window))
 
 
+    ;; Horizontal scrolling. `window-hscroll' and `set-window-hscroll'
+    ;; are `window.c:1289''s - the setter clips to zero or more and
+    ;; suspends auto hscrolling, and `scroll-left'/`scroll-right' are
+    ;; `window.c:7101' and `:7127', bound to C-x < and C-x > as
+    ;; `bindings.el' does. GNU Emacs disables both commands for new
+    ;; users (`put 'scroll-left 'disabled t'); this tree has no
+    ;; disabled-command machinery yet, so the keys run them.
+    (define (window-hscroll window)
+      ;; How many display columns WINDOW's lines are scrolled left by.
+      ;;--------------------------------------------------------------
+      (%window-hscroll window))
+
+    (define (set-window-hscroll! window ncol)
+      ;; Scroll WINDOW NCOL columns from the left margin. Clipped, as
+      ;; `set_window_hscroll' clips (`window.c:1289'), and any change
+      ;; suspends auto hscrolling (`window.c:1305') until the window's
+      ;; point moves. The "prevent redisplay shortcuts" the C also does
+      ;; has no counterpart here - there are none.
+      ;;--------------------------------------------------------------
+      (let ((h (max 0 ncol)))
+        (unless (= (%window-hscroll window) h)
+          (set!%window-hscroll window h))
+        (set!%window-suspend-auto-hscroll? window #t)
+        h))
+
+    (define-command (scroll-left arg set-minimum)
+      "Scroll selected window display ARG columns left.
+Default for ARG is window width minus 2.
+Value is the total amount of leftward horizontal scrolling in
+effect after the change.
+If SET-MINIMUM is non-nil, the new scroll amount becomes the
+lower bound for automatic scrolling, i.e. automatic scrolling
+will not scroll a window to a column less than the value returned
+by this function.  This happens in an interactive call."
+      ;; The interactive spec is `^P\np' (`window.c:7101'): the raw
+      ;; prefix for ARG and the *count* for SET-MINIMUM - a count is
+      ;; always a number, 1 when no prefix was typed, so every
+      ;; interactive call sets the minimum, and a plain Lisp call, whose
+      ;; SET-MINIMUM is nil, does not. The `^' (shift selection) has no
+      ;; counterpart here and the `\n' is only a prompt separator.
+      (interactive (list (current-prefix-arg)
+                         (uarg->integer 1 (current-prefix-arg))))
+      (let* ((window (selected-window))
+             (requested (cond ((not arg)
+                               (- (window-body-width window) 2))
+                              (else (uarg->integer 1 arg))))
+             (result (set-window-hscroll!
+                      window
+                      (+ (window-hscroll window) requested))))
+        (when set-minimum
+          (set!%window-min-hscroll window (window-hscroll window)))
+        result))
+
+    (define-command (scroll-right arg set-minimum)
+      "Scroll selected window display ARG columns right.
+Default for ARG is window width minus 2.
+Value is the total amount of leftward horizontal scrolling in
+effect after the change.
+If SET-MINIMUM is non-nil, the new scroll amount becomes the
+lower bound for automatic scrolling, i.e. automatic scrolling
+will not scroll a window to a column less than the value returned
+by this function.  This happens in an interactive call."
+      (interactive (list (current-prefix-arg)
+                         (uarg->integer 1 (current-prefix-arg))))
+      (let* ((window (selected-window))
+             (requested (cond ((not arg)
+                               (- (window-body-width window) 2))
+                              (else (uarg->integer 1 arg))))
+             (result (set-window-hscroll!
+                      window
+                      (- (window-hscroll window) requested))))
+        (when set-minimum
+          (set!%window-min-hscroll window (window-hscroll window)))
+        result))
+
     ;; The window keys, on the ones GNU Emacs binds them to.
     (define-key *default-keymap* (list (list 'ctrl #\x) #\2)
       split-window-below)
@@ -659,5 +747,12 @@ windows on from the selected one; a negative COUNT goes the other way."
       delete-window)
     (define-key *default-keymap* (list (list 'ctrl #\x) #\o)
       other-window)
+    ;; `bindings.el' binds scroll-left and scroll-right here - the keys
+    ;; for which GNU Emacs has the disabled-command guard this tree
+    ;; cannot express yet.
+    (define-key *default-keymap* (list (list 'ctrl #\x) #\<)
+      scroll-left)
+    (define-key *default-keymap* (list (list 'ctrl #\x) #\>)
+      scroll-right)
 
     ))

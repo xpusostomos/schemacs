@@ -40,9 +40,12 @@
          *current-frame* *echo-area-buffer* current-editor frame-keymap-state 
          selected-window set!frame-keymap-state 
          set!frame-message set!window-top-line window-body-height 
-         window-buffer window-top-line)
+         window-buffer window-list window-top-line)
+    ;; `toggle-truncate-lines' resets the `hscroll' of every window
+    ;; showing the buffer, which is `set-window-hscroll''s
+    (only (schemacs editor window) set-window-hscroll!)
     (only (schemacs editor command)
-         new-command uarg->integer define-command)
+         current-prefix-arg new-command uarg->integer define-command)
     ;; The buffer-local store, for `mark-ring' - which is the buffer's
     ;; own - and the variables that come from the libraries Emacs
     ;; declares them in: `mark-active' and `transient-mark-mode' are
@@ -50,7 +53,8 @@
     ;; `region-beginning' and `region-end' are `editfns.c''s, and
     ;; `add-to-history' is `subr.el''s.
     (only (schemacs editor buffer)
-          buffer-local-value current-buffer mark-active set!mark-active
+          buffer-local-value buffer-truncate-lines current-buffer mark-active
+          set!buffer-truncate-lines set!mark-active
           set-buffer-local-value! transient-mark-mode)
     (only (schemacs editor command) *mark-even-if-inactive*)
     (only (schemacs editor editfns)
@@ -405,22 +409,68 @@
                   (deactivate-mark)
                   (activate-mark))))))
 
-    (define-command (scroll-down-command count)
-      ;; Scroll the view COUNT screenfuls down (toward the end of the
-      ;; buffer), with a two-line overlap, like mg's `forwpage`. If
-      ;; the point falls outside the new window it moves to the top
-      ;; of the window, column zero. Reports "End of buffer" when the
-      ;; view cannot scroll further.
-      "Scroll the view down N screenfuls."
-      (interactive "p")
+    (define *next-screen-context-lines* (make-parameter 2))
+    ;; ^ GNU Emacs's `next-screen-context-lines', which `window.c:9300'
+    ;; declares as a DEFVAR_INT defaulting to 2: "Number of lines of
+    ;; continuity when scrolling by screenfuls". It is what a
+    ;; near-full-screen scroll leaves visible at the far edge.
+
+    ;; The two are named as GNU Emacs's `window.el:10953' and `:11007' name
+    ;; them: `scroll-up-command' "Scroll text of selected window upward" -
+    ;; the text moves up, which is toward the *end* of the buffer - and
+    ;; `scroll-down-command' scrolls downward, toward the beginning. Emacs
+    ;; binds C-v to the first and M-v to the second
+    ;; (`bindings.el:1404-1405' binds `[prior]' and `[next]' to the same
+    ;; two), and this tree's names were the other way round: the command
+    ;; bound to C-v was named `scroll-down-command', so M-x showed the
+    ;; name Emacs gives the *other* key.
+    ;;
+    ;; The *number of lines* is `scroll_command''s (`window.c:6975'), and
+    ;; it is not the same for the two ways the command is called:
+    ;;
+    ;;   * with no prefix, the near-full-screen amount - and
+    ;;     `window_scroll_line_based' multiplies it out from the window's
+    ;;     height: "If scrolling screen-fulls, compute the number of lines
+    ;;     to scroll from the window's height" - `n *= max (1, ht -
+    ;;     nscls)', where `ht' is the window's internal height (its height
+    ;;     less the mode line, which is `window-body-height' here) and
+    ;;     `nscls' is `next-screen-context-lines', 2 by default
+    ;;     (`window.c:9302'). So the amount *is* the window's height less
+    ;;     two, and grows with the window.
+    ;;   * with a *numeric* prefix, `whole' is false and the
+    ;;     multiplication is not done: the command scrolls exactly that
+    ;;     many lines (`window.c:7002-7005' - "NILP (n)" gives the whole
+    ;;     screen, anything else passes `n * direction' straight through).
+    ;;
+    ;; This tree multiplied in both cases, so `C-u 3 M-v' scrolled three
+    ;; screenfuls where Emacs scrolls three *lines*.
+
+    (define (scroll-amount uarg frame window)
+      ;; The number of lines to scroll: the near-full-screen amount when
+      ;; no prefix was typed, its negative for the atom `-', and exactly
+      ;; the prefix's numeric value otherwise - `scroll_command''s three
+      ;; cases (`window.c:7002-7005'), in its order.
+      ;;--------------------------------------------------------------
+      (let* ((vheight (window-body-height window))
+             (full (max 1 (- vheight (*next-screen-context-lines*)))))
+        (cond ((not uarg) full)
+              ((eq? uarg '-) (- full))
+              (else (uarg->integer 1 uarg)))))
+
+    (define-command (scroll-up-command uarg)
+      ;; Scroll the view toward the end of the buffer, with a two-line
+      ;; overlap, like mg's `forwpage`. If the point falls outside the new
+      ;; window it moves to the top of the window, column zero. Reports
+      ;; "End of buffer" when the view cannot scroll further.
+      "Scroll text of selected window upward."
+      (interactive "P")
       (let* ((frame (*current-frame*))
              (window (selected-window))
              (ed (window-buffer window))
              (vheight (window-body-height window))
-             (n (* count (max 1 (- vheight 2))))
+             (n (scroll-amount uarg frame window))
              (last-line (max 0 (- (text-editor-line-count ed) 1)))
-             (new-top
-              (min (+ (window-top-line window) n) last-line)))
+             (new-top (min (+ (window-top-line window) n) last-line)))
         (if (<= new-top (window-top-line window))
             (set!frame-message frame "; End of buffer")
             (begin
@@ -430,16 +480,16 @@
                           (>= line (+ new-top vheight)))
                   (text-editor-set-cursor ed new-top 0)))))))
 
-    (define-command (scroll-up-command count)
-      ;; Scroll the view COUNT screenfuls up (toward the beginning of
-      ;; the buffer), the mirror of `scroll-up-command'.
-      "Scroll the view up N screenfuls."
-      (interactive "p")
+    (define-command (scroll-down-command uarg)
+      ;; Scroll the view toward the beginning of the buffer, the mirror
+      ;; of `scroll-up-command'.
+      "Scroll text of selected window downward."
+      (interactive "P")
       (let* ((frame (*current-frame*))
              (window (selected-window))
              (ed (window-buffer window))
              (vheight (window-body-height window))
-             (n (* count (max 1 (- vheight 2))))
+             (n (scroll-amount uarg frame window))
              (new-top (max 0 (- (window-top-line window) n))))
         (if (= new-top (window-top-line window))
             (set!frame-message frame "; Beginning of buffer")
@@ -450,6 +500,37 @@
                           (>= line (+ new-top vheight)))
                   (text-editor-set-cursor
                    ed (+ new-top (- vheight 1)) 0)))))))
+
+    (define-command (toggle-truncate-lines arg)
+      "Toggle truncating of long lines for the current buffer.
+When truncating is off, long lines are folded.
+With prefix argument ARG, truncate long lines if ARG is positive,
+otherwise fold them.  Note that in side-by-side windows, this
+command has no effect if `truncate-partial-width-windows' is
+non-nil."
+      ;; `simple.el:9341'. It is an M-x command there, bound to nothing -
+      ;; so it is here, where the buffer's `truncate-lines' lives. The
+      ;; `visual-line-mode' half of its message has no counterpart: that
+      ;; minor mode is not ported.
+      (interactive (list (current-prefix-arg)))
+      (let ((truncate
+             (if (not arg)
+                 (not (buffer-truncate-lines (current-buffer)))
+                 (> (uarg->integer 1 arg) 0))))
+        (set!buffer-truncate-lines (current-buffer) truncate)
+        (unless truncate
+          ;; turning folding back on clears the `hscroll' of every window
+          ;; showing the buffer, as `walk-windows' does (`simple.el:9359')
+          (let ((buffer (current-buffer)))
+            (for-each
+             (lambda (window)
+               (when (eq? buffer (window-buffer window))
+                 (set-window-hscroll! window 0)))
+             (window-list (*current-frame*)))))
+        (set!frame-message
+         (*current-frame*)
+         (string-append "Truncate long lines "
+                        (if truncate "enabled" "disabled")))))
 
     (define-command (beginning-of-buffer)
       "Move point to the beginning of the buffer."
@@ -1562,8 +1643,8 @@
     (define-key *default-keymap* (list (list 'ctrl #\x) (list 'ctrl #\x))
       exchange-point-and-mark)
     (define-key *default-keymap* (list (list 'ctrl #\i)) self-insert-tab)
-    (define-key *default-keymap* (list (list 'ctrl #\v)) scroll-down-command)
-    (define-key *default-keymap* (list (list 'meta #\v)) scroll-up-command)
+    (define-key *default-keymap* (list (list 'ctrl #\v)) scroll-up-command)
+    (define-key *default-keymap* (list (list 'meta #\v)) scroll-down-command)
     (define-key *default-keymap* (list (list 'meta #\<)) beginning-of-buffer)
     (define-key *default-keymap* (list (list 'meta #\>)) end-of-buffer)
     (define-key *default-keymap*

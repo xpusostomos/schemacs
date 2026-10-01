@@ -14,6 +14,12 @@ read emacs source code before implementing, are replicating it as close as possi
 in scheme, and of course, following the style and conventions you find already
 in this project.
 
+When a departure from real emacs functionality is found, it's better to look at
+the code and copy it than try and test its functionality. Testing it gets a
+simplistic view of how it works that copying its actual code solves. Testing
+it is a last resort when copying should be the main method of finding and repeating
+real emacs functionality.
+
 When there is a bug, and the user complains about the behavior, never just put in
 what you think the fix should be, what you should do is find out how our implementation
 departed from real emacs, and fix that departure. If you start improvising fixes,
@@ -289,6 +295,16 @@ automatically on the next call.
   non-continuable exception, so the handler appears to do nothing and the
   error escapes anyway. Two of the probes written during this work died
   that way before it was noticed.
+- **A stale `.go` file is read by `--no-auto-compile` runs even when no
+  record changed**, and it makes bisecting meaningless: with a stale
+  `xdisp.sld.go` in the cache, three successive "reverts" all tested the
+  same old binary, three different conclusions were drawn from it, and a
+  "fix" looked like it did nothing. The `--no-auto-compile` flag stops
+  *compiling*; loading an existing `.go` is ordinary behaviour. After any
+  run that leaves a `.go` behind (anything that ran without the flag),
+  `rm -rf ~/.cache/guile/ccache` before trusting a test result — or check
+  for the "newer than compiled" warning, which an import under
+  `--no-auto-compile` prints.
 - **Changing a record type silently breaks every *other* library that
   uses it**, under `--no-auto-compile`. Guile reads the `.go` files in
   `~/.cache/guile/ccache`, and a library whose source did not change keeps
@@ -385,3 +401,24 @@ from `(run-command NAME)` to a plain `(NAME)` call. `read-elem`-style
 sliding on a balanced form is the reliable way to convert a
 `new-command` block in bulk; the lambda's closing paren must be dropped
 and the define-command's own added back.
+
+Optional parameters are not spelled `&optional' - that is not Guile syntax
+and it reads as two required parameters, so the command takes the wrong
+number of arguments from M-x ("Wrong number of arguments to #<procedure
+...>") or, when the command loop swallows it, quietly does nothing. The
+tree's convention is the pattern `split-window-below' uses: fixed
+parameters whose values the interactive *expression* supplies -
+`(define-command (scroll-left arg set-minimum) ... (interactive (list
+(current-prefix-arg) (uarg->integer 1 (current-prefix-arg)))) ...)' - which
+is also how an interactive spec of several codes (`^P\np' in window.c) is
+reproduced: one list element per code.
+
+An interactive expression evaluates in the command's *defining* module, so
+every name it uses must be imported there: `toggle-truncate-lines' in
+simple.sld was unbound on `current-prefix-arg' because simple.sld's
+`(schemacs editor command)' import did not have it - the missing-import
+class again, swallowed by the command loop into a key that does nothing.
+
+Horizontal scrolling landed 2026-10-01 (`hscroll', auto-hscroll-mode,
+scroll-left/scroll-right); GTK-PLAN.md section 11 has the details and the
+`emacs -nw' measurements the port was checked against.

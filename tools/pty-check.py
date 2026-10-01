@@ -1361,6 +1361,94 @@ def check_buffer_menu():
     return problems
 
 
+def check_hscroll():
+    """A truncated line is reachable: the window hscrolls to keep point.
+
+    With `truncate-lines' on, the part of a long line beyond the window
+    is otherwise unreachable. Emacs's answer is `auto-hscroll-mode'
+    (t by default) and `w->hscroll', which `hscroll_window_tree'
+    (xdisp.c:16625) adjusts whenever point lands in the `hscroll-margin'
+    (5) at either edge, putting point at the window's horizontal centre
+    when `hscroll-step' is 0 - which was measured on `emacs -nw': point
+    at column 239 of an 80-column window gave `window-hscroll' 199 and
+    the cursor in column 40. The row drawn is `$' in its first cell (the
+    left truncation glyph overwrites the character at the hscroll
+    column), then the visible characters, then `$' in the last cell when
+    the line runs past the view. Moving point to a short line scrolls
+    back to 0, and an interactive `scroll-left' (C-x <) pins the amount
+    (`window.c:7113' sets `w->min_hscroll').
+
+    A same-size resize ends every run: an hscroll redraw is incremental,
+    and this screen reader would otherwise read the new writes on top of
+    the rows the old hscroll drew.
+    """
+    path = "/tmp/pty-check-hscroll.txt"
+    with open(path, "w") as port:
+        port.write("0123456789" * 25 + "\nsecond line\n")
+    C_e = b"\x05"
+    C_n = b"\x0e"
+    M_x = b"\x1b" + b"x"
+    redraw = ("resize", 24, 80)
+    problems = []
+    screen = screen_of(drive([M_x, b"toggle-truncate-lines", b"\r",
+                              C_e, C_n, redraw], path, settle=1.2, gap=0.35))
+    rows = screen.split("\n")
+    if not rows or rows[0][0] != "0":
+        problems.append("with hscroll reset by the short line below, "
+                        "row 0 did not begin at column 0: %r"
+                        % (rows[0][:10] if rows else None))
+    if len(rows) > 0 and rows[0][79:80] != "$":
+        problems.append("a truncated line did not end with $: %r"
+                        % (rows[0][74:80] if rows else None))
+    if len(rows) < 2 or "second line" not in rows[1]:
+        problems.append("the short line below was not shown after the "
+                        "hscroll reset: %r" % (rows[1][:20] if len(rows) > 1
+                                               else None))
+
+    # C-e alone: point at the end of the 250-column line. Auto hscroll
+    # centres it: hscroll 210, `$' overwrites character 210, characters
+    # 211..249 fill columns 1..39 and the row is blank past column 40 -
+    # no right `$', because the line ends inside the view.
+    screen = screen_of(drive([M_x, b"toggle-truncate-lines", b"\r",
+                              C_e, redraw], path, settle=1.2, gap=0.35))
+    rows = screen.split("\n")
+    if not rows or rows[0][0] != "$":
+        problems.append("the hscrolled row did not begin with the left "
+                        "truncation glyph: %r"
+                        % (rows[0][:4] if rows else None))
+    if len(rows) > 0 and rows[0][1:3] != "12":
+        problems.append("the row after the left glyph was not characters "
+                        "211.. (got %r, wanted '12')" % rows[0][1:3])
+    if len(rows) > 0 and rows[0][38:40] != "89":
+        problems.append("the row's last character was not 249 (got %r, "
+                        "wanted '89')" % rows[0][38:40])
+    if len(rows) > 0 and rows[0][40:79] != " " * 39:
+        problems.append("the hscrolled row did not run out of characters "
+                        "at column 40: %r" % rows[0][40:50])
+
+    # C-x <: scroll-left with no prefix scrolls width-2 = 78 columns and
+    # pins that as the minimum; moving down to the short line then leaves
+    # the window hscrolled at 78 instead of resetting it.
+    screen = screen_of(drive([M_x, b"toggle-truncate-lines", b"\r",
+                              b"\x18<", C_n, redraw], path, settle=1.2, gap=0.35))
+    rows = screen.split("\n")
+    if not rows or rows[0][0] != "$":
+        problems.append("after C-x < the row did not begin with the left "
+                        "truncation glyph: %r"
+                        % (rows[0][:4] if rows else None))
+    if len(rows) > 0 and rows[0][1:3] != "90":
+        problems.append("after C-x < the visible text did not start at "
+                        "character 79 (got %r, wanted '90')"
+                        % rows[0][1:3])
+    if len(rows) > 0 and rows[0][79:80] != "$":
+        problems.append("after C-x < the truncated line did not end with "
+                        "$: %r" % rows[0][74:80])
+    if len(rows) > 1 and rows[1][:2] != "$ ":
+        problems.append("after C-x < the short line was not scrolled out "
+                        "of view (row = %r)" % rows[1][:12])
+    return problems
+
+
 CHECKS = {
     "buffer-menu": check_buffer_menu,
     "suspend": check_suspend,
@@ -1391,6 +1479,7 @@ CHECKS = {
     "wide-columns": check_wide_columns,
     "kill-ring": check_kill_ring,
     "split": check_split,
+    "hscroll": check_hscroll,
 }
 
 

@@ -63,7 +63,13 @@
          window-list
          selected-window set!window-top-line window-point window-right-border?
          window-top
-         window-top-line window-width)
+         window-top-line window-width
+         ;; `w->hscroll' and its friends, which the hscroll display and
+         ;; auto hscrolling read and write
+         %window-hscroll %window-min-hscroll
+         %window-old-point %window-suspend-auto-hscroll?
+         set!%window-hscroll set!%window-min-hscroll
+         set!%window-old-point set!%window-suspend-auto-hscroll?)
     (only (schemacs editor disp-table)
          char-display-cursor-width char-display-width
          current-line-display-column expand-line-display
@@ -76,7 +82,8 @@
     (only (schemacs editor textprop) get-text-property)
     (only (schemacs editor buffer)
           *transient-mark-mode*
-          buffer-cursor-in-non-selected-windows buffer-cursor-type
+          buffer-auto-hscroll-mode buffer-cursor-in-non-selected-windows
+          buffer-cursor-type buffer-hscroll-margin buffer-hscroll-step
           buffer-local-value buffer-truncate-lines buffer-word-wrap)
 
     (only (schemacs editor faces) *undefined-face-attribute*)
@@ -206,9 +213,9 @@
       ;;      area. A mode line or the echo area never wraps, and the
       ;;      callers of this ask only about text rows.
       ;;   2. `!it->w->hscroll' - a horizontally scrolled window cannot
-      ;;      wrap as well. There is no `hscroll' here yet, so this is
-      ;;      always true; when horizontal scrolling arrives it belongs
-      ;;      in this line.
+      ;;      wrap as well (`init_iterator' sets `line_wrap' to TRUNCATE
+      ;;      when `w->hscroll' is set), so a window with an `hscroll'
+      ;;      truncates whatever `truncate-lines' says.
       ;;   3. the window is full-frame width, or
       ;;      `truncate-partial-width-windows' lets it wrap: nil lets it,
       ;;      `t' truncates every partial-width window, and an integer N
@@ -220,10 +227,12 @@
       ;;--------------------------------------------------------------
       (let ((ptw (*truncate-partial-width-windows*))
             (cols (window-width window)))
-        (not (and (or (window-full-width? window)
-                      (not ptw)
-                      (and (exact-integer? ptw) (<= ptw cols)))
-                  (not (buffer-truncate-lines (window-buffer window)))))))
+        (or (not (= (%window-hscroll window) 0))
+            (not (and (or (window-full-width? window)
+                          (not ptw)
+                          (and (exact-integer? ptw) (<= ptw cols)))
+                      (not (buffer-truncate-lines
+                            (window-buffer window))))))))
 
     (define (line-display-rows line-string width wrap? word-wrap?)
       ;; LINE-STRING as the screen rows it is drawn on, each a
@@ -280,6 +289,44 @@
                           (if (and word-wrap? (char=? c #\space)) i space)
                           rows))))))))))
 
+    (define (hscroll-line-slice window line-string)
+      ;; The `(FIRST . LAST)' buffer columns an hscrolled window shows of
+      ;; LINE-STRING, always exactly one screen row's worth. An hscrolled
+      ;; window's view is the display columns from `first_visible_x' to
+      ;; `last_visible_x' (`init_iterator', `xdisp.c:3501' and `:3509':
+      ;; `first_visible_x = w->hscroll', `last_visible_x = first_visible_x
+      ;; + body_width - truncation_pixel_width') - and the first *text*
+      ;; column is one past `first_visible_x', because the character at
+      ;; the hscroll column is the one the left truncation glyph
+      ;; overwrites (`insert_left_trunc_glyphs', `xdisp.c:23884'): with
+      ;; `hscroll' = H, `$' is drawn in the row's first cell and the
+      ;; characters whose display columns lie in [H+1, H+WIDTH-1) fill
+      ;; the rest, the right `$' taking the last cell. This was measured
+      ;; against `emacs -nw': `hscroll' = 100 in an 80-column window drew
+      ;; `$', characters 101 to 178, and `$'.
+      ;;
+      ;; The cut is made at a character boundary by display column - the
+      ;; offsets `line-display-offsets' answers - because a tab or a wide
+      ;; character is more than one cell and a hscroll of its middle
+      ;; would tear it.
+      ;;--------------------------------------------------------------
+      (let* ((h (%window-hscroll window))
+             (width (window-body-width window))
+             (len (string-length line-string))
+             ;; a vector, because the walk indexes it per character and
+             ;; a `list-ref' per step would make a long line quadratic
+             (offsets (list->vector (line-display-offsets line-string))))
+        (let loop ((i 0) (start #f))
+          (cond
+           ((>= i len) (cons (or start len) len))
+           ((not start)
+            ;; the first character whose display column is past the
+            ;; truncation glyph
+            (loop (+ i 1) (if (>= (vector-ref offsets i) (+ h 1)) i #f)))
+           ((>= (vector-ref offsets i) (+ h (- width 1)))
+            (cons start i))
+           (else (loop (+ i 1) start))))))
+
     (define (window-wraps? window)
       ;; Whether WINDOW lays a long line out over several screen rows.
       ;;--------------------------------------------------------------
@@ -290,25 +337,33 @@
       ;; one when it is short enough or truncated, more when it wraps.
       ;;--------------------------------------------------------------
       (let ((line (buffer-line-string (window-buffer window) line-index)))
-        (if (not line)
-            1
-            (length (line-display-rows line
-                                       (window-body-width window)
-                                       (window-wraps? window)
-                                       (buffer-word-wrap
-                                        (window-buffer window)))))))
+        (cond ((not line) 1)
+              ((and (not (window-wraps? window))
+                    (> (%window-hscroll window) 0))
+               ;; an hscrolled line is one row, whatever its length
+               1)
+              (else
+               (length (line-display-rows line
+                                          (window-body-width window)
+                                          (window-wraps? window)
+                                          (buffer-word-wrap
+                                           (window-buffer window))))))))
 
     (define (window-line-slices window line-index)
       ;; The `(FIRST . LAST)' buffer columns of each screen row the buffer
       ;; line LINE-INDEX takes in WINDOW - the rows to draw, in order.
       ;;--------------------------------------------------------------
       (let ((line (buffer-line-string (window-buffer window) line-index)))
-        (if (not line)
-            '()
-            (line-display-rows line
-                               (window-body-width window)
-                               (window-wraps? window)
-                               (buffer-word-wrap (window-buffer window))))))
+        (cond ((not line) '())
+              ((and (not (window-wraps? window))
+                    (> (%window-hscroll window) 0))
+               (list (hscroll-line-slice window line)))
+              (else
+               (line-display-rows line
+                                  (window-body-width window)
+                                  (window-wraps? window)
+                                  (buffer-word-wrap
+                                   (window-buffer window)))))))
 
     (define (rows-above window line)
       ;; How many screen rows the lines between WINDOW's top line and
@@ -382,6 +437,86 @@
                                   (+ need (window-line-rows window (- l 1))))
                             (set!window-top-line window l))))))
                   (loop (+ line 1) (+ used (window-line-rows window line))))))))))
+
+    (define (hscroll-window! window)
+      ;; Auto hscrolling: bring WINDOW's point back into the window's
+      ;; horizontal view when it has left it, before the window is drawn.
+      ;; This is GNU Emacs's `hscroll_window_tree' (`xdisp.c:16625'),
+      ;; which redisplay runs on every window before their matrices are
+      ;; rebuilt, with the settings it reads off the buffer:
+      ;; `auto-hscroll-mode' (t by default), `hscroll-margin' (5) and
+      ;; `hscroll-step' (0).
+      ;;
+      ;; What it does, in the C's order:
+      ;;
+      ;;   * auto hscrolling that `scroll-left'/`scroll-right' suspended
+      ;;     resumes when the window's point has moved since the last
+      ;;     redisplay (`xdisp.c:16756': `w->suspend_auto_hscroll' clears
+      ;;     when `window-point' differs from `old_pointm'), and the
+      ;;     point is then remembered for the next comparison;
+      ;;   * the cursor is in a *scroll margin* - within HSCROLL-MARGIN
+      ;;     columns of the window's left edge while the window is
+      ;;     already hscrolled, or within it of the right edge while the
+      ;;     row is truncated there (`xdisp.c:16791-16800') - and the
+      ;;     amount is then computed from the position of point on a line
+      ;;     of infinite width.
+      ;;
+      ;; The amount is `hscroll-step''s: the default 0 means put point at
+      ;; the window's horizontal centre (`xdisp.c:16851-16860',
+      ;; `hscroll = max (0, it.current_x - text_area_width / 2)'), and a
+      ;; measured `emacs -nw' confirms it: point at column 239 in an
+      ;; 80-column window made `window-hscroll' 199 and the cursor sat in
+      ;; column 40. The C's at-end-of-line variant (`text_area_width -
+      ;; 4 * column_width' for the wanted position, `:16857') is not
+      ;; ported: the iterator stops on the character at point, never on
+      ;; the line break, and a point on the line break was measured
+      ;; centring anyway (`goto-char' onto the break of a 250-column line
+      ;; gave hscroll 210 = 250 - 80/2). The C's third trigger, for
+      ;; `auto-hscroll-mode' = `current-line', belongs to that mode and
+      ;; that mode is not ported.
+      ;;
+      ;; One knowing deviation: the C measures point's position from the
+      ;; *cursor row of the previous redisplay* and converges over two
+      ;; redisplays when point has moved to another line (a move onto a
+      ;; short line from an hscrolled one resets the hscroll there). Here
+      ;; the position is the point's own line's, so the same steady state
+      ;; is reached in the one redisplay this renderer does.
+      ;;--------------------------------------------------------------
+      (let* ((ed (window-buffer window))
+             (h (%window-hscroll window))
+             (point (window-point window)))
+        (when (and (%window-suspend-auto-hscroll? window)
+                   (not (equal? point (%window-old-point window))))
+          ;; "If the position of this window's point has explicitly
+          ;; changed, no more suspend auto hscrolling" (`xdisp.c:16756')
+          (set!%window-suspend-auto-hscroll? window #f))
+        (set!%window-old-point window point)
+        (let* ((line (buffer-line-string ed (text-editor-cursor-line ed)))
+               (width (window-body-width window))
+               (margin (max 0 (buffer-hscroll-margin ed)))
+               (point-x (if line
+                            (current-line-display-column
+                             ed (text-editor-cursor-column ed))
+                            0))
+               (cursor-x (max 0 (- point-x h)))
+               (truncated-right?
+                (and line
+                     (not (window-wraps? window))
+                     (> (line-display-width line) (+ h width -1))))
+               (step (buffer-hscroll-step ed))
+               (wanted
+                ;; `hscroll-step' 0 - neither a float nor a positive
+                ;; integer is ported - centres point
+                (quotient width 2))
+               (new-h (max (max 0 (- point-x wanted))
+                           (%window-min-hscroll window))))
+          (when (and (buffer-auto-hscroll-mode ed)
+                     (not (%window-suspend-auto-hscroll? window))
+                     (or (and (> h 0) (<= cursor-x margin))
+                         (and truncated-right?
+                              (>= cursor-x (- width margin))))
+                     (not (= new-h h)))
+            (set!%window-hscroll window new-h)))))
 
     (define *mode-line-window* (make-parameter #f))
 
@@ -905,7 +1040,7 @@
                 'isearch 'lazy-highlight))))))
 
     (define (highlight-matches window row line line-start width
-                               pattern case-fold?)
+                               pattern case-fold? x-offset)
       ;; Draw the search matches that fall on this line over the line that
       ;; has just been drawn, so that what was found can be seen.
       ;;
@@ -916,10 +1051,14 @@
       ;; hang. Only matches that lie wholly within the line are drawn, so
       ;; a search string containing a line break (typed as C-j) finds its
       ;; match and moves point, but nothing is highlighted for it.
+      ;;
+      ;; X-OFFSET is how far right of the window's left edge the line's
+      ;; first cell is drawn - one when the row begins with the left
+      ;; truncation glyph, zero otherwise.
       ;;--------------------------------------------------------------
       (let* ((ed (window-buffer window))
              (row (+ row (window-top window)))
-             (x0 (window-left window))
+             (x0 (+ (window-left window) x-offset))
              (len (string-length line))
              (glyphs (list->vector (expand-line-glyphs line)))
              (offsets (list->vector (line-display-offsets line)))
@@ -1117,9 +1256,27 @@
                    (>= screen-row 0) (< screen-row vheight))
           (cons (+ screen-row (window-top window))
                 (+ (window-left window)
-                   (min (- (current-line-display-column ed column)
-                           (display-column-of line-string (or row-start 0)))
-                        (- width 1)))))))
+                   (if (window-wraps? window)
+                       ;; the column within its *row*: a continuation row
+                       ;; starts at screen column zero, so the cursor's
+                       ;; display column is measured from where its row
+                       ;; begins, not the line.
+                       (min (- (current-line-display-column ed column)
+                               (display-column-of line-string
+                                                  (or row-start 0)))
+                            (- width 1))
+                       ;; a truncated line is one row, and an hscrolled
+                       ;; row's first cell is the left truncation glyph
+                       ;; that the character at the hscroll column is
+                       ;; overwritten by - so the cursor's column is its
+                       ;; display column less the hscroll, and never
+                       ;; before the row's first cell, which is where
+                       ;; `w->cursor.x' sits too (`xdisp.c' computes it
+                       ;; from the glyphs' screen positions)
+                       (max 0
+                            (min (- (current-line-display-column ed column)
+                                    (%window-hscroll window))
+                                 (- width 1)))))))))
 
     (define (window-top-line-position ed top-line)
       ;; The absolute buffer position of the first character of
@@ -1182,8 +1339,18 @@
                                row line-index line-start line-string slices)
       ;; One buffer line's screen rows, from ROW down.
       ;;--------------------------------------------------------------
-      (let ((truncated? (and (not (window-wraps? window))
-                             (> (line-display-width line-string) width))))
+      (let* ((hscrolled? (and (not (window-wraps? window))
+                              (> (%window-hscroll window) 0)))
+             ;; a row of an hscrolled line: the right truncation glyph is
+             ;; drawn when the line's display width runs past
+             ;; `last_visible_x' = hscroll + width - 1, which is what
+             ;; `cursor_row->truncated_on_right_p' records
+             (hscroll-truncated?
+              (and hscrolled?
+                   (> (line-display-width line-string)
+                      (+ (%window-hscroll window) width -1))))
+             (truncated? (and (not (window-wraps? window))
+                              (> (line-display-width line-string) width))))
         (let rows-loop ((rest slices) (k 0))
           (when (and (pair? rest) (< (+ row k) vheight))
             (let* ((slice (car rest))
@@ -1191,18 +1358,47 @@
                    (slice-start (+ line-start (car slice)))
                    (slice-string (substring line-string (car slice) (cdr slice)))
                    (screen-row (+ row k (window-top window))))
-              (draw-line! ed slice-start line-string slice-string
-                          (expand-line-display slice-string width)
-                          screen-row x0 width more?
-                          (and truncated? (not more?)))
-              ;; the characters the current search matched, drawn over the
-              ;; row: the match point is in reverse video (GNU Emacs's
-              ;; `isearch' face) and the other matches in view in bold
-              ;; (`lazy-highlight')
-              (when highlight
-                (highlight-matches window k slice-string slice-start
-                                   width (car highlight) (cdr highlight))))
-            (rows-loop (cdr rest) (+ k 1))))))
+              (if hscrolled?
+                  ;; the row is `$' in its first cell - the left
+                  ;; truncation glyph, which overwrites the character at
+                  ;; the hscroll column rather than pushing the text
+                  ;; right - then the visible characters from the second
+                  ;; cell, and the right `$' in the last cell when the
+                  ;; line runs past the view. `draw-line!' is handed the
+                  ;; row minus its marker cells: text from X0+1 across
+                  ;; WIDTH-1 columns, so its own right marker lands on
+                  ;; the row's last column.
+                  (let ((row-width (- width 1)))
+                    ;; the left truncation glyph, in the row's FIRST cell
+                    ;; - `draw-special-glyph!' is the last cell's glyph,
+                    ;; so this writes its own
+                    (write-glyphs! (current-display)
+                                   "$" screen-row x0
+                                   (face->attribute 'default))
+                    (draw-line! ed slice-start line-string slice-string
+                                (expand-line-display slice-string row-width)
+                                screen-row (+ x0 1) row-width
+                                #f hscroll-truncated?)
+                    (when highlight
+                      (highlight-matches window k slice-string slice-start
+                                         row-width
+                                         (car highlight) (cdr highlight)
+                                         1)))
+                  (begin
+                    (draw-line! ed slice-start line-string slice-string
+                                (expand-line-display slice-string width)
+                                screen-row x0 width more?
+                                (and truncated? (not more?)))
+                    ;; the characters the current search matched, drawn
+                    ;; over the row: the match point is in reverse video
+                    ;; (GNU Emacs's `isearch' face) and the other matches
+                    ;; in view in bold (`lazy-highlight')
+                    (when highlight
+                      (highlight-matches window k slice-string slice-start
+                                         width
+                                         (car highlight) (cdr highlight)
+                                         0))))
+              (rows-loop (cdr rest) (+ k 1)))))))
 
     (define (render-window! window)
       ;; Draw one window: its rows of text within its rectangle, then its
@@ -1264,6 +1460,12 @@
         ;; is displayed with its own point.
         (let ((selected (frame-selected-window frame)))
           (when selected (scroll-to-cursor! selected)))
+        ;; auto hscrolling, for every window: `hscroll_window_tree'
+        ;; walks the tree before any matrix is rebuilt
+        ;; (`redisplay_internal', `xdisp.c'), and only the selected
+        ;; window's *start* is scrolled, while hscrolling is a property
+        ;; each window's own point decides
+        (for-each hscroll-window! windows)
         (for-each render-window! windows)
         ;; Echo area: the minibuffer when one is active, exactly as GNU
         ;; Emacs draws it (the minibuffer *is* the echo area while it is
