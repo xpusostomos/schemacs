@@ -20,7 +20,8 @@
   (import
     (scheme base)
     (only (schemacs editor engine)
-          text-editor-delete-from-cursor text-editor-get-cursor
+          text-editor-cursor-line text-editor-delete-from-cursor
+          text-editor-get-cursor text-editor-get-line-column
           text-editor-mark text-editor-set-cursor)
     ;; `mark-active' and `transient-mark-mode' are `buffer.c''s
     ;; variables, and `mark-even-if-inactive' is `callint.c''s, which is
@@ -30,11 +31,13 @@
           mark-active transient-mark-mode)
     (only (schemacs editor command)
           *mark-even-if-inactive*)
+    (only (schemacs ui text-buffer-impl) text-location-line)
     (only (schemacs editor frame) current-editor)
     )
 
   (export
    delete-region
+   line-number-at-pos
    region-beginning
    region-end
    region-limit
@@ -95,4 +98,20 @@
       ;;--------------------------------------------------------------
       (region-limit #f))
 
+
+    (define (line-number-at-pos . args)
+      ;; GNU Emacs's `line-number-at-pos' (`editfns.c'): "Return current
+      ;; line number in the current buffer", counting from 1 at
+      ;; `point-min'. With a POSITION, the line that position is on.
+      ;; Emacs's also narrows-independent `what-line' does its own count
+      ;; with the narrowing kept; nothing is narrowed here.
+      ;;--------------------------------------------------------------
+      (let ((ed (current-editor)))
+        (if (pair? args)
+            ;; the line POSITION is on: the engine's
+            ;; `text-editor-get-line-column' answers the one-based line
+            ;; and column of a character index
+            (text-location-line
+             (text-editor-get-line-column ed (car args)))
+            (+ 1 (text-editor-cursor-line ed)))))
     ))

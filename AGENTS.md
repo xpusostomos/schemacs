@@ -470,3 +470,37 @@ pass fixed it, wired the build, and added the terminal half.
   `wl-paste', `wl-copy' is read back through `gui-get-selection', non-ASCII both
   ways. Deferred as in Emacs: `save-interprogram-paste-before-kill',
   `kill-transform-function', `yank-from-kill-ring', the screen/DCS OSC 52 wrapper.
+
+## BASIC-FUNC.md's four commands (2026-10-02)
+
+`what-cursor-position' (C-x =), `recenter' (C-l), `goto-line' (M-g g, M-g
+M-g) and `write-file' (C-x C-w) are in, with the Emacs code they port from
+named on each. The four pty checks (what-cursor, goto-line, write-file,
+recenter) cover them.
+
+- `what-cursor-position' is simple.sld's, `single-key-description' the
+  keymap.sld one it needs (keymap.c's `push_key_description': TAB, RET, ESC,
+  DEL, SPC, C-letters).
+- `recenter' is frame.sld's - window.c is that file's in this tree - and
+  sets the window's top line to the one ARG lines above point's, exactly
+  the C's arithmetic with the margin clip.
+- `write-file' and `set-visited-file-name' are files.sld's, with
+  `directory-name-p' and `file-writable-p' (fileio.c's) beside them; the
+  overwrite confirm is `y-or-n-p'. `read-file-name' takes Emacs's optional
+  DEFAULT now, which write-file uses for a buffer that visits nothing.
+- `goto-line' is in **minibuffer.sld**, not simple.sld, with
+  `goto-line-read-args' and `read-number' (subr.el's, beside
+  `read-char-from-minibuffer' and `minibuffer-default-prompt-format', which
+  are minibuffer.el's). The reason is the import graph: simple.sld is below
+  the minibuffer - minibuffer imports simple for `self-insert-command', and
+  the command loop imports both - so a command that prompts cannot live
+  there, which is the same wall `yank-from-kill-ring' waits behind.
+  simple.sld's read-args-and-prompt cluster moves there the day the
+  layering is fixed.
+
+Gotchas from the work: Guile's `format' takes the DESTINATION first -
+`(format #f "...")' for a string, and the frame as destination is the
+"classic" mistake three of these commands made; `read-number''s cons
+default drops its nil entries the way Emacs's `delq nil' does; and the
+find-file prompt prefill is real minibuffer content, which is why the
+prompting pty checks type `C-a C-k' before an absolute path.

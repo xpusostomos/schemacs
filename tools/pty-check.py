@@ -1086,6 +1086,134 @@ def check_default_directory():
     return problems
 
 
+def check_what_cursor():
+    """C-x = prints where point is, and the character it is on.
+
+    Emacs's `what-cursor-position' answers in the echo area: the
+    character, its code in decimal, octal and hex, the one-based point,
+    the buffer size, the percentage through, and the column.
+    """
+    path = "/tmp/pty-check-wcp.txt"
+    open(path, "w").write("hello world\n")
+    problems = []
+    # point at end of buffer: C-a, then twelve C-f's past every
+    # character of "hello world\n" - the (EOB) message, whose point is
+    # one past the last character, as Emacs's formula makes it
+    out = drive([C_x + C_f, path.encode(), RET, C_a] + [C_f] * 12 +
+                [C_x + b"="], path)
+    if "point=13 of 12 (EOB) column=0" not in out:
+        problems.append("C-x = at end of buffer did not report the EOB "
+                        "message as Emacs's formula gives it")
+    out = drive([C_x + C_f, path.encode(), RET, C_a, C_f, C_f, C_x + b"="],
+                path)
+    if "Char: l (108, #o154, #x6c) point=3 of 12 (17%) column=2" not in out:
+        problems.append("C-x = on the second l did not report "
+                        "`Char: l (108, #o154, #x6c) point=3 of 12 (17%) "
+                        "column=2'")
+    return problems
+
+
+def check_goto_line():
+    """M-g g reads a line number and point goes to its start.
+
+    A numeric prefix argument IS the line (`C-u 3 M-g g'), and without
+    one the line is read from the minibuffer, which offers the line
+    point is on as the default - so bare RET goes to the line point is
+    already on, and typing 3 goes to the start of the third line.
+    """
+    path = "/tmp/pty-check-goto.txt"
+    open(path, "w").write("alpha\nbravo\ncharlie\n")
+    problems = []
+    C_u = b"\x15"
+    # the prompt: M-g g, type 3, RET - point lands on the third line,
+    # which the mode line's L3 says
+    out = drive([C_x + C_f, path.encode(), RET,
+                 b"\x1b", b"g", b"g", b"3", RET], path)
+    screen = screen_of(out)
+    mode = [r for r in screen.split("\n") if "-- L" in r]
+    if not mode or "L3" not in mode[-1]:
+        problems.append("M-g g 3 RET did not put point on the third line "
+                        "(mode line: %r)" % (mode[-1][:40] if mode else None,))
+    if "Mark set" not in out:
+        problems.append("M-g g did not leave the mark where point was")
+    # the prefix argument: C-u 2 M-g g - the line IS the argument
+    out = drive([C_x + C_f, path.encode(), RET, C_u, b"2",
+                 b"\x1b", b"g", b"g"], path)
+    screen = screen_of(out)
+    mode = [r for r in screen.split("\n") if "-- L" in r]
+    if not mode or "L2" not in mode[-1]:
+        problems.append("C-u 2 M-g g did not put point on the second line "
+                        "(mode line: %r)" % (mode[-1][:40] if mode else None,))
+    return problems
+
+
+def check_write_file():
+    """C-x C-w writes the buffer under a new name.
+
+    The prompt is `Write file: ', the answer names the file, the buffer
+    visits it from then on (the mode line says so), and the file is on
+    disk with the buffer's text.
+    """
+    path = "/tmp/pty-check-wf-src.txt"
+    open(path, "w").write("written by write-file\n")
+    target = "/tmp/pty-check-wf-dst.txt"
+    C_w = b"\x17"
+    problems = []
+    try:
+        os.unlink(target)
+    except OSError:
+        pass
+    # C-a C-k kills the directory the prompt starts with, the way the
+    # other prompting checks do before they type an absolute path
+    out = drive([C_x + C_f, path.encode(), RET,
+                 C_x + C_w, C_a, C_k, target.encode(), RET], path)
+    if "Wrote /tmp/pty-check-wf-dst.txt" not in out:
+        problems.append("C-x C-w did not say `Wrote ...' for the new file")
+    if not os.path.exists(target):
+        problems.append("C-x C-w did not create the file it was given")
+    else:
+        with open(target) as port:
+            if port.read() != "written by write-file\n":
+                problems.append("the file C-x C-w wrote does not hold the "
+                                "buffer's text")
+    screen = screen_of(out)
+    if "pty-check-wf-dst.txt" not in screen:
+        problems.append("the mode line does not name the file the buffer "
+                        "was written to")
+    return problems
+
+
+def check_recenter():
+    """C-l puts the line point is on in the middle of the window.
+
+    `recenter' sets the window's start to the line half a window above
+    point's, which is what the redraw shows: on a 23-row window, the
+    line point is on is row 11 (zero-based) after C-l.
+    """
+    lines = "".join("line %02d\n" % n for n in range(1, 41))
+    path = "/tmp/pty-check-recenter.txt"
+    C_l = b"\x0c"
+    open(path, "w").write(lines)
+    problems = []
+    # to the last line, then C-l: point's line is centred
+    out = drive([C_x + C_f, path.encode(), RET,
+                 b"\x1b", b">", C_f, C_l], path)
+    screen = screen_of(out)
+    rows = screen.split("\n")
+    # find the row that point is on - the cursor row - and check it is
+    # around the middle: the mode line is the last row, the text rows
+    # are 1..22, so the centre is row 11 or 12
+    pointed = [n for n, r in enumerate(rows) if "line 40" in r]
+    if not pointed:
+        problems.append("after M-> C-l the line point is on is not on the "
+                        "screen at all")
+    elif not (8 <= pointed[0] <= 14):
+        problems.append("after M-> C-l the line point is on is row %d of "
+                        "the screen, expected around the middle (11)"
+                        % pointed[0])
+    return problems
+
+
 def check_osc52():
     """The cut reaches the terminal as OSC 52, which is the clipboard.
 
@@ -1172,7 +1300,13 @@ def check_kill_ring():
     # unit-tested; what is driven here is the two-key sequence itself,
     # because a long key run is flaky through the pty in a way the
     # command loop is not.
-    screen = screen_of(drive(find + [path.encode(), RET, C_k, C_y, M_y], path))
+    # Two M-y's, not one: the find-file prompt prefill is part of the
+    # ring now - the C-k in the prompt killed the default directory -
+    # and the first M-y correctly rotates to it ("/tmp/"), so reaching
+    # the line kill is a second rotation, which is Emacs's ring doing
+    # what it does.
+    screen = screen_of(drive(find + [path.encode(), RET, C_k, C_y,
+                                     M_y, M_y], path))
     if "Previous command was not a yank" in screen:
         problems.append("M-y was not seen as following a yank")
     if "hello world" not in screen:
@@ -1508,6 +1642,10 @@ CHECKS = {
     "wide-columns": check_wide_columns,
     "kill-ring": check_kill_ring,
     "osc52": check_osc52,
+    "what-cursor": check_what_cursor,
+    "goto-line": check_goto_line,
+    "write-file": check_write_file,
+    "recenter": check_recenter,
     "split": check_split,
     "hscroll": check_hscroll,
 }

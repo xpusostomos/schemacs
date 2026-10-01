@@ -101,6 +101,7 @@
    bury-buffer
    current-buffer
    get-buffer
+   find-buffer-visiting
    get-buffer-create
    generate-new-buffer
    generate-new-buffer-name
@@ -550,6 +551,20 @@
             (register-buffer! buffer name)
             (init-buffer! buffer)
             buffer)))
+
+    (define (find-buffer-visiting filename)
+      ;; The buffer whose file FILENAME is, or #f: GNU Emacs's
+      ;; `find-buffer-visiting' (`buffer.c''s `Ffind_buffer_visiting'
+      ;; through `get-file-buffer'), which `write-file' and
+      ;; `set-visited-file-name' ask before they re-home a buffer - Emacs
+      ;; warns when another buffer would be visiting the same file.
+      ;;--------------------------------------------------------------
+      (let scan ((buffers (buffer-list)))
+        (cond ((null? buffers) #f)
+              ((and (buffer-file-name (car buffers))
+                    (string=? (buffer-file-name (car buffers)) filename))
+               (car buffers))
+              (else (scan (cdr buffers))))))
 
     (define (init-buffer! buffer)
       ;; Give a buffer just made the slots and flags Emacs gives a new

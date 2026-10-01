@@ -42,7 +42,7 @@
     ;; `format-message' does for `minibuffer-message'.
     (only (guile) format)
     (only (schemacs editor command)
-          run-command define-command
+          current-prefix-arg define-command run-command uarg->integer
           *command-table* command-value-of command-interactive-spec)
     (only (schemacs editor engine)
           new-text-editor text-editor-char-count text-editor-copy-string
@@ -70,18 +70,23 @@
     (only (guile) getcwd)
     (only (schemacs editor window)
           delete-window get-buffer-window quit-window
-          split-main-window-below window-min-height)
+          split-main-window-below switch-to-buffer-other-window
+          window-min-height)
+    ;; `line-number-at-pos' is `editfns.c''s: the default `goto-line'
+    ;; offers is the line point is on.
+    (only (schemacs editor editfns) line-number-at-pos)
     ;; `self-insert-command' is what SPC does in a file-name minibuffer
     ;; (`minibuffer-local-filename-completion-map' below), and
     ;; `with-current-buffer' and the line motion are the ordinary
     ;; commands the minibuffer's own keys fall back on.
     (only (schemacs editor simple) self-insert-command
+       push-mark region-active-p
        *this-command* *last-command*)
     (only (schemacs editor frame)
           *current-frame* *echo-area-buffer* *echo-area-prompt* *minibuffer*
-          frame-height set!frame-message set-message!
-          set-window-point! window-buffer window-height window-list
-          window-width)
+          current-editor frame-height select-window set!frame-message
+          set-message! set-window-point! window-buffer window-height
+          window-list window-width)
     ;; `try-completion' and `all-completions' are `minibuf.c''s and live in
     ;; `(schemacs editor minibuf)'; this library is `minibuffer.el' and uses
     ;; them rather than defining them.
@@ -161,7 +166,14 @@
    *minibuffer-completion-predicate*
    common-prefix
    completion-candidates-message
-   file-name-history
+file-name-history
+   minibuffer-default-prompt-format
+   format-prompt
+   read-number
+read-number-history
+   goto-line
+   goto-line-history
+   goto-line-read-args
    make<minibuffer>
    minibuffer-complete
    minibuffer-completion-help
@@ -215,6 +227,13 @@
 
     (define minibuffer-history (make<history> '()))
     (define file-name-history (make<history> '()))
+    (define read-number-history (make<history> '()))
+    ;; ^ GNU Emacs's `read-number-history' (`subr.el'), the history the
+    ;; number prompts share. It is here beside `file-name-history' -
+    ;; which is `files.el''s but lives here for the same reason - because
+    ;; the history records are this library's, and `subr.sld' cannot
+    ;; import them: minibuffer.sld already imports keyboard.sld, which
+    ;; imports subr.sld, so subr -> minibuffer would be a cycle.
 
     (define-record-type <minibuffer-type>
       (make<minibuffer>
@@ -1967,5 +1986,203 @@
                      `(((ctrl #\m) . ,minibuffer-complete-and-exit)
                        ((ctrl #\j) . ,minibuffer-complete-and-exit))))
               (km:keymap->layers-list minibuffer-local-completion-map))))
+
+    ;;----------------------------------------------------------------
+    ;; Reading a number
+    ;;
+    ;; GNU Emacs's `read-number' is `subr.el''s, but it is here: the
+    ;; reading it does is this library's, and subr.sld cannot import
+    ;; this library (see `read-number-history' above).
+    ;;----------------------------------------------------------------
+
+    (define minibuffer-default-prompt-format
+      ;; GNU Emacs's `minibuffer-default-prompt-format' (minibuffer.el:5485):
+      ;; "Format string used to output "default" values" - the
+      ;; "(default 50)" in "Number of articles (default 50): ". It is
+      ;; read-number's, below, and any other prompt that names its default.
+      ;;--------------------------------------------------------------
+      " (default %s)")
+
+    (define (format-prompt prompt default)
+      ;; GNU Emacs's `format-prompt' (minibuffer.el:5499): PROMPT with
+      ;; the DEFAULT named in it, in the way a prompt that has a default
+      ;; is written. Emacs's takes a spec and fills the prompt's own %s's
+      ;; too; nothing here passes a prompt with fields yet, so what is
+      ;; kept of it is the default clause, inserted before a trailing
+      ;; ": " as `read-number''s string-match does.
+      ;;--------------------------------------------------------------
+      (if default
+          (let* ((with-default
+                  (string-append prompt
+                                 (format #f minibuffer-default-prompt-format
+                                         default)))
+                 (end (string-length with-default)))
+            (if (and (> end 2)
+                     (char=? (string-ref with-default (- end 2)) #\:)
+                     (char=? (string-ref with-default (- end 1)) #\space))
+                (string-append (substring with-default 0 (- end 2)) ": ")
+                with-default))
+          prompt))
+
+    (define (read-number prompt . rest)
+      ;; GNU Emacs's `read-number' (subr.el:3709): "Read from the
+      ;; minibuffer and return a numeric value, prompting with PROMPT."
+      ;; DEFAULT - a number, or a list of them, the first being the one
+      ;; RET takes - is named in the prompt and answered when the user
+      ;; types nothing; HIST is the history list, `read-number-history'
+      ;; when not given. The interactive code letter "n" is what uses it.
+      ;;
+      ;; Not ported: the Emacs Lisp `read' of the typed string, which
+      ;; parses a Lisp object and takes only what reads as a number -
+      ;; `string->number' answers a number for a number's spelling and
+      ;; #f otherwise, which is the same rejection for the strings a
+      ;; user actually types.
+      ;;
+      ;; Not ported: `sit-for' after the "Please enter a number." message
+      ;; (a second's pause, so the message is readable). There is no
+      ;; sit-for here, and the prompt that follows the message covers the
+      ;; echo area, so the message is set and the prompt goes straight
+      ;; back up - what the user sees of the rejection is the prompt
+      ;; again.
+      ;;--------------------------------------------------------------
+      (let* ((default (if (pair? rest) (car rest) #f))
+             (hist (if (and (pair? rest) (pair? (cdr rest)))
+                       (cadr rest)
+                       read-number-history))
+             (default1 (if (pair? default) (car default) default))
+             ;; DEFAULT names itself in the prompt: read-number's own
+             ;; string-match on "\(():[ \t]*\'" puts the format before
+             ;; the final colon, or at the end of a prompt with none.
+             (prompt
+              (if default1
+                  (let* ((with-default
+                          (string-append
+                           prompt
+                           (format #f minibuffer-default-prompt-format default1)))
+                         (end (string-length with-default)))
+                    (let scan ((i end))
+                      (cond
+                       ((= i 0)
+                        with-default)
+                       ((char=? (string-ref with-default (- i 1)) #\space)
+                        (scan (- i 1)))
+                       ((char=? (string-ref with-default (- i 1)) #\:)
+                        (string-append (substring with-default 0 (- i 1))
+                                       (format #f minibuffer-default-prompt-format
+                                               default1)
+                                       (substring with-default
+                                                  (- i 1) end)))
+                       (else
+                        with-default))))
+                  prompt))
+             ;; RET on an empty answer takes the default: the strings the
+             ;; minibuffer's default is. Emacs passes every entry of a
+             ;; cons DEFAULT and lets M-n cycle them; the reader here
+             ;; takes one, so it takes the first.
+             ;; Emacs's `(mapcar #'number-to-string (delq nil default))':
+             ;; a cons DEFAULT drops its nil entries, so `(list nil N)'
+             ;; offers N - `number-at-point' being nil is what puts the
+             ;; current line there.
+             (minibuffer-default
+              (and default
+                   (let scan ((rest (if (pair? default)
+                                        default
+                                        (list default))))
+                     (cond ((null? rest) #f)
+                           ((car rest) (number->string (car rest)))
+                           (else (scan (cdr rest))))))))
+        (let loop ()
+          (let ((n (string->number
+                    (read-from-minibuffer prompt #f #f hist minibuffer-default))))
+            (if (number? n)
+                n
+                (begin
+                  (set!frame-message (*current-frame*) "Please enter a number.")
+                  (loop)))))))
+
+    ;;----------------------------------------------------------------
+    ;; Goto line
+    ;;
+    ;; GNU Emacs's `goto-line' and `goto-line-read-args' are `simple.el''s,
+    ;; and they are here and not in simple.sld because they prompt:
+    ;; simple.sld is *below* this library in the import graph - this
+    ;; library imports simple.sld for `self-insert-command', and the
+    ;; command loop imports both - so a command that reads the minibuffer
+    ;; cannot live there. That is the same wall `yank-from-kill-ring'
+    ;; waits behind (simple.sld says so at its `yank-pop'), and the
+    ;; reason `read-number' is here too.
+    ;;----------------------------------------------------------------
+
+    (define goto-line-history (make<history> '()))
+    ;; ^ GNU Emacs's `goto-line-history' (simple.el), the history the
+    ;; line prompt shares, beside `read-number-history' above.
+
+    (define (goto-line-read-args . rest)
+      ;; GNU Emacs's `goto-line-read-args' (simple.el:1615): read the
+      ;; arguments of `goto-line' and its relatives. A numeric prefix
+      ;; argument IS the line, and nothing is read; otherwise the line
+      ;; is read from the minibuffer, the number at point offered as
+      ;; the default - `number-at-point' is not here, so the default
+      ;; is the line point is on, which is the default Emacs offers
+      ;; when there is no number under point - and the buffer read for
+      ;; a cons prefix (`C-u') is not read: `goto-line''s other-buffer
+      ;; switch waits for the buffer-switching its prompt needs.
+      ;;--------------------------------------------------------------
+      (let ((relative (if (pair? rest) (car rest) #f)))
+        (if (and (current-prefix-arg)
+                 (not (pair? (current-prefix-arg))))
+            (let ((n (uarg->integer 1 (current-prefix-arg))))
+              ;; the buffer read for a cons prefix is #f here - see the
+              ;; note above - so the answer is the line and no buffer
+              (list n #f))
+            (list (read-number (format-prompt "Goto line: "
+                                              (line-number-at-pos))
+                               (list #f (line-number-at-pos))
+                               goto-line-history)
+                  #f))))
+
+    (define-command (goto-line line buffer relative interactive)
+      ;; GNU Emacs's `goto-line' (simple.el:1649): "Go to LINE, counting
+      ;; from line 1 at beginning of buffer." Interactively the line is
+      ;; the numeric prefix argument, or what the minibuffer read; the
+      ;; mark is left where point was, unless the region is active -
+      ;; Emacs's `(or (region-active-p) (push-mark))' - and point goes
+      ;; to the start of that line.
+      ;;
+      ;; The move is Emacs's `(goto-char (point-min)) (forward-line
+      ;; (1- line))' done with the engine's line-addressed cursor: line
+      ;; LINE-1, column 0 - and `forward-line''s end-of-buffer case,
+      ;; which stops at `point-max' when LINE is past the end, is the
+      ;; cursor going to the end of the buffer instead of the start of
+      ;; the last line, which is where the engine's clamp stays.
+      ;;
+      ;; Not ported: `selective-display' and the narrowing -
+      ;; `re-search-forward' and `save-restriction' have nothing to act
+      ;; on here - `widen-automatically', and the buffer switch the
+      ;; cons prefix asks for.
+      ;;--------------------------------------------------------------
+      "Go to LINE, counting from line 1 at beginning of buffer."
+      (interactive (append (goto-line-read-args) (list #f #t)))
+      ;; Switch to the desired buffer, one way or another.
+      (when interactive
+        (when buffer
+          (let ((window (get-buffer-window buffer)))
+            (if window (select-window window)
+                (switch-to-buffer-other-window buffer))))
+        ;; Leave mark at previous position
+        (or (region-active-p) (push-mark)))
+      ;; Move to the specified line number in that buffer.
+      (let ((ed (current-editor))
+            (target (max 0 (- line 1))))
+        (text-editor-set-cursor ed target 0)
+        (when (< (text-editor-cursor-line ed) target)
+          (text-editor-set-cursor ed (text-editor-char-count ed)))))
+
+    ;; The keys GNU Emacs binds it to (M-g g, and M-g M-g, which is the
+    ;; same command), beside the command as the other libraries state
+    ;; theirs.
+    (define-key *default-keymap* (list (list 'meta #\g) #\g) goto-line)
+    (define-key *default-keymap* (list (list 'meta #\g) (list 'meta #\g))
+      goto-line)
 
     ))

@@ -28,6 +28,7 @@
     (only (schemacs lens) update))
 
   (export
+   single-key-description
    *current-keymap*
    *default-keymap*
    *special-event-map*
@@ -97,4 +98,30 @@
               keymap km:=>keymap-layers*!)
       keymap)
 
+
+    (define (single-key-description key . rest)
+      ;; GNU Emacs's `single-key-description' (`keymap.c:2307'), which
+      ;; for a character event is `push_key_description'
+      ;; (`keymap.c:2192'): "Control characters turn into C-whatever,
+      ;; etc." - 9 is `TAB', 13 `RET', 27 `ESC', 32 `SPC', 127 `DEL',
+      ;; the other controls `C-' with the letter the 0140 offset makes
+      ;; of them, and a printing character is itself. What
+      ;; `what-cursor-position' shows the character after point as.
+      ;;
+      ;; Only the character branch of the C is here: function keys and
+      ;; event symbols are strings in a key path here, and `text-char-
+      ;; description' - its octal-and-backslashes spelling - is not.
+      ;;--------------------------------------------------------------
+      (let ((c (char->integer key)))
+        (cond
+         ((= c 27) "ESC")
+         ((= c 9) "TAB")
+         ((= c 13) "RET")
+         ((= c 127) "DEL")
+         ((= c 32) "SPC")
+         ((< c 32)
+          (string "C-" (integer->char
+                        (if (and (> c 0) (<= c 26)) (+ c 96) (+ c 64)))))
+         ((< c 128) (string key))
+         (else (string key)))))
     ))

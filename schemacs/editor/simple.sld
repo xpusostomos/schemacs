@@ -18,6 +18,9 @@
     (scheme base)
     (scheme char)
     (scheme case-lambda)
+    ;; `format' fills in `what-cursor-position''s message - Guile's,
+    ;; which `(scheme base)' does not have.
+    (only (guile) format)
     ;; `caddr' is `(scheme cxr)'s, and `push-mark' takes Emacs's three
     ;; optional arguments.
     (only (scheme cxr) caddr)
@@ -38,10 +41,12 @@
          text-editor-undo-boundary! text-editor-undo-list)
     (only (schemacs editor frame)
          *current-frame* *echo-area-buffer* current-editor display-selections-p
+         set-message!
          frame-keymap-state
          selected-window set!frame-keymap-state
          set!frame-message set!window-top-line window-body-height
-         window-buffer window-list window-top-line)
+         window-buffer window-list window-top-line
+         %window-hscroll)
     ;; The kill ring's window-system half: the cut and paste functions
     ;; are simple.el's `interprogram-*-function' variables' defaults,
     ;; and `deactivate-mark' sets PRIMARY through the low-level
@@ -77,6 +82,7 @@
     (only (schemacs editor keymap)
          add-keymap-layer!
          define-key
+         single-key-description
          *default-keymap*)
     )
 
@@ -111,6 +117,7 @@
    region-active-p set-mark set-mark-command
    set!mark-ring use-region-p
    prefix-argument-description
+   what-cursor-position
    prefix-echo-pending? request-prefix-echo! show-prefix-echo!
    strip-undo-boundaries undo undo-redo update-prefix!
    word-char? word-run-end word-run-start yank
@@ -1802,6 +1809,66 @@ non-nil."
     (define-key *default-keymap* (list (list 'meta #\y)) yank-pop)
     (define-key *default-keymap* (list (list 'ctrl #\w)) kill-region)
     (define-key *default-keymap* (list (list 'meta #\w)) kill-ring-save)
+
+    ;;----------------------------------------------------------------
+    ;; `what-cursor-position' - simple.el:1856, C-x =
+    ;;----------------------------------------------------------------
+
+    (define-command (what-cursor-position detail)
+      ;; GNU Emacs's `what-cursor-position' (simple.el:1856): "Print
+      ;; info on cursor position (on screen and within buffer). Also
+      ;; describe the character after point, and give its character
+      ;; code in octal, decimal and hex." With a prefix argument it
+      ;; would go on to `describe-char' in a `*Help*' buffer - which is
+      ;; not here, so the argument is taken and does nothing.
+      ;;
+      ;; Not ported: `what-cursor-show-names' (the character's name),
+      ;; the bidi fixers for embedding-starting characters (there is no
+      ;; bidi here, and the fixer Emacs's condition answers for every
+      ;; other character is the empty string anyway), the `display'
+      ;; text-property and coding-system branches of the encoding
+      ;; message - every character here is what the buffer holds - and
+      ;; the `<BEG-END>' narrowed part of the message, nothing being
+      ;; narrowed. The bidi fixer being the empty string is why it
+      ;; drops out of the format below.
+      ;;--------------------------------------------------------------
+      "Print info on cursor position (on screen and within buffer)."
+      (interactive (list (current-prefix-arg)))
+      (let* ((frame (*current-frame*))
+             (ed (current-editor))
+             (pos (text-editor-get-cursor ed))
+             (total (text-editor-char-count ed))
+             ;; Emacs's `point' is one-based; the engine's cursor is
+             ;; zero-based, and the percent is of the characters
+             ;; *before* point, which is the same count in both.
+             (percent (round (/ (* 100 pos) (max 1 total))))
+             (hscroll (if (= (%window-hscroll (selected-window)) 0)
+                          ""
+                          (format " Hscroll=~a"
+                                  (%window-hscroll (selected-window)))))
+             (col (text-editor-cursor-column ed)))
+        (if (= pos total)
+            (set-message! frame
+                          (format #f "point=~a of ~a (EOB) column=~a~a"
+                                  (+ 1 pos) total col hscroll))
+            (let* ((char (string-ref
+                          (text-editor-copy-string ed pos (+ 1 pos)) 0))
+                   (code (char->integer char))
+                   ;; a multibyte character shows as itself, as Emacs's
+                   ;; `(buffer-substring-no-properties point (1+
+                   ;; point))' does
+                   (shown (if (< code 128)
+                              (single-key-description char)
+                              (string char))))
+              (set-message! frame
+                            (format
+                             #f
+                             "Char: ~a (~a, #o~o, #x~x) point=~a of ~a (~a%) column=~a~a"
+                             shown code code code
+                             (+ 1 pos) total percent col hscroll))))))
+
+    (define-key *default-keymap* (list (list 'ctrl #\x) #\=)
+      what-cursor-position)
 
     (define self-insert-layer
       ;; Catch all printable characters and bind them to

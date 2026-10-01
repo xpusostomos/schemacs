@@ -37,10 +37,12 @@
           screen-size suspend-display!)
     (only (schemacs editor engine)
           copy-marker  marker-position  set-marker!
+          text-editor-cursor-line
           text-editor-get-cursor  text-editor-set-cursor)
     ;; `suspend-frame' is a command and states its own key as the other
     ;; command libraries do.
-    (only (schemacs editor command) define-command uarg->integer)
+    (only (schemacs editor command) current-prefix-arg define-command
+          uarg->integer)
     ;; `special-event-map' is where the window system's events are
     ;; bound, as Emacs's is (`keyboard.c:14550').
     (only (schemacs editor keymap)
@@ -127,6 +129,7 @@
    set!window-top-line
    set!window-width
    resize-frame-windows!
+   recenter
    suspend-frame
    set-window-point!
    sync-frame-size!
@@ -1043,6 +1046,59 @@
           (text-editor-set-cursor (window-buffer window)
                                   (marker-position (%window-point window))))
         window))
+
+    (define-command (recenter arg)
+      ;; GNU Emacs's `recenter' (`window.c:7219'): "Center point in
+      ;; selected window and maybe redisplay frame." With a numeric
+      ;; argument, point goes on screen line ARG - counting up from the
+      ;; bottom when negative - and with no argument, or with a bare
+      ;; `C-u', point goes on the middle line of the window. The way the
+      ;; C's does it is to set the window's start to the position ARG
+      ;; screen lines above point (`vmotion' computes it, and clips ARG
+      ;; into [scroll-margin, height - scroll-margin - 1]) and let
+      ;; redisplay draw from there.
+      ;;
+      ;; What is kept of the C's is the arithmetic and the setting of
+      ;; the window start - here the window's top line, which redisplay
+      ;; scrolls for visibility (`scroll-to-cursor!') but does not move
+      ;; on its own. The screen-line arithmetic is line arithmetic,
+      ;; since a line is a row here unless it wraps - and the wrapped
+      ;; case is what `scroll-to-cursor!' already handles, so a top set
+      ;; to a line ARG lines above point's is the same answer the C
+      ;; gives without wrapped lines.
+      ;;
+      ;; Not ported: the frame erasure the REDISPLAY argument drives
+      ;; (`recenter-redisplay' - this redisplay redraws the whole frame
+      ;; every command anyway), `scroll-margin' (there is none here, so
+      ;; the clip is [0, height - 1]), and the vscroll bookkeeping -
+      ;; there is no vertical scroll offset a line start can carry.
+      ;;--------------------------------------------------------------
+      "Center point in selected window and maybe redisplay frame."
+      (interactive (list (current-prefix-arg)))
+      (let* ((window (selected-window))
+             (ed (window-buffer window))
+             (ht (window-body-height window))
+             ;; "Just C-u as prefix means put point in the center of the
+             ;; window" - a cons ARG is the bare `C-u', and no ARG is
+             ;; centering too.
+             (iarg (cond
+                    ((not arg) (quotient ht 2))
+                    ((pair? arg) (quotient ht 2))
+                    (else
+                     (let ((n (uarg->integer 1 arg)))
+                       ;; negative counts up from the bottom
+                       (if (< n 0) (+ n ht) n)))))
+             ;; Don't let it get into the margin at either top or bottom.
+             (iarg (max 0 (min iarg (- ht 1)))))
+        ;; Set the new window start: the line IARG screen lines above
+        ;; point's, or the top when there are not that many lines
+        ;; above it - which is where `vmotion' stops, at `point-min'.
+        (set!window-top-line
+         window (max 0 (- (text-editor-cursor-line ed) iarg)))))
+
+    ;; The key GNU Emacs binds it to (C-l), beside the command as the
+    ;; other libraries state theirs.
+    (define-key *default-keymap* (list (list 'ctrl #\l)) recenter)
 
     ;; The selected window's buffer, scroll position and file, under the
     ;; names the rest of this file already uses. They are what Emacs's

@@ -40,7 +40,7 @@
           set!frame-message)
     ;; The commands here install their own keys, as files.el does.
     (only (schemacs editor command)
-          run-command define-command)
+          current-prefix-arg define-command run-command)
     ;; `switch-to-buffer' is `window.el''s, and not this file's: it shows a
     ;; buffer in the selected window, which is a window operation.
     (only (schemacs editor window) switch-to-buffer)
@@ -63,6 +63,10 @@
                   buffer-default-directory
                   buffer-file-name
                   buffer-list
+                  buffer-name
+                  rename-buffer
+                  find-buffer-visiting
+                  set-buffer-modified-p
                   buffer-local-value
                   current-buffer
                   get-buffer-create
@@ -105,7 +109,9 @@
    ensure-final-newline-on-save!
    ensure-final-newline-on-visit
    expand-file-name
+directory-name-p
    file-exists-p
+   file-writable-p
    file-name-completion-table
    file-name-directory-part
    file-name-nondirectory-part
@@ -117,7 +123,9 @@
    note-file-read-only!
    read-file-name
    save-answer-char->decision
-   save-buffer
+save-buffer
+   set-visited-file-name
+   write-file
    save-buffers-kill-terminal
    handle-delete-frame
    frames-except
@@ -612,6 +620,29 @@
       (let ((slash (string-rindex name #\/)))
         (if slash (substring name (+ 1 slash) (string-length name)) name)))
 
+    (define (directory-name-p name)
+      ;; GNU Emacs's `directory-name-p' (fileio.c:703): whether NAME
+      ;; ends with a directory separator - "for example `usr/' and
+      ;; `usr' are both directories, but only `usr/' is a directory
+      ;; name". It is what `write-file' asks of the name the user gave,
+      ;; since a name that ends in a slash names a directory and the
+      ;; file gets the buffer's own base name in it.
+      ;;--------------------------------------------------------------
+      (and (< 0 (string-length name))
+           (char=? (string-ref name (- (string-length name) 1)) #\/)))
+
+    (define (file-writable-p path)
+      ;; GNU Emacs's `file-writable-p' (fileio.c): "t if you can write
+      ;; to file or directory PATH". A file that does not exist is
+      ;; writable when its directory is, which is Emacs's rule and the
+      ;; one `write-file' works from - a buffer made writable by the
+      ;; file it now visits.
+      ;;--------------------------------------------------------------
+      (if (file-exists-p path)
+          (access? path W_OK)
+          (let ((dir (file-name-directory-part path)))
+            (access? (if (string=? dir "") "." dir) W_OK))))
+
     (define (directory-entries dir prefix)
       ;; The names in DIR that begin with PREFIX, without the `.` and
       ;; `..` entries (which GNU Emacs hides too, unless the prefix asks
@@ -740,13 +771,15 @@
             ;; answers both, with the names as Emacs answers them.
             (all-completions name names predicate)))))))
 
-    (define (read-file-name prompt)
+    (define (read-file-name . args)
       ;; Read a file name in the minibuffer, completing as TAB is typed:
-      ;; GNU Emacs's `read-file-name', of which this takes the prompt
-      ;; only. The prompt starts with `default-directory' already in it,
-      ;; as Emacs's and mg's do, so a name is typed onto the end of it.
-      ;; A name that does not exist yet is allowed, as Emacs allows it -
-      ;; that is how a file is created.
+      ;; GNU Emacs's `read-file-name', of which this takes the prompt and
+      ;; - as `write-file' needs - an optional DEFAULT, Emacs's fourth
+      ;; argument: what RET answers when the user types nothing. The
+      ;; prompt starts with `default-directory' already in it, as Emacs's
+      ;; and mg's do, so a name is typed onto the end of it. A name that
+      ;; does not exist yet is allowed, as Emacs allows it - that is how
+      ;; a file is created.
       ;;--------------------------------------------------------------
       ;; `completing-read', not `read-from-minibuffer': that is the point
       ;; of this function in Emacs - it is `completing-read' with a file
@@ -756,7 +789,8 @@
       ;; REQUIRE-MATCH is nil: a name that does not exist yet is allowed,
       ;; as Emacs allows it - that is how a file is created. The default
       ;; is the file the buffer already visits, so RET keeps the name it
-      ;; has.
+      ;; has - unless the caller named one, which `write-file' does for a
+      ;; buffer that visits nothing.
       ;;
       ;; `minibuffer-completing-file-name' is what tells
       ;; `completing-read' to layer the file-name keymap over the
@@ -768,13 +802,17 @@
       ;; `read-file-name-default' does with the name it read - the
       ;; reader types a name relative to the directory in the prompt, and
       ;; a bare name means nothing to anything that opens the file.
-      (let ((directory (default-directory)))
+      ;;--------------------------------------------------------------
+      (let* ((prompt (car args))
+             (directory (default-directory))
+             (default (if (pair? (cdr args)) (cadr args) #f)))
         (expand-file-name
          (parameterize ((*minibuffer-completing-file-name* #t))
            (completing-read prompt file-name-completion-table #f #f
                             directory
                             file-name-history
-                            (buffer-file-name (current-buffer))))
+                            (or default
+                                (buffer-file-name (current-buffer)))))
          directory)))
 
     ;;----------------------------------------------------------------
@@ -1034,6 +1072,101 @@
                                        (string-append "Wrote " path))
             path))))
 
+    (define (set-visited-file-name filename . args)
+      ;; GNU Emacs's `set-visited-file-name' (files.el:5146): "Change
+      ;; name of file visited in current buffer to FILENAME. This also
+      ;; renames the buffer to correspond to the new file. The next
+      ;; time the buffer is saved it will go in the newly specified
+      ;; file." FILENAME nil or the empty string marks the buffer as
+      ;; visiting nothing. NO-QUERY - `write-file''s way of passing
+      ;; `(not CONFIRM)' - leaves out the warning when another buffer
+      ;; already visits the file. ALONG-WITH-FILE is Emacs's third
+      ;; argument, for a file that has been renamed under the buffer;
+      ;; nothing here tracks a file's modtime, so there is nothing for
+      ;; it to keep in step with.
+      ;;
+      ;; Not ported: the file's truename and `buffer-file-number', the
+      ;; visit-modtime bookkeeping, `buffer-backed-up' (there are no
+      ;; backups yet), and the flushing of `write-file-functions' -
+      ;; there are no hooks here either. `find-file-visit-truename' is
+      ;; not a variable here.
+      ;;--------------------------------------------------------------
+      (let ((no-query (if (pair? args) (car args) #f)))
+        (let ((filename (and filename
+                             (not (string=? filename ""))
+                             (expand-file-name filename))))
+          (when filename
+            (unless (< 0 (string-length (file-name-nondirectory-part filename)))
+              (error "Empty file name")))
+          ;; A buffer already visiting the file is asked about, as
+          ;; Emacs's `find-buffer-visiting' branch is.
+          (let ((buffer (and filename (find-buffer-visiting filename))))
+            (when (and buffer (not (eq? buffer (current-buffer))) (not no-query))
+              (or (y-or-n-p
+                   (string-append "A buffer is visiting " filename "; proceed? "))
+                  (error "Aborted"))))
+          (set!buffer-file-name (current-buffer) filename)
+          ;; the buffer's name reflects the file's, as Emacs's does,
+          ;; and so does its default directory
+          (when filename
+            (let ((new-name (file-name-nondirectory-part filename)))
+              (set!buffer-default-directory
+               (current-buffer) (file-name-directory-part filename))
+              ;; If new-name == old-name, renaming would add a spurious
+              ;; <2> and it's considered as a feature in rename-buffer.
+              (unless (string=? new-name (buffer-name (current-buffer)))
+                (rename-buffer (current-buffer) new-name #t))))
+          filename)))
+
+    (define-command (write-file filename confirm)
+      ;; GNU Emacs's `write-file' (files.el:5267): "Write current buffer
+      ;; into file FILENAME. This makes the buffer visit that file, and
+      ;; marks it as not modified." `save-buffer' can only write the
+      ;; file a buffer already visits, so this is how a buffer gets a
+      ;; new name to live in.
+      ;;
+      ;; Interactively the name is read, and - unless a prefix argument
+      ;; was given - overwriting an existing file is confirmed with
+      ;; `y-or-n-p'.
+      ;;
+      ;; Not ported: the executable bit Emacs copies from the file the
+      ;; buffer visited before (`file-modes' / `set-file-modes' are not
+      ;; here).
+      ;;--------------------------------------------------------------
+      "Write current buffer into file FILENAME."
+      (interactive
+       (list (if (buffer-file-name (current-buffer))
+                 (read-file-name "Write file: ")
+                 (read-file-name
+                  "Write file: "
+                  (expand-file-name
+                   (file-name-nondirectory-part (buffer-name (current-buffer)))
+                   (default-directory))))
+             (not (current-prefix-arg))))
+      (unless (or (not filename) (string=? filename ""))
+        ;; If arg is a directory name, use the default file name, but
+        ;; in that directory.
+        (let ((filename
+               (if (directory-name-p filename)
+                   (string-append
+                    filename
+                    (file-name-nondirectory-part
+                     (or (buffer-file-name (current-buffer))
+                         (buffer-name (current-buffer)))))
+                   filename)))
+          (when (and confirm (file-exists-p filename))
+            (or (y-or-n-p (string-append "File `" filename "' exists; overwrite? "))
+                (error "Canceled")))
+          (set-visited-file-name filename (not confirm)))
+        (set-buffer-modified-p (current-buffer) #t)
+        ;; Make buffer writable if file is writable: a buffer that
+        ;; could not write its old file was visited read-only, and the
+        ;; new one is not to be.
+        (when (and (buffer-file-name (current-buffer))
+                   (file-writable-p (buffer-file-name (current-buffer))))
+          (text-editor-set-read-only! (current-buffer) #f))
+        (save-buffer)))
+
     ;;----------------------------------------------------------------
     ;; Keymaps
     ;;
@@ -1047,6 +1180,8 @@
       find-file)
     (define-key *default-keymap* (list (list 'ctrl #\x) (list 'ctrl #\s))
       save-buffer)
+    (define-key *default-keymap* (list (list 'ctrl #\x) (list 'ctrl #\w))
+      write-file)
     (define-key *default-keymap* (list (list 'ctrl #\x) (list 'ctrl #\c))
       save-buffers-kill-terminal)
     ;; The window manager's request to close the frame arrives as the key
