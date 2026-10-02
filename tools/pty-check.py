@@ -461,7 +461,11 @@ def check_isearch_scroll():
     path = "/tmp/pty-check-isearch-scroll.txt"
     open(path, "w").write("\n".join("line %02d alpha" % i
                                     for i in range(1, 42)) + "\n")
-    out = drive([C_s, b"alpha"] + [C_s] * 39, path, settle=1.0, gap=0.25)
+    # A settle of a second is not enough for the editor to have opened the
+    # file and be reading keys: the C-s goes to a program that is not
+    # listening yet, no search starts at all, and the check then reports
+    # the match as unhighlighted when nothing ever searched for it.
+    out = drive([C_s, b"alpha"] + [C_s] * 39, path, settle=2.0, gap=0.25)
     tail = out.rsplit("\x1b[2J", 1)[-1]
     # the face attributes active when the search string's text came out:
     # the echo-area prompt "ISearch: alpha" is drawn with no attribute,
@@ -483,6 +487,55 @@ def check_isearch_scroll():
                 "same attribute (%r) - the current match has lost its "
                 "`isearch' face" % (sorted(alpha_sgrs),)]
     return []
+
+
+def check_isearch_highlight_row():
+    """A match is highlighted on its own row, not on the window's first.
+
+    `highlight-matches' is handed a row *within the window* and adds
+    `window-top' to it itself, but the callers passed the slice index of
+    the row within its own buffer line - so every line's matches were
+    drawn on the window's top row.  Two things went wrong at once, and
+    the check is on both: the highlight landed on a row whose text is
+    something else (`inappropriate places'), and it was written *over*
+    that row, so the window's first line stopped reading as the file
+    does.  The second line's own match lost its face entirely, since the
+    first line had nothing there to mark.
+    """
+    import re as _re
+    path = "/tmp/pty-check-isearch-row.txt"
+    open(path, "w").write("xxx apple yyy apple zzz\nsecond apple line here\n")
+    out = drive([C_s, b"apple"], path, settle=2.0)
+    problems = []
+    tail = out.rsplit("\x1b[2J", 1)[-1]
+    # The first line must still read as the file has it. The escapes are
+    # stripped first, since the matches' faces sit inside the row: drawn
+    # over by another line's match the row reads `xxx appappley apple
+    # zzz', and this substring is then not there.
+    plain = _re.sub(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\(B|\x1b.", "", tail)
+    if "xxx apple yyy apple zzz" not in plain:
+        problems.append("the window's first line is not drawn as the file "
+                        "has it - a match from another line was written "
+                        "over it")
+    # The second line's match must carry a face of its own.
+    sgr = set()
+    second_marked = False
+    for chunk in _re.split(r"(\x1b\[[0-9;]*[A-Za-z]|\x1b\(B|\r|\n)", tail):
+        if not chunk or chunk in ("\r", "\n"):
+            continue
+        if chunk.startswith("\x1b["):
+            mm = _re.match(r"\x1b\[([0-9;]*)([A-Za-z])", chunk)
+            if mm.group(2) == "m":
+                sgr = set(x for x in mm.group(1).split(";") if x)
+            continue
+        if "second" in chunk:
+            second_marked = None          # this row's match is still ahead
+        elif second_marked is None and "apple" in chunk:
+            second_marked = bool(sgr)
+    if not second_marked:
+        problems.append("the match on the window's second line carries no "
+                        "face - it was drawn on the first line instead")
+    return problems
 
 
 def check_isearch_quit():
@@ -1835,6 +1888,7 @@ CHECKS = {
     "m-x": check_m_x,
     "isearch-highlight": check_isearch_highlight,
     "isearch-scroll": check_isearch_scroll,
+    "isearch-highlight-row": check_isearch_highlight_row,
     "isearch-quit": check_isearch_quit,
     "region-highlight": check_region_highlight,
     "continuation": check_continuation,

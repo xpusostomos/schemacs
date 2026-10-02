@@ -1052,6 +1052,12 @@
       ;; a search string containing a line break (typed as C-j) finds its
       ;; match and moves point, but nothing is highlighted for it.
       ;;
+      ;; ROW is the row's own row *within the window* - the screen row
+      ;; comes from adding `window-top' to it here, which is why the
+      ;; caller passes `(+ row k)' and not the slice index `k' alone: `k'
+      ;; counts the rows of one buffer line, and a match on the window's
+      ;; second line drawn with `k' lands on the window's first row.
+      ;;
       ;; X-OFFSET is how far right of the window's left edge the line's
       ;; first cell is drawn - one when the row begins with the left
       ;; truncation glyph, zero otherwise.
@@ -1380,8 +1386,8 @@
                                 screen-row (+ x0 1) row-width
                                 #f hscroll-truncated?)
                     (when highlight
-                      (highlight-matches window k slice-string slice-start
-                                         row-width
+                      (highlight-matches window (+ row k) slice-string
+                                         slice-start row-width
                                          (car highlight) (cdr highlight)
                                          1)))
                   (begin
@@ -1394,8 +1400,8 @@
                     ;; (GNU Emacs's `isearch' face) and the other matches
                     ;; in view in bold (`lazy-highlight')
                     (when highlight
-                      (highlight-matches window k slice-string slice-start
-                                         width
+                      (highlight-matches window (+ row k) slice-string
+                                         slice-start width
                                          (car highlight) (cdr highlight)
                                          0))))
               (rows-loop (cdr rest) (+ k 1)))))))
