@@ -67,13 +67,17 @@
     ;; `region-beginning' and `region-end' are `editfns.c''s, and
     ;; `add-to-history' is `subr.el''s.
     (only (schemacs editor buffer)
+          *show-trailing-whitespace*
           buffer-local-value buffer-truncate-lines current-buffer mark-active
           set!buffer-truncate-lines set!mark-active
           set-buffer-local-value! transient-mark-mode)
     (only (schemacs editor command) *mark-even-if-inactive*)
     (only (schemacs editor editfns)
-          delete-region region-beginning region-end
-          save-excursion)
+          bolp buffer-size delete-and-extract-region delete-region eobp
+          eolp following-char forward-line insert line-beginning-position
+          line-end-position goto-char point point-max preceding-char
+          region-beginning region-end save-excursion)
+    (only (schemacs editor syntax) skip-chars-forward skip-chars-backward)
     ;; `kbd' is how the bindings below name their keys, as
     ;; `(define-key global-map (kbd "C-/") ...)' would in Emacs.
     (only (schemacs editor subr) add-to-history kbd nthcdr)
@@ -99,8 +103,8 @@
    backward-kill-word backward-word backward-word-position
    beginning-of-buffer beginning-of-line clear-prefix! delete-char
    end-of-buffer end-of-line exchange-point-and-mark forward-char
-   forward-word forward-word-position keyboard-quit kill-line kill-line-chunk
-   copy-region-as-kill current-kill kill-append kill-line-command
+   forward-word forward-word-position keyboard-quit kill-line
+   copy-region-as-kill current-kill kill-append
    kill-new kill-range kill-region kill-ring-save kill-word next-line
    pending-uarg yank-pop
    ;; Emacs's `newline' clashes with `(scheme base)'s output procedure,
@@ -121,8 +125,9 @@ prefix-argument-description
    what-cursor-position
    open-line open-line-command delete-indentation-command
 just-one-space delete-horizontal-space delete-blank-lines
+   *kill-whole-line*
    delete-all-space delete-leading-space delete-trailing-space
-   transpose-chars transpose-words
+   transpose-chars transpose-words fixup-whitespace
    prefix-echo-pending? request-prefix-echo! show-prefix-echo!
    strip-undo-boundaries undo undo-redo update-prefix!
    word-char? word-run-end word-run-start yank
@@ -260,104 +265,37 @@ just-one-space delete-horizontal-space delete-blank-lines
       (interactive "p")
       (text-editor-delete-from-cursor (current-editor) (- count)))
 
-    (define (kill-line-chunk ed uarg)
-      ;; How many characters `kill-line' removes from point, and in
-      ;; which direction, following mg's `killline' (yank.c:151), whose
-      ;; rule set GNU Emacs's `kill-line' shares:
-      ;;
-      ;;   no argument  from point to the end of the line; when nothing
-      ;;                but blanks is left before the end of the line,
-      ;;                the line break goes too, joining the next line on
-      ;;   N > 0        N lines forward, including the break that ends
-      ;;                the Nth one, stopping at the end of the buffer
-      ;;   N = 0        backward from point to the start of the line
-      ;;   N < 0        backward to the start of the line, then |N|
-      ;;                more lines back
-      ;;
-      ;; Returns a pair: the character count, and #t when the kill runs
-      ;; forward from point or #f when it runs backward. UARG is the raw
-      ;; universal argument, so that "no prefix" is distinguishable from
-      ;; a prefix of 1 (mg's FFARG flag; the two cases differ).
-      ;;--------------------------------------------------------------
-      (let* ((start (text-editor-get-cursor ed))
-             (bol (text-editor-get-start-of-line ed))
-             (eol (text-editor-get-end-of-line ed))
-             (len (text-editor-char-count ed))
-             (blank-at? (lambda (i)
-                          (let ((c (text-editor-get-char-index ed i)))
-                            (and c (or (char=? c #\space) (char=? c #\tab))))))
-             (break-at? (lambda (i)
-                          (let ((c (text-editor-get-char-index ed i)))
-                            (and c (char=? c #\newline))))))
-        (cond
-         ((not uarg)
-          (let loop ((i start))
-            (cond
-             ((>= i eol)
-              ;; only blanks (or nothing at all) before the end of the
-              ;; line: the break is part of the kill
-              (cons (- (min len (+ eol 1)) start) #t))
-             ((blank-at? i) (loop (+ i 1)))
-             (else (cons (- eol start) #t)))))
-         ((> uarg 0)
-          ;; walk forward over UARG line breaks; the break that ends the
-          ;; UARGth line is included, the way mg counts `chunk'
-          (cons (- (let loop ((i start) (lines 1))
-                     (cond
-                      ((>= i len) len)
-                      ((break-at? i)
-                       (if (>= lines uarg) (+ i 1) (loop (+ i 1) (+ lines 1))))
-                      (else (loop (+ i 1) lines))))
-                   start)
-                #t))
-         ((= uarg 0) (cons (- start bol) #f))
-         (else
-          ;; backward: to the start of this line, then |N| more lines
-          (cons (- start
-                   (let loop ((i bol) (lines 0))
-                     (if (or (>= lines (- uarg)) (<= i 0))
-                         i
-                         ;; step over the break that ends the previous
-                         ;; line, then back over the whole of that line
-                         (let scan ((k (- i 1)))
-                           (if (and (> k 0) (not (break-at? (- k 1))))
-                               (scan (- k 1))
-                               (loop k (+ lines 1)))))))
-                #f)))))
-
-    (define (kill-line-command uarg)
-      ;; Kill at point, into the kill buffer. UARG is the raw universal
-      ;; argument: #f when no prefix was typed, otherwise a number.
-      ;;--------------------------------------------------------------
-      (let* ((ed (current-editor))
-             (start (text-editor-get-cursor ed))
-             (chunk+dir (kill-line-chunk ed uarg))
-             (chunk (car chunk+dir)))
-        (cond
-         ((= chunk 0)
-          (set!frame-message (*current-frame*) "; End of buffer")
-          #f)
-         ((cdr chunk+dir) (kill-range ed start (+ start chunk) #t))
-         (else (kill-range ed (- start chunk) start #f)))))
-
     (define-command (kill-line uarg)
-      ;; mg's `killline'. Unlike the other count-taking commands this one
-      ;; needs the raw prefix argument, because killing no lines and
-      ;; killing one line are different operations.
       "Kill N lines at point. With no argument, kill to the end of the
  line, taking the line break when only blanks remain before it."
       (interactive "P")
-      (kill-line-command uarg))
+      (kill-region (point)
+                   (begin
+                     (if uarg
+                         (let ((fail (forward-line (uarg->integer 1 uarg))))
+                           ;; `forward-visible-line 0' is
+                           ;; `beginning-of-line', which `forward-line 0'
+                           ;; is too - the engine's zero stays where it
+                           ;; is, so it is done here
+                           (when (= 0 (uarg->integer 1 uarg))
+                             (beginning-of-line))
+                           (unless (= 0 fail)
+                             (error "End of buffer")))
+                         (begin
+                           (when (eobp)
+                             (error "End of buffer"))
+                           (let ((end (line-end-position)))
+                             (if (or (save-excursion
+                                       (unless (*show-trailing-whitespace*)
+                                         (skip-chars-forward " \t" end))
+                                       (eolp))
+                                     (and (*kill-whole-line*) (bolp)))
+                                 (let ((fail (forward-line 1)))
+                                   (unless (= 0 fail)
+                                     (error "End of buffer")))
+                                 (goto-char end)))))
+                     (point))))
 
-    ;; The command GNU Emacs calls `newline' - `simple.el' defines it
-    ;; under that name and it is what RET and C-j are bound to. The name
-    ;; is taken here, though: `newline' is one of the names `(scheme
-    ;; base)' exports (it is R7RS's output procedure), and defining it
-    ;; again would be a redefinition of an imported binding, which R7RS
-    ;; forbids - Guile would keep the imported one and the keymap would
-    ;; end up bound to Scheme's `newline' instead of the command. A
-    ;; clash with the host language is a real collision, so the command
-    ;; is named `INSERT-NEWLINE' instead.
     (define-command (insert-newline count)
       "Insert N line breaks at point."
       (interactive "p")
@@ -790,6 +728,16 @@ non-nil."
       ;;--------------------------------------------------------------
       (make-parameter #f))
 
+    (define *kill-whole-line*
+      ;; GNU Emacs's `kill-whole-line' (simple.el:6762, a defcustom):
+      ;; "If non-nil, `kill-line' with no arg at start of line kills
+      ;; the whole line. This variable also affects `kill-visual-line'
+      ;; in the same way as it does `kill-line'." Off, as Emacs's
+      ;; default is; `defcustom' is spelled a parameter here, the
+      ;; customize machinery behind it not being ported.
+      ;;--------------------------------------------------------------
+      (make-parameter #f))
+
     (define *kill-read-only-ok*
       ;; GNU Emacs's `kill-read-only-ok', off by default: when it is on,
       ;; a kill from a read-only buffer puts the text in the ring and
@@ -949,21 +897,20 @@ non-nil."
         (and mark
              (list mark (text-editor-get-cursor (current-editor))))))
 
-    (define-command (kill-region)
-      ;; GNU Emacs's `kill-region' (C-w): delete the region and put it in
-      ;; the kill ring.
-      ;;
-      ;; A kill that runs into a read-only buffer does not lose the text:
-      ;; Emacs copies it to the ring and then signals, so that the killing
-      ;; commands can be used to *copy* out of a read-only buffer - and
+    (define-command (kill-region beg end)
+      ;; GNU Emacs's `kill-region' (simple.el:5999): "Kill the text
+      ;; between BEG and END and put it in the kill ring" - which is
+      ;; Emacs's own signature, `(defun kill-region (beg end &optional
+      ;; region) ...)' with the interactive spec `(r)'; the earlier
+      ;; zero-argument port read the region itself. A kill that runs
+      ;; into a read-only buffer does not lose the text: Emacs copies
+      ;; it to the ring and then signals, so that the killing commands
+      ;; can be used to *copy* out of a read-only buffer - and
       ;; `kill-read-only-ok' turns the signal into a message.
       "Kill (cut) the text between point and mark."
-      (interactive)
-         (let ((args (kill-region-arguments)))
-           (if (not args)
-               (error "The mark is not set now, so there is no region")
-               (let* ((beg (car args))
-                      (end (cadr args))
+      (interactive (list (region-beginning) (region-end)))
+           (let* ((beg (- beg 1))
+                  (end (- end 1))
                       (string (text-editor-copy-string (current-editor) beg end))
                       (read-only? (text-editor-read-only? (current-editor))))
                  ;; The ring takes the text first, as in Emacs, so that a
@@ -977,7 +924,7 @@ non-nil."
                 (if read-only?
                     (unless (*kill-read-only-ok*)
                       (error "Buffer is read-only"))
-                    (delete-region beg end))))))
+                    (delete-region beg end))))
 
     (define (copy-region-as-kill beg end)
       ;; GNU Emacs's `copy-region-as-kill': put the text in the kill ring
@@ -1542,12 +1489,14 @@ non-nil."
                             (not (gui-backend-selection-exists-p 'PRIMARY))))
                    ;; `region-extract-function''s default for a nil
                    ;; METHOD is the region's text (`simple.el:1452');
-                   ;; there is no `filter-buffer-substring' here.
+                   ;; there is no `filter-buffer-substring' here. The
+                   ;; region answers are one-based, the engine's copy
+                   ;; zero-based - the conversion at the edge.
                    (gui-set-selection 'PRIMARY
                                       (text-editor-copy-string
                                        (current-editor)
-                                       (region-beginning)
-                                       (region-end))))))
+                                       (- (region-beginning) 1)
+                                       (- (region-end) 1))))))
           ;; a temporarily-enabled Transient Mark mode goes back to what
           ;; it was
           (when (eq? (buffer-local-value (current-buffer)
@@ -1836,34 +1785,6 @@ non-nil."
     ;; the line's ends.
     ;;----------------------------------------------------------------
 
-    (define (%skip-chars-forward ed chars)
-      ;; GNU Emacs's `skip-chars-forward' for the character set the
-      ;; string CHARS holds: move point over as many of them as are
-      ;; there, and answer where point stopped.
-      ;;--------------------------------------------------------------
-      (let ((members (string->list chars)))
-        (let loop ((i (text-editor-get-cursor ed))
-                   (count (text-editor-char-count ed)))
-          (if (>= i count)
-              i
-              (let ((c (%char-at ed i)))
-                (if (and c (memv c members))
-                    (loop (+ i 1) count)
-                    i))))))
-
-    (define (%skip-chars-backward ed chars)
-      ;; GNU Emacs's `skip-chars-backward': the mirror of
-      ;; `%skip-chars-forward'.
-      ;;--------------------------------------------------------------
-      (let ((members (string->list chars)))
-        (let loop ((i (text-editor-get-cursor ed)))
-          (if (<= i 0)
-              i
-              (let ((c (%char-at ed (- i 1))))
-                (if (and c (memv c members))
-                    (loop (- i 1))
-                    i))))))
-
     (define (%blank-line? ed)
       ;; Whether the line point is on is blank: nothing on it but
       ;; spaces and tabs. `looking-at "[ \t]*$"' from the line's
@@ -1907,70 +1828,57 @@ non-nil."
     (define-command (delete-indentation-command arg beg end)
       ;; GNU Emacs's `delete-indentation' (simple.el:778): "Join this
       ;; line to previous and fix up whitespace at join." With a prefix
-      ;; argument, the current line joins the FOLLOWING line, which is
-      ;; the sentinel the loop's `(line-beginning-position (and arg 2))'
-      ;; sets. What is not ported is the fill prefix deletion, there
-      ;; being no fill prefix.
+      ;; ARG, join the current line to the following line. When BEG and
+      ;; END are non-nil, join all lines in the region they define -
+      ;; going to END first, but only if the region spans multiple
+      ;; lines. The region is ignored when a prefix arg is given.
       ;; `join-line' is the alias Emacs defines of this; there is no
       ;; aliasing here, so the binding below is on this name.
+      ;; What is not ported is the fill prefix deletion, there being no
+      ;; fill prefix - and `barf-if-buffer-read-only' in the
+      ;; interactive form, the deletion's own read-only error taking
+      ;; its place.
       "Join this line to previous and fix up whitespace at join."
       (interactive
        (list (current-prefix-arg)
              (and (use-region-p) (region-beginning))
              (and (use-region-p) (region-end))))
-      (let ((ed (current-editor)))
-        ;; Consistently deactivate mark even when no text is changed.
-        (set!text-editor-deactivate-mark! ed #t)
-        ;; The region branch: go to END, but only if the region spans
-        ;; multiple lines - and the region is ignored when a prefix arg
-        ;; is given.
-        (cond
-         ((and beg (not arg))
-          (text-editor-set-cursor ed beg)
-          (when (> end (text-editor-get-end-of-line ed))
-            (text-editor-set-cursor ed end)))
-         (arg
-          ;; Region is inactive. Set a loop sentinel - the beginning of
-          ;; the line AFTER the current one (`line-beginning-position
-          ;; 2') - and move there, the way `(when arg (forward-line))'
-          ;; does.
-          (text-editor-set-cursor ed (text-editor-get-end-of-line ed))
-          (let ((next (text-editor-get-end-of-line ed)))
-            (text-editor-set-cursor
-             ed (if (< next (text-editor-char-count ed))
-                    (+ next 1) next)))
-          (let ((sentinel (max 0
-                               (- (text-editor-get-start-of-line ed) 1))))
-            (loop-indentation-join! ed sentinel)))
-         (else
-          ;; Region is inactive. Set a loop sentinel - the character
-          ;; before the line's beginning (subtracting 1 in order to
-          ;; compare less than BOB) - which is where the loop stops.
-          (let ((sentinel (max 0
-                               (- (text-editor-get-start-of-line ed) 1))))
-            (loop-indentation-join! ed sentinel))))))
+      ;; Consistently deactivate mark even when no text is changed.
+      (set!text-editor-deactivate-mark! (current-buffer) #t)
+      (if (and beg (not arg))
+          ;; Region is active. Go to END, but only if region spans
+          ;; multiple lines.
+          (and (goto-char beg)
+               (> end (line-end-position))
+               (goto-char end))
+          ;; Region is inactive. Set a loop sentinel (subtracting 1 in
+          ;; order to compare less than BOB).
+          (begin
+            (set! beg (- (line-beginning-position (and arg 2)) 1))
+            (when arg (forward-line))))
+      (let ((prefix (and #f "")))   ; no fill prefix
+        ;; Elisp's `(while (and (> (line-beginning-position) beg)
+        ;; (forward-line 0) (= (preceding-char) ?\n)) ...)': the
+        ;; `forward-line 0' has two roles - it moves point to the
+        ;; beginning of the line and its answer is always true (0 is
+        ;; true in Elisp, false here) - so here the move is
+        ;; `beginning-of-line' and the condition goes on.
+        (let loop ()
+          (when (and (> (line-beginning-position) beg)
+                     ;; Elisp's `(forward-line 0)' answers 0, which is
+                     ;; true there; `beginning-of-line' here answers
+                     ;; nothing, so the condition supplies the value
+                     (begin (beginning-of-line) #t)
+                     ;; Elisp's `(preceding-char)' answers 0 at BOB, so
+                     ;; `(= 0 ?\n)' is false there; this one answers #f,
+                     ;; which is the same false answer
+                     (and (preceding-char)
+                          (char=? (preceding-char) #\newline)))
+            (delete-char -1)
+            (fixup-whitespace)
+            (loop)))))
 
-    (define (loop-indentation-join! ed sentinel)
-      ;; The loop `delete-indentation' joins with: "while (and (>
-      ;; (line-beginning-position) beg) (forward-line 0) (= (preceding-
-      ;; char) ?\n)) - delete the newline and fix up the whitespace at
-      ;; the join". The merged line's beginning walks up past SENTINEL
-      ;; as the joins happen, which is what stops the loop: one line
-      ;; joined, unless empty lines join with it.
-      ;;--------------------------------------------------------------
-      (let loop ()
-        (if (and (> (text-editor-get-start-of-line ed) sentinel)
-                 (> (text-editor-get-start-of-line ed) 0)
-                 (eqv? (%char-at ed (- (text-editor-get-start-of-line ed) 1))
-                       #\newline))
-            (begin
-              (text-editor-move-cursor ed -1)
-              (text-editor-delete-from-cursor ed 1)
-              (fixup-whitespace)
-              (loop))
-            #t)))
-
-    (define (fixup-whitespace)
+(define (fixup-whitespace)
       ;; GNU Emacs's `fixup-whitespace' (simple.el:1123): "Fixup white
       ;; space between objects around point. Leave one space or none,
       ;; according to the context." Point is kept where it was, which
@@ -2004,17 +1912,22 @@ non-nil."
 
     (define (delete-space--internal chars backward-only)
       ;; GNU Emacs's `delete-space--internal' (simple.el:1147): "Delete
-      ;; CHARS around point." What is not ported is the
-      ;; `constrain-to-field' pair, there being no fields.
+      ;; CHARS around point" - the skips move point the way the
+      ;; original's do, and the deletion runs between where they leave
+      ;; it. What is not ported is the `constrain-to-field' pair,
+      ;; there being no fields.
       ;;--------------------------------------------------------------
-      (let* ((ed (current-editor))
-             (orig-pos (text-editor-get-cursor ed))
-             (forward-end
-              (if backward-only
-                  orig-pos
-                  (%skip-chars-forward ed chars)))
-             (beg (%skip-chars-backward ed chars)))
-        (delete-region beg forward-end)))
+      (if backward-only
+          (delete-region (text-editor-get-cursor (current-editor))
+                         (begin
+                           (skip-chars-backward chars)
+                           (text-editor-get-cursor (current-editor))))
+          (begin
+            (skip-chars-forward chars)
+            (delete-region (text-editor-get-cursor (current-editor))
+                           (begin
+                             (skip-chars-backward chars)
+                             (text-editor-get-cursor (current-editor)))))))
 
     (define-command (delete-leading-space)
       ;; mg's `delleadwhite' - the whitespace *before* point - which is
@@ -2044,22 +1957,18 @@ non-nil."
       (let* ((ed (current-editor))
              (skip-characters (if (and n (< n 0)) " \t\n\r" " \t"))
              (num (abs (or n 1))))
-        (text-editor-set-cursor
-         ed (%skip-chars-backward ed skip-characters))
+        ;; the skips move point the way the original's do
+        (skip-chars-backward skip-characters)
         ;; the bounded skip: spaces only, at most NUM of them, and
-        ;; what it skipped comes off NUM
-        (let ((skipped
-               (let loop ((i (text-editor-get-cursor ed)) (skipped 0))
-                 (cond ((>= skipped num) skipped)
-                       ((eqv? (%char-at ed i) #\space)
-                        (text-editor-set-cursor ed (+ i 1))
-                        (loop (+ i 1) (+ skipped 1)))
-                       (else skipped)))))
-          (let* ((num (- num skipped))
-                 (mid (text-editor-get-cursor ed))
-                 (end (%skip-chars-forward ed skip-characters)))
-            (delete-region mid end)
-            (text-editor-insert ed (make-string num #\space))))))
+        ;; what it skipped comes off NUM - the spaces it stepped over
+        ;; are the ones that stay
+        (let* ((num (- num (skip-chars-forward " " (+ num (point)))))
+               (mid (text-editor-get-cursor ed))
+               (end (begin
+                      (skip-chars-forward skip-characters)
+                      (text-editor-get-cursor ed))))
+          (delete-region mid end)
+          (text-editor-insert ed (make-string num #\space)))))
 
     (define (%blank-line-up ed pos)
       ;; The position `re-search-backward "[^ \t\n]"' and `(forward-
@@ -2212,15 +2121,17 @@ non-nil."
               (text-editor-set-cursor ed (cdr pos1))
               (text-editor-insert ed word)
               (text-editor-set-cursor ed (car pos1))
-              (let ((first (text-editor-copy-string
-                            ed (car pos1) (+ (car pos1) len1))))
-                (text-editor-delete-from-cursor ed len1)
+              (let ((first (delete-and-extract-region
+                            (+ 1 (car pos1))
+                            (+ 1 (car pos1) len1))))
                 (text-editor-set-cursor
                  ed (+ (car pos2) (- len2 len1)))
-                (text-editor-insert ed first)
+                (insert first)
                 (text-editor-set-cursor
                  ed (+ (car pos2) (- len2 len1) len1))
-                (text-editor-delete-from-cursor ed len2))))))
+                (delete-region
+                 (+ (car pos2) (- len2 len1) len1)
+                 (+ (car pos2) (- len2 len1) len1 len2)))))))
 
     (define (%transpose-subr mover arg)
       ;; GNU Emacs's `transpose-subr' (simple.el:8885): "Subroutine to
@@ -2243,17 +2154,19 @@ non-nil."
                    (cons here (text-editor-get-cursor ed)))))))
         (cond
          ((= arg 0)
-          (let ((ed (current-editor))
-                (start (text-editor-get-cursor ed)))
+          ;; Emacs's arg-zero case (simple.el:8897): the transposition
+          ;; inside `save-excursion' - point back where it started when
+          ;; it is done - and then `exchange-point-and-mark', which puts
+          ;; point where the mark was.
+          (save-excursion
             (let ((pos1 (aux 1)))
               (if (not (mark #t))
                   (error "No mark set in this buffer")
                   (begin
-                    (text-editor-set-cursor ed (mark #t))
+                    (text-editor-set-cursor (current-editor) (mark #t))
                     (let ((pos2 (aux 1)))
-                      (%transpose-subr-1 pos1 pos2)
-                      ;; exchange-point-and-mark
-                      (text-editor-set-cursor ed (car pos2))))))))
+                      (%transpose-subr-1 pos1 pos2))))))
+          (exchange-point-and-mark #f))
          ((> arg 0)
           (let* ((pos1 (aux -1))
                  (pos2 (aux arg)))
@@ -2336,37 +2249,32 @@ non-nil."
       "Print info on cursor position (on screen and within buffer)."
       (interactive (list (current-prefix-arg)))
       (let* ((frame (*current-frame*))
-             (ed (current-editor))
-             (pos (text-editor-get-cursor ed))
-             (total (text-editor-char-count ed))
-             ;; Emacs's `point' is one-based; the engine's cursor is
-             ;; zero-based, and the percent is of the characters
-             ;; *before* point, which is the same count in both.
-             (percent (round (/ (* 100 pos) (max 1 total))))
+             ;; Emacs's own let*: the one-based point, the buffer's
+             ;; size, and the percent of the characters BEFORE point
+             (pos (point))
+             (total (buffer-size))
+             (percent (round (/ (* 100 (- pos 1)) (max 1 total))))
              (hscroll (if (= (%window-hscroll (selected-window)) 0)
                           ""
-                          (format " Hscroll=~a"
+                          (format #f " Hscroll=~a"
                                   (%window-hscroll (selected-window)))))
-             (col (text-editor-cursor-column ed)))
-        (if (= pos total)
+             (col (text-editor-cursor-column (current-editor)))
+             (char (following-char))
+             (shown (and char
+                         (if (< (char->integer char) 128)
+                             (single-key-description char)
+                             (string char))))
+             (code (and char (char->integer char))))
+        (if (= pos (point-max))
+            ;; Emacs's `(= pos end)' - the end being `point-max'
             (set-message! frame
                           (format #f "point=~a of ~a (EOB) column=~a~a"
-                                  (+ 1 pos) total col hscroll))
-            (let* ((char (string-ref
-                          (text-editor-copy-string ed pos (+ 1 pos)) 0))
-                   (code (char->integer char))
-                   ;; a multibyte character shows as itself, as Emacs's
-                   ;; `(buffer-substring-no-properties point (1+
-                   ;; point))' does
-                   (shown (if (< code 128)
-                              (single-key-description char)
-                              (string char))))
-              (set-message! frame
-                            (format
-                             #f
-                             "Char: ~a (~a, #o~o, #x~x) point=~a of ~a (~a%) column=~a~a"
-                             shown code code code
-                             (+ 1 pos) total percent col hscroll))))))
+                                  pos total col hscroll))
+            (set-message! frame
+                          (format #f
+                                  "Char: ~a (~a, #o~o, #x~x) point=~a of ~a (~a%) column=~a~a"
+                                  shown code code code
+                                  pos total percent col hscroll)))))
 
     (define-key *default-keymap* (list (list 'ctrl #\x) #\=)
       what-cursor-position)
@@ -2383,6 +2291,5 @@ non-nil."
        (lambda (c) self-insert-command)
        (lambda () #f)))
 
-(add-keymap-layer! *default-keymap* self-insert-layer)
-
+    (add-keymap-layer! *default-keymap* self-insert-layer)
     ))

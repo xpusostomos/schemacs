@@ -20,6 +20,13 @@ simplistic view of how it works that copying its actual code solves. Testing
 it is a last resort when copying should be the main method of finding and repeating
 real emacs functionality.
 
+Never implement an emacs function without implementing all the more primitive 
+functions it depends on. That just results in something half assed that has
+to be rewritten later. If you have to implement something, start from the bottom
+implementing each primtive in turn that the function needs and work your way
+up until the final function works, and it works exactly the same as emacs because
+it is built up from exactly the same primitives.
+
 When there is a bug, and the user complains about the behavior, never just put in
 what you think the fix should be, what you should do is find out how our implementation
 departed from real emacs, and fix that departure. If you start improvising fixes,
@@ -522,3 +529,217 @@ Gotchas from the work: Guile's `format' takes the DESTINATION first -
 default drops its nil entries the way Emacs's `delq nil' does; and the
 find-file prompt prefill is real minibuffer content, which is why the
 prompting pty checks type `C-a C-k' before an absolute path.
+
+## save-excursion, the position primitives, and BASIC-FUNC's groups 6-9 (2026-10-02)
+
+`save-excursion' was missing and its absence was the reason ports of
+.el functions came out as hand-rolled cursor save/restore dances. It is
+now `editfns.sld''s - a macro over `dynamic-wind', holding a POINT
+MARKER like the C's `save_excursion_save' (so it follows edits inside
+the body), restoring the buffer and point in the wind's after thunk.
+Beside it, the editfns.c primitives came over under their own names:
+`point', `point-min', `point-max', `goto-char', `bobp', `eobp', `bolp',
+`eolp', `char-after', `char-before', `following-char', `preceding-char',
+`line-beginning-position', `line-end-position', `buffer-substring',
+`buffer-size', `buffer-string', `insert', `delete-and-extract-region',
+`point-marker', `barf-if-buffer-read-only', `forward-line' (public -
+paragraphs.sld's walks call it), `search-forward' and `search-backward'
+(with COUNT, and the fold-override `zap-to-char' needs).
+
+A position convention is now settled: the Emacs-named layer answers
+ONE-based positions ((point), point-min/max, region-beginning/end,
+search-forward/backward) and converts at the engine boundary
+(kill-region's -1s, casify-region's -1s, deactivate-mark's and the
+command loop's PRIMARY copies). `delete-region' is the one exception -
+its callers are all internal and pass engine positions; renaming its
+role is for when its callers get names too.
+
+`casefiddle.sld' (NEW, mirrors casefiddle.c): `casify-region' and
+`casify-word' over a per-character walk - `word-char?' is the syntax
+table's stand-in - with `upcase-region', `downcase-region' (C-x C-u,
+C-x C-l) and `upcase-word', `downcase-word', `capitalize-word'
+(M-u/M-l/M-c). `paragraphs.sld' (NEW, mirrors textmodes/paragraphs.el):
+`forward-paragraph', `backward-paragraph', `kill-paragraph' (M-k),
+`backward-kill-paragraph' (M-C-k) - the walks test the DEFAULT
+`paragraph-start'/`paragraph-separate' blank-line patterns directly,
+there being no regexp engine; when one comes, the walks become that
+walk. Both are wired into both platforms' import lists (the
+`define-key'-at-load-time rule). `zap-to-char' (M-z) is in
+minibuffer.sld - it prompts, and simple.sld is below that library.
+
+Group 9 (`transpose-chars' C-t, `transpose-words' M-t) is simple.sld's,
+over `%transpose-subr'/%transpose-subr-1 - whose edit sequence is
+Emacs's insert-before-markers/extract/reinsert, with the boundary
+marker tracked by arithmetic (+len2 on the first insert, -len1 on the
+delete). Group 6's commands (`open-line' C-o, `delete-indentation'/M-^,
+`just-one-space' M-SPC with Emacs's skipped-spaces-come-off-N subtlety,
+`delete-blank-lines' C-x C-o, `delete-horizontal-space' M-\, and mg's
+`delete-leading-space'/`delete-trailing-space' spellings) are there
+too, `fixup-whitespace' and the blank-line walks through
+`save-excursion'. M-z was `read-only-mode''s key in a stale test's
+expectation - the test moved to M-Z.
+
+The audit that found the gap (Emacs defuns with save-excursion vs
+ours): 82 in the mirrored files, 75 not yet ported (they get it for
+free when they come), 6 ported - `fixup-whitespace' now uses it,
+`kill-region'/`next-line' turned out to be scan artifacts, and
+`split-window-below'/`minibuffer-completion-help' have named
+deviations (the thin split port; the field-end computation absent).
+
+## The shape refactors (2026-10-02, after the audit)
+
+The functions whose shapes had departed from Emacs's because primitives
+were missing were reworked onto them:
+
+- `skip-chars-forward' and `skip-chars-backward' are ported -
+  `syntax.sld' (NEW, mirrors syntax.c), whose BOUND argument is a
+  one-based position like every other answer of the Emacs-named layer.
+  simple.sld's private `%skip-chars-*' walks are gone;
+  `delete-space--internal' and `just-one-space' are now the C's shape -
+  the skips move point, and the deletion runs between where they leave
+  it.
+- `transpose-subr-1' uses `delete-and-extract-region' (which is also
+  fixed - it mixed a one-based `buffer-substring' with an engine-based
+  `delete-region').
+- `delete-indentation''s join loop is Emacs's shape: point to the line
+  beginning in the condition (`beginning-of-line' standing for the C's
+  `(forward-line 0)'), `preceding-char' for the newline question,
+  `(delete-char -1)' for the break.
+- `what-cursor-position' is the C's let* - `(point)', `(buffer-size)',
+  `(following-char)', the EOB question `(= pos (point-max))'.
+- `forward-paragraph'/`backward-paragraph' use the public `forward-line'
+  (with its not-moved answer) instead of private duplicates.
+
+The engine cursor bug found under this work: `%text-editor-merge-
+previous-line!' left point at the END of the merged line instead of the
+join - DEL at a line start threw point to the end of the buffer's
+remainder. Fixed in engine.sld (the merge now puts the cursor at the
+former end of the previous line, which its own docstring already
+claimed). `syntax.sld' is in build.scm and the Makefile; it carries no
+bindings, so the platforms need no import for it.
+## The current-buffer leak in the minibuffer, and write-file (2026-10-02)
+
+`write-file`'s pty check failed with the file holding the *minibuffer's*
+text: `save-buffer` had run on the prompt's echo-area editor. The chain:
+while a prompt is read, `(current-buffer)` is the echo-area editor (the
+`*echo-area-buffer*' fallback); the new `save-excursion`-using `kill-line`
+- `C-k` in the prompt kills the prefill - restores the buffer it saved,
+and its restore is a `set-buffer`, which *pins* that echo editor in
+`*current-buffer*' permanently. After the prompt, every command acted on
+the dead editor: `write-file' then read its default off a buffer named
+"Untitled" (the engine's default buffer name) and saved *it* to the file
+the user named.
+
+The departure from Emacs is one missing guard: `read_minibuf'
+(minibuf.c:675) does `record_unwind_current_buffer' - the current buffer
+is restored when the read is over, however the prompt's commands left it.
+The port now does the same: `read-minibuffer-1' parameterizes
+`(*current-buffer* #f)' around the recursive edit, so the unwind restores
+the asker's state whatever the prompt's commands pinned. `save-excursion'
+itself is untouched - Emacs's restore is `Fset_buffer' too; the guard
+belongs where Emacs put it.
+
+Found by tracing `read-minibuffer-1' and `write-file''s interactive on a
+pty run: `TRACE-WF curbuf="Untitled"` after a find-file that had opened
+the right buffer. The doubled write-file prompt prefill (`/tmp/tmp/')
+that led here was a probe artifact - the drive had omitted the `C-a C-k'
+before the path, so find-file visited a doubled directory - not a bug.
+
+## The compile warnings (2026-10-02)
+
+- `pgtk-names.scm' imported `(gi)' wholesale, which re-exports
+  `connect'/`equal?'/`format'/`write'/`quit'/`shutdown' over the core
+  bindings - six warnings at every GTK start. It still needs `(gi)'
+  *loaded* (it initializes the girepository runtime; without it
+  `typelib->module' segfaults), so `(gi)' stays but the six names are
+  `#:hide'd. `pgtk.sld''s own `(gi)' import keeps everything but
+  `equal?' - the `equal?' clash is gone - and why `connect' and `make'
+  have to stay in it is in "What cannot be fixed here, and why", below.
+- `subr.sld' held the whole `kbd' block TWICE - an older, incomplete
+  copy (no `char-numeric?' digit skip, which was the "possibly unbound
+  char-numeric?" warning) above the real one; the real one shadowed
+  everything. The first copy is gone.
+- simple.sld: what-cursor-position's `Hscroll=~a' message called
+  `format' without a destination (Guile's takes it first) - the suffix
+  never formatted; `delete-indentation''s join loop used Elisp's `while'
+  (unbound - `M-^' with no region did nothing) and `forward-line 0''s
+  two roles are spelled out now (move = `beginning-of-line', and 0 is
+  true in Elisp, false here); `%transpose-subr''s arg-zero case had `ed'
+  bound in the same `let' that used it, and is now Emacs's shape -
+  `save-excursion' with `exchange-point-and-mark' after it, outside the
+  excursion. The splice of that case went wrong three times; the method
+  that finally worked was rebuilding the WHOLE `%transpose-subr' define
+  fresh in a file, verifying its `cond' had its three clauses with the
+  reader (`guile -c '(read ...)'` and counting), then splicing the whole
+  block - and even then the reader's ok is not the whole story: the
+  `cond' closed early once with the file still balanced, which the
+  compiler caught as "bad use of 'else'".
+- `delete-indentation' had NEVER worked - the unbound `while' swallowed
+  every call - so the rewrite exposed three layers under it, each read
+  off a live editor through the REPL: `line-beginning-position'/
+  `line-end-position' took an optional explicitly given as nil (Elisp's
+  `(and arg 2)') as a real count, where Emacs's nil means absent - both
+  now read nil as 0; the loop's `beginning-of-line' answers zero values
+  where the condition needs one (Elisp's `(forward-line 0)' answers 0,
+  true there, so the condition supplies the value); and
+  `(= (preceding-char) ?\n)' is `char=?' here - chars are not numbers,
+  and `preceding-char' answers #f at BOB where Elisp answers 0, which
+  the condition guards with the same false answer. M-^ with and without
+  a prefix arg joins "aaa\nbbb" to "aaa bbb" as Emacs's does.
+- simple.sld's export list dropped `kill-line-chunk' and
+  `kill-line-command', neither defined nor used anywhere.
+
+## What cannot be fixed here, and why (2026-10-02)
+
+Three classes of warning remain after the pass above, each measured
+rather than assumed:
+
+1. **`X - non-Object interface wants signals'** for `Component',
+   `Selection', `Editable', `Text', `Hypertext', `Value' and `Table'.
+   Those are GTK 3's AT-SPI accessibility interfaces, loaded because
+   `typelib->module' brings Gtk's whole dependency closure (Gdk, Pango,
+   GLib, Gio, Atk), not because anything here asks for them. The warning
+   is printed by guile-gi's *compiled C* - the string exists only in
+   `/usr/lib/guile/3.0/extensions/libguile-gi.so.6.0.1', nowhere in
+   `/usr/share/guile/site/3.0/gi/' - while it builds generics for each
+   interface it finds: interfaces that are not GObjects cannot have
+   signal generics, so it skips them, warns, and moves on. Nothing in
+   this tree can reach it - it is not a Guile warning, so no import form
+   or variable silences it, and the skip is the *correct* behaviour
+   anyway. Fixing it means a one-line patch to guile-gi's C (suppress
+   the notice for non-Object interfaces) and a local rebuild of the
+   package. Harmless here: nothing connects to an ATK interface.
+
+2. **`connect' imported from both (gi) and (schemacs editor
+   pgtk-names)' / `make' imported from both (oop goops) and (gi)'.**
+   These two are the duplicate-binding `merge-generics' handler doing
+   its job: guile-gi's handler intercepts exactly this kind of
+   collision, merges the two generics, and the merged one is the only
+   `connect' that survives a real `(connect <GtkWindow> <signal>
+   handler)' call. Measured, not guessed: importing only `(gi)''s
+   connect, or only the typelib surface's, or excepting either from the
+   import, all end the same way - `gig_object.c:421' calls
+   `g_signal_lookup' on a NULL self and the editor segfaults at the
+   first connect; excepting `make' as well killed the editor at startup
+   in a clean isolated run (cold cache, nothing else running). The cure
+   is outside this tree: guile-gi would have to register one shared
+   generic in both modules so the duplicate never arises, or Guile would
+   need an import form that says "expect this duplicate, handle it,
+   don't warn". Both warnings are also *cold-cache only*: a warm start
+   of the same code prints neither, so what `seg' shows depends on
+   whether the modules were compiled.
+
+3. **`non-literal format string'** in minibuffer.sld (three sites). They
+   are all `(format #f minibuffer-default-prompt-format ...)'. The
+   warning is the compiler saying it cannot check the format string
+   against its arguments at compile time because it is not a literal -
+   and it must not be one: it is ported from Emacs's
+   `minibuffer-default-prompt-format' defcustom (`" (default %s)"',
+   minibuffer.el), which the user is meant to customize, and
+   `format-prompt' fills it at run time. Making it a literal would
+   compile cleanly and break the customizability, which is the feature
+   being ported. Same class as C's `printf(non-literal)' notice.
+
+So a warm-cache GTK start prints exactly the seven class-1 warnings and
+nothing else; a cold-cache one adds the two class-2 warnings while the
+modules compile; class 3 shows only under the compiler.

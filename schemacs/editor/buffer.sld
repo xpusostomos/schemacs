@@ -102,6 +102,7 @@
    current-buffer
    get-buffer
    *case-fold-search*
+   *show-trailing-whitespace*
    find-buffer-visiting
    get-buffer-create
    generate-new-buffer
@@ -305,6 +306,19 @@
 
     ;;----------------------------------------------------------------
     ;; Names
+
+    (define *show-trailing-whitespace*
+      ;; GNU Emacs's `show-trailing-whitespace' (xdisp.c:38640, a
+      ;; DEFVAR buffer-local): "Non-nil means highlight trailing
+      ;; whitespace. The face used for trailing whitespace is
+      ;; `trailing-whitespace'." The highlighting itself is the
+      ;; redisplay's, which does not port yet; what is read so far is
+      ;; `kill-line''s question - whether trailing whitespace counts
+      ;; as visible text - which is why it exists. Nil, as the C's
+      ;; default is. Buffer-local in Emacs; the buffer-local spelling
+      ;; here is a parameter until the store is per-buffer.
+      ;;--------------------------------------------------------------
+      (make-parameter #f))
 
     (define *transient-mark-mode*
       ;; GNU Emacs's `transient-mark-mode', which is `buffer.c''s: whether

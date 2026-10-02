@@ -44,6 +44,11 @@
     (only (schemacs editor isearch) isearch-forward)
     (only (schemacs editor window) split-window-below)
     (only (schemacs editor buff-menu) list-buffers)
+    ;; `casefiddle.c' and `paragraphs.el': M-u/M-l/M-c, C-x C-u/C-l and
+    ;; M-k/M-C-k - imported for their `define-key' forms, the same
+    ;; reason as the four above.
+    (only (schemacs editor casefiddle))
+    (only (schemacs editor paragraphs))
     )
 
   (export

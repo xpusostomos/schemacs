@@ -1,0 +1,183 @@
+(define-library (schemacs editor casefiddle)
+  ;; This library mirrors GNU Emacs's `casefiddle.c': the case
+  ;; conversions - `upcase-region' and `downcase-region' (C-x C-u and
+  ;; C-x C-l), `upcase-word', `downcase-word' and `capitalize-word'
+  ;; (M-u, M-l and M-c) - over the shared `casify_region' and
+  ;; `casify_word'.
+  ;;
+  ;; The C works per character with the syntax table deciding what a
+  ;; word is, and the capitalization asks each character's case
+  ;; category; here a word-constituent is `simple.sld''s `word-char?'
+  ;; - alphanumerics and the underscore, which is what the default
+  ;; syntax table's `\sw' comes to - and the case conversions are
+  ;; `(scheme base)''s `char-upcase' and `char-downcase'. The
+  ;; multibyte machinery (case tables, `case-char-table') is not
+  ;; ported: ASCII and the identity of the Latin-1 letters are what
+  ;; those conversions give here.
+  ;;
+  ;; Not ported: `upcase-initials-region' and `capitalize-region' -
+  ;; nothing calls them yet - `upcase' / `downcase' / `capitalize' for
+  ;; strings and their insert forms, and the tree-sitter bookkeeping.
+  ;;
+  ;; See LAYOUT-PLAN.txt for the rule this library is a step of.
+
+  (import
+    (scheme base)
+    (scheme char)
+    (only (schemacs editor engine)
+          text-editor-char-count text-editor-copy-string
+          text-editor-delete-from-cursor text-editor-get-cursor
+          text-editor-insert text-editor-set-cursor
+          text-editor-undo-boundary!)
+    ;; `point' is one-based here and the engine's cursor zero-based,
+    ;; which is the conversion `casify-region''s positions go through.
+    (only (schemacs editor editfns) point save-excursion
+          region-beginning region-end)
+    (only (schemacs editor simple) word-char?)
+    (only (schemacs editor command) current-prefix-arg define-command
+          uarg->integer)
+    (only (schemacs editor frame) current-editor)
+    (only (schemacs editor buffer) current-buffer)
+    ;; `scan_words' is `syntax.c''s in the C; here the word motions of
+    ;; simple.sld stand for it, under `save-excursion'.
+    (only (schemacs editor simple) word-run-end word-run-start)
+    (only (schemacs editor keymap) define-key *default-keymap*)
+    (only (guile) format)
+    )
+
+  (export
+   casify-region
+   casify-word
+   upcase-region
+   downcase-region
+   upcase-word
+   downcase-word
+   capitalize-word
+   )
+
+  (begin
+
+    (define (scan-words count)
+      ;; `scan_words' (syntax.c): the position COUNT words from point,
+      ;; forward for positive COUNT and backward for negative; #f when
+      ;; the words run out, which is the 0 the C answers and the
+      ;; caller turns into BEGV or ZV.
+      ;;--------------------------------------------------------------
+      (save-excursion
+        (let ((ed (current-editor)))
+          (if (> count 0)
+              (word-run-end ed count)
+              (word-run-start ed (- count))))))
+
+    (define (casify-region flag beg end)
+      ;; GNU Emacs's `casify_region' (casefiddle.c): FLAG the region
+      ;; BEG..END - `upcase', `downcase' or `capitalize' - and answer
+      ;; the end. Capitalize makes each word's first character upper
+      ;; and the rest lower, a word's start being a word-constituent
+      ;; that follows one that is not; the C's `do_casify_*_region'
+      ;; walk the characters in one pass, and so does this. The
+      ;; positions are one-based, the engine's are zero-based, and the
+      ;; conversion is at the edges only.
+      ;;--------------------------------------------------------------
+      ;; The edit is delete-then-insert, with one undo boundary, which
+      ;; is what `modify_text' makes of it for a case change: the text
+      ;; is the same length, so the markers either side are unchanged
+      ;; and the answer is END.
+      ;;--------------------------------------------------------------
+      (let ((ed (current-editor))
+            (beg (- beg 1))
+            (end (- end 1)))
+        (if (= beg end)
+            (+ end 1)
+            (let ((text (text-editor-copy-string ed beg end)))
+              (text-editor-undo-boundary! ed)
+              (let ((newtext
+                     (let loop ((rest (string->list text))
+                                (prev-word? #f)
+                                (acc '()))
+                       (cond
+                        ((null? rest)
+                         (list->string (reverse acc)))
+                        (else
+                         (let* ((c (car rest))
+                                (word? (word-char? c))
+                                (new
+                                 (cond
+                                  ((eq? flag 'upcase) (char-upcase c))
+                                  ((eq? flag 'downcase) (char-downcase c))
+                                  ;; capitalize: a word-constituent
+                                  ;; changes case only at a word's
+                                  ;; start, the rest going lower
+                                  ((not word?) c)
+                                  ((not prev-word?) (char-upcase c))
+                                  (else (char-downcase c)))))
+                           (loop (cdr rest) word? (cons new acc))))))))
+                (text-editor-set-cursor ed beg)
+                (text-editor-delete-from-cursor ed (- end beg))
+                (text-editor-insert ed newtext)
+                (text-editor-set-cursor ed beg)
+                (+ end 1))))))
+
+    (define (casify-word flag arg)
+      ;; GNU Emacs's `casify_word' (casefiddle.c): FLAG the words from
+      ;; point to the position ARG words away, and leave point there -
+      ;; or, ARG negative, the words before point, leaving point where
+      ;; it was ("With negative argument, convert previous words but
+      ;; do not move"). The scan failing is BEGV or ZV by the sign.
+      ;;--------------------------------------------------------------
+      (let* ((ed (current-editor))
+             (pt (text-editor-get-cursor ed))
+             (farend (or (scan-words arg)
+                         (if (<= arg 0)
+                             0
+                             (text-editor-char-count ed)))))
+        (text-editor-set-cursor
+         ed (casify-region flag
+                           (+ 1 (min pt farend))
+                           (+ 1 (max pt farend))))
+        #f))
+
+    (define-command (upcase-region beg end)
+      ;; GNU Emacs's `upcase-region' (casefiddle.c:609): "Convert the
+      ;; region to upper case."
+      "Convert the region to upper case."
+      (interactive (list (region-beginning) (region-end)))
+      (casify-region 'upcase beg end))
+
+    (define-command (downcase-region beg end)
+      ;; GNU Emacs's `downcase-region' (casefiddle.c:621).
+      "Convert the region to lower case."
+      (interactive (list (region-beginning) (region-end)))
+      (casify-region 'downcase beg end))
+
+    (define-command (upcase-word arg)
+      ;; GNU Emacs's `upcase-word' (casefiddle.c:671): "Convert to
+      ;; upper case from point to end of word, moving over."
+      "Convert to upper case from point to end of word, moving over."
+      (interactive (list (uarg->integer 1 (current-prefix-arg))))
+      (casify-word 'upcase arg))
+
+    (define-command (downcase-word arg)
+      ;; GNU Emacs's `downcase-word' (casefiddle.c:684).
+      "Convert to lower case from point to end of word, moving over."
+      (interactive (list (uarg->integer 1 (current-prefix-arg))))
+      (casify-word 'downcase arg))
+
+    (define-command (capitalize-word arg)
+      ;; GNU Emacs's `capitalize-word' (casefiddle.c:696): "Capitalize
+      ;; from point to the end of word, moving over."
+      "Capitalize from point to the end of word, moving over."
+      (interactive (list (uarg->integer 1 (current-prefix-arg))))
+      (casify-word 'capitalize arg))
+
+    ;; The keys GNU Emacs binds them to, beside the commands as the
+    ;; other libraries state theirs.
+    (define-key *default-keymap* (list (list 'ctrl #\x) (list 'ctrl #\u))
+      upcase-region)
+    (define-key *default-keymap* (list (list 'ctrl #\x) (list 'ctrl #\l))
+      downcase-region)
+    (define-key *default-keymap* (list (list 'meta #\u)) upcase-word)
+    (define-key *default-keymap* (list (list 'meta #\l)) downcase-word)
+    (define-key *default-keymap* (list (list 'meta #\c)) capitalize-word)
+
+    ))

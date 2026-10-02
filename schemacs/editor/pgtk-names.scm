@@ -16,7 +16,13 @@
 ;;; names, and pulling them in wholesale shadows core bindings.
 
 (define-module (schemacs editor pgtk-names)
-  #:use-module (gi)
+  ;; The plain `(gi)' module has to be *loaded* - it initializes the
+  ;; girepository runtime, without which typelib->module segfaults - but
+  ;; its re-exports of `connect', `equal?', `format', `write', `quit'
+  ;; and `shutdown' are hidden, because importing them over the core
+  ;; bindings is where the "overrides core binding" warnings at every
+  ;; import came from.
+  #:use-module ((gi) #:hide (connect equal? format write quit shutdown))
   #:use-module (gi repository)
   #:use-module (gi util)
   #:use-module ((guile) #:select (resolve-module)))

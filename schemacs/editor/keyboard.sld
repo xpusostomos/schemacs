@@ -261,8 +261,8 @@
                                     (*selection-inhibit-update-commands*))))
                 (let ((txt (text-editor-copy-string
                             (current-editor)
-                            (region-beginning)
-                            (region-end))))
+                            (- (region-beginning) 1)
+                            (- (region-end) 1))))
                   (unless (= 0 (string-length txt))
                     ;; Don't set empty selections.
                     (gui-set-selection 'PRIMARY txt)))))

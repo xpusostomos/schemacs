@@ -1960,6 +1960,13 @@
           (text-editor-add-char-count
            ed (- (if gone-lbrk (line-break-size gone-lbrk) 0)))
           (text-editor-load-current-line ed)
+          ;; the cursor belongs at the former end of the previous line
+          ;; (where the break was) - the docstring above says so - but
+          ;; the move-char walk that merged the text left it at the
+          ;; END of the merged line, which is what a backward delete
+          ;; that joins two lines showed: point flew to the end of the
+          ;; buffer's remainder instead of staying at the join.
+          (text-editor-set-cursor ed (- k 1) prev-size)
           (if gone-lbrk (line-break-size gone-lbrk) 0))))
 
     (define (text-editor-delete-from-cursor ed n)

@@ -48,6 +48,7 @@
     (schemacs editor disp-table)
     (schemacs editor files)
     (schemacs editor select)
+    (schemacs editor syntax)
     (schemacs editor simple)
     (schemacs editor xdisp)
     (schemacs editor isearch)

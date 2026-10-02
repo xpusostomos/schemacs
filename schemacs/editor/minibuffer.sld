@@ -61,6 +61,7 @@
           get-text-property put-text-property remove-text-properties)
     (only (schemacs editor buffer)
           *case-fold-search*
+          *current-buffer*
           buffer-default-directory bury-buffer current-buffer get-buffer
           get-buffer-create record-buffer!
           buffer-local-keymap set!buffer-local-keymap set!buffer-default-directory
@@ -341,10 +342,20 @@ read-number-history
           ;; rather than the one being typed about.
           (set!buffer-default-directory
            ed (or (buffer-default-directory (current-buffer)) (getcwd)))
+          ;; The current buffer is restored when the read is over, however
+          ;; it was left: `read_minibuf' (minibuf.c:675) does
+          ;; `record_unwind_current_buffer' for exactly this. Without it,
+          ;; any `set-buffer' the prompt's own commands ran - a
+          ;; `save-excursion' restoring the buffer it found current, which
+          ;; while the prompt is read is the prompt's echo-area editor -
+          ;; *pins* that editor in `*current-buffer*', and every command
+          ;; after the prompt acts on it: write-file then saved the echo
+          ;; editor's text to the file it was given.
           (parameterize ((*minibuffer* mb)
                          (*echo-area-buffer* ed)
                          (*echo-area-prompt* prompt)
-                         (*current-keymap* (minibuffer-keymap mb)))
+                         (*current-keymap* (minibuffer-keymap mb))
+                         (*current-buffer* #f))
             (let ((result (recursive-edit frame)))
               ;; `minibuffer-exit-hook', which GNU Emacs runs on the way
               ;; out however the minibuffer was left - RET, C-g, or a

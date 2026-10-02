@@ -22,6 +22,7 @@ SCHEME_LIBRARIES := \
   ./schemacs/editor/disp-table.sld \
   ./schemacs/editor/files.sld \
   ./schemacs/editor/select.sld \
+  ./schemacs/editor/syntax.sld \
   ./schemacs/editor/simple.sld \
   ./schemacs/editor/xdisp.sld \
   ./schemacs/editor/isearch.sld \

@@ -21,14 +21,20 @@
     (scheme base)
     ;; `current-buffer' and `set-buffer', which `save-excursion' saves
     ;; and restores beside point.
+    (only (guile) cadr caddr cddr cdddr cadddr)
     (only (schemacs editor buffer) current-buffer set-buffer
           *case-fold-search*)
     (only (schemacs editor engine)
           copy-marker marker-position set-marker!
+          text-editor-get-start-of-line text-editor-get-end-of-line
+          text-editor-get-char-index text-editor-copy-string
+          text-editor-search-forward text-editor-search-backward
+          text-editor-read-only?
           text-editor-char-count text-editor-insert
           text-editor-cursor-line text-editor-delete-from-cursor
           text-editor-get-cursor text-editor-get-line-column
-          text-editor-mark text-editor-set-cursor)
+          text-editor-mark text-editor-set-cursor
+          text-editor-undo-boundary!)
     ;; `mark-active' and `transient-mark-mode' are `buffer.c''s
     ;; variables, and `mark-even-if-inactive' is `callint.c''s, which is
     ;; where `region_limit' reads them from - the same three the C's
@@ -42,7 +48,22 @@
     )
 
   (export
-   bobp
+bobp
+   bolp
+   eolp
+   char-after
+   char-before
+   following-char
+   preceding-char
+   line-beginning-position
+   line-end-position
+   buffer-substring
+point-marker
+   buffer-size
+   buffer-string
+   delete-and-extract-region
+   barf-if-buffer-read-only
+   forward-line
    delete-region
    eobp
    goto-char
@@ -103,16 +124,19 @@
         (text-editor-delete-from-cursor ed (- end start))))
 
     (define (region-beginning)
-      ;; GNU Emacs's `region-beginning': "the integer value of point or
-      ;; mark, whichever is smaller".
+      ;; GNU Emacs's `region-beginning' (editfns.c): "the integer value
+      ;; of point or mark, whichever is smaller" - ONE-based, which is
+      ;; the engine's answer plus one, the way every position answer
+      ;; of this library is.
       ;;--------------------------------------------------------------
-      (region-limit #t))
+      (+ 1 (region-limit #t)))
 
     (define (region-end)
-      ;; GNU Emacs's `region-end': "the integer value of point or mark,
-      ;; whichever is larger".
+      ;; GNU Emacs's `region-end' (editfns.c): "the integer value of
+      ;; point or mark, whichever is larger" - one-based, as
+      ;; `region-beginning' is.
       ;;--------------------------------------------------------------
-      (region-limit #f))
+      (+ 1 (region-limit #f)))
 
 
     (define (line-number-at-pos . args)
@@ -232,7 +256,7 @@
              ((> left 1) (loop (- left 1) found))
              (else
               (text-editor-set-cursor ed found)
-              found))))))
+              (+ 1 found)))))))
 
     (define (insert . args)
       ;; GNU Emacs's `insert' (editfns.c:1354): "Insert the arguments,
@@ -266,7 +290,186 @@
       (= (text-editor-get-cursor (current-editor))
          (text-editor-char-count (current-editor))))
 
-    (define-syntax save-excursion
+    (define (bolp)
+      ;; GNU Emacs's `bolp' (editfns.c): "Return t if point is at the
+      ;; beginning of a line."
+      ;;--------------------------------------------------------------
+      (let ((ed (current-editor)))
+        (or (= (text-editor-get-cursor ed) 0)
+            (eqv? (text-editor-get-char-index ed (- (text-editor-get-cursor ed) 1))
+                  #\newline))))
+
+    (define (eolp)
+      ;; GNU Emacs's `eolp' (editfns.c): "Return t if point is at the
+      ;; end of a line. `End of a line' includes point being at the end
+      ;; of the buffer."
+      ;;--------------------------------------------------------------
+      (let ((ed (current-editor)))
+        (= (text-editor-get-cursor ed)
+           (text-editor-get-end-of-line ed))))
+
+    (define (%char-at-index ed index)
+      ;; The character at the ENGINE index INDEX, or #f - the reader
+      ;; the C's `FETCH_BYTE' is here.
+      ;;--------------------------------------------------------------
+      (text-editor-get-char-index ed index))
+
+    (define (char-after position)
+      ;; GNU Emacs's `char-after' (editfns.c): "Return character in
+      ;; current buffer at position POSITION" - nil, this tree's #f,
+      ;; when POSITION is past the end. A POSITION of nil means point,
+      ;; as Emacs's docstring keeps out of the synopsis; the one-based
+      ;; position becomes the engine's zero-based index here.
+      ;;--------------------------------------------------------------
+      (let* ((ed (current-editor))
+             (count (text-editor-char-count ed))
+             (index (- (if position position (point)) 1)))
+        (and (>= index 0) (< index count)
+             (%char-at-index ed index))))
+
+    (define (char-before position)
+      ;; GNU Emacs's `char-before' (editfns.c): "Return character in
+      ;; current buffer immediately before position POSITION" - nil
+      ;; when there is none.
+      ;;--------------------------------------------------------------
+      (let* ((ed (current-editor))
+             (count (text-editor-char-count ed))
+             (index (- (if position position (point)) 1)))
+        (and (> index 0)
+             (%char-at-index ed (- index 1)))))
+
+    (define (following-char)
+      ;; GNU Emacs's `following-char' (editfns.c): "Return the
+      ;; character following point, or nil if point is at the end."
+      ;;--------------------------------------------------------------
+      (char-after (point)))
+
+    (define (preceding-char)
+      ;; GNU Emacs's `preceding-char' (editfns.c): "Return the
+      ;; character preceding point, or nil if point is at the
+      ;; beginning."
+      ;;--------------------------------------------------------------
+      (char-before (point)))
+
+    (define (line-beginning-position . rest)
+      ;; GNU Emacs's `line-beginning-position' (editfns.c): "Return the
+      ;; character position of the beginning of the current line. With
+      ;; argument N, forward N lines first" - the N-line walk being
+      ;; `line-move''s, which is `save-excursion''s to keep point off.
+      ;; The answer is one-based, as every position answer here is.
+      ;;--------------------------------------------------------------
+      (let* ((ed (current-editor))
+             ;; an optional argument explicitly given as nil - Elisp's
+             ;; `(line-beginning-position (and arg 2))' with ARG nil -
+             ;; behaves as absent, as it does in Emacs
+             (n (if (and (pair? rest) (car rest)) (car rest) 0)))
+        (+ 1
+           (save-excursion
+             (text-editor-set-cursor
+              ed (min (+ (text-editor-cursor-line ed) n)
+                      (text-editor-char-count ed)))
+             (text-editor-get-start-of-line ed)))))
+
+    (define (line-end-position . rest)
+      ;; GNU Emacs's `line-end-position' (editfns.c): "Return the
+      ;; character position of the end of the current line" - with a N,
+      ;; of the end of the line N lines away. One-based, as
+      ;; `line-beginning-position' is.
+      ;;--------------------------------------------------------------
+      (let* ((ed (current-editor))
+             ;; nil behaves as absent, as in `line-beginning-position'
+             (n (if (and (pair? rest) (car rest)) (car rest) 0)))
+        (+ 1
+           (save-excursion
+             (text-editor-set-cursor
+              ed (min (+ (text-editor-cursor-line ed) n)
+                      (text-editor-char-count ed)))
+             (text-editor-get-end-of-line ed)))))
+
+    (define (buffer-substring beg end)
+      ;; GNU Emacs's `buffer-substring' (editfns.c): "Return the
+      ;; contents of part of the current buffer, as a string" - the
+      ;; engine's copy, which carries no properties because none are
+      ;; wired to the display yet.
+      ;;--------------------------------------------------------------
+      (text-editor-copy-string (current-editor) (- beg 1) (- end 1)))
+
+    (define (buffer-size)
+      ;; GNU Emacs's `buffer-size' (editfns.c): "Return the number of
+      ;; characters in the current buffer" - no narrowing here, so
+      ;; nothing is subtracted.
+      ;;--------------------------------------------------------------
+      (text-editor-char-count (current-editor)))
+
+    (define (buffer-string)
+      ;; GNU Emacs's `buffer-string' (editfns.c): "Return the contents
+      ;; of the current buffer as a string."
+      ;;--------------------------------------------------------------
+      (buffer-substring (point-min) (point-max)))
+
+    (define (delete-and-extract-region beg end)
+      ;; GNU Emacs's `delete-and-extract-region' (editfns.c): "Delete
+      ;; the text between START and END and return it" - `transpose-
+      ;; subr-1' is what uses it. The positions are one-based here and
+      ;; converted for the engine's delete, as everywhere in this
+      ;; library.
+      ;;--------------------------------------------------------------
+      (let ((text (buffer-substring beg end)))
+        (delete-region (- beg 1) (- end 1))
+        text))
+
+    (define (barf-if-buffer-read-only)
+      ;; GNU Emacs's `barf-if-buffer-read-only' (buffer.c:2453):
+      ;; "Signal a `buffer-read-only' error if the current buffer is
+      ;; read-only." The message is the error's text here, there
+      ;; being no condition symbols yet.
+      ;;--------------------------------------------------------------
+      (when (text-editor-read-only? (current-editor))
+        (error "Buffer is read-only")))
+
+    (define (forward-line . rest)
+      ;; GNU Emacs's `forward-line' (simple.el via the C's
+      ;; `FORWARD_LINE'): "Move N lines forward (backwards if N is
+      ;; negative)." To the START of each line, not keeping the column
+      ;; - which is what distinguishes it from `next-line' - and it
+      ;; answers the count of lines it could NOT move, negative for a
+      ;; backward request that was cut short. `paragraphs.sld''s walks
+      ;; were spelling this privately.
+      ;;--------------------------------------------------------------
+      (let* ((ed (current-editor))
+             (n (if (pair? rest) (car rest) 1))
+             (moved
+              (let loop ((left (abs n)) (moved 0))
+                (cond
+                 ((= left 0) moved)
+                 ((> n 0)
+                  (let ((eol (text-editor-get-end-of-line ed))
+                        (count (text-editor-char-count ed)))
+                    (if (< eol count)
+                        (begin
+                          (text-editor-set-cursor ed (+ eol 1))
+                          (loop (- left 1) moved))
+                        moved)))
+                 (else
+                  (let ((start (text-editor-get-start-of-line ed)))
+                    (if (> start 0)
+                        (begin
+                          (text-editor-set-cursor ed (- start 1))
+                          (text-editor-set-cursor
+                           ed (text-editor-get-start-of-line ed))
+                          (loop (- left 1) moved))
+                        moved)))))))
+        (if (< n 0) (- moved) moved)))
+
+(define (point-marker)
+      ;; GNU Emacs's `point-marker' (editfns.c): "Return value of point
+      ;; as a marker object" - the bookkeeping `save-excursion''s
+      ;; `save_excursion_save' does.
+      ;;--------------------------------------------------------------
+      (copy-marker (current-buffer)
+                   (text-editor-get-cursor (current-editor))))
+
+(define-syntax save-excursion
       ;; GNU Emacs's `save-excursion' (editfns.c:818): "Save point, and
       ;; current buffer; execute BODY; restore those things. Executes
       ;; BODY just like `progn'. The values of point and the current

@@ -1760,8 +1760,33 @@
 (test-equal '(#t "Read-Only mode enabled in current buffer")
   (press-m-z #t))
 
-(test-equal '(#f "; undefined key: (meta #\\z)")
-  (press-m-z #f))
+;; M-z is zap-to-char now (simple.el:6739), so the undefined-key
+;; question is asked of a key nothing binds: M-Z.
+(define (press-m-Z)
+  ;; press-m-z's harness, with the local rebinding left out.
+  (let ((ed (new-text-editor)))
+    (parameterize ((*current-frame* (test-frame ed))
+                   (*echo-area-buffer* #f)
+                   (*buffer-list* '())
+                   (*current-buffer* #f)
+                   (*current-keymap* #f)
+                   (*search-pattern* #f)
+                   (*search-case-fold?* #t)
+                   (*kill-ring* '())
+                   (*kill-ring-yank-pointer* '())
+                   (*this-command* #f)
+                   (*last-command* #f)
+                   (*pending-undo-list* #f))
+      (let* ((buffer (get-buffer-create "*m-z*"))
+             (frame (*current-frame*)))
+        (set!window-buffer (frame-selected-window frame) buffer)
+        (*current-buffer* buffer)
+        (dispatch-key-event frame (list (list 'meta #\Z)))
+        (list (text-editor-read-only? buffer)
+              (frame-message frame))))))
+
+(test-equal '(#f "; undefined key: (meta #\\Z)")
+  (press-m-Z))
 
 (test-end "schemacs_ncurses_editor_buffer_keymap")
 
@@ -2387,7 +2412,7 @@
 ;; The region begins at whichever of point and mark is smaller, whichever
 ;; order they are in: here the mark is set after point, and then point is
 ;; moved back before it, so the two orders are both seen.
-(test-equal '(4 4 2 4)
+(test-equal '(5 5 3 5)
   (with-mark-frame "hello"
     (lambda (frame ed)
       (text-editor-set-cursor ed 4)

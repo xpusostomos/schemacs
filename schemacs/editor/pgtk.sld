@@ -50,11 +50,16 @@
     (oop goops)
     ;; The drawing primitives, which guile-gi does not bind.
     (cairo)
-    ;; guile-gi, and only what is needed from it: `(gi)''s own `equal?'
-    ;; and friends would collide with `(scheme base)''s.
-    (gi)
+    ;; guile-gi, with its own `equal?' excepted: importing it wholesale
+    ;; would shadow `(scheme base)''s. `connect' stays - which `connect'
+    ;; is bound here is measured, not guessed: the duplicate-binding
+    ;; `merge-generics' handler (pushed below) merges `(gi)''s connect
+    ;; with the typelib surface's at this import, and the merged one is
+    ;; the only `connect' that survives a real `(connect <GtkWindow>
+    ;; <signal> handler)' call - either half alone reads a null GObject
+    ;; and the editor dies.
+    (except (gi) equal?)
     (gi repository)
-    (only (gi) <signal>)
     (gi util)
     ;; The GTK surface, from the module that holds it: see pgtk-names.scm
     ;; for why it is not loaded here. `only' is required - the surface is

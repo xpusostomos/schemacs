@@ -25,7 +25,11 @@
     (only (schemacs editor simple) self-insert-layer)
     (only (schemacs editor isearch) isearch-forward)
     (only (schemacs editor window) split-window-below)
-    (only (schemacs editor buff-menu) list-buffers))
+    (only (schemacs editor buff-menu) list-buffers)
+    ;; `casefiddle.c' and `paragraphs.el' - the ncurses.sld note says
+    ;; why.
+    (only (schemacs editor casefiddle))
+    (only (schemacs editor paragraphs)))
 
   (export main-gtk)
 
