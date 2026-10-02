@@ -72,7 +72,8 @@
           set-buffer-local-value! transient-mark-mode)
     (only (schemacs editor command) *mark-even-if-inactive*)
     (only (schemacs editor editfns)
-          delete-region region-beginning region-end)
+          delete-region region-beginning region-end
+          save-excursion)
     ;; `kbd' is how the bindings below name their keys, as
     ;; `(define-key global-map (kbd "C-/") ...)' would in Emacs.
     (only (schemacs editor subr) add-to-history kbd nthcdr)
@@ -87,7 +88,7 @@
     )
 
   (export
-   %char-at %inword-at *amalgamating-count* *amalgamating-undo-limit*
+   %blank-line? %char-at %inword-at *amalgamating-count% *amalgamating-undo-limit*
    *last-change-was-undo* *last-command* *this-command* *temporary-goal-column*
    *kill-do-not-save-duplicates* *kill-read-only-ok*
    *kill-ring* *kill-ring-max* *kill-ring-yank-pointer*
@@ -116,8 +117,12 @@
    pop-mark pop-to-mark-command push-mark push-mark-command
    region-active-p set-mark set-mark-command
    set!mark-ring use-region-p
-   prefix-argument-description
+prefix-argument-description
    what-cursor-position
+   open-line open-line-command delete-indentation-command
+just-one-space delete-horizontal-space delete-blank-lines
+   delete-all-space delete-leading-space delete-trailing-space
+   transpose-chars transpose-words
    prefix-echo-pending? request-prefix-echo! show-prefix-echo!
    strip-undo-boundaries undo undo-redo update-prefix!
    word-char? word-run-end word-run-start yank
@@ -518,7 +523,8 @@
                           (>= line (+ new-top vheight)))
                   (text-editor-set-cursor
                    ed (+ new-top (- vheight 1)) 0)))))))
-(define-command (toggle-truncate-lines arg)
+	
+	(define-command (toggle-truncate-lines arg)
       "Toggle truncating of long lines for the current buffer.
 When truncating is off, long lines are folded.
 With prefix argument ARG, truncate long lines if ARG is positive,
@@ -1805,10 +1811,505 @@ non-nil."
     (define-key *default-keymap* (list (list 'meta #\d)) kill-word)
     (define-key *default-keymap*
       (list (list 'meta 'ctrl #\h)) backward-kill-word)
-    (define-key *default-keymap* (list (list 'ctrl #\y)) yank)
+        (define-key *default-keymap* (list (list 'ctrl #\y)) yank)
     (define-key *default-keymap* (list (list 'meta #\y)) yank-pop)
     (define-key *default-keymap* (list (list 'ctrl #\w)) kill-region)
     (define-key *default-keymap* (list (list 'meta #\w)) kill-ring-save)
+
+    ;;----------------------------------------------------------------
+    ;; Line surgery and whitespace - simple.el
+    ;;
+    ;; `open-line' (C-o), `delete-indentation'/`join-line' (M-^),
+    ;; `fixup-whitespace' (which `delete-indentation' uses),
+    ;; `delete-blank-lines' (C-x C-o), `delete-horizontal-space' (M-\),
+    ;; `just-one-space' (M-SPC), and the two directions mg's
+    ;; `delleadwhite' and `deltrailwhite' do - which this tree spells
+    ;; `delete-leading-space' and `delete-trailing-space', there being
+    ;; no Emacs command of either name: both are
+    ;; `delete-space--internal' with its one knob turned.
+    ;;
+    ;; Not ported of `open-line': the fill prefix and `left-margin'
+    ;; insertion, there being no fill prefix or margin here.
+    ;; Not ported of `fixup-whitespace': the `\s)' and `\s(' clauses -
+    ;; the close- and open-parenthesis *syntax classes*, which need a
+    ;; syntax table, so a space is left between words and none only at
+    ;; the line's ends.
+    ;;----------------------------------------------------------------
+
+    (define (%skip-chars-forward ed chars)
+      ;; GNU Emacs's `skip-chars-forward' for the character set the
+      ;; string CHARS holds: move point over as many of them as are
+      ;; there, and answer where point stopped.
+      ;;--------------------------------------------------------------
+      (let ((members (string->list chars)))
+        (let loop ((i (text-editor-get-cursor ed))
+                   (count (text-editor-char-count ed)))
+          (if (>= i count)
+              i
+              (let ((c (%char-at ed i)))
+                (if (and c (memv c members))
+                    (loop (+ i 1) count)
+                    i))))))
+
+    (define (%skip-chars-backward ed chars)
+      ;; GNU Emacs's `skip-chars-backward': the mirror of
+      ;; `%skip-chars-forward'.
+      ;;--------------------------------------------------------------
+      (let ((members (string->list chars)))
+        (let loop ((i (text-editor-get-cursor ed)))
+          (if (<= i 0)
+              i
+              (let ((c (%char-at ed (- i 1))))
+                (if (and c (memv c members))
+                    (loop (- i 1))
+                    i))))))
+
+    (define (%blank-line? ed)
+      ;; Whether the line point is on is blank: nothing on it but
+      ;; spaces and tabs. `looking-at "[ \t]*$"' from the line's
+      ;; beginning, which is how `delete-blank-lines' asks.
+      ;;--------------------------------------------------------------
+      (let ((start (text-editor-get-start-of-line ed))
+            (end (text-editor-get-end-of-line ed)))
+        (if (= start end)
+            #t
+            (let loop ((i start))
+              (cond ((= i end) #t)
+                    ((memv (%char-at ed i) '(#\space #\tab))
+                     (loop (+ i 1)))
+                    (else #f))))))
+
+    (define (open-line n)
+      ;; GNU Emacs's `open-line' (simple.el:700): "Insert a newline and
+      ;; leave point before it. With arg N, insert N newlines." The
+      ;; body is `(newline n)' then `(goto-char loc)' - the newlines go
+      ;; in at point and point goes back in front of them. What is kept
+      ;; of the rest is the `(end-of-line)' - a no-op with no fill
+      ;; prefix or margin to have been inserted, which is why the
+      ;; whole loop drops out.
+      ;;--------------------------------------------------------------
+      (let* ((ed (current-editor))
+             (loc (text-editor-get-cursor ed)))
+        (text-editor-undo-boundary! ed)
+        (let loop ((i 0))
+          (when (< i n)
+            (text-editor-insert ed #\newline)
+            (loop (+ i 1))))
+        (text-editor-set-cursor ed loc)))
+
+    (define-command (open-line-command n)
+      ;; `open-line' as a command - the name keeps `open-line''s, the
+      ;; way `kill-line' and `kill-line-command' split.
+      "Insert a newline and leave point before it."
+      (interactive (list (uarg->integer 1 (current-prefix-arg))))
+      (open-line n))
+
+    (define-command (delete-indentation-command arg beg end)
+      ;; GNU Emacs's `delete-indentation' (simple.el:778): "Join this
+      ;; line to previous and fix up whitespace at join." With a prefix
+      ;; argument, the current line joins the FOLLOWING line, which is
+      ;; the sentinel the loop's `(line-beginning-position (and arg 2))'
+      ;; sets. What is not ported is the fill prefix deletion, there
+      ;; being no fill prefix.
+      ;; `join-line' is the alias Emacs defines of this; there is no
+      ;; aliasing here, so the binding below is on this name.
+      "Join this line to previous and fix up whitespace at join."
+      (interactive
+       (list (current-prefix-arg)
+             (and (use-region-p) (region-beginning))
+             (and (use-region-p) (region-end))))
+      (let ((ed (current-editor)))
+        ;; Consistently deactivate mark even when no text is changed.
+        (set!text-editor-deactivate-mark! ed #t)
+        ;; The region branch: go to END, but only if the region spans
+        ;; multiple lines - and the region is ignored when a prefix arg
+        ;; is given.
+        (cond
+         ((and beg (not arg))
+          (text-editor-set-cursor ed beg)
+          (when (> end (text-editor-get-end-of-line ed))
+            (text-editor-set-cursor ed end)))
+         (arg
+          ;; Region is inactive. Set a loop sentinel - the beginning of
+          ;; the line AFTER the current one (`line-beginning-position
+          ;; 2') - and move there, the way `(when arg (forward-line))'
+          ;; does.
+          (text-editor-set-cursor ed (text-editor-get-end-of-line ed))
+          (let ((next (text-editor-get-end-of-line ed)))
+            (text-editor-set-cursor
+             ed (if (< next (text-editor-char-count ed))
+                    (+ next 1) next)))
+          (let ((sentinel (max 0
+                               (- (text-editor-get-start-of-line ed) 1))))
+            (loop-indentation-join! ed sentinel)))
+         (else
+          ;; Region is inactive. Set a loop sentinel - the character
+          ;; before the line's beginning (subtracting 1 in order to
+          ;; compare less than BOB) - which is where the loop stops.
+          (let ((sentinel (max 0
+                               (- (text-editor-get-start-of-line ed) 1))))
+            (loop-indentation-join! ed sentinel))))))
+
+    (define (loop-indentation-join! ed sentinel)
+      ;; The loop `delete-indentation' joins with: "while (and (>
+      ;; (line-beginning-position) beg) (forward-line 0) (= (preceding-
+      ;; char) ?\n)) - delete the newline and fix up the whitespace at
+      ;; the join". The merged line's beginning walks up past SENTINEL
+      ;; as the joins happen, which is what stops the loop: one line
+      ;; joined, unless empty lines join with it.
+      ;;--------------------------------------------------------------
+      (let loop ()
+        (if (and (> (text-editor-get-start-of-line ed) sentinel)
+                 (> (text-editor-get-start-of-line ed) 0)
+                 (eqv? (%char-at ed (- (text-editor-get-start-of-line ed) 1))
+                       #\newline))
+            (begin
+              (text-editor-move-cursor ed -1)
+              (text-editor-delete-from-cursor ed 1)
+              (fixup-whitespace)
+              (loop))
+            #t)))
+
+    (define (fixup-whitespace)
+      ;; GNU Emacs's `fixup-whitespace' (simple.el:1123): "Fixup white
+      ;; space between objects around point. Leave one space or none,
+      ;; according to the context." Point is kept where it was, which
+      ;; is the C's `save-excursion' around the whole body. The context
+      ;; without the parenthesis *syntax classes* (`\s)' and `\s(',
+      ;; which need a syntax table) is a line's ends: no space at
+      ;; either, one space otherwise - and the `looking-at' question at
+      ;; the point deletion left is bolp/eolp here.
+      ;;--------------------------------------------------------------
+      (save-excursion
+        (delete-horizontal-space #f)
+        (if (or (bolp) (eolp))
+            #f
+            (insert " "))))
+
+    (define-command (delete-horizontal-space backward-only)
+      ;; GNU Emacs's `delete-horizontal-space' (simple.el:1135): "Delete
+      ;; all spaces and tabs around point." BACKWARD-ONLY is the prefix
+      ;; argument, which Emacs passes to `delete-space--internal' the
+      ;; same way.
+      "Delete all spaces and tabs around point."
+      (interactive (list (current-prefix-arg)))
+      (delete-space--internal " \t" backward-only))
+
+    (define-command (delete-all-space backward-only)
+      ;; GNU Emacs's `delete-all-space' (simple.el:1140): "Delete all
+      ;; spaces, tabs, and newlines around point."
+      "Delete all spaces, tabs, and newlines around point."
+      (interactive (list (current-prefix-arg)))
+      (delete-space--internal " \t\r\n" backward-only))
+
+    (define (delete-space--internal chars backward-only)
+      ;; GNU Emacs's `delete-space--internal' (simple.el:1147): "Delete
+      ;; CHARS around point." What is not ported is the
+      ;; `constrain-to-field' pair, there being no fields.
+      ;;--------------------------------------------------------------
+      (let* ((ed (current-editor))
+             (orig-pos (text-editor-get-cursor ed))
+             (forward-end
+              (if backward-only
+                  orig-pos
+                  (%skip-chars-forward ed chars)))
+             (beg (%skip-chars-backward ed chars)))
+        (delete-region beg forward-end)))
+
+    (define-command (delete-leading-space)
+      ;; mg's `delleadwhite' - the whitespace *before* point - which is
+      ;; `delete-space--internal' with its one knob turned; there is no
+      ;; Emacs command of this name.
+      "Delete all spaces and tabs before point."
+      (interactive)
+      (delete-space--internal " \t" #t))
+
+    (define-command (delete-trailing-space)
+      ;; mg's `deltrailwhite' - the whitespace *after* point - the other
+      ;; turn of `delete-space--internal''s knob.
+      "Delete all spaces and tabs after point."
+      (interactive)
+      (delete-space--internal " \t" #f))
+
+    (define-command (just-one-space n)
+      ;; GNU Emacs's `just-one-space' (simple.el:1162): "Delete all
+      ;; spaces and tabs around point, leaving one space (or N
+      ;; spaces)." A negative N deletes newlines as well and leaves
+      ;; -N spaces. The subtlety of the original: the spaces a
+      ;; bounded skip forward consumes come OFF N - which is why the
+      ;; spaces that stay are the ones the skip stepped over, and a
+      ;; point already inside a run leaves exactly one.
+      "Delete all spaces and tabs around point, leaving one space (or N spaces)."
+      (interactive (list (uarg->integer 1 (current-prefix-arg))))
+      (let* ((ed (current-editor))
+             (skip-characters (if (and n (< n 0)) " \t\n\r" " \t"))
+             (num (abs (or n 1))))
+        (text-editor-set-cursor
+         ed (%skip-chars-backward ed skip-characters))
+        ;; the bounded skip: spaces only, at most NUM of them, and
+        ;; what it skipped comes off NUM
+        (let ((skipped
+               (let loop ((i (text-editor-get-cursor ed)) (skipped 0))
+                 (cond ((>= skipped num) skipped)
+                       ((eqv? (%char-at ed i) #\space)
+                        (text-editor-set-cursor ed (+ i 1))
+                        (loop (+ i 1) (+ skipped 1)))
+                       (else skipped)))))
+          (let* ((num (- num skipped))
+                 (mid (text-editor-get-cursor ed))
+                 (end (%skip-chars-forward ed skip-characters)))
+            (delete-region mid end)
+            (text-editor-insert ed (make-string num #\space))))))
+
+    (define (%blank-line-up ed pos)
+      ;; The position `re-search-backward "[^ \t\n]"' and `(forward-
+      ;; line 1)' find walking up from POS: the start of the line after
+      ;; the first non-blank one. #f - which the caller reads as
+      ;; `point-min' - when nothing but blanks is before POS.
+      ;;--------------------------------------------------------------
+      (save-excursion
+        (let walk ((p pos))
+          (if (<= p 0)
+              #f
+              (begin
+                ;; the newline that ends the line above POS, which is
+                ;; where the previous line starts
+                (text-editor-set-cursor ed (- p 1))
+                (let ((start (text-editor-get-start-of-line ed)))
+                  (text-editor-set-cursor ed start)
+                  (if (%blank-line? ed)
+                      (walk start)
+                      ;; the first non-blank line: past it, which is
+                      ;; `(forward-line 1)'
+                      (let ((eol (text-editor-get-end-of-line ed)))
+                        (if (< eol (text-editor-char-count ed))
+                            (+ eol 1)
+                            eol)))))))))
+
+    (define (%blank-line-down ed pos)
+      ;; The start of the first non-blank line at or after POS, walking
+      ;; down: what `re-search-forward "[^ \t\n]"' finds, and the
+      ;; `(beginning-of-line)' after it. #f - which the caller reads as
+      ;; `point-max' - when only blanks follow.
+      ;;--------------------------------------------------------------
+      (save-excursion
+        (let walk ((p pos))
+          (if (>= p (text-editor-char-count ed))
+              #f
+              (begin
+                (text-editor-set-cursor ed p)
+                (text-editor-set-cursor ed (text-editor-get-start-of-line ed))
+                (if (%blank-line? ed)
+                    (let ((eol (text-editor-get-end-of-line ed)))
+                      (if (< eol (text-editor-char-count ed))
+                          (walk (+ eol 1))
+                          #f))
+                    (text-editor-get-cursor ed)))))))
+
+    (define-command (delete-blank-lines)
+      ;; GNU Emacs's `delete-blank-lines' (simple.el:818): "On blank
+      ;; line, delete all surrounding blank lines, leaving just one. On
+      ;; isolated blank line, delete that one. On nonblank line, delete
+      ;; any immediately following blank lines."
+      "On blank line, delete all surrounding blank lines, leaving just one."
+      (interactive)
+      (let* ((ed (current-editor))
+             (here (text-editor-get-cursor ed))
+             (thisblank
+              (save-excursion
+                (beginning-of-line)
+                (%blank-line? ed)))
+             ;; Set singleblank if there is just one blank line here.
+             (singleblank
+              (save-excursion
+                (and thisblank
+                     ;; there is no second blank line after this one -
+                     ;; the not of `looking-at "[ \t]*\n[ \t]*$"'
+                     (let ((eol (text-editor-get-end-of-line ed)))
+                       (or (>= eol (text-editor-char-count ed))
+                           (begin
+                             (text-editor-set-cursor ed (+ eol 1))
+                             (not (%blank-line? ed)))))
+                     ;; and the line before it is not blank - or there
+                     ;; is none
+                     (or (<= (text-editor-get-start-of-line ed) 0)
+                         (begin
+                           (text-editor-set-cursor
+                            ed (- (text-editor-get-start-of-line ed) 1))
+                           (text-editor-set-cursor
+                            ed (text-editor-get-start-of-line ed))
+                           (not (%blank-line? ed))))))))
+        ;; Delete preceding blank lines, and this one too if it's the
+        ;; only one: from past the first non-blank line above, to
+        ;; here - or past this line's newline when it is the only one.
+        (when thisblank
+          (beginning-of-line)
+          (delete-region
+           (or (%blank-line-up ed (text-editor-get-cursor ed)) 0)
+           (if singleblank
+               (let ((eol (text-editor-get-end-of-line ed)))
+                 (if (< eol (text-editor-char-count ed))
+                     (+ eol 1)
+                     eol))
+               (text-editor-get-cursor ed))))
+        ;; Delete following blank lines, unless the current line is
+        ;; blank and there are no following blank lines.
+        (if (not (and thisblank singleblank))
+            (let ((eol (text-editor-get-end-of-line ed)))
+              (when (< eol (text-editor-char-count ed))
+                ;; forward-line 1, then the walk down
+                (delete-region
+                 (+ eol 1)
+                 (or (%blank-line-down ed (+ eol 1))
+                     (text-editor-char-count ed))))))
+        ;; Handle the special case where point is followed by newline
+        ;; and eob. Delete the line, leaving point at eob - Emacs's
+        ;; `(looking-at "^[ \t]*\n\\'")'.
+        (when (and thisblank
+                   (= (text-editor-get-cursor ed)
+                      (text-editor-get-start-of-line ed))
+                   (= (text-editor-get-end-of-line ed)
+                      (- (text-editor-char-count ed) 1)))
+          (delete-region (text-editor-get-cursor ed)
+                         (text-editor-char-count ed)))))
+    ;; Transposition - simple.el
+    ;;
+    ;; `transpose-chars' (C-t) and `transpose-words' (M-t) over
+    ;; `transpose-subr', the subroutine both of them and the other
+    ;; transposes share. `transpose-subr-1' is its, and does the buffer
+    ;; edit: the two objects swap by the three edits the C's
+    ;; `atomic-change-group' makes one change of.
+    ;;----------------------------------------------------------------
+
+    (define (%transpose-subr-1 pos1 pos2)
+      ;; GNU Emacs's `transpose-subr-1' (simple.el:8921): normalize the
+      ;; two position pairs, order them, and swap what they hold with
+      ;; the three edits that keep the markers between them.
+      ;;--------------------------------------------------------------
+      (let ((ed (current-editor)))
+        (when (> (car pos1) (cdr pos1))
+          (set! pos1 (cons (cdr pos1) (car pos1))))
+        (when (> (car pos2) (cdr pos2))
+          (set! pos2 (cons (cdr pos2) (car pos2))))
+        (when (> (car pos1) (car pos2))
+          (let ((swap pos1)) (set! pos1 pos2) (set! pos2 swap)))
+        (if (> (cdr pos1) (car pos2))
+            (error "Don't have two things to transpose")
+            (let* ((word (text-editor-copy-string ed (car pos2) (cdr pos2)))
+                   (len1 (- (cdr pos1) (car pos1)))
+                   (len2 (string-length word)))
+              (text-editor-undo-boundary! ed)
+              ;; Emacs's sequence (`transpose-subr-1', the C's
+              ;; `atomic-change-group' body): the second object's text
+              ;; goes in at the END of the first (`insert-before-
+              ;; markers', which pushes the boundary marker along);
+              ;; the first object is extracted and deleted; it goes
+              ;; in where the boundary now is; and the second
+              ;; object's original copy is deleted from after it.
+              ;; Without a marker the boundary is tracked by where
+              ;; the edits move it: +LEN2 for the first insert
+              ;; (BEG2 is at or after it), -LEN1 for the delete.
+              (text-editor-set-cursor ed (cdr pos1))
+              (text-editor-insert ed word)
+              (text-editor-set-cursor ed (car pos1))
+              (let ((first (text-editor-copy-string
+                            ed (car pos1) (+ (car pos1) len1))))
+                (text-editor-delete-from-cursor ed len1)
+                (text-editor-set-cursor
+                 ed (+ (car pos2) (- len2 len1)))
+                (text-editor-insert ed first)
+                (text-editor-set-cursor
+                 ed (+ (car pos2) (- len2 len1) len1))
+                (text-editor-delete-from-cursor ed len2))))))
+
+    (define (%transpose-subr mover arg)
+      ;; GNU Emacs's `transpose-subr' (simple.el:8885): "Subroutine to
+      ;; do the work of transposing objects." MOVER moves by one unit,
+      ;; and its positions are the cons the ordinary (non-special)
+      ;; callers make of going over and coming back. The ARG zero case
+      ;; exchanges with the mark's object, and what it is not ported
+      ;; for - `(or (mark) (error ...))' - is the same error.
+      ;;--------------------------------------------------------------
+      (let ((aux
+             (lambda (x)
+               ;; Emacs's: `(cons (begin (funcall mover x) (point))
+               ;; (begin (funcall mover (- x)) (point)))' - the second
+               ;; mover runs from where the first left point, and the
+               ;; two together net point back to where it was.
+               (let ((ed (current-editor)))
+                 (mover x)
+                 (let ((here (text-editor-get-cursor ed)))
+                   (mover (- x))
+                   (cons here (text-editor-get-cursor ed)))))))
+        (cond
+         ((= arg 0)
+          (let ((ed (current-editor))
+                (start (text-editor-get-cursor ed)))
+            (let ((pos1 (aux 1)))
+              (if (not (mark #t))
+                  (error "No mark set in this buffer")
+                  (begin
+                    (text-editor-set-cursor ed (mark #t))
+                    (let ((pos2 (aux 1)))
+                      (%transpose-subr-1 pos1 pos2)
+                      ;; exchange-point-and-mark
+                      (text-editor-set-cursor ed (car pos2))))))))
+         ((> arg 0)
+          (let* ((pos1 (aux -1))
+                 (pos2 (aux arg)))
+            (%transpose-subr-1 pos1 pos2)
+            (text-editor-set-cursor (current-editor) (car pos2))))
+         (else
+          (let* ((pos1 (aux -1))
+                 (ed (current-editor)))
+            (text-editor-set-cursor ed (car pos1))
+            (let ((pos2 (aux arg)))
+              (%transpose-subr-1 pos1 pos2)
+              (text-editor-set-cursor
+               ed (+ (car pos2) (- (cdr pos1) (car pos1))))))))))
+
+    (define-command (transpose-chars arg)
+      ;; GNU Emacs's `transpose-chars' (simple.el:8787): "Interchange
+      ;; characters around point, moving forward one character." At end
+      ;; of line the previous two characters are exchanged, which is
+      ;; the backward step the eolp case makes first.
+      "Interchange characters around point, moving forward one character."
+      (interactive (list (uarg->integer 1 (current-prefix-arg))))
+      (let ((ed (current-editor)))
+        (when (and (= (text-editor-get-cursor ed)
+                      (text-editor-get-end-of-line ed))
+                   (> (text-editor-get-cursor ed) 0))
+          (text-editor-move-cursor ed -1)))
+      (%transpose-subr
+       (lambda (x)
+         (text-editor-move-cursor (current-editor) x))
+       arg))
+
+    (define-command (transpose-words arg)
+      ;; GNU Emacs's `transpose-words' (simple.el:8798), over
+      ;; `transpose-subr' with `forward-word' as its mover - which this
+      ;; tree's `forward-word' cannot do backward, so a negative count
+      ;; moves by `backward-word'.
+      "Interchange words around point, leaving point at end of them."
+      (interactive (list (uarg->integer 1 (current-prefix-arg))))
+      (%transpose-subr
+       (lambda (x)
+         (if (> x 0)
+             (forward-word x)
+             (backward-word (- x))))
+       arg))
+
+    (define-key *default-keymap* (list (list 'ctrl #\o)) open-line-command)
+    (define-key *default-keymap*
+      (list (list 'meta 'ctrl (integer->char 30))) delete-indentation-command)
+    (define-key *default-keymap*
+      (list (list 'meta (integer->char 30))) delete-indentation-command)
+    (define-key *default-keymap* (list (list 'meta #\space)) just-one-space)
+    (define-key *default-keymap*
+      (list (list 'ctrl #\x) (list 'ctrl #\o)) delete-blank-lines)
+    (define-key *default-keymap* (list (list 'meta #\\)) delete-horizontal-space)
+    (define-key *default-keymap* (list (list 'ctrl #\t)) transpose-chars)
+    (define-key *default-keymap* (list (list 'meta #\t)) transpose-words)
 
     ;;----------------------------------------------------------------
     ;; `what-cursor-position' - simple.el:1856, C-x =
@@ -1882,6 +2383,6 @@ non-nil."
        (lambda (c) self-insert-command)
        (lambda () #f)))
 
-    (add-keymap-layer! *default-keymap* self-insert-layer)
+(add-keymap-layer! *default-keymap* self-insert-layer)
 
     ))

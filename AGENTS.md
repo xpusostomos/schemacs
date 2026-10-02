@@ -37,6 +37,24 @@ is actually testing key bindings or something, testing via the REPL
 and calling the commands directly to drive the editor is the preferred
 way to do it.
 
+If you get into a muddle chasing mismatched parenthesis, don't waste too many tokens
+chasing it down. Have a few attempts, then stop and get assistence from the user.
+I dont like seeing AI wasting hours hunting down a parenthesis mismatch that the user
+could easily fix.
+
+If you get into a mess with either bad behavior or super large functions,
+always check yourself... does real emcas have a function this messy or this big?
+Sometimes it does, and it is what it is. But sometimes you make a mess of it
+and try to patch it when you should go back to emacs itself and start afresh.
+
+If Emacs implements an algorithm in several functions, you should too. Don't
+try and mash it into one.
+
+If you find an emacs function that uses a primitive that we don't have.
+Don't try and paper over it by getting around it. It's your job to find that
+primitive, port that primitve and make sure our entire code base uses that
+primitive the same way emacs does.
+
 
 - `tools/syntax-check.scm` — after ANY scripted edit to a machinery
   `.scm` file, run `guile -s tools/syntax-check.scm <files>`: it runs

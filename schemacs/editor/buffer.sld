@@ -101,6 +101,7 @@
    bury-buffer
    current-buffer
    get-buffer
+   *case-fold-search*
    find-buffer-visiting
    get-buffer-create
    generate-new-buffer
@@ -159,6 +160,17 @@
       ;; "whatever the frame says" rather than "no buffer".
       ;;--------------------------------------------------------------
       (make-parameter #f))
+
+    (define *case-fold-search*
+      ;; GNU Emacs's `case-fold-search' (buffer.c:6009): "Non-nil if
+      ;; a case-insensitive search should be done." A nil value makes
+      ;; every search and every case-sensitive-predicate case
+      ;; sensitive; t makes them insensitive. It is buffer-local in
+      ;; Emacs; the buffer-local machinery is this tree's parameters
+      ;; until the value is the buffer's - which is what the other
+      ;; defvars here are too.
+      ;;--------------------------------------------------------------
+      (make-parameter #t))
 
     (define *kill-buffer-query-functions*
       ;; GNU Emacs's `kill-buffer-query-functions': procedures of no

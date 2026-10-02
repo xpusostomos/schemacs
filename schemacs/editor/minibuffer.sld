@@ -60,6 +60,7 @@
     (only (schemacs editor textprop)
           get-text-property put-text-property remove-text-properties)
     (only (schemacs editor buffer)
+          *case-fold-search*
           buffer-default-directory bury-buffer current-buffer get-buffer
           get-buffer-create record-buffer!
           buffer-local-keymap set!buffer-local-keymap set!buffer-default-directory
@@ -74,13 +75,14 @@
           window-min-height)
     ;; `line-number-at-pos' is `editfns.c''s: the default `goto-line'
     ;; offers is the line point is on.
-    (only (schemacs editor editfns) line-number-at-pos)
+    (only (schemacs editor editfns) line-number-at-pos
+          point search-backward search-forward)
     ;; `self-insert-command' is what SPC does in a file-name minibuffer
     ;; (`minibuffer-local-filename-completion-map' below), and
     ;; `with-current-buffer' and the line motion are the ordinary
     ;; commands the minibuffer's own keys fall back on.
     (only (schemacs editor simple) self-insert-command
-       push-mark region-active-p
+       kill-region push-mark region-active-p
        *this-command* *last-command*)
     (only (schemacs editor frame)
           *current-frame* *echo-area-buffer* *echo-area-prompt* *minibuffer*
@@ -173,6 +175,7 @@ file-name-history
 read-number-history
    goto-line
    goto-line-history
+   zap-to-char
    goto-line-read-args
    make<minibuffer>
    minibuffer-complete
@@ -2184,5 +2187,40 @@ read-number-history
     (define-key *default-keymap* (list (list 'meta #\g) #\g) goto-line)
     (define-key *default-keymap* (list (list 'meta #\g) (list 'meta #\g))
       goto-line)
+
+    ;;----------------------------------------------------------------
+    ;; Zap to char - simple.el:6739, and here for the same reason as
+    ;; `goto-line': the character it reads is a minibuffer read, and
+    ;; simple.sld is below this library in the import graph.
+    ;;----------------------------------------------------------------
+
+    (define-command (zap-to-char arg char interactive)
+      ;; GNU Emacs's `zap-to-char' (simple.el:6739): "Kill up to and
+      ;; including ARGth occurrence of CHAR. Case is ignored if
+      ;; `case-fold-search' is non-nil in the current buffer. Goes
+      ;; backward if ARG is negative; error if CHAR not found." The
+      ;; character is read, with `Zap to char: ' as the prompt.
+      ;;
+      ;; The fold rule is Emacs's own: an interactively-given
+      ;; UPPER-case character searches case-sensitively whatever
+      ;; `case-fold-search' says. The `translation-table-for-input'
+      ;; branch of the original is not ported - there is no
+      ;; input-method translation here. Not ported with it:
+      ;; `zap-up-to-char', which stops before the character.
+      ;;--------------------------------------------------------------
+      "Kill up to and including ARGth occurrence of CHAR."
+      (interactive (list (uarg->integer 1 (current-prefix-arg))
+                         (read-char-from-minibuffer "Zap to char: ")
+                         #t))
+      (let ((fold (if (and interactive (char-upper-case? char))
+                      #f
+                      (*case-fold-search*))))
+        (if (< arg 0)
+            (kill-region (point)
+                         (search-backward (string char) #f #f (- arg) fold))
+            (kill-region (point)
+                         (search-forward (string char) #f #f arg fold)))))
+
+    (define-key *default-keymap* (list (list 'meta #\z)) zap-to-char)
 
     ))
