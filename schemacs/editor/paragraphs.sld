@@ -21,12 +21,18 @@
           text-editor-char-count text-editor-get-char-index
           text-editor-get-cursor text-editor-get-start-of-line
           text-editor-get-end-of-line text-editor-set-cursor)
-    (only (schemacs editor editfns) save-excursion forward-line)
+    (only (schemacs editor editfns) goto-char save-excursion forward-line)
     ;; the line ends and the blank-line question are simple.sld's -
     ;; `paragraph-separate''s default is a blank line.
     (only (schemacs editor simple)
-          %blank-line? beginning-of-line end-of-line kill-region)
+          %blank-line? beginning-of-line end-of-line kill-region
+          mark set-mark push-mark)
     (only (schemacs editor frame) current-editor)
+    ;; the mark-active and transient-mark-mode of the extend branch are
+    ;; `buffer.c''s variables, beside `*last-command*' which is
+    ;; simple.sld's (the command loop binds it there)
+    (only (schemacs editor buffer) mark-active transient-mark-mode)
+    (only (schemacs editor simple) *last-command*)
     (only (schemacs editor command) current-prefix-arg define-command
           uarg->integer)
     (only (schemacs editor keymap) define-key *default-keymap*)
@@ -39,6 +45,7 @@
    backward-paragraph
    kill-paragraph
    backward-kill-paragraph
+   mark-paragraph
    )
 
   (begin
@@ -183,10 +190,50 @@
       (interactive (list (uarg->integer 1 (current-prefix-arg))))
       (kill-paragraph (- arg)))
 
+    (define-command (mark-paragraph arg allow-extend)
+      ;; GNU Emacs's `mark-paragraph' (paragraphs.el:382): "Put point at
+      ;; beginning of this paragraph, mark at end." With ARG, mark ARG
+      ;; paragraphs; repeated, or with the mark active, extend by ARG
+      ;; more. The two parameters are the C's `"p\np"' interactive
+      ;; spec's - the count, and ALLOW-EXTEND, which interactively is
+      ;; true. The extend branch works on the mark, which here is the
+      ;; engine's zero-based index - the position `mark' answers - so
+      ;; the conversion to `goto-char''s one-based positions happens
+      ;; once.
+      "Put point at beginning of this paragraph, mark at end.
+The paragraph marked is the one that contains point or follows point.
+
+With argument ARG, puts mark at end of a following paragraph, so that
+the number of paragraphs marked equals ARG.
+
+If ARG is negative, point is put at end of this paragraph, mark is put
+at beginning of this or a previous paragraph.
+
+Interactively (or if ALLOW-EXTEND is non-nil), if this command is
+repeated or (in Transient Mark mode) if the mark is active,
+it marks the next ARG paragraphs after the ones already marked."
+      (interactive (list (uarg->integer 1 (current-prefix-arg)) #t))
+      (if (= arg 0)
+          (error "Cannot mark zero paragraphs"))
+      (if (and allow-extend
+               (or (eq? (*last-command*) mark-paragraph)
+                   (and (transient-mark-mode) (mark-active))))
+          ;; extend: the mark is where the last one ended
+          (let ((here (mark #t)))
+            (goto-char (+ 1 here))
+            (forward-paragraph arg)
+            (set-mark (text-editor-get-cursor (current-editor))))
+          (begin
+            (forward-paragraph arg)
+            (push-mark #f #t #t)
+            (backward-paragraph arg)))
+      #f)
+
     ;; The keys GNU Emacs binds them to, beside the commands as the
     ;; other libraries state theirs.
     (define-key *default-keymap* (list (list 'meta #\k)) kill-paragraph)
     (define-key *default-keymap* (list (list 'meta 'ctrl #\k))
       backward-kill-paragraph)
+    (define-key *default-keymap* (list (list 'meta #\h)) mark-paragraph)
 
     ))

@@ -62,6 +62,14 @@ Don't try and paper over it by getting around it. It's your job to find that
 primitive, port that primitve and make sure our entire code base uses that
 primitive the same way emacs does.
 
+Of course, we don't want to fully port code that exists in guile itself or
+a guile library we can download. In that case the answer is to integrate core
+guile functions and/or find the right library. When I say port every primitive
+I mean in functionality, occasionally that porting might mean substiuting 
+functions that already exist in scheme or guile.
+
+You will most likely find full emacs sources at @../emacs/
+
 
 - `tools/syntax-check.scm` — after ANY scripted edit to a machinery
   `.scm` file, run `guile -s tools/syntax-check.scm <files>`: it runs
@@ -241,6 +249,131 @@ in `../Hyprscheme` but was missing here; it is restored.
 Name note: the capital `B` is right. `lisp/buff-menu.el` names everything
 `Buffer-menu-*`, unlike the lowercase prefix nearly every other Emacs file uses.
 Our library mirrors it on purpose.
+
+
+# Handoff — the replace, quoted-insert and file-command pass (2026-10-02)
+
+## What landed
+
+BASIC-FUNC.md groups 11-15, per the plan in
+`/home/chris/.claude/plans/buzzing-napping-summit.md`:
+
+- **`schemacs/editor/search.sld`** (NEW, mirrors search.c): `string-match`,
+  `looking-at`, `looking-back`, `re-search-forward/backward`,
+  `search-forward/backward` (MOVED here from editfns.sld - they are
+  search.c's DEFUNs; sole other importer is minibuffer.sld's
+  `zap-to-char`), `match-data`/`set-match-data`/`match-beginning`/
+  `match-end`/`match-data--translate`, `replace-match` (string and
+  buffer paths, case transfer per search.c:2406-2510), `regexp-quote`,
+  `match-string`, `save-match-data` (a macro). The REGEXP ENGINE is
+  Guile's - `(ice-9 regex)`, glibc ERE - over which `%emacs-ere'
+  translates: Emacs's `\( \) \| \{n,m\} \? \+` spellings swap to ERE's,
+  ERE's specials escape, `\w \b \< \> \1-\9 [[:digit:]]` pass through
+  (glibc has them), `\sX \Sx \cX \C \= \_ \` \'` are rejected with an
+  error. Named deviations: leftmost-LONGEST (POSIX) vs leftmost-FIRST
+  (Emacs); shy groups renumber. Note `make-regexp`/`regexp-exec`/the
+  `regexp/*' flags are Guile CORE names, NOT `(ice-9 regex)''s - that
+  library only exports the `match:*' accessors and the sugar.
+- **`schemacs/editor/replace.sld`** (NEW, mirrors replace.el): the full
+  `perform-replace' - every answer y/n/Y/N/!/./,/q/RET/DEL/^/u/U/C-r/
+  C-w/e/E/C-l/C-v/M-v/C-g plus the default pushback - the stack, the
+  highlight via `*search-highlight*' (the renderer's channel, which
+  draws the current match with the `isearch' face and the others with
+  `lazy-highlight' already), `query-replace-map' as a real keymap of
+  ANSWER SYMBOLS, the four commands (M-% bound, C-M-%, replace-string
+  and replace-regexp M-x-only). The whole loop is in a `dynamic-wind'
+  (the C's unwind-protect) so C-g clears the highlight.
+- **`schemacs/editor/indent.sld`** (NEW, the start of indent.c):
+  `current-column' over `current-line-display-column' (disp-table's).
+- **keyboard.sld**: `quoted-insert' (C-q) + `read-quoted-char' (octal
+  input, radix parameter, first-C-g-is-code-7, later C-g quits,
+  non-digit terminators pushed back raw) + `key-path->char-code' (the
+  decode's inverse). They are HERE, not in simple.sld, for the import
+  graph (simple is imported BY keyboard).
+- **files.sld**: `insert-file-contents' (fileio.c's, visit/replace
+  semantics - the visit clears the modified flag; find-file-noselect's
+  inline reading was NOT refactored onto it yet), `insert-file'
+  (C-x i), `find-file-read-only' (C-x C-r), `find-file-other-window'
+  (C-x 4 f - a THREE-key key path, which keymap.sld handles without a
+  submap), `find-alternate-file' (C-x C-v, the " **lose**" dance),
+  `revert-buffer' + `revert-buffer--default' (M-x; the buffer-local
+  `revert-buffer-function' is consulted, exactly Emacs's dispatch),
+  `not-modified' (M-~), `files--message'.
+- **buffer.sld**: `erase-buffer' (buffer.c's - the engine calls go
+  direct, editfns cannot be imported here), `buffer-fill-column'
+  accessors (default 70).
+- **minibuffer.sld**: `set-fill-column' (C-x f; prompts, so it is here
+  beside goto-line), the history record accessors are now EXPORTED
+  (`make<history>' etc. - replace.sld owns its own
+  `*query-replace-history*').
+- **casefiddle.sld**: the string/char case functions `upcase',
+  `downcase', `capitalize', `upcase-initials' (casefiddle.c's, over
+  `casify-object') - `replace-match''s case transfer casifies with
+  them.
+- **paragraphs.sld**: `mark-paragraph' (M-h) with the extend branch
+  (`*last-command*' is simple.sld's, not keyboard's).
+- **buff-menu.sld**: the local `revert-buffer' command is GONE. `g'
+  binds the global `revert-buffer', and `list-buffers-noselect'
+  installs the buffer-local `revert-buffer-function' closure (refresh
+  + redraw) - Emacs's shape (special-mode-map inherits `g' to the
+  global command; tabulated-list-mode sets the buffer-local function).
+- **simple.sld**: `read-only-mode' now at C-x C-q (files.el:9330;
+  C-x q is kbd-macro-query's, not ported).
+- Wiring: build.scm, Makefile, both platform files (`(only (schemacs
+  editor replace))' for the M-% bindings), tools/run-suites.py gained
+  search-tests.scm and replace-tests.scm.
+
+## Tests
+
+- search-tests.scm: 37 (translation, match data conventions - one-based
+  in buffers, zero-based in strings - case transfer, both replace-match
+  paths, the error strings).
+- replace-tests.scm: 14 (the answer map, the caret descr, the automatic
+  path: counts, case, delimited, region limits). The QUERY loop is
+  pty-tested; it draws.
+- ncurses-editor-tests.scm: 229 - the read-only-mode tests press the
+  NEW C-x C-q chord.
+- pty-check.py: 11 new checks (query-replace, query-replace-quit,
+  replace-string, quoted-insert, insert-file, find-file-read-only,
+  find-alternate-file, revert-buffer, not-modified, set-fill-column),
+  each seen failing before its fix.
+
+## Bugs this pass fixed or hit
+
+- **Elisp-nil vs Scheme-'() truthiness, again**: query-replace's
+  `(defaults ...)' test fired on the EMPTY list and `(caar '())' died
+  - `'()' is true in Scheme. Now `(pair? defaults)' everywhere a C test
+  would read nil.
+- **`format' is Guile's**: `~a', not `%s'/`%d' - a `%s' prints itself.
+  The compile warnings caught mine.
+- **`string' the constructor vs `string' the parameter**: search.sld's
+  replace-match took STRING as a parameter and the substitution walks
+  called `(string c)' - the PARAMETER, called as a procedure. The walks
+  build strings with `make-string' now.
+- **define-command vs define**: find-alternate-file was written as a
+  plain define, so the key dispatch fed it the RAW PREFIX as its
+  filename ("Wrong number of arguments" in the pty, silently wrong
+  otherwise). Registered commands are what the dispatcher's
+  interactive machinery finds.
+- **push-mark's three optional args**: insert-file-1 gave it
+  `(location #t #t)' - the #t NOMSG suppressed "Mark set". The C's call
+  is one argument.
+- **zerop** is Elisp; `(= arg 0)` here.
+- The REUSE extension of `match-data' splices with `list-copy' (the
+  first version's `last-pair' trick shared structure).
+
+## Still open in these groups
+
+- `fill-paragraph' (M-q) and the whole of fill.el - deferred, as Chris
+  decided; needs its own pass.
+- The regexp variants' remaining surface: `map-query-replace-regexp',
+  `read-regexp' (the C-y/M-s suggestion machinery),
+  `keep-lines'/`flush-lines'/`occur' - the whole second half of
+  replace.el.
+- `query-replace-descr' shows control chars as caret TEXT, not the
+  display-property form; the from-to separator history entry is out.
+- find-file-noselect still reads files inline; folding it onto
+  `insert-file-contents' is a small refactor left undone.
 
 ## Driving a running editor: the REPL back door
 

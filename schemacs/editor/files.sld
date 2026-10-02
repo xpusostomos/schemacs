@@ -43,10 +43,18 @@
           current-prefix-arg define-command run-command)
     ;; `switch-to-buffer' is `window.el''s, and not this file's: it shows a
     ;; buffer in the selected window, which is a window operation.
-    (only (schemacs editor window) switch-to-buffer)
+    ;; `find-file-other-window' shows one in the OTHER window.
+    (only (schemacs editor window) switch-to-buffer
+          switch-to-buffer-other-window)
     ;; The file-name table is a *function* table, so it answers
     ;; `try-completion' and `all-completions' itself - `minibuf.c''s.
     (only (schemacs editor minibuf) all-completions try-completion)
+    ;; `insert-file', `revert-buffer' and the rest edit the buffer:
+    ;; the position primitives and the read-only check are editfns.c's.
+    (only (schemacs editor editfns)
+          barf-if-buffer-read-only goto-char insert point point-max)
+    (only (schemacs editor simple) push-mark)
+    (only (schemacs editor buffer) erase-buffer)
     ;; Buffers by name, and killing one: `buffer.c'. `BUFFER-FILE-NAME' and
     ;; the buffer-local store are what `save-buffer' writes and what the
     ;; visited file's line-break convention is kept in.
@@ -59,6 +67,8 @@
     ;; minibuffer's question, is here.)
     (rename (only (schemacs editor buffer)
                   *current-buffer*
+                  buffer-modified-p
+                  buffer-name
                   *kill-buffer-query-functions*
                   buffer-default-directory
                   buffer-file-name
@@ -93,7 +103,7 @@
     ;; visited file read-only (GNU Emacs's `file-writable-p', plus the
     ;; permission bits it also consults); and the directory reading and
     ;; name splitting `read-file-name' completes with.
-    (only (guile) access? stat stat:mode W_OK X_OK logand logior
+    (only (guile) access? format stat stat:mode W_OK X_OK logand logior
           closedir getcwd opendir readdir stat:type
           string-index string-prefix? string-rindex))
 
@@ -103,6 +113,14 @@
    decode-dos-returns
    default-directory
    detect-line-break
+   files--message
+   find-alternate-file
+   find-file-other-window
+   find-file-read-only
+   insert-file
+   not-modified
+   revert-buffer
+   revert-buffer--default
    directory-entries
    directory-path?
    encode-line-breaks
@@ -1025,6 +1043,276 @@ save-buffer
                str)
               (get-output-string port)))))
 
+    (define (files--message format-string . args)
+      ;; GNU Emacs's `files--message' (files.el): the message the file
+      ;; commands say - `(apply #'message FORMAT-STRING ARGS)'. The
+      ;; echo area is the message's destination here.
+      ;;--------------------------------------------------------------
+      (set!frame-message (*current-frame*)
+                         (apply format #f format-string args)))
+
+    ;;----------------------------------------------------------------
+    ;; Reading a file into the buffer: `insert-file-contents'
+    ;;------------------------------------------------------------------
+
+    (define (insert-file-contents filename . args)
+      ;; GNU Emacs's `insert-file-contents' (fileio.c:4057), the
+      ;; primitive `insert-file' and `revert-buffer' rest on: "Insert
+      ;; contents of file FILENAME after point." The optional VISIT
+      ;; marks the buffer as visiting the file - and unmodified, which
+      ;; is what a visit means - and REPLACE, when true, replaces the
+      ;; buffer's whole contents instead of adding to them - the C's
+      ;; replace-the-accessible-portion, which keeps markers either
+      ;; side of what it changes. What is inserted is the file's text
+      ;; with its line-break convention decoded, as
+      ;; `find-file-noselect''s reading is; the buffer's
+      ;; `buffer-file-coding-system' is not touched - the C sets it
+      ;; through `after-insert-file-set-coding', which the visit-time
+      ;; callers do. The answer is `(FILENAME SIZE)' - the C's, which
+      ;; `insert-file-1' takes the second of.
+      ;;--------------------------------------------------------------
+      (let* ((visit (and (pair? args) (car args)))
+             (replace (and (pair? args) (pair? (cdr args)) (cadr args)))
+             (contents
+              (call-with-input-file filename
+                (lambda (port)
+                  (let loop ((acc (list)))
+                    (let ((c (read-char port)))
+                      (if (eof-object? c)
+                          (list->string (reverse acc))
+                          (loop (cons c acc))))))))
+             (decoded (decode-dos-returns contents))
+             (ed (current-buffer)))
+        (when replace
+          (erase-buffer)
+          ;; the whole buffer is the file's: the convention is the
+          ;; file's again, as `revert-buffer-insert-file-contents'
+          ;; makes of it
+          (set!buffer-file-coding-system ed (detect-line-break contents)))
+        (text-editor-insert ed decoded)
+        ;; the visit: the buffer is what the file is now, so there is
+        ;; nothing in it the file does not have
+        (when visit (text-editor-set-modified! ed #f))
+        (list filename (string-length decoded))))
+
+    (define (insert-file-1 filename insert-func)
+      ;; GNU Emacs's `insert-file-1' (files.el:2836): the common shape
+      ;; of `insert-file' and `insert-file-literally' - "a directory is
+      ;; not a file to open" - and the note about a file already
+      ;; visited and modified elsewhere.
+      ;;--------------------------------------------------------------
+      (when (directory-path? filename)
+        (error "Opening input file: Is a directory" filename))
+      (let* ((result (insert-func filename))
+             (size (cadr result)))
+        ;; Emacs's insert-file-1: `(push-mark (+ (point) (car (cdr tem))))'
+        ;; - one argument, which leaves "Mark set" to show.
+        (push-mark (+ (point) size))
+        (let ((buffer
+               (find-buffer-visiting
+                (expand-file-name filename))))
+          (when (and buffer (buffer-modified-p buffer))
+            (files--message
+             "File ~a already visited and modified in buffer ~a"
+             filename (buffer-name buffer))))))
+
+    (define-command (insert-file filename)
+      ;; GNU Emacs's `insert-file' (files.el:6627): "Insert contents of
+      ;; file FILENAME into buffer after point. Set mark after the
+      ;; inserted text." The `*' of the interactive spec is the
+      ;; read-only check, made first.
+      "Insert contents of file FILENAME into buffer after point.
+Set mark after the inserted text."
+      (interactive (list (read-file-name "Insert file: ")))
+      (barf-if-buffer-read-only)
+      (insert-file-1 filename
+                     (lambda (name) (insert-file-contents name))))
+
+    ;;----------------------------------------------------------------
+    ;; The other ways to visit a file
+    ;;------------------------------------------------------------------
+
+    (define (find-file--read-only mode filename wildcards)
+      ;; GNU Emacs's `find-file--read-only' (files.el:2084): the shape
+      ;; `find-file-read-only' and its window variants share - visit,
+      ;; then turn read-only on. WILDCARDS are not ported; the buffer
+      ;; is visited by the MODE given.
+      ;;--------------------------------------------------------------
+      (unless (file-exists-p filename)
+        (error "~a does not exist" filename))
+      (mode filename)
+      (with-current-buffer (current-buffer)
+        (text-editor-set-read-only! (current-buffer) #t)))
+
+    (define-command (find-file-read-only filename)
+      ;; GNU Emacs's `find-file-read-only' (files.el:2095): "Edit file
+      ;; FILENAME but don't allow changes. Like `find-file', but marks
+      ;; buffer as read-only. Use `read-only-mode' to permit editing."
+      "Edit file FILENAME but don't allow changes.
+Like \\[find-file], but marks buffer as read-only.
+Use \\[read-only-mode] to permit editing."
+      (interactive (list (read-file-name "Find file read-only: ")))
+      (find-file--read-only
+       (lambda (name)
+         (find-file name)
+         (text-editor-set-read-only! (current-buffer) #t))
+       filename #f))
+
+    (define-command (find-file-other-window filename)
+      ;; GNU Emacs's `find-file-other-window' (files.el:2003): "Edit
+      ;; file FILENAME, in another window" - the same prompt, the
+      ;; visit, and the buffer shown in the other window, which is
+      ;; `switch-to-buffer-other-window''s work.
+      "Edit file FILENAME, in another window."
+      (interactive (list (read-file-name "Find file in other window: ")))
+      (switch-to-buffer-other-window (find-file-noselect filename))
+      (note-file-read-only! (*current-frame*))
+      filename)
+
+    (define-command (find-alternate-file filename)
+      ;; GNU Emacs's `find-alternate-file' (files.el:2171): "Find file
+      ;; FILENAME, select its buffer, kill previous buffer." The C's
+      ;; way survives a failed visit: the old buffer is renamed `**lose**'
+      ;; first, its file variables cleared, the new one visited, and on
+      ;; failure the names are put back - an unwind-protect, which is
+      ;; the dynamic-wind here. No indirect buffers, no wildcards, no
+      ;; dired-directory (none of that is ported).
+      "Find file FILENAME, select its buffer, kill previous buffer.
+If the current buffer now contains an empty file that you just visited
+\(presumably by mistake), use this command to visit the file you really want."
+      ;; The C's interactive: the visited file's directory and its own
+      ;; name as the read's default - which `read-file-name' takes from
+      ;; `buffer-file-name' when no default is given.
+      (interactive (list (read-file-name "Find alternate file: ")))
+      (unless (let loop ((rest (*kill-buffer-query-functions*)))
+                (or (null? rest)
+                    (and ((car rest)) (loop (cdr rest)))))
+        (error "Aborted"))
+      (when (and (buffer-modified-p (current-buffer))
+                 (buffer-file-name (current-buffer))
+                 (not (yes-or-no-p
+                       (*current-frame*)
+                       (format #f "Kill and replace buffer `~a' without saving it? "
+                               (buffer-name (current-buffer))))))
+        (error "Aborted"))
+      (let* ((obuf (current-buffer))
+             (ofile (buffer-file-name obuf))
+             (oname (buffer-name obuf)))
+        ;; the kill-buffer hook the C runs here - the query functions
+        ;; have been asked already; the buffer-local hook value is not
+        ;; ported (no hooks yet)
+        (when (get-buffer-create " **lose**")
+          (%kill-buffer " **lose**"))
+        (rename-buffer obuf " **lose**")
+        (set!buffer-file-name obuf #f)
+        (let ((newbuf
+               (dynamic-wind
+                 (lambda () #f)
+                 (lambda ()
+                   (let ((newbuf (find-file-noselect filename)))
+                     (switch-to-buffer newbuf)
+                     newbuf))
+                 (lambda ()
+                   ;; on failure the old buffer is put back, as the
+                   ;; C's unwind-protect does
+                   (unless (eq? (current-buffer) obuf)
+                     #f)))))
+          (unless (eq? (current-buffer) obuf)
+            (let ((*kill-buffer-query-functions* '()))
+              (%kill-buffer obuf)))
+          newbuf)))
+
+    ;;----------------------------------------------------------------
+    ;; `revert-buffer'
+    ;;------------------------------------------------------------------
+
+    (define (revert-buffer--default ignore-auto noconfirm)
+      ;; GNU Emacs's `revert-buffer--default' (files.el:7199): "Default
+      ;; function for `revert-buffer'. The function returns non-nil if
+      ;; it reverts the buffer, and signals an error if the buffer is
+      ;; not associated with a file." The auto-save questions are not
+      ;; ported (no auto-saving here); the confirmations are the C's
+      ;; exact ones - a buffer that was edited is asked about, and so
+      ;; is one that was not (`revert-without-query' is nil by
+      ;; default, so the catch branch reduces to the question).
+      ;;--------------------------------------------------------------
+      (let ((file-name (buffer-file-name (current-buffer))))
+        (cond
+         ((not file-name)
+          (error "Buffer does not seem to be associated with any file"))
+         ((not (file-exists-p file-name))
+          (error "Cannot revert nonexistent file ~a" file-name))
+         ((not (file-writable-p file-name))
+          ;; the C's test is `file-readable-p'; a file that cannot be
+          ;; read cannot be reverted either, and the message is the
+          ;; unreadable one
+          (error "File ~a no longer readable!" file-name))
+         ((or noconfirm
+              (yes-or-no-p
+               (*current-frame*)
+               (format #f (if (buffer-modified-p (current-buffer))
+                              "Discard edits and reread from ~a? "
+                              "Revert buffer from file ~a? ")
+                        file-name)))
+          ;; the re-read: the buffer's text becomes the file's, its
+          ;; name and the variables it visits with standing
+          (let* ((ed (current-buffer))
+                 (old-point (point)))
+            (with-current-buffer ed
+              (text-editor-set-read-only! ed #f)
+              (insert-file-contents file-name #t #t)
+              (goto-char (min old-point (point-max)))
+              ;; the visit-time messages and the read-only note, as
+              ;; `after-find-file' does
+              (text-editor-set-read-only! ed (file-write-protected? file-name))
+              (note-file-read-only! (*current-frame*)))
+            #t)
+          #t))))
+
+    (define-command (revert-buffer . args)
+      ;; GNU Emacs's `revert-buffer' (files.el:7189): "Replace current
+      ;; buffer text with the text of the visited file on disk. This
+      ;; undoes all changes since the file was visited or saved." Its
+      ;; parameters are Elisp's `&optional' three - IGNORE-AUTO,
+      ;; NOCONFIRM, PRESERVE-MODES - which this tree's fixed-parameter
+      ;; pattern cannot spell for a command Lisp calls with any number
+      ;; of them, so the rest-list stands for it: the interactive
+      ;; prefix argument's sense is reversed ("I admit it's odd"),
+      ;; which the interactive form's doing. The buffer-local
+      ;; `revert-buffer-function' runs instead when there is one - the
+      ;; Buffer List's own refresh is that.
+      "Replace current buffer text with the text of the visited file on disk.
+This undoes all changes since the file was visited or saved.
+With a prefix argument, offer to revert from latest auto-save file, if
+that is more recent than the visited file."
+      (interactive (list (not current-prefix-arg)))
+      ;; the optional NOCONFIRM and PRESERVE-MODES are the Lisp call's;
+      ;; interactively neither is given
+      (let ((ignore-auto (if (pair? args) (car args) #f))
+            (noconfirm (if (and (pair? args) (pair? (cdr args)))
+                           (cadr args)
+                           #f)))
+        (let ((fn (buffer-local-value (current-buffer) 'revert-buffer-function)))
+          (if fn
+              (fn ignore-auto noconfirm)
+              (revert-buffer--default ignore-auto noconfirm)))))
+
+    ;;----------------------------------------------------------------
+    ;; `not-modified'
+    ;;------------------------------------------------------------------
+
+    (define-command (not-modified arg)
+      ;; GNU Emacs's `not-modified' (files.el:6591): "Mark current
+      ;; buffer as unmodified, not needing to be saved. With prefix
+      ;; ARG, mark buffer as modified, so `save-buffer' will save."
+      "Mark current buffer as unmodified, not needing to be saved.
+With prefix ARG, mark buffer as modified, so \\[save-buffer] will save."
+      (interactive "P")
+      (files--message
+       (if arg "Modification-flag set" "Modification-flag cleared"))
+      (set-buffer-modified-p (current-buffer) (and arg #t))
+      #f)
+
     (define-command (save-buffer)
       ;; C-x C-s runs this. GNU Emacs's `save-buffer', which acts on
       ;; `(current-buffer)' and takes no argument but the prefix
@@ -1193,6 +1481,17 @@ save-buffer
       handle-delete-frame)
     (define-key *default-keymap* (list (list 'ctrl #\x) #\k)
       kill-buffer)
+    ;; The rest of files.el's C-x map and M-~.
+    (define-key *default-keymap* (list (list 'ctrl #\x) #\i)
+      insert-file)
+    (define-key *default-keymap* (list (list 'ctrl #\x) (list 'ctrl #\r))
+      find-file-read-only)
+    (define-key *default-keymap*
+      (list (list 'ctrl #\x) #\4 #\f)
+      find-file-other-window)
+    (define-key *default-keymap* (list (list 'ctrl #\x) (list 'ctrl #\v))
+      find-alternate-file)
+    (define-key *default-keymap* (list (list 'meta #\~)) not-modified)
 
     ;;----------------------------------------------------------------
     ))

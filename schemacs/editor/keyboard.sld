@@ -38,6 +38,7 @@
     (only (guile) format string-index)
     (prefix (schemacs keymap) km:)
     (only (schemacs editor engine)
+          new-text-editor
           text-editor-copy-string
           text-editor-deactivate-mark set!text-editor-deactivate-mark!)
     (only (schemacs editor command)
@@ -59,7 +60,8 @@
           frame-quit-cont run-pre-command-hook!
           set!frame-keymap-state set!frame-message
           set!frame-message-expiry
-          set!frame-quit-cont)
+          set!frame-quit-cont
+          *echo-area-buffer* *echo-area-prompt*)
     ;; The global map the lookup falls back on, and the local map a
     ;; minibuffer or a mode binds to have its own keys.
     (only (schemacs editor keymap)
@@ -77,6 +79,11 @@
           deactivate-mark clear-prefix! pending-uarg place-undo-boundary!
           prefix-echo-pending? show-prefix-echo!
           undo undo-redo update-prefix!)
+    (only (schemacs editor editfns)
+          barf-if-buffer-read-only insert)
+    ;; `uarg->integer' is `callint.c''s, in the command library the
+    ;; commands' interactive specs come from.
+    (only (schemacs editor command) uarg->integer current-prefix-arg)
     ;; The primary selection the command loop keeps updated while the
     ;; region stays active - the call `keyboard.c:1639' makes.
     (only (schemacs editor select) gui-set-selection
@@ -118,6 +125,9 @@
    dispatch-input-event
    event-loop
    exit-recursive-edit
+   key-path->char-code
+   quoted-insert
+   read-quoted-char
    read-key-event
    recursive-edit
    report-command-error!
@@ -737,6 +747,138 @@
               (exit value)
               (error "Not in a recursive edit"))))))
 
+    ;;----------------------------------------------------------------
+    ;; Quoted insertion
+    ;;
+    ;; GNU Emacs's `quoted-insert' (C-q) and the `read-quoted-char' it
+    ;; reads with are simple.el's, but they are here and not there for
+    ;; the import graph's sake: they read a KEY, and reading a key is
+    ;; `read-key-event''s, which simple.sld cannot import - this
+    ;; library imports simple, not the other way around. It is the
+    ;; same wall `abort-recursive-edit' is the other side of.
+    ;;------------------------------------------------------------------
+
+    (define *read-quoted-char-radix*
+      ;; GNU Emacs's `read-quoted-char-radix' (simple.el): "Radix for
+      ;; `quoted-insert' and other uses of `read-quoted-char'.
+      ;; Supported radix values are 8, 10 and 16."
+      ;;--------------------------------------------------------------
+      (make-parameter 8))
+
+    (define (key-path->char-code path)
+      ;; The key decode's inverse: the CHARACTER CODE a single-key path
+      ;; stands for, or #f when the path is not one key - which is what
+      ;; `read-quoted-char''s translation (`local-function-key-map''s,
+      ;; which maps the TAB key to control-I and friends) comes to. A
+      ;; control-modified letter is its ASCII control code; a plain
+      ;; character is itself; a meta-modified one is the C's
+      ;; 128-set form; a named key (an arrow, a function key) is not a
+      ;; character at all.
+      ;;--------------------------------------------------------------
+      (cond
+       ((and (= 1 (length path)) (char? (car path)))
+        (char->integer (car path)))
+       ((and (= 2 (length path)) (eq? 'ctrl (car path)) (char? (cadr path)))
+        (let ((c (cadr path)))
+          (cond
+           ;; the lowercase letters the decoder spells a control with
+           ;; - the terminal's byte 7 is `\(ctrl #\g)' - and the
+           ;; uppercase spellings, which run @ through _
+           ((and (char<=? #\a c #\z))
+            (- (char->integer c) 96))
+           ((and (char<=? #\@ c #\_))
+            (- (char->integer c) 64))
+           (else #f))))
+       ((and (= 2 (length path)) (eq? 'meta (car path)) (char? (cadr path)))
+        (+ 128 (char->integer (cadr path))))
+       (else #f)))
+
+    (define (read-quoted-char . args)
+      ;; GNU Emacs's `read-quoted-char' (simple.el:986): "Like
+      ;; `read-char', but do not allow quitting. Also, if the first
+      ;; character read is an octal digit, we read any number of octal
+      ;; digits and return the specified character code. Any nondigit
+      ;; terminates the sequence. If the terminator is RET, it is
+      ;; discarded; any other terminator is used itself as input."
+      ;; The optional PROMPT is what the echo area shows with a `-'
+      ;; after it. Quitting is inhibited for the FIRST character only -
+      ;; which is why C-q C-g inserts a ^G - and a C-g later in the
+      ;; digits quits, as the C's `inhibit-quit' binding says.
+      ;;--------------------------------------------------------------
+      (let* ((prompt (if (pair? args) (car args) #f))
+             (frame (*current-frame*))
+             (radix (*read-quoted-char-radix*))
+             (done #f)
+             (first #t)
+             (code 0))
+        (parameterize ((*echo-area-buffer* (new-text-editor))
+                       (*echo-area-prompt*
+                        (if prompt (string-append prompt "-") "")))
+          (render! frame)
+          (let loop ()
+            (if done
+                code
+                (let* ((ev (read-key-event -1))
+                       (path (key-event->keymap-path (current-display) ev))
+                       (code-read (key-path->char-code path)))
+                  (cond
+                   ;; a C-g after the first character quits, as the
+                   ;; C's quitting is enabled once `first' is past
+                   ((and (not first)
+                         (= 2 (length path))
+                         (eq? 'ctrl (car path))
+                         (char=? (cadr path) #\g))
+                    (signal-quit))
+                   ;; a digit of the radix: accumulate, and echo the
+                   ;; digit after the prompt
+                   ((and code-read
+                         (or (char-numeric? (integer->char code-read))
+                             (and (= 16 radix)
+                                  (char<=? #\a (integer->char code-read) #\f))
+                             (and (<= 10 radix)
+                                  (char<=? #\a (integer->char code-read)
+                                           (integer->char (+ 87 (- radix 10)))))))
+                    ;; ^ Elisp's second branch is the letters a-F up
+                    ;; to the radix, for 16: `(and (<= ?a (downcase
+                    ;; translated)) (< (downcase translated) (+ ?a
+                    ;; -10 (min 36 read-quoted-char-radix))))'
+                    (set! code (+ (* code radix)
+                                  (- code-read (char->integer #\0))))
+                    (set! first #f)
+                    (parameterize ((*echo-area-prompt*
+                                    (string-append
+                                     (if prompt prompt "")
+                                     (if first "" " ")
+                                     (string (integer->char code-read)))))
+                      (render! frame))
+                    (loop))
+                   ;; RET after the first digit terminates and is
+                   ;; discarded; before that it is the character
+                   ((and (not first)
+                         (= 2 (length path))
+                         (eq? 'ctrl (car path))
+                         (char=? (cadr path) #\m))
+                    (set! done #t)
+                    (loop))
+                   ;; any other terminator after the first digit is
+                   ;; used itself as input: pushed back for the
+                   ;; caller, and its code read
+                   ((not first)
+                    (*unread-command-events* (cons ev (*unread-command-events*)))
+                    (set! done #t)
+                    (loop))
+                   ;; the first character, not a digit: it is the
+                   ;; answer - quitting inhibited, so a C-g is code 7
+                   ((and code-read)
+                    (set! code code-read)
+                    (set! done #t)
+                    (loop))
+                   (else
+                    ;; a key that is not a character at all (an
+                    ;; arrow, a frame resize): ask again, as the C's
+                    ;; `(cond ((null translated)))' does
+                    (loop)))))))))
+
     (define-command (abort-recursive-edit)
       ;; Leave the innermost recursive edit and signal quit, so the
       ;; command that asked the question is abandoned: GNU Emacs's
@@ -749,6 +891,26 @@
       (interactive)
       (exit-recursive-edit signal-quit))
 
+    (define-command (quoted-insert arg)
+      ;; GNU Emacs's `quoted-insert' (simple.el:1047): "Read next input
+      ;; character and insert it. This is useful for inserting control
+      ;; characters. With argument, insert ARG copies of the
+      ;; character." The `*' of its interactive spec is the read-only
+      ;; check, made first; the overwrite-mode branches are not ported
+      ;; (no overwrite mode here).
+      "Read next input character and insert it.
+This is useful for inserting control characters.
+With argument, insert ARG copies of the character."
+      (interactive (list (uarg->integer 1 (current-prefix-arg))))
+      (barf-if-buffer-read-only)
+      (let* ((code (read-quoted-char))
+             (char (integer->char code)))
+        (let loop ((left arg))
+          (when (> left 0)
+            (insert char)
+            (loop (- left 1))))
+        #f))
+
     (define (event-loop frame)
       ;; The outermost command loop: it runs until the editor is quit.
       ;;--------------------------------------------------------------
@@ -759,5 +921,7 @@
          (lambda (k)
            (set!frame-quit-cont frame k)
            (command-loop frame)))))
+
+    (define-key *default-keymap* (list (list 'ctrl #\q)) quoted-insert)
 
     ))

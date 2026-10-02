@@ -25,7 +25,7 @@
     (only (schemacs editor buffer) current-buffer set-buffer
           *case-fold-search*)
     (only (schemacs editor engine)
-          copy-marker marker-position set-marker!
+          copy-marker marker-position marker-type? set-marker!
           text-editor-get-start-of-line text-editor-get-end-of-line
           text-editor-get-char-index text-editor-copy-string
           text-editor-search-forward text-editor-search-backward
@@ -73,8 +73,6 @@ point-marker
    point-min
    point
    save-excursion
-   search-forward
-   search-backward
    region-beginning
    region-end
    region-limit
@@ -187,76 +185,15 @@ point-marker
 
     (define (goto-char position)
       ;; GNU Emacs's `goto-char' (editfns.c): "Set point to POSITION,
-      ;; a number or marker."
+      ;; a number or marker." A marker's position is the engine's
+      ;; zero-based index; the number is one-based, as every position
+      ;; answer of this library is.
       ;;--------------------------------------------------------------
-      (text-editor-set-cursor (current-editor) (- position 1)))
-
-    (define (search-forward string . args)
-      ;; GNU Emacs's `search-forward' (`search.c', which the engine
-      ;; carries): "Search forward from point for STRING. Set point to
-      ;; the end of the occurrence found, and return point." BOUND
-      ;; limits the search, NOERROR keeps a failed search from
-      ;; signalling, COUNT - which is what `zap-to-char''s ARGth
-      ;; occurrence passes - finds the COUNTth match. The case folding
-      ;; is `case-fold-search''s, which the caller may override: the
-      ;; optional fourth argument is this tree's, for the
-      ;; upper-case-char rule `zap-to-char' applies.
-      ;;--------------------------------------------------------------
-      (let* ((ed (current-editor))
-             (bound (if (pair? args) (car args) #f))
-             (noerror (and (pair? args) (pair? (cdr args)) (cadr args)))
-             (count (if (and (pair? args) (pair? (cdr args))
-                             (pair? (cddr args)))
-                        (caddr args)
-                        1))
-             (fold (if (and (pair? args) (pair? (cdr args))
-                            (pair? (cddr args)) (pair? (cdddr args)))
-                       (cadddr args)
-                       (*case-fold-search*)))
-             (limit (or bound (text-editor-char-count ed))))
-        (let loop ((left (max 1 count)) (from (text-editor-get-cursor ed)))
-          (let ((found (text-editor-search-forward
-                        ed string (min from limit) fold)))
-            (cond
-             ((not found)
-              (if noerror
-                  #f
-                  (error "Search failed" string)))
-             ((> found limit)
-              (if noerror #f (error "Search failed" string)))
-             ((> left 1) (loop (- left 1) found))
-             (else
-              (text-editor-set-cursor ed found)
-              (+ 1 found)))))))
-
-    (define (search-backward string . args)
-      ;; GNU Emacs's `search-backward' (`search.c'): the backward mirror
-      ;; of `search-forward', which answers the START of the match.
-      ;;--------------------------------------------------------------
-      (let* ((ed (current-editor))
-             (bound (if (pair? args) (car args) #f))
-             (noerror (and (pair? args) (pair? (cdr args)) (cadr args)))
-             (count (if (and (pair? args) (pair? (cdr args))
-                             (pair? (cddr args)))
-                        (caddr args)
-                        1))
-             (fold (if (and (pair? args) (pair? (cdr args))
-                            (pair? (cddr args)) (pair? (cdddr args)))
-                       (cadddr args)
-                       (*case-fold-search*)))
-             (limit (or bound 0)))
-        (let loop ((left (max 1 count)) (from (text-editor-get-cursor ed)))
-          (let ((found (text-editor-search-backward
-                        ed string (max from limit) fold)))
-            (cond
-             ((not found)
-              (if noerror #f (error "Search failed" string)))
-             ((< found limit)
-              (if noerror #f (error "Search failed" string)))
-             ((> left 1) (loop (- left 1) found))
-             (else
-              (text-editor-set-cursor ed found)
-              (+ 1 found)))))))
+      (text-editor-set-cursor (current-editor)
+                              (- (cond
+                                  ((marker-type? position) (marker-position position))
+                                  (else position))
+                                 1)))
 
     (define (insert . args)
       ;; GNU Emacs's `insert' (editfns.c:1354): "Insert the arguments,

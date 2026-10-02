@@ -58,6 +58,7 @@
     )
 
   (export
+   *search-upper-case* isearch-no-upper-case-p
    *search-case-fold?* *search-pattern* isearch isearch-backward isearch-find
    isearch-forward isearch-message isearch-pop-state isearch-pop-to-success
    isearch-repeat isearch-search! isearch-word-at-point
@@ -163,6 +164,36 @@
       ;; keeps the same thing in `isearch-string'.
       ;;--------------------------------------------------------------
       (make-parameter #f))
+
+    (define *search-upper-case*
+      ;; GNU Emacs's `search-upper-case' (isearch.el): "If non-nil, an
+      ;; upper case character (or REGEXP char) in a search string forces
+      ;; case insensitive search." perform-replace consults it with
+      ;; `isearch-no-upper-case-p' to decide the search's folding.
+      ;;--------------------------------------------------------------
+      (make-parameter #t))
+
+    (define (isearch-no-upper-case-p string regexp-flag)
+      ;; GNU Emacs's `isearch-no-upper-case-p' (isearch.el:3945):
+      ;; "Return t if there are no upper case chars in STRING. If
+      ;; REGEXP-FLAG is non-nil, disregard letters preceded by `\\'
+      ;; (but not `\\\\') since they have special meaning in a regexp."
+      ;; The upper-case test is the C's own: a character that
+      ;; downcases to something else has upper case; one that does
+      ;; not - a digit, a punctuation mark - has not.
+      ;;--------------------------------------------------------------
+      (let loop ((i 0) (quote-flag #f) (found #f))
+        (cond
+         (found #f)
+         ((>= i (string-length string)) #t)
+         ((and regexp-flag (char=? (string-ref string i) #\\))
+          (loop (+ i 1) (not quote-flag) #f))
+         (else
+          (loop (+ i 1) #f
+                (and (not quote-flag)
+                     (not (char=? (string-ref string i)
+                                  (char-downcase
+                                   (string-ref string i))))))))))
 
     (define (isearch forward?)
       ;; The incremental search itself: read a key, act on it, search

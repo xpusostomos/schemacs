@@ -56,7 +56,8 @@
           text-editor-file-name set!text-editor-file-name
           text-editor-modified? text-editor-set-modified!
           text-editor-read-only? text-editor-set-read-only!
-          text-editor-get-cursor)
+          text-editor-get-cursor text-editor-set-cursor
+          text-editor-delete-from-cursor text-editor-char-count)
     (only (schemacs editor frame)
           *current-frame*
           current-editor
@@ -81,6 +82,7 @@
    buffer-truncate-lines
    buffer-word-wrap
    buffer-modified-p
+   erase-buffer
    *transient-mark-mode*
    buffer-cursor-in-non-selected-windows
    buffer-cursor-type
@@ -92,6 +94,8 @@
    set!buffer-word-wrap
    buffer-auto-hscroll-mode
    set!buffer-auto-hscroll-mode
+   buffer-fill-column
+   set!buffer-fill-column
    buffer-hscroll-margin
    set!buffer-hscroll-margin
    buffer-hscroll-step
@@ -430,6 +434,15 @@
     (define (set!buffer-auto-hscroll-mode buffer value)
       (set-buffer-local-value! buffer 'auto-hscroll-mode value))
 
+(define (buffer-fill-column buffer)
+      ;; The column `fill-paragraph' and auto fill fill to: GNU Emacs's
+      ;; `fill-column', a buffer-local DEFVAR_PER_BUFFER whose default
+      ;; is 70 (`buffer.c:4898').
+      ;;--------------------------------------------------------------
+      (buffer-local-value buffer 'fill-column 70))
+
+    (define (set!buffer-fill-column buffer value)
+      (set-buffer-local-value! buffer 'fill-column value))
     (define (buffer-hscroll-margin buffer)
       ;; How close to the window's left or right edge point may sit before
       ;; auto hscrolling starts scrolling: GNU Emacs's `hscroll-margin',
@@ -798,6 +811,25 @@
     ;; the fields are the engine's here, so these are the names Emacs's
     ;; Elisp calls - `buffer-modified-p' - over the engine's accessors,
     ;; which are spelled the way the rest of this tree spells them.
+
+    (define (erase-buffer)
+      ;; GNU Emacs's `erase-buffer' (buffer.c:2472): "Delete the entire
+      ;; contents of the current buffer. Any narrowing restriction in
+      ;; effect is removed, so the buffer is truly empty after this."
+      ;; The read-only check is the `*' of its interactive spec - the
+      ;; check `barf-if-buffer-read-only' makes (editfns.sld's, which
+      ;; this library cannot import: it imports THIS one - so the check
+      ;; is made with the engine's flag directly, the same test). There
+      ;; is no narrowing, so the widen is a no-op, and the
+      ;; `save_length' is nothing - no auto saving machinery.
+      ;;--------------------------------------------------------------
+      (when (text-editor-read-only? (current-buffer))
+        (error "Buffer is read-only"))
+      (let ((ed (current-buffer)))
+        (text-editor-set-cursor ed 0)
+        (text-editor-delete-from-cursor ed (text-editor-char-count ed)))
+      #f)
+
 
     (define (buffer-modified-p buffer)
       ;; Whether the buffer has been changed since it was saved: GNU Emacs's

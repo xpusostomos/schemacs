@@ -16,8 +16,12 @@
   ;; those conversions give here.
   ;;
   ;; Not ported: `upcase-initials-region' and `capitalize-region' -
-  ;; nothing calls them yet - `upcase' / `downcase' / `capitalize' for
-  ;; strings and their insert forms, and the tree-sitter bookkeeping.
+  ;; nothing calls them yet - the insert forms of the string
+  ;; conversions, and the tree-sitter bookkeeping. The string-and-char
+  ;; forms (`upcase', `downcase', `capitalize', `upcase-initials',
+  ;; casefiddle.c:368/383/400/418, over `casify_object') ARE ported:
+  ;; `replace-match''s case transfer casifies the replacement with
+  ;; them.
   ;;
   ;; See LAYOUT-PLAN.txt for the rule this library is a step of.
 
@@ -53,9 +57,100 @@
    upcase-word
    downcase-word
    capitalize-word
+   upcase
+   downcase
+   capitalize
+   upcase-initials
    )
 
   (begin
+
+    (define (casify-object flag obj)
+      ;; GNU Emacs's `casify_object' (casefiddle.c:354): FLAG the
+      ;; character or string OBJ - `upcase', `downcase', `capitalize'
+      ;; or `upcase-initials' - and answer the cased copy, the argument
+      ;; itself untouched. The C's `do_casify_multibyte_string' walks
+      ;; the characters keeping an in-word state, and so does this;
+      ;; the character after a word-constituent is `the rest of the
+      ;; word', which is what capitalize downcases and
+      ;; upcase-initials leaves alone, and what follows a non-constituent
+      ;; is a word's start, which both upcase.
+      ;;
+      ;; `case_character_impl' decides per character by first updating
+      ;; `inword' with the character itself and then casing it by the
+      ;; state as it stood - so a word's *last* constituent is already
+      ;; inword when the following non-constituent is cased, which is
+      ;; why the separator after it is not capitalized.
+      ;;--------------------------------------------------------------
+      ;; The titlecase and specialcase char tables (`Unicode' one-to-many
+      ;; casing) are not ported, as the file header says.
+      (cond
+       ((char? obj)
+        (let* ((inword (word-char? obj))
+               ;; `case_character_impl''s normalization: CASE_CAPITALIZE
+               ;; becomes CASE_DOWN after a word-constituent and stays
+               ;; CASE_CAPITALIZE - which upcases - otherwise;
+               ;; CASE_CAPITALIZE_UP becomes CASE_CAPITALIZE (upcase)
+               ;; unless we are within a word, where the character
+               ;; stands unchanged.
+               (flag (cond
+                      ((eq? flag 'capitalize)
+                       (if inword 'downcase 'upcase))
+                      ((eq? flag 'capitalize-up)
+                       (if inword 'none 'upcase))
+                      (else flag))))
+          (cond
+           ((eq? flag 'upcase) (char-upcase obj))
+           ((eq? flag 'downcase) (char-downcase obj))
+           ((eq? flag 'none) obj)
+           (else (char-upcase obj)))))
+       ((string? obj)
+        (let loop ((i 0) (inword #f) (acc '()))
+          (if (>= i (string-length obj))
+              (list->string (reverse acc))
+              (let* ((c (string-ref obj i))
+                     (word? (word-char? c))
+                     (flag (cond
+                            ((eq? flag 'capitalize)
+                             (if inword 'downcase 'upcase))
+                            ((eq? flag 'capitalize-up)
+                             (if inword 'none 'upcase))
+                            (else flag)))
+                     (cased
+                      (cond
+                       ((eq? flag 'upcase) (char-upcase c))
+                       ((eq? flag 'downcase) (char-downcase c))
+                       ((eq? flag 'none) c)
+                       (else (char-upcase c)))))
+                (loop (+ i 1) word? (cons cased acc))))))
+       (else (error "Wrong type argument" obj))))
+
+    (define (upcase obj)
+      ;; GNU Emacs's `upcase' (casefiddle.c:368): "Convert argument to
+      ;; upper case and return that. The argument may be a character
+      ;; or string. The result has the same type."
+      ;;--------------------------------------------------------------
+      (casify-object 'upcase obj))
+
+    (define (downcase obj)
+      ;; GNU Emacs's `downcase' (casefiddle.c:383): the lower-case
+      ;; mirror of `upcase'.
+      ;;--------------------------------------------------------------
+      (casify-object 'downcase obj))
+
+    (define (capitalize obj)
+      ;; GNU Emacs's `capitalize' (casefiddle.c:400): "each word's
+      ;; first character is converted to either title case or upper
+      ;; case, and the rest to lower case."
+      ;;--------------------------------------------------------------
+      (casify-object 'capitalize obj))
+
+    (define (upcase-initials obj)
+      ;; GNU Emacs's `upcase-initials' (casefiddle.c:418): "Like
+      ;; Fcapitalize but change only the initials" - the rest of each
+      ;; word is left as it stands.
+      ;;--------------------------------------------------------------
+      (casify-object 'capitalize-up obj))
 
     (define (scan-words count)
       ;; `scan_words' (syntax.c): the position COUNT words from point,

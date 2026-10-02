@@ -29,7 +29,9 @@
     ;; `casefiddle.c' and `paragraphs.el' - the ncurses.sld note says
     ;; why.
     (only (schemacs editor casefiddle))
-    (only (schemacs editor paragraphs)))
+    (only (schemacs editor paragraphs))
+    ;; `replace.el' - the ncurses.sld note says why.
+    (only (schemacs editor replace)))
 
   (export main-gtk)
 

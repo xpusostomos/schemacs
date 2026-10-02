@@ -49,6 +49,9 @@
     ;; reason as the four above.
     (only (schemacs editor casefiddle))
     (only (schemacs editor paragraphs))
+    ;; `replace.el': M-% and C-M-% bind at load, the same reason as the
+    ;; six above.
+    (only (schemacs editor replace))
     )
 
   (export

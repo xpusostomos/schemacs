@@ -1724,7 +1724,11 @@ non-nil."
     (define-key *default-keymap*
       (list (list 'meta 'ctrl (integer->char 31))) undo-redo)
     (define-key *default-keymap* (list (list 'ctrl #\x) #\u) undo)
-    (define-key *default-keymap* (list (list 'ctrl #\x) #\q) read-only-mode)
+    ;; `read-only-mode' is C-x C-q, which is where files.el:9330 binds
+    ;; it; `C-x q' is kbd-macro-query's key in Emacs, which is not
+    ;; ported.
+    (define-key *default-keymap* (list (list 'ctrl #\x) (list 'ctrl #\q))
+      read-only-mode)
     (define-key *default-keymap* (list (list 'ctrl #\x) (list 'ctrl #\x))
       exchange-point-and-mark)
     (define-key *default-keymap* (list (list 'ctrl #\i)) self-insert-tab)

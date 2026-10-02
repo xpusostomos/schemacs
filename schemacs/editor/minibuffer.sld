@@ -64,6 +64,7 @@
           *current-buffer*
           buffer-default-directory bury-buffer current-buffer get-buffer
           get-buffer-create record-buffer!
+          buffer-fill-column set!buffer-fill-column
           buffer-local-keymap set!buffer-local-keymap set!buffer-default-directory
           ;; `completion-base-position' is a variable local to `*Completions*'
           buffer-local-value set-buffer-local-value!
@@ -75,9 +76,14 @@
           split-main-window-below switch-to-buffer-other-window
           window-min-height)
     ;; `line-number-at-pos' is `editfns.c''s: the default `goto-line'
-    ;; offers is the line point is on.
-    (only (schemacs editor editfns) line-number-at-pos
-          point search-backward search-forward)
+    ;; offers is the line point is on. The search primitives are
+    ;; `search.c''s, which have their own library now (`zap-to-char'
+    ;; walks with them).
+    (only (schemacs editor editfns) line-number-at-pos point)
+    (only (schemacs editor search) search-backward search-forward)
+    ;; `current-column' is indent.c's, which this library is the first
+    ;; user of - `set-fill-column''s bare-C-u case reads it.
+    (only (schemacs editor indent) current-column)
     ;; `self-insert-command' is what SPC does in a file-name minibuffer
     ;; (`minibuffer-local-filename-completion-map' below), and
     ;; `with-current-buffer' and the line motion are the ordinary
@@ -176,6 +182,7 @@ file-name-history
 read-number-history
    goto-line
    goto-line-history
+   set-fill-column
    zap-to-char
    goto-line-read-args
    make<minibuffer>
@@ -196,6 +203,10 @@ read-number-history
    previous-history-element
    read-char-from-minibuffer
    read-from-minibuffer
+   ;; the history record itself, for the libraries that hold their own
+   ;; histories - `replace.el''s `query-replace-history' - the way
+   ;; `read-number-history' would have wanted its accessors exported
+   make<history> history-entries set!history-entries
    execute-extended-command *extended-command-history*
    yes-or-no-p
    )
@@ -2231,6 +2242,42 @@ read-number-history
                          (search-backward (string char) #f #f (- arg) fold))
             (kill-region (point)
                          (search-forward (string char) #f #f arg fold)))))
+
+(define-command (set-fill-column arg)
+      ;; GNU Emacs's `set-fill-column' (simple.el:9255): "Set
+      ;; `fill-column' to specified argument. Use
+      ;; \\[universal-argument] followed by a number to specify a
+      ;; column. Just \\[universal-argument] as argument means to use
+      ;; the current column." A bare C-u is the list `(4)' and a bare
+      ;; M-- the symbol `-', so a NUMBER means C-u N; the cons is a
+      ;; bare C-u; nothing typed at all asks for the number, which the
+      ;; 2018 change to this command made of it - and which is why the
+      ;; command is here and not in simple.sld: it prompts, and
+      ;; simple.sld is below this library (the same wall `goto-line'
+      ;; documents above).
+      "Set `fill-column' to specified argument.
+Use \\[universal-argument] followed by a number to specify a column.
+Just \\[universal-argument] as argument means to use the current column."
+      (interactive
+       (list (or (current-prefix-arg)
+                 (read-number
+                  (format #f "Change fill-column from %s to: "
+                          (buffer-fill-column (current-buffer)))
+                  (current-column)))))
+      (let ((n (cond
+                ((pair? arg) (current-column))
+                ((integer? arg) arg)
+                (else #f))))
+        (if (not (integer? n))
+            ;; Disallow missing argument; it's probably a typo for C-x C-f.
+            (error "set-fill-column requires an explicit argument")
+            (let ((was (buffer-fill-column (current-buffer))))
+              (set!buffer-fill-column (current-buffer) n)
+              (set!frame-message
+               (*current-frame*)
+               (format #f "Fill column set to ~a (was ~a)" n was)))))
+      #f)
+    (define-key *default-keymap* (list (list 'ctrl #\x) #\f) set-fill-column)
 
     (define-key *default-keymap* (list (list 'meta #\z)) zap-to-char)
 

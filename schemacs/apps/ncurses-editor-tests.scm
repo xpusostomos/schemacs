@@ -211,6 +211,7 @@
 (define C-b (integer->char 2))
 (define C-e (integer->char 5))
 (define C-g (integer->char 7))
+(define C-q (integer->char 17))
 (define C-underscore (integer->char 31))   ; C-_ and C-/ are the same byte
 (define C-x (integer->char 24))
 (define C-w (integer->char 23))
@@ -646,14 +647,14 @@
 
 ;; C-x C-q toggles it, and says which way, in GNU Emacs's words.
 (test-equal '("%%" "Read-Only mode enabled in current buffer" "content\n" "content\n")
-  (visit* "/tmp/fe-rw.txt" "content\n" (list C-x #\q)))
+  (visit* "/tmp/fe-rw.txt" "content\n" (list C-x C-q)))
 (test-equal '("--" "Read-Only mode disabled in current buffer" "content\n" "content\n")
-  (visit* "/tmp/fe-rw.txt" "content\n" (list C-x #\q C-x #\q)))
+  (visit* "/tmp/fe-rw.txt" "content\n" (list C-x C-q C-x C-q)))
 
 ;; ... so after toggling it back the buffer can be edited again (the
 ;; file is untouched until it is saved).
 (test-equal '("**" "" "content\n" "Xcontent\n")
-  (visit* "/tmp/fe-rw.txt" "content\n" (list C-x #\q C-x #\q #\X)))
+  (visit* "/tmp/fe-rw.txt" "content\n" (list C-x C-q C-x C-q #\X)))
 
 ;; A buffer that is both modified and read-only shows `%*', not `%%'.
 ;; The indicator is two constructs, `mode-line-modified' being
@@ -664,13 +665,13 @@
 ;; `**'. The hand-rolled indicator this replaced got the first of those
 ;; wrong.
 (test-equal '("%*" "Xcontent\n")
-  (let ((result (visit* "/tmp/fe-rw.txt" "content\n" (list #\X C-x #\q))))
+  (let ((result (visit* "/tmp/fe-rw.txt" "content\n" (list #\X C-x C-q))))
     (list (car result) (cadddr result))))
 
 ;; Undo refuses a read-only buffer too, as GNU Emacs's `undo' does, and
 ;; leaves the buffer alone.
 (test-equal '("%*" "Buffer is read-only" "content\n" "Xcontent\n")
-  (visit* "/tmp/fe-rw.txt" "content\n" (list #\X C-x #\q C-underscore)))
+  (visit* "/tmp/fe-rw.txt" "content\n" (list #\X C-x C-q C-underscore)))
 
 ;; The visit-time warning is a rule of its own: it appears when the
 ;; buffer is read-only and stays quiet when it is not.
@@ -1606,7 +1607,7 @@
 ;; A read-only buffer is left alone, and saving it writes what it holds:
 ;; Emacs does not add a line break to a read-only buffer.
 (test-equal '("ab" "ab")
-  (let ((result (visit* "/tmp/fe-nl4.txt" "ab" (list C-x #\q C-x save-key))))
+  (let ((result (visit* "/tmp/fe-nl4.txt" "ab" (list C-x C-q C-x save-key))))
     (list (cadddr result) (caddr result))))
 
 ;; The variable's other values, as Emacs defines them.

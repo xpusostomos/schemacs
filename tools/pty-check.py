@@ -38,6 +38,10 @@ C_k = b"\x0b"
 C_s = b"\x13"
 C_u = b"\x15"
 C_g = b"\x07"
+C_q = b"\x11"   # C-q, quoted-insert
+C_r = b"\x12"   # C-r, recursive-edit / find-file-read-only's chord
+C_v = b"\x16"   # C-v, scroll-up / find-alternate-file's chord
+M_TILDE = b"\x1b~"   # M-~
 # The arrow keys. A terminal in keypad application mode - which is what
 # ncurses puts it in when the editor starts - sends these three bytes for
 # `<down>' and `<up>', and the same with a leading ESC for `M-<down>' and
@@ -1612,8 +1616,204 @@ def check_hscroll():
     return problems
 
 
+def check_query_replace():
+    """M-% asks, and y/n/! answer it, in Emacs's words.
+
+    `perform-replace' shows `Query replacing X with Y: (help for help)'
+    per match, `y' replaces the match, `n' skips, `!' replaces the rest
+    without asking, and the end says `Replaced N occurrence(s)'. The
+    replacement is on screen after each key - the buffer is not saved
+    here, the text check is the screen's.
+    """
+    path = "/tmp/pty-check-qr.txt"
+    open(path, "w").write("apple apple apple\n")
+    problems = []
+    # M-% = ESC %; read FROM and TO, then answer y, n, y
+    out = drive([C_x + C_f, C_a, C_k, path.encode(), RET,
+                 ESC, b"%", b"apple", RET, b"pear", RET,
+                 b"y", b"n", b"y"], path, gap=0.35)
+    if "Replaced 2 occurrences" not in out:
+        problems.append("y n y did not end with `Replaced 2 occurrences'")
+    if "pear" not in out:
+        problems.append("the replaced text is not on the screen")
+    # `!' replaces the rest without asking
+    out = drive([C_x + C_f, C_a, C_k, path.encode(), RET,
+                 ESC, b"%", b"apple", RET, b"pear", RET,
+                 b"n", b"!"], path, gap=0.35)
+    if "Replaced 2 occurrences" not in out:
+        problems.append("`n' then `!' did not end with `Replaced 2 occurrences'")
+    # q exits early with the replacements it made
+    out = drive([C_x + C_f, C_a, C_k, path.encode(), RET,
+                 ESC, b"%", b"apple", RET, b"pear", RET,
+                 b"y", b"q"], path, gap=0.35)
+    if "Replaced 1 occurrence" not in out:
+        problems.append("`y' then `q' did not end with `Replaced 1 occurrence'")
+    return problems
+
+
+def check_query_replace_quit():
+    """C-g during the query leaves the buffer alone and says Quit.
+
+    The dynamic-wind cleanup clears the highlight; the command loop's
+    guard reports the quit. Nothing is replaced.
+    """
+    path = "/tmp/pty-check-qrq.txt"
+    open(path, "w").write("apple apple\n")
+    problems = []
+    out = drive([C_x + C_f, C_a, C_k, path.encode(), RET,
+                 ESC, b"%", b"apple", RET, b"pear", RET,
+                 C_g], path, gap=0.35)
+    if "Quit" not in out:
+        problems.append("C-g during query-replace did not report Quit")
+    # no y was pressed, so nothing was replaced: no "Replaced N" message
+    if "Replaced" in out:
+        problems.append("C-g during query-replace ran a replacement")
+    return problems
+
+
+def check_replace_string():
+    """M-x replace-string replaces everything with no questions."""
+    path = "/tmp/pty-check-rs.txt"
+    open(path, "w").write("apple apple apple\n")
+    problems = []
+    out = drive([C_x + C_f, C_a, C_k, path.encode(), RET,
+                 ESC, b"x", b"replace-string", RET,
+                 b"apple", RET, b"pear", RET], path, gap=0.35)
+    if "Replaced 3 occurrences" not in out:
+        problems.append("M-x replace-string did not say `Replaced 3 occurrences'")
+    return problems
+
+
+def check_quoted_insert():
+    """C-q reads the next key as a character.
+
+    C-q C-g inserts a ^G without quitting; the octal digits C-q 1 0 1
+    give code 65, `A'; a RET terminator is discarded; C-u 3 C-q a gives
+    three of them.
+    """
+    path = "/tmp/pty-check-qi.txt"
+    open(path, "w").write("")
+    problems = []
+    out = drive([C_q, C_g], path)
+    if "^G" not in out:
+        problems.append("C-q C-g did not insert ^G (screen %r)" % out[-200:])
+    # 101 octal is 65, `A'; the RET that terminates the digits is
+    # discarded
+    out = drive([C_q, b"1", b"0", b"1", RET], path)
+    if "A" not in out:
+        problems.append("C-q 1 0 1 RET did not insert A")
+    # a non-digit terminator is used itself as input: the code 010 = 8
+    # is inserted and the `x' runs as a command
+    out = drive([C_q, b"1", b"0", b"x"], path)
+    if "^Hx" not in out:
+        problems.append("C-q 1 0 x did not insert ^H and run the x")
+    out = drive([C_u, b"3", C_q, b"a"], path)
+    if "aaa" not in out:
+        problems.append("C-u 3 C-q a did not insert aaa")
+    return problems
+
+
+def check_insert_file():
+    """C-x i inserts a file's contents after point, mark set."""
+    path = "/tmp/pty-check-ins-src.txt"
+    open(path, "w").write("inserted line\n")
+    problems = []
+    out = drive([b"before ", C_x, b"i", C_a, C_k, path.encode(), RET],
+                "/tmp/pty-check-ins.txt", gap=0.35)
+    if "before inserted line" not in out:
+        problems.append("C-x i did not insert the file after `before '")
+    if "Mark set" not in out:
+        problems.append("C-x i did not say `Mark set' after the insert")
+    return problems
+
+
+def check_find_file_read_only():
+    """C-x C-r visits read-only, and editing it says so."""
+    path = "/tmp/pty-check-rfro.txt"
+    open(path, "w").write("readonly content\n")
+    problems = []
+    out = drive([C_x + C_r, C_a, C_k, path.encode(), RET, b"X"], path, gap=0.35)
+    if "Buffer is read-only" not in out:
+        problems.append("editing a C-x C-r buffer did not say `Buffer is read-only'")
+    return problems
+
+
+def check_find_alternate_file():
+    """C-x C-v kills the old buffer and visits the new file."""
+    a = "/tmp/pty-check-faf-a.txt"
+    b = "/tmp/pty-check-faf-b.txt"
+    open(a, "w").write("file a\n")
+    open(b, "w").write("file b\n")
+    problems = []
+    out = drive([C_x + C_f, C_a, C_k, a.encode(), RET,
+                 C_x, C_v, C_a, C_k, b.encode(), RET], a, gap=0.35)
+    if "file b" not in out:
+        problems.append("C-x C-v did not show the new file's text")
+    if "pty-check-faf-b.txt" not in out:
+        problems.append("C-x C-v did not visit the new file (mode line)")
+    return problems
+
+
+def check_revert_buffer():
+    """M-x revert-buffer rereads the file, confirming edits first."""
+    path = "/tmp/pty-check-rev.txt"
+    open(path, "w").write("original\n")
+    problems = []
+    out = drive([C_x + C_f, C_a, C_k, path.encode(), RET,
+                 b"EDITED ", ESC, b"x", b"revert-buffer", RET,
+                 b"y"], path, gap=0.35)
+    if "Discard edits and reread from" not in out:
+        problems.append("revert of a modified buffer did not ask "
+                        "`Discard edits and reread from ...? '")
+    # after the y, the screen shows the file's text again
+    i = out.find("Discard edits")
+    if i >= 0 and "original" not in out[i:]:
+        problems.append("revert did not reread the file after the y")
+    return problems
+
+
+def check_not_modified():
+    """M-~ clears the modified flag, so exit asks nothing."""
+    path = "/tmp/pty-check-nm.txt"
+    open(path, "w").write("hello\n")
+    problems = []
+    # edit, M-~, quit: no modified question, editor exits
+    screen, exited = drive([b"X", M_TILDE, C_x + C_c], path,
+                           report_exit=True, gap=0.4)
+    if "Modification-flag cleared" not in screen:
+        problems.append("M-~ did not say `Modification-flag cleared'")
+    if not exited:
+        problems.append("M-~ then C-x C-c still asked about modified buffers")
+    # with a prefix it sets the flag instead
+    out = drive([C_u, M_TILDE], path, gap=0.35)
+    if "Modification-flag set" not in out:
+        problems.append("M-~ with a prefix did not say `Modification-flag set'")
+    return problems
+
+
+def check_set_fill_column():
+    """C-u 20 C-x f sets fill-column, saying what it was."""
+    path = "/tmp/pty-check-sfc.txt"
+    open(path, "w").write("hello\n")
+    problems = []
+    out = drive([C_u, b"2", b"0", C_x, b"f"], path, gap=0.35)
+    if "Fill column set to 20 (was 70)" not in out:
+        problems.append("C-u 20 C-x f did not say "
+                        "`Fill column set to 20 (was 70)'")
+    return problems
+
 CHECKS = {
     "buffer-menu": check_buffer_menu,
+    "query-replace": check_query_replace,
+    "query-replace-quit": check_query_replace_quit,
+    "replace-string": check_replace_string,
+    "quoted-insert": check_quoted_insert,
+    "insert-file": check_insert_file,
+    "find-file-read-only": check_find_file_read_only,
+    "find-alternate-file": check_find_alternate_file,
+    "revert-buffer": check_revert_buffer,
+    "not-modified": check_not_modified,
+    "set-fill-column": check_set_fill_column,
     "suspend": check_suspend,
     "resize": check_resize,
     "minibuffer": check_minibuffer,

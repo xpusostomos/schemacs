@@ -68,6 +68,7 @@
           buffer-list buffer-live-p buffer-local-keymap buffer-modified-p
           buffer-name bury-buffer current-buffer get-buffer-create
           kill-buffer set!buffer-local-keymap set!buffer-name
+          set-buffer-local-value!
           with-current-buffer)
     ;; `quit-window' is `window.el''s and lives in `(schemacs editor
     ;; window)'; this library binds it and does not define it.
@@ -77,7 +78,11 @@
     ;; `Buffer-menu-execute' saves the buffers marked `s' with
     ;; `save-buffer', as Emacs's does - in the buffer, so it writes that
     ;; buffer's own file.
-    (only (schemacs editor files) save-buffer)
+    (only (schemacs editor files) save-buffer revert-buffer)
+    ;; `g' in the Buffer List runs the GLOBAL `revert-buffer' - in
+    ;; Emacs `g' is inherited from `special-mode-map' and runs the
+    ;; global command, which dispatches through the buffer-local
+    ;; `revert-buffer-function' to the refresh below.
     (only (schemacs editor tabulated-list)
           *tabulated-list-entries* *tabulated-list-format*
           tabulated-list-get-id tabulated-list-print)
@@ -267,6 +272,21 @@
             (buffer (get-buffer-create "*Buffer List*")))
         (with-current-buffer buffer
           (set!buffer-local-keymap buffer buffer-menu-mode-map)
+          ;; `tabulated-list-mode' sets `revert-buffer-function' to
+          ;; `tabulated-list-revert' (tabulated-list.el:872), which
+          ;; runs the `tabulated-list-revert-hook' and prints again -
+          ;; and buff-menu.el puts `list-buffers--refresh' on that
+          ;; hook. The same dispatch is one closure here: the entries
+          ;; thunk is a parameter whose value was set in THIS call, so
+          ;; the closure carries the asking buffer with it rather than
+          ;; re-reading the parameter stale.
+          (set-buffer-local-value!
+           buffer 'revert-buffer-function
+           (lambda (ignore-auto noconfirm)
+             (*tabulated-list-entries*
+              (lambda () (list-buffers--refresh old-buffer)))
+             (Buffer-menu-redraw! buffer)
+             #t))
           ;; The buffer has to be writable while it is being drawn, as
           ;; Emacs's table code needs `inhibit-read-only' to write into a
           ;; read-only buffer; it is left read-only, which is what
@@ -538,11 +558,6 @@
                    (string-append (number->string killed)
                                   " buffer(s) killed"))
                   (else "No buffers marked for deletion or saving")))))
-    (define-command (revert-buffer)
-      
-      "Update the list of buffers (g)."
-      (interactive)
- (Buffer-menu-redraw! (current-buffer)))
     (define-command (Buffer-menu-next-line count)
       ;; GNU Emacs's list binds `n' and SPC to `next-line'.
       ;;--------------------------------------------------------------

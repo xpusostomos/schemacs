@@ -30,6 +30,9 @@ SCHEME_LIBRARIES := \
   ./schemacs/editor/keymap.sld \
   ./schemacs/editor/keyboard.sld \
   ./schemacs/editor/minibuffer.sld \
+  ./schemacs/editor/search.sld \
+  ./schemacs/editor/indent.sld \
+  ./schemacs/editor/replace.sld \
   ./schemacs/editor/buffer.sld \
   ./schemacs/editor/tabulated-list.sld \
   ./schemacs/editor/buff-menu.sld \
