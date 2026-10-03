@@ -20,7 +20,15 @@
 
   (export
    add-to-history
+   *after-change-major-mode-hook*
+   *change-major-mode-after-body-hook*
+   *delayed-after-hook-functions*
+   *delayed-mode-hooks*
+   *delay-mode-hooks*
+   delay-mode-hooks
    ignore
+   run-hooks
+   run-mode-hooks
    kbd
    nthcdr
    )
@@ -153,6 +161,85 @@
               (loop (substring rest (min word-end (string-length rest)))
                     (cons key keys))))))
 
+
+    (define (run-hooks . hooks)
+      ;; GNU Emacs's `run-hooks' (subr.el): run each hook in turn. A hook
+      ;; is named by a *variable* in Emacs and read by this; here a hook
+      ;; is the list of procedures itself - the tree keeps one as a
+      ;; `make-parameter' holding a list - so the list is what is passed.
+      ;; An argument that is a procedure rather than a list is a single
+      ;; function, which is what `run-hooks' does with a non-list value.
+      ;;--------------------------------------------------------------
+      (for-each (lambda (hook)
+                  (cond ((not hook) #f)
+                        ((procedure? hook) (hook))
+                        (else (for-each (lambda (f) (f)) hook))))
+                hooks))
+
+    (define *change-major-mode-after-body-hook* (make-parameter '()))
+    ;; ^ GNU Emacs's `change-major-mode-after-body-hook' (`subr.el'):
+    ;; "Normal hook run after running the body of `define-derived-mode'."
+
+    (define *after-change-major-mode-hook* (make-parameter '()))
+    ;; ^ GNU Emacs's `after-change-major-mode-hook' (`subr.el'): "Normal
+    ;; hook run at the end of `run-mode-hooks', which see. ... every
+    ;; major mode runs it, whether it is defined with `define-derived-mode'
+    ;; or not."
+
+    (define *delay-mode-hooks* (make-parameter #f))
+    ;; ^ GNU Emacs's `delay-mode-hooks' (`subr.el'): "Non-nil means
+    ;; `run-mode-hooks' should delay running the hooks." A buffer-local
+    ;; variable in Emacs and a parameter here, as this tree keeps
+    ;; buffer-local flags.
+
+    (define *delayed-mode-hooks* (make-parameter '()))
+    ;; ^ GNU Emacs's `delayed-mode-hooks': the hooks a mode asked for
+    ;; while the running was delayed, newest first.
+
+    (define *delayed-after-hook-functions* (make-parameter '()))
+    ;; ^ GNU Emacs's `delayed-after-hook-functions': what a derived
+    ;; mode's `:after-hook' pushed, run at the very end of
+    ;; `run-mode-hooks'.
+
+    (define (delay-mode-hooks thunk)
+      ;; GNU Emacs's `delay-mode-hooks' (`subr.el':2795): "Execute BODY,
+      ;; but delay any `run-mode-hooks'. These hooks will be executed by
+      ;; the first following call to `run-mode-hooks' that occurs outside
+      ;; any `delay-mode-hooks' form."
+      ;;
+      ;; A macro in Emacs; a procedure taking the body as a thunk here,
+      ;; which is how this tree spells a body-taking form that has no
+      ;; syntax of its own to keep.
+      ;;--------------------------------------------------------------
+      (parameterize ((*delay-mode-hooks* #t)) (thunk)))
+
+    (define (run-mode-hooks . hooks)
+      ;; GNU Emacs's `run-mode-hooks' (subr.el:2756): "Run mode hooks
+      ;; `delayed-mode-hooks' and HOOKS, or delay HOOKS. ... Otherwise,
+      ;; runs hooks in the sequence: `change-major-mode-after-body-hook',
+      ;; `delayed-mode-hooks' (in reverse order), HOOKS, then runs
+      ;; `hack-local-variables' (if the buffer is visiting a file), runs
+      ;; the hook `after-change-major-mode-hook', and finally evaluates
+      ;; the functions in `delayed-after-hook-functions'."
+      ;;
+      ;; Not ported: `hack-local-variables', there being no file-local
+      ;; variable machinery here yet. The C's other errand in that gap -
+      ;; turning on `parse-sexp-lookup-properties' when
+      ;; `syntax-propertize-function' is set - waits for
+      ;; `syntax-propertize' too.
+      ;;--------------------------------------------------------------
+      (if (*delay-mode-hooks*)
+          ;; "just adds the HOOKS to the list"
+          (*delayed-mode-hooks* (append hooks (*delayed-mode-hooks*)))
+          (begin
+            (set! hooks (append (reverse (*delayed-mode-hooks*)) hooks))
+            (*delayed-mode-hooks* '())
+            (apply run-hooks
+                   (cons (*change-major-mode-after-body-hook*) hooks))
+            (run-hooks (*after-change-major-mode-hook*))
+            (let ((after (reverse (*delayed-after-hook-functions*))))
+              (*delayed-after-hook-functions* '())
+              (for-each (lambda (f) (f)) after)))))
 
     (define (ignore . _arguments)
       ;; GNU Emacs's `ignore' (`subr.el:501'): accept any arguments, do

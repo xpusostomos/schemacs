@@ -84,7 +84,9 @@
           *transient-mark-mode*
           buffer-auto-hscroll-mode buffer-cursor-in-non-selected-windows
           buffer-cursor-type buffer-hscroll-margin buffer-hscroll-step
-          buffer-local-value buffer-truncate-lines buffer-word-wrap)
+          buffer-local-value buffer-truncate-lines buffer-word-wrap
+          ;; the mode line's mode name is the buffer's `mode-name'
+          mode-name)
 
     (only (schemacs editor faces) *undefined-face-attribute*)
     (only (schemacs editor xfaces)
@@ -535,6 +537,21 @@
               ((eq? line-break line-break-newline) ":")
               (else ""))))
 
+    (define (mode-line-mode-name)
+      ;; GNU Emacs's `mode-line-modes'' first element: the buffer's
+      ;; `mode-name' between the delimiters `mode-line-modes-delimiters'
+      ;; names - "(" and ")" by default, which is what makes a mode line
+      ;; read `(Fundamental)'.
+      ;;
+      ;; Not ported from that construct: `mode-line-process', the
+      ;; `mode-line-minor-modes' lighters (there are no minor modes with
+      ;; lighters yet) and the mouse maps on the name.
+      ;;--------------------------------------------------------------
+      (let ((window (*mode-line-window*)))
+        (if (not window)
+            ""
+            (string-append "(" (mode-name (window-buffer window)) ")"))))
+
     (define *mode-line-format*
       ;; GNU Emacs's `mode-line-format': the template a window's mode line is
       ;; drawn from, evaluated by `FORMAT-MODE-LINE' below.
@@ -560,7 +577,13 @@
              (list "%1*" "%1+")
              " "
              "%12b"
-             " -- L" "%l" " C" "%c")))
+             " -- L" "%l" " C" "%c"
+       ;; and the mode name, where Emacs's default puts `mode-line-modes':
+       ;; after the position, two spaces along. Emacs names the variable
+       ;; in the format and evaluates it; there is no variable registry
+       ;; here, so the construct that produces it is spelled out.
+       "  "
+       (list ':eval mode-line-mode-name))))
 
     (define (mode-line-construct spec window)
       ;; The text one `%'-construct stands for: GNU Emacs's

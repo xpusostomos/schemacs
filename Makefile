@@ -16,9 +16,13 @@ SCHEME_LIBRARIES := \
   ./schemacs/lens/bin-hash-table.sld \
   ./schemacs/lexer.sld \
   ./schemacs/editor/command.sld \
+  ./schemacs/editor/data.sld \
+  ./schemacs/editor/derived.sld \
   ./schemacs/weak.sld \
   ./schemacs/editor/engine.sld \
   ./schemacs/editor/frame.sld \
+  ./schemacs/editor/env.sld \
+  ./schemacs/editor/fileio.sld \
   ./schemacs/editor/disp-table.sld \
   ./schemacs/editor/mule.sld \
   ./schemacs/editor/files.sld \

@@ -54,7 +54,16 @@
     (only (schemacs editor editfns)
           barf-if-buffer-read-only goto-char insert point point-max)
     (only (schemacs editor simple) push-mark)
-    (only (schemacs editor buffer) erase-buffer)
+    (only (schemacs editor buffer) default-directory erase-buffer)
+    ;; The file primitives that were here and have moved to the library
+    ;; that mirrors the C file they are really from, `fileio.c':
+    ;; `expand-file-name' with the two name helpers and its path
+    ;; segments, the two predicates, and `directory-name-p'. This
+    ;; library is `files.el' and is built *on* them.
+    (only (schemacs editor fileio)
+          directory-name-p expand-file-name file-exists-p
+          file-name-directory-part file-name-nondirectory-part
+          file-writable-p)
     ;; Buffers by name, and killing one: `buffer.c'. `BUFFER-FILE-NAME' and
     ;; the buffer-local store are what `save-buffer' writes and what the
     ;; visited file's line-break convention is kept in.
@@ -527,141 +536,21 @@ save-buffer
     ;; File names
     ;;------------------------------------------------------------------
 
-    (define (default-directory)
-      ;; The directory a bare file name is relative to: GNU Emacs's
-      ;; `default-directory', which is a buffer-local variable - each
-      ;; buffer has its own, so two windows showing two files in two
-      ;; directories prompt from the one each is in. `find-file' sets it
-      ;; on the buffer it visits, as Emacs's does.
-      ;;
-      ;; Its *default* - what it answers with when the buffer has not
-      ;; been given one, and when there is no current buffer at all - is
-      ;; the process's own directory, which is Emacs's global value of
-      ;; the variable. The no-buffer case matters: `find-file' expands
-      ;; the name it is given against this, so a `find-file' called with
-      ;; nothing current - from a script, or a test - failed on the way
-      ;; to reading the file at all.
-      ;;--------------------------------------------------------------
-      ;;
-      ;; `(current-buffer)' with one guard: it falls back to the frame's
-      ;; selected window, and with no frame there - which is what a
-      ;; `find-file' called from a script or a test has - there is
-      ;; nothing to ask, so the answer is the process's directory rather
-      ;; than an error on the way to reading the file.
-      ;;--------------------------------------------------------------
-      (let ((buffer (or (*current-buffer*)
-                        (and (*current-frame*) (current-editor)))))
-        (or (and buffer (buffer-default-directory buffer))
-            (string-append (getcwd) "/"))))
 
-    (define (path-segments path)
-      ;; PATH's segments, with the empty ones - from a leading or a
-      ;; repeated slash - dropped.
-      ;;--------------------------------------------------------------
-      (let loop ((i 0) (start 0) (acc '()))
-        (cond
-         ((= i (string-length path))
-          (reverse (if (< start i) (cons (substring path start i) acc) acc)))
-         ((char=? (string-ref path i) #\/)
-          (loop (+ 1 i) (+ 1 i)
-                (if (< start i) (cons (substring path start i) acc) acc)))
-         (else (loop (+ 1 i) start acc)))))
 
-    (define (join-path-segments segments)
-      ;; SEGMENTS joined with a slash between them: the tail of
-      ;; `expand-file-name' that puts a resolved path back together.
-      ;;--------------------------------------------------------------
-      (if (null? segments)
-          ""
-          (let loop ((rest (cdr segments)) (acc (car segments)))
-            (if (null? rest)
-                acc
-                (loop (cdr rest) (string-append acc "/" (car rest)))))))
 
-    (define (expand-file-name name . args)
-      ;; GNU Emacs's `expand-file-name': NAME as an absolute file name.
-      ;; A NAME with no directory of its own - one not starting with a
-      ;; slash - is relative to DEFAULT-DIRECTORY, which is the asking
-      ;; buffer's own when no other is given; either way the `.` and `..`
-      ;; segments are resolved and repeated slashes collapsed.
-      ;;
-      ;; This is what `read-file-name' answers with, which is why a bare
-      ;; name can be typed at the prompt at all: Emacs puts the directory
-      ;; *in* the minibuffer, so its answer is absolute already, while
-      ;; this editor keeps the prompt beside the buffer rather than in it
-      ;; - so what is typed has to be joined to the directory here. A
-      ;; name typed in a buffer visiting a file is relative to that
-      ;; file's directory, which is what `default-directory' says.
-      ;;
-      ;; Not implemented: `~' expansion, and the environment-variable,
-      ;; wildcard and remote-file syntaxes. Nothing here has a home
-      ;; directory to expand against yet.
-      ;;--------------------------------------------------------------
-      (let* ((default (if (pair? args) (car args) (default-directory)))
-             (full (cond
-                    ((= 0 (string-length name)) default)
-                    ((char=? (string-ref name 0) #\/) name)
-                    (else (string-append default name))))
-             ;; A trailing slash names a directory and has to survive
-             ;; the rebuilding below, which would otherwise drop it.
-             ;; An *empty* NAME is the exception, and Emacs's: it expands
-             ;; to the directory itself with no trailing slash.
-             (directory? (and (< 0 (string-length name))
-                              (< 1 (string-length full))
-                              (char=? (string-ref full
-                                                  (- (string-length full) 1))
-                                      #\/))))
-        (let resolve ((rest (path-segments full)) (acc '()))
-          (cond
-           ((null? rest)
-            (let ((path (string-append "/" (join-path-segments
-                                            (reverse acc)))))
-              (cond ((string=? path "/") path)
-                    (directory? (string-append path "/"))
-                    (else path))))
-           ((string=? (car rest) ".") (resolve (cdr rest) acc))
-           ;; a `..' takes back the segment before it, and does nothing
-           ;; at the root, which is what Emacs does with one
-           ((string=? (car rest) "..")
-            (resolve (cdr rest) (if (null? acc) acc (cdr acc))))
-           (else (resolve (cdr rest) (cons (car rest) acc)))))))
 
-    (define (file-name-directory-part name)
-      ;; The directory part of NAME, including the final slash, or "" for
-      ;; a bare name: GNU Emacs's `file-name-directory' as we need it.
-      ;;--------------------------------------------------------------
-      (let ((slash (string-rindex name #\/)))
-        (if slash (substring name 0 (+ 1 slash)) "")))
 
-    (define (file-name-nondirectory-part name)
-      ;; The part of NAME after the last slash: GNU Emacs's
-      ;; `file-name-nondirectory'.
-      ;;--------------------------------------------------------------
-      (let ((slash (string-rindex name #\/)))
-        (if slash (substring name (+ 1 slash) (string-length name)) name)))
 
-    (define (directory-name-p name)
-      ;; GNU Emacs's `directory-name-p' (fileio.c:703): whether NAME
-      ;; ends with a directory separator - "for example `usr/' and
-      ;; `usr' are both directories, but only `usr/' is a directory
-      ;; name". It is what `write-file' asks of the name the user gave,
-      ;; since a name that ends in a slash names a directory and the
-      ;; file gets the buffer's own base name in it.
-      ;;--------------------------------------------------------------
-      (and (< 0 (string-length name))
-           (char=? (string-ref name (- (string-length name) 1)) #\/)))
 
-    (define (file-writable-p path)
-      ;; GNU Emacs's `file-writable-p' (fileio.c): "t if you can write
-      ;; to file or directory PATH". A file that does not exist is
-      ;; writable when its directory is, which is Emacs's rule and the
-      ;; one `write-file' works from - a buffer made writable by the
-      ;; file it now visits.
-      ;;--------------------------------------------------------------
-      (if (file-exists-p path)
-          (access? path W_OK)
-          (let ((dir (file-name-directory-part path)))
-            (access? (if (string=? dir "") "." dir) W_OK))))
+
+
+
+
+
+
+
+
 
     (define (directory-entries dir prefix)
       ;; The names in DIR that begin with PREFIX, without the `.` and
@@ -682,19 +571,7 @@ save-buffer
                  ((string-prefix? prefix entry) (loop (cons entry acc)))
                  (else (loop acc))))))))
 
-    (define (file-exists-p path)
-      ;; GNU Emacs's `file-exists-p': whether PATH names something that
-      ;; exists. Emacs's is true of a directory as well as of a file, and
-      ;; so is this.
-      ;;
-      ;; `guard', not `with-exception-handler': the exception `stat'
-      ;; raises is *non-continuable*, and a handler that returns from one
-      ;; of those re-raises it - so the `with-exception-handler' spelling
-      ;; this started as answered nothing at all and let the error out.
-      ;;--------------------------------------------------------------
-      (guard (e (else #f))
-        (stat path)
-        #t))
+
 
     (define (directory-path? path)
       ;; Whether PATH names a directory. `guard' for the same reason

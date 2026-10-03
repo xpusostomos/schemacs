@@ -64,10 +64,13 @@
        set!text-editor-file-name text-editor-set-modified!)
  (only (schemacs editor intervals) set!buffer-intervals)
  (prefix (schemacs editor intervals) iv:)
+ ;; The file primitives moved to the library that mirrors the C they
+ ;; are from, `fileio.c'; the rest of this list is still `files.el''s.
+ (only (schemacs editor fileio)
+       expand-file-name file-name-directory-part file-name-nondirectory-part)
  (only (schemacs editor files)
        *require-final-newline* ensure-final-newline-on-visit
-       expand-file-name file-name-completion-table file-name-directory-part
-       file-name-nondirectory-part files--buffers-needing-to-be-saved
+       file-name-completion-table files--buffers-needing-to-be-saved
        find-file-noselect note-file-read-only!
        save-answer-char->decision)
  ;; `try-completion' and `all-completions' are `minibuf.c''s.
@@ -1258,7 +1261,10 @@
 ;; made with, column 0. Both windows said `C1' before this: the split
 ;; window and the new one were reading the same point, which is the bug
 ;; the two different numbers are here to catch.
-(test-equal '(": ** alpha.txt    -- L1 C3" ": ** alpha.txt    -- L1 C0")
+;; The mode name is on the end of the line now: `mode-line-modes' is
+;; where Emacs puts it, two spaces after the position.
+(test-equal '(": ** alpha.txt    -- L1 C3  (Fundamental)"
+              ": ** alpha.txt    -- L1 C0  (Fundamental)")
   (let* ((frame (frame-with "alpha\nbeta\n"))
          (ed (frame-editor frame)))
     (set!text-editor-buffer-name ed "alpha.txt")
@@ -1560,7 +1566,7 @@
     (text-editor-insert ed "X")
     ;; point is where the insert left it, one character in, and `%c'
     ;; counts from zero - so C1, not C0
-    (string=? ": ** probe.txt    -- L1 C1"
+    (string=? ": ** probe.txt    -- L1 C1  (Fundamental)"
               (format-in frame (*mode-line-format*)))))
 
 (test-end "schemacs_ncurses_editor_mode_line_format")

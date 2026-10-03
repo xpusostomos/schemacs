@@ -102,6 +102,8 @@
    apply-keymap-index-predicate
 
    keymap-type?
+   keymap-parent
+   set-keymap-parent
    =>keymap-layers*!
    =>keymap-label!
    =>keymap-top-layer!
@@ -1165,17 +1167,29 @@
     ;; -------------------------------------------------------------------------------------------------
 
     (define-record-type <keymap-type>
-      ;; A list of keymap layers. When looking-up an element with a
-      ;; `<keymap-index-type>`, all layers are checked, the element
-      ;; nearest the bottom of the list (nearer to `car` than to `cdr`) is
-      ;; returned. Keymap operations like `KEYMAP-PUSH` treat
+      ;; A list of keymap layers, and a *parent* keymap. When looking-up
+      ;; an element with a `<keymap-index-type>`, all layers are checked,
+      ;; the element nearest the bottom of the list (nearer to `car` than
+      ;; to `cdr`) is returned; and when no layer has anything for the
+      ;; index, the lookup goes on to the parent, and to its parent, and
+      ;; so on. Keymap operations like `KEYMAP-PUSH` treat
       ;; `<KEYMAP-TYPE>`s as immutable and always return newly constructed
       ;; `<KEYMAP-TYPE>` values.
+      ;;
+      ;; The parent is GNU Emacs's (`keymap.c`): a keymap's bindings are
+      ;; those of its own tables plus, for every key they leave
+      ;; unbound, its parent's. It is a *link* and not a copy - the
+      ;; parent is read when the lookup happens, so a binding made in
+      ;; the parent afterwards is still reached. `set-keymap-parent` and
+      ;; `keymap-parent` below are the C's functions over it; the field
+      ;; accessors are spelled with a `%' so that the pair the C calls
+      ;; `keymap-parent' and `set-keymap-parent' can be written on top.
       ;;------------------------------------------------------------------
-      (make<keymap> layers label)
+      (make<keymap> layers label parent)
       keymap-type?
       (layers  keymap->layers-list  set!keymap-layers)
       (label   keymap-label         set!keymap-label)
+      (parent  keymap-parent        %set-keymap-parent!)
       )
 
 
@@ -1199,12 +1213,39 @@
          (else (error "not a <keymap-type> or <keymap-layer-type>" layer))
          ))
       (cond
-       ((null? layers) (make<keymap> '() #f))
+       ((null? layers) (make<keymap> '() #f #f))
        ((or (string? (car layers)) (symbol? (car layers)))
-        (make<keymap> (apply append (map to-list (cdr layers))) (car layers)))
+        (make<keymap> (apply append (map to-list (cdr layers))) (car layers) #f))
        (else
-        (make<keymap> (apply append (map to-list layers)) #f))))
+        (make<keymap> (apply append (map to-list layers)) #f #f))))
 
+
+    (define (keymap-memberp map maps)
+      ;; GNU Emacs's `keymap_memberp' (keymap.c:263): "Check whether MAP
+      ;; is one of MAPS's parents" - the walk `set-keymap-parent' uses
+      ;; to refuse an inheritance that would be a cycle.
+      ;;--------------------------------------------------------------
+      (if (not map)
+          #f
+          (let loop ((maps maps))
+            (cond ((not (keymap-type? maps)) #f)
+                  ((eq? map maps) #t)
+                  (else (loop (keymap-parent maps)))))))
+
+    (define (set-keymap-parent keymap parent)
+      ;; GNU Emacs's `set-keymap-parent' (keymap.c:273): "Modify KEYMAP
+      ;; to set its parent map to PARENT. Return PARENT. PARENT should be
+      ;; nil or another keymap."
+      ;;
+      ;; The C's cycle check is `keymap_memberp': a keymap may not become
+      ;; its own ancestor, or the lookup would never end.
+      ;;--------------------------------------------------------------
+      (unless (or (not parent) (keymap-type? parent))
+        (error "not a keymap" parent))
+      (when (and parent (keymap-memberp keymap parent))
+        (error "Cyclic keymap inheritance"))
+      (%set-keymap-parent! keymap parent)
+      parent)
 
     (define =>keymap-label!
       (record-unit-lens keymap-label set!keymap-label '=>keymap-label!))
@@ -1303,8 +1344,15 @@
                )))
           (cond
            ((not found) #f)
-           ((null? found) #f)
-           ((pair? found) (make<keymap> found #f))
+           ;; Nothing in this keymap's own layers had anything for the
+           ;; index, so the parent is asked - and its parent, which is
+           ;; what makes the chain work. A keymap that *did* have a
+           ;; prefix binding here does not reach its parent for that key,
+           ;; which is Emacs's rule too: the binding shadows.
+           ((null? found)
+            (let ((parent (keymap-parent km)))
+              (and parent (keymap-lookup parent kmix))))
+           ((pair? found) (make<keymap> found #f (keymap-parent km)))
            (else found)
            )))))
 

@@ -2,130 +2,110 @@
 
 #### A clone of Emacs and Emacs Lisp written in R7RS Scheme
 
-## Project Goals
+## Project State
 
-Although this project is still incomplete and experimental, the goals of this project are to construct a Scheme app platform similar to Emacs, not just in the UI/UX, but also to be backward compatible (to the greatest degree possible) with GNU Emacs by implementing an Emacs Lisp interpreter as well.
+It works!!! It's complete enough that you could daily use it as an editor. 
+And it's 100% written in scheme.
 
-- written in [**portable**](../../../wiki/Portability.md) R7RS Scheme, should run on any compliant Scheme implementation.
-- able to run your `init.el`, run Emacs software pulled from ELPA.
-- use Emacs Regression Tests (ERT) from GNU Emacs to ensure compatibility.
-- encourage the use of the Scheme programming language to develop apps and text editing workflows.
+Here's what works already:
+* Both terminal and graphic pixel based implementations
+* Buffers, and buffer manipulation commands
+* Marks, kill ring, regions, copy, yank
+* Windows, window splitting, window sizing
+* The minibuffer, completions, exactly like emacs.
+* Minibuffer history
+* M-x and interactive commands
+* Mode line. 
+* Undo list.
+* Faces and color highlighting
+* isearch, query-replace, query-replace-regexp 
+* Completions, query-replace have color highlighting like real emacs
+* Buffer list
+* Modes, minor modes, special mode handling
+* Clipboard integration
+* And many more...
 
-### Sub-goals
+## A quick word from our lack of sponsors...
 
-- contribute patches upstream to the Guile Scheme Emacs Lisp compiler
-- provide a cross-platform GUI library like [Racket/GUI](https://docs.racket-lang.org/gui/) or [McCLIM](https://mcclim.common-lisp.dev/)
-- be able to develop Schemacs from within it's own editor, create pull requests in Git.
+This project has been moderately expensive to implement in its use of AI, and I'm 
+running out of money to do it. If you want to see it move forward, money, AI tokens
+or human assistence would help it move forward much faster. Having said that, look
+at whats been achieved by one guy in short time.
 
-## The Wiki
+## Developer Discussion
 
-The wiki documents several of the important libraries in this source
-code.
+Github forum is turned on above, you should feel free to discuss the project there.
 
-- [`(schemacs pretty)`](../../../wiki/PrettyPrinter.md): a pretty printer
-- [`(schemacs elisp-eval environment)`](../../../wiki/ElispEnvironments.md): the environments in which Emacs Lisp code evaluates
+## History of scheme and emacs
 
-## How to help contribute code
+Since 1999, many in the Scheme community have dreamed of an Emacs freed from elisp and 
+built on a more solid foundation of Scheme. Off and on the 
+[guile-emacs](https://guile-emacs.org/) project started, stopped 
+and failed. What went wrong? The plan was to integrate guile, a scheme implementation
+with Emacs as phase 1. Slowly turn the emacs C code into foreign function calls as phase 2. Then
+presumably eliminate the C code entirely as phase 3. The project basically failed in phase 1.
 
-### Code of Conduct
+What went wrong? Emacs is not a lisp interpreter with an editor attached. The C/elisp core
+is deeply integrated with the basics of the editor at every level. That means that
+guile-emacs was constantly breaking, and constantly needing to be patched, and never got to
+the point where it could just replace emacs. Right now the code has been abandoned since 2015
+(apart from a brief flurry of activity a few years ago), and it doesn't build against emacs,
+nor would it be easy to get it to.
 
-We respectfully ask all contributors to this project adhere to the
-principles stated in the [Code of Conduct
-(CoC)](../../../wiki/CodeOfConduct.md), so please be sure you read and
-understand this agreement before asking to contribute. The CoC is
-currently based on the [Contributor Covenant 3.0 Code of
-Conduct](https://www.contributor-covenant.org/version/3/0/code_of_conduct/).
+In 2023 Ramin started the Gypsum project of an all-scheme emacs releasing it on 
+[Codeberg](https://codeberg.org/ramin_hal9001/schemacs)
+and presenting it at the EmacsConf 2024, later renaming it to Schemacs. As of late 2026 
+it is not yet an editor, you can't open files,
+there is no window handling, no marks, no kill ring, no nundo, no mode line, no faces, no
+modes.
 
-### Official AI Policy: "The Software Engineer's **Prime Directive**"
+This Schemacs project took Ramin's work in progress and used AI to duplicate emacs
+functionality exactly, file for file, function for function, parameter for parameter, 
+loop for loop.
 
-I am borrowing the term, "The Prime Directive," from the popular
-science fiction series Star Trek to describe my AI policy. My policy
-is this:
 
-> Every single line of code, every S-expression, every comment, every
-> piece of documentation, every part of this software that serves a
-> function **must** have that function be well-understood by at least
-> one person (and of course, AI is not a person).
+## Ramin's Schemacs Project Goals
 
-The term "well-understood" is deliberately vague so that we (the
-Schemacs developer community) can decide on a case-by-case basis
-whether a person understands a function well enough.
+Ramins' project seems fairly clear that he's "not in a hurry" and doesn't want AI help,
+which is what this project is. Perhap at some point we can collaborate somehow, but
+for now, I've accepted his project statement that "we don't need it". I'm sure if he
+continues to make progress we can absorb some of his work. However at his current rate of
+progress, I don't see anything coming out of it for a decade.
 
-#### Vibe coding is banned
 
-The definition of "Vibe Coding" is that you don't bother to understand
-what the computer code means, if the software appears to behave in the
-way you expect you declare the code "correct." By definition, vibe
-coding violates the Software Engineer's Prime Directive.
+Myself I am in a hurry...
 
-#### Some LLM-generated output is OK
+## Future directions
 
-If you are differently-abled and use an AI coding assistant to write
-code faster, this is perfectly acceptable so long you adhere to the
-Prime Directive --- you must be able to defend the code you write by
-explaining the function of all of it's component parts.
 
-The term "differently abled" is deliberately vague because I don't
-believe we as a community should define tests to decide whether
-someone qualifies as "being differently abled." If writing text simply
-bothers you, and you wish to claim being differently-abled for that
-reason, that is OK too. **Just obey the Prime Directive.**
+* "Design is fine, but implementation is everything." - Bill Joy
+* "Talk is cheap. Show me the code." — Linus Torvalds (2000)
+* "We believe in: rough consensus and running code." - David Clark (1992)
+* "Prototypes over process." - Joi Ito, Former director of MIT Media Lab
+* "Real artists ship." - Steve Jobs (1983)
+* "Status is strictly a function of what you build, not what you claim you can build." — Eric S. Raymond
+* "An imperfect solution delivered today is far better than a perfect solution delivered tomorrow." - General George S. Patton
 
-### Unofficial AI Policy: *we don't need it*
+Guile-scheme and Ramin's schemacs has done a lot of great work on elisp compatibility.
+I welcome such work, I encourage such work.
 
-This is a project for people to have fun. If you don't like writing
-computer code, then don't contribute computer code, contribute in some
-other way.
+But it has failed since 1999. It is not the future. This is 2026 not 1999. AI can port
+a large complex elisp project to scheme in less than an hour, and write all the 
+test cases for you. After it does it, you typically go through another half hour
+of human testing, then it's usually done, finished and wrapped up. The community
+has the ability to port all the interesting melpa / elpa packages to scheme in months,
+and leave Emacs legacy implementation behind. 
 
-There is no hurry, there is no deadline. Write code because you like
-to, or because you want to learn how computers work. It is OK to take
-your time and enjoy yourself. There is really no reason to use AI for
-this project.
-
-### First steps toward contributing to Schemacs
-
-There are many tasks to complete, many of which are fairly simple to
-do even for people with not a lot of experience using the Scheme
-programming language, as long as you can get the code in this project
-to run on your Scheme implementation.  See the
-["How to build"](#how-to-build), ["How to run"](#how-to-run), and
-["How to hack"](#how-to-hack) sections below.
-
-As of right now, the most important long-term issue to work on is
-[#30 "*Get Emacs Regression Tests (ERT) to evaluate on the `cl-lib.el`*"](https://codeberg.org/ramin_hal9001/schemacs/issues/30).
-Please refer to that issue for details, but briefly
-here is what must be done: first try running the `elisp-tests.scm`
-test program in your Scheme REPL...
-
-```
-(load "./elisp-tests.scm")
-```
-
-...if an error occurs, it will print the Emacs Lisp form that caused
-the error. Since the test programs run by `elisp-tests.scm` all work
-perfectly well in GNU Emacs Lisp, any error in Schemacs while evaluating
-these tests is an implementation bug that must be corrected.
-
-If you find a bug, check if has already been recorded in the
-[list of open issues](https://codeberg.org/ramin_hal9001/schemacs/issues),
-and if anyone is already assigned to working on it. If it is unassigned,
-please comment on the issue that you would like to begin working on a
-patch! You may also open a new issue if the bug seems not to have been
-recorded yet, but please wait until you receive a reply from the
-maintainers on your issue before starting work on a patch to make sure
-you don't end up duplicating the work of others.
-
-If you want to contribute, but are not interested in working on the
-Emacs Lisp interpreter part of the Schemacs project, please feel free to
-contact the author (contact details on
-[Codeberg.org](https://codeberg.org/ramin_hal9001)) after reading
-through the [list of open issues](https://codeberg.org/ramin_hal9001/schemacs/issues),
-or reading over the [**feature wish list**](../../../wiki/WishList.md) document.
+Those are my delusions of grandeur. In reality, the emacs community is conservative,
+and slow to move. However this time it's different. You don't need the whole community
+anymore, you just need a small team of motivated people, and AI tokens. If Schemacs
+can gain a following, and Emacs releases a new feature, we can port it in hours, 
+not years. We don't need to be beholden to the old ways.
 
 ## How to build
-
+"Prototypes over process."
 As of right now, this project only runs on Guile Scheme, although
-certain libraries (`lens.sld`, `pretty.sld`, `keymap.sld`) can build
+certain libraries (`lens.sld`, `pretty."Design is fine, but implementation is everything."sld`, `keymap.sld`) can build
 and run on other Schemes. The only GUI available right now is for
 [Guile-GI](https://github.com/spk121/guile-gi), but the Editor is
 designed specifically to be able to run on other Scheme platforms with
@@ -284,54 +264,3 @@ That said, `./schemacs/lens.scm` and `./schemacs/keymap.scm` should always
 pass all tests, as these libraries are most essential to the rest of
 the application.
 
-### Lenses
-
-R7RS Scheme does not standardize any Meta-Object Protocol (MOP)
-implementation, not even in the R7RS "Large" standard.
-
-Schemacs has been written such that there no need for any MOP
-implementation. Rather, a "function lenses" implementation written in
-pure R7RS-Small compliant code is provided as a library. Functional
-lenses are inspired by Haskell, and are a way of defining getter and
-setter functions that can be composed together.
-
-Conventionally, lens definitions are prefixed with the `=>`
-symbol. They may also be suffixed with `*!` or `!` whether a lens is
-canonical and/or whether a lens mutates the data structure when
-updating it.
-
-Since it is usually much easier to use lenses rather than getters and
-setters, many Schemacs libraries export their own lenses for working
-with the record types provided within.
-
-Lenses are useful enough to be separated into it's own separate source
-code package. See the documentation for Functional Lenses in its own
-[source code repository](https://codeberg.org/ramin_hal9001/schemacs-lens).
-
-
-### Platform-independent record types
-
-Record types that contain platform specific information are usually
-exported as lenses, and are usually named `=>*-view`, for example
-`=>buffer-view` and `=>window-view`. These are fields that contain
-references to platform-specific data needed by the platform in order
-to render the view of a "buffer" or "window."
-
-## Other resources
-
-- [Presentation of this project at EmacsConf 2025](https://emacsconf.org/2025/talks/schemacs/)
-- [Presentation of this project at EmacsConf 2024](https://emacsconf.org/2024/talks/gypsum/)
-
-## Contributors welcome!
-
-This is a large and ambitious project, but there seems to be a lot of
-interest in both the Emacs and Scheme communities for an Emacs clone
-written in Scheme. Our job is to coordinate everyone's efforts, and to
-make it as easy as possible for anyone to contribute. Please feel free
-to get in touch with us, we want to help you contribute code.
-
-If you would like some ideas on how to contribute, a good place to
-start is to read our [**feature wish list**](../../../wiki/WishList.md) document.
-
-Also check out issue [#30 "*Get Emacs Regression Tests (ERT) to evaluate on the `cl-lib.el`*"](https://codeberg.org/ramin_hal9001/schemacs/issues/30) if you would
-like to try contributing to the Emacs Lisp interpreter part of this project.

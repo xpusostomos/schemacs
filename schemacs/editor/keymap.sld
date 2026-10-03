@@ -25,7 +25,11 @@
   (import
     (scheme base)
     (prefix (schemacs keymap) km:)
-    (only (schemacs lens) update))
+    ;; `keymap-parent' and `set-keymap-parent' are keymap.c's; this
+    ;; library states them beside the keys, as it does `define-key'.
+    (only (schemacs keymap) keymap-parent set-keymap-parent)
+    (only (schemacs lens) update)
+    )
 
   (export
    single-key-description
@@ -34,6 +38,8 @@
    *special-event-map*
    add-keymap-layer!
    define-key
+   keymap-parent
+   set-keymap-parent
    )
 
   (begin

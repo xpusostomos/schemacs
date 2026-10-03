@@ -27,6 +27,9 @@
     ;; The prefix echo is a time.
     (only (scheme time) current-second)
     (prefix (schemacs keymap) km:)
+    ;; `define-derived-mode' is `derived.el''s, and `special-mode' below
+    ;; is defined with it.
+    (only (schemacs editor derived) define-derived-mode)
     (only (schemacs editor engine)
          copy-marker marker-position set-marker!
          set!text-editor-deactivate-mark! text-editor-deactivate-mark
@@ -92,6 +95,7 @@
     )
 
   (export
+   special-mode special-mode-hook special-mode-map
    %blank-line? %char-at %inword-at *amalgamating-count% *amalgamating-undo-limit*
    *last-change-was-undo* *last-command* *this-command* *temporary-goal-column*
    *kill-do-not-save-duplicates* *kill-read-only-ok*
@@ -134,6 +138,31 @@ just-one-space delete-horizontal-space delete-blank-lines
    )
 
   (begin
+
+    ;;----------------------------------------------------------------
+    ;; `special-mode'
+    ;;------------------------------------------------------------------
+
+    (define special-mode-map
+      ;; GNU Emacs's `special-mode-map', which `define-derived-mode'
+      ;; makes for the mode below: the keys every special mode shares.
+      ;; It has no keys of its own here yet - Emacs's carries the
+      ;; `special-mode' bindings - so it is an empty map for the modes
+      ;; that derive from this one to layer over.
+      ;;--------------------------------------------------------------
+      (km:keymap '*special-mode-map*))
+
+    (define special-mode-hook '())
+    ;; ^ GNU Emacs's `special-mode-hook', made by `define-derived-mode'.
+
+    (define-derived-mode (special-mode #f "Special" special-mode-map
+                                       special-mode-hook)
+      "Parent major mode from which special major modes should inherit.
+
+A special major mode is intended to view specially formatted data
+rather than files.  These modes usually use read-only buffers."
+      (text-editor-set-read-only! (current-buffer) #t))
+
     ;;----------------------------------------------------------------
     ;; Commands
     ;;

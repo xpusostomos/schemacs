@@ -43,6 +43,12 @@
   (import
     (scheme base)
     (scheme char)
+    ;; `getcwd' is what `default-directory' answers with when there is no
+    ;; buffer and no frame to ask - Emacs's global value of the variable.
+    (only (guile) getcwd)
+    ;; `run-hooks' is `subr.el''s, and `kill-all-local-variables' runs
+    ;; `change-major-mode-hook' through it.
+    (only (schemacs editor subr) run-hooks)
     (only (schemacs weak)
           new-weak-table
           weak-table-ref
@@ -73,11 +79,20 @@
    *kill-buffer-query-functions*
    *scratch-buffer-name*
    buffer-default-directory
+   default-directory
+   *change-major-mode-hook*
+   kill-all-local-variables
+   major-mode
+   mode-name
+   set!major-mode
+   set!mode-name
    buffer-file-name
    buffer-list
    buffer-list-alist
    buffer-live-p
    buffer-local-keymap
+   current-local-map
+   use-local-map
    buffer-local-value
    buffer-truncate-lines
    buffer-word-wrap
@@ -772,6 +787,25 @@
                                                    (loop (cdr rest))))))))
         value))
 
+    (define (use-local-map keymap)
+      ;; GNU Emacs's `use-local-map' (keymap.c:1900): "Select KEYMAP as
+      ;; the current local keymap. If KEYMAP is nil, that means no local
+      ;; keymap."
+      ;;
+      ;; keymap.c's, but here: `keymap.c' cannot see a buffer in this
+      ;; tree - `(schemacs editor keymap)' is imported by `frame.c', and
+      ;; `buffer.c' by that - so the two functions that read and write
+      ;; the buffer's own keymap slot live with the slot.
+      ;;--------------------------------------------------------------
+      (set!buffer-local-keymap (current-buffer) keymap))
+
+    (define (current-local-map)
+      ;; GNU Emacs's `current-local-map' (keymap.c): "Return current
+      ;; buffer's local map, or nil if there is none." keymap.c's, and
+      ;; here for the reason `use-local-map' is.
+      ;;--------------------------------------------------------------
+      (buffer-local-keymap (current-buffer)))
+
     (define (buffer-local-keymap buffer)
       ;; The buffer's own keymap, or false: GNU Emacs's `current-local-map'
       ;; for a buffer that is not current, and its `BVAR (buf, keymap)'
@@ -784,6 +818,106 @@
       ;; Give BUFFER its own keymap: GNU Emacs's `use-local-map'.
       ;;--------------------------------------------------------------
       (set-buffer-local-value! buffer 'buffer-local-keymap keymap))
+
+    (define (default-directory)
+      ;; The directory a bare file name is relative to: GNU Emacs's
+      ;; `default-directory', which is a buffer-local variable - each
+      ;; buffer has its own, so two windows showing two files in two
+      ;; directories prompt from the one each is in. `find-file' sets it
+      ;; on the buffer it visits, as Emacs's does.
+      ;;
+      ;; Its *default* - what it answers with when the buffer has not
+      ;; been given one, and when there is no current buffer at all - is
+      ;; the process's own directory, which is Emacs's global value of
+      ;; the variable. The no-buffer case matters: `find-file' expands
+      ;; the name it is given against this, so a `find-file' called with
+      ;; nothing current - from a script, or a test - failed on the way
+      ;; to reading the file at all.
+      ;;--------------------------------------------------------------
+      ;;
+      ;; `(current-buffer)' with one guard: it falls back to the frame's
+      ;; selected window, and with no frame there - which is what a
+      ;; `find-file' called from a script or a test has - there is
+      ;; nothing to ask, so the answer is the process's directory rather
+      ;; than an error on the way to reading the file.
+      ;;--------------------------------------------------------------
+      (let ((buffer (or (*current-buffer*)
+                        (and (*current-frame*) (current-editor)))))
+        (or (and buffer (buffer-default-directory buffer))
+            (string-append (getcwd) "/"))))
+
+    (define *change-major-mode-hook* (make-parameter '()))
+    ;; ^ GNU Emacs's `change-major-mode-hook' (`buffer.c'): "Normal hook
+    ;; run before changing the major mode, when otherwise a new major
+    ;; mode would be installed. ... `kill-all-local-variables' runs it."
+    ;; It is what a mode puts its clean-up in.
+
+    (define (major-mode . args)
+      ;; GNU Emacs's `major-mode' (`buffer.c':5230): "Symbol for current
+      ;; buffer's major mode. The default value (normally
+      ;; `fundamental-mode') affects new buffers."
+      ;;
+      ;; A buffer-local *variable* in Emacs; a slot of the buffer here,
+      ;; read through the same store `buffer-local-value' reads. The
+      ;; optional argument is the buffer, and without one the current
+      ;; buffer is asked - and a buffer never given one answers
+      ;; `fundamental-mode', which is Emacs's default.
+      ;;--------------------------------------------------------------
+      (let ((buffer (if (pair? args) (car args) (current-buffer))))
+        (buffer-local-value buffer 'major-mode 'fundamental-mode)))
+
+    (define (set!major-mode value . args)
+      ;; What `(setq major-mode MODE)' does in a buffer.
+      ;;--------------------------------------------------------------
+      (set-buffer-local-value! (if (pair? args) (car args) (current-buffer))
+                               'major-mode value))
+
+    (define (mode-name . args)
+      ;; GNU Emacs's `mode-name' (`buffer.c':5243): "Pretty name of
+      ;; current buffer's major mode. Usually a string, but can use any
+      ;; of the constructs for `mode-line-format'."
+      ;;
+      ;; A fresh buffer answers "Fundamental", which is what Emacs shows
+      ;; for one: `fundamental-mode' is the mode a buffer starts in and
+      ;; this is the name it gives itself.
+      ;;--------------------------------------------------------------
+      (let ((buffer (if (pair? args) (car args) (current-buffer))))
+        (buffer-local-value buffer 'mode-name "Fundamental")))
+
+    (define (set!mode-name value . args)
+      ;; What `(setq mode-name NAME)' does in a buffer.
+      ;;--------------------------------------------------------------
+      (set-buffer-local-value! (if (pair? args) (car args) (current-buffer))
+                               'mode-name value))
+
+    (define (kill-all-local-variables . args)
+      ;; GNU Emacs's `kill-all-local-variables' (`buffer.c':3019):
+      ;; "Switch to Fundamental mode by killing current buffer's local
+      ;; variables. Most local variable bindings are eliminated so that
+      ;; the default values become effective once more. Also, ... the
+      ;; local keymap is set to nil ... This function also forces
+      ;; redisplay of the mode line. Every function to select a new
+      ;; major mode starts by calling this function. ... The first thing
+      ;; this function does is run the normal hook
+      ;; `change-major-mode-hook'."
+      ;;
+      ;; "As a special exception, local variables whose names have a
+      ;; non-nil `permanent-local' property are not eliminated by this
+      ;; function." There are no properties on a variable here - a slot
+      ;; is keyed by a plain value - so there is no exception to make,
+      ;; and the C's KILL-PERMANENT argument has nothing to say.
+      ;;--------------------------------------------------------------
+      (run-hooks (*change-major-mode-hook*))
+      (let ((buffer (if (pair? args) (car args) (current-buffer))))
+        ;; "Actually eliminate all local bindings of this buffer."
+        (weak-table-set! buffer-slots-table buffer '())
+        (set!buffer-local-keymap buffer #f))
+      ;; The C ends by asking for the mode line to be redrawn
+      ;; (`bset_update_mode_line'), because every major mode command calls
+      ;; this and the mode name it shows has just gone. There is nothing
+      ;; to ask here: this editor redraws after every command, so the
+      ;; mode line is drawn again before anything can be seen.
+      #t)
 
     (define (buffer-default-directory buffer . args)
       ;; The directory BUFFER's relative file names are relative to: GNU
