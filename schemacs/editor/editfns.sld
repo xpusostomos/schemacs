@@ -44,7 +44,6 @@
     (only (schemacs editor command)
           *mark-even-if-inactive*)
     (only (schemacs ui text-buffer-impl) text-location-line)
-    (only (schemacs editor frame) current-editor)
     )
 
   (export
@@ -99,9 +98,9 @@ point-marker
                  (not (*mark-even-if-inactive*))
                  (not (mark-active)))
         (error "The mark is not active now"))
-      (let ((m (text-editor-mark (current-editor))))
+      (let ((m (text-editor-mark (current-buffer))))
         (unless m (error "The mark is not set now, so there is no region"))
-        (let ((point (text-editor-get-cursor (current-editor))))
+        (let ((point (text-editor-get-cursor (current-buffer))))
           (if (eq? (< point m) beginning?) point m))))
 
     (define (delete-region start end)
@@ -115,7 +114,7 @@ point-marker
       ;; against the buffer; the engine's cursor-and-delete does the same
       ;; clamping.
       ;;--------------------------------------------------------------
-      (let ((ed (current-editor)))
+      (let ((ed (current-buffer)))
         (when (> start end)
           (let ((swap start)) (set! start end) (set! end swap)))
         (text-editor-set-cursor ed start)
@@ -144,7 +143,7 @@ point-marker
       ;; Emacs's also narrows-independent `what-line' does its own count
       ;; with the narrowing kept; nothing is narrowed here.
       ;;--------------------------------------------------------------
-      (let ((ed (current-editor)))
+      (let ((ed (current-buffer)))
         (if (pair? args)
             ;; the line POSITION is on: the engine's
             ;; `text-editor-get-line-column' answers the one-based line
@@ -167,7 +166,7 @@ point-marker
       ;; zero-based, so the answer is one more than it - and everything
       ;; here that takes an Emacs position converts the same way.
       ;;--------------------------------------------------------------
-      (+ 1 (text-editor-get-cursor (current-editor))))
+      (+ 1 (text-editor-get-cursor (current-buffer))))
 
     (define (point-min)
       ;; GNU Emacs's `point-min' (editfns.c): "the minimum permissible
@@ -181,7 +180,7 @@ point-marker
       ;; character of the buffer - the engine's character count, plus
       ;; the one Emacs's zero-based cursor does not have.
       ;;--------------------------------------------------------------
-      (+ 1 (text-editor-char-count (current-editor))))
+      (+ 1 (text-editor-char-count (current-buffer))))
 
     (define (goto-char position)
       ;; GNU Emacs's `goto-char' (editfns.c): "Set point to POSITION,
@@ -189,7 +188,7 @@ point-marker
       ;; zero-based index; the number is one-based, as every position
       ;; answer of this library is.
       ;;--------------------------------------------------------------
-      (text-editor-set-cursor (current-editor)
+      (text-editor-set-cursor (current-buffer)
                               (- (cond
                                   ((marker-type? position) (marker-position position))
                                   (else position))
@@ -204,7 +203,7 @@ point-marker
       ;; turn; `general_insert_function', which the C's is, does the
       ;; same loop.
       ;;--------------------------------------------------------------
-      (let ((ed (current-editor)))
+      (let ((ed (current-buffer)))
         (for-each
          (lambda (arg)
            (cond ((string? arg) (text-editor-insert ed arg))
@@ -218,20 +217,20 @@ point-marker
       ;; GNU Emacs's `bobp' (editfns.c): "Return t if point is at the
       ;; beginning of the buffer."
       ;;--------------------------------------------------------------
-      (= (text-editor-get-cursor (current-editor)) 0))
+      (= (text-editor-get-cursor (current-buffer)) 0))
 
     (define (eobp)
       ;; GNU Emacs's `eobp' (editfns.c): "Return t if point is at the
       ;; end of the buffer."
       ;;--------------------------------------------------------------
-      (= (text-editor-get-cursor (current-editor))
-         (text-editor-char-count (current-editor))))
+      (= (text-editor-get-cursor (current-buffer))
+         (text-editor-char-count (current-buffer))))
 
     (define (bolp)
       ;; GNU Emacs's `bolp' (editfns.c): "Return t if point is at the
       ;; beginning of a line."
       ;;--------------------------------------------------------------
-      (let ((ed (current-editor)))
+      (let ((ed (current-buffer)))
         (or (= (text-editor-get-cursor ed) 0)
             (eqv? (text-editor-get-char-index ed (- (text-editor-get-cursor ed) 1))
                   #\newline))))
@@ -241,7 +240,7 @@ point-marker
       ;; end of a line. `End of a line' includes point being at the end
       ;; of the buffer."
       ;;--------------------------------------------------------------
-      (let ((ed (current-editor)))
+      (let ((ed (current-buffer)))
         (= (text-editor-get-cursor ed)
            (text-editor-get-end-of-line ed))))
 
@@ -258,7 +257,7 @@ point-marker
       ;; as Emacs's docstring keeps out of the synopsis; the one-based
       ;; position becomes the engine's zero-based index here.
       ;;--------------------------------------------------------------
-      (let* ((ed (current-editor))
+      (let* ((ed (current-buffer))
              (count (text-editor-char-count ed))
              (index (- (if position position (point)) 1)))
         (and (>= index 0) (< index count)
@@ -269,7 +268,7 @@ point-marker
       ;; current buffer immediately before position POSITION" - nil
       ;; when there is none.
       ;;--------------------------------------------------------------
-      (let* ((ed (current-editor))
+      (let* ((ed (current-buffer))
              (count (text-editor-char-count ed))
              (index (- (if position position (point)) 1)))
         (and (> index 0)
@@ -295,7 +294,7 @@ point-marker
       ;; `line-move''s, which is `save-excursion''s to keep point off.
       ;; The answer is one-based, as every position answer here is.
       ;;--------------------------------------------------------------
-      (let* ((ed (current-editor))
+      (let* ((ed (current-buffer))
              ;; an optional argument explicitly given as nil - Elisp's
              ;; `(line-beginning-position (and arg 2))' with ARG nil -
              ;; behaves as absent, as it does in Emacs
@@ -313,7 +312,7 @@ point-marker
       ;; of the end of the line N lines away. One-based, as
       ;; `line-beginning-position' is.
       ;;--------------------------------------------------------------
-      (let* ((ed (current-editor))
+      (let* ((ed (current-buffer))
              ;; nil behaves as absent, as in `line-beginning-position'
              (n (if (and (pair? rest) (car rest)) (car rest) 0)))
         (+ 1
@@ -329,14 +328,14 @@ point-marker
       ;; engine's copy, which carries no properties because none are
       ;; wired to the display yet.
       ;;--------------------------------------------------------------
-      (text-editor-copy-string (current-editor) (- beg 1) (- end 1)))
+      (text-editor-copy-string (current-buffer) (- beg 1) (- end 1)))
 
     (define (buffer-size)
       ;; GNU Emacs's `buffer-size' (editfns.c): "Return the number of
       ;; characters in the current buffer" - no narrowing here, so
       ;; nothing is subtracted.
       ;;--------------------------------------------------------------
-      (text-editor-char-count (current-editor)))
+      (text-editor-char-count (current-buffer)))
 
     (define (buffer-string)
       ;; GNU Emacs's `buffer-string' (editfns.c): "Return the contents
@@ -361,7 +360,7 @@ point-marker
       ;; read-only." The message is the error's text here, there
       ;; being no condition symbols yet.
       ;;--------------------------------------------------------------
-      (when (text-editor-read-only? (current-editor))
+      (when (text-editor-read-only? (current-buffer))
         (error "Buffer is read-only")))
 
     (define (forward-line . rest)
@@ -373,7 +372,7 @@ point-marker
       ;; backward request that was cut short. `paragraphs.sld''s walks
       ;; were spelling this privately.
       ;;--------------------------------------------------------------
-      (let* ((ed (current-editor))
+      (let* ((ed (current-buffer))
              (n (if (pair? rest) (car rest) 1))
              (moved
               (let loop ((left (abs n)) (moved 0))
@@ -404,7 +403,7 @@ point-marker
       ;; `save_excursion_save' does.
       ;;--------------------------------------------------------------
       (copy-marker (current-buffer)
-                   (text-editor-get-cursor (current-editor))))
+                   (text-editor-get-cursor (current-buffer))))
 
 (define-syntax save-excursion
       ;; GNU Emacs's `save-excursion' (editfns.c:818): "Save point, and
@@ -434,7 +433,7 @@ point-marker
         ((save-excursion body ...)
          (let ((marker (copy-marker (current-buffer)
                                     (text-editor-get-cursor
-                                     (current-editor))))
+                                     (current-buffer))))
                (saved-buffer (current-buffer)))
            (dynamic-wind
              (lambda () #f)

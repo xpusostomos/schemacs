@@ -45,7 +45,10 @@
     (scheme char)
     ;; `getcwd' is what `default-directory' answers with when there is no
     ;; buffer and no frame to ask - Emacs's global value of the variable.
-    (only (guile) getcwd)
+    ;; `sort' is what `overlays-at' orders by priority with. It is in
+    ;; `(guile)' as well as `(srfi 1)', and this library already reaches
+    ;; into `(guile)' for `getcwd'.
+    (only (guile) getcwd sort)
     ;; `run-hooks' is `subr.el''s, and `kill-all-local-variables' runs
     ;; `change-major-mode-hook' through it.
     (only (schemacs editor subr) run-hooks)
@@ -63,7 +66,12 @@
           text-editor-modified? text-editor-set-modified!
           text-editor-read-only? text-editor-set-read-only!
           text-editor-get-cursor text-editor-set-cursor
-          text-editor-delete-from-cursor text-editor-char-count)
+          text-editor-delete-from-cursor text-editor-char-count
+          ;; an overlay's two ends are markers: `marker.c''s, which is
+          ;; also the engine's, and they are what makes an overlay follow
+          ;; the text as it is edited
+          copy-marker marker-buffer marker-position marker-type?
+          set-marker!)
     (only (schemacs editor frame)
           *current-frame*
           current-editor
@@ -81,6 +89,21 @@
    buffer-default-directory
    default-directory
    *change-major-mode-hook*
+   delete-overlay
+   make-overlay
+   move-overlay
+   next-overlay-change
+   overlay-buffer
+   overlay-end
+   overlay-get
+   overlay-properties
+   overlay-priority
+   overlay-put
+   overlay-start
+   overlayp
+   overlays-at
+   overlays-in
+   previous-overlay-change
    kill-all-local-variables
    major-mode
    mode-name
@@ -752,6 +775,270 @@
     ;; killed buffer alive - and the table is per buffer rather than one
     ;; slot per fact so that a buffer-local variable can be any name a
     ;; ported Elisp sets, which is what `setq-local' needs.
+
+    ;;----------------------------------------------------------------
+    ;; Overlays
+    ;;
+    ;; GNU Emacs's `buffer.c''s other half. An overlay is a *range of the
+    ;; buffer* with properties on it, as against a text property, which is
+    ;; on the characters: an overlay is an object you make, move and
+    ;; delete; its two ends are markers, so it follows the text as it is
+    ;; edited rather than being torn by it; and when several cover one
+    ;; character the one with the highest `priority' wins.
+    ;;
+    ;; The C keeps them in an interval tree per buffer, for the
+    ;; redisplay's sake. What is kept here is a plain list in order by
+    ;; start: the lookups are over a windowful of rows rather than a whole
+    ;; file, and the tree is an optimisation this tree's shape does not
+    ;; need yet.
+    ;;
+    ;; Positions are the *engine's*, zero-based - what `copy-marker' takes
+    ;; and what `(schemacs editor textprop)' reads. `get-char-property' is
+    ;; the seam the two meet at, and says so in its own comment.
+    ;;
+    ;; Not ported: `before-string' and `after-string', the properties that
+    ;; put text on the screen which is not in the buffer (`xdisp.c''s
+    ;; `load_overlay_strings'); `evaporate'; `overlay-recenter'; the
+    ;; modification hooks; and the `window' property, which limits an
+    ;; overlay to one window.
+    ;;------------------------------------------------------------------
+
+    (define buffer-overlays-table (new-weak-table))
+    ;; ^ each buffer's overlays, as a list in order by start
+
+    (define (overlay-current-buffer)
+      ;; The buffer the overlay functions act on - Emacs's
+      ;; `current_buffer'. `(current-buffer)' *raises* when there is no
+      ;; frame to ask, and the redisplay asks for overlays at a position
+      ;; in a buffer there may be none of: a test that draws a line with
+      ;; nothing current is exactly that case.
+      ;;--------------------------------------------------------------
+      (guard (e (#t #f)) (current-buffer)))
+
+    (define (buffer-overlays buffer)
+      ;; A buffer with no overlays has none, and *no buffer at all* has
+      ;; none either - the redisplay asks this for a position in a buffer
+      ;; there may not be one of, which is what a test that draws a line
+      ;; with no current buffer does.
+      ;;--------------------------------------------------------------
+      (if buffer
+          (weak-table-ref buffer-overlays-table buffer '())
+          '()))
+
+    (define (set!buffer-overlays! buffer overlays)
+      (weak-table-set! buffer-overlays-table buffer overlays))
+
+    (define-record-type <overlay-type>
+      (make<overlay> buffer start end plist)
+      overlayp
+      (buffer overlay-buffer %set-overlay-buffer!)
+      (start  overlay-start-marker)
+      (end    overlay-end-marker)
+      (plist  overlay-properties set!overlay-properties!))
+
+    (define (overlay-start overlay)
+      ;; GNU Emacs's `overlay-start': "Return the start position of
+      ;; OVERLAY." A deleted overlay's markers point nowhere, and its
+      ;; start is nil, as the C's is.
+      ;;--------------------------------------------------------------
+      (and (overlayp overlay)
+           (marker-position (overlay-start-marker overlay))))
+
+    (define (overlay-end overlay)
+      ;; GNU Emacs's `overlay-end': "Return the end position of OVERLAY."
+      ;;--------------------------------------------------------------
+      (and (overlayp overlay)
+           (marker-position (overlay-end-marker overlay))))
+
+    (define (overlay-get overlay prop)
+      ;; GNU Emacs's `overlay-get': "Get the property of overlay OVERLAY
+      ;; with property name PROP."
+      ;;--------------------------------------------------------------
+      (let ((cell (assq prop (overlay-properties overlay))))
+        (and cell (cdr cell))))
+
+    (define (overlay-put overlay prop value)
+      ;; GNU Emacs's `overlay-put': "Set the property of overlay OVERLAY
+      ;; with property name PROP to the value VALUE. ... Return VALUE."
+      ;;--------------------------------------------------------------
+      (set!overlay-properties!
+       overlay
+       (cons (cons prop value)
+             (let loop ((l (overlay-properties overlay)))
+               (cond ((null? l) '())
+                     ((eq? (caar l) prop) (loop (cdr l)))
+                     (else (cons (car l) (loop (cdr l))))))))
+      value)
+
+    (define (overlay-priority overlay)
+      ;; The C's `make_sortvec_item' (buffer.c:3304): the `priority'
+      ;; property if there is one - an integer, or a cons of the
+      ;; priority and a secondary one - and zero otherwise.
+      ;;--------------------------------------------------------------
+      (let ((p (overlay-get overlay 'priority)))
+        (cond ((not p) 0)
+              ((integer? p) p)
+              ((pair? p) (if (integer? (car p)) (car p) 0))
+              (else 0))))
+
+    (define (add-buffer-overlay! buffer overlay)
+      ;; Put OVERLAY into BUFFER's list, in order by start.
+      ;;--------------------------------------------------------------
+      (let loop ((l (buffer-overlays buffer)) (acc '()))
+        (cond ((null? l)
+               (set!buffer-overlays! buffer (reverse (cons overlay acc))))
+              ((< (overlay-start overlay) (overlay-start (car l)))
+               (set!buffer-overlays!
+                buffer (append (reverse acc) (cons overlay l))))
+              (else (loop (cdr l) (cons (car l) acc))))))
+
+    (define (make-overlay beg end . rest)
+      ;; GNU Emacs's `make-overlay' (buffer.c:3635): "Create a new overlay
+      ;; with range BEG to END in BUFFER and return it. If omitted, BUFFER
+      ;; defaults to the current buffer."
+      ;;
+      ;; "The fourth arg FRONT-ADVANCE, if non-nil, makes the marker for
+      ;; the front of the overlay advance when text is inserted there
+      ;; (which means the text *is not* included in the overlay). The
+      ;; fifth arg REAR-ADVANCE ... (which means the text *is*
+      ;; included)." Those are the markers' insertion types here, which
+      ;; is what the C's interval-tree node keeps for the same purpose.
+      ;;--------------------------------------------------------------
+      (let* ((buffer (if (pair? rest) (or (car rest) (current-buffer))
+                         (current-buffer)))
+             (front-advance (and (pair? rest) (pair? (cdr rest)) (cadr rest)))
+             (rear-advance (and (pair? rest) (pair? (cdr rest))
+                                (pair? (cddr rest)) (caddr rest)))
+             ;; "if BEG is greater than END, swap them"
+             (b (min beg end))
+             (e (max beg end))
+             (overlay (make<overlay> buffer
+                                    (copy-marker buffer b front-advance)
+                                    (copy-marker buffer e rear-advance)
+                                    '())))
+        (add-buffer-overlay! buffer overlay)
+        overlay))
+
+    (define (delete-overlay overlay)
+      ;; GNU Emacs's `delete-overlay' (buffer.c:3806): "Delete the overlay
+      ;; OVERLAY from its buffer." Its markers are detached, so it follows
+      ;; nothing from here on and `overlay-start' answers nil.
+      ;;--------------------------------------------------------------
+      (let ((buffer (overlay-buffer overlay)))
+        (when buffer
+          (set!buffer-overlays!
+           buffer
+           (let loop ((l (buffer-overlays buffer)))
+             (cond ((null? l) '())
+                   ((eq? (car l) overlay) (cdr l))
+                   (else (cons (car l) (loop (cdr l)))))))
+          (set-marker! (overlay-start-marker overlay) #f)
+          (set-marker! (overlay-end-marker overlay) #f)
+          (%set-overlay-buffer! overlay #f)))
+      #f)
+
+    (define (move-overlay overlay beg end . rest)
+      ;; GNU Emacs's `move-overlay': "Move OVERLAY to span the region from
+      ;; BEG to END." An overlay moved to another buffer is taken out of
+      ;; the one it was in and put into the other, which is what the C
+      ;; does for the same reason: the two ends are markers, and a marker
+      ;; belongs to one buffer.
+      ;;--------------------------------------------------------------
+      (let ((buffer (if (pair? rest) (or (car rest) (overlay-buffer overlay))
+                        (overlay-buffer overlay))))
+        (unless (eq? buffer (overlay-buffer overlay))
+          (delete-overlay overlay)
+          (%set-overlay-buffer! overlay buffer))
+        (set-marker! (overlay-start-marker overlay) (min beg end) buffer)
+        (set-marker! (overlay-end-marker overlay) (max beg end) buffer)
+        ;; the list is kept in order by start, and this may have moved it
+        (when (overlay-buffer overlay)
+          (let ((ovs (let loop ((l (buffer-overlays buffer)))
+                       (cond ((null? l) '())
+                             ((eq? (car l) overlay) (loop (cdr l)))
+                             (else (cons (car l) (loop (cdr l))))))))
+            (set!buffer-overlays! buffer ovs)
+            (add-buffer-overlay! buffer overlay))))
+      overlay)
+
+    (define (overlays-at pos . rest)
+      ;; GNU Emacs's `overlays-at' (buffer.c:3898): "Return a list of the
+      ;; overlays that contain the character at POS. If SORTED is
+      ;; non-nil, then sort them by decreasing priority. Zero-length
+      ;; ... overlays that start and stop at POS are not included."
+      ;;--------------------------------------------------------------
+      (let ((found (let loop ((l (buffer-overlays (overlay-current-buffer))) (acc '()))
+                     (cond ((null? l) (reverse acc))
+                           ((and (<= (overlay-start (car l)) pos)
+                                 (< pos (overlay-end (car l))))
+                            (loop (cdr l) (cons (car l) acc)))
+                           (else (loop (cdr l) acc))))))
+        (if (and (pair? rest) (car rest))
+            ;; "the list should be in decreasing order of priority ...
+            ;; because sort_overlays sorts in the increasing order"
+            (reverse (sort found (lambda (a b)
+                                   (< (overlay-priority a)
+                                      (overlay-priority b)))))
+            found)))
+
+    (define (overlays-in beg end)
+      ;; GNU Emacs's `overlays-in' (buffer.c:3944): "Return a list of the
+      ;; overlays that overlap the region BEG ... END. Overlap means that
+      ;; at least one character between BEG and END is contained within
+      ;; the overlay." Empty overlays at a point in the range count too.
+      ;;--------------------------------------------------------------
+      (let loop ((l (buffer-overlays (overlay-current-buffer))) (acc '()))
+        (cond ((null? l) (reverse acc))
+              ((and (< (overlay-start (car l)) end)
+                    (< beg (overlay-end (car l))))
+               (loop (cdr l) (cons (car l) acc)))
+              (else (loop (cdr l) acc)))))
+
+    (define (next-overlay-change pos)
+      ;; GNU Emacs's `next-overlay-change' (buffer.c:3987): "Return the
+      ;; next position after POS where an overlay starts or ends. If there
+      ;; are no overlay boundaries from POS to (point-max), the value is
+      ;; (point-max)."
+      ;;--------------------------------------------------------------
+      (let ((buffer (current-buffer)))
+        (let loop ((l (buffer-overlays buffer)) (best #f))
+          (cond ((null? l)
+                 (or best (text-editor-char-count buffer)))
+                (else
+                 (let ((s (overlay-start (car l)))
+                       (e (overlay-end (car l))))
+                   (loop (cdr l)
+                         (fold-best best
+                                    (if (> s pos) s #f)
+                                    (if (> e pos) e #f)))))))))
+
+    (define (fold-best best . candidates)
+      ;; the smallest of BEST and the CANDIDATES that are numbers, #f for
+      ;; none - the "next" of `next-overlay-change'
+      ;;--------------------------------------------------------------
+      (let loop ((rest candidates) (best best))
+        (cond ((null? rest) best)
+              ((not (car rest)) (loop (cdr rest) best))
+              ((or (not best) (< (car rest) best)) (loop (cdr rest) (car rest)))
+              (else (loop (cdr rest) best)))))
+
+    (define (previous-overlay-change pos)
+      ;; GNU Emacs's `previous-overlay-change': "Return the previous
+      ;; position before POS where an overlay starts or ends. If there are
+      ;; no overlay boundaries from (point-min) to POS, the value is
+      ;; (point-min)."
+      ;;--------------------------------------------------------------
+      (let loop ((l (buffer-overlays (overlay-current-buffer))) (best #f))
+        (cond ((null? l) (or best 0))
+              (else
+               (let ((s (overlay-start (car l)))
+                     (e (overlay-end (car l))))
+                 (loop (cdr l)
+                       (let ((s (if (< s pos) s #f))
+                             (e (if (< e pos) e #f)))
+                         (cond ((not s) (or e best))
+                               ((not e) (or best s))
+                               (else (max s e (or best 0)))))))))))
 
     (define buffer-slots-table
       ;; The table of side slots. One table rather than a slot per fact,

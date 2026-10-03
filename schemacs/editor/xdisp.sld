@@ -26,6 +26,9 @@
     ;; neither is missed until a mode line is drawn.
     (only (scheme write) display)
     (only (scheme cxr) caddr)
+    ;; `filter' and `sort' order the overlay strings at a position, as
+    ;; `load_overlay_strings' does with qsort.
+    (only (guile) filter sort)
     ;; The display interface: the redisplay draws through these generics
     ;; and never touches a terminal itself. `dispnew.sld' defines them,
     ;; and `term.sld' answers them for the curses terminal.
@@ -86,7 +89,10 @@
           buffer-cursor-type buffer-hscroll-margin buffer-hscroll-step
           buffer-local-value buffer-truncate-lines buffer-word-wrap
           ;; the mode line's mode name is the buffer's `mode-name'
-          mode-name)
+          mode-name
+          ;; and the overlays at a position are merged into its face
+          overlay-end overlay-get overlay-priority overlay-start
+          overlays-at overlays-in)
 
     (only (schemacs editor faces) *undefined-face-attribute*)
     (only (schemacs editor xfaces)
@@ -106,6 +112,7 @@
    line-end-fill-attribute
    *mode-line-format*
    face-at-buffer-position
+   overlay-strings-at
    face->attribute
    ;; the cursor's type, which the tests check without a display
    get-specified-cursor-type
@@ -1023,15 +1030,94 @@
       ;; this runs per character; a cache is worth adding when the
       ;; renderer starts asking per character rather than per run.
       ;;--------------------------------------------------------------
-      (let ((attrs
-             (merge-face-ref (get-text-property position 'face ed)
-                             (merge-face-vectors
-                              (face-realized-attributes 'default)
-                              (face-attributes-empty)))))
+      (let* ((attrs
+              (merge-face-ref (get-text-property position 'face ed)
+                              (merge-face-vectors
+                               (face-realized-attributes 'default)
+                               (face-attributes-empty))))
+             ;; and the overlays', merged over it in *increasing* order of
+             ;; priority so that the highest-priority one ends on top -
+             ;; which is what `xfaces.c''s `face_at_buffer_position' does
+             ;; with the same list, sorted the same way.
+             (attrs
+              (let loop ((ovs (reverse (overlays-at position #t))) (attrs attrs))
+                (if (null? ovs)
+                    attrs
+                    (loop (cdr ovs)
+                          (merge-face-ref (overlay-get (car ovs) 'face) attrs))))))
         (realize-face (current-display)
                      (if (region-face-at-position? ed position)
                          (merge-face-ref 'region attrs)
                          attrs))))
+
+    (define (overlay-strings-at position)
+      ;; GNU Emacs's `load_overlay_strings' (xdisp.c:7104): the overlay
+      ;; strings to draw at POSITION, as `(HEADS . TAILS)' - the
+      ;; `before-string's that go before the character there and the
+      ;; `after-string's that go after it.
+      ;;
+      ;; Only the overlays that *start or end* at POSITION are looked at,
+      ;; which is what makes these strings appear once rather than along
+      ;; the whole range, and only non-empty ones: a `before-string' of
+      ;; "" is how an overlay says "put a face here", not "draw
+      ;; something".
+      ;;
+      ;; The order is the C's `compare_overlay_entries' (xdisp.c:7044):
+      ;; after-strings before before-strings when they come from
+      ;; different overlays, after-strings by *decreasing* priority and
+      ;; before-strings by *increasing* - so that the highest-priority
+      ;; one ends up nearest the text either way.
+      ;;
+      ;; Not ported: the `window' property, which limits a string to one
+      ;; window, and the invisible-text rule, which shows both the
+      ;; before- and after-strings of an overlay whose text is hidden
+      ;; (there is no `invisible' property here).
+      ;;--------------------------------------------------------------
+      (let ((entries
+             ;; the C's query is over `[charpos - 1, charpos + 1]' - the
+             ;; tree walk's coarse filter - and the exact `start ==
+             ;; charpos' / `end == charpos' test comes after; an overlay
+             ;; *ending* here is in `[position - 1, position)' and one
+             ;; *starting* here is in `[position, position + 1)', so both
+             ;; are wanted
+             (let loop ((ovs (overlays-in (- position 1) (+ position 1)))
+                        (acc '()))
+               (cond
+                ((null? ovs) (reverse acc))
+                (else
+                 (let* ((ov (car ovs))
+                        (start (overlay-start ov))
+                        (end (overlay-end ov))
+                        (before (and (= start position)
+                                     (overlay-get ov 'before-string)))
+                        (after (and (= end position)
+                                    (overlay-get ov 'after-string))))
+                   (loop (cdr ovs)
+                         (append (reverse
+                                  (append
+                                   (if (and (string? after) (< 0 (string-length after)))
+                                       (list (list ov after #t)) '())
+                                   (if (and (string? before) (< 0 (string-length before)))
+                                       (list (list ov before #f)) '())))
+                                 acc))))))))
+        (let ((sorted (sort entries
+                            (lambda (a b)
+                              ;; the C's comparison, in the C's sense of
+                              ;; "less": #t when A comes before B
+                              (cond ((not (eq? (caddr a) (caddr b)))
+                                     (if (eq? (car a) (car b))
+                                         (caddr a)     ; same overlay: tail last
+                                         (not (caddr a)))) ; tail before head
+                                    ((not (= (overlay-priority (car a))
+                                             (overlay-priority (car b))))
+                                     (if (caddr a)
+                                         (> (overlay-priority (car a))
+                                            (overlay-priority (car b)))
+                                         (< (overlay-priority (car a))
+                                            (overlay-priority (car b)))))
+                                    (else #f))))))
+          (cons (map cadr (filter (lambda (e) (not (caddr e))) sorted))
+                (map cadr (filter (lambda (e) (caddr e)) sorted))))))
 
     (define (draw-match row x0 glyphs offsets line-start len start end
                         point width)

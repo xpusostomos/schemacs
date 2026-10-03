@@ -46,7 +46,8 @@
     (scheme char)
     (only (schemacs editor engine)
           text-editor-char-count text-editor-text-props)
-    (only (schemacs editor buffer) current-buffer)
+    (only (schemacs editor buffer)
+          *current-buffer* current-buffer overlay-get overlays-at)
     (prefix (schemacs editor intervals) iv:))
 
   (export
@@ -157,14 +158,22 @@
         (iv:textget (text-properties-at position buffer) prop)))
 
     (define (get-char-property position prop . args)
-      ;; GNU Emacs's `get-char-property': like `get-text-property', and
-      ;; also reads the overlays at POSITION. There are no overlays here,
-      ;; so this is the text property alone - and it is written as the
-      ;; place an overlay lookup would go, because the display's
-      ;; `face_at_buffer_position' wants the same seam.
+      ;; GNU Emacs's `get-char-property' (textprop.c:681): "Return the
+      ;; value of POSITION's property PROP, in OBJECT. Both overlay
+      ;; properties and text properties are checked."
+      ;;
+      ;; The rule is `get_char_property_and_overlay''s (textprop.c:619):
+      ;; walk the overlays at POSITION "in order of decreasing priority"
+      ;; and take the first that has the property; the text property
+      ;; answers only when no overlay has it. This is the seam the
+      ;; overlays were always meant to meet the display at.
       ;;--------------------------------------------------------------
       (let ((buffer (if (pair? args) (car args) (current-buffer))))
-        (get-text-property position prop buffer)))
+        (parameterize ((*current-buffer* buffer))
+          (let loop ((ovs (overlays-at position #t)))
+            (cond ((null? ovs) (get-text-property position prop buffer))
+                  ((overlay-get (car ovs) prop))
+                  (else (loop (cdr ovs))))))))
 
     ;;----------------------------------------------------------------
     ;; Whether an interval already has some properties

@@ -5,6 +5,7 @@
  (only (schemacs editor engine)
        new-text-editor text-editor-insert text-editor-to-string
        text-editor-set-cursor)
+ (only (schemacs editor textprop) get-char-property put-text-property)
  (only (schemacs editor frame)
        *current-frame* *echo-area-buffer* new-frame selected-window
        set!window-buffer set!window-top-line window-buffer)
@@ -241,5 +242,161 @@
                (value (buffer-local-value buffer 'a-variable #f)))
            (kill-buffer buffer)
            (list before after (buffer-local-keymap buffer) value)))))))
+
+;;--------------------------------------------------------------------
+;; Overlays - `buffer.c''s other half
+
+;; `make-overlay' takes a range, and its two ends are *markers*: they
+;; follow the text as it is edited, which is the difference between an
+;; overlay and a text property.
+(test-equal "an overlay spans the range it was made with"
+  '(0 5)
+  (with-buffers
+   (lambda ()
+     (let ((b (get-buffer-create "ov.txt")))
+       (parameterize ((*current-buffer* b))
+         (text-editor-insert b "hello world")
+         (let ((o (make-overlay 0 5)))
+           (list (overlay-start o) (overlay-end o))))))))
+
+;; It follows the text: inserting at its *start*, with `front-advance'
+;; nil, puts the new text inside it - the start stays and the end moves.
+(test-equal "an overlay keeps text inserted at its start"
+  '(0 8)
+  (with-buffers
+   (lambda ()
+     (let ((b (get-buffer-create "ov.txt")))
+       (parameterize ((*current-buffer* b))
+         (text-editor-insert b "hello world")
+         (let ((o (make-overlay 0 5)))
+           (text-editor-set-cursor b 0)
+           (text-editor-insert b "abc")
+           (list (overlay-start o) (overlay-end o))))))))
+
+;; and `front-advance' says the opposite: the text inserted at the start
+;; goes *before* it, so both ends move
+(test-equal "an overlay with front-advance moves with text at its start"
+  '(3 8)
+  (with-buffers
+   (lambda ()
+     (let ((b (get-buffer-create "ov.txt")))
+       (parameterize ((*current-buffer* b))
+         (text-editor-insert b "hello world")
+         (let ((o (make-overlay 0 5 #f #t)))   ; front-advance
+           (text-editor-set-cursor b 0)
+           (text-editor-insert b "abc")
+           (list (overlay-start o) (overlay-end o))))))))
+
+;; and inserting at its end, with the default `rear-advance' nil, does
+;; not extend it: the text goes *after* the overlay.
+(test-equal "an overlay does not swallow text inserted at its end"
+  '(0 5)
+  (with-buffers
+   (lambda ()
+     (let ((b (get-buffer-create "ov.txt")))
+       (parameterize ((*current-buffer* b))
+         (text-editor-insert b "hello world")
+         (let ((o (make-overlay 0 5)))
+           (text-editor-set-cursor b 5)
+           (text-editor-insert b "XYZ")
+           (list (overlay-start o) (overlay-end o))))))))
+
+(test-equal "overlay-put and overlay-get"
+  '(bold ((face . bold)))
+  (with-buffers
+   (lambda ()
+     (let ((b (get-buffer-create "ov.txt")))
+       (parameterize ((*current-buffer* b))
+         (text-editor-insert b "hello")
+         (let ((o (make-overlay 0 3)))
+           (overlay-put o 'face 'bold)
+           (list (overlay-get o 'face) (overlay-properties o))))))))
+
+;; `overlays-at' answers the overlays containing the character at POS -
+;; and a zero-length overlay at POS is *not* one of them.
+(test-equal "overlays-at, and an empty overlay is not at its own point"
+  '(1 1 0)
+  (with-buffers
+   (lambda ()
+     (let ((b (get-buffer-create "ov.txt")))
+       (parameterize ((*current-buffer* b))
+         (text-editor-insert b "hello world")
+         (make-overlay 0 5)
+         (make-overlay 8 8)
+         (list (length (overlays-at 0))     ; the ranged overlay
+               (length (overlays-at 3))     ; still the ranged one
+               (length (overlays-at 8)))))))) ; the empty one is not
+
+(test-equal "overlays-in answers the ones overlapping a region"
+  '(1 0)
+  (with-buffers
+   (lambda ()
+     (let ((b (get-buffer-create "ov.txt")))
+       (parameterize ((*current-buffer* b))
+         (text-editor-insert b "hello world")
+         (make-overlay 0 5)
+         (list (length (overlays-in 3 8))
+               (length (overlays-in 6 9))))))))
+
+(test-equal "next- and previous-overlay-change"
+  '(5 0)
+  (with-buffers
+   (lambda ()
+     (let ((b (get-buffer-create "ov.txt")))
+       (parameterize ((*current-buffer* b))
+         (text-editor-insert b "hello world")
+         (make-overlay 0 5)
+         (list (next-overlay-change 2) (previous-overlay-change 3)))))))
+
+;; `delete-overlay' detaches it: it is in no buffer and has no ends.
+(test-equal "delete-overlay leaves nothing behind"
+  '(#f 0)
+  (with-buffers
+   (lambda ()
+     (let ((b (get-buffer-create "ov.txt")))
+       (parameterize ((*current-buffer* b))
+         (text-editor-insert b "hello world")
+         (let ((o (make-overlay 0 5)))
+           (delete-overlay o)
+           (list (overlay-start o) (length (overlays-at 0)))))))))
+
+;; `overlays-at' with SORTED answers them by *decreasing* priority, which
+;; is what the docstring says and what the redisplay merges onto.
+(test-equal "overlays-at sorts by decreasing priority"
+  '(3 2 1)
+  (with-buffers
+   (lambda ()
+     (let ((b (get-buffer-create "ov.txt")))
+       (parameterize ((*current-buffer* b))
+         (text-editor-insert b "hello world")
+         (overlay-put (make-overlay 0 5) 'priority 1)
+         (overlay-put (make-overlay 1 5) 'priority 3)
+         (overlay-put (make-overlay 2 5) 'priority 2)
+         (map (lambda (o) (overlay-get o 'priority))
+              (overlays-at 3 #t)))))))
+
+;; `get-char-property' reads the overlay *and* the text property, and the
+;; overlay with the highest priority wins - which is the seam the
+;; display's `face_at_buffer_position' reads.
+(test-equal "get-char-property: the highest-priority overlay wins"
+  'ov-face
+  (with-buffers
+   (lambda ()
+     (let ((b (get-buffer-create "ov.txt")))
+       (parameterize ((*current-buffer* b))
+         (text-editor-insert b "hello world")
+         (overlay-put (make-overlay 0 5) 'face 'ov-face)
+         (get-char-property 2 'face))))))
+
+(test-equal "and the text property answers when no overlay has one"
+  'text-face
+  (with-buffers
+   (lambda ()
+     (let ((b (get-buffer-create "ov.txt")))
+       (parameterize ((*current-buffer* b))
+         (text-editor-insert b "hello world")
+         (put-text-property 0 5 'face 'text-face)
+         (overlay-put (make-overlay 0 5) 'priority 1)
+         (get-char-property 2 'face))))))
 
 (test-end "schemacs_editor_buffer")

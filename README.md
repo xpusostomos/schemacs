@@ -18,9 +18,11 @@ Here's what works already:
 * Mode line. 
 * Undo list.
 * Faces and color highlighting
+* Overlays
 * isearch, query-replace, query-replace-regexp 
 * Completions, query-replace have color highlighting like real emacs
 * Buffer list
+* Dired
 * Modes, minor modes, special mode handling
 * Clipboard integration
 * And many more...
@@ -56,8 +58,8 @@ In 2023 Ramin started the Gypsum project of an all-scheme emacs releasing it on
 [Codeberg](https://codeberg.org/ramin_hal9001/schemacs)
 and presenting it at the EmacsConf 2024, later renaming it to Schemacs. As of late 2026 
 it is not yet an editor, you can't open files,
-there is no window handling, no marks, no kill ring, no nundo, no mode line, no faces, no
-modes.
+there is no window handling, no marks, no kill ring, no undo, no mode line, no faces, no
+modes, no minibuffer and none of the commands you would recognise as emacs.
 
 This Schemacs project took Ramin's work in progress and used AI to duplicate emacs
 functionality exactly, file for file, function for function, parameter for parameter, 

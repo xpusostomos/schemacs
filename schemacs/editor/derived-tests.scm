@@ -114,9 +114,9 @@
 (define-key special-mode-map (list #\g) 'parent-key)
 (define child-mode-map (km:keymap '*child-mode-map*))
 (define child-mode-hook '())
-(define-key child-mode-map (list #\c) 'child-key)
 (define-derived-mode (child-mode special-mode "Child" child-mode-map
                                   child-mode-hook))
+(define-key child-mode-map (list #\c) 'child-key)
 
 (test-assert "a derived mode's keymap has the parent's as its parent"
   (in-buffer

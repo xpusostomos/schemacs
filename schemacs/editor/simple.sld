@@ -154,6 +154,8 @@ just-one-space delete-horizontal-space delete-blank-lines
 
     (define special-mode-hook '())
     ;; ^ GNU Emacs's `special-mode-hook', made by `define-derived-mode'.
+    ;; Emacs's macro invents both names from the mode's; this one is
+    ;; handed them, for the reason `(schemacs editor derived)' gives.
 
     (define-derived-mode (special-mode #f "Special" special-mode-map
                                        special-mode-hook)

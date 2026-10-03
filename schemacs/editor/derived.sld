@@ -74,23 +74,34 @@
       ;;     (PARENT)                    ; or `kill-all-local-variables'
       ;;     (setq major-mode 'CHILD)
       ;;     (setq mode-name NAME)
-      ;;     ... the keymap's parent, the syntax table, the abbrev table
+      ;;     (unless (keymap-parent CHILD-map)
+      ;;       (set-keymap-parent CHILD-map (current-local-map)))
       ;;     (use-local-map CHILD-map)
       ;;     BODY ...)
       ;;   (run-mode-hooks 'CHILD-hook)
+      ;;
+      ;; CHILD and PARENT are names, NAME is the string the mode line
+      ;; shows, and MAP and HOOK are the mode's keymap and its hook.
+      ;;
+      ;; Emacs's macro *makes* MAP and HOOK's names, by appending "-map"
+      ;; and "-hook" to CHILD. This one is handed them, and that is a
+      ;; departure worth stating: a `syntax-rules' template can only reuse
+      ;; names it was given, and has no way to spell "append -map to this
+      ;; name" at all - while the procedural macro that could is
+      ;; unhygienic in this Guile (its own identifiers resolve at the call
+      ;; site, so every library defining a mode would have to import the
+      ;; macro's internals). Handing the two names in keeps the hygiene
+      ;; and costs one line at each mode's definition.
       ;;
       ;; PARENT is the parent mode's name, or `#f' for none - which is
       ;; Emacs's nil, and means the mode starts from
       ;; `kill-all-local-variables'.
       ;;
-      ;; The keymap's inheritance is the C's own statement - "if the
-      ;; parent mode has a keymap, set it as the child's parent, unless
-      ;; it already has one" - and both functions are `keymap.c''s, now
-      ;; in `(schemacs keymap)'.
-      ;;
       ;; Not ported: the syntax table and abbrev table arguments
       ;; (`:syntax-table', `:abbrev-table') - neither exists here - and
-      ;; `:group', `:after-hook' and `:interactive'.
+      ;; `:group', `:after-hook', `:interactive', the `mode-class'
+      ;; property, and `derived-mode-make-docstring', which invents a
+      ;; docstring when none is given.
       ;;--------------------------------------------------------------
       (syntax-rules ()
         ;; with the docstring Emacs's optional fourth argument allows
@@ -126,10 +137,6 @@
                 (if parent (parent) (kill-all-local-variables))
                 (set!major-mode 'child)
                 (set!mode-name name)
-                ;; "Set up maps and tables": the child's keymap takes the
-                ;; parent mode's as its *parent*, which is Emacs's
-                ;; `(unless (keymap-parent ,map)
-                ;;    (set-keymap-parent ,map (current-local-map)))'.
                 (when (and parent (not (keymap-parent map)))
                   (set-keymap-parent map (current-local-map)))
                 (use-local-map map)
