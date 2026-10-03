@@ -47,3 +47,61 @@ Named departures
 3. use-local-map / current-local-map live in buffer.sld, not keymap.sld. They're keymap.c's, but keymap.c cannot see a buffer here: buffer → frame → keymap → buffer is a genuine cycle.
 4. kill-all-local-variables has no permanent-local exception (a slot is keyed by a plain value, so there are no variable properties), and its forced mode-line redisplay is a no-op — this editor redraws after every command.
 5. run-mode-hooks doesn't call hack-local-variables (no file-local variables yet) or set parse-sexp-lookup-properties.
+
+
+
+Checked: apart from the mode machinery, the keymap inheritance and the overlays (all done), nothing dired needs exists yet. Here's the order.
+
+1. dired.sld — the file-attributes layer (start here)
+
+file-attributes and the file-attribute-* accessors, directory-files, directory-files-and-attributes,
+file-name-all-completions, file-name-completion. Emacs keeps these in src/dired.c, not fileio.c, so
+that's the mirrored name.
+
+Nothing else works without it, and ls-lisp is built entirely on it — I counted what ls-lisp.el
+calls: file-attributes, directory-files-and-attributes, directory-files,
+file-attribute-{type,modes,size,user-id,group-id,link-number,inode-number}, file-relative-name,
+file-name-nondirectory, file-name-as-directory, file-directory-p. That's the whole dependency list.
+
+The work is Emacs's shape, not the syscalls — Guile gives raw stat numbers, and Emacs wants the mode
+as a string ("drwxr-xr-x" or t for a dangling symlink), uid/gid as names via getpwuid, times as
+(SEC HIGH LOW …) lists, and the link target as element 0.
+
+2. The files.el wrappers ls-lisp wants
+
+file-truename, file-relative-name, file-name-sans-versions, file-name-base, abbreviate-file-name.
+Most are pure string work. (The mutating ones — delete-directory, make-directory, delete-file — are
+for dired-aux later.)
+
+3. The two small decided items
+
+inhibit-read-only — a buffer-local counter barf-if-buffer-read-only consults. dired writes into a read-only buffer 18 times, and the buffer list currently works around its absence with a comment saying so.                                                                                                 
+find-file-name-handler — ~20 lines, plus the same two lines at the top of each primitive we've already read. Register no handlers; the point is that "no remote files" becomes "no handler is registered" rather than "this primitive can't".
+
+4. ls-lisp.sld
+
+The listing itself, on top of step 1. No subprocess, no //DIRED// parsing, no coding systems.
+
+5. insert-directory (files.el)
+
+Emacs dispatches here — ls-lisp on non-Unix, the ls program on Unix. Ours always takes the ls-lisp branch, and that's the one place our dired deliberately differs from Unix Emacs, so it should be named at the definition rather than left to be discovered.
+
+6. dired.sld — the mode
+
+dired-mode derived from special-mode, its keymap and hook, the listing commands, navigation, marking. The bulk.
+
+7. dired-aux.sld
+
+Later and separate — copy, rename, compress, shell-command. It's where async processes would have come in, which ls-lisp avoided for the listing but dired-aux can't avoid entirely for ! and friends.
+
+The one shared thing, already decided
+
+Buffer variables — dired is full of buffer-locals (dired-directory, dired-subdir-alist, dired-marked), and our key-based store handles all of them today. The buffer-var / set-buffer-var! form is about ported code reading like Emacs, not about dired working. So it can go before or after; I'd put it after, since dired will show us what the accessors actually need.
+
+What I'd do next
+
+Steps 1–3 as one pass — the file-attributes layer, the wrappers it needs, and the two small decided items. That's a coherent unit with a testable checkpoint: file-attributes against stat, and ls-lisp's dependency list satisfied.
+
+Then step 4 (ls-lisp) and step 5 are another pass, and dired itself is the one after.
+
+
