@@ -1490,12 +1490,26 @@
            ;; a minibuffer is: it draws a buffer that happens to have a
            ;; prompt beside it, which is what the echo area is.
            (reading
-            (write-glyphs! (current-display)
-                           (truncate-line (string-append (or (*echo-area-prompt*) "")
-                                                         (text-editor-to-string reading)
-                                                         (frame-message frame))
-                                          width)
-                           (- height 1) 0 #f))
+            ;; Two writes, because the prompt carries a face and the
+            ;; typed text does not. In GNU Emacs the prompt is text in
+            ;; the minibuffer buffer carrying `minibuffer-prompt-properties'
+            ;; - whose `face' is `minibuffer-prompt' - and the input after
+            ;; it carries nothing, which is what `xdisp.c' draws. Drawing
+            ;; the two as one plain string is why a prompt here had no
+            ;; colour at all.
+            (let* ((prompt (truncate-line (or (*echo-area-prompt*) "") width))
+                   (pwidth (min (line-display-width prompt) width)))
+              (when (> pwidth 0)
+                (write-glyphs! (current-display)
+                               prompt
+                               (- height 1) 0
+                               (face->attribute 'minibuffer-prompt)))
+              (write-glyphs! (current-display)
+                             (truncate-line
+                              (string-append (text-editor-to-string reading)
+                                             (frame-message frame))
+                              (- width pwidth))
+                             (- height 1) pwidth #f)))
            (else
             (write-glyphs! (current-display)
                            (truncate-line (frame-message frame) width)

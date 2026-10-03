@@ -48,6 +48,25 @@
   2 (string-match "\\<foo\\>" "a foo b"))
 (test-equal "translation: back reference"
   0 (string-match "\\(a\\)\\1" "aa"))
+;; A bracket expression is copied through the translation verbatim.
+;; It used to come out *reversed*: the scanner conses its characters,
+;; so its list is backwards, and it was reversed before being appended
+;; to an accumulator that is also backwards - the one reverse at the
+;; end then turned `[0-9]' into `]9-0[' and the compiler rejected it.
+(test-equal "translation: bracket expression"
+  0 (string-match "foo[0-9]" "foo1 foo2 foo3"))
+(test-equal "translation: bracket expression alone"
+  1 (string-match "[0-9]" "a1b"))
+(test-equal "translation: bracket expression is not a literal"
+  #f (string-match "[0-9]" "abc"))
+(test-equal "translation: bracket range"
+  0 (string-match "[a-z]+" "abc"))
+(test-equal "translation: negated bracket expression"
+  0 (string-match "[^0-9]" "a1"))
+(test-equal "translation: ] first in a set is a member"
+  0 (string-match "[]a]" "]a"))
+(test-equal "translation: unclosed bracket is rejected"
+  #t (guard (e (#t #t)) (string-match "[0-9" "a1") #f))
 (test-equal "translation: case-fold parameter"
   0 (parameterize ((*case-fold-search* #t))
       (string-match "FOO" "foo")))

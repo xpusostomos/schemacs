@@ -44,7 +44,14 @@
          text-editor-get-char-index text-editor-get-cursor
          text-editor-search-backward text-editor-search-forward
          text-editor-set-cursor
+         ;; what `minibuffer-lazy-highlight-setup' hangs its hook on
+         *after-change-functions*
           )
+    ;; `minibuffer-lazy-highlight-setup' is isearch.el's and needs the
+    ;; minibuffer it watches; no library imports isearch, so it can be
+    ;; imported here.
+    (only (schemacs editor minibuffer)
+          *minibuffer-exit-hook* minibuffer-contents minibufferp)
     (only (schemacs editor frame)
          *current-frame* current-editor set!frame-message
           )
@@ -62,6 +69,7 @@
    *search-case-fold?* *search-pattern* isearch isearch-backward isearch-find
    isearch-forward isearch-message isearch-pop-state isearch-pop-to-success
    isearch-repeat isearch-search! isearch-word-at-point
+   minibuffer-lazy-highlight-setup
    )
 
   (begin
@@ -416,5 +424,70 @@
     ;; The keys GNU Emacs binds the search to, beside the commands.
     (define-key *default-keymap* (list (list 'ctrl #\s)) isearch-forward)
     (define-key *default-keymap* (list (list 'ctrl #\r)) isearch-backward)
+
+    (define (minibuffer-lazy-highlight-setup highlight cleanup transform
+                                             regexp case-fold)
+      ;; GNU Emacs's `minibuffer-lazy-highlight-setup' (isearch.el:4507):
+      ;; "Set up minibuffer for lazy highlight of matches in the original
+      ;; window." The answer is a closure to put on
+      ;; `minibuffer-setup-hook', which is how `query-replace-read-args'
+      ;; uses it.
+      ;;
+      ;; As the minibuffer's text changes, what is typed is published to
+      ;; the display as the search to highlight - `*search-highlight*',
+      ;; the same channel `isearch' itself draws its matches through - so
+      ;; the buffer being replaced in shows its matches while the pattern
+      ;; is still being typed. That is what lights up the buffer as you
+      ;; type M-%, and what lights it again when M-p brings a previous
+      ;; answer back into the minibuffer.
+      ;;
+      ;; HIGHLIGHT nil, or a minibuffer already active, sets up nothing:
+      ;; the C's own two early exits. TRANSFORM turns the minibuffer's
+      ;; text into the search string, `query-replace-read-args' passing
+      ;; one that splits a FROM/TO pair apart and settles the case
+      ;; folding; REGEXP and CASE-FOLD are what it then searches with.
+      ;;
+      ;; Not ported: the match count the C shows after the prompt
+      ;; (`minibuffer-lazy-count-format' over `isearch-lazy-count-total'),
+      ;; and the FILTER it adds to `isearch-filter-predicate' for a
+      ;; region.
+      ;;
+      ;; CLEANUP needs no hook here: the highlight and the
+      ;; after-change list are `make-parameter' bindings, and this
+      ;; closure runs inside the minibuffer's own dynamic extent, so
+      ;; what it sets is given back when the minibuffer is left - which
+      ;; is what the C's `unwind' does by hand.
+      ;;--------------------------------------------------------------
+      (if (or (not highlight) (minibufferp))
+          (lambda () #f)
+          (lambda ()
+            (define (publish!)
+              (let ((string (transform (minibuffer-contents))))
+                (*search-highlight*
+                 (and (< 0 (string-length string))
+                      (cons string case-fold)))
+                (render! (*current-frame*))))
+            (define (after-change beg end old-length)
+              ;; The hook is global here where the C's is buffer-local to
+              ;; the minibuffer, so it is asked whether a minibuffer is
+              ;; being read at all - without this it fires for the edits
+              ;; of any buffer, and `minibuffer-contents' has nothing to
+              ;; answer with once the minibuffer is gone.
+              (when (minibufferp) (publish!)))
+            (define (unwind)
+              ;; the C's `unwind': take the hook off again, and the
+              ;; highlight with it
+              (*after-change-functions*
+               (let loop ((l (*after-change-functions*)) (acc '()))
+                 (cond ((null? l) (reverse acc))
+                       ((eq? (car l) after-change) (loop (cdr l) acc))
+                       (else (loop (cdr l) (cons (car l) acc))))))
+              (*search-highlight* #f))
+            (*after-change-functions*
+             (cons after-change (*after-change-functions*)))
+            (*minibuffer-exit-hook*
+             (cons unwind (*minibuffer-exit-hook*)))
+            ;; and once for what is already in the minibuffer
+            (publish!))))
 
     ))

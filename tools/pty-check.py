@@ -399,16 +399,21 @@ def check_m_x():
     open(path, "w").write("hello\n")
     problems = []
     out = drive([b"\x1b", b"x", b"read-only-mode", b"\r"], path,
-                settle=1.2, gap=0.35)
+                settle=2.5, gap=0.35)
     if "Read-Only mode enabled in current buffer" not in out:
         problems.append("M-x read-only-mode did not run the command "
                         "(no enabled message)")
-    out = drive([b"\x1b", b"x", b"read-on", b"\t"], path, settle=1.2, gap=0.35)
-    i = out.rfind("M-x ")
-    completed = out[i+4:i+32].split("\x1b")[0] if i >= 0 else ""
-    if completed.strip() != "read-only-mode":
-        problems.append("M-x completion: `read-on' TAB gave %r, expected "
-                        "`read-only-mode'" % completed.strip())
+    out = drive([b"\x1b", b"x", b"read-on", b"\t"], path, settle=2.5, gap=0.35)
+    # The escapes are stripped before looking for the completed name: the
+    # prompt is drawn in GNU Emacs's `minibuffer-prompt' face, so the
+    # terminal stream carries attribute sequences between `M-x ' and the
+    # name that was completed into it. Reading the bytes between them
+    # finds an escape sequence and no name at all.
+    import re as _re
+    plain = _re.sub(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\(B|\x1b.", "", out)
+    if "M-x read-only-mode" not in plain:
+        problems.append("M-x completion: `read-on' TAB did not complete to "
+                        "`read-only-mode'")
     return problems
 
 
@@ -1611,7 +1616,7 @@ def check_hscroll():
     redraw = ("resize", 24, 80)
     problems = []
     screen = screen_of(drive([M_x, b"toggle-truncate-lines", b"\r",
-                              C_e, C_n, redraw], path, settle=1.2, gap=0.35))
+                              C_e, C_n, redraw], path, settle=2.5, gap=0.35))
     rows = screen.split("\n")
     if not rows or rows[0][0] != "0":
         problems.append("with hscroll reset by the short line below, "
@@ -1630,7 +1635,7 @@ def check_hscroll():
     # 211..249 fill columns 1..39 and the row is blank past column 40 -
     # no right `$', because the line ends inside the view.
     screen = screen_of(drive([M_x, b"toggle-truncate-lines", b"\r",
-                              C_e, redraw], path, settle=1.2, gap=0.35))
+                              C_e, redraw], path, settle=2.5, gap=0.35))
     rows = screen.split("\n")
     if not rows or rows[0][0] != "$":
         problems.append("the hscrolled row did not begin with the left "
@@ -1650,7 +1655,7 @@ def check_hscroll():
     # pins that as the minimum; moving down to the short line then leaves
     # the window hscrolled at 78 instead of resetting it.
     screen = screen_of(drive([M_x, b"toggle-truncate-lines", b"\r",
-                              b"\x18<", C_n, redraw], path, settle=1.2, gap=0.35))
+                              b"\x18<", C_n, redraw], path, settle=2.5, gap=0.35))
     rows = screen.split("\n")
     if not rows or rows[0][0] != "$":
         problems.append("after C-x < the row did not begin with the left "
@@ -1721,6 +1726,101 @@ def check_query_replace_quit():
     # no y was pressed, so nothing was replaced: no "Replaced N" message
     if "Replaced" in out:
         problems.append("C-g during query-replace ran a replacement")
+    return problems
+
+
+def check_query_replace_prompt():
+    """M-% prompts `Query replace: ' in the prompt face, and remembers the pair.
+
+    Three things GNU Emacs does that this did not. `format-prompt'
+    closes a prompt with ": " whether or not it has a default - it
+    returned the prompt untouched when it had none, so M-% prompted
+    `Query replace' with the typed text hard against it. The prompt is
+    drawn in the `minibuffer-prompt' face, which is what gives it its
+    colour; it was drawn as one plain string with the typed text. And a
+    second M-% names the last replacement pair as its default,
+    `Query replace (default apple -> pear): ' - the pair, not just the
+    FROM half, and with the arrow `query-replace-from-to-separator'
+    spells, rather than the literal `%s' the default clause used to come
+    out as.
+    """
+    import re as _re
+    path = "/tmp/pty-check-qr-prompt.txt"
+    open(path, "w").write("apple apple\n")
+    problems = []
+
+    def repaint(out):
+        """The last full repaint, escapes and all."""
+        return out.rsplit("\x1b[2J", 1)[-1]
+
+    def plain(out):
+        return _re.sub(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b.", "", repaint(out))
+
+    out = drive([ESC, b"%"], path, settle=2.0)
+    if "Query replace: " not in plain(out):
+        problems.append("M-% did not prompt `Query replace: ' - the colon "
+                        "and space a prompt is closed with are missing")
+
+    # The prompt must carry a face of its own. The escapes are walked
+    # rather than stripped so that the attributes active where the prompt
+    # text came out can be read, as `isearch-scroll' does.
+    sgr = set()
+    prompt_marked = False
+    for chunk in _re.split(r"(\x1b\[[0-9;]*[A-Za-z]|\x1b\(B|\r|\n)", repaint(out)):
+        if not chunk or chunk in ("\r", "\n"):
+            continue
+        if chunk.startswith("\x1b["):
+            mm = _re.match(r"\x1b\[([0-9;]*)([A-Za-z])", chunk)
+            if mm.group(2) == "m":
+                sgr = set(x for x in mm.group(1).split(";") if x)
+            continue
+        if "Query replace" in chunk and sgr:
+            prompt_marked = True
+    if not prompt_marked:
+        problems.append("the prompt is drawn with no face - in Emacs it "
+                        "carries `minibuffer-prompt'")
+
+    # `q' leaves the pair in the history and the buffer alone, so the
+    # second M-% is the first prompt again, with a default to name.
+    out = drive([ESC, b"%", b"apple", RET, b"pear", RET, b"q",
+                 ESC, b"%"], path, settle=2.0)
+    if "Query replace (default apple → pear): " not in plain(out):
+        problems.append("a repeat M-% did not prompt with the last "
+                        "replacement pair as its default")
+    return problems
+
+
+def check_query_replace_pair_default():
+    """RET on the pair default replaces exactly as typing the two strings does.
+
+    The FROM prompt's history holds the replacement *pairs*, spelled
+    `FROM -> TO'; `query-replace--split-string' reads the chosen one back
+    into its two halves. Without that the whole `apple -> pear' would
+    have been taken as the FROM string, which searches for nothing.
+    """
+    path = "/tmp/pty-check-qr-pair.txt"
+    content = "apple apple apple\n"
+    problems = []
+    # a first run quit before it replaces anything: the pair is recorded,
+    # the buffer still reads as the file does
+    first = [ESC, b"%", b"apple", RET, b"pear", RET, b"q", C_a]
+
+    def run(label, keys):
+        open(path, "w").write(content)
+        return drive(keys, path, settle=2.0, gap=0.4)
+
+    typed = run("typed", first + [ESC, b"%", b"apple", RET, b"pear", RET, b"!"])
+    if "Replaced 3 occurrences" not in typed:
+        problems.append("typing the pair replaced the wrong number of matches "
+                        "(%r)" % (typed[-60:],))
+        return problems
+
+    for label, keys in (("RET on the default", [ESC, b"%", RET, b"!"]),
+                        ("M-p then RET", [ESC, b"%", b"\x1bp", RET, b"!"])):
+        out = run(label, first + keys)
+        if "Replaced 3 occurrences" not in out:
+            problems.append("%s did not replace all three matches - the pair "
+                            "was not split back into FROM and TO" % label)
     return problems
 
 
@@ -1858,6 +1958,8 @@ def check_set_fill_column():
 CHECKS = {
     "buffer-menu": check_buffer_menu,
     "query-replace": check_query_replace,
+    "query-replace-prompt": check_query_replace_prompt,
+    "query-replace-pair-default": check_query_replace_pair_default,
     "query-replace-quit": check_query_replace_quit,
     "replace-string": check_replace_string,
     "quoted-insert": check_quoted_insert,

@@ -68,6 +68,13 @@ guile functions and/or find the right library. When I say port every primitive
 I mean in functionality, occasionally that porting might mean substiuting 
 functions that already exist in scheme or guile.
 
+If you find yourself trying to debug code, you're probably better off looking
+at the emacs code to see how you departed from it, rather than trying to reason
+about why it doesn't work. The emacs code works, so if you ported it faithfully,
+yours will work too. Where you get bugs is mostly where you try to wander off
+your own way. Many times you found that you were chasing rabbit holes of bugs
+but when you read the emacs source you landed it first time.
+
 You will most likely find full emacs sources at @../emacs/
 
 

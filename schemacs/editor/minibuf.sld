@@ -41,6 +41,7 @@
     (only (guile) hash-table? hash-for-each))
 
   (export
+   *history-add-new-input*
    *history-delete-duplicates*
    *history-length*
    all-completions
@@ -75,6 +76,22 @@
       ;; do not give one of their own. 100, as in Emacs.
       ;;--------------------------------------------------------------
       (make-parameter 100))
+
+    (define *history-add-new-input*
+      ;; GNU Emacs's `history-add-new-input' (`minibuf.c'): "Non-nil means
+      ;; to add new elements in history. If set to nil, minibuffer reading
+      ;; functions don't add new elements to the history list, so it is
+      ;; possible to do this afterwards by calling `add-to-history'
+      ;; explicitly."
+      ;;
+      ;; The reader adds the answer to its history when this is true, which
+      ;; is what `read_minibuf' does with it (minibuf.c:984). The commands
+      ;; that read a *series* of related answers - `query-replace' reads
+      ;; FROM and TO into one history - turn it off and say where each
+      ;; answer goes, which is how they keep a reader's automatic entry
+      ;; from landing in a list the prompt was given to walk.
+      ;;--------------------------------------------------------------
+      (make-parameter #t))
 
     (define (compare-strings string1 start1 end1 string2 start2 end2 . args)
       ;; GNU Emacs's `compare-strings', which is `fns.c''s: #t when the

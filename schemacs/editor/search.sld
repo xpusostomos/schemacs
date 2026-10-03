@@ -145,7 +145,17 @@
        (else
         (let ((pair (list-ref (*search-regs*) n)))
           (and pair
-               ((if beginningp car cdr) pair))))))
+               ;; A *position*, always: the C's `match_limit' answers
+               ;; `make_fixnum (search_regs.start[n])', and `search_regs'
+               ;; holds positions there whatever `match-data' is asked
+               ;; to return. The registers kept here are the markers a
+               ;; buffer search makes, so the position is read back out
+               ;; of one - handing the marker itself to `goto-char' or
+               ;; to arithmetic is "Wrong type argument in position 1",
+               ;; which is what `query-replace-regexp' was failing with
+               ;; once it moved point to a match.
+               (let ((v ((if beginningp car cdr) pair)))
+                 (if (marker-type? v) (marker-position v) v)))))))
 
     (define (match-beginning subexp)
       ;; GNU Emacs's `match-beginning' (search.c:2793): "position of
@@ -371,8 +381,7 @@
                     ;; an unclosed bracket: Emacs's matcher says
                     ;; "Unmatched [" and so does glibc - copy the
                     ;; rest and let the compiler reject it
-                    (loop (string-length pattern)
-                          (append (reverse bacc) acc)))
+                    (loop (string-length pattern) (append bacc acc)))
                    ((and (char=? (string-ref pattern j) #\])
                          (or seen-start
                              ;; a `]' first in the set is a member
@@ -381,7 +390,15 @@
                     ;; hmm - the `]` first in the set is its member;
                     ;; seen-start tracks whether we have passed one
                     ;; character already
-                    (loop (+ j 1) (append (reverse (cons #\] bacc)) acc)))
+                    ;;
+                    ;; BACC is appended as it is and not reversed: the
+                    ;; outer loop's ACC is itself reversed, and the
+                    ;; whole is reversed once at the end. Reversing the
+                    ;; set here put it into ACC the right way round
+                    ;; *among characters that were not*, so the final
+                    ;; reverse turned `[0-9]' into `]9-0[' and the
+                    ;; compiler rejected it.
+                    (loop (+ j 1) (append (cons #\] bacc) acc)))
                    (else
                     (scan (+ j 1)
                           (or seen-start

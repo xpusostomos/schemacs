@@ -99,6 +99,8 @@
    text-editor-insert
    text-editor-delete-from-cursor
    text-editor-copy-string
+   *after-change-functions*
+   signal-after-change
 
    ;; Undo
    text-editor-undo-list  set!text-editor-undo-list
@@ -1452,6 +1454,26 @@
       (text-editor-set-modified! ed #t)
       (set!text-editor-deactivate-mark! ed #t))
 
+    (define *after-change-functions* (make-parameter '()))
+    ;; ^ GNU Emacs's `after-change-functions' (`buffer.c'): "List of
+    ;; functions to call after a change in the buffer.  Each function
+    ;; is called with three arguments: the beginning and end of the text
+    ;; that was changed, and the length of the old text." The positions
+    ;; are one-based, as every position of the Emacs-named layer is.
+    ;; `minibuffer-lazy-highlight-setup' hangs its highlighting on this.
+
+    (define (signal-after-change beg end old-length)
+      ;; GNU Emacs's `signal_after_change' (`insdel.c':2381): run
+      ;; `after-change-functions' over a change that has just been made.
+      ;; The C's `(charpos, lendel, lenins)' are BEG, END and
+      ;; OLD-LENGTH here: `(charpos + lenins)' is where the changed text
+      ;; now ends, and LENDEL is what was there before it - zero for an
+      ;; insertion, which is what makes a hook able to tell an insertion
+      ;; from a deletion.
+      ;;--------------------------------------------------------------
+      (for-each (lambda (f) (f beg end old-length))
+                (*after-change-functions*)))
+
     (define (undo-insertion-entry? entry)
       ;; Whether ENTRY records an insertion, that is, whether it is a
       ;; pair of two integers - Emacs's `(BEG . END)'.
@@ -1774,7 +1796,9 @@
             (let ((offset (*text-property-offset-function*)))
               (when offset (offset ed beg (- end beg))))
             (%text-editor-note-change! ed)
-            (%undo-record-insertion! ed beg end)))))
+            (%undo-record-insertion! ed beg end)
+            ;; and the after-change hooks, once the text is really in
+            (signal-after-change (+ beg 1) (+ end 1) 0)))))
 
     (define (%text-editor-insert ed thing)
       (cond
@@ -2005,7 +2029,11 @@
             (let ((beg (if (< n 0) (- cursor deleted) cursor)))
               (adjust-markers-for-deletion! ed beg (+ beg deleted))
               (let ((offset (*text-property-offset-function*)))
-                (when offset (offset ed beg (- deleted)))))
+                (when offset (offset ed beg (- deleted))))
+              ;; and the after-change hooks, while BEG is in hand: a
+              ;; deletion inserts nothing, so the changed range is empty
+              ;; and OLD-LENGTH is what went
+              (signal-after-change (+ beg 1) (+ beg 1) deleted))
             (%text-editor-note-change! ed)
             ;; A forward delete removes the text after point, so point
             ;; was at its beginning and POS is positive; a backward

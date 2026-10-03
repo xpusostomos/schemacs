@@ -93,9 +93,11 @@
           *special-event-map*)
     ;; Every command here prompts.
     (only (schemacs editor minibuffer)
+          *insert-default-directory*
           *minibuffer-completing-file-name*
           completing-read
           file-name-history
+          list-ref-or
           read-char-from-minibuffer
           read-from-minibuffer
           yes-or-no-p)
@@ -789,26 +791,41 @@ save-buffer
             ;; answers both, with the names as Emacs answers them.
             (all-completions name names predicate)))))))
 
-    (define (read-file-name . args)
+    (define (read-file-name prompt . rest)
       ;; Read a file name in the minibuffer, completing as TAB is typed:
-      ;; GNU Emacs's `read-file-name', of which this takes the prompt and
-      ;; - as `write-file' needs - an optional DEFAULT, Emacs's fourth
-      ;; argument: what RET answers when the user types nothing. The
-      ;; prompt starts with `default-directory' already in it, as Emacs's
-      ;; and mg's do, so a name is typed onto the end of it. A name that
-      ;; does not exist yet is allowed, as Emacs allows it - that is how
-      ;; a file is created.
+      ;; GNU Emacs's `read-file-name' (minibuffer.el:4001), with the
+      ;; arguments its `read-file-name-default' (minibuffer.el:4071)
+      ;; takes:
+      ;;
+      ;;   (read-file-name PROMPT &optional DIR DEFAULT-FILENAME
+      ;;                   MUSTMATCH INITIAL PREDICATE)
+      ;;
+      ;; DIR is the directory relative names complete in, nil meaning
+      ;; `default-directory'. DEFAULT-FILENAME is what RET answers when
+      ;; the minibuffer is left holding exactly what was inserted; when
+      ;; none is given it is the buffer's own file, or - when INITIAL is
+      ;; given, which is the case that needs it - DIR with INITIAL after
+      ;; it.
+      ;;
+      ;; INITIAL is what is put in the minibuffer after the directory,
+      ;; and where point goes is the point of it: the directory is
+      ;; inserted, INITIAL after it, and point is left at the length of
+      ;; the directory. So `C-x C-v' fills in the file being visited and
+      ;; puts point at the start of its *name*, which is Emacs's
+      ;; behaviour and the whole reason INITIAL exists here.
+      ;;
+      ;; PREDICATE is not taken - the completion table here has the one
+      ;; predicate, `file-name-completion-table'.
       ;;--------------------------------------------------------------
       ;; `completing-read', not `read-from-minibuffer': that is the point
       ;; of this function in Emacs - it is `completing-read' with a file
       ;; name table and a file name history, and everything else about it
       ;; (what RET does, what the candidates are) is that function's.
       ;;
-      ;; REQUIRE-MATCH is nil: a name that does not exist yet is allowed,
-      ;; as Emacs allows it - that is how a file is created. The default
-      ;; is the file the buffer already visits, so RET keeps the name it
-      ;; has - unless the caller named one, which `write-file' does for a
-      ;; buffer that visits nothing.
+      ;; MUSTMATCH is passed through to `completing-read' as Emacs passes
+      ;; it. A name that does not exist is allowed when it is nil, which
+      ;; is how a file is created; `confirm', which is what
+      ;; `confirm-nonexistent-file-or-buffer' answers, asks first.
       ;;
       ;; `minibuffer-completing-file-name' is what tells
       ;; `completing-read' to layer the file-name keymap over the
@@ -816,22 +833,40 @@ save-buffer
       ;; from `minibuffer-complete-word' - a file name may have a space
       ;; in it, and a space must insert one.
       ;;
-      ;; The answer is put through `expand-file-name', as Emacs's
-      ;; `read-file-name-default' does with the name it read - the
-      ;; reader types a name relative to the directory in the prompt, and
-      ;; a bare name means nothing to anything that opens the file.
+      ;; The answer is put through `expand-file-name' against DIR. Emacs
+      ;; says of its own return that "the return value is not
+      ;; expanded---you must call `expand-file-name' yourself", and every
+      ;; caller here wants the expanded name, so it is done here; with
+      ;; `insert-default-directory' the minibuffer holds an absolute name
+      ;; already and this changes nothing.
       ;;--------------------------------------------------------------
-      (let* ((prompt (car args))
-             (directory (default-directory))
-             (default (if (pair? (cdr args)) (cadr args) #f)))
+      (let* ((dir (or (list-ref-or rest 0 #f) (default-directory)))
+             (named-default (list-ref-or rest 1 #f))
+             (mustmatch (list-ref-or rest 2 #f))
+             (initial (list-ref-or rest 3 #f))
+             (default-filename
+              (or named-default
+                  (cond ((not initial) (buffer-file-name (current-buffer)))
+                        ((string=? "" initial) dir)
+                        (else (expand-file-name initial dir)))))
+             ;; What is inserted, and where point is left in it: the
+             ;; directory, then INITIAL, with point at the directory's
+             ;; own length - Emacs's `insdef', whose cdr is that length
+             ;; (minibuffer.el:4096).
+             (insdef
+              (cond ((and (*insert-default-directory*) (string? dir))
+                     (if initial
+                         (cons (string-append dir initial) (string-length dir))
+                         dir))
+                    (initial (cons initial 0))
+                    (else #f))))
         (expand-file-name
          (parameterize ((*minibuffer-completing-file-name* #t))
-           (completing-read prompt file-name-completion-table #f #f
-                            directory
+           (completing-read prompt file-name-completion-table #f mustmatch
+                            insdef
                             file-name-history
-                            (or default
-                                (buffer-file-name (current-buffer)))))
-         directory)))
+                            default-filename))
+         dir)))
 
     ;;----------------------------------------------------------------
     ;; Final newlines
@@ -1128,6 +1163,22 @@ Set mark after the inserted text."
       (insert-file-1 filename
                      (lambda (name) (insert-file-contents name))))
 
+    (define *confirm-nonexistent-file-or-buffer* (make-parameter #t))
+    ;; ^ GNU Emacs's `confirm-nonexistent-file-or-buffer' (files.el:1898):
+    ;; "Whether confirmation is requested before visiting a new file or
+    ;; buffer." t as in Emacs: any non-nil value means ask.
+
+    (define (confirm-nonexistent-file-or-buffer)
+      ;; GNU Emacs's `confirm-nonexistent-file-or-buffer' (files.el:1914):
+      ;; "Whether to request confirmation before visiting a new file or
+      ;; buffer" - the value to pass as `read-file-name''s REQUIRE-MATCH,
+      ;; which is why it answers the symbol `confirm' rather than t.
+      ;;--------------------------------------------------------------
+      (cond ((eq? (*confirm-nonexistent-file-or-buffer*) 'after-completion)
+             'confirm-after-completion)
+            ((*confirm-nonexistent-file-or-buffer*) 'confirm)
+            (else #f)))
+
     ;;----------------------------------------------------------------
     ;; The other ways to visit a file
     ;;------------------------------------------------------------------
@@ -1180,10 +1231,19 @@ Use \\[read-only-mode] to permit editing."
       "Find file FILENAME, select its buffer, kill previous buffer.
 If the current buffer now contains an empty file that you just visited
 \(presumably by mistake), use this command to visit the file you really want."
-      ;; The C's interactive: the visited file's directory and its own
-      ;; name as the read's default - which `read-file-name' takes from
-      ;; `buffer-file-name' when no default is given.
-      (interactive (list (read-file-name "Find alternate file: ")))
+      ;; The C's interactive: the visited file's directory, its own name
+      ;; as the read's INITIAL, and `confirm-nonexistent-file-or-buffer'
+      ;; as the read's MUSTMATCH. The directory and the name are put in
+      ;; the minibuffer with point at the start of the name, so the
+      ;; command offers the file being visited for editing rather than
+      ;; making the whole name be typed again. The C's `t' beside the
+      ;; name is WILDCARDS, which this tree does not port.
+      (interactive
+       (let* ((file (buffer-file-name (current-buffer)))
+              (name (and file (file-name-nondirectory-part file)))
+              (dir (and file (file-name-directory-part file))))
+         (list (read-file-name "Find alternate file: " dir #f
+                               (confirm-nonexistent-file-or-buffer) name))))
       (unless (let loop ((rest (*kill-buffer-query-functions*)))
                 (or (null? rest)
                     (and ((car rest)) (loop (cdr rest)))))
@@ -1423,13 +1483,17 @@ With prefix ARG, mark buffer as modified, so \\[save-buffer] will save."
       ;;--------------------------------------------------------------
       "Write current buffer into file FILENAME."
       (interactive
+       ;; The C's two reads, in the C's argument positions: DIR,
+       ;; DEFAULT-FILENAME, MUSTMATCH, INITIAL. A buffer that visits
+       ;; nothing is offered its own name in `default-directory'.
        (list (if (buffer-file-name (current-buffer))
-                 (read-file-name "Write file: ")
+                 (read-file-name "Write file: " #f #f #f #f)
                  (read-file-name
-                  "Write file: "
+                  "Write file: " (default-directory)
                   (expand-file-name
                    (file-name-nondirectory-part (buffer-name (current-buffer)))
-                   (default-directory))))
+                   (default-directory))
+                  #f #f))
              (not (current-prefix-arg))))
       (unless (or (not filename) (string=? filename ""))
         ;; If arg is a directory name, use the default file name, but

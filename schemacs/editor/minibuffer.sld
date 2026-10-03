@@ -100,6 +100,7 @@
     ;; `(schemacs editor minibuf)'; this library is `minibuffer.el' and uses
     ;; them rather than defining them.
     (only (schemacs editor minibuf)
+          *history-add-new-input*
           all-completions test-completion try-completion)
     ;; `caddr' is `(scheme cxr)'s: a style's entry in
     ;; `completion-styles-alist' is a four-element list.
@@ -159,7 +160,10 @@
    completions-header-string
    *minibuffer-completion-confirm*
    *minibuffer-completing-file-name*
+   *insert-default-directory*
+   list-ref-or
    *minibuffer-exit-hook*
+   *minibuffer-setup-hook*
    *minibuffer-message-timeout*
    completion--map-for
    completion--message
@@ -331,13 +335,33 @@ read-number-history
 
     (define (read-minibuffer-1 prompt initial keymap history default)
       ;; The body of `read-from-minibuffer'.
+      ;;
+      ;; INITIAL is the string to put in the minibuffer before reading -
+      ;; or the pair `(STRING . POSITION)', which `read_minibuf' also
+      ;; takes (minibuf.c:614). POSITION is *one-indexed* and counts from
+      ;; the start of STRING, and anything one or less means its
+      ;; beginning; a POSITION that is not a number means point at the
+      ;; end, which is where a plain string leaves it. `completing-read'
+      ;; counts the same position from zero and adds one before it gets
+      ;; here (minibuffer.el:5214), because the two functions disagree.
       ;;--------------------------------------------------------------
       (let* ((frame (*current-frame*))
-             (ed (new-text-editor)))
+             (ed (new-text-editor))
+             (text (if (pair? initial) (car initial) initial))
+             ;; point, counting from zero into TEXT, or #f for its end
+             (at (if (not (pair? initial))
+                     #f
+                     (let ((n (cdr initial)))
+                       (cond ((not (integer? n)) #f)
+                             ((< n 1) 0)
+                             (else (- n 1)))))))
         ;; Emacs disables undo in the minibuffer.
         (text-editor-undo-disable! ed)
-        (when initial (text-editor-insert ed initial))
-        (text-editor-set-cursor ed (text-editor-char-count ed))
+        (when text (text-editor-insert ed text))
+        (text-editor-set-cursor ed
+                                (if at
+                                    (min at (text-editor-char-count ed))
+                                    (text-editor-char-count ed)))
         (let ((mb (make<minibuffer>
                    ed prompt (or keymap minibuffer-local-map) default
                    (or history minibuffer-history) 0 #f)))
@@ -367,6 +391,10 @@ read-number-history
                          (*echo-area-prompt* prompt)
                          (*current-keymap* (minibuffer-keymap mb))
                          (*current-buffer* #f))
+            ;; `minibuffer-setup-hook', run where the C runs it: after
+            ;; the prompt and the initial input are in place, before the
+            ;; recursive edit that reads (minibuf.c:912).
+            (for-each (lambda (hook) (hook)) (*minibuffer-setup-hook*))
             (let ((result (recursive-edit frame)))
               ;; `minibuffer-exit-hook', which GNU Emacs runs on the way
               ;; out however the minibuffer was left - RET, C-g, or a
@@ -388,7 +416,8 @@ read-number-history
                          (answer (if (and (= 0 (string-length typed)) default)
                                      default
                                      typed)))
-                    (when (< 0 (string-length answer))
+                    (when (and (*history-add-new-input*)
+                               (< 0 (string-length answer)))
                       (let ((h (minibuffer-history-of mb)))
                         (set!history-entries
                          h (cons answer (history-entries h)))))
@@ -1068,11 +1097,17 @@ read-number-history
                     (*minibuffer-completion-predicate*)
                     (string-length typed))))
         (cond
-         ((or (= bits 1) (= bits 3)) (run-command exit-minibuffer))
+         ;; `exit-minibuffer' is called, not run: `run-command' takes a
+         ;; command *record* and this is the command's own procedure.
+         ;; Nothing reached this until `read-file-name' began passing
+         ;; `confirm-nonexistent-file-or-buffer' as its REQUIRE-MATCH -
+         ;; M-x reads with REQUIRE-MATCH nil, so its RET is the plain
+         ;; `exit-minibuffer' binding and never comes here.
+         ((or (= bits 1) (= bits 3)) (exit-minibuffer))
          ((= bits 7)
           (if (*minibuffer-completion-confirm*)
               (minibuffer-message "Confirm")
-              (run-command exit-minibuffer)))
+              (exit-minibuffer)))
          (else #f))))
 
     (define (completion--try-word-completion string table predicate point)
@@ -1145,6 +1180,12 @@ read-number-history
             (initial (list-ref-or args 2 #f))
             (history (list-ref-or args 3 minibuffer-history))
             (default (list-ref-or args 4 #f)))
+        ;; `(STRING . POSITION)' is the initial input with point at
+        ;; POSITION in it. The position counts from *zero* here and from
+        ;; one in `read-from-minibuffer', which is what the adjustment
+        ;; is for (minibuffer.el:5214).
+        (when (pair? initial)
+          (set! initial (cons (car initial) (+ 1 (cdr initial)))))
         (parameterize ((*minibuffer-completion-table* collection)
                        (*minibuffer-completion-predicate* predicate)
                        (*minibuffer-completion-confirm*
@@ -1172,6 +1213,15 @@ read-number-history
     ;; minibuffer being read is reading a file name, which decides
     ;; whether `minibuffer-local-filename-completion-map' is layered
     ;; over the completion map. `read-file-name' binds it.
+
+    (define *insert-default-directory* (make-parameter #t))
+    ;; ^ GNU Emacs's `insert-default-directory' (minibuffer.el:3915):
+    ;; "Non-nil means when reading a filename start with the default
+    ;; directory in the minibuffer." `read-file-name' puts the directory
+    ;; in the minibuffer when this is set, and the directory plus the
+    ;; INITIAL after it when there is one - with point after the
+    ;; directory, so that the name is what is typed over. Emacs's value
+    ;; is t.
 
     (define (completion--map-for base)
       ;; BASE with `minibuffer-local-filename-completion-map' layered
@@ -1741,6 +1791,15 @@ read-number-history
       ;;--------------------------------------------------------------
       (minibuffer-hide-completions))
 
+    (define *minibuffer-setup-hook* (make-parameter '()))
+    ;; ^ GNU Emacs's `minibuffer-setup-hook' (`minibuf.c':2564): "Normal
+    ;; hook to run when entering the minibuffer." `read_minibuf' runs it
+    ;; after the prompt and the initial input are in place and the
+    ;; minibuffer's keymap is bound, and before the recursive edit
+    ;; (minibuf.c:912) - so it runs with the minibuffer current and can
+    ;; still see what is in it. It is what
+    ;; `minibuffer-lazy-highlight-setup' adds its hook to.
+
     (define *minibuffer-exit-hook* (make-parameter (list minibuffer-restore-windows)))
     ;; ^ GNU Emacs's `minibuffer-exit-hook': run when a minibuffer is
     ;; left. It is a `make-parameter' holding the list of procedures
@@ -2028,26 +2087,53 @@ read-number-history
       ;;--------------------------------------------------------------
       " (default %s)")
 
-    (define (format-prompt prompt default)
-      ;; GNU Emacs's `format-prompt' (minibuffer.el:5499): PROMPT with
-      ;; the DEFAULT named in it, in the way a prompt that has a default
-      ;; is written. Emacs's takes a spec and fills the prompt's own %s's
-      ;; too; nothing here passes a prompt with fields yet, so what is
-      ;; kept of it is the default clause, inserted before a trailing
-      ;; ": " as `read-number''s string-match does.
+    (define (minibuffer-default-clause default)
+      ;; `minibuffer-default-prompt-format' with DEFAULT written into it:
+      ;; the "(default 50)" of "Number of articles (default 50): ".
+      ;;
+      ;; Not through `format', for the reason `completions-header-string'
+      ;; is not: the format string is Emacs's, and its directive is `%s'
+      ;; where Guile's `format' spells one `~a' - it writes the `%s' out
+      ;; as itself rather than filling it - so the variable would have to
+      ;; be given a Guile spelling to work, and Emacs's docstring offers
+      ;; `" [%s]"' as the way a user shortens it. Emacs fills the field
+      ;; with whatever `format' prints, so a number comes out as digits.
       ;;--------------------------------------------------------------
-      (if default
-          (let* ((with-default
-                  (string-append prompt
-                                 (format #f minibuffer-default-prompt-format
-                                         default)))
-                 (end (string-length with-default)))
-            (if (and (> end 2)
-                     (char=? (string-ref with-default (- end 2)) #\:)
-                     (char=? (string-ref with-default (- end 1)) #\space))
-                (string-append (substring with-default 0 (- end 2)) ": ")
-                with-default))
-          prompt))
+      (let* ((format-string minibuffer-default-prompt-format)
+             (value (if (pair? default) (car default) default))
+             (text (if (string? value) value (format #f "~a" value)))
+             (at (string-contains format-string "%s")))
+        (if (not at)
+            format-string
+            (string-append (substring format-string 0 at)
+                           text
+                           (substring format-string (+ at 2)
+                                      (string-length format-string))))))
+
+    (define (format-prompt prompt default)
+      ;; GNU Emacs's `format-prompt' (minibuffer.el:5498): "Format PROMPT
+      ;; with DEFAULT according to `minibuffer-default-prompt-format'."
+      ;;
+      ;; Two things about the shape are Emacs's and were both missing
+      ;; here. The prompt is closed with ": " whether or not it has a
+      ;; default - that colon is what a prompt ends with, and leaving it
+      ;; off is what left `M-%' prompting `Query replace' with the typed
+      ;; text hard against it. And the default clause goes *before* that
+      ;; colon, not after it: "Query replace (default a -> b): ".
+      ;;
+      ;; A DEFAULT that is an empty string names nothing and gets no
+      ;; clause; a list names its first element; anything else names
+      ;; itself.
+      ;;--------------------------------------------------------------
+      (let ((default (if (null? default) #f default)))
+        (string-append
+         prompt
+         (if (and default
+                  (or (not (string? default))
+                      (> (string-length default) 0)))
+             (minibuffer-default-clause default)
+             "")
+         ": ")))
 
     (define (read-number prompt . rest)
       ;; GNU Emacs's `read-number' (subr.el:3709): "Read from the
@@ -2083,7 +2169,7 @@ read-number-history
                   (let* ((with-default
                           (string-append
                            prompt
-                           (format #f minibuffer-default-prompt-format default1)))
+                           (minibuffer-default-clause default1)))
                          (end (string-length with-default)))
                     (let scan ((i end))
                       (cond
@@ -2093,8 +2179,7 @@ read-number-history
                         (scan (- i 1)))
                        ((char=? (string-ref with-default (- i 1)) #\:)
                         (string-append (substring with-default 0 (- i 1))
-                                       (format #f minibuffer-default-prompt-format
-                                               default1)
+                                       (minibuffer-default-clause default1)
                                        (substring with-default
                                                   (- i 1) end)))
                        (else
@@ -2160,8 +2245,15 @@ read-number-history
               ;; the buffer read for a cons prefix is #f here - see the
               ;; note above - so the answer is the line and no buffer
               (list n #f))
-            (list (read-number (format-prompt "Goto line: "
-                                              (line-number-at-pos))
+            ;; The prompt is built with `format' and not `format-prompt',
+            ;; which is what GNU Emacs does here and says why in
+            ;; `read-number''s docstring: "the value of DEFAULT is always
+            ;; inserted into PROMPT, so it's recommended to use `format'
+            ;; instead of `format-prompt'". Naming the default here as
+            ;; well names it twice. Emacs's own spec is "Goto%s line%s: ",
+            ;; whose two `%s's are the narrowing note and the buffer being
+            ;; switched to - this tree reads neither, so it is a literal.
+            (list (read-number "Goto line: "
                                (list #f (line-number-at-pos))
                                goto-line-history)
                   #f))))

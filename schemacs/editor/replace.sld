@@ -65,14 +65,22 @@
     (only (schemacs editor dispnew)
           current-display key-event->keymap-path)
     (only (schemacs editor minibuffer)
-          format-prompt history-entries make<history> read-from-minibuffer
-          set!history-entries)
+          *minibuffer-setup-hook*
+          format-prompt history-entries list-ref-or make<history>
+          read-from-minibuffer set!history-entries)
+    ;; `history-add-new-input' is `minibuf.c''s; the two reads below turn
+    ;; it off and file each answer themselves, as the C does.
+    (only (schemacs editor minibuf) *history-add-new-input*)
+    ;; `char-displayable-p' is `international/mule.el''s: it decides
+    ;; whether the terminal can draw the separator between FROM and TO.
+    (only (schemacs editor mule) char-displayable-p)
     ;; The highlight channel and the redraw.
     (only (schemacs editor xdisp) *search-highlight* render!)
     ;; `search-upper-case' decides the search's folding, which the
     ;; `isearch-no-upper-case-p' of isearch.el reads.
     (only (schemacs editor isearch)
-          *search-upper-case* isearch-no-upper-case-p)
+          *search-upper-case* isearch-no-upper-case-p
+          minibuffer-lazy-highlight-setup)
     (only (schemacs editor command)
           current-prefix-arg define-command uarg->integer)
     (only (schemacs editor keymap) define-key *default-keymap* *current-keymap*)
@@ -85,9 +93,12 @@
   (export
    *case-replace*
    *query-replace-defaults*
+   *query-replace-from-to-separator*
    *query-replace-history*
    *query-replace-lazy-highlight*
    *query-replace-map*
+   *query-replace-read-from-default*
+   *query-replace-read-from-regexp-default*
    perform-replace
    query-replace
    query-replace-descr
@@ -123,6 +134,30 @@
       ;; pair, which the FROM prompt offers as its default.
       ;;--------------------------------------------------------------
       (make-parameter '()))
+
+    (define *query-replace-from-to-separator*
+      ;; GNU Emacs's `query-replace-from-to-separator' (replace.el:73):
+      ;; "String that separates FROM and TO in the history of replacement
+      ;; pairs. When nil, the pair will not be added to the history".
+      ;; Emacs draws it in the `minibuffer-prompt' face and marks it with
+      ;; a `separator' text property so it can be found again; there are
+      ;; no text properties on a minibuffer answer here, so it is found
+      ;; as a substring (`query-replace--split-string').
+      ;;--------------------------------------------------------------
+      " → ")
+
+    (define *query-replace-read-from-default*
+      ;; GNU Emacs's `query-replace-read-from-default' (replace.el:221):
+      ;; "Function to get default non-regexp value for
+      ;; `query-replace-read-from'." Unset, as in Emacs.
+      ;;--------------------------------------------------------------
+      #f)
+
+    (define *query-replace-read-from-regexp-default*
+      ;; GNU Emacs's `query-replace-read-from-regexp-default'
+      ;; (replace.el:224): the regexp reading's own.
+      ;;--------------------------------------------------------------
+      #f)
 
     (define *query-replace-show-replacement*
       ;; GNU Emacs's `query-replace-show-replacement' (replace.el): show
@@ -240,28 +275,100 @@ re-executed as a normal key sequence.")
                 (loop (+ i 1) (cons "^?" acc)))
                (else (loop (+ i 1) (cons (make-string 1 c) acc))))))))
 
+    (define (query-replace-separator-string)
+      ;; GNU Emacs's `query-replace-read-from' computes this in its own
+      ;; `let*': `query-replace-from-to-separator' when the terminal can
+      ;; draw its first non-space character, and the " -> " spelling when
+      ;; it cannot - so that a terminal which has no arrow glyph gets
+      ;; something it can draw.
+      ;;
+      ;; An all-space separator has no character to ask about; Emacs's
+      ;; `(string-to-char "")' is 0, and 0 is an ASCII character and so
+      ;; always displayable, which is the branch taken here.
+      ;;--------------------------------------------------------------
+      (let ((separator *query-replace-from-to-separator*))
+        (and separator
+             (let loop ((i 0))
+               (cond ((>= i (string-length separator)) separator)
+                     ((char=? (string-ref separator i) #\space) (loop (+ i 1)))
+                     ((char-displayable-p (string-ref separator i)) separator)
+                     (else " -> "))))))
+
+    (define (query-replace-pair-string from-to separator)
+      ;; One replacement pair spelled the way the FROM prompt's history
+      ;; holds it: "FROM → TO", which `query-replace--split-string' reads
+      ;; back into the two halves.
+      ;;--------------------------------------------------------------
+      (string-append (query-replace-descr (car from-to))
+                     separator
+                     (query-replace-descr (cdr from-to))))
+
+    (define (query-replace--split-string string separator)
+      ;; GNU Emacs's `query-replace--split-string' (replace.el:208):
+      ;; "Split string STRING at a substring with property `separator'" -
+      ;; the answer `(FROM . TO)' when the text holds a separator, and
+      ;; STRING itself when it does not.
+      ;;
+      ;; Emacs finds the separator by its `separator' text property, so
+      ;; that a FROM which happens to contain the same characters is not
+      ;; split. There are no text properties on a minibuffer answer here,
+      ;; so the *substring* is what is looked for - which differs only
+      ;; for a FROM that itself contains the separator text. The
+      ;; fallback spelling " -> " is not split in Emacs either, the
+      ;; property not being on it, so only the separator variable's own
+      ;; text is searched for.
+      ;;--------------------------------------------------------------
+      (if (or (not separator) (= 0 (string-length separator)))
+          string
+          (let ((at (string-contains string separator)))
+            (if (not at)
+                string
+                (cons (substring string 0 at)
+                      (substring string (+ at (string-length separator))
+                                 (string-length string)))))))
+
     (define (query-replace-read-from prompt regexp-flag)
       ;; GNU Emacs's `query-replace-read-from' (replace.el:242): "Query
-      ;; and return the FROM argument of a `query-replace' operation."
-      ;; The C reads with `read-regexp' when the answer is to be a
-      ;; regexp, and offers the last replacement pair through a
-      ;; from-to-separator; both are the text-property machinery this
-      ;; tree's minibuffer does not hold, so the reading is
-      ;; `read-from-minibuffer' with `query-replace-defaults'' last
-      ;; pair as the default, in either case. An empty answer takes
-      ;; that pair whole.
+      ;; and return the FROM argument of a `query-replace' operation.
+      ;; The return value can also be a pair (FROM . TO)".
+      ;;
+      ;; The history the prompt walks is not the FROM history: the last
+      ;; replacement *pairs*, each spelled "FROM → TO", come first, and
+      ;; the plain FROM strings after them. That is what makes M-p and
+      ;; M-n step through a whole previous replacement, and it is what
+      ;; the prompt's default names - "Query replace (default a → b): ".
+      ;;
+      ;; Not ported: the `read-regexp' the regexp case reads with, and
+      ;; `query-replace-read-from-suggestions' (the region, the tag at
+      ;; point, the last search string) which Emacs offers through M-n.
       ;;--------------------------------------------------------------
-      (let* ((defaults (*query-replace-defaults*))
-             (default (if (pair? defaults) (caar defaults) #f))
+      (let* ((separator-string (query-replace-separator-string))
+             (defaults (*query-replace-defaults*))
+             (pair-entries
+              (if separator-string
+                  (map (lambda (from-to)
+                         (query-replace-pair-string from-to separator-string))
+                       defaults)
+                  '()))
+             ;; the history to walk: the pairs, then the plain FROMs
+             (walked (make<history>
+                      (append pair-entries
+                              (history-entries *query-replace-history*))))
+             (default (and *query-replace-read-from-default*
+                           (not regexp-flag)
+                           (*query-replace-read-from-default*)))
              (prompt
               (cond
-               ((and default (not regexp-flag))
-                (format-prompt prompt default))
+               ((and *query-replace-read-from-regexp-default* regexp-flag)
+                prompt)
+               (default (format-prompt prompt default))
                ;; NOTE: a Scheme empty list is TRUE, which Elisp's
                ;; nil is not - the C's `(if query-replace-defaults
                ;; ...)' is `(pair? defaults)' here or the caar of the
                ;; empty list is the error, which is what the first
                ;; run of this read made of it
+               ((and (pair? defaults) separator-string)
+                (format-prompt prompt (car pair-entries)))
                ((pair? defaults)
                 (format-prompt
                  prompt
@@ -270,12 +377,37 @@ re-executed as a normal key sequence.")
                                 (query-replace-descr (cdar defaults)))))
                (else (format-prompt prompt #f))))
              (from
-              (read-from-minibuffer
-               prompt #f #f *query-replace-history* #f)))
-        (cond
-         ((and (= 0 (string-length from)) (pair? defaults))
-          (cons (caar defaults) (cdar defaults)))
-         (else from))))
+              ;; `history-add-new-input' off, as the C turns it off: the
+              ;; answer is put in the history below, and a reader that
+              ;; put it in as well would file it twice - and would file
+              ;; it in the *walked* list, which holds the pairs.
+              (parameterize ((*history-add-new-input* #f))
+                (read-from-minibuffer prompt #f #f walked #f))))
+        (if (and (= 0 (string-length from))
+                 (pair? defaults)
+                 (not default))
+            (cons (caar defaults)
+                  (query-replace-compile-replacement
+                   (cdar defaults) regexp-flag))
+            (let* ((split (query-replace--split-string from separator-string))
+                   (to (if (pair? split) (cdr split) #f))
+                   (from (or (and (= 0 (string-length from)) default)
+                             (if (pair? split) (car split) split))))
+              (set!history-entries
+               *query-replace-history*
+               (add-to-history (history-entries *query-replace-history*)
+                               from #f #t))
+              (if (not to)
+                  from
+                  (begin
+                    (set!history-entries
+                     *query-replace-history*
+                     (add-to-history (history-entries *query-replace-history*)
+                                     to #f #t))
+                    (*query-replace-defaults*
+                     (cons (cons from to) (*query-replace-defaults*)))
+                    (cons from
+                          (query-replace-compile-replacement to regexp-flag))))))))
 
     (define (query-replace-compile-replacement to regexp-flag)
       ;; GNU Emacs's `query-replace-compile-replacement' (replace.el:301):
@@ -296,36 +428,68 @@ re-executed as a normal key sequence.")
       ;; the TO prompt is FROM's text with " with: " after it.
       ;;--------------------------------------------------------------
       (let ((to
-             (read-from-minibuffer
-              (format #f "~a ~a with: " prompt (query-replace-descr from))
-              #f #f *query-replace-history* from)))
+             ;; the reader does not file the answer; the C's
+             ;; `history-add-new-input' is off and the history is written
+             ;; below, once
+             (parameterize ((*history-add-new-input* #f))
+               (read-from-minibuffer
+                (format #f "~a ~a with: " prompt (query-replace-descr from))
+                #f #f *query-replace-history* from))))
         (set!history-entries
          *query-replace-history*
-         (add-to-history (history-entries *query-replace-history*) to))
+         (add-to-history (history-entries *query-replace-history*) to #f #t))
         (*query-replace-defaults*
          (cons (cons from to) (*query-replace-defaults*)))
         (query-replace-compile-replacement to regexp-flag)))
 
-    (define (query-replace-read-args prompt regexp-flag)
+    (define (query-replace-read-args prompt regexp-flag . rest)
       ;; GNU Emacs's `query-replace-read-args' (replace.el:609): read
       ;; FROM and TO, and answer `(FROM TO DELIMITED BACKWARD)' - the
       ;; prefix argument's two meanings, the C's
       ;; `(and current-prefix-arg (not (eq current-prefix-arg '-)))' and
       ;; `(eq current-prefix-arg '-)'. A bare C-u is the list `(4)', a
       ;; bare M-- the symbol `-', never a number.
+      ;;
+      ;; The C's two optional arguments are NOERROR, which lets a
+      ;; read-only buffer through to be complained about later, and
+      ;; NO-HIGHLIGHT, which turns off the lazy highlight of the FROM
+      ;; read below.
       ;;--------------------------------------------------------------
-      (barf-if-buffer-read-only)
+      (let ((noerror (list-ref-or rest 0 #f))
+            (no-highlight (list-ref-or rest 1 #f)))
+      (unless noerror
+        (barf-if-buffer-read-only))
       (let* ((delimited (and (current-prefix-arg)
                              (not (eq? '- (current-prefix-arg)))))
              (backward (and (current-prefix-arg)
                             (eq? '- (current-prefix-arg)))))
         (save-excursion
-          (let* ((from-pair (query-replace-read-from prompt regexp-flag))
+          ;; The FROM read is made with the buffer's matches highlighted
+          ;; as the pattern is typed: GNU Emacs wraps it in
+          ;; `minibuffer-with-setup-hook' with
+          ;; `minibuffer-lazy-highlight-setup' (replace.el:627), whose
+          ;; TRANSFORM is the FROM half of a `FROM -> TO' pair - so a
+          ;; history entry picked with M-p lights the buffer up as it is
+          ;; put in the minibuffer, which is the other half of what the
+          ;; C does there.
+          (let* ((setup (minibuffer-lazy-highlight-setup
+                         (not (eq? 'no-highlight no-highlight))
+                         #f
+                         (lambda (string)
+                           (let ((split (query-replace--split-string
+                                         string
+                                         (query-replace-separator-string))))
+                             (if (pair? split) (car split) split)))
+                         regexp-flag
+                         (*case-fold-search*)))
+                 (from-pair (parameterize ((*minibuffer-setup-hook*
+                                            (cons setup (*minibuffer-setup-hook*))))
+                              (query-replace-read-from prompt regexp-flag)))
                  (from (if (pair? from-pair) (car from-pair) from-pair))
                  (to (if (pair? from-pair)
                          (cdr from-pair)
                          (query-replace-read-to from prompt regexp-flag))))
-            (list from to delimited backward)))))
+            (list from to delimited backward))))))
 
     ;;----------------------------------------------------------------
     ;; The search, the highlight, the stack
@@ -689,10 +853,18 @@ re-executed as a normal key sequence.")
                                ;; a known match: take it, as the C's
                                ;; `(consp match-again)' branch does
                                ((pair? match-again)
+                                ;; the C's `(nth 0 match-again)' and
+                                ;; `(nth 1 match-again)' - the pair's
+                                ;; two ends. It was `(cdr match-again)'
+                                ;; here, which is the *rest of the
+                                ;; list*, so point was asked to go to a
+                                ;; list of markers: "Wrong type argument
+                                ;; in position 1" at the second
+                                ;; occurrence of a regexp replacement.
                                 (goto-char
                                  (if backward
                                      (car match-again)
-                                     (cdr match-again)))
+                                     (cadr match-again)))
                                 (match-data))
                                (match-again
                                 (and (replace-search
@@ -749,8 +921,22 @@ re-executed as a normal key sequence.")
                                                      (looking-at
                                                       search-string))
                                                  (let ((match (match-data)))
-                                                   (and (not (= (car match)
-                                                                (cadr match)))
+                                                   ;; the C's `/=' - is
+                                                   ;; the match
+                                                   ;; nonempty. Emacs's
+                                                   ;; `=' compares
+                                                   ;; markers by their
+                                                   ;; positions; Scheme's
+                                                   ;; takes numbers, so
+                                                   ;; the positions are
+                                                   ;; read out of them
+                                                   ;; first.
+                                                   (and (not (= (if (marker-type? (car match))
+                                                                   (marker-position (car match))
+                                                                   (car match))
+                                                                (if (marker-type? (cadr match))
+                                                                    (marker-position (cadr match))
+                                                                    (cadr match))))
                                                         match))))))
                              (set! replaced-this #f)
                              (if (not query-flag)

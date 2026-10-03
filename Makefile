@@ -20,6 +20,7 @@ SCHEME_LIBRARIES := \
   ./schemacs/editor/engine.sld \
   ./schemacs/editor/frame.sld \
   ./schemacs/editor/disp-table.sld \
+  ./schemacs/editor/mule.sld \
   ./schemacs/editor/files.sld \
   ./schemacs/editor/select.sld \
   ./schemacs/editor/syntax.sld \

@@ -46,6 +46,7 @@
     (schemacs editor characters)
     (schemacs editor character)
     (schemacs editor disp-table)
+    (schemacs editor mule)
     (schemacs editor files)
     (schemacs editor select)
     (schemacs editor syntax)
