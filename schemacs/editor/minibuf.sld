@@ -38,7 +38,11 @@
     (scheme base)
     (scheme char)
     ;; Guile's hash tables, which is what Emacs's hash-table form is.
-    (only (guile) hash-table? hash-for-each))
+    (only (guile) hash-table? hash-for-each)
+    ;; `compare-strings' is fns.c's, and now lives in `fns.sld' - it is
+    ;; still exported from here, so that the callers below and the tests
+    ;; that reach it as `mb:compare-strings' do not move.
+    (only (schemacs editor fns) compare-strings))
 
   (export
    *history-add-new-input*
@@ -92,36 +96,6 @@
       ;; from landing in a list the prompt was given to walk.
       ;;--------------------------------------------------------------
       (make-parameter #t))
-
-    (define (compare-strings string1 start1 end1 string2 start2 end2 . args)
-      ;; GNU Emacs's `compare-strings', which is `fns.c''s: #t when the
-      ;; two ranges are the same, and otherwise an integer whose
-      ;; magnitude is *one more* than the index of the first difference
-      ;; and whose sign says which string is less - which is why callers
-      ;; write `(abs tem) - 1' to get the index.
-      ;;
-      ;; It is here rather than in a library of its own because these
-      ;; three functions are its only caller so far; when `fns.sld'
-      ;; exists it goes there, as `get' and `put' will.
-      ;;--------------------------------------------------------------
-      (let ((ignore-case (if (pair? args) (car args) #f))
-            (end1 (if end1 end1 (string-length string1)))
-            (end2 (if end2 end2 (string-length string2))))
-        (let loop ((i start1) (j start2) (n 0))
-          (cond
-           ((or (>= i end1) (>= j end2))
-            (cond ((and (>= i end1) (>= j end2)) #t)
-                  ((>= i end1) (- (+ n 1)))   ; string1 is a prefix: it is less
-                  (else (+ n 1))))
-           (else
-            (let* ((c1 (string-ref string1 i))
-                   (c2 (string-ref string2 j))
-                   (c1 (if ignore-case (char-downcase c1) c1))
-                   (c2 (if ignore-case (char-downcase c2) c2)))
-              (cond
-               ((char=? c1 c2) (loop (+ 1 i) (+ 1 j) (+ 1 n)))
-               ((char<? c1 c2) (- (+ n 1)))
-               (else (+ n 1)))))))))
 
     (define (collection-type collection)
       ;; Which of the table forms COLLECTION is: GNU Emacs's `type' in

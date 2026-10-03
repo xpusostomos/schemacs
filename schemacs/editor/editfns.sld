@@ -23,7 +23,7 @@
     ;; and restores beside point.
     (only (guile) cadr caddr cddr cdddr cadddr)
     (only (schemacs editor buffer) current-buffer set-buffer
-          *case-fold-search*)
+          *case-fold-search* *inhibit-read-only*)
     (only (schemacs editor engine)
           copy-marker marker-position marker-type? set-marker!
           text-editor-get-start-of-line text-editor-get-end-of-line
@@ -41,6 +41,18 @@
     ;; `region_limit' reads.
     (only (schemacs editor buffer)
           mark-active transient-mark-mode)
+    ;; `barf-if-buffer-read-only' asks whether the text at a position
+    ;; carries the `inhibit-read-only' property.
+    (only (schemacs editor textprop)
+          add-text-properties get-text-property)
+    ;; `propertize' and the two string paths are intervals.c's and
+    ;; fns.c's: `propertize' copies through `copy-sequence', and `insert'
+    ;; and `buffer-substring' are the two ways text properties cross
+    ;; between a string and a buffer.
+    (only (schemacs editor fns) copy-sequence)
+    (only (schemacs editor intervals)
+          copy-intervals-to-string graft-intervals-into-buffer
+          string-intervals)
     (only (schemacs editor command)
           *mark-even-if-inactive*)
     (only (schemacs ui text-buffer-impl) text-location-line)
@@ -59,7 +71,10 @@ bobp
    buffer-substring
 point-marker
    buffer-size
+   insert-char
    buffer-string
+   buffer-substring-no-properties
+   propertize
    delete-and-extract-region
    barf-if-buffer-read-only
    forward-line
@@ -188,11 +203,19 @@ point-marker
       ;; zero-based index; the number is one-based, as every position
       ;; answer of this library is.
       ;;--------------------------------------------------------------
-      (text-editor-set-cursor (current-buffer)
-                              (- (cond
-                                  ((marker-type? position) (marker-position position))
-                                  (else position))
-                                 1)))
+      ;;
+      ;; It *returns* the position, which the C's does - "Return
+      ;; POSITION" - and which callers depend on: `(goto-char
+      ;; (match-end 0))' and `(goto-char (next-single-property-change
+      ;; ...))' read the answer, and `dired-move-to-end-of-filename'
+      ;; returns its property branch's value outright. The engine's
+      ;; `text-editor-set-cursor' answers something else entirely.
+      ;;--------------------------------------------------------------
+      (let ((at (cond
+                 ((marker-type? position) (marker-position position))
+                 (else position))))
+        (text-editor-set-cursor (current-buffer) (- at 1))
+        at))
 
     (define (insert . args)
       ;; GNU Emacs's `insert' (editfns.c:1354): "Insert the arguments,
@@ -206,10 +229,20 @@ point-marker
       (let ((ed (current-buffer)))
         (for-each
          (lambda (arg)
-           (cond ((string? arg) (text-editor-insert ed arg))
-                 ((char? arg) (text-editor-insert ed arg))
-                 ((integer? arg) (text-editor-insert ed (integer->char arg)))
-                 (else (error "Wrong type argument" arg))))
+           (cond
+            ((string? arg)
+             ;; `general_insert_function' hands a string to
+             ;; `insert_from_string', which is `insert_from_string_1':
+             ;; the text goes in, and then the properties it *carries*
+             ;; are grafted in after it (`graft_intervals_into_buffer'
+             ;; with the string's own tree, and `inherit' false).
+             (let ((at (text-editor-get-cursor ed)))
+               (text-editor-insert ed arg)
+               (graft-intervals-into-buffer (string-intervals arg) at
+                                            (string-length arg) ed #f)))
+            ((char? arg) (text-editor-insert ed arg))
+            ((integer? arg) (text-editor-insert ed (integer->char arg)))
+            (else (error "Wrong type argument" arg))))
          args)
         #f))
 
@@ -299,12 +332,18 @@ point-marker
              ;; `(line-beginning-position (and arg 2))' with ARG nil -
              ;; behaves as absent, as it does in Emacs
              (n (if (and (pair? rest) (car rest)) (car rest) 0)))
-        (+ 1
-           (save-excursion
-             (text-editor-set-cursor
-              ed (min (+ (text-editor-cursor-line ed) n)
-                      (text-editor-char-count ed)))
-             (text-editor-get-start-of-line ed)))))
+        (save-excursion
+          ;; "With argument N not nil or 1, move forward N - 1 lines
+          ;; first" - so an absent N is 1 and means *no* move, and an
+          ;; explicit N moves N - 1. The line arithmetic that used to be
+          ;; here added `text-editor-cursor-line' - a *line number* - to
+          ;; N and passed the sum as a *character position* to
+          ;; `text-editor-set-cursor', so every line but the first
+          ;; answered the first line's boundary; and `(forward-line N)'
+          ;; with the absent-N case read as 0 was right only by
+          ;; accident, and wrong by one for every explicit N.
+          (forward-line (- n 1))
+          (+ 1 (text-editor-get-start-of-line ed)))))
 
     (define (line-end-position . rest)
       ;; GNU Emacs's `line-end-position' (editfns.c): "Return the
@@ -313,22 +352,76 @@ point-marker
       ;; `line-beginning-position' is.
       ;;--------------------------------------------------------------
       (let* ((ed (current-buffer))
-             ;; nil behaves as absent, as in `line-beginning-position'
-             (n (if (and (pair? rest) (car rest)) (car rest) 0)))
-        (+ 1
-           (save-excursion
-             (text-editor-set-cursor
-              ed (min (+ (text-editor-cursor-line ed) n)
-                      (text-editor-char-count ed)))
-             (text-editor-get-end-of-line ed)))))
+             ;; "N not nil or 1" - an absent N is 1, which moves no
+             ;; lines; see the note below.
+             (n (if (and (pair? rest) (car rest)) (car rest) 1)))
+        (save-excursion
+          ;; `forward-line' and then the line's end - the C's shape, and
+          ;; N - 1 lines as `line-beginning-position' explains.
+          (forward-line (- n 1))
+          (+ 1 (text-editor-get-end-of-line ed)))))
 
     (define (buffer-substring beg end)
-      ;; GNU Emacs's `buffer-substring' (editfns.c): "Return the
-      ;; contents of part of the current buffer, as a string" - the
-      ;; engine's copy, which carries no properties because none are
-      ;; wired to the display yet.
+      ;; GNU Emacs's `buffer-substring' (editfns.c): "Return the contents
+      ;; of part of the current buffer, as a string" - the engine's copy,
+      ;; and then the properties of that range, which is the C's
+      ;; `copy_intervals_to_string'.
+      ;;
+      ;; The one-based positions are this layer's and the tree's are
+      ;; zero-based, which is the conversion every answer here makes.
+      ;;--------------------------------------------------------------
+      (let ((result (text-editor-copy-string (current-buffer)
+                                             (- beg 1) (- end 1))))
+        ;; The C's `copy_intervals_to_string (result, current_buffer,
+        ;; start, end - start)': the fourth argument is a *length*, not
+        ;; an end position, and passing the end position walks the tree
+        ;; off its last interval.
+        (copy-intervals-to-string result (current-buffer)
+                                  (- beg 1) (- end beg))
+        result))
+
+    (define (buffer-substring-no-properties beg end)
+      ;; GNU Emacs's `buffer-substring-no-properties': "Return the
+      ;; characters of part of the current buffer, without text
+      ;; properties."
       ;;--------------------------------------------------------------
       (text-editor-copy-string (current-buffer) (- beg 1) (- end 1)))
+
+    (define (propertize string . properties)
+      ;; GNU Emacs's `propertize' (editfns.c:3296): "Return a copy of
+      ;; STRING with text properties added. First argument is the string
+      ;; to copy. Remaining arguments form a sequence of PROPERTY VALUE
+      ;; pairs for text properties to add to the result."
+      ;;
+      ;; "Number of args must be odd" - the count includes the string, so
+      ;; what must be odd is the *properties*, which are name/value pairs
+      ;; and so must be even. The copy is `copy-sequence', so a string
+      ;; that already had properties keeps them, and then
+      ;; `add_text_properties' over the whole of it.
+      ;;--------------------------------------------------------------
+      (if (odd? (length properties))
+          (error "Wrong number of arguments" 'propertize))
+      (let ((result (copy-sequence string)))
+        (add-text-properties 0 (string-length result) properties result)
+        result))
+
+    (define (insert-char character count . rest)
+      ;; GNU Emacs's `insert-char' (editfns.c): "Insert COUNT copies of
+      ;; CHARACTER. Point, and before-insertion markers, are relocated
+      ;; as usual."
+      ;;
+      ;; "Optional second arg INHERIT, if non-nil, means to inherit text
+      ;; properties from the surrounding text" - the third argument here,
+      ;; and insert-with-inherit is not ported, so only the plain arm is,
+      ;; which is the one `indent-to' takes.
+      ;;--------------------------------------------------------------
+      (let ((count (if count count 1)))
+        (if (<= count 0)
+            #f
+            (let loop ((left count))
+              (when (> left 0)
+                (insert (string character))
+                (loop (- left 1)))))))
 
     (define (buffer-size)
       ;; GNU Emacs's `buffer-size' (editfns.c): "Return the number of
@@ -354,13 +447,31 @@ point-marker
         (delete-region (- beg 1) (- end 1))
         text))
 
-    (define (barf-if-buffer-read-only)
-      ;; GNU Emacs's `barf-if-buffer-read-only' (buffer.c:2453):
-      ;; "Signal a `buffer-read-only' error if the current buffer is
-      ;; read-only." The message is the error's text here, there
-      ;; being no condition symbols yet.
+    (define (barf-if-buffer-read-only . rest)
+      ;; GNU Emacs's `barf-if-buffer-read-only' (buffer.c:2453): "Signal a
+      ;; `buffer-read-only' error if the current buffer is read-only. If
+      ;; the text under POSITION (which defaults to point) has the
+      ;; `inhibit-read-only' text property set, the error will not be
+      ;; raised."
+      ;;
+      ;; The C's test is three parts: the buffer is read-only, *and*
+      ;; `inhibit-read-only' is nil - the global a command let-binds to
+      ;; write into a read-only buffer - *and* the text property is nil
+      ;; where the change is.
+      ;;
+      ;; The message is the error's text here, there being no condition
+      ;; symbols yet.
+      ;;
+      ;; Not ported: the `read-only' *text* property, which makes a piece
+      ;; of an otherwise writable buffer read-only. Nothing consults it
+      ;; yet, and the engine's insert and delete do not know about text
+      ;; properties at all.
       ;;--------------------------------------------------------------
-      (when (text-editor-read-only? (current-buffer))
+      (when (and (text-editor-read-only? (current-buffer))
+                 (not (*inhibit-read-only*))
+                 (not (get-text-property
+                       (if (pair? rest) (car rest) (point))
+                       'inhibit-read-only)))
         (error "Buffer is read-only")))
 
     (define (forward-line . rest)

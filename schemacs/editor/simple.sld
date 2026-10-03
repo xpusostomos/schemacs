@@ -43,7 +43,7 @@
          text-editor-set-read-only! text-editor-undo 
          text-editor-undo-boundary! text-editor-undo-list)
     (only (schemacs editor frame)
-         *current-frame* *echo-area-buffer* current-editor display-selections-p
+         *current-frame* *echo-area-buffer* display-selections-p
          set-message!
          frame-keymap-state
          selected-window set!frame-keymap-state
@@ -201,11 +201,11 @@ rather than files.  These modes usually use read-only buffers."
               (lambda (c)
                 (let loop ((i (uarg->integer 1 uarg)))
                   (when (> i 0)
-                    (text-editor-insert (current-editor) c)
+                    (text-editor-insert (current-buffer) c)
                     (loop (- i 1)))))
               (lambda () #f))
               )))
-       (lambda (c) (text-editor-insert (current-editor) c))
+       (lambda (c) (text-editor-insert (current-buffer) c))
        "Insert the typed character at point."
        'uarg))
 
@@ -214,25 +214,25 @@ rather than files.  These modes usually use read-only buffers."
       (interactive "p")
       (let loop ((i 0))
         (when (< i count)
-          (text-editor-insert (current-editor) #\tab)
+          (text-editor-insert (current-buffer) #\tab)
           (loop (+ 1 i)))))
 
     (define-command (forward-char count)
       "Move point N characters forward."
       (interactive "p")
-      (text-editor-move-cursor (current-editor) count))
+      (text-editor-move-cursor (current-buffer) count))
 
     (define-command (backward-char count)
       "Move point N characters backward."
       (interactive "p")
-      (text-editor-move-cursor (current-editor) (- count)))
+      (text-editor-move-cursor (current-buffer) (- count)))
 
     (define *temporary-goal-column* (make-parameter 0))
 
     (define-command (next-line count)
       "Move point down N lines, keeping the column."
       (interactive "p")
-      (let* ((ed (current-editor))
+      (let* ((ed (current-buffer))
              (goal (if (memq (*last-command*) (list next-line previous-line))
                        (*temporary-goal-column*)
                        (text-editor-cursor-column ed))))
@@ -256,7 +256,7 @@ rather than files.  These modes usually use read-only buffers."
     (define-command (previous-line count)
       "Move point up N lines, keeping the column."
       (interactive "p")
-      (let* ((ed (current-editor))
+      (let* ((ed (current-buffer))
              (goal (if (memq (*last-command*) (list next-line previous-line))
                        (*temporary-goal-column*)
                        (text-editor-cursor-column ed))))
@@ -275,26 +275,26 @@ rather than files.  These modes usually use read-only buffers."
     (define-command (beginning-of-line)
       "Move point to the beginning of the current line."
       (interactive)
-      (text-editor-set-cursor (current-editor)
+      (text-editor-set-cursor (current-buffer)
                               (text-editor-get-start-of-line
-                               (current-editor))))
+                               (current-buffer))))
 
     (define-command (end-of-line)
       "Move point to the end of the current line."
       (interactive)
-      (text-editor-set-cursor (current-editor)
+      (text-editor-set-cursor (current-buffer)
                               (text-editor-get-end-of-line
-                               (current-editor))))
+                               (current-buffer))))
 
     (define-command (delete-char count)
       "Delete N characters after point."
       (interactive "p")
-      (text-editor-delete-from-cursor (current-editor) count))
+      (text-editor-delete-from-cursor (current-buffer) count))
 
     (define-command (backward-delete-char count)
       "Delete N characters before point."
       (interactive "p")
-      (text-editor-delete-from-cursor (current-editor) (- count)))
+      (text-editor-delete-from-cursor (current-buffer) (- count)))
 
     (define-command (kill-line uarg)
       "Kill N lines at point. With no argument, kill to the end of the
@@ -332,7 +332,7 @@ rather than files.  These modes usually use read-only buffers."
       (interactive "p")
       (let loop ((i 0))
         (when (< i count)
-          (text-editor-insert (current-editor) #\newline)
+          (text-editor-insert (current-buffer) #\newline)
           (loop (+ 1 i)))))
 
     ;; `keyboard-quit', `read-only-mode' and
@@ -354,7 +354,7 @@ rather than files.  These modes usually use read-only buffers."
       "Toggle whether the buffer can be changed (bound to C-x C-q)."
       (interactive "P")
       (let* ((frame (*current-frame*))
-             (ed (current-editor))
+             (ed (current-buffer))
              (on? (if uarg
                       (< 0 (uarg->integer 1 uarg))
                       (not (text-editor-read-only? ed)))))
@@ -392,8 +392,8 @@ rather than files.  These modes usually use read-only buffers."
         (if (not omark)
             (error "No mark set in this buffer")
             (begin
-              (set-mark (text-editor-get-cursor (current-editor)))
-              (text-editor-set-cursor (current-editor) omark)
+              (set-mark (text-editor-get-cursor (current-buffer)))
+              (text-editor-set-cursor (current-buffer) omark)
               (if (eq? (and arg #t)
                        (not (if (*exchange-point-and-mark-highlight-region*)
                                 (region-active-p)
@@ -534,7 +534,7 @@ non-nil."
     (define-command (end-of-buffer)
       "Move point to the end of the buffer."
       (interactive)
-      (let ((ed (current-editor)))
+      (let ((ed (current-buffer)))
         (text-editor-set-cursor
          ed (text-editor-char-count ed))))
 
@@ -652,7 +652,7 @@ non-nil."
       (let loop ((i 0))
         (when (< i count)
           (text-editor-set-cursor
-           (current-editor) (forward-word-position (current-editor)))
+           (current-buffer) (forward-word-position (current-buffer)))
           (loop (+ 1 i)))))
 
     (define-command (backward-word count)
@@ -662,7 +662,7 @@ non-nil."
       (let loop ((i 0))
         (when (< i count)
           (text-editor-set-cursor
-           (current-editor) (backward-word-position (current-editor)))
+           (current-buffer) (backward-word-position (current-buffer)))
           (loop (+ 1 i)))))
 
     (define (word-run-end ed count)
@@ -697,7 +697,7 @@ non-nil."
       ;; into the kill buffer as a single entry.
       "Kill N words forward from point."
       (interactive "p")
-      (let* ((ed (current-editor))
+      (let* ((ed (current-buffer))
              (start (text-editor-get-cursor ed))
              (end (word-run-end ed count)))
         (when (< start end)
@@ -708,7 +708,7 @@ non-nil."
       ;; previous word to point.
       "Kill N words backward from point."
       (interactive "p")
-      (let* ((ed (current-editor))
+      (let* ((ed (current-buffer))
              (end (text-editor-get-cursor ed))
              (start (word-run-start ed count)))
         (when (< start end)
@@ -926,7 +926,7 @@ non-nil."
       ;;--------------------------------------------------------------
       (let ((mark (mark #f)))   ; signals when the mark is not active
         (and mark
-             (list mark (text-editor-get-cursor (current-editor))))))
+             (list mark (text-editor-get-cursor (current-buffer))))))
 
     (define-command (kill-region beg end)
       ;; GNU Emacs's `kill-region' (simple.el:5999): "Kill the text
@@ -942,8 +942,8 @@ non-nil."
       (interactive (list (region-beginning) (region-end)))
            (let* ((beg (- beg 1))
                   (end (- end 1))
-                      (string (text-editor-copy-string (current-editor) beg end))
-                      (read-only? (text-editor-read-only? (current-editor))))
+                      (string (text-editor-copy-string (current-buffer) beg end))
+                      (read-only? (text-editor-read-only? (current-buffer))))
                  ;; The ring takes the text first, as in Emacs, so that a
                  ;; read-only buffer still gives up its text.
                  (if (and (not read-only?)
@@ -962,7 +962,7 @@ non-nil."
       ;; without deleting it. The appending rule is the kill one, so M-w
       ;; after a kill extends that kill rather than starting a new entry.
       ;;--------------------------------------------------------------
-      (let ((string (text-editor-copy-string (current-editor) beg end)))
+      (let ((string (text-editor-copy-string (current-buffer) beg end)))
         (if (eq? (*last-command*) kill-region)
             (kill-append string (< end beg))
             (kill-new string))
@@ -1009,7 +1009,7 @@ non-nil."
                      ((pair? arg) 0)
                      ((eq? '- arg) -2)
                      (else (- arg 1))))
-            (ed (current-editor)))
+            (ed (current-buffer)))
         (push-mark)
         (text-editor-insert ed (current-kill n))
         ;; `C-u C-y' leaves point *before* what it inserted and the
@@ -1040,7 +1040,7 @@ non-nil."
       (interactive "p")
       (if (not (eq? (*last-command*) yank))
           (error "Previous command was not a yank")
-          (let* ((ed (current-editor))
+          (let* ((ed (current-buffer))
                  (before (< (text-editor-get-cursor ed) (mark #t)))
                  (beg (if before (text-editor-get-cursor ed) (mark #t)))
                  (end (if before (mark #t) (text-editor-get-cursor ed))))
@@ -1096,7 +1096,7 @@ non-nil."
                (< (*amalgamating-count*) (*amalgamating-undo-limit*)))
           (*amalgamating-count* (+ 1 (*amalgamating-count*)))
           (begin
-            (text-editor-undo-boundary! (current-editor))
+            (text-editor-undo-boundary! (current-buffer))
             (*amalgamating-count* (if (amalgamating-command? action) 1 0)))))
 
     (define (strip-undo-boundaries list)
@@ -1116,7 +1116,7 @@ non-nil."
       "Undo some previous changes."
       (interactive "p")
       (let* ((frame (*current-frame*))
-             (ed (current-editor))
+             (ed (current-buffer))
              (pending
               (if (eq? (*last-command*) undo)
                   ;; continue the run
@@ -1143,7 +1143,7 @@ non-nil."
       (let ((frame (*current-frame*)))
         (if (not (*last-change-was-undo*))
             (set!frame-message frame "No undone changes to redo")
-            (let* ((ed (current-editor))
+            (let* ((ed (current-buffer))
                    (list (strip-undo-boundaries
                           (text-editor-undo-list ed))))
               (if (not (pair? list))
@@ -1525,7 +1525,7 @@ non-nil."
                    ;; zero-based - the conversion at the edge.
                    (gui-set-selection 'PRIMARY
                                       (text-editor-copy-string
-                                       (current-editor)
+                                       (current-buffer)
                                        (- (region-beginning) 1)
                                        (- (region-end) 1))))))
           ;; a temporarily-enabled Transient Mark mode goes back to what
@@ -1573,7 +1573,7 @@ non-nil."
                            (*mark-ring-max*) #t)))
         (set!text-editor-mark (current-buffer)
                               (or location (text-editor-get-cursor
-                                            (current-editor))))
+                                            (current-buffer))))
         (unless (or nomsg (*echo-area-buffer*))
           (set!frame-message (*current-frame*) "Mark set"))
         (when (or activate (not (transient-mark-mode)))
@@ -1601,7 +1601,7 @@ non-nil."
       ;; activate it.
       ;;--------------------------------------------------------------
       (let ((here (mark #t))
-            (point (text-editor-get-cursor (current-editor))))
+            (point (text-editor-get-cursor (current-buffer))))
         (if (or arg (not here) (not (= here point)))
             (push-mark #f nomsg #t)
             (begin
@@ -1617,9 +1617,9 @@ non-nil."
       (if (not (mark #t))
           (error "No mark set in this buffer")
           (begin
-            (when (= (text-editor-get-cursor (current-editor)) (mark #t))
+            (when (= (text-editor-get-cursor (current-buffer)) (mark #t))
               (set!frame-message (*current-frame*) "Mark popped"))
-            (text-editor-set-cursor (current-editor) (mark #t))
+            (text-editor-set-cursor (current-buffer) (mark #t))
             (pop-mark))))
 
     (define-command (set-mark-command arg)
@@ -1662,8 +1662,8 @@ non-nil."
       "Put point at beginning and mark at end of buffer."
       (interactive)
       (push-mark)
-      (push-mark (text-editor-char-count (current-editor)) #f #t)
-      (text-editor-set-cursor (current-editor) 0))
+      (push-mark (text-editor-char-count (current-buffer)) #f #t)
+      (text-editor-set-cursor (current-buffer) 0))
 
     ;;----------------------------------------------------------------
     ;; The keys GNU Emacs binds these commands to
@@ -1844,7 +1844,7 @@ non-nil."
       ;; prefix or margin to have been inserted, which is why the
       ;; whole loop drops out.
       ;;--------------------------------------------------------------
-      (let* ((ed (current-editor))
+      (let* ((ed (current-buffer))
              (loc (text-editor-get-cursor ed)))
         (text-editor-undo-boundary! ed)
         (let loop ((i 0))
@@ -1953,16 +1953,16 @@ non-nil."
       ;; there being no fields.
       ;;--------------------------------------------------------------
       (if backward-only
-          (delete-region (text-editor-get-cursor (current-editor))
+          (delete-region (text-editor-get-cursor (current-buffer))
                          (begin
                            (skip-chars-backward chars)
-                           (text-editor-get-cursor (current-editor))))
+                           (text-editor-get-cursor (current-buffer))))
           (begin
             (skip-chars-forward chars)
-            (delete-region (text-editor-get-cursor (current-editor))
+            (delete-region (text-editor-get-cursor (current-buffer))
                            (begin
                              (skip-chars-backward chars)
-                             (text-editor-get-cursor (current-editor)))))))
+                             (text-editor-get-cursor (current-buffer)))))))
 
     (define-command (delete-leading-space)
       ;; mg's `delleadwhite' - the whitespace *before* point - which is
@@ -1989,7 +1989,7 @@ non-nil."
       ;; point already inside a run leaves exactly one.
       "Delete all spaces and tabs around point, leaving one space (or N spaces)."
       (interactive (list (uarg->integer 1 (current-prefix-arg))))
-      (let* ((ed (current-editor))
+      (let* ((ed (current-buffer))
              (skip-characters (if (and n (< n 0)) " \t\n\r" " \t"))
              (num (abs (or n 1))))
         ;; the skips move point the way the original's do
@@ -2057,7 +2057,7 @@ non-nil."
       ;; any immediately following blank lines."
       "On blank line, delete all surrounding blank lines, leaving just one."
       (interactive)
-      (let* ((ed (current-editor))
+      (let* ((ed (current-buffer))
              (here (text-editor-get-cursor ed))
              (thisblank
               (save-excursion
@@ -2130,7 +2130,7 @@ non-nil."
       ;; two position pairs, order them, and swap what they hold with
       ;; the three edits that keep the markers between them.
       ;;--------------------------------------------------------------
-      (let ((ed (current-editor)))
+      (let ((ed (current-buffer)))
         (when (> (car pos1) (cdr pos1))
           (set! pos1 (cons (cdr pos1) (car pos1))))
         (when (> (car pos2) (cdr pos2))
@@ -2182,7 +2182,7 @@ non-nil."
                ;; (begin (funcall mover (- x)) (point)))' - the second
                ;; mover runs from where the first left point, and the
                ;; two together net point back to where it was.
-               (let ((ed (current-editor)))
+               (let ((ed (current-buffer)))
                  (mover x)
                  (let ((here (text-editor-get-cursor ed)))
                    (mover (- x))
@@ -2198,7 +2198,7 @@ non-nil."
               (if (not (mark #t))
                   (error "No mark set in this buffer")
                   (begin
-                    (text-editor-set-cursor (current-editor) (mark #t))
+                    (text-editor-set-cursor (current-buffer) (mark #t))
                     (let ((pos2 (aux 1)))
                       (%transpose-subr-1 pos1 pos2))))))
           (exchange-point-and-mark #f))
@@ -2206,10 +2206,10 @@ non-nil."
           (let* ((pos1 (aux -1))
                  (pos2 (aux arg)))
             (%transpose-subr-1 pos1 pos2)
-            (text-editor-set-cursor (current-editor) (car pos2))))
+            (text-editor-set-cursor (current-buffer) (car pos2))))
          (else
           (let* ((pos1 (aux -1))
-                 (ed (current-editor)))
+                 (ed (current-buffer)))
             (text-editor-set-cursor ed (car pos1))
             (let ((pos2 (aux arg)))
               (%transpose-subr-1 pos1 pos2)
@@ -2223,14 +2223,14 @@ non-nil."
       ;; the backward step the eolp case makes first.
       "Interchange characters around point, moving forward one character."
       (interactive (list (uarg->integer 1 (current-prefix-arg))))
-      (let ((ed (current-editor)))
+      (let ((ed (current-buffer)))
         (when (and (= (text-editor-get-cursor ed)
                       (text-editor-get-end-of-line ed))
                    (> (text-editor-get-cursor ed) 0))
           (text-editor-move-cursor ed -1)))
       (%transpose-subr
        (lambda (x)
-         (text-editor-move-cursor (current-editor) x))
+         (text-editor-move-cursor (current-buffer) x))
        arg))
 
     (define-command (transpose-words arg)
@@ -2293,7 +2293,7 @@ non-nil."
                           ""
                           (format #f " Hscroll=~a"
                                   (%window-hscroll (selected-window)))))
-             (col (text-editor-cursor-column (current-editor)))
+             (col (text-editor-cursor-column (current-buffer)))
              (char (following-char))
              (shown (and char
                          (if (< (char->integer char) 128)

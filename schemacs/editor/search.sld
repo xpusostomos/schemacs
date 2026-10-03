@@ -57,7 +57,8 @@
     ;; import of them is
     (only (guile) cadr caddr cddr cdddr cadddr
           make-regexp regexp-exec
-          regexp/icase regexp/notbol regexp/noteol string-index)
+          regexp/icase regexp/newline regexp/notbol regexp/noteol
+          string-index)
     (only (schemacs editor engine)
           copy-marker marker-buffer marker-position marker-type?
           set-marker! text-editor-type?
@@ -89,6 +90,7 @@
    *last-thing-searched*
    *search-regs*
    looking-at
+   looking-at-p
    looking-back
    match-beginning
    match-data
@@ -357,7 +359,140 @@
       ;;--------------------------------------------------------------
       (memv c (list #\w #\W #\b #\B #\< #\>
                     #\1 #\2 #\3 #\4 #\5 #\6 #\7 #\8 #\9
+                    ;; the string beginning and end: glibc's too, as `\<'
+                    ;; is, and they keep that meaning when `^' and `$'
+                    ;; are asked for the line's
+                    #\` #\'
                     #\. #\* #\? #\+ #\[ #\] #\$ #\^ #\\)))
+
+    (define (%without-nul text)
+      ;; TEXT with every NUL taken out. See `%class-for-ere'.
+      ;;
+      ;; The parameter is TEXT and not STRING: `string' is the
+      ;; constructor this walks with, and naming the parameter after it
+      ;; made every `(string c)' a call of the *parameter* - the same
+      ;; departure search.sld's `replace-match' had.
+      ;;--------------------------------------------------------------
+      ;; A NUL is dropped, and `[^\000-\177]' - "a character that is not
+      ;; ASCII", which `directory-listing-before-filename-regexp' is full
+      ;; of - therefore comes out as `[^-\177]', a *different* set. There
+      ;; is no way to do better: glibc cannot be handed a NUL in a
+      ;; pattern, has no `[:ascii:]' named class, refuses a range over
+      ;; control characters in a locale ("Invalid range end" for
+      ;; `[^ -DEL]', and `[^SOH-DEL]' silently matches everything), and
+      ;; `[:print:]' is the *locale's* printable set, so it takes
+      ;; non-ASCII in with it.
+      ;;
+      ;; What it costs, measured against `emacs -Q --batch' on the six
+      ;; line shapes a listing actually has - western `Oct  2 15:09',
+      ;; ISO `10-02 22:09', ISO with seconds and a zone
+      ;; `2026-10-02 22:09:01.123 +0700', western with the day first,
+      ;; a date-less line, and the `total' line - is nothing: every one
+      ;; gives the same match end, and the two that fail to match fail
+      ;; in Emacs too. So `directory-listing-before-filename-regexp' may
+      ;; be used here as Emacs uses it.
+      (let loop ((i 0) (acc ""))
+        (if (>= i (string-length text))
+            acc
+            (let ((c (string-ref text i)))
+              (loop (+ i 1)
+                    (cond ((not (char=? c #\nul))
+                           (string-append acc (string c)))
+                          (else acc)))))))
+
+    (define (%class-for-ere class)
+      ;; CLASS is a bracket expression spelled as an *Emacs* pattern
+      ;; spells it, and this is where the two dialects' text differs.
+      ;; Two things are repaired, both measured rather than guessed:
+      ;;
+      ;;   1. A NUL - the C's `\000' - cannot go through `make-regexp',
+      ;;      which hands the pattern to `regcomp' as a C string.
+      ;;      `[^\000]' is "any character" and becomes `(.|<newline>)':
+      ;;      under `regexp/newline' a `.` is every character but a
+      ;;      newline, and the newline is named. A NUL as the *start of
+      ;;      a range* becomes `\001', which is the same set - see
+      ;;      `%without-nul'. A NUL anywhere else is a member that
+      ;;      cannot be spelled and is dropped - and where it was the
+      ;;      *first* member the `^' that follows it stops being first,
+      ;;      so that one is escaped to stay the literal it was.
+      ;;
+      ;;   2. glibc reads `[.', `[:' and `[=' *inside* a bracket as the
+      ;;      start of a collating element, a named character class and
+      ;;      an equivalence class, where Emacs reads a literal `[' and
+      ;;      then the character after it. So `[[.*+\^$?]', which Emacs
+      ;;      reads as the eight characters `[ . * + \ ^ $ ?', makes
+      ;;      glibc say "Unmatched [, [^, [:, [., or [=" - which is how
+      ;;      `wildcard-to-regexp' found this. Escaping the character
+      ;;      *after* such a `[' is what glibc takes (`[[\.*+\^$?]'
+      ;;      matches `[' as Emacs does); escaping the `[' itself does
+      ;;      not. `[:name:]' is a named class in both dialects and is
+      ;;      left alone.
+      ;;--------------------------------------------------------------
+      (let* ((len (string-length class))
+             (negated? (and (> len 1) (char=? #\^ (string-ref class 1))))
+             (body (substring class (if negated? 2 1) (- len 1)))
+             (bare (%without-nul body)))
+        (cond
+         ;; `[^\000]' is every character, and `regexp/newline' keeps `.`
+         ;; from matching a newline, so the newline is named
+         ((and negated? (string=? bare ""))
+          (string-append "(.|" (string #\newline) ")"))
+         (else
+          (string-append
+           "["
+           (if negated? "^" "")
+           (if (and (not negated?)
+                    (> (string-length body) 0)
+                    (char=? #\nul (string-ref body 0))
+                    (> (string-length body) 1)
+                    (char=? #\^ (string-ref body 1)))
+               "\\"                        ; the `^' was not the first member
+               "")
+           (%escape-class-brackets bare)
+           "]")))))
+
+    (define (%escape-class-brackets members)
+      ;; The `[.' / `[:' / `[=' repair of `%class-for-ere', over the
+      ;; members of a class.
+      ;;--------------------------------------------------------------
+      (let ((len (string-length members)))
+        (let loop ((i 0) (acc ""))
+          (if (>= i len)
+              acc
+              (let ((c (string-ref members i)))
+                (if (and (char=? c #\[)
+                         (< (+ i 1) len)
+                         (memv (string-ref members (+ i 1)) (list #\. #\: #\=))
+                         (not (and (char=? (string-ref members (+ i 1)) #\:)
+                                   (%named-class-at? members i))))
+                    (loop (+ i 2)
+                          (string-append acc "[" "\\"
+                                         (string (string-ref members (+ i 1)))))
+                    (loop (+ i 1) (string-append acc (string c)))))))))
+
+    (define (%named-class-end text i)
+      ;; The index just past the `]' of a `[:name:]' beginning at I in
+      ;; TEXT, or #f when the `[' there does not begin one. A named
+      ;; character class is `[:', a name, `:]', and both dialects read
+      ;; it the same way - which is the whole reason the bracket walk
+      ;; has to know where it ends.
+      ;;--------------------------------------------------------------
+      (and (char=? #\[ (string-ref text i))
+           (< (+ i 1) (string-length text))
+           (char=? #\: (string-ref text (+ i 1)))
+           (let scan ((j (+ i 2)))
+             (cond ((>= j (string-length text)) #f)
+                   ((char=? #\: (string-ref text j))
+                    (and (< (+ j 1) (string-length text))
+                         (char=? #\] (string-ref text (+ j 1)))
+                         (+ j 2)))
+                   ((char=? #\] (string-ref text j)) #f)
+                   (else (scan (+ j 1)))))))
+
+    (define (%named-class-at? text i)
+      ;; Whether the `[' at I in TEXT begins a `[:name:]'.
+      ;;--------------------------------------------------------------
+      (and (%named-class-end text i) #t))
 
     (define (%translate-emacs-regexp pattern)
       ;; An Emacs regexp spelled as the Emacs regexp dialect spells
@@ -373,37 +508,58 @@
             (list->string (reverse acc))
             (let ((c (string-ref pattern i)))
               (cond
-               ;; a bracket expression: copied verbatim to its `]'
+               ;; a bracket expression: copied to its `]', with one
+               ;; repair - see `%class-for-ere'
                ((char=? c #\[)
-                (let scan ((j (+ i 1)) (seen-start #f) (bacc (list #\[)))
+                (let scan ((j (+ i 1)) (seen-start #f) (members '()))
                   (cond
                    ((>= j (string-length pattern))
                     ;; an unclosed bracket: Emacs's matcher says
-                    ;; "Unmatched [" and so does glibc - copy the
-                    ;; rest and let the compiler reject it
-                    (loop (string-length pattern) (append bacc acc)))
+                    ;; "Unmatched [" and so does glibc - copy the rest
+                    ;; and let the compiler reject it
+                    (loop (string-length pattern)
+                          (append (reverse
+                                   (string->list
+                                    (string-append
+                                     "["
+                                     (list->string (reverse members)))))
+                                  acc)))
                    ((and (char=? (string-ref pattern j) #\])
-                         (or seen-start
-                             ;; a `]' first in the set is a member
-                             (and (>= j (+ i 2))
-                                  (char=? (string-ref pattern j) #\]))))
-                    ;; hmm - the `]` first in the set is its member;
-                    ;; seen-start tracks whether we have passed one
-                    ;; character already
-                    ;;
-                    ;; BACC is appended as it is and not reversed: the
-                    ;; outer loop's ACC is itself reversed, and the
-                    ;; whole is reversed once at the end. Reversing the
-                    ;; set here put it into ACC the right way round
-                    ;; *among characters that were not*, so the final
-                    ;; reverse turned `[0-9]' into `]9-0[' and the
-                    ;; compiler rejected it.
-                    (loop (+ j 1) (append (cons #\] bacc) acc)))
+                         ;; a `]' first in the set is its own member
+                         (or seen-start (>= j (+ i 2))))
+                    ;; MEMBERS is consed, so it is in reverse; the
+                    ;; class text is put into ACC - which is itself the
+                    ;; text reversed - reversed again, so that the one
+                    ;; reverse at the end of this walk turns it the
+                    ;; right way round. Appending it the other way is
+                    ;; what once turned `[0-9]' into `]9-0['.
+                    (let ((class (%class-for-ere
+                                  (list->string
+                                   (append (list #\[)
+                                           (reverse members)
+                                           (list #\]))))))
+                      (loop (+ j 1)
+                            (append (reverse (string->list class)) acc))))
                    (else
-                    (scan (+ j 1)
-                          (or seen-start
-                              (not (char=? (string-ref pattern j) #\^)))
-                          (cons (string-ref pattern j) bacc))))))
+                    (let ((named (and (char=? (string-ref pattern j) #\[)
+                                      (%named-class-end pattern j))))
+                      (if named
+                          ;; A `[:name:]' is copied whole, so that its
+                          ;; own `]' does not close the set it stands
+                          ;; in. Closing there is what turned
+                          ;; `[[:alnum:]_]' into the named class
+                          ;; followed by a literal `_]', and what the
+                          ;; environment-variable regexp's
+                          ;; `[[:alnum:]_]+' then stopped matching.
+                          (let copy ((k j) (members members))
+                            (if (>= k named)
+                                (scan named #t members)
+                                (copy (+ k 1)
+                                      (cons (string-ref pattern k) members))))
+                          (scan (+ j 1)
+                                (or seen-start
+                                    (not (char=? (string-ref pattern j) #\^)))
+                                (cons (string-ref pattern j) members))))))))
                ((char=? c #\\)
                 (if (>= (+ i 1) (string-length pattern))
                     (error "Trailing backslash in regexp" pattern)
@@ -437,8 +593,18 @@
         (cond
          ((assoc key %regexp-cache) (cadr (assoc key %regexp-cache)))
          (else
+          ;; `regexp/newline' is what makes `^' and `$' mean what they
+          ;; mean to Emacs: the start and end of a *line*, not of the
+          ;; whole string. It settles two things at once, and both were
+          ;; wrong without it - measured against this machine's Emacs:
+          ;; `(string-match "^b" "a\nb")' is 2 there and was #f here, and
+          ;; `(string-match "a.b" "a\nb")' is nil there and was 0 here,
+          ;; because Emacs's `.' does not match a newline and POSIX's
+          ;; does until this flag is given. The string anchors `\`' and
+          ;; `\'' keep their own meaning under it.
           (let ((rx (make-regexp (%translate-emacs-regexp pattern)
-                                 (if icase? regexp/icase 0))))
+                                 (if icase? regexp/icase 0)
+                                 regexp/newline)))
             (set! %regexp-cache
                   (cons (list key rx)
                         (let trim ((l %regexp-cache) (n 0))
@@ -501,6 +667,19 @@
             (%string-match-into-regs m)
             (*last-thing-searched* 'string)
             (match:start m 0))))))
+
+    (define (looking-at-p regexp)
+      ;; GNU Emacs's `looking-at-p' (subr.el): "Same as `looking-at'
+      ;; except this function does not change the match data."
+      ;;
+      ;; It is `subr.el''s, and it is here rather than in
+      ;; `(schemacs editor subr)' because that library is *below* this
+      ;; one: `simple' imports `subr' and this library imports `simple',
+      ;; so subr cannot reach `looking-at'. This tree moves a function
+      ;; down to the library that can hold it and says so, as
+      ;; `goto-line' is in `minibuffer.sld' for the same reason.
+      ;;--------------------------------------------------------------
+      (save-match-data (looking-at regexp)))
 
     (define (looking-at regexp)
       ;; GNU Emacs's `looking-at' (search.c:347): "Return t if point is

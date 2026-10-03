@@ -53,7 +53,7 @@
     (only (schemacs editor dispnew)
           current-display key-event->keymap-path read-input-event)
     (only (schemacs editor frame)
-          *current-frame* blink-cursor-check current-editor
+          *current-frame* blink-cursor-check
           display-selections-p frame-keymap-state
           frame-message frame-message-expired?
           frame-message-expiry
@@ -269,8 +269,17 @@
                          (transient-mark-mode)
                          (not (memq (this-command-name)
                                     (*selection-inhibit-update-commands*))))
+                ;; `buffer' and not `(current-buffer)' or
+                ;; `(current-editor)': this command loop bound it once at
+                ;; the top, which is the C's `current_buffer' for the
+                ;; whole command (keyboard.c:1615-1647), and
+                ;; `region-beginning'/`region-end' answer against the
+                ;; same buffer. Re-reading it here asks a *different*
+                ;; question - a command may have moved the current
+                ;; buffer, and the answer at this point is not
+                ;; necessarily the one the positions were computed in.
                 (let ((txt (text-editor-copy-string
-                            (current-editor)
+                            buffer
                             (- (region-beginning) 1)
                             (- (region-end) 1))))
                   (unless (= 0 (string-length txt))

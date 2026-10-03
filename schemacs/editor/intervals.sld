@@ -51,8 +51,13 @@
     (scheme base)
     (scheme char)
     ;; `symbol-property' is Guile's name for the symbol properties that
-    ;; `get' and `put' below are Emacs's names for.
-    (only (guile) symbol-property set-symbol-property!)
+    ;; `get' and `put' below are Emacs's names for, and
+    ;; `make-object-property' is the weak side table a *string* keeps its
+    ;; tree in - see "The string's tree" below.
+    (only (guile) make-object-property set-symbol-property! symbol-property)
+    ;; The weak reference a *string* owner is held by - see
+    ;; `set-interval-object!'.
+    (only (ice-9 weak-vector) list->weak-vector weak-vector-ref weak-vector?)
     (only (schemacs editor engine)
           *text-property-offset-function*
           text-editor-char-count
@@ -80,6 +85,8 @@
    interval-last-pos
    interval-left-total-length
    interval-right-total-length
+   set-interval-object!
+   interval-object
    ;; shape tests
    interval-right-child?
    interval-left-child?
@@ -102,16 +109,30 @@
    merge-interval-left
    delete-interval
    copy-properties
+   merge-properties
    copy-interval-parent
    balance-an-interval
    balance-possible-root-interval
    balance-intervals
    intervals-equal?
+   reproduce-interval
+   reproduce-tree
+   reproduce-tree-object
+   copy-intervals
+   copy-intervals-to-string
+   graft-intervals-into-buffer
+   install-intervals-set-text-properties!
    merge-properties-sticky
    create-root-interval
    ;; the buffer's tree
    buffer-intervals
    set!buffer-intervals
+   object-intervals
+   object-length
+   set-object-intervals
+   ;; the string's tree
+   string-intervals
+   set!string-intervals
    offset-intervals
    adjust-intervals-for-insertion
    adjust-intervals-for-deletion
@@ -200,12 +221,57 @@
     (define (interval-object i)
       ;; The object a root interval belongs to, or #f. Emacs's
       ;; INTERVAL_HAS_OBJECT / GET_INTERVAL_OBJECT pair.
+      ;;
+      ;; A *string* owner is reached through a weak vector, which is where
+      ;; `set-interval-object!' puts it; this is where the two spellings
+      ;; meet.
       ;;--------------------------------------------------------------
       (let ((up (and i (interval-up i))))
-        (if (and up (not (interval-type? up))) up #f)))
+        (cond ((not up) #f)
+              ((weak-vector? up) (weak-vector-ref up 0))
+              ((interval-type? up) #f)
+              (else up))))
 
     (define (set-interval-object! i object)
-      (set!interval-up i object))
+      ;; GNU Emacs's `set_interval_object'.
+      ;;
+      ;; A string is held *weakly*. The tree of a propertized string is the
+      ;; value of a weak table keyed by that string - see "The string's
+      ;; tree" below - and a value that reached its own key would root the
+      ;; key and so keep both alive for ever. A buffer is held as itself: a
+      ;; buffer is not a table key, and the engine already owns it.
+      ;;--------------------------------------------------------------
+      (set!interval-up i (if (string? object)
+                             (list->weak-vector (list object))
+                             object)))
+
+    (define (object-length object)
+      ;; How many characters OBJECT holds. Emacs has two macros for this
+      ;; and picks between them the same way: `(BUF_Z (b) - BUF_BEG (b))'
+      ;; for a buffer and `SCHARS' for a string.
+      ;;--------------------------------------------------------------
+      (if (string? object)
+          (string-length object)
+          (text-editor-char-count object)))
+
+    (define (object-intervals object)
+      ;; GNU Emacs's `buffer_intervals' read of a *string* - the read half
+      ;; of `set-object-intervals'. See "The string's tree" below.
+      ;;--------------------------------------------------------------
+      (if (string? object)
+          (string-intervals object)
+          (buffer-intervals object)))
+
+    (define (set-object-intervals object tree)
+      ;; GNU Emacs's `set_buffer_intervals' and `set_string_intervals',
+      ;; chosen by what OBJECT is. The C makes the same choice inline -
+      ;; `balance_possible_root_interval' (intervals.c:435) and
+      ;; `delete_interval' - wherever a rotation has to put the new root
+      ;; back where the old one came from.
+      ;;--------------------------------------------------------------
+      (if (string? object)
+          (set!string-intervals object tree)
+          (set!buffer-intervals object tree)))
 
     (define (interval-left-child-of? i)
       (let ((parent (and i (interval-up i))))
@@ -241,6 +307,32 @@
       ;;--------------------------------------------------------------
       (set!interval-up target (interval-up source))
       target)
+
+    (define (merge-properties source target)
+      ;; GNU Emacs's `merge_properties' (intervals.c:132): "Merge
+      ;; properties of both intervals. SOURCE is the interval we are
+      ;; copying from, TARGET the interval we are copying to." A property
+      ;; SOURCE has that TARGET does not is added to TARGET; one both have
+      ;; keeps TARGET's value.
+      ;;
+      ;; This is the *inheriting* half of `graft_intervals_into_buffer':
+      ;; `copy_properties' replaces TARGET's list, where this adds to it.
+      ;;--------------------------------------------------------------
+      (if (and (interval-default? source) (interval-default? target))
+          target
+          (let loop ((o (interval-plist source)))
+            (if (not (pair? o))
+                target
+                (let ((sym (car o))
+                      (rest (cdr o)))
+                  (if (pair? rest)
+                      (begin
+                        (if (not (plist-member (interval-plist target) sym))
+                            (set!interval-plist
+                             target
+                             (cons sym (cons (car rest)
+                                             (interval-plist target)))))
+                        (loop (cdr rest)))))))))
 
     (define (copy-properties source target)
       ;; GNU Emacs's `copy_properties': TARGET's properties become
@@ -473,7 +565,7 @@
           ;; `set_buffer_intervals (XBUFFER (parent), interval)'. Without
           ;; this the buffer goes on pointing at the old root, and every
           ;; later lookup starts from the wrong node.
-          (set!buffer-intervals owner balanced)
+          (set-object-intervals owner balanced)
           balanced))
        ((not (interval-parent? interval)) interval)
        (else (balance-an-interval interval))))
@@ -726,7 +818,7 @@
           (let* ((owner (interval-object i))
                  (parent (delete-node i)))
             (when parent (set-interval-object! parent owner))
-            (when owner (set!buffer-intervals owner parent)))
+            (when owner (set-object-intervals owner parent)))
           (let ((parent (interval-up i)))
             (if (interval-left-child-of? i)
                 (begin
@@ -1099,9 +1191,9 @@
       ;; covering all of PARENT, which is the object the tree belongs to.
       ;;--------------------------------------------------------------
       (let ((new (make-interval)))
-        (set!interval-total-length new (text-editor-char-count parent))
+        (set!interval-total-length new (object-length parent))
         (set!interval-position new 0)
-        (set!buffer-intervals parent new)
+        (set-object-intervals parent new)
         (set-interval-object! new parent)
         new))
 
@@ -1224,6 +1316,238 @@
                         (loop (let ((up (interval-up balanced)))
                                 (if (interval-type? up) up #f)))))))
               tree)))
+
+    ;;----------------------------------------------------------------
+    ;; The string's tree
+    ;;
+    ;; Emacs hangs the tree off the string object itself: `struct
+    ;; Lisp_String' has an `intervals' field, and `string_intervals' /
+    ;; `set_string_intervals' are a pointer read and a pointer write
+    ;; (lisp.h:4035, 4043). A Scheme string has nowhere to put it, so it
+    ;; goes in a Guile *object property* - `make-object-property' is a
+    ;; weak `eq?'-keyed table wrapped in a procedure-with-setter
+    ;; (boot-9.scm:844) - and a propertized string is therefore still a
+    ;; string, with `string-length' and friends working on it, exactly as
+    ;; in Emacs.
+    ;;
+    ;; Two consequences of that choice, both load-bearing:
+    ;;
+    ;;  * **A weak table holds its values strongly.** A tree that pointed
+    ;;    back at its own string would root that string, and neither would
+    ;;    ever be collected. `copy_intervals_to_string' therefore leaves
+    ;;    the root's object unset, where the C sets it. The C does not
+    ;;    care, because its collector walks the tree
+    ;;    (`traverse_intervals'); this one does.
+    ;;  * **The key is the object, not the text.** Two strings with the
+    ;;    same characters are two keys, and a copy carries nothing until
+    ;;    something copies it. That is Emacs's behaviour too - which is
+    ;;    why `copy-sequence', `substring' and `concat' each call
+    ;;    `copy_intervals' in the C, and why the three call sites are
+    ;;    here as well.
+
+    (define string-intervals-property (make-object-property))
+
+    (define (string-intervals string)
+      ;; GNU Emacs's `string_intervals' (lisp.h:4035): "Get text
+      ;; properties of S."
+      ;;--------------------------------------------------------------
+      (string-intervals-property string))
+
+    (define (set!string-intervals string tree)
+      ;; GNU Emacs's `set_string_intervals' (lisp.h:4043): "Set text
+      ;; properties of S to I."
+      ;;--------------------------------------------------------------
+      (set! (string-intervals-property string) tree)
+      tree)
+
+    ;;----------------------------------------------------------------
+    ;; Copying, and grafting into a buffer
+    ;;
+    ;; Emacs has the same cycle these four are arranged around - an
+    ;; insertion in `insdel.c' needs the tree from here, and the clearing
+    ;; `graft_intervals_into_buffer' does needs `textprop.c', which is
+    ;; *above* this library. C does not care; a library system does, so
+    ;; the one call that would go upwards is handed over at load.
+
+    (define %clear-interval-properties
+      (lambda (start end properties buffer i)
+        (error
+         "intervals: textprop.sld's `set-text-properties-1' is not installed")))
+
+    (define (install-intervals-set-text-properties! set-text-properties-1)
+      ;; Called by textprop.sld at load. It is the same kind of seam as
+      ;; `*text-property-offset-function*', which the engine holds for the
+      ;; call this library cannot receive.
+      ;;--------------------------------------------------------------
+      (set! %clear-interval-properties set-text-properties-1))
+
+    (define (reproduce-interval source)
+      ;; GNU Emacs's `reproduce_interval' (intervals.c:1487): "an exact
+      ;; copy of the tree that SOURCE is the root of", with the links
+      ;; re-made so that the copy stands alone.
+      ;;--------------------------------------------------------------
+      (let ((target (make-interval)))
+        (set!interval-total-length target (interval-total-length source))
+        (set!interval-position target (interval-position source))
+        (copy-properties source target)
+        (if (interval-left source)
+            (set!interval-left target (reproduce-tree (interval-left source) target)))
+        (if (interval-right source)
+            (set!interval-right target (reproduce-tree (interval-right source) target)))
+        target))
+
+    (define (reproduce-tree source parent)
+      ;; GNU Emacs's `reproduce_tree' (intervals.c:1511).
+      ;;--------------------------------------------------------------
+      (let ((target (reproduce-interval source)))
+        (set!interval-up target parent)
+        target))
+
+    (define (reproduce-tree-object source object)
+      ;; GNU Emacs's `reproduce_tree_obj' (intervals.c:1520): the copy,
+      ;; with its root belonging to OBJECT.
+      ;;--------------------------------------------------------------
+      (let ((target (reproduce-interval source)))
+        (set-interval-object! target object)
+        target))
+
+    (define (copy-intervals tree start length)
+      ;; GNU Emacs's `copy_intervals' (intervals.c:2227): "Produce an
+      ;; interval tree reflecting the intervals in TREE from START to
+      ;; START + LENGTH. The new interval tree has no parent and has a
+      ;; starting-position of 0."
+      ;;
+      ;; #f is answered when there is nothing to copy: no tree, no
+      ;; length, or a single default interval, which carries no
+      ;; properties at all.
+      ;;--------------------------------------------------------------
+      (if (or (not tree) (<= length 0))
+          #f
+          (let ((i (find-interval tree start)))
+            (if (and (< (+ (- start (interval-position i)) 1 length)
+                         (interval-length i))
+                     (interval-default? i))
+                #f
+                (let* ((new (make-interval))
+                       ;; "got" is how many of LENGTH's characters the
+                       ;; intervals walked so far account for.
+                       (got (- (interval-length i)
+                               (- start (interval-position i)))))
+                  (set!interval-position new 0)
+                  (set!interval-total-length new length)
+                  (copy-properties i new)
+                  (let loop ((i i) (t new) (got got) (prevlen got))
+                    (if (>= got length)
+                        (balance-an-interval new)
+                        (let* ((i (next-interval i))
+                               (t (split-interval-right t prevlen))
+                               (prevlen (interval-length i)))
+                          (copy-properties i t)
+                          (loop i t (+ got prevlen) prevlen)))))))))
+
+    (define (copy-intervals-to-string string buffer position length)
+      ;; GNU Emacs's `copy_intervals_to_string' (intervals.c:2267):
+      ;; "Give STRING the properties of BUFFER from POSITION to LENGTH."
+      ;;
+      ;; "The C follows its `copy_intervals' with `set_interval_object
+      ;; (interval_copy, string)'" - the root is made to point at the
+      ;; string. That is done here too, and is safe because
+      ;; `set-interval-object!' holds a string *weakly*: were it strong,
+      ;; the tree - which is the value of a weak table keyed by that
+      ;; string - would root its own key and neither would ever be
+      ;; collected.
+      ;;--------------------------------------------------------------
+      (let ((interval-copy (copy-intervals (buffer-intervals buffer)
+                                           position length)))
+        (if interval-copy
+            (begin
+              (set-interval-object! interval-copy string)
+              (set!string-intervals string interval-copy)))
+        interval-copy))
+
+    (define (graft-intervals-into-buffer source position length buffer inherit)
+      ;; GNU Emacs's `graft_intervals_into_buffer' (intervals.c:1566):
+      ;; "Insert the intervals of SOURCE into BUFFER at POSITION. LENGTH
+      ;; is the length of the text in SOURCE."
+      ;;
+      ;; SOURCE is the tree of the string that was inserted, or #f for
+      ;; text that carries none. The text itself is already in the buffer;
+      ;; this is the properties catching up with it.
+      ;;--------------------------------------------------------------
+      (let ((tree (buffer-intervals buffer)))
+        (if (not source)
+            ;; "If the new text has no properties, then with inheritance
+            ;; it becomes part of whatever interval it was inserted into.
+            ;; To prevent inheritance, we must clear out the properties
+            ;; of the newly inserted text."
+            (begin
+              (if (and (not inherit) tree (> length 0))
+                  (%clear-interval-properties position (+ position length) '()
+                                              buffer (find-interval tree position)))
+              ;; "Shouldn't be necessary. --Stef"
+              (if tree
+                  (set!buffer-intervals buffer (balance-an-interval tree)))
+              #f)
+            (if (= (text-editor-char-count buffer) length)
+                ;; "The inserted text constitutes the whole buffer, so
+                ;; simply copy over the interval structure."
+                (begin
+                  (set!buffer-intervals buffer (reproduce-tree-object source buffer))
+                  (set!interval-position (buffer-intervals buffer) 0)
+                  #f)
+                (let* ((tree (if tree tree (create-root-interval buffer)))
+                       ;; "Insertion is now at beginning of UNDER. The
+                       ;; inserted text `sticks' to the interval UNDER,
+                       ;; which means it gets those properties. The
+                       ;; properties of under are the result of
+                       ;; adjust_intervals_for_insertion, so stickiness has
+                       ;; already been taken care of."
+                       (under (find-interval tree position)))
+                  ;; "Here for insertion in the middle of an interval.
+                  ;; Split off an equivalent interval to the right, then
+                  ;; don't bother with it any more."
+                  (if (> position (interval-position under))
+                      (let ((end-unchanged
+                             (split-interval-left
+                              under (- position (interval-position under)))))
+                        (copy-properties under end-unchanged)
+                        (set!interval-position under position)))
+                  ;; "OVER is the interval we are copying from next.
+                  ;; OVER_USED says how many characters' worth of OVER
+                  ;; have already been copied into target intervals.
+                  ;; UNDER is the next interval in the target."
+                  (let loop ((over (find-interval source (interval-start-pos source)))
+                             (under under)
+                             (over-used 0))
+                    (if (not over)
+                        (if (buffer-intervals buffer)
+                            (set!buffer-intervals
+                             buffer (balance-an-interval (buffer-intervals buffer))))
+                        (let ((this (if (< (- (interval-length over) over-used)
+                                           (interval-length under))
+                                        ;; "If UNDER is longer than OVER, split it."
+                                        (let ((this (split-interval-left
+                                                     under
+                                                     (- (interval-length over)
+                                                        over-used))))
+                                          (copy-properties under this)
+                                          this)
+                                        under)))
+                          ;; "THIS is now the interval to copy or merge
+                          ;; into. OVER covers all of it."
+                          (if inherit
+                              (merge-properties over this)
+                              (copy-properties over this))
+                          (if (= (interval-length this)
+                                 (- (interval-length over) over-used))
+                              ;; "If THIS and OVER end at the same place,
+                              ;; advance OVER to a new source interval."
+                              (loop (next-interval over) (next-interval this) 0)
+                              ;; "Otherwise just record that more of OVER
+                              ;; has been used."
+                              (loop over
+                                    (next-interval this)
+                                    (+ over-used (interval-length this))))))))))))
 
     ;; Install the seam the engine calls on every edit. `intervals.c' is
     ;; called from `insdel.c' directly in C; here the engine cannot import

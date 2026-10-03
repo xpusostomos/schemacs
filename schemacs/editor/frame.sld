@@ -770,12 +770,17 @@
     ;; finds it.
 
     (define (current-editor)
-      ;; The buffer commands operate on: GNU Emacs's `current-buffer',
-      ;; which is the selected window's buffer - except while a
-      ;; minibuffer is being read, when it is the minibuffer's. That one
-      ;; exception is what makes every editing command work in the
-      ;; prompt with no code of its own: C-f, C-a, C-k, M-f, C-y and DEL
-      ;; there are the ordinary commands over an ordinary buffer.
+      ;; Which buffer the *selected window* shows - the window half of GNU
+      ;; Emacs's `current-buffer', which is the buffer this frame's window
+      ;; code writes when the window changes, and the echo area's while a
+      ;; minibuffer is being read.
+      ;;
+      ;; It is not `(current-buffer)' on its own: Emacs's `current_buffer'
+      ;; is written by `set-buffer' as well as by the window code, and
+      ;; `(schemacs editor buffer)''s `current-buffer' is what asks both -
+      ;; `(or (*current-buffer*) (current-editor))'. Commands want *that*;
+      ;; this is what the renderer, `display-buffer' and `switch-to-buffer'
+      ;; want, and it is the fallback inside it.
       ;;--------------------------------------------------------------
       (or (*echo-area-buffer*)
           (window-buffer (selected-window))))

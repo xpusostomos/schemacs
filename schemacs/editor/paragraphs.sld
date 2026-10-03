@@ -31,7 +31,8 @@
     ;; the mark-active and transient-mark-mode of the extend branch are
     ;; `buffer.c''s variables, beside `*last-command*' which is
     ;; simple.sld's (the command loop binds it there)
-    (only (schemacs editor buffer) mark-active transient-mark-mode)
+    (only (schemacs editor buffer)
+          current-buffer mark-active transient-mark-mode)
     (only (schemacs editor simple) *last-command*)
     (only (schemacs editor command) current-prefix-arg define-command
           uarg->integer)
@@ -67,7 +68,7 @@
 
 (define (%forward-line ed)
       ;; The public `forward-line' against ED - the Emacs-named one
-      ;; answers against `(current-editor)', and the walks here are
+      ;; answers against `(current-buffer)', and the walks here are
       ;; called with the walk's editor. The answer of interest to the
       ;; walks is whether the line moved at all.
       ;;--------------------------------------------------------------
@@ -98,7 +99,7 @@
       ;; of paragraphs left undone, as the C returns.
       ;;--------------------------------------------------------------
       (let* ((n (if (pair? args) (car args) 1))
-             (ed (current-editor)))
+             (ed (current-buffer)))
         (if (< n 0)
             (backward-paragraph (- n))
             (let loop ((left n))
@@ -133,7 +134,7 @@
       ;; buffer.
       ;;--------------------------------------------------------------
       (let* ((n (if (pair? args) (car args) 1))
-             (ed (current-editor)))
+             (ed (current-buffer)))
         (if (< n 0)
             (forward-paragraph (- n))
             (let loop ((left n))
@@ -170,7 +171,7 @@
       ;; start of paragraph."
       "Kill forward to end of paragraph."
       (interactive (list (uarg->integer 1 (current-prefix-arg))))
-      (let* ((ed (current-editor))
+      (let* ((ed (current-buffer))
              (here (text-editor-get-cursor ed)))
         ;; Emacs's `(progn (forward-paragraph arg) (point))': the motion
         ;; moves point, and it is point AFTER it that the kill runs to -
@@ -222,7 +223,7 @@ it marks the next ARG paragraphs after the ones already marked."
           (let ((here (mark #t)))
             (goto-char (+ 1 here))
             (forward-paragraph arg)
-            (set-mark (text-editor-get-cursor (current-editor))))
+            (set-mark (text-editor-get-cursor (current-buffer))))
           (begin
             (forward-paragraph arg)
             (push-mark #f #t #t)

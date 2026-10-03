@@ -83,7 +83,7 @@
     (only (schemacs editor search) search-backward search-forward)
     ;; `current-column' is indent.c's, which this library is the first
     ;; user of - `set-fill-column''s bare-C-u case reads it.
-    (only (schemacs editor indent) current-column)
+    (only (schemacs editor indentc) current-column)
     ;; `self-insert-command' is what SPC does in a file-name minibuffer
     ;; (`minibuffer-local-filename-completion-map' below), and
     ;; `with-current-buffer' and the line motion are the ordinary
@@ -93,7 +93,7 @@
        *this-command* *last-command*)
     (only (schemacs editor frame)
           *current-frame* *echo-area-buffer* *echo-area-prompt* *minibuffer*
-          current-editor frame-height select-window set!frame-message
+          frame-height select-window set!frame-message
           set-message! set-window-point! window-buffer window-height
           window-list window-width)
     ;; `try-completion' and `all-completions' are `minibuf.c''s and live in
@@ -2289,7 +2289,7 @@ read-number-history
         ;; Leave mark at previous position
         (or (region-active-p) (push-mark)))
       ;; Move to the specified line number in that buffer.
-      (let ((ed (current-editor))
+      (let ((ed (current-buffer))
             (target (max 0 (- line 1))))
         (text-editor-set-cursor ed target 0)
         (when (< (text-editor-cursor-line ed) target)

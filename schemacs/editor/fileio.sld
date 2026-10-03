@@ -51,6 +51,9 @@
     ;; `substitute-env-vars' is `env.el''s, and is what
     ;; `substitute-in-file-name' below substitutes the variables with.
     (only (schemacs editor env) substitute-env-vars)
+    ;; `find-file-name-handler' matches a handler's regexp against the
+    ;; name, which is the same regexp engine `string-match' reads.
+    (only (schemacs editor search) string-match)
     ;; `default-directory' is what a name with no directory of its own is
     ;; expanded against - a buffer-local variable in Emacs, and so
     ;; `buffer.c''s, which is where it now lives.
@@ -58,6 +61,9 @@
     )
 
   (export
+   *file-name-handler-alist*
+   *inhibit-file-name-handlers*
+   *inhibit-file-name-operation*
    copy-file
    delete-directory-internal
    delete-file-internal
@@ -77,6 +83,7 @@
    file-readable-p
    file-regular-p
    file-symlink-p
+   find-file-name-handler
    make-directory-internal
    rename-file
    set-file-modes
@@ -252,6 +259,68 @@
       (guard (e (else #f))
         (stat path)
         #t))
+
+    ;;----------------------------------------------------------------
+    ;; File name handlers
+    ;;
+    ;; The hook every function below asks before it does anything, which
+    ;; is what makes a name that is not a path on this machine work -
+    ;; TRAMP's `/ssh:host:/path', `jka-compr''s transparent `.gz',
+    ;; archive entries. Emacs has no SSH code in it: a handler is
+    ;; *registered* and the primitives hand the name to it. No handler is
+    ;; registered here, so nothing is handled - but the question is
+    ;; asked, which is the difference between "no remote files" and "this
+    ;; primitive cannot".
+    ;;------------------------------------------------------------------
+
+    (define *file-name-handler-alist* (make-parameter '()))
+    ;; ^ GNU Emacs's `file-name-handler-alist': "Alist of handler
+    ;; functions for special file name constructs. Each element looks
+    ;; like (REGEXP . HANDLER)."
+
+    (define *inhibit-file-name-handlers* (make-parameter '()))
+    (define *inhibit-file-name-operation* (make-parameter #f))
+    ;; ^ GNU Emacs's two: the handlers and the operation for which they
+    ;; are skipped, which is how a handler calls the standard function
+    ;; without calling itself.
+
+    (define (find-file-name-handler filename operation)
+      ;; GNU Emacs's `find-file-name-handler' (fileio.c:370): "Return
+      ;; FILENAME's handler function for OPERATION, if it has one.
+      ;; Otherwise, return nil. A file name is handled if one of the
+      ;; regular expressions in `file-name-handler-alist' matches it."
+      ;;
+      ;; The match that reaches *furthest right* wins - the C keeps the
+      ;; largest `match_pos', not the first - which is how a handler for
+      ;; the tail of a name (`jka-compr''s `.gz', an archive entry) is
+      ;; preferred to one for its head.
+      ;;
+      ;; Not ported: the `operations' property on the handler symbol,
+      ;; which lets a handler declare which operations it serves. There
+      ;; are no symbol properties here, so a handler is asked for
+      ;; everything.
+      ;;--------------------------------------------------------------
+      (if (not (string? filename))
+          #f
+          (let ((inhibited (if (eq? operation
+                                    (*inhibit-file-name-operation*))
+                               (*inhibit-file-name-handlers*)
+                               '())))
+            (let loop ((chain (*file-name-handler-alist*))
+                       (result #f) (pos -1))
+              (cond
+               ((null? chain) result)
+               ((not (pair? (car chain))) (loop (cdr chain) result pos))
+               (else
+                (let* ((elt (car chain))
+                       (regexp (car elt))
+                       (handler (cdr elt))
+                       (at (and (string? regexp)
+                                (guard (e (#t #f))
+                                  (string-match regexp filename)))))
+                  (if (and at (> at pos) (not (memq handler inhibited)))
+                      (loop (cdr chain) handler at)
+                      (loop (cdr chain) result pos)))))))))
 
     ;;----------------------------------------------------------------
     ;; Asking about a file

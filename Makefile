@@ -18,6 +18,10 @@ SCHEME_LIBRARIES := \
   ./schemacs/editor/command.sld \
   ./schemacs/editor/data.sld \
   ./schemacs/editor/derived.sld \
+  ./schemacs/editor/diredc.sld \
+  ./schemacs/editor/dired.sld \
+  ./schemacs/editor/fns.sld \
+  ./schemacs/editor/timefns.sld \
   ./schemacs/weak.sld \
   ./schemacs/editor/engine.sld \
   ./schemacs/editor/frame.sld \
@@ -36,7 +40,7 @@ SCHEME_LIBRARIES := \
   ./schemacs/editor/keyboard.sld \
   ./schemacs/editor/minibuffer.sld \
   ./schemacs/editor/search.sld \
-  ./schemacs/editor/indent.sld \
+  ./schemacs/editor/indentc.sld \
   ./schemacs/editor/replace.sld \
   ./schemacs/editor/buffer.sld \
   ./schemacs/editor/tabulated-list.sld \

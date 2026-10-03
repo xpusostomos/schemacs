@@ -40,7 +40,6 @@
     (only (schemacs editor simple) word-char?)
     (only (schemacs editor command) current-prefix-arg define-command
           uarg->integer)
-    (only (schemacs editor frame) current-editor)
     (only (schemacs editor buffer) current-buffer)
     ;; `scan_words' is `syntax.c''s in the C; here the word motions of
     ;; simple.sld stand for it, under `save-excursion'.
@@ -159,7 +158,7 @@
       ;; caller turns into BEGV or ZV.
       ;;--------------------------------------------------------------
       (save-excursion
-        (let ((ed (current-editor)))
+        (let ((ed (current-buffer)))
           (if (> count 0)
               (word-run-end ed count)
               (word-run-start ed (- count))))))
@@ -179,7 +178,7 @@
       ;; is the same length, so the markers either side are unchanged
       ;; and the answer is END.
       ;;--------------------------------------------------------------
-      (let ((ed (current-editor))
+      (let ((ed (current-buffer))
             (beg (- beg 1))
             (end (- end 1)))
         (if (= beg end)
@@ -220,7 +219,7 @@
       ;; it was ("With negative argument, convert previous words but
       ;; do not move"). The scan failing is BEGV or ZV by the sign.
       ;;--------------------------------------------------------------
-      (let* ((ed (current-editor))
+      (let* ((ed (current-buffer))
              (pt (text-editor-get-cursor ed))
              (farend (or (scan-words arg)
                          (if (<= arg 0)

@@ -2,13 +2,13 @@
 
 #### A clone of Emacs and Emacs Lisp written in R7RS Scheme
 
-## Project State
+### Project State
 
 It works!!! It's complete enough that you could daily use it as an editor. 
 And it's 100% written in scheme.
 
 Here's what works already:
-* Both terminal and graphic pixel based implementations
+* Both terminal and Gtk pixel based implementations
 * Buffers, and buffer manipulation commands
 * Marks, kill ring, regions, copy, yank
 * Windows, window splitting, window sizing
@@ -27,58 +27,74 @@ Here's what works already:
 * Clipboard integration
 * And many more...
 
+How does it feel? Zippy! They say they fixed Emacs' performance, 
+but it isn't as zippy as this!
+
 ## A quick word from our lack of sponsors...
 
-This project has been moderately expensive to implement in its use of AI, and I'm 
-running out of money to do it. If you want to see it move forward, money, AI tokens
-or human assistence would help it move forward much faster. Having said that, look
-at whats been achieved by one guy in short time.
+This project has been moderately expensive to implement in its use of
+AI, and I'm running out of money to do it. If you want to see it move
+forward, money, AI tokens or human assistence would help it move
+forward much faster. Having said that, look at whats been achieved by
+one guy in a short time.
 
 ## Developer Discussion
 
-Github forum is turned on above, you should feel free to discuss the project there.
+Github forum is turned on above, you should feel free to discuss the
+project there.
 
 ## History of scheme and emacs
 
-Since 1999, many in the Scheme community have dreamed of an Emacs freed from elisp and 
-built on a more solid foundation of Scheme. Off and on the 
-[guile-emacs](https://guile-emacs.org/) project started, stopped 
-and failed. What went wrong? The plan was to integrate guile, a scheme implementation
-with Emacs as phase 1. Slowly turn the emacs C code into foreign function calls as phase 2. Then
-presumably eliminate the C code entirely as phase 3. The project basically failed in phase 1.
+Since 1999, many in the Scheme community have dreamed of an Emacs
+freed from elisp and built on a more solid foundation of Scheme. Off
+and on the [guile-emacs](https://guile-emacs.org/) project started,
+stopped and failed. What went wrong? The plan was to integrate guile,
+a scheme implementation, with Emacs as phase 1. Slowly turn the emacs
+C code into foreign function calls as phase 2. Then presumably
+eliminate the C code entirely as phase 3. The project basically failed
+in phase 1.
 
-What went wrong? Emacs is not a lisp interpreter with an editor attached. The C/elisp core
-is deeply integrated with the basics of the editor at every level. That means that
-guile-emacs was constantly breaking, and constantly needing to be patched, and never got to
-the point where it could just replace emacs. Right now the code has been abandoned since 2015
-(apart from a brief flurry of activity a few years ago), and it doesn't build against emacs,
-nor would it be easy to get it to.
+What went wrong? Emacs is not a lisp interpreter with an editor
+attached. The C/elisp core is deeply integrated with the basics of the
+editor at every level. That means that guile-emacs was constantly
+breaking, and constantly needing to be patched, and never got to the
+point where it could just replace emacs. Right now the code has been
+abandoned since 2015 (apart from a brief flurry of activity a few
+years ago), and it doesn't build against emacs, nor would it be easy
+to get it to.
 
-In 2023 Ramin started the Gypsum project of an all-scheme emacs releasing it on 
-[Codeberg](https://codeberg.org/ramin_hal9001/schemacs)
-and presenting it at the EmacsConf 2024, later renaming it to Schemacs. As of late 2026 
-it is not yet an editor, you can't open files,
-there is no window handling, no marks, no kill ring, no undo, no mode line, no faces, no
-modes, no minibuffer and none of the commands you would recognise as emacs.
+In 2023 Ramin started the Gypsum project of an all-scheme emacs
+releasing it on
+[Codeberg](https://codeberg.org/ramin_hal9001/schemacs) and presenting
+it at the EmacsConf 2024, later renaming it to Schemacs. As of late
+2026 it is not yet an editor, you can't open files, there is no window
+handling, no marks, no kill ring, no undo, no mode line, no faces, no
+modes, no minibuffer and none of the commands you would recognise as
+emacs.
 
-This Schemacs project took Ramin's work in progress and used AI to duplicate emacs
-functionality exactly, file for file, function for function, parameter for parameter, 
-loop for loop.
+This Schemacs project took Ramin's work in progress and used AI to
+duplicate emacs functionality exactly, file for file, function for
+function, parameter for parameter, loop for loop. One thing that's
+surprising is how well AI can translate the mess of emacs C code into
+scheme. Sure, it's not the prettiest code in the world, but it's
+actually more readable than the spaghetti of the original C. And if
+one cares to, you can compare the logic variable for variable, loop
+for loop and see that it is the same.
 
 
 ## Ramin's Schemacs Project Goals
 
-Ramins' project seems fairly clear that he's "not in a hurry" and doesn't want AI help,
-which is what this project is. Perhap at some point we can collaborate somehow, but
-for now, I've accepted his project statement that "we don't need it". I'm sure if he
-continues to make progress we can absorb some of his work. However at his current rate of
-progress, I don't see anything coming out of it for a decade.
+Ramins' project seems fairly clear that he's "not in a hurry" and
+doesn't want AI help, which is what this project is. Perhap at some
+point we can collaborate somehow, but for now, I've accepted his
+project statement that "we don't need it". I'm sure if he continues to
+make progress we can absorb some of his work. However at his current
+rate of progress, I don't see anything coming out of it for a decade.
 
 
 Myself I am in a hurry...
 
 ## Future directions
-
 
 * "Design is fine, but implementation is everything." - Bill Joy
 * "Talk is cheap. Show me the code." — Linus Torvalds (2000)
@@ -91,26 +107,64 @@ Myself I am in a hurry...
 Guile-scheme and Ramin's schemacs has done a lot of great work on elisp compatibility.
 I welcome such work, I encourage such work.
 
-But it has failed since 1999. It is not the future. This is 2026 not 1999. AI can port
-a large complex elisp project to scheme in less than an hour, and write all the 
-test cases for you. After it does it, you typically go through another half hour
-of human testing, then it's usually done, finished and wrapped up. The community
-has the ability to port all the interesting melpa / elpa packages to scheme in months,
-and leave Emacs legacy implementation behind. 
+But it has failed since 1999. It is not the future. This is 2026
+not 1999. AI can port a large complex elisp project to scheme in less
+than an hour, and write all the test cases for you. The code it
+generates will be function for function, variable for variable, loop
+for loop identical to the original elisp. It will not be tripped up by
+elispisms like '() vs nil, nil vs #f, funcall, quoting rules, etc, it
+will write its own test harnesses, and it will root out any
+errors. After it does it, you typically go through another half hour
+of human testing, then it's usually done, finished and wrapped up. The
+community has the ability to port all the interesting melpa / elpa
+packages to scheme in months, and leave Emacs legacy implementation
+behind.
 
-Those are my delusions of grandeur. In reality, the emacs community is conservative,
-and slow to move. However this time it's different. You don't need the whole community
-anymore, you just need a small team of motivated people, and AI tokens. If Schemacs
-can gain a following, and Emacs releases a new feature, we can port it in hours, 
-not years. We don't need to be beholden to the old ways.
+Those are my delusions of grandeur. People have had Scheme / Emacs
+delusions for decades. In reality, the emacs community is
+conservative, and slow to move. However this time it's different. You
+don't need the whole community anymore, you just need a small team of
+motivated people, and AI tokens. If Schemacs can gain a following, and
+Emacs releases a new feature, we can port it in hours, not years. We
+don't need to be beholden to the old ways.
 
 ## How to build
+
 As of right now, this project only runs on Guile Scheme, although
 certain libraries (`lens.sld`, `pretty."Design is fine, but implementation is everything."sld`, `keymap.sld`) can build
 and run on other Schemes. The only GUI available right now is for
 [Guile-GI](https://github.com/spk121/guile-gi), but the Editor is
 designed specifically to be able to run on other Scheme platforms with
 other GUI toolkits. All platform specific calls are parameterized.
+
+## Why guile? Why not...Chez or...
+
+Mostly because there seems to be more packages and more developer
+support around guile, and that helps when you're trying to port a
+large complex package.
+
+Also guile is better than it used to be. I've seen figures that it's
+about 4x as slow as C++, which is pretty good all things considered.
+Chez is 2x, so there's that, but at least it's not 40x like Python :-)
+But guile has had a lot of work done making it easier to integrate with 
+C libraries.. not that Chez is hard.. it's not really, but guile is
+much easier. Also more work has been done to integrate it with elisp...
+if that ever comes to anything.
+
+### Running it
+
+There are 2 scripts in the top level: 
+
+* se - the Scheme Editor, or if you like the Scheme Emacs.
+* seg - the Scheme Editor, Graphical.
+
+Right now I'm using Wayland, I presume the graphics will work on X11
+but haven't tried it.
+
+It looks for an init file in:
+* $XDG_CONFIG_HOME/schemacs/init.scm
+* $HOME/.config/schemacs/init.scm
+* $HOME/.schemacs
 
 ### Scheme Requirements
 

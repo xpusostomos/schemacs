@@ -19,7 +19,7 @@
     (only (schemacs editor engine)
           text-editor-get-cursor text-editor-get-char-index
           text-editor-char-count text-editor-set-cursor)
-    (only (schemacs editor frame) current-editor)
+    (only (schemacs editor buffer) current-buffer)
     )
 
   (export
@@ -36,7 +36,7 @@
       ;; that position. The C moves point and answers the count; so
       ;; does this, the cursor being the engine's.
       ;;--------------------------------------------------------------
-      (let* ((ed (current-editor))
+      (let* ((ed (current-buffer))
              (bound (if (pair? rest) (car rest) #f))
              (members (string->list set)))
         (let loop ((i (text-editor-get-cursor ed))
@@ -60,7 +60,7 @@
       ;; - "Move point backward, stopping before a character not in
       ;; SET."
       ;;--------------------------------------------------------------
-      (let* ((ed (current-editor))
+      (let* ((ed (current-buffer))
              (bound (if (pair? rest) (car rest) #f))
              (members (string->list set)))
         (let loop ((i (text-editor-get-cursor ed))

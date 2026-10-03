@@ -206,4 +206,40 @@
   #t
   (parameterize ((*search-regs* #f)) (replace-match "x" #t #t)))
 
+;; ------------------------------------------------------------------
+;; bracket expressions, where the two dialects' text differs
+
+;; `[[:name:]]' is a named character class in both dialects, and its own
+;; `]' must not close the set it stands in. It once did, which turned
+;; `[[:alnum:]_]' into the named class followed by a literal `_]' - and
+;; the environment-variable regexp's `[[:alnum:]_]+' then stopped
+;; matching, which is how it was found.
+(test-equal '(0 7 0 3)
+  (list (string-match "[[:alnum:]_]+" "abc_def")
+        (match-end 0)
+        (string-match "[[:alpha:]]+" "abc")
+        (match-end 0)))
+;; and the whole match is the underscore-including name
+(test-equal "abc_def"
+  (begin (string-match "[[:alnum:]_]+" "abc_def") (match-string 0 "abc_def")))
+(test-equal '(#f 0)
+  ;; a name, not `[:...:]'/`[...]', still matches letters
+  (list (string-match "[[:alpha:]]" "123")
+        (string-match "[[:digit:]]" "123")))
+
+;; glibc reads `[.' inside a bracket as the start of a collating element
+;; and refuses the pattern; Emacs reads a literal `[' and the `.'. What
+;; `wildcard-to-regexp' produces for `[.*+\^$?]' is exactly that shape,
+;; so this is where it was found.
+(test-equal '(0 0 #f)
+  ;; a class of `[' `.` `*' `+' `\' `^' `$' `?'
+  (list (string-match "[[.*+\\^$?]" "[")
+        (string-match "[[.*+\\^$?]" ".")
+        (string-match "[[.*+\\^$?]" "x")))
+
+;; `[[]' - a class holding only `[' - is the same repair
+(test-equal '(0 1)
+  (list (string-match "[[]" "[")
+        (match-end 0)))
+
 (test-end)

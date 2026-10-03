@@ -89,6 +89,7 @@
    buffer-default-directory
    default-directory
    *change-major-mode-hook*
+   *inhibit-read-only*
    delete-overlay
    make-overlay
    move-overlay
@@ -134,6 +135,8 @@
    set!buffer-auto-hscroll-mode
    buffer-fill-column
    set!buffer-fill-column
+   buffer-tab-width
+   set!buffer-tab-width
    buffer-hscroll-margin
    set!buffer-hscroll-margin
    buffer-hscroll-step
@@ -472,6 +475,16 @@
     (define (set!buffer-auto-hscroll-mode buffer value)
       (set-buffer-local-value! buffer 'auto-hscroll-mode value))
 
+(define (buffer-tab-width buffer)
+      ;; How wide a tab is in columns: GNU Emacs's `tab-width', a
+      ;; buffer-local DEFVAR_PER_BUFFER whose default is 8
+      ;; (`buffer.c:4880'), which `indent-to' and the display both read.
+      ;;--------------------------------------------------------------
+      (buffer-local-value buffer 'tab-width 8))
+
+(define (set!buffer-tab-width buffer value)
+      (set-buffer-local-value! buffer 'tab-width value))
+
 (define (buffer-fill-column buffer)
       ;; The column `fill-paragraph' and auto fill fill to: GNU Emacs's
       ;; `fill-column', a buffer-local DEFVAR_PER_BUFFER whose default
@@ -805,6 +818,19 @@
 
     (define buffer-overlays-table (new-weak-table))
     ;; ^ each buffer's overlays, as a list in order by start
+
+    (define *inhibit-read-only* (make-parameter #f))
+    ;; ^ GNU Emacs's `inhibit-read-only' (`buffer.c':5885): "Non-nil means
+    ;; disregard read-only status of buffers or characters. A non-nil
+    ;; value that is a list means disregard `buffer-read-only' status, and
+    ;; disregard a `read-only' text property if the property value is a
+    ;; member of the list. Any other non-nil value means disregard
+    ;; `buffer-read-only' and all `read-only' text properties."
+    ;;
+    ;; A global variable in Emacs - not buffer-local - which is what makes
+    ;; `(let ((inhibit-read-only t)) ...)' the way a command writes into a
+    ;; read-only buffer. It is a parameter here, as this tree keeps the
+    ;; flags that Elisp let-binds.
 
     (define (overlay-current-buffer)
       ;; The buffer the overlay functions act on - Emacs's

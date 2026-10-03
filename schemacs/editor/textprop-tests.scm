@@ -8,7 +8,11 @@
        text-editor-insert text-editor-set-cursor text-editor-text-props)
  (only (schemacs editor intervals)
        find-interval next-interval interval-position interval-last-pos
-       interval-plist)
+       interval-plist string-intervals)
+ (only (schemacs editor buffer) erase-buffer get-buffer-create set-buffer)
+ (only (schemacs editor editfns)
+       buffer-substring buffer-substring-no-properties insert propertize)
+ (only (schemacs editor fns) concat copy-sequence)
  (prefix (schemacs editor textprop) tp:))
 
 ;; Unbuffered output, so a run that hangs shows where it got to.
@@ -201,5 +205,119 @@
     (text-editor-set-cursor ed 4)
     (text-editor-insert ed "XYZ")
     (runs ed)))
+
+;; ------------------------------------------------------------------
+;; properties on a *string*
+;;
+;; A propertized string is still a string - the tree lives in a Guile
+;; object property, keyed by the string's identity - so all the string
+;; functions go on working, which is the point of doing it that way.
+;; What follows is Emacs's behaviour, measured with `emacs -Q --batch'
+;; for the same calls: `copy-sequence', `concat', `insert' and
+;; `buffer-substring' all carry properties, and a string that merely
+;; looks the same does not have them.
+
+(define (pstr)
+  (propertize "abcdef" 'face 'bold))
+
+(test-equal "a propertized string is a string"
+  '(6 "abcdef")
+  (list (string-length (pstr)) (string-copy (pstr))))
+
+(test-equal "and carries the property, at every character of it"
+  '(bold bold (face bold))       ; `get-text-property' answers the value
+  (let ((s (pstr)))
+    (list (tp:get-text-property 0 'face s)
+          (tp:get-text-property 3 'face s)
+          (tp:text-properties-at 5 s))))
+
+(test-equal "past the last character there is no property"
+  #f
+  (tp:get-text-property 6 'face (pstr)))
+
+;; the key is the *object*, not the text: Emacs's properties are on the
+;; string, not on the characters, and this is that same fact
+(test-equal "a string that only looks the same has none"
+  #f
+  (tp:get-text-property 0 'face "abcdef"))
+
+(test-equal "and neither is a copy, until something copies them"
+  #f
+  (string-intervals (string-copy (pstr))))
+
+;; "the elements ... are shared" is the C's note for lists and vectors;
+;; for a string it copies the properties, which is `copy_intervals'
+(test-equal '(#t bold)
+  (let ((c (copy-sequence (pstr))))
+    (list (string? c) (tp:get-text-property 0 'face c))))
+
+;; "an unknown property is simply not there", and `text-properties-at'
+;; of a plain string is the empty list
+(test-equal '(() #f)
+  (list (tp:text-properties-at 0 "abc") (tp:get-text-property 0 'face "abc")))
+
+;; ------------------------------------------------------------------
+;; concat, which is how a property survives being built into a line
+
+(test-equal "properties ride through concat at the offsets they went in at"
+  '(#f bold #f)
+  (let ((c (concat "ab" (pstr) "yz")))
+    (list (tp:get-text-property 0 'face c)
+          (tp:get-text-property 2 'face c)
+          (tp:get-text-property 8 'face c))))
+
+(test-equal "and the result is a string of the whole length"
+  10
+  (string-length (concat "ab" (pstr) "yz")))
+
+(test-equal "a concat of plain strings has no properties at all"
+  '(() "abc")
+  (list (tp:text-properties-at 0 (concat "a" "b" "c")) (concat "a" "b" "c")))
+
+(test-equal "and the argument forms `concat' takes"
+  '("ab" "" "ab")
+  (list (concat (list #\a) "" "b") (concat) (concat '(#\a) "b")))
+
+;; ------------------------------------------------------------------
+;; the round trip through a buffer
+
+(define (fresh-buffer name)
+  ;; A buffer per test: `insert' appends, so a shared one would carry the
+  ;; previous test's text into the next.
+  ;;--------------------------------------------------------------
+  (let ((ed (get-buffer-create name)))
+    (set-buffer ed)
+    (erase-buffer)
+    ed))
+
+(test-equal "insert grafts a string's properties into the buffer"
+  '("abcdef" bold bold)
+  (let ((ed (fresh-buffer "*textprop-string-tests*")))
+    (insert (pstr))
+    (list (buffer-substring-no-properties 1 7)
+          (tp:get-text-property 0 'face)
+          (tp:get-text-property 5 'face))))
+
+(test-equal "and buffer-substring carries them back out"
+  (list "abcdef" '(face bold))
+  (let ((ed (fresh-buffer "*textprop-string-tests*")))
+    (insert (pstr))
+    (let ((out (buffer-substring 1 7)))
+      (list out (tp:text-properties-at 0 out)))))
+
+(test-equal "which buffer-substring-no-properties does not"
+  #f
+  (let ((ed (fresh-buffer "*textprop-string-tests*")))
+    (insert (pstr))
+    (tp:get-text-property 0 'face (buffer-substring-no-properties 1 7))))
+
+;; a string inserted after propertized text does not take its properties:
+;; `insert' passes `inherit' false, which is `general_insert_function''s 0
+(test-equal "plain text inserted beside it stays plain"
+  '((face bold) ())   ; `text-properties-at' answers the plist
+  (let ((ed (fresh-buffer "*textprop-string-tests*")))
+    (insert (pstr))
+    (insert "xyz")
+    (list (tp:text-properties-at 0 ed) (tp:text-properties-at 6 ed))))
 
 (test-end "schemacs_editor_textprop")

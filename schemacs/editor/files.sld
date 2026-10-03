@@ -54,16 +54,23 @@
     (only (schemacs editor editfns)
           barf-if-buffer-read-only goto-char insert point point-max)
     (only (schemacs editor simple) push-mark)
-    (only (schemacs editor buffer) default-directory erase-buffer)
+    (only (schemacs editor buffer)
+          current-buffer default-directory erase-buffer)
     ;; The file primitives that were here and have moved to the library
     ;; that mirrors the C file they are really from, `fileio.c':
     ;; `expand-file-name' with the two name helpers and its path
     ;; segments, the two predicates, and `directory-name-p'. This
     ;; library is `files.el' and is built *on* them.
     (only (schemacs editor fileio)
-          directory-name-p expand-file-name file-exists-p
-          file-name-directory-part file-name-nondirectory-part
-          file-writable-p)
+          directory-file-name directory-name-p expand-file-name
+          file-exists-p file-name-as-directory file-name-directory-part
+          file-name-nondirectory-part file-writable-p
+          find-file-name-handler)
+    ;; the truename walk, the home directory, and the last-dot search
+    ;; `file-name-sans-extension' does
+    (only (guile) canonicalize-path getenv string-rindex)
+    ;; `file-name-sans-versions' matches a regexp, as the C's does
+    (only (schemacs editor search) match-string string-match)
     ;; Buffers by name, and killing one: `buffer.c'. `BUFFER-FILE-NAME' and
     ;; the buffer-local store are what `save-buffer' writes and what the
     ;; visited file's line-break convention is kept in.
@@ -116,7 +123,12 @@
     ;; name splitting `read-file-name' completes with.
     (only (guile) access? format stat stat:mode W_OK X_OK logand logior
           closedir getcwd opendir readdir stat:type
-          string-index string-prefix? string-rindex))
+          string-index string-prefix? string-rindex)
+    ;; `file-size-human-readable''s arithmetic
+    (only (guile) caddr floor quotient remainder)
+    ;; The two files.el functions `ls-lisp' needs, handed over below.
+    (only (schemacs editor ls-lisp)
+          install-ls-lisp-files! ls-lisp--insert-directory))
 
   (export
    *require-final-newline*
@@ -132,7 +144,22 @@
    not-modified
    revert-buffer
    revert-buffer--default
+   abbreviate-file-name
+   *directory-abbrev-alist*
+   directory-listing-before-filename-regexp
    directory-entries
+   file-name-base
+   file-name-sans-extension
+   file-name-sans-versions
+   file-size-human-readable
+   insert-directory
+   files--use-insert-directory-program-p
+   *insert-directory-program*
+   *ls-lisp-use-insert-directory-program*
+   wildcard-to-regexp
+   file-name-version-regexp
+   file-relative-name
+   file-truename
    directory-path?
    encode-line-breaks
    ensure-final-newline-on-save!
@@ -150,6 +177,7 @@ directory-name-p
    find-file-noselect
    kill-buffer
    note-file-read-only!
+   read-directory-name
    read-file-name
    save-answer-char->decision
 save-buffer
@@ -397,7 +425,7 @@ save-buffer
  unsaved changes."
       (interactive)
       (let* ((frame (*current-frame*))
-             (buffer (current-editor)))
+             (buffer (current-buffer)))
         (let ((killed
                (parameterize
                    ((*kill-buffer-query-functions*
@@ -551,6 +579,311 @@ save-buffer
 
 
 
+
+    ;;----------------------------------------------------------------
+    ;; Abbreviating a name, and the truename
+    ;;------------------------------------------------------------------
+
+    (define *directory-abbrev-alist* (make-parameter '()))
+    ;; ^ GNU Emacs's `directory-abbrev-alist': "Alist of abbreviations for
+    ;; directories. Each element looks like (FROM . TO), meaning if FROM
+    ;; is a prefix of a directory, replace it by TO. If FROM starts with
+    ;; a regexp..." - the regexp form is not ported, for the reason
+    ;; `match-at-end' below gives.
+
+    (define (directory-abbrev-apply filename)
+      ;; GNU Emacs's `directory-abbrev-apply': "Apply
+      ;; `directory-abbrev-alist' to FILENAME. All the elements of
+      ;; `directory-abbrev-alist' that apply are abbreviated. If FROM
+      ;; does not begin with a `\\`', it is a literal prefix."
+      ;;--------------------------------------------------------------
+      (let loop ((rest (*directory-abbrev-alist*)) (name filename))
+        (cond ((null? rest) name)
+              ((and (pair? (car rest))
+                    (string? (caar rest))
+                    (string-prefix? (caar rest) name))
+               ;; the FIRST match returns, as Emacs's `catch' does
+               (string-append (cdar rest)
+                              (substring name (string-length (caar rest))
+                                         (string-length name))))
+              (else (loop (cdr rest) name)))))
+
+    (define (abbreviate-file-name filename)
+      ;; GNU Emacs's `abbreviate-file-name' (files.el): "Return a version
+      ;; of FILENAME shortened using `directory-abbrev-alist'. This also
+      ;; substitutes \"~\" for the user's home directory (unless the home
+      ;; directory is a root directory)."
+      ;;
+      ;; Not ported: `abbreviated-home-dir', the cache Emacs keeps so the
+      ;; home directory is not re-read every call; the home directory is
+      ;; read each time here, which is slower and never stale.
+      ;;--------------------------------------------------------------
+      (let* ((name (directory-abbrev-apply filename))
+             (home (getenv "HOME"))
+             (homedir (and home (file-name-as-directory home))))
+        (if (and homedir
+                 ;; "unless the home directory is a root directory"
+                 (not (string=? homedir "/"))
+                 (string-prefix? homedir name))
+            (string-append "~" (substring name (- (string-length homedir) 1)
+                                          (string-length name)))
+            name)))
+
+    (define (file-truename filename . rest)
+      ;; GNU Emacs's `file-truename' (files.el): "Return the truename of
+      ;; FILENAME. If FILENAME is not absolute, first expands it against
+      ;; `default-directory'. The truename of a file name is found by
+      ;; chasing symbolic links both at the level of the file and at the
+      ;; level of the directories containing it, until no links are left
+      ;; at any level."
+      ;;
+      ;; Guile's `canonicalize-path' is that walk - the C's `Ffile_truename'
+      ;; is a `realpath' with the parts Emacs needs around it - and the
+      ;; C's COUNTER and PREV-DIRS are for its own recursion, which
+      ;; `realpath' does internally.
+      ;;--------------------------------------------------------------
+      (canonicalize-path (expand-file-name filename)))
+
+    (define (match-at-end regexp string)
+      ;; The start of the leftmost match of REGEXP in STRING that *ends*
+      ;; at the end of STRING - which is what Emacs means by writing
+      ;; REGEXP with `\\'' after it. This tree's regexp engine has no
+      ;; end-of-string anchor, so the anchor is applied here instead.
+      ;;--------------------------------------------------------------
+      (let loop ((start 0))
+        (if (> start (string-length string))
+            #f
+            (let ((at (guard (e (#t #f)) (string-match regexp string start))))
+              (cond ((not at) #f)
+                    ((= (+ at (string-length (match-string 0 string)))
+                        (string-length string))
+                     at)
+                    (else (loop (+ at 1))))))))
+
+    (define file-name-version-regexp
+      ;; GNU Emacs's `file-name-version-regexp' (files.el:5507): "Regular
+      ;; expression matching the backup/version part of a file name."
+      ;; Emacs spells its groups shy (`\\(?:'); those have no ERE
+      ;; spelling, and a plain group means the same thing here.
+      ;;--------------------------------------------------------------
+      "\\(~\\|\\.~[-[:alnum:]:#@^._]+\\(~[[:digit:]]+\\)?~\\)")
+
+    (define (file-name-sans-versions name . rest)
+      ;; GNU Emacs's `file-name-sans-versions' (files.el:5514): "Return
+      ;; file NAME sans backup versions or strings. ... If the optional
+      ;; argument KEEP-BACKUP-VERSION is non-nil, we do not remove backup
+      ;; version numbers, only true file version numbers."
+      ;;--------------------------------------------------------------
+      (let ((keep (and (pair? rest) (car rest))))
+        (if keep
+            name
+            (let ((at (match-at-end file-name-version-regexp name)))
+              (if at (substring name 0 at) name)))))
+
+    (define (file-name-sans-extension filename)
+      ;; GNU Emacs's `file-name-sans-extension' (files.el:5572): "Return
+      ;; FILENAME sans final \"extension\" and any backup version strings.
+      ;; The extension ... is the part that begins with the last `.',
+      ;; except that a leading `.' of the file name, if there is one,
+      ;; doesn't count."
+      ;;--------------------------------------------------------------
+      (let* ((file (file-name-sans-versions
+                    (file-name-nondirectory-part filename)))
+             (dot (string-rindex file #\.)))
+        (if (and dot (> dot 0))
+            (string-append (file-name-directory-part filename)
+                           (substring file 0 dot))
+            filename)))
+
+    (define (file-name-base . rest)
+      ;; GNU Emacs's `file-name-base': "Return the base name of the
+      ;; FILENAME: no directory, no extension."
+      ;;
+      ;; The C defaults FILENAME to the buffer's own file - the
+      ;; DEPRECATED advertised-calling-convention Emacs keeps.
+      ;;--------------------------------------------------------------
+      (let ((filename (if (pair? rest)
+                          (car rest)
+                          (buffer-file-name (current-buffer)))))
+        (file-name-sans-extension
+         (file-name-nondirectory-part (or filename "")))))
+
+(define (wildcard-to-regexp wildcard)
+      ;; GNU Emacs's `wildcard-to-regexp' (files.el): "Given a shell file
+      ;; name pattern WILDCARD, return an equivalent regexp. The
+      ;; generated regexp will match a file name only if the file name
+      ;; matches that wildcard according to shell rules. Only wildcards
+      ;; known by `sh' are supported."
+      ;;
+      ;; The C's walk, kept in its shape: the leading run of non-special
+      ;; characters is copied whole, then each special character is
+      ;; translated - `*' to `[^\000]*', `?' to `[^\000]', a `[...]'
+      ;; class to a regexp class with `!' spelled as `^' - and the
+      ;; result is anchored at both ends.
+      ;;
+      ;; `\000' cannot occur in a file name, so `[^\000]' is "any
+      ;; character". It is left spelled with the NUL in it, as the C
+      ;; writes it, so that the text says what Emacs's says.
+      ;;--------------------------------------------------------------
+      (let* ((i (string-match "[[.*+\\^$?]" wildcard))
+             (result (substring wildcard 0 (if i i (string-length wildcard))))
+             (len (string-length wildcard)))
+        (if (not i)
+            (string-append "\\`" result "\\'")
+            (begin
+              ;; the C's `(while (< i len) ...)'
+              (let loop ()
+                (when (< i len)
+                  (let ((ch (string-ref wildcard i)))
+                    (set! result
+                          (string-append
+                           result
+                           (cond
+                            ((and (char=? ch #\[)
+                                  (< (+ i 1) len)
+                                  (char=? #\] (string-ref wildcard (+ i 1))))
+                             "\\[")
+                            ((char=? ch #\[)   ; [...] maps to a regexp class
+                             (set! i (+ i 1))
+                             (let* ((opener
+                                     (cond
+                                      ((char=? (string-ref wildcard i) #\!)
+                                       ;; [!...] -> [^...]
+                                       (set! i (+ i 1))
+                                       (if (and (< i len)
+                                                (char=? #\] (string-ref wildcard i)))
+                                           (begin (set! i (+ i 1)) "[^]")
+                                           "[^"))
+                                      ((char=? (string-ref wildcard i) #\^)
+                                       ;; "Found `[^'. Insert a `\0'
+                                       ;; character (which cannot happen
+                                       ;; in a filename) into the
+                                       ;; character class, so that `^' is
+                                       ;; not the first character after
+                                       ;; `[', and thus non-special in a
+                                       ;; regexp."
+                                       (set! i (+ i 1))
+                                       (string-append "[" (string #\nul) "^"))
+                                      ((char=? (string-ref wildcard i) #\])
+                                       ;; "I don't think `]' can appear
+                                       ;; in a character class in a
+                                       ;; wildcard, but let's be general
+                                       ;; here."
+                                       (set! i (+ i 1))
+                                       "[]")
+                                      (else "[")))
+                                    ;; "copy everything up to next `]'"
+                                    (j (let search ((k i))
+                                         (cond ((>= k len) #f)
+                                               ((char=? #\] (string-ref wildcard k)) k)
+                                               (else (search (+ k 1))))))
+                                    (body (substring wildcard i (if j j len))))
+                               (set! i (if j (- j 1) (- len 1)))
+                               (string-append opener body)))
+                            ((char=? ch #\.) "\\.")
+                            ((char=? ch #\*) (string-append "[^" (string #\nul) "]*"))
+                            ((char=? ch #\+) "\\+")
+                            ((char=? ch #\^) "\\^")
+                            ((char=? ch #\$) "\\$")
+                            ((char=? ch #\\) "\\\\")  ; probably cannot happen...
+                            ((char=? ch #\?) (string-append "[^" (string #\nul) "]"))
+                            (else (string ch))))))
+                  (set! i (+ i 1))
+                  (loop)))
+              (string-append "\\`" result "\\'")))))
+
+    (define (file-size-human-readable file-size . rest)
+      ;; GNU Emacs's `file-size-human-readable' (files.el:1689): "Produce
+      ;; a string showing FILE-SIZE in human-readable form.
+      ;;
+      ;; FLAVOR: nil for 1024-byte kilobytes and `k M G T ...' suffixes,
+      ;; `si' for 1000-byte kilobytes, `iec' for 1024-byte kilobytes and
+      ;; `KiB MiB GiB ...'. SPACE is what stands between the number and
+      ;; the unit, and UNIT the unit itself.
+      ;;
+      ;; It is here rather than beside its `ls-lisp' callers because it
+      ;; is files.el's; `ls-lisp.sld' is *imported* by this library and
+      ;; so cannot import it back - see the seam in that library.
+      ;;--------------------------------------------------------------
+      (let* ((flavor (if (pair? rest) (car rest) #f))
+             (space (if (and (pair? rest) (pair? (cdr rest))) (cadr rest) ""))
+             (unit (if (and (pair? rest) (pair? (cdr rest)) (pair? (cddr rest)))
+                       (caddr rest)
+                       #f))
+             (power (if (or (not flavor) (eq? flavor 'iec)) 1024.0 1000.0))
+             (prefixes '("" "k" "M" "G" "T" "P" "E" "Z" "Y" "R" "Q")))
+        (let loop ((size (inexact file-size)) (prefixes prefixes))
+          (if (and (>= size power) (pair? (cdr prefixes)))
+              (loop (/ size power) (cdr prefixes))
+              (let* ((prefix (car prefixes))
+                     (prefixed-unit
+                      (if (eq? flavor 'iec)
+                          (string-append (if (string=? prefix "k") "K" prefix)
+                                         (if (string=? prefix "") "" "i")
+                                         (or unit "B"))
+                          (string-append prefix (or unit ""))))
+                     ;; "Mimic what GNU `ls -lh' does: If the formatted
+                     ;; size will have just one digit before the
+                     ;; decimal... and its fractional part is not too
+                     ;; small... then emit one digit after the decimal."
+                     (frac (- size (floor size)))
+                     (fmt (if (and (< size 10)
+                                   (>= frac 0.05)
+                                   (< frac 0.95))
+                              "%.1f"
+                              "%.0f")))
+                (string-append (format-size fmt size)
+                               (if (string=? prefixed-unit "")
+                                   ""
+                                   (or space ""))
+                               prefixed-unit))))))
+
+    (define (format-size fmt size)
+      ;; Guile's `format' has no float directive, so the two the C
+      ;; chooses between are written out. `%.0f' rounds half away from
+      ;; zero, which is what C's does.
+      ;;--------------------------------------------------------------
+      (if (string=? fmt "%.0f")
+          (let ((n (floor (+ size 0.5))))
+            (number->string (exact n)))
+          (let* ((scaled (* 10 size))
+                 (n (floor (+ scaled 0.5))))
+            (string-append (number->string (quotient (exact n) 10))
+                           "."
+                           (number->string (remainder (exact n) 10))))))
+
+    (define (file-relative-name filename . rest)
+      ;; GNU Emacs's `file-relative-name' (files.el): "Convert FILENAME to
+      ;; be relative to DIRECTORY (default: `default-directory'). ...
+      ;; This function returns a relative file name that is equivalent to
+      ;; FILENAME when used with that default directory as the default."
+      ;;
+      ;; The walk is the C's: climb out of DIRECTORY one component at a
+      ;; time with `..' until what is left of it is a prefix of
+      ;; FILENAME, then add the rest of FILENAME on.
+      ;;--------------------------------------------------------------
+      (let* ((directory (file-name-as-directory
+                         (expand-file-name (if (pair? rest)
+                                               (car rest)
+                                               (default-directory)))))
+             (filename (expand-file-name filename)))
+        (let loop ((directory directory) (ancestor "."))
+          (cond
+           ((or (string-prefix? directory filename)
+                (string-prefix? (directory-file-name directory) filename))
+            (if (string-prefix? directory filename)
+                (let ((rest (substring filename (string-length directory))))
+                  (if (and (string=? ancestor ".") (not (string=? rest "")))
+                      rest
+                      (string-append (file-name-as-directory ancestor) rest)))
+                ancestor))
+           (else
+            (loop (file-name-directory-part
+                   (substring directory 0 (- (string-length directory) 1)))
+                  ;; the C: `(if (equal ancestor ".") ".." ...)' - from
+                  ;; the first step the ancestor is `..', and each step
+                  ;; after adds a level on
+                  (if (string=? ancestor ".") ".." (string-append "../" ancestor))))))))
 
     (define (directory-entries dir prefix)
       ;; The names in DIR that begin with PREFIX, without the `.` and
@@ -762,6 +1095,79 @@ save-buffer
     ;; visit-save  add it at both times
     ;; any other   ask whether to add it, when saving
     ;; #f          never add one
+
+    (define directory-listing-before-filename-regexp
+      ;; GNU Emacs's `directory-listing-before-filename-regexp'
+      ;; (files.el:8250): "Regular expression to match up to the file name
+      ;; in a directory listing. The default value is designed to
+      ;; recognize dates and times regardless of the language."
+      ;;
+      ;; The C builds it out of named pieces in one `let*', and the names
+      ;; are kept. `HH:MM' is a legal Scheme identifier, `:' being a
+      ;; special initial, so it stays as Emacs spells it.
+      ;;
+      ;; The `\0' and `\177' of `[^\0-\177]' are NUL and DEL written in
+      ;; Guile's `\x..;' spelling. That range cannot survive this tree's
+      ;; regexp translation, and what that costs is measured in
+      ;; `(schemacs editor search)'s `%without-nul' - nothing, on the line
+      ;; shapes a listing has.
+      ;;--------------------------------------------------------------
+      (let* ((l "\\([A-Za-z]\\|[^\x0;-\x7f;]\\)")
+             (l-or-quote "\\([A-Za-z']\\|[^\x0;-\x7f;]\\)")
+             (month (string-append l-or-quote l-or-quote "+\\.?"))
+             (s " ")
+             (yyyy "[0-9][0-9][0-9][0-9]")
+             (dd "[ 0-3][0-9]")
+             (HH:MM "[ 0-2][0-9][:.][0-5][0-9]")
+             (seconds "[0-6][0-9]\\([.,][0-9]+\\)?")
+             (zone "[-+][0-2][0-9][0-5][0-9]")
+             (iso-mm-dd "[01][0-9]-[0-3][0-9]")
+             (iso-time (string-append HH:MM "\\(:" seconds
+                                      "\\( ?" zone "\\)?\\)?"))
+             (iso (string-append "\\(\\(" yyyy "-\\)?" iso-mm-dd "[ T]" iso-time
+                                 "\\|" yyyy "-" iso-mm-dd "\\)"))
+             (western (string-append "\\(" month s "+" dd "\\|" dd "\\.?"
+                                     s month "\\)"
+                                     s "+"
+                                     "\\(" HH:MM "\\|" yyyy "\\)"))
+             (western-comma (string-append month s "+" dd "," s "+" yyyy))
+             (DD-MMM-YYYY (string-append dd "-" month "-" yyyy s HH:MM))
+             ;; "Japanese MS-Windows ls-lisp has one-digit months, and
+             ;; omits the Kanji characters after month and day-of-month.
+             ;; On Mac OS X 10.3, the date format in East Asian locales is
+             ;; day-of-month digits followed by month digits."
+             (mm "[ 0-1]?[0-9]")
+             (east-asian
+              (string-append "\\(" mm l "?" s dd l "?" s "+"
+                             "\\|" dd s mm s "+" "\\)"
+                             "\\(" HH:MM "\\|" yyyy l "?" "\\)")))
+        (string-append "\\([0-9][BkKMGTPEZYRQ]? " iso
+                       "\\|.*[0-9][BkKMGTPEZYRQ]? "
+                       "\\(" western "\\|" western-comma
+                       "\\|" DD-MMM-YYYY "\\|" east-asian "\\)"
+                       "\\) +")))
+
+    (define (read-directory-name prompt . rest)
+      ;; GNU Emacs's `read-directory-name' (files.el:884): "Read directory
+      ;; name, prompting with PROMPT and completing in directory DIR. The
+      ;; return value is not expanded - you must call `expand-file-name'
+      ;; yourself."
+      ;;
+      ;; "It is `read-file-name' with `file-directory-p' as the completion
+      ;; predicate and with DIR as the default"; PREDICATE, the sixth
+      ;; argument, is not taken here for the reason `read-file-name' above
+      ;; gives - the completion table carries the one predicate.
+      ;;--------------------------------------------------------------
+      (let* ((dir (or (list-ref-or rest 0 #f) (default-directory)))
+             (default-dirname (list-ref-or rest 1 #f))
+             (mustmatch (list-ref-or rest 2 #f))
+             (initial (list-ref-or rest 3 #f)))
+        (read-file-name prompt dir
+                        (or default-dirname
+                            (if initial
+                                (expand-file-name initial dir)
+                                dir))
+                        mustmatch initial)))
 
     (define *require-final-newline*
       (make-parameter #t))
@@ -1435,4 +1841,76 @@ With prefix ARG, mark buffer as modified, so \\[save-buffer] will save."
     (define-key *default-keymap* (list (list 'meta #\~)) not-modified)
 
     ;;----------------------------------------------------------------
+    ;; insert-directory
+
+    (define *insert-directory-program* (make-parameter "ls"))
+    ;; ^ GNU Emacs's `insert-directory-program' (files.el): "The program
+    ;; to use to list a directory."
+
+    (define *ls-lisp-use-insert-directory-program* (make-parameter #f))
+    ;; ^ GNU Emacs's `ls-lisp-use-insert-directory-program', whose own
+    ;; default is `(not (memq system-type '(ms-dos windows-nt android)))'
+    ;; - true on GNU/Linux, where Emacs runs `ls'. It is false here, and
+    ;; that is the decision `ls-lisp.sld''s header records rather than an
+    ;; accident: this editor lists directories with `ls-lisp' everywhere,
+    ;; so that a listing needs no subprocess, no `--dired' parsing and no
+    ;; coding-system round trip.
+
+    (define (files--use-insert-directory-program-p)
+      ;; GNU Emacs's `files--use-insert-directory-program-p' (files.el):
+      ;; "Return non-nil if we should use `insert-directory-program'.
+      ;; Return nil if we should prefer `ls-lisp' instead."
+      ;;--------------------------------------------------------------
+      (and (*ls-lisp-use-insert-directory-program*)
+           (*insert-directory-program*)))
+
+    (define (insert-directory file switches . rest)
+      ;; GNU Emacs's `insert-directory' (files.el): "Insert directory
+      ;; listing for FILE, formatted according to SWITCHES. Leaves point
+      ;; after the inserted text. SWITCHES may be a string of options, or
+      ;; a list of strings representing individual options. Optional
+      ;; third arg WILDCARD means treat FILE as shell wildcard. Optional
+      ;; fourth arg FULL-DIRECTORY-P means file is a directory and
+      ;; switches do not contain `d', so that a full listing is expected.
+      ;;
+      ;; Depending on the value of `ls-lisp-use-insert-directory-program'
+      ;; this works either using a Lisp emulation of the "ls" program or
+      ;; by running a directory listing program whose name is in the
+      ;; variable `insert-directory-program'."
+      ;;
+      ;; Only the first arm is ported: `insert-directory-program', the
+      ;; shell and the `--dired' parsing are the machinery this tree does
+      ;; not have, and `files--use-insert-directory-program-p' is false
+      ;; here, so that arm is the one a listing would not have taken.
+      ;; Its place is kept rather than dropped, so that the day a
+      ;; subprocess exists the shape is already Emacs's.
+      ;;--------------------------------------------------------------
+      (let ((wildcard (and (pair? rest) (car rest)))
+            (full-directory-p (and (pair? rest) (pair? (cdr rest)) (cadr rest))))
+        ;; "We need the directory in order to find the right handler."
+        (let ((handler (find-file-name-handler (expand-file-name file)
+                                               'insert-directory)))
+          (cond
+           (handler
+            (handler 'insert-directory file switches wildcard full-directory-p))
+           ((not (files--use-insert-directory-program-p))
+            (ls-lisp--insert-directory file switches wildcard full-directory-p))
+           (else
+            (error "No `insert-directory-program' here: %s"
+                   (*insert-directory-program*)))))))
+
+
+    ;;----------------------------------------------------------------
+    ;; The seam to `ls-lisp.sld'
+
+    ;; `ls-lisp.sld' cannot import this library - this library is *its*
+    ;; importer, and a Scheme library import cannot be circular, where
+    ;; Emacs gets away with the same cycle because files.el only
+    ;; `(require 'ls-lisp)' from inside a function body. So the two
+    ;; files.el functions `ls-lisp' calls are handed to it here, once,
+    ;; at the end of this library's load. A listing that somehow ran
+    ;; before this line would say those functions were missing rather
+    ;; than quietly draw something else.
+    (install-ls-lisp-files! wildcard-to-regexp file-size-human-readable)
+
     ))

@@ -44,14 +44,21 @@
   (import
     (scheme base)
     (scheme char)
+    (only (guile) caddr)
     (only (schemacs editor engine)
-          text-editor-char-count text-editor-text-props)
+          text-editor-char-count text-editor-text-props text-editor-type?)
     (only (schemacs editor buffer)
           *current-buffer* current-buffer overlay-get overlays-at)
+    ;; `install-intervals-set-text-properties!' is the seam back *up*
+    ;; into this library - see the end of the file.
+    (only (schemacs editor fns) install-fns-textprop!)
+    (only (schemacs editor intervals) install-intervals-set-text-properties!)
     (prefix (schemacs editor intervals) iv:))
 
   (export
    add-text-properties
+   add-text-properties-from-list
+   text-property-list
    get-char-property
    remove-text-properties
    set-text-properties
@@ -92,9 +99,21 @@
             (error "Odd length text property list" list))
            (else (loop (cddr tail))))))))
 
-    (define (validate-interval-range buffer start end force?)
+    (define (object-or-current args)
+      ;; The OBJECT an optional argument names, with nil meaning the
+      ;; current buffer - which is what every one of these functions'
+      ;; C does first thing: `if (NILP (object)) object =
+      ;; Fcurrent_buffer ()'. Passing an explicit nil is *not* the same
+      ;; as omitting the argument until it is read this way, and a nil
+      ;; taken for a real object is a `text-editor-char-count' of #f.
+      ;;--------------------------------------------------------------
+      (or (and (pair? args) (car args)) (current-buffer)))
+
+    (define (validate-interval-range object start end force?)
       ;; GNU Emacs's `validate_interval_range': the interval covering
-      ;; START..END in BUFFER, with the range checked and put in order.
+      ;; START..END in OBJECT - a buffer or a string, which is the C's
+      ;; `BUFFERP (object) ? buffer_intervals (XBUFFER (object)) :
+      ;; string_intervals (object)'.
       ;; Answers three values - the interval (or #f), and START and END
       ;; as they were corrected - because the C corrects its arguments
       ;; through pointers and Scheme has to return them.
@@ -108,7 +127,7 @@
       ;; interval tree yet, make one rather than answering #f. Only a
       ;; function that is about to *put* a property needs that.
       ;;--------------------------------------------------------------
-      (let* ((length (text-editor-char-count buffer))
+      (let* ((length (iv:object-length object))
              (start (if (> start end) end start))
              (end (if (> start end) start end)))
         (cond
@@ -116,17 +135,17 @@
          ((or (< start 0) (< length end))
           (error "Args out of range" start end))
          (else
-          (let ((i (or (iv:buffer-intervals buffer)
-                       (and force? (iv:create-root-interval buffer)))))
+          (let ((i (or (iv:object-intervals object)
+                       (and force? (iv:create-root-interval object)))))
             (values (and i (iv:find-interval i start)) start end))))))
 
-    (define (interval-of buffer position)
+    (define (interval-of object position)
       ;; GNU Emacs's `interval_of': the interval POSITION is in, or #f.
       ;;--------------------------------------------------------------
-      (let ((length (text-editor-char-count buffer)))
+      (let ((length (iv:object-length object)))
         (if (or (< position 0) (< length position))
             (error "Args out of range" position)
-            (let ((i (iv:buffer-intervals buffer)))
+            (let ((i (iv:object-intervals object)))
               (and i (iv:find-interval i position))))))
 
     ;;----------------------------------------------------------------
@@ -142,8 +161,8 @@
       ;; Qnil'. It is what makes `(get-text-property (point-max) ...)'
       ;; answer nil rather than reading the last character's properties.
       ;;--------------------------------------------------------------
-      (let ((buffer (if (pair? args) (car args) (current-buffer))))
-        (let ((interval (interval-of buffer position)))
+      (let ((object (object-or-current args)))
+        (let ((interval (interval-of object position)))
           (cond
            ((not interval) '())
            ((= position (iv:interval-last-pos interval)) '())
@@ -154,8 +173,8 @@
       ;; or #f. TEXTGET is what answers, so a `category' property and the
       ;; default values are honoured.
       ;;--------------------------------------------------------------
-      (let ((buffer (if (pair? args) (car args) (current-buffer))))
-        (iv:textget (text-properties-at position buffer) prop)))
+      (let ((object (object-or-current args)))
+        (iv:textget (text-properties-at position object) prop)))
 
     (define (get-char-property position prop . args)
       ;; GNU Emacs's `get-char-property' (textprop.c:681): "Return the
@@ -168,12 +187,17 @@
       ;; answers only when no overlay has it. This is the seam the
       ;; overlays were always meant to meet the display at.
       ;;--------------------------------------------------------------
-      (let ((buffer (if (pair? args) (car args) (current-buffer))))
-        (parameterize ((*current-buffer* buffer))
-          (let loop ((ovs (overlays-at position #t)))
-            (cond ((null? ovs) (get-text-property position prop buffer))
-                  ((overlay-get (car ovs) prop))
-                  (else (loop (cdr ovs))))))))
+      (let ((object (object-or-current args)))
+        ;; "Both overlay properties and text properties are checked" - but
+        ;; only a *buffer* has overlays, which is the C's
+        ;; `if (BUFFERP (object))'.
+        (if (not (text-editor-type? object))
+            (get-text-property position prop object)
+            (parameterize ((*current-buffer* object))
+              (let loop ((ovs (overlays-at position #t)))
+                (cond ((null? ovs) (get-text-property position prop object))
+                      ((overlay-get (car ovs) prop))
+                      (else (loop (cdr ovs)))))))))
 
     ;;----------------------------------------------------------------
     ;; Whether an interval already has some properties
@@ -287,9 +311,9 @@
                                         (list old val)))))
                   (loop (cddr tail) #t))))))))))
 
-    (define (add-text-properties-1 start end properties buffer set-type)
+    (define (add-text-properties-1 start end properties object set-type)
       ;; GNU Emacs's `add_text_properties_1': add PROPERTIES to the text
-      ;; START..END of BUFFER.
+      ;; START..END of OBJECT.
       ;;
       ;; The interval the range starts in is split at START when the range
       ;; starts inside it, so that the change begins on a boundary; then
@@ -301,7 +325,7 @@
         (if (null? properties)
             #f
             (let-values (((i start end)
-                          (validate-interval-range buffer start end #t)))
+                          (validate-interval-range object start end #t)))
               (if (not i)
                   #f
                   (let ((len (- end start)))
@@ -344,16 +368,16 @@
       ;; value is *replaced*; one that is not there is added; and the rest
       ;; of each interval's plist is left alone.
       ;;--------------------------------------------------------------
-      (let ((buffer (if (pair? args) (car args) (current-buffer))))
-        (add-text-properties-1 start end properties buffer
+      (let ((object (object-or-current args)))
+        (add-text-properties-1 start end properties object
                                *text-property-replace*)))
 
     (define (put-text-property start end property value . args)
       ;; GNU Emacs's `put-text-property': set one property, which is
       ;; `add-text-properties' of a one-property plist.
       ;;--------------------------------------------------------------
-      (let ((buffer (if (pair? args) (car args) (current-buffer))))
-        (add-text-properties start end (list property value) buffer)
+      (let ((object (object-or-current args)))
+        (add-text-properties start end (list property value) object)
         #f))
 
     ;;----------------------------------------------------------------
@@ -369,7 +393,7 @@
       ;;--------------------------------------------------------------
       (iv:set!interval-plist interval (list-copy properties)))
 
-    (define (set-text-properties-1 start end properties buffer i)
+    (define (set-text-properties-1 start end properties object i)
       ;; GNU Emacs's `set_text_properties_1': PROPERTIES *replace* the
       ;; properties of the text START..END, interval by interval.
       ;;
@@ -433,14 +457,14 @@
       ;; property list of the text from START to END. With no properties
       ;; at all, this removes every property from the range.
       ;;--------------------------------------------------------------
-      (let* ((buffer (if (pair? args) (car args) (current-buffer)))
+      (let* ((object (object-or-current args))
              (properties (validate-plist properties)))
         (let-values (((i start end)
-                      (validate-interval-range buffer start end #t)))
+                      (validate-interval-range object start end #t)))
           (if (not i)
               #f
               (begin
-                (set-text-properties-1 start end properties buffer i)
+                (set-text-properties-1 start end properties object i)
                 #t)))))
 
     ;;----------------------------------------------------------------
@@ -488,9 +512,9 @@
       ;; PROPERTIES is *not* run through `validate-plist': the C does not
       ;; validate it here, precisely so that a list of names with no
       ;; values - which is what callers write - is accepted.
-      (let* ((buffer (if (pair? args) (car args) (current-buffer))))
+      (let* ((object (object-or-current args)))
         (let-values (((i start end)
-                      (validate-interval-range buffer start end #f)))
+                      (validate-interval-range object start end #f)))
           (cond
            ((not i) #f)
            ((null? properties) #f)
@@ -550,11 +574,11 @@
       ;; between one change and the next all have the same value, so they
       ;; can be drawn in one go.
       ;;--------------------------------------------------------------
-      (let* ((buffer (if (pair? args) (car args) (current-buffer)))
+      (let* ((object (object-or-current args))
              (limit (if (and (pair? args) (pair? (cdr args))) (cadr args) #f))
-             (length (text-editor-char-count buffer))
+             (length (iv:object-length object))
              (end (or limit length)))
-        (let ((i (interval-of buffer (min position (max 0 (- length 1))))))
+        (let ((i (interval-of object (min position (max 0 (- length 1))))))
           (if (not i)
               limit
               (let ((here (iv:textget (iv:interval-plist i) prop)))
@@ -576,10 +600,10 @@
       ;; back one first - otherwise a change exactly at POSITION would be
       ;; reported as being before it.
       ;;--------------------------------------------------------------
-      (let* ((buffer (if (pair? args) (car args) (current-buffer)))
+      (let* ((object (object-or-current args))
              (limit (if (and (pair? args) (pair? (cdr args))) (cadr args) #f))
-             (length (text-editor-char-count buffer)))
-        (let* ((at (interval-of buffer (min position (max 0 (- length 1)))))
+             (length (iv:object-length object)))
+        (let* ((at (interval-of object (min position (max 0 (- length 1)))))
                (i (if (and at (= (iv:interval-position at) position))
                       (iv:previous-interval at)
                       at)))
@@ -596,4 +620,62 @@
                         (<= (iv:interval-last-pos previous) (or limit 0)))
                     limit)
                    (else (iv:interval-last-pos previous)))))))))
+    (define (text-property-list object start end prop)
+      ;; GNU Emacs's `text_property_list' (textprop.c): the properties of
+      ;; OBJECT from START to END as a list of `(START END PLIST)'
+      ;; triples, one per run of text that has any - newest first, as the
+      ;; C's consing leaves them.
+      ;;
+      ;; PROP, when given, keeps only that one property of each run, and a
+      ;; run without it is left out altogether. That is the C's `if
+      ;; (!NILP (prop))' walk, and it is what lets a caller ask for one
+      ;; property down a whole string.
+      ;;--------------------------------------------------------------
+      (let-values (((i start end) (validate-interval-range object start end #f)))
+        (if (not i)
+            '()
+            (let loop ((i i) (s start) (e end) (acc '()))
+              (if (or (not i) (>= s e))
+                  acc
+                  (let* ((interval-end (min (+ (iv:interval-position i)
+                                               (iv:interval-length i))
+                                            e))
+                         (len (- interval-end s))
+                         (plist (if (not prop)
+                                    (iv:interval-plist i)
+                                    (let ((tail (iv:plist-member
+                                                 (iv:interval-plist i) prop)))
+                                      (if tail (list prop (cadr tail)) '()))))
+                         (next (iv:next-interval i)))
+                    (loop next
+                          (if next (iv:interval-position next) e)
+                          e
+                          (if (null? plist)
+                              acc
+                              (cons (list s (+ s len) plist) acc)))))))))
+
+    (define (add-text-properties-from-list object list delta)
+      ;; GNU Emacs's `add_text_properties_from_list' (textprop.c): add
+      ;; every run of LIST - `(START END PLIST)' triples - to OBJECT,
+      ;; with DELTA added to each end. It is how `concat' moves the
+      ;; properties of the pieces it was given onto the string it made.
+      ;;--------------------------------------------------------------
+      (for-each (lambda (item)
+                  (add-text-properties (+ (car item) delta)
+                                       (+ (cadr item) delta)
+                                       (caddr item)
+                                       object))
+                list)
+      #f)
+
+
+    ;; `graft-intervals-into-buffer' clears the properties of text it is
+    ;; given that carries none, and the C does that with
+    ;; `set_text_properties_1' from *this* file, which sits above
+    ;; `(schemacs editor intervals)'. Handed over once, at load, the same
+    ;; way files.el's two functions are handed to `ls-lisp'.
+    (install-intervals-set-text-properties! set-text-properties-1)
+    (install-fns-textprop! text-property-list add-text-properties-from-list)
+
+
     ))
