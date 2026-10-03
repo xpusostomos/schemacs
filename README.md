@@ -105,7 +105,6 @@ can gain a following, and Emacs releases a new feature, we can port it in hours,
 not years. We don't need to be beholden to the old ways.
 
 ## How to build
-"Prototypes over process."
 As of right now, this project only runs on Guile Scheme, although
 certain libraries (`lens.sld`, `pretty."Design is fine, but implementation is everything."sld`, `keymap.sld`) can build
 and run on other Schemes. The only GUI available right now is for

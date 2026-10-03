@@ -875,12 +875,90 @@
                    (cons (apply string-append (reverse acc)) start)
                    (loop (+ i 1) (cons (vector-ref glyphs i) acc)))))))
 
+    (define (draw-overlay-strings! entries screen-row x)
+      ;; Draw each `(OVERLAY . STRING)' of ENTRIES at X, in order, in the
+      ;; overlay's own face, and answer the column the last one ended at.
+      ;; GNU Emacs draws an overlay string with its overlay's face (the
+      ;; `OVERLAY_STRING' case of `xdisp.c''s `display_string').
+      ;;--------------------------------------------------------------
+      (let loop ((rest entries) (x x))
+        (if (null? rest)
+            x
+            (let* ((entry (car rest))
+                   (text (cdr entry))
+                   (face (overlay-get (car entry) 'face)))
+              (write-glyphs! (current-display) text screen-row x
+                             (and face (face->attribute face)))
+              (loop (cdr rest) (+ x (line-display-width text)))))))
+
+    (define (row-overlay-strings ed slice-start len)
+      ;; The overlay strings to draw among the buffer columns of a row:
+      ;; a vector of `(HEADS . TAILS)' indexed by column, `'()' where
+      ;; there are none. The entry at LEN is the row's *end* - where the
+      ;; `after-string' of an overlay that ends with the row goes.
+      ;;--------------------------------------------------------------
+      (let ((v (make-vector (+ len 1) '())))
+        (let loop ((c 0))
+          (when (<= c len)
+            (let ((s (overlay-strings-at (+ slice-start c))))
+              (when (or (pair? (car s)) (pair? (cdr s)))
+                (vector-set! v c s))
+              (loop (+ c 1)))))
+        v))
+
+    (define (row-string-elements? strings)
+      ;; Whether any column of the row has an overlay string at all.
+      ;;--------------------------------------------------------------
+      (let loop ((c 0))
+        (cond ((>= c (vector-length strings)) #f)
+              ((null? (vector-ref strings c)) (loop (+ c 1)))
+              (else #t))))
+
+    (define (draw-row-with-strings! ed slice slice-start strings
+                                    screen-row x0 width)
+      ;; Draw a row that has overlay strings on it, and answer the column
+      ;; it ended at.
+      ;;
+      ;; The strings are cells that are *not* buffer characters, so the
+      ;; row can no longer be drawn as runs of the line's columns: every
+      ;; column is walked in turn, its `before-string's drawn, then its
+      ;; own glyph, then its `after-string's. That is what `xdisp.c''
+      ;; iterator does - it delivers the overlay strings at a position
+      ;; and then the character there.
+      ;;--------------------------------------------------------------
+      (let* ((len (string-length slice))
+             (glyphs (list->vector (expand-line-glyphs slice))))
+        (let loop ((c 0) (col 0))
+          (if (or (> c len) (>= col width))
+              col
+              ;; a column with no strings has `'()' there, not a pair
+              (let* ((strs (vector-ref strings c))
+                     (heads (if (pair? strs) (car strs) '()))
+                     (tails (if (pair? strs) (cdr strs) '()))
+                     (col (draw-overlay-strings! heads screen-row
+                                                 (+ x0 col))))
+                (if (>= c len)
+                    (draw-overlay-strings! tails screen-row (+ x0 col))
+                    (let* ((ch (string-ref slice c))
+                           (w (char-display-width ch col)))
+                      (when (< col width)
+                        (write-glyphs!
+                         (current-display) (vector-ref glyphs c) screen-row
+                         (+ x0 col)
+                         (face-at-buffer-position ed (+ slice-start c))))
+                      ;; and the `after-string's come after the character,
+                      ;; not at the end of the row - which is what the
+                      ;; first version of this got wrong
+                      (loop (+ c 1)
+                            (draw-overlay-strings! tails screen-row
+                                                   (+ x0 col w))))))))))
+
     (define (draw-line! ed slice-start line-string slice display
                         screen-row x0 width more? truncated?)
-      ;; Draw one *screen row* of a line at SCREEN-ROW, X0: the buffer
-      ;; columns of SLICE (a `(FIRST . LAST)' pair), whose text is SLICE
-      ;; and whose display form is DISPLAY. LINE-STRING is the whole
-      ;; line, for the region's line-end rule.
+      ;; Draw one *screen row* of a line at SCREEN-ROW, X0. SLICE is the
+      ;; row's own text - the buffer columns the caller cut out of
+      ;; LINE-STRING - and DISPLAY its display form. LINE-STRING is the
+      ;; whole line, for the region's line-end rule.
       ;;
       ;; A row of a long line is one of three things, and the last cell
       ;; says which: it *continues* on the next row (MORE?), it was *cut
@@ -891,27 +969,39 @@
       ;; there was no wrapping at all, is the marker for the other thing.
       ;; A terminal was verified against `emacs -nw': 79 `X' then `\',
       ;; with the rest of the line on the row below.
-      ;;--------------------------------------------------------------
-      (if (and (not (text-editor-text-props ed))
-               (not (region-face-active? ed)))
-          (write-glyphs! (current-display) display screen-row x0 #f)
-          (let ((offsets (list->vector (line-display-offsets slice)))
-                (glyphs (list->vector (expand-line-glyphs slice))))
-            (for-each
-             (lambda (run)
-               (let ((drawn (line-glyph-run glyphs offsets
-                                            (car run) (cadr run) width)))
-                 (when drawn
-                   (write-glyphs! (current-display) (car drawn) screen-row
-                                  (+ x0 (cdr drawn)) (caddr run)))))
-             (line-face-runs ed slice-start slice))))
-      ;; The last cell, and what the row's own width was.
       ;;
-      ;; `display` holds no tabs or control characters - they were
-      ;; expanded into it - so `line-display-width' of it is a sum of
-      ;; character widths, and for a wide character that is 2 where a
-      ;; `string-length' would say 1.
-      (let ((drawn-width (line-display-width display)))
+      ;; A row with overlay strings on it takes a different path: see
+      ;; `draw-row-with-strings!'. A row without them is unchanged, so
+      ;; the common case keeps its fast path.
+      ;;--------------------------------------------------------------
+      (let* ((len (string-length slice))
+             (strings (row-overlay-strings ed slice-start len))
+             (drawn-width
+              (if (row-string-elements? strings)
+                  (draw-row-with-strings! ed slice slice-start strings
+                                          screen-row x0 width)
+                  (begin
+                    (if (and (not (text-editor-text-props ed))
+                             (not (region-face-active? ed)))
+                        (write-glyphs! (current-display) display screen-row x0 #f)
+                        (let ((offsets (list->vector (line-display-offsets slice)))
+                              (glyphs (list->vector (expand-line-glyphs slice))))
+                          (for-each
+                           (lambda (run)
+                             (let ((drawn (line-glyph-run glyphs offsets
+                                                          (car run) (cadr run) width)))
+                               (when drawn
+                                 (write-glyphs! (current-display) (car drawn)
+                                                screen-row
+                                                (+ x0 (cdr drawn)) (caddr run)))))
+                           (line-face-runs ed slice-start slice))))
+                    ;; The row's own width: `display` holds no tabs or
+                    ;; control characters - they were expanded into it -
+                    ;; so this is a sum of character widths, and for a
+                    ;; wide character that is 2 where a `string-length'
+                    ;; would say 1.
+                    (line-display-width display)))))
+        ;; The last cell, and what the row's own width was.
         (cond
          (more? (draw-special-glyph! screen-row x0 width "\\"))
          (truncated? (draw-special-glyph! screen-row x0 width "$"))
@@ -1116,8 +1206,13 @@
                                          (< (overlay-priority (car a))
                                             (overlay-priority (car b)))))
                                     (else #f))))))
-          (cons (map cadr (filter (lambda (e) (not (caddr e))) sorted))
-                (map cadr (filter (lambda (e) (caddr e)) sorted))))))
+          ;; each entry keeps its overlay as well as its string, which
+          ;; is the C's `string_overlays[]': the string is drawn in the
+          ;; *overlay's* face, so the two cannot be separated
+          (cons (map (lambda (e) (cons (car e) (cadr e)))
+                     (filter (lambda (e) (not (caddr e))) sorted))
+                (map (lambda (e) (cons (car e) (cadr e)))
+                     (filter (lambda (e) (caddr e)) sorted))))))
 
     (define (draw-match row x0 glyphs offsets line-start len start end
                         point width)
