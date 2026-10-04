@@ -16,6 +16,15 @@
   ;; that nothing else would notice going wrong, which is why
   ;; `tools/pty-check.py isearch-highlight' exists.
   ;;
+  ;; The faces themselves are the display's to merge, and they must be
+  ;; merged *over* the face already in effect: in Emacs they arrive as an
+  ;; overlay's face and `face_at_buffer_position' merges them with the
+  ;; text property's, so a font-locked word inside a match keeps its
+  ;; colour. `draw-match' does that merge; a match drawn in the search
+  ;; face alone loses the font-lock colour under it, and
+  ;; `pgtk-tests.scm'"'"'s "a search match keeps the face colour that was
+  ;; under it" is the check that catches it.
+  ;;
   ;; See LAYOUT-PLAN.txt for the rule this library is a step of.
 
   (import

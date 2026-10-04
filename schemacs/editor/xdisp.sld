@@ -140,12 +140,22 @@
       ;;
       ;; The matching itself lives with the search commands - this is a
       ;; *display* fact, and it is here because the display layer must not
-      ;; have to know who set it. In GNU Emacs the same fact is a text
-      ;; property: isearch puts the `isearch\' face on the match point is
-      ;; on and the `lazy-highlight\' face on the others, and `xdisp.c\'
-      ;; draws whatever faces it finds. This editor has no text properties
-      ;; and no overlays yet, so isearch publishes what it found here and
-      ;; the renderer draws it.
+      ;; have to know who set it. In GNU Emacs the same fact is an
+      ;; *overlay*: `isearch-highlight\' puts the `isearch\' face on a
+      ;; match and the lazy highlighter puts `lazy-highlight\' on the
+      ;; others, and `xdisp.c\' draws whatever faces it finds.
+      ;;
+      ;; This tree has overlays now (`textprop.sld\', `buffer.sld\'), and
+      ;; `attrs-at-buffer-position\' merges an overlay\'s face over the
+      ;; text property\'s. What is still this renderer\'s own is the
+      ;; *finding*: the search commands publish the pattern and each drawn
+      ;; row searches itself, where Emacs searches once per isearch update
+      ;; and records overlays. The drawing is the same either way - see
+      ;; `draw-match\', which merges the search face over the face in
+      ;; effect rather than replacing it, exactly as the overlay would.
+      ;; Porting the finding too is the step that would retire this
+      ;; parameter; the parts it would buy are regexp lazy highlighting
+      ;; (a row search here is literal) and `search-highlight-submatches\'.
       ;;--------------------------------------------------------------
       (make-parameter #f))
     (define (buffer-line-string ed i)
@@ -1295,38 +1305,49 @@
                     (and (>= position beginning)
                          (< position end)))))))
 
-    (define (face-at-buffer-position ed position)
-      ;; The display's token for the face in effect at POSITION
-      ;; in ED: GNU Emacs's `face_at_buffer_position'. The `face' text
-      ;; property there - a face name, a property list, or a list of
-      ;; either - is merged with the `default' face and folded down to
-      ;; what the terminal can draw. `xfaces.c' merges overlays after the
-      ;; text property; the active region face follows those in Emacs's
-      ;; redisplay pipeline, and is merged here after the property face.
+    (define (attrs-at-buffer-position ed position)
+      ;; The *unrealized* face in effect at POSITION in ED: the merged
+      ;; attribute vector GNU Emacs's `face_at_buffer_position' computes,
+      ;; before anything is folded down to what the display can draw. The
+      ;; `face' text property there - a face name, a property list, or a
+      ;; list of either - is merged with the `default' face; `xfaces.c'
+      ;; merges overlays after the text property, in *increasing* order
+      ;; of priority so that the highest-priority one ends on top, which
+      ;; is where the same list, sorted the same way, is merged here; and
+      ;; the active region face follows those in Emacs's redisplay
+      ;; pipeline, and is merged here after the property face.
       ;;
-      ;; Emacs caches the realized face against the position, because
-      ;; this runs per character; a cache is worth adding when the
-      ;; renderer starts asking per character rather than per run.
+      ;; This is what the search highlight needs: `isearch' and
+      ;; `lazy-highlight' are *overlay* faces in Emacs, so the face the
+      ;; match is drawn with is this one with the search face merged
+      ;; over it - NOT the search face alone, which is what replaces a
+      ;; keyword's own colour with nothing.
       ;;--------------------------------------------------------------
       (let* ((attrs
               (merge-face-ref (get-text-property position 'face ed)
                               (merge-face-vectors
                                (face-realized-attributes 'default)
                                (face-attributes-empty))))
-             ;; and the overlays', merged over it in *increasing* order of
-             ;; priority so that the highest-priority one ends on top -
-             ;; which is what `xfaces.c''s `face_at_buffer_position' does
-             ;; with the same list, sorted the same way.
              (attrs
               (let loop ((ovs (reverse (overlays-at position #t))) (attrs attrs))
                 (if (null? ovs)
                     attrs
                     (loop (cdr ovs)
                           (merge-face-ref (overlay-get (car ovs) 'face) attrs))))))
-        (realize-face (current-display)
-                     (if (region-face-at-position? ed position)
-                         (merge-face-ref 'region attrs)
-                         attrs))))
+        (if (region-face-at-position? ed position)
+            (merge-face-ref 'region attrs)
+            attrs)))
+
+    (define (face-at-buffer-position ed position)
+      ;; The display's token for the face in effect at POSITION in ED:
+      ;; `attrs-at-buffer-position' folded down to what the terminal can
+      ;; draw, which is the last thing `face_at_buffer_position' does.
+      ;;
+      ;; Emacs caches the realized face against the position, because
+      ;; this runs per character; a cache is worth adding when the
+      ;; renderer starts asking per character rather than per run.
+      ;;--------------------------------------------------------------
+      (realize-face (current-display) (attrs-at-buffer-position ed position)))
 
     (define (overlay-strings-at position)
       ;; GNU Emacs's `load_overlay_strings' (xdisp.c:7104): the overlay
@@ -1402,13 +1423,13 @@
                 (map (lambda (e) (cons (car e) (cadr e)))
                      (filter (lambda (e) (caddr e)) sorted))))))
 
-    (define (draw-match row x0 glyphs offsets line-start len start end
+    (define (draw-match ed row x0 glyphs offsets line-start len start end
                         point width)
       ;; Draw the part of the search match [START, END) that falls on this
-      ;; line over the text already drawn there: in reverse video when
-      ;; point is inside the match (GNU Emacs's `isearch' face) and in
-      ;; bold otherwise (`lazy-highlight'). ROW is the screen row and X0
-      ;; the screen column the window's text starts at.
+      ;; line over the text already drawn there: with the `isearch' face
+      ;; when point is inside the match and `lazy-highlight' otherwise.
+      ;; ROW is the screen row and X0 the screen column the window's text
+      ;; starts at.
       ;;
       ;; GLYPHS and OFFSETS are the line's, computed once by the caller
       ;; for all its matches.
@@ -1417,19 +1438,49 @@
       ;; characters and placed at its screen column, so a line holding a
       ;; wide character highlights the match itself and not the two cells
       ;; before it.
+      ;;
+      ;; The search face is *merged with the face already in effect* at
+      ;; each cell, which is what GNU Emacs computes: `isearch' and
+      ;; `lazy-highlight' are overlay faces there (`isearch-highlight'
+      ;; puts one on with `overlay-put isearch-overlay 'face
+      ;; isearch-face', isearch.el:4026), and `face_at_buffer_position'
+      ;; merges an overlay's face over the text property's - so a
+      ;; font-locked keyword inside a match keeps its colour and gains
+      ;; the search face on top. Drawing the match in the search face
+      ;; *alone* is what made Dired's search lose every colour it had
+      ;; found: the whole match came out in one face, and the cells under
+      ;; it were painted over.
+      ;;
+      ;; The merge is per cell, so the run is cut where the merged
+      ;; attribute changes rather than at the match's edges - a match
+      ;; spanning a face boundary is two runs.
       ;;--------------------------------------------------------------
       (let* ((col (max 0 (- start line-start)))
              (to (min len (- end line-start)))
-             (drawn (and (> to col)
-                         (line-glyph-run glyphs offsets col to width))))
-        (when drawn
-          (write-glyphs!
-           (current-display)
-           (car drawn)
-           row (+ x0 (cdr drawn))
-           (face->attribute
-            (if (and (<= start point) (<= point end))
-                'isearch 'lazy-highlight))))))
+             (search-face (if (and (<= start point) (<= point end))
+                              'isearch
+                              'lazy-highlight)))
+        (let loop ((i col))
+          (when (< i to)
+            (let* ((attrs (merge-face-ref
+                           search-face
+                           (attrs-at-buffer-position ed (+ line-start i))))
+                   ;; the cells that merge to the same thing
+                   (j (let more ((j (+ i 1)))
+                        (if (and (< j to)
+                                 (equal? (merge-face-ref
+                                          search-face
+                                          (attrs-at-buffer-position
+                                           ed (+ line-start j)))
+                                         attrs))
+                            (more (+ j 1))
+                            j)))
+                   (drawn (line-glyph-run glyphs offsets i j width)))
+              (when drawn
+                (write-glyphs! (current-display) (car drawn)
+                               row (+ x0 (cdr drawn))
+                               (realize-face (current-display) attrs)))
+              (loop j))))))
 
     (define (highlight-matches window row line line-start width
                                pattern case-fold? x-offset texts from)
@@ -1470,7 +1521,7 @@
         (let loop ((at 0))
           (let ((found (string-search-forward line pattern at case-fold?)))
             (when (and found (<= (+ found plen) len))
-              (draw-match row x0 glyphs offsets line-start len
+              (draw-match ed row x0 glyphs offsets line-start len
                           (+ line-start found) (+ line-start found plen)
                           point width)
               ;; on to the next match, starting inside this one so that

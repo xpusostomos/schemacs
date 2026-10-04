@@ -269,6 +269,78 @@
 
 
 ;;------------------------------------------------------------------
+;; A search match keeps the face that was under it
+;;
+;; `isearch' and `lazy-highlight' are *overlay* faces in GNU Emacs:
+;; `isearch-highlight' makes an overlay and `overlay-put's the `isearch'
+;; face on it (isearch.el:4026), and `face_at_buffer_position' merges an
+;; overlay's face over the text property's. So a font-locked word inside
+;; a match keeps its colour and gains the search face on top.
+;;
+;; Drawing the match in the search face *alone* - which is what this did -
+;; paints over the cells under it with one face, so the word's colour is
+;; gone for as long as the search lasts. Only the pixels can see it: the
+;; attributes are all present and correct in the face table, and the
+;; search face is drawn either way.
+;;
+;; `lazy-highlight' is the face the *other* matches get, and its spec
+;; sets a background and nothing else - so the colour a word is drawn in
+;; with a match on it must be the colour it is drawn in without one. That
+;; is what is compared, and it holds whatever the palette is.
+;;------------------------------------------------------------------
+
+(define (render-search text face-start face-end pattern)
+  ;; TEXT with `font-lock-keyword-face' over [FACE-START, FACE-END), and
+  ;; PATTERN as the search to highlight, or #f for no search at all.
+  (let* ((d (new-display))
+         (ed (new-text-editor)))
+    (text-editor-insert ed text)
+    (text-editor-set-cursor ed 0)
+    (put-text-property face-start face-end 'face 'font-lock-keyword-face ed)
+    (let ((frame (fr:new-frame ed 24 80)))
+      (parameterize ((fr:*current-frame* frame)
+                     (xd:*search-highlight* (and pattern (cons pattern #f))))
+        (xd:render! frame)))
+    (shot-of d)))
+
+(define (cell-colours pix cell)
+  ;; The distinct `(R G B)' the pixels of CELL's glyph band take.
+  (let ((seen '()))
+    (let x-loop ((x 0))
+      (when (< x 9)
+        (let y-loop ((y 3))
+          (when (< y 15)
+            (let ((c (pix (+ (* cell 9) x) y)))
+              (unless (member c seen) (set! seen (cons c seen)))
+              (y-loop (+ y 1)))))
+        (x-loop (+ x 1))))
+    seen))
+
+(define (inkiest colours)
+  ;; The colour in COLOURS furthest from white: a glyph's own colour
+  ;; rather than its antialiased edges or the cell's background.
+  (let loop ((rest colours) (best #f) (far -1))
+    (if (null? rest)
+        best
+        (let ((d (apply + (map (lambda (v) (- 255 v)) (car rest)))))
+          (if (> d far)
+              (loop (cdr rest) (car rest) d)
+              (loop (cdr rest) best far))))))
+
+;; "keyword" is cells 3 to 9; point is at 0, so the match is one of the
+;; *other* matches and gets `lazy-highlight'.
+(define no-search-colours (cell-colours (render-search "aa keyword bb" 3 10 #f) 4))
+(define searching-colours (cell-colours (render-search "aa keyword bb" 3 10 "keyword") 4))
+(define keyword-ink (inkiest no-search-colours))
+
+;; the word is drawn in a colour of its own without a search...
+(test-assert "a font-locked word is drawn in its face's colour"
+  (not (equal? keyword-ink white)))
+;; ...and the same colour with one, which is the merge
+(test-assert "a search match keeps the face colour that was under it"
+  (and keyword-ink (member keyword-ink searching-colours)))
+
+;;------------------------------------------------------------------
 ;; The `display' text property replaces a character on the screen
 ;;
 ;; GNU Emacs's `handle_display_prop': a character whose `display'
