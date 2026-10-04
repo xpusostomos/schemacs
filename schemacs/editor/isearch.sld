@@ -42,7 +42,7 @@
     ;; `*unread-command-events*' when something was. Reading through it is
     ;; what lets the search give the key that ended it back to the loop.
     (only (schemacs editor keyboard)
-          *unread-command-events* read-key-event read-wait-ms)
+          *unread-command-events* key-event->char read-key-event read-wait-ms)
     ;; `define-key' and the global map: the keys C-s and C-r are stated
     ;; here, beside the commands they run.
     (only (schemacs editor keymap)
@@ -442,7 +442,19 @@
           ;; pumps, so a blocking wait is one in which no key is ever seen.
           ;; The search looked hung the moment it started, with every key
           ;; doing nothing, `C-g' included.
-          (let ((ev (read-key-event (read-wait-ms))))
+          ;; The key as the *character* it stands for, which is the form
+          ;; every test below reads - and not what the display necessarily
+          ;; answered with. A terminal folds the modifiers into the byte,
+          ;; so its key already is a character; Gtk answers every key as
+          ;; the integer `(modifiers . keysym)', and comparing those to
+          ;; characters matched nothing, so on Gtk *no* key did anything -
+          ;; `RET' and `C-g' included. `key-event->char' is the decode the
+          ;; command loop does; see its note.
+          ;;
+          ;; It answers #f for a key that is not a character, which falls
+          ;; through to the read-again branch below, exactly where a
+          ;; timeout and an ignored key go.
+          (let ((ev (key-event->char (read-key-event (read-wait-ms)))))
             (cond
              ;; ---- keys that end the search ----
              ((and (char? ev) (char=? ev #\return))          ; isearch-exit

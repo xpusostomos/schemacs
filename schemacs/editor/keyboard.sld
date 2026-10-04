@@ -125,6 +125,7 @@
    dispatch-input-event
    event-loop
    exit-recursive-edit
+   key-event->char
    key-path->char-code
    quoted-insert
    read-quoted-char
@@ -522,7 +523,8 @@
       ;;--------------------------------------------------------------
       (let ((unread (*unread-command-events*)))
         (if (null? unread)
-            (read-input-event (current-display) timeout)
+            (let ((ev (read-input-event (current-display) timeout)))
+              ev)
             (begin
               (*unread-command-events* (cdr unread))
               (car unread)))))
@@ -791,6 +793,39 @@
       ;; Supported radix values are 8, 10 and 16."
       ;;--------------------------------------------------------------
       (make-parameter 8))
+
+    (define (key-event->char ev)
+      ;; EV, a key the driver's read has answered, as the CHARACTER it
+      ;; stands for - or #f when it does not stand for one.
+      ;;
+      ;; The two drivers answer a key in different forms, and this is the
+      ;; seam between them. A terminal folds the modifiers into the byte,
+      ;; so `read-input-event' answers a printable key as the character
+      ;; and a control key as its code - already the form a command that
+      ;; reads its own keys wants. Gtk answers *every* key as the integer
+      ;; `(modifiers . keysym)' (`pgtk-encode-event'), which stands for a
+      ;; character only after the same decode the command loop does:
+      ;; `key-event->keymap-path' names the path and `key-path->char-code'
+      ;; reads the character out of it - the translation
+      ;; `read-quoted-char' already uses.
+      ;;
+      ;; A command that reads its own keys must go through this or it will
+      ;; work on a terminal and not on Gtk. `isearch' did not, and every
+      ;; key on Gtk - `RET' and `C-g' included - matched none of its
+      ;; tests and was thrown away.
+      ;;--------------------------------------------------------------
+      (cond
+       ((char? ev) ev)
+       ((not (integer? ev)) #f)
+       (else
+        (let ((path (guard (e (#t #f))
+                      (key-event->keymap-path (current-display) ev))))
+          ;; a special code - a resize, a focus change - has no key path
+          ;; and a named key (an arrow, a function key) has one that is
+          ;; not a character; both answer #f, and the caller ignores them
+          ;; as it always did
+          (let ((code (and path (key-path->char-code path))))
+            (and code (< 0 code 256) (integer->char code)))))))
 
     (define (key-path->char-code path)
       ;; The key decode's inverse: the CHARACTER CODE a single-key path
