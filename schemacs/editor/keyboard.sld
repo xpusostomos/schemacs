@@ -433,8 +433,16 @@
                         (list (string->symbol (car path)) (list frame))
                         path)))
         (cond
-         ;; ESC prefixes the next key with the meta modifier
-         ((and (char? ev) (char=? ev #\esc))
+         ;; ESC prefixes the next key with the meta modifier. It is asked
+         ;; of the *path* as well as of the event, because the two
+         ;; displays answer the key in different forms: a terminal sends
+         ;; the byte 27, which arrives as the character, while Gtk sends
+         ;; the keysym 0xff1b, which arrives as an integer and whose path
+         ;; is `(#\esc)'. A test against the character alone is a
+         ;; terminal-shaped test, and on Gtk a lone ESC was reported as an
+         ;; unhandled event instead of prefixing the next key.
+         ((or (and (char? ev) (char=? ev #\esc))
+              (equal? path '(#\esc)))
           (*esc-pending* #t))
          ((and path (*esc-pending*))
           (*esc-pending* #f)
@@ -820,12 +828,29 @@
        (else
         (let ((path (guard (e (#t #f))
                       (key-event->keymap-path (current-display) ev))))
-          ;; a special code - a resize, a focus change - has no key path
-          ;; and a named key (an arrow, a function key) has one that is
-          ;; not a character; both answer #f, and the caller ignores them
-          ;; as it always did
-          (let ((code (and path (key-path->char-code path))))
-            (and code (< 0 code 256) (integer->char code)))))))
+          ;; The two forms a terminal produces, and *only* those. A
+          ;; modified key - `M-<' - is deliberately not a character here,
+          ;; even though `key-path->char-code' can read one out of the path
+          ;; (the C's 128-set form, which is what `read-quoted-char' wants
+          ;; and a search does not). A search that took `M-<' for the
+          ;; character 188 put it in the search string instead of leaving
+          ;; the search, which is what it did on Gtk: a terminal sends
+          ;; `M-<' as the two bytes ESC and `<', and the ESC leaves the
+          ;; search, but a window system sends ONE event with the meta
+          ;; modifier set.
+          ;;
+          ;; A special code - a resize, a focus change - has no key path at
+          ;; all, and a named key (an arrow, a function key) has one that
+          ;; is not a character; all of those answer #f, which is the
+          ;; caller's "not a character of mine".
+          (cond
+           ((and (pair? path) (= 1 (length path)) (char? (car path)))
+            (car path))
+           ((and (pair? path) (= 2 (length path))
+                 (eq? 'ctrl (car path)) (char? (cadr path)))
+            (let ((code (key-path->char-code path)))
+              (and code (integer->char code))))
+           (else #f))))))
 
     (define (key-path->char-code path)
       ;; The key decode's inverse: the CHARACTER CODE a single-key path

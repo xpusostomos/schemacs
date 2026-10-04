@@ -454,7 +454,8 @@
           ;; It answers #f for a key that is not a character, which falls
           ;; through to the read-again branch below, exactly where a
           ;; timeout and an ignored key go.
-          (let ((ev (key-event->char (read-key-event (read-wait-ms)))))
+          (let* ((raw (read-key-event (read-wait-ms)))
+                 (ev (key-event->char raw)))
             (cond
              ;; ---- keys that end the search ----
              ((and (char? ev) (char=? ev #\return))          ; isearch-exit
@@ -553,11 +554,45 @@
               ;; what pushes it onto `unread-command-events' - Emacs's
               ;; `isearch-other-control-char' does the same, the loop's
               ;; read answering a pushed-back event before the display's.
-              (*unread-command-events* (cons ev (*unread-command-events*))))
-             ;; anything else (a keypad key, end of input) is not an
-             ;; answer to the search
+              ;;
+              ;; The *event* is given back and not the character, because
+              ;; the command loop decodes the event and not a character:
+              ;; a terminal's `C-x' arrives as the byte, so the two are
+              ;; the same thing there, but Gtk answers the integer
+              ;; `(modifiers . keysym)' and a pushed-back character has no
+              ;; key path on that display at all - the key came back as an
+              ;; unhandled event instead of running. Emacs pushes back the
+              ;; *key sequence* it read for the same reason.
+              (*unread-command-events* (cons raw (*unread-command-events*))))
+             ;; anything else that is a *key* is not an answer to the
+             ;; search, and ends it: a meta key such as `M-<', a function
+             ;; key, an arrow. The key is given back to the command loop
+             ;; to run, which is GNU Emacs's `isearch-other-meta-char' -
+             ;; and it is what makes `M-<' leave the search and run
+             ;; `beginning-of-buffer'. Without this a search simply
+             ;; ignored the key: a terminal's `M-<' is the two bytes ESC
+             ;; and `<', so the ESC took the control-character exit above,
+             ;; but a window system sends ONE event with the meta modifier
+             ;; set, and that event matched nothing and was thrown away.
+             ;;
+             ;; The *event* is given back as the display answered it and
+             ;; not as a character, because the event is what the command
+             ;; loop decodes: handing back anything else would run some
+             ;; other key. A read that answered nothing - a timeout, the
+             ;; end of input - is not a key and is not given back; and a
+             ;; special code (a resize, a focus change) is not a key
+             ;; either, and is skipped as it always was.
              (else
-              (loop pattern direction states success? wrapped? case-fold?)))))))
+              (if (or (char? raw) (and (integer? raw) (>= raw 0)))
+                  (begin
+                    (*search-pattern* #f)
+                    (isearch-dehighlight)
+                    (lazy-highlight-cleanup #t)
+                    (set!frame-message frame "")
+                    (*unread-command-events*
+                     (cons raw (*unread-command-events*))))
+                  (loop pattern direction states success? wrapped?
+                        case-fold?))))))))
 
     (define (isearch-pop-state ed states)
       ;; Take back the last state the search pushed, as DEL does.
