@@ -77,6 +77,10 @@ but when you read the emacs source you landed it first time.
 
 You will most likely find full emacs sources at @../emacs/
 
+A piece of work isn't done till you fix most of the warnings. There are a
+few warnings that we can't avoid, those are fine, but all the ones we
+can fix should be fixed before a piece of work is complete.
+
 
 - `tools/syntax-check.scm` — after ANY scripted edit to a machinery
   `.scm` file, run `guile -s tools/syntax-check.scm <files>`: it runs

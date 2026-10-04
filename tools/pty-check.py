@@ -1966,8 +1966,23 @@ def check_dired():
     with open(_os.path.join(d, "second.txt"), "w") as out:
         out.write("ho\n")
     problems = []
-    out = drive([C_x + b"d", C_a, C_k, (d + "/").encode(), RET],
-                _os.path.join(d, "hello.txt"), gap=0.35)
+    import re as _re
+
+    def plain(text):
+        """TEXT with the terminal's escape sequences taken out.
+
+        The listing carries faces now that Dired fontifies through
+        font-lock - the header gets `dired-header', a name gets
+        `dired-directory', a permission character gets `dired-perm-write'
+        - and a terminal draws each face run with escapes around it, so
+        a literal like "/tmp/x:" or "D " is not in the byte stream. The
+        checks are about what is drawn, not about how, so they read the
+        stripped text.
+        """
+        return _re.sub(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\(B|\x1b.", "", text)
+
+    out = plain(drive([C_x + b"d", C_a, C_k, (d + "/").encode(), RET],
+                      _os.path.join(d, "hello.txt"), gap=0.35))
     if "Dired" not in out:
         problems.append("C-x d did not enter Dired (the mode line says so)")
     if "hello.txt" not in out:
@@ -1977,12 +1992,28 @@ def check_dired():
     if d + ":" not in out:
         problems.append("the listing has no header line naming the directory")
 
+    # And the free space follows that colon, as Emacs 31 draws it: the
+    # `total N' line the listing wrote is deleted and `dired--insert-disk-
+    # space' puts "(SUCH available)" on the colon - as a `display' TEXT
+    # PROPERTY, which the redisplay substitutes for the character it
+    # stands on. Both halves are checked here because the *substitution*
+    # is the part that only drawing can show: the property can be on the
+    # buffer, the free space can be right, and the header still read
+    # "/tmp/x:" if the renderer ignored `display'.
+    if "total" in out:
+        problems.append("the listing still shows the `total N' line, which "
+                        "Emacs 31's `dired-free-space' deletes")
+    if not _re.search(_re.escape(d) + r": \([^)]* available\)", out):
+        problems.append("the header does not show the free disk space - "
+                        "`dired--insert-disk-space' puts it on the colon as "
+                        "a `display' property, and the redisplay must draw it")
+
     # And the editor started *on* a directory - `emacs /some/dir' - direds
     # it too: `find-file-noselect' sends a directory through
     # `find-directory-functions', whose value names `dired-noselect'.
     # Before that branch was ported this said
     # `; find-file: error loading <dir>'.
-    out = drive([], d, gap=0.4)
+    out = plain(drive([], d, gap=0.4))
     if "Dired" not in out:
         problems.append("the editor started on a directory did not enter "
                         "Dired")
@@ -1998,7 +2029,6 @@ def check_dired():
     # The editor is started *on the directory* rather than driven through
     # `C-x d', so no prompt is involved: typing into the directory prompt
     # is timing-sensitive enough that `m' and `d' sometimes landed in it.
-    out = drive([b"m", b"d"], d, gap=0.35)
     # The mark characters carry faces now that Dired fontifies through
     # font-lock (`dired-re-mark' gets `dired-mark-face'), so a terminal
     # draws them with escape sequences around them and the literal
@@ -2006,11 +2036,10 @@ def check_dired():
     # the two tests, which are about the marks being made, not about how
     # they are drawn - `dired-delete' below is what exercises the drawing
     # and the deletion.
-    import re as _re
-    plain = _re.sub(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\(B|\x1b.", "", out)
-    if "* " not in plain:
+    out = plain(drive([b"m", b"d"], d, gap=0.35))
+    if "* " not in out:
         problems.append("`m' in Dired did not mark the file at point")
-    if "D " not in plain:
+    if "D " not in out:
         problems.append("`d' in Dired did not flag the next file")
     if "Wrong type argument" in out:
         problems.append("a Dired marking key still fails on the prefix: "

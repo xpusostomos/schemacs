@@ -14,6 +14,17 @@
   ;;
   ;; See LAYOUT-PLAN.txt for the rule this library is a step of.
 
+  ;; Guile warns here that `load' is used "in declarative module
+  ;; (schemacs editor startup)" and suggests "Add #:declarative? #f to
+  ;; your define-module invocation". There is no `define-module' to add
+  ;; it to - this is a `define-library', which Guile's R7RS expansion
+  ;; does not pass the clause through (tried: it is a syntax error) - and
+  ;; the warning is *correct*: loading the user's init file at run time
+  ;; is exactly a non-declarative act, which is why Guile is right to ask
+  ;; for the hint rather than to be silenced. Turning this library into a
+  ;; `define-module' to carry one line of metadata would be a bigger
+  ;; change than the warning is worth; it stays, and says so.
+
   (import
     (scheme base)
     ;; the init file's error report is *said*, so `display' is needed here

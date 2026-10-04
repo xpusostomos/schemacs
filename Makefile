@@ -49,6 +49,7 @@ SCHEME_LIBRARIES := \
   ./schemacs/editor/tabulated-list.sld \
   ./schemacs/editor/buff-menu.sld \
   ./schemacs/map-ynp.sld \
+  ./schemacs/regexp-opt.sld \
   ./schemacs/ui/platform/ncurses.sld \
   ./schemacs/keymap.sld \
   ./schemacs/bit-stack.sld \

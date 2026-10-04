@@ -38,6 +38,20 @@
     ;; `string-rindex' is what the two name helpers find their slash
     ;; with.
     (only (guile) logand string-rindex)
+    ;; `statvfs' is reached through Guile's FFI - `(system foreign)'
+    ;; dlopens libc and calls the function through its pointer, so there
+    ;; is no C to write. `(rnrs bytevectors)' is here for the struct: the
+    ;; C fills a buffer we own, and its fields are read at fixed offsets.
+    ;; The FFI is two imports, split as `pgtk.sld' splits it: the
+    ;; *pointer procedures* are `(system foreign)''s, while
+    ;; `dynamic-link' and `dynamic-func' are core bindings and come from
+    ;; `(guile)'. Importing `(system foreign)' whole binds neither of those
+    ;; two - inside a `define-library' it binds nothing at all, which a
+    ;; five-line library shows - so the split is not tidiness.
+    (only (system foreign)
+          pointer->procedure string->pointer bytevector->pointer int)
+    (only (guile) dynamic-link dynamic-func)
+    (only (rnrs bytevectors) bytevector-u64-ref native-endianness)
     ;; The operating system calls. `rename-file' and `copy-file' are
     ;; renamed as they come in, because this library defines functions
     ;; under those two names and would otherwise call itself.
@@ -61,6 +75,7 @@
     )
 
   (export
+   file-system-info
    *file-name-handler-alist*
    *inhibit-file-name-handlers*
    *inhibit-file-name-operation*
@@ -158,6 +173,53 @@
                     (let ((home (user-homedir (substring name 1 i))))
                       (if home (string-append home rest) name)))))
              (else (loop (+ i 1)))))))
+
+    (define %libc (dynamic-link))
+    ;; ^ libc itself, dlopened once.
+
+    (define %c-statvfs
+      ;; `int statvfs(const char *path, struct statvfs *buf)'
+      ;;--------------------------------------------------------------
+      (pointer->procedure int
+                          (dynamic-func "statvfs" %libc)
+                          (list '* '*)))
+
+    (define (file-system-info filename)
+      ;; GNU Emacs's `file-system-info' (fileio.c): "Return storage
+      ;; information about the file system FILENAME is on. Value is a list
+      ;; of numbers (TOTAL FREE AVAIL), where TOTAL is the total size of
+      ;; the file system, FREE is the free space in it, and AVAIL is the
+      ;; size of the free space available to an unprivileged user. ...
+      ;; If the underlying system call fails, value is nil."
+      ;;
+      ;; The C calls `statvfs' (`lib/fsusage.c':126) and multiplies by the
+      ;; *fundamental* block size - `f_frsize' when it is non-zero and
+      ;; `f_bsize' otherwise, "f_frsize isn't guaranteed to be supported"
+      ;; - which is why offset 8 is read first below and offset 0 only as
+      ;; the fallback.
+      ;;
+      ;; The struct is read at fixed offsets, and those ARE C's `struct
+      ;; statvfs' on this platform: `unsigned long' twice and then three
+      ;; `fsblkcnt_t', each 8 bytes on x86-64 glibc. That is the one
+      ;; fragile thing here and it is named rather than trusted: the
+      ;; offsets move on a 32-bit build, where `unsigned long' is 4 bytes.
+      ;; Measured against `emacs -Q --batch''s own `file-system-info' on
+      ;; the same paths, and against `df -B1'.
+      ;;--------------------------------------------------------------
+      (let* ((path (expand-file-name filename))
+             (buf (make-bytevector 128 0))
+             (res (%c-statvfs (string->pointer path)
+                              (bytevector->pointer buf))))
+        (if (not (= res 0))
+            #f
+            (let* ((endian (native-endianness))
+                   (bsize (bytevector-u64-ref buf 0 endian))   ; f_bsize
+                   (frsize (bytevector-u64-ref buf 8 endian))  ; f_frsize
+                   (blocks (bytevector-u64-ref buf 16 endian)) ; f_blocks
+                   (bfree (bytevector-u64-ref buf 24 endian))  ; f_bfree
+                   (bavail (bytevector-u64-ref buf 32 endian)) ; f_bavail
+                   (unit (if (zero? frsize) bsize frsize)))
+              (list (* unit blocks) (* unit bfree) (* unit bavail))))))
 
     (define (expand-file-name name . args)
       ;; GNU Emacs's `expand-file-name': NAME as an absolute file name.

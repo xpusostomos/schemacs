@@ -47,15 +47,19 @@
   ;;     hiding commands are what would.
   ;;
   ;; And the *filesystem* half of the listing: `dired--insert-disk-space'
-  ;; is not ported, so the `total N' line ls-lisp writes stays where it
-  ;; is. Emacs 31 deletes it - `dired-free-space' defaults to `first'
-  ;; (dired.el:224), which `dired--insert-disk-space' reads as "remove
-  ;; the line and put the free space on the header's colon" - and that
-  ;; needs `file-system-info' (fileio.c), `get-free-disk-space' and
-  ;; `byte-count-to-string-function' (files.el). Measured against
-  ;; `emacs -Q --batch', which answers a first content line of
-  ;; `  drwxr-xr-x', not `  total'. The test in
-  ;; `dired-mode-tests.scm' pins the current shape and says so.
+  ;; IS ported, so the `total N' line ls-lisp writes is deleted, as Emacs
+  ;; 31 deletes it - `dired-free-space' defaults to `first' (dired.el:224)
+  ;; which that function reads as "remove the line and put the free space
+  ;; on the header's colon". `file-system-info' (fileio.c) is ported over
+  ;; Guile's FFI, since Guile has no `statvfs' of its own; measured
+  ;; against `emacs -Q --batch' and `df -B1', which agree on
+  ;; `(15619129344 15577452544 15577452544)' for `/tmp'.
+  ;;
+  ;; The free space itself is a `display' TEXT PROPERTY on the header's
+  ;; colon - `": (15 GiB available)"' over the one character - and the
+  ;; renderer draws it: `xdisp.sld' reads the property the way the C's
+  ;; `handle_display_prop' does, so the `total' line goes and the free
+  ;; space appears on the header, as Emacs 31 shows it.
 
   (import
     (scheme base)
@@ -67,20 +71,33 @@
     (only (guile) caddr cadddr cdddr cddddr delq open-input-string read
           string-prefix? string-suffix?)
     ;; The file primitives this is built on, and their library.
-    (only (schemacs editor diredc) directory-files file-attributes)
+    (only (schemacs editor diredc) directory-files file-attributes
+          *completion-ignored-extensions*)
     (only (schemacs editor fileio)
           directory-file-name expand-file-name file-directory-p
           file-exists-p file-name-absolute-p file-name-as-directory
           file-name-directory-part file-name-nondirectory-part
           file-readable-p)
     (only (schemacs editor files)
-          abbreviate-file-name create-file-buffer
+          abbreviate-file-name create-file-buffer get-free-disk-space
           *delete-by-moving-to-trash*
           *directory-files-no-dot-files-regexp*
           *find-directory-functions*
+          ;; `dired--find-file' binds it so that a command works on a
+          ;; directory whatever the user's `find-file-run-dired' - the
+          ;; C's `(let ((find-file-run-dired t)) ...)'.
+          *find-file-run-dired*
           delete-directory delete-file
           directory-listing-before-filename-regexp files--name-absolute-system-p
-          find-file insert-directory
+          find-file find-alternate-file find-file-other-window insert-directory
+          ;; `file-truename' is files.el's, and the symlink keywords below
+          ;; need it. Its absence was silent: the check is wrapped in the
+          ;; `guard' that stands for Elisp's `ignore-errors', so an
+          ;; unbound `file-truename' made every symlink look broken -
+          ;; `(not (and #f ...))' is true - and the whole listing came out
+          ;; in `dired-broken-symlink' with nothing saying why. A missing
+          ;; import hid behind a handler meant for a *file* error.
+          file-truename
           read-file-name revert-buffer)
     ;; `indent-rigidly' is indent.el's, and is what gives a dired buffer
     ;; its two-column indent
@@ -133,13 +150,16 @@
     ;; the three mark faces are dired.el's own `defface's
     (only (schemacs editor faces) defface)
     ;; the mark keywords are run by font-lock, which `dired-mode' turns on
-    (only (schemacs editor font-lock) set!font-lock-defaults!)
+    (only (schemacs editor font-lock) font-lock-defaults
+          set!font-lock-defaults!)
+    (only (schemacs regexp-opt) regexp-opt)
     (only (schemacs editor font-core) font-lock-mode)
     (only (schemacs editor indentc) *indent-tabs-mode*)
     (prefix (schemacs keymap) km:)
     (only (schemacs editor window)
           display-buffer display-buffer-below-selected pop-to-buffer-same-window
           quit-restore-window quit-window switch-to-buffer
+          switch-to-buffer-other-window
           temp-buffer-window-setup temp-buffer-window-show window-live-p
           with-current-buffer-window with-selected-window)
     ;; the switches prompt, which the C reads with `read-string'; the
@@ -147,7 +167,7 @@
     ;; is filled by `completion--insert-strings'
     (only (schemacs editor minibuffer)
           completion--insert-strings read-from-minibuffer yes-or-no-p)
-    (only (schemacs editor frame) *current-frame*)
+    (only (schemacs editor frame) *current-frame* window-list)
     (only (schemacs editor subr) run-hooks run-mode-hooks string-replace)
     )
 
@@ -179,6 +199,14 @@
    dired-remember-marks
    dired-revert
    dired-sort-other
+   dired-sort-set-mode-line
+   dired-file-name-at-point
+   dired-sort-by-name-regexp
+   dired-sort-by-date-regexp
+   dired-ls-sorting-switches
+   *dired-check-symlinks*
+   *dired-switches-in-mode-line*
+   *dired-sort-inhibit*
    dired-flagged-face
    dired-mark-face
    dired-marked-face
@@ -225,6 +253,8 @@
    dired-flag-file-deletion
    dired-get-filename
    dired-insert-directory
+   dired--insert-disk-space
+   *dired-free-space*
    dired-insert-set-properties
    dired-mark
    dired-marker-regexp
@@ -233,6 +263,18 @@
    dired-move-to-end-of-filename
    dired-move-to-filename
    dired-next-line
+   dired-next-dirline
+   dired-prev-dirline
+   dired-up-directory
+   dired-other-window
+   dired-find-file-other-window
+   dired-find-alternate-file
+   dired-get-file-for-visit
+   *dired-movement-style*
+   *dired-kill-when-opening-new-dired-buffer*
+   dired-next-subdir
+   dired-subdir-index
+   dired-subdir-max
    dired-previous-line
    dired-repeat-over-lines
    set!dired-actual-switches!
@@ -688,7 +730,65 @@
                                 (file-name-directory-part dir))))
                 (insert dir-indent dir-name ":\n"))
               (set! content-point (point))))
+          (set! content-point (dired--insert-disk-space opoint dir))
           (dired-insert-set-properties content-point (point)))))
+
+    (define *dired-free-space* (make-parameter 'first))
+    ;; ^ GNU Emacs's `dired-free-space' (dired.el:224), whose default is
+    ;; `first': "Whether and how to display the disk space usage info in
+    ;; Dired buffers. If nil, don't display. If `separate', display on a
+    ;; separate line ... If `first', the default, display only the free
+    ;; disk space on the first line, following the directory name."
+
+    (define (dired--insert-disk-space beg file)
+      ;; GNU Emacs's `dired--insert-disk-space' (dired.el:1960): "Try to
+      ;; insert the amount of free space."
+      ;;
+      ;; With `dired-free-space' at its default `first', the C deletes the
+      ;; `total' line the listing wrote and puts the free space on the
+      ;; header's colon - as a `display' TEXT PROPERTY, which is how that
+      ;; text replaces the colon rather than following it. `xdisp' draws
+      ;; that property, so the line reads `  /tmp: (15 GiB available)' as
+      ;; Emacs 31's does. The chain is measured: `(get-free-disk-space
+      ;; "/tmp")' answers "15 GiB", Emacs's own answer for it.
+      ;;--------------------------------------------------------------
+      (save-excursion
+        (goto-char beg)
+        (if (not (re-search-forward "^ *\\(total\\)" #f #t))
+            beg
+            (begin
+              (if (or (not (*dired-free-space*))
+                      (eq? (*dired-free-space*) 'first))
+                  ;; `delete-region' takes engine positions in this tree,
+                  ;; one below the Emacs-named layer's
+                  (delete-region (- (match-beginning 0) 1)
+                                 (- (line-beginning-position 2) 1))
+                  (replace-match "total used in directory" #f #f #f 1))
+              (let ((available (get-free-disk-space file)))
+                (if (not available)
+                    beg
+                    (cond
+                     ((eq? (*dired-free-space*) 'separate)
+                      (end-of-line)
+                      (insert " available " available)
+                      (beginning-of-line)
+                      (point))
+                     ((eq? (*dired-free-space*) 'first)
+                      (goto-char beg)
+                      ;; The C tests `(memq system-type '(windows-nt
+                      ;; ms-dos))' to choose " *[A-Za-z]:/" over " */";
+                      ;; this tree has no `system-type', and the second is
+                      ;; the one every path here is.
+                      (when (and (looking-at " */")
+                                 (begin (end-of-line)
+                                        (char=? (char-after (- (point) 1)) #\:)))
+                        (put-text-property (- (point) 2) (- (point) 1) 'display
+                                           (string-append ": (" available
+                                                          " available)")
+                                           (current-buffer)))
+                      (forward-line 1)
+                      (point))
+                     (else beg))))))))
 
     (define (dired-insert-set-properties beg end)
       ;; GNU Emacs's `dired-insert-set-properties' (dired.el:2087): "Add
@@ -839,6 +939,149 @@ With a prefix arg, mark files on the next ARG lines."
     ;;----------------------------------------------------------------
     ;; The commands whose homes are `files.el' and `window.el'
     ;;------------------------------------------------------------------
+
+    (define *dired-movement-style* (make-parameter #f))
+    ;; ^ GNU Emacs's `dired-movement-style' (dired.el:511), nil by
+    ;; default: "Non-nil means point skips empty lines when moving in
+    ;; Dired buffers."
+
+    (define *dired-kill-when-opening-new-dired-buffer* (make-parameter #t))
+    ;; ^ GNU Emacs's `dired-kill-when-opening-new-dired-buffer', true by
+    ;; default, which `dired--find-possibly-alternative-file' reads.
+
+    (define (dired--trivial-next-dirline arg opoint)
+      ;; GNU Emacs's `dired--trivial-next-dirline': "Goto ARGth next
+      ;; directory file line."
+      ;;--------------------------------------------------------------
+      (let ((opoint (or opoint (point))))
+        (if (if (> arg 0)
+                (re-search-forward dired-re-dir #f #t arg)
+                (begin (beginning-of-line)
+                       (re-search-backward dired-re-dir #f #t (- arg))))
+            ;; "user may type `i' or `f'"
+            (dired-move-to-filename)
+            (begin
+              (goto-char opoint)
+              (unless (*dired-movement-style*)
+                (error "No more subdirectories"))))))
+
+    (define-command (dired-next-dirline arg opoint)
+      ;; GNU Emacs's `dired-next-dirline': "Goto ARGth next directory
+      ;; file line. Whether to skip empty lines and how to move from last
+      ;; line is controlled by `dired-movement-style'."
+      ;;--------------------------------------------------------------
+      "Goto ARGth next directory file line."
+      (interactive (list (uarg->integer 1 (current-prefix-arg)) #f))
+      (if (*dired-movement-style*)
+          (dired--move-to-next-line arg dired--trivial-next-dirline)
+          (dired--trivial-next-dirline arg opoint)))
+
+    (define-command (dired-prev-dirline arg)
+      ;; GNU Emacs's `dired-prev-dirline'.
+      ;;--------------------------------------------------------------
+      "Goto ARGth previous directory file line."
+      (interactive (list (uarg->integer 1 (current-prefix-arg))))
+      (dired-next-dirline (- arg) #f))
+
+    (define (dired--move-to-next-line arg fun)
+      ;; GNU Emacs's `dired--move-to-next-line'. Its walk is over
+      ;; `dired-movement-style''s `cycle' and `bounded' values, which
+      ;; `line-move' drives and which is not ported; the `fun' arm is the
+      ;; one every default reaches, the style being nil.
+      ;;--------------------------------------------------------------
+      (fun arg #f))
+
+    (define (dired-get-file-for-visit)
+      ;; GNU Emacs's `dired-get-file-for-visit': "Get the current line's
+      ;; file name, with an error if file does not exist."
+      ;;--------------------------------------------------------------
+      (let ((file (dired-get-filename #f #t)))
+        (if (file-exists-p file)
+            file
+            (error "File no longer exists; type `g' to update Dired buffer"))))
+
+    (define (dired--find-file find-file-function file)
+      ;; GNU Emacs's `dired--find-file': "Call FIND-FILE-FUNCTION on FILE,
+      ;; but bind some relevant variables." The C binds
+      ;; `find-file-run-dired' so that the command works on directories
+      ;; whatever the user's setting; the two window-point variables it
+      ;; also binds are `switch-to-buffer-preserve-window-point''s, which
+      ;; this tree has not got.
+      ;;--------------------------------------------------------------
+      (parameterize ((*find-file-run-dired* #t))
+        (find-file-function file)))
+
+    (define-command (dired-find-file-other-window)
+      ;; GNU Emacs's `dired-find-file-other-window': "In Dired, visit this
+      ;; file or directory in another window."
+      ;;--------------------------------------------------------------
+      "In Dired, visit this file or directory in another window."
+      (interactive)
+      (dired--find-file find-file-other-window (dired-get-file-for-visit)))
+
+    (define-command (dired-find-alternate-file)
+      ;; GNU Emacs's `dired-find-alternate-file': "In Dired, visit file or
+      ;; directory on current line via `find-alternate-file'. This kills
+      ;; the Dired buffer, then visits the current line's file or
+      ;; directory."
+      ;;--------------------------------------------------------------
+      "In Dired, visit this file or directory, killing the Dired buffer."
+      (interactive)
+      (set-buffer-modified-p #f)
+      (find-alternate-file (dired-get-file-for-visit)))
+
+    (define (dired--find-possibly-alternative-file file)
+      ;; GNU Emacs's `dired--find-possibly-alternative-file': "Find FILE,
+      ;; but respect `dired-kill-when-opening-new-dired-buffer'."
+      ;;--------------------------------------------------------------
+      (if (and (*dired-kill-when-opening-new-dired-buffer*)
+               (file-directory-p file)
+               (< (length (window-list)) 2))
+          (begin (set-buffer-modified-p #f)
+                 (dired--find-file find-alternate-file file))
+          (dired--find-file find-file file)))
+
+    (define-command (dired-other-window dirname switches)
+      ;; GNU Emacs's `dired-other-window': "`Edit' directory DIRNAME.
+      ;; Like `dired' but select in another window."
+      ;;
+      ;; The C ends with `(dired--display-ls-error)', which reports an
+      ;; `ls' whose stderr went somewhere - this tree lists with `ls-lisp'
+      ;; and runs no `ls', so there is no such error to display.
+      ;;--------------------------------------------------------------
+      "Edit directory DIRNAME, selecting it in another window."
+      (interactive (dired-read-dir-and-switches "in other window "))
+      (let ((buf (dired-noselect dirname switches)))
+        (if buf
+            (switch-to-buffer-other-window buf)
+            (current-buffer))))
+
+    (define-command (dired-up-directory other-window)
+      ;; GNU Emacs's `dired-up-directory': "Run Dired on parent directory
+      ;; of current directory. ... If OTHER-WINDOW (the optional prefix
+      ;; arg), display the parent directory in another window."
+      ;;
+      ;; The C's second arm is `(dired-goto-subdir up)', which comes with
+      ;; subdirectory insertion and is not ported; it is guarded there by
+      ;; `(cdr dired-subdir-alist)', empty for every buffer this port
+      ;; makes, so the arm is unreachable and says so.
+      ;;--------------------------------------------------------------
+      "Run Dired on parent directory of current directory."
+      (interactive (list (current-prefix-arg)))
+      (let* ((dir (dired-current-directory))
+             (up (file-name-directory-part (directory-file-name dir))))
+        (or (dired-goto-file (directory-file-name dir))
+            (and (pair? (cdr (dired-subdir-alist)))
+                 (error "dired-goto-subdir is not ported"))
+            (begin
+              (if other-window
+                  ;; EMACS's `(dired-other-window up)' leaves SWITCHES
+                  ;; optional; this tree spells an optional argument as a
+                  ;; fixed one the interactive expression fills, so the
+                  ;; call site has to say `#f' itself.
+                  (dired-other-window up #f)
+                  (dired--find-possibly-alternative-file up))
+              (dired-goto-file dir)))))
 
     (define-command (dired-find-file)
       "In Dired, visit the file or directory named on this line."
@@ -1091,11 +1334,11 @@ With a prefix arg, mark files on the next ARG lines."
       ;;
       ;; Not ported: `dired-sort-R-check', which saves and restores
       ;; `dired-subdir-alist' across the `-R' switch and so is the
-      ;; subdirectory work, and `dired-sort-set-mode-line', which shows
-      ;; "by name"/"by date" in the mode line.
+      ;; subdirectory work.
       ;;--------------------------------------------------------------
       (let ((no-revert (and (pair? rest) (car rest))))
         (set!dired-actual-switches! switches)
+        (dired-sort-set-mode-line)
         (if (not no-revert) (revert-buffer))))
 
     (define (dired-readin)
@@ -1131,7 +1374,11 @@ With a prefix arg, mark files on the next ARG lines."
         ;; "The hook can successfully use dired functions (e.g.
         ;; dired-get-filename) as the subdir-alist has been built in
         ;; dired-readin."
-        (run-hooks *dired-after-readin-hook*)))
+        (run-hooks *dired-after-readin-hook*)
+        ;; Now that the alist is built, the listing can be fontified -
+        ;; see `dired-mode' for why it is this late. It is the same point
+        ;; Emacs reaches, one deferred fontification later.
+        (when (font-lock-defaults) (font-lock-mode #t))))
 
     (define (dired-readin-insert)
       ;; GNU Emacs's `dired-readin-insert' (dired.el:1626): "Insert
@@ -1212,15 +1459,55 @@ With a prefix arg, mark files on the next ARG lines."
                         (car elt))
                     (loop (cdr rest) (car elt))))))))
 
+    (define (dired-subdir-index dir)
+      ;; GNU Emacs's `dired-subdir-index' (dired.el:3796): "Return an
+      ;; index into alist for use with nth for the sake of subdir moving
+      ;; commands."
+      ;;--------------------------------------------------------------
+      (let loop ((alist (dired-subdir-alist)) (index 0))
+        (cond ((null? alist) #f)
+              ((string=? dir (car (car alist))) index)
+              (else (loop (cdr alist) (+ index 1))))))
+
+    (define-command (dired-next-subdir arg no-error-if-not-found no-skip)
+      ;; GNU Emacs's `dired-next-subdir' (dired.el:3806): "Go to next
+      ;; subdirectory, regardless of level. Use 0 arg to go to this
+      ;; directory's header line. NO-SKIP prevents moving to end of
+      ;; header line, returning whatever position was found in
+      ;; dired-subdir-alist."
+      ;;
+      ;; This was named as "coming with subdirectory insertion" and left
+      ;; unported; that was wrong. It is these lines, over
+      ;; `dired-subdir-alist' and `dired-current-directory', both here
+      ;; already, plus `dired-subdir-index' above.
+      ;;--------------------------------------------------------------
+      "Go to next subdirectory, regardless of level."
+      (interactive (list (uarg->integer 1 (current-prefix-arg)) #f #f))
+      (let* ((this-dir (dired-current-directory))
+             (index (- (dired-subdir-index this-dir) arg))
+             ;; the C's `(cdr (nth index dired-subdir-alist))'; "nth with
+             ;; negative arg does not return nil but the first element",
+             ;; which is why the index is tested first
+             (pos (if (>= index 0)
+                      (let loop ((alist (dired-subdir-alist)) (n index))
+                        (cond ((not (pair? alist)) #f)
+                              ((= n 0) (cdr (car alist)))
+                              (else (loop (cdr alist) (- n 1)))))
+                      #f)))
+        (if pos
+            (begin (goto-char pos)
+                   (or no-skip (end-of-line))
+                   (point))
+            (if no-error-if-not-found
+                #f
+                (error "%s directory" (if (> arg 0) "Last" "First"))))))
+
     (define (dired-subdir-max)
-      ;; GNU Emacs's `dired-subdir-max' (dired.el:4057): "Subdirs start at
+      ;; GNU Emacs's `dired-subdir-max' (dired.el:4065): "Subdirs start at
       ;; the beginning of their header lines and end just before the
       ;; beginning of the next header line (or end of buffer)."
       ;;
       ;; The C's second arm is `dired-next-subdir', which moves through
-      ;; the alist - and it is only reached when there is more than one
-      ;; entry, which is the subdirectory work. The first arm is the one
-      ;; every buffer this port makes takes.
       ;;--------------------------------------------------------------
       (save-excursion
         (if (or (null? (cdr (dired-subdir-alist)))
@@ -1511,10 +1798,15 @@ for SWITCHES."
         (bind! #\n dired-next-line)
         (bind! #\space dired-next-line)
         (bind! #\p dired-previous-line)
+        (bind! #\> dired-next-dirline)
+        (bind! #\^ dired-up-directory)
+        (bind! #\j dired-goto-file)
+        (bind! #\o dired-find-file-other-window)
+        (bind! #\a dired-find-alternate-file)
         (bind! #\m dired-mark)
         (bind! #\u dired-unmark)
         (bind! #\d dired-flag-file-deletion)
-        (bind! #\< delete-char)
+        (bind! #\< dired-prev-dirline)
         (bind! #\g revert-buffer)
         ;; RET is `(ctrl #\m)' and not `#\return': a terminal sends byte
         ;; 13, and Emacs's keymap has the same key, where RET and C-m are
@@ -1595,24 +1887,106 @@ for SWITCHES."
         ;; port of that reads neither.
         (set!font-lock-defaults!
          (list dired-font-lock-keywords #t #f #f 'beginning-of-line))
-        ;; The C's next act, which fontifies the listing. It is turned on
-        ;; now, and the reason it could not be earlier is worth keeping:
-        ;; `(dired-noselect "/tmp/")' - 488 entries - took over 120s with
-        ;; the mode on against 0.72s with it off, while ONE fontification
-        ;; pass over the whole listing took 0.0008s. The cost was not the
-        ;; fontifying but the searches inside it: `(schemacs editor
-        ;; search)''s `%re-search' copied the WHOLE buffer on every call,
-        ;; so `(re-search-forward "^[^ \n]" 47 t)' cost the same 5.5ms as
-        ;; the same search bounded to the whole buffer - a bound that
-        ;; costs nothing is a bound that is not used. And font-lock
-        ;; searches once per keyword per line, which made it quadratic.
-        ;; Windowing the copy (and adding the window's offset to the match
-        ;; registers) brought 488 entries to 1.89s, and 104 entries from
-        ;; 4.58s to 0.31s against a 0.14s baseline.
-        (font-lock-mode #t)
+        ;; Emacs's `dired-mode' sets `font-lock-defaults' and stops
+        ;; there - it does *not* turn Font Lock on: Global Font Lock does
+        ;; that, off `after-change-major-mode-hook'. Turning it on here
+        ;; was this port's invention, and it fontified during
+        ;; `dired-readin' - before `dired-build-subdir-alist' had run -
+        ;; which the symlink keywords cannot survive, because they ask
+        ;; `dired-file-name-at-point' and that asks
+        ;; `dired-current-directory', whose answer for an empty alist is
+        ;; "No subdir-alist in %s". Emacs never meets it, because with
+        ;; jit-lock `font-lock-after-change-function' only *records* the
+        ;; region, and the fontification happens after the buffer is
+        ;; consistent. This port fontifies on the change, so it is turned
+        ;; on where the alist is ready instead - see `dired-readin'.
         (run-mode-hooks *dired-mode-hook*)))
 
     ;;----------------------------------------------------------------
+    (define dired-ls-sorting-switches "SXU")
+    ;; ^ GNU Emacs's `dired-ls-sorting-switches' (dired.el:5114): "String
+    ;; of `ls' switches (single letters) except \"t\" that influence
+    ;; sorting."
+
+    (define *dired-sort-inhibit* (make-parameter #f))
+    ;; ^ GNU Emacs's `dired-sort-inhibit'.
+
+    (define dired-sort-by-date-regexp
+      (string-append "\\(\\`\\| \\)-[^- ]*t"
+                     ;; "`dired-ls-sorting-switches' after -t overrides -t."
+                     "[^ " dired-ls-sorting-switches "]*"
+                     "\\(\\(\\`\\| +\\)\\(--[^ ]+\\|-[^- t"
+                     dired-ls-sorting-switches "]+\\|"
+                     ;; "Allow quoted strings"
+                     "\"[^\"]*\"\\)\\)* *$"))
+    ;; ^ "Regexp recognized by Dired to set `by date' mode."
+
+    (define dired-sort-by-name-regexp
+      (string-append "\\`\\(\\(\\`\\| +\\)\\(--[^ ]+\\|"
+                     "-[^- t" dired-ls-sorting-switches "]+[^- tSXU]+\\|"
+                     ;; "Allow quoted strings"
+                     "\"[^\"]*\"\\)\\)* *$"))
+    ;; ^ "Regexp recognized by Dired to set `by name' mode."
+
+    (define *dired-switches-in-mode-line* (make-parameter #f))
+    ;; ^ GNU Emacs's `dired-switches-in-mode-line' (dired.el:5145), whose
+    ;; default is nil: "Indicate name-or-date sort order, if possible.
+    ;; Else show full switches." The `as-is', integer and function arms of
+    ;; the C are read below; the value a user may set is theirs to set.
+
+    (define (dired-sort-set-mode-line)
+      ;; GNU Emacs's `dired-sort-set-mode-line' (dired.el:5161): "Set
+      ;; mode-line according to option `dired-switches-in-mode-line'."
+      ;;
+      ;; `force-mode-line-update', which the C ends with, is not here and
+      ;; is not needed: it marks the mode-line format for redisplay, and
+      ;; this tree's renderer draws the mode line from `mode-name' every
+      ;; time it draws the frame.
+      ;;--------------------------------------------------------------
+      (when (eq? (major-mode) 'dired-mode)
+        (let ((switches (dired-actual-switches)))
+          (set!mode-name
+           (if (*dired-switches-in-mode-line*)
+               (let ((value (*dired-switches-in-mode-line*)))
+                 (cond ((integer? value)
+                        (let* ((l1 (string-length switches))
+                               (xs (substring switches
+                                              0 (min l1 value)))
+                               (l2 (string-length xs)))
+                          (if (= l2 0)
+                              xs
+                              (string-append " " xs
+                                             (if (< l2 l1) "…" "")))))
+                       ((procedure? value)
+                        (string-append " "
+                                       (value switches)))
+                       (else (string-append " " switches))))
+               (cond ((string-match-p dired-sort-by-name-regexp switches)
+                      "Dired by name")
+                     ((string-match-p dired-sort-by-date-regexp switches)
+                      "Dired by date")
+                     (else (string-append "Dired " switches))))))))
+
+    (define (dired-file-name-at-point)
+      ;; GNU Emacs's `dired-file-name-at-point' (dired.el:1195): "Try to
+      ;; get a file name at point in the current Dired buffer. ...
+      ;; Note that it returns an abbreviated name that can't be used as
+      ;; an argument to `dired-goto-file'."
+      ;;--------------------------------------------------------------
+      (let ((filename (dired-get-filename #f #t)))
+        (when filename
+          (if (file-directory-p filename)
+              (file-name-as-directory (abbreviate-file-name filename))
+              (abbreviate-file-name filename)))))
+
+    (define *dired-check-symlinks* (make-parameter #t))
+    ;; ^ GNU Emacs's `dired-check-symlinks' (dired.el:769), whose default
+    ;; is t: "Whether symlinks are checked for validity. Set it to nil for
+    ;; remote directories, which suffer from a slow connection." The C
+    ;; reads it through `connection-local-value'; with no TRAMP here a
+    ;; connection-local value is the variable's, so the parameter is read
+    ;; directly and that is named rather than faked.
+
     ;;----------------------------------------------------------------
     ;; The faces, and the font-lock keywords that name them
     ;;
@@ -1636,6 +2010,17 @@ for SWITCHES."
     ;; ("the regexps don't identify the file name itself").
     ;;------------------------------------------------------------------
 
+    ;; the `defvar's naming the faces, which the keyword list below
+    ;; refers to. Emacs has these five; `dired-set-id',
+    ;; `dired-broken-symlink', `dired-special' and `dired-ignored' have
+    ;; none there, and the keywords name those by their bare symbol.
+    (define dired-header-face 'dired-header)
+    (define dired-warning-face 'dired-warning)
+    (define dired-perm-write-face 'dired-perm-write)
+    (define dired-directory-face 'dired-directory)
+    (define dired-symlink-face 'dired-symlink)
+    (define dired-ignored-face 'dired-ignored)
+
     (define dired-mark-face 'dired-mark)
     (define dired-marked-face 'dired-marked)
     (define dired-flagged-face 'dired-flagged)
@@ -1657,6 +2042,55 @@ for SWITCHES."
     ;; ^ Emacs's three, specs and all (dired.el:676, :684, :692). Each
     ;; inherits a face that exists here: `warning' and `error' are
     ;; faces.sld's, and `font-lock-constant-face' is font-lock.sld's.
+
+    (defface 'dired-header '((#t :inherit font-lock-type-face))
+      "Face used for directory headers.")
+
+    (defface 'dired-directory '((#t :inherit font-lock-function-name-face))
+      "Face used for subdirectories.")
+
+    (defface 'dired-symlink '((#t :inherit font-lock-keyword-face))
+      "Face used for symbolic links.")
+
+    (defface 'dired-broken-symlink
+          '((((class color)) :foreground "yellow1" :background "red1" :weight bold)
+            (#t :weight bold :slant italic :underline #t))
+      "Face used for broken symbolic links.")
+
+    (defface 'dired-special '((#t :inherit font-lock-variable-name-face))
+      "Face used for sockets, pipes, block devices and char devices.")
+
+    (defface 'dired-ignored '((#t :inherit shadow))
+      "Face used for files suffixed with `completion-ignored-extensions'.")
+
+    (defface 'dired-perm-write
+          ;; "Inherit from font-lock-comment-delimiter-face since with
+          ;; min-colors 8 font-lock-comment-face is not colored any
+          ;; more" - the C's own comment.
+          '((#t :inherit font-lock-comment-delimiter-face))
+      "Face used to highlight permissions of group- and world-writable files.")
+
+    (defface 'dired-set-id '((#t :inherit font-lock-warning-face))
+      "Face used to highlight permissions of suid and guid files.")
+    ;; ^ Emacs's (dired.el:668-760), specs and all. The two above have a
+    ;; `((type w32 pc) :inherit default)' branch first, which is left
+    ;; out: there is no w32 or PC display type in this tree's
+    ;; `defface' conditions, and on one the face would be the default.
+
+    (define (dired--ignored-regexp)
+      ;; The C's `(regexp-opt completion-ignored-extensions)' with its shy
+      ;; groups rewritten as plain ones.
+      ;;
+      ;; `regexp-opt' emits `\(?:' both for the group it is asked for and
+      ;; for every group inside its alternation, and this tree's regexp
+      ;; engine refuses that spelling outright - "Regexp escape this
+      ;; engine does not implement", named in `search.sld'. The keyword
+      ;; reads subexpression 0, the whole match, so a capturing group
+      ;; answers the same; what shifts is the numbering of the groups
+      ;; *inside* the alternation, which nothing here reads.
+      ;;--------------------------------------------------------------
+      (string-replace "\\(?:" "\\("
+                      (regexp-opt (*completion-ignored-extensions*) #t)))
 
     (define dired-font-lock-keywords
       ;; GNU Emacs's `dired-font-lock-keywords' (dired.el:776), the mark
@@ -1682,7 +2116,133 @@ for SWITCHES."
        ;; "Flagged files."
        (list (string-append "^[" (string (*dired-del-marker*)) "]")
              (list ".+" dired-move-to-filename #f
-                   (list 0 dired-flagged-face)))))
+                   (list 0 dired-flagged-face)))
+       ;;
+       ;; The permissions. Each of these colours ONE character - which
+       ;; is why the permission field is only sometimes coloured, and
+       ;; why an ordinary `rw-r--r--' never is: the group-writable `w'
+       ;; (the sixth character), the world-writable `w' (the ninth), the
+       ;; setuid `s' (the fourth) and the setgid `s'/`S' (the seventh).
+       (list (string-append dired-re-maybe-mark dired-re-inode-size
+                            "[-d]....\\(w\\)....")   ; group writable
+             (list 1 dired-perm-write-face))
+       (list (string-append dired-re-maybe-mark dired-re-inode-size
+                            "[-d].......\\(w\\).")   ; world writable
+             (list 1 dired-perm-write-face))
+       (list (string-append dired-re-maybe-mark dired-re-inode-size
+                            "[-d]..\\(s\\)......")   ; suid
+             (list 1 'dired-set-id))
+       (list (string-append dired-re-maybe-mark dired-re-inode-size
+                            "[-d].....\\([sS]\\)...")  ; guid
+             (list 1 'dired-set-id))
+       ;;
+       ;; "Subdirectories."
+       (list dired-re-dir
+             (list ".+" dired-move-to-filename #f
+                   (list 0 dired-directory-face)))
+       ;;
+       ;;
+       ;; "Files suffixed with `completion-ignored-extensions'."
+       ;;
+       ;; The C is an `(eval . ...)' element, building the regexp when the
+       ;; keyword is first used; the list is built here at load time
+       ;; instead, which is the same regexp. `regexp-opt' is
+       ;; `regexp-opt.sld''s, and its output is identical to Emacs's for
+       ;; every case tried, the docstring's own worked example among them.
+       (list (string-append "\\(" (dired--ignored-regexp)
+                            "\\|#\\|\\.#.+\\)$")
+             (list ".+" dired-move-to-filename #f (list 0 dired-ignored-face)))
+       ;;
+       ;; "Files suffixed with `completion-ignored-extensions' plus a
+       ;; character put in by -F."
+       (list (string-append "\\(" (dired--ignored-regexp)
+                            "\\|#\\|\\.#.+\\)[*=|]$")
+             (list ".+"
+                   (lambda ()
+                     ;; "If the last character is not part of the
+                     ;; filename, move back to the start of the filename
+                     ;; so it can be fontified. Otherwise, leave point at
+                     ;; the end of the line; that way, nothing is
+                     ;; fontified."
+                     (end-of-line)
+                     (unless (get-text-property (- (point) 2) 'mouse-face
+                                                (current-buffer))
+                       (dired-move-to-filename)))
+                   #f
+                   (list 0 dired-ignored-face)))
+       ;;
+       ;; Everything below is Emacs's own list, in Emacs's order, which
+       ;; matters: font-lock applies them in it.
+       ;;
+       ;; "Broken Symbolic link."
+       (list dired-re-sym
+             (list (lambda (end)
+                     (when (*dired-check-symlinks*)
+                       (let* ((file (dired-file-name-at-point))
+                              (truename (guard (e (#t #f))
+                                          (file-truename file))))
+                         ;; "either not existent target or circular link"
+                         (and (not (and truename (file-exists-p truename)))
+                              (re-search-forward
+                               "\\(.+\\) \\(->\\) ?\\(.+\\)"
+                               end #t)))))
+                   dired-move-to-filename
+                   #f
+                   (list 1 'dired-broken-symlink)
+                   (list 2 dired-symlink-face)
+                   (list 3 (list 'face 'dired-broken-symlink
+                                 'dired-symlink-filename #t))))
+       ;;
+       ;; "Symbolic link to a directory."
+       (list dired-re-sym
+             (list (lambda (end)
+                     (when (*dired-check-symlinks*)
+                       (let ((file (dired-file-name-at-point)))
+                         (let ((truename (and file
+                                              (guard (e (#t #f))
+                                                (file-truename file)))))
+                           (and file truename
+                                (file-directory-p truename)
+                                (re-search-forward "\\(.+-> ?\\)\\(.+\\)"
+                                                   end #t))))))
+                   dired-move-to-filename
+                   #f
+                   (list 1 dired-symlink-face)
+                   (list 2 (list 'face dired-directory-face
+                                 'dired-symlink-filename #t))))
+       ;;
+       ;; "Symbolic link to a non-directory. Or no check at all."
+       (list dired-re-sym
+             (list (lambda (end)
+                     (if (not (*dired-check-symlinks*))
+                         (re-search-forward "\\(.+-> ?\\)\\(.+\\)"
+                                            end #t)
+                         (let ((file (dired-file-name-at-point)))
+                           (when file
+                             (let ((truename (guard (e (#t #f))
+                                             (file-truename file))))
+                               (and (or (not truename)
+                                        (not (file-directory-p truename)))
+                                    (re-search-forward
+                                     "\\(.+-> ?\\)\\(.+\\)"
+                                     end #t)))))))
+                   dired-move-to-filename
+                   #f
+                   (list 1 dired-symlink-face)
+                   (list 2 (list 'face 'default 'dired-symlink-filename #t))))
+       ;;
+       ;; "Sockets, pipes, block devices, char devices."
+       (list dired-re-special
+             (list ".+" dired-move-to-filename #f (list 0 'dired-special)))
+       ;;
+       ;; "Explicitly put the default face on file names ending in a
+       ;; colon to avoid fontifying them as directory header."
+       (list (string-append dired-re-maybe-mark dired-re-inode-size
+                            dired-re-perms ".*:$")
+             (list ".+" dired-move-to-filename #f (list 0 'default)))
+       ;;
+       ;; "Directory headers."
+       (list dired-subdir-regexp (list 1 dired-header-face))))
 
     (define *dired-log-buffer* "*Dired log*")
     ;; ^ GNU Emacs's `dired-log-buffer' (dired.el:5043).
@@ -1875,11 +2435,17 @@ for SWITCHES."
              (lambda (window value)
                (with-selected-window
                 window
-                (unwind-protect
-                    (apply function args)
-                  (if (window-live-p window)
-                      (quit-restore-window window 'kill)
-                      #f))))
+                ;; the C's `unwind-protect' is `dynamic-wind' here, as it
+                ;; is everywhere else in this tree - Scheme has no
+                ;; `unwind-protect', and an unbound one is a runtime error
+                ;; the compiler only warns about.
+                (dynamic-wind
+                    (lambda () #f)
+                    (lambda () (apply function args))
+                    (lambda ()
+                      (if (window-live-p window)
+                          (quit-restore-window window 'kill)
+                          #f)))))
              ;; "Handle (t FILE) just like (FILE), here."
              (dired-format-columns-of-files
               (if (and (pair? files) (eq? (car files) #t))

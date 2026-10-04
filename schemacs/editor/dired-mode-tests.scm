@@ -160,7 +160,7 @@
 ;; a first content line of `  drwxr-xr-x', not `  total'.
 ;; The second line is `  total N', and N is the tree's block count, which
 ;; is not this test's business - so the prefix is asserted, not the line.
-(test-equal (list (string-append "  " root ":") "  total")
+(test-equal (list (string-append "  " root ":") "  drwxr")
   (let ((b (listing)))
     (goto-char (point-min))
     (list (buffer-substring-no-properties (line-beginning-position)
@@ -216,13 +216,13 @@
 ;; - the C's last guard lets it through when the marker is not the
 ;; deletion flag. One leading `"  "' more than there used to be, for the
 ;; header line the indent fix brought in.
-(test-equal '("  " "  " "  " "  " "* " "  " "  " "")
+(test-equal '("  " "  " "  " "* " "  " "  " "")
   (let ((b (listing)))
     (goto-file-line "a.txt")
     (dired-mark 1 #f)
     (first-chars-of-every-line)))
 
-(test-equal '("  " "  " "* " "  " "  " "  " "  " "")
+(test-equal '("  " "* " "  " "  " "  " "  " "")
   (let ((b (listing)))
     (goto-dot-line)
     (dired-mark 1 #f)
@@ -230,14 +230,14 @@
 
 ;; `dired-flag-file-deletion' is the same command with the deletion
 ;; marker bound
-(test-equal '("  " "  " "  " "  " "  " "D " "  " "")
+(test-equal '("  " "  " "  " "  " "D " "  " "")
   (let ((b (listing)))
     (goto-file-line "b.txt")
     (dired-flag-file-deletion 1 #f)
     (first-chars-of-every-line)))
 
 ;; and `dired-unmark' the same with a space
-(test-equal '("  " "  " "  " "  " "  " "  " "  " "")
+(test-equal '("  " "  " "  " "  " "  " "  " "")
   (let ((b (listing)))
     (goto-file-line "a.txt")
     (dired-mark 1 #f)
@@ -250,7 +250,7 @@
     (first-chars-of-every-line)))
 
 ;; a prefix argument marks that many lines
-(test-equal '("  " "  " "  " "  " "* " "* " "  " "")
+(test-equal '("  " "  " "  " "* " "* " "  " "")
   (let ((b (listing)))
     (goto-file-line "a.txt")
     (dired-mark 2 #f)
@@ -396,14 +396,14 @@
 ;; needs a number; without the conversion every marking key failed with
 ;; "Wrong type argument in position 2: #f", which is what `M-x dired-mark'
 ;; and `m' did.
-(test-equal '("  " "  " "  " "  " "* " "  " "  " "")
+(test-equal '("  " "  " "  " "* " "  " "  " "")
   (let ((b (listing)))
     (goto-file-line "a.txt")
     (dired-mark #f #t)
     (first-chars-of-every-line)))
 
 ;; and a prefix argument still counts lines
-(test-equal '("  " "  " "  " "  " "* " "* " "  " "")
+(test-equal '("  " "  " "  " "* " "* " "  " "")
   (let ((b (listing)))
     (goto-file-line "a.txt")
     (dired-mark (list 2) #t)

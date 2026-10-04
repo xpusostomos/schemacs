@@ -75,6 +75,7 @@
     (schemacs editor tabulated-list)
     (schemacs editor buff-menu)
     (schemacs map-ynp)
+    (schemacs regexp-opt)
     (schemacs ui platform ncurses)
     (schemacs keymap)
     (schemacs bit-stack)

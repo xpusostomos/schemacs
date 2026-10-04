@@ -75,8 +75,8 @@
          set!%window-old-point set!%window-suspend-auto-hscroll?)
     (only (schemacs editor disp-table)
          char-display-cursor-width char-display-width
-         current-line-display-column expand-line-display
-         expand-line-glyphs line-display-offsets)
+         char-display-glyph current-line-display-column display-text-width
+         expand-line-display expand-line-glyphs line-display-offsets)
     ;; The `face' text property, and the faces themselves. A face reaches
     ;; the display through these libraries and no others: the property
     ;; says which faces are in effect, `xfaces' merges them and folds
@@ -182,6 +182,143 @@
         (text-line-inner->string (text-editor-text-line-ref ed i)))
        (else #f)))
 
+    ;;----------------------------------------------------------------
+    ;; The `display' text property
+    ;;
+    ;; GNU Emacs's `handle_display_prop' (`xdisp.c'): a character whose
+    ;; `display' property is a string is *drawn* as that string, while the
+    ;; buffer keeps the character and every position stays where it was.
+    ;; Dired is what asks for it - `dired--insert-disk-space' writes
+    ;; ": (15 GiB available)" over the header's colon - and that is the
+    ;; STRING branch of the C. The other branches - `(space :align-to
+    ;; ...)', images, `(when ...)', `(height ...)', `(raise ...)' - are
+    ;; NOT ported, and a `display' value that is not a string is ignored
+    ;; here rather than faked: nothing in this tree sets one.
+    ;;
+    ;; The renderer here draws from a line *string*, so the substitution
+    ;; has to be carried beside it. What is carried is a vector with one
+    ;; entry per *buffer column* of the line - the column being what every
+    ;; slice, face run and cursor position in this file is expressed in,
+    ;; so nothing else has to change. An entry is the substituted string
+    ;; where the property stands, and the line's own character otherwise;
+    ;; the glyph an entry is drawn as, and the number of cells it takes,
+    ;; are `texts-glyph' and `texts-width' below.
+    ;;
+    ;; The character is kept rather than its glyph because a tab's glyph
+    ;; depends on the column it is drawn at, and a wrapped row starts at
+    ;; screen column zero - see `line-display-rows'.
+    ;;------------------------------------------------------------------
+
+    (define (line-display-texts ed line-start line-string)
+      ;; LINE-STRING - the line beginning at buffer position LINE-START -
+      ;; as the vector of texts described above, one entry per buffer
+      ;; column. LINE-START is an engine position, which is what
+      ;; `get-text-property' takes; the overlay layer is not consulted,
+      ;; because the C's `handle_display_prop' reads the text property.
+      ;;--------------------------------------------------------------
+      (let ((len (string-length line-string)))
+        (let loop ((i 0) (acc '()))
+          (if (>= i len)
+              (list->vector (reverse acc))
+              (let ((prop (and ed
+                               (get-text-property (+ line-start i)
+                                                  'display ed))))
+                (loop (+ i 1)
+                      (cons (if (string? prop) prop (string-ref line-string i))
+                            acc)))))))
+
+    (define (buffer-line-texts window line-index)
+      ;; The texts of LINE-INDEX's line in WINDOW, or #f when there is no
+      ;; such line. Computing them needs the line's *buffer position*,
+      ;; which `window-top-line-position' answers for any line.
+      ;;--------------------------------------------------------------
+      (let* ((ed (window-buffer window))
+             ;; The line number is tested here rather than left to
+             ;; `buffer-line-string', because the position walk below has
+             ;; no answer for a line that is not there.
+             (line-string (and (>= line-index 0)
+                               (< line-index (text-editor-line-count ed))
+                               (buffer-line-string ed line-index))))
+        (and line-string
+             (line-display-texts ed
+                                 (window-top-line-position ed line-index)
+                                 line-string))))
+
+    (define (texts-glyph texts i col)
+      ;; Buffer column I of TEXTS as the string the redisplay writes for
+      ;; it, drawn at screen column COL - `char-display-glyph', or the
+      ;; `display' string standing there.
+      ;;--------------------------------------------------------------
+      (let ((entry (vector-ref texts i)))
+        (if (string? entry) entry (char-display-glyph entry col))))
+
+    (define (texts-width texts i col)
+      ;; How many screen cells buffer column I of TEXTS takes, drawn at
+      ;; screen column COL - `char-display-width', or the width of the
+      ;; `display' string standing there. The two conds must agree with
+      ;; `texts-glyph', as `char-display-width''s own note says.
+      ;;--------------------------------------------------------------
+      (let ((entry (vector-ref texts i)))
+        (if (string? entry)
+            (display-text-width entry col)
+            (char-display-width entry col))))
+
+    (define (line-texts-width texts)
+      ;; The display width of TEXTS, all of it: `line-display-width' over
+      ;; the texts rather than over the line's characters.
+      ;;--------------------------------------------------------------
+      (let loop ((i 0) (col 0))
+        (if (>= i (vector-length texts))
+            col
+            (loop (+ i 1) (+ col (texts-width texts i col))))))
+
+    (define (line-texts-column texts k)
+      ;; The screen column at which buffer column K of TEXTS is drawn, so
+      ;; a column a `display' property moved along is counted at where it
+      ;; is really drawn.
+      ;;--------------------------------------------------------------
+      (let loop ((i 0) (col 0))
+        (if (>= i k)
+            col
+            (loop (+ i 1) (+ col (texts-width texts i col))))))
+
+    (define (line-texts-offsets texts from to)
+      ;; Where each buffer column of the slice [FROM, TO) is drawn, as a
+      ;; list of TO-FROM+1 screen columns, the last being the slice's own
+      ;; width - `line-display-offsets'' walk over a vector of texts.
+      ;;--------------------------------------------------------------
+      (let loop ((i from) (col 0) (acc '()))
+        (cond ((>= i to) (reverse (cons col acc)))
+              (else
+               (loop (+ i 1) (+ col (texts-width texts i col)) (cons col acc))))))
+
+    (define (line-texts-glyphs texts from to)
+      ;; The slice [FROM, TO) of TEXTS as a list of its glyph strings, one
+      ;; per buffer column, in order - `expand-line-glyphs'' walk.
+      ;;--------------------------------------------------------------
+      (let loop ((i from) (col 0) (acc '()))
+        (if (>= i to)
+            (reverse acc)
+            (let ((glyph (texts-glyph texts i col)))
+              (loop (+ i 1)
+                    (+ col (display-text-width glyph col))
+                    (cons glyph acc))))))
+
+    (define (line-texts-display texts from to width)
+      ;; The slice [FROM, TO) of TEXTS as one string, cut at WIDTH screen
+      ;; cells - `expand-line-display''s walk, and its same rule that the
+      ;; glyph starting before WIDTH is written whole and the renderer
+      ;; clips it by column.
+      ;;--------------------------------------------------------------
+      (call-with-port (open-output-string)
+        (lambda (port)
+          (let loop ((i from) (col 0))
+            (when (and (< i to) (< col width))
+              (let ((glyph (texts-glyph texts i col)))
+                (display glyph port)
+                (loop (+ i 1) (+ col (display-text-width glyph col))))))
+          (get-output-string port))))
+
     (define (truncate-line str width)
       (let ((len (string-length str)))
         (cond
@@ -243,8 +380,31 @@
                       (not (buffer-truncate-lines
                             (window-buffer window))))))))
 
+    (define (string->texts str)
+      ;; STR's characters as a texts vector - what `line-display-texts'
+      ;; builds for a line that carries no `display' property, and the
+      ;; reason `line-display-rows' can keep taking a plain string.
+      ;;--------------------------------------------------------------
+      (let* ((n (string-length str))
+             (v (make-vector n)))
+        (let loop ((i 0))
+          (when (< i n)
+            (vector-set! v i (string-ref str i))
+            (loop (+ i 1))))
+        v))
+
     (define (line-display-rows line-string width wrap? word-wrap?)
-      ;; LINE-STRING as the screen rows it is drawn on, each a
+      ;; LINE-STRING as the screen rows it is drawn on - `line-texts-rows'
+      ;; over the line's own characters. A line that carries a `display'
+      ;; property has to go through `line-texts-rows' with
+      ;; `line-display-texts'' vector instead; this entry point is for a
+      ;; string that carries none, which is what the mode line, the echo
+      ;; area and the layout tests use.
+      ;;--------------------------------------------------------------
+      (line-texts-rows (string->texts line-string) width wrap? word-wrap?))
+
+    (define (line-texts-rows texts width wrap? word-wrap?)
+      ;; The screen rows LINE-STRING is drawn on, each a
       ;; `(FIRST . LAST)' pair of *buffer* columns. One row when the line
       ;; is truncated or short enough; several when it wraps.
       ;;
@@ -271,7 +431,7 @@
       ;; below. Reserving the cell is what stops the marker from landing
       ;; on top of the line's last character and losing it.
       ;;--------------------------------------------------------------
-      (let ((len (string-length line-string))
+      (let ((len (vector-length texts))
             (usable (max 1 (- width 1))))
         (cond
          ((or (not wrap?) (<= len 0))
@@ -282,12 +442,14 @@
             (cond
              ((>= i len) (reverse (cons (cons start len) rows)))
              (else
-              (let* ((c (string-ref line-string i))
-                     (w (char-display-width c col)))
+              (let* ((entry (vector-ref texts i))
+                     (w (texts-width texts i col)))
                 (if (and (> (+ col w) usable) (> i start))
                     ;; this character does not fit and the row is not
                     ;; empty, so break here - or after the last space, if
-                    ;; word wrapping and there is one
+                    ;; word wrapping and there is one. A `display' string
+                    ;; standing on a column is not a space, whatever it
+                    ;; looks like: the break is at a buffer space.
                     (let ((end (if (and word-wrap? space (> space start))
                                    (+ space 1)
                                    i)))
@@ -295,12 +457,16 @@
                     (loop start
                           (+ i 1)
                           (+ col w)
-                          (if (and word-wrap? (char=? c #\space)) i space)
+                          (if (and word-wrap?
+                                   (char? entry)
+                                   (char=? entry #\space))
+                              i space)
                           rows))))))))))
 
-    (define (hscroll-line-slice window line-string)
+    (define (hscroll-line-slice window texts)
       ;; The `(FIRST . LAST)' buffer columns an hscrolled window shows of
-      ;; LINE-STRING, always exactly one screen row's worth. An hscrolled
+      ;; the line whose texts are TEXTS, always exactly one screen row's
+      ;; worth. An hscrolled
       ;; window's view is the display columns from `first_visible_x' to
       ;; `last_visible_x' (`init_iterator', `xdisp.c:3501' and `:3509':
       ;; `first_visible_x = w->hscroll', `last_visible_x = first_visible_x
@@ -321,10 +487,10 @@
       ;;--------------------------------------------------------------
       (let* ((h (%window-hscroll window))
              (width (window-body-width window))
-             (len (string-length line-string))
+             (len (vector-length texts))
              ;; a vector, because the walk indexes it per character and
              ;; a `list-ref' per step would make a long line quadratic
-             (offsets (list->vector (line-display-offsets line-string))))
+             (offsets (list->vector (line-texts-offsets texts 0 len))))
         (let loop ((i 0) (start #f))
           (cond
            ((>= i len) (cons (or start len) len))
@@ -345,34 +511,44 @@
       ;; How many screen rows the buffer line LINE-INDEX takes in WINDOW:
       ;; one when it is short enough or truncated, more when it wraps.
       ;;--------------------------------------------------------------
-      (let ((line (buffer-line-string (window-buffer window) line-index)))
-        (cond ((not line) 1)
-              ((and (not (window-wraps? window))
-                    (> (%window-hscroll window) 0))
-               ;; an hscrolled line is one row, whatever its length
-               1)
-              (else
-               (length (line-display-rows line
-                                          (window-body-width window)
-                                          (window-wraps? window)
-                                          (buffer-word-wrap
-                                           (window-buffer window))))))))
+      (let ((texts (buffer-line-texts window line-index)))
+        (if texts (%window-line-rows window texts) 1)))
+
+    (define (%window-line-rows window texts)
+      ;; `window-line-rows' over texts already in hand.
+      ;;--------------------------------------------------------------
+      (cond ((and (not (window-wraps? window))
+                  (> (%window-hscroll window) 0))
+             ;; an hscrolled line is one row, whatever its length
+             1)
+            (else
+             (length (line-texts-rows texts
+                                      (window-body-width window)
+                                      (window-wraps? window)
+                                      (buffer-word-wrap
+                                       (window-buffer window)))))))
 
     (define (window-line-slices window line-index)
       ;; The `(FIRST . LAST)' buffer columns of each screen row the buffer
       ;; line LINE-INDEX takes in WINDOW - the rows to draw, in order.
       ;;--------------------------------------------------------------
-      (let ((line (buffer-line-string (window-buffer window) line-index)))
-        (cond ((not line) '())
-              ((and (not (window-wraps? window))
-                    (> (%window-hscroll window) 0))
-               (list (hscroll-line-slice window line)))
-              (else
-               (line-display-rows line
-                                  (window-body-width window)
-                                  (window-wraps? window)
-                                  (buffer-word-wrap
-                                   (window-buffer window)))))))
+      (let ((texts (buffer-line-texts window line-index)))
+        (if texts (%window-line-slices window texts) '())))
+
+    (define (%window-line-slices window texts)
+      ;; `window-line-slices' over texts already in hand. The row walk
+      ;; computes them itself, beside the line's buffer position, so that
+      ;; a line with a `display' property is walked for it once.
+      ;;--------------------------------------------------------------
+      (cond ((and (not (window-wraps? window))
+                  (> (%window-hscroll window) 0))
+             (list (hscroll-line-slice window texts)))
+            (else
+             (line-texts-rows texts
+                              (window-body-width window)
+                              (window-wraps? window)
+                              (buffer-word-wrap
+                               (window-buffer window))))))
 
     (define (rows-above window line)
       ;; How many screen rows the lines between WINDOW's top line and
@@ -500,18 +676,18 @@
           ;; changed, no more suspend auto hscrolling" (`xdisp.c:16756')
           (set!%window-suspend-auto-hscroll? window #f))
         (set!%window-old-point window point)
-        (let* ((line (buffer-line-string ed (text-editor-cursor-line ed)))
+        (let* ((texts (buffer-line-texts window (text-editor-cursor-line ed)))
                (width (window-body-width window))
                (margin (max 0 (buffer-hscroll-margin ed)))
-               (point-x (if line
+               (point-x (if texts
                             (current-line-display-column
                              ed (text-editor-cursor-column ed))
                             0))
                (cursor-x (max 0 (- point-x h)))
                (truncated-right?
-                (and line
+                (and texts
                      (not (window-wraps? window))
-                     (> (line-display-width line) (+ h width -1))))
+                     (> (line-texts-width texts) (+ h width -1))))
                (step (buffer-hscroll-step ed))
                (wanted
                 ;; `hscroll-step' 0 - neither a float nor a positive
@@ -608,8 +784,15 @@
              ;; The line point is on, for `%c' and `%C': Emacs's
              ;; `current-column' is the number of *screen* columns from the
              ;; start of the line, which is not the number of characters
-             ;; when the line holds a tab or a wide character.
-             (line (buffer-line-string ed (- (text-location-line at) 1))))
+             ;; when the line holds a tab or a wide character - nor when a
+             ;; `display' property stands on the way, which moves the
+             ;; columns after it along.
+             (line-index (- (text-location-line at) 1))
+             (line (buffer-line-string ed line-index))
+             (line-texts (and line
+                              (line-display-texts
+                               ed (window-top-line-position ed line-index)
+                               line))))
         (case spec
           ((#\%) "%")
           ((#\b) (or (text-editor-buffer-name ed) "*scratch*"))
@@ -622,14 +805,15 @@
           ;; a character count, so the construct converts it through the
           ;; line's display widths - which is what makes it 3 rather than
           ;; 2 after a CJK character, as Emacs's is.
-          ((#\c) (number->string (if line
-                                     (display-column-of
-                                      line (- (text-location-column at) 1))
+          ((#\c) (number->string (if line-texts
+                                     (line-texts-column
+                                      line-texts (- (text-location-column at) 1))
                                      (- (text-location-column at) 1))))
           ;; `%C' is `%c' counting from one rather than zero
-          ((#\C) (number->string (if line
-                                     (+ 1 (display-column-of
-                                           line (- (text-location-column at) 1)))
+          ((#\C) (number->string (if line-texts
+                                     (+ 1 (line-texts-column
+                                           line-texts
+                                           (- (text-location-column at) 1)))
                                      (text-location-column at))))
           ;; `%*' is `%' read-only, `*' modified, `-' neither; `%+' is `*'
           ;; modified, `%' read-only, `-' neither; `%&' is `*' modified
@@ -804,16 +988,11 @@
       ;;--------------------------------------------------------------
       (text-editor-line-outer-size ed line-index))
 
-    (define (display-column-of line col)
-      ;; The screen column at which buffer column COL of LINE is drawn,
-      ;; which is where a search match has to be drawn.
-      ;;
-      ;; The prefix's *display width*, not the length of its expansion: a
-      ;; tab is several cells and a wide character is two, so the number
-      ;; of characters drawn is not the number of cells they take.
-      ;;--------------------------------------------------------------
-      (line-display-width
-       (substring line 0 (min col (string-length line)))))
+    ;; `display-column-of' used to sit here - the screen column at which
+    ;; buffer column COL of a line is drawn, as the display width of the
+    ;; line's *prefix*. It walked the line string, so a `display' property
+    ;; on the way was not counted, and both of its callers now go through
+    ;; `line-texts-column' with the line's texts instead.
 
     ;;----------------------------------------------------------------
     ;; Faces
@@ -845,9 +1024,9 @@
         (if (= len 0)
             '()
             (let loop ((i 1)
-                       (start 0)
-                       (attribute (face-at-buffer-position ed line-start))
-                       (acc '()))
+                     (start 0)
+                     (attribute (face-at-buffer-position ed line-start))
+                     (acc '()))
               (if (>= i len)
                   (reverse (cons (list start len attribute) acc))
                   (let ((a (face-at-buffer-position ed (+ line-start i))))
@@ -914,10 +1093,10 @@
               ((null? (vector-ref strings c)) (loop (+ c 1)))
               (else #t))))
 
-    (define (draw-row-with-strings! ed slice slice-start strings
+    (define (draw-row-with-strings! ed texts from to slice-start strings
                                     screen-row x0 width)
       ;; Draw a row that has overlay strings on it, and answer the column
-      ;; it ended at.
+      ;; it ended at. The row's buffer columns are [FROM, TO) of TEXTS.
       ;;
       ;; The strings are cells that are *not* buffer characters, so the
       ;; row can no longer be drawn as runs of the line's columns: every
@@ -926,8 +1105,7 @@
       ;; iterator does - it delivers the overlay strings at a position
       ;; and then the character there.
       ;;--------------------------------------------------------------
-      (let* ((len (string-length slice))
-             (glyphs (list->vector (expand-line-glyphs slice))))
+      (let ((len (- to from)))
         (let loop ((c 0) (col 0))
           (if (or (> c len) (>= col width))
               col
@@ -939,11 +1117,12 @@
                                                  (+ x0 col))))
                 (if (>= c len)
                     (draw-overlay-strings! tails screen-row (+ x0 col))
-                    (let* ((ch (string-ref slice c))
-                           (w (char-display-width ch col)))
+                    (let* ((i (+ from c))
+                           (glyph (texts-glyph texts i col))
+                           (w (texts-width texts i col)))
                       (when (< col width)
                         (write-glyphs!
-                         (current-display) (vector-ref glyphs c) screen-row
+                         (current-display) glyph screen-row
                          (+ x0 col)
                          (face-at-buffer-position ed (+ slice-start c))))
                       ;; and the `after-string's come after the character,
@@ -953,12 +1132,12 @@
                             (draw-overlay-strings! tails screen-row
                                                    (+ x0 col w))))))))))
 
-    (define (draw-line! ed slice-start line-string slice display
+    (define (draw-line! ed slice-start line-string texts slice
                         screen-row x0 width more? truncated?)
       ;; Draw one *screen row* of a line at SCREEN-ROW, X0. SLICE is the
-      ;; row's own text - the buffer columns the caller cut out of
-      ;; LINE-STRING - and DISPLAY its display form. LINE-STRING is the
-      ;; whole line, for the region's line-end rule.
+      ;; row's own buffer columns in TEXTS - the caller cut them out of
+      ;; the line, whose texts TEXTS are and whose string LINE-STRING is,
+      ;; the latter for the region's line-end rule.
       ;;
       ;; A row of a long line is one of three things, and the last cell
       ;; says which: it *continues* on the next row (MORE?), it was *cut
@@ -974,18 +1153,30 @@
       ;; `draw-row-with-strings!'. A row without them is unchanged, so
       ;; the common case keeps its fast path.
       ;;--------------------------------------------------------------
-      (let* ((len (string-length slice))
+      (let* ((from (car slice))
+             (to (cdr slice))
+             (len (- to from))
+             ;; The row's own width: `display` holds no tabs or control
+             ;; characters - they were expanded into it - so this is a sum
+             ;; of character widths, and for a wide character that is 2
+             ;; where a `string-length' would say 1.
+             (display (line-texts-display texts from to width))
+             ;; the row's own characters, which the two face walks below
+             ;; ask the length of
+             (slice-string (substring line-string from to))
              (strings (row-overlay-strings ed slice-start len))
              (drawn-width
               (if (row-string-elements? strings)
-                  (draw-row-with-strings! ed slice slice-start strings
+                  (draw-row-with-strings! ed texts from to slice-start strings
                                           screen-row x0 width)
                   (begin
                     (if (and (not (text-editor-text-props ed))
                              (not (region-face-active? ed)))
                         (write-glyphs! (current-display) display screen-row x0 #f)
-                        (let ((offsets (list->vector (line-display-offsets slice)))
-                              (glyphs (list->vector (expand-line-glyphs slice))))
+                        (let ((offsets (list->vector
+                                        (line-texts-offsets texts from to)))
+                              (glyphs (list->vector
+                                       (line-texts-glyphs texts from to))))
                           (for-each
                            (lambda (run)
                              (let ((drawn (line-glyph-run glyphs offsets
@@ -994,12 +1185,7 @@
                                  (write-glyphs! (current-display) (car drawn)
                                                 screen-row
                                                 (+ x0 (cdr drawn)) (caddr run)))))
-                           (line-face-runs ed slice-start slice))))
-                    ;; The row's own width: `display` holds no tabs or
-                    ;; control characters - they were expanded into it -
-                    ;; so this is a sum of character widths, and for a
-                    ;; wide character that is 2 where a `string-length'
-                    ;; would say 1.
+                           (line-face-runs ed slice-start slice-string))))
                     (line-display-width display)))))
         ;; The last cell, and what the row's own width was.
         (cond
@@ -1008,7 +1194,8 @@
          (else
           ;; the line's own end: a region may extend its face into the
           ;; empty cells after the text
-          (let ((fill (line-end-fill-attribute ed slice-start slice display width)))
+          (let ((fill (line-end-fill-attribute ed slice-start slice-string
+                                               display width)))
             (when fill
               (write-glyphs! (current-display)
                              (make-string (- width drawn-width) #\space)
@@ -1050,7 +1237,8 @@
 
     (define (line-end-fill-attribute ed line-start line-string display width)
       ;; Face used for cells after a line's text when the line-end
-      ;; position is inside the active region. A line that ends at point-max
+      ;; position is inside the active region. LINE-STRING is the *row's*
+      ;; text, so its length is the row's. A line that ends at point-max
       ;; has no newline position and gets no extension face in Emacs.
       ;;--------------------------------------------------------------
       (let* ((row-end (+ line-start (string-length line-string)))
@@ -1244,7 +1432,7 @@
                 'isearch 'lazy-highlight))))))
 
     (define (highlight-matches window row line line-start width
-                               pattern case-fold? x-offset)
+                               pattern case-fold? x-offset texts from)
       ;; Draw the search matches that fall on this line over the line that
       ;; has just been drawn, so that what was found can be seen.
       ;;
@@ -1270,8 +1458,13 @@
              (row (+ row (window-top window)))
              (x0 (+ (window-left window) x-offset))
              (len (string-length line))
-             (glyphs (list->vector (expand-line-glyphs line)))
-             (offsets (list->vector (line-display-offsets line)))
+             ;; the row's buffer columns are [FROM, FROM+LEN) of TEXTS,
+             ;; which is where the glyphs and screen columns come from -
+             ;; the match is found in LINE's characters and drawn in the
+             ;; row's glyphs, and a `display' property makes those differ
+             (to (+ from len))
+             (glyphs (list->vector (line-texts-glyphs texts from to)))
+             (offsets (list->vector (line-texts-offsets texts from to)))
              (point (text-editor-get-cursor ed))
              (plen (string-length pattern)))
         (let loop ((at 0))
@@ -1445,6 +1638,9 @@
              (line (text-editor-cursor-line ed))
              (column (text-editor-cursor-column ed))
              (line-string (buffer-line-string ed line))
+             (texts (and line-string
+                         (line-display-texts
+                          ed (text-editor-get-start-of-line ed) line-string)))
              (width (window-body-width window))
              (vheight (window-body-height window))
              ;; The cursor's own row is not its line's row: a wrapped
@@ -1472,8 +1668,7 @@
                        ;; display column is measured from where its row
                        ;; begins, not the line.
                        (min (- (current-line-display-column ed column)
-                               (display-column-of line-string
-                                                  (or row-start 0)))
+                               (line-texts-column texts (or row-start 0)))
                             (- width 1))
                        ;; a truncated line is one row, and an hscrolled
                        ;; row's first cell is the left truncation glyph
@@ -1533,34 +1728,40 @@
                               ed (window-top-line window))))
         (when (< row vheight)
           (let* ((line-string (buffer-line-string ed line-index))
-                 (slices (window-line-slices window line-index)))
+                 ;; The line's `display' texts, from the buffer position
+                 ;; the walk already has - so the two do not disagree.
+                 (texts (and line-string
+                             (line-display-texts ed line-start line-string)))
+                 (slices (if texts
+                             (%window-line-slices window texts)
+                             '())))
             ;; No slices means there is no such line - the walk has run
             ;; past the end of the buffer, and there is nothing below to
             ;; draw.
             (when (pair? slices)
               (render-line-rows! window ed width x0 vheight highlight
-                                 row line-index line-start
-                                 line-string slices)
+                                 row line-start line-string texts slices)
               (loop (+ row (length slices))
                     (+ line-index 1)
                     (+ line-start (or (line-outer-size ed line-index) 0))))))))
 
     (define (render-line-rows! window ed width x0 vheight highlight
-                               row line-index line-start line-string slices)
+                               row line-start line-string texts slices)
       ;; One buffer line's screen rows, from ROW down.
       ;;--------------------------------------------------------------
       (let* ((hscrolled? (and (not (window-wraps? window))
                               (> (%window-hscroll window) 0)))
+             (line-width (line-texts-width texts))
              ;; a row of an hscrolled line: the right truncation glyph is
              ;; drawn when the line's display width runs past
              ;; `last_visible_x' = hscroll + width - 1, which is what
              ;; `cursor_row->truncated_on_right_p' records
              (hscroll-truncated?
               (and hscrolled?
-                   (> (line-display-width line-string)
+                   (> line-width
                       (+ (%window-hscroll window) width -1))))
              (truncated? (and (not (window-wraps? window))
-                              (> (line-display-width line-string) width))))
+                              (> line-width width))))
         (let rows-loop ((rest slices) (k 0))
           (when (and (pair? rest) (< (+ row k) vheight))
             (let* ((slice (car rest))
@@ -1585,18 +1786,16 @@
                     (write-glyphs! (current-display)
                                    "$" screen-row x0
                                    (face->attribute 'default))
-                    (draw-line! ed slice-start line-string slice-string
-                                (expand-line-display slice-string row-width)
+                    (draw-line! ed slice-start line-string texts slice
                                 screen-row (+ x0 1) row-width
                                 #f hscroll-truncated?)
                     (when highlight
                       (highlight-matches window (+ row k) slice-string
                                          slice-start row-width
                                          (car highlight) (cdr highlight)
-                                         1)))
+                                         1 texts (car slice))))
                   (begin
-                    (draw-line! ed slice-start line-string slice-string
-                                (expand-line-display slice-string width)
+                    (draw-line! ed slice-start line-string texts slice
                                 screen-row x0 width more?
                                 (and truncated? (not more?)))
                     ;; the characters the current search matched, drawn
@@ -1607,7 +1806,7 @@
                       (highlight-matches window (+ row k) slice-string
                                          slice-start width
                                          (car highlight) (cdr highlight)
-                                         0))))
+                                         0 texts (car slice)))))
               (rows-loop (cdr rest) (+ k 1)))))))
 
     (define (render-window! window)

@@ -33,6 +33,7 @@
         new-text-editor text-editor-insert text-editor-set-cursor
         set!text-editor-mark)
  (only (schemacs editor buffer) buffer-local-value set-buffer-local-value!)
+ (only (schemacs editor textprop) put-text-property)
  ;; Imported for the *faces* it defines - `dired-marked' and the two
  ;; beside it are dired.el's own `defface's - which the test below
  ;; realizes. Loaded by both front ends in the real editor, so this is
@@ -266,6 +267,75 @@
 ;; and the text after the region is not painted
 (test-equal white (wide-cell-pixel 5))
 
+
+;;------------------------------------------------------------------
+;; The `display' text property replaces a character on the screen
+;;
+;; GNU Emacs's `handle_display_prop': a character whose `display'
+;; property is a string is *drawn* as that string while the buffer keeps
+;; the character. Dired is what asks for it - `dired--insert-disk-space'
+;; writes ": (15 GiB available)" over the header's colon - so this is one
+;; of the few redisplay facts that changes what the user sees in Dired.
+;;
+;; Only the pixels can tell: the property is on the buffer either way and
+;; every layout function would agree with itself. What is checked is that
+;; the cells *past* the line's own last character have ink with the
+;; property and none without it - which is the substitution, in the one
+;; place a substitution can be seen.
+;;------------------------------------------------------------------
+
+(define (render-line text prop?)
+  ;; A frame on a display showing TEXT, with the last character's
+  ;; `display' property set to a long string when PROP?.
+  (let* ((d (new-display))
+         (ed (new-text-editor)))
+    (text-editor-insert ed text)
+    (text-editor-set-cursor ed 0)
+    (when prop?
+      (put-text-property (- (string-length text) 1) (string-length text)
+                         'display ": (15 GiB available)" ed))
+    (let ((frame (fr:new-frame ed 24 80)))
+      (parameterize ((fr:*current-frame* frame))
+        (xd:render! frame)))
+    (shot-of d)))
+
+(define (cell-has-ink? pix cell)
+  ;; Whether any pixel of CELL's glyph band is not the white background.
+  ;; The band is below the top of the row and above its bottom, where the
+  ;; glyph strokes are - a cell with no character is blank throughout.
+  (let x-loop ((x 0))
+    (cond ((>= x 9) #f)
+          ((let y-loop ((y 3))
+             (cond ((>= y 15) #f)
+                   ((not (equal? '(255 255 255)
+                                 (pix (+ (* cell 9) x) y)))
+                    #t)
+                   (else (y-loop (+ y 1)))))
+           #t)
+          (else (x-loop (+ x 1))))))
+
+(define colon-pixels (render-line "  /tmp:" #t))
+(define plain-pixels (render-line "  /tmp:" #f))
+
+;; The line's own characters are drawn either way: cells 2..6 are
+;; "/tmp:".
+(test-assert "the line's own characters are drawn"
+  (cell-has-ink? colon-pixels 2))
+;; and with the property, so is "(15 GiB available)" - which is longer
+;; than the character it replaces, so it reaches into cells the plain line
+;; leaves empty.
+(test-assert "a display property is drawn over the character it is on"
+  ;; ": (15 GiB available)" is nineteen characters on a cell the plain
+  ;; line ends at, so the row's last cell - 6 for the colon plus 19 less
+  ;; one - carries its closing bracket. Counting the cells with ink would
+  ;; depend on the font; naming two that are well inside it does not.
+  (and (cell-has-ink? colon-pixels 12)
+       (cell-has-ink? colon-pixels 24)))
+(test-assert "and nothing is drawn there without it"
+  (let loop ((c 7))
+    (cond ((>= c 25) #t)
+          ((cell-has-ink? plain-pixels c) #f)
+          (else (loop (+ c 1))))))
 
 ;; A face whose colour is named in a spec's `(min-colors 88)' or
 ;; `(min-colors 16)' branch must realize to a colour, and it did not:

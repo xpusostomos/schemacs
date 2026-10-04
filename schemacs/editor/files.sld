@@ -78,7 +78,8 @@
           file-directory-p file-exists-p file-name-absolute-p
           file-name-as-directory
           file-name-directory-part file-name-nondirectory-part
-          file-symlink-p file-writable-p find-file-name-handler)
+          file-symlink-p file-system-info file-writable-p
+          find-file-name-handler)
     ;; `directory-files' and `file-attributes' are `dired.c''s, and
     ;; `delete-directory''s recursive half reads both.
     (only (schemacs editor diredc) directory-files file-attributes)
@@ -142,12 +143,19 @@
           closedir getcwd opendir readdir stat:type
           string-index string-prefix? string-rindex)
     ;; `file-size-human-readable''s arithmetic
-    (only (guile) caddr floor quotient remainder)
+    (only (guile) caddr exact->inexact floor quotient remainder)
+    ;; `format' here is Guile's (destination first); the C's `format' is
+    ;; editfns.c's, so it is imported under a prefix of its own.
+    (prefix (only (schemacs editor editfns) format) ef:)
     ;; The two files.el functions `ls-lisp' needs, handed over below.
     (only (schemacs editor ls-lisp)
           install-ls-lisp-files! ls-lisp--insert-directory))
 
   (export
+   *byte-count-to-string-function*
+   file-size-human-readable
+   file-size-human-readable-iec
+   get-free-disk-space
    *delete-by-moving-to-trash*
    *directory-files-no-dot-files-regexp*
    delete-directory
@@ -827,65 +835,13 @@ save-buffer
                   (loop)))
               (string-append "\\`" result "\\'")))))
 
-    (define (file-size-human-readable file-size . rest)
-      ;; GNU Emacs's `file-size-human-readable' (files.el:1689): "Produce
-      ;; a string showing FILE-SIZE in human-readable form.
-      ;;
-      ;; FLAVOR: nil for 1024-byte kilobytes and `k M G T ...' suffixes,
-      ;; `si' for 1000-byte kilobytes, `iec' for 1024-byte kilobytes and
-      ;; `KiB MiB GiB ...'. SPACE is what stands between the number and
-      ;; the unit, and UNIT the unit itself.
-      ;;
-      ;; It is here rather than beside its `ls-lisp' callers because it
-      ;; is files.el's; `ls-lisp.sld' is *imported* by this library and
-      ;; so cannot import it back - see the seam in that library.
-      ;;--------------------------------------------------------------
-      (let* ((flavor (if (pair? rest) (car rest) #f))
-             (space (if (and (pair? rest) (pair? (cdr rest))) (cadr rest) ""))
-             (unit (if (and (pair? rest) (pair? (cdr rest)) (pair? (cddr rest)))
-                       (caddr rest)
-                       #f))
-             (power (if (or (not flavor) (eq? flavor 'iec)) 1024.0 1000.0))
-             (prefixes '("" "k" "M" "G" "T" "P" "E" "Z" "Y" "R" "Q")))
-        (let loop ((size (inexact file-size)) (prefixes prefixes))
-          (if (and (>= size power) (pair? (cdr prefixes)))
-              (loop (/ size power) (cdr prefixes))
-              (let* ((prefix (car prefixes))
-                     (prefixed-unit
-                      (if (eq? flavor 'iec)
-                          (string-append (if (string=? prefix "k") "K" prefix)
-                                         (if (string=? prefix "") "" "i")
-                                         (or unit "B"))
-                          (string-append prefix (or unit ""))))
-                     ;; "Mimic what GNU `ls -lh' does: If the formatted
-                     ;; size will have just one digit before the
-                     ;; decimal... and its fractional part is not too
-                     ;; small... then emit one digit after the decimal."
-                     (frac (- size (floor size)))
-                     (fmt (if (and (< size 10)
-                                   (>= frac 0.05)
-                                   (< frac 0.95))
-                              "%.1f"
-                              "%.0f")))
-                (string-append (format-size fmt size)
-                               (if (string=? prefixed-unit "")
-                                   ""
-                                   (or space ""))
-                               prefixed-unit))))))
-
-    (define (format-size fmt size)
-      ;; Guile's `format' has no float directive, so the two the C
-      ;; chooses between are written out. `%.0f' rounds half away from
-      ;; zero, which is what C's does.
-      ;;--------------------------------------------------------------
-      (if (string=? fmt "%.0f")
-          (let ((n (floor (+ size 0.5))))
-            (number->string (exact n)))
-          (let* ((scaled (* 10 size))
-                 (n (floor (+ scaled 0.5))))
-            (string-append (number->string (quotient (exact n) 10))
-                           "."
-                           (number->string (remainder (exact n) 10))))))
+    ;; `file-size-human-readable' is defined once, further down this file
+    ;; beside `file-size-human-readable-iec' and
+    ;; `byte-count-to-string-function' - which is where its two callers
+    ;; are. There was a second copy here, and it was *this* one that the
+    ;; later definition shadowed: two definitions of one files.el
+    ;; function is a departure the compiler catches as "shadows previous
+    ;; definition", and only the live one was ever exercised.
 
     (define (file-relative-name filename . rest)
       ;; GNU Emacs's `file-relative-name' (files.el): "Convert FILENAME to
@@ -1701,10 +1657,13 @@ If the current buffer now contains an empty file that you just visited
          ((or noconfirm
               (yes-or-no-p
                (*current-frame*)
-               (format #f (if (buffer-modified-p (current-buffer))
-                              "Discard edits and reread from ~a? "
-                              "Revert buffer from file ~a? ")
-                        file-name)))
+               ;; Emacs's `(if (buffer-modified-p) (format "Discard ...")
+               ;; (format "Revert ..."))' - the two `format' calls are
+               ;; separate there and separate here, which is also what
+               ;; lets the compiler check both format strings.
+               (if (buffer-modified-p (current-buffer))
+                   (format #f "Discard edits and reread from ~a? " file-name)
+                   (format #f "Revert buffer from file ~a? " file-name))))
           ;; the re-read: the buffer's text becomes the file's, its
           ;; name and the variables it visits with standing
           (let* ((ed (current-buffer))
@@ -2041,6 +2000,91 @@ With prefix ARG, mark buffer as modified, so \\[save-buffer] will save."
                        files)
                       #t))
             (delete-directory-internal directory))))))
+
+    (define *byte-count-to-string-function* (make-parameter #f))
+    ;; ^ GNU Emacs's `byte-count-to-string-function' (files.el:1740), a
+    ;; `defcustom': "Function that turns a number of bytes into a
+    ;; human-readable string. It is for use when displaying file sizes and
+    ;; disk space where other constraints do not force a specific format."
+    ;; Its default is `file-size-human-readable-iec', filled in below
+    ;; because that function is defined after it.
+
+    (define (file-size-human-readable file-size . rest)
+      ;; GNU Emacs's `file-size-human-readable' (files.el:1689): "Produce
+      ;; a string showing FILE-SIZE in human-readable form." FLAVOR is
+      ;; nil, `si' or `iec'; SPACE goes between the number and the unit;
+      ;; UNIT is the unit symbol.
+      ;;--------------------------------------------------------------
+      (let* ((flavor (if (pair? rest) (car rest) #f))
+             (space (if (and (pair? rest) (pair? (cdr rest))) (cadr rest) #f))
+             (unit (if (and (pair? rest) (pair? (cdr rest)) (pair? (cddr rest)))
+                       (caddr rest)
+                       #f))
+             (power (if (or (not flavor) (eq? flavor 'iec)) 1024.0 1000.0))
+             (prefixes '("" "k" "M" "G" "T" "P" "E" "Z" "Y" "R" "Q")))
+        (let loop ((size (exact->inexact file-size)) (prefixes prefixes))
+          ;; "while (and (>= file-size power) (cdr prefixes))"
+          (if (and (>= size power) (pair? (cdr prefixes)))
+              (loop (/ size power) (cdr prefixes))
+              (let* ((prefix (car prefixes))
+                     (prefixed-unit
+                      (if (eq? flavor 'iec)
+                          (string-append
+                           (if (string=? prefix "k") "K" prefix)
+                           (if (string=? prefix "") "" "i")
+                           (or unit "B"))
+                          (string-append prefix (or unit "")))))
+                ;; "Mimic what GNU \"ls -lh\" does: If the formatted size
+                ;; will have just one digit before the decimal ... and its
+                ;; fractional part is not too small ... then emit one digit
+                ;; after the decimal."
+                ;; The C's own `(format "%.1f%s%s" ...)': `format' is
+                ;; Guile's in this library, so editfns.c's is imported
+                ;; under `ef:' for this - Guile's `~,0f' writes "0." where
+                ;; C's `%.0f' writes "0", and ours writes C's.
+                ;;
+                ;; `(mod size 1.0)' is the fractional part; Guile's
+                ;; `modulo' takes integers only.
+                (ef:format (if (and (< size 10)
+                                    (>= (- size (floor size)) 0.05)
+                                    (< (- size (floor size)) 0.95))
+                               "%.1f%s%s"
+                               "%.0f%s%s")
+                        size
+                        (if (string=? prefixed-unit "") "" (or space ""))
+                        prefixed-unit))))))
+
+    (define (file-size-human-readable-iec size)
+      ;; GNU Emacs's `file-size-human-readable-iec': "Human-readable
+      ;; string for SIZE bytes, using IEC prefixes."
+      ;;--------------------------------------------------------------
+      (file-size-human-readable size 'iec " "))
+
+    (*byte-count-to-string-function* file-size-human-readable-iec)
+
+    (define (get-free-disk-space dir)
+      ;; GNU Emacs's `get-free-disk-space' (files.el:8242): "String
+      ;; describing the amount of free space on DIR's file system. If
+      ;; DIR's free space cannot be obtained, this function returns nil."
+      ;;
+      ;; It reads element 2 of `file-system-info' - the *available*
+      ;; space - and passes it through `byte-count-to-string-function'.
+      ;; `file-system-info' is fileio.c's and is NOT ported: Guile has no
+      ;; `statvfs' at all (checked: neither `(guile)' nor any `ice-9'
+      ;; module), so porting it means reaching `statvfs(3)' through FFI
+      ;; and reading a `struct statvfs' by offset, which the GTK binding
+      ;; in `pgtk.sld' shows how to do but which nothing here has done
+      ;; yet. Until it is, this answers nil, which is the C's own answer
+      ;; when the free space cannot be obtained.
+      ;;--------------------------------------------------------------
+      (let ((info (file-system-info dir)))
+        (if (not info)
+            #f
+            (let ((avail (let loop ((rest info) (n 2))
+                           (cond ((not (pair? rest)) #f)
+                                 ((= n 0) (car rest))
+                                 (else (loop (cdr rest) (- n 1)))))))
+              (and avail ((*byte-count-to-string-function*) avail))))))
 
     (define (insert-directory file switches . rest)
       ;; GNU Emacs's `insert-directory' (files.el): "Insert directory

@@ -36,7 +36,12 @@
     ;; because they never render.
     (only (scheme write) display)
     (only (schemacs editor engine)
-          text-editor-line-editor-ref)
+          text-editor-get-start-of-line text-editor-line-editor-ref)
+    ;; The `display' text property, which a substituted column is drawn
+    ;; from - `handle_display_prop''s business, read here for the same
+    ;; reason `current-line-display-column' is: it is the column side of
+    ;; the same substitution.
+    (only (schemacs editor textprop) get-text-property)
     ;; `char-width' is `character.c''s, and `*tab-width*' is defined there
     ;; too because `CHARACTER_WIDTH' reads it - see the note above.
     (only (schemacs editor character) *tab-width* char-width))
@@ -47,6 +52,7 @@
    char-display-glyph
    char-display-width
    current-line-display-column
+   display-text-width
    expand-line-display
    expand-line-glyphs
    line-display-offsets
@@ -157,15 +163,47 @@
                   (+ col (char-display-width ch col))
                   (cons col acc)))))))
 
+    (define (display-text-width text col)
+      ;; How many screen cells the string TEXT takes drawn from screen
+      ;; column COL. A glyph's width is what `char-display-width' answers;
+      ;; this is the same sum over a whole string, which is what a
+      ;; `display' text property substituted for a character is made of -
+      ;; and the string's own tabs expand from the column it starts at.
+      ;;
+      ;; GNU Emacs keeps the one function for both - `string-width'
+      ;; (`character.c') - and xdisp.sld has its own copy of it under
+      ;; `line-display-width'. That copy is for a string drawn from
+      ;; column zero, which is not this; the sum is written here over the
+      ;; primitive both are built from.
+      ;;--------------------------------------------------------------
+      (let loop ((i 0) (end col))
+        (if (>= i (string-length text))
+            (- end col)
+            (let ((ch (string-ref text i)))
+              (loop (+ i 1) (+ end (char-display-width ch end)))))))
+
     (define (current-line-display-column ed buffer-col)
       ;; The screen column at which buffer column BUFFER-COL of the
       ;; current line is drawn.
+      ;;
+      ;; A `display' text property standing on a column is drawn as its
+      ;; string instead of the character - GNU Emacs's
+      ;; `handle_display_prop' - so it moves every column after it along,
+      ;; and point past it sits further right than the character count
+      ;; says. The property is read here the same way `xdisp.sld''s
+      ;; `line-display-texts' reads it, from the line's buffer position.
       ;;--------------------------------------------------------------
-      (let loop ((j 0) (col 0))
-        (if (>= j buffer-col)
-            col
-            (let ((ch (text-editor-line-editor-ref ed j)))
-              (loop (+ 1 j)
-                    (+ col (char-display-width ch col)))))))
+      (let ((line-start (text-editor-get-start-of-line ed)))
+        (let loop ((j 0) (col 0))
+          (if (>= j buffer-col)
+              col
+              (let* ((ch (text-editor-line-editor-ref ed j))
+                     (prop (and ed
+                                (get-text-property (+ line-start j)
+                                                   'display ed))))
+                (loop (+ 1 j)
+                      (+ col (if (string? prop)
+                                 (display-text-width prop col)
+                                 (char-display-width ch col)))))))))
 
     ))

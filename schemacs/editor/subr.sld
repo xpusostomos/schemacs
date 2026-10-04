@@ -25,6 +25,7 @@
 
   (export
    add-to-history
+   regexp-unmatchable
    string-prefix-p
    string-replace
    run-hook-with-args-until-success
@@ -42,6 +43,12 @@
    )
 
   (begin
+
+    (define regexp-unmatchable "\\`a\\`")
+    ;; ^ GNU Emacs's `regexp-unmatchable' (subr.el:7794): "Standard regexp
+    ;; guaranteed not to match any string at all." Two beginning-of-buffer
+    ;; anchors, which cannot both hold.
+
     (define (string-prefix-p prefix string . rest)
       ;; GNU Emacs's `string-prefix-p' (subr.el:6246): "Return non-nil if
       ;; STRING begins with PREFIX. PREFIX should be a string; the
