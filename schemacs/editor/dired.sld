@@ -1594,20 +1594,21 @@ for SWITCHES."
         ;; port of that reads neither.
         (set!font-lock-defaults!
          (list dired-font-lock-keywords #t #f #f 'beginning-of-line))
-        ;; ... and *not* `(font-lock-mode #t)', which is the C's next act
-        ;; and which this port cannot yet afford. Measured on this
-        ;; machine, `(dired-noselect "/tmp/")' - 488 entries - takes
-        ;; 0.72s with the mode off and over 120s with it on, while ONE
-        ;; fontification pass over the whole 488-line buffer takes
-        ;; 0.0008s. So the cost is not the fontifying, it is the *number*
-        ;; of times it is asked for: Emacs installs
-        ;; `font-lock-after-change-function' buffer-locally and jit-lock
-        ;; defers the work to idle time, and with neither of those a
-        ;; Dired buffer fontifies again on every insertion `dired-readin'
-        ;; makes. Turning it on wants that per-change path understood
-        ;; first - which is the next piece of this work, and the reason
-        ;; the mode is left off here rather than the port being left
-        ;; unfinished.
+        ;; The C's next act, which fontifies the listing. It is turned on
+        ;; now, and the reason it could not be earlier is worth keeping:
+        ;; `(dired-noselect "/tmp/")' - 488 entries - took over 120s with
+        ;; the mode on against 0.72s with it off, while ONE fontification
+        ;; pass over the whole listing took 0.0008s. The cost was not the
+        ;; fontifying but the searches inside it: `(schemacs editor
+        ;; search)''s `%re-search' copied the WHOLE buffer on every call,
+        ;; so `(re-search-forward "^[^ \n]" 47 t)' cost the same 5.5ms as
+        ;; the same search bounded to the whole buffer - a bound that
+        ;; costs nothing is a bound that is not used. And font-lock
+        ;; searches once per keyword per line, which made it quadratic.
+        ;; Windowing the copy (and adding the window's offset to the match
+        ;; registers) brought 488 entries to 1.89s, and 104 entries from
+        ;; 4.58s to 0.31s against a 0.14s baseline.
+        (font-lock-mode #t)
         (run-mode-hooks *dired-mode-hook*)))
 
     ;;----------------------------------------------------------------

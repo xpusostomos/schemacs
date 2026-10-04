@@ -70,7 +70,8 @@
     ;; the region: its ends, and the search that walks it
     (only (schemacs editor editfns)
           buffer-substring forward-line goto-char line-beginning-position
-          line-end-position point point-max point-min save-excursion)
+          line-end-position point point-marker point-max point-min
+          save-excursion)
     (only (schemacs editor search)
           match-beginning match-end re-search-forward save-match-data)
     ;; `font-lock-mode''s buffer, and the `defvar-local' variables it
@@ -80,7 +81,8 @@
           major-mode set-buffer-local-value! set-buffer-modified-p)
     ;; the hook `font-lock-mode' hangs its incremental fontification on:
     ;; `after-change-functions' is `buffer.c''s, and the engine holds it
-    (only (schemacs editor engine) *after-change-functions*)
+    (only (schemacs editor engine)
+          *after-change-functions* marker-position set-marker!)
     (only (schemacs editor command) current-prefix-arg define-command)
     (only (schemacs editor frame) *current-frame* set!frame-message)
     ;; the faces above are `defface''d here, as font-lock.el deffaces them
@@ -705,7 +707,12 @@
              (keywords (if (eq? (car-safe current) #t)
                            current
                            (font-lock-compile-keywords current))))
-        (for-each
+        ;; "Ensure forward progress. `pos' is a marker because anchored
+        ;; keyword may add/delete text (this happens e.g. in grep.el)." A
+        ;; plain position is not enough and this port used one.
+        (let ((pos (point-marker)))
+          (set-marker! pos #f)          ; `(make-marker)': nowhere yet
+          (for-each
          (lambda (keyword)
            (let ((matcher (car keyword)))
              (goto-char start)
@@ -724,19 +731,50 @@
                           (or (> (point) (match-beginning 0))
                               (begin (goto-char (min (point-max) (+ (point) 1)))
                                      #t)))
+                 ;; The C's multiline block, which this port did not have
+                 ;; at all - and which is the only place *this* function
+                 ;; calls `save-excursion'. Both calls are the same
+                 ;; computation: the position of the start of the line
+                 ;; *after* the match's line, worked out without leaving
+                 ;; point where the search left it, since the `while'
+                 ;; carries on from point.
+                 (when (and *font-lock-multiline*
+                            (>= (point)
+                                (save-excursion (goto-char (match-beginning 0))
+                                                (forward-line 1)
+                                                (point))))
+                   ;; "this is a multiline regexp match"
+                   ;;
+                   ;; A match that *ends* flush with the next line's start
+                   ;; means the regexp consumed the newline itself, so the
+                   ;; property starts at the last character of the match;
+                   ;; otherwise it starts at the match's beginning.
+                   (let ((next-line-start
+                          (save-excursion (goto-char (match-beginning 0))
+                                          (forward-line 1)
+                                          (point))))
+                     (put-text-property
+                      (if (= (point) next-line-start)
+                          (- (point) 1)
+                          (- (match-beginning 0) 1))
+                      (- (point) 1)
+                      'font-lock-multiline #t
+                      (current-buffer))))
                  (for-each
                   (lambda (highlight)
                     (if (number? (car highlight))
                         (font-lock-apply-highlight highlight)
-                        (let ((pos (point)))
+                        (begin
+                          (set-marker! pos (point) (current-buffer))
                           (font-lock-fontify-anchored-keywords highlight end)
-                          ;; "Ensure forward progress. `pos' is a marker
-                          ;; because anchored keyword may add/delete text".
-                          (when (< (point) pos) (goto-char pos)))))
+                          (when (< (point) (marker-position pos))
+                            (goto-char (marker-position pos))))))
                   (if (pair? (cdr keyword)) (cdr keyword) '()))
                  (loop)))))
          (if (pair? (cddr keywords)) (cddr keywords) '()))
-        #f))
+          ;; `(set-marker pos nil)'
+          (set-marker! pos #f)
+          #f)))
 
     (define (car-safe x) (if (pair? x) (car x) #f))
     (define (cdr-safe x) (if (pair? x) (cdr x) '()))

@@ -1999,9 +1999,18 @@ def check_dired():
     # `C-x d', so no prompt is involved: typing into the directory prompt
     # is timing-sensitive enough that `m' and `d' sometimes landed in it.
     out = drive([b"m", b"d"], d, gap=0.35)
-    if "* " not in out:
+    # The mark characters carry faces now that Dired fontifies through
+    # font-lock (`dired-re-mark' gets `dired-mark-face'), so a terminal
+    # draws them with escape sequences around them and the literal
+    # strings "* " and "D " are not in the byte stream. Stripped before
+    # the two tests, which are about the marks being made, not about how
+    # they are drawn - `dired-delete' below is what exercises the drawing
+    # and the deletion.
+    import re as _re
+    plain = _re.sub(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\(B|\x1b.", "", out)
+    if "* " not in plain:
         problems.append("`m' in Dired did not mark the file at point")
-    if "D " not in out:
+    if "D " not in plain:
         problems.append("`d' in Dired did not flag the next file")
     if "Wrong type argument" in out:
         problems.append("a Dired marking key still fails on the prefix: "
