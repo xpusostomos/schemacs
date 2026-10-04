@@ -107,29 +107,104 @@
 
   (begin
 
-    (define (path-segments path)
-      ;; PATH's segments, with the empty ones - from a leading or a
-      ;; repeated slash - dropped.
+    (define (canonical-back-up buf o)
+      ;; The C's `while (o != target && (--o, !IS_DIRECTORY_SEP (*o)))'
+      ;; (fileio.c:1687): step O back to the separator before it, or to
+      ;; the beginning. It is the `..' of a `/..` taking back the segment
+      ;; that was written before it - which is why the canonicalization
+      ;; is a walk over one buffer rather than a rebuild from segments.
       ;;--------------------------------------------------------------
-      (let loop ((i 0) (start 0) (acc '()))
-        (cond
-         ((= i (string-length path))
-          (reverse (if (< start i) (cons (substring path start i) acc) acc)))
-         ((char=? (string-ref path i) #\/)
-          (loop (+ 1 i) (+ 1 i)
-                (if (< start i) (cons (substring path start i) acc) acc)))
-         (else (loop (+ 1 i) start acc)))))
+      (if (= o 0)
+          0
+          (if (char=? #\/ (string-ref buf (- o 1)))
+              (- o 1)
+              (canonical-back-up buf (- o 1)))))
 
-    (define (join-path-segments segments)
-      ;; SEGMENTS joined with a slash between them: the tail of
-      ;; `expand-file-name' that puts a resolved path back together.
+    (define (canonicalize-file-name name)
+      ;; GNU Emacs's `Fexpand_file_name''s canonicalization loop
+      ;; (fileio.c:1658-1717): "Now canonicalize by removing `//', `/.'
+      ;; and `/foo/..' if they appear." P reads and O writes over one
+      ;; buffer, which is what lets a `/..` *take back* what has already
+      ;; been written; a stack of segments can do that too, but it cannot
+      ;; say either of the two exceptions, and both of them are the
+      ;; reason this is a walk and not a split.
+      ;;
+      ;;   * Repeated slashes collapse to one, "except leave leading
+      ;;     `//' alone" (fileio.c:1710). The C's test is
+      ;;     `p != target || IS_DIRECTORY_SEP (p[2])', so a pair at the
+      ;;     very start survives unless a *third* slash follows it:
+      ;;     `/a//b' is `/a/b' and `//a//b' is `//a/b'. That leading
+      ;;     pair is not decoration - POSIX leaves the meaning of exactly
+      ;;     two leading slashes to the implementation, and that is where
+      ;;     a network host goes - so Emacs keeps it as written.
+      ;;   * `/..` backs up to the previous separator, "except" at the
+      ;;     root, where it does nothing (the `o != target' guard at
+      ;;     fileio.c:1685). So `/foo/..' is `/` and `/..' stays `/..' -
+      ;;     a segment stack pops at the root and would lose the `..'.
+      ;;
+      ;; The C's other two cases are `/.` , which goes away unless it is
+      ;; the whole name (so `/.' is `/`), and the copy of any other
+      ;; character. `/../' is left alone as well: `..' at the root is
+      ;; "the superroot on certain file systems" (fileio.c:1684).
+      ;;
+      ;; Written against a *copy* of NAME, because the C reads `*o' at
+      ;; the target even before anything has been written there - at
+      ;; `o == target' that is the name's own first character.
       ;;--------------------------------------------------------------
-      (if (null? segments)
-          ""
-          (let loop ((rest (cdr segments)) (acc (car segments)))
-            (if (null? rest)
-                acc
-                (loop (cdr rest) (string-append acc "/" (car rest)))))))
+      (let* ((len (string-length name))
+             (buf (string-copy name))
+             ;; the C reads one character past P; `#f' is its NUL, and
+             ;; every test that asks for it asks `p[2] == 0' or
+             ;; `p[3] == 0'.
+             (at (lambda (i) (if (< i len) (string-ref name i) #f)))
+             (sep-at? (lambda (i) (and (< i len) (char=? #\/ (string-ref name i))))))
+        (let loop ((p 0) (o 0))
+          (if (>= p len)
+              (substring buf 0 o)
+              (let ((c (string-ref name p))
+                    (c1 (at (+ p 1)))
+                    (c2 (at (+ p 2))))
+                (cond
+                 ;; any other character is copied
+                 ((not (char=? c #\/))
+                  (string-set! buf o c)
+                  (loop (+ p 1) (+ o 1)))
+                 ;; "/." - keep the "/" only when this is the whole name
+                 ((and (eqv? c1 #\.) (or (sep-at? (+ p 2)) (not c2)))
+                  (when (and (= o 0) (not c2))
+                    (string-set! buf o c))
+                  (loop (+ p 2) (if (and (= o 0) (not c2)) (+ o 1) o)))
+                 ;; "/.." - back up to the previous separator
+                 ((and (eqv? c1 #\.) (eqv? c2 #\.)
+                       (not (= o 0))
+                       (or (sep-at? (+ p 3)) (not (at (+ p 3)))))
+                  (let ((k (canonical-back-up buf o)))
+                    ;; "Keep initial / only if this is the whole name."
+                    (loop (+ p 3)
+                          (if (and (= k 0)
+                                   (char=? #\/ (string-ref buf 0))
+                                   (not (at (+ p 3))))
+                              (+ k 1)
+                              k))))
+                 ;; collapse multiple "/", except leave leading "//" alone
+                 ((and (sep-at? (+ p 1)) (or (not (= p 0)) (sep-at? (+ p 2))))
+                  (loop (+ p 1) o))
+                 (else
+                  (string-set! buf o c)
+                  (loop (+ p 1) (+ o 1)))))))))
+
+    (define (trim-newdir-slashes dir)
+      ;; GNU Emacs's `Fexpand_file_name' (fileio.c:1609): "Ignore any
+      ;; slash at the end of newdir, unless newdir is just `/` or `//`."
+      ;; It is what makes `(expand-file-name "")' the directory itself
+      ;; with no trailing slash, while `//' stays `//'.
+      ;;--------------------------------------------------------------
+      (let loop ((len (string-length dir)))
+        (if (and (> len 1)
+                 (char=? #\/ (string-ref dir (- len 1)))
+                 (not (and (= len 2) (char=? #\/ (string-ref dir 0)))))
+            (loop (- len 1))
+            (substring dir 0 len))))
 
     (define (user-homedir name)
       ;; GNU Emacs's `user_homedir' (fileio.c:972): "the home directory
@@ -243,37 +318,31 @@
       ;;--------------------------------------------------------------
       (let* ((name (expand-tilde name))
              (default (if (pair? args) (car args) (default-directory)))
+             ;; the C's prefix (fileio.c:1600-1650): a name that is empty
+             ;; or absolute takes *no* directory prefix - for an absolute
+             ;; one it sets `newdir' to "" outright, which is how the
+             ;; default directory is ignored - and anything else is
+             ;; joined onto the default *as a directory*. The empty name
+             ;; is the directory itself, with its trailing slashes
+             ;; trimmed, which is "Ignore any slash at the end of newdir"
+             ;; (fileio.c:1609).
              (full (cond
-                    ((= 0 (string-length name)) default)
-                    ((char=? (string-ref name 0) #\/) name)
-                    (else (string-append default name))))
-             ;; A trailing slash names a directory and has to survive
-             ;; the rebuilding below, which would otherwise drop it.
-             ;; An *empty* NAME is the exception, and Emacs's: it expands
-             ;; to the directory itself with no trailing slash.
-             (directory? (and (< 0 (string-length name))
-                              (< 1 (string-length full))
-                              (char=? (string-ref full
-                                                  (- (string-length full) 1))
-                                      #\/))))
-        (let resolve ((rest (path-segments full)) (acc '()))
-          (cond
-           ((null? rest)
-            (let ((path (string-append "/" (join-path-segments
-                                            (reverse acc)))))
-              (cond ((string=? path "/") path)
-                    (directory? (string-append path "/"))
-                    (else path))))
-           ((string=? (car rest) ".") (resolve (cdr rest) acc))
-           ;; a `..' takes back the segment before it, and does nothing
-           ;; at the root, which is what Emacs does with one
-           ((string=? (car rest) "..")
-            (resolve (cdr rest) (if (null? acc) acc (cdr acc))))
-           (else (resolve (cdr rest) (cons (car rest) acc)))))))
+                    ((= 0 (string-length name)) (trim-newdir-slashes default))
+                    ((char=? #\/ (string-ref name 0)) name)
+                    (else (string-append (file-name-as-directory default)
+                                         name)))))
+        (canonicalize-file-name full)))
 
     (define (file-name-directory-part name)
       ;; The directory part of NAME, including the final slash, or "" for
-      ;; a bare name: GNU Emacs's `file-name-directory' as we need it.
+      ;; a name with none.
+      ;;
+      ;; GNU Emacs's `file-name-directory' answers *nil* in that case -
+      ;; "Return nil if FILENAME does not include a directory" - and this
+      ;; answers `""', which every caller here wants to append to. The
+      ;; difference is real and is why this is a `-part' helper and not
+      ;; the Emacs function's name; the callers are the listings, which
+      ;; hand it either a bare name or one with a slash.
       ;;--------------------------------------------------------------
       (let ((slash (string-rindex name #\/)))
         (if slash (substring name 0 (+ 1 slash)) "")))
@@ -477,11 +546,15 @@
       ;; string representing the file name FILE interpreted as a
       ;; directory. ... For a Unix-syntax file name, just appends a slash
       ;; unless a trailing slash is already present."
+      ;;
+      ;; The empty name is the C's first case and not the last: `""'
+      ;; answers `"./"' (fileio.c:314), not `""'. It is what makes
+      ;; `(expand-file-name "x" "")' a relative name rather than a
+      ;; malformed one, and it is what `"."' means.
       ;;--------------------------------------------------------------
-      (if (or (= 0 (string-length file))
-              (char=? #\/ (string-ref file (- (string-length file) 1))))
-          file
-          (string-append file "/")))
+      (cond ((= 0 (string-length file)) "./")
+            ((char=? #\/ (string-ref file (- (string-length file) 1))) file)
+            (else (string-append file "/"))))
 
     (define (directory-file-name directory)
       ;; GNU Emacs's `directory-file-name' (fileio.c:727): "Returns the
@@ -490,12 +563,24 @@
       ;;
       ;; The slash comes off, except that the root keeps its own - the
       ;; C stops at "the last slash that is not the first character".
+      ;;
+      ;; And `//' is the second exception, which is easy to miss because
+      ;; it is the *negation* of the whole loop: `directory_file_name'
+      ;; (fileio.c:680) says "if they are all slashes, leave `/' and `//'
+      ;; alone, and treat `///' and longer as if they were `/'", and
+      ;; writes it as `if (! (srclen == 2 && IS_DIRECTORY_SEP (src[0])))'
+      ;; around the stripping. So `directory-file-name "//"' is `//' -
+      ;; the pair is a root of its own, and stripping it to `/' would
+      ;; make a network root into the local one.
       ;;--------------------------------------------------------------
-      (let loop ((end (string-length directory)))
-        (if (and (> end 1)
-                 (char=? #\/ (string-ref directory (- end 1))))
-            (loop (- end 1))
-            (substring directory 0 end))))
+      (if (and (= 2 (string-length directory))
+               (char=? #\/ (string-ref directory 0)))
+          directory
+          (let loop ((end (string-length directory)))
+            (if (and (> end 1)
+                     (char=? #\/ (string-ref directory (- end 1))))
+                (loop (- end 1))
+                (substring directory 0 end)))))
 
     (define (file-name-absolute-p filename)
       ;; GNU Emacs's `file-name-absolute-p' (fileio.c:2967): "Return t if

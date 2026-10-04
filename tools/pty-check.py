@@ -1944,6 +1944,79 @@ def check_not_modified():
     return problems
 
 
+def check_find_file_substitution():
+    """`//' in a name typed at `C-x C-f' goes back to the root.
+
+    `read-file-name-default' runs the typed name through
+    `substitute-in-file-name' before returning it (minibuffer.el:4192),
+    and that is where a name is re-rooted: "If `//' appears, everything
+    up to and including the first of those `/' is discarded"
+    (fileio.c:2060). So `/tmp//tmp/x' names `/tmp/x'.
+
+    This port left that call out entirely, so a typed `//' reached
+    `expand-file-name' instead, which is the *other* rule - it collapses
+    repeated slashes and keeps only a leading pair - and the name meant
+    `/tmp/tmp/x'. The two functions disagree about `//' on purpose, which
+    is why the substitution has to happen where Emacs puts it.
+    """
+    d = "/tmp/pty-check-slash"
+    import os as _os
+    _os.makedirs(d, exist_ok=True)
+    path = _os.path.join(d, "x.txt")
+    open(path, "w").write("SLASH-CONTENT\n")
+    problems = []
+    # `/tmp//tmp/pty-check-slash/x.txt' is `/tmp/pty-check-slash/x.txt'
+    typed = "/tmp//" + d.lstrip("/") + "/x.txt"
+    out = drive([C_x + C_f, C_a, C_k, typed.encode(), RET], "/tmp/pty-check-mx.txt",
+                settle=2.0, gap=0.35)
+    if "SLASH-CONTENT" not in out:
+        problems.append("`C-x C-f %s' did not visit %s - a `//' in a typed "
+                        "name must be discarded up to, not doubled"
+                        % (typed, path))
+    return problems
+
+
+def check_pwd():
+    """M-x pwd shows the default directory; with a prefix it inserts it.
+
+    files.el's `pwd' is a straight pair of statements -
+    `(message "Directory %s" default-directory)' and `(insert
+    default-directory)' - and two departures hid in it. The tree's
+    `default-directory' is a zero-argument *procedure*, so the variable
+    read has to be a call (without one the message reads "Directory
+    #<procedure default-directory ()>"); and the C's parameter is named
+    INSERT, which shadows editfns.c's `insert' procedure, so the
+    inserting arm applied the prefix as a function. Both are checked
+    here, and both showed only in the drawn message.
+    """
+    d = "/tmp/pty-check-pwd"
+    import os as _os
+    _os.makedirs(d, exist_ok=True)
+    path = _os.path.join(d, "f.txt")
+    open(path, "w").write("hello\n")
+    problems = []
+    out = drive([b"\x1b", b"x", b"pwd", b"\r"], path, settle=2.0, gap=0.35)
+    if "Directory " + d + "/" not in out:
+        problems.append("M-x pwd did not show the default directory - it "
+                        "should say `Directory %s/' for the buffer's" % d)
+    if "#<procedure" in out:
+        problems.append("M-x pwd printed a procedure where the directory "
+                        "goes: `default-directory' is a procedure in this "
+                        "tree and has to be called")
+    # and with a prefix the directory goes into the buffer instead - no
+    # message, so what is looked for is the text at point, with the
+    # file's own first line right after it
+    out = drive([C_u, b"\x1b", b"x", b"pwd", b"\r"], path, settle=2.0, gap=0.35)
+    if "Wrong type to apply" in out:
+        problems.append("C-u M-x pwd applied the prefix as a function - "
+                        "the parameter named `insert' shadows the "
+                        "procedure")
+    if d + "/hello" not in out:
+        problems.append("C-u M-x pwd did not insert the default directory "
+                        "at point")
+    return problems
+
+
 def check_set_fill_column():
     """C-u 20 C-x f sets fill-column, saying what it was."""
     path = "/tmp/pty-check-sfc.txt"
@@ -2096,6 +2169,8 @@ CHECKS = {
     "find-alternate-file": check_find_alternate_file,
     "revert-buffer": check_revert_buffer,
     "not-modified": check_not_modified,
+    "pwd": check_pwd,
+    "find-file-substitution": check_find_file_substitution,
     "set-fill-column": check_set_fill_column,
     "suspend": check_suspend,
     "resize": check_resize,

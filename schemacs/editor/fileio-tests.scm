@@ -56,12 +56,21 @@
 
 (test-equal "file-name-as-directory adds a slash" "/a/" (file-name-as-directory "/a"))
 (test-equal "file-name-as-directory keeps one" "/a/" (file-name-as-directory "/a/"))
-(test-equal "file-name-as-directory of the empty string" "" (file-name-as-directory ""))
+;; `file_name_as_directory''s first case, not its last: the empty name is
+;; "." as a directory (fileio.c:314), so `(file-name-as-directory "")' is
+;; "./" and not "".
+(test-equal "file-name-as-directory of the empty string" "./" (file-name-as-directory ""))
 
 (test-equal "directory-file-name drops the slash" "/a/b" (directory-file-name "/a/b/"))
 (test-equal "directory-file-name of a bare name" "/a/b" (directory-file-name "/a/b"))
 ;; the root keeps its own slash
 (test-equal "directory-file-name of the root" "/" (directory-file-name "/"))
+;; and "//" keeps both, which is the *exception around* the stripping
+;; loop (fileio.c:685): "if they are all slashes, leave "/" and "//"
+;; alone, and treat "///" and longer as if they were "/"."
+(test-equal "directory-file-name of the double root" "//" (directory-file-name "//"))
+(test-equal "directory-file-name of three slashes" "/" (directory-file-name "///"))
+(test-equal "directory-file-name of four slashes" "/" (directory-file-name "////"))
 
 (test-equal "file-name-absolute-p of an absolute name" #t (file-name-absolute-p "/a"))
 (test-equal "file-name-absolute-p of a relative name" #f (file-name-absolute-p "a"))
@@ -97,6 +106,39 @@
 (test-equal "file-name-absolute-p of ~root/a" #t (file-name-absolute-p "~root/a"))
 (test-equal "file-name-absolute-p of an unknown user" #f
   (file-name-absolute-p "~nosuchuser/a"))
+
+;; A leading "//" survives `expand-file-name', and that is the whole
+;; reason its canonicalization is a walk over the name rather than a
+;; rebuild from segments: the C collapses repeated slashes "except leave
+;; leading '//' alone" (fileio.c:1710), and the test for it is
+;; `p != target || IS_DIRECTORY_SEP (p[2])' - so a pair at the very start
+;; stays unless a *third* slash follows it. POSIX gives exactly two
+;; leading slashes an implementation-defined meaning, which is where a
+;; network host goes, so the pair is not a doubled separator.
+(test-equal "expand-file-name keeps a leading double slash" "//tmp"
+  (expand-file-name "//tmp"))
+(test-equal "expand-file-name keeps the double root" "//" (expand-file-name "//"))
+(test-equal "expand-file-name keeps the pair, not the run" "//a/b"
+  (expand-file-name "//a//b"))
+(test-equal "expand-file-name collapses three slashes" "/tmp"
+  (expand-file-name "///tmp"))
+(test-equal "expand-file-name collapses a doubled separator inside" "/tmp/x"
+  (expand-file-name "/tmp//x"))
+
+;; `/..' at the root does nothing - the C's `o != target' guard
+;; (fileio.c:1685) - and `..' at the root is "the superroot on certain
+;; file systems", so it is kept. A stack of segments pops at the root and
+;; loses it.
+(test-equal "expand-file-name keeps /.. at the root" "/.." (expand-file-name "/.."))
+(test-equal "expand-file-name of /foo/.. is the root" "/"
+  (expand-file-name "/foo/.."))
+(test-equal "expand-file-name keeps the last .. of /foo/../.." "/.."
+  (expand-file-name "/foo/../.."))
+(test-equal "expand-file-name of /foo/../bar" "/bar"
+  (expand-file-name "/foo/../bar"))
+(test-equal "expand-file-name drops a /." "/foo" (expand-file-name "/foo/."))
+(test-equal "expand-file-name keeps a trailing /. as the root" "/"
+  (expand-file-name "/./"))
 
 ;; `substitute-in-file-name' - the variables, and the `/~' and `//'
 ;; rule that discards what came before

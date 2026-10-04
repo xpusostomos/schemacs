@@ -18,6 +18,7 @@ Here's what works already:
 * Mode line. 
 * Undo list.
 * Faces and color highlighting
+* Font-lock
 * Overlays
 * isearch, query-replace, query-replace-regexp 
 * Completions, query-replace have color highlighting like real emacs

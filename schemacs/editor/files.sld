@@ -59,7 +59,7 @@
     ;; `insert-file', `revert-buffer' and the rest edit the buffer:
     ;; the position primitives and the read-only check are editfns.c's.
     (only (schemacs editor editfns)
-          barf-if-buffer-read-only goto-char insert point point-max)
+          barf-if-buffer-read-only goto-char insert message point point-max)
     (only (schemacs editor simple) push-mark)
     ;; `string-prefix-p' is `subr.el''s and now lives in
     ;; `(schemacs editor subr)', which is below this library.
@@ -79,7 +79,10 @@
           file-name-as-directory
           file-name-directory-part file-name-nondirectory-part
           file-symlink-p file-system-info file-writable-p
-          find-file-name-handler)
+          find-file-name-handler
+          ;; `read-file-name' runs the typed name through it before
+          ;; expanding - see the note there.
+          substitute-in-file-name)
     ;; `directory-files' and `file-attributes' are `dired.c''s, and
     ;; `delete-directory''s recursive half reads both.
     (only (schemacs editor diredc) directory-files file-attributes)
@@ -171,6 +174,8 @@
    find-file-read-only
    insert-file
    not-modified
+   pwd
+   *save-silently*
    revert-buffer
    revert-buffer--default
    abbreviate-file-name
@@ -1062,11 +1067,23 @@ save-buffer
                     (initial (cons initial 0))
                     (else #f))))
         (expand-file-name
-         (parameterize ((*minibuffer-completing-file-name* #t))
-           (completing-read prompt file-name-completion-table #f mustmatch
-                            insdef
-                            file-name-history
-                            default-filename))
+         ;; The answer goes through `substitute-in-file-name' *before* it
+         ;; is expanded, which is what `read-file-name-default' does at
+         ;; its exit (minibuffer.el:4192). That call is where a typed name
+         ;; is re-rooted: `substitute-in-file-name' discards everything up
+         ;; to a `//' (or a `/~', or a `$VAR' that expands to an absolute
+         ;; name), so `C-x C-f /tmp//x' visits `/x' - and `/tmp//x' is
+         ;; `/tmp/x' only to `expand-file-name', which is what this used
+         ;; to give it to. Emacs runs the two in this order for the whole
+         ;; file-name-reading path; leaving the first out made every
+         ;; `//' in a typed name mean "a doubled separator" instead of
+         ;; "the root".
+         (substitute-in-file-name
+          (parameterize ((*minibuffer-completing-file-name* #t))
+            (completing-read prompt file-name-completion-table #f mustmatch
+                             insdef
+                             file-name-history
+                             default-filename)))
          dir)))
 
     ;;----------------------------------------------------------------
@@ -1425,13 +1442,27 @@ save-buffer
                str)
               (get-output-string port)))))
 
+    (define *save-silently* (make-parameter #f))
+    ;; ^ GNU Emacs's `save-silently' (files.el:830), nil by default: "If
+    ;; non-nil, messages are suppressed when saving a file." It is read
+    ;; by `files--message' below and by `basic-save-buffer'.
+
     (define (files--message format-string . args)
-      ;; GNU Emacs's `files--message' (files.el): the message the file
-      ;; commands say - `(apply #'message FORMAT-STRING ARGS)'. The
-      ;; echo area is the message's destination here.
+      ;; GNU Emacs's `files--message' (files.el:2538): "Like `message',
+      ;; except sometimes don't show the message text. If the variable
+      ;; `save-silently' is non-nil, the message will not be visible in
+      ;; the echo area." The C is two statements - `(apply #'message
+      ;; FORMAT ARGS)' and `(when save-silently (message nil))' - and
+      ;; this is those two.
+      ;;
+      ;; FORMAT-STRING is `message''s, so it is an *Emacs* format
+      ;; string: this used to hand the text to Guile's `format' instead,
+      ;; which reads `~a' and prints a `%s' as itself - a departure that
+      ;; made every `files--message' call site speak Guile rather than
+      ;; Emacs. `pwd' below is the message that showed it.
       ;;--------------------------------------------------------------
-      (set!frame-message (*current-frame*)
-                         (apply format #f format-string args)))
+      (apply message format-string args)
+      (when (*save-silently*) (message #f)))
 
     ;;----------------------------------------------------------------
     ;; Reading a file into the buffer: `insert-file-contents'
@@ -1494,8 +1525,10 @@ save-buffer
                (find-buffer-visiting
                 (expand-file-name filename))))
           (when (and buffer (buffer-modified-p buffer))
-            (files--message
-             "File ~a already visited and modified in buffer ~a"
+            ;; the C's `(message "File %s already visited and modified in
+            ;; buffer %s" ...)' - `message', not `files--message'
+            (message
+             "File %s already visited and modified in buffer %s"
              filename (buffer-name buffer))))))
 
     (define-command (insert-file filename)
@@ -1723,6 +1756,36 @@ With prefix ARG, mark buffer as modified, so \\[save-buffer] will save."
       (set-buffer-modified-p (and arg #t))
       #f)
 
+    (define-command (pwd insert?)
+      ;; GNU Emacs's `pwd' (files.el:924): "Show the current default
+      ;; directory. With prefix argument INSERT, insert the current
+      ;; default directory at point instead."
+      ;;
+      ;; `(interactive "P")' is the raw prefix, so *any* prefix inserts -
+      ;; `C-u M-x pwd' and `M-1 M-x pwd' both do, which is what testing
+      ;; the argument for truth means in Elisp and what
+      ;; `(current-prefix-arg)' answers here, a bare `C-u' being the list
+      ;; `(4)'.
+      ;;
+      ;; The C's parameter is named INSERT, and it cannot be here: the
+      ;; body calls editfns.c's `insert', and a parameter of that name
+      ;; shadows the procedure - so `(insert (default-directory))' tried
+      ;; to *apply* the prefix, "(4)", as a function. The `?' is the
+      ;; tree's mark for a name the host language took, as
+      ;; `font-lock--add-text-property''s `append?' is.
+      "Show the current default directory.
+With prefix argument INSERT, insert the current default directory
+at point instead."
+      (interactive (list (current-prefix-arg)))
+      ;; `default-directory' is a *variable* in Emacs and a zero-argument
+      ;; procedure here - it is buffer-local and answers from the buffer -
+      ;; so the C's `default-directory' is `(default-directory)'. Without
+      ;; the call the message reads "Directory #<procedure
+      ;; default-directory ()>", which is how this was found.
+      (if insert?
+          (insert (default-directory))
+          (message "Directory %s" (default-directory))))
+
     (define-command (save-buffer)
       ;; C-x C-s runs this. GNU Emacs's `save-buffer', which acts on
       ;; `(current-buffer)' and takes no argument but the prefix
@@ -1768,6 +1831,10 @@ With prefix ARG, mark buffer as modified, so \\[save-buffer] will save."
             (text-editor-set-modified! buffer #f)
             (set!frame-message (*current-frame*)
                                        (string-append "Wrote " path))
+            ;; the C's `(when save-silently (message nil))', which
+            ;; `basic-save-buffer' runs after the write: with the
+            ;; variable set there is nothing in the echo area to say
+            (when (*save-silently*) (message #f))
             path))))
 
     (define (set-visited-file-name filename . args)
