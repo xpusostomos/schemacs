@@ -91,6 +91,9 @@
    default-directory
    *change-major-mode-hook*
    *inhibit-read-only*
+   ;; the whole list, which the redisplay asks before it takes its
+   ;; no-properties shortcut
+   buffer-overlays
    delete-overlay
    make-overlay
    move-overlay

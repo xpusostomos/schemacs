@@ -10,11 +10,12 @@
   ;; it does. The echo area's buffer and prompt are read from the frame
   ;; (`*echo-area-buffer*', `*echo-area-prompt*'), which is where GNU
   ;; Emacs keeps them, so the renderer has nothing to ask a minibuffer.
-  ;; And what to draw as a search match arrives in `*search-highlight*',
-  ;; which the search commands publish - in Emacs the same fact is the
-  ;; `isearch' and `lazy-highlight' faces on the match. A renderer that
-  ;; imported the minibuffer and the search would sit in a cycle with
-  ;; them, and this is the knot the layout plan cuts here.
+  ;; And a search match is nothing this library knows about at all: the
+  ;; `isearch' and `lazy-highlight' faces reach it as *overlays* on the
+  ;; buffer, through the same `attrs-at-buffer-position' every other face
+  ;; comes through. A renderer that imported the minibuffer and the search
+  ;; would sit in a cycle with them, and this is the knot the layout plan
+  ;; cuts here - the search no longer has anything to tell it.
   ;;
   ;; See LAYOUT-PLAN.txt for the rule this library is a step of.
 
@@ -91,6 +92,7 @@
           ;; the mode line's mode name is the buffer's `mode-name'
           mode-name
           ;; and the overlays at a position are merged into its face
+          buffer-overlays
           overlay-end overlay-get overlay-priority overlay-start
           overlays-at overlays-in)
 
@@ -101,11 +103,10 @@
     )
 
   (export
-   ;; The search highlight is the search commands' to set, so it is
-   ;; exported; `render!' and the mode line are what the rest calls.
-   *search-highlight*
+   ;; `render!' and the mode line are what the rest calls. The search
+   ;; highlight used to be here as a parameter; it is isearch's overlays
+   ;; now, and the display only reads faces.
    cursor-screen-position
-   highlight-matches
    ;; the run computation, which is what a caller can test without a
    ;; terminal: `draw-line!' itself needs one
    line-face-runs
@@ -126,38 +127,26 @@
    render!
    scroll-to-cursor!
    status-string
+   window-end
    window-line-rows
    window-line-slices
+   window-start
    window-truncates-lines?
    )
 
   (begin
 
-    (define *search-highlight*
-      ;; What the renderer should draw as search matches, or false when
-      ;; nothing should be: a pair of the search string and whether the
-      ;; search folds case.
-      ;;
-      ;; The matching itself lives with the search commands - this is a
-      ;; *display* fact, and it is here because the display layer must not
-      ;; have to know who set it. In GNU Emacs the same fact is an
-      ;; *overlay*: `isearch-highlight\' puts the `isearch\' face on a
-      ;; match and the lazy highlighter puts `lazy-highlight\' on the
-      ;; others, and `xdisp.c\' draws whatever faces it finds.
-      ;;
-      ;; This tree has overlays now (`textprop.sld\', `buffer.sld\'), and
-      ;; `attrs-at-buffer-position\' merges an overlay\'s face over the
-      ;; text property\'s. What is still this renderer\'s own is the
-      ;; *finding*: the search commands publish the pattern and each drawn
-      ;; row searches itself, where Emacs searches once per isearch update
-      ;; and records overlays. The drawing is the same either way - see
-      ;; `draw-match\', which merges the search face over the face in
-      ;; effect rather than replacing it, exactly as the overlay would.
-      ;; Porting the finding too is the step that would retire this
-      ;; parameter; the parts it would buy are regexp lazy highlighting
-      ;; (a row search here is literal) and `search-highlight-submatches\'.
-      ;;--------------------------------------------------------------
-      (make-parameter #f))
+    ;; There used to be a `*search-highlight*' parameter here, and before
+    ;; that a `window' slot the renderer read: the search commands publish
+    ;; what they found and the renderer drew it. It is gone. The search
+    ;; highlight is *isearch's overlays* - `isearch-highlight' puts the
+    ;; `isearch' face on the current match and the lazy highlighter puts
+    ;; `lazy-highlight' on the others, exactly as GNU Emacs does - and the
+    ;; display reads them the way it reads every other face, through
+    ;; `attrs-at-buffer-position'. The renderer no longer knows that
+    ;; searching exists, which is the whole point: it cannot disagree with
+    ;; the search about what matched.
+
     (define (buffer-line-string ed i)
       ;; Get the displayable contents of line I (not including its
       ;; line break) as a string, or #f when I is past the end of the
@@ -1021,28 +1010,42 @@
 
     (define (line-face-runs ed line-start line-string)
       ;; LINE-STRING as maximal runs of characters that share one face:
-      ;; `(FROM TO ATTRIBUTE)' in buffer columns, ATTRIBUTE being what
-      ;; `face-at-buffer-position' answers.
+      ;; `(FROM TO ATTRIBUTE)' in buffer columns, ATTRIBUTE being the
+      ;; display's token for the face `face-at-buffer-position' finds.
       ;;
       ;; The runs, not the characters, are what gets drawn: a terminal is
       ;; told "these cells are bold" once per run rather than once per
       ;; character, which is the same reason Emacs walks faces with
       ;; `next-single-property-change' instead of asking at every
       ;; position.
+      ;;
+      ;; So the comparison that finds a run's end is on the merged,
+      ;; *unrealized* attributes, and the face is realized once at the end
+      ;; of the run. Realizing per character is 15us on the GTK display
+      ;; against 1.2us for the attribute lookup - twelve times the cost, to
+      ;; intern a face a run is about to hand over unchanged. With a search
+      ;; face on every row of a wide window that is most of a redisplay,
+      ;; which is what made isearch look like it had hung on Gtk; a
+      ;; terminal's realize is a cheap intern, so nothing showed there.
       ;;--------------------------------------------------------------
       (let ((len (string-length line-string)))
         (if (= len 0)
             '()
             (let loop ((i 1)
-                     (start 0)
-                     (attribute (face-at-buffer-position ed line-start))
-                     (acc '()))
+                       (start 0)
+                       (attrs (attrs-at-buffer-position ed line-start))
+                       (acc '()))
               (if (>= i len)
-                  (reverse (cons (list start len attribute) acc))
-                  (let ((a (face-at-buffer-position ed (+ line-start i))))
-                    (if (equal? a attribute)
-                        (loop (+ 1 i) start attribute acc)
-                        (loop (+ 1 i) i a (cons (list start i attribute) acc)))))))))
+                  (reverse (cons (list start len
+                                       (realize-face (current-display) attrs))
+                                 acc))
+                  (let ((a (attrs-at-buffer-position ed (+ line-start i))))
+                    (if (equal? a attrs)
+                        (loop (+ 1 i) start attrs acc)
+                        (loop (+ 1 i) i a
+                              (cons (list start i
+                                          (realize-face (current-display) attrs))
+                                    acc)))))))))
 
     (define (line-glyph-run glyphs offsets from to width)
       ;; The text to write for the buffer columns [FROM, TO) of a line
@@ -1180,8 +1183,21 @@
                   (draw-row-with-strings! ed texts from to slice-start strings
                                           screen-row x0 width)
                   (begin
+                    ;; The shortcut for a plain row: no text properties,
+                    ;; no overlay over it and nothing else painting means
+                    ;; every cell is the default face, so the row is one
+                    ;; write with no face at all. An *overlay* is a face
+                    ;; too - the search highlight is an overlay - and
+                    ;; leaving overlays out is what made isearch's matches
+                    ;; invisible on a buffer with no text properties of
+                    ;; its own.
+                    ;;
+                    ;; It is asked of *this row* and not of the buffer, so
+                    ;; that one overlay somewhere does not put every row of
+                    ;; the window through the per-cell face walk.
                     (if (and (not (text-editor-text-props ed))
-                             (not (region-face-active? ed)))
+                             (not (region-face-active? ed))
+                             (null? (overlays-in slice-start (+ slice-start len))))
                         (write-glyphs! (current-display) display screen-row x0 #f)
                         (let ((offsets (list->vector
                                         (line-texts-offsets texts from to)))
@@ -1423,111 +1439,13 @@
                 (map (lambda (e) (cons (car e) (cadr e)))
                      (filter (lambda (e) (caddr e)) sorted))))))
 
-    (define (draw-match ed row x0 glyphs offsets line-start len start end
-                        point width)
-      ;; Draw the part of the search match [START, END) that falls on this
-      ;; line over the text already drawn there: with the `isearch' face
-      ;; when point is inside the match and `lazy-highlight' otherwise.
-      ;; ROW is the screen row and X0 the screen column the window's text
-      ;; starts at.
-      ;;
-      ;; GLYPHS and OFFSETS are the line's, computed once by the caller
-      ;; for all its matches.
-      ;;
-      ;; The match is cut out of the line as a range of *buffer*
-      ;; characters and placed at its screen column, so a line holding a
-      ;; wide character highlights the match itself and not the two cells
-      ;; before it.
-      ;;
-      ;; The search face is *merged with the face already in effect* at
-      ;; each cell, which is what GNU Emacs computes: `isearch' and
-      ;; `lazy-highlight' are overlay faces there (`isearch-highlight'
-      ;; puts one on with `overlay-put isearch-overlay 'face
-      ;; isearch-face', isearch.el:4026), and `face_at_buffer_position'
-      ;; merges an overlay's face over the text property's - so a
-      ;; font-locked keyword inside a match keeps its colour and gains
-      ;; the search face on top. Drawing the match in the search face
-      ;; *alone* is what made Dired's search lose every colour it had
-      ;; found: the whole match came out in one face, and the cells under
-      ;; it were painted over.
-      ;;
-      ;; The merge is per cell, so the run is cut where the merged
-      ;; attribute changes rather than at the match's edges - a match
-      ;; spanning a face boundary is two runs.
-      ;;--------------------------------------------------------------
-      (let* ((col (max 0 (- start line-start)))
-             (to (min len (- end line-start)))
-             (search-face (if (and (<= start point) (<= point end))
-                              'isearch
-                              'lazy-highlight)))
-        (let loop ((i col))
-          (when (< i to)
-            (let* ((attrs (merge-face-ref
-                           search-face
-                           (attrs-at-buffer-position ed (+ line-start i))))
-                   ;; the cells that merge to the same thing
-                   (j (let more ((j (+ i 1)))
-                        (if (and (< j to)
-                                 (equal? (merge-face-ref
-                                          search-face
-                                          (attrs-at-buffer-position
-                                           ed (+ line-start j)))
-                                         attrs))
-                            (more (+ j 1))
-                            j)))
-                   (drawn (line-glyph-run glyphs offsets i j width)))
-              (when drawn
-                (write-glyphs! (current-display) (car drawn)
-                               row (+ x0 (cdr drawn))
-                               (realize-face (current-display) attrs)))
-              (loop j))))))
-
-    (define (highlight-matches window row line line-start width
-                               pattern case-fold? x-offset texts from)
-      ;; Draw the search matches that fall on this line over the line that
-      ;; has just been drawn, so that what was found can be seen.
-      ;;
-      ;; The matching is done on the line's own text rather than through
-      ;; the buffer: a buffer search re-reads the text from where it
-      ;; starts, and a screenful of rows each searching a large buffer
-      ;; costs far more than the drawing is worth - enough to look like a
-      ;; hang. Only matches that lie wholly within the line are drawn, so
-      ;; a search string containing a line break (typed as C-j) finds its
-      ;; match and moves point, but nothing is highlighted for it.
-      ;;
-      ;; ROW is the row's own row *within the window* - the screen row
-      ;; comes from adding `window-top' to it here, which is why the
-      ;; caller passes `(+ row k)' and not the slice index `k' alone: `k'
-      ;; counts the rows of one buffer line, and a match on the window's
-      ;; second line drawn with `k' lands on the window's first row.
-      ;;
-      ;; X-OFFSET is how far right of the window's left edge the line's
-      ;; first cell is drawn - one when the row begins with the left
-      ;; truncation glyph, zero otherwise.
-      ;;--------------------------------------------------------------
-      (let* ((ed (window-buffer window))
-             (row (+ row (window-top window)))
-             (x0 (+ (window-left window) x-offset))
-             (len (string-length line))
-             ;; the row's buffer columns are [FROM, FROM+LEN) of TEXTS,
-             ;; which is where the glyphs and screen columns come from -
-             ;; the match is found in LINE's characters and drawn in the
-             ;; row's glyphs, and a `display' property makes those differ
-             (to (+ from len))
-             (glyphs (list->vector (line-texts-glyphs texts from to)))
-             (offsets (list->vector (line-texts-offsets texts from to)))
-             (point (text-editor-get-cursor ed))
-             (plen (string-length pattern)))
-        (let loop ((at 0))
-          (let ((found (string-search-forward line pattern at case-fold?)))
-            (when (and found (<= (+ found plen) len))
-              (draw-match ed row x0 glyphs offsets line-start len
-                          (+ line-start found) (+ line-start found plen)
-                          point width)
-              ;; on to the next match, starting inside this one so that
-              ;; overlapping matches are found too, as a repeated search
-              ;; finds them
-              (loop (+ 1 found)))))))
+    ;; `draw-match' and `highlight-matches' used to be here: the renderer
+    ;; searched each drawn row for the pattern and painted what it found.
+    ;; Both are gone with `*search-highlight*'. The matches are isearch's
+    ;; overlays now and arrive through the ordinary face machinery, which
+    ;; is also what fixed the row-by-row search's two blind spots - a
+    ;; match spanning a line break, and a font-locked word losing its
+    ;; colour inside a match.
 
     ;;----------------------------------------------------------------
     ;; The cursor's type
@@ -1760,7 +1678,50 @@
                   (loop (+ line 1)
                         (+ pos (or (line-outer-size ed line) 0))))))))
 
-    (define (render-window-rows! window ed width x0 vheight highlight)
+    (define (window-start window)
+      ;; GNU Emacs's `window-start': "Return the position of the start of
+      ;; the text displayed in WINDOW." Emacs answers from the marker the
+      ;; redisplay left behind (`w->start'); here the window's top is a
+      ;; *line* and the line's first character is that position.
+      ;;--------------------------------------------------------------
+      (window-top-line-position (window-buffer window)
+                                (window-top-line window)))
+
+    (define (window-end window)
+      ;; GNU Emacs's `window-end': "Return the end position of the text
+      ;; visible in WINDOW." Emacs answers from `w->window_end_pos',
+      ;; recorded as it drew; here the rows are laid out from the top line
+      ;; by the same walk `render-window-rows!' makes.
+      ;;
+      ;; It is the end of the last *row* that fits, which is not the same
+      ;; as the end of the last line: a line whose remaining rows fall off
+      ;; the bottom ends the window part way through, and the answer is
+      ;; where that row ends. A caller bounding a search is asking exactly
+      ;; this - "is this match on the screen?" - so a whole-line answer
+      ;; would reach below the window.
+      ;;--------------------------------------------------------------
+      (let ((ed (window-buffer window))
+            (vheight (window-body-height window)))
+        (let loop ((line (window-top-line window))
+                   (pos (window-start window))
+                   (row 0))
+          (if (>= row vheight)
+              pos
+              (let ((texts (buffer-line-texts window line)))
+                (if (not texts)
+                    ;; past the end of the buffer: the window ends here
+                    pos
+                    (let* ((slices (%window-line-slices window texts))
+                           (fits (- vheight row)))
+                      (if (>= fits (length slices))
+                          (loop (+ line 1)
+                                (+ pos (or (line-outer-size ed line) 0))
+                                (+ row (length slices)))
+                          ;; the line is cut off by the bottom of the
+                          ;; window: the last row that fits ends it
+                          (+ pos (cdr (list-ref slices (- fits 1))))))))))))
+
+    (define (render-window-rows! window ed width x0 vheight)
       ;; Draw WINDOW's rows of text: the buffer lines from its top line
       ;; down, each taking as many screen rows as it lays out.
       ;;
@@ -1790,13 +1751,13 @@
             ;; past the end of the buffer, and there is nothing below to
             ;; draw.
             (when (pair? slices)
-              (render-line-rows! window ed width x0 vheight highlight
+              (render-line-rows! window ed width x0 vheight
                                  row line-start line-string texts slices)
               (loop (+ row (length slices))
                     (+ line-index 1)
                     (+ line-start (or (line-outer-size ed line-index) 0))))))))
 
-    (define (render-line-rows! window ed width x0 vheight highlight
+    (define (render-line-rows! window ed width x0 vheight
                                row line-start line-string texts slices)
       ;; One buffer line's screen rows, from ROW down.
       ;;--------------------------------------------------------------
@@ -1839,25 +1800,10 @@
                                    (face->attribute 'default))
                     (draw-line! ed slice-start line-string texts slice
                                 screen-row (+ x0 1) row-width
-                                #f hscroll-truncated?)
-                    (when highlight
-                      (highlight-matches window (+ row k) slice-string
-                                         slice-start row-width
-                                         (car highlight) (cdr highlight)
-                                         1 texts (car slice))))
-                  (begin
-                    (draw-line! ed slice-start line-string texts slice
-                                screen-row x0 width more?
-                                (and truncated? (not more?)))
-                    ;; the characters the current search matched, drawn
-                    ;; over the row: the match point is in reverse video
-                    ;; (GNU Emacs's `isearch' face) and the other matches
-                    ;; in view in bold (`lazy-highlight')
-                    (when highlight
-                      (highlight-matches window (+ row k) slice-string
-                                         slice-start width
-                                         (car highlight) (cdr highlight)
-                                         0 texts (car slice)))))
+                                #f hscroll-truncated?))
+                  (draw-line! ed slice-start line-string texts slice
+                              screen-row x0 width more?
+                              (and truncated? (not more?))))
               (rows-loop (cdr rest) (+ k 1)))))))
 
     (define (render-window! window)
@@ -1872,9 +1818,8 @@
              (width (window-body-width window))
              (x0 (window-left window))
              (vheight (window-body-height window))
-             (border (and (window-right-border? window) (+ x0 width)))
-             (highlight (*search-highlight*)))
-        (render-window-rows! window ed width x0 vheight highlight)
+             (border (and (window-right-border? window) (+ x0 width))))
+        (render-window-rows! window ed width x0 vheight)
         ;; the mode line, on the window's last row. The face is Emacs's
         ;; `mode-line' for the selected window and `mode-line-inactive'
         ;; for the others - and on a terminal `mode-line' is

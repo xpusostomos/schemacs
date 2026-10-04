@@ -42,14 +42,15 @@
     ;; `*unread-command-events*' when something was. Reading through it is
     ;; what lets the search give the key that ended it back to the loop.
     (only (schemacs editor keyboard)
-          *unread-command-events* read-key-event)
+          *unread-command-events* read-key-event read-wait-ms)
     ;; `define-key' and the global map: the keys C-s and C-r are stated
     ;; here, beside the commands they run.
     (only (schemacs editor keymap)
          define-key
          *default-keymap*)
     (only (schemacs editor engine)
-         set!text-editor-mark text-editor-char-count
+         set!text-editor-mark string-search-forward text-editor-char-count
+         text-editor-copy-string
          text-editor-get-char-index text-editor-get-cursor
          text-editor-search-backward text-editor-search-forward
          text-editor-set-cursor
@@ -61,16 +62,28 @@
     ;; imported here.
     (only (schemacs editor minibuffer)
           *minibuffer-exit-hook* minibuffer-contents minibufferp)
+    ;; `frame-selected-window' and `window-buffer' are the window whose
+    ;; matches the lazy highlighter covers, and which it asks for its top
+    ;; and bottom - `isearch-lazy-highlight-update''s bounds.
     (only (schemacs editor frame)
-         *current-frame* current-editor set!frame-message
+         *current-frame* current-editor frame-selected-window
+         set!frame-message window-buffer
           )
     (only (schemacs editor command) define-command)
     (only (schemacs editor simple)
          current-kill word-char?
           )
+    ;; `render!' redraws after each key; `window-start' and `window-end'
+    ;; are the range the lazy highlighter covers - the window, which is
+    ;; what GNU Emacs's `lazy-highlight-buffer' nil means.
     (only (schemacs editor xdisp)
-         *search-highlight* render!
-          )
+         render! window-end window-start)
+    ;; The highlight is an *overlay* now - `isearch-highlight' makes one
+    ;; and puts the `isearch' face on it - which is GNU Emacs's mechanism
+    ;; and the reason a font-locked word keeps its colour inside a match:
+    ;; the display merges an overlay's face over the text property's.
+    (only (schemacs editor buffer)
+          current-buffer delete-overlay make-overlay move-overlay overlay-put)
     )
 
   (export
@@ -79,6 +92,11 @@
    isearch-forward isearch-message isearch-pop-state isearch-pop-to-success
    isearch-repeat isearch-search! isearch-word-at-point
    minibuffer-lazy-highlight-setup
+   ;; the highlighting, which `replace.sld' runs for query-replace
+   *search-highlight* *isearch-lazy-highlight* *lazy-highlight-cleanup*
+   isearch-highlight isearch-dehighlight
+   isearch-lazy-highlight-match isearch-lazy-highlight-update
+   lazy-highlight-cleanup
    )
 
   (begin
@@ -190,6 +208,168 @@
       ;;--------------------------------------------------------------
       (make-parameter #t))
 
+    ;;----------------------------------------------------------------
+    ;; Highlighting what the search found
+    ;;
+    ;; GNU Emacs's `isearch-highlight' (isearch.el:4016) and the lazy
+    ;; highlighter under it. What the search found is recorded as
+    ;; *overlays*: the match point is on gets one carrying the `isearch'
+    ;; face and priority 1001, and every other match in the window gets
+    ;; one carrying `lazy-highlight' and priority 1000. The display is told
+    ;; nothing - it reads those faces like any others, through
+    ;; `attrs-at-buffer-position', which merges an overlay's face *over*
+    ;; the text property's.
+    ;;
+    ;; That merge is the point of doing it this way. The previous
+    ;; arrangement published the search string to the renderer, which
+    ;; searched each drawn row again and painted the match in the search
+    ;; face *alone* - so every font-lock face under a match was wiped out
+    ;; for as long as the search lasted, and a match spanning a line break
+    ;; was not drawn at all (a row-by-row search cannot see one).
+    ;;------------------------------------------------------------------
+
+    (define *search-highlight* (make-parameter #t))
+    ;; ^ GNU Emacs's `search-highlight' (isearch.el:200), t by default:
+    ;; "Non-nil means highlight the current match during search."
+
+    (define *isearch-lazy-highlight* (make-parameter #t))
+    ;; ^ GNU Emacs's `isearch-lazy-highlight' (isearch.el:345), t by
+    ;; default: "Non-nil means highlight all matches of the current
+    ;; search string."
+
+    (define *lazy-highlight-cleanup* (make-parameter #t))
+    ;; ^ GNU Emacs's `lazy-highlight-cleanup' (isearch.el:329), t by
+    ;; default: "If non-nil, remove lazy highlighting when no search
+    ;; string is active."
+
+    (define isearch-overlay (make-parameter #f))
+    ;; ^ GNU Emacs's `isearch-overlay': "Overlay for highlighting the
+    ;; current match during search."
+
+    (define isearch-lazy-highlight-overlays (make-parameter '()))
+    ;; ^ GNU Emacs's `isearch-lazy-highlight-overlays'.
+
+    (define (isearch-highlight beg end)
+      ;; GNU Emacs's `isearch-highlight': "Highlight the current match."
+      ;; "1001 is higher than lazy's 1000 and ediff's 100+" - the C's own
+      ;; note, and the reason the current match wins where a lazy overlay
+      ;; covers the same characters. An overlay that already exists is
+      ;; *moved* rather than replaced, which is what the C does and keeps
+      ;; one overlay alive across a search instead of one per keystroke.
+      ;;--------------------------------------------------------------
+      (when (*search-highlight*)
+        (if (isearch-overlay)
+            (move-overlay (isearch-overlay) beg end (current-buffer))
+            (let ((overlay (make-overlay beg end)))
+              (isearch-overlay overlay)
+              (overlay-put overlay 'priority 1001)
+              (overlay-put overlay 'face 'isearch)))))
+
+    (define (isearch-dehighlight)
+      ;; GNU Emacs's `isearch-dehighlight': "Cancel the current-match
+      ;; highlighting."
+      ;;--------------------------------------------------------------
+      (when (isearch-overlay)
+        (delete-overlay (isearch-overlay))
+        (isearch-overlay #f)))
+
+    (define (lazy-highlight-cleanup force)
+      ;; GNU Emacs's `lazy-highlight-cleanup': "Stop lazy highlighting and
+      ;; remove extra highlighting from current buffer. FORCE non-nil means
+      ;; do it whether or not `lazy-highlight-cleanup' is nil." The C's
+      ;; second argument PROCRASTINATE is its idle-timer bookkeeping and
+      ;; has nothing to postpone here - the loop is run when it is asked
+      ;; for, not on a timer.
+      ;;--------------------------------------------------------------
+      (when (or force (*lazy-highlight-cleanup*))
+        (for-each delete-overlay (isearch-lazy-highlight-overlays))
+        (isearch-lazy-highlight-overlays '())))
+
+    (define (isearch-lazy-highlight-match beg end)
+      ;; GNU Emacs's `isearch-lazy-highlight-match`: one overlay per other
+      ;; match. "1000 is higher than ediff's 100+, but lower than isearch
+      ;; main overlay's 1001" - the C's note again.
+      ;;--------------------------------------------------------------
+      (let ((overlay (make-overlay beg end)))
+        (isearch-lazy-highlight-overlays
+         (cons overlay (isearch-lazy-highlight-overlays)))
+        (overlay-put overlay 'priority 1000)
+        (overlay-put overlay 'face 'lazy-highlight)
+        overlay))
+
+    (define (isearch-lazy-highlight-search text pattern from case-fold?)
+      ;; GNU Emacs's `isearch-lazy-highlight-search': "Search ahead for the
+      ;; next or previous match, for lazy highlighting. Attempt to do the
+      ;; search exactly the way the pending Isearch would."
+      ;;
+      ;; The C searches the *buffer*, with the same search function the
+      ;; search itself uses, so a regexp search highlights regexp matches.
+      ;; Here the caller has already copied out the window - one copy for
+      ;; the whole pass, see `isearch-lazy-highlight-update' - and this
+      ;; searches that. The rule is the engine's own literal one, which is
+      ;; what `isearch-find' runs, and searching the window's text rather
+      ;; than one row's is what lets a match spanning a line break be
+      ;; highlighted.
+      ;;
+      ;; The answer is the index of the match, or #f. The caller knows the
+      ;; pattern's length, and the search answers where point would go.
+      ;;--------------------------------------------------------------
+      (string-search-forward text pattern from case-fold?))
+
+    (define (isearch-lazy-highlight-update ed window pattern case-fold?)
+      ;; GNU Emacs's `isearch-lazy-highlight-update': every match of the
+      ;; search string in the window is highlighted.
+      ;;
+      ;; The C walks outwards from the match point is on and wraps at the
+      ;; window's edges, so that the matches nearest point are made first
+      ;; when `lazy-highlight-max-at-a-time' cuts a pass short; the set it
+      ;; arrives at is the window's matches, and that is the set made here
+      ;; in one pass. Emacs defers the work to an idle timer so that a
+      ;; long search stays responsive; here it is one screenful, so it is
+      ;; done where the C's loop would eventually get to.
+      ;;
+      ;; The window is copied out **once** and the pass walks the copy.
+      ;; Searching the buffer a match at a time would be quadratic and was:
+      ;; the engine's `text-editor-search-forward' copies from its start
+      ;; argument to the end of the *buffer* on every call, and
+      ;; `text-editor-copy-string' reads character by character through the
+      ;; engine, so a per-match copy of a two-kilobyte window cost about a
+      ;; millisecond for each of a screenful of matches - 165ms per
+      ;; keystroke on an 800KB file, which is what "isearch has become
+      ;; super slow" was. One copy for the pass is the whole of it.
+      ;;--------------------------------------------------------------
+      (lazy-highlight-cleanup #t)
+      (when (and (*isearch-lazy-highlight*)
+                 (< 0 (string-length pattern))
+                 (eq? (window-buffer window) ed))
+        (let* ((limit (min (window-end window) (text-editor-char-count ed)))
+               (start (min (window-start window) limit))
+               (len (string-length pattern))
+               (text (text-editor-copy-string ed start limit))
+               (end (string-length text)))
+          (let loop ((at 0))
+            (let ((found (isearch-lazy-highlight-search text pattern at case-fold?)))
+              ;; a match running past the end of the window is not one of
+              ;; the window's matches, which is what a bounded search means
+              (when (and found (<= (+ found len) end))
+                (isearch-lazy-highlight-match (+ start found)
+                                              (+ start found len))
+                ;; the pattern is at least one character, so this advances
+                (loop (+ found len))))))))
+
+    (define (isearch-match-bounds ed pattern direction)
+      ;; Where the match the search is on begins and ends, in engine
+      ;; indexes. Point sits at the match's far end - past it searching
+      ;; forward, at its start searching backward (`isearch-search-string':
+      ;; "If found, move point to the end of the occurrence") - so the
+      ;; other end is the pattern's length away.
+      ;;--------------------------------------------------------------
+      (let ((point (text-editor-get-cursor ed))
+            (len (string-length pattern)))
+        (if (eq? direction 'forward)
+            (cons (- point len) point)
+            (cons point (+ point len)))))
+
     (define (isearch-no-upper-case-p string regexp-flag)
       ;; GNU Emacs's `isearch-no-upper-case-p' (isearch.el:3945):
       ;; "Return t if there are no upper case chars in STRING. If
@@ -219,6 +399,9 @@
       ;;--------------------------------------------------------------
       (let* ((frame (*current-frame*))
              (ed (current-editor))
+             ;; the window whose matches are highlighted lazily, which is
+             ;; the one the search is being watched in
+             (window (frame-selected-window frame))
              (opoint (text-editor-get-cursor ed)))
         (let loop ((pattern "")
                    (direction (if forward? 'forward 'backward))
@@ -230,25 +413,42 @@
                    (case-fold? #t))
           (*search-pattern* (and (< 0 (string-length pattern)) pattern))
           (*search-case-fold?* case-fold?)
-          ;; and tell the renderer what to draw as matches. In GNU Emacs
-          ;; this is not a variable at all: isearch puts the `isearch'
-          ;; face on the match point is on and `lazy-highlight' on the
-          ;; others, and the display finds them as text properties. With
-          ;; no properties here, the search publishes the same fact for
-          ;; the display to read.
-          (*search-highlight* (and (< 0 (string-length pattern))
-                                   (cons pattern case-fold?)))
+          ;; and record what was found as overlays for the display to
+          ;; draw - the match point is on with the `isearch' face, the
+          ;; others in the window with `lazy-highlight'. This is GNU
+          ;; Emacs's `isearch-search' followed by
+          ;; `isearch-lazy-highlight-new-loop', run on the key rather than
+          ;; on an idle timer, there being no timer to hang it on and only
+          ;; a screenful of work to do.
+          (if success?
+              (let ((match (isearch-match-bounds ed pattern direction)))
+                (isearch-highlight (car match) (cdr match)))
+              ;; a failing search leaves the last highlight where it was,
+              ;; as `isearch-search' leaves the overlay alone when it
+              ;; finds nothing
+              #f)
+          (isearch-lazy-highlight-update ed window pattern case-fold?)
           (set!frame-message
            frame
            (isearch-message pattern direction success? wrapped? case-fold?
                             (text-editor-get-cursor ed) opoint))
           (render! frame)
-          (let ((ev (read-key-event -1)))
+          ;; The read waits as long as any other interactive read may -
+          ;; `read-wait-ms', the command loop's own computation - and not
+          ;; for ever. A wait that never comes back gives nothing else a
+          ;; turn: on a terminal the read blocks in `getch` and the
+          ;; development REPL never answers between keys, and on Gtk the
+          ;; code that waits for a key is the same code that polls and
+          ;; pumps, so a blocking wait is one in which no key is ever seen.
+          ;; The search looked hung the moment it started, with every key
+          ;; doing nothing, `C-g' included.
+          (let ((ev (read-key-event (read-wait-ms))))
             (cond
              ;; ---- keys that end the search ----
              ((and (char? ev) (char=? ev #\return))          ; isearch-exit
               (*search-pattern* #f)
-              (*search-highlight* #f)
+              (isearch-dehighlight)
+              (lazy-highlight-cleanup #t)
               (set!frame-message frame "")
               (when (not (= (text-editor-get-cursor ed) opoint))
                 (set!text-editor-mark ed opoint)
@@ -261,7 +461,8 @@
                   (begin
                     (text-editor-set-cursor ed opoint)
                     (*search-pattern* #f)
-                    (*search-highlight* #f)
+                    (isearch-dehighlight)
+                    (lazy-highlight-cleanup #t)
                     (set!frame-message frame "Quit"))
                   (let ((popped (isearch-pop-to-success ed states)))
                     (loop (car popped) direction (cdr popped) #t #f
@@ -333,7 +534,8 @@
              ;; alone, as it is on this exit.
              ((and (char? ev) (char<? ev #\space))
               (*search-pattern* #f)
-              (*search-highlight* #f)
+              (isearch-dehighlight)
+              (lazy-highlight-cleanup #t)
               (set!frame-message frame "")
               ;; Give the key back to the command loop to run, which is
               ;; what pushes it onto `unread-command-events' - Emacs's
@@ -442,13 +644,13 @@
       ;; `minibuffer-setup-hook', which is how `query-replace-read-args'
       ;; uses it.
       ;;
-      ;; As the minibuffer's text changes, what is typed is published to
-      ;; the display as the search to highlight - `*search-highlight*',
-      ;; the same channel `isearch' itself draws its matches through - so
-      ;; the buffer being replaced in shows its matches while the pattern
-      ;; is still being typed. That is what lights up the buffer as you
-      ;; type M-%, and what lights it again when M-p brings a previous
-      ;; answer back into the minibuffer.
+      ;; As the minibuffer's text changes, the buffer being replaced in is
+      ;; searched for what has been typed so far and each match gets a
+      ;; `lazy-highlight' overlay - the same `isearch-lazy-highlight-update'
+      ;; the search itself runs, aimed at the window the minibuffer was
+      ;; entered from (the C's `with-minibuffer-selected-window'). That is
+      ;; what lights up the buffer as you type M-%, and what lights it
+      ;; again when M-p brings a previous answer back into the minibuffer.
       ;;
       ;; HIGHLIGHT nil, or a minibuffer already active, sets up nothing:
       ;; the C's own two early exits. TRANSFORM turns the minibuffer's
@@ -461,42 +663,44 @@
       ;; and the FILTER it adds to `isearch-filter-predicate' for a
       ;; region.
       ;;
-      ;; CLEANUP needs no hook here: the highlight and the
-      ;; after-change list are `make-parameter' bindings, and this
-      ;; closure runs inside the minibuffer's own dynamic extent, so
-      ;; what it sets is given back when the minibuffer is left - which
-      ;; is what the C's `unwind' does by hand.
+      ;; CLEANUP is the C's `unwind' argument: the C deletes the overlays
+      ;; itself only when it is true, and otherwise leaves
+      ;; `lazy-highlight-cleanup' to decide. Either way the `unwind'
+      ;; closure here takes the after-change hook off again, which the C
+      ;; does by hand for the same reason - the hook list is global here
+      ;; where Emacs's is buffer-local to the minibuffer.
       ;;--------------------------------------------------------------
       (if (or (not highlight) (minibufferp))
           (lambda () #f)
-          (lambda ()
-            (define (publish!)
-              (let ((string (transform (minibuffer-contents))))
-                (*search-highlight*
-                 (and (< 0 (string-length string))
-                      (cons string case-fold)))
-                (render! (*current-frame*))))
-            (define (after-change beg end old-length)
-              ;; The hook is global here where the C's is buffer-local to
-              ;; the minibuffer, so it is asked whether a minibuffer is
-              ;; being read at all - without this it fires for the edits
-              ;; of any buffer, and `minibuffer-contents' has nothing to
-              ;; answer with once the minibuffer is gone.
-              (when (minibufferp) (publish!)))
-            (define (unwind)
-              ;; the C's `unwind': take the hook off again, and the
-              ;; highlight with it
+          (let ((buffer (current-buffer))
+                ;; the window the minibuffer was entered from, which is
+                ;; the one whose matches light up
+                (window (frame-selected-window (*current-frame*))))
+            (lambda ()
+              (define (update!)
+                ;; The hook is global here where the C's is buffer-local to
+                ;; the minibuffer, so it is asked whether a minibuffer is
+                ;; being read at all - without this it fires for the edits
+                ;; of any buffer, and `minibuffer-contents' has nothing to
+                ;; answer with once the minibuffer is gone.
+                (when (minibufferp)
+                  (isearch-lazy-highlight-update
+                   buffer window (transform (minibuffer-contents)) case-fold)
+                  (render! (*current-frame*))))
+              (define (after-change beg end old-length)
+                (update!))
+              (define (unwind)
+                (*after-change-functions*
+                 (let loop ((l (*after-change-functions*)) (acc '()))
+                   (cond ((null? l) (reverse acc))
+                         ((eq? (car l) after-change) (loop (cdr l) acc))
+                         (else (loop (cdr l) (cons (car l) acc))))))
+                (lazy-highlight-cleanup cleanup))
               (*after-change-functions*
-               (let loop ((l (*after-change-functions*)) (acc '()))
-                 (cond ((null? l) (reverse acc))
-                       ((eq? (car l) after-change) (loop (cdr l) acc))
-                       (else (loop (cdr l) (cons (car l) acc))))))
-              (*search-highlight* #f))
-            (*after-change-functions*
-             (cons after-change (*after-change-functions*)))
-            (*minibuffer-exit-hook*
-             (cons unwind (*minibuffer-exit-hook*)))
-            ;; and once for what is already in the minibuffer
-            (publish!))))
+               (cons after-change (*after-change-functions*)))
+              (*minibuffer-exit-hook*
+               (cons unwind (*minibuffer-exit-hook*)))
+              ;; and once for what is already in the minibuffer
+              (update!)))))
 
     ))

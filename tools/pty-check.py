@@ -436,15 +436,45 @@ def check_isearch_highlight():
     something was wrong.  What is asserted is the part that must hold
     whatever the palette: a search draws something no other screen does.
     """
-    import re
     path = "/tmp/pty-check-isearch.txt"
     open(path, "w").write("alpha beta alpha gamma alpha\n")
-    searched = set(re.findall(r"\x1b\[[0-9;]*m", drive([C_s, b"alpha"], path)))
-    plain = set(re.findall(r"\x1b\[[0-9;]*m", drive([], path)))
+    # the *text* row's attributes, not the whole screen's: the echo area
+    # carries the search prompt, so a screen-wide set differs for any
+    # search at all and would call the prompt a highlight.
+    searched = row_attrs(drive([C_s, b"alpha"], path), 0)
+    plain = row_attrs(drive([], path), 0)
     if not (searched - plain):
         return ["a search draws the same text attributes as no search at all: "
                 "matches are not being drawn (is *search-highlight* set, and "
                 "does the face reach the renderer?)"]
+    return []
+
+
+def check_isearch_multiline():
+    """A match with a line break in it is highlighted.
+
+    `C-j` is `isearch-printing-char` for a newline, so `C-s alpha C-j beta`
+    searches for "alpha\\nbeta" and `search-forward` crosses the line break
+    to find it. Emacs makes *one* overlay from the match's start to its
+    end, so both halves are highlighted.
+
+    This port could not do that while the renderer searched each drawn row
+    for the pattern: a row's text has no line break in it, so a match
+    spanning one was never found and nothing was drawn for it - point
+    moved, the colour did not. The highlight is an overlay now, made from
+    the match the search reported, and the break is inside it.
+    """
+    path = "/tmp/pty-check-isearch-multiline.txt"
+    open(path, "w").write("alpha\nbeta\ngamma\n")
+    # row 0 is the "alpha" half of the match; row 1 is "beta". Both must
+    # carry a face the plain screen does not.
+    searched = drive([C_s, b"alpha", b"\n", b"beta"], path, settle=2.0, gap=0.35)
+    plain = drive([], path)
+    if not ((row_attrs(searched, 0) - row_attrs(plain, 0))
+            and (row_attrs(searched, 1) - row_attrs(plain, 1))):
+        return ["a search for a string with a line break in it draws no "
+                "match: `alpha\\nbeta' spans two rows and its highlight has "
+                "to be one overlay over both"]
     return []
 
 
@@ -617,6 +647,56 @@ def screen_of(out, width=80):
     return "\n".join(
         "".join(rows.get(r, {}).get(c, " ") for c in range(width))
         for r in range(max(rows) + 1))
+
+
+def row_attrs(out, want_row=0):
+    """The attributes in effect on one row of the newest repaint.
+
+    `screen_of' throws the attributes away, and the whole screen's set of
+    them is too coarse for "is this match highlighted": the echo area
+    carries the search prompt, so *any* search adds an escape somewhere and
+    a screen-wide comparison would call that a highlight. This keeps the
+    attributes that belong to one row - the text row, for a search - by
+    walking the same cursor addressing `screen_of' does.
+
+    What is *in effect* and not what was *emitted*: a terminal keeps its
+    drawing state across rows, so a face that covers two rows is set once,
+    on the first, and the second inherits it with no escape of its own.
+    That is exactly the case a match with a line break in it makes, and a
+    reader of escapes-sent would call the second row unhighlighted.
+    """
+    import re
+    tail = out.rsplit("\x1b[2J", 1)[-1]
+    active, row, col = frozenset(), 0, 0
+    row_active = {}
+    for chunk in re.split(r"(\x1b\[[0-9;]*[A-Za-z]|\x1b\(B|\r|\n)", tail):
+        if not chunk or chunk in ("\r", "\n"):
+            continue
+        if chunk.startswith("\x1b"):
+            m = re.match(r"\x1b\[([0-9;]*)([A-Za-z])", chunk)
+            if not m:
+                continue
+            nums = [int(x) for x in m.group(1).split(";") if x.isdigit()]
+            cmd, n = m.group(2), (nums[0] if nums else 1)
+            if cmd in "Hd":
+                row = (nums[0] if nums else 1) - 1
+                col = (nums[1] if len(nums) > 1 else 1) - 1
+            elif cmd == "A":
+                row -= n
+            elif cmd == "B":
+                row += n
+            elif cmd == "C":
+                col += n
+            elif cmd == "D":
+                col -= n
+            elif cmd == "m":
+                # `ESC [ m' is `ESC [ 0 m': everything off
+                active = (frozenset() if not nums or 0 in nums
+                          else active | {chunk})
+            continue
+        col += len(chunk)
+        row_active[row] = active
+    return row_active.get(want_row, frozenset())
 
 
 def check_completions():
@@ -2192,6 +2272,7 @@ CHECKS = {
     "default-directory": check_default_directory,
     "m-x": check_m_x,
     "isearch-highlight": check_isearch_highlight,
+    "isearch-multiline": check_isearch_multiline,
     "isearch-scroll": check_isearch_scroll,
     "isearch-highlight-row": check_isearch_highlight_row,
     "isearch-quit": check_isearch_quit,

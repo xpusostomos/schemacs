@@ -36,7 +36,8 @@
           erase-buffer get-buffer-create transient-mark-mode
           with-current-buffer)
     (only (schemacs editor frame)
-          *current-frame* recenter set!frame-message set-message!)
+          *current-frame* frame-selected-window recenter set!frame-message
+          set-message!)
     (only (schemacs editor editfns)
           barf-if-buffer-read-only bobp buffer-substring char-after
           delete-region eobp goto-char insert point point-min point-max
@@ -74,13 +75,24 @@
     ;; `char-displayable-p' is `international/mule.el''s: it decides
     ;; whether the terminal can draw the separator between FROM and TO.
     (only (schemacs editor mule) char-displayable-p)
-    ;; The highlight channel and the redraw.
-    (only (schemacs editor xdisp) *search-highlight* render!)
+    ;; the redraw
+    (only (schemacs editor xdisp) render!)
     ;; `search-upper-case' decides the search's folding, which the
-    ;; `isearch-no-upper-case-p' of isearch.el reads.
+    ;; `isearch-no-upper-case-p' of isearch.el reads; the highlighting is
+    ;; isearch's, as it is in Emacs - `replace-highlight' makes its own
+    ;; overlay and hands the other matches to the lazy highlighter.
     (only (schemacs editor isearch)
           *search-upper-case* isearch-no-upper-case-p
+          *lazy-highlight-cleanup*
+          isearch-lazy-highlight-update lazy-highlight-cleanup
           minibuffer-lazy-highlight-setup)
+    ;; `replace-highlight''s overlay, and the `query-replace' face it
+    ;; carries - `(defface query-replace '((t (:inherit isearch))))'
+    ;; (replace.el:165), which is why the match point is on looks the way
+    ;; an isearch match does.
+    (only (schemacs editor buffer)
+          current-buffer delete-overlay make-overlay move-overlay overlay-put)
+    (only (schemacs editor faces) defface)
     (only (schemacs editor command)
           current-prefix-arg define-command uarg->integer)
     (only (schemacs editor keymap) define-key *default-keymap* *current-keymap*)
@@ -167,13 +179,32 @@
       (make-parameter #t))
 
     (define *query-replace-lazy-highlight*
-      ;; GNU Emacs's `query-replace-lazy-highlight' (replace.el:153).
-      ;; The renderer highlights every visible match of
-      ;; `*search-highlight*''s pattern whether this is set or not, so
-      ;; this parameter only carries the C's meaning for a caller that
-      ;; reads it.
+      ;; GNU Emacs's `query-replace-lazy-highlight' (replace.el:153):
+      ;; "Controls the lazy-highlighting during query replacements. When
+      ;; non-nil, all text matching the current match that is currently
+      ;; visible in the window is highlighted lazily using isearch lazy
+      ;; highlighting." `replace-highlight' reads it to decide whether to
+      ;; run the lazy loop, exactly as the C does.
       ;;--------------------------------------------------------------
       (make-parameter #t))
+
+    (define *query-replace-highlight*
+      ;; GNU Emacs's `query-replace-highlight' (replace.el:130): "Non-nil
+      ;; means to highlight matches during query replacement."
+      ;;--------------------------------------------------------------
+      (make-parameter #t))
+
+    (define replace-overlay (make-parameter #f))
+    ;; ^ GNU Emacs's `replace-overlay' (replace.el:3031): the overlay the
+    ;; match being replaced is highlighted with. It is `replace-highlight''s
+    ;; own, not isearch's - the C keeps the two separate so that leaving
+    ;; query-replace cannot disturb a search in progress.
+
+    (defface 'query-replace
+          '((#t :inherit isearch))
+          "Face for highlighting query replacement matches.
+Used in `query-replace' and `query-replace-regexp'
+when `query-replace-highlight' is non-nil")
 
     ;;----------------------------------------------------------------
     ;; The answers: `query-replace-map'
@@ -540,21 +571,48 @@ re-executed as a normal key sequence.")
 
     (define (replace-highlight match-beg match-end search-string
                                case-fold backward)
-      ;; GNU Emacs's `replace-highlight' (replace.el:3034): publish the
-      ;; match for the renderer. The display's channel
-      ;; (`*search-highlight*', xdisp.sld) already draws the match
-      ;; point is in with the `isearch' face and the other visible
-      ;; matches with `lazy-highlight' - the appearance the C's faces
-      ;; give, through one pair.
+      ;; GNU Emacs's `replace-highlight' (replace.el:3034): "Highlight the
+      ;; match to be replaced" - an overlay carrying the `query-replace'
+      ;; face, "higher than lazy overlays" at priority 1001, and the rest
+      ;; of the matches in the window handed to the lazy highlighter so
+      ;; that what is coming up can be seen. The C's other arguments -
+      ;; RANGE-BEG, RANGE-END, REGEXP-FLAG, DELIMITED-FLAG - bound the
+      ;; lazy search and pick the faces for regexp submatches; the window
+      ;; is the bound used here, which is the same set of matches
+      ;; (`lazy-highlight-buffer' is nil in this call in the C too), and
+      ;; the submatch faces are not ported.
+      ;;
+      ;; The highlight is an overlay and not a message to the display for
+      ;; the reason the whole search highlight is: an overlay's face
+      ;; *merges* with the text property's, so a font-locked word inside
+      ;; the match keeps its colour.
       ;;--------------------------------------------------------------
-      (*search-highlight* (cons search-string case-fold))
+      (when (*query-replace-highlight*)
+        (if (replace-overlay)
+            (move-overlay (replace-overlay) match-beg match-end
+                          (current-buffer))
+            (let ((overlay (make-overlay match-beg match-end)))
+              (replace-overlay overlay)
+              (overlay-put overlay 'priority 1001)
+              (overlay-put overlay 'face 'query-replace))))
+      (when (*query-replace-lazy-highlight*)
+        (let ((frame (*current-frame*)))
+          (isearch-lazy-highlight-update (current-buffer)
+                                         (frame-selected-window frame)
+                                         search-string case-fold)))
       (render! (*current-frame*))
       #f)
 
     (define (replace-dehighlight)
-      ;; GNU Emacs's `replace-dehighlight' (replace.el:3087): clear it.
+      ;; GNU Emacs's `replace-dehighlight' (replace.el:3087): "Cancel
+      ;; highlighting of matches being replaced" - the overlay goes, and
+      ;; the lazy highlighting with it.
       ;;--------------------------------------------------------------
-      (*search-highlight* #f)
+      (when (replace-overlay)
+        (delete-overlay (replace-overlay))
+        (replace-overlay #f))
+      (when (*query-replace-lazy-highlight*)
+        (lazy-highlight-cleanup (*lazy-highlight-cleanup*)))
       #f)
 
     (define (replace-match-maybe-edit newtext fixedcase literal noedit
@@ -663,7 +721,7 @@ re-executed as a normal key sequence.")
         (render! frame)))
 
     (define (undo-replacements def stack replaced last-was-act-and-show
-                               literal regexp-flag backward
+                               literal regexp-flag backward noedit
                                get-real-match-data set-real-match-data!
                                set-noedit! get-replace-count
                                set-replace-count! set-next-replacement!
@@ -1032,7 +1090,7 @@ re-executed as a normal key sequence.")
                                                         def stack replaced
                                                         last-was-act-and-show
                                                         literal regexp-flag
-                                                        backward
+                                                        backward noedit
                                                         (lambda () real-match-data)
                                                         (lambda (md)
                                                           (set! real-match-data md))

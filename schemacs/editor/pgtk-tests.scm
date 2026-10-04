@@ -34,6 +34,8 @@
         set!text-editor-mark)
  (only (schemacs editor buffer) buffer-local-value set-buffer-local-value!)
  (only (schemacs editor textprop) put-text-property)
+ (prefix (schemacs editor isearch) is:)
+ (only (schemacs editor buffer) overlays-at overlay-get overlay-start)
  ;; Imported for the *faces* it defines - `dired-marked' and the two
  ;; beside it are dired.el's own `defface's - which the test below
  ;; realizes. Loaded by both front ends in the real editor, so this is
@@ -291,17 +293,22 @@
 
 (define (render-search text face-start face-end pattern)
   ;; TEXT with `font-lock-keyword-face' over [FACE-START, FACE-END), and
-  ;; PATTERN as the search to highlight, or #f for no search at all.
+  ;; PATTERN highlighted the way the search highlights it - by
+  ;; `isearch-lazy-highlight-update', the very call `isearch' makes, which
+  ;; puts a `lazy-highlight' overlay on each match in the window. #f for
+  ;; no search at all.
   (let* ((d (new-display))
          (ed (new-text-editor)))
     (text-editor-insert ed text)
     (text-editor-set-cursor ed 0)
     (put-text-property face-start face-end 'face 'font-lock-keyword-face ed)
     (let ((frame (fr:new-frame ed 24 80)))
-      (parameterize ((fr:*current-frame* frame)
-                     (xd:*search-highlight* (and pattern (cons pattern #f))))
-        (xd:render! frame)))
-    (shot-of d)))
+      (parameterize ((fr:*current-frame* frame))
+        (when pattern
+          (is:isearch-lazy-highlight-update
+           ed (fr:frame-selected-window frame) pattern #f))
+        (xd:render! frame))
+      (shot-of d))))
 
 (define (cell-colours pix cell)
   ;; The distinct `(R G B)' the pixels of CELL's glyph band take.
@@ -327,10 +334,12 @@
               (loop (cdr rest) (car rest) d)
               (loop (cdr rest) best far))))))
 
-;; "keyword" is cells 3 to 9; point is at 0, so the match is one of the
-;; *other* matches and gets `lazy-highlight'.
-(define no-search-colours (cell-colours (render-search "aa keyword bb" 3 10 #f) 4))
-(define searching-colours (cell-colours (render-search "aa keyword bb" 3 10 "keyword") 4))
+;; Cell 4 is inside "keyword" (cells 3 to 9); point is at 0, so the match
+;; is one of the *other* matches and gets `lazy-highlight'.
+(define no-search-pixels (render-search "aa keyword bb" 3 10 #f))
+(define searching-pixels (render-search "aa keyword bb" 3 10 "keyword"))
+(define no-search-colours (cell-colours no-search-pixels 4))
+(define searching-colours (cell-colours searching-pixels 4))
 (define keyword-ink (inkiest no-search-colours))
 
 ;; the word is drawn in a colour of its own without a search...
@@ -339,6 +348,83 @@
 ;; ...and the same colour with one, which is the merge
 (test-assert "a search match keeps the face colour that was under it"
   (and keyword-ink (member keyword-ink searching-colours)))
+;; and the search face is drawn there at all - the cell's background is
+;; what `lazy-highlight' changes
+(test-assert "and the search face is drawn over it"
+  (not (equal? (list (no-search-pixels (+ (* 4 9) 4) 16))
+               (list (searching-pixels (+ (* 4 9) 4) 16)))))
+
+;; The case above has a `face' text property, so the renderer is on its
+;; face path either way. The one the shortcut broke is a buffer with *no*
+;; text properties at all: `draw-line!' used to draw such a row in one
+;; write with no face, so an overlay face was never looked up and the
+;; match was invisible. Overlays are faces too, and the shortcut has to
+;; ask whether this row has one.
+(define (render-plain-search text pattern)
+  ;; TEXT with no text properties at all, and PATTERN highlighted.
+  (let* ((d (new-display))
+         (ed (new-text-editor)))
+    (text-editor-insert ed text)
+    (text-editor-set-cursor ed 0)
+    (let ((frame (fr:new-frame ed 24 80)))
+      (parameterize ((fr:*current-frame* frame))
+        (when pattern
+          (is:isearch-lazy-highlight-update
+           ed (fr:frame-selected-window frame) pattern #f))
+        (xd:render! frame))
+      (shot-of d))))
+
+(define plain-pixels (render-plain-search "aa keyword bb" #f))
+(define plain-search-pixels (render-plain-search "aa keyword bb" "keyword"))
+(define (plain-cell pix) (list (pix (+ (* 4 9) 4) 16)))
+
+(test-assert "a search is drawn on a buffer with no text properties"
+  (not (equal? (plain-cell plain-pixels) (plain-cell plain-search-pixels))))
+
+;; The mechanism behind it, without a display: the highlight is an
+;; overlay carrying the face, so the display merges it like any other
+;; overlay - `isearch-highlight' makes it, `isearch-dehighlight' removes
+;; it, and the lazy highlighter makes one per other match.
+(let* ((ed (new-text-editor)))
+  (text-editor-insert ed "alpha beta alpha")
+  (text-editor-set-cursor ed 0)
+  (parameterize ((fr:*current-frame* (fr:new-frame ed 24 80)))
+    (is:isearch-highlight 0 5)
+    (is:isearch-lazy-highlight-update ed (fr:frame-selected-window
+                                          (fr:*current-frame*))
+                                      "alpha" #f)
+    (test-equal "isearch-highlight puts the `isearch' face on an overlay"
+      'isearch
+      (let loop ((ovs (overlays-at 2 #t)))
+        (and (pair? ovs)
+             (if (eq? (overlay-get (car ovs) 'face) 'isearch)
+                 'isearch
+                 (loop (cdr ovs))))))
+    ;; one overlay per match, so the count is of the cells a match
+    ;; *starts* at - "alpha" twice in "alpha beta alpha"
+    (test-equal "and the lazy highlighter a `lazy-highlight' one per match"
+      '(11 0)
+      (let loop ((i 0) (acc '()))
+        (if (>= i 16)          ; the text's length
+            acc
+            (loop (+ i 1)
+                  (if (let loop-ovs ((ovs (overlays-at i #t)))
+                        (and (pair? ovs)
+                             (if (and (eq? (overlay-get (car ovs) 'face)
+                                           'lazy-highlight)
+                                      (= (overlay-start (car ovs)) i))
+                                 #t
+                                 (loop-ovs (cdr ovs)))))
+                      (cons i acc)
+                      acc)))))
+    (is:isearch-dehighlight)
+    (test-assert "isearch-dehighlight takes the `isearch' overlay away"
+      (not (let loop ((ovs (overlays-at 2 #t)))
+             (and (pair? ovs)
+                  (if (eq? (overlay-get (car ovs) 'face) 'isearch)
+                      #t
+                      (loop (cdr ovs)))))))
+    (is:lazy-highlight-cleanup #t)))
 
 ;;------------------------------------------------------------------
 ;; The `display' text property replaces a character on the screen

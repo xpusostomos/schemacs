@@ -129,6 +129,7 @@
    quoted-insert
    read-quoted-char
    read-key-event
+   read-wait-ms
    recursive-edit
    report-command-error!
    signal-quit
@@ -631,6 +632,25 @@
                 ((< want 0) cap)
                 (else (min want cap))))))
 
+    (define (read-wait-ms)
+      ;; How long an interactive read may block for, in milliseconds, or a
+      ;; negative number for "until an event arrives".
+      ;;
+      ;; It is the command loop's own computation, published because a
+      ;; command that reads its *own* keys has to wait the same way and
+      ;; must not drift from it. `isearch' is that command.
+      ;;
+      ;; The cap is the whole point: a read that blocks for ever gives
+      ;; nothing else in the process a turn. On a terminal the read blocks
+      ;; in `getch' with nothing to poll, so the development REPL never
+      ;; answers between keys; on Gtk the *pump* that waits for a key is
+      ;; the same code that polls, and a wait that never comes back is a
+      ;; wait in which no key is ever seen - which is what made an
+      ;; incremental search on Gtk look like it had hung the moment it
+      ;; started, with every key doing nothing, `C-g' included.
+      ;;--------------------------------------------------------------
+      (read-timeout-or -1 #f (and (repl-open?) 100)))
+
     (define (command-loop frame)
       ;; Read key events and dispatch them, until something leaves this
       ;; level with `exit-recursive-edit' - or, at the outermost level,
@@ -680,10 +700,8 @@
                               -1)
                           (timer-next-delay)
                           ;; With the development REPL open the wait is
-                          ;; capped, because the server is given its turn
-                          ;; by this loop and a blocked wait never gets
-                          ;; there. A run that has not opened it is not
-                          ;; slowed at all.
+                          ;; capped - see `read-wait-ms', which is the
+                          ;; same computation `isearch' waits by.
                           (and (repl-open?) 100))))
              (let ((ev (read-key-event want)))
                ;; A *key* means the editor is not idle any more. A timeout
