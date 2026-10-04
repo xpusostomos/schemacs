@@ -64,10 +64,15 @@
    set-text-properties
    get-text-property
    interval-of
+   interval-has-some-properties-list
+   keyword?
    next-single-property-change
    previous-single-property-change
    put-text-property
+   remove-list-of-text-properties
    text-properties-at
+   text-property-any
+   text-property-not-all
    validate-interval-range
    validate-plist
    ;; the kinds of change `add_properties' can make to a property that is
@@ -258,6 +263,19 @@
          ((not (pair? tail)) #f)
          ((plist-member-of (iv:interval-plist i) (car tail)) #t)
          (else (loop (if (pair? (cdr tail)) (cddr tail) '()))))))
+
+    (define (interval-has-some-properties-list list i)
+      ;; GNU Emacs's `interval_has_some_properties_list': I has one of the
+      ;; property names in LIST, whatever the values - the same question
+      ;; `interval-has-some-properties' asks, asked of a plain list of
+      ;; names rather than of a plist. `remove-list-of-text-properties'
+      ;; is the caller, and this is the only difference between it and
+      ;; `remove-text-properties'.
+      ;;--------------------------------------------------------------
+      (let loop ((tail list))
+        (cond ((not (pair? tail)) #f)
+              ((plist-member-of (iv:interval-plist i) (car tail)) #t)
+              (else (loop (cdr tail))))))
 
     (define *text-property-replace* 'replace)
     (define *text-property-prepend* 'prepend)
@@ -516,6 +534,83 @@
                            (cons (cadr tail) (cons (car tail) acc))
                            changed?)))))))
 
+    (define (%remove-properties-from i start end properties names)
+      ;; The removal itself: the properties named by PROPERTIES (or, when
+      ;; that is empty, by NAMES) off the text from START to END, I being
+      ;; the interval START falls in. The C's walk - the range may begin
+      ;; inside an interval, so it is split at START first, and then each
+      ;; interval that has something is cleared until the range runs out.
+      ;;--------------------------------------------------------------
+      (let ((has? (if (pair? properties)
+                      (lambda (i) (interval-has-some-properties properties i))
+                      (lambda (i)
+                        (interval-has-some-properties-list names i)))))
+        (let ((i (if (= start (iv:interval-position i))
+                     i
+                     (let* ((unchanged i)
+                            (piece (iv:split-interval-right
+                                    unchanged
+                                    (- start (iv:interval-position unchanged)))))
+                       (iv:copy-properties unchanged piece)
+                       piece))))
+          (let loop ((i i) (len (- end start)) (modified? #f))
+            (cond
+             ((>= (iv:interval-length i) len)
+              (cond
+               ((not (has? i)) modified?)
+               ((= (iv:interval-length i) len)
+                (remove-properties properties names i))
+               (else
+                ;; I has the properties and runs past the end of the range:
+                ;; split it there and remove only from the part inside.
+                (let* ((unchanged i)
+                       (piece (iv:split-interval-left unchanged len)))
+                  (iv:copy-properties unchanged piece)
+                  (remove-properties properties names piece)))))
+             (else
+              (let ((next (iv:next-interval i))
+                    (len (- len (iv:interval-length i))))
+                (loop next len
+                      (or (remove-properties properties names i)
+                          modified?)))))))))
+
+    (define (%remove-properties-range object start end properties names)
+      ;; The walk GNU Emacs's `Fremove_text_properties' and
+      ;; `Fremove_list_of_text_properties' both make; they differ only in
+      ;; which predicate asks "has this interval got any of the names" -
+      ;; PROPERTIES being the names-with-values plist and NAMES the plain
+      ;; list of names.
+      ;;
+      ;; The C's first step walks to the first interval in the range that
+      ;; carries one of them, *and goes on to remove from there*: a range
+      ;; that begins before the property does is not a reason to remove
+      ;; nothing. This used to answer #t at that point and remove nothing,
+      ;; so the function reported success and changed nothing whenever
+      ;; START fell before the property - which is the shape
+      ;; `dired-fontify-line!' has, clearing a whole line while the face
+      ;; sits on the file name in the middle of it. Measured: a face on
+      ;; [6,8) of a ten-character buffer survived
+      ;; `(remove-text-properties 0 10 '(face))', which answered #t.
+      ;;--------------------------------------------------------------
+      (let ((has? (if (pair? properties)
+                      (lambda (i) (interval-has-some-properties properties i))
+                      (lambda (i)
+                        (interval-has-some-properties-list names i)))))
+        (let-values (((i start end)
+                      (validate-interval-range object start end #f)))
+          (cond
+           ((not i) #f)
+           ((and (null? properties) (null? names)) #f)
+           (else
+            (let loop ((i i) (from start))
+              (cond
+               ((or (not i) (<= end from)) #f)
+               ((has? i)
+                (%remove-properties-from i from end properties names))
+               (else
+                (let ((next (iv:next-interval i)))
+                  (loop next (if next (iv:interval-position next) end)))))))))))
+
     (define (remove-text-properties start end properties . args)
       ;; GNU Emacs's `remove-text-properties': take the properties named
       ;; in PROPERTIES off the text from START to END, leaving the others.
@@ -524,55 +619,68 @@
       ;; PROPERTIES is *not* run through `validate-plist': the C does not
       ;; validate it here, precisely so that a list of names with no
       ;; values - which is what callers write - is accepted.
-      (let* ((object (object-or-current args)))
+      ;;--------------------------------------------------------------
+      (%remove-properties-range (object-or-current args) start end
+                                properties '()))
+
+    (define (remove-list-of-text-properties start end properties . args)
+      ;; GNU Emacs's `remove-list-of-text-properties': "like
+      ;; `remove-text-properties' except that the third argument is a
+      ;; list of property names rather than a property list". It is what
+      ;; `font-lock-default-unfontify-region' clears a region with, since
+      ;; the properties it manages are a list of names.
+      ;;--------------------------------------------------------------
+      (%remove-properties-range (object-or-current args) start end
+                                '() properties))
+
+    ;;----------------------------------------------------------------
+    ;; Looking for a value
+
+    (define (text-property-any start end property value . args)
+      ;; GNU Emacs's `text-property-any' (textprop.c:1821): "Check text
+      ;; from START to END for property PROPERTY equaling VALUE. If so,
+      ;; return the position of the first character whose property
+      ;; PROPERTY is `eq' to VALUE. Otherwise return nil."
+      ;;
+      ;; Positions here are the interval layer's zero-based indices, as
+      ;; every other function of this library's are.
+      ;;--------------------------------------------------------------
+      (let ((object (object-or-current args)))
         (let-values (((i start end)
                       (validate-interval-range object start end #f)))
-          (cond
-           ((not i) #f)
-           ((null? properties) #f)
-           ((not (interval-has-some-properties properties i))
-            ;; Nothing on this interval to remove; walk to the next one
-            ;; that has something, or give up at the end of the range.
-            (let loop ((i (iv:next-interval i))
-                       (len (- end start (iv:interval-length i))))
-              (cond
-               ((not i) #f)
-               ((<= len 0) #f)
-               ((interval-has-some-properties properties i) #t)
-               (else (loop (iv:next-interval i)
-                           (- len (iv:interval-length i)))))))
-           (else
-            ;; The range may begin inside an interval: split it so the
-            ;; removal starts on a boundary.
-            (let ((i (if (= start (iv:interval-position i))
-                         i
-                         (let* ((unchanged i)
-                                (piece (iv:split-interval-right
-                                        unchanged
-                                        (- start (iv:interval-position unchanged)))))
-                           (iv:copy-properties unchanged piece)
-                           piece))))
-              (let loop ((i i) (len (- end start)) (modified? #f))
-                (cond
-                 ((>= (iv:interval-length i) len)
-                  (cond
-                   ((not (interval-has-some-properties properties i)) modified?)
-                   ((= (iv:interval-length i) len)
-                    (remove-properties properties '() i))
-                   (else
-                    ;; I has the properties and runs past the end of the
-                    ;; range: split it there and remove only from the
-                    ;; part inside.
-                    (let* ((unchanged i)
-                           (piece (iv:split-interval-left unchanged len)))
-                      (iv:copy-properties unchanged piece)
-                      (remove-properties properties '() piece)))))
-                 (else
-                  (let ((next (iv:next-interval i))
-                        (len (- len (iv:interval-length i))))
-                    (loop next len
-                          (or (remove-properties properties '() i)
-                              modified?))))))))))))
+          (if (not i)
+              ;; the C's `(!NILP (value) || EQ (start, end) ? Qnil : start)'
+              (if (or value (= start end)) #f start)
+              (let loop ((i i))
+                (cond ((not i) #f)
+                      ((>= (iv:interval-position i) end) #f)
+                      ((eq? (iv:textget (iv:interval-plist i) property) value)
+                       (max (iv:interval-position i) start))
+                      (else (loop (iv:next-interval i)))))))))
+
+    (define (text-property-not-all start end property value . args)
+      ;; GNU Emacs's `text-property-not-all' (textprop.c:1857): "Check
+      ;; text from START to END for property PROPERTY not equaling VALUE.
+      ;; If so, return the position of the first character whose property
+      ;; PROPERTY is not `eq' to VALUE. Otherwise, return nil."
+      ;;
+      ;; The walk may find the interval that *precedes* START, and the C
+      ;; then answers START itself rather than that interval's position.
+      ;;--------------------------------------------------------------
+      (let ((object (object-or-current args)))
+        (let-values (((i start end)
+                      (validate-interval-range object start end #f)))
+          (if (not i)
+              ;; the C's `(NILP (value) || EQ (start, end)) ? Qnil : start'
+              (if (or (not value) (= start end)) #f start)
+              (let loop ((i i) (s start))
+                (cond ((not i) #f)
+                      ((>= (iv:interval-position i) end) #f)
+                      ((not (eq? (iv:textget (iv:interval-plist i) property)
+                                 value))
+                       (max (iv:interval-position i) s))
+                      (else (loop (iv:next-interval i) s))))))))
+
     ;;----------------------------------------------------------------
     ;; Where a property changes
 

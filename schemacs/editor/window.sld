@@ -61,7 +61,16 @@
     ;; `pop-to-buffer' makes a buffer current by name when a string is
     ;; what it was given, and `switch-to-buffer' does the same.
     (only (schemacs editor buffer)
-          bury-buffer get-buffer-create record-buffer! set-buffer)
+          bury-buffer default-directory erase-buffer get-buffer-create
+          kill-all-local-variables kill-buffer record-buffer! set-buffer
+          set!buffer-default-directory set!buffer-file-name set!buffer-read-only
+          set-buffer-modified-p with-current-buffer *inhibit-read-only*)
+    ;; `run-hooks' is `subr.el''s, and the two temp-buffer hooks below
+    ;; are run through it.
+    (only (schemacs editor subr) run-hooks)
+    ;; `temp-buffer-window-show' puts point at the beginning of the
+    ;; buffer it is about to show, which `goto-char' is.
+    (only (schemacs editor editfns) goto-char)
     )
 
   (export
@@ -85,6 +94,13 @@
    window-min-height
    *cursor-in-echo-area*
    window-min-width
+   display-buffer-below-selected
+   quit-restore-window
+   temp-buffer-window-setup
+   temp-buffer-window-show
+   window-live-p
+   with-current-buffer-window
+   with-selected-window
    window-position
    window-hscroll
    set-window-hscroll!
@@ -355,6 +371,23 @@
              (let ((entry (assq 'inhibit-same-window (cdr action))))
                (and entry (cdr entry) #t)))))
 
+    (define display-buffer--same-window-action
+      ;; GNU Emacs's `display-buffer--same-window-action' (window.el:8166):
+      ;; "A `display-buffer' action for displaying in the same window.
+      ;; Specifies to call `display-buffer-same-window'."
+      ;;--------------------------------------------------------------
+      (list 'display-buffer-same-window (cons 'inhibit-same-window #f)))
+
+    (define (display-buffer--same-window-action? action)
+      ;; Whether ACTION asks for `display-buffer-same-window'. Emacs's
+      ;; action lists hold the *function* first and its alist after; this
+      ;; tree has one policy rather than a list of action functions, so
+      ;; the name is what is read - and it is the name Emacs's own value
+      ;; carries. Named rather than faked: no other action function is
+      ;; ported, and one that is would have to be dispatched on here.
+      ;;--------------------------------------------------------------
+      (and (list? action) (eq? (car action) 'display-buffer-same-window)))
+
     (define (display-buffer buffer . args)
       ;; Show BUFFER in some window without selecting it, and answer with
       ;; that window, or false when there is none: GNU Emacs's
@@ -389,9 +422,24 @@
       ;; leaving the window's point at the beginning would put it back on
       ;; the titles.
       ;;--------------------------------------------------------------
-      (let ((refuse-selected
-             (display-buffer--inhibit-same-window?
-              (if (pair? args) (car args) #f))))
+      (let* ((action (if (pair? args) (car args) #f))
+             (refuse-selected (display-buffer--inhibit-same-window? action))
+             ;; GNU Emacs's `display-buffer-same-window' (window.el:8500):
+             ;; "Display BUFFER in the selected window. ... fails if ALIST
+             ;; has an `inhibit-same-window' element whose value is
+             ;; non-nil, or if the selected window is a minibuffer window
+             ;; or is dedicated to another buffer; in that case, return
+             ;; nil. Otherwise, return the selected window." It is the
+             ;; first - and for `pop-to-buffer-same-window''s action the
+             ;; only - action function, so it is the *first* policy here.
+             ;;
+             ;; Without it `pop-to-buffer-same-window' fell through to
+             ;; the split arm and showed the buffer in a new window below
+             ;; the old one: every `find-file' from a minibuffer left two
+             ;; windows and the old buffer above, which is not what
+             ;; "preferably the same one" means.
+             (same-window? (and (display-buffer--same-window-action? action)
+                                (not refuse-selected))))
         (let ((showing
                ;; 1. a window that shows BUFFER already
                (let loop ((rest (window-list)))
@@ -408,6 +456,13 @@
                        ((not (eq? (car rest) (selected-window))) (car rest))
                        (else (loop (cdr rest)))))))
           (cond
+           (same-window?
+            (let ((window (selected-window)))
+              (set!window-buffer window buffer)
+              (set!window-top-line window 0)
+              (set-window-point! window (text-editor-get-cursor buffer))
+              (record-buffer! buffer)
+              window))
            (showing (record-buffer! buffer) showing)
            (other (set!window-buffer other buffer)
                   (set!window-top-line other 0)
@@ -457,7 +512,15 @@
              (window (display-buffer buffer action)))
         ;; Emacs falls back to making the buffer current when
         ;; `display-buffer' found no window at all.
-        (if window (select-window window) (set-buffer buffer))
+        (if window (select-window window) #f)
+        ;; ... and in either case the buffer becomes the current one:
+        ;; Emacs's `pop-to-buffer' ends by selecting the window it found,
+        ;; and `select-window' makes that window's buffer current
+        ;; (`Fselect_window', window.c:3803). `select-window' is the
+        ;; frame's here and cannot reach `set-buffer' - `(schemacs editor
+        ;; buffer)' is built *on* it - so the two commands that switch
+        ;; buffers do it themselves, as `switch-to-buffer' does.
+        (set-buffer buffer)
         (unless norecord (record-buffer! buffer))
         buffer))
 
@@ -466,7 +529,7 @@
       ;; Emacs's `pop-to-buffer-same-window', which is `pop-to-buffer' with
       ;; an action that allows the selected window.
       ;;--------------------------------------------------------------
-      (pop-to-buffer buffer '(nil (inhibit-same-window . #f))
+      (pop-to-buffer buffer display-buffer--same-window-action
                      (if (pair? args) (car args) #f)))
 
     (define (switch-to-buffer buffer-or-name . args)
@@ -491,6 +554,18 @@
         (set-marker! (%window-point window) (text-editor-get-cursor buffer)
                      buffer)
         (unless norecord (record-buffer! buffer))
+        ;; The C's last line is `(set-buffer buffer)' (window.el:9706):
+        ;; switching to a buffer *switches to it*, so the commands that
+        ;; follow act on it. Without this the window showed the new buffer
+        ;; while the current buffer stayed where it was - and since
+        ;; `(current-buffer)' falls back to the frame's editor only while
+        ;; `*current-buffer*' is unset, the editor looked right in a front
+        ;; end that never sets it and was wrong in one that does. The GTK
+        ;; front end sets it to `*scratch*' at startup, so there every
+        ;; command acted on an empty buffer: the arrows said "Beginning of
+        ;; buffer" and "End of buffer" at once, and `dired-mark' walked a
+        ;; buffer with no listing in it for ever.
+        (set-buffer buffer)
         buffer))
 
     (define (switch-to-buffer-other-window buffer-or-name . args)
@@ -657,6 +732,9 @@ windows on from the selected one; a negative COUNT goes the other way."
              (at (window-position (selected-window) windows))
              (window (list-ref windows (modulo (+ at count) n))))
         (select-window window)
+        ;; ... and the buffer it shows becomes current, which in Emacs is
+        ;; `select-window''s own doing (`Fselect_window', window.c:3803)
+        (set-buffer (window-buffer window))
         (record-buffer! (window-buffer window))
         window))
 
@@ -754,5 +832,147 @@ by this function.  This happens in an interactive call."
       scroll-left)
     (define-key *default-keymap* (list (list 'ctrl #\x) #\>)
       scroll-right)
+
+    (define *temp-buffer-window-setup-hook* (make-parameter '()))
+    (define *temp-buffer-window-show-hook* (make-parameter '()))
+    ;; ^ GNU Emacs's `temp-buffer-window-setup-hook' and
+    ;; `temp-buffer-window-show-hook' (window.el): "Normal hook run
+    ;; before [after] setting up [showing] a temporary buffer" - the
+    ;; first runs with the buffer current and empty, the second with its
+    ;; window selected. Nothing hangs off either here yet; they are the
+    ;; extension points `temp-buffer-window-setup' and
+    ;; `temp-buffer-window-show' run in Emacs.
+
+    (define (window-live-p window)
+      ;; GNU Emacs's `window-live-p' (window.c): "Return t if OBJECT is a
+      ;; window that is displaying a buffer. A live window is one that
+      ;; can be deleted." A window here is live while it is one of the
+      ;; frame's windows - a deleted window is no longer on that list.
+      ;;--------------------------------------------------------------
+      (and (window-type? window)
+           (let loop ((rest (window-list)))
+             (cond ((null? rest) #f)
+                   ((eq? (car rest) window) #t)
+                   (else (loop (cdr rest)))))))
+
+    (define-syntax with-selected-window
+      ;; GNU Emacs's `with-selected-window': "Execute the forms in BODY
+      ;; with WINDOW as the selected window." It selects WINDOW, which
+      ;; Emacs does with a `norecord' argument so that a temporary
+      ;; selection does not reorder the buffer list, and restores the
+      ;; window that was selected however BODY leaves - which is the
+      ;; `unwind-protect' in the C, a `dynamic-wind' here.
+      ;;--------------------------------------------------------------
+      (syntax-rules ()
+        ((with-selected-window window body ...)
+         (let ((saved-window (selected-window)))
+           (select-window window)
+           (dynamic-wind
+             (lambda () #f)
+             (lambda () body ...)
+             (lambda () (select-window saved-window)))))))
+
+    (define (quit-restore-window window bury-or-kill)
+      ;; GNU Emacs's `quit-restore-window' (window.el): "Deal with
+      ;; WINDOW after having displayed it before and now burying or
+      ;; killing it." Two of its jobs are done here - take WINDOW off the
+      ;; frame when it is not the only one, and kill or bury the buffer
+      ;; it was showing. The third is not: putting back the buffer the
+      ;; window showed before, out of the `quit-restore' window
+      ;; parameter, which Emacs's `display-buffer' records when it shows
+      ;; a buffer and this tree's does not (it has one display policy
+      ;; rather than a list of action functions to record between).
+      ;;--------------------------------------------------------------
+      (let ((buffer (window-buffer window)))
+        (when (and (window-live-p window) (< 1 (length (window-list))))
+          (delete-window window))
+        (cond ((eq? bury-or-kill 'kill) (kill-buffer buffer))
+              ((eq? bury-or-kill 'bury) (bury-buffer buffer))
+              (else #f))))
+
+    (define display-buffer-below-selected
+      ;; GNU Emacs's `display-buffer-below-selected' (window.el): "Try
+      ;; displaying BUFFER in a window below the selected window."
+      ;;
+      ;; Emacs dispatches an action by calling this function; this tree's
+      ;; `display-buffer' has one policy rather than a list of action
+      ;; functions, and reads the name the way it reads
+      ;; `display-buffer-same-window''s (see
+      ;; `display-buffer--same-window-action?'). The split-below arm of
+      ;; that policy is what "below the selected window" comes to, so the
+      ;; name only has to be recognisable.
+      ;;--------------------------------------------------------------
+      (list 'display-buffer-below-selected))
+
+    (define (temp-buffer-window-setup buffer-or-name)
+      ;; GNU Emacs's `temp-buffer-window-setup' (window.el:3287): "Set
+      ;; up temporary buffer specified by BUFFER-OR-NAME. Return the
+      ;; buffer." The buffer is emptied and given a plain state - no
+      ;; file, no local variables, not read-only - so that a caller can
+      ;; print into it and show it.
+      ;;
+      ;; Two of the C's steps have nothing to do here and are named:
+      ;; `delete-all-overlays' (there is no such function in this tree;
+      ;; the overlays a `*Completions*' or `*Marked Files*' buffer would
+      ;; carry are not made), and `inhibit-modification-hooks' (there are
+      ;; no modification hooks to inhibit).
+      ;;--------------------------------------------------------------
+      (let ((old-dir (default-directory))
+            (buffer (get-buffer-create buffer-or-name)))
+        (with-current-buffer buffer
+          (kill-all-local-variables)
+          (set!buffer-default-directory buffer old-dir)
+          (set!buffer-read-only buffer #f)
+          (set!buffer-file-name buffer #f)
+          (parameterize ((*inhibit-read-only* #t))
+            (erase-buffer)
+            (run-hooks *temp-buffer-window-setup-hook*)))
+        buffer))
+
+    (define (temp-buffer-window-show buffer . args)
+      ;; GNU Emacs's `temp-buffer-window-show' (window.el:3303): "Show
+      ;; temporary buffer BUFFER in a window. Return the window showing
+      ;; BUFFER. Pass ACTION as action argument to `display-buffer'."
+      ;;
+      ;; The `window-combination-limit' binding around the call is about
+      ;; which window gives up the space when the buffer is shown;
+      ;; nothing here models that. `temp-buffer-resize-mode' is off by
+      ;; default, so its `resize-temp-buffer-window' (and so
+      ;; `fit-window-to-buffer') does not run, and `minibuffer-scroll-window'
+      ;; is a variable this tree has not needed yet.
+      ;;--------------------------------------------------------------
+      (let ((action (if (pair? args) (car args) #f)))
+        (with-current-buffer buffer
+          (set-buffer-modified-p #f)
+          (set!buffer-read-only buffer #t)
+          (goto-char (point-min))
+          (let ((window (display-buffer buffer action)))
+            (when window
+              (set!window-hscroll! window 0)
+              (with-selected-window window
+                (run-hooks *temp-buffer-window-show-hook*)))
+            window))))
+
+    (define-syntax with-current-buffer-window
+      ;; GNU Emacs's `with-current-buffer-window': "Evaluate BODY with a
+      ;; buffer BUFFER-OR-NAME current and show that buffer." The value
+      ;; is the last form of BODY, passed to QUIT-FUNCTION together with
+      ;; the window when there is one - which is how `dired-mark-pop-up'
+      ;; gets its confirmation to run with the window selected and to
+      ;; take the window down again afterwards.
+      ;;--------------------------------------------------------------
+      (syntax-rules ()
+        ((with-current-buffer-window buffer-or-name action quit-function
+                                     body ...)
+         (let* ((window #f)
+                (value #f)
+                (buffer (temp-buffer-window-setup buffer-or-name)))
+           (with-current-buffer buffer
+             (set! value (let () body ...))
+             (set! window (temp-buffer-window-show buffer action)))
+           (if (procedure? quit-function)
+               (quit-function window value)
+               value)))))
+
 
     ))

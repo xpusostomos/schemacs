@@ -11,14 +11,16 @@
 (setenv "GUILE_WARN_DEPRECATED" "no")
 
 (import (schemacs ui platform ncurses))
-(import (only (schemacs repl) start-repl!))
+(import (only (schemacs repl) remove-repl-port-file! start-repl!))
 (import (only (guile) getenv string->number))
 
 ;; The development back door, the same one `main-gtk.scm' opens and for
 ;; the same reason - see `schemacs/repl.sld'. Here the command loop is the
 ;; only thing that can give the server a turn: a terminal's read blocks in
 ;; `getch', so this REPL answers between keys rather than while idle. It is
-;; a no-op unless `SCHEMACS_REPL' names a port.
+;; a no-op unless `SCHEMACS_REPL' names a port, or an init file calls
+;; `(start-repl!)' with no port - which chooses one and writes it where
+;; `tools/repl.py' looks.
 (let ((port (getenv "SCHEMACS_REPL")))
   (when port
     (start-repl! (string->number port))))
@@ -27,3 +29,8 @@
                 (cdr (command-line))
                 (list))))
   (apply main-ncurses args))
+
+;; `main-ncurses' returns when the editor quits, so this is the way out;
+;; the editor proper does not know the back door exists and cannot tidy up
+;; after it.
+(remove-repl-port-file!)

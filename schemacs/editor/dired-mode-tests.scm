@@ -1,15 +1,18 @@
 (import
  (scheme base)
  (scheme char)
- (only (guile) delete-file mkdir rmdir setvbuf)
- (only (schemacs editor engine) new-text-editor)
+ (only (guile) delete-file mkdir rmdir setvbuf string-contains)
+ (only (schemacs editor engine) new-text-editor text-editor-to-string)
  (only (schemacs editor frame) *current-frame* new-frame)
  (only (srfi 64) test-assert test-equal test-begin test-end)
  (schemacs editor buffer)
  (schemacs editor dired)
  (schemacs editor editfns)
  (only (schemacs editor buffer) *inhibit-read-only*)
- (only (schemacs editor files) revert-buffer insert-directory)
+ (only (schemacs editor files) *find-file-run-dired* find-file-noselect
+       revert-buffer insert-directory)
+ (only (schemacs editor fileio) file-exists-p)
+ (only (schemacs editor font-core) font-lock-mode)
  (schemacs editor frame)
  (only (schemacs editor search) regexp-quote re-search-forward)
  (only (schemacs editor indent) indent-rigidly)
@@ -26,11 +29,10 @@
 ;; against Emacs's own ls-lisp byte for byte, so what is on trial here is
 ;; dired's reading of it.
 ;;
-;; The tests make their own tree under /tmp and **delete nothing**: not
-;; one of them calls a delete command. `dired-flag-file-deletion' here
-;; only writes a `D' into the buffer, which is all it does in Emacs too
-;; - the deleting is `dired-do-flagged-delete', which is not ported and
-;; is not wanted in a test.
+;; The tests make their own tree under /tmp. The one that deletes does it
+;; in a tree of its own (`/tmp/schemacs-dired-delete-tests'), made and
+;; emptied by its own fixture, and the confirmation is stubbed - so
+;; nothing outside those two directories is ever a candidate.
 
 ;; Unbuffered output, so a run that hangs shows where it got to - the
 ;; same line `textprop-tests.scm' carries, and for the same reason.
@@ -355,5 +357,145 @@
   (let ((b (marked-listing)))
     (parameterize ((*dired-ls-F-marks-symlinks* #t))
       (names-on-every-line))))
+
+;; ------------------------------------------------------------------
+;; visiting a directory direds it
+;;
+;; `find-file-noselect' routes a directory through
+;; `find-directory-functions' (files.el:2561), whose value names
+;; `dired-noselect' - which is how Emacs's `C-x C-f' on a directory
+;; reaches Dired at all. Before the branch was ported the directory was
+;; read as a file and `find-file' said
+;; "; find-file: error loading <dir>" from its guard.
+
+(test-equal (list 'dired-mode (string-append root "/"))
+  (let ((buffer (find-file-noselect root)))
+    (set-buffer buffer)
+    ;; `dired-directory' is abbreviated when the name is under the home
+    ;; directory, as Emacs's is - the same answer `emacs -Q --batch'
+    ;; gives for the same directory
+    (list (major-mode) (dired-directory))))
+
+;; and the file case still reads a file
+(test-equal (list 'fundamental-mode "a.txt")
+  (let ((buffer (find-file-noselect (string-append root "/a.txt"))))
+    (set-buffer buffer)
+    (list (major-mode) (buffer-name))))
+
+;; `find-file-run-dired' off is Emacs's error, not a Dired buffer
+(test-equal "raised"
+  (guard (e (#t "raised"))
+    (parameterize ((*find-file-run-dired* #f))
+      (find-file-noselect "/tmp")
+      "not raised")))
+
+;; The *key* path, which the tests above never took: `m' and `d' hand the
+;; command the raw prefix - `(interactive (list current-prefix-arg t))' -
+;; and that is #f when no prefix was typed, which is every time. The C's
+;; body converts it with `(prefix-numeric-value arg)' before the walk
+;; needs a number; without the conversion every marking key failed with
+;; "Wrong type argument in position 2: #f", which is what `M-x dired-mark'
+;; and `m' did.
+(test-equal '("  " "  " "  " "  " "* " "  " "  " "")
+  (let ((b (listing)))
+    (goto-file-line "a.txt")
+    (dired-mark #f #t)
+    (first-chars-of-every-line)))
+
+;; and a prefix argument still counts lines
+(test-equal '("  " "  " "  " "  " "* " "* " "  " "")
+  (let ((b (listing)))
+    (goto-file-line "a.txt")
+    (dired-mark (list 2) #t)
+    (first-chars-of-every-line)))
+
+
+;; ------------------------------------------------------------------
+;; `x', `dired-do-flagged-delete'
+
+;; Its own tree, so that a run that goes wrong cannot reach the listing
+;; tests' files. The confirmation is stubbed rather than answered: the
+;; question it would ask is the minibuffer's, and this is a batch run.
+(define delete-root "/tmp/schemacs-dired-delete-tests")
+
+(define (delete-fixture!)
+  (for-each (lambda (name)
+              (guard (e (#t #f)) (delete-file (string-append delete-root name))))
+            (list "/a.txt" "/b.txt"))
+  (guard (e (#t #f)) (rmdir delete-root))
+  (guard (e (#t #f)) (mkdir delete-root))
+  (for-each (lambda (name)
+              (call-with-output-file (string-append delete-root name)
+                (lambda (out) (display "x\n" out))))
+            (list "/a.txt" "/b.txt")))
+
+(define (delete-listing)
+  ;; a Dired buffer on the deletion tree, current. A fresh one, for the
+  ;; reason `listing' gives: `dired-noselect' hands back the registered
+  ;; buffer for a directory, and a reverting one keeps the marks.
+  (for-each kill-buffer (dired-buffers-for-dir delete-root))
+  (let ((b (dired-noselect (string-append delete-root "/"))))
+    (set-buffer b)
+    (goto-char (point-min))
+    b))
+
+(test-assert "dired-do-flagged-delete: the flagged file goes from disk and listing"
+  (let ()
+  (delete-fixture!)
+  (let ((b (delete-listing)))
+    ;; flag b.txt with `d', the way the key does
+    (goto-file-line "b.txt")
+    (dired-flag-file-deletion #f #t)
+    (parameterize ((*dired-no-confirm* #t)
+                   (*dired-deletion-confirmer* (lambda (prompt) #t)))
+      (dired-do-flagged-delete #f))
+    (let ((text (text-editor-to-string (current-buffer))))
+      (and (not (file-exists-p (string-append delete-root "/b.txt")))
+           (file-exists-p (string-append delete-root "/a.txt"))
+           (not (string-contains text "b.txt"))
+           (string-contains text "a.txt"))))))
+
+(test-assert "dired-do-flagged-delete: nothing flagged says so and deletes nothing"
+  (let ()
+  (delete-fixture!)
+  (let ((b (delete-listing)))
+    (parameterize ((*dired-no-confirm* #t)
+                   (*dired-deletion-confirmer* (lambda (prompt) #t)))
+      (dired-do-flagged-delete #f))
+    (and (file-exists-p (string-append delete-root "/a.txt"))
+         (file-exists-p (string-append delete-root "/b.txt"))
+         (equal? "(No deletions requested)" (frame-message (*current-frame*)))))))
+
+
+;; ------------------------------------------------------------------
+;; the mark faces
+
+;; Emacs colours the file name when it is marked or flagged:
+;; `dired-font-lock-keywords' applies `dired-marked' (which inherits
+;; `warning') to a marked file's name and `dired-flagged' (inheriting
+;; `error') to a flagged one. The mechanism here is the `face' text
+;; property rather than font-lock - named in dired.sld - so what is on
+;; trial is that the property lands on the name, follows `m' / `d' / `u',
+;; and is taken off again.
+(test-equal "marked and flagged names carry their faces, and unmarking clears them"
+  '(dired-marked dired-flagged #f)
+  (let* ((b (listing))
+         (name-face (lambda ()
+                      (goto-file-line "a.txt")
+                      (get-text-property (- (dired-move-to-filename) 1)
+                                         'face (current-buffer)))))
+    ;; `dired-mode' sets `font-lock-defaults' to `dired-font-lock-keywords'
+    ;; but does not turn the mode on yet - see the measurement in
+    ;; dired.sld - so the test turns it on. What is on trial is the
+    ;; keyword list, which is the same either way.
+    (font-lock-mode #t)
+    (goto-file-line "a.txt")
+    (dired-mark #f #t)
+    (let ((marked (name-face)))
+      (goto-file-line "a.txt")
+      (dired-flag-file-deletion #f #t)
+      (let ((flagged (name-face)))
+        (dired-unmark #f #t)
+        (list marked flagged (name-face))))))
 
 (test-end "schemacs_editor_dired_mode")

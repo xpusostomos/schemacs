@@ -67,7 +67,7 @@
     (only (guile) caddr delq open-input-string read string-prefix?
           string-suffix?)
     ;; The file primitives this is built on, and their library.
-    (only (schemacs editor diredc) file-attributes)
+    (only (schemacs editor diredc) directory-files file-attributes)
     (only (schemacs editor fileio)
           directory-file-name expand-file-name file-directory-p
           file-exists-p file-name-absolute-p file-name-as-directory
@@ -75,6 +75,10 @@
           file-readable-p)
     (only (schemacs editor files)
           abbreviate-file-name create-file-buffer
+          *delete-by-moving-to-trash*
+          *directory-files-no-dot-files-regexp*
+          *find-directory-functions*
+          delete-directory delete-file
           directory-listing-before-filename-regexp files--name-absolute-system-p
           find-file insert-directory
           read-file-name revert-buffer)
@@ -88,17 +92,18 @@
     (only (schemacs editor buffer)
           *case-fold-search* buffer-local-keymap buffer-local-value buffer-modified-p
           buffer-name current-buffer default-directory erase-buffer
-          get-buffer-create kill-all-local-variables kill-buffer major-mode
+          get-buffer get-buffer-create kill-all-local-variables kill-buffer major-mode
           restore-buffer-modified-p set!buffer-default-directory
           set!buffer-local-keymap set!major-mode set-buffer
           *inhibit-read-only*
           set!mode-name set-buffer-local-value! set-buffer-modified-p
           use-local-map with-current-buffer)
     (only (schemacs editor editfns)
-          buffer-substring buffer-substring-no-properties char-after char-before
-          eobp forward-line goto-char insert
-          line-beginning-position line-end-position point point-marker point-max
-          point-min preceding-char save-excursion)
+          bolp buffer-substring buffer-substring-no-properties char-after char-before
+          delete-region eobp eolp forward-line format goto-char insert
+          insert-buffer-substring
+          line-beginning-position line-end-position message
+          point point-marker point-max point-min preceding-char save-excursion)
     (only (schemacs editor search)
           looking-at looking-at-p match-beginning match-end match-string
           re-search-backward re-search-forward regexp-quote replace-match
@@ -108,19 +113,40 @@
           next-single-property-change put-text-property
           remove-text-properties set-text-properties)
     (only (schemacs editor simple)
-          beginning-of-line delete-char end-of-line forward-char
+          beginning-of-line delete-char end-of-line forward-char keyboard-quit
           special-mode special-mode-map)
+    ;; the page walk `dired-log''s page header needs
+    (only (schemacs editor pages) backward-page)
+    ;; the date that header is headed with
+    (only (schemacs editor timefns) current-time-string)
+    ;; `read-answer' is `map-ynp.el''s, which is what `dired-delete-file'
+    ;; asks before it deletes a directory with anything in it
+    (only (schemacs map-ynp) read-answer)
     (only (schemacs editor keymap) define-key set-keymap-parent
           *default-keymap*)
-    (only (schemacs editor command) current-prefix-arg define-command)
+    (only (schemacs editor command) current-prefix-arg define-command
+          uarg->integer)
     (only (schemacs editor engine)
-          marker-position set-marker! text-editor-set-read-only!)
+          marker-position set-marker! text-editor-set-read-only!
+          text-editor-type?)
+    ;; the three mark faces are dired.el's own `defface's
+    (only (schemacs editor faces) defface)
+    ;; the mark keywords are run by font-lock, which `dired-mode' turns on
+    (only (schemacs editor font-lock) set!font-lock-defaults!)
+    (only (schemacs editor font-core) font-lock-mode)
     (only (schemacs editor indentc) *indent-tabs-mode*)
     (prefix (schemacs keymap) km:)
     (only (schemacs editor window)
-          display-buffer pop-to-buffer-same-window quit-window switch-to-buffer)
-    ;; the switches prompt, which the C reads with `read-string'
-    (only (schemacs editor minibuffer) read-from-minibuffer)
+          display-buffer display-buffer-below-selected pop-to-buffer-same-window
+          quit-restore-window quit-window switch-to-buffer
+          temp-buffer-window-setup temp-buffer-window-show window-live-p
+          with-current-buffer-window with-selected-window)
+    ;; the switches prompt, which the C reads with `read-string'; the
+    ;; deletion confirmation is `yes-or-no-p', and the marked-file window
+    ;; is filled by `completion--insert-strings'
+    (only (schemacs editor minibuffer)
+          completion--insert-strings read-from-minibuffer yes-or-no-p)
+    (only (schemacs editor frame) *current-frame*)
     (only (schemacs editor subr) run-hooks run-mode-hooks string-replace)
     )
 
@@ -152,6 +178,29 @@
    dired-remember-marks
    dired-revert
    dired-sort-other
+   dired-flagged-face
+   dired-mark-face
+   dired-marked-face
+   dired-delete-entry
+   dired-font-lock-keywords
+   dired-delete-file
+   dired-do-flagged-delete
+   dired-fun-in-all-buffers
+   dired-get-marked-files
+   dired-internal-do-deletions
+   dired-log
+   dired-log-summary
+   dired-map-over-marks
+   dired-mark-pop-up
+   dired-mark-prompt
+   dired-remove-entry
+   dired-why
+   *dired-clean-confirm-killing-deleted-buffers*
+   *dired-clean-up-buffers-too*
+   *dired-deletion-confirmer*
+   *dired-log-buffer*
+   *dired-no-confirm*
+   *dired-recursive-deletes*
    dired-subdir-alist
    dired-subdir-regexp
    dired-unadvertise
@@ -698,15 +747,31 @@
     ;;------------------------------------------------------------------
 
     (define-command (dired-next-line arg)
-      "Move down ARG lines, then position at filename."
-      (interactive (list 1))
+      "Move down ARG lines, then position at filename.
+The argument ARG (interactively, prefix argument) says how many lines
+to move; the default is one line."
+      ;; the C's `(interactive "^p" dired-mode)' - `^' is the
+      ;; `handle-shift-selection' marker and `p' the numeric prefix
+      (interactive (list (uarg->integer 1 (current-prefix-arg))))
+      ;; The C is `(if dired-movement-style (dired--move-to-next-line arg
+      ;; #'dired--trivial-next-line) (dired--trivial-next-line arg))', and
+      ;; `dired--trivial-next-line' moves with `(line-move arg t)' - which
+      ;; keeps the goal column and moves *visual* lines. `line-move' is
+      ;; simple.el's and is not ported, and `dired-movement-style' is nil
+      ;; by default, so the walk here is `forward-line'; dired's lines are
+      ;; one visual line each unless the listing wraps, and
+      ;; `dired-move-to-filename' then puts point on the name, which is
+      ;; what the C's own last step does.
       (forward-line arg)
       (dired-move-to-filename))
 
     (define-command (dired-previous-line arg)
-      "Move up ARG lines, then position at filename."
-      (interactive (list 1))
-      (dired-next-line (- arg)))
+      "Move up ARG lines, then position at filename.
+The argument ARG (interactively, prefix argument) says how many lines
+to move; the default is one line."
+      (interactive (list (uarg->integer 1 (current-prefix-arg))))
+      ;; the C's `(dired-next-line (- (or arg 1)))'
+      (dired-next-line (- (if arg arg 1))))
 
     ;;----------------------------------------------------------------
     ;; Marking
@@ -740,7 +805,14 @@ With a prefix arg, mark files on the next ARG lines."
       ;; ported; see the library comment.
       (parameterize ((*inhibit-read-only* #t))
         (dired-repeat-over-lines
-         arg
+         ;; "The C's `(prefix-numeric-value arg)'" - the raw prefix is what
+         ;; the interactive spec hands over (`(list current-prefix-arg
+         ;; t)'), and the *number* is what the walk needs. Passing the raw
+         ;; value straight through made `m', `d' and `u' fail with
+         ;; "Wrong type argument in position 2: #f" whenever no prefix was
+         ;; typed - which is every time - because `(> #f 0)' is not a test
+         ;; the walk can make.
+         (uarg->integer 1 arg)
          (lambda ()
            (if (or (not (looking-at-p dired-re-dot))
                    ;; "Don't skip symlinks to `.', `..', etc."
@@ -1373,7 +1445,15 @@ for SWITCHES."
                                  #f)
                          (dired-goto-file-1 (file-name-nondirectory-part file)
                                             file (dired-subdir-max)))))))
-        (if found (point) #f)))
+        ;; "Return buffer position, if found" - and the C's `(if found
+        ;; (goto-char found))' *moves point there*, which is what its
+        ;; callers rely on: `dired-mark-remembered' asks for the file and
+        ;; then does `(beginning-of-line) (delete-char 1) (insert chr)'
+        ;; *at that point*. Answering the position without moving left
+        ;; point where the caller had it, so a revert put every restored
+        ;; mark on whatever line point happened to be on - which was the
+        ;; header.
+        (if found (goto-char found) #f)))
 
     (define (dired-revert . rest)
       ;; "Reread the Dired buffer.
@@ -1453,6 +1533,14 @@ for SWITCHES."
     (define-key *default-keymap* (list (list 'ctrl #\x) (list #\d))
       dired)
 
+    ;; `files.el''s `find-directory-functions' is `(cvs-dired-noselect
+    ;; dired-noselect)' - it names this function, so visiting a directory
+    ;; with `C-x C-f' runs Dired. A hook here is a list of *procedures*,
+    ;; so files.el cannot name a function in the library that is built on
+    ;; it: this library adds itself, once, at load. `cvs-dired-noselect'
+    ;; is CVS's and is not ported.
+    (*find-directory-functions* (list dired-noselect))
+
     (define (dired-mode . rest)
       ;; GNU Emacs's `dired-mode' (dired.el:2840) is a plain function, not
       ;; a `define-derived-mode': its signature is `(&optional dirname
@@ -1496,6 +1584,566 @@ for SWITCHES."
         ;; `dired-sort-other' would add - `dired-sort-R-check''s subdir
         ;; save and the mode line's "by date" - is what it does not.
         (dired-sort-other (dired-actual-switches) #t)
+        ;; The C's `(setq-local font-lock-defaults
+        ;; '(dired-font-lock-keywords t nil nil beginning-of-line))'
+        ;; (dired.el:2919): KEYWORDS-ONLY is t, since a Dired buffer has
+        ;; no comments or strings to fontify syntactically, and the
+        ;; fifth element is the slot that used to hold
+        ;; `font-lock-beginning-of-syntax-function' - which
+        ;; `font-lock-set-defaults' skips when it is not a cons, and the
+        ;; port of that reads neither.
+        (set!font-lock-defaults!
+         (list dired-font-lock-keywords #t #f #f 'beginning-of-line))
+        ;; ... and *not* `(font-lock-mode #t)', which is the C's next act
+        ;; and which this port cannot yet afford. Measured on this
+        ;; machine, `(dired-noselect "/tmp/")' - 488 entries - takes
+        ;; 0.72s with the mode off and over 120s with it on, while ONE
+        ;; fontification pass over the whole 488-line buffer takes
+        ;; 0.0008s. So the cost is not the fontifying, it is the *number*
+        ;; of times it is asked for: Emacs installs
+        ;; `font-lock-after-change-function' buffer-locally and jit-lock
+        ;; defers the work to idle time, and with neither of those a
+        ;; Dired buffer fontifies again on every insertion `dired-readin'
+        ;; makes. Turning it on wants that per-change path understood
+        ;; first - which is the next piece of this work, and the reason
+        ;; the mode is left off here rather than the port being left
+        ;; unfinished.
         (run-mode-hooks *dired-mode-hook*)))
+
+    ;;----------------------------------------------------------------
+    ;;----------------------------------------------------------------
+    ;; The faces, and the font-lock keywords that name them
+    ;;
+    ;; GNU Emacs's `dired-mark''s own `defface's (dired.el:668-696) and
+    ;; `dired-font-lock-keywords' (dired.el:776) - the *mark* keywords
+    ;; only, for now.
+    ;;
+    ;; What is not ported of `dired-font-lock-keywords', named with what
+    ;; each would need: the permission keywords (`dired-perm-write',
+    ;; `dired-set-id', `dired-warning', and `dired-re-maybe-mark' +
+    ;; `dired-re-inode-size'), the subdirectory keyword
+    ;; (`dired-directory'), the two `completion-ignored-extensions'
+    ;; keywords (which need `regexp-opt' and that variable, from
+    ;; `files.el'), and the three symlink keywords (`dired-symlink',
+    ;; `dired-broken-symlink', and the `file-truename',
+    ;; `dired-file-name-at-point', `dired-check-symlinks' and
+    ;; `connection-local-value' they call). Each is a keyword list plus
+    ;; a face, and each wants its helper ported first - which is the
+    ;; shape `dired-font-lock-keywords' is written in: the comment above
+    ;; the marked-file keyword says why they are all MATCH-ANCHORED
+    ;; ("the regexps don't identify the file name itself").
+    ;;------------------------------------------------------------------
+
+    (define dired-mark-face 'dired-mark)
+    (define dired-marked-face 'dired-marked)
+    (define dired-flagged-face 'dired-flagged)
+    ;; ^ GNU Emacs's `dired-mark-face', `dired-marked-face' and
+    ;; `dired-flagged-face' (dired.el:681, :688, :696), which are
+    ;; `defvar's naming the faces - the names the keyword list below
+    ;; refers to. Emacs also marks the `font-lock-*-face' variables
+    ;; obsolete in favour of the bare symbol, so a keyword may name the
+    ;; face either way; these are here because dired.el has them.
+
+    (defface 'dired-mark '((#t :inherit font-lock-constant-face))
+      "Face used for Dired marks.")
+
+    (defface 'dired-marked '((#t :inherit warning))
+      "Face used for marked files.")
+
+    (defface 'dired-flagged '((#t :inherit error))
+      "Face used for files flagged for deletion.")
+    ;; ^ Emacs's three, specs and all (dired.el:676, :684, :692). Each
+    ;; inherits a face that exists here: `warning' and `error' are
+    ;; faces.sld's, and `font-lock-constant-face' is font-lock.sld's.
+
+    (define dired-font-lock-keywords
+      ;; GNU Emacs's `dired-font-lock-keywords' (dired.el:776), the mark
+      ;; keywords. The regexps are built once, here, from the marker
+      ;; characters as they stand - which is what the C's `list' does at
+      ;; `defvar' time, so a user who moves `dired-marker-char' before
+      ;; loading gets the regexp for their character, and one who moves
+      ;; it after does not.
+      ;;
+      ;; The second and third are MATCH-ANCHORED: the anchor regexp
+      ;; finds the marker character and `dired-move-to-filename' - the
+      ;; pre-match form - moves point to the name and answers where it
+      ;; landed, so the `.+''s face is the name and the rest of the line
+      ;; after it.
+      ;;--------------------------------------------------------------
+      (list
+       ;; "Dired marks."
+       (list dired-re-mark (list 0 dired-mark-face))
+       ;; "Marked files."
+       (list (string-append "^[" (string (*dired-marker-char*)) "]")
+             (list ".+" dired-move-to-filename #f
+                   (list 0 dired-marked-face)))
+       ;; "Flagged files."
+       (list (string-append "^[" (string (*dired-del-marker*)) "]")
+             (list ".+" dired-move-to-filename #f
+                   (list 0 dired-flagged-face)))))
+
+    (define *dired-log-buffer* "*Dired log*")
+    ;; ^ GNU Emacs's `dired-log-buffer' (dired.el:5043).
+    (define *dired-no-confirm* (make-parameter #f))
+    ;; ^ GNU Emacs's `dired-no-confirm' (dired.el:4485), whose default is
+    ;; nil and which "can also be a list of command symbols" - `#f' or a
+    ;; list here, since Elisp's nil is both.
+    (define *dired-deletion-confirmer*
+      (make-parameter (lambda (prompt) (yes-or-no-p (*current-frame*) prompt))))
+    ;; ^ GNU Emacs's `dired-deletion-confirmer' (dired.el:4304), which is
+    ;; "`yes-or-no-p'; or `y-or-n-p'?" as its comment says. Emacs holds
+    ;; the *symbol* and calls it with the prompt; every variable of this
+    ;; tree holds procedures rather than names, so the procedure is what
+    ;; is held here - and it is a one-argument *closure* over
+    ;; `yes-or-no-p' rather than `yes-or-no-p' itself, because this
+    ;; tree's `yes-or-no-p' takes the frame it is asking on as well as
+    ;; the prompt. Without the closure the confirmation came apart with
+    ;; "Wrong number of arguments to #<procedure yes-or-no-p (a b)>".
+    (define *dired-recursive-deletes* (make-parameter 'top))
+    ;; ^ GNU Emacs's `dired-recursive-deletes' (dired.el:4183), whose
+    ;; default value is `top': "ask for each top directory only".
+    (define *dired-clean-up-buffers-too* (make-parameter #t))
+    ;; ^ GNU Emacs's `dired-clean-up-buffers-too' (dired.el:4408).
+    (define *dired-clean-confirm-killing-deleted-buffers* (make-parameter #t))
+    ;; ^ GNU Emacs's `dired-clean-confirm-killing-deleted-buffers'
+    ;; (dired.el:4413).
+    (define (%dired-over-marks-walk body arg distinguish-one-marked)
+      ;; The walk itself, which `%dired-map-over-marks' is a `let' around.
+      ;; Emacs expands `dired-map-over-marks' into the one expression
+      ;; whose value is this; splitting it out is only so that the
+      ;; closure over FOUND and RESULTS and the moving of point can each
+      ;; be read.
+      ;;--------------------------------------------------------------
+      (let ((found #f)
+            (results '()))
+        (define (collect!)
+          (set! results (cons (body) results)))
+        (cond
+         ((and arg (not (eq? arg 'marked)))
+          (if (integer? arg)
+              (begin
+                (dired-repeat-over-lines arg collect!)
+                (if (< arg 0) (reverse results) results))
+              (list (body))))
+         (else
+          (let ((regexp (dired-marker-regexp)))
+            (save-excursion
+              (goto-char (point-min))
+              (let ((next-position
+                     (let ((found-at (re-search-forward regexp #f #t)))
+                       (and found-at (point-marker)))))
+                (set! found (and next-position #t))
+                (let loop ()
+                  (when next-position
+                    (goto-char (marker-position next-position))
+                    (collect!)
+                    (goto-char (marker-position next-position))
+                    (forward-line 1)
+                    (set-marker! next-position #f)
+                    (set! next-position
+                          (let ((found-at (re-search-forward regexp #f #t)))
+                            (and found-at (point-marker))))
+                    (loop)))))
+            (if (and distinguish-one-marked (= 1 (length results)))
+                (set! results (cons #t results)))
+            (cond (found results)
+                  ((eq? arg 'marked) '())
+                  (else (list (body)))))))))
+
+    (define (%dired-map-over-marks body arg show-progress
+                                   distinguish-one-marked)
+      ;; The expansion of GNU Emacs's `dired-map-over-marks'
+      ;; (dired.el:969), with BODY as a thunk - the same rendering
+      ;; `dired-repeat-over-lines' uses for the function it calls on each
+      ;; line. "Eval BODY with point on each marked line. Return a list
+      ;; of BODY's results."
+      ;;
+      ;; "No guarantee is made about the position on the marked line",
+      ;; which is why the `prog1''s `dired-move-to-filename' runs on the
+      ;; way out. `inhibit-auto-revert' and the `(sit-for 0)' that
+      ;; SHOW-PROGRESS would ask for are not here: nothing in this tree
+      ;; auto-reverts, and `sit-for' is not ported - every caller passes
+      ;; nil for SHOW-PROGRESS, so nothing is lost by the second.
+      ;;--------------------------------------------------------------
+      (let ((result
+             (parameterize ((*case-fold-search* #f)
+                            (*inhibit-read-only* #t))
+               (%dired-over-marks-walk body arg distinguish-one-marked))))
+        ;; "save-excursion loses, again"
+        (dired-move-to-filename)
+        result))
+    (define-syntax dired-map-over-marks
+      ;; GNU Emacs's `dired-map-over-marks' as a macro, so that a caller
+      ;; writes the body where Emacs writes it. ARG is "#f, an integer, or
+      ;; the symbol `marked'"; SHOW-PROGRESS and DISTINGUISH-ONE-MARKED
+      ;; are Emacs's optional third and fourth arguments.
+      ;;--------------------------------------------------------------
+      (syntax-rules ()
+        ((dired-map-over-marks body arg)
+         (dired-map-over-marks body arg #f #f))
+        ((dired-map-over-marks body arg show-progress)
+         (dired-map-over-marks body arg show-progress #f))
+        ((dired-map-over-marks body arg show-progress distinguish-one-marked)
+         (%dired-map-over-marks (lambda () body) arg show-progress
+                                distinguish-one-marked))))
+    (define (dired-get-marked-files . rest)
+      ;; GNU Emacs's `dired-get-marked-files' (dired.el:1051): "Return
+      ;; the marked files' names as list of strings."
+      ;;--------------------------------------------------------------
+      (let* ((localp (if (pair? rest) (car rest) #f))
+             (arg (if (and (pair? rest) (pair? (cdr rest))) (cadr rest) #f))
+             (filter (if (and (pair? rest) (pair? (cdr rest)) (pair? (cddr rest)))
+                         (caddr rest) #f))
+             (distinguish-one-marked
+              (if (and (pair? rest) (pair? (cdr rest)) (pair? (cddr rest))
+                       (pair? (cdddr rest)))
+                  (cadddr rest) #f))
+             (message-if-empty
+              (if (and (pair? rest) (pair? (cdr rest)) (pair? (cddr rest))
+                       (pair? (cdddr rest)) (pair? (cddddr rest)))
+                  (car (cddddr rest)) #f)))
+        (let ((all-of-them
+               (save-excursion
+                 (delq #f (dired-map-over-marks
+                           (dired-get-filename localp 'no-error-if-not-filep)
+                           arg #f distinguish-one-marked)))))
+          (if (equal? all-of-them '(#t)) (set! all-of-them '()))
+          (let ((result
+                 (if (not filter)
+                     (if (and distinguish-one-marked (eq? (car all-of-them) #t))
+                         all-of-them
+                         (reverse all-of-them))
+                     (let loop ((rest all-of-them) (acc '()))
+                       (cond ((null? rest) (reverse acc))
+                             ((filter (car rest)) (loop (cdr rest) (cons (car rest) acc)))
+                             (else (loop (cdr rest) acc)))))))
+            (when (and (null? result) message-if-empty)
+              (error "%s" (if (string? message-if-empty)
+                              message-if-empty
+                              "No files specified")))
+            result))))
+    (define (dired-mark-prompt arg files)
+      ;; GNU Emacs's `dired-mark-prompt' (dired.el:4458): "Return a string
+      ;; suitable for use in a Dired prompt. ... The return value has a
+      ;; form like \"foo.txt\", \"[next 3 files]\", or \"* [3 files]\"."
+      ;;
+      ;; Emacs's first line is `(if (eq (car files) t) (setq files (cdr
+      ;; files)))' - a `t' standing in for one marked file - and `(car
+      ;; nil)' is nil in Elisp, so an empty FILES falls through here.
+      ;;--------------------------------------------------------------
+      (let ((files (if (and (pair? files) (eq? (car files) #t))
+                       (cdr files)
+                       files)))
+        (let ((count (length files)))
+          (cond ((= count 1) (car files))
+                ((integer? arg) (format "[next %d files]" arg))
+                (else (format "%c [%d files]" (*dired-marker-char*) count))))))
+    (define (dired-format-columns-of-files files)
+      ;; GNU Emacs's `dired-format-columns-of-files' (dired.el:4535):
+      ;; the marked names laid out in the columns `completion--insert-strings'
+      ;; makes of them, in the current buffer.
+      ;;--------------------------------------------------------------
+      (let ((beg (point)))
+        (completion--insert-strings (current-buffer) files)
+        (put-text-property beg (point) 'mouse-face #f)))
+    (define (dired-mark-pop-up buffer-or-name op-symbol files function . args)
+      ;; GNU Emacs's `dired-mark-pop-up' (dired.el:4501): "Return
+      ;; FUNCTION's result on ARGS after showing which files are marked."
+      ;;
+      ;; The window is not made when there is only one file, or when
+      ;; `dired-no-confirm' says not to - which is when the confirmation
+      ;; is simply asked. Otherwise the names go in a buffer shown below
+      ;; the selected window, and FUNCTION runs with that window selected
+      ;; and is taken down again afterwards. Two of the C's steps are
+      ;; named rather than done: `display-buffer-mark-dedicated' (the
+      ;; window dedicated softly to the display buffer, so that the
+      ;; completions window cannot take it) is not modelled - window
+      ;; dedication is not in this tree - and `tab-line-exclude' is a
+      ;; tab-line variable there is no tab line to read.
+      ;;--------------------------------------------------------------
+      (if (or (eq? (*dired-no-confirm*) #t)
+              (and (pair? (*dired-no-confirm*))
+                   (memq op-symbol (*dired-no-confirm*)))
+              (= 1 (length files)))
+          (apply function args)
+          (let ((buffer (get-buffer-create (or buffer-or-name " *Marked Files*"))))
+            (with-current-buffer-window
+             buffer
+             display-buffer-below-selected
+             (lambda (window value)
+               (with-selected-window
+                window
+                (unwind-protect
+                    (apply function args)
+                  (if (window-live-p window)
+                      (quit-restore-window window 'kill)
+                      #f))))
+             ;; "Handle (t FILE) just like (FILE), here."
+             (dired-format-columns-of-files
+              (if (and (pair? files) (eq? (car files) #t))
+                  (cdr files)
+                  files))
+             (remove-text-properties (point-min) (point-max)
+                                     '(mouse-face nil help-echo nil))
+             #f))))
+    (define (dired-log log . args)
+      ;; GNU Emacs's `dired-log' (dired.el:5062): "Log a message or the
+      ;; contents of a buffer. ... Usually the LOG string ends with a \\n.
+      ;; End each bunch of errors with (dired-log t)."
+      ;;--------------------------------------------------------------
+      (let ((obuf (current-buffer)))
+        (with-current-buffer (get-buffer-create *dired-log-buffer*)
+          (goto-char (point-max))
+          (parameterize ((*inhibit-read-only* #t))
+            (cond
+             ((string? log)
+              (insert (if (pair? args) (apply format log args) log)))
+             ((text-editor-type? log)
+              (insert-buffer-substring log))
+             ((eq? log #t)
+              ;; "insert the current time and buffer at the start of the
+              ;; page, and \\f (formfeed) at the end"
+              (save-excursion
+                (backward-page 1)
+                (unless (bolp) (insert "\n"))
+                (insert (current-time-string)
+                        (format "\tBuffer `%s'\n" (buffer-name obuf))))
+              (goto-char (point-max))
+              (insert "\f\n"))
+             (else #f))))))
+    (define (dired-log-summary string failures)
+      ;; GNU Emacs's `dired-log-summary' (dired.el:5088): "State a summary
+      ;; of a command's failures, in echo area and log buffer."
+      ;;--------------------------------------------------------------
+      (if (= 1 (length failures))
+          (message "%s"
+                   (with-current-buffer *dired-log-buffer*
+                     (goto-char (point-max))
+                     (backward-page 1)
+                     (when (eolp) (forward-line 1))
+                     (buffer-substring (point) (point-max))))
+          (message (if (pair? failures)
+                       "%s--type ? for details (%s)"
+                       "%s--type ? for details")
+                   string failures))
+      ;; "Log a summary describing a bunch of errors."
+      (dired-log (string-append "\n" string "\n"))
+      (dired-log #t))
+    (define-command (dired-why)
+      ;; GNU Emacs's `dired-why' (dired.el:5045): "Pop up a buffer with
+      ;; error log output from Dired."
+      "Pop up the Dired log of a failed command's errors."
+      (interactive)
+      (let ((buffer (get-buffer *dired-log-buffer*)))
+        (when buffer
+          (display-buffer buffer))))
+    (define (dired-delete-file file recursive trash)
+      ;; GNU Emacs's `dired-delete-file' (dired.el:4206): "Delete FILE or
+      ;; directory (possibly recursively if optional RECURSIVE is true.)
+      ;; RECURSIVE determines what to do with a non-empty directory. The
+      ;; effect of its possible values is: nil -- do not delete.
+      ;; `always' -- delete recursively without asking. `top' -- ask for
+      ;; each directory at top level. Anything else -- ask for each
+      ;; sub-directory."
+      ;;
+      ;; The C's `unless'/`pcase' pair is the `if'/`cond' here: `always'
+      ;; is the one answer that asks nothing, and the `cond''s last arm
+      ;; is the `pcase''s catch-all, which quits on an answer it does not
+      ;; know. The C sets the *global* `dired-recursive-deletes' as well
+      ;; as its local RECURSIVE on an `all' answer; a parameter is set by
+      ;; calling it, which is what that line does.
+      ;;--------------------------------------------------------------
+      (if (not (eq? #t (car (file-attributes file))))
+          (delete-file file trash)
+          (let* ((empty-dir-p
+                  (null? (directory-files
+                          file #t *directory-files-no-dot-files-regexp*))))
+            (let ((recursive
+                   (if (and recursive (not empty-dir-p))
+                       (if (eq? recursive 'always)
+                           recursive
+                           (let ((answer
+                                  (read-answer
+                                   (format "Recursively %s %s? "
+                                           (if (and trash
+                                                    (*delete-by-moving-to-trash*))
+                                               "trash"
+                                               "delete")
+                                           (dired-make-relative file))
+                                   '(("yes" ?y "delete recursively the current directory")
+                                     ("no" ?n "skip to next")
+                                     ("all" ?! "delete all remaining directories with no more questions")
+                                     ("quit" ?q "exit")))))
+                             (cond ((equal? answer "all")
+                                    (*dired-recursive-deletes* recursive)
+                                    'always)
+                                   ((equal? answer "yes")
+                                    (if (eq? recursive 'top) 'always recursive))
+                                   ((equal? answer "no") #f)
+                                   (else (keyboard-quit)))))
+                       ;; "Empty dir or recursive is nil."
+                       #f)))
+              (delete-directory file recursive trash)))))
+    (define (dired-fun-in-all-buffers directory file fun . args)
+      ;; GNU Emacs's `dired-fun-in-all-buffers' (dired.el:4358): "In all
+      ;; buffers Dired'ing DIRECTORY, run FUN with ARGS. ... If the buffer
+      ;; has a wildcard pattern, check that it matches FILE."
+      ;;--------------------------------------------------------------
+      (let ((success-list '()))
+        (for-each
+         (lambda (buf)
+           (with-current-buffer buf
+             (when (apply fun args)
+               (set! success-list (cons (buffer-name buf) success-list)))))
+         (dired-buffers-for-dir directory file))
+        success-list))
+    (define (dired-remove-entry file)
+      ;; GNU Emacs's `dired-remove-entry' (dired.el:4376): "Remove entry
+      ;; FILE in the current Dired buffer. Note this doesn't delete FILE
+      ;; in the file system."
+      ;;
+      ;; `delete-region' takes engine positions here - it is the one
+      ;; function of the Emacs-named layer that does, because its callers
+      ;; are all internal - so the two one-based `point's lose one.
+      ;;--------------------------------------------------------------
+      (save-excursion
+        (when (dired-goto-file file)
+          (parameterize ((*inhibit-read-only* #t))
+            ;; Emacs's `(progn (beginning-of-line) (point))': the two
+            ;; moves are the value, so this is a `begin'.
+            (delete-region (begin (beginning-of-line) (- (point) 1))
+                           (- (line-beginning-position 2) 1))))))
+    (define (dired-clean-up-after-deletion fn)
+      ;; GNU Emacs's `dired-clean-up-after-deletion' (dired.el:4417):
+      ;; "Clean up after a deleted file or directory FN. Removes any
+      ;; expanded subdirectory of deleted directory. If
+      ;; `dired-clean-up-buffers-too' is non-nil, kill any buffers
+      ;; visiting those files, prompting for confirmation."
+      ;;
+      ;; Both halves are named here rather than done, and both are
+      ;; guarded in Emacs by something that is false in this tree: the
+      ;; subdirectory half by `(cdr dired-subdir-alist)', which is empty
+      ;; until subdirectory insertion exists here, and needs
+      ;; `dired-goto-subdir' and `dired-kill-subdir' with it; the
+      ;; buffer-killing half by `(featurep 'dired-x)', `dired-x' being a
+      ;; feature with its own file in Emacs, and needing
+      ;; `get-file-buffer'. So the answer Emacs gives in this
+      ;; configuration - no subdirectories, no `dired-x' - is this.
+      ;;--------------------------------------------------------------
+      #f)
+    (define (dired-delete-entry file)
+      ;; GNU Emacs's `dired-delete-entry' (dired.el:4391): "Remove entry
+      ;; FILE in the current Dired buffer. Like `dired-remove-entry'
+      ;; followed by `dired-clean-up-after-deletion'."
+      ;;--------------------------------------------------------------
+      (dired-remove-entry file)
+      (dired-clean-up-after-deletion file))
+    (define (dired-internal-do-deletions l arg trash)
+      ;; GNU Emacs's `dired-internal-do-deletions' (dired.el:4306).
+      ;; L is an alist of files to delete with their buffer positions,
+      ;; ARG is the prefix argument, and the file names are absolute.
+      ;;--------------------------------------------------------------
+      (let* ((files (map car l))
+             (count (length l))
+             (succ 0)
+             ;; "Bind `dired-recursive-deletes' so that we can change it
+             ;; locally according with the user answer within
+             ;; `dired-delete-file'."
+             (recursive (*dired-recursive-deletes*))
+             (trashing (and trash (*delete-by-moving-to-trash*))))
+        ;; "canonicalize file list for pop up"
+        (set! files (map dired-make-relative files))
+        (if (dired-mark-pop-up
+             " *Deletions*" 'delete files (*dired-deletion-confirmer*)
+             (format "%s %s "
+                     (if trashing "Trash" "Delete")
+                     (dired-mark-prompt arg files)))
+            (save-excursion
+              (let ((failures '()))
+                (let loop ((rest l))
+                  (when (pair? rest)
+                    (let ((entry (car rest)))
+                      (goto-char (marker-position (cdr entry)))
+                      (dired-move-to-filename)
+                      (parameterize ((*inhibit-read-only* #t))
+                        (guard (err
+                                (#t
+                                 ;; "catch errors from failed deletions";
+                                 ;; the C's other arm is `quit', which
+                                 ;; cancels the whole command - a quit
+                                 ;; here would be caught by this same
+                                 ;; arm, and is not told apart.
+                                 (dired-log "%s: %s\n" (car entry) err)
+                                 (set! failures
+                                       (cons (car entry) failures))))
+                          (let ((fn (car entry)))
+                            (dired-delete-file fn recursive trash)
+                            ;; "if we get here, removing worked"
+                            (set! succ (+ succ 1))
+                            (dired-fun-in-all-buffers
+                             (file-name-directory-part fn)
+                             (file-name-nondirectory-part fn)
+                             dired-delete-entry fn)
+                            ;; "For when FN's directory name is different
+                            ;; from the current buffer's dired-directory."
+                            (dired-delete-entry fn))))
+                      (loop (cdr rest)))))
+                (if (null? failures)
+                    #f
+                    (dired-log-summary
+                     (format "%d of %d deletion failed" (length failures) count)
+                     failures))))
+            (message "(No deletions performed)")))
+      (dired-move-to-filename))
+    (define-command (dired-do-flagged-delete nomessage)
+      ;; GNU Emacs's `dired-do-flagged-delete' (dired.el:4248): "In Dired,
+      ;; delete the files flagged for deletion. If NOMESSAGE is non-nil,
+      ;; we don't display any message if there are no flagged files.
+      ;; `dired-recursive-deletes' controls whether deletion of non-empty
+      ;; directories is allowed."
+      ;;
+      ;; "NOMESSAGE is always nil in the interactive case", which is what
+      ;; the `(interactive nil dired-mode)' the C has comes to.
+      ;;--------------------------------------------------------------
+      "Delete the files flagged for deletion."
+      (interactive (list #f))
+      (let ((markers '()))
+        ;; The C's `let*' binding of `dired-marker-char' is a
+        ;; `parameterize' here, and `regexp' is computed *inside* it:
+        ;; Elisp's variable is dynamic, so a `let' there is seen by
+        ;; `dired-marker-regexp'; a Scheme `let' would only shadow the
+        ;; name in this body and `dired-marker-regexp' would go on
+        ;; reading `*' from the parameter - which is why `x' found
+        ;; nothing to delete.
+        (parameterize ((*dired-marker-char* (*dired-del-marker*))
+                       (*case-fold-search* #f))
+          (let ((regexp (dired-marker-regexp)))
+            (if (save-excursion
+                  (goto-char (point-min))
+                  (and (re-search-forward regexp #f #t) #t))
+                (begin
+                  (dired-internal-do-deletions
+                   (reverse
+                    (dired-map-over-marks
+                     (cons (dired-get-filename)
+                           (let ((m (point-marker)))
+                             (set! markers (cons m markers))
+                             m))
+                     #f))
+                   #f #t)
+                  (for-each (lambda (m) (set-marker! m #f)) markers))
+                (if (not nomessage)
+                    (message "(No deletions requested)")
+                    #f))))))
+
+
+    ;; `x' is `dired-do-flagged-delete', at `(kbd "x")' in dired.el's own
+    ;; map (dired.el:2481). It is bound here rather than in
+    ;; `make-dired-mode-map' for the reason the C-x d binding above is at
+    ;; the end of the file: `define-key' holds the command's value, and
+    ;; the command is defined further down. Without it `x' was undefined
+    ;; and self-inserted into the read-only listing, which is what the
+    ;; "Buffer is read-only" report was.
+    (define-key dired-mode-map (list #\x) dired-do-flagged-delete)
 
     ))

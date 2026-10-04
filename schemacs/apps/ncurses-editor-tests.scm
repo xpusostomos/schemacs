@@ -115,6 +115,7 @@
        *search-case-fold?* *search-pattern* isearch-find isearch-message)
  (only (schemacs editor window)
        delete-window delete-other-windows display-buffer get-buffer-window
+       pop-to-buffer-same-window
        split-window
        switch-to-buffer)
  (only (schemacs editor xdisp)
@@ -158,6 +159,26 @@
   ;; tests open none, so the size is given rather than asked for.
   ;;--------------------------------------------------------------
   (new-frame ed 24 80))
+
+
+(define (run-keys-named path)
+  ;; Run one named key (a keymap path such as `("f13")') over the text
+  ;; "abc" and answer what the buffer holds afterwards. This is
+  ;; `run-keys*' with `dispatch-key-event', which takes a keymap path
+  ;; rather than a raw event - a named key has no byte to feed.
+  (parameterize ((*buffer-list* '())
+                 (*current-buffer* #f)
+                 (*this-command* #f)
+                 (*last-command* #f)
+                 (*kill-buffer-query-functions* #f))
+    (let* ((ed (new-text-editor))
+           (frame (test-frame ed)))
+      (parameterize ((*current-frame* frame) (*echo-area-buffer* #f))
+        (set!window-buffer (frame-selected-window frame) ed)
+        (*current-buffer* ed)
+        (text-editor-insert ed "abc")
+        (dispatch-key-event frame path)
+        (text-editor-to-string ed)))))
 
 (define (run-keys* text evs)
   ;; Load TEXT into a fresh buffer, run EVS over it, and return
@@ -274,6 +295,24 @@
 ;; nowhere. Every prompting command in the tree is therefore tested in
 ;; `tools/pty-check.py', which types at a real terminal - see its
 ;; `dired' check.
+
+
+;; ------------------------------------------------------------------
+;; An unbound key is *undefined*, and is not a self-inserting character
+;;
+;; `km:keymap-index-to-char' handed the catch-all self-insert layer the
+;; char-index of *any* unmodified key, so an unbound *named* key
+;; (`<f13>', `<prior>', `<insert>') reached `self-insert-command' and it
+;; inserted the key's *name* as text. In a read-only buffer the same keys
+;; said only "Buffer is read-only" and otherwise did nothing, which is how
+;; PgUp and PgDn appeared to be dead in Dired. Emacs reaches
+;; `self-insert-command' only for a character event.
+
+(test-equal '("abc" "abc" "abcz")
+  ;; a named key that no map binds, then a character, then nothing
+  (list (run-keys-named (list "f13"))
+        (run-keys-named (list "insert"))
+        (run-keys-named (list #\z))))
 
 
 (test-end "schemacs_ncurses_editor_command")
@@ -917,6 +956,11 @@
     (text-editor-set-cursor mb-ed 0 0)
     (parameterize ((*current-frame* frame)
                    (*minibuffer* mb)
+                   ;; what `read_minibuf' does with the current buffer:
+                   ;; `record_unwind_current_buffer' and then the
+                   ;; minibuffer's - so that typing goes into the prompt
+                   ;; whatever buffer was current before
+                   (*current-buffer* #f)
                    (*echo-area-buffer* mb-ed)
                    (*current-keymap* minibuffer-local-map))
       (dispatch-key-event frame (list (list 'ctrl #\f)))
@@ -1124,7 +1168,13 @@
     frame))
 
 (define (run-window-keys frame . evs)
+  ;; `*current-buffer*' is bound to #f for the same reason `run-keys*'
+  ;; binds it: a command that switches buffers makes that buffer current -
+  ;; Emacs's `select-window' does it (`Fselect_window', window.c:3803) - so
+  ;; without this binding the test inherits whatever buffer the last one
+  ;; left current, and its typing goes there.
   (parameterize ((*current-frame* frame)
+                 (*current-buffer* #f)
                  (*search-pattern* #f)
                  (*search-case-fold?* #t)
                  (*kill-ring* '())
@@ -1595,6 +1645,35 @@
       (display-buffer popup)
       (window-rects frame))))
 
+;; `pop-to-buffer-same-window' shows the buffer in the *selected* window
+;; and does not split: "preferably the same one". Its action is Emacs's
+;; `display-buffer--same-window-action' (window.el:8166), whose first
+;; element is `display-buffer-same-window' - "Display BUFFER in the
+;; selected window. ... fails if ALIST has an `inhibit-same-window'
+;; element whose value is non-nil" (window.el:8500). Passing a `nil'
+;; action function instead fell through to the split policy, so every
+;; `find-file' from a minibuffer left two windows with the old buffer
+;; above - which is what broke the completion UI's M-<down> test.
+(test-equal '(1 "beta")
+  (let ((frame (frame-with "alpha\nbeta\n"))
+        (other (new-text-editor)))
+    (parameterize ((*current-frame* frame))
+      (text-editor-insert other "beta")
+      (pop-to-buffer-same-window other)
+      (list (length (window-list frame))
+            (text-editor-to-string
+             (window-buffer (frame-selected-window frame)))))))
+
+;; ...and `inhibit-same-window' still refuses it, which is the action's
+;; own test
+(test-equal 2
+  (let ((frame (frame-with "alpha\nbeta\n"))
+        (other (new-text-editor)))
+    (parameterize ((*current-frame* frame))
+      (text-editor-insert other "beta")
+      (display-buffer other (list #f (cons 'inhibit-same-window #t)))
+      (length (window-list frame)))))
+
 (test-end "schemacs_ncurses_editor_windows")
 
 ;;--------------------------------------------------------------------
@@ -2055,6 +2134,14 @@
     (parameterize ((*current-frame* frame)
                    (*minibuffer* mb)
                    (*echo-area-buffer* mb-ed)
+                   ;; What `read_minibuf' does with the current buffer:
+                   ;; `record_unwind_current_buffer' and then the
+                   ;; minibuffer's. Without it this test inherits whatever
+                   ;; buffer the last one left current - a command that
+                   ;; switches buffers makes it current now, as Emacs's
+                   ;; `select-window' does - and the typing goes there
+                   ;; instead of into the prompt.
+                   (*current-buffer* #f)
                    ;; the prompt too: the renderer draws it from
                    ;; the frame, and a command that runs with the
                    ;; minibuffer active must not see a stale one

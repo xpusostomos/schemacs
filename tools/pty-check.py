@@ -1963,6 +1963,8 @@ def check_dired():
     _os.makedirs(d, exist_ok=True)
     with open(_os.path.join(d, "hello.txt"), "w") as out:
         out.write("hi\n")
+    with open(_os.path.join(d, "second.txt"), "w") as out:
+        out.write("ho\n")
     problems = []
     out = drive([C_x + b"d", C_a, C_k, (d + "/").encode(), RET],
                 _os.path.join(d, "hello.txt"), gap=0.35)
@@ -1974,6 +1976,70 @@ def check_dired():
     # `dired-insert-directory' takes it from
     if d + ":" not in out:
         problems.append("the listing has no header line naming the directory")
+
+    # And the editor started *on* a directory - `emacs /some/dir' - direds
+    # it too: `find-file-noselect' sends a directory through
+    # `find-directory-functions', whose value names `dired-noselect'.
+    # Before that branch was ported this said
+    # `; find-file: error loading <dir>'.
+    out = drive([], d, gap=0.4)
+    if "Dired" not in out:
+        problems.append("the editor started on a directory did not enter "
+                        "Dired")
+    if "hello.txt" not in out:
+        problems.append("the editor started on a directory did not list it")
+
+    # And the marking keys work. `m' hands `dired-mark' the raw prefix,
+    # which is nil when none was typed - and the C's body converts it with
+    # `(prefix-numeric-value arg)' before the walk needs a number. Without
+    # that conversion `m', `d' and `u' failed with "Wrong type argument in
+    # position 2: #f", which read as "the keys do nothing".
+    #
+    # The editor is started *on the directory* rather than driven through
+    # `C-x d', so no prompt is involved: typing into the directory prompt
+    # is timing-sensitive enough that `m' and `d' sometimes landed in it.
+    out = drive([b"m", b"d"], d, gap=0.35)
+    if "* " not in out:
+        problems.append("`m' in Dired did not mark the file at point")
+    if "D " not in out:
+        problems.append("`d' in Dired did not flag the next file")
+    if "Wrong type argument" in out:
+        problems.append("a Dired marking key still fails on the prefix: "
+                        "Wrong type argument in position 2: #f")
+    if "read-only" in out:
+        problems.append("a Dired marking key was refused as read-only")
+    return problems
+
+
+
+def check_dired_delete():
+    """`d' then `x' deletes the flagged file, by key."""
+    import os as _os
+    d = "/tmp/pty-check-dired-delete"
+    _os.makedirs(d, exist_ok=True)
+    for name in ("gone.txt",):
+        with open(_os.path.join(d, name), "w") as out:
+            out.write("x\n")
+    for name in ("keep.txt",):
+        with open(_os.path.join(d, name), "w") as out:
+            out.write("y\n")
+    problems = []
+    # Start on the directory, so no `C-x d' prompt is involved (`m' and
+    # `d' have landed in that prompt before). `d' flags, `x' runs
+    # `dired-do-flagged-delete', and with one file in the list the
+    # confirmation is `yes-or-no-p''s - whose answer is the whole word.
+    # Point starts on `gone.txt' (the listing is sorted, and `..' comes
+    # before it).
+    out = drive([b"d", b"x", b"yes", RET], d, gap=0.4)
+    if "read-only" in out:
+        problems.append("`x' was refused as read-only - it was unbound and "
+                        "self-inserted into the read-only listing")
+    if "end of buffer" in out.lower():
+        problems.append("`x' ran off the end of the buffer")
+    if _os.path.exists(_os.path.join(d, "gone.txt")):
+        problems.append("`d' then `x' did not delete the flagged file")
+    if not _os.path.exists(_os.path.join(d, "keep.txt")):
+        problems.append("`x' deleted a file that was not flagged")
     return problems
 
 
@@ -1987,6 +2053,7 @@ CHECKS = {
     "quoted-insert": check_quoted_insert,
     "insert-file": check_insert_file,
     "dired": check_dired,
+    "dired-delete": check_dired_delete,
     "find-file-read-only": check_find_file_read_only,
     "find-alternate-file": check_find_alternate_file,
     "revert-buffer": check_revert_buffer,

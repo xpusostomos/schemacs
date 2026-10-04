@@ -19,9 +19,22 @@
 
   (import
     (scheme base)
+    ;; `string-upcase' is `%format-integer''s - `%X' and `%B' write the
+    ;; digits upper case, as the C's sprintf does.
+    (scheme char)
+    ;; `format', `format-message' and `message' are this library's (they
+    ;; are editfns.c's in Emacs 31), so the object printer they use is
+    ;; spelled `%printf' here: it is Guile's `format', and it is *not*
+    ;; exported - a name collision with Emacs's `format' would make the
+    ;; whole library ambiguous.
+    (rename (only (ice-9 format) format) (format %printf))
+    ;; `princ'/`prin1' of an object, which `%s' and `%S' substitute, are
+    ;; `display'/`write' on a string port.
+    (only (scheme write) display write)
     ;; `current-buffer' and `set-buffer', which `save-excursion' saves
     ;; and restores beside point.
-    (only (guile) cadr caddr cddr cdddr cadddr)
+    (only (guile) cadr caddr cddr cdddr cadddr call-with-output-string
+          exact->inexact string-index)
     (only (schemacs editor buffer) current-buffer set-buffer
           *case-fold-search* *inhibit-read-only*)
     (only (schemacs editor engine)
@@ -55,6 +68,12 @@
           string-intervals)
     (only (schemacs editor command)
           *mark-even-if-inactive*)
+    ;; `message' puts its text in the echo area, which is the frame's -
+    ;; Emacs's `message3' reaches the display the same way, so this is
+    ;; the C's own dependency and not a detour. (Frame's own closure does
+    ;; not contain this library, so the import is not circular.)
+    (only (schemacs editor frame)
+          *current-frame* frame-message set-message!)
     (only (schemacs ui text-buffer-impl) text-location-line)
     )
 
@@ -90,9 +109,35 @@ point-marker
    region-beginning
    region-end
    region-limit
+   insert-buffer-substring
+   *inhibit-message*
+   *message-log-max*
+   *standard-display-table*
+   *text-quoting-style*
+   default-to-grave-quoting-style
+   current-message
+   format
+   format-message
+   message
+   message-clear
+   text-quoting-style
    )
 
   (begin
+
+    (define (insert-buffer-substring buffer . rest)
+      ;; GNU Emacs's `insert-buffer-substring' (editfns.c): "Insert
+      ;; before point the contents of BUFFER." START and END are
+      ;; one-based positions of the Emacs-named layer, and END is
+      ;; exclusive, as in `buffer-substring'.
+      ;;--------------------------------------------------------------
+      (let* ((start (if (pair? rest) (car rest) #f))
+             (end (if (and (pair? rest) (pair? (cdr rest))) (cadr rest) #f))
+             (text (text-editor-copy-string
+                    buffer
+                    (if start (- start 1) 0)
+                    (if end (- end 1) (text-editor-char-count buffer)))))
+        (insert text)))
 
     (define (region-limit beginning?)
       ;; GNU Emacs's `region_limit' (`editfns.c'): the start or the end
@@ -579,5 +624,483 @@ point-marker
                (text-editor-set-cursor
                 saved-buffer (marker-position marker))
                (set-marker! marker #f)))))))
+
+    ;;----------------------------------------------------------------
+    ;; `format', `format-message' and `message'
+    ;;
+    ;; GNU Emacs 31 has all three in `src/editfns.c': `Fformat_message'
+    ;; (editfns.c:3422, over the static `styled_format') and `Fmessage'
+    ;; (editfns.c:3197). Emacs 28 had `message' in `src/xdisp.c', which
+    ;; is where the rest of this tree's echo-area code was read from;
+    ;; the version ported here is the one in the Emacs in `../emacs'.
+    ;;------------------------------------------------------------------
+
+    (define *text-quoting-style* (make-parameter #f))
+    ;; ^ GNU Emacs's `text-quoting-style' (doc.c:652). Its default is
+    ;; nil: "grave if curved quotes cannot be displayed, otherwise
+    ;; curve", which `text-quoting-style' below resolves through
+    ;; `default-to-grave-quoting-style'.
+
+    (define *standard-display-table* (make-parameter #f))
+    ;; ^ GNU Emacs's `standard-display-table' (C, xdisp.c), which is nil
+    ;; by default and which `default-to-grave-quoting-style' asks whether
+    ;; `‘' has been made to display as a `\`'. Nothing in this tree sets
+    ;; it, so the answer is what the C gives when the table is not a
+    ;; display table: curve - the same style `emacs -Q' answers in a
+    ;; UTF-8 terminal or a window frame.
+
+    (define *inhibit-message* (make-parameter #f))
+    ;; ^ GNU Emacs's `inhibit-message': "Non-nil means `message' should
+    ;; not display a message, only log it in the `*Messages*' buffer."
+
+    (define *message-log-max* (make-parameter 1000))
+    ;; ^ GNU Emacs's `message-log-max': "Maximum number of lines to keep
+    ;; in the `*Messages*' buffer."
+
+    (define (default-to-grave-quoting-style)
+      ;; GNU Emacs's `default_to_grave_quoting_style' (doc.c:640):
+      ;; whether `‘' has been given a display table entry that draws it
+      ;; as a plain `\`' - which is what a terminal that cannot show the
+      ;; curved quote is given. With no such table the answer is false,
+      ;; and the style is `curve'. (The C's first test, a compile-time
+      ;; `text_quoting_flag', is what a build with the feature left out
+      ;; answers, and is not a run-time question.)
+      ;;--------------------------------------------------------------
+      (and (*standard-display-table*)
+           ;; The non-nil arm is the C's `DISP_CHAR_VECTOR' of
+           ;; `LEFT_SINGLE_QUOTATION_MARK': whether the table draws `‘'
+           ;; as a bare `` ` ''. A display table is a C char-table of
+           ;; glyph vectors and this tree has no such object - the
+           ;; library called `disp-table' here is `disp-table.el''s
+           ;; character-width table - so a non-nil value cannot arise,
+           ;; and the answer that can is the C's for a nil variable:
+           ;; false, which makes the style `curve'.
+           #f))
+
+    (define (text-quoting-style)
+      ;; GNU Emacs's `text-quoting-style' (doc.c:652): "Return the
+      ;; current effective text quoting style. If the variable
+      ;; `text-quoting-style' is `grave', `straight' or `curve', just
+      ;; return that value. If it is nil (the default), return `grave'
+      ;; if curved quotes cannot be displayed ... otherwise `curve'.
+      ;; Any other value is treated as `curve'."
+      ;;--------------------------------------------------------------
+      (cond ((not (*text-quoting-style*))
+             (if (default-to-grave-quoting-style) 'grave 'curve))
+            ((eq? (*text-quoting-style*) 'grave) 'grave)
+            ((eq? (*text-quoting-style*) 'straight) 'straight)
+            (else 'curve)))
+
+    (define (%requote text)
+      ;; The grave-accent/apostrophe substitution `format-message' makes:
+      ;; under `curve' each ` becomes a left quote and each ' a right
+      ;; quote; under `straight' each ` becomes '; under `grave' nothing
+      ;; changes, the text already carrying the quotes it meant.
+      ;; (editfns.c:3440 takes `quoting_style' from `Ftext_quoting_style'
+      ;; only when MESSAGE is true, and the re-quoting is done by the walk
+      ;; over the `discarded' table at the end of `styled_format'.)
+      ;;--------------------------------------------------------------
+      (case (text-quoting-style)
+        ((curve)
+         (string-map (lambda (c)
+                       (case c ((#\`) #\‘) ((#\') #\’) (else c)))
+                     text))
+        ((straight)
+         (string-map (lambda (c) (if (char=? c #\`) #\' c)) text))
+        (else text)))
+
+    (define (%object->string obj readable?)
+      ;; The object OBJ as `%s' (READABLE? false) or `%S' (true) writes
+      ;; it: `styled_format' sends a `%S' argument through `prin1' and a
+      ;; `%s' argument through `princ' (editfns.c:3687). Guile's `write'
+      ;; is `prin1' and its `display' is `princ' - both print a string
+      ;; inside a list without its quotes, which is what princ does and
+      ;; what makes `%s' of a list differ from its printed form.
+      ;;--------------------------------------------------------------
+      (if (and (not readable?) (string? obj))
+          obj
+          (call-with-output-string
+           (lambda (port)
+             (if readable? (write obj port) (display obj port))))))
+
+    (define (%format-digits text i len)
+      ;; The run of digits at I as a number, and the index after it:
+      ;; the C's `str2num' as `styled_format' uses it.
+      ;;--------------------------------------------------------------
+      (let loop ((j i) (n 0))
+        (if (and (< j len) (char-numeric? (string-ref text j)))
+            (loop (+ j 1)
+                  (+ (* n 10) (- (char->integer (string-ref text j)) 48)))
+            (values n j))))
+
+    (define (%format-flags text i len)
+      ;; The flag run at I. `styled_format' collects the five flags and
+      ;; then applies two C rules to them (editfns.c:3639): "Ignore flags
+      ;; when sprintf ignores them" - `space' is dropped when `plus' is
+      ;; there, and `zero' when `minus' is.
+      ;;--------------------------------------------------------------
+      (let loop ((j i) (minus #f) (plus #f) (space #f) (sharp #f) (zero #f))
+        (if (>= j len)
+            (values j minus plus (and space (not plus))
+                    sharp (and zero (not minus)))
+            (case (string-ref text j)
+              ((#\-) (loop (+ j 1) #t plus space sharp zero))
+              ((#\+) (loop (+ j 1) minus #t space sharp zero))
+              ((#\space) (loop (+ j 1) minus plus #t sharp zero))
+              ((#\#) (loop (+ j 1) minus plus space #t zero))
+              ((#\0) (loop (+ j 1) minus plus space sharp #t))
+              (else
+               (values j minus plus (and space (not plus))
+                       sharp (and zero (not minus))))))))
+
+    (define (%format-pad text width minus zero prefix-length)
+      ;; TEXT widened to WIDTH the way the C's sprintf does it: on the
+      ;; right when `-' was given, with zeroes after the sign or radix
+      ;; prefix when `0' was, and with spaces otherwise. PREFIX-LENGTH
+      ;; says how many leading characters the zeroes must come after.
+      ;;--------------------------------------------------------------
+      (if (or (not width) (<= width (string-length text)))
+          text
+          (let ((pad (- width (string-length text))))
+            (cond (minus
+                   (string-append text (make-string pad #\space)))
+                  (zero
+                   (string-append (substring text 0 prefix-length)
+                                  (make-string pad #\0)
+                                  (substring text prefix-length
+                                             (string-length text))))
+                  (else
+                   (string-append (make-string pad #\space) text))))))
+
+    (define (%format-integer arg conversion minus plus space sharp zero
+                             width precision)
+      ;; ARG under a `%d', `%i', `%o', `%x', `%X', `%b' or `%B'
+      ;; conversion. `%b' and `%B' are Emacs's own - C's printf has no
+      ;; binary conversion - and are the reason this is not a call to
+      ;; Guile's.
+      ;;
+      ;; The C hands all of this to sprintf, so the rules are sprintf's:
+      ;; a precision is a minimum number of digits (and turns off the
+      ;; `0' flag), `#' asks for the radix prefix, and the sign is the
+      ;; `-' of a negative number, or `+' or a space where those flags
+      ;; asked for it.
+      ;;--------------------------------------------------------------
+      (let* ((base (case conversion
+                     ((#\d #\i) 10) ((#\o) 8) ((#\x #\X) 16)
+                     ((#\b #\B) 2) (else 10)))
+             (negative (and (< arg 0) (memv conversion '(#\d #\i))))
+             (magnitude (abs arg))
+             (digits (number->string magnitude base))
+             (digits (if (and precision (< (string-length digits) precision))
+                         (string-append
+                          (make-string (- precision (string-length digits)) #\0)
+                          digits)
+                         digits))
+             (digits (if (memv conversion '(#\X #\B))
+                         (string-upcase digits)
+                         digits))
+             (radix (case conversion
+                      ((#\o) (if sharp "0" ""))
+                      ((#\x) (if sharp "0x" ""))
+                      ((#\X) (if sharp "0X" ""))
+                      ((#\b) (if sharp "0b" ""))
+                      ((#\B) (if sharp "0B" ""))
+                      (else "")))
+             (sign (cond (negative "-") (plus "+") (space " ") (else "")))
+             (body (string-append sign radix digits)))
+        (%format-pad body width minus (and zero (not precision))
+                     (+ (string-length sign) (string-length radix)))))
+
+    (define (%parse-spec format-string start n)
+      ;; The conversion specification at START, which is its `%'.
+      ;; Answers: the index just after it, the argument count to carry
+      ;; into the next specification, the conversion character, the
+      ;; argument index it takes (or #f for `%%'), the five flags,
+      ;; the field width and the precision - each of the last two #f
+      ;; when it was not given.
+      ;;
+      ;; The grammar is the C's own comment (editfns.c:3610):
+      ;;   '%' [field-number] [flags] [field-width] [precision] conversion
+      ;; with field-number `N$', and a field number overriding the
+      ;; count-to-next-argument the plain form uses (editfns.c:3624).
+      ;;--------------------------------------------------------------
+      (let* ((len (string-length format-string))
+             (j (+ start 1))
+             (numbered
+              (and (< j len) (char-numeric? (string-ref format-string j))
+                   (let-values (((num end)
+                                 (%format-digits format-string j len)))
+                     (and (< end len)
+                          (char=? (string-ref format-string end) #\$)
+                          (cons num (+ end 1))))))
+             (j (if numbered (cdr numbered) j))
+             (numbered-arg (and numbered (- (car numbered) 1)))
+             (n (if numbered-arg numbered-arg n)))
+        (let*-values (((j minus plus space sharp zero)
+                       (%format-flags format-string j len))
+                      ((width j)
+                       (if (and (< j len)
+                                (char-numeric? (string-ref format-string j)))
+                           (let-values (((num end)
+                                         (%format-digits format-string j len)))
+                             (values num end))
+                           (values #f j)))
+                      ((precision j)
+                       (if (and (< j len)
+                                (char=? (string-ref format-string j) #\.))
+                           (let-values (((num end)
+                                         (%format-digits format-string
+                                                         (+ j 1) len)))
+                             (values num end))
+                           (values #f j))))
+          (when (>= j len)
+            (error "Format string ends in middle of format specifier"))
+          (let ((conversion (string-ref format-string j)))
+            (values (+ j 1)
+                    (cond (numbered-arg (+ numbered-arg 1))
+                          ((char=? conversion #\%) n)
+                          (else (+ n 1)))
+                    conversion
+                    (cond (numbered-arg numbered-arg)
+                          ((char=? conversion #\%) #f)
+                          (else n))
+                    (list minus plus space sharp zero)
+                    width precision)))))
+
+    (define (%truncate-to-precision text precision)
+      ;; A `%s' or `%c' argument cut to PRECISION characters, which for a
+      ;; string conversion is what C's "%.3s" means.
+      ;;--------------------------------------------------------------
+      (if (and precision (< precision (string-length text)))
+          (substring text 0 precision)
+          text))
+
+    (define (%float-no-bare-point text)
+      ;; C's printf writes no `.` when the precision is zero - `%.0f' of
+      ;; 3.7 is "4" - and Guile's `~f'/`~e' write the point anyway ("4.",
+      ;; "0.E+0"). A point with no fraction is exactly what has to go.
+      ;;--------------------------------------------------------------
+      (let ((e-at (string-index text (lambda (c) (char=? c #\e)))))
+        (cond ((and e-at (> e-at 0)
+                    (char=? (string-ref text (- e-at 1)) #\.))
+               (string-append (substring text 0 (- e-at 1))
+                              (substring text e-at (string-length text))))
+              ((and (not e-at) (< 0 (string-length text))
+                    (char=? (string-ref text (- (string-length text) 1)) #\.))
+               (substring text 0 (- (string-length text) 1)))
+              (else text))))
+
+    (define (%float-exponent text)
+      ;; The decimal exponent in a `~e'-written TEXT, e.g. the 3 of
+      ;; "1.234500E+3". `%g' needs it to choose between C's two styles.
+      ;;--------------------------------------------------------------
+      (let ((at (string-index text (lambda (c) (char=? c #\E)))))
+        (string->number (substring text (+ at 1) (string-length text)))))
+
+    (define (%float-exponent-text exponent)
+      ;; An exponent the way C's printf writes it, which is not the way
+      ;; Guile's does: at least two digits, lower-case `e', and a sign.
+      ;;--------------------------------------------------------------
+      (let* ((digits (number->string (abs exponent)))
+             (digits (if (< (string-length digits) 2)
+                         (string-append "0" digits)
+                         digits)))
+        (string-append (if (< exponent 0) "e-" "e+") digits)))
+
+    (define (%float-strip-zeros text)
+      ;; C's `%g' rule: "trailing zeros are removed from the fractional
+      ;; portion of the result unless the `#' flag is used". The point
+      ;; goes with them when nothing is left after it.
+      ;;--------------------------------------------------------------
+      (let* ((e-at (string-index text (lambda (c) (char=? c #\e))))
+             (head (if e-at (substring text 0 e-at) text))
+             (tail (if e-at (substring text e-at (string-length text)) ""))
+             (dot (string-index head (lambda (c) (char=? c #\.)))))
+        (if (not dot)
+            text
+            (let loop ((end (string-length head)))
+              (cond ((and (< (+ dot 1) end)
+                          (char=? (string-ref head (- end 1)) #\0))
+                     (loop (- end 1)))
+                    ((= end (+ dot 1)) (string-append (substring head 0 dot) tail))
+                    (else (string-append (substring head 0 end) tail)))))))
+
+    (define (%format-float arg conversion minus plus space sharp zero
+                           width precision)
+      ;; ARG under `%e', `%f' or `%g', the way the C's sprintf does it,
+      ;; since that is what `styled_format' hands the specification to
+      ;; (editfns.c:3865). The work is Guile's `~f'/`~e' at a given
+      ;; precision - there is no C printf here to call - and the
+      ;; adaptation around it is C's: `%e' and `%g' write a lower-case
+      ;; `e' and at least two exponent digits, where Guile writes an
+      ;; upper-case `E' and as few as one; and `%g' chooses between the
+      ;; exponential and the decimal-point style by the decimal exponent
+      ;; and then strips the trailing zeros (C's `%g' step 4).
+      ;;--------------------------------------------------------------
+      (let* ((p (if (and precision (= precision 0) (char=? conversion #\g))
+                    1
+                    (or precision 6)))
+             (magnitude (abs arg))
+             (sign (cond ((negative? arg) "-")
+                         (plus "+")
+                         (space " ")
+                         (else "")))
+             (body
+              (case conversion
+                ((#\f)
+                 (%printf #f "~,vf" p magnitude))
+                ((#\e)
+                 (let* ((raw (%printf #f "~,ve" p magnitude))
+                        (at (string-index raw (lambda (c) (char=? c #\E)))))
+                   (string-append
+                    (substring raw 0 at)
+                    (%float-exponent-text
+                     (string->number
+                      (substring raw (+ at 1) (string-length raw)))))))
+                (else
+                 ;; `%g': the C's rule is "use the `%e' style if the
+                 ;; exponent is less than -4 or greater than or equal to
+                 ;; the precision, and the `%f' style otherwise", with
+                 ;; one fewer digit after the point either way.
+                 (let* ((raw (%printf #f "~,ve" (max 0 (- p 1)) magnitude))
+                        (at (string-index raw (lambda (c) (char=? c #\E))))
+                        (x (string->number
+                            (substring raw (+ at 1) (string-length raw)))))
+                   (let ((text (if (or (< x -4) (<= p x))
+                                   (string-append (substring raw 0 at)
+                                                  (%float-exponent-text x))
+                                   (%printf #f "~,vf" (max 0 (- p 1 x))
+                                            magnitude))))
+                     (if sharp text (%float-strip-zeros text))))))))
+        (%format-pad (string-append sign (%float-no-bare-point body))
+                     width minus zero (string-length sign))))
+
+    (define (%format-one conversion arg minus plus space sharp zero
+                         width precision)
+      ;; The text one conversion substitutes: the body of the C's
+      ;; `styled_format' loop, with the parsing already done by
+      ;; `%parse-spec'. Emacs keeps this in the one function; it is
+      ;; separate here only so that the parse, the dispatch and the
+      ;; assembly can each be read - the arms are the C's arms in the
+      ;; C's order (editfns.c:3855).
+      ;;--------------------------------------------------------------
+      (case conversion
+        ((#\s #\S)
+         (%format-pad (%truncate-to-precision
+                       (%object->string arg (char=? conversion #\S))
+                       precision)
+                      width minus #f 0))
+        ((#\c)
+         ;; "For 'c' ... if ARG is a fixnum that is not an ASCII
+         ;; character, convert it to a string and treat it like 's'"
+         ;; (editfns.c:3698) - so `%c' of 65 is `A'.
+         (%format-pad (%truncate-to-precision
+                       (if (integer? arg)
+                           (string (integer->char arg))
+                           (%object->string arg #f))
+                       precision)
+                      width minus #f 0))
+        ((#\d #\i #\o #\x #\X #\b #\B)
+         (if (integer? arg)
+             (%format-integer arg conversion minus plus space sharp zero
+                              width precision)
+             (error "Format specifier doesn't match argument type")))
+        ((#\e #\f #\g)
+         (if (not (number? arg))
+             (error "Format specifier doesn't match argument type")
+             (%format-float (exact->inexact arg) conversion minus plus space
+                            sharp zero width precision)))
+        (else
+         (error (string-append "Invalid format operation %"
+                               (string conversion))))))
+
+    (define (%styled-format format-string args message?)
+      ;; GNU Emacs's `styled_format' (editfns.c:3440): FORMAT-STRING
+      ;; with ARGS substituted into it, and - when MESSAGE? - the grave
+      ;; accents and apostrophes requoted by `%requote'.
+      ;;
+      ;; The conversions are the C's list (editfns.c:3855): s S c d i o
+      ;; x X b B e f g, and `%%'. Two named departures from the C: the
+      ;; float conversions are Guile's `~f'/`~e'/`~g' at a fixed
+      ;; precision, so `%e' writes an upper-case `E' and a one-or-more
+      ;; digit exponent where C writes a lower-case `e' and at least two;
+      ;; and `%s' carries none of the argument's text properties into
+      ;; the result, where the C carries the argument's intervals.
+      ;;--------------------------------------------------------------
+      (let ((len (string-length format-string))
+            (nargs (length args))
+            (parts '()))
+        (define (emit text) (set! parts (cons text parts)))
+        (let loop ((i 0) (n 0))
+          (if (>= i len)
+              (apply string-append (reverse parts))
+              (let ((ch (string-ref format-string i)))
+                (if (not (char=? ch #\%))
+                    (begin (emit (string ch))
+                           (loop (+ i 1) n))
+                    (let*-values (((next n conversion argn flags width precision)
+                                   (%parse-spec format-string i n)))
+                      (if (char=? conversion #\%)
+                          (begin (emit "%")
+                                 (loop next n))
+                          (begin
+                            (when (>= argn nargs)
+                              (error "Not enough arguments for format string"))
+                            (emit (%format-one conversion (list-ref args argn)
+                                               (list-ref flags 0) (list-ref flags 1)
+                                               (list-ref flags 2) (list-ref flags 3)
+                                               (list-ref flags 4)
+                                               width precision))
+                            (loop next n))))))))))
+
+    (define (format format-string . args)
+      ;; GNU Emacs's `format' (editfns.c, `Fformat' over the static
+      ;; `styled_format' with MESSAGE false): "Format a string out of a
+      ;; format-string and arguments. The first argument is a format
+      ;; control string."
+      ;;--------------------------------------------------------------
+      (%styled-format format-string args #f))
+
+    (define (format-message format-string . args)
+      ;; GNU Emacs's `format-message' (editfns.c:3422): "This acts like
+      ;; `format', except it also replaces each grave accent (`) by a
+      ;; left quote, and each apostrophe (') by a right quote."
+      ;;--------------------------------------------------------------
+      (%requote (%styled-format format-string args #t)))
+
+    (define (message format-string . args)
+      ;; GNU Emacs's `message' (editfns.c:3197): "Display a message at
+      ;; the bottom of the screen. The message also goes into the
+      ;; `*Messages*' buffer, if `message-log-max' is non-nil. ... If
+      ;; the first argument is nil or the empty string, the function
+      ;; clears any existing message."
+      ;;
+      ;; The C's `message3' hands the text to the echo area and to
+      ;; `message_dolog', which appends it to `*Messages*'. There is no
+      ;; `*Messages*' buffer in this tree yet, so only the echo area end
+      ;; is here, and `message-log-max' is the variable waiting for it.
+      ;;--------------------------------------------------------------
+      (if (or (not format-string)
+              (and (string? format-string) (= 0 (string-length format-string))))
+          (begin (message-clear) format-string)
+          (let ((text (%requote (%styled-format format-string args #t))))
+            (unless (*inhibit-message*)
+              (set-message! (*current-frame*) text))
+            text)))
+
+    (define (message-clear)
+      ;; The `message1 (0)' arm of `Fmessage' (editfns.c:3229): take any
+      ;; message down, letting the minibuffer's own contents show.
+      ;;--------------------------------------------------------------
+      (set-message! (*current-frame*) ""))
+
+    (define (current-message)
+      ;; GNU Emacs's `current-message' (xdisp.c): "Return the string
+      ;; currently displayed in the echo area, or nil if none." The
+      ;; echo area is the frame's message when it has not expired.
+      ;;--------------------------------------------------------------
+      (let ((frame (*current-frame*)))
+        (and frame (frame-message frame))))
+
 
     ))

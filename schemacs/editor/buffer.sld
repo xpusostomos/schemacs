@@ -756,7 +756,31 @@
                                (else (loop (cdr rest)))))))
           (if refused
               #f
-              (begin
+              ;; "Make this buffer not be current. Exit if it is the sole
+              ;; visible buffer." - the C's
+              ;;
+              ;;   if (b == current_buffer)
+              ;;     { tem = Fother_buffer (buffer, Qnil, Qnil);
+              ;;       Fset_buffer (tem);
+              ;;       if (b == current_buffer) return Qnil; }
+              ;;
+              ;; (buffer.c:2046-2052), and it *gives up* when there is
+              ;; nothing else to show - the buffer is left alive and the
+              ;; answer is nil. Without it the killed buffer stayed
+              ;; current, so a *second* `C-x k' read its name - which the
+              ;; kill clears, below - and `(string-append "Killed " #f)'
+              ;; answered with `wrong type (expecting string) #f'. That is
+              ;; why it only happened sometimes: it takes killing the
+              ;; current buffer twice.
+              (let ((switched
+                     (if (eq? (current-buffer) buffer)
+                         (begin
+                           (set-buffer (other-buffer buffer))
+                           (not (eq? (current-buffer) buffer)))
+                         #t)))
+               (if (not switched)
+                   #f
+                   (begin
                 (*buffer-list*
                  (let loop ((rest (*buffer-list*)))
                    (cond ((null? rest) '())
@@ -785,7 +809,7 @@
                 ;; `last-name' half is `buffer-last-name', not ported.
                 (set!buffer-name buffer #f)
                 (run-buffer-list-update-hook!)
-                name)))))
+                name)))))))
 
     (define (frame-windows-with buffer)
       ;; The current frame's windows showing BUFFER: `window.c''s
@@ -1394,5 +1418,7 @@
       ;; `set-visited-file-name''s job, above this.
       ;;--------------------------------------------------------------
       (set!text-editor-file-name buffer path))
+
+
 
     ))

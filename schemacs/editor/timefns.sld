@@ -53,12 +53,14 @@
     (scheme base)
     (scheme char)
     ;; the clock, and the local-time breakdown SRFI-19's date needs
-    (only (guile) ash cadddr caddr gettimeofday logand localtime string-index)
+    (only (guile) ash cadddr caddr gettimeofday logand localtime strftime
+          string-index tm:hour tm:mday tm:min tm:mon tm:sec tm:wday tm:year)
     ;; the substituted implementation - see the comment above
     (only (srfi srfi-19) date->string make-date)
     )
 
-  (export current-time
+  (export current-time-string
+          current-time
           float-time
           format-time-string
           make-lisp-time
@@ -112,6 +114,44 @@
       ;;--------------------------------------------------------------
       (let ((now (gettimeofday)))
         (cons (car now) (* 1000000 (cdr now)))))
+
+    (define (current-time-string . rest)
+      ;; GNU Emacs's `current-time-string' (timefns.c): "Return the current
+      ;; local time, as a human-readable string. ... The format is `Sun Sep
+      ;; 16 01:03:52 1973'."
+      ;;
+      ;; The C writes the English weekday and month names from its own
+      ;; tables rather than calling `ctime', so that a year outside
+      ;; ctime's range cannot dump core; that is copied here, names and
+      ;; all, rather than going through `strftime', whose names are the
+      ;; locale's. The C's two optional arguments (SPECIFIED-TIME and
+      ;; ZONE) are not taken - nothing here asks for a time other than
+      ;; now.
+      ;;--------------------------------------------------------------
+      (let* ((tm (localtime (car (gettimeofday))))
+             (two (lambda (n)
+                    (let ((text (number->string n)))
+                      (if (< (string-length text) 2)
+                          (string-append "0" text)
+                          text)))))
+        (string-append
+         (vector-ref '#("Sun" "Mon" "Tue" "Wed" "Thu" "Fri" "Sat")
+                     (tm:wday tm))
+         " "
+         (vector-ref '#("Jan" "Feb" "Mar" "Apr" "May" "Jun"
+                        "Jul" "Aug" "Sep" "Oct" "Nov" "Dec")
+                     (tm:mon tm))
+         ;; `%3d': the day of the month in three columns
+         ;; the C's `%3d': the day of the month in *three* columns, so
+         ;; the fourth is "Oct  4" and not "Oct 4"
+         (let ((day (number->string (tm:mday tm))))
+           (if (< (string-length day) 3)
+               (string-append (make-string (- 3 (string-length day)) #\space) day)
+               day))
+         " "
+         (two (tm:hour tm)) ":" (two (tm:min tm)) ":" (two (tm:sec tm))
+         " "
+         (number->string (+ 1900 (tm:year tm))))))
 
     (define (current-time)
       ;; GNU Emacs's `current-time': "Return the current time, as the

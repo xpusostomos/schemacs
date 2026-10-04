@@ -16,6 +16,16 @@
 
   (import
     (scheme base)
+    ;; the init file's error report is *said*, so `display' is needed here
+    ;; (`newline' is `(scheme base)''s) - and without it the handler that
+    ;; catches a bad init file is itself an error, which is a worse failure
+    ;; than the one it reports
+    (only (scheme write) display)
+    ;; `load' is Guile's own, and is what the init file is read with - the
+    ;; same call the shell in `../guile-scsh/editor/init.scm' makes.
+    (only (guile) catch current-module getenv load resolve-module
+          set-current-module)
+    (only (schemacs editor fileio) file-exists-p)
     (only (schemacs editor files) find-file-noselect)
     (only (schemacs editor buff-menu) list-buffers)
     (only (schemacs editor window)
@@ -25,9 +35,87 @@
   (export
    command-line-1
    command-line-1--display
+   init-path
+   load-init
    )
 
   (begin
+
+    ;;----------------------------------------------------------------
+    ;; The init file
+    ;;------------------------------------------------------------------
+    ;;
+    ;; Taken from `../guile-scsh/editor/init.scm' - "the shell's init file",
+    ;; loaded once on startup - with the directory renamed for this editor
+    ;; and the paths below.
+    ;;
+    ;; Where it lives:
+    ;;
+    ;;     $XDG_CONFIG_HOME/schemacs/init.scm   when the variable is set
+    ;;     $HOME/.config/schemacs/init.scm      when the variable is not
+    ;;     $HOME/.schemacs                      the old spelling, when the
+    ;;                                          one above is not there
+    ;;
+    ;; (With the variable set but its file missing, ~/.schemacs is still
+    ;; consulted - the variable relocates the config, it does not delete the
+    ;; old one.) The file is plain Scheme, loaded the way Guile loads any
+    ;; Scheme file - with `load', so it is compiled and cached, and
+    ;; `define-module' inside it behaves as it would anywhere. An error
+    ;; stops the init where it happened and is reported; the editor starts
+    ;; anyway.
+    ;;
+    ;; GNU Emacs's version of this is `startup--load-user-init-file'
+    ;; (`startup.el') and the `user-init-file' it answers with, searching
+    ;; `~/.emacs', `~/.emacs.el' and `~/.emacs.d/init.el'. The paths are the
+    ;; shell's here because the tree already reads its configuration from
+    ;; `$XDG_CONFIG_HOME'; the *shape* is Emacs's - load it before the
+    ;; command line's files are visited, and carry on if it fails.
+
+    (define (first-existing paths)
+      (cond ((null? paths) #f)
+            ((not (car paths)) (first-existing (cdr paths)))
+            ((file-exists-p (car paths)) (car paths))
+            (else (first-existing (cdr paths)))))
+
+    (define (init-path)
+      ;; The first of the init file's locations that exists, or #f.
+      ;;--------------------------------------------------------------
+      (let ((xdg (getenv "XDG_CONFIG_HOME"))
+            (home (getenv "HOME")))
+        (if xdg
+            (first-existing (list (string-append xdg "/schemacs/init.scm")
+                                  (and home (string-append home "/.schemacs"))))
+            (first-existing (list (and home
+                                       (string-append home "/.config/schemacs/init.scm"))
+                                  (and home (string-append home "/.schemacs")))))))
+
+    (define (load-init)
+      ;; Load the init file, if there is one. An error in it is reported
+      ;; and the editor starts anyway, as the shell's does.
+      ;;
+      ;; `(scheme base)' has no `getenv'; the shell's file is a
+      ;; `define-module' with Guile's own bindings, and this library is
+      ;; an R7RS one, so `getenv' comes from `(guile)'.
+      ;;--------------------------------------------------------------
+      (let ((path (init-path)))
+        (when path
+          ;; In the *user's* module and not this library's, so that the
+          ;; file has Guile's ordinary bindings - `display', `getenv' and
+          ;; the rest - and `(import (schemacs repl))' works, rather than
+          ;; only what this library happens to import. Emacs's init file
+          ;; has the same property: it runs with all of Emacs's Lisp to
+          ;; hand, not with the internals of `startup.el'.
+          (let ((here (current-module)))
+            (catch #t
+              (lambda ()
+                (dynamic-wind
+                  (lambda () (set-current-module (resolve-module '(guile-user))))
+                  (lambda () (load path))
+                  (lambda () (set-current-module here))))
+              (lambda (key . args)
+                (display "error: init file ") (display path)
+                (display ": ") (display key) (display " ") (display args)
+                (newline)))))))
 
     (define (command-line-1--display displayable-buffers)
       ;; Show the buffers the command line named: the `let' at the end of
@@ -84,6 +172,10 @@
       ;; ARGS is the file names, in command-line order. Nothing comes back:
       ;; what the caller wanted has happened to the frame's windows.
       ;;--------------------------------------------------------------
+      ;; Emacs loads the init file before it visits the files named on
+      ;; the command line (`normal-top-level' runs `command-line' after it),
+      ;; and so does this.
+      (load-init)
       (let ((displayable-buffers '()))
         (for-each
          (lambda (name)

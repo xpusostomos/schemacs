@@ -27,6 +27,7 @@
    add-to-history
    string-prefix-p
    string-replace
+   run-hook-with-args-until-success
    *after-change-major-mode-hook*
    *change-major-mode-after-body-hook*
    *delayed-after-hook-functions*
@@ -235,6 +236,31 @@
                         ((procedure? hook) (hook))
                         (else (for-each (lambda (f) (f)) hook))))
                 hooks))
+
+    (define (run-hook-with-args-until-success hook . args)
+      ;; GNU Emacs's `run-hook-with-args-until-success' (`eval.c:2927'):
+      ;; "Run HOOK with the specified arguments ARGS. ... Call each
+      ;; function in order with arguments ARGS, stopping at the first one
+      ;; that returns non-nil, and return that value. Otherwise (if all
+      ;; functions return nil, or if there are no functions to call),
+      ;; return nil."
+      ;;
+      ;; HOOK is the list of procedures rather than a symbol naming one,
+      ;; as `run-hooks' above takes it, and for the same reason: a hook is
+      ;; a parameter here, so its value is what is to hand.
+      ;;
+      ;; The C's `t' marker in a hook's value - "this hook has a local
+      ;; binding; it means to run the global binding too" - is not here.
+      ;; A buffer-local half of a hook is not ported, so a hook's value is
+      ;; the whole value.
+      ;;--------------------------------------------------------------
+      (let loop ((rest (cond ((not hook) '())
+                             ((procedure? hook) (list hook))
+                             (else hook))))
+        (cond ((null? rest) #f)
+              (else
+               (let ((value (apply (car rest) args)))
+                 (if value value (loop (cdr rest))))))))
 
     (define *change-major-mode-after-body-hook* (make-parameter '()))
     ;; ^ GNU Emacs's `change-major-mode-after-body-hook' (`subr.el'):

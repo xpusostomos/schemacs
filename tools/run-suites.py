@@ -29,6 +29,7 @@ SUITES = [
     'schemacs/editor/derived-tests.scm',
     'schemacs/editor/dired-tests.scm',
     'schemacs/editor/dired-mode-tests.scm',
+    'schemacs/editor/font-lock-tests.scm',
     'schemacs/editor/editfns-tests.scm',
     'schemacs/editor/env-tests.scm',
     'schemacs/editor/fileio-tests.scm',
@@ -42,6 +43,7 @@ SUITES = [
     'schemacs/editor/pgtk-tests.scm',
     'schemacs/editor/timer-tests.scm',
     'schemacs/editor/select-tests.scm',
+    'schemacs/editor/startup-tests.scm',
     'schemacs/apps/ncurses-editor-tests.scm',
 ]
 

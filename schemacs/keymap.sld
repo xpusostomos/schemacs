@@ -714,7 +714,17 @@
            (else (on-fail)))))
        ((not (= 0 (mod-index keyix)))
         (on-fail)) ;; ctrl chars not allows and mod-index is not zero
-       (else (on-success (char-index keyix)))
+       ;; A *character* key is self-inserting; a *named* one is not. Emacs
+       ;; makes the same test in `keyboard.c' - the catch-all that runs
+       ;; `self-insert-command' is reached only when the key is a
+       ;; character event - and without it every unbound named key
+       ;; (`<f13>', `<prior>', `<insert>') reached `self-insert-command',
+       ;; which inserted the key's *name* as text. In a read-only buffer
+       ;; the same keys said "Buffer is read-only" and otherwise did
+       ;; nothing, which is how PgUp and PgDn were lost in Dired.
+       (else (if (char? (char-index keyix))
+                 (on-success (char-index keyix))
+                 (on-fail)))
        ))
 
     (define keymap-index->expr keymap-index->list)

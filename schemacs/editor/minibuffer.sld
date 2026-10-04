@@ -166,6 +166,7 @@
    *minibuffer-setup-hook*
    *minibuffer-message-timeout*
    completion--map-for
+   completion--insert-strings
    completion--message
    completion--selected-candidate
    minibuffer-choose-completion

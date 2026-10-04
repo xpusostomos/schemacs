@@ -1050,6 +1050,16 @@
           ;; ... and the one being selected gives the buffer its point
           (text-editor-set-cursor (window-buffer window)
                                   (marker-position (%window-point window))))
+        ;; The C's `Fselect_window' also makes the window's buffer current
+        ;; when it differs (window.c:3803-3806), and that half is done by
+        ;; the *callers* that switch buffers rather than here:
+        ;; `switch-to-buffer', `pop-to-buffer' and `other-window' are all
+        ;; in `(schemacs editor window)', which can import `set-buffer' -
+        ;; this library cannot, because `(schemacs editor buffer)' is built
+        ;; on it. What is set is `(current-editor)' and not the window's
+        ;; buffer: in Emacs the minibuffer *is* a window so the two are one
+        ;; thing, while here the echo area is not, and a prompt is the case
+        ;; the fallback exists for.
         window))
 
     (define-command (recenter arg)

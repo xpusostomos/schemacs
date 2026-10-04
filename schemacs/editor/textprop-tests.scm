@@ -356,4 +356,31 @@
     (list (tp:get-text-property 0 'a ed)
           (tp:get-text-property 0 'b ed))))
 
+
+;; `remove-text-properties' over a range that begins *before* the
+;; property: GNU Emacs's `Fremove_text_properties' walks to the first
+;; interval that has something and removes from there. Without that walk
+;; the function answered #t and changed nothing, which is what
+;; `dired-fontify-line''s line-wide removal hit - it clears a whole line
+;; and the face sits on the file name in the middle of it.
+(test-equal "remove-text-properties: the range may begin before the property"
+  (list #f #f)
+  (let ((ed (new-text-editor)))
+    (set-buffer ed)
+    (insert "abcdefghij")
+    (tp:put-text-property 6 8 'face 'zz ed)
+    (tp:remove-text-properties 0 10 '(face) ed)
+    (list (tp:get-text-property 6 'face ed)
+          (tp:get-text-property 7 'face ed))))
+
+(test-equal "remove-text-properties: a range that ends inside the property"
+  (list #f 'zz)
+  (let ((ed (new-text-editor)))
+    (set-buffer ed)
+    (insert "abcdefghij")
+    (tp:put-text-property 6 8 'face 'zz ed)
+    (tp:remove-text-properties 0 7 '(face) ed)
+    (list (tp:get-text-property 6 'face ed)
+          (tp:get-text-property 7 'face ed))))
+
 (test-end "schemacs_editor_textprop")

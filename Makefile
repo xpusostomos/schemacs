@@ -43,8 +43,12 @@ SCHEME_LIBRARIES := \
   ./schemacs/editor/indentc.sld \
   ./schemacs/editor/replace.sld \
   ./schemacs/editor/buffer.sld \
+  ./schemacs/editor/font-core.sld \
+  ./schemacs/editor/font-lock.sld \
+  ./schemacs/editor/pages.sld \
   ./schemacs/editor/tabulated-list.sld \
   ./schemacs/editor/buff-menu.sld \
+  ./schemacs/map-ynp.sld \
   ./schemacs/ui/platform/ncurses.sld \
   ./schemacs/keymap.sld \
   ./schemacs/bit-stack.sld \

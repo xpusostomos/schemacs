@@ -1722,6 +1722,14 @@ non-nil."
     (define-key *default-keymap* (list (list "home")) beginning-of-line)
     (define-key *default-keymap* (list (list "end")) end-of-line)
     (define-key *default-keymap* (list (list "delete")) delete-char)
+    ;; PgUp and PgDn: `bindings.el:1418-1419' binds `[prior]' to
+    ;; `scroll-down-command' and `[next]' to `scroll-up-command' - the
+    ;; same two commands C-v and M-v run. Without them the keys were
+    ;; unbound, and an unbound key was taken for a self-inserting
+    ;; character, so in a read-only Dired buffer PgDn said only "Buffer is
+    ;; read-only" and otherwise did nothing.
+    (define-key *default-keymap* (list (list "prior")) scroll-down-command)
+    (define-key *default-keymap* (list (list "next")) scroll-up-command)
     ;; Undo, on the keys GNU Emacs binds it to - and there are *four* of
     ;; them, not one, because the two front ends do not spell them alike.
     ;; `bindings.el:1237-1238' has

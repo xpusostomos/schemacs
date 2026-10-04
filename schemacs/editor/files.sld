@@ -22,7 +22,14 @@
     ;; the buffer back line by line. Neither is in `(scheme base)', and a
     ;; missing one reports as an unbound variable the first time a file is
     ;; visited or saved - which is how `call-with-input-file' was found.
-    (scheme file)
+    ;;
+    ;; `delete-file' is EXCEPTED: `(scheme file)' exports a one-argument
+    ;; one, Emacs's `delete-file' (defined below, files.el's) takes the
+    ;; TRASH argument as well, and an imported binding of the same name
+    ;; wins over the definition - so the two-argument call came apart
+    ;; with "Wrong number of arguments to #<procedure delete-file (_)>"
+    ;; the first time Dired deleted anything.
+    (except (scheme file) delete-file)
     (only (scheme write) display)
     (only (schemacs editor engine)
           line-break-newline line-break-crlf line-break-return
@@ -44,8 +51,8 @@
     ;; `switch-to-buffer' is `window.el''s, and not this file's: it shows a
     ;; buffer in the selected window, which is a window operation.
     ;; `find-file-other-window' shows one in the OTHER window.
-    (only (schemacs editor window) switch-to-buffer
-          switch-to-buffer-other-window)
+    (only (schemacs editor window) pop-to-buffer-same-window
+          switch-to-buffer switch-to-buffer-other-window)
     ;; The file-name table is a *function* table, so it answers
     ;; `try-completion' and `all-completions' itself - `minibuf.c''s.
     (only (schemacs editor minibuf) all-completions try-completion)
@@ -56,7 +63,8 @@
     (only (schemacs editor simple) push-mark)
     ;; `string-prefix-p' is `subr.el''s and now lives in
     ;; `(schemacs editor subr)', which is below this library.
-    (only (schemacs editor subr) string-prefix-p)
+    (only (schemacs editor subr) run-hook-with-args-until-success
+          string-prefix-p)
     (only (schemacs editor buffer)
           current-buffer default-directory erase-buffer)
     ;; The file primitives that were here and have moved to the library
@@ -65,10 +73,15 @@
     ;; segments, the two predicates, and `directory-name-p'. This
     ;; library is `files.el' and is built *on* them.
     (only (schemacs editor fileio)
+          delete-directory-internal delete-file-internal
           directory-file-name directory-name-p expand-file-name
-          file-exists-p file-name-absolute-p file-name-as-directory
+          file-directory-p file-exists-p file-name-absolute-p
+          file-name-as-directory
           file-name-directory-part file-name-nondirectory-part
-          file-writable-p find-file-name-handler)
+          file-symlink-p file-writable-p find-file-name-handler)
+    ;; `directory-files' and `file-attributes' are `dired.c''s, and
+    ;; `delete-directory''s recursive half reads both.
+    (only (schemacs editor diredc) directory-files file-attributes)
     ;; the truename walk, the home directory, and the last-dot search
     ;; `file-name-sans-extension' does
     (only (guile) canonicalize-path getenv string-rindex)
@@ -135,6 +148,10 @@
           install-ls-lisp-files! ls-lisp--insert-directory))
 
   (export
+   *delete-by-moving-to-trash*
+   *directory-files-no-dot-files-regexp*
+   delete-directory
+   delete-file
    *require-final-newline*
    buffer-ends-with-newline?
    decode-dos-returns
@@ -179,6 +196,8 @@ directory-name-p
    files--buffers-needing-to-be-saved
    find-file
    create-file-buffer
+   *find-directory-functions*
+   *find-file-run-dired*
    files--name-absolute-system-p
    find-file-noselect
    kill-buffer
@@ -316,20 +335,30 @@ save-buffer
       ;; a plain function, the other a command, as in Emacs.
       "Prompt for a file name and load it into the buffer."
       (interactive (list (read-file-name "Find file: ")))
-      (let ((frame (*current-frame*)))
-        (guard (ex
-                (else
-                 (set!frame-message
-                  frame (string-append
-                         "; find-file: error loading " path))
-                 #f))
-          ;; the message is cleared *before* the file is visited, so
-          ;; that what `find-file' says about it - "(New file)", or
-          ;; the read-only note - is what stays in the echo area
-          (set!frame-message frame "")
-          (switch-to-buffer (find-file-noselect path))
-          (note-file-read-only! frame)
-          path)))
+      ;; The C is
+      ;;
+      ;;   (let ((value (find-file-noselect filename nil nil wildcards)))
+      ;;     (if (listp value)
+      ;;         (mapcar #'pop-to-buffer-same-window (nreverse value))
+      ;;       (pop-to-buffer-same-window value)))
+      ;;
+      ;; so the answer is what `pop-to-buffer-same-window' answers, which
+      ;; is the *buffer* - and it is `pop-to-buffer-same-window', not
+      ;; `switch-to-buffer'. Wildcards are not ported, so the `listp' arm
+      ;; cannot arise.
+      ;;
+      ;; There is no error guard, and the C's `find-file' has none: a name
+      ;; that cannot be visited signals, and the command loop puts the
+      ;; error in the echo area. The guard this used to have turned every
+      ;; such failure into `"; find-file: error loading <name>"' - which
+      ;; said nothing about the cause. A directory was being read as a file
+      ;; underneath it and the message hid exactly the thing worth seeing;
+      ;; the directory branch in `find-file-noselect' is what fixed that.
+      ;;
+      ;; The read-only note is not here either: the C says it from
+      ;; `after-find-file', which is `find-file-noselect''s, and it is
+      ;; there now.
+      (pop-to-buffer-same-window (find-file-noselect path)))
 
     ;;----------------------------------------------------------------
     ;; The two commands that still need the minibuffer
@@ -1255,6 +1284,24 @@ save-buffer
       (when (text-editor-read-only? (frame-editor frame))
         (set!frame-message frame "Note: file is write protected")))
 
+    (define *find-file-run-dired* (make-parameter #t))
+    ;; ^ GNU Emacs's `find-file-run-dired' (files.el:579): "Non-nil means
+    ;; allow `find-file' to visit directories. To visit the directory,
+    ;; `find-file' runs `find-directory-functions'." T, as in Emacs.
+
+    (define *find-directory-functions* (make-parameter '()))
+    ;; ^ GNU Emacs's `find-directory-functions' (files.el:585): "List of
+    ;; functions to try in sequence to visit a directory. Each function is
+    ;; called with the directory name as the sole argument and should
+    ;; return either a buffer or nil."
+    ;;
+    ;; The C's value is `(cvs-dired-noselect dired-noselect)' - the two
+    ;; functions *named*, because an Elisp hook is a list of symbols. A
+    ;; hook here is a list of procedures, so it cannot name a function in
+    ;; a library that is built on this one: the list starts empty and
+    ;; `dired.sld' adds `dired-noselect' to it at load. `cvs-dired-noselect'
+    ;; is CVS's, which is not ported.
+
     (define (files--name-absolute-system-p file)
       ;; GNU Emacs's `files--name-absolute-system-p' (files.el:1522):
       ;; "Return non-nil if FILE is an absolute name to the operating
@@ -1325,6 +1372,20 @@ save-buffer
       ;; directory - is not implemented; there is no home directory here
       ;; to shorten against.
       (let ((path (expand-file-name path)))
+      (if (file-directory-p path)
+          ;; "To visit the directory, `find-file' runs
+          ;; `find-directory-functions'." The C passes the truename when
+          ;; `find-file-visit-truename' - nil by default, and truenames
+          ;; are not ported - and otherwise the name itself.
+          ;;
+          ;; Without this a directory was read as a file: the editor said
+          ;; `find-file: error loading <dir>', and there was no way to
+          ;; reach Dired by visiting a directory at all.
+          (or (and (*find-file-run-dired*)
+                   (run-hook-with-args-until-success
+                    (*find-directory-functions*)
+                    path))
+              (error "%s is a directory" path))
       (or
        ;; a file already visited is one buffer, not two - and it is
        ;; returned as it stands: Emacs's `find-file-noselect' does not
@@ -1365,6 +1426,10 @@ save-buffer
         ;; the edits which could not be saved are refused in the first
         ;; place rather than at the end.
         (text-editor-set-read-only! ed (file-write-protected? path))
+        ;; and the echo area says so, which the C does from
+        ;; `after-find-file' - in `find-file-noselect', not in the command.
+        ;; A frame is needed to say it in, and a script has none.
+        (when (*current-frame*) (note-file-read-only! (*current-frame*)))
         ;; The buffer remembers the file it came from - GNU Emacs's
         ;; `buffer-file-name' - and the name it was given when it was made
         ;; (a visiting buffer keeps the name it already had, which is what
@@ -1381,7 +1446,7 @@ save-buffer
         ;; and point starts at the beginning of what was read, which is
         ;; where GNU Emacs's `find-file-noselect' puts it
         (text-editor-set-cursor ed 0 0)
-        ed))))
+        ed)))))
 
     (define (encode-line-breaks str line-break)
       ;; Encode the buffer's line-feed breaks back into the file's
@@ -1906,6 +1971,76 @@ With prefix ARG, mark buffer as modified, so \\[save-buffer] will save."
       ;;--------------------------------------------------------------
       (and (*ls-lisp-use-insert-directory-program*)
            (*insert-directory-program*)))
+
+    (define *directory-files-no-dot-files-regexp* "[^.]\\|\\.\\.\\.")
+    ;; ^ GNU Emacs's `directory-files-no-dot-files-regexp' (files.el:6768),
+    ;; a `defconst': "Regexp matching any file name except \".\" and
+    ;; \"..\". More precisely, it matches parts of any nonempty string
+    ;; except those two."
+
+    (define *delete-by-moving-to-trash* (make-parameter #f))
+    ;; ^ GNU Emacs's `delete-by-moving-to-trash' (files.el), false by
+    ;; default: "Non-nil means `delete-file' and `delete-directory'
+    ;; move to the system trash instead of deleting."
+
+    (define (delete-file filename . rest)
+      ;; GNU Emacs's `delete-file' (files.el): "Delete file named
+      ;; FILENAME. If it is a symlink, remove the symlink. ... TRASH
+      ;; non-nil means to trash the file instead of deleting, provided
+      ;; `delete-by-moving-to-trash' is non-nil."
+      ;;
+      ;; `move-file-to-trash' is not ported, and the arm that calls it
+      ;; cannot be reached while `delete-by-moving-to-trash' is false,
+      ;; which is its default.
+      ;;--------------------------------------------------------------
+      (let ((trash (if (pair? rest) (car rest) #f)))
+        (if (and (file-directory-p filename) (not (file-symlink-p filename)))
+            (error "Removing old name: is a directory")
+            (let ((filename (expand-file-name filename)))
+              (cond ((and (*delete-by-moving-to-trash*) trash)
+                     (error "move-file-to-trash is not ported"))
+                    (else (delete-file-internal filename)))))))
+
+    (define (delete-directory directory . rest)
+      ;; GNU Emacs's `delete-directory' (files.el): "Delete the directory
+      ;; named DIRECTORY. Does not follow symlinks. If RECURSIVE is
+      ;; non-nil, delete files in DIRECTORY as well, with no error if
+      ;; something else is simultaneously deleting them."
+      ;;
+      ;; The C's `(files--force t #'directory-files ...)' is an
+      ;; autoload-forcing call, which has no equivalent here, and its
+      ;; `(files--force t #'delete-file file)' likewise; the calls are
+      ;; made directly. `move-file-to-trash' is not ported, as in
+      ;; `delete-file' above.
+      ;;--------------------------------------------------------------
+      (let* ((recursive (if (pair? rest) (car rest) #f))
+             (trash (if (and (pair? rest) (pair? (cdr rest))) (cadr rest) #f))
+             (directory (directory-file-name (expand-file-name directory))))
+        (cond
+         ((and (*delete-by-moving-to-trash*) trash)
+          (if (not (or recursive
+                       (null? (directory-files directory #t
+                                               *directory-files-no-dot-files-regexp*))))
+              (error "Directory is not empty, not moving to trash")
+              (error "move-file-to-trash is not ported")))
+         (else
+          ;; "Otherwise, call ourselves recursively if needed."
+          (when (or (not recursive)
+                    (file-symlink-p directory)
+                    (let ((files (directory-files
+                                  directory #t
+                                  *directory-files-no-dot-files-regexp*)))
+                      (for-each
+                       (lambda (file)
+                         ;; "This test is equivalent to but more efficient
+                         ;; than (and (file-directory-p fn) (not
+                         ;; (file-symlink-p fn)))."
+                         (if (eq? #t (car (file-attributes file)))
+                             (delete-directory file recursive)
+                             (delete-file file)))
+                       files)
+                      #t))
+            (delete-directory-internal directory))))))
 
     (define (insert-directory file switches . rest)
       ;; GNU Emacs's `insert-directory' (files.el): "Insert directory
