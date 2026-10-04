@@ -1,12 +1,15 @@
 (import
  (scheme base)
  (scheme char)
- (only (guile) delete-file mkdir rmdir)
+ (only (guile) delete-file mkdir rmdir setvbuf)
+ (only (schemacs editor engine) new-text-editor)
+ (only (schemacs editor frame) *current-frame* new-frame)
  (only (srfi 64) test-assert test-equal test-begin test-end)
  (schemacs editor buffer)
  (schemacs editor dired)
  (schemacs editor editfns)
- (schemacs editor files)
+ (only (schemacs editor buffer) *inhibit-read-only*)
+ (only (schemacs editor files) revert-buffer insert-directory)
  (schemacs editor frame)
  (only (schemacs editor search) regexp-quote re-search-forward)
  (only (schemacs editor indent) indent-rigidly)
@@ -29,12 +32,22 @@
 ;; - the deleting is `dired-do-flagged-delete', which is not ported and
 ;; is not wanted in a test.
 
+;; Unbuffered output, so a run that hangs shows where it got to - the
+;; same line `textprop-tests.scm' carries, and for the same reason.
+(setvbuf (current-output-port) 'none)
+
 (test-begin "schemacs_editor_dired_mode")
 
 ;; ------------------------------------------------------------------
 ;; the fixture
 
 (define root "/tmp/schemacs-dired-mode-tests")
+
+;; One frame for the whole file. Setting a parameter as a plain top-level
+;; expression binds it for the rest of the file, which is what these tests
+;; need: without a frame every command that reads the current buffer dies,
+;; and the failure is a `struct-vtable' error on #f three frames away.
+(*current-frame* (new-frame (new-text-editor) 24 80))
 
 (define (fixture!)
   (for-each (lambda (name)
@@ -55,25 +68,47 @@
 (fixture!)
 
 (define (listing . switches)
-  ;; A dired buffer, made the way `dired-readin' makes one: the listing
-  ;; goes in with `dired-insert-directory' - which indents it by two and
-  ;; puts the directory's header line above it - and the two
-  ;; buffer-locals the commands read are set. The way *in*
-  ;; (`dired-noselect') is not ported yet; see the library's comment.
-  (let ((buffer (get-buffer-create "*dired-mode-tests*")))
+  ;; A dired buffer, made the way dired makes one: `dired-noselect'. It
+  ;; sets `dired-directory', `dired-actual-switches' and
+  ;; `dired-subdir-alist', puts the header line and the two-space indent
+  ;; in, and is the same path `C-x d' takes - which is what the tests
+  ;; should be driving now that the way in is ported.
+  ;;
+  ;; The directory is passed with its trailing slash, as `C-x d' passes
+  ;; it: `dired-insert-directory' takes the header's name from
+  ;; `(file-name-directory dir)', which is the whole name only when the
+  ;; name *is* a directory name.
+  ;;
+  ;; A *fresh* buffer each time. The registry hands the same buffer back
+  ;; for the same directory, and a revert keeps the marks - which is
+  ;; Emacs's behaviour and exactly what `dired-revert' is for - so a test
+  ;; that marks a line would leave it marked for the next one. Killing it
+  ;; first also exercises the registry dropping a killed buffer, which
+  ;; `dired-buffers-for-dir' does as a side effect.
+  (for-each kill-buffer (dired-buffers-for-dir root))
+  (let ((buffer (dired-noselect (string-append root "/")
+                                (if (pair? switches) (car switches) "-al"))))
     (set-buffer buffer)
-    (erase-buffer)
-    (set!dired-directory! (string-append root "/"))
-    (set!dired-actual-switches! (if (pair? switches) (car switches) "-al"))
-    (insert-directory root (if (pair? switches) (car switches) "-al") #f #t)
-    ;; `dired-insert-directory' is ported and calls `indent-rigidly' for
-    ;; this, but its own indent is not firing yet - see the note in the
-    ;; library - so the tests do it with the same function, which is what
-    ;; makes the buffer dired's shape. `dired-re-maybe-mark' is `"^. "',
-    ;; so the shape is not cosmetic.
-    (indent-rigidly (point-min) (point) 2)
     (goto-char (point-min))
     buffer))
+
+(define (goto-file-line name)
+  ;; Point at the beginning of the line naming NAME, whichever line of
+  ;; the listing that is - the tests must not count lines, because the
+  ;; header and the `total' line are what changed when the indent
+  ;; started working.
+  (goto-char (point-min))
+  (re-search-forward (string-append " " (regexp-quote name)) #f #t)
+  (beginning-of-line)
+  (point))
+
+(define (goto-dot-line)
+  ;; The `.` line: a space, then `.` at the end of the line. Searching
+  ;; for `\.$' alone would find the `..' line too.
+  (goto-char (point-min))
+  (re-search-forward " \\.$" #f #t)
+  (beginning-of-line)
+  (point))
 
 (define (names)
   ;; Every file name on every line, the way dired reads them.
@@ -111,13 +146,25 @@
   (let ((b (listing))) (names)))
 
 ;; and the buffer above it is dired's: the directory's header line, then
-;; the indented listing
-(test-equal '("  total" "  drwxr-xr-x")
+;; the `total' line, then the indented listing.
+;;
+;; The `total' line is a **departure**: Emacs 31 deletes it. Its
+;; `dired-free-space' is `first' by default (dired.el:224), and
+;; `dired--insert-disk-space' reads that as "remove the total line and
+;; put the free space as a `display' property on the header's colon",
+;; which needs `file-system-info' (fileio.c) and `get-free-disk-space'
+;; (files.el). Neither is ported, so this leaves the line where ls-lisp
+;; put it. Measured: `(dired-noselect DIR)' in `emacs -Q --batch' gives
+;; a first content line of `  drwxr-xr-x', not `  total'.
+;; The second line is `  total N', and N is the tree's block count, which
+;; is not this test's business - so the prefix is asserted, not the line.
+(test-equal (list (string-append "  " root ":") "  total")
   (let ((b (listing)))
     (goto-char (point-min))
-    (list (buffer-substring-no-properties (point) (+ (point) 7))
+    (list (buffer-substring-no-properties (line-beginning-position)
+                                          (line-end-position))
           (let ((start (line-beginning-position 2)))
-            (buffer-substring-no-properties start (+ start 12))))))
+            (buffer-substring-no-properties start (+ start 7))))))
 
 ;; `dired-move-to-filename' leaves point on the name
 (test-equal "a.txt"
@@ -143,8 +190,12 @@
 (test-equal '(#t #f)
   (let ((b (listing)))
     (goto-char (point-min))
+    ;; the `total' line, found by its text rather than counted to: the
+    ;; header and the total line are what the indent fix changed
+    (re-search-forward "^  total" #f #t)
+    (beginning-of-line)
     (let ((total (dired-between-files)))
-      (forward-line 3)                    ; the a.txt line
+      (goto-file-line "a.txt")
       (list total (dired-between-files)))))
 
 (test-equal "the marker regexp is the current marker's line"
@@ -161,55 +212,45 @@
 
 ;; measured: mark writes `*' in the first column, and on a *dot* line too
 ;; - the C's last guard lets it through when the marker is not the
-;; deletion flag
-(test-equal '("  " "  " "  " "* " "  " "  " "")
+;; deletion flag. One leading `"  "' more than there used to be, for the
+;; header line the indent fix brought in.
+(test-equal '("  " "  " "  " "  " "* " "  " "  " "")
   (let ((b (listing)))
-    (goto-char (point-min))
-    (re-search-forward "a\\.txt" #f #t)
-    (beginning-of-line)
+    (goto-file-line "a.txt")
     (dired-mark 1 #f)
     (first-chars-of-every-line)))
 
-(test-equal '("  " "* " "  " "  " "  " "  " "")
+(test-equal '("  " "  " "* " "  " "  " "  " "  " "")
   (let ((b (listing)))
-    (goto-char (point-min))
-    (forward-line 1)                      ; the `.` line
+    (goto-dot-line)
     (dired-mark 1 #f)
     (first-chars-of-every-line)))
 
 ;; `dired-flag-file-deletion' is the same command with the deletion
 ;; marker bound
-(test-equal '("  " "  " "  " "  " "D " "  " "")
+(test-equal '("  " "  " "  " "  " "  " "D " "  " "")
   (let ((b (listing)))
-    (goto-char (point-min))
-    (re-search-forward "b\\.txt" #f #t)
-    (beginning-of-line)
+    (goto-file-line "b.txt")
     (dired-flag-file-deletion 1 #f)
     (first-chars-of-every-line)))
 
 ;; and `dired-unmark' the same with a space
-(test-equal '("  " "  " "  " "  " "  " "  " "")
+(test-equal '("  " "  " "  " "  " "  " "  " "  " "")
   (let ((b (listing)))
-    (goto-char (point-min))
-    (re-search-forward "a\\.txt" #f #t)
-    (beginning-of-line)
+    (goto-file-line "a.txt")
     (dired-mark 1 #f)
     ;; `dired-repeat-over-lines' leaves point on the *next* file line, so
     ;; a bare `(dired-unmark 1)' straight after a mark unmarks the line
     ;; below - Emacs's answer too. Back to a.txt first, which is what a
     ;; user pressing `m' then `u' on the same line does.
-    (goto-char (point-min))
-    (re-search-forward "a\\.txt" #f #t)
-    (beginning-of-line)
+    (goto-file-line "a.txt")
     (dired-unmark 1 #f)
     (first-chars-of-every-line)))
 
 ;; a prefix argument marks that many lines
-(test-equal '("  " "  " "  " "* " "* " "  " "")
+(test-equal '("  " "  " "  " "  " "* " "* " "  " "")
   (let ((b (listing)))
-    (goto-char (point-min))
-    (re-search-forward "a\\.txt" #f #t)
-    (beginning-of-line)
+    (goto-file-line "a.txt")
     (dired-mark 2 #f)
     (first-chars-of-every-line)))
 
@@ -224,11 +265,95 @@
     (goto-char (point-min))
     (re-search-forward "a\\.txt" #f #t)
     (beginning-of-line)
-    (dired-insert-set-properties (point-min) (point-max))
+    ;; `dired-insert-set-properties' writes properties, and a property
+    ;; change checks read-only as an insertion does - so the caller binds
+    ;; it, which in Emacs is `dired-readin'
+    (parameterize ((*inhibit-read-only* #t))
+      (dired-insert-set-properties (point-min) (point-max)))
     (goto-char (point-min))
     (re-search-forward "a\\.txt" #f #t)
     (goto-char (- (point) 1))
     (list (get-text-property (- (point) 1) 'dired-filename)
           (get-char-property (- (point) 1) 'mouse-face))))
+
+;; ------------------------------------------------------------------
+;; `dired-move-to-end-of-filename''s regexp path
+;;
+;; This is the path that runs when the `dired-filename' property is
+;; absent, which is what happens without `ls --dired'. It never worked:
+;; it answered nil for every ordinary file, because the port had dropped
+;; the `(goto-char eol)' the C does for a non-symlink (dired.el:3581) and
+;; put one in the *symlink* branch instead - where the C has none. It was
+;; invisible because `re-search-backward', which finds the permission
+;; flags, also answered nil for everything; a nil from either is read as
+;; "no file on this line".
+;;
+;; The listing is plain text here, so there is no property on it at all.
+;; Expectations measured: `emacs -Q --batch' reading the same lines.
+
+(define (plain-listing . switches)
+  (let ((buffer (get-buffer-create "*dired-plain*")))
+    (set-buffer buffer)
+    (erase-buffer)
+    (set!dired-directory! "/tmp/")
+    (set!dired-actual-switches! (if (pair? switches) (car switches) "-al"))
+    (insert "  -rw-r--r--  1 chris chris    1 10-04 06:03 a.txt\n")
+    (insert "  drwxr-xr-x  2 chris chris   60 10-04 06:03 sub\n")
+    (insert "  -rwxr-xr-x  1 chris chris    1 10-04 06:03 run\n")
+    (insert "  lrwxrwxrwx  1 chris chris    4 10-04 06:03 link -> a.txt\n")
+    (goto-char (point-min))
+    buffer))
+
+(define (marked-listing)
+  ;; the same lines as `ls -F' writes them: `/` on the directory, `*' on
+  ;; the executable, and `@' on the link whose *link* is marked
+  (let ((buffer (get-buffer-create "*dired-marked*")))
+    (set-buffer buffer)
+    (erase-buffer)
+    (set!dired-directory! "/tmp/")
+    (set!dired-actual-switches! "-alF")
+    (insert "  -rw-r--r--  1 chris chris    1 10-04 06:03 a.txt\n")
+    (insert "  drwxr-xr-x  2 chris chris   60 10-04 06:03 sub/\n")
+    (insert "  -rwxr-xr-x  1 chris chris    1 10-04 06:03 run*\n")
+    (insert "  lrwxrwxrwx  1 chris chris    4 10-04 06:03 link -> a.txt\n")
+    (insert "  lrwxrwxrwx  1 chris chris    4 10-04 06:03 link2@ -> a.txt\n")
+    (goto-char (point-min))
+    buffer))
+
+(define (names-on-every-line)
+  (goto-char (point-min))
+  (let loop ((acc '()))
+    (if (eobp)
+        (reverse acc)
+        (begin
+          (beginning-of-line)
+          (let ((p1 (dired-move-to-filename)))
+            (if p1
+                (let ((p2 (dired-move-to-end-of-filename #t)))
+                  (set! acc (cons (and p2 (buffer-substring-no-properties p1 p2))
+                                  acc)))))
+          (forward-line 1)
+          (loop acc)))))
+
+(test-equal '("a.txt" "sub" "run" "link")
+  (let ((b (plain-listing))) (names-on-every-line)))
+
+;; With `-F' each name carries one trailing type character, and the C
+;; backs off exactly one for a directory, a socket, a fifo or an
+;; executable - but not for a plain file. Note that the listing has to
+;; actually carry the markers: `-alF' over a listing *without* them makes
+;; the C back off a real character, which `emacs -Q --batch' confirms by
+;; answering `("a.txt" "su" "ru" "link")' for that shape.
+(test-equal '("a.txt" "sub" "run" "link" "link2@")
+  (let ((b (marked-listing))) (names-on-every-line)))
+
+;; `dired-ls-F-marks-symlinks' is the C's `dired-ls-F-marks-symlinks':
+;; nil means `ls -F' is taken to mark the *target* (`link -> a.txt'), so
+;; the `@' on `link2@ -> a.txt' stays part of the name; t means it marks
+;; the link itself and the `@' comes off. Both lists measured.
+(test-equal '("a.txt" "sub" "run" "link" "link2")
+  (let ((b (marked-listing)))
+    (parameterize ((*dired-ls-F-marks-symlinks* #t))
+      (names-on-every-line))))
 
 (test-end "schemacs_editor_dired_mode")

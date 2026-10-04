@@ -213,9 +213,19 @@
               (else (loop (cddr tail))))))
 
     (define (interval-has-all-properties plist i)
-      ;; GNU Emacs's `interval_has_all_properties': every property in
-      ;; PLIST is on I with an `eq?' value. It is what lets
-      ;; `add-text-properties-1' skip an interval it would not change.
+      ;; GNU Emacs's `interval_has_all_properties' (textprop.c:221):
+      ;; "Return true if interval I has all the properties, with the
+      ;; same values, of list PLIST."
+      ;;
+      ;; *Every* element of PLIST has to be looked for, and the answer to
+      ;; the first one is not the answer: answering there says only "I
+      ;; have this one property", which is true of nearly every call, so
+      ;; `add-text-properties-1' concluded the interval needed no change
+      ;; and silently added nothing. A multi-property plist whose first
+      ;; property was already present never landed at all - which is how
+      ;; `dired-insert-set-properties'' `(dired-filename t mouse-face
+      ;; highlight help-echo ...)' left a name carrying no `mouse-face',
+      ;; because ls-lisp had already marked it `dired-filename'.
       ;;--------------------------------------------------------------
       (let loop ((tail plist))
         (cond
@@ -223,11 +233,13 @@
          (else
           (let ((sym (car tail))
                 (val (cadr tail)))
-            (let find ((mine (iv:interval-plist i)))
-              (cond
-               ((not (pair? mine)) #f)
-               ((eq? (car mine) sym) (eq? (cadr mine) val))
-               (else (find (if (pair? (cdr mine)) (cddr mine) '()))))))))))
+            (and
+             (let find ((mine (iv:interval-plist i)))
+               (cond
+                ((not (and (pair? mine) (pair? (cdr mine)))) #f)
+                ((eq? (car mine) sym) (eq? (cadr mine) val))
+                (else (find (cddr mine)))))
+             (loop (cddr tail))))))))
 
     (define (interval-has-some-properties plist i)
       ;; GNU Emacs's `interval_has_some_properties': I has one of the

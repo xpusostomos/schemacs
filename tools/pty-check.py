@@ -1955,6 +1955,28 @@ def check_set_fill_column():
                         "`Fill column set to 20 (was 70)'")
     return problems
 
+
+def check_dired():
+    """C-x d opens a Dired buffer on a directory."""
+    import os as _os
+    d = "/tmp/pty-check-dired"
+    _os.makedirs(d, exist_ok=True)
+    with open(_os.path.join(d, "hello.txt"), "w") as out:
+        out.write("hi\n")
+    problems = []
+    out = drive([C_x + b"d", C_a, C_k, (d + "/").encode(), RET],
+                _os.path.join(d, "hello.txt"), gap=0.35)
+    if "Dired" not in out:
+        problems.append("C-x d did not enter Dired (the mode line says so)")
+    if "hello.txt" not in out:
+        problems.append("C-x d did not list the directory's file")
+    # the header line is the directory as a directory name, which is what
+    # `dired-insert-directory' takes it from
+    if d + ":" not in out:
+        problems.append("the listing has no header line naming the directory")
+    return problems
+
+
 CHECKS = {
     "buffer-menu": check_buffer_menu,
     "query-replace": check_query_replace,
@@ -1964,6 +1986,7 @@ CHECKS = {
     "replace-string": check_replace_string,
     "quoted-insert": check_quoted_insert,
     "insert-file": check_insert_file,
+    "dired": check_dired,
     "find-file-read-only": check_find_file_read_only,
     "find-alternate-file": check_find_alternate_file,
     "revert-buffer": check_revert_buffer,

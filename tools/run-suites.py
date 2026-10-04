@@ -29,6 +29,7 @@ SUITES = [
     'schemacs/editor/derived-tests.scm',
     'schemacs/editor/dired-tests.scm',
     'schemacs/editor/dired-mode-tests.scm',
+    'schemacs/editor/editfns-tests.scm',
     'schemacs/editor/env-tests.scm',
     'schemacs/editor/fileio-tests.scm',
     'schemacs/editor/fns-tests.scm',

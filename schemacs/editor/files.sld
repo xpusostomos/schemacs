@@ -54,6 +54,9 @@
     (only (schemacs editor editfns)
           barf-if-buffer-read-only goto-char insert point point-max)
     (only (schemacs editor simple) push-mark)
+    ;; `string-prefix-p' is `subr.el''s and now lives in
+    ;; `(schemacs editor subr)', which is below this library.
+    (only (schemacs editor subr) string-prefix-p)
     (only (schemacs editor buffer)
           current-buffer default-directory erase-buffer)
     ;; The file primitives that were here and have moved to the library
@@ -63,9 +66,9 @@
     ;; library is `files.el' and is built *on* them.
     (only (schemacs editor fileio)
           directory-file-name directory-name-p expand-file-name
-          file-exists-p file-name-as-directory file-name-directory-part
-          file-name-nondirectory-part file-writable-p
-          find-file-name-handler)
+          file-exists-p file-name-absolute-p file-name-as-directory
+          file-name-directory-part file-name-nondirectory-part
+          file-writable-p find-file-name-handler)
     ;; the truename walk, the home directory, and the last-dot search
     ;; `file-name-sans-extension' does
     (only (guile) canonicalize-path getenv string-rindex)
@@ -95,6 +98,7 @@
                   set-buffer-modified-p
                   buffer-local-value
                   current-buffer
+                  generate-new-buffer
                   get-buffer-create
                   kill-buffer
                   record-buffer!
@@ -174,6 +178,8 @@ directory-name-p
    file-write-protected?
    files--buffers-needing-to-be-saved
    find-file
+   create-file-buffer
+   files--name-absolute-system-p
    find-file-noselect
    kill-buffer
    note-file-read-only!
@@ -1249,6 +1255,43 @@ save-buffer
       (when (text-editor-read-only? (frame-editor frame))
         (set!frame-message frame "Note: file is write protected")))
 
+    (define (files--name-absolute-system-p file)
+      ;; GNU Emacs's `files--name-absolute-system-p' (files.el:1522):
+      ;; "Return non-nil if FILE is an absolute name to the operating
+      ;; system. This is like `file-name-absolute-p', except that it
+      ;; returns nil for names beginning with `~'."
+      ;;--------------------------------------------------------------
+      (and (file-name-absolute-p file)
+           (not (char=? (string-ref file 0) #\~))))
+
+    (define (create-file-buffer filename)
+      ;; GNU Emacs's `create-file-buffer' (files.el:2266): "Create a
+      ;; suitably named buffer for visiting FILENAME, and return it.
+      ;; FILENAME (sans directory) is used unchanged if that name is free;
+      ;; otherwise the buffer is renamed according to
+      ;; `uniquify-buffer-name-style' to get an unused name.
+      ;;
+      ;; Emacs treats buffers whose names begin with a space as internal
+      ;; buffers. To avoid confusion when visiting a file whose name
+      ;; begins with a space, this function prepends a \"|\" to the final
+      ;; result if necessary."
+      ;;
+      ;; The renaming is the *uniquify* advice, and uniquify is not
+      ;; ported: `uniquify-trailing-separator-flag' is nil by default
+      ;; (uniquify.el:194) so its first branch is the one taken in any
+      ;; case, and `uniquify-buffer-name-style' - which only the *advice*
+      ;; reads - then has nothing to do. `generate-new-buffer' is what
+      ;; makes the name unique, and it is already Emacs's.
+      ;;--------------------------------------------------------------
+      (let* ((lastname (file-name-nondirectory-part
+                        (directory-file-name filename)))
+             ;; "FILENAME is a root directory"
+             (lastname (if (string=? lastname "") filename lastname))
+             (basename (if (string-prefix-p " " lastname)
+                           (string-append "|" lastname)
+                           lastname)))
+        (generate-new-buffer basename)))
+
     (define (find-file-noselect path)
       ;; Open a file into a text editor buffer and answer with it, the way
       ;; GNU Emacs's `find-file-noselect' visits a file: the line-break
@@ -1653,7 +1696,7 @@ With prefix ARG, mark buffer as modified, so \\[save-buffer] will save."
       (interactive "P")
       (files--message
        (if arg "Modification-flag set" "Modification-flag cleared"))
-      (set-buffer-modified-p (current-buffer) (and arg #t))
+      (set-buffer-modified-p (and arg #t))
       #f)
 
     (define-command (save-buffer)
@@ -1793,7 +1836,7 @@ With prefix ARG, mark buffer as modified, so \\[save-buffer] will save."
             (or (y-or-n-p (string-append "File `" filename "' exists; overwrite? "))
                 (error "Canceled")))
           (set-visited-file-name filename (not confirm)))
-        (set-buffer-modified-p (current-buffer) #t)
+        (set-buffer-modified-p #t)
         ;; Make buffer writable if file is writable: a buffer that
         ;; could not write its old file was visited read-only, and the
         ;; new one is not to be.

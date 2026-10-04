@@ -42,6 +42,9 @@
  (only (schemacs editor dispnew) current-display key-event->keymap-path)
  (only (schemacs editor term) <tty-display>)
  (only (schemacs editor keymap) *current-keymap* *default-keymap*)
+ (only (schemacs editor dired)
+       dired dired-directory dired-noselect dired-revert)
+ (only (schemacs editor buffer) buffer-name major-mode)
  (only (schemacs editor buff-menu)
        *Buffer-menu-del-char* *Buffer-menu-marks* Buffer-menu-buffer
        Buffer-menu-execute Buffer-menu--set-mark! Buffer-menu-redraw!
@@ -260,6 +263,18 @@
 
 (test-equal #f
   (command-record-of (lambda (x) x)))
+
+;; ------------------------------------------------------------------
+;; `C-x d' is *not* tested here.
+;;
+;; The binding and the way in are both in place, but `C-x d' prompts, and
+;; a prompting command cannot be driven with `dispatch-input-event' in
+;; this harness: `read-minibuffer-1' reads its keys from the display
+;; rather than through the command loop, so the keys fed to it go
+;; nowhere. Every prompting command in the tree is therefore tested in
+;; `tools/pty-check.py', which types at a real terminal - see its
+;; `dired' check.
+
 
 (test-end "schemacs_ncurses_editor_command")
 

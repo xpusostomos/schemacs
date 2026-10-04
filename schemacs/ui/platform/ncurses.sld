@@ -52,6 +52,8 @@
     ;; `replace.el': M-% and C-M-% bind at load, the same reason as the
     ;; six above.
     (only (schemacs editor replace))
+    ;; `dired.el': C-x d binds at load, the same reason again.
+    (only (schemacs editor dired))
     )
 
   (export

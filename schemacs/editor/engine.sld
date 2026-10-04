@@ -117,6 +117,7 @@
    ;; which mirrors `intervals.c'.
    text-editor-text-props  set!text-editor-text-props
    text-editor-deactivate-mark  set!text-editor-deactivate-mark!
+   *inhibit-read-only*
    *text-property-offset-function*
 
    ;; Whether the buffer has changed since it was last saved
@@ -1767,13 +1768,37 @@
       ;;--------------------------------------------------------------
       (make-parameter #f))
 
+    (define *inhibit-read-only* (make-parameter #f))
+    ;; ^ GNU Emacs's `inhibit-read-only' (`buffer.c':5885): "Non-nil means
+    ;; disregard read-only status of buffers or characters. A non-nil
+    ;; value that is a list means disregard `buffer-read-only' status, and
+    ;; disregard a `read-only' text property if the property value is a
+    ;; member of the list. Any other non-nil value means disregard
+    ;; `buffer-read-only' and all `read-only' text properties."
+    ;;
+    ;; Emacs defines it in buffer.c and *reads* it from insdel.c, which is
+    ;; this library - and here the read is the other way round, because
+    ;; the engine cannot import the library that imports it. So it is held
+    ;; here and `buffer.sld' re-exports it, the same arrangement as
+    ;; `*text-property-offset-function*' below. A command writes into a
+    ;; read-only buffer with
+    ;; `(parameterize ((*inhibit-read-only* #t)) ...)'.
+    ;;
+    ;; Not ported: the *list* value's meaning for `read-only' text
+    ;; properties. The engine's insert and delete do not know about text
+    ;; properties at all - see `barf-if-buffer-read-only' - so any non-nil
+    ;; value is the "disregard all of it" case.
+
     (define (text-editor-insert ed thing)
       ;; Insert THING at the cursor. The insertion is recorded in the
       ;; buffer's undo list as the range of characters it now occupies,
       ;; and marks the buffer modified. Nothing is inserted into a
-      ;; read-only buffer; that is an error, as it is in GNU Emacs.
+      ;; read-only buffer; that is an error, as it is in GNU Emacs -
+      ;; unless `inhibit-read-only' says otherwise, which is the same
+      ;; test the C's `prepare_to_modify_buffer_1' makes.
       ;;--------------------------------------------------------------
-      (when (text-editor-read-only? ed)
+      (when (and (text-editor-read-only? ed)
+                 (not (*inhibit-read-only*)))
         (error "Buffer is read-only"))
       (let ((beg (text-editor-get-cursor ed)))
         (%text-editor-insert ed thing)
@@ -2008,9 +2033,12 @@
       ;; records 3, and reinserts 3.
       ;;
       ;; Nothing is deleted from a read-only buffer; that is an error,
-      ;; as it is in GNU Emacs.
+      ;; as it is in GNU Emacs - and as with insertion, not when
+      ;; `inhibit-read-only' says otherwise.
       ;;--------------------------------------------------------------
-      (when (and (not (= n 0)) (text-editor-read-only? ed))
+      (when (and (not (= n 0))
+                 (text-editor-read-only? ed)
+                 (not (*inhibit-read-only*)))
         (error "Buffer is read-only"))
       (cond
        ((= n 0) 0)

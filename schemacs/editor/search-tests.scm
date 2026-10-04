@@ -242,4 +242,128 @@
   (list (string-match "[[]" "[")
         (match-end 0)))
 
+;; ------------------------------------------------------------------
+;; the anchor, and what `^' means
+;;
+;; Every expectation here is `emacs -Q --batch' on this machine. They
+;; are here because the suite passed without them: `looking-at' searched
+;; *forward* from point, so a pattern that occurred anywhere later on
+;; the line answered t, and `^' was judged against the start of a copy
+;; rather than against the character before the position. Dired's own
+;; indent reads `(looking-at-p "  ")' and had never once fired.
+
+;; "right at the start of a match" - a match further along is not one
+(test-equal '(#f #t #t)
+  (with-buffer
+   (lambda ()
+     (let ((b (get-buffer-create "*anchor*")))
+       (set-buffer b)
+       (erase-buffer)
+       (fill "total 7\nabc\n  xyz\n")
+       (goto-char 1)
+       (let ((a (looking-at "  "))          ; two spaces are on line 3
+             (b* (looking-at "total")))
+         (goto-char 9)                      ; the beginning of "abc"
+         (list a b* (looking-at "^abc")))))))
+
+;; `^' mid-line is not a line beginning, and is one just after a newline
+(test-equal '(#f #t #f)
+  (with-buffer
+   (lambda ()
+     (let ((b (get-buffer-create "*bol*")))
+       (set-buffer b)
+       (erase-buffer)
+       (fill "total 7\nabc\n  xyz\n")
+       (goto-char 10)                       ; 'b' of "abc", mid-line
+       (let ((mid (looking-at "^bc")))
+         (goto-char 9)
+         (let ((bol (looking-at "^abc")))
+           (goto-char 12)                   ; the newline ending "abc"
+           (list mid bol (looking-at "^  xyz"))))))))
+
+;; a `^' that cannot match at a real line beginning makes the search
+;; miss the line it is standing on
+(test-equal '(12 18)
+  (with-buffer
+   (lambda ()
+     (let ((b (get-buffer-create "*bol*")))
+       (set-buffer b)
+       (erase-buffer)
+       (fill "total 7\nabc\n  xyz\n")
+       (goto-char 9)
+       (let ((a (re-search-forward "^abc" #f #t)))
+         (goto-char 9)
+         (list a (re-search-forward "^  xyz" #f #t)))))))
+
+;; the same question asked of a string, with the start itself a line
+;; beginning - 2 is the beginning of "b", 1 is the newline before it
+(test-equal '(2 2 2)
+  (list (string-match "^b" "a\nb" 2)
+        (string-match "^b" "a\nb" 1)
+        (string-match "^b" "a\nb" 0)))
+
+;; and 1 is not a line beginning in "ab"
+(test-equal #f (string-match "^b" "ab" 1))
+
+;; ------------------------------------------------------------------
+;; `re-search-backward'
+;;
+;; This answered nil for *every* pattern: the walk began at the bound
+;; rather than at point, and the bound is 0 when searching backwards, so
+;; the first test failed and the walk stopped before it began. Nothing
+;; in the tree noticed because both callers swallow the nil -
+;; `dired-move-to-end-of-filename' reads it as "no file on this line",
+;; and query-replace's backward loop as "no match".
+
+(test-equal '(9 9 9)
+  (with-buffer
+   (lambda ()
+     (let ((b (get-buffer-create "*back*")))
+       (set-buffer b)
+       (erase-buffer)
+       (fill "one two\nthree four\nfive\n")
+       (goto-char 10)
+       (let ((a (re-search-backward "^." #f #t)))
+         (goto-char 10)
+         (let ((b* (re-search-backward "^" #f #t)))
+           (goto-char 9)
+           (list a b* (re-search-backward "^" #f #t))))))))
+
+;; the match may not extend past point - the C's `stop' - so a backward
+;; search from just after a word finds the word before it
+(test-equal '(5 1)
+  (with-buffer
+   (lambda ()
+     (let ((b (get-buffer-create "*back*")))
+       (set-buffer b)
+       (erase-buffer)
+       (fill "one two\nthree four\nfive\n")
+       (goto-char 6)
+       (let ((a (re-search-backward "t" #f #t)))
+         (goto-char 14)
+         (list a (re-search-backward "^one" #f #t)))))))
+
+;; a repeated backward search steps back one match at a time rather than
+;; answering the same match three times
+(test-equal 1
+  (with-buffer
+   (lambda ()
+     (let ((b (get-buffer-create "*back*")))
+       (set-buffer b)
+       (erase-buffer)
+       (fill "aaa\n")
+       (goto-char 4)
+       (re-search-backward "a" #f #t 3)))))
+
+;; and no match answers nil rather than signalling
+(test-equal #f
+  (with-buffer
+   (lambda ()
+     (let ((b (get-buffer-create "*back*")))
+       (set-buffer b)
+       (erase-buffer)
+       (fill "five\n")
+       (goto-char 5)
+       (re-search-backward "z" #f #t)))))
+
 (test-end)

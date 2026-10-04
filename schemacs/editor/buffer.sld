@@ -59,6 +59,7 @@
           weak-table-delete!
           weak-table-keys)
     (only (schemacs editor engine)
+          *inhibit-read-only*
           new-text-editor
           text-editor-type?
           text-editor-buffer-name set!text-editor-buffer-name
@@ -161,6 +162,7 @@
    set-buffer
    set-buffer-local-value!
    set-buffer-modified-p
+   restore-buffer-modified-p
    set!buffer-default-directory
    set!buffer-file-name
    set!buffer-local-keymap
@@ -543,13 +545,23 @@
     (define (set!mark-active flag)
       (set-buffer-local-value! (current-buffer) 'mark-active (and flag #t)))
 
-    (define (buffer-name buffer)
-      ;; The name of BUFFER: GNU Emacs's `buffer-name'. Emacs gives every
-      ;; buffer a name, and a buffer with no name of its own would be one
-      ;; the engine has not been told about, so it is named `*scratch*'
-      ;; here the way an unnamed buffer is by Emacs's startup.
+    (define (buffer-name . rest)
+      ;; The name of BUFFER: GNU Emacs's `buffer-name' (buffer.c:1302):
+      ;; "Return the name of BUFFER, as a string. BUFFER defaults to the
+      ;; current buffer. Return nil if BUFFER has been killed."
+      ;;
+      ;; BUFFER is optional - the C's DEFUN is `0, 1, 0' - and `(buffer-name)'
+      ;; is how the .el code this tree ports usually spells it. A required
+      ;; BUFFER answered "Wrong number of arguments" instead.
+      ;;
+      ;; A killed buffer's name is nil, because `kill-buffer' clears it -
+      ;; that is what the C answers nil *for*, and it is the test the
+      ;; Dired buffer registry makes. Answering `*scratch*' for it, which
+      ;; is what this did, made a killed buffer look alive and left it in
+      ;; the registry for ever.
       ;;--------------------------------------------------------------
-      (or (text-editor-buffer-name buffer) *scratch-buffer-name*))
+      (text-editor-buffer-name (or (and (pair? rest) (car rest))
+                                   (current-buffer))))
 
     (define (set!buffer-name buffer name)
       ;; Name BUFFER: what Emacs's `rename-buffer' ends with. Use
@@ -765,6 +777,13 @@
                         (set!window-top-line window 0))
                       (loop (cdr windows)))))
                 (weak-table-delete! buffer-slots-table buffer)
+                ;; Emacs sets the killed buffer's `name' to nil and keeps
+                ;; the old one in `last_name'. That nil *is* why
+                ;; `buffer-name' answers nil for a killed buffer - the
+                ;; test in `dired-buffers-for-dir' and
+                ;; `dired-find-buffer-nocreate' is exactly it. The
+                ;; `last-name' half is `buffer-last-name', not ported.
+                (set!buffer-name buffer #f)
                 (run-buffer-list-update-hook!)
                 name)))))
 
@@ -819,18 +838,21 @@
     (define buffer-overlays-table (new-weak-table))
     ;; ^ each buffer's overlays, as a list in order by start
 
-    (define *inhibit-read-only* (make-parameter #f))
-    ;; ^ GNU Emacs's `inhibit-read-only' (`buffer.c':5885): "Non-nil means
-    ;; disregard read-only status of buffers or characters. A non-nil
-    ;; value that is a list means disregard `buffer-read-only' status, and
-    ;; disregard a `read-only' text property if the property value is a
-    ;; member of the list. Any other non-nil value means disregard
-    ;; `buffer-read-only' and all `read-only' text properties."
+    ;; `*inhibit-read-only*' is GNU Emacs's `inhibit-read-only'
+    ;; (`buffer.c':5885), which is where Emacs defines it - but it is
+    ;; *read* by `insdel.c', on every insertion and deletion, and that is
+    ;; the library this one is built on. A Guile library cannot be
+    ;; imported by the library it imports, so the variable is held in
+    ;; `(schemacs editor engine)' and re-exported here, exactly as
+    ;; `*text-property-offset-function*' is. Everything that imports it
+    ;; from here still reaches it.
     ;;
-    ;; A global variable in Emacs - not buffer-local - which is what makes
-    ;; `(let ((inhibit-read-only t)) ...)' the way a command writes into a
-    ;; read-only buffer. It is a parameter here, as this tree keeps the
-    ;; flags that Elisp let-binds.
+    ;; "Non-nil means disregard read-only status of buffers or
+    ;; characters." A global in Emacs - not buffer-local - which is what
+    ;; makes `(let ((inhibit-read-only t)) ...)' the way a command writes
+    ;; into a read-only buffer. It is a parameter here, as this tree keeps
+    ;; the flags that Elisp let-binds, so a command writes
+    ;; `(parameterize ((*inhibit-read-only* #t)) ...)'.
 
     (define (overlay-current-buffer)
       ;; The buffer the overlay functions act on - Emacs's
@@ -1203,6 +1225,20 @@
       (set-buffer-local-value! (if (pair? args) (car args) (current-buffer))
                                'mode-name value))
 
+    (define *permanent-local-variables*
+      ;; The variables `kill-all-local-variables' does not reset, because
+      ;; they have no default value to reset *to*: the C's
+      ;; `init_buffer_once' marks them -1 in `buffer_local_flags', and
+      ;; `bindings.el:1058' writes the same list down as the
+      ;; `permanent-local' property.
+      ;;
+      ;; This tree has as slots only the ones it uses. `buffer-read-only'
+      ;; is a field of the buffer here and not a slot, so it needs no
+      ;; entry; `buffer-undo-list' is the engine's.
+      ;;--------------------------------------------------------------
+      '(default-directory buffer-file-name mark-active truncate-lines
+        buffer-file-coding-system))
+
     (define (kill-all-local-variables . args)
       ;; GNU Emacs's `kill-all-local-variables' (`buffer.c':3019):
       ;; "Switch to Fundamental mode by killing current buffer's local
@@ -1222,8 +1258,26 @@
       ;;--------------------------------------------------------------
       (run-hooks (*change-major-mode-hook*))
       (let ((buffer (if (pair? args) (car args) (current-buffer))))
-        ;; "Actually eliminate all local bindings of this buffer."
-        (weak-table-set! buffer-slots-table buffer '())
+        ;; "Actually eliminate all local bindings of this buffer" - except
+        ;; the ones the C never had in its locals list to begin with. Those
+        ;; are `init_buffer_once''s `buffer_local_flags' set to -1
+        ;; (`bset_directory', `bset_filename', `bset_read_only',
+        ;; `bset_mark_active', `bset_truncate_lines' and the rest), and
+        ;; `bindings.el:1058' spells the same list out: "These per-buffer
+        ;; variables are never reset by `kill-all-local-variables', because
+        ;; they have no default value." `default-directory' is the one that
+        ;; matters most - a major mode that reset it would send every bare
+        ;; file name to the process's directory - and it is why
+        ;; `dired-advertise', which runs from a mode, read the wrong
+        ;; directory until this preserved it.
+        (weak-table-set!
+         buffer-slots-table buffer
+         (let loop ((slots (weak-table-ref buffer-slots-table buffer '()))
+                    (kept '()))
+           (cond ((null? slots) kept)
+                 ((memq (caar slots) *permanent-local-variables*)
+                  (loop (cdr slots) (cons (car slots) kept)))
+                 (else (loop (cdr slots) kept)))))
         (set!buffer-local-keymap buffer #f))
       ;; The C ends by asking for the mode line to be redrawn
       ;; (`bset_update_mode_line'), because every major mode command calls
@@ -1270,7 +1324,8 @@
       ;; is no narrowing, so the widen is a no-op, and the
       ;; `save_length' is nothing - no auto saving machinery.
       ;;--------------------------------------------------------------
-      (when (text-editor-read-only? (current-buffer))
+      (when (and (text-editor-read-only? (current-buffer))
+                 (not (*inhibit-read-only*)))
         (error "Buffer is read-only"))
       (let ((ed (current-buffer)))
         (text-editor-set-cursor ed 0)
@@ -1278,17 +1333,40 @@
       #f)
 
 
-    (define (buffer-modified-p buffer)
-      ;; Whether the buffer has been changed since it was saved: GNU Emacs's
-      ;; `buffer-modified-p'.
+    (define (buffer-modified-p . rest)
+      ;; GNU Emacs's `buffer-modified-p' (buffer.c:1506): "Return non-nil
+      ;; if BUFFER was modified since its file was last read or saved. No
+      ;; argument or nil as argument means use current buffer as BUFFER."
+      ;;
+      ;; The C's DEFUN is `0, 1, 0', so BUFFER is optional; taking it as
+      ;; a required argument, which this did, is a departure that all
+      ;; callers had to work around - and it makes `(buffer-modified-p)'
+      ;; - how every .el caller spells it - an error.
       ;;--------------------------------------------------------------
-      (text-editor-modified? buffer))
+      (text-editor-modified? (or (and (pair? rest) (car rest))
+                                 (current-buffer))))
 
-    (define (set-buffer-modified-p buffer flag)
-      ;; Set that flag: GNU Emacs's `set-buffer-modified-p'. Emacs takes
-      ;; the buffer first and the flag second, and so does this.
+    (define (set-buffer-modified-p flag)
+      ;; GNU Emacs's `set-buffer-modified-p' (buffer.c:1549): "Mark
+      ;; current buffer as modified or unmodified according to FLAG."
+      ;;
+      ;; FLAG is the *only* argument - the C's DEFUN is `1, 1, 0' and it
+      ;; acts on the current buffer.
       ;;--------------------------------------------------------------
-      (text-editor-set-modified! buffer flag))
+      (text-editor-set-modified! (current-buffer) flag))
+
+    (define (restore-buffer-modified-p flag)
+      ;; GNU Emacs's `restore-buffer-modified-p' (buffer.c:1576): "Like
+      ;; `set-buffer-modified-p', but doesn't redisplay buffer's mode
+      ;; line. A nil FLAG means to mark the buffer as unmodified."
+      ;;
+      ;; The C also locks or unlocks the visited file, which needs file
+      ;; locking - not ported - and its other difference is that the mode
+      ;; line is not redrawn. This tree redraws when it redraws, so the
+      ;; two are the same function here, which is the whole of what the
+      ;; difference buys.
+      ;;--------------------------------------------------------------
+      (set-buffer-modified-p flag))
 
     (define (buffer-read-only? buffer)
       ;; Whether the buffer refuses changes: GNU Emacs's `buffer-read-only'

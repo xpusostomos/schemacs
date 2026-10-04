@@ -15,11 +15,18 @@
           *history-delete-duplicates* *history-length*)
     ;; `delete' is Guile's - R7RS has no list `delete' - and `logand' is
     ;; `key-parse''s control-character folding.
-    (only (guile) delete logand)
+    (only (guile) delete logand string-contains)
+    ;; `string-prefix-p' compares with `compare-strings', which is
+    ;; fns.c's and lives in `(schemacs editor fns)'. That library is
+    ;; below this one - it imports none of subr - so this is not a
+    ;; cycle.
+    (only (schemacs editor fns) compare-strings)
     )
 
   (export
    add-to-history
+   string-prefix-p
+   string-replace
    *after-change-major-mode-hook*
    *change-major-mode-after-body-hook*
    *delayed-after-hook-functions*
@@ -34,8 +41,61 @@
    )
 
   (begin
-    ;;----------------------------------------------------------------
-    ;; `kbd' - the way a key is *named*.
+    (define (string-prefix-p prefix string . rest)
+      ;; GNU Emacs's `string-prefix-p' (subr.el:6246): "Return non-nil if
+      ;; STRING begins with PREFIX. PREFIX should be a string; the
+      ;; function returns non-nil if the characters at the beginning of
+      ;; STRING compare equal with PREFIX. If IGNORE-CASE is non-nil, the
+      ;; comparison is done without paying attention to letter-case
+      ;; differences."
+      ;;
+      ;; The answer is the C's `(eq t (compare-strings ...))' - against
+      ;; the symbol `t', not against a true value: `compare-strings'
+      ;; answers the index of the first difference when they differ, so
+      ;; `eq t' is the whole test.
+      ;;
+      ;; `string-length' and not `length': Emacs's `length' takes a
+      ;; string and Guile's does not.
+      ;;--------------------------------------------------------------
+      (let ((ignore-case (and (pair? rest) (car rest)))
+            (prefix-length (string-length prefix)))
+        (if (> prefix-length (string-length string))
+            #f
+            (eq? #t (compare-strings prefix 0 prefix-length
+                                     string 0 prefix-length
+                                     ignore-case)))))
+
+    (define (string-replace from-string to-string in-string)
+      ;; GNU Emacs's `string-replace' (subr.el:6157): "Replace FROM-STRING
+      ;; with TO-STRING in IN-STRING each time it occurs."
+      ;;
+      ;; The C searches with `string-search', which is `string-contains'
+      ;; here and answers an index rather than the C's position or nil -
+      ;; the two are the same question. An empty FROM-STRING is the C's
+      ;; `wrong-length-argument', which is an error here too.
+      ;;--------------------------------------------------------------
+      (when (string=? from-string "")
+        (error "Wrong length argument: 0"))
+      (let loop ((start 0) (result '()))
+        (let ((pos (string-contains in-string from-string start)))
+          (cond
+           ((not pos)
+            ;; "No replacements were done, so just return the original
+            ;; string" - the C's answer when RESULT is still nil
+            (if (null? result)
+                in-string
+                (begin
+                  (unless (= start (string-length in-string))
+                    (set! result (cons (substring in-string start) result)))
+                  (apply string-append (reverse result)))))
+           (else
+            (loop (+ pos (string-length from-string))
+                  (cons to-string
+                        (if (= start pos)
+                            result
+                            (cons (substring in-string start pos) result)))))))))
+
+
     ;;
     ;; GNU Emacs's `kbd' (`subr.el:1258') is how a user writes a key
     ;; sequence: `(kbd "C-x C-f")', `(kbd "C-/")', `(kbd "<up>")'. It is

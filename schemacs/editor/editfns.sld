@@ -296,15 +296,31 @@ point-marker
         (and (>= index 0) (< index count)
              (%char-at-index ed index))))
 
-    (define (char-before position)
-      ;; GNU Emacs's `char-before' (editfns.c): "Return character in
-      ;; current buffer immediately before position POSITION" - nil
-      ;; when there is none.
+    (define (char-before . rest)
+      ;; GNU Emacs's `char-before' (editfns.c:1070): "Return character in
+      ;; current buffer preceding position POS. POS is an integer or a
+      ;; marker and defaults to point. If POS is out of range, the value
+      ;; is nil."
+      ;;
+      ;; POS is *optional* - the C's DEFUN is `0, 1, 0' - and
+      ;; `(char-before)' is how the .el code this tree ports spells it.
+      ;; A required POS answered "Wrong number of arguments" instead,
+      ;; which `dired-move-to-end-of-filename''s symlink path - the
+      ;; C's `(preceding-char)' - ran straight into the day that path
+      ;; became reachable.
+      ;;
+      ;; "If POS is out of range, the value is nil": the C clips through
+      ;; `BUF_BEGV' and `BUF_ZV', so POS may be 1 through ZV (= COUNT + 1)
+      ;; and no further. `(char-before 100)' on a three-character buffer
+      ;; is nil in Emacs and ran off the engine here, the upper bound
+      ;; having no test at all.
       ;;--------------------------------------------------------------
       (let* ((ed (current-buffer))
+             (position (if (pair? rest) (car rest) #f))
              (count (text-editor-char-count ed))
              (index (- (if position position (point)) 1)))
         (and (> index 0)
+             (<= index count)
              (%char-at-index ed (- index 1)))))
 
     (define (following-char)
@@ -331,17 +347,24 @@ point-marker
              ;; an optional argument explicitly given as nil - Elisp's
              ;; `(line-beginning-position (and arg 2))' with ARG nil -
              ;; behaves as absent, as it does in Emacs
-             (n (if (and (pair? rest) (car rest)) (car rest) 0)))
+             ;;
+             ;; The absent value is 1, which is the C's `count = 1'
+             ;; (`Fline_beginning_position', editfns.c:727) and not 0:
+             ;; `(forward-line (- n 1))' below is then `(forward-line 0)',
+             ;; no move at all. With a 0 here it was `(forward-line -1)',
+             ;; so every call without an N answered the *previous* line's
+             ;; beginning - measured, `emacs -Q --batch' answers 5 for
+             ;; position 5 of "aaa\nbbb\nccc\n" and this answered 1.
+             (n (if (and (pair? rest) (car rest)) (car rest) 1)))
         (save-excursion
           ;; "With argument N not nil or 1, move forward N - 1 lines
-          ;; first" - so an absent N is 1 and means *no* move, and an
-          ;; explicit N moves N - 1. The line arithmetic that used to be
-          ;; here added `text-editor-cursor-line' - a *line number* - to
-          ;; N and passed the sum as a *character position* to
-          ;; `text-editor-set-cursor', so every line but the first
-          ;; answered the first line's boundary; and `(forward-line N)'
-          ;; with the absent-N case read as 0 was right only by
-          ;; accident, and wrong by one for every explicit N.
+          ;; first" - so N moves N - 1, and the binding above has already
+          ;; turned an absent N into 1, which is no move. The line
+          ;; arithmetic that used to be here added
+          ;; `text-editor-cursor-line' - a *line number* - to N and passed
+          ;; the sum as a *character position* to `text-editor-set-cursor',
+          ;; so every line but the first answered the first line's
+          ;; boundary.
           (forward-line (- n 1))
           (+ 1 (text-editor-get-start-of-line ed)))))
 

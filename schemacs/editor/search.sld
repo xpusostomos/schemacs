@@ -91,6 +91,7 @@
    *search-regs*
    looking-at
    looking-at-p
+   string-match-p
    looking-back
    match-beginning
    match-data
@@ -641,6 +642,28 @@
             (loop (+ i 1))))
         (*search-regs* regs)))
 
+    (define (%bol-flags text start)
+      ;; The flags for a match that begins at START of TEXT: `0' when
+      ;; START is a real beginning of line, `regexp/notbol' when it is
+      ;; not.
+      ;;
+      ;; It has to be said, because glibc takes the offset
+      ;; `regexp-exec' is handed as a beginning of line whether or not
+      ;; it is one - `(regexp-exec (make-regexp "^b" regexp/newline)
+      ;; "ab" 1)' matches at 1, where Emacs's `re_search', handed the
+      ;; whole string and the position, reads the character before the
+      ;; position and answers nil. This flag is how it is told
+      ;; otherwise. And *when* to pass it is a real question, not the
+      ;; `start = 0' guess it used to be: `(string-match "^b" "a\nb"
+      ;; 2)' is 2 in Emacs, because 2 is the beginning of a line, so a
+      ;; `^' that cannot match there makes `re-search-forward "^abc"'
+      ;; from the start of a line miss the very line it stands on.
+      ;;--------------------------------------------------------------
+      (if (and (> start 0)
+               (not (char=? #\newline (string-ref text (- start 1)))))
+          regexp/notbol
+          0))
+
     (define (string-match pattern string . args)
       ;; GNU Emacs's `string-match' (search.c:442): "Return index of
       ;; start of string match for REGEXP in STRING, or nil." The
@@ -659,7 +682,7 @@
              (icase? (*case-fold-search*)))
         (let ((m (regexp-exec (%compile-emacs-regexp pattern icase?)
                               string start
-                              (if (= start 0) 0 regexp/notbol))))
+                              (%bol-flags string start))))
           (cond
            ((not m) #f)
            (inhibit (match:start m 0))
@@ -667,6 +690,18 @@
             (%string-match-into-regs m)
             (*last-thing-searched* 'string)
             (match:start m 0))))))
+
+    (define (string-match-p regexp string . rest)
+      ;; GNU Emacs's `string-match-p' (subr.el:5946): "Same as
+      ;; `string-match' except this function does not change the match
+      ;; data."
+      ;;
+      ;; It is `subr.el''s and it is here for the same reason
+      ;; `looking-at-p' is: `(schemacs editor subr)' is *below* this
+      ;; library, so subr cannot reach `string-match'. The C's fourth
+      ;; argument, INHIBIT-MODIFY, is how `string-match' itself says it.
+      ;;--------------------------------------------------------------
+      (string-match regexp string (if (pair? rest) (car rest) 0) #t))
 
     (define (looking-at-p regexp)
       ;; GNU Emacs's `looking-at-p' (subr.el): "Same as `looking-at'
@@ -685,20 +720,39 @@
       ;; GNU Emacs's `looking-at' (search.c:347): "Return t if point is
       ;; right at the start of a match for REGEXP" - the match does not
       ;; move point, and the match data is the buffer's, one-based.
+      ;;
+      ;; The C is `re_match_2 (..., PT_BYTE - BEGV_BYTE, ...)', which
+      ;; is an *anchored* match at point: the regexp has to match
+      ;; *there*, not merely somewhere after it. Guile's `regexp-exec'
+      ;; searches forward from the offset it is handed, so the anchor
+      ;; must be asked for - and leaving it out made `looking-at-p' on a
+      ;; two-space pattern answer t on a buffer whose first line is
+      ;; `total 7', because there are two spaces further down the
+      ;; listing. That was dired's own indent never firing: its
+      ;; `looking-at-p' guard read t on an unindented listing and the
+      ;; function concluded someone else had indented it already.
+      ;;
+      ;; The whole buffer text goes in with point as the offset, as the
+      ;; C hands `re_match_2' the whole accessible portion, so the
+      ;; positions that come back are the buffer's own and `^' is
+      ;; judged against the real character before point.
       ;;--------------------------------------------------------------
       (with-current-buffer (current-buffer)
         (let* ((ed (current-buffer))
                (from (text-editor-get-cursor ed))
-               (text (text-editor-copy-string ed from (text-editor-char-count ed))))
+               (text (text-editor-copy-string ed 0 (text-editor-char-count ed))))
           (let ((m (regexp-exec (%compile-emacs-regexp regexp (*case-fold-search*))
-                                text 0)))
+                                text from (%bol-flags text from))))
             (cond
-             ((not m) #f)
+             ;; "right at the start of a match": a match further along
+             ;; is not one at point, and answers the C's `-1' / nil.
+             ((or (not m) (not (= (match:start m 0) from))) #f)
              (else
               (%string-match-into-regs m)
-              ;; string positions to buffer positions: point's one-based
-              ;; position is the offset
-              (match-data--translate (+ 1 from))
+              ;; zero-based buffer positions to one-based ones; the
+              ;; match was made against the buffer itself, so nothing
+              ;; else is added
+              (match-data--translate 1)
               (*last-thing-searched* (current-buffer))
               #t))))))
 
@@ -818,9 +872,17 @@
       ;; BOUND, NOERROR answering nil for what would signal, and leave
       ;; point at the match's far end (forward) or start (backward),
       ;; answering the point value, as the C's DEFUNs do.
+      ;;
+      ;; The whole buffer text goes in and the search's start is an
+      ;; offset into it, as the C hands `re_search' the whole accessible
+      ;; portion. That is what makes `^' mean the line beginning: a copy
+      ;; *from* the offset is a string whose first character is a line
+      ;; beginning whether or not it is one, which is the same defect as
+      ;; `looking-at''s, and `%bol-flags' is the flag that says.
       ;;--------------------------------------------------------------
       (let* ((ed (current-buffer))
              (size (text-editor-char-count ed))
+             (whole (text-editor-copy-string ed 0 size))
              (limit (or bound
                         (if backward 0 size)))
              (from (text-editor-get-cursor ed)))
@@ -828,55 +890,56 @@
           (let ((found
                  (cond
                   ((not backward)
-                   (let ((text (text-editor-copy-string
-                                ed (min at limit) size)))
-                     ;; `regexp/notbol': a match may not begin at
-                     ;; `^' when the start is not the buffer's
-                     ;; beginning - `re_search' says so for the C
-                     (let ((m (regexp-exec
-                               (%compile-emacs-regexp regexp (*case-fold-search*))
-                               text 0
-                               (if (= (min at limit) 0) 0 regexp/notbol))))
-                       (and m
-                            (let ((s (+ (min at limit) (match:start m 0)))
-                                  (e (+ (min at limit) (match:end m 0))))
-                              (if (<= e limit) (cons s e) #f))))))
+                   ;; Forward: `re_search_2' with `start' at point,
+                   ;; `range' up to the bound, and the `stop' argument
+                   ;; the bound as well - so a match running past the
+                   ;; bound is not one, and the next position is tried.
+                   (let* ((here (min at limit))
+                          (m (regexp-exec
+                              (%compile-emacs-regexp regexp (*case-fold-search*))
+                              whole here (%bol-flags whole here))))
+                     (and m
+                          (let ((s (match:start m 0))
+                                (e (match:end m 0)))
+                            (if (<= e limit) (list m s e) #f)))))
                   (else
-                   ;; backward: try each start downward, the way
-                   ;; `re_search' walks back
-                   (let try ((s (min at limit)))
+                   ;; Backward: `re_search_2' with a negative `range'
+                   ;; walks the start position down from point to the
+                   ;; bound and takes the first one the pattern matches
+                   ;; at; its `stop' is point - "Don't allow match past
+                   ;; current point" - which is what steps the walk back
+                   ;; on a repeated search, and why the end test is
+                   ;; against `at' and not the bound. The walk begins
+                   ;; *at* point; beginning it at the bound instead is
+                   ;; what made every `re-search-backward' answer nil.
+                   (let try ((s at))
                      (cond
-                      ((< s 0) #f)
-                      ((< s limit)
-                       (let ((text (text-editor-copy-string ed s size)))
-                         (let ((m (regexp-exec
-                                   (%compile-emacs-regexp regexp (*case-fold-search*))
-                                   text 0)))
-                           (if (and m (<= (+ s (match:end m 0)) limit)
-                                    ;; a backward search's match must
-                                    ;; END at or before the start point
-                                    ;; we began at - which AT already
-                                    ;; says
-                                    )
-                               (cons s (+ s (match:end m 0)))
-                               (try (- s 1))))))
-                      (else #f)))))))
+                      ((< s limit) #f)
+                      (else
+                       (let ((m (regexp-exec
+                                 (%compile-emacs-regexp regexp (*case-fold-search*))
+                                 whole s (%bol-flags whole s))))
+                         (if (and m
+                                  (= (match:start m 0) s)
+                                  (<= (match:end m 0) at))
+                             (list m s (match:end m 0))
+                             (try (- s 1)))))))))))
             (cond
              ((not found)
               (if noerror #f (error "Search failed" regexp)))
-             ((> left 1) (loop (- left 1) (if backward (car found) (cdr found))))
+             ((> left 1) (loop (- left 1) (if backward (cadr found)
+                                              (caddr found))))
              (else
               (text-editor-set-cursor ed
-                                      (if backward (car found) (cdr found)))
-              (%string-match-into-regs
-               ;; re-derive the match object for the data
-               (regexp-exec (%compile-emacs-regexp regexp (*case-fold-search*))
-                            (text-editor-copy-string
-                             ed (car found) (cdr found))
-                            0))
-              (match-data--translate (+ 1 (car found)))
+                                      (if backward (cadr found) (caddr found)))
+              ;; the registers of the match actually made, not a
+              ;; re-derivation of it from a copy of the matched text -
+              ;; the copy made `^' and the subexpression offsets answers
+              ;; about the copy, not about the buffer
+              (%string-match-into-regs (car found))
+              (match-data--translate 1)
               (*last-thing-searched* (current-buffer))
-              (+ 1 (if backward (car found) (cdr found)))))))))
+              (+ 1 (if backward (cadr found) (caddr found)))))))))
 
     (define (re-search-forward regexp . args)
       ;; GNU Emacs's `re-search-forward' (search.c:2264): "Search

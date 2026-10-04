@@ -31,7 +31,9 @@
     (only (schemacs editor casefiddle))
     (only (schemacs editor paragraphs))
     ;; `replace.el' - the ncurses.sld note says why.
-    (only (schemacs editor replace)))
+    (only (schemacs editor replace))
+    ;; `dired.el': C-x d binds at load, the same reason again.
+    (only (schemacs editor dired)))
 
   (export main-gtk)
 

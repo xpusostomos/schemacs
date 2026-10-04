@@ -320,4 +320,40 @@
     (insert "xyz")
     (list (tp:text-properties-at 0 ed) (tp:text-properties-at 6 ed))))
 
+;; ------------------------------------------------------------------
+;; `add-text-properties' adds *all* of a plist
+;;
+;; `interval-has-all-properties' answered after the first property - "I
+;; have this one" - instead of checking every one, so
+;; `add-text-properties-1' decided the interval needed no change and
+;; added nothing. Every multi-property plist whose first property was
+;; already present went missing, which is how dired names ended up
+;; carrying no `mouse-face': ls-lisp had already put `dired-filename' on
+;; them, and `dired-filename' is the first property dired adds.
+
+(test-equal '(#t highlight "here")
+  (let ((ed (fresh-buffer "*textprop-add-all*")))
+    (insert "abc")
+    ;; the first property alone, as ls-lisp leaves the name
+    (tp:put-text-property 0 3 'dired-filename #t ed)
+    ;; then the plist whose *first* property is already there
+    (tp:add-text-properties 0 3 (list 'dired-filename #t
+                                      'mouse-face 'highlight
+                                      'help-echo "here")
+                            ed)
+    (list (tp:get-text-property 0 'dired-filename ed)
+          (tp:get-text-property 0 'mouse-face ed)
+          (tp:get-text-property 0 'help-echo ed))))
+
+;; and the guard still holds: a plist that really is all present is left
+;; alone rather than rewritten - the values in PLIST win when they differ
+(test-equal '(#t other)
+  (let ((ed (fresh-buffer "*textprop-add-guard*")))
+    (insert "abc")
+    (tp:put-text-property 0 3 'a #t ed)
+    (tp:put-text-property 0 3 'b 'old ed)
+    (tp:add-text-properties 0 3 (list 'a #t 'b 'other) ed)
+    (list (tp:get-text-property 0 'a ed)
+          (tp:get-text-property 0 'b ed))))
+
 (test-end "schemacs_editor_textprop")
