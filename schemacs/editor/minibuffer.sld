@@ -632,8 +632,10 @@ read-number-history
                        (*echo-area-prompt* prompt))
           (render! frame)
           (let loop ()
-            (let ((path (key-event->keymap-path
-                         (current-display) (read-key-event -1))))
+            ;; `read-key-event' answers the key's *path* already: the
+            ;; display's own form was normalised away at the read, so
+            ;; nothing here knows which front end is running.
+            (let ((path (read-key-event -1)))
               (cond
                ;; C-g abandons the whole command. A terminal sends the
                ;; byte, so the path is `\'s own `(ctrl #\g)'; a window

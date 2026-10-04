@@ -57,9 +57,10 @@
           search-backward search-forward set-match-data string-match)
     ;; The key reads: the loop reads one key at a time, exactly the
     ;; command loop's own read, and pushes a key it does not know back
-    ;; onto `*unread-command-events*'. The event's key path comes from
-    ;; the generic `key-event->keymap-path' (`dispnew.sld''s, which
-    ;; term and pgtk method).
+    ;; onto `*unread-command-events*'. `read-key-event' answers the key's
+    ;; *path* - the display's own form is normalised away at the read - so
+    ;; what is pushed back is a path, which is what the command loop reads
+    ;; next and what `dispatch-key-path' takes.
     (only (schemacs editor keyboard)
           *unread-command-events* read-key-event recursive-edit
           signal-quit)
@@ -1048,9 +1049,7 @@ re-executed as a normal key sequence.")
                                                      replacement-presentation))))
                                              (set!frame-message frame prompt)
                                              (render! frame)
-                                             (let* ((ev (read-key-event -1))
-                                                    (path (key-event->keymap-path
-                                                           (current-display) ev))
+                                             (let* ((path (read-key-event -1))
                                                     (def (km:keymap-lookup
                                                           map
                                                           (km:keymap-index
@@ -1278,7 +1277,7 @@ re-executed as a normal key sequence.")
                                                 (else
                                                  (set! keep-going #f)
                                                  (*unread-command-events*
-                                                  (cons ev
+                                                  (cons path
                                                         (*unread-command-events*)))
                                                  (response #t replaced))))))))))))
                      ;; the occurrence is handled: record the
