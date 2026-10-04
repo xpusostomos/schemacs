@@ -33,13 +33,13 @@
     (scheme char)
     ;; `string-join' is `mapconcat''s: the answers written out between
     ;; ", " for the prompt.
-    (only (guile) string-join)
+    (only (guile) caddr string-join)
     ;; the question, and the one-key question the short path asks
     (only (schemacs editor minibuffer)
           read-from-minibuffer read-char-from-minibuffer)
     ;; a message goes to the echo area, and the `message' that puts it
     ;; there is editfns.c's in Emacs 31
-    (only (schemacs editor editfns) message)
+    (only (schemacs editor editfns) format message)
     )
 
   (export *read-answer-short* *use-short-answers* read-answer

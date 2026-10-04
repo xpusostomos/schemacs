@@ -679,7 +679,7 @@ re-executed as a normal key sequence.")
       ;; preserve case). Answers the stack as it now stands; the
       ;; setters carry what the caller's locals take.
       ;;--------------------------------------------------------------
-      (if (null stack)
+      (if (not stack)
           (begin (set-message! (*current-frame*) "Nothing to undo" 1)
                  (render! (*current-frame*))
                  stack)
@@ -720,7 +720,7 @@ re-executed as a normal key sequence.")
                       (set-real-match-data! (match-data)))
                     (set-noedit!
                      (replace-match-maybe-edit
-                      last-replacement #t literal
+                      last-replacement #t literal noedit
                       (get-real-match-data) backward))
                     (set-replace-count!
                      (- (get-replace-count) 1))
@@ -1038,10 +1038,22 @@ re-executed as a normal key sequence.")
                                                           (set! real-match-data md))
                                                         (lambda (ne)
                                                           (set! noedit ne))
+                                                        ;; the C's
+                                                        ;; GET-REPLACE-COUNT,
+                                                        ;; which this call
+                                                        ;; did not pass -
+                                                        ;; five of the
+                                                        ;; eight accessors
+                                                        ;; were supplied
+                                                        (lambda () replace-count)
                                                         (lambda (n)
                                                           (set! replace-count n))
                                                         (lambda (nr)
-                                                          (set! next-replacement nr))))
+                                                          (set! next-replacement nr))
+                                                        (lambda (v)
+                                                          (set! search-string-replaced v))
+                                                        (lambda (v)
+                                                          (set! next-replacement-replaced v))))
                                                  (set! last-was-undo #t)
                                                  (set! last-was-act-and-show #f)
                                                  (response done replaced))

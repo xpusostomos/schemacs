@@ -593,7 +593,7 @@
             (unless (eq? data-type 'STRING)
               (error "Unsupported data type" data-type))
             (let ((prefix (string #\escape #\] #\5 #\2 #\;
-                                  (string-ref (xterm--selection-char selection))
+                                  (string-ref (xterm--selection-char selection) 0)
                                   #\;)))
               (let ((reply
                      (xterm--query (string-append prefix "?"

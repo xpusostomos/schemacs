@@ -48,7 +48,7 @@
     ;; `sort' is what `overlays-at' orders by priority with. It is in
     ;; `(guile)' as well as `(srfi 1)', and this library already reaches
     ;; into `(guile)' for `getcwd'.
-    (only (guile) getcwd sort)
+    (only (guile) caddr getcwd sort)
     ;; `run-hooks' is `subr.el''s, and `kill-all-local-variables' runs
     ;; `change-major-mode-hook' through it.
     (only (schemacs editor subr) run-hooks)

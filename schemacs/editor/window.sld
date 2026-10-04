@@ -47,6 +47,7 @@
           set!%window-hscroll set!%window-min-hscroll
           set!%window-suspend-auto-hscroll?
           *current-frame* current-editor frame-height frame-width
+          window-type?
           make<window> frame-quit-cont
           frame-selected-window frame-windows select-window
           selected-window set!frame-editor set!frame-message
@@ -70,7 +71,7 @@
     (only (schemacs editor subr) run-hooks)
     ;; `temp-buffer-window-show' puts point at the beginning of the
     ;; buffer it is about to show, which `goto-char' is.
-    (only (schemacs editor editfns) goto-char)
+    (only (schemacs editor editfns) goto-char point-min)
     )
 
   (export
@@ -948,7 +949,7 @@ by this function.  This happens in an interactive call."
           (goto-char (point-min))
           (let ((window (display-buffer buffer action)))
             (when window
-              (set!window-hscroll! window 0)
+              (set-window-hscroll! window 0)
               (with-selected-window window
                 (run-hooks *temp-buffer-window-show-hook*)))
             window))))

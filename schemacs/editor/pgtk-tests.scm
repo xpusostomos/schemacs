@@ -33,6 +33,11 @@
         new-text-editor text-editor-insert text-editor-set-cursor
         set!text-editor-mark)
  (only (schemacs editor buffer) buffer-local-value set-buffer-local-value!)
+ ;; Imported for the *faces* it defines - `dired-marked' and the two
+ ;; beside it are dired.el's own `defface's - which the test below
+ ;; realizes. Loaded by both front ends in the real editor, so this is
+ ;; not a test-only dependency.
+ (only (schemacs editor dired))
  (only (schemacs editor keyboard) dispatch-input-event)
  (only (schemacs editor engine) text-editor-mark text-editor-get-cursor)
  (only (cairo) cairo-image-surface-create-from-png cairo-image-surface-get-data
@@ -260,5 +265,45 @@
 (test-equal lightgoldenrod2 (wide-cell-pixel 3))
 ;; and the text after the region is not painted
 (test-equal white (wide-cell-pixel 5))
+
+
+;; A face whose colour is named in a spec's `(min-colors 88)' or
+;; `(min-colors 16)' branch must realize to a colour, and it did not:
+;; every face realized to the plain token 0, so the GUI drew no face at
+;; all. The cause was the *name*: those branches say "Firebrick",
+;; "chocolate1", "DarkOrange" and "dark cyan", the table Emacs ships
+;; (and this tree ports) spells them "firebrick", "chocolate1",
+;; "darkorange" and "darkcyan", and a GUI frame resolves a name through
+;; the X server, whose matching is case-insensitive and ignores spaces.
+;; A terminal never met the difference, because its 8-colour branch
+;; names "yellow", "red" and "magenta", spelled the same either way -
+;; which is why this showed only under Gtk.
+;;
+;; These two are the faces the standard specs colour that way; the
+;; MERGE is what the redisplay does before realizing (`merge-face-vectors'
+;; resolves `:inherit'), and leaving it out is what made `dired-marked'
+;; look uncoloured for a second reason.
+(test-assert "a face named in the many-colour branch realizes to a colour"
+  (let ((d (new-display)))
+    (let ((w (realize d 'warning)))
+      (and (> w 0) (not (= w plain-token))))))
+
+(test-assert "an inheriting face realizes as what it inherits"
+  ;; The merge by hand, because the `realize' helper above passes the
+  ;; face's own attributes as they stand - which is what a test of the
+  ;; interning wants, and not what the redisplay does. The redisplay
+  ;; merges first: `merge-face-vectors' is "the function the display
+  ;; reads faces with", and it is what resolves `:inherit'. Measured
+  ;; before the colour-name fix: `dired-marked' realized to the plain
+  ;; token on Gtk, for this reason as well as for the name one.
+  (let* ((d (new-display))
+         (rm (lambda (face)
+               (f:face-spec-recalc face)
+               (dn:realize-face d (x:merge-face-vectors
+                                   (x:face-realized-attributes face) '())))))
+    (list (= ((lambda () (rm 'dired-marked)))
+             (rm 'warning))
+          (> (rm 'dired-flagged) 0)
+          (> (rm 'dired-mark) 0))))
 
 (test-end "schemacs_editor_pgtk")

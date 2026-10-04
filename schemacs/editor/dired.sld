@@ -64,8 +64,8 @@
     ;; string - see `dired-get-filename'. `delq' is `dired-buffers-for-dir'
     ;; and `dired-unadvertise' dropping a killed buffer from the registry,
     ;; as the C's `delq' does.
-    (only (guile) caddr delq open-input-string read string-prefix?
-          string-suffix?)
+    (only (guile) caddr cadddr cdddr cddddr delq open-input-string read
+          string-prefix? string-suffix?)
     ;; The file primitives this is built on, and their library.
     (only (schemacs editor diredc) directory-files file-attributes)
     (only (schemacs editor fileio)
@@ -99,8 +99,9 @@
           set!mode-name set-buffer-local-value! set-buffer-modified-p
           use-local-map with-current-buffer)
     (only (schemacs editor editfns)
-          bolp buffer-substring buffer-substring-no-properties char-after char-before
-          delete-region eobp eolp forward-line format goto-char insert
+          bobp bolp buffer-substring buffer-substring-no-properties char-after
+          char-before delete-region eobp eolp forward-line format goto-char
+          insert
           insert-buffer-substring
           line-beginning-position line-end-position message
           point point-marker point-max point-min preceding-char save-excursion)

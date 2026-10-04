@@ -763,9 +763,17 @@
                          (len (- interval-end s))
                          (plist (if (not prop)
                                     (iv:interval-plist i)
-                                    (let ((tail (iv:plist-member
-                                                 (iv:interval-plist i) prop)))
-                                      (if tail (list prop (cadr tail)) '()))))
+                                    ;; the C's `Fplist_member', which
+                                    ;; answers the *tail* - not
+                                    ;; `plist-member-of' above, which
+                                    ;; answers a boolean
+                                    (let find ((tail (iv:interval-plist i)))
+                                      (cond ((not (and (pair? tail)
+                                                       (pair? (cdr tail))))
+                                             '())
+                                            ((eq? (car tail) prop)
+                                             (list prop (cadr tail)))
+                                            (else (find (cddr tail)))))))
                          (next (iv:next-interval i)))
                     (loop next
                           (if next (iv:interval-position next) e)

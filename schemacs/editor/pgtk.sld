@@ -41,7 +41,7 @@
     ;; reaches through `(guile)' - as `frame.sld''s SIGTSTP does.
     (only (system foreign) pointer->procedure string->pointer pointer->string
           null-pointer? int void)
-    (only (guile) dynamic-link dynamic-func assq-ref)
+    (only (guile) dynamic-link dynamic-func assq-ref filter)
     ;; `alist-delete' removes one selection from the ownership record.
     (only (srfi srfi-1) alist-delete)
     (only (scheme write) display write)
@@ -166,6 +166,18 @@
     ;; attributes are kept beside it.
     ;;------------------------------------------------------------------
 
+    (define (%colour-name name)
+      ;; A colour name as the standard table spells it: lower case, with
+      ;; no spaces. X's own name matching is case-insensitive and ignores
+      ;; spaces - "DarkOrange", "darkorange" and "dark orange" all name
+      ;; one colour - and a GUI frame gets that from the X server, since
+      ;; `xfaces.c' hands the name to `XParseColor'. There is no X here,
+      ;; so the normalisation is done by hand.
+      ;;--------------------------------------------------------------
+      (list->string
+       (filter (lambda (c) (not (char=? c #\space)))
+               (string->list (string-downcase name)))))
+
     (define (colour->rgb value)
       ;; A face colour as three cairo components, or #f when the face
       ;; does not name one. VALUE is a pixel integer, a colour name, or
@@ -184,7 +196,18 @@
               (/ (logand (ash value -8) 255) 255.0)
               (/ (logand value 255) 255.0)))
        ((string? value)
-        (let ((rgb (tty-color-standard-values value)))
+        ;; The name as written, then the name normalised - see
+        ;; `%colour-name'. Without the second try EVERY face realized to
+        ;; the plain token on GTK and none of them drew in colour: the
+        ;; standard specs' `(min-colors 88)' and `(min-colors 16)'
+        ;; branches name "Firebrick", "chocolate1", "DarkOrange" and
+        ;; "dark cyan", while the table's entries are "firebrick",
+        ;; "chocolate1", "darkorange" and "darkcyan". A terminal never
+        ;; met the difference, because its 8-colour branch names
+        ;; "yellow", "red" and "magenta", which are spelled the same
+        ;; either way.
+        (let ((rgb (or (tty-color-standard-values value)
+                       (tty-color-standard-values (%colour-name value)))))
           (and (list? rgb)
                (= 3 (length rgb))
                (map (lambda (c) (/ c 65535.0)) rgb))))
