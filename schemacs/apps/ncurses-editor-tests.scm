@@ -3099,4 +3099,42 @@
             (list (= start (- here half))
                   (< start before))))))))
 
+;; ...and the same rule going *down*, which is the half that was missing.
+;; Walking one line at a time until point falls off the bottom recentres
+;; too: `try_scrolling' - the scroll-by-a-few-lines path, the one that
+;; would move the window by a single line - is not even *called* at the
+;; default settings (`xdisp.c:21109'), because `scroll-conservatively' and
+;; `scroll-step' are both 0 and `scroll-*-aggressively' both nil. Control
+;; falls through to `recenter:' whichever direction point left by.
+;;
+;; This scrolled by two lines instead until 2026-10-06, and the rule it
+;; asserts is the same one the test above asserts: the start lands
+;; `half' lines above point.
+(test-equal '(#t #t)
+  (let* ((ed (new-text-editor))
+         (frame (test-frame ed)))
+    (parameterize ((*current-frame* frame) (*current-buffer* #f)
+                   (*this-command* #f) (*last-command* #f))
+      (let loop ((i 0))
+        (when (< i 300)
+          (text-editor-insert ed (string-append "line " (number->string i) "\n"))
+          (loop (+ i 1))))
+      (set-window-buffer! (frame-selected-window frame) ed)
+      (text-editor-set-cursor ed 1)
+      (let* ((w (frame-selected-window frame))
+             (half (quotient (window-body-height w) 2))
+             (start-before (window-start w)))
+        ;; one line at a time, until the window has had to move
+        (let loop ((n 0))
+          (when (and (< n 200) (= (window-start w) start-before))
+            (dispatch-input-event frame C-n)
+            (scroll-to-cursor! w)
+            (loop (+ n 1))))
+        (let* ((here (count-lines ed (text-editor-point-min ed)
+                                  (text-editor-get-cursor ed)))
+               (start (count-lines ed (text-editor-point-min ed)
+                                   (window-start w))))
+          (list (= start (- here half))
+                (> start start-before)))))))
+
 (test-end "schemacs_ncurses_editor_recenter")

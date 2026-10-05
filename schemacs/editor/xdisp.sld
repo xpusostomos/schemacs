@@ -613,26 +613,55 @@
               ((< column (cdr (car rest))) k)
               (else (loop (cdr rest) (+ k 1))))))
 
-    (define (back-up-from-cursor window ed cursor-start vheight need)
-      ;; The cursor's line has fallen off the bottom of WINDOW: back the
-      ;; window's start up from the cursor's own row until one more line
-      ;; above will not fit. NEED is the rows the cursor's line and
-      ;; everything below it take.
+    (define (recenter-window-on-cursor! window ed cursor-start vheight)
+      ;; Put WINDOW's start half a window's height *backward* from its
+      ;; point - GNU Emacs's `recenter:' label (`xdisp.c:21150') at the
+      ;; default settings, which is where every window whose point has
+      ;; left it ends up.
       ;;
-      ;; The walk carries the position it is on - the cursor's own line
-      ;; beginning, then each line beginning above it - so crossing N
-      ;; lines costs those N lines. Asking the engine for line L - 1's
-      ;; rows instead, as this walk first did, costs a scan of the whole
-      ;; buffer per line crossed.
+      ;; "Determine the window start relative to point": the C seats the
+      ;; display iterator on point and sets
+      ;;
+      ;;     /* Set the window start half the height of the window
+      ;;        backward from point.  */
+      ;;     centering_position = window_box_height (w) / 2;
+      ;;
+      ;; (`xdisp.c:21230'), then walks back that far with
+      ;; `move_it_vertically_backward (&it, centering_position)'
+      ;; (`:21245') - by *rows*, so a wrapped line counts for the height
+      ;; it takes, and it stops on a line beginning.
+      ;;
+      ;; **Both directions go through it**, and that is the part worth
+      ;; having read the C for. `try_scrolling' - the scroll-by-a-few-
+      ;; lines path, the one that would move the window by a single line
+      ;; - is not even *called* at the default settings:
+      ;;
+      ;;     if ((0 < scroll_conservatively
+      ;;          || 0 < emacs_scroll_step
+      ;;          || temp_scroll_step
+      ;;          || NUMBERP (scroll_up_aggressively)
+      ;;          || NUMBERP (scroll_down_aggressively))
+      ;;         && CHARPOS (startp) >= BEGV && ...)
+      ;;       { ... try_scrolling ... }
+      ;;
+      ;; (`xdisp.c:21109'). `scroll-conservatively' and `scroll-step' are
+      ;; both 0 and the two `aggressively' variables are both nil, so the
+      ;; condition is false and control falls straight through to
+      ;; `recenter:' whichever direction point left by. Scrolling by one
+      ;; line is what a *configured* Emacs does; the default recentres.
+      ;;
+      ;; One guard after the walk (`:21250'): if the iterator was carried
+      ;; past the top of the window the window starts at the beginning of
+      ;; point's own line instead - "If cursor did not appear assume that
+      ;; the middle of the window is in the first line of the window."
       ;;--------------------------------------------------------------
-      (let loop ((pos cursor-start) (need need))
-        (if (= pos (text-editor-point-min ed))
-            (set-window-start! window pos)
+      (let loop ((back (quotient vheight 2)) (rows 0) (pos cursor-start))
+        (if (or (<= back 0) (= pos (text-editor-point-min ed)))
+            (set-window-start!
+             window (if (>= rows vheight) cursor-start pos))
             (let* ((above (text-editor-get-start-of-line ed (- pos 1)))
-                   (rows (window-line-rows-at window above)))
-              (if (< (+ need rows) vheight)
-                  (loop above (+ need rows))
-                  (set-window-start! window pos))))))
+                   (tall (window-line-rows-at window above)))
+              (loop (- back tall) (+ rows tall) above)))))
 
     (define (scroll-to-cursor! window)
       ;; Adjust WINDOW's start so that its point is visible, as GNU
@@ -646,12 +675,12 @@
       ;; ordinary scrolling gives - so the start is a line and its rows
       ;; follow from it.
       ;;
-      ;; This is where this redisplay stands in for `redisplay_window''s
-      ;; start decision (`xdisp.c'), which is a good deal larger: the C
-      ;; weighs `scroll-conservatively', `scroll-step', the scroll margin
-      ;; and `w->force_start' before it chooses. What it does here is the
-      ;; case those all reduce to for a window that is redrawn whenever
-      ;; point moves.
+      ;; When point is not visible the answer is
+      ;; `recenter-window-on-cursor!', in *either* direction - which is
+      ;; `redisplay_window`'s whole start decision at the default
+      ;; settings. This function's job is the one thing that decision
+      ;; needs from the display: whether the cursor's own row is on the
+      ;; screen, which is a question about rows and not about lines.
       ;;--------------------------------------------------------------
       (let* ((ed (window-buffer window))
              (vheight (window-body-height window))
@@ -659,60 +688,23 @@
              (start (window-start window)))
         (cond
          ((< cursor-start start)
-          ;; Point is above the window. GNU Emacs does not make it the
-          ;; top line - it *recentres*, which is why `C-v C-v C-v' then
-          ;; `C-p' scrolls back half a page where this scrolled one.
-          ;;
-          ;; The path is `redisplay_window`'s `recenter:' label
-          ;; (`xdisp.c:21150'). Its first act is to seat the display
-          ;; iterator on point with `it.current_y = it.last_visible_y' -
-          ;; point, measured from the bottom of the window - and then:
-          ;;
-          ;;     /* Set the window start half the height of the window
-          ;;        backward from point.  */
-          ;;     centering_position = window_box_height (w) / 2;
-          ;;
-          ;; (`:21197'). That `else` is the whole of the default
-          ;; behaviour: the branch above it is taken only when
-          ;; `scroll-conservatively' is over 100 or `scroll-*-aggressively'
-          ;; is a number, and both defaults are 0 and nil.
-          ;;
-          ;; The walk is `move_it_vertically_backward (&it,
-          ;; centering_position)' - by *rows*, so a wrapped line counts
-          ;; for the height it takes, and it stops on a line beginning.
-          ;;
-          ;; One guard after it (`:21250'): if the iterator was carried
-          ;; past the top of the window the window starts at the
-          ;; beginning of point's own line instead - "If cursor did not
-          ;; appear assume that the middle of the window is in the first
-          ;; line of the window."
-          (let loop ((back (quotient vheight 2)) (rows 0) (pos cursor-start))
-            (if (or (<= back 0) (= pos (text-editor-point-min ed)))
-                (set-window-start!
-                 window (if (>= rows vheight) cursor-start pos))
-                (let* ((above (text-editor-get-start-of-line ed (- pos 1)))
-                       (tall (window-line-rows-at window above)))
-                  (loop (- back tall) (+ rows tall) above)))))
+          ;; point's line begins above the window, so point is not visible
+          (recenter-window-on-cursor! window ed cursor-start vheight))
          (else
           ;; walk down from the start to the cursor's line, counting rows
           (let loop ((pos start) (used 0))
             (cond
              ((>= used vheight)
               ;; the cursor's line has fallen off the bottom
-              (back-up-from-cursor
-               window ed cursor-start vheight
-               (+ 1 (rows-row-of-column
-                     (window-line-slices-at window cursor-start)
-                     (text-editor-cursor-column ed)))))
+              (recenter-window-on-cursor! window ed cursor-start vheight))
              ((= pos cursor-start)
               ;; the cursor's line: visible only if its own row is
               (let ((k (rows-row-of-column
                         (window-line-slices-at window pos)
                         (text-editor-cursor-column ed))))
                 (when (>= (+ used k) vheight)
-                  ;; its row is below the window, so it becomes the last
-                  (back-up-from-cursor window ed cursor-start vheight
-                                       (+ 1 k)))))
+                  ;; its row is below the window, so point is not visible
+                  (recenter-window-on-cursor! window ed cursor-start vheight))))
              (else
               (let ((next (line-next-start ed pos)))
                 ;; visible as it stands, or the walk ran past the end of

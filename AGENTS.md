@@ -2036,3 +2036,58 @@ longer says they were.
 
 The lesson is the one about naming-step tracing: when the evidence is a
 printed value, read the *shape* of it before drawing a conclusion from it.
+
+## Scrolling down one line at a time — the other half of the recentring rule
+
+Chris, from using the editor: *"In emacs if I go down one line at a time,
+when I hit the bottom it scrolls up half a page or something. In schemacs if
+I go down one line at a time it seems to scroll always 2 lines at the
+bottom."*
+
+Right again, and it is the same rule as the recentring note above - applied
+in the direction that note did not cover. `scroll-to-cursor!` recentred when
+point went *above* the window and scrolled by a couple of lines when it went
+*below*, as if the two were different decisions.
+
+**They are one decision, and the C says so in the guard rather than in the
+body.** `try_scrolling` - the scroll-by-a-few-lines path, the one that would
+move the window by a single line - is not even *called* at the default
+settings (`xdisp.c:21109`):
+
+```c
+  if ((0 < scroll_conservatively
+       || 0 < emacs_scroll_step
+       || temp_scroll_step
+       || NUMBERP (BVAR (current_buffer, scroll_up_aggressively))
+       || NUMBERP (BVAR (current_buffer, scroll_down_aggressively)))
+      && CHARPOS (startp) >= BEGV && ...)
+    { ... try_scrolling ... }
+
+  /* Finally, just choose a place to start which positions point
+     according to user preferences.  */
+ recenter:
+```
+
+`scroll-conservatively` and `scroll-step` are both 0 and the two
+`aggressively` variables are both nil, so the condition is **false** and
+control falls straight through to `recenter:` whichever direction point left
+by. And `recenter:` sets `centering_position = window_box_height (w) / 2`
+(`:21230`) unless the conservative/aggressive branch above it is taken,
+which it is not.
+
+So the default Emacs scrolls by *one line* never; it **recentres**, and the
+text moving up about half a page on each C-n at the bottom is exactly what
+that looks like from the outside. Scrolling by one line is what a
+*configured* Emacs does - `scroll-step 1`, or `scroll-conservatively` over
+100 - and those settings are the branch this port does not have.
+
+`back-up-from-cursor` is gone: its only caller was the downward case, and
+the downward case is `recenter-window-on-cursor!`, which is the upward
+case's walk with a name. `scroll-to-cursor!`'s own job is now only the one
+thing the decision needs from the display - **whether the cursor's own row
+is on the screen**, which is a question about rows and not about lines, and
+is why the row walk is still there.
+
+`ncurses-editor-tests.scm` has the mirror of the upward test: walk down one
+line at a time until the window has to move, and assert the *rule*
+(`start == point - body/2`), not a measured number.
