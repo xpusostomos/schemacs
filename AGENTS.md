@@ -54,6 +54,9 @@ always check yourself... does real emcas have a function this messy or this big?
 Sometimes it does, and it is what it is. But sometimes you make a mess of it
 and try to patch it when you should go back to emacs itself and start afresh.
 
+If our behavior differs to real emacs, don't just figure it out empirically,
+look at the emacs code to find out definitively the rule.
+
 If Emacs implements an algorithm in several functions, you should too. Don't
 try and mash it into one.
 
@@ -1574,3 +1577,76 @@ which is why the two counters exist apart.
    so `text-editor-note-property-change!` was unbound at run time with
    no load-time error - the missing-import class, twice in one session.
    Assert on the match before replacing.
+
+## Recentring: `scroll-to-cursor!` put point at the top where Emacs centres — 2026-10-06
+
+Chris, from using the editor: "`C-v C-v C-v` in emacs and schemacs is the
+same, cursor on first line. But if I then do `C-p` up one line, emacs
+pages up half a page visually, while moving cursor up one line. schemacs
+goes up one line only."
+
+He was right. `scroll-to-cursor!` had, for point above the window:
+
+```scheme
+(set-window-start! window cursor-start)   ; point's line becomes the top
+```
+
+GNU Emacs does not do that. `redisplay_window`'s `recenter:` label
+(`xdisp.c:21150`) seats the display iterator on point with
+`it.current_y = it.last_visible_y`, and then
+
+```c
+  if (!MINI_WINDOW_P (w)
+      && (scroll_conservatively > SCROLL_LIMIT || NUMBERP (aggressive)))
+    { ...the conservative/aggressive arithmetic... }
+  else
+    /* Set the window start half the height of the window backward
+       from point.  */
+    centering_position = window_box_height (w) / 2;      /* :21197 */
+```
+
+**The `else` is the whole of the default behaviour.** The branch above it
+is taken only when `scroll-conservatively` is over 100 or
+`scroll-*-aggressively` is a number, and the defaults are 0 and nil. So
+whenever point moves off the screen, Emacs puts the window start half a
+window's height *backward* from point - point lands in the middle, which
+is the "half a page" Chris saw.
+
+The walk is `move_it_vertically_backward (&it, centering_position)`,
+which turns the distance into lines with
+
+```c
+  nlines = max (1, dy / default_line_pixel_height (it->w));
+```
+
+and then walks back that many *visible line* starts. One guard after it
+(`:21250`): if the iterator was carried past the top of the window the
+window starts at point's own line instead.
+
+`scroll-to-cursor!` is that now - `floor (body-height / 2)` rows back,
+counting a wrapped line for the rows it takes, snapped to a line
+beginning, with the guard.
+
+### The method lesson
+
+I found this by driving a real Emacs in a pty and reading `point`,
+`window-start` and `window-end` after each key. That was the wrong order
+and Chris called it: **the rule is to read the C and copy it**, not to
+fit an implementation to measurements. The measurements were still worth
+having as a *check* - and they are why the one-line residual below is
+visible at all - but the algorithm came out of `xdisp.c`, not out of the
+numbers. Doing it the other way would have produced something that
+matched one terminal size.
+
+### Open, and deliberately not tuned
+
+My harness still differs from the Emacs run by one line: with a 12-row
+terminal (body 10), Emacs scrolled back 5 lines and ours 6. Per the rule
+above I have **not** adjusted the arithmetic to close that gap, because
+the difference is almost certainly in what Emacs counts as
+`window_box_height` (the text area minus its mode line, scroll bars,
+dividers and fringes) against what our `window-body-height` returns -
+a geometry question to resolve by reading, not by fitting. The
+regression test in `ncurses-editor-tests.scm` asserts the *rule*
+(`start == point - body/2`), not the measured number, for the same
+reason.

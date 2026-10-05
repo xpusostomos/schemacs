@@ -26,7 +26,8 @@
        window-internal?
        window-list
        set!window-height set!window-width
-       set-window-point! window-body-width window-buffer window-edges
+       set-window-point! window-body-height window-body-width
+       window-buffer window-edges
        window-height window-point window-right-border? window-top
        window-width)
  (only (schemacs editor keyboard)
@@ -35,7 +36,8 @@
  ;; `cursor-type' - the tests below are its rule, not the drawing of it.
  (only (schemacs editor xdisp)
        *truncate-partial-width-windows* get-window-cursor-type
-       line-display-rows window-truncates-lines? scroll-to-cursor!)
+       line-display-rows window-truncates-lines? scroll-to-cursor!
+       window-start)
  ;; The dispatch asks the display what a raw event means, and this is the
  ;; display it asks: a terminal object with no curses behind it, which is
  ;; all the character events these tests feed ever need (only an extended
@@ -230,6 +232,8 @@
 
 ;; The key events used below.
 (define C-u (integer->char 21))
+(define C-v (integer->char 22))
+(define C-p (integer->char 16))
 (define C-k (integer->char 11))
 (define C-y (integer->char 25))
 (define C-d (integer->char 4))
@@ -2990,3 +2994,62 @@
       (window-truncates-lines? window))))
 
 (test-end "schemacs_editor_line_wrap")
+
+;;--------------------------------------------------------------------
+;; Recentring when point moves off the top
+;;
+;; GNU Emacs does not make point the top line when it moves above the
+;; window - it recentres. `redisplay_window`'s `recenter:' label
+;; (xdisp.c:21150) seats the display iterator on point with
+;; `it.current_y = it.last_visible_y' and then:
+;;
+;;     /* Set the window start half the height of the window backward
+;;        from point.  */
+;;     centering_position = window_box_height (w) / 2;
+;;
+;; That `else` is the whole of the default behaviour - the branch above
+;; it needs `scroll-conservatively' over 100 or a numeric
+;; `scroll-*-aggressively', and both defaults are 0 and nil.
+;; `move_it_vertically_backward' turns the distance into lines with
+;; `nlines = max (1, dy / default_line_pixel_height)' and walks back
+;; that many, stopping on a line beginning.
+;;
+;; So the assertion below is the *rule*, not a transcription of a run:
+;; the window start ends half a window's height of lines above point.
+;; Before this it was point's own line, which is why `C-v C-v C-v' then
+;; `C-p' scrolled one line where Emacs scrolls half a page.
+;;--------------------------------------------------------------------
+
+(test-begin "schemacs_ncurses_editor_recenter")
+
+(test-equal '(#t #t)
+  (let* ((ed (new-text-editor))
+         (frame (test-frame ed)))
+    (parameterize ((*current-frame* frame) (*current-buffer* #f)
+                   (*this-command* #f) (*last-command* #f))
+      (let loop ((i 0))
+        (when (< i 300)
+          (text-editor-insert ed (string-append "line " (number->string i) "\n"))
+          (loop (+ i 1))))
+      (set-window-buffer! (frame-selected-window frame) ed)
+      (text-editor-set-cursor ed 1)
+      (let* ((w (frame-selected-window frame))
+             (half (quotient (window-body-height w) 2)))
+        ;; scroll so point is at the top of the window
+        (for-each (lambda (ev) (dispatch-input-event frame ev))
+                  (list C-v C-v C-v))
+        (scroll-to-cursor! w)
+        (let ((before (count-lines ed (text-editor-point-min ed)
+                                   (window-start w))))
+          ;; now move up one line, which puts point above the window
+          (dispatch-input-event frame C-p)
+          (scroll-to-cursor! w)
+          (let* ((here (count-lines ed (text-editor-point-min ed)
+                                    (text-editor-get-cursor ed)))
+                 (start (count-lines ed (text-editor-point-min ed)
+                                     (window-start w))))
+            ;; the start went back half a window, not to point's own line
+            (list (= start (- here half))
+                  (< start before))))))))
+
+(test-end "schemacs_ncurses_editor_recenter")

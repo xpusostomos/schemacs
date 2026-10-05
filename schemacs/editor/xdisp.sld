@@ -646,8 +646,40 @@
              (start (window-start window)))
         (cond
          ((< cursor-start start)
-          ;; point is above the window: its line becomes the top
-          (set-window-start! window cursor-start))
+          ;; Point is above the window. GNU Emacs does not make it the
+          ;; top line - it *recentres*, which is why `C-v C-v C-v' then
+          ;; `C-p' scrolls back half a page where this scrolled one.
+          ;;
+          ;; The path is `redisplay_window`'s `recenter:' label
+          ;; (`xdisp.c:21150'). Its first act is to seat the display
+          ;; iterator on point with `it.current_y = it.last_visible_y' -
+          ;; point, measured from the bottom of the window - and then:
+          ;;
+          ;;     /* Set the window start half the height of the window
+          ;;        backward from point.  */
+          ;;     centering_position = window_box_height (w) / 2;
+          ;;
+          ;; (`:21197'). That `else` is the whole of the default
+          ;; behaviour: the branch above it is taken only when
+          ;; `scroll-conservatively' is over 100 or `scroll-*-aggressively'
+          ;; is a number, and both defaults are 0 and nil.
+          ;;
+          ;; The walk is `move_it_vertically_backward (&it,
+          ;; centering_position)' - by *rows*, so a wrapped line counts
+          ;; for the height it takes, and it stops on a line beginning.
+          ;;
+          ;; One guard after it (`:21250'): if the iterator was carried
+          ;; past the top of the window the window starts at the
+          ;; beginning of point's own line instead - "If cursor did not
+          ;; appear assume that the middle of the window is in the first
+          ;; line of the window."
+          (let loop ((back (quotient vheight 2)) (rows 0) (pos cursor-start))
+            (if (or (<= back 0) (= pos (text-editor-point-min ed)))
+                (set-window-start!
+                 window (if (>= rows vheight) cursor-start pos))
+                (let* ((above (text-editor-get-start-of-line ed (- pos 1)))
+                       (tall (window-line-rows-at window above)))
+                  (loop (- back tall) (+ rows tall) above)))))
          (else
           ;; walk down from the start to the cursor's line, counting rows
           (let loop ((pos start) (used 0))
