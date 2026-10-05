@@ -49,6 +49,14 @@
           buffer-text-substring  buffer-text-for-each
           buffer-text-clear!
           )
+    ;; The line-break cache `find-newline' keeps - GNU Emacs's
+    ;; `region-cache.c', which is `buf->newline_cache' there. It is what
+    ;; makes searching a buffer with very long lines affordable: a
+    ;; stretch already searched and found free of line breaks is skipped
+    ;; whole rather than scanned again.
+    (only (schemacs editor region-cache)
+          new-region-cache  know-region-cache  invalidate-region-cache
+          region-cache-forward  region-cache-backward)
     )
   (cond-expand
    ;; To define pretty-printers for Guile
@@ -146,6 +154,13 @@
    find-newline  scan-newline-from-point
    bol  eol  find-before-next-newline  count-lines
    text-editor  show-text-editor
+   ;; `invalidate_buffer_caches' (`insdel.c:2206'). The three writers in
+   ;; this file call it themselves; it is exported because anything that
+   ;; changes the text by another route has to, and the C's `erase-buffer'
+   ;; is the example - `(invalidate_buffer_caches (current_buffer, BEGV,
+   ;; ZV))' (buffer.c:2773). `erase-buffer' here goes through
+   ;; `text-editor-delete-from-cursor', so it is already covered.
+   text-editor-invalidate-caches!
    )
 
   (begin
@@ -317,13 +332,21 @@
 
     (define-record-type <text-editor-type>
       (make<text-editor>
-       text  point
+       text  newline-cache  point
        ins-char  lbrk  textprops  undo
        modified  save-token  read-only  mark  markers
        deactivate-mark
        name  file-name
        )
       text-editor-type?
+      (newline-cache %text-editor-newline-cache
+                     set!%text-editor-newline-cache)
+      ;; ^ GNU Emacs's `buf->newline_cache' (`buffer.h:696'), the
+      ;; `region-cache' that remembers which stretches of the buffer have
+      ;; been searched and found to hold no line break. False until
+      ;; `find-newline' first wants it, which is when the C makes one
+      ;; too (`search.c:640') - a buffer whose lines are never searched
+      ;; never pays for it.
       (text       text-editor-text          set!text-editor-text)
       ;; ^ The buffer's text - a `(schemacs editor buffer-text)', which
       ;; is GNU Emacs's `struct buffer_text': the characters, the gap
@@ -447,6 +470,8 @@
                         ;; Emacs's `BEG' is 1, and every position the
                         ;; class answers is in that coordinate system.
                         (new-buffer-text 1 size)
+                        ;; the newline cache, made on first use
+                        #f
                         1
                         #f lbrk props
                         ;; A newly created buffer records undo
@@ -1255,6 +1280,7 @@
       (let ((text  (text-editor-text ed))
             (point (text-editor-point ed))
             )
+        (text-editor-invalidate-caches! ed point point)
         (buffer-text-insert! text point (string ch))
         (set!text-editor-point ed (+ 1 point))
         ch
@@ -1270,6 +1296,30 @@
     ;; editor, a gap buffer of `<text-line>' records and a CDF, have no
     ;; counterpart in Emacs and are gone with those three structures.
 
+    (define (text-editor-invalidate-caches! ed start end)
+      ;; Tell the buffer's caches that the region START to END is about to
+      ;; change - GNU Emacs's `invalidate_buffer_caches' (`insdel.c:2206'),
+      ;; which `prepare_to_modify_buffer' calls before every modification.
+      ;; The line-break cache is the only one this tree keeps; the C's
+      ;; `bidi_paragraph_cache' and `width_run_cache' cache things - bidi
+      ;; paragraph starts, and the display widths of a stretch of text -
+      ;; that nothing here asks for.
+      ;;
+      ;; The cache is told in the HEAD/TAIL form - "this many characters
+      ;; unchanged at the beginning of the buffer, this many at the end" -
+      ;; rather than with positions, because an insertion or a deletion
+      ;; moves everything after it and that form reads the same before and
+      ;; after the change. For an insertion at POINT the tail is
+      ;; `Z - POINT`, which is the same count either side of it.
+      ;;--------------------------------------------------------------
+      (let ((cache (%text-editor-newline-cache ed)))
+        (when cache
+          (invalidate-region-cache cache
+                                   (text-editor-point-min ed)
+                                   (text-editor-point-max ed)
+                                   (- start (text-editor-point-min ed))
+                                   (- (text-editor-point-max ed) end)))))
+
     (define (%text-editor-delete-forward ed n)
       ;; Delete up to N characters after point, clamped at `point-max'.
       ;; GNU Emacs's `Fdelete_char' (`cmds.c:221') with a positive N
@@ -1281,6 +1331,7 @@
              (avail (- (text-editor-point-max ed) point))
              (n     (min n avail))
              )
+        (text-editor-invalidate-caches! ed point (+ point n))
         (buffer-text-delete! (text-editor-text ed) point (+ point n))
         n))
 
@@ -1292,6 +1343,7 @@
              (avail (- point (text-editor-point-min ed)))
              (n     (min n avail))
              )
+        (text-editor-invalidate-caches! ed (- point n) point)
         (buffer-text-delete! (text-editor-text ed) (- point n) point)
         (set!text-editor-point ed (- point n))
         n))
@@ -1510,31 +1562,137 @@
       ;; END false means what the C's zero means: "the end of the buffer
       ;; in the direction of travel" - `ZV' going forward, `BEGV' going
       ;; backward (`search.c:681').
+      ;;
+      ;; The line-break cache (`buf->newline_cache', which is
+      ;; `(schemacs editor region-cache)') is consulted on the way, as
+      ;; the C consults it: a stretch already searched and found to hold
+      ;; no line break is skipped whole, and a stretch this scan crosses
+      ;; without finding one is recorded as known. That is what makes a
+      ;; buffer with very long lines affordable - see `region-cache.sld'
+      ;; for why the C has it at all.
       ;;--------------------------------------------------------------
-      (let* ((text (text-editor-text ed))
-             (end  (or end (if (< 0 count)
+      (let* ((end  (or end (if (< 0 count)
                                (text-editor-point-max ed)
                                (text-editor-point-min ed))))
-             )
+             ;; The cache is made here on first use, as the C makes it
+             ;; (`if (!cache_buffer->newline_cache) cache_buffer->
+             ;; newline_cache = new_region_cache ()', `search.c:640') - a
+             ;; buffer whose lines are never searched never pays for one.
+             (cache (or (%text-editor-newline-cache ed)
+                        (let ((c (new-region-cache (text-editor-point-min ed))))
+                          (set!%text-editor-newline-cache ed c)
+                          c))))
         (if (< 0 count)
-            (let loop ((pos start) (left count) (found 0))
-              (cond
-               ((>= pos end) (values end found))
-               ((= (buffer-text-ref text pos) #x0a)
-                (let ((left (- left 1)) (found (+ found 1)))
-                  (if (= left 0)
-                      (values (+ pos 1) found)
-                      (loop (+ pos 1) left found))))
-               (else (loop (+ pos 1) left found))))
-            (let loop ((pos start) (left count) (found 0))
-              (cond
-               ((<= pos end) (values end found))
-               ((= (buffer-text-ref text (- pos 1)) #x0a)
-                (let ((left (+ left 1)) (found (- found 1)))
-                  (if (>= left 0)
-                      (values pos found)
-                      (loop (- pos 1) left found))))
-               (else (loop (- pos 1) left found)))))))
+            (find-newline-forward ed start count end cache)
+            (find-newline-backward ed start count end cache))))
+
+    (define (%newline-in ed pos lim)
+      ;; The first line break in [POS, LIM), or false when there is none -
+      ;; the C's "dumb loop", the innermost scan that knows nothing about
+      ;; the cache or the buffer's ends. It carries one variable, because
+      ;; it runs once per character.
+      ;;--------------------------------------------------------------
+      (let ((text (text-editor-text ed)))
+        (let loop ((p pos))
+          (cond ((>= p lim) #f)
+                ((= (buffer-text-ref text p) #x0a) p)
+                (else (loop (+ p 1)))))))
+
+    (define (%newline-before ed pos lim)
+      ;; The first line break strictly before POS and at or after LIM,
+      ;; answering the position just *after* it, or false when there is
+      ;; none. Scanning backward looks at the character before the
+      ;; position it is at, which is why the answer is a position past the
+      ;; break rather than on it.
+      ;;--------------------------------------------------------------
+      (let ((text (text-editor-text ed)))
+        (let loop ((p pos))
+          (cond ((<= p lim) #f)
+                ((= (buffer-text-ref text (- p 1)) #x0a) p)
+                (else (loop (- p 1)))))))
+
+    (define (find-newline-forward ed start count end cache)
+      ;; The forward half of `find-newline'. Each round asks the cache
+      ;; where the knowledge runs out, scans that far for a line break,
+      ;; and records what it crossed - which is the C's structure: consult,
+      ;; dumb-loop, `know_region_cache', repeat.
+      ;;
+      ;; A stretch the cache calls known holds no line break, so it is
+      ;; stepped over rather than looked at. That is the whole saving.
+      ;;--------------------------------------------------------------
+      (let ((beg (text-editor-point-min ed))
+            (z (text-editor-point-max ed)))
+        (let outer ((pos start) (left count) (found 0))
+          (if (>= pos end)
+              (values end found)
+              (call-with-values
+                  (lambda ()
+                    (if cache
+                        (region-cache-forward cache beg z pos)
+                        (values 0 pos)))
+                (lambda (known next-change)
+                  (cond
+                   ((= known 1)
+                    ;; known: no break in here at all - step over it
+                    (let ((skip (min next-change end)))
+                      (if (<= skip pos)
+                          (values end found)
+                          (outer skip left found))))
+                   (else
+                    ;; unknown as far as NEXT-CHANGE, or as far as the
+                    ;; caller asked
+                    (let ((lim (min (if (> next-change pos) next-change end)
+                                    end)))
+                      (let ((nl (%newline-in ed pos lim)))
+                        (cond
+                         ((not nl)
+                          (when (and cache (> lim pos))
+                            (know-region-cache cache beg z pos lim))
+                          (outer lim left found))
+                         (else
+                          (when (and cache (> nl pos))
+                            (know-region-cache cache beg z pos nl))
+                          (if (= left 1)
+                              (values (+ nl 1) (+ found 1))
+                              (outer (+ nl 1) (- left 1) (+ found 1)))))))))))))))
+
+    (define (find-newline-backward ed start count end cache)
+      ;; The backward half of `find-newline', the mirror of the forward
+      ;; one: consult, scan down to where the knowledge runs out, record
+      ;; what was crossed, repeat.
+      ;;--------------------------------------------------------------
+      (let ((beg (text-editor-point-min ed))
+            (z (text-editor-point-max ed)))
+        (let outer ((pos start) (left count) (found 0))
+          (if (<= pos end)
+              (values end found)
+              (call-with-values
+                  (lambda ()
+                    (if cache
+                        (region-cache-backward cache beg z pos)
+                        (values 0 pos)))
+                (lambda (known next-change)
+                  (cond
+                   ((= known 1)
+                    (let ((skip (max next-change end)))
+                      (if (>= skip pos)
+                          (values end found)
+                          (outer skip left found))))
+                   (else
+                    (let ((lim (max (if (< next-change pos) next-change end)
+                                    end)))
+                      (let ((nl (%newline-before ed pos lim)))
+                        (cond
+                         ((not nl)
+                          (when (and cache (< lim pos))
+                            (know-region-cache cache beg z lim pos))
+                          (outer lim left found))
+                         (else
+                          (when (and cache (< nl pos))
+                            (know-region-cache cache beg z nl pos))
+                          (if (= left -1)
+                              (values nl -1)
+                              (outer (- nl 1) (+ left 1) (- found 1)))))))))))))))
 
     (define (scan-newline-from-point ed count)
       ;; GNU Emacs's `scan_newline_from_point' (`search.c':986'): scan
@@ -1633,15 +1791,18 @@
         (lambda (found-pos _found) found-pos)))
 
     (define (%line-end ed from)
-      ;; The position of the newline that ends the line containing FROM,
-      ;; or `point-max' when there is none - the forward half of `eol'.
+      ;; The position of the newline that ends the line containing FROM, or
+      ;; `point-max' when there is none. It is the forward half of `eol'
+      ;; with the scan started where it is told to rather than at point.
+      ;;
+      ;; It goes through `find-before-next-newline', and so through
+      ;; `find-newline' and the line-break cache, as the C's does. It used
+      ;; to be a private character-at-a-time loop, which not only
+      ;; duplicated a scan Emacs already has but missed the cache
+      ;; entirely - a long line was re-walked by every caller, which is
+      ;; what `region-cache.c' exists to prevent.
       ;;--------------------------------------------------------------
-      (let ((text (text-editor-text ed)))
-        (let loop ((pos from))
-          (cond
-           ((>= pos (text-editor-point-max ed)) pos)
-           ((= (buffer-text-ref text pos) #x0a) pos)
-           (else (loop (+ pos 1)))))))
+      (find-before-next-newline ed from 1))
 
     (define (%text-editor-position ed line col)
       ;; The position of column COL - counting from 0 - on line LINE -

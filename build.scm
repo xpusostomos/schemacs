@@ -70,6 +70,7 @@
     (schemacs editor replace)
     (schemacs editor buffer)
     (schemacs editor buffer-text)
+    (schemacs editor region-cache)
     (schemacs editor font-core)
     (schemacs editor font-lock)
     (schemacs editor pages)

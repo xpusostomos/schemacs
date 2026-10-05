@@ -1381,7 +1381,100 @@ Use `char=?` and `#\newline`.
 
 ## Still open after this
 
-- `find_newline`'s `region_cache` (search.c) is still not ported. What is
-  left that scans from `point-min` is `buffer-line-string`,
-  `line-outer-size`, `text-editor-line-count` and the line numbers the
-  `%l` cache has to walk for - none of them on the redisplay path now.
+- `find_newline`'s `region_cache` was not ported at the time of writing;
+  it is now - see the next section.
+
+# The line-break cache — done (2026-10-05)
+
+## What landed
+
+`schemacs/editor/region-cache.sld` is a port of `region-cache.c`, and
+`find-newline` consults it, as `find_newline` does. `region-cache.h`
+says what it is for: "some applications, like gene editing, make use of
+very long lines --- on the order of tens of kilobytes", where scanning
+to the next line break costs tens of thousands of characters *every*
+time. The cache notes a stretch it has searched and found free of line
+breaks, and the next search steps over it whole.
+
+The buffer gained `newline-cache` - GNU Emacs's `buf->newline_cache` -
+made lazily the first time a search wants it (`search.c:640`), so a
+buffer whose lines are never searched never pays for one.
+
+## The bug that made it look useless
+
+The first measurement said the cache bought nothing: 225ms cold, 211ms
+warm. Two things were wrong, and both are worth knowing:
+
+1. **Nothing ever created the cache.** The field defaults to false and
+   `find-newline` used `(or (%text-editor-newline-cache ed) ...)` only
+   after I added the lazy creation the C does at `search.c:640`. Until
+   then every lookup answered "no cache" and the whole port was dead
+   code. A cache that is never populated is indistinguishable from one
+   that never helps.
+
+2. **`%line-end` did not go through `find-newline` at all.** It was a
+   private character-at-a-time loop - a hand-rolled duplicate of a scan
+   Emacs already has - so the most-called line scan in the engine
+   bypassed the cache entirely. It is `(find-before-next-newline ed
+   from 1)` now, which is `eol`'s own forward half.
+
+After both, on 4 MB of 20,000-character lines:
+
+| | ms |
+|---|---|
+| first pass over 200 long lines | 727 |
+| the same pass again | **2.8** |
+| a single `eol` cold / warm | 3.96 / **0.026** |
+| a single `bol` cold / warm | 1.49 / **0.012** |
+
+The hand-rolled loop this replaced cost 225ms for the first pass, so
+**the cold pass is about 3x slower and every pass after it is 80-260x
+faster.** That is the trade Emacs made too, and the redisplay repeats
+these scans many times per redraw, so the warm case is the one that is
+lived in.
+
+## Invalidation
+
+`text-editor-invalidate-caches!` is `invalidate_buffer_caches`
+(`insdel.c:2206`), which the C calls from `prepare_to_modify_buffer`
+before every change. It is called from the three writers in
+`engine.sld` - `text-editor-force-insert-char` and the two delete
+primitives. `erase-buffer` goes through `text-editor-delete-from-cursor`,
+so it is covered without a call of its own.
+
+The cache is told in the **HEAD/TAIL form** - "this many characters
+unchanged at the beginning, this many at the end" - and not with
+positions, because an insertion or a deletion moves everything after it
+and that form reads the same before and after the change. For an
+insertion at POINT the tail is `Z - POINT`, the same count either side.
+
+Nothing is *repaired* at invalidation time; it only records that the
+region is now unknown, and `revalidate_region_cache` cleans up in one go
+the next time the cache is read. That is why the cost of an edit does
+not depend on how much the cache knows.
+
+## Departures
+
+- The C reaches the buffer through `struct buffer *` and the `BEG`/`Z`
+  macros; `region-cache.sld` sits under the engine and cannot see a
+  `<text-editor-type>`, so the caller passes the two endpoints. A
+  boundary is a pair and the array is a Scheme vector; the gap
+  arithmetic and the relative-position scheme are the C's.
+- `xpalloc`'s growth - "about 50%", `n = n0 + n0 / 2`, raised to what
+  the caller needs - is `%grow-boundaries!`. No doubling.
+- The C counts the line breaks immediately following a known run before
+  consulting the cache again (`search.c:733-746`). This port consults
+  every time. The answers are identical; only the number of
+  consultations differs.
+- `pp_cache` (the `ENABLE_CHECKING` pretty-printer), the
+  `width_run_cache` and the `bidi_paragraph_cache` are not ported.
+  Nothing here asks for the last two.
+
+## Hazard found while porting it
+
+`%insert-cache-boundary!` must write the new boundary at the **raw**
+array index once `%move-cache-gap!` has put the gap there, as the C's
+`c->boundaries[i]` does. Reading it back through the before/after-gap
+arithmetic reads one slot past the end of the array - this failed with
+`vector-set!: Argument 2 out of range: 40`, which says nothing about
+which of the two branches is wrong.

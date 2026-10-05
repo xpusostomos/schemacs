@@ -44,6 +44,7 @@ SCHEME_LIBRARIES := \
   ./schemacs/editor/replace.sld \
   ./schemacs/editor/buffer.sld \
   ./schemacs/editor/buffer-text.sld \
+  ./schemacs/editor/region-cache.sld \
   ./schemacs/editor/font-core.sld \
   ./schemacs/editor/font-lock.sld \
   ./schemacs/editor/pages.sld \
