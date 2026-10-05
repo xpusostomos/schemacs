@@ -35,10 +35,11 @@
     (only (guile)
           make-weak-key-hash-table  hashq-set!  hashq-remove!  hash-for-each)
     ;; The buffer's text. Emacs's `struct buffer_text' as an object -
-    ;; the characters, the gap and where the gap is - so the three
+    ;; the characters, the gap and where the gap is - so the four
     ;; structures this file used to keep (a gap buffer of `<text-line>'
-    ;; records, a separate line editor, and a CDF indexing the lines)
-    ;; are one sequence of characters, as they are in Emacs.
+    ;; records, a separate line editor, a CDF indexing the lines, and a
+    ;; hand-maintained character count) are one sequence of characters,
+    ;; as they are in Emacs.
     (only (schemacs editor buffer-text)
           new-buffer-text  buffer-text-type?
           buffer-text-base  buffer-text-z  buffer-text-length
@@ -63,14 +64,6 @@
    (else)
    )
   (export
-   ;; Text lines, these are contain individual lines of text possibly
-   ;; terminated with some line breaking character sequence.
-   text-line-type?  new-text-line  text-line
-   text-line-inner-size  text-line-outer-size
-   write-text-line  text-line-for-each
-   text-line-ref    text-line-code-ref
-   text-line->string  text-line-inner->string  show-text-line
-
    ;; The text editor data type
    new-text-editor  text-editor-type?
    *init-text-editor-line-count*
@@ -131,12 +124,19 @@
    line-break-size   *default-line-break*
    line-break  show-line-break
 
-   ;; Getting and setting the cursor index
+   ;; Getting and setting the cursor index. Every *position* the engine
+   ;; answers is one-based, as Emacs's are: `point-min' is 1 and
+   ;; `point-max' is one past the last character. Line numbers count
+   ;; from 1 (`line-number-at-pos'); columns from 0 (`current-column').
    text-editor-char-count
+   text-editor-point-min
+   text-editor-point-max
+   text-editor-ref
    text-editor-cursor-line
    text-editor-cursor-column
    text-editor-cursor-location
    text-editor-line-count
+   text-editor-line-string
    text-editor-get-start-of-line
    text-editor-get-end-of-line
    text-editor-get-line-column
@@ -144,9 +144,15 @@
    text-editor-move-cursor
    text-editor-get-cursor
    text-editor-get-char-index
-   text-editor-line-editor-ref
-   text-editor-text-line-ref
+   text-editor-line-ref
    text-editor-line-outer-size
+   ;; The scans the line arithmetic is built on - GNU Emacs's
+   ;; `find_newline' (`search.c:675'), `scan_newline_from_point'
+   ;; (:986), `bol' (`editfns.c:665'), `eol' (:723),
+   ;; `find_before_next_newline' (`search.c':997) and `count_lines'
+   ;; (`xdisp.c:29892').
+   find-newline  scan-newline-from-point
+   bol  eol  find-before-next-newline  count-lines
    text-editor  show-text-editor
 
    run-editor-engine
@@ -336,29 +342,28 @@
       ;; ^ The buffer's text - a `(schemacs editor buffer-text)', which
       ;; is GNU Emacs's `struct buffer_text': the characters, the gap
       ;; and where the gap is. There is ONE of these where there used to
-      ;; be three structures - a gap buffer of `<text-line>' records, a
-      ;; separate line editor, and a CDF indexing the lines. None of the
-      ;; three has a counterpart in Emacs; the text is one sequence of
-      ;; characters there and it is one here.
+      ;; be four - a gap buffer of `<text-line>' records, a separate
+      ;; line editor, a CDF indexing the lines, and a hand-maintained
+      ;; character count. None of the four has a counterpart in Emacs;
+      ;; the text is one sequence of characters there and it is one
+      ;; here.
       (point      text-editor-point         set!text-editor-point)
       ;; ^ The cursor, as a `buffer-text' *position* - one-based, the
-      ;; convention the class speaks. Emacs keeps `PT' on the buffer for
-      ;; the same reason: it is not derivable from the gap, which can
-      ;; sit anywhere.
-      ;;
-      ;; NOTE: `TEXT-EDITOR-GET-CURSOR', the engine's public cursor, is
-      ;; still ZERO-based - every caller depends on that, and
-      ;; `(schemacs editor editfns)''s `point' is `(+ 1 ...)' over it.
-      ;; The subtraction lives in that one accessor.
+      ;; convention the class speaks, and Emacs's own. Emacs keeps `PT'
+      ;; on the buffer for the same reason: it is not derivable from the
+      ;; gap, which can sit anywhere. `TEXT-EDITOR-GET-CURSOR' answers
+      ;; this position as it stands, so `point' is that value and
+      ;; nothing has to convert between two conventions.
       (ins-char   %text-editor-insert-char   set!text-editor-insert-char)
       ;; ^ A function which inserts characters into the editor.
       (lbrk       text-editor-line-break     set!text-editor-line-break)
       ;; ^ The current line-breaking protocol.
       (textprops  text-editor-text-props     set!text-editor-text-props)
-      ;; A VBAL that contains text properties for ranges of text that
-      ;; span multiple <text-line-type> values. This is useful for
-      ;; syntax coloring as you can declare all characters between any
-      ;; two (line,colunm) coordinates to have a particular tag.
+      ;; A VBAL of the buffer's text properties. This is GNU Emacs's
+      ;; `BUFFER_INTERVALS' - the root of the interval tree - which
+      ;; `(schemacs editor intervals)' mirrors and this library only
+      ;; holds; it is what syntax colouring and the `display' property
+      ;; are kept in.
       (undo       text-editor-undo-list     set!text-editor-undo-list)
       ;; ^ The buffer's undo list, GNU Emacs's `buffer-undo-list'. A
       ;; list, newest entry first, of the edits that can be undone; or
@@ -503,34 +508,28 @@
       (buffer-text-length (text-editor-text ed))
       )
 
-    (define (show-text-editor-single-line port)
-      (lambda (line)
-        (display "  " port)
-        (write (text-line->string line) port)
-        (newline port)
-        ))
-
     (define show-text-editor
-      ;; Write the whole content of a text editor to a port.
+      ;; Write the whole content of a text editor to a port: the cursor's
+      ;; location, then the buffer's lines, one per line, each indented
+      ;; two spaces - the shape this printer has had since it printed a
+      ;; gap buffer of lines, kept so that a printed buffer reads the
+      ;; same as it always did.
       ;;--------------------------------------------------------------
       (case-lambda
        ((ed) (show-text-editor ed (current-output-port)))
        ((ed port)
-        (let*((lines (text-editor-lines ed))
-              (weight (gap-buffer-weight lines))
-              (location (text-editor-cursor-location ed))
-              )
-          (display "(text-editor " port)
-          (show-text-location location port)
-          (cond
-           ((= weight 0) (display ")" port))
-           (else
-            (newline port)
-            (gap-buffer-for-each-before (show-text-editor-single-line port) lines)
-            ;; TODO: output current gap buffer, if necessary.
-            (gap-buffer-for-each-after (show-text-editor-single-line port) lines)
-            (display "  )\n" port)
-            ))))))
+        (display "(text-editor " port)
+        (show-text-location (text-editor-cursor-location ed) port)
+        (newline port)
+        (let ((last (text-editor-line-count ed)))
+          (let loop ((line 1))
+            (when (<= line last)
+              (display "  " port)
+              (write (text-editor-line-string ed line) port)
+              (newline port)
+              (loop (+ line 1)))))
+        (display "  )\n" port)
+        )))
 
     (cond-expand
      (guile
@@ -545,20 +544,14 @@
 
 
     (define (text-editor-copy-string ed start end)
-      ;; Copy the buffer contents between the character indices START
-      ;; (inclusive) and END (exclusive) into a string. Arguments may
+      ;; The buffer's text between the positions START and END, as a
+      ;; string - GNU Emacs's `buffer-substring' over the whole buffer,
+      ;; and the same half-open range (START in, END out). Arguments may
       ;; be given in either order; the empty range returns "".
       ;;--------------------------------------------------------------
       (let ((start (min start end))
             (end (max start end)))
-        (call-with-port (open-output-string)
-          (lambda (port)
-            (let loop ((i start))
-              (when (< i end)
-                (let ((c (text-editor-get-char-index ed i)))
-                  (when c (write-char c port)))
-                (loop (+ 1 i))))
-            (get-output-string port)))))
+        (buffer-text-substring (text-editor-text ed) start end)))
 
     ;;----------------------------------------------------------------
     ;; Undo
@@ -1208,8 +1201,7 @@
             ;; The text is in, so the markers after it move with it.
             ;; Doing it here - once for the whole insertion, from where
             ;; the cursor ended up - covers every way text gets in:
-            ;; characters, strings, whole lines, a line break typed or
-            ;; forced by the line-break state machine, and an insertion
+            ;; characters, strings, a whole file, and an insertion
             ;; replayed by undo, which comes back through here.
             (adjust-markers-for-insertion! ed beg (- end beg))
             ;; The intervals move with the text for the same reason the
@@ -1219,15 +1211,19 @@
               (when offset (offset ed beg (- end beg))))
             (%text-editor-note-change! ed)
             (%undo-record-insertion! ed beg end)
-            ;; and the after-change hooks, once the text is really in
-            (signal-after-change (+ beg 1) (+ end 1) 0)))))
+            ;; and the after-change hooks, once the text is really in.
+            ;; BEG and END are positions, one-based like Emacs's, so
+            ;; they are what `signal_after_change' is given as they
+            ;; stand.
+            (signal-after-change beg end 0)))))
 
     (define (%text-editor-insert ed thing)
       (cond
        ((string? thing)
         ;; NOTE: the insert-char procedure must be re-read for every
-        ;; character, because the line-break state machine sets
-        ;; `text-editor-insert-char` when it transitions states.
+        ;; character, because `text-editor-insert-char' is a slot a
+        ;; caller can replace (the line-break protocols install their
+        ;; own) and re-reading is what sees the current one.
         ;;--------------------------------------------------------------
         (string-for-each
          (lambda (c) ((%text-editor-insert-char ed) c))
@@ -1237,7 +1233,7 @@
         ((%text-editor-insert-char ed) thing)
         )
        ((and (input-port? thing) (input-port-open? thing))
-        (text-editor-insert-line-from-port ed thing)
+        (text-editor-insert-from-port ed thing)
         )
        (else (error "editor cannot insert text from" thing))
        ))
@@ -1264,157 +1260,57 @@
         ))
 
     ;; Deleting text
+    ;;
+    ;; GNU Emacs's `del_range' (`insdel.c'): take the characters of a
+    ;; range out of the buffer. With one store and no line objects there
+    ;; is nothing else to it - a line break is a character like any
+    ;; other, so joining two lines is deleting the break between them.
+    ;; The merge helpers this section used to carry, which walked a line
+    ;; editor, a gap buffer of `<text-line>' records and a CDF, have no
+    ;; counterpart in Emacs and are gone with those three structures.
 
-    (define (%text-editor-line-inner-size ed line-num)
-      ;; The number of characters in the line at line index LINE-NUM,
-      ;; not counting its line break. Returns false when LINE-NUM is
-      ;; past the end of the lines gap-buffer.
-      (let ((lines (text-editor-lines ed)))
-        (if (< line-num (gap-buffer-weight lines))
-            (or (text-line-inner-size (gap-buffer-ref lines line-num)) 0)
-            #f)))
-
-    (define (%text-editor-freeze-editor-with ed lbrk)
-      ;; Freeze the whole line editor into a <text-line-type> carrying
-      ;; the line break LBRK, then restore the line editor contents
-      ;; and cursor position. The frozen line is returned but not
-      ;; stored anywhere.
+    (define (%text-editor-delete-forward ed n)
+      ;; Delete up to N characters after point, clamped at `point-max'.
+      ;; GNU Emacs's `Fdelete_char' (`cmds.c:221') with a positive N
+      ;; deletes the range `(PT, PT + n)'; where the C signals
+      ;; `end-of-buffer' this engine's public delete clamps instead,
+      ;; which is its documented behaviour.
       ;;--------------------------------------------------------------
-      (let* ((lines   (text-editor-lines ed))
-             (line-ed (text-editor-line-editor ed))
-             (col-num (gap-buffer-cursor line-ed)))
-        (gap-buffer-cursor-to-end line-ed)
-        (let ((line (line-editor-freeze-line-before line-ed lbrk)))
-          (gap-buffer-clear line-ed)
-          (set!text-editor-column ed col-num)
-          (text-editor-load-current-line ed)
-          line
-          )))
+      (let* ((point (text-editor-point ed))
+             (avail (- (text-editor-point-max ed) point))
+             (n     (min n avail))
+             )
+        (buffer-text-delete! (text-editor-text ed) point (+ point n))
+        n))
 
-    (define (%text-editor-merge-next-line! ed)
-      ;; Merge the line after the current line into the current line,
-      ;; deleting the line break between them - one character on a `\n'
-      ;; buffer and two on a CR-LF one. The merged line inherits the
-      ;; line break of the (former) next line. The line editor keeps the
-      ;; merged line contents with the cursor at the former end of the
-      ;; current line. Returns the size of the line break that was
-      ;; deleted, in characters.
+    (define (%text-editor-delete-backward ed n)
+      ;; Delete up to N characters before point, clamped at `point-min',
+      ;; and leave point at the start of what went.
       ;;--------------------------------------------------------------
-      (let* ((lines (text-editor-lines ed))
-             (line-ed (text-editor-line-editor ed))
-             (cdf (text-editor-cdf ed))
-             (k (gap-buffer-cursor lines))
-             (col-num (gap-buffer-cursor line-ed))
-             (next (gap-buffer-ref lines (+ 1 k)))
-             (next-lbrk (text-line-break next))
-             ;; the line break that goes away is the *current* line's -
-             ;; the merged line keeps NEXT's. The characters copied out
-             ;; of the next line are a rearrangement of what is already
-             ;; in the buffer and are not counted; this break is the
-             ;; only thing that has really gone.
-             (gone-lbrk (text-line-break (gap-buffer-ref lines k))))
-        ;; append the next line's characters to the line editor
-        (gap-buffer-cursor-to-end line-ed)
-        (text-line-for-each
-         (lambda (ch) (%text-editor-move-char ed ch))
-         next
-         )
-        ;; restore the line editor cursor to the former end of the
-        ;; current line (where the deleted line break was)
-        (gap-buffer-set-cursor line-ed col-num)
-        ;; delete the stale copies of both lines and store the merged
-        ;; contents as the new stale copy of the merged line
-        (gap-buffer-delete lines 2)
-        (let ((merged (%text-editor-freeze-editor-with ed next-lbrk)))
-          (gap-buffer-insert-after lines merged)
-          (gap-buffer-set-cursor lines k)
-          (cdf-invalidate! cdf k)
-          )
-        (text-editor-add-char-count
-         ed (- (if gone-lbrk (line-break-size gone-lbrk) 0)))
-        (text-editor-load-current-line ed)
-        (if gone-lbrk (line-break-size gone-lbrk) 0)))
-
-    (define (%text-editor-merge-previous-line! ed)
-      ;; Merge the current line into the line before it, deleting the
-      ;; line break between them (one character). The merged line
-      ;; keeps the current line's line-break protocol (the break that
-      ;; terminated the merged-away tail line), and the cursor ends up
-      ;; at the former end of the previous line (where the break was).
-      ;;--------------------------------------------------------------
-      (let* ((lines (text-editor-lines ed))
-             (line-ed (text-editor-line-editor ed))
-             (cdf (text-editor-cdf ed))
-             (k (gap-buffer-cursor lines))
-             (weight (gap-buffer-weight lines))
-             (prev-size (%text-editor-line-inner-size ed (- k 1)))
-             ;; the merged line's line-break protocol is the tail
-             ;; line's line break; at the end of the buffer the
-             ;; current line is a new line with no line break and no
-             ;; stale copy, so the merged line ends up with none
-             (tail-lbrk
-              (if (< k weight)
-                  (text-line-break (gap-buffer-ref lines k))
-                  #f))
-             ;; the number of stale copies to delete: two (the
-             ;; previous line's and the current line's) except at the
-             ;; end of the buffer, where only the previous line's
-             ;; stale copy exists
-             (stale-count (if (< k weight) 2 1))
-             ;; the line break that goes away is the *previous* line's.
-             ;; The current line's characters are moved into the line
-             ;; editor rather than inserted, so they are not counted;
-             ;; this break is the only thing that has really gone.
-             (gone-lbrk (and (< 0 k)
-                             (text-line-break (gap-buffer-ref lines (- k 1))))))
-        ;; capture the current line's characters, move the gap-buffer
-        ;; cursor to the previous line, and load it into the line
-        ;; editor with the cursor at its end.
-        (let ((current-string
-               (call-with-port (open-output-string)
-                 (lambda (port)
-                   (gap-buffer-for-each
-                    (lambda (n) (write-char (integer->char n) port))
-                    line-ed)
-                   (get-output-string port)))))
-          (text-editor-set-cursor ed (- k 1) prev-size)
-          (string-for-each
-           (lambda (c) (%text-editor-move-char ed c))
-           current-string
-           )
-          ;; delete the stale copies and store the merged contents as
-          ;; the new stale copy of the merged line
-          (gap-buffer-delete lines stale-count)
-          (let ((merged (%text-editor-freeze-editor-with ed tail-lbrk)))
-            (gap-buffer-insert-after lines merged)
-            (gap-buffer-set-cursor lines (- k 1))
-            (cdf-invalidate! cdf (- k 1))
-            )
-          (text-editor-add-char-count
-           ed (- (if gone-lbrk (line-break-size gone-lbrk) 0)))
-          (text-editor-load-current-line ed)
-          ;; the cursor belongs at the former end of the previous line
-          ;; (where the break was) - the docstring above says so - but
-          ;; the move-char walk that merged the text left it at the
-          ;; END of the merged line, which is what a backward delete
-          ;; that joins two lines showed: point flew to the end of the
-          ;; buffer's remainder instead of staying at the join.
-          (text-editor-set-cursor ed (- k 1) prev-size)
-          (if gone-lbrk (line-break-size gone-lbrk) 0))))
+      (let* ((point (text-editor-point ed))
+             (avail (- point (text-editor-point-min ed)))
+             (n     (min n avail))
+             )
+        (buffer-text-delete! (text-editor-text ed) (- point n) point)
+        (set!text-editor-point ed (- point n))
+        n))
 
     (define (text-editor-delete-from-cursor ed n)
       ;; Delete N characters at the text editor cursor. Positive N
       ;; deletes characters after the cursor (forward), negative N
       ;; deletes characters before the cursor. Deletion is clamped to
-      ;; the bounds of the buffer. Deleting across a line boundary
-      ;; merges the two lines. Returns the number of characters
+      ;; the bounds of the buffer. Returns the number of characters
       ;; deleted.
       ;;
-      ;; The deleted text is captured first, and recorded in the
-      ;; buffer's undo list. The deletion is clamped, so what is
-      ;; recorded is whatever was really there to delete: a request to
-      ;; delete 100 characters at the end of a 3-character buffer
-      ;; records 3, and reinserts 3.
+      ;; This is GNU Emacs's `delete-char' (`cmds.c:221') over
+      ;; `del_range', with its two endpoint errors (`end-of-buffer',
+      ;; `beginning-of-buffer') replaced by that clamp.
+      ;;
+      ;; The deleted text is captured first and recorded in the
+      ;; buffer's undo list as `record_delete' (`undo.c:163') records
+      ;; it: the text, and the position it went back to - POSITIVE when
+      ;; point was at the beginning of it, NEGATIVE when point was at
+      ;; the end.
       ;;
       ;; Nothing is deleted from a read-only buffer; that is an error,
       ;; as it is in GNU Emacs - and as with insertion, not when
@@ -1427,8 +1323,10 @@
       (cond
        ((= n 0) 0)
        (else
-        (let* ((cursor (text-editor-get-cursor ed))
-               (text (text-editor-copy-string ed cursor (+ cursor n)))
+        (let* ((cursor (text-editor-point ed))
+               (target (max (text-editor-point-min ed)
+                            (min (text-editor-point-max ed) (+ cursor n))))
+               (text   (text-editor-copy-string ed cursor target))
                (deleted (cond
                          ((< n 0) (%text-editor-delete-backward ed (- n)))
                          (else (%text-editor-delete-forward ed n)))))
@@ -1445,175 +1343,69 @@
               ;; and the after-change hooks, while BEG is in hand: a
               ;; deletion inserts nothing, so the changed range is empty
               ;; and OLD-LENGTH is what went
-              (signal-after-change (+ beg 1) (+ beg 1) deleted))
+              (signal-after-change beg beg deleted))
             (%text-editor-note-change! ed)
-            ;; A forward delete removes the text after point, so point
-            ;; was at its beginning and POS is positive; a backward
-            ;; delete removes the text before point, so point was at its
-            ;; end and POS is negative. In both cases `(abs POS)` is
-            ;; where the text has to go back, and the sign is what tells
-            ;; the undo which side of it to leave point on.
-            (%undo-record-deletion!
-             ed
-             (if (< deleted (string-length text))
-                 (if (< n 0)
-                     (substring text (- (string-length text) deleted)
-                                (string-length text))
-                     (substring text 0 deleted))
-                 text)
-             (if (< n 0) (- deleted cursor) cursor)))
+            ;; The sign of the recorded position is Emacs's rule in
+            ;; `record_delete': `-beg' when point was at the end of the
+            ;; deleted text (a backward delete leaves it there), `beg'
+            ;; when it was at the beginning (a forward delete). In both
+            ;; cases `(abs POS)' is where the text has to go back, and
+            ;; the sign is what tells the undo which side of it to leave
+            ;; point on.
+            (%undo-record-deletion! ed text (if (< n 0) (- deleted cursor) cursor)))
           deleted))))
 
-    (define (%text-editor-delete-forward ed n)
-      (let* ((lines (text-editor-lines ed))
-             (line-ed (text-editor-line-editor ed))
-             (col (gap-buffer-cursor line-ed))
-             (avail (- (gap-buffer-weight line-ed) col))
-             )
-        (cond
-         ((<= n avail)
-          ;; delete within the current line
-          (gap-buffer-delete line-ed n)
-          (text-editor-add-char-count ed (- n))
-          (set!text-editor-line-changed ed #t)
-          n)
-         ((< 0 avail)
-          ;; delete to the end of the current line, then continue
-          (gap-buffer-delete line-ed avail)
-          (text-editor-add-char-count ed (- avail))
-          (set!text-editor-line-changed ed #t)
-          (+ avail (%text-editor-delete-forward ed (- n avail))))
-         ((< (+ 1 (gap-buffer-cursor lines)) (gap-buffer-weight lines))
-          ;; the cursor is at the end of the line: delete the line
-          ;; break by merging with the next line, then continue. The
-          ;; break is one character on a `\n' buffer and two on a
-          ;; CR-LF one, so how much of N is left is what the merge
-          ;; says it took, not a fixed one.
-          (let ((gone (%text-editor-merge-next-line! ed)))
-            (+ gone (%text-editor-delete-forward ed (- n gone)))))
-         ;; the cursor is at the end of the last line: delete the
-         ;; current line's own terminating line break, if it has one
-         ;; (as GNU Emacs does)
-         (else
-          (let* ((stale
-                  (and (< (gap-buffer-cursor lines)
-                          (gap-buffer-weight lines))
-                       (gap-buffer-ref lines (gap-buffer-cursor lines))))
-                 (lbrk (and stale (text-line-break stale))))
-            (if lbrk
-                (let ((size (line-break-size lbrk)))
-                  (set!text-line-break stale #f)
-                  (text-editor-add-char-count ed (- size))
-                  (set!text-editor-line-changed ed #t)
-                  size)
-                0))
-          ))))
-
-    (define (%text-editor-delete-backward ed n)
-      (let* ((lines (text-editor-lines ed))
-             (line-ed (text-editor-line-editor ed))
-             (col (gap-buffer-cursor line-ed))
-             )
-        (cond
-         ((<= n col)
-          (gap-buffer-delete line-ed (- n))
-          (text-editor-add-char-count ed (- n))
-          (set!text-editor-column ed (- col n))
-          (set!text-editor-line-changed ed #t)
-          n)
-         ((< 0 (gap-buffer-cursor lines))
-          ;; at the start of a line which has a line before it: the
-          ;; deleted character is the line break; merge the lines. The
-          ;; break is one character on a `\n' buffer and two on a
-          ;; CR-LF one, so how much of N is left is what the merge
-          ;; says it took, not a fixed one.
-          (let ((gone (%text-editor-merge-previous-line! ed)))
-            (+ gone (%text-editor-delete-backward ed (- n gone)))))
-         (else 0)
-         )))
-
-    (define (text-editor-insert-from-port-until until ed port)
-      (let loop ((next (read-char port)))
-        (cond
-         ((eof-object? next) next)
-         (else
-          (let ((result ((%text-editor-insert-char ed) next)))
-            (if (until result) result (loop (read-char port)))
-            )))))
-
     (define (text-editor-insert-from-port ed port)
-      (text-editor-insert-from-port-until (lambda _ #f) ed port)
-      )
+      ;; Insert everything the port has left, at the cursor. This is
+      ;; GNU Emacs's `insert-file-contents' (`fileio.c'): the text is
+      ;; read first and inserted in one go, which is the C's shape - it
+      ;; reads the file into a buffer and inserts the whole of it.
+      ;;
+      ;; The old engine read one *line* at a time, because a line was
+      ;; the unit it stored and a line break was a record's field rather
+      ;; than a character. There are no lines to read one at a time now,
+      ;; so `text-editor-insert-line-from-port', which stopped at the
+      ;; first frozen line, is gone with them.
+      ;;--------------------------------------------------------------
+      (let loop ((acc '()))
+        (let ((next (read-char port)))
+          (cond
+           ((eof-object? next) (text-editor-insert ed (list->string (reverse acc))))
+           (else (loop (cons next acc)))
+           ))))
 
-    (define (text-editor-insert-line-from-port ed port)
-      (text-editor-insert-from-port-until text-line-type? ed port)
-      )
-
-    (define (text-editor-dump-before ed port)
-      (let*((line-gb (text-editor-lines ed))
-            (line (gap-buffer-cursor line-gb))
-            (changed (text-editor-line-changed ed))
-            )
-        (cond
-         (changed
-          ;; The line editor holds the live contents of the current
-          ;; line, whose stale copy sits at the gap-buffer cursor. All
-          ;; committed lines before the cursor are written, then the
-          ;; line editor's characters before its cursor; the
-          ;; `text-editor-dump-after` companion writes the rest.
-          (let ((end line))
-            (gap-buffer-for-each-before/index
-             (lambda (i text-line)
-               (when (< i end) (write-text-line text-line port))
-               )
-             line-gb
-             )
-            (gap-buffer-for-each-before
-             (lambda (ch) (write-char (integer->char ch) port))
-             (text-editor-line-editor ed)
-             )))
-         (else
-          (gap-buffer-for-each-before
-           (lambda (text-line)
-             (write-text-line text-line port)
-             )
-           line-gb
-           )))))
-
-    (define (text-editor-dump-after ed port)
-      (let*((line-gb (text-editor-lines ed))
-            (line    (gap-buffer-cursor line-gb))
-            (changed (text-editor-line-changed ed))
-            )
-        (when changed
-          (gap-buffer-for-each-after
-           (lambda (ch) (write-char (integer->char ch) port))
-           (text-editor-line-editor ed)
-           )
-          ;; The current line's terminating line break is stored in
-          ;; its stale copy in the gap-buffer (the line editor holds
-          ;; only the line contents, not its break), so it must be
-          ;; written here explicitly.
-          (when (< line (gap-buffer-weight line-gb))
-            (let ((lbrk (text-line-break (gap-buffer-ref line-gb line))))
-              (when lbrk ((line-break-write-to-port lbrk) port))
-              )))
-        ;; Write the committed lines after the gap-buffer cursor. When
-        ;; the line editor has been modified, the gap-buffer element
-        ;; at the cursor holds the stale copy of the current line,
-        ;; which the line editor contents replace, so it is skipped.
-        (gap-buffer-for-each-after/index
-         (lambda (i text-line)
-           (unless (and changed (= i line))
-             (write-text-line text-line port)
-             ))
-         line-gb
-         )))
+    ;; Writing the buffer out
+    ;;
+    ;; The engine keeps one sequence of characters, so writing it out is
+    ;; one `write-string' of the whole text with the buffer's line-break
+    ;; convention applied - the shape `text-editor-dump-before' and
+    ;; `text-editor-dump-after' had to fake, because the live copy of the
+    ;; current line sat in the line editor rather than in the buffer.
 
     (define (text-editor-dump ed port)
-      (text-editor-dump-before ed port)
-      (text-editor-dump-after ed port)
-      )
+      ;; Write the buffer's characters to PORT, with a `\n' written as
+      ;; the buffer's own line break.
+      ;;--------------------------------------------------------------
+      (let ((lbrk (text-editor-line-break ed)))
+        (buffer-text-for-each
+         (text-editor-text ed)
+         (lambda (_pos cp)
+           (if (= cp #x0a)
+               ((line-break-write-to-port lbrk) port)
+               (write-char (integer->char cp) port))
+           ))))
+
+    (define text-load-port
+      (case-lambda
+       ((ed port) (text-load-port ed port #f))
+       ((ed port _flags) (text-editor-insert-from-port ed port))
+       ))
+
+    (define text-dump-port
+      (case-lambda
+       ((ed port) (text-dump-port ed port #f))
+       ((ed port _flags) (text-editor-dump ed port))
+       ))
 
     (define text-load-port
       (case-lambda
@@ -1635,296 +1427,335 @@
           (get-output-string port)
           )))
 
+    ;;----------------------------------------------------------------
+    ;; The cursor, lines and columns
+    ;;
+    ;; GNU Emacs stores no line index. It *scans*: `find_newline'
+    ;; (`search.c:675') walks the buffer counting newlines, and
+    ;; everything that wants a line or a column is built on it - `bol'
+    ;; and `eol' (`editfns.c:665', :723), `line-beginning-position',
+    ;; `line-end-position', `line-number-at-pos' (`fns.c:6688').
+    ;;
+    ;; The engine used to keep an index instead: a CDF over a gap buffer
+    ;; of lines, so a character index could be turned into a line with a
+    ;; binary search. That was a departure, and an expensive one - the
+    ;; index had to be invalidated on every edit, and where it went stale
+    ;; showed up three screens from where it mattered. There is one
+    ;; sequence of characters now and no index; the scans below are
+    ;; Emacs's, ported over `buffer-text'.
+    ;;
+    ;; Positions are one-based, as Emacs's are: `point-min' is 1 and
+    ;; `point-max' is one past the last character. Line numbers count
+    ;; from 1; columns count from 0.
+    ;;
+    ;; A knowing deviation: `find_newline' in the C exists largely to
+    ;; cope with a byte store that a gap splits in two, and it keeps a
+    ;; `region_cache' of where newlines are known to be, so that
+    ;; repeated scans do not walk the whole buffer. `buffer-text-ref'
+    ;; already copes with the gap, so the gap half of the C is gone;
+    ;; the *cache* half is not ported, so a scan here really is O(n).
+    ;; That is what the renderer pays for a line it reads by scanning to
+    ;; it, and the cache is the Emacs answer when that stops being good
+    ;; enough.
+
+    ;;----------------------------------------------------------------
+    ;; Positions
+
+    (define (text-editor-point-min ed)
+      ;; GNU Emacs's `point-min' (`editfns.c'): "the minimum permissible
+      ;; value of point in the current buffer. This is 1, unless
+      ;; narrowing ... is in effect." Nothing is narrowed here, and the
+      ;; buffer-text's base is that same 1.
+      ;;--------------------------------------------------------------
+      (buffer-text-base (text-editor-text ed)))
+
+    (define (text-editor-point-max ed)
+      ;; GNU Emacs's `point-max' (`editfns.c'): one past the last
+      ;; character of the buffer. It is the buffer-text's own `z' field,
+      ;; which is Emacs's `Z'.
+      ;;--------------------------------------------------------------
+      (buffer-text-z (text-editor-text ed)))
+
+    (define (text-editor-ref ed pos)
+      ;; The character at position POS, or false when there is none
+      ;; there - GNU Emacs's `char-after' (`editfns.c'), which answers
+      ;; nil at or past the end of the buffer.
+      ;;--------------------------------------------------------------
+      (and (<= (text-editor-point-min ed) pos)
+           (< pos (text-editor-point-max ed))
+           (integer->char (buffer-text-ref (text-editor-text ed) pos))
+           ))
+
+    ;;----------------------------------------------------------------
+    ;; Newlines
+
+    (define (find-newline ed start count end)
+      ;; GNU Emacs's `find_newline' (`search.c:675'): scan COUNT line
+      ;; boundaries from START, forward for a positive COUNT and
+      ;; backward for a negative one, and stop at END if COUNT of them
+      ;; are not there.
+      ;;
+      ;; Two values come back: where the scan stopped, and how many
+      ;; boundaries it found, counted the way COUNT is - positive going
+      ;; forward, negative going backward. Where it found them all, the
+      ;; position is just past the COUNTth one; where it ran out of
+      ;; text, it is END. Both conventions are the C's, whose caller
+      ;; reads the pair out of `*counted' and `*bytepos'.
+      ;;
+      ;; Scanning backward looks at the character *before* the position
+      ;; it is at, so a COUNT of -1 from the middle of a line lands on
+      ;; the line's first character when there is a newline just behind
+      ;; it - which is what `bol' is.
+      ;;
+      ;; END false means what the C's zero means: "the end of the buffer
+      ;; in the direction of travel" - `ZV' going forward, `BEGV' going
+      ;; backward (`search.c:681').
+      ;;--------------------------------------------------------------
+      (let* ((text (text-editor-text ed))
+             (end  (or end (if (< 0 count)
+                               (text-editor-point-max ed)
+                               (text-editor-point-min ed))))
+             )
+        (if (< 0 count)
+            (let loop ((pos start) (left count) (found 0))
+              (cond
+               ((>= pos end) (values end found))
+               ((= (buffer-text-ref text pos) #x0a)
+                (let ((left (- left 1)) (found (+ found 1)))
+                  (if (= left 0)
+                      (values (+ pos 1) found)
+                      (loop (+ pos 1) left found))))
+               (else (loop (+ pos 1) left found))))
+            (let loop ((pos start) (left count) (found 0))
+              (cond
+               ((<= pos end) (values end found))
+               ((= (buffer-text-ref text (- pos 1)) #x0a)
+                (let ((left (+ left 1)) (found (- found 1)))
+                  (if (>= left 0)
+                      (values pos found)
+                      (loop (- pos 1) left found))))
+               (else (loop (- pos 1) left found)))))))
+
+    (define (scan-newline-from-point ed count)
+      ;; GNU Emacs's `scan_newline_from_point' (`search.c':986'): scan
+      ;; COUNT line boundaries from point. It does not move point.
+      ;;
+      ;; Two values come back - where the scan stopped, and how many
+      ;; boundaries it found - which is the C's two out-parameters
+      ;; (`*charpos' and the returned `counted'). A COUNT at or below
+      ;; zero scans backward, one boundary further back than COUNT asks
+      ;; for; that difference is what makes `bol' land on the *start* of
+      ;; a line where `forward-line' would land on the one before it.
+      ;;--------------------------------------------------------------
+      (if (<= count 0)
+          (find-newline ed (text-editor-point ed) (- count 1)
+                        (text-editor-point-min ed))
+          (find-newline ed (text-editor-point ed) count
+                        (text-editor-point-max ed))))
+
+    (define (bol ed n)
+      ;; The position of the first character of the line N - 1 lines
+      ;; forward - the internal `bol' (`editfns.c:665') that
+      ;; `line-beginning-position', `beginning-of-line' and
+      ;; `forward-line' are all built on. N false means the current
+      ;; line. It does not move point.
+      ;;--------------------------------------------------------------
+      (call-with-values
+          (lambda () (scan-newline-from-point ed (if n (- n 1) 0)))
+        (lambda (pos _found) pos)))
+
+    (define (eol ed n)
+      ;; The position of the last character of the line N - 1 lines
+      ;; forward - the internal `eol' (`editfns.c:723') that
+      ;; `line-end-position', `end-of-line' and `forward-line' are built
+      ;; on. N false means the current line. It does not move point.
+      ;;--------------------------------------------------------------
+      (let ((count (if n n 1)))
+        (find-before-next-newline ed (text-editor-point ed)
+                                  (- count (if (<= count 0) 1 0)))))
+
+    (define (find-before-next-newline ed from cnt)
+      ;; GNU Emacs's `find_before_next_newline' (`search.c':997'): where
+      ;; the line boundary CNT boundaries away from FROM begins. With a
+      ;; positive CNT the scan lands just *after* the newline, so it
+      ;; steps back one, to the newline's own position - which is what
+      ;; an end-of-line wants.
+      ;;--------------------------------------------------------------
+      (call-with-values
+          (lambda () (find-newline ed from cnt #f))
+        (lambda (pos found)
+          (if (= found cnt) (- pos 1) pos))))
+
+    (define (count-lines ed from to)
+      ;; The number of line boundaries between the positions FROM and TO
+      ;; - GNU Emacs's `count_lines' (`xdisp.c:29892'), which is
+      ;; `display_count_lines (FROM, TO, ZV)'. The C's display version
+      ;; also honours `selective-display'; that is not ported.
+      ;;
+      ;; NOTE: `count_lines' is `xdisp.c''s in Emacs and this is the
+      ;; engine, but `line-number-at-pos' - which is what wants it - is
+      ;; `fns.c''s and reads the buffer through exactly this scan.
+      ;; `(schemacs editor xdisp)' imports the engine, so the name lives
+      ;; here and can be re-exported there.
+      ;;--------------------------------------------------------------
+      (let ((text (text-editor-text ed)))
+        (let loop ((pos from) (n 0))
+          (cond
+           ((>= pos to) n)
+           ((= (buffer-text-ref text pos) #x0a) (loop (+ pos 1) (+ n 1)))
+           (else (loop (+ pos 1) n))))))
+
+    ;;----------------------------------------------------------------
+    ;; Lines, by scanning
+
+    (define (%line-start ed line)
+      ;; The position of the first character of line LINE, counting from
+      ;; 1; false when the buffer has no such line. This is the `bol'
+      ;; scan started from the buffer's beginning rather than from
+      ;; point: `find_newline' from `point-min' for LINE - 1 boundaries.
+      ;;--------------------------------------------------------------
+      (and (integer? line)
+           (<= (text-editor-point-min ed) line)
+           (call-with-values
+               (lambda ()
+                 (find-newline ed (text-editor-point-min ed) (- line 1) #f))
+             (lambda (pos found) (and (= found (- line 1)) pos)))))
+
+    (define (%bol-at ed pos)
+      ;; The position of the first character of the line POSITION is on.
+      ;; Emacs reaches this with `save-excursion' around
+      ;; `line-beginning-position'; here the scan simply starts where it
+      ;; is told to.
+      ;;--------------------------------------------------------------
+      (call-with-values
+          (lambda ()
+            (find-newline ed pos -1 (text-editor-point-min ed)))
+        (lambda (found-pos _found) found-pos)))
+
+    (define (%line-end ed from)
+      ;; The position of the newline that ends the line containing FROM,
+      ;; or `point-max' when there is none - the forward half of `eol'.
+      ;;--------------------------------------------------------------
+      (let ((text (text-editor-text ed)))
+        (let loop ((pos from))
+          (cond
+           ((>= pos (text-editor-point-max ed)) pos)
+           ((= (buffer-text-ref text pos) #x0a) pos)
+           (else (loop (+ pos 1)))))))
+
+    (define (%text-editor-position ed line col)
+      ;; The position of column COL - counting from 0 - on line LINE -
+      ;; counting from 1 - clamped to the line. False when the buffer
+      ;; has no such line. This is what `goto-line' and `move-to-column'
+      ;; between them do, `line-beginning-position' then an offset.
+      ;;--------------------------------------------------------------
+      (let ((start (%line-start ed line)))
+        (and start
+             (min (%line-end ed start) (+ start (max 0 col))))))
+
+    (define (text-editor-line-string ed line)
+      ;; The contents of LINE - a line *number*, counting from 1 - as a
+      ;; string, without the line break that ends it. False when the
+      ;; buffer has no such line.
+      ;;
+      ;; There is no Emacs function that materialises a line as a
+      ;; string: `xdisp.c' walks the buffer with the display iterator
+      ;; and never builds one. This is the engine's own, the shortcut
+      ;; the renderer reads its lines through, and both ends of the line
+      ;; come from the same scans everything else uses.
+      ;;--------------------------------------------------------------
+      (let ((start (%line-start ed line)))
+        (and start
+             (buffer-text-substring (text-editor-text ed)
+                                    start (%line-end ed start)))))
+
+    (define (text-editor-line-outer-size ed line)
+      ;; How many characters line LINE advances the buffer by: its
+      ;; contents plus the line break that ends it. Zero for a line the
+      ;; buffer does not hold.
+      ;;--------------------------------------------------------------
+      (let ((start (%line-start ed line)))
+        (if (not start)
+            0
+            (let ((end (%line-end ed start)))
+              (+ (- end start)
+                 (if (< end (text-editor-point-max ed)) 1 0))))))
+
+    (define (text-editor-get-start-of-line ed)
+      ;; The position of the first character of the line point is on -
+      ;; GNU Emacs's `line-beginning-position' (`editfns.c:700'), which
+      ;; is `(bol nil)'. It does not move point.
+      ;;--------------------------------------------------------------
+      (bol ed #f))
+
+    (define (text-editor-get-end-of-line ed)
+      ;; The position of the last character of the line point is on -
+      ;; GNU Emacs's `line-end-position' (`editfns.c:736'), which is
+      ;; `(eol nil)'. At the end of the buffer it is `point-max', as the
+      ;; C's is. It does not move point.
+      ;;--------------------------------------------------------------
+      (eol ed #f))
+
+    (define (text-editor-line-count ed)
+      ;; How many lines the buffer has - which is the line number of
+      ;; `point-max', since every line boundary in front of it starts
+      ;; another line. An empty buffer has one line, as Emacs's does.
+      ;;--------------------------------------------------------------
+      (+ 1 (count-lines ed (text-editor-point-min ed)
+                           (text-editor-point-max ed))))
+
     (define (text-editor-cursor-line ed)
-      (let ((lines (text-editor-lines ed)))
-        (or (and lines (gap-buffer-cursor lines)) 0)
-        ))
+      ;; The line number point is on, counting from 1 - GNU Emacs's
+      ;; `line-number-at-pos' (`fns.c:6688'), which is
+      ;; `(count_lines BEGV PT) + 1'.
+      ;;--------------------------------------------------------------
+      (+ 1 (count-lines ed (text-editor-point-min ed) (text-editor-point ed))))
 
     (define (text-editor-cursor-column ed)
-      (let ((line-ed (text-editor-line-editor ed)))
-        (or (and line-ed (gap-buffer-cursor line-ed)) 0)
-        ))
-
-    (define (text-editor-cursor-line-number ed)
-      (gap-buffer-cursor (text-editor-lines ed))
-      )
-
-    (define (text-editor-cursor-column-number ed)
-      (gap-buffer-cursor (text-editor-line-editor ed))
-      )
+      ;; How many characters point is from the start of its line,
+      ;; counting from 0 - what the C's `current-column' (`indent.c:298')
+      ;; answers for a line with no tab and no multi-column character in
+      ;; it. The *display* column, which is what `current-column' really
+      ;; answers, is `(schemacs editor indentc)''s
+      ;; `current-line-display-column', and every caller that wants one
+      ;; goes through it.
+      ;;--------------------------------------------------------------
+      (- (text-editor-point ed) (text-editor-get-start-of-line ed)))
 
     (define (text-editor-cursor-location ed)
-      (make<text-location>
-       (text-editor-cursor-line-number ed)
-       (text-editor-cursor-column-number ed)
-       ))
-
-    (define (text-editor-make-cdf-fill-range lines to)
-      ;; Creates a closure that acts as a generator of lines in the
-      ;; `LINES` gap buffer between the indices of the current cursor
-      ;; position of the CDF up until the index given by the argument
-      ;; `TO` (not including `TO`) using `gap-buffer-ref`, and
-      ;; `text-line-size` to produce the output values.
+      ;; Point as a `<text-location>': line counting from 1 and column
+      ;; counting from 1, which is that type's convention - its readers
+      ;; subtract the one they need.
       ;;--------------------------------------------------------------
-      (lambda (cursor accum)
-        (cond
-         ((< cursor to)
-          (text-line-outer-size (gap-buffer-ref lines cursor))
-          )
-         (else #f)
-         )))
+      (make<text-location> (text-editor-cursor-line ed)
+                           (+ 1 (text-editor-cursor-column ed))))
 
-    (define (text-editor-make-cdf-fill-until lines accum-max-value)
-      ;; Creates a closure that acts as a generator of lines in the
-      ;; `LINES` gap buffer and continues until the end of the buffer
-      ;; is reached or until the accumulator exceeds `ACCUM-MAX-VALUE`.
-      ;;
-      ;; The accumulator is the CDF value of the line *before* the one
-      ;; being generated, so generation must continue while it is less
-      ;; than or EQUAL to the target: the line whose bucket starts at
-      ;; the accumulator is the line the target index falls on. Testing
-      ;; `<` instead left that line's bucket unfilled, so `CDF-FIND`
-      ;; saw the target as out of bounds and every character index that
-      ;; begins a line - index 0 above all - was unresolvable.
+    (define (text-editor-line-ref ed offset)
+      ;; The character at column OFFSET - counting from 0 - of the
+      ;; current line, or false when OFFSET is past the end of the line.
+      ;; The display-width walk and the renderer read a line's
+      ;; characters through this.
       ;;--------------------------------------------------------------
-      (let ((weight (gap-buffer-weight lines)))
-        (lambda (cursor accum)
-          (cond
-           ((and (<= accum accum-max-value) (< cursor weight))
-            (text-line-outer-size (gap-buffer-ref lines cursor))
-            )
-           (else #f)
-           ))))
-
-    (define (text-editor-text-line-ref ed offset)
-      ;; Get a whole line of text given the line number.
-      ;;--------------------------------------------------------------
-      (gap-buffer-ref (text-editor-lines ed) offset)
-      )
-
-    (define (text-editor-line-outer-size ed line-index)
-      ;; How many characters line LINE-INDEX advances the buffer's
-      ;; character index by: its contents plus its line break, which is
-      ;; the unit the CDF counts lines in. Zero for a line the buffer
-      ;; does not hold - the empty line past the end of the buffer, which
-      ;; is the only line a brand new buffer has.
-      ;;
-      ;; This exists because `TEXT-EDITOR-LINE-COUNT' counts that last
-      ;; empty line, while the lines gap-buffer does not hold it yet, so
-      ;; `TEXT-EDITOR-TEXT-LINE-REF' cannot be asked for it.
-      ;;--------------------------------------------------------------
-      (let ((lines (text-editor-lines ed)))
-        (if (< line-index (gap-buffer-weight lines))
-            (text-line-outer-size (gap-buffer-ref lines line-index))
-            0)))
-
-    (define (text-editor-line-editor-ref ed offset)
-      ;; Used to get the character on the current line. The line
-      ;; editor always holds the contents of the current line, so the
-      ;; character is read directly from the line editor. Returns
-      ;; false when the offset is past the end of the line.
-      ;;--------------------------------------------------------------
-      (let ((line-ed (text-editor-line-editor ed)))
-        (and (< offset (gap-buffer-weight line-ed))
-             (integer->char (gap-buffer-ref line-ed offset))
-             )))
-
-    (define (text-editor-get-cursor ed)
-      ;; Check if the CDF needs updating, and if so, recompute all
-      ;; elements up to the current cursor position. Returns the
-      ;; character position of the text editor's cursor when complete.
-      ;;--------------------------------------------------------------
-      (let*((lines    (text-editor-lines ed))
-            (line-num (gap-buffer-cursor lines))
-            (line-ed  (text-editor-line-editor ed))
-            (cdf      (text-editor-cdf ed))
-            (cdf-cur  (cdf-cursor cdf))
-            (offset
-             (cond
-              ((< cdf-cur line-num)
-               (cdf-fill
-                cdf (text-editor-make-cdf-fill-range lines line-num)
-                ))
-              ((< 0 line-num)
-               (cdf-ref cdf (- line-num 1))
-               )
-              (else 0)
-              )))
-        (+ offset (or (and line-ed (gap-buffer-cursor line-ed)) 0))
-        ))
-
-    (define (text-editor-move-cursor ed move-by)
-      ;; Move the text editor cursor to the position
-      ;; `(+ (TEXT-EDITOR-GET-CURSOR ED) MOVE-BY)`, clamped to the
-      ;; bounds of the buffer. When the target position is on a
-      ;; different line than the current cursor position, the current
-      ;; line is written back into the lines gap-buffer, the
-      ;; gap-buffer cursor is moved to the target line, and the
-      ;; target line is loaded into the line editor. The remembered
-      ;; column (`text-editor-column`) is updated to the target
-      ;; column.
-      ;;--------------------------------------------------------------
-      (let*((ch-index0 (text-editor-get-cursor ed))
-            (count (text-editor-char-count ed))
-            (target (max 0 (min count (+ ch-index0 move-by))))
-            (delta (- target ch-index0))
-            )
-        (cond
-         ((= 0 delta) (values))
-         (else
-          (text-editor-write-back ed)
-          (let*-values
-              (((t-line t-col) (text-editor-index-line-offset ed target))
-               ((lines) (text-editor-lines ed))
-               ((line-ed) (text-editor-line-editor ed))
-               ((line-num) (gap-buffer-cursor lines)))
-            (cond
-             ;; Same line: the line editor is already loaded, just
-             ;; move its cursor to the target column.
-             ((= t-line line-num)
-              (gap-buffer-set-cursor line-ed t-col)
-              (set!text-editor-column ed t-col)
-              )
-             (else
-              (gap-buffer-set-cursor lines t-line)
-              (set!text-editor-column ed t-col)
-              (text-editor-load-current-line ed)
-              )))))))
-
-    (define text-editor-set-cursor
-      (case-lambda
-       ((ed index)
-        (cond
-         ((text-location-type? index)
-          (text-editor-set-cursor
-           ed (text-location-line index)
-                 (text-location-column index)
-              ))
-         ((integer? index)
-          (let ((cursor (text-editor-get-cursor ed)))
-            (text-editor-move-cursor ed (- index cursor))
-            ))
-         (else
-          (error
-           "text editor index must be set with integer or text-location-type"
-           index
-           ))))
-       ((ed line-num column-num)
-        ;; Move the cursor to the given zero-based line index and
-        ;; column. Writing back any modified line first preserves the
-        ;; buffer contents; the target line is then loaded into the
-        ;; line editor with the cursor at the given column (clamped
-        ;; to the line by `TEXT-EDITOR-LOAD-CURRENT-LINE').
-        ;;
-        ;; The new empty line past the end of the buffer is only
-        ;; addressable when the buffer's last line ends in a line
-        ;; break - that break is what starts it. Without one the last
-        ;; line the buffer holds is the last line there is, and the
-        ;; end of the buffer is the end of that line, which is where
-        ;; GNU Emacs puts `point-max': moving past it, as `next-line'
-        ;; does at the last line, stays on the last line rather than
-        ;; onto a line that does not exist.
-        (let* ((lines (text-editor-lines ed)))
-          (text-editor-write-back ed)
-          (let* ((weight (gap-buffer-weight lines))
-                 (last (if (and (< 0 weight)
-                                (text-line-break (gap-buffer-ref lines (- weight 1))))
-                           weight
-                           (- weight 1))))
-            (gap-buffer-set-cursor lines (max 0 (min line-num last))))
-          (set!text-editor-column ed column-num)
-          (text-editor-load-current-line ed)
-          ))))
-
-    (define (text-editor-index-line-offset ed ch-index)
-      ;; This function is used to update the CDF and to return the
-      ;; line number, and the character offset (column) of the
-      ;; character index `CH-INDEX` within its line. Returns two
-      ;; values: (1) the zero-based line index to which the
-      ;; `CH-INDEX` is pointing, and (2) the zero-based column of the
-      ;; character within that line.
-      ;;
-      ;; First, write back any modified line editor contents, so the
-      ;; gap-buffer and CDF reflect the true buffer contents, then
-      ;; fill the CDF until it covers `CH-INDEX`, and binary-search it
-      ;; with `CDF-FIND`, which returns the line index and the start
-      ;; offset of that line. `CDF-FIND` returns false values when
-      ;; `CH-INDEX` is at or past the end of the last committed line,
-      ;; which is one of two positions:
-      ;;
-      ;;  - the current line, when it is a new, empty line past every
-      ;;    committed one (the lines gap-buffer cursor is at its
-      ;;    weight). That is a line of its own - the empty line a
-      ;;    brand new buffer has, and the one a line break at the end
-      ;;    of the buffer starts - so the index is on it, at the
-      ;;    column the CDF does not reach;
-      ;;
-      ;;  - the end of the last committed line, when that line has no
-      ;;    line break after it. That is NOT a line of its own: the
-      ;;    buffer's line count has no such line, and GNU Emacs puts
-      ;;    `point-max' at the end of the last line here. Reporting a
-      ;;    phantom line instead is what left point at the end of a
-      ;;    buffer that does not end in a newline on an empty line
-      ;;    past it, so that `C-e' then `C-a' could not reach the
-      ;;    beginning of the line at all (`beginning-of-line' moved
-      ;;    point to the start of the empty line - the same place),
-      ;;    and the mode line read `L2 C1' for a file of one line.
-      ;;--------------------------------------------------------------
-      (let*((lines (text-editor-lines ed))
-            (cdf (text-editor-cdf ed))
-            (_write-back (text-editor-write-back ed))
-            (_fill (cdf-fill cdf (text-editor-make-cdf-fill-until lines ch-index)))
-            )
-        (call-with-values
-            (lambda () (cdf-find cdf ch-index))
-          (lambda (i lo)
-            (cond
-             (i (values i (- ch-index lo)))
-             (else
-              (let ((weight (gap-buffer-weight lines))
-                    (line-num (gap-buffer-cursor lines)))
-                (if (= line-num weight)
-                    (values weight
-                            (max 0 (- ch-index (cdf-maximum cdf))))
-                    (let ((outer (text-line-outer-size
-                                  (gap-buffer-ref lines (- weight 1)))))
-                      (values (- weight 1)
-                              (max 0 (- ch-index
-                                        (- (cdf-maximum cdf) outer))))))
-                )))))))
+      (let ((pos (+ (text-editor-get-start-of-line ed) offset)))
+        (and (< pos (text-editor-get-end-of-line ed))
+             (integer->char (buffer-text-ref (text-editor-text ed) pos)))))
 
     (define (text-editor-get-char-index ed ch-index)
-      ;; Get the character at the given index `CH-INDEX`. This
-      ;; recomputes part of the CDF for the editor buffer.
+      ;; The character at position CH-INDEX, or false when there is none
+      ;; there - GNU Emacs's `char-after' (`editfns.c'), which answers
+      ;; nil at or past the end of the buffer.
       ;;--------------------------------------------------------------
-      (let*-values
-          (((cdf-cur offset) (text-editor-index-line-offset ed ch-index))
-           ((lines) (text-editor-lines ed))
-           )
-        (cond
-         ((< cdf-cur (gap-buffer-weight lines))
-          (text-line-ref (gap-buffer-ref lines cdf-cur) offset)
-          )
-         (else #f)
-         )))
+      (text-editor-ref ed ch-index))
 
     (define (%text-editor-get-line-column ed ch-index)
-      (cond
-       ;; If `index` is not `#f` compute the line and column number of
-       ;; that character index.
-       (ch-index
-        (let*-values
-            (((line-index offset)
-              (text-editor-index-line-offset ed ch-index)
-              ))
-          (make<text-location> (+ 1 line-index) (+ 1 offset))
-          ))
-       ;; Otherwise get the current cursor position.
-       (else
+      ;; A `<text-location>' for the position CH-INDEX, or for point
+      ;; when there is none: line counting from 1 and column counting
+      ;; from 1, that type's convention.
+      ;;--------------------------------------------------------------
+      (let ((pos (if ch-index ch-index (text-editor-point ed))))
         (make<text-location>
-         (+ 1 (text-editor-cursor-line ed))
-         (+ 1 (text-editor-cursor-column ed))
-         ))))
+         (+ 1 (count-lines ed (text-editor-point-min ed) pos))
+         (+ 1 (- pos (%bol-at ed pos))))))
 
     (define text-editor-get-line-column
       (case-lambda
@@ -1932,55 +1763,66 @@
        ((ed ch-index) (%text-editor-get-line-column ed ch-index))
        ))
 
-    (define (text-editor-get-end-of-line ed)
-      ;; Get the character index of the end of the current line. The
-      ;; line editor always holds the current line's contents, so this
-      ;; is the start of the current line plus the number of
-      ;; characters in the line editor.
-      ;;--------------------------------------------------------------
-      (text-editor-get-cursor ed)
-      (let*((lines (text-editor-lines ed))
-            (line-num (gap-buffer-cursor lines))
-            (cdf (text-editor-cdf ed))
-            )
-        (+ (cond
-            ((< 0 line-num) (cdf-ref cdf (- line-num 1)))
-            (else 0)
-            )
-           (gap-buffer-weight (text-editor-line-editor ed))
-           )))
+    ;;----------------------------------------------------------------
+    ;; Moving the cursor
 
-    (define (text-editor-line-count ed)
-      ;; The total number of lines in the buffer. The lines gap-buffer
-      ;; contains one element for every line of the buffer, except
-      ;; that when the gap-buffer cursor points past the last
-      ;; committed line, the current line is a new empty line which is
-      ;; not yet buffered, so one more line is counted. That is a line
-      ;; the buffer really has, because it is a line break at the end of
-      ;; the buffer that starts it: a last line with no break after it
-      ;; is the last line there is (see `TEXT-EDITOR-WRITE-BACK').
+    (define (text-editor-get-cursor ed)
+      ;; The position of the cursor, one-based as every position of this
+      ;; engine is - GNU Emacs's `point' (`editfns.c'). Emacs keeps `PT'
+      ;; on the buffer and so does this: the position *is* the cursor.
       ;;--------------------------------------------------------------
-      (let* ((lines (text-editor-lines ed))
-             (line-num (gap-buffer-cursor lines))
-             (weight (gap-buffer-weight lines)))
-        (if (= line-num weight) (+ 1 weight) weight)))
+      (text-editor-point ed))
 
-    (define (text-editor-get-start-of-line ed)
-      ;; Get the character index of the start of the current line:
-      ;; the running total of the CDF for the line before the current
-      ;; line, which `TEXT-EDITOR-GET-CURSOR` has ensured is filled.
+    (define (text-editor-move-cursor ed move-by)
+      ;; Move the cursor MOVE-BY characters, clamped to the buffer -
+      ;; GNU Emacs's `forward-char' (`cmds.c') with its two endpoint
+      ;; errors replaced by that clamp. Answers the new position.
       ;;--------------------------------------------------------------
-      (text-editor-get-cursor ed)
-      (let*((lines (text-editor-lines ed))
-            (line-num (gap-buffer-cursor lines))
-            (cdf (text-editor-cdf ed))
-            )
+      (text-editor-set-cursor
+       ed (max (text-editor-point-min ed)
+               (min (text-editor-point-max ed)
+                    (+ (text-editor-point ed) move-by)))))
+
+    (define text-editor-set-cursor
+      (case-lambda
+       ((ed index)
         (cond
-         ((< 0 line-num) (cdf-ref cdf (- line-num 1)))
-         ;; If the cursor is at the beginning of the buffer, the
-         ;; start-of-line is always zero.
-         (else 0)
-         )))
+         ((text-location-type? index)
+          ;; A `<text-location>' names a line and a column, counting
+          ;; from 1 each; the two-argument form below counts columns
+          ;; from 0, as `current-column' does.
+          (text-editor-set-cursor ed (text-location-line index)
+                                      (- (text-location-column index) 1)))
+         ((integer? index)
+          ;; A position, one-based as every position here is.
+          (set!text-editor-point ed
+             (max (text-editor-point-min ed)
+                  (min (text-editor-point-max ed) index))))
+         (else
+          (error
+           "text editor index must be set with integer or text-location-type"
+           index
+           ))))
+       ((ed line-num column-num)
+        ;; Move the cursor to the given line - counting from 1, as
+        ;; `line-number-at-pos' does - and column, counting from 0 as
+        ;; `current-column' does, clamped to the line. This is
+        ;; `goto-line' followed by `move-to-column', both built on the
+        ;; scans.
+        ;;
+        ;; The new empty line past the end of the buffer is only
+        ;; addressable when the buffer's last line ends in a line break
+        ;; - that break is what starts it. Without one, the last line
+        ;; the buffer holds is the last line there is, and the end of
+        ;; the buffer is the end of that line, which is where GNU Emacs
+        ;; puts `point-max'.
+        (set!text-editor-point
+         ed (max (text-editor-point-min ed)
+                 (min (text-editor-point-max ed)
+                      (or (%text-editor-position
+                           ed (max 1 line-num) (max 0 column-num))
+                          (text-editor-point-max ed)))))))
+      )
 
     ;;----------------------------------------------------------------
 
