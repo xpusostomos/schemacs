@@ -1226,52 +1226,82 @@ The alternative - keeping 0-based and converting in `editfns` - buys nothing
 and costs a permanent ±1 at the boundary between two conventions. AGENTS.md
 already records what that class of bug has cost here.
 
-## Remaining, in order
+## Done now (2026-10-05, second sitting)
 
-1. Import `(schemacs editor buffer-text)`; drop `(schemacs editor cdf)` and
-   `(schemacs gap-buffer)` once nothing refers to them.
-2. **Delete outright** (they are the author's layers, with no Emacs
-   counterpart):
-   - the CDF section, and `text-editor-make-cdf-fill-range` /
-     `-fill-until`
-   - the `<text-line-type>` record, `new-text-line`, `text-line-*`,
-     `write-text-line`, `show-text-line`
-   - the line editor procedures and `load-current-line`
-   - the write-back / freeze section, `line-editor-freeze*`,
-     `%line-editor-pre-freeze`, `text-editor-force-line-break`
-3. **The three writers become one.** `text-editor-force-insert-char` is the
-   only character-entry point left; `%text-editor-move-char` and
-   `load-current-line` go with the line editor. It becomes:
-   `(buffer-text-insert! text point (string ch))` then `point += 1`.
-   `text-editor-add-char-count` goes - the class owns the length.
-4. `text-editor-char-count` becomes a *procedure*: `(buffer-text-length
-   (text-editor-text ed))`. It is exported and read from outside; it has no
-   setter exported, so making it a function is safe.
-5. **Line and column become scans** - Emacs has no line index, and neither
-   will we. Port these and build the rest on them:
-   - `find_newline` (`search.c:675`)
-   - `line-beginning-position` (`editfns.c:700`)
-   - `line-number-at-pos` (`fns.c:6688`)
+Steps 1-7, 9 and 10 of the list this section used to carry are done, and the
+tree loads end to end. **It is not green**: the suites run, and a set of them
+fail on expectations written for the old coordinates, plus one real bug (below).
 
-   Then: `text-editor-get-start-of-line`, `-get-end-of-line`,
-   `-line-count`, `-cursor-line`, `-cursor-column`, `-cursor-location`,
-   `-get-line-column`, `-line-outer-size`.
-6. `text-editor-set-cursor ed line col` keeps its signature - scan to the
-   line, add the column. `text-editor-get-cursor` and
-   `text-editor-get-char-index` answer `(- point 1)`.
-7. `text-editor-line-editor-ref ed col` becomes the character at
-   `(+ line-start col)`; `text-editor-text-line-ref` returned a `text-line`
-   and must be replaced - its **only external user is `xdisp.sld:181`**,
-   which wants `text-line-inner->string` of it. Both become a
-   `buffer-text-substring` of the line's range.
-8. Delete `cdf.sld`, `cdf-tests.scm`, `gap-buffer.sld`,
-   `gap-buffer-tests.scm`; drop them from `build.scm`, `Makefile`,
-   `run-suites.py`, `run-tests.scm`.
-9. Tests to rewrite: `engine-tests.scm` (1335 lines), `ncurses-editor-tests.scm`
-   (2954), `buffer-tests.scm`. They are the safety net for this - keep them
-   green as each stage lands.
-10. Then `tools/pty-check.py` with nothing else running, and a live drive
-    through the REPL back door.
+- **The CDF is gone**, and with it `text-editor-make-cdf-fill-range`,
+  `-fill-until`, `text-editor-index-line-offset`, `text-editor-text-line-ref`
+  and `text-editor-line-editor-ref`; `xdisp.sld`'s `buffer-line-string` is now
+  one call to the engine's `text-editor-line-string`.
+- **The merge helpers are gone.** A line break is a character, so joining two
+  lines is deleting it; `%text-editor-delete-forward`/`-backward` are
+  `del_range` over the one store, with the clamp the engine documents as its
+  own deviation from the C's `end-of-buffer`/`beginning-of-buffer` signals.
+- **The scans are in**, in `engine.sld`, under their Emacs names:
+  `find-newline` (`search.c:675`), `scan-newline-from-point` (:986), `bol`
+  (`editfns.c:665`), `eol` (:723), `find-before-next-newline`
+  (`search.c:997`), `count-lines` (`xdisp.c:29892`). `find-newline` keeps the
+  C's two conventions - the position past the COUNTth boundary, and END when
+  it runs out - and its `end` of `#f` means the C's `0`, "the end of the
+  buffer in the direction of travel".
+- **Every caller above the engine speaks positions.** `editfns`' `point`,
+  `point-min`, `point-max`, `goto-char`, `region-*`, `line-*-position`,
+  `line-number-at-pos`, `char-after/before`, `forward-line` lost their ±1;
+  `search.sld`, `isearch.sld`, `minibuffer.sld`, `simple.sld`,
+  `paragraphs.sld`, `casefiddle.sld`, `buff-menu.sld`, `tabulated-list.sld`,
+  `files.sld`, `buffer.sld`, `syntax.sld` and the display's line and
+  scroll arithmetic follow.
+- **`text-editor-cursor-line` is a line NUMBER** (1-based, Emacs's
+  `line-number-at-pos`) and `text-editor-cursor-column` a 0-based character
+  offset. The display layer's `window-top-line` and `buffer-line-string`
+  are line numbers too, and `xdisp`'s row walk compares them as such.
+- **The interval and text-property layer went to Emacs's positions as
+  well** (`intervals.sld`, `textprop.sld`): a buffer's intervals are 1-based
+  (`create_root_interval` sets `new->position = BEG`), a string's are
+  offset-based, and `interval-start-pos` now takes the origin from the
+  *object* rather than from the root's cached position field - which a tree
+  reproduced out of a string has not had corrected yet, and which is what
+  `find_interval` subtracts on its way in.
+
+## What is still wrong
+
+1. **A propertized insert into a buffer that already holds propertized text
+   walks `copy-intervals` off the end of the tree** - `(interval-length #f)`,
+   "Wrong type argument in position 1 (expecting struct): #f". `ls-lisp`'s
+   listing is where it shows: the first line goes in, and the second dies.
+   The tree's `total_length` agrees with the buffer's size at that point, so
+   the intervals do not tile it - something in the grafting or the offset
+   walk is still moving an interval wrongly. Find it by comparing our tree
+   against `../emacs/src/intervals.c`'s `copy_intervals`, which cannot reach
+   `#f` because the C's `got` covers LENGTH by construction.
+2. **The test suites are written for the old coordinates.** `engine-tests`
+   (51 failures), `ncurses-editor-tests` (55), `dired-mode-tests` (18),
+   `textprop-tests` (18), `search-tests` (16), `pgtk-tests` (16),
+   `ls-lisp-tests` (10), `font-lock-tests` (10), `select-tests` (9),
+   `replace-tests` (5), `buffer-tests` (2). Most are a `0` that must be a `1`
+   or a line *number* where a line *index* was meant; the ones that are not
+   are the real things to look at.
+3. **`cdf.sld`, `cdf-tests.scm`, `gap-buffer.sld` and `gap-buffer-tests.scm`
+   still exist** and are still in `build.scm`, `Makefile`, `run-suites.py`
+   and `run-tests.scm`. Nothing imports them any more except
+   `gap-buffer-tests.scm` itself, so they are ready to delete - it was left
+   for a pass that could watch the suites go green around it.
+
+## Method that worked, and one that did not
+
+Reading the C is what landed these: `find_newline`'s two conventions, `bol`
+vs `forward_line`'s `count - 1`, `create_root_interval`'s `position = BEG`,
+`find_interval`'s `relative_position -= BUF_BEG` (from the *object*), and
+`graft_intervals_into_buffer`'s `buffer_intervals (buffer)->position =
+BUF_BEG (buffer)`. Every one of them was a place the port had written `0`.
+
+The one that did not work: a Python edit of the form
+`open(p,'w').write(open(p).read().replace(...))` **truncates the file before
+reading it** and wrote `replace.sld` out empty. It was committed empty and
+had to be restored. Read into a variable first, always.
 
 ## Why this is one change and not several
 
