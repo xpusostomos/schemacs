@@ -1197,7 +1197,11 @@ save-buffer
       ;; end.
       ;;--------------------------------------------------------------
       (let ((at (text-editor-get-cursor ed)))
-        (text-editor-set-cursor ed (text-editor-char-count ed))
+        ;; `point-max', not the character count: positions are one-based
+        ;; and `point-max' is one past the last character, which is where
+        ;; a break appended to the buffer goes. The count is one short of
+        ;; it, which put the break before the last character.
+        (text-editor-set-cursor ed (text-editor-point-max ed))
         (text-editor-insert ed #\newline)
         (text-editor-set-cursor ed at)))
 
@@ -1418,8 +1422,8 @@ save-buffer
         ;; which `find-file-noselect' sets to the file's directory
         (set!buffer-default-directory ed (file-name-directory-part path))
         ;; and point starts at the beginning of what was read, which is
-        ;; where GNU Emacs's `find-file-noselect' puts it
-        (text-editor-set-cursor ed 0 0)
+        ;; where GNU Emacs's `find-file-noselect' puts it - `point-min'
+        (text-editor-set-cursor ed 1 0)
         ed)))))
 
     (define (encode-line-breaks str line-break)
