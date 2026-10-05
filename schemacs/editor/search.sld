@@ -740,13 +740,14 @@
       ;;--------------------------------------------------------------
       (with-current-buffer (current-buffer)
         (let* ((ed (current-buffer))
-               (from (text-editor-get-cursor ed))
                ;; The whole buffer, from `point-min' - so a buffer
                ;; position is one more than its offset in TEXT, which is
                ;; what `(%bol-flags ...)' and the match data's
-               ;; translation below both assume.
+               ;; translation below both assume. Point is a position;
+               ;; the regexp engine is handed an offset.
                (text (text-editor-copy-string ed (text-editor-point-min ed)
-                                                 (text-editor-point-max ed))))
+                                                 (text-editor-point-max ed)))
+               (from (- (text-editor-get-cursor ed) 1)))
           (let ((m (regexp-exec (%compile-emacs-regexp regexp (*case-fold-search*))
                                 text from (%bol-flags text from))))
             (cond
@@ -755,7 +756,7 @@
              ((or (not m) (not (= (match:start m 0) from))) #f)
              (else
               (%string-match-into-regs m)
-              ;; zero-based buffer positions to one-based ones; the
+              ;; zero-based offsets to one-based buffer positions; the
               ;; match was made against the buffer itself, so nothing
               ;; else is added
               (match-data--translate 1)
@@ -835,9 +836,13 @@
              ((> left 1) (loop (- left 1) found))
              (else
               (text-editor-set-cursor ed found)
-              (%set-search-regs (+ 1 (- found (string-length string)))
+              ;; FOUND is a position now - the engine's positions are
+              ;; Emacs's - so the match starts `(string-length string)'
+              ;; before it and neither the register nor the answer adds
+              ;; the one they used to, when positions were zero-based.
+              (%set-search-regs (- found (string-length string))
                                 (string-length string))
-              (+ 1 found)))))))
+              found))))))
 
     (define (search-backward string . args)
       ;; GNU Emacs's `search-backward' (search.c:2206): the backward
@@ -869,8 +874,8 @@
               ;; `found' is the match's start, where the backward
               ;; search leaves point
               (text-editor-set-cursor ed found)
-              (%set-search-regs (+ 1 found) (string-length string))
-              (+ 1 found)))))))
+              (%set-search-regs found (string-length string))
+              found))))))
 
     (define (%search-window-text ed at limit backward)
       ;; The stretch of the buffer the search from AT can reach, and AT's
@@ -999,9 +1004,17 @@
               ;; it searches from the middle of a buffer rather than from
               ;; the beginning.
               (%string-match-into-regs (car found))
-              (match-data--translate (+ base 1))
+              ;; BASE is the window's first *position*, so the register
+              ;; for offset O is at position `(+ base O)' - and the
+              ;; offsets are already positions' worth, so what goes on
+              ;; is BASE and not `(+ base 1)'. The window begins at
+              ;; `point-min' only when point does.
+              (match-data--translate base)
               (*last-thing-searched* (current-buffer))
-              (+ 1 (if backward (cadr found) (caddr found))))))))
+              ;; ... and the answer is that same position. It used to be
+              ;; `(+ 1 ...)', which was right while the engine's
+              ;; positions were zero-based and is one too far now.
+              (if backward (cadr found) (caddr found)))))))
 )
 
     (define (re-search-forward regexp . args)
