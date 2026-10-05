@@ -36,6 +36,7 @@
           set!text-editor-buffer-name set!text-editor-file-name
           text-editor-buffer-name text-editor-char-count
           text-editor-file-name text-editor-get-char-index text-editor-get-cursor
+          text-editor-point-min text-editor-point-max
           text-editor-insert text-editor-modified? text-editor-read-only?
           text-editor-set-cursor text-editor-set-modified!
           text-editor-set-read-only! text-editor-to-string
@@ -1184,9 +1185,9 @@ save-buffer
       ;; Whether the last character of the buffer is a line break. False
       ;; for an empty buffer, which Emacs treats as needing nothing.
       ;;--------------------------------------------------------------
-      (let ((count (text-editor-char-count ed)))
-        (and (< 0 count)
-             (char=? (text-editor-get-char-index ed (- count 1)) #\newline))))
+      (let ((max (text-editor-point-max ed)))
+        (and (< (text-editor-point-min ed) max)
+             (char=? (text-editor-get-char-index ed (- max 1)) #\newline))))
 
     (define (add-line-break-at-end! ed)
       ;; Append a line break to the buffer, leaving the cursor where it

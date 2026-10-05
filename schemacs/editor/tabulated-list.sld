@@ -28,6 +28,7 @@
     (scheme char)
     (only (schemacs editor engine)
           text-editor-char-count text-editor-get-cursor text-editor-insert
+          text-editor-point-min
           text-editor-delete-from-cursor text-editor-set-cursor
           text-editor-get-line-column
           text-editor-undo-disable! text-editor-undo-enable!)
@@ -192,7 +193,7 @@
         ;; point. Deleting forward from point instead would leave whatever
         ;; came before it and draw the new list onto the end of the old -
         ;; which is what a redraw with point down the list used to do.
-        (text-editor-set-cursor ed 0)
+        (text-editor-set-cursor ed (text-editor-point-min ed))
         (text-editor-delete-from-cursor ed (text-editor-char-count ed))
         (text-editor-insert ed (tabulated-list--header))
         (text-editor-insert ed "\n")
@@ -202,7 +203,7 @@
                     (text-editor-insert ed "\n"))
                   entries)
         (text-editor-undo-enable! ed)
-        (text-editor-set-cursor ed 0)
+        (text-editor-set-cursor ed (text-editor-point-min ed))
         entries))
 
     (define (tabulated-list-revert ed)

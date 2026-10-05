@@ -51,10 +51,10 @@
          text-editor-cursor-column text-editor-cursor-line
          text-editor-get-cursor text-editor-mark text-editor-get-end-of-line
          text-editor-get-line-column text-editor-get-start-of-line
-         text-editor-line-count text-editor-line-editor-ref
+         text-editor-line-count
          text-editor-line-outer-size text-editor-modified?
-         text-editor-read-only? text-editor-text-line-ref
-         text-editor-to-string text-line-inner->string)
+         text-editor-read-only? text-editor-line-string
+         text-editor-point-max text-editor-to-string)
     (only (schemacs editor frame)
          *current-frame* *echo-area-buffer* *echo-area-prompt*
          *frame-cursor-type* *frame-focus* frame-height frame-width
@@ -148,38 +148,22 @@
     ;; the search about what matched.
 
     (define (buffer-line-string ed i)
-      ;; Get the displayable contents of line I (not including its
-      ;; line break) as a string, or #f when I is past the end of the
-      ;; buffer. The current line is read from the line editor, which
-      ;; holds the live copy of the line under the cursor; every other
-      ;; line is read from the lines gap-buffer.
+      ;; The displayable contents of line I - a line *number*, counting
+      ;; from 1 - as a string, without the line break that ends it, or
+      ;; #f when there is no such line.
       ;;
       ;; This is a departure, and there is no Emacs function to mirror
       ;; it with: xdisp.c never materialises a line as a string - it
       ;; walks the buffer with the display iterator (`struct it'),
       ;; fetching characters as it produces glyphs. Rendering from a
       ;; line string is this redisplay's shortcut.
+      ;;
+      ;; The engine used to keep the current line in a line editor of
+      ;; its own, so this had to read that one from the editor and every
+      ;; other from a gap buffer of lines. There is one store now, and
+      ;; one answer for every line.
       ;;--------------------------------------------------------------
-      (cond
-       ((= i (text-editor-cursor-line ed))
-        ;; The live current line: the line editor's characters, from
-        ;; the start of the line to the end of the line.
-        (call-with-port (open-output-string)
-          (lambda (port)
-            (let* ((start (text-editor-get-start-of-line ed))
-                   (end   (text-editor-get-end-of-line ed))
-                   (len   (- end start)))
-              (let loop ((j 0))
-                (when (< j len)
-                  (let ((ch (text-editor-line-editor-ref ed j)))
-                    (when ch (write-char ch port)))
-                  (loop (+ 1 j)))))
-            (get-output-string port))))
-       ((< i (text-editor-line-count ed))
-        ;; the display form of the line: its contents WITHOUT the
-        ;; terminating line break
-        (text-line-inner->string (text-editor-text-line-ref ed i)))
-       (else #f)))
+      (text-editor-line-string ed i))
 
     ;;----------------------------------------------------------------
     ;; The `display' text property
@@ -235,8 +219,8 @@
              ;; The line number is tested here rather than left to
              ;; `buffer-line-string', because the position walk below has
              ;; no answer for a line that is not there.
-             (line-string (and (>= line-index 0)
-                               (< line-index (text-editor-line-count ed))
+             (line-string (and (<= 1 line-index)
+                               (<= line-index (text-editor-line-count ed))
                                (buffer-line-string ed line-index))))
         (and line-string
              (line-display-texts ed
@@ -601,7 +585,7 @@
                          (need (+ 1 (rows-row-of-column
                                      (window-line-slices window cursor-line)
                                      (text-editor-cursor-column ed)))))
-                (if (and (> l 0)
+                (if (and (> l 1)
                          (< (+ need (window-line-rows window (- l 1))) vheight))
                     (back (- l 1) (+ need (window-line-rows window (- l 1))))
                     (set!window-top-line window l))))
@@ -614,7 +598,7 @@
                     (when (>= (+ used k) vheight)
                       ;; its row is below the window, so it becomes the last
                       (let back ((l cursor-line) (need (+ 1 k)))
-                        (if (and (> l 0)
+                        (if (and (> l 1)
                                  (< (+ need (window-line-rows window (- l 1)))
                                     vheight))
                             (back (- l 1)
@@ -786,7 +770,7 @@
              ;; when the line holds a tab or a wide character - nor when a
              ;; `display' property stands on the way, which moves the
              ;; columns after it along.
-             (line-index (- (text-location-line at) 1))
+             (line-index (text-location-line at))
              (line (buffer-line-string ed line-index))
              (line-texts (and line
                               (line-display-texts
@@ -1278,7 +1262,7 @@
              region-end
              (<= region-start row-end)
              (< row-end region-end)
-             (< row-end (text-editor-char-count ed))
+             (< row-end (text-editor-point-max ed))
              (region-face-at-position? ed row-end)
              ;; The region face's :extend fills newline space even in the
              ;; monochrome spec, where :extend itself is unspecified and

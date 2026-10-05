@@ -21,6 +21,7 @@
     (scheme base)
     (only (schemacs editor engine)
           text-editor-char-count text-editor-get-char-index
+          text-editor-point-min text-editor-point-max
           text-editor-get-cursor text-editor-get-start-of-line
           text-editor-get-end-of-line text-editor-set-cursor)
     (only (schemacs editor editfns) goto-char save-excursion forward-line)
@@ -82,7 +83,7 @@
       ;; The backward mirror, the same way.
       ;;--------------------------------------------------------------
       (let ((start (text-editor-get-start-of-line ed)))
-        (if (> start 0)
+        (if (> start (text-editor-point-min ed))
             (begin
               (text-editor-set-cursor ed (- start 1))
               (text-editor-set-cursor
@@ -107,7 +108,7 @@
             (let loop ((left n))
               (if (and (> left 0)
                        (< (text-editor-get-cursor ed)
-                          (text-editor-char-count ed)))
+                          (text-editor-point-max ed)))
                   (begin
                     ;; over the separator lines
                     (let skip ()
@@ -121,7 +122,7 @@
                     (let find ()
                       (cond
                        ((>= (text-editor-get-cursor ed)
-                            (text-editor-char-count ed)) #f)
+                            (text-editor-point-max ed)) #f)
                        ((%paragraph-start-line? ed) #f)
                        (else (%forward-line ed) (find))))
                     (loop (- left 1)))
@@ -151,7 +152,8 @@
                         (skip)))
                     ;; up while the line above this one is not blank
                     (let find ()
-                      (if (<= (text-editor-get-start-of-line ed) 0)
+                      (if (<= (text-editor-get-start-of-line ed)
+                              (text-editor-point-min ed))
                           #f
                           (let ((above (begin
                                          (text-editor-set-cursor

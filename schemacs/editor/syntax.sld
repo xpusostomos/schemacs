@@ -18,7 +18,8 @@
     (scheme base)
     (only (schemacs editor engine)
           text-editor-get-cursor text-editor-get-char-index
-          text-editor-char-count text-editor-set-cursor)
+          text-editor-point-min text-editor-point-max
+          text-editor-set-cursor)
     (only (schemacs editor buffer) current-buffer)
     )
 
@@ -29,50 +30,58 @@
 
   (begin
 
+    ;; `point', `point-min' and `point-max' are `editfns.c''s names for
+    ;; what the engine answers as `text-editor-get-cursor' and the two
+    ;; bounds. They are the same values under private names here, so the
+    ;; walks below read like the C they are ported from:
+    ;; `(schemacs editor editfns)' imports this library, so this one
+    ;; cannot import that back.
+    (define (%point ed) (text-editor-get-cursor ed))
+    (define (%point-min ed) (text-editor-point-min ed))
+    (define (%point-max ed) (text-editor-point-max ed))
+
     (define (skip-chars-forward set . rest)
       ;; GNU Emacs's `skip-chars-forward' (syntax.c:1618): "Move point
       ;; forward, stopping before a character not in SET" - and answer
       ;; the distance moved. With the optional BOUND, no farther than
-      ;; that position. The C moves point and answers the count; so
-      ;; does this, the cursor being the engine's.
+      ;; that position. The C moves point and answers the count; so does
+      ;; this, the cursor being the engine's.
+      ;;
+      ;; BOUND is a position, one-based as every position here is. The C
+      ;; clips it to the buffer's end (`skip_chars', syntax.c:1470).
       ;;--------------------------------------------------------------
       (let* ((ed (current-buffer))
              (bound (if (pair? rest) (car rest) #f))
+             (lim (min (or bound (%point-max ed)) (%point-max ed)))
              (members (string->list set)))
-        (let loop ((i (text-editor-get-cursor ed))
-                   (moved 0)
-                   ;; BOUND is a one-based position, the engine's index
-                   ;; one below it
-                   (count (if bound
-                              (min (- bound 1) (text-editor-char-count ed))
-                              (text-editor-char-count ed))))
-          (if (>= i count)
+        (let loop ((pos (%point ed)) (moved 0))
+          (if (>= pos lim)
               moved
-              (let ((c (text-editor-get-char-index ed i)))
+              (let ((c (text-editor-get-char-index ed pos)))
                 (if (and c (memv c members))
                     (begin
-                      (text-editor-set-cursor ed (+ i 1))
-                      (loop (+ i 1) (+ moved 1) count))
+                      (text-editor-set-cursor ed (+ pos 1))
+                      (loop (+ pos 1) (+ moved 1)))
                     moved))))))
 
     (define (skip-chars-backward set . rest)
-      ;; GNU Emacs's `skip-chars-backward' (syntax.c:1633): the mirror
-      ;; - "Move point backward, stopping before a character not in
-      ;; SET."
+      ;; GNU Emacs's `skip-chars-backward' (syntax.c:1633): the mirror -
+      ;; "Move point backward, stopping before a character not in SET."
+      ;; BOUND is a position, and the C clips it to the buffer's
+      ;; beginning.
       ;;--------------------------------------------------------------
       (let* ((ed (current-buffer))
              (bound (if (pair? rest) (car rest) #f))
+             (lim (max (or bound (%point-min ed)) (%point-min ed)))
              (members (string->list set)))
-        (let loop ((i (text-editor-get-cursor ed))
-                   (moved 0)
-                   (floor (if bound bound 0)))
-          (if (<= i floor)
+        (let loop ((pos (%point ed)) (moved 0))
+          (if (<= pos lim)
               moved
-              (let ((c (text-editor-get-char-index ed (- i 1))))
+              (let ((c (text-editor-get-char-index ed (- pos 1))))
                 (if (and c (memv c members))
                     (begin
-                      (text-editor-set-cursor ed (- i 1))
-                      (loop (- i 1) (+ moved 1) floor))
+                      (text-editor-set-cursor ed (- pos 1))
+                      (loop (- pos 1) (+ moved 1)))
                     moved))))))
 
     ))

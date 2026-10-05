@@ -1112,7 +1112,7 @@
         ;; point's, or the top when there are not that many lines
         ;; above it - which is where `vmotion' stops, at `point-min'.
         (set!window-top-line
-         window (max 0 (- (text-editor-cursor-line ed) iarg)))))
+         window (max 1 (- (text-editor-cursor-line ed) iarg)))))
 
     ;; The key GNU Emacs binds it to (C-l), beside the command as the
     ;; other libraries state theirs.

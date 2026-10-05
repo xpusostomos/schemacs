@@ -740,7 +740,12 @@
       (with-current-buffer (current-buffer)
         (let* ((ed (current-buffer))
                (from (text-editor-get-cursor ed))
-               (text (text-editor-copy-string ed 0 (text-editor-char-count ed))))
+               ;; The whole buffer, from `point-min' - so a buffer
+               ;; position is one more than its offset in TEXT, which is
+               ;; what `(%bol-flags ...)' and the match data's
+               ;; translation below both assume.
+               (text (text-editor-copy-string ed (text-editor-point-min ed)
+                                                 (text-editor-point-max ed))))
           (let ((m (regexp-exec (%compile-emacs-regexp regexp (*case-fold-search*))
                                 text from (%bol-flags text from))))
             (cond
@@ -815,7 +820,7 @@
                             (pair? (cddr args)) (pair? (cdddr args)))
                        (cadddr args)
                        (*case-fold-search*)))
-             (limit (or bound (text-editor-char-count ed))))
+             (limit (or bound (text-editor-point-max ed))))
         (let loop ((left (max 1 count)) (from (text-editor-get-cursor ed)))
           (let ((found (text-editor-search-forward
                         ed string (min from limit) fold)))
@@ -849,7 +854,7 @@
                             (pair? (cddr args)) (pair? (cdddr args)))
                        (cadddr args)
                        (*case-fold-search*)))
-             (limit (or bound 0)))
+             (limit (or bound (text-editor-point-min ed))))
         (let loop ((left (max 1 count)) (from (text-editor-get-cursor ed)))
           (let ((found (text-editor-search-backward
                         ed string (max from limit) fold)))
@@ -899,9 +904,17 @@
       ;; down from AT to LIMIT and takes only a match that *ends* by AT,
       ;; so it reaches [LIMIT, AT).
       ;;--------------------------------------------------------------
-      (let* ((wstart (min (if backward (max 0 (- limit 1)) (max 0 (- at 1)))
+      (let* ((lo (text-editor-point-min ed))
+             ;; The window starts one character *before* the search
+             ;; start, so that `^' is judged against the real character
+             ;; in front of it - which is what the C's `re_search_2'
+             ;; gets by being handed the buffer itself.
+             (wstart (min (if backward (max lo (- limit 1)) (max lo (- at 1)))
                           (if backward at limit)))
              (wend (if backward at limit)))
+        ;; WSTART is a position and is answered as the base the match
+        ;; offsets are added to: the character at offset O of the window
+        ;; is at position `(+ wstart O)'.
         (cons (text-editor-copy-string ed wstart wend) wstart)))
 
     (define (%re-search regexp bound noerror count backward)
@@ -916,9 +929,9 @@
       ;; offsets are added and subtracted at the two ends of the search.
       ;;--------------------------------------------------------------
       (let* ((ed (current-buffer))
-             (size (text-editor-char-count ed))
              (limit (or bound
-                        (if backward 0 size)))
+                        (if backward (text-editor-point-min ed)
+                                     (text-editor-point-max ed))))
              (from (text-editor-get-cursor ed)))
         (let loop ((left (max 1 count)) (at from))
           (let* ((window (%search-window-text ed at limit backward))
@@ -1256,14 +1269,14 @@
              (pair (list-ref regs sub))
              (sub-start (car pair))
              (sub-end (cdr pair))
-             (size (text-editor-char-count ed))
+             (zv (text-editor-point-max ed))
              ;; `opoint = PT <= sub_start ? PT : max (PT, sub_end) - ZV'
              ;; - the recorded point, negative being an offset from the
              ;; buffer's end
-             (pt (+ 1 (text-editor-get-cursor ed)))
+             (pt (text-editor-get-cursor ed))
              (opoint (if (<= pt sub-start)
                          pt
-                         (- (max pt sub-end) (+ 1 size))))
+                         (- (max pt sub-end) zv)))
              ;; the case pattern of the matched text
              (case-action
               (if fixedcase 'nochange
@@ -1275,9 +1288,8 @@
                   newtext
                   (%substitute-replacement newtext regs sub)))
              (newpoint (+ sub-start (string-length newtext))))
-        ;; replace the region, as `replace_range' does - the engine
-        ;; boundary takes the one-based positions down to indices
-        (text-editor-set-cursor ed (- sub-start 1))
+        ;; replace the region, as `replace_range' does
+        (text-editor-set-cursor ed sub-start)
         (text-editor-delete-from-cursor ed (- sub-end sub-start))
         (text-editor-insert ed newtext)
         ;; the match data follows the change, as the C's
@@ -1294,11 +1306,11 @@
         ;; put point back where it was, then move it "officially" to
         ;; the replacement's end
         (text-editor-set-cursor
-         ed (max 0 (min size
-                        (if (< opoint 0)
-                            (+ (+ 1 size) opoint)
-                            (- opoint 1)))))
-        (text-editor-set-cursor ed (- newpoint 1))
+         ed (max (text-editor-point-min ed)
+                 (min zv (if (< opoint 0)
+                             (+ zv opoint)
+                             opoint))))
+        (text-editor-set-cursor ed newpoint)
         #f))
 
     (define (match-string num . args)

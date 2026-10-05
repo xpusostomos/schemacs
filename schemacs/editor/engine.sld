@@ -1112,10 +1112,10 @@
       (if case-fold? (char-downcase c) c))
 
     (define (text-editor-search-forward ed string start case-fold?)
-      ;; Search forward from the character index START for STRING.
-      ;; Returns the index just past the match, which is where GNU
-      ;; Emacs's `search-forward' leaves point, or #f when STRING does
-      ;; not occur there. An empty STRING finds nothing, as it does for
+      ;; Search forward from the position START for STRING. Returns the
+      ;; position just past the match, which is where GNU Emacs's
+      ;; `search-forward' leaves point, or #f when STRING does not
+      ;; occur there. An empty STRING finds nothing, as it does for
       ;; mg's `is_find', rather than matching everywhere as Emacs's
       ;; `search-forward' does - an empty search string means "no search
       ;; yet" to the incremental search that wants this.
@@ -1123,23 +1123,26 @@
       (and (< 0 (string-length string))
            (let ((found (string-search-forward
                          (text-editor-copy-string
-                          ed start (text-editor-char-count ed))
+                          ed start (text-editor-point-max ed))
                          string 0 case-fold?)))
              (and found (+ start found (string-length string))))))
 
     (define (text-editor-search-backward ed string start case-fold?)
-      ;; Search backward from the character index START for STRING.
-      ;; Returns the index of the start of the match, which is where GNU
-      ;; Emacs's `search-backward' leaves point, or #f when STRING does
-      ;; not occur before START. An empty STRING finds nothing.
+      ;; Search backward from the position START for STRING. Returns the
+      ;; position of the start of the match, which is where GNU Emacs's
+      ;; `search-backward' leaves point, or #f when STRING does not
+      ;; occur before START. An empty STRING finds nothing.
       ;;--------------------------------------------------------------
       (and (< 0 (string-length string))
-           (let* ((text (text-editor-copy-string ed 0 start))
+           (let* ((text (text-editor-copy-string ed (text-editor-point-min ed)
+                                                    start))
                   (found (%string-search-backward
                           text string (- (string-length text)
                                          (string-length string))
                           case-fold?)))
-             found)))
+             ;; FOUND is an offset into TEXT, whose first character is
+             ;; at `point-min'
+             (and found (+ found (text-editor-point-min ed))))))
 
     (define *text-property-offset-function*
       ;; The procedure that shifts a buffer's text-property intervals when
