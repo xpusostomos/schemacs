@@ -59,6 +59,8 @@
    buffer-text-for-each
    buffer-text-clear!
    buffer-text-beg-unchanged  set!buffer-text-beg-unchanged
+   buffer-text-modiff  buffer-text-chars-modiff
+   set!buffer-text-modiff  set!buffer-text-chars-modiff
    *gap-bytes-dfl*  *gap-bytes-min*
    )
 
@@ -68,7 +70,8 @@
     (define *gap-bytes-min* 20)     ;; buffer.h:210
 
     (define-record-type <buffer-text-type>
-      (make<buffer-text> base store gpt z gap-size beg-unchanged)
+      (make<buffer-text> base store gpt z gap-size beg-unchanged
+                        modiff chars-modiff)
       buffer-text-type?
       (base     buffer-text-base)
       ;; ^ The coordinate base of every *position* this class answers,
@@ -98,6 +101,23 @@
       ;; `redisplay_internal''s frame-based redisplay, and neither is
       ;; ported; the one reader here is the `%l' cache's freshness test,
       ;; which the C spells `BASE_LINE_NUMBER_VALID_P' (`xdisp.c:19393').
+      (modiff buffer-text-modiff set!buffer-text-modiff)
+      ;; ^ GNU Emacs's `modiff' (`buffer.h'), a field of
+      ;; `struct buffer_text': a counter raised on *every* modification,
+      ;; by `modiff_incr' - and raised further for a larger change, but
+      ;; only logarithmically, so a big edit does not race it away:
+      ;; `len == 0 ? 1 : elogb (len) + 1' (`lisp.h:4142').
+      ;;
+      ;; `buffer-modified-p' is derived from it (`SAVE_MODIFF <
+      ;; MODIFF'), and a great deal of redisplay freshness is too.
+      (chars-modiff buffer-text-chars-modiff set!buffer-text-chars-modiff)
+      ;; ^ GNU Emacs's `chars_modiff': set to `modiff' when the change
+      ;; was to the *characters*, and left alone when it was only to
+      ;; their properties (`textprop.c:90' raises `MODIFF' and does not
+      ;; touch this). The difference is what `buffer-chars-modified-tick'
+      ;; answers, and it is the question jit-lock asks - "have the
+      ;; characters moved under my fontification?" - so that a mere
+      ;; property change does not force refontification.
       )
 
     ;;----------------------------------------------------------------
@@ -156,7 +176,11 @@
       (case-lambda
        ((base) (new-buffer-text base 0))
        ((base size)
-        (make<buffer-text> base (make-u32vector size 0) base base size 0)
+        ;; `modiff' and `chars_modiff' both start at 1, not 0: that is
+        ;; what Emacs reports for a buffer that has just been made
+        ;; (`(buffer-modified-tick)' on a fresh buffer is 1).
+        (make<buffer-text> base (make-u32vector size 0) base base size 0
+                           1 1)
         )))
 
     ;;----------------------------------------------------------------

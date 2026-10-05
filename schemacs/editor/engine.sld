@@ -49,6 +49,8 @@
           buffer-text-substring  buffer-text-for-each
           buffer-text-clear!
           buffer-text-beg-unchanged  set!buffer-text-beg-unchanged
+          buffer-text-modiff  buffer-text-chars-modiff
+          set!buffer-text-modiff  set!buffer-text-chars-modiff
           )
     ;; The line-break cache `find-newline' keeps - GNU Emacs's
     ;; `region-cache.c', which is `buf->newline_cache' there. It is what
@@ -165,6 +167,11 @@
    ;; `BEG_UNCHANGED' (`buffer.h:156') and the caches' own "everything is
    ;; current as of now".
    text-editor-beg-unchanged  text-editor-note-unchanged!
+   ;; `buffer-modified-tick' and `buffer-chars-modified-tick' (buffer.c)
+   text-editor-modiff  text-editor-chars-modiff
+   ;; `modify_text_properties' raises `MODIFF' without touching
+   ;; `CHARS_MODIFF' (textprop.c:90); this is that raise
+   text-editor-note-property-change!
    )
 
   (begin
@@ -338,7 +345,7 @@
       (make<text-editor>
        text  newline-cache  point
        ins-char  lbrk  textprops  undo
-       modified  save-token  read-only  mark  markers
+       save-modiff  save-token  read-only  mark  markers
        deactivate-mark
        name  file-name
        )
@@ -384,11 +391,15 @@
       ;; undo information is disabled. The empty list is Emacs's `nil':
       ;; recording is enabled but there is nothing to undo. See the
       ;; "Undo" section below for the entry formats.
-      (modified   text-editor-modified-flag set!text-editor-modified-flag)
-      ;; ^ Whether the buffer has been changed since it was last saved
-      ;; or visited, GNU Emacs's `buffer-modified-p'. It is cleared by
-      ;; saving and by undoing back past every change made since the
-      ;; last save.
+      (save-modiff text-editor-save-modiff  set!text-editor-save-modiff)
+      ;; ^ GNU Emacs's `SAVE_MODIFF' (`buffer.h'), a field of
+      ;; `struct buffer': the value of the text's `modiff' when the
+      ;; buffer was last in sync with its file. There is no flag
+      ;; beside it - `buffer-modified-p' *is* the comparison
+      ;; `SAVE_MODIFF < MODIFF', which is what `text-editor-modified?'
+      ;; answers and what `text-editor-set-modified!' maintains.
+      ;; It is cleared by saving and by undoing back past every change
+      ;; made since the last save.
       (save-token text-editor-save-token    set!text-editor-save-token)
       ;; ^ Identifies the state the buffer was last in sync with its
       ;; file. It is an integer that counts up every time the buffer is
@@ -479,10 +490,16 @@
                         1
                         #f lbrk props
                         ;; A newly created buffer records undo
-                        ;; information from the start, as in GNU Emacs,
-                        ;; is unmodified (there is no file it could
-                        ;; differ from), writable, and has no mark set.
-                        '() #f 0 #f
+                        ;; information from the start, as in GNU Emacs.
+                        '()
+                        ;; `SAVE_MODIFF' starts at 1 and so does the
+                        ;; text's `modiff', which is what makes a fresh
+                        ;; buffer unmodified: `1 < 1' is false. Emacs
+                        ;; sets the one to 1 at `buffer.c:631' and a
+                        ;; fresh buffer reports a tick of 1.
+                        ;; `SAVE_MODIFF' is 1, the `save-token' 0, and
+                        ;; the buffer writable.
+                        1 0 #f
                         ;; The mark, pointing nowhere until it is set,
                         ;; and an empty marker chain.
                         (make<marker> #f 0 #f)
@@ -833,30 +850,91 @@
       ;;--------------------------------------------------------------
       (set-marker! (%mark-marker ed) (and position position) ed))
 
+    (define (text-editor-modiff ed)
+      ;; The buffer's modification tick: GNU Emacs's `buffer-modified-tick'
+      ;; (`buffer.c:1631'), which answers `MODIFF'. Every change to the
+      ;; text raises it, so two readings that differ mean the buffer
+      ;; changed in between - which is the question the line-break cache
+      ;; and redisplay freshness both ask.
+      ;;--------------------------------------------------------------
+      (buffer-text-modiff (text-editor-text ed)))
+
+    (define (text-editor-chars-modiff ed)
+      ;; The same, for changes to the *characters* alone: GNU Emacs's
+      ;; `buffer-chars-modified-tick'. A change to a text property raises
+      ;; `modiff' and not this one, so a cache of something computed from
+      ;; the characters is not invalidated by a fontification change.
+      ;;--------------------------------------------------------------
+      (buffer-text-chars-modiff (text-editor-text ed)))
+
     (define (text-editor-modified? ed)
       ;; Whether the buffer has been changed since it was last saved or
-      ;; visited. GNU Emacs's `buffer-modified-p'.
+      ;; visited: GNU Emacs's `buffer-modified-p' (`buffer.c'), which is
+      ;; not a flag but the comparison
+      ;;
+      ;;     BUF_SAVE_MODIFF (buf) < BUF_MODIFF (buf)
       ;;--------------------------------------------------------------
-      (text-editor-modified-flag ed))
+      (< (text-editor-save-modiff ed) (text-editor-modiff ed)))
+
+    (define (%text-editor-incr-modiff! ed len)
+      ;; Raise the modification counter by `modiff_incr''s rule
+      ;; (`lisp.h:4142'): one for a change that is not to the characters,
+      ;; and `elogb (len) + 1' - the base-2 logarithm of the size, plus
+      ;; one - for one that is. Raising it more for a bigger change but
+      ;; only logarithmically is what stops a large edit racing the
+      ;; counter away; and `chars_modiff' follows `modiff' only for a
+      ;; change to the characters (`insdel.c:929').
+      ;;--------------------------------------------------------------
+      (let ((text (text-editor-text ed)))
+        (set!buffer-text-modiff
+         text (+ (buffer-text-modiff text)
+                 (if (or (not len) (= len 0))
+                     1
+                     (+ 1 (let loop ((n len) (w 0))
+                            (if (<= n 1) w (loop (quotient n 2) (+ w 1))))))))
+        (when (and len (> len 0))
+          (set!buffer-text-chars-modiff text (buffer-text-modiff text)))))
+
+    (define (text-editor-note-property-change! ed start end)
+      ;; A change to the buffer's *text properties* rather than to its
+      ;; characters - GNU Emacs's `modify_text_properties'
+      ;; (`textprop.c:80'), which wraps every property write. It raises
+      ;; `modiff' by one and does **not** touch `chars_modiff', which is
+      ;; the whole reason the two counters exist apart: a cache of
+      ;; something computed from the characters need not be thrown away
+      ;; because a face changed.
+      ;;--------------------------------------------------------------
+      (text-editor-invalidate-caches! ed start end)
+      (%text-editor-incr-modiff! ed 0))
 
     (define (text-editor-set-modified! ed flag)
-      ;; Set whether ED is modified, GNU Emacs's
-      ;; `set-buffer-modified-p'. Marking a buffer modified records
-      ;; where it was last in sync with its file, so that undoing back
-      ;; past every change made since then can mark it unmodified
-      ;; again; marking it unmodified (saving it) starts a new such
-      ;; point, which is why an older mark no longer counts - the
-      ;; buffer saved in the meantime is not the buffer that mark
-      ;; describes.
+      ;; Set whether ED is modified - GNU Emacs's
+      ;; `set-buffer-modified-p' (`buffer.c:1573'), whose arithmetic is
+      ;; all in terms of the two counters rather than a flag.
+      ;;
+      ;; Marking it modified *raises MODIFF* when `SAVE_MODIFF' has
+      ;; caught up with it, so that the comparison comes out true again:
+      ;; that is how "modified" is said of a buffer whose text never
+      ;; changed. Note that `modiff_incr' answers the *old* count, so
+      ;; `SAVE_MODIFF' is set to the value `MODIFF' had before the
+      ;; raise, and the two end up one apart.
+      ;;
+      ;; Marking it unmodified records where it was last in sync with its
+      ;; file, so undoing back past every change made since then can mark
+      ;; it unmodified again; the `(t . TOKEN)' undo entry is that mark,
+      ;; and an older one no longer counts - the buffer saved in the
+      ;; meantime is not the buffer that mark describes.
       ;;--------------------------------------------------------------
       (cond
        (flag
         (unless (text-editor-modified? ed)
           (%undo-record! ed (cons 't (text-editor-save-token ed)))
-          (set!text-editor-modified-flag ed #t)))
+          (when (>= (text-editor-save-modiff ed) (text-editor-modiff ed))
+            (set!text-editor-save-modiff ed (text-editor-modiff ed))
+            (%text-editor-incr-modiff! ed 0))))
        (else
         (when (text-editor-modified? ed)
-          (set!text-editor-modified-flag ed #f)
+          (set!text-editor-save-modiff ed (text-editor-modiff ed))
           (set!text-editor-save-token ed (+ 1 (text-editor-save-token ed)))))))
 
     (define (%text-editor-note-change! ed)
@@ -869,7 +947,15 @@
       ;; is what GNU Emacs's `prepare_to_modify_buffer' does with
       ;; `(setq deactivate-mark t)' - `insdel.c''s, where this is.
       ;;--------------------------------------------------------------
-      (text-editor-set-modified! ed #t)
+      ;;
+      ;; The mark is recorded here because this is the C's
+      ;; `record_first_change' (`undo.c:210'), which `record_insert' calls
+      ;; before the modification counter rises - so the test "have we
+      ;; changed since the save?" is still answered by the *old* counter.
+      ;; It is not a call to `set-buffer-modified-p': with the counter
+      ;; moved, `text-editor-modified?' is true on its own.
+      (when (not (text-editor-modified? ed))
+        (%undo-record! ed (cons 't (text-editor-save-token ed))))
       (set!text-editor-deactivate-mark! ed #t))
 
     (define *after-change-functions* (make-parameter '()))
@@ -1240,6 +1326,22 @@
             (let ((offset (*text-property-offset-function*)))
               (when offset (offset ed beg (- end beg))))
             (%text-editor-note-change! ed)
+            ;; The modification counter rises once for the whole
+            ;; insertion, sized by how much went in - the C's
+            ;; `insert_from_string_1' does one
+            ;; `modiff_incr (&MODIFF, nchars)' for a string, however many
+            ;; characters that is (`insdel.c:1069'), where counting each
+            ;; character separately would race the counter away on a
+            ;; large insertion. It is here rather than beside the
+            ;; character writer because `force-insert-char' is called
+            ;; once per character, and the operation is what the C
+            ;; counts.
+            ;;
+            ;; It comes *after* `note-change!', which is where the C
+            ;; puts it too: `record_insert' runs before `modiff_incr'
+            ;; (`insdel.c:926-928'), and `record_insert' is what asks
+            ;; "is this the first change since the save?".
+            (%text-editor-incr-modiff! ed (- end beg))
             (%undo-record-insertion! ed beg end)
             ;; and the after-change hooks, once the text is really in.
             ;; BEG and END are positions, one-based like Emacs's, so
@@ -1430,6 +1532,11 @@
               ;; and OLD-LENGTH is what went
               (signal-after-change beg beg deleted))
             (%text-editor-note-change! ed)
+            ;; One rise for the whole deletion, sized by how much went,
+            ;; and again *after* the first-change mark - the C's
+            ;; `record_delete' then `modiff_incr (&MODIFF, nchars_del)'
+            ;; (`insdel.c:2030', `:2036').
+            (%text-editor-incr-modiff! ed deleted)
             ;; The sign of the recorded position is Emacs's rule in
             ;; `record_delete': `-beg' when point was at the end of the
             ;; deleted text (a backward delete leaves it there), `beg'

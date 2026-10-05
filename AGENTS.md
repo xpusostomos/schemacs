@@ -1517,3 +1517,60 @@ wrong, because the shape does not carry the invariants. This one was
 invisible to reading and to every existing test; only measuring it
 against a from-scratch count found it. `set-window-start!' computing
 `start_at_line_beg` rather than writing `false` is the same kind of rule.
+
+## modiff: `buffer-modified-p` is a comparison, not a flag — 2026-10-06
+
+`text-editor-modified?` was a boolean the setters wrote. In Emacs it is
+**derived**: `buffer-modified-p` is `BUF_SAVE_MODIFF (buf) < BUF_MODIFF
+(buf)`, and `MODIFF` is a counter on `struct buffer_text` raised by
+`modiff_incr` on every change.
+
+Ported: `modiff` and `chars_modiff` on the buffer-text (both starting at
+1, as a fresh buffer reports a tick of 1), `SAVE_MODIFF` on the editor,
+`text-editor-modiff` / `text-editor-chars-modiff` (Emacs's
+`buffer-modified-tick` and `buffer-chars-modified-tick`), and the C's
+`set-buffer-modified-p` arithmetic - including the trick that marking a
+buffer modified *raises* `MODIFF` when `SAVE_MODIFF` has caught up, which
+is how "modified" is said of a buffer whose text never changed.
+
+Checked against a real Emacs rather than reasoned about. Seven steps,
+`emacs -Q --batch`:
+
+| | tick | chars | modified |
+|---|---|---|---|
+| new buffer | 1 | 1 | nil |
+| insert "a" | 2 | 2 | t |
+| insert "b" | 3 | 3 | t |
+| `set-buffer-modified-p nil` | 3 | 3 | nil |
+| `set-buffer-modified-p t` | 4 | 3 | t |
+| `put-text-property` | 5 | 3 | t |
+| insert 10 chars | **9** | 9 | t |
+
+Ours matches every row. The last is the point of `modiff_incr`: ten
+characters raise the counter by four, not ten - the rise is
+`len == 0 ? 1 : elogb (len) + 1`, logarithmic in the size of the change.
+And `put-text-property` raises `MODIFF` without touching `CHARS_MODIFF`,
+which is why the two counters exist apart.
+
+### Two orderings that had to be right, and one silent bug
+
+1. **The bump is per operation, not per character.** Our string insert
+   goes character by character through `force-insert-char`, so bumping
+   there gave ten rises for ten characters and a tick of 15 where Emacs
+   gives 9. The C's `insert_from_string_1` does one
+   `modiff_incr (&MODIFF, nchars)` for the whole string. The bump moved
+   up to `text-editor-insert`, sized by `(- end beg)`, and the same for
+   the delete path.
+
+2. **The bump comes *after* the first-change mark.** `record_insert` runs
+   before `modiff_incr` (`insdel.c:926-928`), and `record_insert` is what
+   asks "is this the first change since the save?" - so `note-change!`
+   must run while the counter still says unmodified. With the bump first,
+   the `(t . TOKEN)` undo entry was never recorded and seven engine tests
+   failed.
+
+3. **A silent `replace` again.** One of the edits to `textprop.sld`'s
+   import list did not match (wrong leading whitespace) and did nothing,
+   so `text-editor-note-property-change!` was unbound at run time with
+   no load-time error - the missing-import class, twice in one session.
+   Assert on the match before replacing.

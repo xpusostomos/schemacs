@@ -46,7 +46,8 @@
     (scheme char)
     (only (guile) caddr)
     (only (schemacs editor engine)
-          text-editor-char-count text-editor-text-props text-editor-type?)
+          text-editor-char-count text-editor-text-props text-editor-type?
+          text-editor-note-property-change!)
     (only (schemacs editor buffer)
           *current-buffer* current-buffer overlay-get overlays-at)
     ;; `install-intervals-set-text-properties!' is the seam back *up*
@@ -360,6 +361,17 @@
                           (validate-interval-range object start end #t)))
               (if (not i)
                   #f
+                  (begin
+                    ;; A property write raises the buffer's modification
+                    ;; counter - GNU Emacs's `modify_text_properties'
+                    ;; (`textprop.c:78'), which this is, called at the
+                    ;; same point (`if (BUFFERP (object) && first_time)',
+                    ;; `:1231'). It raises `MODIFF' and *not*
+                    ;; `CHARS_MODIFF', because the characters have not
+                    ;; changed - which is why a cache of something
+                    ;; computed from them is not thrown away by it.
+                    (if (text-editor-type? object)
+                        (text-editor-note-property-change! object start end))
                   (let ((len (- end start)))
                     (let ((i (if (= start (iv:interval-position i))
                                  i
@@ -392,7 +404,7 @@
                           (loop (iv:next-interval i)
                                 (- len (iv:interval-length i))
                                 (or (add-properties properties i set-type)
-                                    changed?))))))))))))
+                                    changed?)))))))))))))
 
     (define (add-text-properties start end properties . args)
       ;; GNU Emacs's `add-text-properties': merge PROPERTIES into the text
@@ -439,6 +451,9 @@
       ;; already longer than the range, split it again at the end and the
       ;; whole job is done.
       ;;--------------------------------------------------------------
+      ;; the same raise as `add-text-properties-1''s, for a replacement
+      (if (text-editor-type? object)
+          (text-editor-note-property-change! object start end))
       (let ((len (- end start)))
         (if (<= len 0)
             #f
@@ -622,8 +637,12 @@
       ;; validate it here, precisely so that a list of names with no
       ;; values - which is what callers write - is accepted.
       ;;--------------------------------------------------------------
-      (%remove-properties-range (object-or-current args) start end
-                                properties '()))
+      (let ((object (object-or-current args)))
+        ;; `Fremove_text_properties' raises the counter for a buffer, as
+        ;; the adding side does (`textprop.c:1775')
+        (if (text-editor-type? object)
+            (text-editor-note-property-change! object start end))
+        (%remove-properties-range object start end properties '())))
 
     (define (remove-list-of-text-properties start end properties . args)
       ;; GNU Emacs's `remove-list-of-text-properties': "like
@@ -632,8 +651,10 @@
       ;; `font-lock-default-unfontify-region' clears a region with, since
       ;; the properties it manages are a list of names.
       ;;--------------------------------------------------------------
-      (%remove-properties-range (object-or-current args) start end
-                                '() properties))
+      (let ((object (object-or-current args)))
+        (if (text-editor-type? object)
+            (text-editor-note-property-change! object start end))
+        (%remove-properties-range object start end '() properties)))
 
     ;;----------------------------------------------------------------
     ;; Looking for a value

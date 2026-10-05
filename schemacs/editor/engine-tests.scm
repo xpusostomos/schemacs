@@ -1355,3 +1355,62 @@
         (list full emptied (text-editor-char-count ed))))))
 
 (test-end "schemacs_editor_engine_char_count")
+
+;;--------------------------------------------------------------------
+;; The modification counters, against Emacs's own answers
+;;
+;; `buffer-modified-tick' and `buffer-chars-modified-tick' are `MODIFF'
+;; and `CHARS_MODIFF'. Every line below was read off a real Emacs first:
+;;
+;;   emacs -Q --batch --eval '(progn
+;;     (princ (format "%s %s %s" (buffer-modified-tick)
+;;                            (buffer-chars-modified-tick)
+;;                            (buffer-modified-p)))
+;;     (insert "a") ...)'
+;;
+;; gave 1 1 nil / 2 2 t / 3 3 t / 3 3 nil / 4 3 t / 5 3 t / 9 9 t for
+;; the seven steps here. The last is the point of `modiff_incr': ten
+;; characters raise the counter by four, not by ten, because the rise is
+;; logarithmic in the size of the change.
+;;--------------------------------------------------------------------
+
+(test-begin "schemacs_editor_engine_modiff")
+
+(define (tick-triple ed)
+  (list (text-editor-modiff ed)
+        (text-editor-chars-modiff ed)
+        (text-editor-modified? ed)))
+
+(test-equal '((1 1 #f) (2 2 #t) (3 3 #t) (3 3 #f)
+              (4 3 #t) (5 3 #t) (9 9 #t))
+  (let ((ed (new-text-editor)))
+    (let ((steps (list (tick-triple ed))))
+      (text-editor-insert ed "a")
+      (set! steps (cons (tick-triple ed) steps))
+      (text-editor-insert ed "b")
+      (set! steps (cons (tick-triple ed) steps))
+      ;; saving: the buffer is in sync with its file again
+      (text-editor-set-modified! ed #f)
+      (set! steps (cons (tick-triple ed) steps))
+      ;; marking it modified without changing the text raises the tick,
+      ;; so that the comparison comes out true again
+      (text-editor-set-modified! ed #t)
+      (set! steps (cons (tick-triple ed) steps))
+      ;; a property change raises the tick and NOT the character tick
+      (text-editor-note-property-change! ed 1 2)
+      (set! steps (cons (tick-triple ed) steps))
+      (text-editor-insert ed "cccccccccc")
+      (set! steps (cons (tick-triple ed) steps))
+      (reverse steps))))
+
+;; A deletion is one change however many characters go, like an
+;; insertion: ten characters raise the tick by four.
+(test-equal 9
+  (let ((ed (new-text-editor)))
+    (text-editor-insert ed "abcdefghij")
+    (text-editor-set-cursor ed 1)
+    (text-editor-set-modified! ed #f)
+    (text-editor-delete-from-cursor ed 10)
+    (text-editor-modiff ed)))
+
+(test-end "schemacs_editor_engine_modiff")
