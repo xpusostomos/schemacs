@@ -1220,10 +1220,11 @@ def check_default_directory():
                             "directory" % shown)
 
     # ...and the same for a file named with a directory in front of it. The
-    # file it visits is a *small* fixture and not this script: a buffer of a
-    # few thousand lines takes seconds to draw, because the renderer scans
-    # the buffer for every line it puts on the screen (`find_newline' in
-    # engine.sld has no `region_cache'), and this check is about the prompt
+    # file it visits is a *small* fixture and not this script: the check is
+    # about the prompt, and a large buffer takes longer to draw than the
+    # harness waits (the renderer was quadratic in the buffer's length
+    # before `buffer-text' and `region_cache' landed, and is not now, but
+    # the fixture keeps this check independent of that)
     # and not about how fast a redraw is. Measured: this script, 3.3s to the
     # prompt; a small file, 0.3s.
     d = "/tmp/pty-check-dd"
@@ -2243,6 +2244,48 @@ def check_dired_delete():
     return problems
 
 
+def check_cd():
+    """`M-x cd' makes the directory the buffer's `default-directory'.
+
+    `cd' (files.el:920) resolves its argument through `locate-file' over
+    `cd-path' - the CDPATH list - and hands the answer to `cd-absolute',
+    which puts it in directory syntax, checks it is really a directory
+    and makes it the buffer's `default-directory'. `cd' is bound to no
+    key in GNU Emacs - `where-is-internal' answers nil - so M-x is the
+    only way in, which is what this drives.
+
+    The observable is the next `C-x C-f' prompt, which holds
+    `default-directory'. The prompt arrives prefilled with the current
+    directory, so `C-a C-k' clears it before the new path is typed.
+    """
+    path = "/tmp/pty-check-cd.txt"
+    open(path, "w").write("hello\n")
+    problems = []
+
+    screen = screen_of(drive([b"\x1b", b"x", b"cd", b"\r",
+                              C_a, C_k, b"/tmp", b"\r", C_x + C_f],
+                             path, settle=2.0, gap=0.4))
+    if "Find file: " not in screen:
+        problems.append("no `Find file: ' prompt after M-x cd")
+    else:
+        shown = screen.split("Find file: ", 1)[1].split("\n")[0].strip()
+        if not shown.startswith("/tmp/"):
+            problems.append("after M-x cd RET /tmp the prompt offers %r, "
+                            "not something under /tmp/" % shown)
+
+    # a directory that is not there is a message, and `default-directory'
+    # is left alone - worth checking because `/etc/hostname' is a *file*,
+    # on which Emacs does not say "is not a directory" either: the
+    # `dir-ok' predicate rejects it in `locate-file' first.
+    out = drive([b"\x1b", b"x", b"cd", b"\r", C_a, C_k,
+                 b"/etc/hostname", b"\r"], path, settle=2.0, gap=0.4)
+    if "No such directory: /etc/hostname" not in out:
+        problems.append("M-x cd to a file did not say "
+                        "`No such directory: /etc/hostname'")
+
+    return problems
+
+
 CHECKS = {
     "buffer-menu": check_buffer_menu,
     "query-replace": check_query_replace,
@@ -2280,6 +2323,7 @@ CHECKS = {
     "quit-completions": check_quit_after_completion,
     "default-directory": check_default_directory,
     "m-x": check_m_x,
+    "cd": check_cd,
     "isearch-highlight": check_isearch_highlight,
     "isearch-multiline": check_isearch_multiline,
     "isearch-scroll": check_isearch_scroll,

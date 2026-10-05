@@ -83,7 +83,12 @@
           find-file-name-handler
           ;; `read-file-name' runs the typed name through it before
           ;; expanding - see the note there.
-          substitute-in-file-name)
+          substitute-in-file-name
+          ;; `cd' resolves its argument through this
+          locate-file-internal)
+    ;; `parse-colon-path' runs the whole search path through it before
+    ;; splitting it - `files.el:946'
+    (only (schemacs editor env) substitute-env-vars)
     ;; `directory-files' and `file-attributes' are `dired.c''s, and
     ;; `delete-directory''s recursive half reads both.
     (only (schemacs editor diredc) directory-files file-attributes)
@@ -218,6 +223,10 @@ directory-name-p
    note-file-read-only!
    read-directory-name
    read-file-name
+   ;; `cd' (files.el:920), with `cd-absolute', `cd-path', the
+   ;; `parse-colon-path' that fills it, and the `locate-file' the
+   ;; command resolves through
+   cd  cd-absolute  cd-path  set!cd-path  parse-colon-path  locate-file
    save-answer-char->decision
 save-buffer
    set-visited-file-name
@@ -2204,7 +2213,139 @@ at point instead."
     ;; files.el functions `ls-lisp' calls are handed to it here, once,
     ;; at the end of this library's load. A listing that somehow ran
     ;; before this line would say those functions were missing rather
+
     ;; than quietly draw something else.
     (install-ls-lisp-files! wildcard-to-regexp file-size-human-readable)
+
+    ;;----------------------------------------------------------------
+    ;; `cd' - the buffer's default directory
+    ;;------------------------------------------------------------------
+
+    (define *cd-path*
+      ;; GNU Emacs's `cd-path' (`files.el:933'): "Value of the CDPATH
+      ;; environment variable, as a list. Not actually set up until the
+      ;; first time you use it." A parameter here for the same reason the
+      ;; other defvars are - so a test can bind it.
+      ;;--------------------------------------------------------------
+      (make-parameter #f))
+
+    (define (cd-path . args)
+      ;; The value of the variable, which `cd' fills in on first use.
+      ;; GNU Emacs's `cd-path' is a `defvar', so this is its reading face
+      ;; and `set!cd-path' its writing one - the same pair the other
+      ;; defvars here have.
+      ;;--------------------------------------------------------------
+      (*cd-path*))
+
+    (define (set!cd-path value)
+      (*cd-path* value))
+
+    (define (parse-colon-path search-path)
+      ;; GNU Emacs's `parse-colon-path' (`files.el:937'): "Explode a
+      ;; search path into a list of directory names... For an empty path
+      ;; element (i.e., a leading or trailing separator, or two adjacent
+      ;; separators), return nil (meaning `default-directory') as the
+      ;; associated list element."
+      ;;
+      ;; The names are runs of non-separator characters, each turned
+      ;; into directory syntax, and each an environment-substituted
+      ;; string first - which is `substitute-env-vars', called on the
+      ;; whole path before it is split (`:946'). The C's
+      ;; `double-slash-special-p' case is for Windows and Cygwin; the
+      ;; leading-slash collapse here is the `1' branch.
+      ;;--------------------------------------------------------------
+      (if (not (string? search-path))
+          #f
+          (let ((spath (substitute-env-vars search-path)))
+            (let loop ((i 0) (start 0) (acc '()))
+              (cond
+               ((= i (string-length spath))
+                (reverse (let ((piece (substring spath start i)))
+                           (cons (if (equal? "" piece)
+                                     #f
+                                     (let* ((dir (file-name-as-directory piece))
+                                            ;; the whole run of leading
+                                            ;; slashes collapses to one -
+                                            ;; `(substring dir (1- (match-end 0)))'
+                                            ;; for a run of `//+' on a
+                                            ;; system where a double slash is
+                                            ;; not special
+                                            (run (let loop ((i 0))
+                                                   (if (and (< i (string-length dir))
+                                                            (char=? #\/ (string-ref dir i)))
+                                                       (loop (+ i 1))
+                                                       i))))
+                                       (if (> run 1) (substring dir (- run 1)) dir)))
+                                 acc))))
+               ((char=? #\: (string-ref spath i))
+                (loop (+ i 1) (+ i 1)
+                      (cons (if (= start i)
+                                #f
+                                (file-name-as-directory (substring spath start i)))
+                            acc)))
+               (else (loop (+ i 1) start acc)))))))
+
+    (define (locate-file filename path . rest)
+      ;; GNU Emacs's `locate-file' (`files.el:1113'): "Search for
+      ;; FILENAME through PATH. If found, return the absolute file name
+      ;; of FILENAME; otherwise return nil."
+      ;;
+      ;; The C wrapper's symbol forms of PREDICATE - `executable',
+      ;; `readable', `writable', `exists' - are the `access' bits, which
+      ;; is what `(lread.c:1582') spells with a logior. They are not
+      ;; carried: the one caller here passes a procedure.
+      ;;--------------------------------------------------------------
+      (let ((suffixes (if (pair? rest) (car rest) '()))
+            (predicate (if (and (pair? rest) (pair? (cdr rest)))
+                           (cadr rest)
+                           #f)))
+        (locate-file-internal filename path suffixes predicate)))
+
+    (define (cd-absolute dir)
+      ;; GNU Emacs's `cd-absolute' (`files.el:962'): "Change current
+      ;; directory to given absolute file name DIR."
+      ;;
+      ;; "Put the name into directory syntax now, because otherwise
+      ;; expand-file-name may give some bad results" - the C's own
+      ;; comment, and the reason for the order of the first two lines.
+      ;; `abbreviate-file-name' is deliberately not called; the C's note
+      ;; says why: most buffers never go through here, so abbreviating
+      ;; only some of them makes the directory look different for no
+      ;; reason.
+      ;;--------------------------------------------------------------
+      (let* ((dir (file-name-as-directory dir))
+             (dir (expand-file-name dir)))
+        (if (not (file-directory-p dir))
+            ;; the C's two messages (`files.el:973-976'), each built as
+            ;; one string - `(error "a" dir)' would put DIR in the
+            ;; irritants and print a message without it
+            (error (if (file-exists-p dir)
+                       (format #f "~a is not a directory" dir)
+                       (format #f "~a: no such directory" dir))))
+            (set!buffer-default-directory (current-buffer) dir)))
+
+    (define-command (cd dir)
+      "Make DIR become the current buffer's default directory.
+If your environment includes a `CDPATH' variable, try each one of
+that list of directories (separated by occurrences of
+`path-separator') when resolving a relative directory name.
+The path separator is colon in GNU and GNU-like systems."
+      (interactive (list (read-directory-name "Change default directory: "
+                                              (default-directory)
+                                              (default-directory))))
+      ;; The CDPATH list is filled in on first use, as `cd-path' says it
+      ;; is, and both the interactive spec and the body need it - so it
+      ;; is done here rather than twice.
+      (unless (*cd-path*)
+        (*cd-path* (or (parse-colon-path (getenv "CDPATH")) (list "./"))))
+      (cd-absolute
+       (or (locate-file dir (*cd-path*) '()
+                        (lambda (f)
+                          (and (file-directory-p f) 'dir-ok)))
+           (if (getenv "CDPATH")
+               (error (format #f
+                              "No such directory found via CDPATH environment variable: ~a"
+                              dir))
+               (error (format #f "No such directory: ~a" dir))))))
 
     ))

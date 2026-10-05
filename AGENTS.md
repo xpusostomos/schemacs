@@ -1650,3 +1650,57 @@ a geometry question to resolve by reading, not by fitting. The
 regression test in `ncurses-editor-tests.scm` asserts the *rule*
 (`start == point - body/2`), not the measured number, for the same
 reason.
+
+## `M-x cd` — done (2026-10-06)
+
+`cd` (`files.el:920`), with `cd-absolute` (`:962`), `cd-path` (`:933`),
+`parse-colon-path` (`:937`) and the `locate-file` (`:1113`) it resolves
+through, plus the `locate-file-internal` / `openp` search those sit on
+(`lread.c:1590`, `:1756`).
+
+`cd` is **bound to no key in GNU Emacs** - `(where-is-internal 'cd)` is
+nil - so it is M-x only, and it is not bound here either.
+
+Where each piece lives, and why:
+
+- `locate-file-internal` went into `fileio.sld`, not a new `lread.sld`:
+  it is `lread.c`'s (`:1590`) and so is the `openp` it wraps (`:1756`),
+  but this is the library that holds the primitives it is built from and
+  there is no `lread.sld`. Same seam as `keymap.c`'s buffer-keymap pair.
+  The C's file-name-handler machinery and its native-compilation `.eln`
+  swap are not carried - neither exists here - so what is ported is the
+  search itself.
+- Everything else is `files.el`'s and went into `files.sld`.
+
+Two details that had to be copied rather than guessed:
+
+- **`dir-ok`.** `openp` skips directories, so `cd` wants them found, and
+  the way it says so is a predicate returning the symbol `dir-ok`
+  (`files.el:940`). Without that the search would reject the very thing
+  it is looking for. It is why `cd` on a *file* answers "No such
+  directory: X" and not `cd-absolute`'s "is not a directory" - the
+  predicate rejects it before `cd-absolute` is ever reached. Emacs
+  confirms both messages.
+- **The messages are one formatted string.** `(error "No such directory:
+  %s" dir)` renders as "No such directory: /x"; `(error "No such
+  directory: " dir)` renders without the name at all, because the second
+  argument becomes an irritant. Ours formats with `~a` into a single
+  string, as the tree does elsewhere.
+- `cd-absolute`'s message carries a trailing slash - "/etc/hostname/: no
+  such directory" - because `file-name-as-directory` put it there before
+  the test was made, and `(file-exists-p "/etc/hostname/")` is false
+  *because* of that slash, so it takes the "no such directory" branch
+  rather than "is not a directory". Read off Emacs.
+
+Tests: `schemacs/editor/files-tests.scm` (13), wired into
+`tools/run-suites.py`, and a `cd` check in `tools/pty-check.py` that
+drives M-x and reads the next `C-x C-f` prompt, since `default-directory`
+is what changed and that is where it shows.
+
+Not ported, with what each would need: the completion table `cd`'s
+interactive spec installs over `cd-path` (`files.el:929-944`) - it needs
+`minibuffer-completion-table` and `minibuffer-completion-predicate` as
+buffer-locals that a completion function consults, which this minibuffer
+does not have. Ours reads the directory the ordinary way. Also the
+`access`-bit forms of `locate-file`'s PREDICATE (`executable`,
+`readable`, ...), because nothing here passes one.

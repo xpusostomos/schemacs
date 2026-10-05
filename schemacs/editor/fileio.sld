@@ -34,6 +34,9 @@
   (import
     (scheme base)
     (scheme char)
+    ;; `locate-file-internal' takes optional arguments, which is a
+    ;; `case-lambda'
+    (scheme case-lambda)
     ;; `logand' is Guile's, not R7RS's, and `file-modes' masks with it;
     ;; `string-rindex' is what the two name helpers find their slash
     ;; with.
@@ -96,6 +99,12 @@
    file-name-as-directory
    file-name-concat
    file-readable-p
+   ;; `locate-file-internal' is `lread.c''s (`:1590'), and so is the
+   ;; `openp' it wraps (`:1756'). It lives here because this is the
+   ;; library that holds the file primitives it is built from, and
+   ;; because there is no `lread.sld' - the same seam `keymap.c''s
+   ;; buffer-keymap pair sits on.
+   locate-file-internal
    file-regular-p
    file-symlink-p
    find-file-name-handler
@@ -768,5 +777,99 @@
                                               (loop (- i 1)))))
                          newname)))
         (%copy-file (expand-file-name file) (expand-file-name newname))))
+
+    
+
+    ;;----------------------------------------------------------------
+    ;; Finding a file through a list of directories
+    ;;
+    ;; GNU Emacs's `locate-file-internal' (`lread.c:1590'), which is a
+    ;; wrapper over `openp' (`:1756'). `cd' is what this tree wants it
+    ;; for: "find the directory DIR in the CDPATH list".
+    ;;
+    ;; The C works in bytes and carries the file-name-handler machinery
+    ;; and the native-compilation `.eln' swap; neither exists here, so
+    ;; what is left is the search itself, whose shape is:
+    ;;
+    ;;   for each element of PATH:
+    ;;     filename = expand STR against it (or STR itself, when PATH is
+    ;;                nil - the C's `just_use_str' sentinel)
+    ;;     if the result is not absolute, expand it against
+    ;;       `default-directory' and give up on this element if it still
+    ;;       is not
+    ;;     for each suffix (the empty string when there are none):
+    ;;       if the name passes PREDICATE, answer it
+    ;;------------------------------------------------------------------
+
+    (define (%complete-filename-p name)
+      ;; GNU Emacs's `complete_filename_p' (`lread.c:1582'): whether NAME
+      ;; already names an absolute path. The C also accepts a DOS drive
+      ;; letter (`c:/...'); there is no such spelling here.
+      ;;--------------------------------------------------------------
+      (and (> (string-length name) 0)
+           (char=? #\/ (string-ref name 0))))
+
+    (define (%pathname-passes? name predicate)
+      ;; Whether one candidate name is the answer - the C's test
+      ;; (`lread.c:1874-1897'). With no predicate the question is
+      ;; `file-readable-p'; with one, the answer is the predicate's, and
+      ;; a predicate may answer the symbol `dir-ok' to say "a directory
+      ;; is acceptable here", which is how `cd' asks for one - without
+      ;; it a directory would be rejected, because `openp' skips them.
+      ;;--------------------------------------------------------------
+      (cond
+       ((or (not predicate) (eq? predicate #t))
+        (file-readable-p name))
+       (else
+        (let ((answer (predicate name)))
+          (cond ((not answer) #f)
+                ((eq? answer 'dir-ok) #t)
+                ((not (file-directory-p name)) #t)
+                (else #f))))))
+
+    (define locate-file-internal
+      (case-lambda
+       ((filename path) (locate-file-internal filename path '() #f))
+       ((filename path suffixes)
+        (locate-file-internal filename path suffixes #f))
+       ((filename path suffixes predicate)
+        ;; PATH nil means "look at FILENAME itself and nothing else" -
+        ;; the C replaces a nil PATH with the one-element list
+        ;; `just_use_str' and compares the *tail cell* against it, so the
+        ;; first round uses STR unexpanded (`lread.c:1799-1806').
+        ;;
+        ;; SUFFIXES nil means the one empty suffix, so the name is tried
+        ;; as it stands (`:1836').
+        ;;--------------------------------------------------------------
+        (let ((suffixes (if (pair? suffixes) suffixes (list ""))))
+          (let loop ((path (if (pair? path) path (list 'just-use-str))))
+            (if (null? path)
+                #f
+                (let* ((dir (car path))
+                       (base (if (eq? dir 'just-use-str)
+                                 filename
+                                 (expand-file-name filename dir))))
+                  (if (not (%complete-filename-p base))
+                      ;; "Of course, this could conceivably lose if luser
+                      ;; sets default-directory to be something
+                      ;; non-absolute" - `lread.c:1812'
+                      (let ((fixed (expand-file-name base (default-directory))))
+                        (if (%complete-filename-p fixed)
+                            (or (%try-suffixes fixed suffixes predicate)
+                                (loop (cdr path)))
+                            (loop (cdr path))))
+                      (or (%try-suffixes base suffixes predicate)
+                          (loop (cdr path)))))))))))
+
+    (define (%try-suffixes base suffixes predicate)
+      ;; BASE with each suffix appended, the first that passes answered.
+      ;;--------------------------------------------------------------
+      (let loop ((rest suffixes))
+        (if (null? rest)
+            #f
+            (let ((name (string-append base (car rest))))
+              (if (%pathname-passes? name predicate)
+                  name
+                  (loop (cdr rest)))))))
 
     ))
