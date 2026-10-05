@@ -1523,6 +1523,37 @@ def check_scroll():
     return []
 
 
+def check_pagedown():
+    """Page Down and Page Up reach their commands.
+
+    `bindings.el` binds `<next>` and `<prior>` to `scroll-up-command` and
+    `scroll-down-command`, and this editor binds the same. Neither did
+    anything until 2026-10-06: the terminal layer's decoder could not
+    read the keys at all - see `check_overwrite`, which is the Insert
+    half of the same bug. This is the end-to-end check on that decode
+    for a key whose effect is visible on the screen.
+
+    The bytes are xterm's: ``\\e[6~`` for Page Down and ``\\e[5~`` for Page
+    Up, which ncurses reads as `KEY_NPAGE` and `KEY_PPAGE`.
+    """
+    path = "/tmp/pty-check-pagedown.txt"
+    open(path, "w").write("".join("line %d\n" % i for i in range(1, 61)))
+    PAGE_DOWN = b"\x1b[6~"
+    PAGE_UP = b"\x1b[5~"
+    problems = []
+    screen = screen_of(drive([C_x + C_f, path.encode(), RET, PAGE_DOWN], path))
+    if "line 1\n" in screen or screen.strip().startswith("line 1"):
+        problems.append("Page Down did not move the view off line 1 "
+                        "(screen %r)" % screen[:300])
+    # ...and back again
+    screen = screen_of(drive([C_x + C_f, path.encode(), RET,
+                              PAGE_DOWN, PAGE_UP], path))
+    if not screen.strip().startswith("line 1"):
+        problems.append("Page Up did not come back to line 1 "
+                        "(screen %r)" % screen[:300])
+    return problems
+
+
 def check_resize():
     """Split the frame, then make the terminal wider, narrower and taller.
 
@@ -2351,6 +2382,7 @@ CHECKS = {
     "suspend": check_suspend,
     "resize": check_resize,
     "minibuffer": check_minibuffer,
+    "pagedown": check_pagedown,
     "scroll": check_scroll,
     "save": check_save,
     "save-y-n": check_save_y_n,

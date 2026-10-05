@@ -62,15 +62,19 @@ large negative ARG."
                   (set! eol-flag (eolp)))
                 (if (not eol-flag)
                     (indent-to (max 0 (+ indent arg)) 0))
-                ;; `delete-region' answers the engine's *zero-based*
-                ;; indices, not this layer's one-based ones - the one
-                ;; exception `editfns.sld' records - so the conversion is
-                ;; here, as it is inside `delete-and-extract-region'.
-                (delete-region (- (point) 1)
-                               (- (save-excursion
-                                    (skip-chars-forward " \t")
-                                    (point))
-                                  1)))
+                ;; Emacs's `(delete-region (point) (progn
+                ;; (skip-chars-forward " \t") (point)))' - the indentation
+                ;; just inserted stays, and the run that was there goes.
+                ;; These two carried a `(- ... 1)' each until 2026-10-06,
+                ;; from the note in `editfns.sld' that `delete-region'
+                ;; took engine positions. It does not, and never did after
+                ;; the one-based conversion; the shift was benign only
+                ;; because `indent-to' above had moved point to the far
+                ;; side of the run.
+                (delete-region (point)
+                               (save-excursion
+                                 (skip-chars-forward " \t")
+                                 (point))))
               (forward-line 1)
               (loop)))
           (set-marker! end-marker #f))))

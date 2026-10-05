@@ -31,7 +31,8 @@
     ;; import for that: the eight standard colors, the xterm driver for
     ;; a TERM of xterm*, and the face registry to recalc.
     (only (schemacs editor tty-colors) tty-register-default-colors)
-    (only (schemacs editor xterm) terminal-init-xterm
+    (only (schemacs editor xterm)
+          *input-decode-map* terminal-init-xterm
           *xterm--set-selection* *xterm--get-selection*
           xterm--tty-set-selection xterm--tty-get-selection)
     ;; `tty-select-active-regions' gates the tty branch of
@@ -193,8 +194,39 @@
             ;; produces". Both `[insert]' and `[insertchar]' are bound to
             ;; `overwrite-mode' there, so both are bound here.
             (cons KEY_IC 'insertchar)
+            ;; Page Up and Page Down, which nothing in this editor was
+            ;; reaching at all until 2026-10-06: they arrived here, the
+            ;; old decoder could not read their names, and they were
+            ;; dead - which is how PgUp and PgDn came to look broken in
+            ;; Dired. `bindings.el' binds `[prior]' and `[next]' to
+            ;; `scroll-down-command' and `scroll-up-command'.
             (cons KEY_PPAGE 'prior)
             (cons KEY_NPAGE 'next)))
+
+    (define (%sequence->event ev)
+      ;; The event `input-decode-map' gives for the escape sequence an
+      ;; ncurses keycode stands for, or #f when it is not one this
+      ;; editor knows a sequence for.
+      ;;
+      ;; This is the path a *modified* function key takes, and the only
+      ;; one it can take: ncurses decodes `\e[1;3A' - `M-up' - into an
+      ;; extended keycode, `(keyname)' names that keycode from terminfo
+      ;; (`kUP3'), and `tiget' turns the name back into the sequence the
+      ;; map is keyed on. Emacs reaches the same table by a different
+      ;; road: it never asks ncurses to decode at all, it reads the bytes
+      ;; and consults `input-decode-map' directly (`keyboard.c').
+      ;;
+      ;; `tiget' errors for a capability the terminal does not have, and
+      ;; a name this editor's keymaps do not know answers #f.
+      ;;--------------------------------------------------------------
+      (let ((name (keyname ev)))
+        (if (not (string? name))
+            #f
+            (let ((sequence (guard (e (#t #f)) (tiget name))))
+              (if (not (string? sequence))
+                  #f
+                  (let ((entry (assoc sequence (*input-decode-map*))))
+                    (and entry (cdr entry))))))))
 
     (define-method (key-event->key (d <tty-display>) ev)
       ;; The *key event* for what the terminal sent - GNU Emacs's
@@ -234,7 +266,11 @@
          ((= ev KEY_RESIZE) 'resize)
          ;; The function keys, from the table above.
          (else (let ((k (assq ev function-key-names)))
-                 (and k (cdr k))))))
+                 (if k
+                     (cdr k)
+                     ;; ...and anything else ncurses decoded but has no
+                     ;; constant for.
+                     (%sequence->event ev))))))
        (else #f)))
 
     ;;----------------------------------------------------------------

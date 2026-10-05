@@ -1849,14 +1849,10 @@ capability name, because this binding has already decoded the sequence by
 the time it is asked. It is a load-time table again, where the version it
 replaced had to ask the terminal at every key press.
 
-**Still open, and deliberately not faked:** `named-key-modifiers` was dead
-with this binding and is deleted rather than kept. It was not wrong about
-Emacs - it was in the wrong *place*. Emacs does not read modifiers off a
-keycode at all: `M-up` is an `input-decode-map` entry that `term/xterm.el`
-installs, parsed from the escape sequence (`\e[1;3A`), which is a Lisp
-file's work. A faithful port keys the decode on the **sequence**, not on the
-keycode, and then the modifiers fall out of it. That is a piece of work of
-its own and it is the one real gap left in the tty key path.
+**And then it was done properly - see `input-decode-map` below.**
+`named-key-modifiers` was not wrong about Emacs; it was in the wrong
+*place*, and it was reimplementing by hand what `input-decode-map` already
+is. It is deleted and replaced by the real thing.
 
 ### 2. `minor-mode-alist` is two evaluations, not one
 
@@ -1880,3 +1876,163 @@ real bugs above were found that way rather than by reading - the
 `display`-run over-count, the column-0 measurement, and `insert` reaching
 nothing. Reading gave the *algorithm*; asking gave the *check*. Both were
 needed, and neither alone would have found all three.
+
+## `define-minor-mode`, and the four things it was hiding (2026-10-06)
+
+Chris: *"so you fucking hacked the minor mode like a lazy shit head instead
+of doing it properly."* He was right. `overwrite-mode` was written out by
+hand - command, variable, hook, message - because `define-minor-mode` did
+not exist, and that is the "improvise around the missing primitive" thing
+this file forbids two paragraphs into it. Four pieces, in the order they
+had to be done.
+
+### 1. `define-minor-mode` (`emacs-lisp/easy-mmode.el`)
+
+`schemacs/editor/easy-mmode.sld`, with `easy-mmode-pretty-mode-name`. The
+macros in this tree were `syntax-rules`, which cannot *make* a name - so
+`define-derived-mode` is handed its keymap's and hook's names by the caller,
+and says why. `define-minor-mode` makes three (the hook and, with no
+`:variable`, the variable's two accessors), and it can, because this Guile
+has **`syntax-case` and `datum->syntax`**: a name built from the mode's own
+identifier with the *call site's* lexical context is hygienic and lands as a
+real binding in the defining library. `(define-minor-mode overwrite-mode
+...)` leaves `overwrite-mode-hook` bound in `simple.sld`.
+
+Two things had to be right and were not, first time:
+
+- **`interactive` is a `syntax-rules` *literal* of `define-command`, not a
+  binding anywhere.** Written into a template it resolves in *easy-mmode*,
+  where it is unbound, and psyntax refuses the expansion: "reference to
+  identifier outside its scope". Built with the call site's context it is
+  the same unbound-but-named identifier a hand-written `(interactive ...)`
+  is, which is what matches.
+- **`current-prefix-arg` is a parameter.** The generated spec read it as a
+  variable - `(if current-prefix-arg ...)` - and an uncalled parameter is a
+  *procedure*, so it was always true and every press went down the
+  "numeric prefix" branch: `uarg->integer` then raised "U-argument cannot be
+  cast to integer" and the key silently did nothing. It must be `(current-prefix-arg)`.
+
+`called-interactively-p` (`eval.c`) is ported to make the message right: the
+generated command echoes `"%s %sabled%s"` only when it was called through
+`interactive-proc`, which now binds a flag around every interactive call.
+A programmatic `(overwrite-mode 1)` stays silent, as Emacs's does - verified:
+`emacs -Q --batch` with `(call-interactively 'overwrite-mode)` prints the
+messages and a plain call prints nothing.
+
+**The hand-written version had the wrong words.** The real ones, measured,
+are `"Overwrite mode enabled in current buffer"` and
+`"Binary-Overwrite mode enabled in current buffer"` - `pretty-name` keeps
+the " mode". The hand-written ones said "Overwrite enabled". And the
+hand-written toggle enabled on a bare call where Emacs's *toggles* (the
+macro's interactive form passes the symbol `toggle` when there is no prefix).
+
+### 2. `add-minor-mode` (`subr.el`), and where `minor-mode-alist` lives
+
+`*minor-mode-alist*`, `*minor-mode-list*` and `add-minor-mode` are in
+`subr.sld`. **Placement is a departure**: Emacs declares the alist in
+`bindings.el`, and this tree keeps the other mode-line variables there too
+(`*mode-line-format*` is in `xdisp.sld`). It is here because of the import
+graph - `xdisp.sld` imports `simple.sld`, which imports `subr.sld`, and the
+alist has to be reachable from `simple.sld`, where `define-minor-mode`
+expands.
+
+`overwrite-mode` passes **no** `:lighter` - also as in Emacs: the entry
+`(overwrite-mode overwrite-mode)` that `bindings.el:979` puts in the alist
+is already there, and `add-minor-mode` with a nil name leaves it alone.
+
+### 3. `input-decode-map`, and the end of the modifier parsing
+
+The finding that made this possible, and it was a *measurement*:
+
+```
+(getch) for "\e[1;3A"  ->  573
+(keyname 573)          ->  "kUP3"      ;; a terminfo name
+(tiget "kUP3")         ->  "\e[1;3A"   ;; the sequence, back again
+```
+
+So `keyname` has **two shapes**: for the keys ncurses decodes to a constant
+it answers `"KEY_IC"`, and for everything above that range it answers a
+*terminfo* name. The version this replaces assumed the terminfo shape
+everywhere, split `k`+base+digit, and matched nothing for the standard keys
+- which is why Insert, Page Up and Page Down reached nothing at all.
+
+The other half is that `tiget` turns the name back into the escape
+sequence, and **that is what Emacs keys `input-decode-map` on**. So:
+
+- `xterm.sld` now has `*input-decode-map*` - `xterm-rxvt-function-map` and
+  `xterm-function-map` from `term/xterm.el:211-661`, 255 entries,
+  **transcribed by a script**. Its own header used to say the key maps were
+  "not ported ... the keys come through ncurses's terminfo lookup here";
+  they are ported now, and the terminfo lookup is the road to them rather
+  than a replacement for them.
+- `term.sld` has `%sequence->event`: `(keyname ev)` -> `(tiget name)` ->
+  the sequence -> the map. **No modifier is parsed out of anything.**
+
+Verified at a pty against the tree's own `key-event->key`:
+
+```
+573 -> M-up      574 -> M-S-up      575 -> C-up
+331 -> insertchar    339 -> prior    258 -> down
+```
+
+(`'M-S-kp-subtract` and its like - 255 entries full of them - are Emacs's
+own spelling: `(define-key map "\eO4m" [M-S-kp-subtract])` is verbatim at
+`xterm.el:476`. The whole thing is one *event symbol*, not a modifier list
+this port invented.)
+
+### 4. The cmds.c command cluster, and two compensating shifts
+
+`self-insert-command`, `self-insert-tab`, `forward-char`, `backward-char`,
+`beginning-of-line`, `end-of-line` and `delete-char` moved from
+`simple.sld` to `cmds.sld`, which is `cmds.c`'s file; `simple.sld` imports
+them from there and re-exports them, so every existing importer is
+unchanged.
+
+The two `(- ... 1)`s in `indent-rigidly` and `dired-remove-entry` are gone.
+They were compensating for a `delete-region` that took engine positions, and
+it does not - both now read as the Elisp they came from.
+
+---
+
+## The pair bug: a decoder that answered a dotted pair
+
+Worth its own note because it cost two rounds of false conclusions and the
+evidence was in front of me both times.
+
+`key-event->key`'s new else-branch was written
+
+```scheme
+(let ((k (assq ev function-key-names)))
+  (and k (cdr k))                   ; <- this line does nothing
+  (or k (%sequence->event ev)))     ; <- and this returns K, the pair
+```
+
+so Insert answered `(331 . insertchar)` - a **pair** - where the event
+should have been the symbol `insertchar`, and the keymap lookup then did
+nothing with it. The probe printed it plainly:
+
+```
+(331 (331 . insertchar))
+```
+
+and I read it as `(code result)` with `result` = `insertchar`. It is
+`(code result)` with `result` = the pair. `(if k (cdr k) ...)` is the fix.
+
+**And it produced a wrong finding.** Page Down scrolled and then the editor
+died with
+
+```
+In procedure car: Wrong type argument in position 1 (expecting pair): next
+```
+
+which I diagnosed as a pre-existing keymap bug - "a named key reaching a
+command whose interactive spec is `"P"`", with a table of five isolating
+observations and a paragraph in this file about holding the keys back. All
+five observations were true and the conclusion was wrong: `next` was the
+*cdr of the pair the decoder had just returned*, and `car` of it is exactly
+the error. With the pair fixed, Page Down and Page Up work and the
+`pagedown` check passes. The keys were never held back and this file no
+longer says they were.
+
+The lesson is the one about naming-step tracing: when the evidence is a
+printed value, read the *shape* of it before drawing a conclusion from it.

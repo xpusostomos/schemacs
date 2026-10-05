@@ -39,6 +39,10 @@
 
   (export
    add-to-history
+   ;; `minor-mode-alist' and the function that fills it. See the note on
+   ;; `add-minor-mode' for why the alist lives here and not with the mode
+   ;; line that reads it.
+   *minor-mode-alist* *minor-mode-list* add-minor-mode
    regexp-unmatchable
    string-prefix-p
    string-replace
@@ -127,6 +131,85 @@
 
 
 
+
+    ;;------------------------------------------------------------------
+    ;; Minor modes
+    ;;------------------------------------------------------------------
+
+    (define *minor-mode-list* (make-parameter '()))
+    ;; ^ GNU Emacs's `minor-mode-list' (`bindings.el`): "List of
+    ;; variables of minor modes. Each element is a variable symbol, whose
+    ;; value is t when the minor mode is enabled." The list is not read
+    ;; by anything here yet; `add-minor-mode' keeps it because it is one
+    ;; of the three things that function maintains.
+
+    (define *minor-mode-alist* (make-parameter (list (list 'overwrite-mode 'overwrite-mode))))
+    ;; ^ GNU Emacs's `minor-mode-alist' (`bindings.el:976'): "Alist
+    ;; saying how to show minor modes in the mode line. Each element
+    ;; looks like (VARIABLE STRING); STRING is included in the mode line
+    ;; if VARIABLE's value is non-nil. ... Actually, STRING need not be a
+    ;; string; any mode-line construct is okay."
+    ;;
+    ;; The initial value is bindings.el's own list, of which only the
+    ;; `overwrite-mode' entry is carried - `abbrev-mode',
+    ;; `auto-fill-function' and `defining-kbd-macro' are not ported.
+    ;;
+    ;; **Placement, a departure.** Emacs declares this in `bindings.el',
+    ;; and this tree declares the other mode-line variables there too
+    ;; (`*mode-line-format*' is in `xdisp.sld'). The alist is here
+    ;; instead, beside the one function that writes it, because of the
+    ;; import graph: `xdisp.sld' imports `simple.sld', which imports this
+    ;; library, so an alist that `simple.sld' had to reach could not live
+    ;; in `xdisp.sld' - and `define-minor-mode', which is expanded in
+    ;; libraries at and below `simple.sld', generates a call to
+    ;; `add-minor-mode'.
+    ;;
+    ;; `overwrite-mode`'s indicator is the *symbol* of the same name and
+    ;; not a string, which is the "need not be a string" clause doing
+    ;; real work: the construct is evaluated, so what is shown is the
+    ;; variable's value - `overwrite-mode-textual` or
+    ;; `overwrite-mode-binary` - and then *that* symbol's value, which is
+    ;; the string. The mode line does both steps.
+
+    (define (add-minor-mode toggle name . rest)
+      ;; GNU Emacs's `add-minor-mode' (`subr.el:3201'): "Register a new
+      ;; minor mode. ... TOGGLE is a symbol that is the name of a
+      ;; buffer-local variable that is toggled on or off to say whether
+      ;; the minor mode is active or not. NAME specifies what will appear
+      ;; in the mode line when the minor mode is active. NAME should be
+      ;; either a string starting with a space, or a symbol whose value
+      ;; is such a string."
+      ;;
+      ;; "This function shouldn't be used directly -- use
+      ;; `define-minor-mode' instead (which will then call this
+      ;; function)."
+      ;;
+      ;; What it maintains: the list above, and the alist entry. A NAME
+      ;; of nil adds nothing to the alist - the entry it would add is
+      ;; already there, which is how `overwrite-mode' gets its lighter
+      ;; from bindings.el rather than from its own definition.
+      ;;
+      ;; Not carried: KEYMAP and `minor-mode-map-alist' (per-mode keymaps
+      ;; are not ported), and the `:included'/`:menu-tag' menu entry,
+      ;; which needs a symbol plist and the mode-line menu.
+      ;;--------------------------------------------------------------
+      (let ((keymap (if (pair? rest) (car rest) #f))
+            (after (if (and (pair? rest) (pair? (cdr rest))) (cadr rest) #f))
+            (toggle-fun (if (and (pair? rest) (pair? (cdr rest))
+                                 (pair? (cddr rest)))
+                            (car (cddr rest))
+                            #f)))
+        (unless (memq toggle (*minor-mode-list*))
+          (*minor-mode-list* (cons toggle (*minor-mode-list*))))
+        (when name
+          (let ((alist (*minor-mode-alist*)))
+            (let ((existing (assq toggle alist)))
+              (if existing
+                  (set-cdr! existing (list name))
+                  (*minor-mode-alist*
+                   (cons (list toggle name) alist))))))
+        keymap after toggle-fun
+        #f))
 
     (define (run-hooks . hooks)
       ;; GNU Emacs's `run-hooks' (subr.el): run each hook in turn. A hook

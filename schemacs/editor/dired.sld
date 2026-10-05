@@ -2577,17 +2577,20 @@ for SWITCHES."
       ;; FILE in the current Dired buffer. Note this doesn't delete FILE
       ;; in the file system."
       ;;
-      ;; `delete-region' takes engine positions here - it is the one
-      ;; function of the Emacs-named layer that does, because its callers
-      ;; are all internal - so the two one-based `point's lose one.
+      ;; The two ends carried a `(- ... 1)' each until 2026-10-06, from
+      ;; the note in `editfns.sld' that `delete-region' took engine
+      ;; positions. It does not - it is one-based like everything else at
+      ;; this layer - and the shift was benign only because the range
+      ;; ends on a newline either way, so the line went and a newline
+      ;; went with it whichever end was off by one.
       ;;--------------------------------------------------------------
       (save-excursion
         (when (dired-goto-file file)
           (parameterize ((*inhibit-read-only* #t))
             ;; Emacs's `(progn (beginning-of-line) (point))': the two
             ;; moves are the value, so this is a `begin'.
-            (delete-region (begin (beginning-of-line) (- (point) 1))
-                           (- (line-beginning-position 2) 1))))))
+            (delete-region (begin (beginning-of-line) (point))
+                           (line-beginning-position 2))))))
     (define (dired-clean-up-after-deletion fn)
       ;; GNU Emacs's `dired-clean-up-after-deletion' (dired.el:4417):
       ;; "Clean up after a deleted file or directory FN. Removes any

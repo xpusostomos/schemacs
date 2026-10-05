@@ -1351,6 +1351,26 @@
     (parameterize ((*current-frame* frame))
       (map (lambda (w) (mode-line-string w)) (window-list frame)))))
 
+;; ...and it says so in the echo area too, in GNU Emacs's own words:
+;; `define-minor-mode' messages `"%s %sabled%s"' (`easy-mmode.el:395')
+;; with the pretty name `easy-mmode-pretty-mode-name' builds - which
+;; keeps the " mode" - and " in current buffer", because the mode is not
+;; global. `emacs -Q --batch' with `(call-interactively
+;; 'overwrite-mode)' prints exactly these three lines.
+;;
+;; A *programmatic* call stays silent: the message is inside `(if
+;; (called-interactively-p 'any) ...)', and a mode switched on by a
+;; program that echoed would be wrong. Both halves are here.
+(test-equal '("Overwrite mode enabled in current buffer"
+              "Overwrite mode disabled in current buffer")
+  (let* ((frame (frame-with "alpha\n"))
+         (ed (frame-editor frame)))
+    (parameterize ((*current-frame* frame))
+      (list (begin (dispatch-key-event frame 'insertchar)
+                   (frame-message frame))
+            (begin (dispatch-key-event frame 'insertchar)
+                   (frame-message frame))))))
+
 ;; The Insert key toggles overwrite mode, and the mode line says so: GNU
 ;; Emacs binds `[insert]' to `overwrite-mode' (`bindings.el:1438') and
 ;; `[insertchar]' too (`bindings.el:1441'), and `minor-mode-alist`'s

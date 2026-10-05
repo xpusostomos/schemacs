@@ -28,10 +28,24 @@
           char-after char-before delete-region goto-char insert point
           point-max)
     (only (schemacs editor indentc) current-column move-to-column)
+    ;; the commands below are `define-command`s, and `self-insert-command`
+    ;; is still on the record form `new-command` builds.
+    (only (schemacs editor command)
+          define-command new-command uarg->integer)
+    ;; `self-insert-command` re-derives the character from the keymap
+    ;; lookup state the frame is holding.
+    (only (schemacs editor frame) *current-frame* frame-keymap-state)
+    (prefix (schemacs keymap) km:)
+    (only (schemacs editor engine)
+          text-editor-delete-from-cursor text-editor-get-end-of-line
+          text-editor-get-start-of-line text-editor-insert
+          text-editor-move-cursor text-editor-set-cursor)
     )
 
   (export
    internal-self-insert
+   backward-char beginning-of-line delete-char end-of-line forward-char
+   self-insert-command self-insert-tab
    )
 
   (begin
@@ -144,5 +158,78 @@
           ;; ported. Neither is `post-self-insert-hook', which is the
           ;; last thing the C runs.
           hairy)))
+
+
+    ;;------------------------------------------------------------------
+    ;; The commands
+    ;;------------------------------------------------------------------
+
+    ;; `self-insert-command' is the one command left on `new-command':
+    ;; the character it inserts is re-derived from the keymap lookup
+    ;; state at *interactive* time, which `(interactive ...)' cannot say
+    ;; yet - so it stays on the record form until it can.
+    (define self-insert-command
+      ;; The character is not an argument the dispatcher can supply: it
+      ;; is re-derived from the frame's keymap lookup state, which holds
+      ;; the key index of the chord that reached this command. The
+      ;; prefix argument is supplied normally, as the repeat count.
+      (new-command
+       "self-insert-command"
+       (lambda (uarg)
+         (let ((state (frame-keymap-state (*current-frame*))))
+           (when state
+             (km:keymap-index-to-char
+              (km:modal-lookup-state-key-index state) #f
+              ;; `internal_self_insert' takes the repeat count itself -
+              ;; `(self-insert-command N C)' - so the loop the C's
+              ;; `self-insert-command' wraps round it is not repeated
+              ;; here.
+              (lambda (c)
+                (internal-self-insert c (uarg->integer 1 uarg)))
+              (lambda () #f))
+              )))
+       (lambda (c) (internal-self-insert c 1))
+       "Insert the typed character at point."
+       'uarg))
+
+    ;; Not an Emacs command: Emacs binds C-i to
+    ;; `indent-for-tab-command', which indents. This inserts a tab,
+    ;; which is what a terminal's TAB does here until that is ported.
+    (define-command (self-insert-tab count)
+      "Insert N tab characters at point."
+      (interactive "p")
+      (let loop ((i 0))
+        (when (< i count)
+          (text-editor-insert (current-buffer) #\tab)
+          (loop (+ 1 i)))))
+
+    (define-command (forward-char count)
+      "Move point N characters forward."
+      (interactive "p")
+      (text-editor-move-cursor (current-buffer) count))
+
+    (define-command (backward-char count)
+      "Move point N characters backward."
+      (interactive "p")
+      (text-editor-move-cursor (current-buffer) (- count)))
+
+    (define-command (beginning-of-line)
+      "Move point to the beginning of the current line."
+      (interactive)
+      (text-editor-set-cursor (current-buffer)
+                              (text-editor-get-start-of-line
+                               (current-buffer))))
+
+    (define-command (end-of-line)
+      "Move point to the end of the current line."
+      (interactive)
+      (text-editor-set-cursor (current-buffer)
+                              (text-editor-get-end-of-line
+                               (current-buffer))))
+
+    (define-command (delete-char count)
+      "Delete N characters after point."
+      (interactive "p")
+      (text-editor-delete-from-cursor (current-buffer) count))
 
     ))

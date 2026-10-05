@@ -42,6 +42,7 @@ SCHEME_LIBRARIES := \
   ./schemacs/editor/search.sld \
   ./schemacs/editor/indentc.sld \
   ./schemacs/editor/cmds.sld \
+  ./schemacs/editor/easy-mmode.sld \
   ./schemacs/editor/replace.sld \
   ./schemacs/editor/buffer.sld \
   ./schemacs/editor/buffer-text.sld \

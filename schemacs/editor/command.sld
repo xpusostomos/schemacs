@@ -22,6 +22,8 @@
    *mark-even-if-inactive*
    *this-event*
    current-prefix-arg
+   *called-interactively*
+   called-interactively?
    uarg->integer
    run-command apply-command show-command
    define-command *command-table* command? command-record-of command-value-of
@@ -193,6 +195,28 @@
     ;; records, or of whatever it has) by re-implementing this library.
     ;;------------------------------------------------------------------
 
+    (define *called-interactively* (make-parameter #f))
+    ;; ^ Whether the command now running was reached through
+    ;; `interactive-proc' below - GNU Emacs's `called-interactively-p'
+    ;; (`eval.c:470'), which asks whether a `call-interactively' frame is
+    ;; on the stack. `define-minor-mode`'s generated command reads it to
+    ;; decide whether to echo the "enabled"/"disabled" message: a mode
+    ;; switched on by a program must stay quiet, as `(message ...)' is
+    ;; inside `(if (called-interactively-p 'any) ...)' there.
+    ;;
+    ;; `'any' and not the other kind: Emacs's `'any' counts a
+    ;; `call-interactively' anywhere up the stack, not only the innermost
+    ;; one, which is what a dynamically bound flag gives.
+
+    (define (called-interactively?)
+      ;; GNU Emacs's `called-interactively-p': "Return t if the function
+      ;; it is called from was called with `call-interactively' and thus
+      ;; can have been passed an `interactive' specification."  The
+      ;; KIND argument (`'interactive', `'any', `'command') is not
+      ;; carried; every caller here wants `'any'.
+      ;;--------------------------------------------------------------
+      (*called-interactively*))
+
     (define *command-table* (make-parameter '()))
     ;; ^ The command obarray: GNU Emacs's `command-obarray', an alist of
     ;; (NAME . COMMAND-RECORD) - the record that `M-x' and the
@@ -217,7 +241,9 @@
       ;; are not all in it.
       ;;--------------------------------------------------------------
       (cond
-       ((not spec) (lambda () (command)))
+       ((not spec) (lambda ()
+                     (parameterize ((*called-interactively* #t))
+                       (command))))
        ;; an expression - a list - is recognised before the strings, so
        ;; that testing a form for `"p"' does not compare a list
        ((pair? spec)
@@ -227,13 +253,20 @@
           ;; read; an interactive expression, like Emacs's `(interactive
           ;; ...)', can read it for an argument (`split-window-below'
           ;; does).
-          (parameterize ((current-prefix-arg uarg))
+          (parameterize ((current-prefix-arg uarg)
+                         (*called-interactively* #t))
             (apply command (eval spec module)))))
        ;; The invoking event, which the command loop has bound - Emacs's
        ;; `args[i] = AREF (keys, next_event)' (`callint.c:608').
-       ((string=? spec "e") (lambda (uarg) (command (*this-event*))))
-       ((string=? spec "p") (lambda (uarg) (command (uarg->integer 1 uarg))))
-       ((string=? spec "P") (lambda (uarg) (command uarg)))
+       ((string=? spec "e") (lambda (uarg)
+                              (parameterize ((*called-interactively* #t))
+                                (command (*this-event*)))))
+       ((string=? spec "p") (lambda (uarg)
+                              (parameterize ((*called-interactively* #t))
+                                (command (uarg->integer 1 uarg)))))
+       ((string=? spec "P") (lambda (uarg)
+                              (parameterize ((*called-interactively* #t))
+                                (command uarg))))
        (else (error "Unsupported interactive specification" spec))))
 
     (define (register-command! command spec)
