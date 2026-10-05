@@ -943,22 +943,25 @@ non-nil."
       ;; `kill-read-only-ok' turns the signal into a message.
       "Kill (cut) the text between point and mark."
       (interactive (list (region-beginning) (region-end)))
-           (let* ((beg (- beg 1))
-                  (end (- end 1))
-                      (string (text-editor-copy-string (current-buffer) beg end))
-                      (read-only? (text-editor-read-only? (current-buffer))))
-                 ;; The ring takes the text first, as in Emacs, so that a
-                 ;; read-only buffer still gives up its text.
-                 (if (and (not read-only?)
-                          (eq? (*last-command*) kill-region))
-                     (kill-append string (< end beg))
-                     (kill-new string))
-                 (*this-command* kill-region)
-                 (set!text-editor-deactivate-mark! (current-buffer) #t)
-                (if read-only?
-                    (unless (*kill-read-only-ok*)
-                      (error "Buffer is read-only"))
-                    (delete-region beg end))))
+      ;; BEG and END are Emacs positions and the engine's are too, so
+      ;; there is nothing to convert: this used to subtract one from
+      ;; each, which is what the engine's old zero-based positions
+      ;; needed, and it silently killed one character too far to the
+      ;; left once the engine went to Emacs's own coordinates.
+      (let* ((string (text-editor-copy-string (current-buffer) beg end))
+             (read-only? (text-editor-read-only? (current-buffer))))
+        ;; The ring takes the text first, as in Emacs, so that a
+        ;; read-only buffer still gives up its text.
+        (if (and (not read-only?)
+                 (eq? (*last-command*) kill-region))
+            (kill-append string (< end beg))
+            (kill-new string))
+        (*this-command* kill-region)
+        (set!text-editor-deactivate-mark! (current-buffer) #t)
+        (if read-only?
+            (unless (*kill-read-only-ok*)
+              (error "Buffer is read-only"))
+            (delete-region beg end))))
 
     (define (copy-region-as-kill beg end)
       ;; GNU Emacs's `copy-region-as-kill': put the text in the kill ring

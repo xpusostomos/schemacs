@@ -187,7 +187,7 @@
       ;; one. Only leaves hold a buffer or point, which is why this one has
       ;; neither.
       ;;--------------------------------------------------------------
-      (make<window> #f #f 0 top height left width
+      (make<window> #f #f 1 top height left width
                             (window-parent window) (list window new)
                             0 0 #f 0))
 
@@ -309,7 +309,7 @@
         (let ((new (make<window>
                     buffer
                     (copy-marker buffer (text-editor-get-cursor buffer))
-                    0
+                    1
                     (+ top (- total size))
                     size
                     left

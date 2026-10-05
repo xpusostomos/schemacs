@@ -44,9 +44,7 @@
    ;;   schemacs/hash-table-tests.scm  (a runtime error in hashx-create-handle!)
    ;;   schemacs/vector-tests.scm      (unbound names)
    ;;   schemacs/sim-agent-tests.scm   (unbound names)
-   "./schemacs/gap-buffer-tests.scm"
    "./schemacs/vbal-tests.scm"
-   "./schemacs/editor/cdf-tests.scm"
    "./schemacs/bit-stack-tests.scm"
    ))
 

@@ -362,8 +362,11 @@
       ;; A window filling the given rectangle, showing BUFFER with point
       ;; at its beginning: a leaf the frame holds directly.
       ;;--------------------------------------------------------------
-      (make<window> buffer (copy-marker buffer 0)
-                            0 top height left width #f '()
+      ;; The top line is 1, not 0: a line number counts from one, as
+      ;; GNU Emacs's do, and the display's row arithmetic walks from the
+      ;; top line to the cursor's line counting the rows between them.
+      (make<window> buffer (copy-marker buffer 1)
+                            1 top height left width #f '()
                             0 0 #f 0))
 
     ;;----------------------------------------------------------------
