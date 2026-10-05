@@ -691,9 +691,16 @@
       ;;--------------------------------------------------------------
       (if (not tree)
           #f
-          (let ((position (- position (interval-start-pos tree))))
+          ;; The C keeps POSITION as it was given and carries the
+          ;; distance from the object's first position separately -
+          ;; `relative_position = position; ... relative_position -=
+          ;; BUF_BEG'. Rebinding *position* to that distance, as this
+          ;; did, was harmless while the origin was 0 and is not now:
+          ;; the position the interval is given below has to be an
+          ;; absolute one.
+          (let ((relative-position (- position (interval-start-pos tree))))
             (let loop ((tree (balance-possible-root-interval tree))
-                       (relative position))
+                       (relative relative-position))
               (cond
                ((< relative (interval-left-total-length tree))
                 (loop (interval-left tree) relative))
