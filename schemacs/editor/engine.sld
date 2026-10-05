@@ -1398,17 +1398,6 @@
                (write-char (integer->char cp) port))
            ))))
 
-    (define text-load-port
-      (case-lambda
-       ((ed port) (text-load-port ed port #f))
-       ((ed port _flags) (text-editor-insert-from-port ed port))
-       ))
-
-    (define text-dump-port
-      (case-lambda
-       ((ed port) (text-dump-port ed port #f))
-       ((ed port _flags) (text-editor-dump ed port))
-       ))
 
     (define text-load-port
       (case-lambda
@@ -1423,12 +1412,22 @@
        ))
 
     (define (text-editor-to-string ed)
-      ;; Dump the text editor buffer into a string.
-      (call-with-port (open-output-string)
-        (lambda (port)
-          (text-dump-port ed port)
-          (get-output-string port)
-          )))
+      ;; The buffer's characters as a string - GNU Emacs's
+      ;; `buffer-string' (`editfns.c'): "Return the contents of the
+      ;; current buffer as a string."
+      ;;
+      ;; It is the *raw* text, with `\n' for every line break and no
+      ;; coding-system translation, because that is what a buffer holds
+      ;; in Emacs. The buffer's line-break convention is applied once,
+      ;; by whoever writes the buffer out - `(schemacs editor files)'s
+      ;; `encode-line-breaks', which mirrors `coding.c' - and not here:
+      ;; this used to route through `text-dump-port', which applies the
+      ;; line break, and `save-buffer' then applied it a second time, so
+      ;; a CRLF file was written as `\r\r\n'.
+      ;;--------------------------------------------------------------
+      (text-editor-copy-string ed
+                               (text-editor-point-min ed)
+                               (text-editor-point-max ed)))
 
     ;;----------------------------------------------------------------
     ;; The cursor, lines and columns

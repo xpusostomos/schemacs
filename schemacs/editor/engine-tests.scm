@@ -50,6 +50,9 @@
   ;; If the string and buffer have the same textual content, 1. will
   ;; be the length of the string and buffer (which will be the same)
   ;; and 2. and 3. will be `#f`.
+  ;;
+  ;; A string index counts from 0 and a buffer position from 1, so the
+  ;; buffer is read one ahead of the string.
   (let*((strlen (string-length str))
 	(buflen (text-editor-char-count buf))
 	(len (min strlen buflen))
@@ -60,7 +63,7 @@
       (cond
        ((< i len)
 	(let ((str-ch (string-ref str i))
-	      (buf-ch (text-editor-get-char-index buf i))
+	      (buf-ch (text-editor-get-char-index buf (+ i 1)))
 	      )
 	  ;;(display "s=") (write str-ch) (display ", b=") (write buf-ch) (newline);;DEBUG
 	  (cond
@@ -69,7 +72,7 @@
 	   )))
        ((< i buflen)
 	;;(display " end of string\n");;DEBUG
-	(values i #f (text-editor-get-char-index buf i))
+	(values i #f (text-editor-get-char-index buf (+ i 1)))
 	)
        ((< i strlen)
 	;;(display " end of buffer\n");;DEBUG
@@ -186,7 +189,7 @@
     (text-editor-insert ed "AAA\nBBB\nCCC\nDDD\n")
     (text-editor-move-cursor ed -100)
     (text-editor-insert ed "S")
-    (text-editor-set-cursor ed 1 1)
+    (text-editor-set-cursor ed 2 1)
     (text-editor-insert ed "1")
     (text-editor-move-cursor ed 100)
     (text-editor-insert ed "E")
@@ -228,17 +231,18 @@
     (text-editor-insert ed "\r\n")
     (text-editor-to-string ed)))
 
-;; Cursor motion: the character index tracks the position after a
-;; sequence of moves and inserts.
+;; Cursor motion: the position tracks a sequence of moves and inserts.
+;; START is `point-min', 1 - Emacs's coordinate, not an index - and the
+;; second line's third character is position 9.
 (test-assert
  (let ((ed (new-text-editor)))
    (text-editor-insert ed "alpha\nbeta\ngamma\n")
    ;; move to start
    (text-editor-move-cursor ed -100)
    (let ((start (text-editor-get-cursor ed)))
-     (text-editor-set-cursor ed 1 2)
+     (text-editor-set-cursor ed 2 2)
      (let ((mid (text-editor-get-cursor ed)))
-       (and (= 0 start) (= 8 mid))))))
+       (and (= 1 start) (= 9 mid))))))
 
 ;; Deleting characters within a line.
 (test-equal "hello\n"
@@ -254,7 +258,7 @@
 (test-equal "alphabeta\ngamma\n"
   (let ((ed (new-text-editor)))
     (text-editor-insert ed "alpha\nbeta\ngamma\n")
-    (text-editor-set-cursor ed 1 0)
+    (text-editor-set-cursor ed 2 0)
     (text-editor-delete-from-cursor ed -1)
     (text-editor-to-string ed)))
 
@@ -271,7 +275,7 @@
 (test-equal "alphagamma\n"
   (let ((ed (new-text-editor)))
     (text-editor-insert ed "alpha\nbeta\ngamma\n")
-    (text-editor-set-cursor ed 0 5)
+    (text-editor-set-cursor ed 1 5)
     (text-editor-delete-from-cursor ed 6)
     (text-editor-to-string ed)))
 
@@ -280,38 +284,37 @@
 ;;--------------------------------------------------------------------
 ;; 4. regression tests: character indexing and copying
 ;;
-;; `text-editor-get-char-index` reads the line containing the index out
-;; of the CDF. The CDF was filled only while the running total was
-;; strictly less than the target index, so the bucket holding the index
-;; itself was never generated and `cdf-find` reported the index as out
-;; of bounds. Every character index that begins a line was therefore
-;; unresolvable - index 0 of any buffer above all - which made
-;; `text-editor-copy-string` silently drop that character.
+;; These were written against the CDF, which read the line containing an
+;; index out of a bucket table and reported every index that began a
+;; line as out of bounds. The CDF is gone; an index is a `buffer-text'
+;; position now, one-based as Emacs's are, and these check the same
+;; things it did - that the first character of the buffer and of every
+;; line is where it should be, and that a whole-buffer copy keeps it.
 
 (test-begin "schemacs_editor_engine_char_index")
 
-;; The first character of a single-line buffer, which has no line
-;; break to anchor the CDF.
+;; The first character of a single-line buffer - position 1, which is
+;; `point-min'.
 (test-equal #\X
   (let ((ed (new-text-editor)))
     (text-editor-insert ed "X")
-    (text-editor-set-cursor ed 0 0)
-    (text-editor-get-char-index ed 0)))
+    (text-editor-set-cursor ed 1 0)
+    (text-editor-get-char-index ed 1)))
 
 ;; Copying a whole single-line buffer keeps its first character.
 (test-equal "one two"
   (let ((ed (new-text-editor)))
     (text-editor-insert ed "one two")
-    (text-editor-set-cursor ed 0 0)
-    (text-editor-copy-string ed 0 7)))
+    (text-editor-set-cursor ed 1 0)
+    (text-editor-copy-string ed 1 8)))
 
-;; The first character of every line, including the first character of
-;; the second line, which begins at a CDF bucket boundary.
+;; The first character of every line: position 5 begins the second line
+;; and position 10 the third.
 (test-equal '(#\a #\d #\h)
   (let ((ed (new-text-editor)))
     (text-editor-insert ed "abc\ndefg\nhi")
-    (text-editor-set-cursor ed 0 0)
-    (map (lambda (i) (text-editor-get-char-index ed i)) '(0 4 9))))
+    (text-editor-set-cursor ed 1 0)
+    (map (lambda (i) (text-editor-get-char-index ed i)) '(1 5 10))))
 
 ;; An index past the end of the buffer is still unresolvable.
 (test-equal #f
@@ -364,42 +367,42 @@
 
 ;; An insertion is recorded as the range of characters it occupies, and
 ;; undoing it deletes that range.
-(test-equal '((0 . 3) (t . 0))
+(test-equal '((1 . 4) (t . 0))
   (let ((ed (new-text-editor)))
     (text-editor-insert ed "abc")
     (text-editor-undo-list ed)))
 
-(test-equal '("" 0)
+(test-equal '("" 1)
   (let ((ed (new-text-editor)))
     (text-editor-insert ed "abc")
-    (text-editor-set-cursor ed 0 0)
+    (text-editor-set-cursor ed 1 0)
     (undo! ed 1)
     (list (text-editor-to-string ed) (text-editor-get-cursor ed))))
 
 ;; A deletion is recorded with the deleted text, so undo can put it
 ;; back without having to recover it from the buffer - which is what
 ;; makes undoing the deletion of a line break work.
-(test-equal 5
+(test-equal 6
   (let ((ed (new-text-editor)))
     (text-editor-insert ed "hello\nworld")
     (text-editor-undo-boundary! ed)
-    (text-editor-set-cursor ed 5)
+    (text-editor-set-cursor ed 6)
     (text-editor-delete-from-cursor ed 1)
     (cdr (car (text-editor-undo-list ed)))))
 
-(test-equal (list (cons (string #\newline) 5))
+(test-equal (list (cons (string #\newline) 6))
   (let ((ed (new-text-editor)))
     (text-editor-insert ed "hello\nworld")
     (text-editor-undo-boundary! ed)
-    (text-editor-set-cursor ed 5)
+    (text-editor-set-cursor ed 6)
     (text-editor-delete-from-cursor ed 1)
     (list (car (text-editor-undo-list ed)))))
 
-(test-equal '("hello\nworld" 5)
+(test-equal '("hello\nworld" 6)
   (let ((ed (new-text-editor)))
     (text-editor-insert ed "hello\nworld")
     (text-editor-undo-boundary! ed)
-    (text-editor-set-cursor ed 5)
+    (text-editor-set-cursor ed 6)
     (text-editor-delete-from-cursor ed 1)
     (undo! ed 1)
     (list (text-editor-to-string ed) (text-editor-get-cursor ed))))
@@ -412,7 +415,7 @@
   (let ((ed (new-text-editor)))
     (text-editor-insert ed "hello\nworld")
     (text-editor-undo-boundary! ed)
-    (text-editor-set-cursor ed 5)
+    (text-editor-set-cursor ed 6)
     (text-editor-delete-from-cursor ed 1)
     (undo! ed 1)                       ; undo the deletion
     (let ((after-undo (text-editor-to-string ed)))
@@ -445,7 +448,7 @@
 
 ;; A boundary is never recorded twice in a row, nor at the front of an
 ;; empty list (mg's rule), so the grouping cannot be split by accident.
-(test-equal '(() (0 . 3) (t . 0))
+(test-equal '(() (1 . 4) (t . 0))
   (let ((ed (new-text-editor)))
     (text-editor-insert ed "abc")
     (text-editor-undo-boundary! ed)
@@ -454,7 +457,7 @@
 
 ;; Adjacent insertions grow one entry rather than adding one each, the
 ;; way Emacs's `record_insert' and mg's `undo_add_insert' do.
-(test-equal '((0 . 6) (t . 0))
+(test-equal '((1 . 7) (t . 0))
   (let ((ed (new-text-editor)))
     (text-editor-insert ed "abc")
     (text-editor-insert ed "def")
@@ -462,21 +465,21 @@
 
 ;; An insertion that does not abut the previous one starts a new entry,
 ;; rather than being folded into it.
-(test-equal '((1 . 2) (0 . 3) (t . 0))
+(test-equal '((2 . 3) (1 . 4) (t . 0))
   (let ((ed (new-text-editor)))
     (text-editor-insert ed "abc")
-    (text-editor-set-cursor ed 1)
+    (text-editor-set-cursor ed 2)
     (text-editor-insert ed "X")
     (text-editor-undo-list ed)))
 
 ;; Deletion is clamped, so what is recorded is what was really there:
 ;; deleting 100 characters of a 3-character buffer records 3, and undo
 ;; restores 3.
-(test-equal '("abc" . 0)
+(test-equal '("abc" . 1)
   (let ((ed (new-text-editor)))
     (text-editor-insert ed "abc")
     (text-editor-undo-boundary! ed)
-    (text-editor-set-cursor ed 0 0)
+    (text-editor-set-cursor ed 1 0)
     (text-editor-delete-from-cursor ed 100)
     (car (text-editor-undo-list ed))))
 
@@ -527,10 +530,12 @@
     (undo! ed 1)
     (list (text-editor-to-string ed) (text-editor-get-cursor ed))))
 
-;; Loading a file records nothing: what is in the buffer after visiting
-;; a file is not an edit the user made (GNU Emacs leaves `buffer-undo-list'
-;; empty there).
-(test-equal '(() "loaded\ntext\n")
+;; Reading a file records the insertion like any other, which is what
+;; GNU Emacs's `insert-file-contents' does - its `buffer-undo-list'
+;; after a 12-character read is `((1 . 13) (t . 0))', and so is this.
+;; It is the *visit* that leaves nothing to undo, and that is
+;; `find-file-noselect''s doing (`empty_undo_list_p', fileio.c:4125).
+(test-equal '(((1 . 13) (t . 0)) "loaded\ntext\n")
   (let ((ed (new-text-editor)))
     (call-with-output-file "/tmp/schemacs-undo-test.txt"
       (lambda (port) (display "loaded\ntext\n" port)))
@@ -541,7 +546,7 @@
 ;; Disabling undo drops the list and stops recording; enabling it again
 ;; starts a fresh, empty list (Emacs's `buffer-disable-undo' sets
 ;; `buffer-undo-list' to t, and `buffer-enable-undo' sets it to nil).
-(test-equal '(#f 3 () ((3 . 7)))
+(test-equal '(#f 3 () ((4 . 8)))
   (let ((ed (new-text-editor)))
     (text-editor-insert ed "abc")
     (text-editor-undo-disable! ed)
@@ -558,7 +563,7 @@
 ;; (Emacs' own policy is three-tiered and measured in bytes; this is the
 ;; simplified stand-in, so the test pins the direction of the trimming
 ;; rather than Emacs' exact thresholds.)
-(test-equal '((3 . 4) () (2 . 3) () (1 . 2))
+(test-equal '((4 . 5) () (3 . 4) () (2 . 3))
   (parameterize ((*undo-limit* 6))
     (let ((ed (new-text-editor)))
       (text-editor-insert ed "A")
@@ -597,7 +602,7 @@
 
 ;; Changing it marks it modified, and records where it was last in sync
 ;; so that undoing back there can unmark it.
-(test-equal '(#t ((0 . 3) (t . 0)))
+(test-equal '(#t ((1 . 4) (t . 0)))
   (let ((ed (new-text-editor)))
     (text-editor-insert ed "abc")
     (list (text-editor-modified? ed) (text-editor-undo-list ed))))
@@ -618,7 +623,7 @@
 ;; Saving clears the flag and leaves the undo list alone, as in GNU
 ;; Emacs: the record of where the buffer was last in sync is what makes
 ;; undo able to clear the flag again later.
-(test-equal '(#f ((0 . 5) (t . 0)))
+(test-equal '(#f ((1 . 6) (t . 0)))
   (let ((ed (new-text-editor)))
     (text-editor-insert ed "hello")
     (text-editor-set-modified! ed #f)
@@ -793,51 +798,51 @@
 (test-begin "schemacs_editor_engine_search")
 
 (define (searchable)
-  ;; "alpha beta gamma\nbeta delta\n": the two "beta"s are at 6..10 and
-  ;; 17..21, and "gamma\nbeta" spans a line break.
+  ;; "alpha beta gamma\nbeta delta\n": the two "beta"s are at 7..10 and
+  ;; 18..21, and "gamma\nbeta" spans a line break.
   (let ((ed (new-text-editor)))
     (text-editor-insert ed "alpha beta gamma\nbeta delta\n")
     ed))
 
 ;; Forward: the position just past the match.
-(test-equal 10 (text-editor-search-forward (searchable) "beta" 0 #t))
-(test-equal 21 (text-editor-search-forward (searchable) "beta" 11 #t))
+(test-equal 11 (text-editor-search-forward (searchable) "beta" 1 #t))
+(test-equal 22 (text-editor-search-forward (searchable) "beta" 12 #t))
 
 ;; ... including when the search starts in the middle of the buffer, and
 ;; when it starts at a line break.
-(test-equal 21 (text-editor-search-forward (searchable) "beta" 16 #t))
-(test-equal #f (text-editor-search-forward (searchable) "beta" 22 #t))
+(test-equal 22 (text-editor-search-forward (searchable) "beta" 17 #t))
+(test-equal #f (text-editor-search-forward (searchable) "beta" 23 #t))
 
 ;; Backward: the position of the start of the match.
-(test-equal 6 (text-editor-search-backward (searchable) "beta" 16 #t))
-(test-equal 6 (text-editor-search-backward (searchable) "beta" 10 #t))
-(test-equal #f (text-editor-search-backward (searchable) "beta" 6 #t))
+(test-equal 7 (text-editor-search-backward (searchable) "beta" 17 #t))
+(test-equal 7 (text-editor-search-backward (searchable) "beta" 11 #t))
+(test-equal #f (text-editor-search-backward (searchable) "beta" 7 #t))
 
 ;; A match that spans a line break.
-(test-equal 21 (text-editor-search-forward (searchable) "gamma\nbeta" 0 #t))
-(test-equal 11 (text-editor-search-backward (searchable) "gamma\nbeta" 27 #t))
+(test-equal 22 (text-editor-search-forward (searchable) "gamma\nbeta" 1 #t))
+(test-equal 12 (text-editor-search-backward (searchable) "gamma\nbeta" 28 #t))
 
 ;; Case folding is the caller's choice, as it is for Emacs's
 ;; `search-forward', which only obeys `case-fold-search'.
-(test-equal 10 (text-editor-search-forward (searchable) "BETA" 0 #t))
-(test-equal #f (text-editor-search-forward (searchable) "BETA" 0 #f))
+(test-equal 11 (text-editor-search-forward (searchable) "BETA" 1 #t))
+(test-equal #f (text-editor-search-forward (searchable) "BETA" 1 #f))
 
 ;; An empty search string finds nothing: it means "no search yet" to the
 ;; incremental search.
-(test-equal #f (text-editor-search-forward (searchable) "" 0 #t))
-(test-equal #f (text-editor-search-backward (searchable) "" 10 #t))
+(test-equal #f (text-editor-search-forward (searchable) "" 1 #t))
+(test-equal #f (text-editor-search-backward (searchable) "" 11 #t))
 
 ;; A pattern that would run off the end of the buffer finds nothing,
 ;; rather than reading past it. ("delta\n" IS there, at 22..28; two line
 ;; breaks are not.)
-(test-equal 28 (text-editor-search-forward (searchable) "delta\n" 22 #t))
-(test-equal #f (text-editor-search-forward (searchable) "delta\n\n" 22 #t))
+(test-equal 29 (text-editor-search-forward (searchable) "delta\n" 23 #t))
+(test-equal #f (text-editor-search-forward (searchable) "delta\n\n" 23 #t))
 
 ;; The mark starts unset, and holds a character index once set.
-(test-equal '(#f 6)
+(test-equal '(#f 7)
   (let ((ed (searchable)))
     (let ((unset (text-editor-mark ed)))
-      (set!text-editor-mark ed 6)
+      (set!text-editor-mark ed 7)
       (list unset (text-editor-mark ed)))))
 
 (test-end "schemacs_editor_engine_search")
@@ -861,7 +866,7 @@
 
 ;; The end of a buffer with no trailing line break is the end of its
 ;; last line, not a line of its own.
-(test-equal '(1 0 3 0 3)
+(test-equal '(1 1 3 1 4)
   (let ((ed (new-text-editor)))
     (text-editor-insert ed "abc")
     (text-editor-move-cursor ed 100)
@@ -881,7 +886,7 @@
 
 ;; Point at that end still reaches the beginning of the line, which is
 ;; what `C-e' then `C-a' does.
-(test-equal 0
+(test-equal 1
   (let ((ed (new-text-editor)))
     (text-editor-insert ed "abc")
     (text-editor-move-cursor ed 100)
@@ -891,7 +896,7 @@
 
 ;; A line break at the end of the buffer does start a line: the buffer
 ;; has two lines and the empty one gets `point-max'.
-(test-equal '(2 1 0 4 4)
+(test-equal '(2 2 0 5 5)
   (let ((ed (new-text-editor)))
     (text-editor-insert ed "abc\n")
     (text-editor-move-cursor ed 100)
@@ -901,31 +906,32 @@
           (text-editor-get-start-of-line ed)
           (text-editor-get-end-of-line ed))))
 
-;; With no line past the end there is nothing to move down to: the line
-;; index is clamped to the last line the buffer has, which is what
-;; `next-line' at the last line relies on. Point stays inside the text
-;; rather than at index 4, past the end of a three character buffer.
-(test-equal '(0 0 3)
+;; A line number past the end of the buffer is `goto-line''s case, and
+;; GNU Emacs moves point to the end of the buffer there - `forward-line'
+;; with a count it cannot fulfil leaves point at `point-max'. Emacs:
+;; `(goto-line 2)' in a buffer holding "abc" puts point at 4, line 1,
+;; column 3, which is exactly this.
+(test-equal '(1 4 3)
   (let ((ed (new-text-editor)))
     (text-editor-insert ed "abc")
-    (text-editor-set-cursor ed 1 0)
+    (text-editor-set-cursor ed 2 0)
     (list (text-editor-cursor-line ed)
           (text-editor-get-cursor ed)
           (text-editor-char-count ed))))
 
 ;; With a line break at the end there is: the empty line the break
-;; started is addressable, at the index the break ends at.
-(test-equal '(1 4 2)
+;; started is addressable, at the position the break ends at.
+(test-equal '(2 5 2)
   (let ((ed (new-text-editor)))
     (text-editor-insert ed "abc\n")
-    (text-editor-set-cursor ed 1 0)
+    (text-editor-set-cursor ed 2 0)
     (list (text-editor-cursor-line ed)
           (text-editor-get-cursor ed)
           (text-editor-line-count ed))))
 
 ;; Typing a line break at the end of a buffer with no trailing break
 ;; starts a line, and point is on it.
-(test-equal '(2 1 0)
+(test-equal '(2 2 0)
   (let ((ed (new-text-editor)))
     (text-editor-insert ed "abc")
     (text-editor-move-cursor ed 100)
@@ -936,7 +942,7 @@
 
 ;; So does accepting a file whose text ends in a line break, and its
 ;; end is the empty line the break started.
-(test-equal '(3 2 0)
+(test-equal '(3 3 0)
   (let ((ed (new-text-editor)))
     (text-editor-insert ed "one\ntwo\n")
     (text-editor-move-cursor ed 100)
@@ -956,22 +962,23 @@
 ;; wrongly). The values below are what a real Emacs reports for the same
 ;; operations.
 
-;; One line, and the cursor at the end of it.
-(test-equal '(1 4 4)
+;; One line, and the cursor at the end of it - position 5, which is
+;; `point-max', column 4 as Emacs counts it.
+(test-equal '(1 4 5)
   (let ((ed (new-text-editor)))
     (text-editor-insert ed "abcd")
-    (text-editor-set-cursor ed 4)
+    (text-editor-set-cursor ed 5)
     (list (text-editor-line-count ed)
           (text-editor-cursor-column ed)
           (text-editor-get-cursor ed))))
 
 ;; Deleting backwards at the end takes the two characters before it:
 ;; Emacs: "abcd" with point at the end and `(delete-char -2)' is "ab"
-;; with point 3, which is index 2 here.
-(test-equal '("ab" 2 2)
+;; with point 3.
+(test-equal '("ab" 3 2)
   (let ((ed (new-text-editor)))
     (text-editor-insert ed "abcd")
-    (text-editor-set-cursor ed 4)
+    (text-editor-set-cursor ed 5)
     (let ((deleted (text-editor-delete-from-cursor ed -2)))
       (list (text-editor-to-string ed)
             (text-editor-get-cursor ed)
@@ -992,7 +999,7 @@
 ;; A buffer whose last line does end in a line break does have an empty
 ;; line after it, and the cursor can be on it: Emacs: "abcd\n" has two
 ;; lines and `(point-max)' is on the second.
-(test-equal '(2 1 0)
+(test-equal '(2 2 0)
   (let ((ed (new-text-editor)))
     (text-editor-insert ed "abcd\n")
     (list (text-editor-line-count ed)
@@ -1002,32 +1009,32 @@
 ;; ... and deleting backwards there takes the break and the character
 ;; before it: Emacs: "abcd\n" with point at the end and
 ;; `(delete-char -2)' is "abc".
-(test-equal '("abc" 3)
+(test-equal '("abc" 4)
   (let ((ed (new-text-editor)))
     (text-editor-insert ed "abcd\n")
-    (text-editor-set-cursor ed 5)
+    (text-editor-set-cursor ed 6)
     (text-editor-delete-from-cursor ed -2)
     (list (text-editor-to-string ed) (text-editor-get-cursor ed))))
 
 ;; Writing a line back while the cursor is in the middle of it leaves the
-;; cursor there: Emacs: point after inserting "X" at index 2 of "abcdef"
-;; is 3, and stays 3 while the buffer is read.
-(test-equal '("abXcdef" 3 3)
+;; cursor there: Emacs: point after inserting "X" at position 3 of
+;; "abcdef" is 4, and stays 4 while the buffer is read.
+(test-equal '("abXcdef" 4 4)
   (let ((ed (new-text-editor)))
     (text-editor-insert ed "abcdef")
-    (text-editor-set-cursor ed 2)          ; writes the line back
+    (text-editor-set-cursor ed 3)          ; writes the line back
     (text-editor-insert ed "X")            ; the line is changed again
     (let ((before (text-editor-get-cursor ed)))
-      (text-editor-copy-string ed 0 7)     ; a read, which writes back
+      (text-editor-copy-string ed 1 8)     ; a read, which writes back
       (list (text-editor-to-string ed) before (text-editor-get-cursor ed)))))
 
 ;; Deleting backwards in the middle of a line was always right, and stays
-;; right: Emacs: point 3 (index 2) of "abcdef" with `(delete-char -1)' is
-;; "acdef" with point at index 1.
-(test-equal '("acdef" 1)
+;; right: Emacs: point 3 of "abcdef" with `(delete-char -1)' is "acdef"
+;; with point 2.
+(test-equal '("acdef" 2)
   (let ((ed (new-text-editor)))
     (text-editor-insert ed "abcdef")
-    (text-editor-set-cursor ed 2)
+    (text-editor-set-cursor ed 3)
     (text-editor-delete-from-cursor ed -1)
     (list (text-editor-to-string ed) (text-editor-get-cursor ed))))
 
@@ -1121,7 +1128,7 @@
 ;; Text inserted EXACTLY at a marker is the boundary case: the default
 ;; marker (insertion type false) stays put and the text lands after it -
 ;; Emacs: a marker at 3, "XY" inserted at 3, is still at 3 in "abXYcd".
-(test-equal '(3 "abcXYd")
+(test-equal '(3 "abXYcd")
   (let* ((ed (new-text-editor)))
     (text-editor-insert ed "abcd")
     (let ((m (copy-marker ed 3)))
@@ -1140,9 +1147,10 @@
       (marker-position m))))
 
 ;; Deletion does not shift markers, it collapses the ones inside the
-;; deleted text to its start: Emacs: delete [2,5) of "abcdef" with a
-;; marker at 4 leaves it at 2.
-(test-equal '(2 "abf")
+;; deleted text to its start: Emacs: delete the three characters from
+;; position 2 of "abcdef" with a marker at 4 leaves "aef" and the marker
+;; collapsed to 2.
+(test-equal '(2 "aef")
   (let* ((ed (new-text-editor)))
     (text-editor-insert ed "abcdef")
     (let ((m (copy-marker ed 4)))
@@ -1160,13 +1168,14 @@
       (text-editor-delete-from-cursor ed 3)
       (list (marker-position at-end) (marker-position after)))))
 
-;; Deleting backwards takes the text before the cursor: "cd" deleted
-;; from before index 4 of "abcdef" leaves a marker at 2 where it is.
-(test-equal '(2 "abef")
+;; Deleting backwards takes the text before the cursor: Emacs: "abcdef"
+;; with point at 5 and `(delete-char -2)' is "abef" with the marker that
+;; was at 4 collapsed to 3.
+(test-equal '(3 "abef")
   (let* ((ed (new-text-editor)))
     (text-editor-insert ed "abcdef")
     (let ((m (copy-marker ed 4)))
-      (text-editor-set-cursor ed 4)
+      (text-editor-set-cursor ed 5)
       (text-editor-delete-from-cursor ed -2)
       (list (marker-position m) (text-editor-to-string ed)))))
 
@@ -1175,11 +1184,11 @@
 ;; `SCHEMACS_EDITOR_ENGINE_END_OF_BUFFER'): the markers inside the
 ;; deleted text collapse to where it began, and the buffer loses exactly
 ;; the two characters asked for.
-(test-equal '(4 "abcd")
+(test-equal '(5 "abcd")
   (let* ((ed (new-text-editor)))
     (text-editor-insert ed "abcdef")
     (let ((m (copy-marker ed 5)))
-      (text-editor-set-cursor ed 6)
+      (text-editor-set-cursor ed 7)
       (text-editor-delete-from-cursor ed -2)
       (list (marker-position m) (text-editor-to-string ed)))))
 
@@ -1205,11 +1214,11 @@
       (list (marker-position m1) (marker-position m2)))))
 
 ;; A line break is text too: a marker after it moves with it.
-(test-equal '(5 "ab\ncd")
+(test-equal '(6 "ab\ncd")
   (let* ((ed (new-text-editor)))
     (text-editor-insert ed "abcd")
-    (let ((m (copy-marker ed 4)))
-      (text-editor-set-cursor ed 2)
+    (let ((m (copy-marker ed 5)))
+      (text-editor-set-cursor ed 3)
       (text-editor-insert ed #\newline)
       (list (marker-position m) (text-editor-to-string ed)))))
 
@@ -1291,7 +1300,7 @@
 (test-equal '(7 7 "abcdef\n")
   (let ((ed (new-text-editor)))
     (text-editor-insert ed "abc\ndef\n")
-    (text-editor-set-cursor ed 0 3)
+    (text-editor-set-cursor ed 1 3)
     (text-editor-delete-from-cursor ed 1)
     (list (text-editor-char-count ed)
           (string-length (text-editor-to-string ed))
@@ -1302,7 +1311,7 @@
 (test-equal '(7 7 "abcdef\n")
   (let ((ed (new-text-editor)))
     (text-editor-insert ed "abc\ndef\n")
-    (text-editor-set-cursor ed 1 0)
+    (text-editor-set-cursor ed 2 0)
     (text-editor-delete-from-cursor ed -1)
     (list (text-editor-char-count ed)
           (string-length (text-editor-to-string ed))
