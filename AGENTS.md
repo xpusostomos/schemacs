@@ -2091,3 +2091,147 @@ is why the row walk is still there.
 `ncurses-editor-tests.scm` has the mirror of the upward test: walk down one
 line at a time until the window has to move, and assert the *rule*
 (`start == point - body/2`), not a measured number.
+
+# `eval-expression` (2026-10-06)
+
+## What it is, and the one departure
+
+M-: prompts `Eval: `, evaluates what is typed, and echoes the value; an
+error fills `*Backtrace*`. That is `simple.el:2140` with
+`eval-expression-print-format` (`:2044`), `read--expression` (`:2063`) and
+the variables they read.
+
+**The evaluator is Scheme's, and that is the departure.** Emacs's
+`eval-expression` evaluates Emacs Lisp - `(eval (let ((lexical-binding t))
+(macroexpand-all exp)) t)' (`:2172'). This editor is a Scheme program, so
+what the minibuffer reads is a Scheme expression and `(scheme eval)''s
+`eval' runs it. Chris's call, and the header of the backtrace says
+`Debugger entered--Scheme error:` where Emacs says `--Lisp error:`, which
+is the same departure showing through.
+
+It lives in `minibuffer.sld`, not `simple.sld`, for the reason
+`goto-line`, `zap-to-char` and `set-fill-column` do: `simple.sld` is
+*beneath* the minibuffer library and a command that prompts cannot live
+there.
+
+## Where the expression is evaluated, and how that was found
+
+`(interaction-environment)' was the first answer and it was wrong: under
+`--r7rs' it is a minimal environment, and `(+ 40 2)' answered **"Unbound
+variable: +"**. What is used is `(current-module)' - the module current
+when the command runs, which is where the editor's own bindings are. A
+name the editor defines is reachable from M-: as a result, which is the
+useful behaviour and the nearest thing to Emacs evaluating in the current
+buffer's context.
+
+## The backtrace, which is possible after all
+
+Chris asked whether a backtrace is even possible with Scheme `eval'. It
+is, and the reason is the same one that makes Emacs's work: **the debugger
+does not invent the frames, it asks the runtime.** Emacs asks its own
+backtrace machinery; this asks Guile's.
+
+The one thing that has to be right is *when* the stack is taken. A `guard`
+unwinds before its handler runs, so it has no frames to show.
+`with-exception-handler` calls its handler **on the raising stack**, so
+that is where `(make-stack #t)' can still see them - and a continuation
+captured outside escapes with the condition so the header can name it:
+
+```scheme
+(call/cc
+ (lambda (escape)
+   (with-exception-handler
+    (lambda (e) (set! stack (make-stack #t)) (set! failed #t) (escape e))
+    (lambda () (eval exp (%eval-expression-environment))))))
+```
+
+`display-backtrace' then writes the frames, which are inserted into the
+buffer Emacs uses - `*Backtrace*' (`debug.el:212'), with
+`debugger--insert-header''s `error' case (`:412') as its first line.
+
+**Guile's condition messages are format templates.** `error-object-message'
+answers `"Unbound variable: ~S"' with the name in
+`error-object-irritants', so the two are put back together - with `~S' and
+`~A' lowered to the directives Guile's own `format' takes. Without that
+the header read `Unbound variable: ~S', which is what the first version
+printed.
+
+## `prin1`, which came first
+
+`eval-expression` is `prin1` with `print-length` and `print-level` bound
+(`:2182'), and the tree's `prin1` was `(write val stream)' - Guile's
+`write', which says `#t' where Lisp wants `t', knows nothing of this
+tree's `nil', and has no `print-length' at all. So the port started there:
+`schemacs/elisp-eval/print.sld', mirroring `print.c' - `print_object' and
+the four variables its default path reads.
+
+Twelve cases, each measured on Emacs 31.1 first, in `print-tests.scm' (29):
+
+| | Emacs | ours |
+|---|---|---|
+| `(prin1-to-string nil)` | `"nil"` | `"nil"` |
+| `(prin1-to-string t)` | `"t"` | `"t"` |
+| `(prin1-to-string '(quote a))` | `"'a"` | `"'a"` |
+| `print-length 2` on `(1 2 3 4)` | `"(1 2 ...)"` | `"(1 2 ...)"` |
+| `print-level 1` on `(1 (2 3))` | `"(1 ...)"` | `"(1 ...)"` |
+| `print-quoted nil` on `'(quote a)` | `"(quote a)"` | `"(quote a)"` |
+| `(prin1-to-string (intern "?"))` | `"\\?"` | `"\\?"` |
+
+**Not carried**, each because nothing here produces the value:
+`Lisp_Vectorlike' and its dozen sub-cases (buffers, windows, markers,
+overlays, char-tables, hash tables, records, subrs), and with them the
+`#<...>' forms; `print-gensym'; `print-circle' and the `#N=' / `#N#'
+notation - a circular structure is reported rather than abbreviated,
+which is the C's own behaviour with `print-circle' nil;
+`print-escape-nonascii', `print-escape-multibyte' and
+`print-escape-control-characters', whose defaults are nil.
+
+**One data-model difference the printer shows.** Emacs has one empty
+thing: `()` and `nil` are the same object, so `(prin1-to-string '())` is
+`"nil"`. This tree has two - its empty list is Scheme `'()` and its `nil`
+is a `sym-type` - and `(eq? (scheme->elisp '()) nil)` is **`#f`**. So
+`'()` prints `"()"` here and `"nil"` there. That is the tree's data model,
+not the printer's; it is named here because M-: output is where a user
+would first see it.
+
+## The piece whose absence made it look broken
+
+Chris, using it: *"it mostly works... it doesn't make a backtrace buffer
+though."* It did - for a *runtime* error - and the case he was hitting was a
+**read** error, which never reached the debugger at all, because the read
+happened after the minibuffer had already closed.
+
+Emacs cannot get into that state: `read--expression-map` binds RET to
+`read--expression-try-read` (`simple.el:2083`), which reads the text *while
+the minibuffer is still open* and, on failure, reports the error and
+**refuses to exit**. So a malformed expression is a prompt-time complaint,
+not an evaluation error, and the backtrace is only ever for what `eval`
+raised - which is the right division and was missing here.
+
+Both are now carried, and the three cases behave as they should at a pty:
+
+| typed | what happens |
+|---|---|
+| `(+ 1` | minibuffer stays open, `Eval: (+ 1 [<reader error>]` - `minibuffer-message`'s enclosure |
+| `(car (quote ()))` | `*Backtrace*` fills and displays |
+| `(no-such-thing)` | `*Backtrace*` fills and displays |
+
+`read--expression-map` needs its *parent* set: a map handed to
+`read-from-minibuffer` replaces `minibuffer-local-map` rather than adding
+to it, so `(set-keymap-parent map minibuffer-local-map)` is what keeps C-g
+and the history keys - which is Emacs's own line.
+
+**The reader's words are Guile's.** Emacs says "End of file during parsing"
+and "Invalid read syntax"; ours says `#<unknown port>:1:5: unexpected end of
+input while searching for: )`. Same class of message, the runtime's text
+rather than Emacs's, because the reader is the runtime's.
+
+## Not ported from `eval-expression`
+
+`eval-expression-get-print-arguments' and the prefix-argument behaviour it
+serves - `C-u` to insert the value into the buffer rather than echo it,
+`C-u 0` for no truncation, `-1` for the widest character limit.
+`eval-expression-print-level' and `eval-expression-print-length' likewise:
+the Scheme printer has no truncation to bind. And moving point to the
+reader's error in `read--expression-try-read', which needs a reader that
+can be asked where it stopped - see above.

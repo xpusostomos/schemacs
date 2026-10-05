@@ -70,19 +70,29 @@
           buffer-fill-column set!buffer-fill-column
           buffer-local-keymap set!buffer-local-keymap set!buffer-default-directory
           ;; `completion-base-position' is a variable local to `*Completions*'
-          buffer-local-value set-buffer-local-value!
+          buffer-local-value erase-buffer set-buffer-local-value!
           with-current-buffer)
     ;; `getcwd' is Guile's, for a buffer that has no `default-directory'.
     (only (guile) getcwd)
+    ;; `(scheme eval)''s `eval' is the evaluator `eval-expression' runs,
+    ;; and Guile's stack is where its `*Backtrace*' frames come from.
+    (scheme eval)
+    (only (guile) current-module display-backtrace make-stack)
+    ;; `read' is `(scheme read)''s, not `(scheme base)''s - the trap
+    ;; `(scheme write)''s `display' is in, one library over.
+    (only (scheme read) read)
+    (only (scheme write) display write)
+    (only (schemacs editor keymap) set-keymap-parent)
     (only (schemacs editor window)
-          delete-window get-buffer-window quit-window
+          delete-window display-buffer get-buffer-window quit-window
           split-main-window-below switch-to-buffer-other-window
           window-min-height)
     ;; `line-number-at-pos' is `editfns.c''s: the default `goto-line'
     ;; offers is the line point is on. The search primitives are
     ;; `search.c''s, which have their own library now (`zap-to-char'
     ;; walks with them).
-    (only (schemacs editor editfns) line-number-at-pos point)
+    (only (schemacs editor editfns)
+          insert line-number-at-pos message point)
     (only (schemacs editor search) search-backward search-forward)
     ;; `current-column' is indent.c's, which this library is the first
     ;; user of - `set-fill-column''s bare-C-u case reads it.
@@ -189,6 +199,11 @@ file-name-history
 read-number-history
    goto-line
    goto-line-history
+   ;; `eval-expression' and its variables, from `simple.el'
+   eval-expression eval-expression-print-format read--expression
+   read--expression-map read--expression-try-read
+   *eval-expression-print-maximum-character* *eval-expression-debug-on-error*
+   read-expression-history
    set-fill-column
    zap-to-char
    goto-line-read-args
@@ -2387,5 +2402,286 @@ Just \\[universal-argument] as argument means to use the current column."
     (define-key *default-keymap* (kbd "C-x f") set-fill-column)
 
     (define-key *default-keymap* (kbd "M-z") zap-to-char)
+
+    ;;------------------------------------------------------------------
+    ;; eval-expression - `simple.el:2140'
+    ;;------------------------------------------------------------------
+    ;;
+    ;; **The evaluator is Scheme's, and that is the one departure.** GNU
+    ;; Emacs's `eval-expression' evaluates Emacs Lisp: `(eval (let
+    ;; ((lexical-binding t)) (macroexpand-all exp)) t)' (`simple.el:2172').
+    ;; This editor is a Scheme program, so the expression the minibuffer
+    ;; reads is a Scheme one and `(scheme eval)''s `eval' is what runs it.
+    ;; Everything else is Emacs's: the `Eval: ' prompt, the result in the
+    ;; echo area, `eval-expression-print-format''s octal/hex/character
+    ;; suffix for an integer, and a `*Backtrace*' buffer when it raises.
+
+    (define *eval-expression-print-maximum-character* (make-parameter 127))
+    ;; ^ GNU Emacs's `eval-expression-print-maximum-character'
+    ;; (`simple.el:2034'): "The largest integer that will be displayed as
+    ;; a character." 127 by default.
+
+    (define *eval-expression-debug-on-error* (make-parameter #t))
+    ;; ^ `eval-expression-debug-on-error' (`simple.el:2027'): "If non-nil
+    ;; set `debug-on-error' to t in `eval-expression'." On by default,
+    ;; which is why an error puts up a backtrace.
+
+    (define read-expression-history (make<history> '()))
+    ;; ^ GNU Emacs's `read-expression-history' (`simple.el'), the
+    ;; minibuffer history `read--expression' reads into - a
+    ;; `make<history>' like `goto-line-history' beside it, because that
+    ;; is what `read-from-minibuffer''s HISTORY argument is here.
+    (define (%prin1-char code)
+      ;; GNU Emacs's `prin1-char': CODE as the character syntax `?a' or
+      ;; `?\C-a', or #f when it is not one to write that way.
+      ;;
+      ;; Measured on Emacs 31.1: 97 is `?a', 1 is `?\C-a', 9 is
+      ;; `?\C-i' - *not* `?\TAB', so this is not
+      ;; `single-key-description''s table - 27 is `?\C-[', 32 is `? '
+      ;; with the space, and 127 is `?\C-?'. The letter is the control
+      ;; character's caret spelling: `c + 96' for the letters, `c + 64'
+      ;; for `@' and the punctuation, and `?' for DEL.
+      ;;--------------------------------------------------------------
+      (let ((c (integer->char code)))
+        (cond
+         ((and (> code 31) (< code 127)) (string #\? c))
+         ((or (< code 32) (= code 127))
+          (string #\? #\\ #\C #\-
+                  (integer->char (cond ((and (> code 0) (<= code 26))
+                                        (+ code 96))
+                                       ((= code 127) 63)
+                                       (else (+ code 64))))))
+         (else #f))))
+
+    (define (eval-expression-print-format value)
+      ;; GNU Emacs's `eval-expression-print-format' (`simple.el:2044'):
+      ;; "If VALUE is an integer, return a specially formatted string.
+      ;; This string will typically look like \" (#o1, #x1, ?\\C-a)\".
+      ;; If VALUE is not an integer, return nil."
+      ;;
+      ;; The character part is there only when the value is at most
+      ;; `eval-expression-print-maximum-character' and has a character
+      ;; spelling. Emacs gates it on `char-displayable-p' as well; every
+      ;; code point this editor draws is displayable, so that test has
+      ;; nothing to say here.
+      ;;--------------------------------------------------------------
+      (if (not (exact-integer? value))
+          #f
+          (let ((char-string
+                 (and (>= value 0)
+                      (<= value (*eval-expression-print-maximum-character*))
+                      (%prin1-char value))))
+            (if char-string
+                (format #f " (#o~a, #x~a, ~a)"
+                        (number->string value 8)
+                        (number->string value 16)
+                        char-string)
+                (format #f " (#o~a, #x~a)"
+                        (number->string value 8)
+                        (number->string value 16))))))
+
+    (define (%eval-expression-environment)
+      ;; Where the typed expression is evaluated.
+      ;;
+      ;; GNU Emacs evaluates in the current buffer's own context. The
+      ;; nearest thing here is the module that is current when the command
+      ;; runs, which is where the editor's own bindings live - so
+      ;; `(+ 40 2)' finds `+' and a name the editor defines finds that
+      ;; too. `(interaction-environment)' is *not* it: under `--r7rs' that
+      ;; is a minimal environment with no `+' in it at all, which is how
+      ;; the first version of this answered "Unbound variable: +".
+      ;;--------------------------------------------------------------
+      (current-module))
+
+    (define (%eval-expression-value->string value)
+      (call-with-port (open-output-string)
+        (lambda (port) (write value port) (get-output-string port))))
+
+    (define (%condition-message condition)
+      ;; The error's own words, for the `*Backtrace*' header. Guile's
+      ;; `error-object-message' is the R7RS accessor, and for most of its
+      ;; conditions it answers a *format template* - `"Unbound variable:
+      ;; ~S"' - with the thing itself in `error-object-irritants'. So the
+      ;; two are put back together, which is what `message' does for the
+      ;; same condition when it is printed to the terminal.
+      ;;
+      ;; Anything that is not an error object is written out instead,
+      ;; which is what a raised non-error looks like.
+      ;;--------------------------------------------------------------
+      (cond
+       ((error-object? condition)
+        (let ((template (error-object-message condition))
+              (irritants (error-object-irritants condition)))
+          (if (or (not (string? template))
+                  (not (pair? irritants))
+                  (not (string-contains template "~")))
+              template
+              (guard (e (#t template))
+                (apply format #f
+                       (%guile-format-template template)
+                       irritants)))))
+       (else (%eval-expression-value->string condition))))
+
+    (define (%guile-format-template template)
+      ;; Guile writes its condition messages with the *uppercase* format
+      ;; directives - `~S' for `write', `~A' for `display' - and its own
+      ;; `format' takes the lower-case ones. A template with any other
+      ;; directive is left alone for the caller's `guard'.
+      ;;--------------------------------------------------------------
+      (list->string
+       (let loop ((cs (string->list template)) (out '()))
+         (cond
+          ((null? cs) (reverse out))
+          ((and (char=? (car cs) #\~) (pair? (cdr cs))
+                (memv (cadr cs) '(#\S #\A)))
+           (loop (cddr cs)
+                 (cons (char-downcase (cadr cs)) (cons #\~ out))))
+          (else (loop (cdr cs) (cons (car cs) out)))))))
+
+    (define (%eval-expression-backtrace condition stack)
+      ;; GNU Emacs's `*Backtrace*' (`debug.el:212'): the buffer is
+      ;; `*Backtrace*', and `debugger--insert-header''s `error' case
+      ;; (`:412') is
+      ;;
+      ;;     Debugger entered--Lisp error: <the error>
+      ;;
+      ;; followed by the frames. The frames are the *runtime's* - Emacs
+      ;; asks its own backtrace machinery, and this asks Guile's
+      ;; `make-stack', which is why the port is possible at all: the
+      ;; debugger does not invent them.
+      ;;
+      ;; One word differs, and it is the departure above showing through:
+      ;; Emacs says "Lisp error" because its evaluator is Lisp.
+      ;;--------------------------------------------------------------
+      (let ((buffer (get-buffer-create "*Backtrace*"))
+            (frames (call-with-port (open-output-string)
+                      (lambda (port)
+                        (if stack
+                            (display-backtrace stack port)
+                            (display "no stack captured\n" port))
+                        (get-output-string port)))))
+        (with-current-buffer buffer
+          (erase-buffer)
+          (insert "Debugger entered--Scheme error: ")
+          (insert (%condition-message condition))
+          (insert "\n")
+          (insert frames))
+        (display-buffer buffer)))
+
+    (define (%eval-expression-run exp)
+      ;; Evaluate EXP, and on an error fill and show `*Backtrace*' - GNU
+      ;; Emacs's `handler-bind ((error #'eval-expression--debug))'
+      ;; (`simple.el:2177'), whose default `debugger' is `debug'.
+      ;;
+      ;; The stack is taken *before* the unwinding, and that is the whole
+      ;; trick: `with-exception-handler' calls its handler on the raising
+      ;; stack, which is where `make-stack' can still see the frames, and
+      ;; the continuation escapes with the condition so the header can
+      ;; name it. A `guard' would have unwound first and had no frames to
+      ;; show.
+      ;;--------------------------------------------------------------
+      (let ((stack #f)
+            (failed #f))
+        (let ((value (call/cc
+                      (lambda (escape)
+                        (with-exception-handler
+                         (lambda (e)
+                           (set! stack (make-stack #t))
+                           (set! failed #t)
+                           (escape e))
+                         (lambda () (eval exp (%eval-expression-environment))))))))
+          (if failed
+              (begin (%eval-expression-backtrace value stack) #f)
+              value))))
+
+    (define-command (read--expression-try-read)
+      ;; GNU Emacs's `read--expression-try-read' (`simple.el:2083'): "Try
+      ;; to read an Emacs Lisp expression in the minibuffer. Exit the
+      ;; minibuffer if successful, else report the error to the user and
+      ;; move point to the location of the error."
+      ;;
+      ;; **This is why a malformed expression cannot reach the backtrace
+      ;; buffer**, and it is the piece whose absence made M-: look like it
+      ;; never made one: RET bound to this reads the text *while the
+      ;; minibuffer is still open*, so a bad expression is reported at the
+      ;; prompt and the minibuffer stays up. Without it RET exits, the
+      ;; read happens afterwards, and the read error - which is not
+      ;; `eval-expression''s, and so is not the debugger's either - comes
+      ;; out as a bare error in the echo area.
+      ;;
+      ;; Not carried: moving point to the error. Emacs has the reader's
+      ;; own point, because it reads in a temp buffer it can ask;
+      ;; `(scheme read)' over a string port reports the position in its
+      ;; message and nowhere else.
+      "Try to read a Scheme expression in the minibuffer.
+Exit the minibuffer if successful, else report the error to the user."
+      (interactive)
+      (let ((contents (minibuffer-contents)))
+        (if (guard (e (#t (minibuffer-message (%condition-message e)) #f))
+              (read (open-input-string contents))
+              #t)
+            (exit-minibuffer))))
+
+    (define read--expression-map
+      ;; GNU Emacs's `read--expression-map': the minibuffer's own map with
+      ;; RET bound to `read--expression-try-read'. Emacs builds it with
+      ;; `(set-keymap-parent read--expression-map minibuffer-local-map)',
+      ;; which is what keeps C-g and the history keys - a map handed to
+      ;; `read-from-minibuffer' *replaces* `minibuffer-local-map' rather
+      ;; than adding to it, so the parent is what puts them back.
+      ;;--------------------------------------------------------------
+      (let ((map (km:keymap
+                  '*read--expression-map*
+                  (km:alist->keymap-layer
+                   (list (cons (kbd "RET") read--expression-try-read))))))
+        (set-keymap-parent map minibuffer-local-map)
+        map))
+
+    (define (read--expression prompt)
+      ;; GNU Emacs's `read--expression' (`simple.el:2063'): "Read an Emacs
+      ;; Lisp expression from the minibuffer."
+      ;;
+      ;; Emacs's `minibuffer-with-setup-hook' puts `emacs-lisp-mode-syntax-
+      ;; table' and `elisp-completion-at-point' on the minibuffer; there is
+      ;; no elisp mode here, and the expression is a Scheme one. What is
+      ;; carried is the read itself: PROMPT and `read-expression-history'.
+      ;; `read--expression-map', which binds RET to
+      ;; `read--expression-try-read' so a bad expression is caught in the
+      ;; minibuffer, is not - the tree's minibuffer map has no RET
+      ;; override, so RET exits as usual and the read happens after.
+      ;;--------------------------------------------------------------
+      (let* ((text (read-from-minibuffer prompt #f read--expression-map
+                                         read-expression-history))
+             (port (open-input-string text)))
+        (let ((form (read port)))
+          ;; "Since `read' does not signal the "Trailing garbage following
+          ;; expression" error, we check for trailing garbage ourselves."
+          (let loop ()
+            (let ((c (peek-char port)))
+              (cond
+               ((eof-object? c) form)
+               ((char-whitespace? c) (read-char port) (loop))
+               (else (error "Trailing garbage following expression"))))))))
+
+    (define-command (eval-expression exp)
+      "Evaluate EXP and print value in the echo area.
+When called interactively, read a Scheme expression and evaluate it.
+
+The expression is Scheme: this editor has no Lisp evaluator under it,
+where GNU Emacs's `eval-expression' evaluates Emacs Lisp. Everything
+else is Emacs's - the `Eval: ' prompt, the result echoed, and a
+`*Backtrace*' buffer when the expression raises."
+      (interactive (list (read--expression "Eval: ")))
+      (let ((result (%eval-expression-run exp)))
+        (when result
+          (let ((suffix (eval-expression-print-format result)))
+            (message "%s%s"
+                     (%eval-expression-value->string result)
+                     (if suffix suffix ""))))))
+
+    ;; GNU Emacs's `(define-key global-map (kbd "M-:") 'eval-expression)'
+    ;; (`simple.el:2198' region; `(where-is-internal 'eval-expression)'
+    ;; answers `M-:').
+    (define-key *default-keymap* (kbd "M-:") eval-expression)
 
     ))

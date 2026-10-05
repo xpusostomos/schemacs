@@ -8,6 +8,7 @@
     (scheme base)
     (scheme case-lambda)
     (only (scheme write) display write)
+    (only (schemacs elisp-eval print) elisp-prin1 elisp-princ)
     (only (schemacs elisp-eval environment)
           *elisp-input-port*
           *elisp-output-port*
@@ -180,19 +181,24 @@
 
     ;;--------------------------------------------------------------------------------------------------
 
+    ;; `prin1' and `princ' are `print.c`'s, and the real ones are in
+    ;; `(schemacs elisp-eval print)'. What stood here was
+    ;; `(write val stream)' - Guile's `write', which is not `prin1': it
+    ;; says `#t' where Lisp wants `t', it has no `print-length' and no
+    ;; `print-level', and it does not know this tree's `nil'.
     (define default-prin1-impl
       (case-lambda
-        ((val) (default-prin1-impl val (*elisp-output-port*) #f))
-        ((val stream) (default-prin1-impl val (*elisp-output-port*) #f))
-        ((val stream overrides) (write val stream))
+        ((val) (elisp-prin1 val (*elisp-output-port*)))
+        ((val stream) (elisp-prin1 val stream))
+        ((val stream overrides) (elisp-prin1 val stream overrides))
         ))
 
     (define prin1* (make-parameter default-prin1-impl))
 
     (define default-princ-impl
       (case-lambda
-        ((val) (default-princ-impl val (*elisp-output-port*)))
-        ((val stream) (display val stream))
+        ((val) (elisp-princ val (*elisp-output-port*)))
+        ((val stream) (elisp-princ val stream))
         ))
 
     (define princ* (make-parameter default-princ-impl))

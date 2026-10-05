@@ -58,6 +58,7 @@ SCHEME_LIBRARIES := \
   ./schemacs/keymap.sld \
   ./schemacs/bit-stack.sld \
   ./schemacs/elisp-eval/pretty.sld \
+  ./schemacs/elisp-eval/print.sld \
   ./schemacs/elisp-eval/parser.sld \
   ./schemacs/elisp-eval/environment.sld \
   ./schemacs/elisp-eval/format.sld \

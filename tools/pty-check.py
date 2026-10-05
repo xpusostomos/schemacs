@@ -1554,6 +1554,50 @@ def check_pagedown():
     return problems
 
 
+def check_eval_expression():
+    """M-: reads a Scheme expression and echoes its value.
+
+    GNU Emacs binds `M-:' to `eval-expression' (`simple.el'), which
+    prompts `Eval: ', evaluates what is typed and puts the value in the
+    echo area. The evaluator here is Scheme's `eval' rather than Emacs's
+    Lisp one - the one departure - so what is typed is a Scheme
+    expression.
+
+    An expression that raises fills `*Backtrace*' instead: that is
+    `eval-expression-debug-on-error' (t by default) reaching the
+    debugger, whose buffer is `*Backtrace*' (`debug.el:212') and whose
+    header is "Debugger entered--<kind> error: " and the error. The
+    frames come from the runtime, which is what makes the port possible
+    at all - Guile's `make-stack' taken *before* the unwinding.
+    """
+    path = "/tmp/pty-check-eval.txt"
+    open(path, "w").write("hello\n")
+    M_COLON = b"\x1b:"
+    problems = []
+    # the value goes to the echo area
+    out = drive([C_x + C_f, path.encode(), RET,
+                 M_COLON, b"(+ 40 2)", RET], path)
+    if "42" not in out:
+        problems.append("M-: (+ 40 2) did not echo 42 (screen %r)"
+                        % screen_of(out)[:300])
+    if "Eval: " not in out:
+        problems.append("M-: did not prompt `Eval: '")
+    # an integer is echoed with the octal/hex/character suffix, which is
+    # `eval-expression-print-format''s
+    out = drive([C_x + C_f, path.encode(), RET,
+                 M_COLON, b"97", RET], path)
+    if "#o141" not in out or "#x61" not in out:
+        problems.append("M-: 97 did not echo the octal/hex suffix "
+                        "(screen %r)" % screen_of(out)[:300])
+    # an error fills *Backtrace*
+    out = drive([C_x + C_f, path.encode(), RET,
+                 M_COLON, b"(car (quote ()))", RET], path)
+    if "Debugger entered--Scheme error:" not in out:
+        problems.append("M-: on an error did not fill *Backtrace* with "
+                        "the header (screen %r)" % screen_of(out)[:300])
+    return problems
+
+
 def check_resize():
     """Split the frame, then make the terminal wider, narrower and taller.
 
@@ -2383,6 +2427,7 @@ CHECKS = {
     "resize": check_resize,
     "minibuffer": check_minibuffer,
     "pagedown": check_pagedown,
+    "eval-expression": check_eval_expression,
     "scroll": check_scroll,
     "save": check_save,
     "save-y-n": check_save_y_n,

@@ -37,6 +37,7 @@ SUITES = [
     'schemacs/editor/fileio-tests.scm',
     'schemacs/editor/files-tests.scm',
     'schemacs/editor/indentc-tests.scm',
+    'schemacs/elisp-eval/print-tests.scm',
     'schemacs/editor/cmds-tests.scm',
     'schemacs/editor/fns-tests.scm',
     'schemacs/editor/subr-tests.scm',

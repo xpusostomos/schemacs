@@ -84,6 +84,7 @@
     (schemacs keymap)
     (schemacs bit-stack)
     (schemacs elisp-eval pretty)
+    (schemacs elisp-eval print)
     (schemacs elisp-eval parser)
     (schemacs elisp-eval environment)
     (schemacs elisp-eval format)
