@@ -70,7 +70,7 @@
     ;; `buffer.c''s, `mark-even-if-inactive' is `callint.c''s,
     ;; `region-beginning' and `region-end' are `editfns.c''s, and
     ;; `add-to-history' is `subr.el''s.
-    (only (schemacs editor buffer)
+    (only (schemacs editor buffer) buffer-overwrite-mode set!buffer-overwrite-mode
           *show-trailing-whitespace*
           buffer-local-value buffer-truncate-lines current-buffer mark-active
           set!buffer-truncate-lines set!mark-active
@@ -79,9 +79,13 @@
     (only (schemacs editor editfns)
           bolp buffer-size delete-and-extract-region delete-region eobp
           eolp following-char forward-line insert line-beginning-position
-          line-end-position goto-char point point-max preceding-char
-          region-beginning region-end save-excursion)
+          line-end-position goto-char message point point-max
+          preceding-char region-beginning region-end save-excursion)
     (only (schemacs editor syntax) skip-chars-forward skip-chars-backward)
+    ;; `internal-self-insert' is `cmds.c`'s, and it is where overwrite
+    ;; mode lives - `self-insert-command' below is a wrapper round it,
+    ;; as the C's is.
+    (only (schemacs editor cmds) internal-self-insert)
     ;; `kbd' is how the bindings below name their keys, as
     ;; `(define-key global-map (kbd "C-/") ...)' would in Emacs.
     (only (schemacs editor subr)
@@ -119,6 +123,8 @@
    place-undo-boundary! previous-line read-only-mode
    scroll-down-command scroll-up-command self-insert-command
    self-insert-layer self-insert-tab
+   overwrite-mode binary-overwrite-mode
+   *overwrite-mode-textual* *overwrite-mode-binary*
    *activate-mark-hook* *deactivate-mark-hook*
    *exchange-point-and-mark-highlight-region*
    *mark-ring-max* *use-empty-active-region*
@@ -200,14 +206,15 @@ rather than files.  These modes usually use read-only buffers."
            (when state
              (km:keymap-index-to-char
               (km:modal-lookup-state-key-index state) #f
+              ;; `internal_self_insert' takes the repeat count itself -
+              ;; `(self-insert-command N C)' - so the loop the C's
+              ;; `self-insert-command' wraps round it is not repeated
+              ;; here.
               (lambda (c)
-                (let loop ((i (uarg->integer 1 uarg)))
-                  (when (> i 0)
-                    (text-editor-insert (current-buffer) c)
-                    (loop (- i 1)))))
+                (internal-self-insert c (uarg->integer 1 uarg)))
               (lambda () #f))
               )))
-       (lambda (c) (text-editor-insert (current-buffer) c))
+       (lambda (c) (internal-self-insert c 1))
        "Insert the typed character at point."
        'uarg))
 
@@ -218,6 +225,118 @@ rather than files.  These modes usually use read-only buffers."
         (when (< i count)
           (text-editor-insert (current-buffer) #\tab)
           (loop (+ 1 i)))))
+
+    ;;----------------------------------------------------------------
+    ;; Overwrite mode
+    ;;------------------------------------------------------------------
+    ;;
+    ;; GNU Emacs's `overwrite-mode' (`simple.el:9389'), a `define-
+    ;; minor-mode' over the *buffer-local* variable of the same name.
+    ;; The value is the mode - nil, `overwrite-mode-textual' or
+    ;; `overwrite-mode-binary' - so switching it on is setting the
+    ;; variable to a symbol, not setting a flag. `internal-self-insert'
+    ;; in `(schemacs editor cmds)' is the only reader that matters, and
+    ;; it is where the behaviour lives; this is the switch.
+    ;;
+    ;; There is no `define-minor-mode' in this tree yet - font-lock,
+    ;; blink-cursor and the others each say so where they are defined -
+    ;; so the two commands are written out, with what the macro would
+    ;; generate: a toggle when there is no prefix argument, on for a
+    ;; positive one, off for a negative one, and a message.
+
+    (define *overwrite-mode-textual* " Ovwrt")
+    ;; ^ GNU Emacs's `overwrite-mode-textual' (`simple.el:9384'): "The
+    ;; string displayed in the mode line when in overwrite mode." It is a
+    ;; *variable* rather than a constant because `minor-mode-alist'
+    ;; names it - the entry is `(overwrite-mode overwrite-mode)' and the
+    ;; mode line evaluates the value, which is this symbol, and then its
+    ;; value again, which is this string.
+
+    (define *overwrite-mode-binary* " Bin Ovwrt")
+    ;; ^ ...and `overwrite-mode-binary' (`simple.el:9386').
+
+    (define (overwrite-mode-enable)
+      ;; The setter `(define-minor-mode overwrite-mode ... :variable
+      ;; (overwrite-mode . (lambda (v) (setq overwrite-mode (if v
+      ;; 'overwrite-mode-textual)))))' installs, for the on direction.
+      ;;--------------------------------------------------------------
+      (set!buffer-overwrite-mode (current-buffer) 'overwrite-mode-textual))
+
+    (define (overwrite-mode-disable)
+      (set!buffer-overwrite-mode (current-buffer) #f))
+
+    (define (binary-overwrite-mode-enable)
+      (set!buffer-overwrite-mode (current-buffer) 'overwrite-mode-binary))
+
+    (define (binary-overwrite-mode-disable)
+      (set!buffer-overwrite-mode (current-buffer) #f))
+
+    (define-command (overwrite-mode arg)
+      "Toggle Overwrite mode.
+
+When Overwrite mode is enabled, printing characters typed in
+replace existing text on a one-for-one basis, rather than pushing
+it to the right.  At the end of a line, such characters extend
+the line.  Before a tab, such characters insert until the tab is
+filled in.  \\[quoted-insert] still inserts characters in
+overwrite mode; this is supposed to make it easier to insert
+characters when necessary."
+      ;; `define-minor-mode"'s generated interactive form
+      ;; (`easy-mmode.el:360'): the prefix argument as a *number*, or the
+      ;; symbol `toggle' when there is none - and it is not "no argument
+      ;; means on", which is what this had first. `(overwrite-mode)' with
+      ;; no prefix toggles.
+      (interactive (list (if (current-prefix-arg)
+                             (uarg->integer 1 (current-prefix-arg))
+                             'toggle)))
+      ;; the body's own `(cond ((eq arg 'toggle) (not ,getter)) (t (not
+      ;; (and (numberp arg) (< arg 1)))))' (`easy-mmode.el:366')
+      (let ((on (if (eq? arg 'toggle)
+                    (not (buffer-overwrite-mode (current-buffer)))
+                    (not (and (number? arg) (< arg 1))))))
+        (if on
+            (overwrite-mode-enable)
+            (overwrite-mode-disable))
+        ;; `define-minor-mode'"s own message, `"%s %sabled%s"'
+        ;; (`easy-mmode.el:395') with its pretty name - the mode's name
+        ;; capitalized with the `-mode' suffix dropped - and " in current
+        ;; buffer", because the mode is not global.
+        (message "%s %sabled in current buffer" "Overwrite" (if on "en" "dis"))))
+
+    (define-command (binary-overwrite-mode arg)
+      "Toggle Binary Overwrite mode.
+
+When Binary Overwrite mode is enabled, printing characters typed
+in replace existing text.  Newlines are not treated specially, so
+typing at the end of a line joins the line to the next, with the
+typed character between them.  Typing before a tab character
+simply replaces the tab with the character typed.
+\\[quoted-insert] replaces the text at the cursor, just as
+ordinary typing characters do.
+
+Note that Binary Overwrite mode is not its own minor mode; it is
+a specialization of overwrite mode, entered by setting the
+`overwrite-mode' variable to `overwrite-mode-binary'."
+      (interactive (list (if (current-prefix-arg)
+                             (uarg->integer 1 (current-prefix-arg))
+                             'toggle)))
+      (let ((on (if (eq? arg 'toggle)
+                    (not (eq? (buffer-overwrite-mode (current-buffer))
+                              'overwrite-mode-binary))
+                    (not (and (number? arg) (< arg 1))))))
+        (if on
+            (binary-overwrite-mode-enable)
+            (binary-overwrite-mode-disable))
+        (message "%s %sabled in current buffer" "Binary-Overwrite" (if on "en" "dis"))))
+
+    ;; GNU Emacs's two bindings for the Insert key: `[insert]'
+    ;; (`bindings.el:1438') and `[insertchar]' (`bindings.el:1441').
+    ;; Both are here for the reason bindings.el gives for having both -
+    ;; "`insertchar' is what term.c produces" - and this editor's
+    ;; terminal layer is the counterpart of term.c, so it produces
+    ;; `insertchar' too (`(schemacs editor term)').
+    (define-key *default-keymap* (kbd "<insert>") overwrite-mode)
+    (define-key *default-keymap* (kbd "<insertchar>") overwrite-mode)
 
     (define-command (forward-char count)
       "Move point N characters forward."

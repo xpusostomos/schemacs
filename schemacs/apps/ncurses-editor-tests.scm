@@ -308,16 +308,19 @@
 ;;
 ;; `km:keymap-index-to-char' handed the catch-all self-insert layer the
 ;; char-index of *any* unmodified key, so an unbound *named* key
-;; (`<f13>', `<prior>', `<insert>') reached `self-insert-command' and it
-;; inserted the key's *name* as text. In a read-only buffer the same keys
-;; said only "Buffer is read-only" and otherwise did nothing, which is how
+;; (`<f13>', `<select>') reached `self-insert-command' and it inserted
+;; the key's *name* as text. In a read-only buffer the same keys said
+;; only "Buffer is read-only" and otherwise did nothing, which is how
 ;; PgUp and PgDn appeared to be dead in Dired. Emacs reaches
 ;; `self-insert-command' only for a character event.
+;;
+;; `<insert>' is bound now - to `overwrite-mode', as Emacs binds it - so
+;; it is no longer an example here, and it has a test of its own below.
 
 (test-equal '("abc" "abc" "abcz")
   ;; a named key that no map binds, then a character, then nothing
   (list (run-keys-named 'f13)
-        (run-keys-named 'insert)
+        (run-keys-named 'select)
         (run-keys-named (char->integer #\z))))
 
 
@@ -1347,6 +1350,30 @@
     ;; was quietly reading both of them
     (parameterize ((*current-frame* frame))
       (map (lambda (w) (mode-line-string w)) (window-list frame)))))
+
+;; The Insert key toggles overwrite mode, and the mode line says so: GNU
+;; Emacs binds `[insert]' to `overwrite-mode' (`bindings.el:1438') and
+;; `[insertchar]' too (`bindings.el:1441'), and `minor-mode-alist`'s
+;; entry `(overwrite-mode overwrite-mode)' puts that variable's value -
+;; the string " Ovwrt" - *inside* the mode-name parentheses, so the mode
+;; line reads `(Fundamental Ovwrt)`.
+;;
+;; The lighter is what makes the key visible at all: until the next
+;; character is typed the buffer is unchanged, so without it the Insert
+;; key looks like it did nothing. It toggles back off on a second press.
+(test-equal '(": ** alpha.txt    -- L1 C0  (Fundamental)"
+              ": ** alpha.txt    -- L1 C0  (Fundamental Ovwrt)"
+              ": ** alpha.txt    -- L1 C0  (Fundamental)")
+  (let* ((frame (frame-with "alpha\nbeta\n"))
+         (ed (frame-editor frame)))
+    (set!text-editor-buffer-name ed "alpha.txt")
+    (parameterize ((*current-frame* frame))
+      (let ((w (car (window-list frame))))
+        (list (mode-line-string w)
+              (begin (dispatch-key-event frame 'insertchar)
+                     (mode-line-string w))
+              (begin (dispatch-key-event frame 'insertchar)
+                     (mode-line-string w)))))))
 
 ;; C-x 3 splits the selected window into two side by side, the new one
 ;; to the right, sharing the width. An even width divides evenly; an odd

@@ -1927,6 +1927,49 @@ def check_replace_string():
     return problems
 
 
+def check_overwrite():
+    """The Insert key toggles overwrite mode, and the mode line says so.
+
+    GNU Emacs binds `[insert]` to `overwrite-mode` (`bindings.el:1438'),
+    and `minor-mode-alist`'s entry `(overwrite-mode overwrite-mode)`
+    makes the mode line show that variable's value - the string
+    `overwrite-mode-textual`, " Ovwrt" - inside the mode-name
+    parentheses, so the mode line reads `(Fundamental Ovwrt)`.
+
+    With it on a typed character replaces the one at point instead of
+    pushing it right; the Insert key toggles it back off.
+    """
+    path = "/tmp/pty-check-overwrite.txt"
+    open(path, "w").write("abcdef\n")
+    INS = b"\x1b[2~"           # xterm's `kich1', which ncurses reads as KEY_IC
+    problems = []
+    # off: the character goes in and pushes the rest of the line right
+    out = drive([C_x + C_f, path.encode(), RET, C_a, b"X"], path)
+    screen = screen_of(out)
+    if "Xabcdef" not in screen:
+        problems.append("with overwrite mode off, X did not insert before "
+                        "abcdef (screen %r)" % screen[:300])
+    if "Ovwrt" in screen:
+        problems.append("the mode line says Ovwrt with overwrite mode off "
+                        "(screen %r)" % screen[:300])
+    # on: X replaces the `a'
+    out = drive([C_x + C_f, path.encode(), RET, C_a, INS, b"X"], path)
+    screen = screen_of(out)
+    if "Xbcdef" not in screen:
+        problems.append("with overwrite mode on, X did not replace the `a' "
+                        "(screen %r)" % screen[:300])
+    if "Ovwrt" not in screen:
+        problems.append("the mode line does not say Ovwrt in overwrite mode "
+                        "(screen %r)" % screen[:300])
+    # and the Insert key toggles it back off
+    out = drive([C_x + C_f, path.encode(), RET, C_a, INS, INS, b"X"], path)
+    screen = screen_of(out)
+    if "Xabcdef" not in screen:
+        problems.append("a second Insert did not turn overwrite mode off "
+                        "(screen %r)" % screen[:300])
+    return problems
+
+
 def check_quoted_insert():
     """C-q reads the next key as a character.
 
@@ -2294,6 +2337,7 @@ CHECKS = {
     "query-replace-quit": check_query_replace_quit,
     "replace-string": check_replace_string,
     "quoted-insert": check_quoted_insert,
+    "overwrite": check_overwrite,
     "insert-file": check_insert_file,
     "dired": check_dired,
     "dired-delete": check_dired_delete,

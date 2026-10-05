@@ -701,9 +701,11 @@ A position convention is now settled: the Emacs-named layer answers
 ONE-based positions ((point), point-min/max, region-beginning/end,
 search-forward/backward) and converts at the engine boundary
 (kill-region's -1s, casify-region's -1s, deactivate-mark's and the
-command loop's PRIMARY copies). `delete-region' is the one exception -
-its callers are all internal and pass engine positions; renaming its
-role is for when its callers get names too.
+command loop's PRIMARY copies). `delete-region' is **no longer** an
+exception - see "`delete-region' is one-based, and AGENTS.md said otherwise"
+further down, which dates from the 2026-10-05 conversion. The sentence that
+used to stand here said its callers pass engine positions; it was true when
+written and two callers still do, harmlessly.
 
 `casefiddle.sld' (NEW, mirrors casefiddle.c): `casify-region' and
 `casify-word' over a per-character walk - `word-char?' is the syntax
@@ -1704,3 +1706,177 @@ buffer-locals that a completion function consults, which this minibuffer
 does not have. Ours reads the directory the ordinary way. Also the
 `access`-bit forms of `locate-file`'s PREDICATE (`executable`,
 `readable`, ...), because nothing here passes one.
+
+# The column primitives, and overwrite mode (2026-10-06)
+
+## `scan_for_column` — one walk, not two
+
+`move-to-column` is what `internal_self_insert`'s overwrite branch is built
+on, so the bottom-up rule meant porting `scan_for_column` (`indent.c:607`)
+first. Doing that turned up that **we already had the walk twice**:
+`current-line-display-column` (`disp-table.sld`) was a hand-rolled copy of
+it, and `current_column_1` (`indent.c:856`) is literally
+
+```c
+  EMACS_INT col = MOST_POSITIVE_FIXNUM;
+  ptrdiff_t opoint = PT;
+  scan_for_column (&opoint, &col, NULL, NULL, NULL);
+  return col;
+```
+
+so Emacs has *one*. There is now one here: `scan-for-column` in
+`indentc.sld`, answering the position, the column, and the position and
+column one character before the stop as four values; `current-column` and
+`current-line-display-column` are both that one call.
+
+**Being a copy, it had drifted in two ways** — both found by asking a real
+Emacs, both in the same helper:
+
+- **A `display` property's width was added once per character it covered**
+  instead of once for the whole run. A `display` string is substituted for
+  the *run*, and the C jumps the scan to the run's end (`scan = endp;
+  continue`). Measured on `"abcdef"` with `"XY"` displayed over 2..5:
+
+  | | columns at positions 1..7 |
+  |---|---|
+  | Emacs | `0 1 3 3 3 4 5` |
+  | ours, before | `0 1 3 5 7 8 9` |
+
+- **The substituted string was measured from the current column**, where
+  `check_display_width` calls `Fstring_width (val, Qnil, Qnil)`
+  (`indent.c:567`) - from column **0**. A display string `"\tY"` reached at
+  column 3 is 9 columns wide, not 6: the next position is column 12, not 9.
+
+`indentc-tests.scm` (17) pins both, with Emacs's own numbers in the
+expectations. The lesson is the one `AGENTS.md` already carries about
+hand-rolled duplicates: the second copy cannot show you it disagrees.
+
+## `delete-region` is one-based, and AGENTS.md said otherwise
+
+The note under "save-excursion, the position primitives" reads:
+
+> `delete-region' is the one exception - its callers are all internal and
+> pass engine positions
+
+**That was true when it was written (2026-10-02) and is not true now.** The
+2026-10-05 conversion moved the whole engine, and everything above it, to
+Emacs's one-based positions; `delete-region` passes its first argument
+straight to `text-editor-set-cursor`, so it is one-based like everything
+else. Measured: `(delete-region 1 2)` on `"abcdef"` gives `"bcdef"`.
+
+Two callers still carry the `(- ... 1)` conversion the old note told them to
+write - `indent-rigidly` (`indent.sld:69`) and `dired-remove-entry`
+(`dired.sld:2589`). **Both are benign as they stand**, and that is worth
+knowing rather than fixing blind: each deletes a range that begins just
+before the text and ends just before the following newline, so it removes
+the *previous* line's newline and keeps this line's instead. The result is
+textually identical. They are compensating shifts, not bugs - but they are
+load-bearing accidents, and the next edit to either should convert them.
+
+## `indent-tabs-mode` defaults to `t`, and ours was `#f`
+
+`move-to-column`'s FORCE branch fills a split tab with `indent_to`, which
+obeys `indent-tabs-mode`. Emacs's default is **t** (`emacs -Q --batch`
+answers `t`); ours was `#f`, so the same command filled with spaces:
+
+| | `(move-to-column 3 t)` on `"a\tb"` |
+|---|---|
+| Emacs | point 4, buffer `"a  \tb"` |
+| ours, before | point 4, buffer `"a       b"` |
+
+Fixed. The one consumer that wants it off binds it itself, as Emacs's does:
+`dired-insert-directory` (`dired.el:1923`, `dired.sld:719`).
+
+# Overwrite mode (2026-10-06)
+
+## What landed
+
+`overwrite-mode` is `simple.el:9389`, a `define-minor-mode` over a
+**buffer-local variable of the same name** (`DEFVAR_PER_BUFFER`,
+`buffer.c:5480`) whose value *is* the mode: nil, `overwrite-mode-textual` or
+`overwrite-mode-binary`. The behaviour is entirely
+`internal_self_insert`'s overwrite branch (`cmds.c:312-400`), which is now
+ported as `internal-self-insert` in a new `schemacs/editor/cmds.sld` -
+`cmds.c`'s file, where `self-insert-command` and its neighbours still ought
+to move to.
+
+`overwrite-mode` and `binary-overwrite-mode` are in `simple.sld` beside
+their lighters; the Insert key is bound as Emacs binds it. Ten cases, all
+measured on `emacs -Q --batch` first, are in `cmds-tests.scm` (11) and match
+exactly - including the two that show why the branch measures columns rather
+than characters:
+
+- overwriting a wide character with a narrow one **pads with a space**, so
+  the rest of the line does not move left;
+- overwriting a narrow one with a wide one **eats two characters**.
+
+## Two departures this exposed
+
+### 1. `insert` and `page up`/`page down` reached nothing at all
+
+`term.sld`'s `extended-key->event` was written on a belief about the
+ncurses binding that is not true. It split what it took to be a terminfo
+name (`kDN3`, `kIC`) into a key and a trailing modifier digit, and looked
+both up in two tables. Measured on this binding:
+
+```
+(keyname KEY_IC) = "KEY_IC"        (keyname 532) = "(unknown)"
+```
+
+So the digit was never there, the base came out as `"I"` and the digit as
+`"C"`, neither table matched, and the answer was `#f`. **Insert, Page Up and
+Page Down did nothing.** `KEY_LEFT`/`KEY_HOME`/`KEY_DC` and the rest were
+fine only because they were also listed as explicit constants beside it.
+
+Chris's read - "when I see great big chunks of logic just to parse a key, I
+smell a hack" - was right. Emacs's `term.c` is a **flat two-column table**:
+
+```c
+static const struct fkey_table keys[] = {
+  {"kh", "home"}, {"ku", "up"}, {"kI", "insertchar"}, ...
+};
+  for (i = 0; i < countof (keys); i++) {
+    char *sequence = tgetstr (keys[i].cap, address);
+    if (sequence)
+      Fdefine_key (KVAR (kboard, Vinput_decode_map),
+                   build_string (sequence), make_vector (1, intern (keys[i].name)), Qnil);
+  }
+```
+
+No prefix, no digit, no second table. That is what `function-key-names` in
+`term.sld` is now, with the left column the **keycode** rather than the
+capability name, because this binding has already decoded the sequence by
+the time it is asked. It is a load-time table again, where the version it
+replaced had to ask the terminal at every key press.
+
+**Still open, and deliberately not faked:** `named-key-modifiers` was dead
+with this binding and is deleted rather than kept. It was not wrong about
+Emacs - it was in the wrong *place*. Emacs does not read modifiers off a
+keycode at all: `M-up` is an `input-decode-map` entry that `term/xterm.el`
+installs, parsed from the escape sequence (`\e[1;3A`), which is a Lisp
+file's work. A faithful port keys the decode on the **sequence**, not on the
+keycode, and then the modifiers fall out of it. That is a piece of work of
+its own and it is the one real gap left in the tty key path.
+
+### 2. `minor-mode-alist` is two evaluations, not one
+
+`bindings.el:979` has `(overwrite-mode overwrite-mode)` - the indicator is
+the **symbol of the same name**, i.e. the *variable*, not a string. The mode
+line evaluates the construct, gets the variable's value
+(`overwrite-mode-textual`), and evaluates *that*, getting the string
+`" Ovwrt"` (`simple.el:9384`).
+
+Written as one step, the lighter is handed the symbol `overwrite-mode`,
+matches nothing, and every lighter comes out empty - so the mode line said
+`(Fundamental)` in overwrite mode and the Insert key looked like it did
+nothing. `minor-mode-indicator-value` and `minor-mode-lighter` are now the
+two steps, named.
+
+## The method note worth keeping
+
+Every expectation in `cmds-tests.scm` and `indentc-tests.scm` came from
+`emacs -Q --batch` **before** the port was written, and two of the three
+real bugs above were found that way rather than by reading - the
+`display`-run over-count, the column-0 measurement, and `insert` reaching
+nothing. Reading gave the *algorithm*; asking gave the *check*. Both were
+needed, and neither alone would have found all three.

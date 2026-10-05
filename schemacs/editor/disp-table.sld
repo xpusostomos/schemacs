@@ -35,13 +35,6 @@
     ;; ENGINE-FINDINGS.txt), and one that the unit tests do not catch
     ;; because they never render.
     (only (scheme write) display)
-    (only (schemacs editor engine)
-          text-editor-get-start-of-line text-editor-line-ref)
-    ;; The `display' text property, which a substituted column is drawn
-    ;; from - `handle_display_prop''s business, read here for the same
-    ;; reason `current-line-display-column' is: it is the column side of
-    ;; the same substitution.
-    (only (schemacs editor textprop) get-text-property)
     ;; `char-width' is `character.c''s, and `*tab-width*' is defined there
     ;; too because `CHARACTER_WIDTH' reads it - see the note above.
     (only (schemacs editor character) *tab-width* char-width))
@@ -51,7 +44,6 @@
    char-display-cursor-width
    char-display-glyph
    char-display-width
-   current-line-display-column
    display-text-width
    expand-line-display
    expand-line-glyphs
@@ -181,29 +173,5 @@
             (- end col)
             (let ((ch (string-ref text i)))
               (loop (+ i 1) (+ end (char-display-width ch end)))))))
-
-    (define (current-line-display-column ed buffer-col)
-      ;; The screen column at which buffer column BUFFER-COL of the
-      ;; current line is drawn.
-      ;;
-      ;; A `display' text property standing on a column is drawn as its
-      ;; string instead of the character - GNU Emacs's
-      ;; `handle_display_prop' - so it moves every column after it along,
-      ;; and point past it sits further right than the character count
-      ;; says. The property is read here the same way `xdisp.sld''s
-      ;; `line-display-texts' reads it, from the line's buffer position.
-      ;;--------------------------------------------------------------
-      (let ((line-start (text-editor-get-start-of-line ed)))
-        (let loop ((j 0) (col 0))
-          (if (>= j buffer-col)
-              col
-              (let* ((ch (text-editor-line-ref ed j))
-                     (prop (and ed
-                                (get-text-property (+ line-start j)
-                                                   'display ed))))
-                (loop (+ 1 j)
-                      (+ col (if (string? prop)
-                                 (display-text-width prop col)
-                                 (char-display-width ch col)))))))))
 
     ))

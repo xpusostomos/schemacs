@@ -81,8 +81,12 @@
          set!%window-old-point set!%window-suspend-auto-hscroll?)
     (only (schemacs editor disp-table)
          char-display-cursor-width char-display-width
-         char-display-glyph current-line-display-column display-text-width
+         char-display-glyph display-text-width
          expand-line-display expand-line-glyphs line-display-offsets)
+    ;; `current-line-display-column' is `indent.c''s walk - it moved out of
+    ;; `disp-table.sld' on 2026-10-06, when it stopped being a second copy
+    ;; of `scan_for_column' and became that function asked one question.
+    (only (schemacs editor indentc) current-line-display-column)
     ;; The `face' text property, and the faces themselves. A face reaches
     ;; the display through these libraries and no others: the property
     ;; says which faces are in effect, `xfaces' merges them and folds
@@ -93,7 +97,8 @@
           *transient-mark-mode*
           buffer-auto-hscroll-mode buffer-cursor-in-non-selected-windows
           buffer-cursor-type buffer-hscroll-margin buffer-hscroll-step
-          buffer-local-value buffer-truncate-lines buffer-word-wrap
+          buffer-local-value buffer-overwrite-mode buffer-truncate-lines
+          buffer-word-wrap
           ;; the mode line's mode name is the buffer's `mode-name'
           mode-name
           ;; and the overlays at a position are merged into its face
@@ -101,6 +106,11 @@
           overlay-end overlay-get overlay-priority overlay-start
           overlays-at overlays-in)
 
+    ;; `overwrite-mode''s two mode-line lighters are `simple.el''s and
+    ;; live beside the commands that set the variable; `minor-mode-alist'
+    ;; below is what names them.
+    (only (schemacs editor simple)
+          *overwrite-mode-textual* *overwrite-mode-binary*)
     (only (schemacs editor faces) *undefined-face-attribute*)
     (only (schemacs editor xfaces)
           attribute-value face-attributes-empty face-realized-attributes
@@ -117,6 +127,9 @@
    line-face-runs
    line-end-fill-attribute
    *mode-line-format*
+   ;; `bindings.el''s other mode-line variable, and the construct that
+   ;; reads it. A minor mode with a lighter adds itself to the alist.
+   *minor-mode-alist* mode-line-minor-modes
    face-at-buffer-position
    overlay-strings-at
    face->attribute
@@ -812,14 +825,107 @@
       ;; names - "(" and ")" by default, which is what makes a mode line
       ;; read `(Fundamental)'.
       ;;
-      ;; Not ported from that construct: `mode-line-process', the
-      ;; `mode-line-minor-modes' lighters (there are no minor modes with
-      ;; lighters yet) and the mouse maps on the name.
+      ;; GNU Emacs's `mode-line-modes` (`bindings.el:596') is
+      ;; "(" MODE-NAME MODE-LINE-PROCESS %n MODE-LINE-MINOR-MODES ")" -
+      ;; the lighters go *inside* the parentheses, which is what makes a
+      ;; mode line read `(Fundamental Ovwrt)`. The two lighters start
+      ;; with their own space, so nothing separates the name from them.
+      ;;
+      ;; Not ported from that construct: `mode-line-process` (no process
+      ;; support), the `%n` narrowing indicator (no narrowing) and the
+      ;; mouse maps on the name.
       ;;--------------------------------------------------------------
       (let ((window (*mode-line-window*)))
         (if (not window)
             ""
-            (string-append "(" (mode-name (window-buffer window)) ")"))))
+            (string-append "(" (mode-name (window-buffer window))
+                           (mode-line-minor-modes) ")"))))
+
+    (define *minor-mode-alist*
+      ;; GNU Emacs's `minor-mode-alist` (`bindings.el:976`): "Alist
+      ;; saying how to show minor modes in the mode line. Each element
+      ;; looks like (VARIABLE STRING); STRING is included in the mode
+      ;; line if VARIABLE's value is non-nil. ... Actually, STRING need
+      ;; not be a string; any mode-line construct is okay."
+      ;;
+      ;; bindings.el's own default has four entries; only the first of
+      ;; the ones this editor has is carried, because `abbrev-mode`,
+      ;; `auto-fill-function` and `defining-kbd-macro` are not ported.
+      ;;
+      ;; `overwrite-mode`'s indicator is the *symbol* of the same name
+      ;; and not a string, which is the "need not be a string" clause
+      ;; doing real work: the construct is evaluated, so what is shown is
+      ;; the variable's value - `overwrite-mode-textual` or
+      ;; `overwrite-mode-binary` - and then *that* symbol's value, which
+      ;; is the string. Two evaluations, as in Emacs.
+      ;;--------------------------------------------------------------
+      (make-parameter (list (list 'overwrite-mode 'overwrite-mode))))
+
+    (define (minor-mode-indicator-value buffer indicator)
+      ;; The *first* of the two evaluations an indicator goes through.
+      ;; `minor-mode-alist` says "STRING need not be a string; any
+      ;; mode-line construct is okay" - and `overwrite-mode`'s really is
+      ;; not one: it is the symbol of the same name, which is the
+      ;; *variable*, so what it stands for is that variable's value in
+      ;; this buffer. That value is itself a symbol,
+      ;; `overwrite-mode-textual` or `overwrite-mode-binary`, which
+      ;; `minor-mode-lighter` below takes the second step on.
+      ;;
+      ;; Both steps collapsed into one is a bug worth naming: the
+      ;; indicator was handed straight to `minor-mode-lighter`, which
+      ;; looked for `overwrite-mode-textual` and was given
+      ;; `overwrite-mode`, so every lighter came out empty and the mode
+      ;; line said `(Fundamental)` in overwrite mode.
+      ;;--------------------------------------------------------------
+      (cond
+       ((string? indicator) indicator)
+       ((eq? indicator 'overwrite-mode) (buffer-overwrite-mode buffer))
+       (else #f)))
+
+    (define (minor-mode-lighter value)
+      ;; The *second* evaluation: the symbol a variable held stands for
+      ;; the string of the same name - `overwrite-mode-textual` is both
+      ;; the name of the symbol and the name of the variable holding
+      ;; " Ovwrt" (`simple.el:9384').
+      ;;--------------------------------------------------------------
+      (cond
+       ((string? value) value)
+       ((eq? value 'overwrite-mode-textual) *overwrite-mode-textual*)
+       ((eq? value 'overwrite-mode-binary) *overwrite-mode-binary*)
+       (else "")))
+
+    (define (minor-mode-variable-true? buffer variable)
+      ;; Whether VARIABLE - the first half of a `*minor-mode-alist*`
+      ;; entry - is on in BUFFER. Emacs asks whether the variable is
+      ;; bound and non-nil; this tree has no variable registry, so the
+      ;; name is looked up here.
+      ;;--------------------------------------------------------------
+      (case variable
+        ((overwrite-mode) (buffer-overwrite-mode buffer))
+        (else #f)))
+
+    (define (mode-line-minor-modes)
+      ;; GNU Emacs's `mode-line-minor-modes` (`bindings.el:468`), which
+      ;; is `(:eval (mode-line--minor-modes))`: the lighters of the minor
+      ;; modes that are on, concatenated.
+      ;;
+      ;; `mode-line--minor-modes` computes more than this - the
+      ;; `mode-line-collapse-minor-modes` hiding, and the clickable menu
+      ;; `mode-line--make-lighter-menu` makes - and neither is carried,
+      ;; there being one lighter here and no mode-line mouse maps.
+      ;;--------------------------------------------------------------
+      (let ((window (*mode-line-window*)))
+        (if (not window)
+            ""
+            (let ((buffer (window-buffer window)))
+              (apply string-append
+                     (map (lambda (entry)
+                            (if (minor-mode-variable-true? buffer (car entry))
+                                (minor-mode-lighter
+                                 (minor-mode-indicator-value buffer
+                                                             (cadr entry)))
+                                ""))
+                          (*minor-mode-alist*)))))))
 
     (define *mode-line-format*
       ;; GNU Emacs's `mode-line-format': the template a window's mode line is

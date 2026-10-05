@@ -71,12 +71,13 @@
     ;; The keys the current buffer has of its own - what gives a buffer
     ;; like `*Completions*' its own bindings - and which buffer is current.
     (only (schemacs editor buffer)
-          buffer-local-keymap buffer-local-value current-buffer
-          mark-active set!mark-active transient-mark-mode)
+          buffer-local-keymap buffer-local-value buffer-overwrite-mode
+          current-buffer mark-active set!mark-active transient-mark-mode)
     (only (schemacs editor simple)
           *last-change-was-undo* *last-command* *this-command*
           *select-active-regions*
-          deactivate-mark clear-prefix! pending-uarg place-undo-boundary!
+          deactivate-mark clear-prefix! delete-char pending-uarg
+          place-undo-boundary!
           prefix-echo-pending? show-prefix-echo!
           undo undo-redo update-prefix!)
     (only (schemacs editor editfns)
@@ -1005,19 +1006,47 @@
       ;; character and insert it. This is useful for inserting control
       ;; characters. With argument, insert ARG copies of the
       ;; character." The `*' of its interactive spec is the read-only
-      ;; check, made first; the overwrite-mode branches are not ported
-      ;; (no overwrite mode here).
+      ;; check, and it is made first.
+      ;;
+      ;; "In overwrite mode, this function inserts the character anyway,
+      ;; and does not handle octal (or decimal or hex) digits specially.
+      ;; This means that if you use overwrite mode as your normal editing
+      ;; mode, you can use this function to insert characters when
+      ;; necessary" (`simple.el:1068') - so in *textual* overwrite mode
+      ;; the character is read plainly rather than through
+      ;; `read-quoted-char'; binary mode keeps the octal reader, its own
+      ;; docstring calling that "useful for editing binary files".
+      ;;
+      ;; Not ported: the `user-error' for a non-character event, which
+      ;; needs `key-description' and a message, neither of which this
+      ;; library has.
       "Read next input character and insert it.
 This is useful for inserting control characters.
 With argument, insert ARG copies of the character."
       (interactive (list (uarg->integer 1 (current-prefix-arg))))
       (barf-if-buffer-read-only)
-      (let* ((code (read-quoted-char))
-             (char (integer->char code)))
-        (let loop ((left arg))
-          (when (> left 0)
-            (insert char)
-            (loop (- left 1))))
+      (let* ((mode (buffer-overwrite-mode (current-buffer)))
+             (code (if (eq? mode 'overwrite-mode-textual)
+                       ;; "a character reader": `read-char' answers the
+                       ;; character the event is, and for every key this
+                       ;; asks about the event *is* the code
+                       (let ((key (read-key-event -1)))
+                         (and (integer? key) key))
+                       (read-quoted-char)))
+             (char (and code (integer->char code))))
+        (when char
+          ;; "In binary overwrite mode, this function does overwrite"
+          ;; (`simple.el:1097'): the characters being replaced are
+          ;; deleted first, and the insert below is an ordinary one -
+          ;; so `C-q' replaces ARG characters in binary overwrite mode
+          ;; where in textual mode it goes through
+          ;; `internal-self-insert' per character instead.
+          (when (and (> arg 0) (eq? mode 'overwrite-mode-binary))
+            (delete-char arg))
+          (let loop ((left arg))
+            (when (> left 0)
+              (insert char)
+              (loop (- left 1)))))
         #f))
 
     (define (event-loop frame)

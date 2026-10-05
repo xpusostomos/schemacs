@@ -139,6 +139,8 @@
    set!buffer-word-wrap
    buffer-auto-hscroll-mode
    set!buffer-auto-hscroll-mode
+   buffer-overwrite-mode
+   set!buffer-overwrite-mode
    buffer-fill-column
    set!buffer-fill-column
    buffer-tab-width
@@ -510,7 +512,28 @@
 (define (set!buffer-tab-width buffer value)
       (set-buffer-local-value! buffer 'tab-width value))
 
-(define (buffer-fill-column buffer)
+(define (buffer-overwrite-mode buffer)
+      ;; Which overwrite mode this buffer is in: GNU Emacs's
+      ;; `overwrite-mode', a buffer-local DEFVAR_PER_BUFFER of `cmds.c'
+      ;; whose default is nil (`buffer.c:5480' - `DEFVAR_PER_BUFFER
+      ;; ("overwrite-mode", overwrite_mode, Qoverwrite_mode, ...)').
+      ;;
+      ;; It is nil, or one of two symbols - `overwrite-mode-textual' and
+      ;; `overwrite-mode-binary' - and the value *is* the mode: there is
+      ;; no separate on/off flag, which is why `overwrite-mode' being
+      ;; non-nil is the same statement as "overwrite mode is on" and why
+      ;; `binary-overwrite-mode' is a second command over one variable
+      ;; rather than a second mode.
+      ;;
+      ;; `internal-self-insert' reads it on every character typed, and
+      ;; the mode line reads it for the ` Ovwrt' lighter.
+      ;;--------------------------------------------------------------
+      (buffer-local-value buffer 'overwrite-mode #f))
+
+    (define (set!buffer-overwrite-mode buffer value)
+      (set-buffer-local-value! buffer 'overwrite-mode value))
+
+    (define (buffer-fill-column buffer)
       ;; The column `fill-paragraph' and auto fill fill to: GNU Emacs's
       ;; `fill-column', a buffer-local DEFVAR_PER_BUFFER whose default
       ;; is 70 (`buffer.c:4898').

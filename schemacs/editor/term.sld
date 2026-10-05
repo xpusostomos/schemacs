@@ -26,10 +26,6 @@
     ;; and what the terminal can draw of it is computed here - that
     ;; last step is the whole of this library's face code.
     (only (schemacs editor xfaces) attribute-value realize-tty-face)
-    ;; `event-convert-list' is the C's way from a key description to
-    ;; the event it names, which is how a keypad key's name and its
-    ;; modifiers become the one event GNU Emacs would have read.
-    (only (schemacs editor character) event-convert-list)
     ;; Opening a terminal runs `startup.el''s color and face
     ;; initialization against it, so it needs what ncurses.sld used to
     ;; import for that: the eight standard colors, the xterm driver for
@@ -157,58 +153,48 @@
     ;; applies.
     ;;------------------------------------------------------------------
 
-    (define named-key-names
-      ;; The key at the front of an ncurses extended keyname, as the name
-      ;; this editor's keymaps use for it. The names are terminfo's:
-      ;; `kUP3' is the up key, and the `3' is the modifier.
-      ;;--------------------------------------------------------------
-      '(("UP" . "up") ("DN" . "down") ("LFT" . "left") ("RGT" . "right")
-        ("HOM" . "home") ("END" . "end") ("DC" . "delete")
-        ("IC" . "insert") ("PP" . "prior") ("NP" . "next")))
-
-    (define named-key-modifiers
-      ;; The digit ncurses puts after the key name, as the modifiers it
-      ;; stands for, spelled the way `event-convert-list' takes them. The
-      ;; digits are xterm's `CSI 1 ; N A' numbering, which is the
-      ;; numbering terminfo's `kUP3'-style names are built from, and GNU
-      ;; Emacs reads the sequences the same way in `term/xterm.el'
-      ;; (`\e[1;3A' is `[M-up]' there).
+    (define function-key-names
+      ;; GNU Emacs's `struct fkey_table keys[]' (`term.c:1298'): "This
+      ;; structure holds the information for the function keys. The first
+      ;; element is the termcap/terminfo capability name and the second
+      ;; the name of the Lisp symbol the key should be."
       ;;
-      ;; 2, 4, 6 and 8 all carry Shift, and this editor's keymaps have no
-      ;; shift modifier - `(schemacs keymap)''s modifier table has ctrl,
-      ;; meta, super, hyper and alt and no more - so those answer #f and
-      ;; the key is reported unhandled, which is where it was before.
-      ;;--------------------------------------------------------------
-      '(("3" (meta)) ("5" (ctrl)) ("7" (meta ctrl))))
-
-    (define (extended-key->event ev)
-      ;; The *event* for an ncurses extended keycode, or #f when it is not
-      ;; one this editor knows a name for. ncurses names them from
-      ;; terminfo - `(keyname 532)' answers "kDN3" - so what is decoded is
-      ;; that name: the key, and the modifier digit after it.
+      ;; `term_get_fkeys_1' (`term.c:1417') walks that table and, for
+      ;; each capability the terminal has, does
       ;;
-      ;; `keyname' can only be asked once the terminal is open, which is
-      ;; why this cannot be a table built at load time. It costs one call
-      ;; per modified key press, and nothing at all for the keys the
-      ;; constants in `key-event->key' already cover.
+      ;;     Fdefine_key (Vinput_decode_map, <the escape sequence>, [SYM])
       ;;
-      ;; The answer is built by `event-convert-list', the C's own way from
-      ;; a description to an event (`keyboard.c':7832), with the base last
-      ;; as it requires: `(meta up)' is the symbol `M-up'.
+      ;; so it keys the decode on the *sequence* `tgetstr' answers. The
+      ;; table itself is no more than a pair of names per key, and that
+      ;; is all this is.
+      ;;
+      ;; This editor's terminal layer has already turned the sequence
+      ;; into an ncurses keycode by the time it is asked what a key
+      ;; means, so the left column is the keycode rather than the
+      ;; capability name: the same table with the same right column,
+      ;; keyed on what there is to key on. That also makes it a table
+      ;; that can be built at load time, where the version this replaced
+      ;; had to ask the terminal at every key press.
+      ;;
+      ;; Not carried, each needing a terminfo lookup this binding does
+      ;; not expose: the `kp-*' keypad keys, the `f0' to `f63' run, and
+      ;; `insertline', `deleteline', `clearline' and `backtab'.
       ;;--------------------------------------------------------------
-      (let ((name (keyname ev)))
-        (and (string? name)
-             (< 2 (string-length name))
-             (char=? (string-ref name 0) #\k)
-             (let* ((base (substring name 1 (- (string-length name) 1)))
-                    (digit (string (string-ref name
-                                               (- (string-length name) 1))))
-                    (key (assoc base named-key-names))
-                    (modifiers (assoc digit named-key-modifiers)))
-               (and key modifiers
-                    (event-convert-list
-                     (append (cadr modifiers)
-                             (list (string->symbol (cdr key))))))))))
+      (list (cons KEY_UP 'up)
+            (cons KEY_DOWN 'down)
+            (cons KEY_LEFT 'left)
+            (cons KEY_RIGHT 'right)
+            (cons KEY_HOME 'home)
+            (cons KEY_END 'end)
+            (cons KEY_DC 'delete)
+            ;; Insert. Emacs's table spells the termcap name `kI' and its
+            ;; symbol `insertchar' (`term.c:1331'), and the comment at
+            ;; `bindings.el:1440' says "`insertchar' is what term.c
+            ;; produces". Both `[insert]' and `[insertchar]' are bound to
+            ;; `overwrite-mode' there, so both are bound here.
+            (cons KEY_IC 'insertchar)
+            (cons KEY_PPAGE 'prior)
+            (cons KEY_NPAGE 'next)))
 
     (define-method (key-event->key (d <tty-display>) ev)
       ;; The *key event* for what the terminal sent - GNU Emacs's
@@ -239,23 +225,16 @@
        ((char? ev) (char->integer ev))
        ((integer? ev)
         (cond
-         ((= ev KEY_LEFT)  'left)
-         ((= ev KEY_RIGHT) 'right)
-         ((= ev KEY_UP)    'up)
-         ((= ev KEY_DOWN)  'down)
-         ((= ev KEY_HOME)  'home)
-         ((= ev KEY_END)   'end)
-         ((= ev KEY_DC)    'delete)
          ;; The Backspace key: ncurses matched the terminal's `kbs', which
          ;; is `^?' on the terminals here - so what the terminal sent, and
          ;; what GNU Emacs would have read, is the DEL byte.
          ((= ev KEY_BACKSPACE) 127)
+         ;; Not a key: the terminal changed size. Emacs reads that as
+         ;; SIGWINCH, and `make_lispy_event' makes the `resize' event.
          ((= ev KEY_RESIZE) 'resize)
-         ;; Anything else: ncurses reports a key carrying a *modifier* as
-         ;; an extended keycode - one above `KEY_MAX', named from
-         ;; terminfo - and `M-<down>' arrives as the code ncurses calls
-         ;; `kDN3' rather than as anything the constants above cover.
-         (else (extended-key->event ev))))
+         ;; The function keys, from the table above.
+         (else (let ((k (assq ev function-key-names)))
+                 (and k (cdr k))))))
        (else #f)))
 
     ;;----------------------------------------------------------------
