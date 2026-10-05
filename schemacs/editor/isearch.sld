@@ -167,16 +167,16 @@
       ;; character before each repeat).
       ;;--------------------------------------------------------------
       (let* ((forward? (eq? direction 'forward))
-             (max (text-editor-point-max ed))
+             (bound (text-editor-point-max ed))
              (point (text-editor-get-cursor ed))
              (len (string-length pattern))
              (start (if step?
                         (if forward? (+ point 1) (- point 1))
                         point)))
-        (and (<= (text-editor-point-min ed) start count)
+        (and (<= (text-editor-point-min ed) start bound)
              (let ((from (if forward?
                              (max (text-editor-point-min ed) (- start len))
-                             (min count (+ start len)))))
+                             (min bound (+ start len)))))
                (if forward?
                    (text-editor-search-forward
                     ed pattern from case-fold?)

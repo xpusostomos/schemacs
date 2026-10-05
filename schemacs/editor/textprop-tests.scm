@@ -25,8 +25,9 @@
 ;; then `get-text-property' to read it back - because the point of this
 ;; library is that those names mean here what they mean in Emacs.
 ;;
-;; Positions are 0-based, as both libraries' headers explain: a
-;; 10-character buffer is `0' to `10'.
+;; Positions are Emacs's: one-based, and a 10-character buffer is
+;; `1' to `11', with `point-max' at 11. Strings keep their own
+;; zero-based offsets, as Emacs's do.
 
 (test-begin "schemacs_editor_textprop")
 
@@ -39,7 +40,7 @@
   ;; The tree as (FIRST LAST PLIST) per run, so a test can see the shape
   ;; a change left behind.
   ;;--------------------------------------------------------------
-  (let loop ((i (find-interval (text-editor-text-props ed) 0))
+  (let loop ((i (find-interval (text-editor-text-props ed) 1))
              (acc '()))
     (if (not i)
         (reverse acc)
@@ -53,13 +54,13 @@
 ;; not outside it - and the buffer was cut into three runs to hold it.
 (test-equal '(bold bold bold #f #f)
   (let ((ed (buffer-of "abcdefghij")))
-    (tp:put-text-property 2 5 'face 'bold ed)
+    (tp:put-text-property 3 6 'face 'bold ed)
     (map (lambda (pos) (tp:get-text-property pos 'face ed))
-         '(2 3 4 5 6))))
+         '(3 4 5 6 7))))
 
-(test-equal '((0 2 ()) (2 5 (face bold)) (5 10 ()))
+(test-equal '((1 3 ()) (3 6 (face bold)) (6 11 ()))
   (let ((ed (buffer-of "abcdefghij")))
-    (tp:put-text-property 2 5 'face 'bold ed)
+    (tp:put-text-property 3 6 'face 'bold ed)
     (runs ed)))
 
 ;; `text-properties-at' answers the whole plist of the character there,
@@ -68,10 +69,10 @@
 ;; check is for.
 (test-equal '((face bold) () ())
   (let ((ed (buffer-of "abcdefghij")))
-    (tp:put-text-property 2 5 'face 'bold ed)
-    (list (tp:text-properties-at 3 ed)
-          (tp:text-properties-at 6 ed)
-          (tp:text-properties-at 10 ed))))
+    (tp:put-text-property 3 6 'face 'bold ed)
+    (list (tp:text-properties-at 4 ed)
+          (tp:text-properties-at 7 ed)
+          (tp:text-properties-at 11 ed))))
 
 ;; `add-text-properties' *merges*: a second property joins the first
 ;; rather than replacing the plist. That is the difference from
@@ -81,18 +82,18 @@
 ;; of what a property list means, but it is what the code produces.
 (test-equal '((mouse-face highlight face bold) (mouse-face highlight))
   (let ((ed (buffer-of "abcdefghij")))
-    (tp:put-text-property 2 5 'face 'bold ed)
-    (tp:add-text-properties 2 7 '(mouse-face highlight) ed)
-    (list (tp:text-properties-at 3 ed)
-          (tp:text-properties-at 6 ed))))
+    (tp:put-text-property 3 6 'face 'bold ed)
+    (tp:add-text-properties 3 8 '(mouse-face highlight) ed)
+    (list (tp:text-properties-at 4 ed)
+          (tp:text-properties-at 7 ed))))
 
 ;; A property added again with a different value is *replaced*, not
 ;; duplicated - the plist keeps one entry per property.
 (test-equal '(face italic)
   (let ((ed (buffer-of "abcdefghij")))
-    (tp:put-text-property 2 5 'face 'bold ed)
-    (tp:put-text-property 3 4 'face 'italic ed)
-    (tp:text-properties-at 3 ed)))
+    (tp:put-text-property 3 6 'face 'bold ed)
+    (tp:put-text-property 4 5 'face 'italic ed)
+    (tp:text-properties-at 4 ed)))
 
 ;; `set-text-properties' replaces the whole plist, so a property that was
 ;; there and is not in the new list goes.
@@ -100,11 +101,11 @@
 ;; plist too - the range is 2..5, and 2 is inside it.
 (test-equal '((face italic) (face italic))
   (let ((ed (buffer-of "abcdefghij")))
-    (tp:put-text-property 2 5 'face 'bold ed)
-    (tp:put-text-property 2 5 'mouse-face 'highlight ed)
-    (tp:set-text-properties 2 5 '(face italic) ed)
-    (list (tp:text-properties-at 3 ed)
-          (tp:text-properties-at 2 ed))))
+    (tp:put-text-property 3 6 'face 'bold ed)
+    (tp:put-text-property 3 6 'mouse-face 'highlight ed)
+    (tp:set-text-properties 3 6 '(face italic) ed)
+    (list (tp:text-properties-at 4 ed)
+          (tp:text-properties-at 3 ed))))
 
 ;; Setting no properties at all empties the range - and the runs it left
 ;; collapse back into their neighbours, so the buffer is one run again.
@@ -112,11 +113,11 @@
 ;; only into one this same set already changed (`prev_changed'), so runs
 ;; outside the range are untouched and remain separate. They are all
 ;; default intervals afterwards, which is what the empty plists say.
-(test-equal '(() (0 2 ()))
+(test-equal '(() (1 3 ()))
   (let ((ed (buffer-of "abcdefghij")))
-    (tp:put-text-property 2 5 'face 'bold ed)
-    (tp:set-text-properties 2 5 '() ed)
-    (list (tp:text-properties-at 3 ed)
+    (tp:put-text-property 3 6 'face 'bold ed)
+    (tp:set-text-properties 3 6 '() ed)
+    (list (tp:text-properties-at 4 ed)
           (car (runs ed)))))
 
 ;; `remove-text-properties' takes the named properties and leaves the
@@ -125,83 +126,83 @@
 ;; values - which is an odd-length list, and the library must take it.
 (test-equal '(mouse-face highlight)
   (let ((ed (buffer-of "abcdefghij")))
-    (tp:put-text-property 2 5 'face 'bold ed)
-    (tp:put-text-property 2 5 'mouse-face 'highlight ed)
-    (tp:remove-text-properties 2 5 '(face) ed)
-    (tp:text-properties-at 3 ed)))
+    (tp:put-text-property 3 6 'face 'bold ed)
+    (tp:put-text-property 3 6 'mouse-face 'highlight ed)
+    (tp:remove-text-properties 3 6 '(face) ed)
+    (tp:text-properties-at 4 ed)))
 
 ;; ...and answers whether anything was actually removed.
 (test-equal '(#t #f)
   (let ((ed (buffer-of "abcdefghij")))
-    (tp:put-text-property 2 5 'face 'bold ed)
-    (list (tp:remove-text-properties 2 5 '(face) ed)
-          (tp:remove-text-properties 2 5 '(face) ed))))
+    (tp:put-text-property 3 6 'face 'bold ed)
+    (list (tp:remove-text-properties 3 6 '(face) ed)
+          (tp:remove-text-properties 3 6 '(face) ed))))
 
 ;; `next-single-property-change' walks from one run to the next: from
 ;; inside the bold run the next change is where it ends, and past it there
 ;; is no further change.
-(test-equal '(5 5 #f)
+(test-equal '(6 6 #f)
   (let ((ed (buffer-of "abcdefghij")))
-    (tp:put-text-property 2 5 'face 'bold ed)
-    (list (tp:next-single-property-change 2 'face ed)
-          (tp:next-single-property-change 4 'face ed)
-          (tp:next-single-property-change 5 'face ed))))
+    (tp:put-text-property 3 6 'face 'bold ed)
+    (list (tp:next-single-property-change 3 'face ed)
+          (tp:next-single-property-change 5 'face ed)
+          (tp:next-single-property-change 6 'face ed))))
 
 ;; ...and `previous-single-property-change' walks back to where the
 ;; current run began.
-(test-equal '(2 2)
+(test-equal '(3 3)
   (let ((ed (buffer-of "abcdefghij")))
-    (tp:put-text-property 2 5 'face 'bold ed)
-    (list (tp:previous-single-property-change 4 'face ed)
-          (tp:previous-single-property-change 5 'face ed))))
+    (tp:put-text-property 3 6 'face 'bold ed)
+    (list (tp:previous-single-property-change 5 'face ed)
+          (tp:previous-single-property-change 6 'face ed))))
 
 ;; A limit is answered with rather than searched past, which is how a
 ;; renderer asks "does this change before the end of the line?".
-(test-equal '(3 3)
+(test-equal '(4 4)
   (let ((ed (buffer-of "abcdefghij")))
-    (tp:put-text-property 2 5 'face 'bold ed)
-    (list (tp:next-single-property-change 2 'face ed 3)
-          (tp:next-single-property-change 3 'face ed 3))))
+    (tp:put-text-property 3 6 'face 'bold ed)
+    (list (tp:next-single-property-change 3 'face ed 4)
+          (tp:next-single-property-change 4 'face ed 4))))
 
 ;; An empty buffer has no properties and no runs: there is no character to
 ;; hang them on, as in Emacs.
 (test-equal '(() #f)
   (let ((ed (buffer-of "")))
-    (list (tp:text-properties-at 0 ed)
+    (list (tp:text-properties-at 1 ed)
           (text-editor-text-props ed))))
 
 ;; A property the buffer has nowhere answers #f rather than erroring.
 (test-equal #f
   (let ((ed (buffer-of "abcdefghij")))
-    (tp:get-text-property 3 'face ed)))
+    (tp:get-text-property 4 'face ed)))
 
 ;; The properties move with the text, because the engine calls
 ;; `offset-intervals' from beside `adjust-markers-for-insertion!' on every
 ;; insert. Text put in *before* a run carries the run along with it.
-(test-equal '(4 7 (face bold))
+(test-equal '(5 8 (face bold))
   (let ((ed (buffer-of "abcdefghij")))
-    (tp:put-text-property 2 5 'face 'bold ed)
-    (text-editor-set-cursor ed 0)
+    (tp:put-text-property 3 6 'face 'bold ed)
+    (text-editor-set-cursor ed 1)
     (text-editor-insert ed "XY")
-    (let ((i (find-interval (text-editor-text-props ed) 4)))
+    (let ((i (find-interval (text-editor-text-props ed) 5)))
       (list (interval-position i) (interval-last-pos i) (interval-plist i)))))
 
 ;; ...and text deleted before a run pulls it back - the same call with a
 ;; negative length.
-(test-equal '(0 3 (face bold))
+(test-equal '(1 4 (face bold))
   (let ((ed (buffer-of "abcdefghij")))
-    (tp:put-text-property 2 5 'face 'bold ed)
-    (text-editor-set-cursor ed 0)
+    (tp:put-text-property 3 6 'face 'bold ed)
+    (text-editor-set-cursor ed 1)
     (text-editor-delete-from-cursor ed 2)
-    (let ((i (find-interval (text-editor-text-props ed) 1)))
+    (let ((i (find-interval (text-editor-text-props ed) 2)))
       (list (interval-position i) (interval-last-pos i) (interval-plist i)))))
 
 ;; Text inserted *inside* a run takes the run's properties - the sticky
 ;; rule, which is what makes a `read-only' or `field' property survive an
 ;; edit instead of stopping at the old characters.
-(test-equal '((0 2 ()) (2 8 (face bold)) (8 13 ()))
+(test-equal '((1 3 ()) (3 9 (face bold)) (9 14 ()))
   (let ((ed (buffer-of "abcdefghij")))
-    (tp:put-text-property 2 5 'face 'bold ed)
+    (tp:put-text-property 3 6 'face 'bold ed)
     (text-editor-set-cursor ed 4)
     (text-editor-insert ed "XYZ")
     (runs ed)))
@@ -295,8 +296,8 @@
   (let ((ed (fresh-buffer "*textprop-string-tests*")))
     (insert (pstr))
     (list (buffer-substring-no-properties 1 7)
-          (tp:get-text-property 0 'face)
-          (tp:get-text-property 5 'face))))
+          (tp:get-text-property 1 'face)
+          (tp:get-text-property 6 'face))))
 
 (test-equal "and buffer-substring carries them back out"
   (list "abcdef" '(face bold))
@@ -318,7 +319,7 @@
   (let ((ed (fresh-buffer "*textprop-string-tests*")))
     (insert (pstr))
     (insert "xyz")
-    (list (tp:text-properties-at 0 ed) (tp:text-properties-at 6 ed))))
+    (list (tp:text-properties-at 1 ed) (tp:text-properties-at 7 ed))))
 
 ;; ------------------------------------------------------------------
 ;; `add-text-properties' adds *all* of a plist
@@ -335,26 +336,26 @@
   (let ((ed (fresh-buffer "*textprop-add-all*")))
     (insert "abc")
     ;; the first property alone, as ls-lisp leaves the name
-    (tp:put-text-property 0 3 'dired-filename #t ed)
+    (tp:put-text-property 1 4 'dired-filename #t ed)
     ;; then the plist whose *first* property is already there
-    (tp:add-text-properties 0 3 (list 'dired-filename #t
+    (tp:add-text-properties 1 4 (list 'dired-filename #t
                                       'mouse-face 'highlight
                                       'help-echo "here")
                             ed)
-    (list (tp:get-text-property 0 'dired-filename ed)
-          (tp:get-text-property 0 'mouse-face ed)
-          (tp:get-text-property 0 'help-echo ed))))
+    (list (tp:get-text-property 1 'dired-filename ed)
+          (tp:get-text-property 1 'mouse-face ed)
+          (tp:get-text-property 1 'help-echo ed))))
 
 ;; and the guard still holds: a plist that really is all present is left
 ;; alone rather than rewritten - the values in PLIST win when they differ
 (test-equal '(#t other)
   (let ((ed (fresh-buffer "*textprop-add-guard*")))
     (insert "abc")
-    (tp:put-text-property 0 3 'a #t ed)
-    (tp:put-text-property 0 3 'b 'old ed)
-    (tp:add-text-properties 0 3 (list 'a #t 'b 'other) ed)
-    (list (tp:get-text-property 0 'a ed)
-          (tp:get-text-property 0 'b ed))))
+    (tp:put-text-property 1 4 'a #t ed)
+    (tp:put-text-property 1 4 'b 'old ed)
+    (tp:add-text-properties 1 4 (list 'a #t 'b 'other) ed)
+    (list (tp:get-text-property 1 'a ed)
+          (tp:get-text-property 1 'b ed))))
 
 
 ;; `remove-text-properties' over a range that begins *before* the
@@ -368,19 +369,19 @@
   (let ((ed (new-text-editor)))
     (set-buffer ed)
     (insert "abcdefghij")
-    (tp:put-text-property 6 8 'face 'zz ed)
-    (tp:remove-text-properties 0 10 '(face) ed)
-    (list (tp:get-text-property 6 'face ed)
-          (tp:get-text-property 7 'face ed))))
+    (tp:put-text-property 7 9 'face 'zz ed)
+    (tp:remove-text-properties 1 11 '(face) ed)
+    (list (tp:get-text-property 7 'face ed)
+          (tp:get-text-property 8 'face ed))))
 
 (test-equal "remove-text-properties: a range that ends inside the property"
   (list #f 'zz)
   (let ((ed (new-text-editor)))
     (set-buffer ed)
     (insert "abcdefghij")
-    (tp:put-text-property 6 8 'face 'zz ed)
-    (tp:remove-text-properties 0 7 '(face) ed)
-    (list (tp:get-text-property 6 'face ed)
-          (tp:get-text-property 7 'face ed))))
+    (tp:put-text-property 7 9 'face 'zz ed)
+    (tp:remove-text-properties 1 8 '(face) ed)
+    (list (tp:get-text-property 7 'face ed)
+          (tp:get-text-property 8 'face ed))))
 
 (test-end "schemacs_editor_textprop")

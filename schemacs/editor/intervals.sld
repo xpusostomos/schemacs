@@ -924,11 +924,23 @@
                 (if (interval-only? tree)
                     (set!interval-total-length
                      tree (- (interval-total-length tree) length))
-                    (let ((start (min start (interval-total-length tree))))
+                    ;; START is a buffer position and the walk below
+                    ;; counts from the tree's own origin - the C's
+                    ;; `offset', `BUF_BEG (buffer)', which
+                    ;; `interval_deletion_adjustment' is handed
+                    ;; `start - offset' of. Passing the position through
+                    ;; unsubtracted started the walk one character in,
+                    ;; so a deletion at `point-min' took one character
+                    ;; from the run that should have gone and one from
+                    ;; the run after it.
+                    (let* ((offset (interval-start-pos tree))
+                           (start (min start
+                                       (+ offset (interval-total-length tree)))))
                       (let loop ((left-to-delete length))
                         (when (> left-to-delete 0)
                           (let* ((deleted (interval-deletion-adjustment
-                                           tree start left-to-delete))
+                                           tree (- start offset)
+                                           left-to-delete))
                                  (tree (buffer-intervals buffer)))
                             (set! left-to-delete (- left-to-delete deleted))
                             (if (and tree (= left-to-delete
