@@ -48,6 +48,7 @@
          text-editor-get-start-of-line text-editor-copy-string
          text-editor-line-count count-lines
          text-editor-point-min
+         text-editor-beg-unchanged text-editor-note-unchanged!
          text-editor-line-outer-size text-editor-modified?
          text-editor-read-only? text-editor-line-string
          text-editor-point-max text-editor-to-string)
@@ -856,6 +857,18 @@
       ;; `base_line_pos' set to -1 - for a window whose lines are too
       ;; long to find one in.
       ;;
+      ;; The cache is only good while nothing *before the line it names*
+      ;; has changed: a line number counts from `point-min', so an edit
+      ;; above the cached line moves it, while an edit below does not.
+      ;; The C tests exactly that, as
+      ;;
+      ;;     !clip_changed && BEG_UNCHANGED >= w->base_line_pos
+      ;;
+      ;; (`BASE_LINE_NUMBER_VALID_P', `xdisp.c:19393'), and discards the
+      ;; cache when it fails. Without the test the number goes stale and
+      ;; the mode line quietly shows the wrong line - measured at 160 of
+      ;; 400 randomly-edited states before this was added.
+      ;;
       ;; Answers #f where the C prints "??": when the buffer is over
       ;; `line-number-display-limit', or when the cache was abandoned.
       ;;--------------------------------------------------------------
@@ -872,7 +885,9 @@
             #f
             (let* ((cached (%window-base-line-number window))
                    (use-cache (and (> cached 0) (> base-pos 0)
-                                   (<= base-pos startpos)))
+                                   (<= base-pos startpos)
+                                   (>= (text-editor-beg-unchanged ed)
+                                       base-pos)))
                    (line (if use-cache cached 1))
                    (linepos (if use-cache base-pos (text-editor-point-min ed)))
                    (nlines (count-lines ed linepos startpos))
@@ -883,6 +898,7 @@
                  ((= startpos (text-editor-point-min ed))
                   (set!%window-base-line-number window topline)
                   (set!%window-base-line-pos window (text-editor-point-min ed))
+                  (text-editor-note-unchanged! ed)
                   (+ topline (nlines-from-start)))
                  ;; "too close" to the window, too far from it, or never
                  ;; set: re-base it
@@ -912,6 +928,7 @@
                           (set!%window-base-line-number
                            window (- topline (car got)))
                           (set!%window-base-line-pos window (cdr got))
+                          (text-editor-note-unchanged! ed)
                           (+ topline (nlines-from-start))))))
                  (else (+ topline (nlines-from-start)))))))))
 

@@ -58,6 +58,7 @@
    buffer-text-insert!  buffer-text-delete!  buffer-text-substring
    buffer-text-for-each
    buffer-text-clear!
+   buffer-text-beg-unchanged  set!buffer-text-beg-unchanged
    *gap-bytes-dfl*  *gap-bytes-min*
    )
 
@@ -67,7 +68,7 @@
     (define *gap-bytes-min* 20)     ;; buffer.h:210
 
     (define-record-type <buffer-text-type>
-      (make<buffer-text> base store gpt z gap-size)
+      (make<buffer-text> base store gpt z gap-size beg-unchanged)
       buffer-text-type?
       (base     buffer-text-base)
       ;; ^ The coordinate base of every *position* this class answers,
@@ -82,6 +83,21 @@
       ;; the answer to `point-max'. The character count is `(- z base)'.
       (gap-size buffer-text-gap-size set!buffer-text-gap-size)
       ;; ^ The number of unused elements - Emacs's `GAP_SIZE'.
+      (beg-unchanged buffer-text-beg-unchanged
+                     set!buffer-text-beg-unchanged)
+      ;; ^ How many characters at the beginning of the buffer are known
+      ;; not to have changed since the caches were last told that
+      ;; everything is current - GNU Emacs's `beg_unchanged'
+      ;; (`buffer.h:149'), a field of `struct buffer_text'. It is 0 for
+      ;; a new buffer, which is the conservative answer: nothing is
+      ;; known until something says so.
+      ;;
+      ;; Emacs keeps `end_unchanged' beside it, and `insert_1_both'
+      ;; shrinks both to `GPT - BEG' and `Z - GPT' on every modification
+      ;; (`insdel.c:1608'). Its readers are `window_outdated' and
+      ;; `redisplay_internal''s frame-based redisplay, and neither is
+      ;; ported; the one reader here is the `%l' cache's freshness test,
+      ;; which the C spells `BASE_LINE_NUMBER_VALID_P' (`xdisp.c:19393').
       )
 
     ;;----------------------------------------------------------------
@@ -140,7 +156,7 @@
       (case-lambda
        ((base) (new-buffer-text base 0))
        ((base size)
-        (make<buffer-text> base (make-u32vector size 0) base base size)
+        (make<buffer-text> base (make-u32vector size 0) base base size 0)
         )))
 
     ;;----------------------------------------------------------------

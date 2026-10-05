@@ -1478,3 +1478,42 @@ array index once `%move-cache-gap!` has put the gap there, as the C's
 arithmetic reads one slot past the end of the array - this failed with
 `vector-set!: Argument 2 out of range: 40`, which says nothing about
 which of the two branches is wrong.
+
+## The `%l' cache's freshness rule was missing — found 2026-10-06
+
+Found while surveying how faithful the engine is, not by a test:
+`mode-line-line-number` had the right fields, the right `topline +
+nlines` expression and the right refresh heuristic, and was missing the
+one-line rule that says when the cache may be believed at all:
+
+```c
+#define BASE_LINE_NUMBER_VALID_P(w)                      \
+   (eassert (current_buffer == XBUFFER ((w)->contents)), \
+    !current_buffer->clip_changed                        \
+    && BEG_UNCHANGED >= (w)->base_line_pos)
+```
+
+`w->base_line_pos` is a position and `BEG_UNCHANGED` counts characters
+from the beginning of the buffer, so the test says "nothing before the
+line I remember has changed" - which is the only thing that makes a
+remembered *line number* still true, since a line number counts from
+`point-min`.
+
+Measured before the fix, over 400 states built from random edits with a
+scrolled window: **160 wrong**, the mode line quietly showing the wrong
+line. After it: **0**. `ncurses-editor-tests.scm` has the case.
+
+The fix needed `beg_unchanged`, which is a `struct buffer_text` field
+(`buffer.h:149`) that had never been ported - so the missing rule and the
+missing field were the same omission. It is shrunk on every modification
+to `change-position - BEG` (`insdel.c:1608`) and set to "everything" when
+the cache is written, where the C sets it once per redisplay
+(`xdisp.c:22732`); the `%l` cache is its only reader here. Emacs keeps
+`end_unchanged` beside it and its readers (`window_outdated',
+`redisplay_internal`) are not ported, so it is not carried.
+
+**The lesson worth keeping**: a port can have Emacs's shape and still be
+wrong, because the shape does not carry the invariants. This one was
+invisible to reading and to every existing test; only measuring it
+against a from-scratch count found it. `set-window-start!' computing
+`start_at_line_beg` rather than writing `false` is the same kind of rule.

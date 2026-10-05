@@ -48,6 +48,7 @@
           buffer-text-insert!  buffer-text-delete!
           buffer-text-substring  buffer-text-for-each
           buffer-text-clear!
+          buffer-text-beg-unchanged  set!buffer-text-beg-unchanged
           )
     ;; The line-break cache `find-newline' keeps - GNU Emacs's
     ;; `region-cache.c', which is `buf->newline_cache' there. It is what
@@ -161,6 +162,9 @@
    ;; ZV))' (buffer.c:2773). `erase-buffer' here goes through
    ;; `text-editor-delete-from-cursor', so it is already covered.
    text-editor-invalidate-caches!
+   ;; `BEG_UNCHANGED' (`buffer.h:156') and the caches' own "everything is
+   ;; current as of now".
+   text-editor-beg-unchanged  text-editor-note-unchanged!
    )
 
   (begin
@@ -1312,13 +1316,41 @@
       ;; after the change. For an insertion at POINT the tail is
       ;; `Z - POINT`, which is the same count either side of it.
       ;;--------------------------------------------------------------
-      (let ((cache (%text-editor-newline-cache ed)))
-        (when cache
-          (invalidate-region-cache cache
-                                   (text-editor-point-min ed)
-                                   (text-editor-point-max ed)
-                                   (- start (text-editor-point-min ed))
-                                   (- (text-editor-point-max ed) end)))))
+      (let ((beg (text-editor-point-min ed))
+            (text (text-editor-text ed)))
+        ;; Nothing before the change is known to be unchanged any more -
+        ;; the C's `if (GPT - BEG < BEG_UNCHANGED) BEG_UNCHANGED =
+        ;; GPT - BEG' (`insdel.c:1608'). The `%l' cache reads this to
+        ;; decide whether the line number it remembers is still true.
+        (let ((prefix (- start beg)))
+          (when (< prefix (buffer-text-beg-unchanged text))
+            (set!buffer-text-beg-unchanged text prefix)))
+        (let ((cache (%text-editor-newline-cache ed)))
+          (when cache
+            (invalidate-region-cache cache beg (text-editor-point-max ed)
+                                     (- start beg)
+                                     (- (text-editor-point-max ed) end))))))
+
+    (define (text-editor-beg-unchanged ed)
+      ;; GNU Emacs's `BEG_UNCHANGED' (`buffer.h:156'): how many characters
+      ;; at the beginning of the buffer are known not to have changed
+      ;; since `text-editor-note-unchanged!' was last called. The `%l'
+      ;; cache is only good while this still reaches past the line it
+      ;; remembers - `BASE_LINE_NUMBER_VALID_P' (`xdisp.c:19393').
+      ;;--------------------------------------------------------------
+      (buffer-text-beg-unchanged (text-editor-text ed)))
+
+    (define (text-editor-note-unchanged! ed)
+      ;; Say that everything the buffer holds is current as of now, so
+      ;; that `text-editor-beg-unchanged' counts from here. The C does
+      ;; this from `mark_window_display_accurate_1', once per redisplay
+      ;; (`xdisp.c:22732'); here the only reader is the `%l' cache, so it
+      ;; is done when that cache is written - the same statement, made at
+      ;; the one moment it is needed.
+      ;;--------------------------------------------------------------
+      (set!buffer-text-beg-unchanged
+       (text-editor-text ed)
+       (- (text-editor-point-max ed) (text-editor-point-min ed))))
 
     (define (%text-editor-delete-forward ed n)
       ;; Delete up to N characters after point, clamped at `point-max'.

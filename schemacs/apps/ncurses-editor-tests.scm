@@ -15,6 +15,7 @@
        text-editor-mark text-editor-move-cursor text-editor-set-cursor
        text-editor-set-modified! text-editor-set-read-only!
        text-editor-to-string text-editor-undo-list
+       text-editor-point-min text-editor-point-max count-lines
        line-break-newline line-break-crlf line-break-return string-search-forward)
  (only (schemacs editor frame)
        *current-frame* *echo-area-buffer* *echo-area-prompt* *minibuffer*
@@ -34,7 +35,7 @@
  ;; `cursor-type' - the tests below are its rule, not the drawing of it.
  (only (schemacs editor xdisp)
        *truncate-partial-width-windows* get-window-cursor-type
-       line-display-rows window-truncates-lines?)
+       line-display-rows window-truncates-lines? scroll-to-cursor!)
  ;; The dispatch asks the display what a raw event means, and this is the
  ;; display it asks: a terminal object with no curses behind it, which is
  ;; all the character events these tests feed ever need (only an extended
@@ -1634,6 +1635,43 @@
     ;; counts from zero - so C1, not C0
     (string=? ": ** probe.txt    -- L1 C1  (Fundamental)"
               (format-in frame (*mode-line-format*)))))
+
+;; The `%l' cache is only good while nothing *before the line it names*
+;; has changed - a line number counts from `point-min', so an edit above
+;; the cached line moves it while an edit below does not. Emacs tests
+;; exactly that (`BASE_LINE_NUMBER_VALID_P', xdisp.c:19393) and throws the
+;; cache away when it fails. Without the test the mode line quietly shows
+;; the wrong line: this failed 160 times out of 400 randomly-edited
+;; states before it was added.
+(test-equal '("501" "502" "502" "502")
+  (let ((frame (frame-with
+                (let loop ((i 0) (acc ""))
+                  (if (= i 500)
+                      acc
+                      (loop (+ i 1)
+                            (string-append acc "line " (number->string i) "\n")))))))
+    (let ((ed (frame-editor frame))
+          (w (frame-selected-window frame)))
+      (text-editor-set-cursor ed (text-editor-point-max ed))
+      ;; scroll the window onto point so that the cache is based on a line
+      ;; that is *not* the first - otherwise no edit can go above it and
+      ;; the test proves nothing
+      (scroll-to-cursor! w)
+      (let ((before (format-in frame "%l")))
+        ;; a line inserted at the very top moves every line below it down
+        ;; one, the cached base line included
+        (text-editor-set-cursor ed (text-editor-point-min ed))
+        (text-editor-insert ed "INSERTED\n")
+        (text-editor-set-cursor ed (text-editor-point-max ed))
+        (list before
+              (format-in frame "%l")
+              ;; and again, now that a fresh cache has been made
+              (begin (format-in frame "%l") (format-in frame "%l"))
+              ;; the answer counted from scratch, which is what the
+              ;; cache must never disagree with
+              (number->string
+               (+ 1 (count-lines ed (text-editor-point-min ed)
+                                 (text-editor-get-cursor ed)))))))))
 
 (test-end "schemacs_ncurses_editor_mode_line_format")
 
