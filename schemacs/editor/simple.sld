@@ -84,7 +84,7 @@
     ;; `kbd' is how the bindings below name their keys, as
     ;; `(define-key global-map (kbd "C-/") ...)' would in Emacs.
     (only (schemacs editor subr)
-          add-to-history kbd key-path->event nthcdr)
+          add-to-history event-convert-list kbd nthcdr)
     ;; `define-key' and the global map, which this library fills with the
     ;; bindings for the commands it defines - as simple.el does with
     ;; `(define-key global-map ...)'.
@@ -1221,12 +1221,12 @@ non-nil."
       ;;
       ;; The argument is a *key event*, which is what GNU Emacs reads:
       ;; `C-u' is the event `(aref (kbd "C-u") 0)', which
-      ;; `key-path->event' answers here, and the digits are the events
+      ;; `event-convert-list' answers here, and the digits are the events
       ;; `universal-argument-map' binds as `(vector ?0)' through
       ;; `(vector ?9)' - a bare character event, no modifier on it.
       ;;--------------------------------------------------------------
       (cond
-       ((eqv? key (key-path->event (list 'ctrl #\u)))
+       ((eqv? key (event-convert-list '(control #\u)))
         (*prefix-cu* (+ 1 (or (*prefix-cu*) 0)))
         (request-prefix-echo!)
         #t)

@@ -759,22 +759,22 @@
     (define (reverse-list->keymap-index nodes)
       (let loop
           ((nodes nodes)
-           (key-path #f))
+           (key #f))
         (cond
-         ((null? nodes) key-path)
+         ((null? nodes) key)
          ((pair? nodes)
           (let ((head (car nodes))
                 (tail (cdr nodes)))
             (cond
              ((not head)
-              (loop tail key-path))
+              (loop tail key))
              ((keymap-index-type? head)
               (loop
                tail
                (make<keymap-index>
                 (mod-index head)
                 (char-index head)
-                (keymap-index-append (next-index head) key-path))))
+                (keymap-index-append (next-index head) key))))
              (else
               (error "all list items must be of type <keymap-index-type>" head)))))
          (else
@@ -1002,32 +1002,36 @@
        ))
 
 
-    (define (=>keymap-layer-index! key-path)
+    (define (=>keymap-layer-index! key)
       ;; Construct a lens to access a KEYMAP-LAYER-TYPE by the given
       ;; INDEX. The INDEX is of type <KEYMAP-INDEX-TYPE> or a list of
       ;; symbols and characters that can be passed to the KEYMAP-INDEX
       ;; function.
       ;;------------------------------------------------------------------
       (cond
-       ((string? key-path)
-        (=>keymap-layer-index! (keymap-index key-path)))
-       ((keymap-index-type? key-path)
+       ((string? key)
+        (=>keymap-layer-index! (keymap-index key)))
+       ((keymap-index-type? key)
         (=>canonical
          (apply lens
-          (let loop ((key-path key-path))
-            (if (not key-path) '()
+          (let loop ((key key))
+            (if (not key) '()
                 (cons
-                 (=>keymap-layer-mod-table-key? (mod-index key-path))
+                 (=>keymap-layer-mod-table-key? (mod-index key))
                  (cons
-                  (=>char-table-char! #t (char-index key-path))
-                  (loop (next-index key-path)))))))
+                  (=>char-table-char! #t (char-index key))
+                  (loop (next-index key)))))))
          keymap-layer
          keymap-layer-empty?))
-       ((pair? key-path) (=>keymap-layer-index! (keymap-index key-path)))
-       ((null? key-path) =>self)
+       ((pair? key) (=>keymap-layer-index! (keymap-index key)))
+       ;; A *key sequence*, which is what `kbd' answers with and what
+       ;; Emacs's `define-key' takes - the same thing `keymap-index'
+       ;; accepts, so it is taken the same way.
+       ((vector? key) (=>keymap-layer-index! (keymap-index key)))
+       ((null? key) =>self)
        (else
-        (error "=>keymap-layer-index! lens, key-path not a list or a <KEYMAP-INDEX-TYPE>."
-               key-path))
+        (error "=>keymap-layer-index! lens, key not a list or a <KEYMAP-INDEX-TYPE>."
+               key))
        ))
 
 
@@ -1348,15 +1352,15 @@
       (record-unit-lens keymap-label set!keymap-label '=>keymap-label!))
 
 
-    (define (keymap-layer-ref km key-path)
+    (define (keymap-layer-ref km key)
       ;; This is similar to `KEYMAP-LAYER-LOOKUP` except it always returns
       ;; a `KEYMAP-LAYER` node (or #f), rather than returning the
       ;; `KEYMAP-LAYER-ALT-ACTION` (if any).
       (cond
        ((keymap-layer-type? km)
-        (view km (=>keymap-layer-index! key-path)))
+        (view km (=>keymap-layer-index! key)))
        ((keymap-index-predicate-type? km)
-        (apply-keymap-index-predicate km key-path))
+        (apply-keymap-index-predicate km key))
        (else (error "not a <keymap-layer-type> or <keymap-index-predicate-type>" km))
        ))
 
@@ -1375,7 +1379,7 @@
        ))
 
 
-    (define (keymap-layer-lookup km key-path)
+    (define (keymap-layer-lookup km key)
       ;; Take a KEY-PATH that has been constructed by the KEYMAP-INDEX
       ;; procedure from a sequence of keyboard characters and keyboard
       ;; modifier symbols such as 'Control or 'Alt (see
@@ -1389,9 +1393,9 @@
       ;; `KEYMAP-LAYER-MOD-TABLE` is empty) the alt-action is returned.
       (cond
        ((keymap-layer-type? km)
-        (view km (=>keymap-layer-index! key-path) =>keymap-layer-alt-action?))
+        (view km (=>keymap-layer-index! key) =>keymap-layer-alt-action?))
        ((keymap-index-predicate-type? km)
-        (apply-keymap-index-predicate km key-path))
+        (apply-keymap-index-predicate km key))
        (else (error "not a <keymap-layer-type> or <keymap-index-predicate-type>" km))
        ))
 
@@ -1493,10 +1497,10 @@
       ;; function which implements the modal state key lookup
       ;; mechanism. This record type contains 2 fields:
       ;;
-      ;;  1. KEYMAP is the current keymap in which the key-path will
+      ;;  1. KEYMAP is the current keymap in which the key will
       ;;     lookup the next action or keymap
       ;;
-      ;;  2. STACK is a reversed list of key-path values that have been
+      ;;  2. STACK is a reversed list of key values that have been
       ;;     looked-up so far
       ;;------------------------------------------------------------------
       (make<modal-lookup-state-type> keymap stack)
@@ -1568,12 +1572,12 @@
     (define (modal-lookup-state-key-index state)
       (reverse-list->keymap-index (modal-lookup-state-index-stack state)))
 
-    (define (modal-lookup-state-lookup state key-path)
-      ;; Looks-up a key-path in <modal-lookup-state-type> object, which
+    (define (modal-lookup-state-lookup state key)
+      ;; Looks-up a key in <modal-lookup-state-type> object, which
       ;; might contain a single keymap or a list of keymaps.
-      (keymap-lookup (modal-lookup-state-keymap state) key-path))
+      (keymap-lookup (modal-lookup-state-keymap state) key))
 
-    (define (modal-lookup-state-step! state key-path do-action do-wait-next do-fail-lookup)
+    (define (modal-lookup-state-step! state key do-action do-wait-next do-fail-lookup)
       ;; In Emacs, key lookup is actually a modal operation. Each key
       ;; chord is an index that looks up a keymap node. If the index
       ;; lookup returns another keymap node that is empty but has an
@@ -1585,18 +1589,18 @@
       ;;
       ;;  1. an object of record type <MODAL-LOOKUP-STATE-TYPE>
       ;;
-      ;;  2. a key-path from a keyboard event that recently occurred,
+      ;;  2. a key from a keyboard event that recently occurred,
       ;;     which is used to lookup the next action or keymap in the the
       ;;     current keymap (the MODAL-LOOKUP-STATE-KEYMAP field) of the
       ;;     <MODAL-LOOKUP-STATE-TYPE> record.
       ;;
-      ;;  3. DO-ACTION is a procedure called when the key-path lookup
+      ;;  3. DO-ACTION is a procedure called when the key lookup
       ;;     retrieved an action and not a keymap.
       ;;
-      ;;  4. DO-WAIT-NEXT is a procedure called when the key-path lookup
+      ;;  4. DO-WAIT-NEXT is a procedure called when the key lookup
       ;;     retrieved a keymap and not an action.
       ;;
-      ;;  5. DO-FAIL-LOOKUP is a procedure called when the key-path lookup
+      ;;  5. DO-FAIL-LOOKUP is a procedure called when the key lookup
       ;;     finds neither an action or a keymap.
       ;;
       ;; This function should be called every time a keyboard event
@@ -1622,24 +1626,24 @@
       ;;     index up to this point (not a "promise" object wrapping the
       ;;     key index value, but the key index value itself). After
       ;;     evaluating DO-FAIL-LOOKUP, return #f.
-      (let*((step (make<keymap-index> (mod-index key-path) (char-index key-path) #f))
-            (next (next-index key-path))
+      (let*((step (make<keymap-index> (mod-index key) (char-index key) #f))
+            (next (next-index key))
             (stack (cons step (modal-lookup-state-index-stack state)))
-            (full-key-path (delay (reverse-list->keymap-index stack)))
+            (full-key (delay (reverse-list->keymap-index stack)))
             (action-or-map (modal-lookup-state-lookup state step))
             )
         (set!modal-lookup-state-index-stack state stack)
         (cond
          ((and (not next) action-or-map (not (keymap-type? action-or-map)))
           (set!modal-lookup-state-keymap state #f)
-          (do-action full-key-path action-or-map)
+          (do-action full-key action-or-map)
           #f)
          ((keymap-type? action-or-map)
           (set!modal-lookup-state-keymap state action-or-map)
-          (do-wait-next full-key-path action-or-map) #t)
+          (do-wait-next full-key action-or-map) #t)
          (else
           (set!modal-lookup-state-keymap state #f)
-          (do-fail-lookup (force full-key-path)) #f))
+          (do-fail-lookup (force full-key)) #f))
         ))
 
     ;;----------------------------------------------------------------

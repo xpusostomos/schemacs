@@ -34,9 +34,9 @@
    ;; `subr.sld' - has to be able to read a `kbd' description.
    char-alt char-super char-hyper char-shift char-ctl char-meta
    parse-solitary-modifier make-ctrl-char
+   function-key-name function-key-offset *lispy-function-keys*
    parse-modifiers-uncached event-symbol-elements
    event-modifiers event-basic-type apply-modifiers event-convert-list
-   key-path->event
    kbd
    *tab-width*
    char-width
@@ -138,13 +138,15 @@
     ;; matched only that front end - which is why C-/ and C-_ did nothing
     ;; on the graphical one, and why C-@ and C-SPC needed two bindings.
     ;;
-    ;; The result is this tree's key path: a list of keys, each either a
-    ;; character, a string naming a keyboard key, or a list of modifier
-    ;; symbols followed by the character or string - so `(kbd "C-x C-f")'
-    ;; is `((ctrl #\x) (ctrl #\f))' and `(kbd "C-/")' is `((ctrl #\/))'.
-    ;; `define-key' takes it and `keymap-index' reads it, so a binding
-    ;; written with `kbd' is written the way a front end is expected to
-    ;; deliver.
+    ;; What that answer now is is GNU Emacs's: a *vector of key events* -
+    ;; `(kbd "C-x C-f")' is `#(24 6)' and `(kbd "C-/")' is `#(31)' -
+    ;; which is what `define-key' takes there ("a string or a vector of
+    ;; symbols and characters", `keymap.c':1084') and what every read in
+    ;; this tree answers with. The older spelling this parser also
+    ;; produces, a list of modifier symbols and characters, is
+    ;; `(schemacs keymap)''s own key representation and is what
+    ;; `keymap-index' converts an event into; it is kept as an input
+    ;; because the keymap layer tables are written in it.
     ;;----------------------------------------------------------------
 
     (define *key-parse-modifiers*
@@ -205,15 +207,14 @@
             (cons (reverse mods) rest))))
 
     (define (parse-key word)
-      ;; One word of a `kbd' string as one key of a key path: the chord
+      ;; One word of a `kbd' string as one key of the chord:
       ;; `(modifiers... character-or-string)'.
       ;;--------------------------------------------------------------
       (if (and (> (string-length word) 2)
                (char=? (string-ref word 0) #\<)
                (char=? (string-ref word (- (string-length word) 1)) #\>))
-          ;; `<up>' names a keyboard key, which is how a named key is
-          ;; written in a key path here - and Emacs's is a symbol in the
-          ;; vector, `up', the same thing as the string this tree uses.
+          ;; `<up>' names a keyboard key: a *symbol* in the event
+          ;; vector, `up', which is what Emacs's `(kbd "<up>")' is.
           (string->symbol (substring word 1 (- (string-length word) 1)))
           (let* ((mods-and-key (key-parse-modifiers word))
                  (mods (car mods-and-key))
@@ -283,6 +284,79 @@
       (list (cons 'alt char-alt) (cons 'super char-super)
             (cons 'hyper char-hyper) (cons 'shift char-shift)
             (cons 'control char-ctl) (cons 'meta char-meta)))
+
+    (define *lispy-function-keys*
+      ;; GNU Emacs's `lispy_function_keys' (`keyboard.c':5513): "You'll
+      ;; notice that this table is arranged to be conveniently indexed by
+      ;; X Windows keysym values." A keysym from `FUNCTION_KEY_OFFSET'
+      ;; (0xff00) up is not a character, and what it is called is this
+      ;; table at its offset: 0xff0d is `"return"', 0xff50 `"home"',
+      ;; 0xff63 `"insert"', 0xffff `"delete"'. #f for a keysym the table
+      ;; leaves unnamed, which is Emacs's 0.
+      ;;
+      ;; It is here rather than in a backend because it is not a
+      ;; backend's: the same names come out of an X display, a Gtk one
+      ;; and a terminal's terminfo (`term.c''s `fkey_table' spells the
+      ;; terminfo names into exactly this list).
+      ;;--------------------------------------------------------------
+      (vector
+        #f #f #f #f #f #f                                                    ; 0xff00
+        #f #f "backspace" "tab" "linefeed" "clear"                           ; 0xff06
+        #f "return" #f #f #f #f                                              ; 0xff0c
+        #f "pause" #f #f #f #f                                               ; 0xff12
+        #f #f #f "escape" #f #f                                              ; 0xff18
+        #f #f #f "kanji" "muhenkan" "henkan"                                 ; 0xff1e
+        "romaji" "hiragana" "katakana" "hiragana-katakana" "zenkaku" "hankaku" ; 0xff24
+        "zenkaku-hankaku" "touroku" "massyo" "kana-lock" "kana-shift" "eisu-shift" ; 0xff2a
+        "eisu-toggle" #f #f #f #f #f                                         ; 0xff30
+        #f #f #f #f #f #f                                                    ; 0xff36
+        #f #f #f #f #f #f                                                    ; 0xff3c
+        #f #f #f #f #f #f                                                    ; 0xff42
+        #f #f #f #f #f #f                                                    ; 0xff48
+        #f #f "home" "left" "up" "right"                                     ; 0xff4e
+        "down" "prior" "next" "end" "begin" #f                               ; 0xff54
+        #f #f #f #f #f #f                                                    ; 0xff5a
+        "select" "print" "execute" "insert" #f "undo"                        ; 0xff60
+        "redo" "menu" "find" "cancel" "help" "break"                         ; 0xff66
+        #f #f #f #f #f #f                                                    ; 0xff6c
+        #f #f "backtab" #f #f #f                                             ; 0xff72
+        #f #f #f #f #f #f                                                    ; 0xff78
+        #f "kp-numlock" "kp-space" #f #f #f                                  ; 0xff7e
+        #f #f #f #f #f "kp-tab"                                              ; 0xff84
+        #f #f #f "kp-enter" #f #f                                            ; 0xff8a
+        #f "kp-f1" "kp-f2" "kp-f3" "kp-f4" "kp-home"                         ; 0xff90
+        "kp-left" "kp-up" "kp-right" "kp-down" "kp-prior" "kp-next"          ; 0xff96
+        "kp-end" "kp-begin" "kp-insert" "kp-delete" #f #f                    ; 0xff9c
+        #f #f #f #f #f #f                                                    ; 0xffa2
+        #f #f "kp-multiply" "kp-add" "kp-separator" "kp-subtract"            ; 0xffa8
+        "kp-decimal" "kp-divide" "kp-0" "kp-1" "kp-2" "kp-3"                 ; 0xffae
+        "kp-4" "kp-5" "kp-6" "kp-7" "kp-8" "kp-9"                            ; 0xffb4
+        #f #f #f "kp-equal" "f1" "f2"                                        ; 0xffba
+        "f3" "f4" "f5" "f6" "f7" "f8"                                        ; 0xffc0
+        "f9" "f10" "f11" "f12" "f13" "f14"                                   ; 0xffc6
+        "f15" "f16" "f17" "f18" "f19" "f20"                                  ; 0xffcc
+        "f21" "f22" "f23" "f24" "f25" "f26"                                  ; 0xffd2
+        "f27" "f28" "f29" "f30" "f31" "f32"                                  ; 0xffd8
+        "f33" "f34" "f35" #f #f #f                                           ; 0xffde
+        #f #f #f #f #f #f                                                    ; 0xffe4
+        #f #f #f #f #f #f                                                    ; 0xffea
+        #f #f #f #f #f #f                                                    ; 0xfff0
+        #f #f #f #f #f #f                                                    ; 0xfff6
+        #f #f #f "delete"                                                    ; 0xfffc
+        ))
+
+    (define function-key-offset #xff00)
+    ;; ^ `FUNCTION_KEY_OFFSET' (`keyboard.c':5507').
+
+    (define (function-key-name keysym)
+      ;; The name GNU Emacs gives a non-character keysym, or #f. The
+      ;; lookup is the C's `lispy_function_keys[keysym -
+      ;; FUNCTION_KEY_OFFSET]' and nothing more.
+      ;;--------------------------------------------------------------
+      (and (integer? keysym)
+           (>= keysym function-key-offset)
+           (< (- keysym function-key-offset) (vector-length *lispy-function-keys*))
+           (vector-ref *lispy-function-keys* (- keysym function-key-offset))))
 
     (define (parse-solitary-modifier symbol)
       ;; GNU Emacs's `parse_solitary_modifier' (`keyboard.c':7920): the
@@ -464,11 +538,19 @@
             (cond
              ((not base) (error "Invalid base event"))
              (else
-              ;; "Let the symbol A refer to the character A."
-              (let ((base (if (and (symbol? base)
-                                   (= 1 (string-length (symbol->string base))))
-                              (char->integer (string-ref (symbol->string base) 0))
-                              base)))
+              ;; "Let the symbol A refer to the character A." The C's
+              ;; `base' is a *character*, and a character in Elisp is an
+              ;; integer, so a description written with a Scheme
+              ;; character - `(control #\x)' - is the C's
+              ;; `(control ?x)' and is made one here. Without this the
+              ;; character fell past both branches below and the whole
+              ;; list was rejected as having no base.
+              (let ((base (cond
+                           ((char? base) (char->integer base))
+                           ((and (symbol? base)
+                                 (= 1 (string-length (symbol->string base))))
+                            (char->integer (string-ref (symbol->string base) 0)))
+                           (else base))))
                 (cond
                  ((integer? base)
                   ;; "Turn (shift a) into A", then "Turn (control a) into
@@ -494,23 +576,6 @@
               (cond (this (loop (cdr rest) (logior modifiers this) base))
                     (base (error "Two bases given in one event"))
                     (else (loop (cdr rest) modifiers elt)))))))
-
-    (define (key-path->event path)
-      ;; A one-key *path* as the *event* it names: `(ctrl #\s)' is 19,
-      ;; `(meta #\<)' is 134217788, `("up")' is the symbol `up'.
-      ;;
-      ;; It is the seam between the two forms while the tree is being
-      ;; moved onto events: a display's decoder builds the path - that is
-      ;; what its key table holds - and this is `event-convert-list', the
-      ;; C's way from a description to an event, applied to it.
-      ;;--------------------------------------------------------------
-      (event-convert-list
-       (map (lambda (x)
-              (cond ((char? x) (char->integer x))
-                    ((string? x) (string->symbol x))
-                    ((eq? x 'ctrl) 'control)
-                    (else x)))
-            path)))
 
     (define (kbd keys)
       ;; GNU Emacs's `kbd': "Convert KEYS to the internal Emacs key

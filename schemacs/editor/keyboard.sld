@@ -112,7 +112,7 @@
     ;; must receive but not act on to - the frame's resize.
     (only (schemacs editor subr) kbd ignore)
     (only (schemacs editor character)
-          char-meta event-convert-list key-path->event)
+          char-meta event-convert-list)
     )
 
   (export
@@ -126,6 +126,7 @@
    dispatch-key
    dispatch-key-event
    dispatch-input-event
+   function-key-translate
    event-loop
    exit-recursive-edit
    quoted-insert
@@ -149,6 +150,53 @@
     ;; `*esc-pending*' is keyboard.c's own state (its meta-prefix
     ;; resolution), which is why it lives here and not on the frame.
     (define *esc-pending* (make-parameter #f))
+
+    (define *function-key-map*
+      ;; GNU Emacs's `function-key-map' (`keyboard.c':14209', filled by
+      ;; `bindings.el':1554' and `lisp/term/common-win.el'). It "decodes
+      ;; input escape sequences": a key that is not a character, but that
+      ;; has a character people expect it to mean, is translated into
+      ;; that character before anything looks the key up. `read_key_sequence'
+      ;; is where Emacs consults it; here it is `function-key-translate',
+      ;; called from `dispatch-key'.
+      ;;
+      ;; The entries are the ones a plain (unmodified) key has, read off
+      ;; a real Emacs (`emacs -Q --batch'): the erase key is DEL 127,
+      ;; Return is 13, TAB is 9, Escape is 27 - which is what makes a
+      ;; window system's Return the same key a terminal's byte 13 is -
+      ;; and the keypad is spelled into the key beside it, `kp-enter' to
+      ;; 13 and `kp-0' to `0'. A key with no entry (`up', `f1', `menu')
+      ;; passes through unchanged and is looked up as itself.
+      ;;
+      ;; The modifier combinations `function-key-map' also carries
+      ;; (`C-kp-1' and the rest, `bindings.el':1541') and the M- ones in
+      ;; `x-alternatives-map' are not here yet.
+      ;;--------------------------------------------------------------
+      (list (cons 'backspace 127) (cons 'delete 127) (cons 'kp-delete 127)
+            (cons 'tab 9) (cons 'kp-tab 9) (cons 'linefeed 10)
+            (cons 'clear 12)
+            (cons 'return 13) (cons 'kp-enter 13)
+            (cons 'escape 27)
+            (cons 'kp-space 32)
+            (cons 'kp-multiply 42) (cons 'kp-add 43) (cons 'kp-separator 44)
+            (cons 'kp-subtract 45) (cons 'kp-decimal 46) (cons 'kp-divide 47)
+            (cons 'kp-0 48) (cons 'kp-1 49) (cons 'kp-2 50) (cons 'kp-3 51)
+            (cons 'kp-4 52) (cons 'kp-5 53) (cons 'kp-6 54) (cons 'kp-7 55)
+            (cons 'kp-8 56) (cons 'kp-9 57) (cons 'kp-equal 61)
+            (cons 'kp-home 'home) (cons 'kp-left 'left) (cons 'kp-up 'up)
+            (cons 'kp-right 'right) (cons 'kp-down 'down)
+            (cons 'kp-prior 'prior) (cons 'kp-next 'next) (cons 'kp-end 'end)
+            (cons 'kp-begin 'begin) (cons 'kp-insert 'insert)))
+
+    (define (function-key-translate key)
+      ;; KEY as `function-key-map' means it, or KEY itself when it has no
+      ;; entry there. `read_key_sequence''s translation step, over one
+      ;; key rather than a sequence - every read here answers one.
+      ;;--------------------------------------------------------------
+      (if (symbol? key)
+          (let ((found (assq key *function-key-map*)))
+            (if found (cdr found) key))
+          key))
 
     (define *selection-inhibit-update-commands*
       ;; GNU Emacs's `selection-inhibit-update-commands' (keyboard.c:14371):
@@ -431,6 +479,10 @@
       ;; `dispatch-input-event', for a caller holding one - into the very
       ;; event GNU Emacs's `read_char' would have answered with.
       ;;--------------------------------------------------------------
+      ;; `function-key-map' first, as `read_key_sequence' does: the
+      ;; erase key, Return, TAB and Escape are translated into the
+      ;; characters they mean before anything looks them up.
+      (set! key (function-key-translate key))
       (cond
        ;; ESC prefixes the next key with the meta modifier. Its event is
        ;; 27, `(kbd "ESC")', and it is the same event from either display:
@@ -440,7 +492,7 @@
        ;; binding one misses the other". A test against the *character*
        ;; was a terminal-shaped one, and on Gtk a lone ESC came out an
        ;; unhandled event instead of prefixing the next key.
-       ((eqv? key (key-path->event (list 'ctrl #\[)))
+       ((eqv? key (event-convert-list '(control #\[)))
         (*esc-pending* #t))
        ;; and the next key takes the meta modifier, which is how a
        ;; terminal's `ESC x' becomes `M-x'. A *character* event takes
@@ -875,17 +927,17 @@
                 ;; The key is the *event*, and the C is a character
                 ;; reader: `read-char' answers the character the event
                 ;; is, which for every key this asks about - a digit, a
-                ;; `C-g', RET - is the event itself. `key-path->event'
-                ;; names the event of a description, the C's
-                ;; `event-convert-list', so the tests below spell the
-                ;; keys the way Emacs's `(eq char ?\C-g)' does.
+                ;; `C-g', RET - is the event itself. `event-convert-list'
+                ;; names the event of a description and is the C's own, so
+                ;; the tests below spell the keys the way Emacs's
+                ;; `(eq char ?\C-g)' does.
                 (let* ((key (read-key-event -1))
                        (code-read (and (integer? key) key)))
                   (cond
                    ;; a C-g after the first character quits, as the
                    ;; C's quitting is enabled once `first' is past
                    ((and (not first)
-                         (eqv? key (key-path->event (list 'ctrl #\g))))
+                         (eqv? key (event-convert-list '(control #\g))))
                     (signal-quit))
                    ;; a digit of the radix: accumulate, and echo the
                    ;; digit after the prompt
@@ -913,7 +965,7 @@
                    ;; RET after the first digit terminates and is
                    ;; discarded; before that it is the character
                    ((and (not first)
-                         (eqv? key (key-path->event (list 'ctrl #\m))))
+                         (eqv? key (event-convert-list '(control #\m))))
                     (set! done #t)
                     (loop))
                    ;; any other terminator after the first digit is

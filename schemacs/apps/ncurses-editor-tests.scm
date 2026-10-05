@@ -131,7 +131,7 @@
 ;;
 ;; The tests drive the frontend the way the event loop does - as a
 ;; stream of ncurses key events the display is asked to name, through
-;; `key-event->key' - rather than as keymap paths, because the
+;; `key-event->key' - rather than as raw bytes, because the
 ;; translation from a keystroke to a path is itself part of what can
 ;; break (TAB arrives as `#\tab' but is bound as C-i, and the arrow keys
 ;; arrive as integers). Only `dispatch-key-event' is called, so no
@@ -161,11 +161,12 @@
   (new-frame ed 24 80))
 
 
-(define (run-keys-named path)
-  ;; Run one named key (a keymap path such as `("f13")') over the text
-  ;; "abc" and answer what the buffer holds afterwards. This is
-  ;; `run-keys*' with `dispatch-key-event', which takes a keymap path
-  ;; rather than a raw event - a named key has no byte to feed.
+(define (run-keys-named name)
+  ;; Run one named key *event* over the text "abc" and answer what the
+  ;; buffer holds afterwards. This is `run-keys*' with `dispatch-key-event'
+  ;; called directly, since a named key has no byte for a display to
+  ;; decode into an event - `f13' and `insert' are symbols, and a
+  ;; character's event is its own code.
   (parameterize ((*buffer-list* '())
                  (*current-buffer* #f)
                  (*this-command* #f)
@@ -177,7 +178,7 @@
         (set!window-buffer (frame-selected-window frame) ed)
         (*current-buffer* ed)
         (text-editor-insert ed "abc")
-        (dispatch-key-event frame path)
+        (dispatch-key-event frame name)
         (text-editor-to-string ed)))))
 
 (define (run-keys* text evs)
@@ -310,9 +311,9 @@
 
 (test-equal '("abc" "abc" "abcz")
   ;; a named key that no map binds, then a character, then nothing
-  (list (run-keys-named (list "f13"))
-        (run-keys-named (list "insert"))
-        (run-keys-named (list #\z))))
+  (list (run-keys-named 'f13)
+        (run-keys-named 'insert)
+        (run-keys-named (char->integer #\z))))
 
 
 (test-end "schemacs_ncurses_editor_command")
@@ -917,8 +918,8 @@
 ;; The minibuffer keymaps are sparse maps that inherit the global one, so
 ;; RET leaves the minibuffer, C-g abandons the command that asked, M-p and
 ;; M-n walk the history, and the ordinary editing keys still apply.
-(define (bound-in keymap path)
-  (km:keymap-lookup keymap (km:keymap-index path)))
+(define (bound-in keymap keys)
+  (km:keymap-lookup keymap (km:keymap-index keys)))
 (define (command-named? action name)
   ;; Since the `define-command' conversion the maps hold the commands'
   ;; *procedures*, whose record - with the name - sits in the obarray;

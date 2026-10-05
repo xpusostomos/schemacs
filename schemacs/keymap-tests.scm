@@ -462,10 +462,10 @@
           (keymap-layer (map-key (list (list 'ctrl #\f)) 'global-command)
                         (map-key (list (list 'ctrl #\x) (list 'ctrl #\f)) 'find-file))))
 
-(define (lookup-in keymaps key-path)
+(define (lookup-in keymaps keys)
   (let ((r (keymap-lookup
             (modal-lookup-state-keymap (new-modal-lookup-state keymaps))
-            (keymap-index key-path))))
+            (keymap-index keys))))
     (if (keymap-type? r) 'keymap r)))
 
 ;; a list is accepted at all

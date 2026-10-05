@@ -74,20 +74,23 @@
       ;;--------------------------------------------------------------
       (make-parameter #f))
 
-    (define (define-key keymap key-path command)
-      ;; Bind KEY-PATH to COMMAND in KEYMAP: GNU Emacs's `define-key'. The
+    (define (define-key keymap keys command)
+      ;; Bind KEYS to COMMAND in KEYMAP: GNU Emacs's `define-key'. The
       ;; binding goes into the keymap's top layer, which is the one a lookup
       ;; tries first, so a definition here shadows one in a layer below it.
       ;;
-      ;; KEY-PATH is a list of keys, each either a character or a list of a
-      ;; modifier and a character - `(ctrl #\x)' then `#\f' for C-x C-f -
-      ;; which is the form `KM:MAP-KEY' takes.
+      ;; KEYS is a *key sequence* - what `(kbd "C-x C-f")' answers with,
+      ;; a vector of events, which is what Emacs's `define-key' takes
+      ;; ("a string or a vector of symbols and characters,
+      ;; representing a sequence of keystrokes and events",
+      ;; `keymap.c':1084'). The tree's own spelling, a list of modifier
+      ;; symbols and characters, still converts too.
       ;;--------------------------------------------------------------
       (update (lambda (layer)
                 (values
                  (km:keymap-layer-update!
                   km:prefer-new-bindings layer
-                  (list (km:map-key key-path command)))
+                  (list (km:map-key keys command)))
                  #f))
               keymap km:=>keymap-top-layer!)
       command)
@@ -114,8 +117,7 @@
       ;; of them, and a printing character is itself. What
       ;; `what-cursor-position' shows the character after point as.
       ;;
-      ;; Only the character branch of the C is here: function keys and
-      ;; event symbols are strings in a key path here, and `text-char-
+      ;; Only the character branch of the C is here: `text-char-
       ;; description' - its octal-and-backslashes spelling - is not.
       ;;--------------------------------------------------------------
       (let ((c (char->integer key)))

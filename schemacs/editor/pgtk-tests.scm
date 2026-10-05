@@ -94,8 +94,18 @@
 ;; *terminal* folds these onto `(ctrl #\m)' and `(ctrl #\i)' because a
 ;; terminal has one byte for the pair; a window system has the keysym,
 ;; and Emacs's event there is the character.
-(test-equal 13 (key-event 13))                            ; GDK_KEY_Return
-(test-equal 9 (key-event 9))                              ; GDK_KEY_Tab
+;; Return, TAB and Escape keep their *names* here: a window system
+;; sends a keysym, and Emacs names it `return', `tab', `escape' from
+;; `lispy_function_keys' (`keyboard.c':5513'). That they *mean* 13, 9
+;; and 27 is `function-key-map''s job (`bindings.el':1554'), one
+;; translation further on - `keyboard.sld''s `function-key-translate',
+;; exercised in `subr-tests.scm'.
+(test-equal 'return (key-event #xff0d))                   ; GDK_KEY_Return
+(test-equal 'tab (key-event #xff09))                      ; GDK_KEY_Tab
+(test-equal 'escape (key-event #xff1b))                   ; GDK_KEY_Escape
+(test-equal 'delete (key-event #xffff))                   ; GDK_KEY_Delete
+(test-equal 'kp-enter (key-event #xff8d))
+(test-equal 'M-return (key-event (encode 8 #xff0d)))
 
 ;; A resize is a code, not a key: `read-input-event' cannot answer a
 ;; pair, so the display uses one integer for it, as a terminal uses

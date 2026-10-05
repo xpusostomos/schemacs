@@ -45,7 +45,7 @@
     ;; `alist-delete' removes one selection from the ownership record.
     (only (srfi srfi-1) alist-delete)
     (only (scheme write) display write)
-    (only (guile) catch ash logand inexact->exact round
+    (only (guile) catch ash logand logior lognot inexact->exact round
           get-internal-real-time internal-time-units-per-second)
     (oop goops)
     ;; The drawing primitives, which guile-gi does not bind.
@@ -95,9 +95,13 @@
     ;; How many cells a character takes - a CJK ideograph is one character
     ;; and two cells, so a run is not `string-length' wide.
     (only (schemacs editor disp-table) char-display-width)
-    ;; `key-path->event' is the event model's, in `character.sld': the
-    ;; C's `event-convert-list', which every decoder answers with.
-    (only (schemacs editor character) key-path->event)
+    ;; The event model, in `character.sld': the modifier bits a decoder
+    ;; ORs into an event, the two C functions that fold a keysym into its
+    ;; event - `make_ctrl_char' and `apply_modifiers' - and
+    ;; `lispy_function_keys', which names a key that is not a character.
+    (only (schemacs editor character)
+          apply-modifiers char-ctl char-hyper char-meta char-shift
+          char-super function-key-name make-ctrl-char)
     ;; The frame's focus, which the window tells us about: it decides
     ;; whether the cursor blinks and whether it is drawn hollow.
     (only (schemacs editor frame)
@@ -285,82 +289,74 @@
     ;; note that Mod1 is META, not alt.
     ;;------------------------------------------------------------------
 
-    (define named-keysyms
-      ;; The keysyms this editor's keymaps have names for, as
-      ;; `(KEYSYM . NAME)'. The rest are left unhandled, which is what
-      ;; Emacs does with a key it has no name for.
-      ;;--------------------------------------------------------------
-      (list (cons #xff51 "left")   (cons #xff53 "right")
-            (cons #xff52 "up")     (cons #xff54 "down")
-            (cons #xff50 "home")   (cons #xff57 "end")
-            (cons #xff55 "prior")  (cons #xff56 "next")
-            (cons #xffff "delete") (cons #xff63 "insert")))
-
-    (define (modifier-symbols state)
-      ;; The modifier symbols of a GDK modifier state, in the order
-      ;; `key-event->key' builds its paths in. The masks are
-      ;; Gdk's: SHIFT 1, CONTROL 4, MOD1 8, SUPER 1<<26, HYPER 1<<27,
-      ;; META 1<<28. Note that MOD1 means META here, as Emacs has it in
-      ;; `pgtk_gtk_to_emacs_modifiers' - not alt.
+    (define (modifier-bits state)
+      ;; The Gdk modifier STATE as the C's modifier *bits* - GNU Emacs's
+      ;; `pgtk_gtk_to_emacs_modifiers' (pgtkterm.c:5157), with `x_x_to_emacs_modifiers'
+      ;; deciding which Gdk mask is which. The masks are Gdk's: SHIFT 1,
+      ;; CONTROL 4, MOD1 8, SUPER 1<<26, HYPER 1<<27, META 1<<28. MOD1
+      ;; means META here, as Emacs has it - not Alt; Gdk has no Alt.
+      ;;
+      ;; This is the whole of what the backend is for: it hands the rest
+      ;; of Emacs a bitmask, and `make_lispy_event' (keyboard.c:3783)
+      ;; turns that and the keysym into one event. There is no list of
+      ;; modifier *symbols* in the C's path, and no "keymap path".
       ;;--------------------------------------------------------------
       (let ((bits (if (integer? state) state 0)))
         (define (set? mask) (not (= 0 (logand bits mask))))
-        ;; Shift is deliberately dropped: `(schemacs keymap)' has no shift
-        ;; modifier - `modifier->integer' takes only ctrl/meta/super/hyper/
-        ;; alt - so a shifted key must be reported without it or the lookup
-        ;; fails with "unknown keymap-index modifier symbol". The keysym
-        ;; already carries the case (shift+a arrives as `A'), and the
-        ;; terminal drops shift the same way: `named-key-modifiers' in
-        ;; term.sld answers #f for the shift variants.
-        (append (if (set? (ash 1 26)) (list 'super) '())
-                (if (set? (ash 1 27)) (list 'hyper) '())
-                (if (or (set? (ash 1 28)) (set? 8)) (list 'meta) '())
-                (if (set? 4) (list 'ctrl) '()))))
+        (logior (if (set? 1) char-shift 0)
+                (if (set? 4) char-ctl 0)
+                (if (or (set? (ash 1 28)) (set? 8)) char-meta 0)
+                (if (set? (ash 1 26)) char-super 0)
+                (if (set? (ash 1 27)) char-hyper 0))))
 
-    (define (character-path c)
-      ;; The key sequence for a character. A control character is
-      ;; `C-<letter>`, which is the ASCII protocol a terminal obeys:
-      ;; `ncurses-key->keymap-path' in `term.sld' folds the same way, and
-      ;; the two must agree because the keymaps are the same. This is
-      ;; what makes RET (`#\\return`, code 13) the `C-m' the keymap binds
-      ;; to `newline' rather than a literal carriage return.
+    (define (keysym-event state keysym)
+      ;; The *key event* for one keysym and Gdk modifier state - GNU
+      ;; Emacs's `make_lispy_event' for a window system, over what
+      ;; `xg_widget_key_press_event_cb' (gtkutil.c) hands over.
+      ;;
+      ;; `keyboard.c':3783 is the arithmetic, and it is three steps: the
+      ;; keysym is the event's character; a Control modifier *folds* that
+      ;; character with `make_ctrl_char' - so `C-x' is 24, the event
+      ;; `(kbd "C-x")' answers, and not a `ctrl' symbol beside a letter;
+      ;; and meta, alt, hyper and super become the matching bits on the
+      ;; event. Shift is not among them: the keysym carries the case.
+      ;;
+      ;; A key that is not a character - an arrow, a function key - is the
+      ;; *symbol* Emacs reads there, with the modifiers in its name:
+      ;; `M-up', `C-left'. That is `apply_modifiers', the C's own.
       ;;--------------------------------------------------------------
-      (let ((ci (char->integer c)))
+      (let* ((bits (modifier-bits state))
+             ;; What `make_lispy_event' ORs in: everything but Control
+             ;; (folded into the character below) and Shift (in the
+             ;; keysym).
+             (extra (logand bits (lognot (logior char-ctl char-shift)))))
+        (define (character code)
+          (if (zero? (logand bits char-ctl))
+              (logior extra code)
+              (logior extra (make-ctrl-char code))))
         (cond
-         ((char=? c #\return) (list 'ctrl #\m))
-         ((char=? c #\newline) (list 'ctrl #\j))
-         ((char=? c #\esc) (list 'ctrl #\[))
-         ((or (= ci 127) (char=? c #\backspace)) (list 'ctrl #\h))
-         ((= ci 0) (list 'ctrl #\@))
-         ((and (< 0 ci) (< ci 27)) (list 'ctrl (integer->char (+ 96 ci))))
-         ;; unfolded, as `make_ctrl_char' unfolds them - see `term.sld'
-         ((and (>= ci 28) (< ci 32)) (list 'ctrl (integer->char (+ 64 ci))))
-         (else (list c)))))
-
-    (define (key-event->path ev)
-      ;; The keymap path for one of this display's key events: a
-      ;; character, or a named key's string.
-      ;;--------------------------------------------------------------
-      (let ((keysym (cdr ev))
-            (mods (modifier-symbols (car ev))))
-        (cond
-         ((< keysym 256)
-          ;; A plain ASCII keysym is the character itself.
-          (append mods (character-path (integer->char keysym))))
-         ;; Escape is the terminal's `C-[': a terminal sends byte 27 and
-         ;; `ncurses-key->keymap-path' folds it to `(ctrl #\\[)', which
-         ;; is the ESC that makes `M-w' out of `w' - and the two
-         ;; displays must name it the same way or a keymap binding one
-         ;; misses the other. Gtk sends the keysym 0xff1b.
-         ((= keysym #xff1b) (character-path #\esc))
+         ;; "First deal with keysyms which have defined translations to
+         ;; characters" (gtkutil.c): ASCII.
+         ((and (>= keysym 32) (< keysym 128)) (character keysym))
+         ;; keysyms directly mapped to Unicode characters
+         ((and (>= keysym #x01000000) (<= keysym #x0110FFFF))
+          (character (logand keysym #xFFFFFF)))
          (else
-          (let* ((unicode (keyval-to-unicode keysym))
-                 (named (assoc keysym named-keysyms)))
+          ;; A key that is not a character: a name this editor's keymaps
+          ;; have for the keysym, with the modifiers on it.
+          (let ((name (function-key-name keysym)))
             (cond
-             (named (append mods (list (cdr named))))
-             ((and unicode (> unicode 0))
-              (append mods (character-path (integer->char unicode))))
-             (else #f)))))))
+             ;; A key that is not a character is the *symbol* Emacs reads
+             ;; there, with the modifiers in its name - `M-up', `C-left'.
+             ;; The names are `lispy_function_keys'' (`keyboard.c':5513'),
+             ;; which is where `escape', `return' and the arrows come
+             ;; from; what those then *mean* - Return is 13, Escape is 27
+             ;; - is `function-key-map''s, one translation further on,
+             ;; and not this backend's business.
+             (name (apply-modifiers bits (string->symbol name)))
+             (else
+              (let ((unicode (keyval-to-unicode keysym)))
+                (and unicode (> unicode 0) (character unicode))))))))))
 
     ;;----------------------------------------------------------------
     ;; The display
@@ -466,7 +462,7 @@
     (define *delete-frame-code* -3)
     ;; ^ What the window manager's request to close the frame is reported
     ;; as: `*resize-code*' again, for the same reason
-    ;; and with the same shape - a key path the command loop can dispatch,
+    ;; and with the same shape - a key event the command loop can dispatch,
     ;; bound to a command in `files.sld' (`handle-delete-frame', which is
     ;; `frame.el''s). Gtk's `delete-event' asks whether it may destroy the
     ;; window, and this is the answer being "not yet": Emacs's
@@ -609,18 +605,21 @@
 
     (define-method (key-event->key (d <pgtk-display>) ev)
       ;; EV is the integer `read-input-event' answered; decode it into the
-      ;; modifier state and keysym this file builds paths from, and answer
-      ;; the *key event* those name - GNU Emacs's `make_lispy_event' for a
-      ;; window system - through `key-path->event'.
+      ;; modifier state and keysym, and answer the *key event* GNU Emacs's
+      ;; `make_lispy_event' would have - which is what `keysym-event'
+      ;; builds. The four codes below are not keys at all: they are the
+      ;; frame events the same decode carries, named as the keymaps name
+      ;; them (`(kbd "<resize>")' and the three beside it).
       ;;--------------------------------------------------------------
-      (let ((path (cond
-                   ((eqv? ev *resize-code*) '("resize"))
-                   ((eqv? ev *focus-in-code*) '("focus-in"))
-                   ((eqv? ev *focus-out-code*) '("focus-out"))
-                   ((eqv? ev *delete-frame-code*) '("delete-frame"))
-                   ((integer? ev) (key-event->path (pgtk-decode-event ev)))
-                   (else #f))))
-        (and path (key-path->event path))))
+      (cond
+       ((eqv? ev *resize-code*) 'resize)
+       ((eqv? ev *focus-in-code*) 'focus-in)
+       ((eqv? ev *focus-out-code*) 'focus-out)
+       ((eqv? ev *delete-frame-code*) 'delete-frame)
+       ((integer? ev)
+        (let ((decoded (pgtk-decode-event ev)))
+          (and decoded (keysym-event (car decoded) (cdr decoded)))))
+       (else #f)))
 
     (define-method (screen-size (d <pgtk-display>))
       ;; In pixels, and a character is one pixel here, so this is the

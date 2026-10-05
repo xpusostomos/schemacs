@@ -5,7 +5,10 @@
  (only (srfi 64) test-assert test-equal test-begin test-end)
  (only (schemacs editor subr) kbd event-modifiers event-basic-type
        event-convert-list event-symbol-elements)
- (only (schemacs keymap) keymap-index mod-index char-index))
+ (only (schemacs keymap) keymap-index mod-index char-index)
+ ;; `function-key-map''s translation of a named key into the character it
+ ;; means, which is `read_key_sequence''s step.
+ (only (schemacs editor keyboard) function-key-translate))
 
 ;; The key event model: GNU Emacs's `subr.el' and `keyboard.c' functions
 ;; that say what a key *is*, and `kbd', which builds one.
@@ -134,5 +137,30 @@
   (same-index? (kbd "<up>") '(("up"))))
 (test-assert "kbd M-<up> indexes as the path spelling"
   (same-index? (kbd "M-<up>") '((meta "up"))))
+
+;; ------------------------------------------------------------------
+;; `function-key-map' (`bindings.el':1554'), read off a real Emacs: the
+;; erase key is DEL, Return is 13, TAB is 9, Escape is 27, and the keypad
+;; is spelled into the key beside it.
+
+(test-equal 127 (function-key-translate 'backspace))
+(test-equal 127 (function-key-translate 'delete))
+(test-equal 127 (function-key-translate 'kp-delete))
+(test-equal 9 (function-key-translate 'tab))
+(test-equal 10 (function-key-translate 'linefeed))
+(test-equal 12 (function-key-translate 'clear))
+(test-equal 13 (function-key-translate 'return))
+(test-equal 13 (function-key-translate 'kp-enter))
+(test-equal 27 (function-key-translate 'escape))
+(test-equal 48 (function-key-translate 'kp-0))
+(test-equal 61 (function-key-translate 'kp-equal))
+(test-equal 'home (function-key-translate 'kp-home))
+(test-equal 'insert (function-key-translate 'kp-insert))
+;; a key the map says nothing about is looked up as itself
+(test-equal 'up (function-key-translate 'up))
+(test-equal 'f1 (function-key-translate 'f1))
+(test-equal 'menu (function-key-translate 'menu))
+;; and a character is not the map's business at all
+(test-equal 97 (function-key-translate 97))
 
 (test-end "schemacs_editor_subr")

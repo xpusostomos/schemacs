@@ -46,7 +46,6 @@
     (schemacs editor dired)
     (schemacs editor fns)
     (schemacs editor timefns)
-    (schemacs weak)
     (schemacs editor engine)
     (schemacs editor frame)
     (schemacs editor characters)

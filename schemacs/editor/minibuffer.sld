@@ -116,9 +116,9 @@
     ;; The event model, for `read-char-from-minibuffer': it asks the
     ;; key *event* what it is, `char-alt' being `lisp.h''s lowest
     ;; modifier bit - the boundary between a plain character and a
-    ;; modified key. `key-path->event' is the C's `event-convert-list',
-    ;; which names one key's event from its description.
-    (only (schemacs editor character) char-alt key-path->event)
+    ;; modified key - and `event-convert-list', the C's way to name one
+    ;; key's event from its description.
+    (only (schemacs editor character) char-alt event-convert-list)
     ;; `read-char-from-minibuffer' reads the one key that answers it with
     ;; the command loop's read, so a pushed-back event reaches it too;
     ;; what it draws with is the display's `render!'.
@@ -501,11 +501,11 @@ read-number-history
       (km:keymap
        '*minibuffer-local-map*
        (km:alist->keymap-layer
-        `(((ctrl #\m) . ,exit-minibuffer)
-          ((ctrl #\j) . ,exit-minibuffer)
-          ((ctrl #\g) . ,abort-recursive-edit)
-          ((meta #\p) . ,previous-history-element)
-          ((meta #\n) . ,next-history-element)))))
+        (list (cons (kbd "RET") exit-minibuffer)
+              (cons (kbd "C-j") exit-minibuffer)
+              (cons (kbd "C-g") abort-recursive-edit)
+              (cons (kbd "M-p") previous-history-element)
+              (cons (kbd "M-n") next-history-element)))))
 
 
     ;;----------------------------------------------------------------
@@ -642,7 +642,7 @@ read-number-history
                ;; byte, so the event is `(kbd "C-g")' - the same event a
                ;; window system's `g' keysym with the control modifier
                ;; becomes.
-               ((eqv? key (key-path->event (list 'ctrl #\g))) (signal-quit))
+               ((eqv? key (event-convert-list '(control #\g))) (signal-quit))
                ;; a key the question names as one character answers it -
                ;; `y' and `n' and the rest. A character is an event
                ;; below every modifier bit and above the control range;
@@ -2030,7 +2030,7 @@ read-number-history
       (km:keymap
        '*minibuffer-local-filename-completion-map*
        (km:alist->keymap-layer
-        `(((#\space) . ,self-insert-command)))))
+        (list (cons (kbd "SPC") self-insert-command)))))
 
     (define minibuffer-local-completion-map
       ;; GNU Emacs's `minibuffer-local-completion-map', whose parent is
@@ -2053,13 +2053,13 @@ read-number-history
              '*minibuffer-local-completion-map*
              (append
               (list (km:alist->keymap-layer
-                     `(((ctrl #\i) . ,minibuffer-complete)
-                       ((#\space) . ,minibuffer-complete-word)
-                       ((#\?) . ,minibuffer-completion-help)
-                       ((ctrl #\m) . ,minibuffer-completion-exit)
-                       ((meta "up") . ,minibuffer-previous-completion)
-                       ((meta "down") . ,minibuffer-next-completion)
-                       ((meta ctrl #\m) . ,minibuffer-choose-completion))))
+                     (list (cons (kbd "TAB") minibuffer-complete)
+                           (cons (kbd "SPC") minibuffer-complete-word)
+                           (cons (kbd "?") minibuffer-completion-help)
+                           (cons (kbd "RET") minibuffer-completion-exit)
+                           (cons (kbd "M-<up>") minibuffer-previous-completion)
+                           (cons (kbd "M-<down>") minibuffer-next-completion)
+                           (cons (kbd "M-RET") minibuffer-choose-completion))))
               (km:keymap->layers-list minibuffer-local-map))))
 
 
@@ -2074,8 +2074,8 @@ read-number-history
              '*minibuffer-local-must-match-map*
              (append
               (list (km:alist->keymap-layer
-                     `(((ctrl #\m) . ,minibuffer-complete-and-exit)
-                       ((ctrl #\j) . ,minibuffer-complete-and-exit))))
+                     (list (cons (kbd "RET") minibuffer-complete-and-exit)
+                           (cons (kbd "C-j") minibuffer-complete-and-exit))))
               (km:keymap->layers-list minibuffer-local-completion-map))))
 
     ;;----------------------------------------------------------------

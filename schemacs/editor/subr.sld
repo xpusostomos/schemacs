@@ -34,8 +34,7 @@
           kbd char-alt char-super char-hyper char-shift char-ctl char-meta
           parse-solitary-modifier make-ctrl-char
           parse-modifiers-uncached event-symbol-elements
-          event-modifiers event-basic-type apply-modifiers event-convert-list
-          key-path->event)
+          event-modifiers event-basic-type apply-modifiers event-convert-list)
     )
 
   (export
@@ -51,7 +50,6 @@
    parse-solitary-modifier make-ctrl-char
    parse-modifiers-uncached event-symbol-elements
    event-modifiers event-basic-type apply-modifiers event-convert-list
-   key-path->event
    run-hook-with-args-until-success
    *after-change-major-mode-hook*
    *change-major-mode-after-body-hook*

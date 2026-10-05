@@ -50,14 +50,16 @@
           define-key *default-keymap* *special-event-map*)
     ;; `SIGTSTP' is raised through `kill': `(scheme base)''s `raise'
     ;; raises an exception, not a signal.
-    (only (guile) kill getpid SIGTSTP)
+    ;; `window-cursor-table' is held weakly - see the note above
+    ;; `WINDOW-CURSOR-TABLE'. Guile's own weak table, a key held weakly.
+    (only (guile) kill getpid SIGTSTP
+          make-weak-key-hash-table hashq-ref hashq-set!)
     ;; The message timeout is a time in seconds, and so is a timer's.
     (only (scheme time) current-second)
     ;; `w->cursor_off_p' and the blink's timers are kept beside the
     ;; window and the frame rather than in the window, for the reason
     ;; `buffer.sld' gives for its own slots: the record is shared and
     ;; changing it touches every library that makes a window.
-    (only (schemacs weak) new-weak-table weak-table-ref weak-table-set!)
     ;; `display-graphic-p' is a question about the window system the frame
     ;; is on, which is what the face machinery records.
     (only (schemacs editor faces) *window-system*)
@@ -486,7 +488,7 @@
     ;; window's fields will look, which is the point.
     ;;------------------------------------------------------------------
 
-    (define window-cursor-table (new-weak-table))
+    (define window-cursor-table (make-weak-key-hash-table))
     ;; ^ The windows whose cursor has been blinked off, standing in for
     ;; the `bool_bf cursor_off_p : 1' that `struct window' has in Emacs.
     ;; Beside the window rather than in it so that adding it does not
@@ -497,10 +499,10 @@
       ;; `w->cursor_off_p', which `get_window_cursor_type' reads as "use
       ;; normal cursor if not blinked off".
       ;;--------------------------------------------------------------
-      (weak-table-ref window-cursor-table window #f))
+      (hashq-ref window-cursor-table window #f))
 
     (define (set!window-cursor-off? window off?)
-      (weak-table-set! window-cursor-table window (and off? #t)))
+      (hashq-set! window-cursor-table window (and off? #t)))
 
     (define (internal-show-cursor window show)
       ;; GNU Emacs's `internal-show-cursor': set WINDOW's cursor-visibility

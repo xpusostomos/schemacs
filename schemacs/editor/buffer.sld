@@ -26,9 +26,9 @@
   ;;    buffer struct, so that the collector can see them and so that
   ;;    reaching them is a field read. The engine is a large and tested
   ;;    library, and a keymap is a management concern rather than a text
-  ;;    one, so the slots live in a weak table keyed by the buffer
-  ;;    (`WEAK-TABLE', from `(schemacs weak)') - weak because a table that
-  ;;    held its keys strongly would keep every killed buffer alive
+  ;;    one, so the slots live in a weak table keyed by the buffer -
+  ;;    `MAKE-WEAK-KEY-HASH-TABLE' - weak because a table that held its
+  ;;    keys strongly would keep every killed buffer alive
   ;;    forever. They move into the record when the engine is next opened.
   ;;  * **Names.** Where Emacs has a *function*, this library uses its
   ;;    name - `GET-BUFFER', `KILL-BUFFER', `SET-BUFFER', `OTHER-BUFFER'
@@ -48,16 +48,14 @@
     ;; `sort' is what `overlays-at' orders by priority with. It is in
     ;; `(guile)' as well as `(srfi 1)', and this library already reaches
     ;; into `(guile)' for `getcwd'.
-    (only (guile) caddr getcwd sort)
+    ;; The buffer's side tables - its slots and its overlays - are held
+    ;; weakly, keyed by the buffer: see the note in the header. Guile's own
+    ;; weak table, a key held weakly and a value held strongly.
+    (only (guile) caddr getcwd sort
+          make-weak-key-hash-table hashq-ref hashq-set! hashq-remove!)
     ;; `run-hooks' is `subr.el''s, and `kill-all-local-variables' runs
     ;; `change-major-mode-hook' through it.
     (only (schemacs editor subr) run-hooks)
-    (only (schemacs weak)
-          new-weak-table
-          weak-table-ref
-          weak-table-set!
-          weak-table-delete!
-          weak-table-keys)
     (only (schemacs editor engine)
           *inhibit-read-only*
           new-text-editor
@@ -803,7 +801,7 @@
                         (set!window-buffer window replacement)
                         (set!window-top-line window 0))
                       (loop (cdr windows)))))
-                (weak-table-delete! buffer-slots-table buffer)
+                (hashq-remove! buffer-slots-table buffer)
                 ;; Emacs sets the killed buffer's `name' to nil and keeps
                 ;; the old one in `last_name'. That nil *is* why
                 ;; `buffer-name' answers nil for a killed buffer - the
@@ -862,7 +860,7 @@
     ;; overlay to one window.
     ;;------------------------------------------------------------------
 
-    (define buffer-overlays-table (new-weak-table))
+    (define buffer-overlays-table (make-weak-key-hash-table))
     ;; ^ each buffer's overlays, as a list in order by start
 
     ;; `*inhibit-read-only*' is GNU Emacs's `inhibit-read-only'
@@ -897,11 +895,11 @@
       ;; with no current buffer does.
       ;;--------------------------------------------------------------
       (if buffer
-          (weak-table-ref buffer-overlays-table buffer '())
+          (hashq-ref buffer-overlays-table buffer '())
           '()))
 
     (define (set!buffer-overlays! buffer overlays)
-      (weak-table-set! buffer-overlays-table buffer overlays))
+      (hashq-set! buffer-overlays-table buffer overlays))
 
     (define-record-type <overlay-type>
       (make<overlay> buffer start end plist)
@@ -1120,7 +1118,7 @@
       ;; so that a buffer-local variable can be any name a ported Elisp
       ;; sets, which is what `setq-local' needs.
       ;;--------------------------------------------------------------
-      (new-weak-table))
+      (make-weak-key-hash-table))
 
     (define (buffer-local-value buffer key . args)
       ;; The buffer-local value of KEY in BUFFER, or the optional default:
@@ -1129,7 +1127,7 @@
       ;; a symbol for a ported Elisp variable, and this library's own
       ;; slots below are keys of its own.
       ;;--------------------------------------------------------------
-      (let* ((slots (weak-table-ref buffer-slots-table buffer '()))
+      (let* ((slots (hashq-ref buffer-slots-table buffer '()))
              (entry (assq key slots)))
         (cond (entry (cdr entry))
               ((pair? args) (car args))
@@ -1139,8 +1137,8 @@
       ;; Make KEY locally VALUE in BUFFER: GNU Emacs's `setq-local' and the
       ;; `make-local-variable' beneath it.
       ;;--------------------------------------------------------------
-      (let ((slots (weak-table-ref buffer-slots-table buffer '())))
-        (weak-table-set! buffer-slots-table buffer
+      (let ((slots (hashq-ref buffer-slots-table buffer '())))
+        (hashq-set! buffer-slots-table buffer
                          (cons (cons key value)
                                (let loop ((rest slots))
                                  (cond ((null? rest) '())
@@ -1297,9 +1295,9 @@
         ;; file name to the process's directory - and it is why
         ;; `dired-advertise', which runs from a mode, read the wrong
         ;; directory until this preserved it.
-        (weak-table-set!
+        (hashq-set!
          buffer-slots-table buffer
-         (let loop ((slots (weak-table-ref buffer-slots-table buffer '()))
+         (let loop ((slots (hashq-ref buffer-slots-table buffer '()))
                     (kept '()))
            (cond ((null? slots) kept)
                  ((memq (caar slots) *permanent-local-variables*)

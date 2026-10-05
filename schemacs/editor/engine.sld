@@ -27,8 +27,13 @@
           vbal-type?  vbal->alist  alist->vbal
           )
     ;;(only (schemacs lexer) make<source-file-location>)
-    (only (schemacs weak)
-          new-weak-set  weak-set-add!  weak-set-delete!  weak-set-for-each)
+    ;; The marker chain is held weakly - see the note above
+    ;; `MAKE<MARKER>'. There is no Emacs name for the mechanism and no
+    ;; wrapper for it any more: this is Guile's own weak table, a key
+    ;; held weakly with a constant for its value, which `(schemacs
+    ;; weak)' used to spell `new-weak-set'.
+    (only (guile)
+          make-weak-key-hash-table  hashq-set!  hashq-remove!  hash-for-each)
     (only (schemacs editor cdf)
           new-cdf  cdf-cursor  cdf-maximum  cdf-ref
           cdf-fill  cdf-invalidate!  cdf-push  cdf-find
@@ -744,7 +749,7 @@
                         ;; The mark, pointing nowhere until it is set,
                         ;; and an empty marker chain.
                         (make<marker> #f 0 #f)
-                        (new-weak-set)
+                        (make-weak-key-hash-table)
                         ;; Nothing is waiting to deactivate the mark.
                         #f
                         ;; Named as `generate-new-buffer' names a
@@ -1285,9 +1290,10 @@
     ;; while sweeping, so an unreachable marker is collected and its
     ;; place in the chain goes with it. A Scheme implementation cannot
     ;; hook its collector's sweep, so the chain holds its markers
-    ;; weakly instead (`(schemacs weak)'), which comes to the same
-    ;; thing: a marker that nothing else refers to is collected, and it
-    ;; stops being adjusted.
+    ;; weakly instead - `MAKE-WEAK-KEY-HASH-TABLE', whose key is held
+    ;; weakly and whose value is the constant `#t' - which comes to the
+    ;; same thing: a marker that nothing else refers to is collected,
+    ;; and it stops being adjusted.
 
     (define-record-type <marker-type>
       (make<marker> buffer index insertion-type)
@@ -1329,7 +1335,7 @@
       ;;--------------------------------------------------------------
       (let ((marker (make<marker> ed index
                                 (and (pair? insertion-type) (car insertion-type)))))
-        (weak-set-add! (text-editor-markers ed) marker)
+        (hashq-set! (text-editor-markers ed) marker #t)
         marker))
 
     (define (set-marker! marker position . buffer)
@@ -1347,10 +1353,10 @@
             (error "set-marker! needs a buffer for a marker that points nowhere"))
           (set!marker-buffer marker ed)
           (set!%marker-index marker position)
-          (weak-set-add! (text-editor-markers ed) marker))
+          (hashq-set! (text-editor-markers ed) marker #t))
          (else
           (when ed
-            (weak-set-delete! (text-editor-markers ed) marker))
+            (hashq-remove! (text-editor-markers ed) marker))
           (set!marker-buffer marker #f)
           (set!%marker-index marker 0)))
         marker))
@@ -1363,7 +1369,8 @@
       ;; Apply PROC to every marker in ED's chain. A marker that has
       ;; been collected is simply no longer in it.
       ;;--------------------------------------------------------------
-      (weak-set-for-each proc (text-editor-markers ed)))
+      (hash-for-each (lambda (marker _) (proc marker))
+                     (text-editor-markers ed)))
 
     (define (adjust-markers-for-insertion! ed position delta)
       ;; Move the markers of ED for DELTA characters inserted at

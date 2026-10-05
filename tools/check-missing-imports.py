@@ -47,7 +47,7 @@ EDITOR_LIBS = [
     '(schemacs editor simple)', '(schemacs editor window)',
     '(schemacs editor isearch)', '(schemacs editor xdisp)',
     '(schemacs editor disp-table)', '(schemacs editor files)',
-    '(schemacs keymap)', '(schemacs lens)', '(schemacs weak)',
+    '(schemacs keymap)', '(schemacs lens)',
     '(schemacs vector)', '(schemacs string)', '(schemacs bitwise)',
     '(schemacs comparator)', '(schemacs hash-table)', '(schemacs pretty)',
     '(schemacs lexer)', '(schemacs bit-stack)', '(schemacs cursor)',

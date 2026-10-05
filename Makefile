@@ -22,7 +22,6 @@ SCHEME_LIBRARIES := \
   ./schemacs/editor/dired.sld \
   ./schemacs/editor/fns.sld \
   ./schemacs/editor/timefns.sld \
-  ./schemacs/weak.sld \
   ./schemacs/editor/engine.sld \
   ./schemacs/editor/frame.sld \
   ./schemacs/editor/env.sld \
