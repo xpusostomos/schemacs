@@ -1528,13 +1528,13 @@ non-nil."
                    ;; `region-extract-function''s default for a nil
                    ;; METHOD is the region's text (`simple.el:1452');
                    ;; there is no `filter-buffer-substring' here. The
-                   ;; region answers are one-based, the engine's copy
-                   ;; zero-based - the conversion at the edge.
+                   ;; region's answers are positions, and so are the
+                   ;; engine's, so nothing is converted.
                    (gui-set-selection 'PRIMARY
                                       (text-editor-copy-string
                                        (current-buffer)
-                                       (- (region-beginning) 1)
-                                       (- (region-end) 1))))))
+                                       (region-beginning)
+                                       (region-end))))))
           ;; a temporarily-enabled Transient Mark mode goes back to what
           ;; it was
           (when (eq? (buffer-local-value (current-buffer)

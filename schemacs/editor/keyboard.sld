@@ -331,8 +331,8 @@
                 ;; necessarily the one the positions were computed in.
                 (let ((txt (text-editor-copy-string
                             buffer
-                            (- (region-beginning) 1)
-                            (- (region-end) 1))))
+                            (region-beginning)
+                            (region-end))))
                   (unless (= 0 (string-length txt))
                     ;; Don't set empty selections.
                     (gui-set-selection 'PRIMARY txt)))))

@@ -16,14 +16,16 @@
   ;; Two things this library does not carry over from the C, both stated
   ;; where they matter:
   ;;
-  ;;  * **Positions are 0-based.** Emacs's interval positions are 1-based
-  ;;    for a buffer (`create_root_interval' sets `new->position = BEG',
-  ;;    which is 1) and 0-based for a string, because they *are* Lisp
-  ;;    buffer positions. This engine indexes characters from 0
-  ;;    everywhere - `text-editor-get-cursor' is such an index - so the
-  ;;    positions here are 0-based too, which is Emacs's *string*
-  ;;    convention. The 1-based conversion belongs to the elisp layer,
-  ;;    the same way `point' does, and is not done silently here.
+  ;;  * **Positions are Emacs's own.** A buffer's intervals are
+  ;;    *one-based* - `create_root_interval' sets `new->position = BEG',
+  ;;    which is 1 - and a string's are zero-based, because a string's
+  ;;    interval positions *are* its character offsets. That is exactly
+  ;;    what happens here: `create-root-interval' asks `object-beg-position'
+  ;;    for the origin, and every position in `textprop.sld' is then a
+  ;;    buffer position for a buffer and a string offset for a string.
+  ;;    This library used to keep the buffer's origin at 0 as well,
+  ;;    because the engine indexed characters from 0 - the engine counts
+  ;;    from 1 now, so the departure is gone.
   ;;  * **The sticky bits are not cached.** `set_interval_plist' in the C
   ;;    copies four flags out of the plist onto the struct
   ;;    (`front_sticky', `rear_sticky', `write_protect', `visible') so
@@ -60,7 +62,7 @@
     (only (ice-9 weak-vector) list->weak-vector weak-vector-ref weak-vector?)
     (only (schemacs editor engine)
           *text-property-offset-function*
-          text-editor-char-count
+          text-editor-char-count text-editor-point-max
           text-editor-text-props set!text-editor-text-props))
 
   (export
@@ -83,6 +85,7 @@
    ;; the measured fields, as `intervals.h' spells them
    interval-length
    interval-last-pos
+   object-beg-position  object-end-position  object-last-position
    interval-left-total-length
    interval-right-total-length
    set-interval-object!
@@ -253,6 +256,29 @@
       (if (string? object)
           (string-length object)
           (text-editor-char-count object)))
+
+    (define (object-beg-position object)
+      ;; The first position of OBJECT: a buffer's `BEGV', which is 1, and
+      ;; a string's 0. Emacs spells this inline - `create_root_interval'
+      ;; sets `new->position = BEG' - rather than as a function.
+      ;;--------------------------------------------------------------
+      (if (string? object) 0 1))
+
+    (define (object-end-position object)
+      ;; One past the last character of OBJECT: a buffer's `ZV', which is
+      ;; `point-max', and a string's length. Emacs spells this inline too.
+      ;;--------------------------------------------------------------
+      (if (string? object)
+          (string-length object)
+          (text-editor-point-max object)))
+
+    (define (object-last-position object)
+      ;; The position of OBJECT's last character, or its first position
+      ;; when it holds none - `(max BEG (ZV - 1))', which is how the C
+      ;; writes it in `next_single_property_change' and its mirror.
+      ;;--------------------------------------------------------------
+      (max (object-beg-position object)
+           (- (object-end-position object) 1)))
 
     (define (object-intervals object)
       ;; GNU Emacs's `buffer_intervals' read of a *string* - the read half
@@ -642,11 +668,16 @@
     ;; Finding
 
     (define (interval-start-pos source)
-      ;; GNU Emacs's `interval_start_pos'. Emacs answers 1 for a buffer
-      ;; and 0 for a string, because that is where a buffer's positions
-      ;; start; ours are 0-based for both, as the header explains.
+      ;; GNU Emacs's `interval_start_pos': where positions begin in the
+      ;; object the tree belongs to - `BEG', which is 1, for a buffer and
+      ;; 0 for a string, and 0 for a tree with no object at all. This is
+      ;; what `find_interval' subtracts on its way in, and it is a
+      ;; property of the *object*, never of the root's cached position
+      ;; field (which a tree copied out of a string may not have had
+      ;; corrected yet).
       ;;--------------------------------------------------------------
-      (if (interval-object source) 0 0))
+      (let ((object (and source (interval-object source))))
+        (if object (object-beg-position object) 0)))
 
     (define (find-interval tree position)
       ;; GNU Emacs's `find_interval': the interval containing POSITION.
@@ -1192,7 +1223,7 @@
       ;;--------------------------------------------------------------
       (let ((new (make-interval)))
         (set!interval-total-length new (object-length parent))
-        (set!interval-position new 0)
+        (set!interval-position new (object-beg-position parent))
         (set-object-intervals parent new)
         (set-interval-object! new parent)
         new))
@@ -1225,9 +1256,13 @@
       ;; properties - which is why the merged property list is computed
       ;; and compared rather than decided up front.
       ;;--------------------------------------------------------------
-      (let* ((eobp (>= position (interval-total-length tree)))
-                 (position (if eobp (interval-total-length tree) position))
-                 (i (find-interval tree position)))
+      (let* ((offset (interval-start-pos tree))
+             ;; "If inserting at point-max of a buffer, that position
+             ;; will be out of range. Remember that buffer positions are
+             ;; 1-based."
+             (eobp (>= position (+ (interval-total-length tree) offset)))
+             (position (if eobp (+ (interval-total-length tree) offset) position))
+             (i (find-interval tree position)))
 
             ;; An insertion in the middle of a run: if any property there
             ;; is one that should not be extended over the new text, the
@@ -1270,7 +1305,7 @@
                   ;; Between two runs, or at the very end: extend the
                   ;; left one, then split off what the sticky rules give
                   ;; the new text.
-                  (let* ((prev (cond ((= position 0) #f)
+                  (let* ((prev (cond ((= position offset) #f)
                                      (eobp i)
                                      (else (previous-interval i))))
                          (i (if eobp #f i)))
@@ -1490,10 +1525,15 @@
               #f)
             (if (= (text-editor-char-count buffer) length)
                 ;; "The inserted text constitutes the whole buffer, so
-                ;; simply copy over the interval structure."
+                ;; simply copy over the interval structure." The C then
+                ;; re-states the root's position - `buffer_intervals
+                ;; (buffer)->position = BUF_BEG (buffer)' - because the
+                ;; tree it just copied came from a *string*, whose
+                ;; positions are offsets from 0.
                 (begin
                   (set!buffer-intervals buffer (reproduce-tree-object source buffer))
-                  (set!interval-position (buffer-intervals buffer) 0)
+                  (set!interval-position (buffer-intervals buffer)
+                                         (object-beg-position buffer))
                   #f)
                 (let* ((tree (if tree tree (create-root-interval buffer)))
                        ;; "Insertion is now at beginning of UNDER. The

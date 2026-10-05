@@ -64,7 +64,8 @@
           set-marker! text-editor-type?
           text-editor-char-count text-editor-copy-string
           text-editor-delete-from-cursor text-editor-get-cursor
-          text-editor-insert text-editor-search-backward
+          text-editor-insert text-editor-point-min text-editor-point-max
+          text-editor-search-backward
           text-editor-search-forward text-editor-set-cursor)
     ;; `*case-fold-search*' is the case folding every search here
     ;; consults (`case-fold-search', buffer.c:6009), `with-current-buffer'

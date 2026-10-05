@@ -437,7 +437,7 @@ point-marker
         ;; an end position, and passing the end position walks the tree
         ;; off its last interval.
         (copy-intervals-to-string result (current-buffer)
-                                  (- beg 1) (- end beg))
+                                  beg (- end beg))
         result))
 
     (define (buffer-substring-no-properties beg end)
