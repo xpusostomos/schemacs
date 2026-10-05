@@ -169,6 +169,9 @@
    text-editor-beg-unchanged  text-editor-note-unchanged!
    ;; `buffer-modified-tick' and `buffer-chars-modified-tick' (buffer.c)
    text-editor-modiff  text-editor-chars-modiff
+   ;; `cache-long-scans' (`buffer.c:5786'), the buffer-local both region
+   ;; caches hang on
+   text-editor-cache-long-scans  set!text-editor-cache-long-scans
    ;; `modify_text_properties' raises `MODIFF' without touching
    ;; `CHARS_MODIFF' (textprop.c:90); this is that raise
    text-editor-note-property-change!
@@ -345,7 +348,7 @@
       (make<text-editor>
        text  newline-cache  point
        ins-char  lbrk  textprops  undo
-       save-modiff  save-token  read-only  mark  markers
+       save-modiff  save-token  cache-long-scans  read-only  mark  markers
        deactivate-mark
        name  file-name
        )
@@ -392,6 +395,18 @@
       ;; recording is enabled but there is nothing to undo. See the
       ;; "Undo" section below for the entry formats.
       (save-modiff text-editor-save-modiff  set!text-editor-save-modiff)
+      (cache-long-scans text-editor-cache-long-scans
+                        set!text-editor-cache-long-scans)
+      ;; ^ GNU Emacs's `cache-long-scans' (`buffer.c:5786'), a
+      ;; `DEFVAR_PER_BUFFER' whose default is **true**: "Non-nil means
+      ;; that Emacs should use caches in attempt to speedup buffer
+      ;; scans... There is no reason to set this to nil except for
+      ;; debugging purposes." It is the switch both region caches hang
+      ;; on - `find_newline' consults it before making one
+      ;; (`search.c:618'), and `width_run_cache_on_off' checks it too.
+      ;; It lives on the buffer because that is where Emacs declares
+      ;; it, and `find-newline' is below the library that would
+      ;; otherwise hold it.
       ;; ^ GNU Emacs's `SAVE_MODIFF' (`buffer.h'), a field of
       ;; `struct buffer': the value of the text's `modiff' when the
       ;; buffer was last in sync with its file. There is no flag
@@ -497,9 +512,9 @@
                         ;; buffer unmodified: `1 < 1' is false. Emacs
                         ;; sets the one to 1 at `buffer.c:631' and a
                         ;; fresh buffer reports a tick of 1.
-                        ;; `SAVE_MODIFF' is 1, the `save-token' 0, and
-                        ;; the buffer writable.
-                        1 0 #f
+                        ;; `SAVE_MODIFF' is 1, the `save-token' 0,
+                        ;; long scans cached, and the buffer writable.
+                        1 0 #t #f
                         ;; The mark, pointing nowhere until it is set,
                         ;; and an empty marker chain.
                         (make<marker> #f 0 #f)
@@ -1717,10 +1732,12 @@
              ;; (`if (!cache_buffer->newline_cache) cache_buffer->
              ;; newline_cache = new_region_cache ()', `search.c:640') - a
              ;; buffer whose lines are never searched never pays for one.
-             (cache (or (%text-editor-newline-cache ed)
-                        (let ((c (new-region-cache (text-editor-point-min ed))))
-                          (set!%text-editor-newline-cache ed c)
-                          c))))
+             (cache (and (text-editor-cache-long-scans ed)
+                         (or (%text-editor-newline-cache ed)
+                             (let ((c (new-region-cache
+                                       (text-editor-point-min ed))))
+                               (set!%text-editor-newline-cache ed c)
+                               c)))))
         (if (< 0 count)
             (find-newline-forward ed start count end cache)
             (find-newline-backward ed start count end cache))))

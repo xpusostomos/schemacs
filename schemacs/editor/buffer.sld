@@ -63,6 +63,7 @@
           text-editor-buffer-name set!text-editor-buffer-name
           text-editor-file-name set!text-editor-file-name
           text-editor-modified? text-editor-set-modified!
+          text-editor-cache-long-scans set!text-editor-cache-long-scans
           text-editor-read-only? text-editor-set-read-only!
           text-editor-get-cursor text-editor-set-cursor
           text-editor-delete-from-cursor text-editor-char-count
@@ -120,6 +121,9 @@
    current-local-map
    use-local-map
    buffer-local-value
+   ;; `cache-long-scans' (`buffer.c:5786'), the buffer-local the
+   ;; line-break cache hangs on
+   cache-long-scans  set!cache-long-scans
    buffer-truncate-lines
    buffer-word-wrap
    buffer-modified-p
@@ -422,6 +426,24 @@
 
     (define (set!buffer-cursor-type buffer value)
       (set-buffer-local-value! buffer 'cursor-type value))
+
+    (define (cache-long-scans . args)
+      ;; GNU Emacs's `cache-long-scans' (`buffer.c:5786'): "Non-nil means
+      ;; that Emacs should use caches in attempt to speedup buffer
+      ;; scans." A per-buffer variable, true by default, and the switch
+      ;; the line-break cache hangs on - `find_newline' consults it
+      ;; before making one (`search.c:618'). It is read through the
+      ;; engine, because that is where it is consulted and the engine is
+      ;; below this library.
+      ;;--------------------------------------------------------------
+      (let ((buffer (if (pair? args) (car args) (current-buffer))))
+        (text-editor-cache-long-scans buffer)))
+
+    (define (set!cache-long-scans buffer value)
+      ;; Emacs's `setq-local' of it; the engine's setter is the same one
+      ;; the buffer's own field uses.
+      ;;--------------------------------------------------------------
+      (set!text-editor-cache-long-scans buffer value))
 
     (define (buffer-truncate-lines buffer)
       ;; Whether BUFFER's long lines are cut off at the window edge
