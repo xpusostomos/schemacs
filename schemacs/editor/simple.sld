@@ -48,9 +48,9 @@
          set-message!
          frame-keymap-state
          selected-window set!frame-keymap-state
-         set!frame-message set!window-top-line window-body-height
-         window-buffer window-list window-top-line
-         %window-hscroll)
+         set!frame-message window-body-height
+         window-buffer window-list
+         %window-hscroll %window-start set-window-start!)
     ;; The kill ring's window-system half: the cut and paste functions
     ;; are simple.el's `interprogram-*-function' variables' defaults,
     ;; and `deactivate-mark' sets PRIMARY through the low-level
@@ -239,21 +239,31 @@ rather than files.  These modes usually use read-only buffers."
                        (*temporary-goal-column*)
                        (text-editor-cursor-column ed))))
         (*temporary-goal-column* goal)
-        (let loop ((i 0))
+        ;; The walk carries the line's *position*: line numbers would be
+        ;; a scan of the buffer for every step, and one more to notice
+        ;; that the step did not move - the move below costs the lines it
+        ;; crosses and nothing above them.
+        (let loop ((i 0) (start (text-editor-get-start-of-line ed)))
           (when (< i count)
-            (let ((line (text-editor-cursor-line ed)))
-              (text-editor-set-cursor ed (+ 1 line) goal)
+            (let* ((end (text-editor-get-end-of-line ed start))
+                   ;; the buffer's last line starts no other
+                   (next (and (< end (text-editor-point-max ed))
+                              (+ end 1))))
               (cond
                ;; There was no line to move to: point is on the last
                ;; line, and the engine will not leave it. Emacs moves
                ;; point to the end of the buffer there - which is the
                ;; end of this line, there being no line break after it
                ;; - and reports `end-of-buffer'.
-               ((= line (text-editor-cursor-line ed))
+               ((not next)
                 (text-editor-set-cursor
                  ed (text-editor-get-end-of-line ed))
                 (error "End of buffer"))
-               (else (loop (+ 1 i)))))))))
+               (else
+                (text-editor-set-cursor
+                 ed (min (text-editor-get-end-of-line ed next)
+                         (+ next goal)))
+                (loop (+ 1 i) next))))))))
 
     (define-command (previous-line count)
       "Move point up N lines, keeping the column."
@@ -263,16 +273,18 @@ rather than files.  These modes usually use read-only buffers."
                        (*temporary-goal-column*)
                        (text-editor-cursor-column ed))))
         (*temporary-goal-column* goal)
-        (let loop ((i 0))
+        (let loop ((i 0) (start (text-editor-get-start-of-line ed)))
           (when (< i count)
-            (let ((line (text-editor-cursor-line ed)))
-              (text-editor-set-cursor ed (- line 1) goal)
-              (cond
-               ((= line (text-editor-cursor-line ed))
+            (cond
+             ((= start (text-editor-point-min ed))
+              (text-editor-set-cursor ed start)
+              (error "Beginning of buffer"))
+             (else
+              (let ((prev (text-editor-get-start-of-line ed (- start 1))))
                 (text-editor-set-cursor
-                 ed (text-editor-get-start-of-line ed))
-                (error "Beginning of buffer"))
-               (else (loop (+ 1 i)))))))))
+                 ed (min (text-editor-get-end-of-line ed prev)
+                         (+ prev goal)))
+                (loop (+ 1 i) prev))))))))
 
     (define-command (beginning-of-line)
       "Move point to the beginning of the current line."
@@ -451,6 +463,32 @@ rather than files.  These modes usually use read-only buffers."
               ((eq? uarg '-) (- full))
               (else (uarg->integer 1 uarg)))))
 
+    (define (window-move-lines ed pos n)
+      ;; POS moved N lines - forward when N is positive, backward when it
+      ;; is negative - stopping at the ends of the buffer. The walk
+      ;; steps one line break at a time, as the renderer's row walk does,
+      ;; so crossing N lines costs those lines.
+      ;;
+      ;; GNU Emacs reaches this through `vmotion' (`indent.c'), which
+      ;; measures *screen* lines and so differs when a line wraps; the
+      ;; arithmetic here is line arithmetic, as the two commands below
+      ;; have always been - the wrapped case is what `scroll-to-cursor!'
+      ;; handles after the fact.
+      ;;--------------------------------------------------------------
+      (if (<= n 0)
+          (let loop ((n (- n)) (pos pos))
+            (if (or (<= n 0) (= pos (text-editor-point-min ed)))
+                pos
+                (loop (- n 1)
+                      (text-editor-get-start-of-line ed (- pos 1)))))
+          (let loop ((n n) (pos pos))
+            (if (<= n 0)
+                pos
+                (let ((end (text-editor-get-end-of-line ed pos)))
+                  (if (< end (text-editor-point-max ed))
+                      (loop (- n 1) (+ end 1))
+                      pos))))))
+
     (define-command (scroll-up-command uarg)
       ;; Scroll the view toward the end of the buffer, with a two-line
       ;; overlap, like mg's `forwpage`. If the point falls outside the new
@@ -463,16 +501,19 @@ rather than files.  These modes usually use read-only buffers."
              (ed (window-buffer window))
              (vheight (window-body-height window))
              (n (scroll-amount uarg window))
-             (last-line (text-editor-line-count ed))
-             (new-top (min (+ (window-top-line window) n) last-line)))
-        (if (<= new-top (window-top-line window))
+             (old (marker-position (%window-start window)))
+             (new (window-move-lines ed old n)))
+        (if (<= new old)
             (set!frame-message frame "; End of buffer")
             (begin
-              (set!window-top-line window new-top)
-              (let ((line (text-editor-cursor-line ed)))
-                (when (or (< line new-top)
-                          (>= line (+ new-top vheight)))
-                  (text-editor-set-cursor ed new-top 0)))))))
+              (set-window-start! window new)
+              ;; point is visible when it lies between this window's
+              ;; first line and its last - the same test the line
+              ;; numbers made, in positions
+              (let ((point (text-editor-get-cursor ed))
+                    (bottom (window-move-lines ed new vheight)))
+                (when (or (< point new) (>= point bottom))
+                  (text-editor-set-cursor ed new)))))))
 
     (define-command (scroll-down-command uarg)
       ;; Scroll the view toward the beginning of the buffer, the mirror
@@ -484,16 +525,19 @@ rather than files.  These modes usually use read-only buffers."
              (ed (window-buffer window))
              (vheight (window-body-height window))
              (n (scroll-amount uarg window))
-             (new-top (max 1 (- (window-top-line window) n))))
-        (if (= new-top (window-top-line window))
+             (old (marker-position (%window-start window)))
+             (new (window-move-lines ed old (- n))))
+        (if (= new old)
             (set!frame-message frame "; Beginning of buffer")
             (begin
-              (set!window-top-line window new-top)
-              (let ((line (text-editor-cursor-line ed)))
-                (when (or (< line new-top)
-                          (>= line (+ new-top vheight)))
+              (set-window-start! window new)
+              (let ((point (text-editor-get-cursor ed))
+                    (bottom (window-move-lines ed new vheight)))
+                (when (or (< point new) (>= point bottom))
+                  ;; point is off the bottom: it goes to the window's last
+                  ;; line, which is what the line arithmetic did
                   (text-editor-set-cursor
-                   ed (+ new-top (- vheight 1)) 0)))))))
+                   ed (window-move-lines ed new (- vheight 1)))))))))
 	
 	(define-command (toggle-truncate-lines arg)
       "Toggle truncating of long lines for the current buffer.
@@ -530,8 +574,8 @@ non-nil."
       "Move point to the beginning of the buffer."
       (interactive)
       (let ((window (selected-window)))
-        (set!window-top-line window 1)
-        (text-editor-set-cursor (window-buffer window) 1 0)))
+        (set-window-start! window 1)
+        (text-editor-set-cursor (window-buffer window) 1)))
 
     (define-command (end-of-buffer)
       "Move point to the end of the buffer."

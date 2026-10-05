@@ -1693,13 +1693,17 @@
        ((ed) (bol ed #f))
        ((ed pos) (%bol-at ed pos))))
 
-    (define (text-editor-get-end-of-line ed)
-      ;; The position of the last character of the line point is on -
-      ;; GNU Emacs's `line-end-position' (`editfns.c:736'), which is
-      ;; `(eol nil)'. At the end of the buffer it is `point-max', as the
-      ;; C's is. It does not move point.
+    (define text-editor-get-end-of-line
+      ;; The position of the last character of the line point is on - or,
+      ;; with POS, of the line POS is on. GNU Emacs's
+      ;; `line-end-position' (`editfns.c:736'), which is `(eol nil)'; the
+      ;; POSITION form is the same scan started where it is told to
+      ;; rather than at point. At the end of the buffer it is `point-max',
+      ;; as the C's is. It does not move point.
       ;;--------------------------------------------------------------
-      (eol ed #f))
+      (case-lambda
+       ((ed) (eol ed #f))
+       ((ed pos) (%line-end ed pos))))
 
     (define (text-editor-line-count ed)
       ;; How many lines the buffer has - which is the line number of

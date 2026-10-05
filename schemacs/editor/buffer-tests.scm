@@ -8,7 +8,7 @@
  (only (schemacs editor textprop) get-char-property put-text-property)
  (only (schemacs editor frame)
        *current-frame* *echo-area-buffer* new-frame selected-window
-       set!window-buffer set!window-top-line window-buffer)
+       set-window-buffer! window-buffer)
  (schemacs editor buffer)
  )
 
@@ -126,7 +126,7 @@
    (lambda ()
      (let* ((start (get-buffer-create "start"))
             (other (get-buffer-create "other")))
-       (set!window-buffer (selected-window) start)
+       (set-window-buffer! (selected-window) start)
        (set-buffer other)
        (list (buffer-name (current-buffer))
              ;; the window still shows what it showed: `set-buffer' does
@@ -206,7 +206,7 @@
    (lambda ()
      (let* ((doomed (get-buffer-create "doomed"))
             (window (selected-window)))
-       (set!window-buffer window doomed)
+       (set-window-buffer! window doomed)
        (get-buffer-create "other")
        (kill-buffer doomed)
        (list (buffer-name (window-buffer window)))))))

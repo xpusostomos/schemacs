@@ -76,8 +76,7 @@
           *current-frame*
           current-editor
           selected-window
-          set!window-buffer
-          set!window-top-line
+          set-window-buffer!
           window-buffer))
 
   (export
@@ -798,9 +797,11 @@
                       ;; that is gone
                       (unless replacement
                         (set! replacement (other-buffer buffer)))
-                      (let ((window (car windows)))
-                        (set!window-buffer window replacement)
-                        (set!window-top-line window 1))
+                      ;; `replace_buffer_in_windows' (`buffer.c') puts
+                      ;; the replacement in through `set_window_buffer',
+                      ;; so everything the window recorded about the
+                      ;; buffer being killed goes with it
+                      (set-window-buffer! (car windows) replacement)
                       (loop (cdr windows)))))
                 (hashq-remove! buffer-slots-table buffer)
                 ;; Emacs sets the killed buffer's `name' to nil and keeps

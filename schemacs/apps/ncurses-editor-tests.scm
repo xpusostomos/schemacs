@@ -21,7 +21,7 @@
        frame-height frame-editor frame-message
        frame-message-expiry set!frame-message
        frame-selected-window new-frame set!frame-selected-window
-       set!window-buffer set!window-width
+       set-window-buffer! set!window-width
        window-internal?
        window-list
        set!window-height set!window-width
@@ -175,7 +175,7 @@
     (let* ((ed (new-text-editor))
            (frame (test-frame ed)))
       (parameterize ((*current-frame* frame) (*echo-area-buffer* #f))
-        (set!window-buffer (frame-selected-window frame) ed)
+        (set-window-buffer! (frame-selected-window frame) ed)
         (*current-buffer* ed)
         (text-editor-insert ed "abc")
         (dispatch-key-event frame name)
@@ -1615,9 +1615,9 @@
     (text-editor-insert unix "unix\n")
     (set-buffer-local-value! dos 'buffer-file-coding-system line-break-crlf)
     (set-buffer-local-value! unix 'buffer-file-coding-system line-break-newline)
-    (set!window-buffer window dos)
+    (set-window-buffer! window dos)
     (let ((dos-mode (format-in frame (*mode-line-format*))))
-      (set!window-buffer window unix)
+      (set-window-buffer! window unix)
       (let ((unix-mode (format-in frame (*mode-line-format*))))
         (list (and (string-search-forward dos-mode "(DOS)" 0 #f) #t)
               (not (string-search-forward unix-mode "(DOS)" 0 #f))
@@ -1835,7 +1835,7 @@
                    (*buffer-list* '())
                    ;; #f: the buffer is made below, and the frame's
                    ;; notion is the window's buffer, which the
-                   ;; `set!window-buffer' below sets to it
+                   ;; `set-window-buffer!' below sets to it
                    (*current-buffer* #f)
                    (*current-keymap* #f)
                    (*search-pattern* #f)
@@ -1848,7 +1848,7 @@
                    (*last-change-was-undo* #f))
      (let ((frame (*current-frame*))
            (buffer (get-buffer-create "*own-keys*")))
-      (set!window-buffer (frame-selected-window frame) buffer)
+      (set-window-buffer! (frame-selected-window frame) buffer)
       (when local?
         (set!buffer-local-keymap
          buffer
@@ -1881,7 +1881,7 @@
                    (*pending-undo-list* #f))
       (let* ((buffer (get-buffer-create "*m-z*"))
              (frame (*current-frame*)))
-        (set!window-buffer (frame-selected-window frame) buffer)
+        (set-window-buffer! (frame-selected-window frame) buffer)
         (*current-buffer* buffer)
         (dispatch-key-event frame (list (list 'meta #\Z)))
         (list (text-editor-read-only? buffer)
@@ -1910,7 +1910,7 @@
     (let* ((ed (get-buffer-create "shown.txt"))
            (frame (test-frame ed)))
       (parameterize ((*current-frame* frame) (*echo-area-buffer* #f))
-        (set!window-buffer (frame-selected-window frame) ed)
+        (set-window-buffer! (frame-selected-window frame) ed)
         (for-each (lambda (spec)
                     (let ((buffer (get-buffer-create (car spec))))
                       (when (cadr spec) (text-editor-set-read-only! buffer #t))
@@ -1988,14 +1988,14 @@
     (let* ((ed (get-buffer-create "shown.txt"))
            (frame (test-frame ed)))
       (parameterize ((*current-frame* frame) (*echo-area-buffer* #f))
-        (set!window-buffer (frame-selected-window frame) ed)
+        (set-window-buffer! (frame-selected-window frame) ed)
         (for-each (lambda (spec)
                     (let ((buffer (get-buffer-create (car spec))))
                       (when (cadr spec) (text-editor-set-read-only! buffer #t))
                       (when (caddr spec) (text-editor-insert buffer "x"))))
                   extra)
         (let ((list (list-buffers-noselect)))
-          (set!window-buffer (frame-selected-window frame) list)
+          (set-window-buffer! (frame-selected-window frame) list)
           (*current-buffer* list)
           (thunk list (lambda (ev) (dispatch-input-event frame ev))))))))
 
@@ -2062,12 +2062,12 @@
            ;; the list is made from this buffer, so its line is marked `.`
            (frame (test-frame ed)))
       (parameterize ((*current-frame* frame) (*echo-area-buffer* #f))
-        (set!window-buffer (frame-selected-window frame) ed)
+        (set-window-buffer! (frame-selected-window frame) ed)
         (*current-buffer* ed)
         (text-editor-insert ed "saved\n")
         ;; now into the list, which becomes the current buffer - so if
         ;; `x' saved "the current buffer" it would save the list
-        (set!window-buffer (frame-selected-window frame)
+        (set-window-buffer! (frame-selected-window frame)
                            (list-buffers-noselect))
         (*current-buffer* (get-buffer "*Buffer List*"))
         ;; `s' marks the buffer on this line for saving, `x' does it

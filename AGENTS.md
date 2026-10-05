@@ -1284,3 +1284,104 @@ Two tools that paid for themselves here and are worth reaching for first:
 - `get-free-disk-space` is not ported, so `dired--insert-disk-space` leaves
   the free-space `display` property off; the `total` line is still deleted as
   Emacs 31 deletes it.
+
+# The window's start is a marker — done (2026-10-05)
+
+## The departure, and what it cost
+
+`<window>` kept its scroll position as `top-line` — a **buffer line
+number**. GNU Emacs's window has no such field: `w->start` is a marker,
+and the window's `top_line` is a *screen* coordinate ("The upper left
+corner coordinates of this window, relative to upper left corner of frame
+= 0, 0"). So we had taken Emacs's name for a screen row and used it for
+something Emacs stores a position in.
+
+Every use of it had to convert, and each conversion was a scan of the
+buffer. Measured on a 20,001-line / 508,891-character file with point at
+the end:
+
+| | before | after |
+|---|---|---|
+| the 24 rows of one window | 487 ms | **0.2 ms** |
+| 24 rows at the top of the same file | 0.4 ms | 0.4 ms |
+| the mode line | 93 ms | 0.2 ms |
+| `render!`, point at line 20001 | 296 ms | **19 ms** |
+| `render!`, point at line 1 | 52 ms | 19 ms |
+| **one keystroke** | **~440 ms** | **1-5 ms** |
+
+The last two rows are the point: the redisplay no longer depends on where
+you are in the buffer at all.
+
+## What the record holds now
+
+`w->start` as a marker, and everything Emacs stores beside it:
+
+| field | Emacs | what it is |
+|---|---|---|
+| `start` | `w->start` | a marker: where the text being displayed begins |
+| `start-at-line-beg` | `w->start_at_line_beg` | whether that was a line beginning |
+| `end-pos` | `w->window_end_pos` | **`Z -`** the position of the last glyph — a distance from the *end* of the buffer, so an edit before it leaves it valid |
+| `end-vpos` | `w->window_end_vpos` | the glyph matrix row of that last glyph |
+| `end-valid` | `w->window_end_valid` | whether those two mean anything |
+| `base-line-number`, `base-line-pos` | same | the `%l` cache: a line somewhere above the window, 0 = none, -1 = gave up |
+
+`set-window-start!` sets `start` and `start-at-line-beg` together, as
+every site in the C does. `set-window-buffer!` is `set_window_buffer`:
+everything the window recorded about the old buffer - the end, the
+cache, the hscroll - goes with it. The row walk begins at `window-start`
+and steps forward, as the C's display iterator does, and records
+`end-pos`/`end-vpos` as it draws instead of walking again for
+`window-end`.
+
+`%l` is the C's `'l'` case: `topline + count_lines (w->start, PT)`, with
+`topline` from the base-line cache. The same count measured 20.3ms from
+`point-min` and 0.033ms from the window's start - 620x - which is why
+counting from the window matters and why the cache is worth having on
+top of it.
+
+## Deliberately not stored yet
+
+Each of these has a reader in the C that this tree has no counterpart
+for, so adding the field would be state nothing consults:
+
+- **`b->last_window_start`** (`window.c:2521`): the start a buffer had in
+  the last window disconnected from it. It is a buffer-local slot and
+  `frame.sld`, where the record lives, is below the library that owns the
+  buffer's slots. It would also have no effect - `scroll-to-cursor!`
+  recomputes a window's start from its point on every redisplay, where
+  the C's `w->start` survives until redisplay decides otherwise.
+- **`w->force_start`, `w->optional_new_start`**: read by
+  `redisplay_window`'s start decision. `scroll-to-cursor!` is this tree's
+  stand-in for that decision and does not consult them.
+- **`w->column_number_displayed`**: read by `mode_line_update_needed` and
+  `redisplay_internal` to decide whether the mode line needs redrawing.
+  This renderer redraws unconditionally.
+
+## Deviations introduced by this work
+
+- `set_window_buffer` writes `start_at_line_beg = false` and lets
+  redisplay recompute it; `set-window-buffer!` has `set-window-start!`
+  compute it from the text at once. Same value, arrived at earlier.
+- `%l`'s give-up answer is `"??"`; the C pads it to the construct's
+  field width first.
+- `next-line`, `previous-line`, `scroll-up-command` and
+  `scroll-down-command` are *line* arithmetic, where Emacs uses
+  `vmotion` (indent.c) and so measures screen lines - they agree except
+  on a wrapped line. They were line arithmetic before; they are now
+  position-driven line arithmetic, which is what took next-line from
+  89ms a keystroke to 5ms.
+
+## Hazard worth knowing
+
+`text-editor-ref` is `char-after` and answers a **character**, not a code
+point, where `buffer-text-ref` answers an integer. Comparing its answer
+with `=` against `#x0a` crashes the editor with `In procedure =: Wrong
+type argument in position 1: #\newline`, several frames from the cause.
+Use `char=?` and `#\newline`.
+
+## Still open after this
+
+- `find_newline`'s `region_cache` (search.c) is still not ported. What is
+  left that scans from `point-min` is `buffer-line-string`,
+  `line-outer-size`, `text-editor-line-count` and the line numbers the
+  `%l` cache has to walk for - none of them on the redisplay path now.
