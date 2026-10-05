@@ -44,23 +44,18 @@
           text-location-line   text-location-column
           text-location  show-text-location
           )
-    (only (schemacs sequence)
-          *sequence-allocate-function*
-          sequence-resize
-          vector-sequence-iface
-          u16vector-sequence-iface
-          u32vector-sequence-iface
-          u64vector-sequence-iface
-          bytevector-sequence-iface
-          get-sequence-iface
-          iface-make-sequence
-          iface-sequence-length
-          iface-sequence-ref
-          iface-sequence-set!
-          iface-sequence-copy!
-          iface-sequence-for-each
-          seq-step-forward/index
-          typeof-vector?
+    ;; The array operations the text lines are made of. A line's store is
+    ;; a plain array - a `u32vector`, a `u16vector`, a bytevector or a
+    ;; vector - and its *array type* is what is carried around, so every
+    ;; operation below dispatches on the store itself. `(schemacs arrays)'
+    ;; has the two Guile lacks; none of them is needed here.
+    (only (guile)
+          array-type
+          array-length
+          array-ref
+          array-set!
+          array-for-each
+          make-typed-array
           )
     (only (schemacs gap-buffer)
           new-gap-buffer              gap-buffer-allocate
@@ -196,8 +191,6 @@
     ;; characters and lazily re-computing the distribution whenever
     ;; characters are inserted or removed from somewhere in the middle
     ;; of the text buffer.
-
-    (define cdf-sequence-iface u64vector-sequence-iface)
 
     ;;----------------------------------------------------------------
     ;; Line breaking state machine (not to be confused with a
@@ -391,7 +384,7 @@
       ;; it is done being editied, it is "frozen" to this type and
       ;; placed somewhere into the buffer where the line cursor is.
       ;;--------------------------------------------------------------
-      (make<text-line> string props parser offset maxval lbrk iface)
+      (make<text-line> string props parser offset maxval lbrk type)
       text-line-type?
       (string   text-line-string   set!text-line-string)
       ;; ^ This defines the actual string content.
@@ -416,26 +409,29 @@
       ;; is usually the procedure `line-break-crlf`,
       ;; `line-break-lfcr`, `line-break-null`, `line-break-newline`,
       ;; or `line-break-return`.
-      (iface    text-line-sequence-iface)
-      ;; ^ a reference to the vector interface for the
-      ;; `text-line-string` field of this value.
+      (type     text-line-seq-type)
+      ;; ^ The *array type* of the `text-line-string` field of this
+      ;; value, as `array-type` answers it - or `#f`, which is how an
+      ;; empty line says it has no store at all. It used to be a
+      ;; ten-field interface record from `(schemacs sequence)`; the type
+      ;; symbol is the only field that was ever read.
       )
 
     (define new-text-line
       (case-lambda
-       ((string) (new-text-line (get-sequence-iface string) string))
-       ((iface string)
-        (make<text-line> string #f #f #f #f #f iface)
+       ((string) (new-text-line (array-type string) string))
+       ((type string)
+        (make<text-line> string #f #f #f #f #f type)
         )))
 
     (define (text-line-inner-size line)
       ;; Return the number of characters in the text line
       ;; *NOT_INCLUDING* the line break.
       ;;--------------------------------------------------------------
-      (let ((iface (text-line-sequence-iface line)))
-        ;; If `iface` is `#f` this is an indication that the line is empty
+      (let ((type (text-line-seq-type line)))
+        ;; A `#f` type is this tree's way of saying the line is empty
         (cond
-         (iface ((iface-sequence-length iface) (text-line-string line)))
+         (type (array-length (text-line-string line)))
          (else 0)
          )))
 
@@ -459,17 +455,16 @@
       ;; Like `text-line-ref` but returns the UTF code point, rather
       ;; than a `char?` value.
       ;;--------------------------------------------------------------
-      (let*((iface (text-line-sequence-iface line))
+      (let*((type (text-line-seq-type line))
             (str (text-line-string line))
-            (len (if iface ((iface-sequence-length iface) str) 0))
+            (len (if type (array-length str) 0))
             )
         (cond
          ((< i 0) #f)
          ((< i len)
           (+ (text-line-char-offset line)
-             ((iface-sequence-ref (text-line-sequence-iface line))
-              (text-line-string line) i
-              )))
+             (array-ref str i)
+             ))
          (else
           (let*((lbrk (text-line-break line))
                 (lbrk-str (and lbrk (line-break-bytevector lbrk)))
@@ -487,16 +482,14 @@
          ((string? str) (string-for-each proc str))
          ((not     str) (values))
          (else
-          (let*((iface   (text-line-sequence-iface line))
-                (foreach (iface-sequence-for-each iface))
-                (offset  (text-line-char-offset line))
+          (let*((offset (text-line-char-offset line))
                 )
             (cond
              ((and offset (= offset 0))
-              (foreach (lambda (i) (proc (integer->char i))) str)
+              (array-for-each (lambda (i) (proc (integer->char i))) str)
               )
              (else
-              (foreach
+              (array-for-each
                (lambda (i) (proc (integer->char (+ i offset))))
                str
                ))))))))
@@ -556,17 +549,23 @@
                     (char=? ch #\return)
                     (char=? ch #\null)
                     )
-                (let*((iface (%line-editor-pre-freeze lo hi))
-                      (set-char! (iface-sequence-set! iface))
-                      (vec ((iface-make-sequence iface) count))
+                (let*((type (%line-editor-pre-freeze lo hi))
+                      (vec (make-typed-array type 0 count))
                       )
                   (let loop ((i 0))
                     (cond
                      ((< i count)
-                      (set-char! vec (- (char->integer (string-ref str i)) lo))
+                      ;; The author's `set-char!' call here omitted the
+                      ;; index, so it passed two arguments to a three
+                      ;; argument setter - `text-line' failed on any
+                      ;; non-empty string. Nothing calls it, so it was
+                      ;; never noticed; the index is here now.
+                      (array-set! vec
+                                  (- (char->integer (string-ref str i)) lo)
+                                  i)
                       (loop (+ 1 i))
                       )
-                     (else (make<text-line> vec #f #f lo hi #f iface))
+                     (else (make<text-line> vec #f #f lo hi #f type))
                      ))))
                (else
                 (let ((pt (char->integer ch)))
@@ -597,40 +596,31 @@
 
     (define-record-type <text-editor-type>
       (make<text-editor>
-       lines  count  line-ed  line-ch  moved  column
-       cdf  ins-char  lbrk  textprops  undo
+       text  point
+       ins-char  lbrk  textprops  undo
        modified  save-token  read-only  mark  markers
        deactivate-mark
        name  file-name
        )
       text-editor-type?
-      (lines      text-editor-lines         set!text-editor-lines)
-      ;; ^ A <gap-buffer-type> which buffers <text-line-type> values.
-      (count      text-editor-char-count    set!text-editor-char-count)
-      ;; ^ Counting the number of characters.
-      (line-ed    text-editor-line-editor   set!text-editor-line-editor)
-      ;; ^ A <gap-buffer-type> which buffers characters, edits the
-      ;; current line under the cursor.
-      (line-ch    text-editor-line-changed  set!text-editor-line-changed)
-      ;; ^ A boolean value indicating that the current line being edited
-      ;; by the `text-editor-line-editor` has actually changed. This
-      ;; allows the editor to decide whether the current line editor
-      ;; needs to be frozen and written-back to the line buffer. If
-      ;; there have been no edits when the cursor is moved, the freeze
-      ;; and write-back step can be skipped.
-      (moved      text-editor-line-moved    set!text-editor-line-moved)
-      ;; ^ A boolean value indicating that the cursor of the
-      ;; `text-editor-lines` gap buffer has moved and the line editor
-      ;; need to be reset with the content of the current line.
-      (column     text-editor-column        set!text-editor-column)
-      ;; ^ When the selected line changes, the column number of the cursor
-      ;; may be lost. This field keeps a record of the column number.
-      (cdf        text-editor-cdf           set!text-editor-cdf)
-      ;; ^ The "Cumulative Distribution Function" is a gap buffer that
-      ;; keeps a running total number of characters for each line in
-      ;; the `text-editor-lines` gap buffer. Any change to the
-      ;; `text-editor-lines` buffer erases everything after the cursor
-      ;; in the CDF so that they can be re-computed.
+      (text       text-editor-text          set!text-editor-text)
+      ;; ^ The buffer's text - a `(schemacs editor buffer-text)', which
+      ;; is GNU Emacs's `struct buffer_text': the characters, the gap
+      ;; and where the gap is. There is ONE of these where there used to
+      ;; be three structures - a gap buffer of `<text-line>' records, a
+      ;; separate line editor, and a CDF indexing the lines. None of the
+      ;; three has a counterpart in Emacs; the text is one sequence of
+      ;; characters there and it is one here.
+      (point      text-editor-point         set!text-editor-point)
+      ;; ^ The cursor, as a `buffer-text' *position* - one-based, the
+      ;; convention the class speaks. Emacs keeps `PT' on the buffer for
+      ;; the same reason: it is not derivable from the gap, which can
+      ;; sit anywhere.
+      ;;
+      ;; NOTE: `TEXT-EDITOR-GET-CURSOR', the engine's public cursor, is
+      ;; still ZERO-based - every caller depends on that, and
+      ;; `(schemacs editor editfns)''s `point' is `(+ 1 ...)' over it.
+      ;; The subtraction lives in that one accessor.
       (ins-char   %text-editor-insert-char   set!text-editor-insert-char)
       ;; ^ A function which inserts characters into the editor.
       (lbrk       text-editor-line-break     set!text-editor-line-break)
@@ -731,15 +721,13 @@
            )
           (else
            (let*((size (*init-text-editor-line-count*))
-                 (line (new-gap-buffer u32vector-sequence-iface size))
                  (lbrk (or lbrk (*default-line-break*)))
                  (ed (let ()
-                       (set!gap-buffer-minimum line #xFFFFFFFF)
-                       (set!gap-buffer-maximum line 0)
                        (make<text-editor>
-                        (new-gap-buffer vector-sequence-iface size)
-                        0 line #f #f 0
-                        (new-cdf u64vector-sequence-iface size)
+                        ;; Emacs's `BEG' is 1, and every position the
+                        ;; class answers is in that coordinate system.
+                        (new-buffer-text 1 size)
+                        1
                         #f lbrk props
                         ;; A newly created buffer records undo
                         ;; information from the start, as in GNU Emacs,
@@ -826,15 +814,19 @@
       )
 
     (define (%line-editor-pre-freeze lo hi)
+      ;; The array type a frozen line will be stored in: the narrowest
+      ;; store that holds every code point once `LO` is subtracted from
+      ;; it. `vu8' is `array-type''s name for a bytevector.
+      ;;--------------------------------------------------------------
       (or
        (and lo hi
         (let*((range (abs (- hi lo))))
           (cond
-           ((<= range #xFF) bytevector-sequence-iface)
-           ((<= range #xFFFF) u16vector-sequence-iface)
+           ((<= range #xFF) 'vu8)
+           ((<= range #xFFFF) 'u16)
            (else #f)
            )))
-       u32vector-sequence-iface
+       'u32
        ))
 
     (define (line-editor-freeze line-ed lbrk)
@@ -847,15 +839,14 @@
             (cursor   (gap-buffer-cursor  line-ed))
             (lo       (gap-buffer-minimum line-ed))
             (hi       (gap-buffer-maximum line-ed))
-            (iface    (%line-editor-pre-freeze lo hi))
-            (vec      ((iface-make-sequence iface) weight))
-            (seq-set! (iface-sequence-set! iface))
+            (type     (%line-editor-pre-freeze lo hi))
+            (vec      (make-typed-array type 0 weight))
             )
         (gap-buffer-for-each/index
-         (lambda (i n) (seq-set! vec i (- n lo)))
+         (lambda (i n) (array-set! vec (- n lo) i))
          line-ed
          )
-        (make<text-line> vec #f #f lo hi lbrk iface)
+        (make<text-line> vec #f #f lo hi lbrk type)
         ))
 
     ;;----------------------------------------------------------------
@@ -1048,16 +1039,15 @@
           (cond
            ((< 0 weight)
             (let-values (((lo hi) (line-editor-char-range ref foreach line-ed)))
-              (let*((iface    (%line-editor-pre-freeze lo hi))
-                    (vec      ((iface-make-sequence iface) frozen-size))
-                    (seq-set! (iface-sequence-set! iface))
+              (let*((type     (%line-editor-pre-freeze lo hi))
+                    (vec      (make-typed-array type 0 frozen-size))
                     (base     (index-base cursor))
                     )
                 (foreach/index
-                 (lambda (i n) (seq-set! vec (- i base) (- n lo)))
+                 (lambda (i n) (array-set! vec (- n lo) (- i base)))
                  line-ed
                  )
-                (make<text-line> vec #f #f lo hi lbrk iface)
+                (make<text-line> vec #f #f lo hi lbrk type)
                 )))
            (else (make<text-line> #f #f #f #f #f lbrk #f))
            ))))

@@ -12,3 +12,8 @@
 *.comld
 *.ext
 *~
+
+# build artifacts
+.guile-cairo/
+__pycache__/
+*.pyc

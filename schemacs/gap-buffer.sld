@@ -4,14 +4,19 @@
     (scheme case-lambda)
     (only (scheme write) display write);;DEBUG
     (scheme case-lambda)
-    (only (schemacs sequence)
-          get-sequence-iface
-          iface-make-sequence
-          iface-sequence-length
-          iface-sequence-ref
-          iface-sequence-set!
-          iface-sequence-copy!
-          typeof-vector?
+    (only (schemacs arrays)
+          %array-copy-range!
+          )
+    ;; The array operations Guile already has. There is no interface
+    ;; object any more: the gap buffer is told the *array type* of its
+    ;; store (`array-type''s answer - `#t' for a plain vector, `u32' for
+    ;; a `u32vector', `vu8' for a bytevector) and everything else
+    ;; dispatches on the store itself. See `(schemacs arrays)'.
+    (only (guile)
+          array-length
+          array-ref
+          array-set!
+          make-typed-array
           )
     )
   (export
@@ -36,8 +41,9 @@
    gap-buffer-ref-before        gap-buffer-ref-after
    gap-buffer-cursor-to-start   gap-buffer-cursor-to-end
 
-   *gap-buffer-grow-size-function*
+   *gap-bytes-dfl*              *gap-bytes-min*
    gap-buffer-grow              gap-buffer-allocate
+   gap-buffer-compact
    gap-buffer-minimum           set!gap-buffer-minimum
    gap-buffer-maximum           set!gap-buffer-maximum
    )
@@ -45,9 +51,15 @@
   (begin
 
     (define-record-type <gap-buffer-type>
-      (make<gap-buffer> iface vec weight cursor min max)
+      (make<gap-buffer> type vec weight cursor min max)
       gap-buffer-type?
-      (iface   gap-buffer-seq-iface)
+      (type    gap-buffer-seq-type)
+      ;; ^ The *array type* of the backing store, as `array-type`
+      ;; answers it: `#t` for a plain vector, `vu8` for a bytevector,
+      ;; `u8`, `u16`, `u32` and so on for the homogeneous vectors. It is
+      ;; what `make-typed-array` takes, so growing the store needs
+      ;; nothing else. The author's table of fourteen interfaces said
+      ;; the same thing in sixty times the space.
       (vec     gap-buffer-vector  set!gap-buffer-vector)
       ;; ^ The backing vector. This may be an ordinary vector
       ;; (satisfying `vector?`), or a `bytevector?`, or it may be a
@@ -75,40 +87,53 @@
       ;;
       ;; The `proc` is applied 5 values:
       ;;
-      ;;  1. the vector interface
+      ;;  1. the array type of the store
       ;;  2. the buffer vector
       ;;  3. the length of the buffer
       ;;  4. the weight, i.e. number of items in the buffer
       ;;  5. the cursor
       ;;--------------------------------------------------------------
       (let*((vec (gap-buffer-vector gb))
-            (iface (gap-buffer-seq-iface gb))
-            (len ((iface-sequence-length iface) vec))
+            (type (gap-buffer-seq-type gb))
+            (len (array-length vec))
             )
         (proc
-         iface vec len
+         type vec len
          (gap-buffer-weight gb)
          (gap-buffer-cursor gb)
          )))
 
-    (define (new-gap-buffer iface store-size . fill-val)
-      ;; Construct a new gap buffer. The `MAKE-VECTOR` argument must
-      ;; be a procedure which constructs a the backing vector such as
-      ;; `make-vector` or `make-bytevector` or `make-u32vector`. The
-      ;; backing vector constructor must take the `STORE-SIZE`
-      ;; argument, and must optionally take the `fill-val` (value used
-      ;; to initialize vector cells), these two arguments
-      ;; (`STORE-SIZE` and `FILL-VAL` if provided) are applied to
-      ;; procedure passed as the `MAKE-VECTOR` argument.
+    (define (%gap-buffer-make-store type size)
+      ;; A new store of `SIZE` elements of `TYPE`.
+      ;;
+      ;; The author's constructor pairs (`make-u16vector`, `make-vector`)
+      ;; let the fill be omitted, meaning "whatever the allocator left";
+      ;; `make-typed-array` has no such case and wants one. A numeric
+      ;; store is zeroed either way, and a plain vector is filled with
+      ;; `#f` where it used to be left unspecified - no live element is
+      ;; ever read out of the gap, so the fill only shows through in
+      ;; slots the gap buffer has not written.
+      ;;---------------------------------------------------------------
+      (make-typed-array type (if (eq? type #t) #f 0) size)
+      )
+
+    (define (new-gap-buffer type store-size . fill-val)
+      ;; Construct a new gap buffer over a store of `STORE-SIZE`
+      ;; elements of array `TYPE` - `#t` for a plain vector, `u32` for a
+      ;; `u32vector`, `vu8` for a bytevector, and so on. The optional
+      ;; `FILL-VAL` initialises the store's cells.
       ;;---------------------------------------------------------------
       (make<gap-buffer>
-       iface
-       (apply (iface-make-sequence iface) store-size fill-val)
+       type
+       (if (pair? fill-val)
+           (make-typed-array type (car fill-val) store-size)
+           (%gap-buffer-make-store type store-size)
+           )
        0 0 #f #f
        ))
 
     (define (gap-buffer-length gb)
-      ((iface-sequence-length (gap-buffer-seq-iface gb)) (gap-buffer-vector gb))
+      (array-length (gap-buffer-vector gb))
       )
 
     (define (gap-buffer-end-of-line? gb)
@@ -117,42 +142,111 @@
 
     (define (gap-buffer-start-of-line? gb) (= 0 (gap-buffer-cursor gb)))
 
-    (define *gap-buffer-grow-size-function*
-      ;; A parameter which defines the function that should be used to
-      ;; compute a new size for a gap buffer when it needs to be grown
-      ;; to fit more elements than it has room to hold. The default is
-      ;; to simply double the size of the current allocation.
-      ;;--------------------------------------------------------------
-      (make-parameter
-       (lambda (len weight +size)
-         (let ((request (+ weight +size)))
-           (let loop ((len len))
-             (if (< len request) (loop (* 2 len)) len)
-             )))))
+    (define *gap-bytes-dfl* 2000)   ;; buffer.h:205
+    (define *gap-bytes-min* 20)     ;; buffer.h:210
 
-    (define (gap-buffer-grow gb +size)
+    (define (%gap-grow-size len weight needed)
+      ;; GNU Emacs's `make_gap' (insdel.c:583) and `make_gap_larger'
+      ;; (:467), which is what a gap is grown BY:
+      ;;
+      ;;     make_gap_larger (max (nbytes_added, (Z - BEG) / 64));
+      ;;     nbytes_added = min (nbytes_added + GAP_BYTES_DFL, ...);
+      ;;
+      ;; "If we have to get more space, get enough to last a while" -
+      ;; at least a sixty-fourth of the text, plus GAP_BYTES_DFL. There
+      ;; is no doubling anywhere in Emacs. The `/64' is a measured
+      ;; choice, not a guess: the comment at :583-600 records that it
+      ;; "already brings almost the best performance" while limiting the
+      ;; wasted memory to 1.5%, where a doubling wastes up to half.
+      ;;
+      ;; Emacs's other bound, `BUF_BYTES_MAX', has no analogue in
+      ;; Scheme and is not applied.
+      ;;--------------------------------------------------------------
+      (+ len (max needed (quotient weight 64)) *gap-bytes-dfl*)
+      )
+
+    (define (%gap-buffer-realloc! gb new-len)
+      ;; Rebuild the store `NEW-LEN` elements long, keeping the gap, the
+      ;; cursor and the weight where they are. This is Emacs's
+      ;; `make_gap_larger'/`make_gap_smaller' pair minus the two-step
+      ;; shuffle they need: they enlarge in place around a live gap and
+      ;; so must move it first, where a new Scheme array is simply
+      ;; written in the layout wanted.
+      ;;
+      ;; The same two copies serve growing and shrinking alike, because
+      ;; where the segments go is decided by the NEW length and the
+      ;; weight, never by the old: the text before the cursor starts at
+      ;; 0, the text after it ends at the end, and the gap falls between
+      ;; them.
+      ;;--------------------------------------------------------------
       (gap-buffer-update
        gb
-       (lambda (iface old-vec old-len weight cursor)
-         (let*((new-len
-                ((*gap-buffer-grow-size-function*)
-                 old-len weight +size
-                 )))
-           (when (< old-len new-len)
-             (let ((new-vec ((iface-make-sequence iface) new-len))
-                   (above (- weight cursor))
-                   (copy! (iface-sequence-copy! iface))
-                   )
-               (when (< 0 cursor)
-                 (copy! new-vec 0 old-vec 0 cursor)
+       (lambda (type old-vec old-len weight cursor)
+         (cond
+          ((or (= new-len old-len) (< new-len weight)) gb)
+          (else
+           (let ((new-vec (%gap-buffer-make-store type new-len))
+                 (above (- weight cursor))
                  )
-               (when (< 0 above)
-                 (copy!
-                  new-vec (- new-len above)
-                  old-vec (- old-len above) old-len
-                  ))
-               (set!gap-buffer-vector gb new-vec)
-               ))
+             (when (< 0 cursor)
+               (%array-copy-range! new-vec 0 old-vec 0 cursor)
+               )
+             (when (< 0 above)
+               (%array-copy-range!
+                new-vec (- new-len above)
+                old-vec (- old-len above) old-len
+                ))
+             (set!gap-buffer-vector gb new-vec)
+             gb
+             ))))))
+
+    (define (gap-buffer-grow gb +size)
+      ;; `+SIZE` is what is about to be inserted, and the grow happens
+      ;; only when there is not room for it - GNU Emacs's `insert_1_both'
+      ;; (insdel.c:915):
+      ;;
+      ;;     if (GAP_SIZE < nbytes)
+      ;;       make_gap (nbytes - GAP_SIZE);
+      ;;
+      ;; The amount handed to the policy is therefore the shortfall, not
+      ;; the insert.
+      ;;--------------------------------------------------------------
+      (gap-buffer-update
+       gb
+       (lambda (_type vec len weight cursor)
+         (let ((free (- len weight)))
+           (when (< free +size)
+             (%gap-buffer-realloc! gb (%gap-grow-size len weight (- +size free)))
+             )
+           gb
+           ))))
+
+    (define (gap-buffer-compact gb)
+      ;; GNU Emacs's `compact_buffer' (buffer.c:1857):
+      ;;
+      ;;     ptrdiff_t size = clip_to_bounds (GAP_BYTES_MIN,
+      ;;                                      BUF_Z_BYTE (buffer) / 10,
+      ;;                                      GAP_BYTES_DFL);
+      ;;     if (BUF_GAP_SIZE (buffer) > size)
+      ;;       make_gap_1 (buffer, -(BUF_GAP_SIZE (buffer) - size));
+      ;;
+      ;; "If a buffer's gap size is more than 10% of the buffer size, or
+      ;; larger than GAP_BYTES_DFL bytes, then shrink it accordingly.
+      ;; Keep a minimum size of GAP_BYTES_MIN bytes."
+      ;;
+      ;; In Emacs the caller is the garbage collector. Nothing calls it
+      ;; here yet - there is no equivalent pass - so it is exported for
+      ;; whatever later wants to.
+      ;;--------------------------------------------------------------
+      (gap-buffer-update
+       gb
+       (lambda (_type vec len weight cursor)
+         (let ((size (min (max *gap-bytes-min* (quotient weight 10))
+                          *gap-bytes-dfl*
+                          )))
+           (when (< size (- len weight))
+             (%gap-buffer-realloc! gb (+ weight size))
+             )
            gb
            ))))
 
@@ -162,36 +256,39 @@
       ;; allocation if it is not big enough. If the requested
       ;; `NEW-SIZE` is smaller than the current allocation, no change
       ;; is made.
+      ;;
+      ;; Where `gap-buffer-grow` is handed an insert shortfall and asks
+      ;; the growth policy what to do with it, this asks for an exact
+      ;; total - Emacs's `enlarge_buffer_text' rather than `make_gap'.
+      ;; Shrinking is `gap-buffer-compact`'s, so a smaller `NEW-SIZE`
+      ;; than the store already is does nothing.
       ;;--------------------------------------------------------------
-      (let*((vec (gap-buffer-vector gb))
-            (iface (gap-buffer-seq-iface gb))
-            (old-size ((iface-sequence-length iface) vec))
-            )
-        (when (< old-size new-size)
-          (gap-buffer-grow gb (- new-size old-size))
-          )))
+      (when (< (gap-buffer-length gb) new-size)
+        (%gap-buffer-realloc! gb new-size)
+        )
+      gb
+      )
 
     (define (gap-buffer-free-space gb)
-      (- ((iface-sequence-length (gap-buffer-seq-iface gb)) (gap-buffer-vector gb))
+      (- (array-length (gap-buffer-vector gb))
          (gap-buffer-weight gb)
          ))
 
-    (define (gap-buffer-full? gb) 
+    (define (gap-buffer-full? gb)
       (= 0 (gap-buffer-free-space gb))
       )
 
     (define (%gap-buffer-for-each proc gb)
       (gap-buffer-update
        gb
-       (lambda (iface vec len weight cursor)
+       (lambda (_type vec len weight cursor)
          (cond
           ((not vec) (values))
           (else
            (let*((after  (- weight cursor))
                  (offset (- len weight))
-                 (ref    (iface-sequence-ref iface))
                  )
-             (proc ref vec len cursor after offset)
+             (proc array-ref vec len cursor after offset)
              ))))))
 
     (define (%gap-buffer-for-each-before proc ref vec cursor)
@@ -264,9 +361,9 @@
       ;; elements before the cursor.
       (gap-buffer-update
        gb
-       (lambda (iface vec _len _weight cursor)
+       (lambda (_type vec _len _weight cursor)
          (%gap-buffer-for-each-before
-          proc (iface-sequence-ref iface) vec cursor
+          proc array-ref vec cursor
           ))
        ))
 
@@ -295,11 +392,10 @@
       )
 
     (define (%gap-buffer-map/index! proc gb to-vec)
-      (let ((setter (iface-sequence-set! (gap-buffer-seq-iface gb))))
-        (gap-buffer-for-each/index
-         (lambda (i elem) (setter to-vec i (proc i elem)))
-         gb
-         )))
+      (gap-buffer-for-each/index
+       (lambda (i elem) (array-set! to-vec (proc i elem) i))
+       gb
+       ))
 
     (define (gap-buffer-map/index! proc gb)
       ;; Similar to `gap-buffer-for-each/index`, except that the
@@ -321,15 +417,12 @@
       ;; updated with the elements returned by `PROC`. The `PROC`
       ;; procedure takes an index of the current element, and the
       ;; current element.
-      (let*((iface (gap-buffer-seq-iface gb))
+      (let*((type (gap-buffer-seq-type gb))
             (vec (gap-buffer-vector gb))
-            (new-vec
-             ((iface-make-sequence iface)
-              ((iface-sequence-length iface) vec)
-              ))
+            (new-vec (%gap-buffer-make-store type (array-length vec)))
             (new-gb
              (make<gap-buffer>
-              iface  new-vec
+              type  new-vec
               (gap-buffer-weight gb)
               (gap-buffer-cursor gb)
               (gap-buffer-minimum gb)
@@ -355,10 +448,10 @@
     (define (gap-buffer-update-min-max gb)
       (gap-buffer-update
        gb
-       (lambda (iface vec len weight cursor)
+       (lambda (_type vec len weight cursor)
          (let*((lo  (gap-buffer-minimum gb))
                (hi  (gap-buffer-maximum gb))
-               (ref (iface-sequence-ref iface))
+               (ref array-ref)
                )
            (cond
             ((and (< 0 weight) (not (and lo hi)))
@@ -390,10 +483,10 @@
       ;; Get the item just before the cursor
       (gap-buffer-update
        gb
-       (lambda (iface vec len weight cursor)
+       (lambda (_type vec len weight cursor)
          (cond
           ((< 0 cursor)
-           ((iface-sequence-ref iface) vec (- cursor 1))
+           (array-ref vec (- cursor 1))
            )
           (else
            ;;(error "cannot reference empty gap buffer" gb)
@@ -405,10 +498,10 @@
       ;; Get the item just after the cursor
       (gap-buffer-update
        gb
-       (lambda (iface vec len weight cursor)
+       (lambda (_type vec len weight cursor)
          (cond
           ((< cursor weight)
-           ((iface-sequence-ref iface) vec (- len (- weight cursor)))
+           (array-ref vec (- len (- weight cursor)))
            )
           (else
            ;;(error "cannot reference empty gap buffer" gb)
@@ -418,12 +511,11 @@
     (define (gap-buffer-ref gb i)
       (gap-buffer-update
        gb
-       (lambda (iface vec len weight cursor)
-         (let ((ref (iface-sequence-ref iface)))
-           (cond
-            ((< i cursor) (ref vec i))
-            (else (ref vec (+ i (- len weight))))
-            )))))
+       (lambda (_type vec len weight cursor)
+         (cond
+          ((< i cursor) (array-ref vec i))
+          (else (array-ref vec (+ i (- len weight))))
+          ))))
 
     (define (%gapbuf-get-index-before cur _wt _len) cur)
     (define (%gapbuf-get-index-after  cur  wt  len) (- len 1 (- wt cur)))
@@ -433,8 +525,8 @@
         (gap-buffer-grow gb 1)
         (gap-buffer-update
          gb
-         (lambda (iface vec len weight cursor)
-           ((iface-sequence-set! iface) vec (get-index cursor weight len) elem)
+         (lambda (_type vec len weight cursor)
+           (array-set! vec elem (get-index cursor weight len))
            (set!gap-buffer-weight gb (+ 1 weight))
            elem
            ))))
@@ -462,20 +554,25 @@
       ;; buffer, moves characters toward the beginning of the buffer.
       ;; ------------------------------------------------------------
 
-      ;; NOTE: I believe Guile's implementation of `vector-copy!` for
-      ;; (SRFI-4) is incorrect. The lines marked ";;NOTE" below are
-      ;; commented out, but when uncommenting them you get log output
-      ;; like this:
+      ;; The author's note here was that Guile's `vector-copy!` for the
+      ;; SRFI-4 vectors is wrong:
       ;;
       ;;     move: len=4, weight=3, cursor=3, after=4, n=-3
       ;;     pre: #u16(30 10 20 20)
       ;;     vector-copy! at=1, start=0, end=3
       ;;     post: #u16(30 30 30 30)
       ;;
-      ;; The "post:" vector should have been #u16(30 30 10 20)
+      ;; The "post:" vector should have been #u16(30 30 10 20). It is
+      ;; still so - `vector-copy!` refuses a `u16vector' outright ("Wrong
+      ;; type argument in position 1 (expecting mutable vector)"), and
+      ;; `array-copy!` is a forward loop that corrupts this direction.
+      ;; `%array-copy-range!' is what makes it right, by reversing both
+      ;; sides of the copy - see `(schemacs arrays)'. There is no
+      ;; `cond-expand' here any more: the loop that used to stand in for
+      ;; the broken primitive was slower than the primitive and is gone.
       (gap-buffer-update
        gb
-       (lambda (iface vec len weight cursor)
+       (lambda (_type vec len weight cursor)
          (cond
           ((= n 0) 0)     ;; no movement
           ((= len weight) ;; no gap
@@ -494,28 +591,8 @@
                  ;;(display "pre: ") (write vec) (newline) ;;DEBUG
                  ;;(display "vector-copy! at=") (write (+ after n)) (display ", start=");;NOTE
                  ;;(write (+ cursor n)) (display ", end=") (write cursor) (newline) ;;NOTE
-                 (cond-expand
-                   (guile
-                    ;; Guile's implementation of `vector-copy!` for
-                    ;; SRFI-4 probably has a bug.
-                    (let loop ((lo (- cursor 1)) (hi (- after 1)))
-                      (cond
-                       ((<= limit lo)
-                        ((iface-sequence-set! iface)
-                         vec hi ((iface-sequence-ref iface) vec lo)
-                         )
-                        (loop (- lo 1) (- hi 1))
-                        )
-                       (else (values))
-                       ))
-                    ) ;; end guile cond-expand
-                   (else
-                    ((iface-sequence-copy! iface)
-                     vec (+ after n)
-                     vec (+ cursor n) cursor
-                     )
-                    ;; end cond-expand
-                    ))
+                 (%array-copy-range!
+                  vec (+ after n)  vec (+ cursor n) cursor)
                  ;;(display "post: ") (write vec) (newline) ;;DEBUG
                  ))
               (else
@@ -523,28 +600,8 @@
                  ;;(display "pre: ") (write vec) (newline) ;;DEBUG
                  ;;(display "vector-copy! at=") (write cursor) (display ", start=") (write after);;DEBUG
                  ;;(display ", end=") (write (+ after n)) (newline) ;;DEBUG
-                 (cond-expand
-                   (guile
-                    ;; Guile's implementation of `vector-copy!` for
-                    ;; SRFI-4 probably has a bug.
-                    (let loop ((lo cursor) (hi after))
-                      (cond
-                       ((< lo limit)
-                        ((iface-sequence-set! iface)
-                         vec lo ((iface-sequence-ref iface) vec hi)
-                         )
-                        (loop (+ 1 lo) (+ 1 hi))
-                        )
-                       (else (values))
-                       ))
-                    ) ;; end guile cond-expand
-                   (else
-                    ((iface-sequence-copy! iface)
-                     vec cursor
-                     vec after (+ after n)
-                     )
-                    ;; end cond-expand
-                    ))
+                 (%array-copy-range!
+                  vec cursor  vec after (+ after n))
                  ;;(display "post: ") (write vec) (newline) ;;DEBUG
                  )))
              (set!gap-buffer-cursor gb limit)
@@ -584,16 +641,14 @@
         ((gb n del)
          (gap-buffer-update
           gb
-          (lambda (iface vec len weight cursor)
+          (lambda (_type vec len weight cursor)
             (let*((n (max (- cursor) (min n (- weight cursor))))
                   (on-range
                    (lambda (from to)
                      (let loop ((i from))
                        (cond
                         ((< i to)
-                         ((iface-sequence-set! iface)
-                          vec i (del ((iface-sequence-ref iface) vec i))
-                          )
+                         (array-set! vec (del (array-ref vec i)) i)
                          (loop (+ 1 i))
                          )
                         (else (values))

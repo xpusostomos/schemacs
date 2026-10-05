@@ -2,10 +2,6 @@
   (scheme base)
   (schemacs gap-buffer)
   (only (srfi 64) test-assert test-equal test-begin test-end)
-  (only (schemacs sequence)
-        iface-make-sequence
-        u16vector-sequence-iface
-        )
   )
 
 ;;------------------------------------------------------------------------------
@@ -62,7 +58,10 @@
 
 (test-begin "schemacs_GapBuffer")
 
-(define vif u16vector-sequence-iface)
+;; The gap buffer takes the array *type* of its store now, not an
+;; interface object - see `(schemacs arrays)'. `u16' is what
+;; `(array-type (u16vector))' answers.
+(define vif 'u16)
 
 (define gb (new-gap-buffer vif 8 0))
 
@@ -97,7 +96,7 @@
 
 (test-assert
     (test-results=?
-     '((cursor . 10) (weight . 10) (length . 16)
+     '((cursor . 10) (weight . 10) (length . 2009)
        (before . " 0:0 1:10 2:20 3:30 4:40 5:50 6:60 7:70 8:80 9:90")
        (after  . "")
        (all    . " 0:0 1:10 2:20 3:30 4:40 5:50 6:60 7:70 8:80 9:90")
@@ -122,7 +121,7 @@
 
 (test-assert
     (test-results=?
-     '((cursor . 5) (weight . 10) (length . 16)
+     '((cursor . 5) (weight . 10) (length . 2009)
        (before . " 0:0 1:10 2:20 3:30 4:40")
        (after  . " 5:50 6:60 7:70 8:80 9:90")
        (all    . " 0:0 1:10 2:20 3:30 4:40 5:50 6:60 7:70 8:80 9:90")
@@ -135,7 +134,7 @@
 
 (test-assert
     (test-results=?
-     '((cursor . 0) (weight . 10) (length . 16)
+     '((cursor . 0) (weight . 10) (length . 2009)
        (before . "")
        (after  . " 0:0 1:10 2:20 3:30 4:40 5:50 6:60 7:70 8:80 9:90")
        (all    . " 0:0 1:10 2:20 3:30 4:40 5:50 6:60 7:70 8:80 9:90")
@@ -225,7 +224,7 @@
 
 (test-assert
     (test-results=?
-     '((cursor . 2) (weight . 5) (length . 8)
+     '((cursor . 2) (weight . 5) (length . 2005)
        (before . " 0:40 1:30")
        (after  . " 2:50 3:10 4:20")
        (all    . " 0:40 1:30 2:50 3:10 4:20")
@@ -241,7 +240,7 @@
 
 (test-assert
     (test-results=?
-     '((cursor . 0) (weight . 9) (length . 16)
+     '((cursor . 0) (weight . 9) (length . 2005)
        (before . "")
        (after  . " 0:90 1:80 2:70 3:60 4:40 5:30 6:50 7:10 8:20")
        (all    . " 0:90 1:80 2:70 3:60 4:40 5:30 6:50 7:10 8:20")
@@ -262,7 +261,7 @@
     (test-results=?
      `((deleted-before . 2)
        (deleted-after  . 2)
-       (cursor . 3) (weight . 6) (length . 16)
+       (cursor . 3) (weight . 6) (length . 2009)
        (before . " 0:0 1:10 2:20")
        (after  . " 3:70 4:80 5:90")
        (all    . " 0:0 1:10 2:20 3:70 4:80 5:90")
@@ -272,9 +271,22 @@
        . ,(test-gap-buffer-state gb)
          )))
 
-(test-equal '(16 64)
+;; The lengths above are GNU Emacs's growth policy, not a doubling -
+;; `make_gap' + `make_gap_larger' (insdel.c:583, :467): a grow adds
+;; `max (shortfall, (Z - BEG) / 64)' plus `GAP_BYTES_DFL' (2000), so the
+;; 2000 dominates on a store this small. The two growths in this file
+;; are 8 -> 2009 (the ninth insert into an 8-element store, text 8) and
+;; 4 -> 2005 (the fifth, text 4).
+;;
+;; `gap-buffer-allocate' asks for an exact total and only ever grows;
+;; shrinking is `gap-buffer-compact''s.
+(test-equal '(2009 3000 3000)
   (list
    (gap-buffer-length gb)
+   (let ()
+     (gap-buffer-allocate gb 3000)
+     (gap-buffer-length gb)
+     )
    (let ()
      (gap-buffer-allocate gb 50)
      (gap-buffer-length gb)

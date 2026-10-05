@@ -18,20 +18,20 @@
    (scheme base)
    (scheme case-lambda)
    ;;(scheme write) ;;DEBUG
-   (only (schemacs sequence)
-         *sequence-allocate-function*
-         u64vector-sequence-iface
-         iface-make-sequence
-         iface-sequence-length
-         iface-sequence-ref
-         iface-sequence-set!
-         sequence-allocate
+   (only (schemacs arrays)
+         %array-resize
+         )
+   (only (guile)
+         array-length
+         array-ref
+         array-set!
+         make-typed-array
          )
    )
 
   (export
    new-cdf  cdf-vector-type?
-   cdf-vector-iface  cdf-vector  cdf-cursor  cdf-maximum
+   cdf-vector-seq-type  cdf-vector  cdf-cursor  cdf-maximum
    cdf-ref  cdf-fill  cdf-invalidate!  cdf-push  cdf-pop
    cdf-find cdf-for-each
    )
@@ -44,29 +44,52 @@
       ;; distribution function (PDF) that can change over time. The
       ;; CDF is re-computed lazily, only recomputed when `CDF-FIND` is
       ;; called on a `CDF` for which it's associated PDF has changed.
-      (make<cdf-vector> iface vec cur max)
+      (make<cdf-vector> type vec cur max)
       cdf-vector-type?
-      (iface  cdf-vector-iface)
+      (type   cdf-vector-seq-type)
+      ;; ^ The array type of the store, as `array-type` answers it - the
+      ;; gap buffer's `gap-buffer-seq-type` is the same thing. It was an
+      ;; interface object until `(schemacs sequence)` went.
       (vec    cdf-vector   set!cdf-vector)
       (cur    cdf-cursor   set!cdf-cursor)
       (max    cdf-maximum  set!cdf-maximum)
       )
 
+    (define (%cdf-allocate-size len request)
+      ;; The author's `default-allocate-function' (`sequence.sld:288'),
+      ;; moved here. Unlike the gap buffer, the CDF mirrors no Emacs
+      ;; file - Emacs answers what the CDF answers with intervals
+      ;; (`intervals.c') - so there is no Emacs growth policy to copy,
+      ;; and this is kept as it was. The `max 1' is what lets
+      ;; `(new-cdf 0)' work.
+      ;;--------------------------------------------------------------
+      (let loop ((len (max 1 len)))
+        (if (< len request) (loop (* 2 len)) len)
+        ))
+
+    (define (%cdf-allocate vec request)
+      ;; Grow `VEC' to cover `REQUEST' - the author's
+      ;; `sequence-allocate', now the two steps it always was. The same
+      ;; vector comes back untouched when it is already big enough, and
+      ;; `cdf-fill' tests that with `eq?'.
+      ;;--------------------------------------------------------------
+      (%array-resize vec (%cdf-allocate-size (array-length vec) request) 0)
+      )
+
     (define new-cdf
       ;; Construct a cumulative distribution function (CDF) of type
-      ;; `<cdf-vector-type>` of a given `SIZE` and (optionally) using
-      ;; a given sequence interface `IFACE`. If `IFACE` is not provided
-      ;; then the `u64vector-sequence-iface` is selected by default.
+      ;; `<cdf-vector-type>` of a given `SIZE` and (optionally) over
+      ;; array type `TYPE`. If `TYPE` is not given it is `u64'.
       (case-lambda
-       ((size) (new-cdf u64vector-sequence-iface size))
-       ((iface size)
-        (make<cdf-vector> iface ((iface-make-sequence iface) size) 0 0)
+       ((size) (new-cdf 'u64 size))
+       ((type size)
+        (make<cdf-vector> type (make-typed-array type 0 size) 0 0)
         )))
 
     (define (cdf-ref cdf i)
       (and
        (<= 0 i) (< i (cdf-cursor cdf))
-       ((iface-sequence-ref (cdf-vector-iface cdf)) (cdf-vector cdf) i)
+       (array-ref (cdf-vector cdf) i)
        ))
 
     (define (cdf-fill cdf generate)
@@ -89,13 +112,12 @@
       ;; the stack.  The last value pushed to the CDF stack is the
       ;; value returned by this function.
       ;;--------------------------------------------------------------
-      (let*((iface  (cdf-vector-iface cdf))
-            (vec    (cdf-vector cdf))
-            (len    ((iface-sequence-length iface) vec))
+      (let*((vec    (cdf-vector cdf))
+            (len    (array-length vec))
             (cursor (cdf-cursor cdf))
             (accum
              (if (< 0 cursor)
-                 ((iface-sequence-ref iface) vec (- cursor 1))
+                 (array-ref vec (- cursor 1))
                  0)))
         (let loop ((cursor cursor) (accum accum) (vec vec) (len len))
           (let ((next (generate cursor accum)))
@@ -103,19 +125,17 @@
              (next
               (let*-values
                   (((vec len)
-                    (let*((new-vec (sequence-allocate iface vec (+ 1 cursor)))
-                          (new-len ((iface-sequence-length iface) new-vec))
-                          )
+                    (let ((new-vec (%cdf-allocate vec (+ 1 cursor))))
                       (cond
                        ((not (eq? vec new-vec))
                         (set!cdf-vector cdf new-vec)
-                        (values new-vec new-len)
+                        (values new-vec (array-length new-vec))
                         )
                        (else (values vec len))
                        )))
                    ((accum) (+ accum next))
                    )
-                ((iface-sequence-set! iface) vec cursor accum)
+                (array-set! vec accum cursor)
                 (loop (+ 1 cursor) accum vec len)
                 ))
              (else
@@ -133,8 +153,7 @@
       ;; `cursor` is greater than the current `cdf-cursor`, then the
       ;; `cdf-cursor` is not changed and `#f` is returned.
       ;;--------------------------------------------------------------
-      (let ((iface (cdf-vector-iface cdf))
-            (old-cursor (cdf-cursor cdf))
+      (let ((old-cursor (cdf-cursor cdf))
             )
         (cond
          ((< old-cursor cursor) #f)
@@ -142,11 +161,7 @@
           (set!cdf-cursor cdf cursor)
           (cond
            ((< 0 cursor)
-            (let ((maximum
-                   ((iface-sequence-ref iface)
-                    (cdf-vector cdf)
-                    (- cursor 1)
-                    )))
+            (let ((maximum (array-ref (cdf-vector cdf) (- cursor 1))))
               (set!cdf-maximum cdf maximum)
               maximum
               ))
@@ -216,8 +231,7 @@
       ;; bucket (too far to the negative or positive ends of the
       ;; field) then `(values #f #f)` is the result.
       ;;--------------------------------------------------------------
-      (let*((iface  (cdf-vector-iface cdf))
-            (ref    (iface-sequence-ref iface))
+      (let*((ref    array-ref)
             (cursor (cdf-cursor cdf))
             (vec    (cdf-vector cdf))
             (top    (and (< 0 cursor) (ref vec (- cursor 1))))
@@ -252,8 +266,7 @@
       ;;--------------------------------------------------------------
       (let*((vec (cdf-vector cdf))
             (cursor (cdf-cursor cdf))
-            (iface (cdf-vector-iface cdf))
-            (ref (iface-sequence-ref iface))
+            (ref array-ref)
             )
         (let loop ((i 0))
           (cond
