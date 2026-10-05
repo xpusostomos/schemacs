@@ -30,11 +30,8 @@
           text-editor-char-count text-editor-get-cursor text-editor-insert
           text-editor-point-min
           text-editor-delete-from-cursor text-editor-set-cursor
-          text-editor-get-line-column
-          text-editor-undo-disable! text-editor-undo-enable!)
-    ;; `text-editor-get-line-column' answers with one of these, and the
-    ;; line it names is what says which entry a line is.
-    (only (schemacs ui text-buffer-impl) text-location-line))
+          text-editor-cursor-line
+          text-editor-undo-disable! text-editor-undo-enable!))
 
   (export
    tabulated-list-entries
@@ -88,7 +85,7 @@
       ;; buffer's first line (`tabulated-list--header'), so the first
       ;; entry is the second line and row 0 is line 2.
       ;;--------------------------------------------------------------
-      (- (text-location-line (text-editor-get-line-column ed)) 2))
+      (- (text-editor-cursor-line ed) 2))
 
     (define (tabulated-list-get-id ed)
       ;; The ID of the entry on the line point is on in ED, or #f when

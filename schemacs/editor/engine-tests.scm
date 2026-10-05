@@ -2,7 +2,6 @@
  (scheme base)
  (scheme file)
  (schemacs editor engine)
- (only (schemacs ui text-buffer-impl) text-location-line text-location-column)
  (only (srfi 64) test-assert test-equal test-begin test-end)
  )
 
@@ -876,13 +875,27 @@
           (text-editor-get-start-of-line ed)
           (text-editor-get-end-of-line ed))))
 
-;; ... and the 1-based line and column the mode line shows agree.
-(test-equal '(1 4)
+;; ... and the line and column the mode line shows agree: the line
+;; counting from 1 as `line-number-at-pos' does, the column from 0 as
+;; `current-column' does.
+(test-equal '(1 3)
+  (let ((ed (new-text-editor)))
+    (text-editor-insert ed "abc")
+    (text-editor-move-cursor ed 100)
+    (list (text-editor-cursor-line ed)
+          (text-editor-cursor-column ed))))
+
+;; The same pair for a position that is not point, which is what the
+;; mode line asks for when the window it draws is not the selected one:
+;; the line comes from the `count-lines' scan and the column from the
+;; start of that line.
+(test-equal '(2 1)
   (let* ((ed (new-text-editor))
-         (at (begin (text-editor-insert ed "abc")
-                    (text-editor-move-cursor ed 100)
-                    (text-editor-get-line-column ed))))
-    (list (text-location-line at) (text-location-column at))))
+         (pos (begin (text-editor-insert ed "ab\ncd")
+                     (text-editor-set-cursor ed 5)
+                     (text-editor-get-cursor ed))))
+    (list (+ 1 (count-lines ed (text-editor-point-min ed) pos))
+          (- pos (text-editor-get-start-of-line ed pos)))))
 
 ;; Point at that end still reaches the beginning of the line, which is
 ;; what `C-e' then `C-a' does.

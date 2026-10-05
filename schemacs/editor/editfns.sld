@@ -46,7 +46,7 @@
           text-editor-char-count text-editor-insert
           text-editor-cursor-line text-editor-delete-from-cursor
           text-editor-point-min text-editor-point-max
-          text-editor-get-cursor text-editor-get-line-column
+          text-editor-get-cursor count-lines
           text-editor-mark text-editor-set-cursor
           text-editor-undo-boundary!)
     ;; `mark-active' and `transient-mark-mode' are `buffer.c''s
@@ -75,7 +75,6 @@
     ;; not contain this library, so the import is not circular.)
     (only (schemacs editor frame)
           *current-frame* frame-message set-message!)
-    (only (schemacs ui text-buffer-impl) text-location-line)
     )
 
   (export
@@ -204,13 +203,14 @@ point-marker
       ;; with the narrowing kept; nothing is narrowed here.
       ;;--------------------------------------------------------------
       (let ((ed (current-buffer)))
-        (if (pair? args)
-            ;; the line POSITION is on: the engine's
-            ;; `text-editor-get-line-column' answers the one-based line
-            ;; and column of a position
-            (text-location-line
-             (text-editor-get-line-column ed (car args)))
-            (text-editor-cursor-line ed))))
+        ;; `(count_lines BEGV POS) + 1', with POS defaulting to point.
+        ;; The C's second argument, ABSOLUTE, is about counting past a
+        ;; narrowing, and nothing is narrowed here.
+        (+ 1 (count-lines ed
+                          (text-editor-point-min ed)
+                          (if (pair? args)
+                              (car args)
+                              (text-editor-get-cursor ed))))))
 
     ;;----------------------------------------------------------------
     ;; Point, its questions, and its preservation - the `editfns.c'

@@ -49,12 +49,6 @@
           buffer-text-substring  buffer-text-for-each
           buffer-text-clear!
           )
-    (prefix (schemacs ui text-buffer-impl) impl/)
-    (only (schemacs ui text-buffer-impl)
-          make<text-location>  text-location-type?
-          text-location-line   text-location-column
-          text-location  show-text-location
-          )
     )
   (cond-expand
    ;; To define pretty-printers for Guile
@@ -134,12 +128,10 @@
    text-editor-ref
    text-editor-cursor-line
    text-editor-cursor-column
-   text-editor-cursor-location
    text-editor-line-count
    text-editor-line-string
    text-editor-get-start-of-line
    text-editor-get-end-of-line
-   text-editor-get-line-column
    text-editor-set-cursor
    text-editor-move-cursor
    text-editor-get-cursor
@@ -154,12 +146,6 @@
    find-newline  scan-newline-from-point
    bol  eol  find-before-next-newline  count-lines
    text-editor  show-text-editor
-
-   run-editor-engine
-   ;; ^ This procedure is called in the same way as the Scheme
-   ;; `apply` procedure, except that it parameterizes all of the
-   ;; relevant parameter variables in the
-   ;; `(schemacs ui text-buffer-impl)` library.
    )
 
   (begin
@@ -509,17 +495,29 @@
       )
 
     (define show-text-editor
-      ;; Write the whole content of a text editor to a port: the cursor's
-      ;; location, then the buffer's lines, one per line, each indented
-      ;; two spaces - the shape this printer has had since it printed a
-      ;; gap buffer of lines, kept so that a printed buffer reads the
-      ;; same as it always did.
+      ;; Write the whole content of a text editor to a port: where point
+      ;; is, then the buffer's lines, one per line, each indented two
+      ;; spaces - the shape this printer has had since it printed a gap
+      ;; buffer of lines, kept so that a printed buffer reads the same as
+      ;; it always did.
+      ;;
+      ;; Point is printed as a character position with the line it is on
+      ;; and its column beside it, which is the pair `line-number-at-pos'
+      ;; and `current-column' answer. It used to be a `<text-location>'
+      ;; record - a `(line . column)' pair counting columns from 1, which
+      ;; is a type GNU Emacs does not have - and the engine no longer
+      ;; knows that type exists.
       ;;--------------------------------------------------------------
       (case-lambda
        ((ed) (show-text-editor ed (current-output-port)))
        ((ed port)
-        (display "(text-editor " port)
-        (show-text-location (text-editor-cursor-location ed) port)
+        (display "(text-editor (point " port)
+        (write (text-editor-point ed) port)
+        (display " line " port)
+        (write (text-editor-cursor-line ed) port)
+        (display " column " port)
+        (write (text-editor-cursor-column ed) port)
+        (display ")" port)
         (newline port)
         (let ((last (text-editor-line-count ed)))
           (let loop ((line 1))
@@ -1683,12 +1681,17 @@
               (+ (- end start)
                  (if (< end (text-editor-point-max ed)) 1 0))))))
 
-    (define (text-editor-get-start-of-line ed)
-      ;; The position of the first character of the line point is on -
-      ;; GNU Emacs's `line-beginning-position' (`editfns.c:700'), which
-      ;; is `(bol nil)'. It does not move point.
+    (define text-editor-get-start-of-line
+      ;; The position of the first character of the line point is on - or,
+      ;; with POS, of the line POS is on. GNU Emacs's
+      ;; `line-beginning-position' (`editfns.c:700'), which is
+      ;; `(bol nil)'; with a POSITION the C reaches the same place with
+      ;; `save-excursion' around `goto-char', the scan here simply starts
+      ;; where it is told to. It does not move point.
       ;;--------------------------------------------------------------
-      (bol ed #f))
+      (case-lambda
+       ((ed) (bol ed #f))
+       ((ed pos) (%bol-at ed pos))))
 
     (define (text-editor-get-end-of-line ed)
       ;; The position of the last character of the line point is on -
@@ -1724,14 +1727,6 @@
       ;;--------------------------------------------------------------
       (- (text-editor-point ed) (text-editor-get-start-of-line ed)))
 
-    (define (text-editor-cursor-location ed)
-      ;; Point as a `<text-location>': line counting from 1 and column
-      ;; counting from 1, which is that type's convention - its readers
-      ;; subtract the one they need.
-      ;;--------------------------------------------------------------
-      (make<text-location> (text-editor-cursor-line ed)
-                           (+ 1 (text-editor-cursor-column ed))))
-
     (define (text-editor-line-ref ed offset)
       ;; The character at column OFFSET - counting from 0 - of the
       ;; current line, or false when OFFSET is past the end of the line.
@@ -1748,22 +1743,6 @@
       ;; nil at or past the end of the buffer.
       ;;--------------------------------------------------------------
       (text-editor-ref ed ch-index))
-
-    (define (%text-editor-get-line-column ed ch-index)
-      ;; A `<text-location>' for the position CH-INDEX, or for point
-      ;; when there is none: line counting from 1 and column counting
-      ;; from 1, that type's convention.
-      ;;--------------------------------------------------------------
-      (let ((pos (if ch-index ch-index (text-editor-point ed))))
-        (make<text-location>
-         (+ 1 (count-lines ed (text-editor-point-min ed) pos))
-         (+ 1 (- pos (%bol-at ed pos))))))
-
-    (define text-editor-get-line-column
-      (case-lambda
-       ((ed) (%text-editor-get-line-column ed #f))
-       ((ed ch-index) (%text-editor-get-line-column ed ch-index))
-       ))
 
     ;;----------------------------------------------------------------
     ;; Moving the cursor
@@ -1788,23 +1767,12 @@
     (define text-editor-set-cursor
       (case-lambda
        ((ed index)
-        (cond
-         ((text-location-type? index)
-          ;; A `<text-location>' names a line and a column, counting
-          ;; from 1 each; the two-argument form below counts columns
-          ;; from 0, as `current-column' does.
-          (text-editor-set-cursor ed (text-location-line index)
-                                      (- (text-location-column index) 1)))
-         ((integer? index)
-          ;; A position, one-based as every position here is.
-          (set!text-editor-point ed
-             (max (text-editor-point-min ed)
-                  (min (text-editor-point-max ed) index))))
-         (else
-          (error
-           "text editor index must be set with integer or text-location-type"
-           index
-           ))))
+        (if (integer? index)
+            ;; A position, one-based as every position here is.
+            (set!text-editor-point ed
+               (max (text-editor-point-min ed)
+                    (min (text-editor-point-max ed) index)))
+            (error "text editor index must be set with an integer" index)))
        ((ed line-num column-num)
         ;; Move the cursor to the given line - counting from 1, as
         ;; `line-number-at-pos' does - and column, counting from 0 as
@@ -1825,40 +1793,6 @@
                            ed (max 1 line-num) (max 0 column-num))
                           (text-editor-point-max ed)))))))
       )
-
-    ;;----------------------------------------------------------------
-
-    (define (run-editor-engine proc . args)
-      (parameterize
-          ((impl/new-buffer*           new-text-editor)
-           (impl/buffer-type?*         text-editor-type?)
-           (impl/buffer-length*        text-editor-char-count)
-           (impl/text-load-port*       text-load-port)
-           (impl/text-dump-port*       text-dump-port)
-           (impl/style-type?*          vbal-type?)
-           (impl/new-style*            alist->vbal)
-           (impl/get-cursor-index*     text-editor-get-cursor)
-           (impl/move-cursor-index*    text-editor-move-cursor)
-           (impl/set-cursor-position*  text-editor-set-cursor)
-           (impl/index->line-column*   text-editor-get-line-column)
-           (impl/get-end-of-line*      text-editor-get-end-of-line)
-           (impl/get-start-of-line*    text-editor-get-start-of-line)
-           (impl/insert*               text-editor-insert)
-           (impl/copy-string*          '*TODO*)
-           (impl/get-char*             '*TODO*)
-           (impl/delete-range*         '*TODO*)
-           (impl/delete-from-cursor*   '*TODO*)
-           (impl/get-default-style*    '*TODO*)
-           (impl/set-default-style*    '*TODO*)
-           (impl/get-text-style*       '*TODO*)
-           (impl/set-text-style*       '*TODO*)
-           (impl/get-selection*        '*TODO*)
-           (impl/set-selection*        '*TODO*)
-           (impl/scan-for-char*        '*TODO*)
-           (impl/scan-for-string*      '*TODO*)
-           )
-        (apply proc args)
-        ))
 
     )
   )

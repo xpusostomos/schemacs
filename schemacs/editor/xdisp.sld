@@ -39,19 +39,15 @@
           update-window-begin! update-window-end!
           draw-window-cursor! flush-display!
           realize-face)
-    ;; The mode line reads a line and column out of the engine, which
-    ;; answers with one of these.
-    (only (schemacs ui text-buffer-impl)
-          text-location-type? text-location-line text-location-column)
-
     (only (schemacs editor engine)
          line-break-newline line-break-crlf line-break-return
          string-search-forward text-editor-buffer-name text-editor-text-props
          text-editor-char-count text-editor-file-name
          text-editor-cursor-column text-editor-cursor-line
          text-editor-get-cursor text-editor-mark text-editor-get-end-of-line
-         text-editor-get-line-column text-editor-get-start-of-line
-         text-editor-line-count
+         text-editor-get-start-of-line
+         text-editor-line-count count-lines
+         text-editor-point-min
          text-editor-line-outer-size text-editor-modified?
          text-editor-read-only? text-editor-line-string
          text-editor-point-max text-editor-to-string)
@@ -763,14 +759,25 @@
       ;; with a construct it does not recognise either.
       ;;--------------------------------------------------------------
       (let* ((ed (window-buffer window))
-             (at (text-editor-get-line-column ed (window-point window)))
-             ;; The line point is on, for `%c' and `%C': Emacs's
-             ;; `current-column' is the number of *screen* columns from the
-             ;; start of the line, which is not the number of characters
+             ;; The line the window's point is on, counting from 1 -
+             ;; GNU Emacs's `line-number-at-pos' (`fns.c:6688'), which is
+             ;; `(count_lines BEGV PT) + 1'. Emacs's `%l' counts from the
+             ;; window's *start* marker instead (`xdisp.c:29580'), the
+             ;; line at the top of the window; this renderer has always
+             ;; shown point's line there, and `%l' reads the same number.
+             (line-index (+ 1 (count-lines ed (text-editor-point-min ed)
+                                           (window-point window))))
+             ;; How many characters point is from the start of its line,
+             ;; counting from zero. That is not yet `current-column': the
+             ;; C's `current-column' (`indent.c:298') is the number of
+             ;; *screen* columns, which is not the number of characters
              ;; when the line holds a tab or a wide character - nor when a
              ;; `display' property stands on the way, which moves the
-             ;; columns after it along.
-             (line-index (text-location-line at))
+             ;; columns after it along. The display widths are applied
+             ;; below.
+             (column (- (window-point window)
+                        (text-editor-get-start-of-line
+                         ed (window-point window))))
              (line (buffer-line-string ed line-index))
              (line-texts (and line
                               (line-display-texts
@@ -780,7 +787,7 @@
           ((#\%) "%")
           ((#\b) (or (text-editor-buffer-name ed) "*scratch*"))
           ((#\f) (or (text-editor-file-name ed) ""))
-          ((#\l) (number->string (text-location-line at)))
+          ((#\l) (number->string line-index))
           ;; `%c' is GNU Emacs's `(current-column)': the *screen* column,
           ;; counting from zero - "the leftmost column is displayed as
           ;; zero", which a terminal Emacs confirms: `(format-mode-line
@@ -789,15 +796,12 @@
           ;; line's display widths - which is what makes it 3 rather than
           ;; 2 after a CJK character, as Emacs's is.
           ((#\c) (number->string (if line-texts
-                                     (line-texts-column
-                                      line-texts (- (text-location-column at) 1))
-                                     (- (text-location-column at) 1))))
+                                     (line-texts-column line-texts column)
+                                     column)))
           ;; `%C' is `%c' counting from one rather than zero
           ((#\C) (number->string (if line-texts
-                                     (+ 1 (line-texts-column
-                                           line-texts
-                                           (- (text-location-column at) 1)))
-                                     (text-location-column at))))
+                                     (+ 1 (line-texts-column line-texts column))
+                                     (+ 1 column))))
           ;; `%*' is `%' read-only, `*' modified, `-' neither; `%+' is `*'
           ;; modified, `%' read-only, `-' neither; `%&' is `*' modified
           ((#\*) (if (text-editor-read-only? ed)
