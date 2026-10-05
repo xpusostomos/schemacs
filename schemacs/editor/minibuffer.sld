@@ -2300,8 +2300,12 @@ read-number-history
         ;; Leave mark at previous position
         (or (region-active-p) (push-mark)))
       ;; Move to the specified line number in that buffer.
-      (let ((ed (current-buffer))
-            (target (max (text-editor-point-min ed) line)))
+      ;; `let*', not `let': TARGET's initializer reads ED, and Elisp's
+      ;; `let' binds its names one at a time the way `let*' does. Under
+      ;; `let' ED is unbound there and the command dies with "Unbound
+      ;; variable: ed" in the echo area - which is what `M-g g' did.
+      (let* ((ed (current-buffer))
+             (target (max (text-editor-point-min ed) line)))
         (text-editor-set-cursor ed target 0)
         (when (< (text-editor-cursor-line ed) target)
           (text-editor-set-cursor ed (text-editor-point-max ed)))))

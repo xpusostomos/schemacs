@@ -1219,12 +1219,21 @@ def check_default_directory():
             problems.append("the prompt's directory is %r, which is not a "
                             "directory" % shown)
 
-    # ...and the same for a file named with a directory in front of it
-    screen = screen_of(drive([C_x + C_f], "tools/pty-check.py"))
+    # ...and the same for a file named with a directory in front of it. The
+    # file it visits is a *small* fixture and not this script: a buffer of a
+    # few thousand lines takes seconds to draw, because the renderer scans
+    # the buffer for every line it puts on the screen (`find_newline' in
+    # engine.sld has no `region_cache'), and this check is about the prompt
+    # and not about how fast a redraw is. Measured: this script, 3.3s to the
+    # prompt; a small file, 0.3s.
+    d = "/tmp/pty-check-dd"
+    os.makedirs(d, exist_ok=True)
+    open(os.path.join(d, "f.txt"), "w").write("hello\n")
+    screen = screen_of(drive([C_x + C_f], os.path.join(d, "f.txt")))
     shown = screen.split("Find file: ", 1)[1].split("\n")[0].strip() if "Find file: " in screen else ""
-    if not shown.endswith("tools/"):
-        problems.append("a file named as tools/pty-check.py prompts with "
-                        "%r, expected the tools/ directory" % shown)
+    if not shown.endswith("pty-check-dd/"):
+        problems.append("a file named with a directory in front of it "
+                        "prompts with %r, expected its own directory" % shown)
     return problems
 
 
