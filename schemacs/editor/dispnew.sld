@@ -31,7 +31,7 @@
    draw-window-cursor!
    flush-display!
    read-input-event
-   key-event->keymap-path
+   key-event->key
    suspend-display!
    resume-display!
    realize-face
@@ -143,14 +143,16 @@
     ;; the display's business; a keyboard reads a char, a mouse a
     ;; button. `(read-input-event display timeout)'.
 
-    (define-generic key-event->keymap-path)
-    ;; What this display says a raw event is, as a key sequence path: a
-    ;; list of modifier symbols and characters, or #f when the display
-    ;; has no name for it. The display's own key table answers, because
+    (define-generic key-event->key)
+    ;; What this display says a raw event is, as the *key event* GNU
+    ;; Emacs's `make_lispy_event' would have built: an integer carrying
+    ;; the character and the modifier bits, or a symbol for a key that is
+    ;; not a character (`up', `f1'), or #f when the display has no name
+    ;; for it. The display's own key table answers, because
     ;; only the display knows what its codes mean - the terminfo/termcap
     ;; function-key table term.c builds from `struct fkey_table keys[]'
     ;; and turns into `input-decode-map', which keyboard.c's `read_char'
-    ;; then applies. `(key-event->keymap-path display event)'.
+    ;; then applies. `(key-event->key display event)'.
 
     (define-generic suspend-display!)
     ;; Hand the display back to whatever is around it, so the editor

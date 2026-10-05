@@ -28,6 +28,8 @@
   ;; See LAYOUT-PLAN.txt for the rule this library is a step of.
 
   (import
+    ;; `kbd' - see `character.sld''s export note for why it is there
+    (only (schemacs editor character) kbd)
     (scheme base)
     (scheme char)
     ;; `read-from-minibuffer' takes an optional keymap, history and default,
@@ -111,13 +113,12 @@
     (only (schemacs editor keyboard)
           abort-recursive-edit exit-recursive-edit read-key-event
           recursive-edit signal-quit)
-    ;; `key-event->keymap-path' is what the command loop asks an event to
-    ;; name itself with, and `read-char-from-minibuffer' asks the same
-    ;; thing - because a terminal hands back the character a key *is*
-    ;; while a window system hands back an integer it must be decoded
-    ;; from, and a question one key answers cannot tell those apart by
-    ;; `char?'.
-    (only (schemacs editor dispnew) current-display key-event->keymap-path)
+    ;; The event model, for `read-char-from-minibuffer': it asks the
+    ;; key *event* what it is, `char-alt' being `lisp.h''s lowest
+    ;; modifier bit - the boundary between a plain character and a
+    ;; modified key. `key-path->event' is the C's `event-convert-list',
+    ;; which names one key's event from its description.
+    (only (schemacs editor character) char-alt key-path->event)
     ;; `read-char-from-minibuffer' reads the one key that answers it with
     ;; the command loop's read, so a pushed-back event reaches it too;
     ;; what it draws with is the display's `render!'.
@@ -632,20 +633,23 @@ read-number-history
                        (*echo-area-prompt* prompt))
           (render! frame)
           (let loop ()
-            ;; `read-key-event' answers the key's *path* already: the
+            ;; `read-key-event' answers the *key event* already: the
             ;; display's own form was normalised away at the read, so
             ;; nothing here knows which front end is running.
-            (let ((path (read-key-event -1)))
+            (let ((key (read-key-event -1)))
               (cond
                ;; C-g abandons the whole command. A terminal sends the
-               ;; byte, so the path is `\'s own `(ctrl #\g)'; a window
-               ;; system sends a `g' keysym with the control modifier,
-               ;; which is the same event and so the same path.
-               ((equal? path '(ctrl #\g)) (signal-quit))
+               ;; byte, so the event is `(kbd "C-g")' - the same event a
+               ;; window system's `g' keysym with the control modifier
+               ;; becomes.
+               ((eqv? key (key-path->event (list 'ctrl #\g))) (signal-quit))
                ;; a key the question names as one character answers it -
-               ;; `y' and `n' and the rest
-               ((and (= (length path) 1) (char? (car path)))
-                (car path))
+               ;; `y' and `n' and the rest. A character is an event
+               ;; below every modifier bit and above the control range;
+               ;; an arrow key, a frame resize and the control keys
+               ;; (RET included, as it was before) ask again.
+               ((and (integer? key) (< key char-alt) (>= key 32))
+                (integer->char key))
                ;; an arrow key, a frame resize: asks again
                (else (loop))))))))
 
@@ -696,7 +700,7 @@ read-number-history
                   (run-command record uarg)
                   (run-command record))))))
 
-    (define-key *default-keymap* (list 'meta #\x) execute-extended-command)
+    (define-key *default-keymap* (kbd "M-x") execute-extended-command)
 
     (define (yes-or-no-p frame prompt)
       ;; GNU Emacs's `yes-or-no-p': the whole word, then RET. Being
@@ -1668,10 +1672,10 @@ read-number-history
       ;;--------------------------------------------------------------
       (let ((map (km:keymap '*completion-list-mode-map*)))
         (define (bind! key command)
-          (define-key map (if (list? key) key (list key)) command))
-        (bind! #\q quit-window)
-        (bind! (list 'ctrl #\m) choose-completion)
-        (bind! #\return choose-completion)
+          (define-key map (kbd key) command))
+        (bind! "q" quit-window)
+        (bind! "C-m" choose-completion)
+        (bind! "RET" choose-completion)
         map))
 
     ;;----------------------------------------------------------------
@@ -2301,8 +2305,8 @@ read-number-history
     ;; The keys GNU Emacs binds it to (M-g g, and M-g M-g, which is the
     ;; same command), beside the command as the other libraries state
     ;; theirs.
-    (define-key *default-keymap* (list (list 'meta #\g) #\g) goto-line)
-    (define-key *default-keymap* (list (list 'meta #\g) (list 'meta #\g))
+    (define-key *default-keymap* (kbd "M-g g") goto-line)
+    (define-key *default-keymap* (kbd "M-g M-g")
       goto-line)
 
     ;;----------------------------------------------------------------
@@ -2372,8 +2376,8 @@ Just \\[universal-argument] as argument means to use the current column."
                (*current-frame*)
                (format #f "Fill column set to ~a (was ~a)" n was)))))
       #f)
-    (define-key *default-keymap* (list (list 'ctrl #\x) #\f) set-fill-column)
+    (define-key *default-keymap* (kbd "C-x f") set-fill-column)
 
-    (define-key *default-keymap* (list (list 'meta #\z)) zap-to-char)
+    (define-key *default-keymap* (kbd "M-z") zap-to-char)
 
     ))

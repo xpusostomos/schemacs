@@ -34,6 +34,7 @@ SUITES = [
     'schemacs/editor/env-tests.scm',
     'schemacs/editor/fileio-tests.scm',
     'schemacs/editor/fns-tests.scm',
+    'schemacs/editor/subr-tests.scm',
     'schemacs/editor/textprop-tests.scm',
     'schemacs/editor/ls-lisp-tests.scm',
     'schemacs/editor/timefns-tests.scm',

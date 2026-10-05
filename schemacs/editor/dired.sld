@@ -168,7 +168,7 @@
     (only (schemacs editor minibuffer)
           completion--insert-strings read-from-minibuffer yes-or-no-p)
     (only (schemacs editor frame) *current-frame* window-list)
-    (only (schemacs editor subr) run-hooks run-mode-hooks string-replace)
+    (only (schemacs editor subr) kbd run-hooks run-mode-hooks string-replace)
     )
 
   (export
@@ -1794,27 +1794,27 @@ for SWITCHES."
         ;; because `dired-mode' is a plain function and not a derived mode
         (set-keymap-parent map special-mode-map)
         (define (bind! key command)
-          (define-key map (if (list? key) key (list key)) command))
-        (bind! #\n dired-next-line)
-        (bind! #\space dired-next-line)
-        (bind! #\p dired-previous-line)
-        (bind! #\> dired-next-dirline)
-        (bind! #\^ dired-up-directory)
-        (bind! #\j dired-goto-file)
-        (bind! #\o dired-find-file-other-window)
-        (bind! #\a dired-find-alternate-file)
-        (bind! #\m dired-mark)
-        (bind! #\u dired-unmark)
-        (bind! #\d dired-flag-file-deletion)
-        (bind! #\< dired-prev-dirline)
-        (bind! #\g revert-buffer)
+          (define-key map (kbd key) command))
+        (bind! "n" dired-next-line)
+        (bind! "SPC" dired-next-line)
+        (bind! "p" dired-previous-line)
+        (bind! ">" dired-next-dirline)
+        (bind! "^" dired-up-directory)
+        (bind! "j" dired-goto-file)
+        (bind! "o" dired-find-file-other-window)
+        (bind! "a" dired-find-alternate-file)
+        (bind! "m" dired-mark)
+        (bind! "u" dired-unmark)
+        (bind! "d" dired-flag-file-deletion)
+        (bind! "<" dired-prev-dirline)
+        (bind! "g" revert-buffer)
         ;; RET is `(ctrl #\m)' and not `#\return': a terminal sends byte
         ;; 13, and Emacs's keymap has the same key, where RET and C-m are
         ;; one key.
-        (bind! (list 'ctrl #\m) dired-find-file)
-        (bind! #\f dired-find-file)
-        (bind! #\e dired-find-file)
-        (bind! #\q quit-window)
+        (bind! "C-m" dired-find-file)
+        (bind! "f" dired-find-file)
+        (bind! "e" dired-find-file)
+        (bind! "q" quit-window)
         map))
 
     (define dired-mode-map (make-dired-mode-map))
@@ -1823,7 +1823,7 @@ for SWITCHES."
     ;; It is the last thing in the file for the reason the other binding
     ;; libraries give: `define-key' holds the command's value, and Guile
     ;; resolves a binding when the form is evaluated.
-    (define-key *default-keymap* (list (list 'ctrl #\x) (list #\d))
+    (define-key *default-keymap* (kbd "C-x d")
       dired)
 
     ;; `files.el''s `find-directory-functions' is `(cvs-dired-noselect
@@ -2712,6 +2712,6 @@ for SWITCHES."
     ;; the command is defined further down. Without it `x' was undefined
     ;; and self-inserted into the read-only listing, which is what the
     ;; "Buffer is read-only" report was.
-    (define-key dired-mode-map (list #\x) dired-do-flagged-delete)
+    (define-key dired-mode-map (kbd "x") dired-do-flagged-delete)
 
     ))

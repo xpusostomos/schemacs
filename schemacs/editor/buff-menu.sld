@@ -39,6 +39,8 @@
   ;; See LAYOUT-PLAN.txt for the rule this library is a step of.
 
   (import
+    ;; `kbd' - see `character.sld''s export note for why it is there
+    (only (schemacs editor character) kbd)
     (scheme base)
     (scheme char)
     (prefix (schemacs keymap) km:)
@@ -591,39 +593,39 @@
       ;;--------------------------------------------------------------
       (let ((map (km:keymap '*buffer-menu-mode-map*)))
         (define (bind! key command)
-          ;; a key is a path, as `define-key' takes it: one key, which may
-          ;; be a character or a modifier and a character
-          (define-key map (if (list? key) key (list key)) command))
-        (bind! #\q quit-window)
-        (bind! #\d Buffer-menu-delete)
-        (bind! #\k Buffer-menu-delete)
-        (bind! (list 'ctrl #\k) Buffer-menu-delete)
-        (bind! #\x Buffer-menu-execute)
-        (bind! #\u Buffer-menu-unmark)
-        (bind! #\m Buffer-menu-mark)
-        (bind! #\s Buffer-menu-save)
-        (bind! #\b Buffer-menu-bury)
-        (bind! #\~ Buffer-menu-not-modified)
-        (bind! #\% Buffer-menu-toggle-read-only)
-        (bind! #\g revert-buffer)
+          ;; a key is written the way Emacs writes it, as `kbd' reads it:
+          ;; `"q"', `"C-k"', `"M-x"', `"<up>"'
+          (define-key map (kbd key) command))
+        (bind! "q" quit-window)
+        (bind! "d" Buffer-menu-delete)
+        (bind! "k" Buffer-menu-delete)
+        (bind! "C-k" Buffer-menu-delete)
+        (bind! "x" Buffer-menu-execute)
+        (bind! "u" Buffer-menu-unmark)
+        (bind! "m" Buffer-menu-mark)
+        (bind! "s" Buffer-menu-save)
+        (bind! "b" Buffer-menu-bury)
+        (bind! "~" Buffer-menu-not-modified)
+        (bind! "%" Buffer-menu-toggle-read-only)
+        (bind! "g" revert-buffer)
         ;; RET is `(ctrl #\m)' and not the character `#\return': a
         ;; terminal sends the byte 13, and the keymap path for it is
         ;; control-M. Emacs's keymap has the same key - RET and C-m are one
         ;; key there too - which is why `(key-binding "\r")' finds it.
-        (bind! (list 'ctrl #\m) Buffer-menu-this-window)
-        (bind! #\f Buffer-menu-this-window)
-        (bind! #\e Buffer-menu-this-window)
-        (bind! #\o Buffer-menu-other-window)
-        (bind! (list 'ctrl #\o) Buffer-menu-switch-other-window)
-        (bind! #\n Buffer-menu-next-line)
-        (bind! #\space Buffer-menu-next-line)
-        (bind! #\p Buffer-menu-previous-line)
+        (bind! "C-m" Buffer-menu-this-window)
+        (bind! "f" Buffer-menu-this-window)
+        (bind! "e" Buffer-menu-this-window)
+        (bind! "o" Buffer-menu-other-window)
+        (bind! "C-o" Buffer-menu-switch-other-window)
+        (bind! "n" Buffer-menu-next-line)
+        (bind! "SPC" Buffer-menu-next-line)
+        (bind! "p" Buffer-menu-previous-line)
         map))
 
     ;;----------------------------------------------------------------
     ;; The keys
 
-    (define-key *default-keymap* (list (list 'ctrl #\x) (list 'ctrl #\b))
+    (define-key *default-keymap* (kbd "C-x C-b")
       list-buffers)
 
     ))

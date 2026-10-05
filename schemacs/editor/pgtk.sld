@@ -81,7 +81,7 @@
     (only (schemacs editor dispnew)
           <display> clear-frame-area! column-width current-display
           display-color-cells
-          draw-window-cursor! flush-display! key-event->keymap-path
+          draw-window-cursor! flush-display! key-event->key
           get-selection line-height read-input-event realize-face
           resume-display! screen-size selection-exists? selection-owner?
           set-selection! suspend-display! update-window-begin!
@@ -95,6 +95,9 @@
     ;; How many cells a character takes - a CJK ideograph is one character
     ;; and two cells, so a run is not `string-length' wide.
     (only (schemacs editor disp-table) char-display-width)
+    ;; `key-path->event' is the event model's, in `character.sld': the
+    ;; C's `event-convert-list', which every decoder answers with.
+    (only (schemacs editor character) key-path->event)
     ;; The frame's focus, which the window tells us about: it decides
     ;; whether the cursor blinks and whether it is drawn hollow.
     (only (schemacs editor frame)
@@ -276,7 +279,7 @@
     ;; (gtkutil.c:6520): a keysym that `keyval_to_unicode' maps to a
     ;; character is a character event, and everything else - the cursor
     ;; keys, function keys, the keypad - is an event whose code is the
-    ;; keysym, which `key-event->keymap-path' then names.
+    ;; keysym, which `key-event->key' then names.
     ;;
     ;; The modifiers are `pgtk_gtk_to_emacs_modifiers' (pgtkterm.c:5157):
     ;; note that Mod1 is META, not alt.
@@ -295,7 +298,7 @@
 
     (define (modifier-symbols state)
       ;; The modifier symbols of a GDK modifier state, in the order
-      ;; `key-event->keymap-path' builds its paths in. The masks are
+      ;; `key-event->key' builds its paths in. The masks are
       ;; Gdk's: SHIFT 1, CONTROL 4, MOD1 8, SUPER 1<<26, HYPER 1<<27,
       ;; META 1<<28. Note that MOD1 means META here, as Emacs has it in
       ;; `pgtk_gtk_to_emacs_modifiers' - not alt.
@@ -330,7 +333,8 @@
          ((or (= ci 127) (char=? c #\backspace)) (list 'ctrl #\h))
          ((= ci 0) (list 'ctrl #\@))
          ((and (< 0 ci) (< ci 27)) (list 'ctrl (integer->char (+ 96 ci))))
-         ((and (>= ci 28) (< ci 32)) (list 'ctrl (integer->char ci)))
+         ;; unfolded, as `make_ctrl_char' unfolds them - see `term.sld'
+         ((and (>= ci 28) (< ci 32)) (list 'ctrl (integer->char (+ 64 ci))))
          (else (list c)))))
 
     (define (key-event->path ev)
@@ -603,17 +607,20 @@
     (define-method (read-input-event (d <pgtk-display>) timeout)
       (pgtk-read-event d timeout))
 
-    (define-method (key-event->keymap-path (d <pgtk-display>) ev)
-      ;; EV is the integer `read-input-event' answered; decode it into
-      ;; the modifier state and keysym this file builds paths from.
+    (define-method (key-event->key (d <pgtk-display>) ev)
+      ;; EV is the integer `read-input-event' answered; decode it into the
+      ;; modifier state and keysym this file builds paths from, and answer
+      ;; the *key event* those name - GNU Emacs's `make_lispy_event' for a
+      ;; window system - through `key-path->event'.
       ;;--------------------------------------------------------------
-      (cond
-       ((eqv? ev *resize-code*) '("resize"))
-       ((eqv? ev *focus-in-code*) '("focus-in"))
-       ((eqv? ev *focus-out-code*) '("focus-out"))
-       ((eqv? ev *delete-frame-code*) '("delete-frame"))
-       ((integer? ev) (key-event->path (pgtk-decode-event ev)))
-       (else #f)))
+      (let ((path (cond
+                   ((eqv? ev *resize-code*) '("resize"))
+                   ((eqv? ev *focus-in-code*) '("focus-in"))
+                   ((eqv? ev *focus-out-code*) '("focus-out"))
+                   ((eqv? ev *delete-frame-code*) '("delete-frame"))
+                   ((integer? ev) (key-event->path (pgtk-decode-event ev)))
+                   (else #f))))
+        (and path (key-path->event path))))
 
     (define-method (screen-size (d <pgtk-display>))
       ;; In pixels, and a character is one pixel here, so this is the

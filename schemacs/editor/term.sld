@@ -26,6 +26,9 @@
     ;; and what the terminal can draw of it is computed here - that
     ;; last step is the whole of this library's face code.
     (only (schemacs editor xfaces) attribute-value realize-tty-face)
+    ;; `key-path->event' turns the path this file's key table builds into
+    ;; the *key event* GNU Emacs's `make_lispy_event' would have built.
+    (only (schemacs editor character) key-path->event)
     ;; Opening a terminal runs `startup.el''s color and face
     ;; initialization against it, so it needs what ncurses.sld used to
     ;; import for that: the eight standard colors, the xterm driver for
@@ -199,7 +202,7 @@
                (and key modifiers
                     (append (cadr modifiers) (list (cdr key))))))))
 
-    (define-method (key-event->keymap-path (d <tty-display>) ev)
+    (define-method (key-event->key (d <tty-display>) ev)
       ;; Convert one of this terminal's key events to a keymap path: a
       ;; list of modifier symbols and characters (or #f when the event
       ;; cannot be converted).
@@ -215,23 +218,41 @@
       ;; commands, so folding them is no longer a behaviour anything
       ;; depends on.
       ;;--------------------------------------------------------------
-      (cond
+      ;; The *key event* the path names - GNU Emacs's `make_lispy_event'
+      ;; for a terminal: an integer carrying the character and the
+      ;; modifier bits, or a symbol for a key that is not a character.
+      ;;--------------------------------------------------------------
+      (let ((path
+             (cond
        ((char? ev)
         (let ((ci (char->integer ev)))
           (cond
            ((char=? ev #\return) (list 'ctrl #\m))
            ((char=? ev #\newline) (list 'ctrl #\j))
            ((char=? ev #\esc) (list 'ctrl #\[))
-           ((or (= ci 127) (char=? ev #\backspace))
-            (list 'ctrl #\h))
            ;; NUL is C-@, and C-@ is C-SPC: one key, one byte, and the
            ;; binding for the mark is on it.
            ((= ci 0) (list 'ctrl #\@))
            ((and (< 0 ci) (< ci 27))
             (list 'ctrl (integer->char (+ 96 ci))))
+           ;; 28-31 are the second column of the control range, and GNU
+           ;; Emacs's `make_ctrl_char' unfolds them the same way it unfolds
+           ;; 1-26: `\', `]', `^' and `_'. This used to answer the *raw*
+           ;; control character - `(ctrl #\us)' for 31 - where the letters
+           ;; answered the unfolded one, so a binding written `C-_'
+           ;; matched nothing a terminal sent.
            ((and (>= ci 28) (< ci 32))
-            (list 'ctrl (integer->char ci)))
-           ((and (>= ci 32) (not (= ci 127)))
+            (list 'ctrl (integer->char (+ 64 ci))))
+           ;; 127 is DEL, a key of its own - `bindings.el:1318' binds it
+           ;; to `delete-backward-char'. It used to be folded onto
+           ;; `(ctrl #\h)' with byte 8, on the theory that "DEL and BS are
+           ;; the same event in a terminal". They are not: they are two
+           ;; bytes and GNU Emacs reads them as two events - `C-h' (8) is
+           ;; `help-command' (`help.el:124', `help-char' being `?\C-h').
+           ;; The fold cost the C-h key its meaning and left
+           ;; `query-replace-map''s DEL answer unreachable from a
+           ;; terminal.
+           ((>= ci 32)
             (list ev))
            (else #f))))
        ((integer? ev)
@@ -243,17 +264,18 @@
          ((= ev KEY_HOME)  (list "home"))
          ((= ev KEY_END)   (list "end"))
          ((= ev KEY_DC)    (list "delete"))
-         ;; DEL and BS are the same event in a terminal, and Emacs reads
-         ;; that byte as `C-h' - which is why both spellings of the
-         ;; backspace key land on the same binding here.
-         ((= ev KEY_BACKSPACE) (list 'ctrl #\h))
+         ;; The Backspace key: ncurses matched the terminal's `kbs',
+         ;; which is `^?' on the terminals here - so what the terminal
+         ;; sent, and what GNU Emacs would have read, is the DEL byte.
+         ((= ev KEY_BACKSPACE) (list (integer->char 127)))
          ((= ev KEY_RESIZE) (list "resize"))
          ;; Anything else: ncurses reports a key carrying a *modifier* as
          ;; an extended keycode - one above `KEY_MAX', named from
          ;; terminfo - and `M-<down>' arrives as the code ncurses calls
          ;; `kDN3' rather than as anything the constants above cover.
          (else (extended-key->keymap-path ev))))
-       (else #f)))
+       (else #f))))
+        (and path (key-path->event path))))
 
     ;;----------------------------------------------------------------
     ;; The display interface, for a text terminal
@@ -330,16 +352,16 @@
       ;; of input, the caller telling the two apart by the TIMEOUT it
       ;; asked for.
       ;;
-      ;; The keypad's Backspace is answered as DEL (`#\backspace'), the
-      ;; character the search and the prompt know it by. The keymap
-      ;; decode reads both spellings of the byte as `C-h', so the command
-      ;; loop cannot tell the difference.
+      ;; The keypad's Backspace is answered as DEL, the byte the
+      ;; terminal sends for it (`kbs=^?'): ncurses has matched that byte
+      ;; to `kbs' and hands back its own code, and DEL is what GNU Emacs
+      ;; would have read there.
       ;;--------------------------------------------------------------
       (timeout! (stdscr) timeout)
       (let ((ev (getch (stdscr))))
         (cond
          ((or (eqv? ev ERR) (eqv? ev #f)) #f)
-         ((and (integer? ev) (= ev KEY_BACKSPACE)) #\backspace)
+         ((and (integer? ev) (= ev KEY_BACKSPACE)) (integer->char 127))
          (else ev))))
 
     (define-method (screen-size (d <tty-display>))

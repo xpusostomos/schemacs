@@ -39,7 +39,7 @@
  ;; display it asks: a terminal object with no curses behind it, which is
  ;; all the character events these tests feed ever need (only an extended
  ;; keycode would ask the terminal's terminfo, and none is used here).
- (only (schemacs editor dispnew) current-display key-event->keymap-path)
+ (only (schemacs editor dispnew) current-display key-event->key)
  (only (schemacs editor term) <tty-display>)
  (only (schemacs editor keymap) *current-keymap* *default-keymap*)
  (only (schemacs editor dired)
@@ -131,7 +131,7 @@
 ;;
 ;; The tests drive the frontend the way the event loop does - as a
 ;; stream of ncurses key events the display is asked to name, through
-;; `key-event->keymap-path' - rather than as keymap paths, because the
+;; `key-event->key' - rather than as keymap paths, because the
 ;; translation from a keystroke to a path is itself part of what can
 ;; break (TAB arrives as `#\tab' but is bound as C-i, and the arrow keys
 ;; arrive as integers). Only `dispatch-key-event' is called, so no
@@ -343,16 +343,16 @@
   (let* ((ed (new-text-editor))
         (frame (test-frame ed)))
     (parameterize ((*current-frame* frame))
-      (dispatch-key-event frame (key-event->keymap-path (current-display) C-u))
-      (dispatch-key-event frame (key-event->keymap-path (current-display) (integer->char 24)))
+      (dispatch-key-event frame (key-event->key (current-display) C-u))
+      (dispatch-key-event frame (key-event->key (current-display) (integer->char 24)))
       (pending-uarg))))
 
 (test-equal #f
   (let* ((ed (new-text-editor))
         (frame (test-frame ed)))
     (parameterize ((*current-frame* frame))
-      (dispatch-key-event frame (key-event->keymap-path (current-display) C-u))
-      (dispatch-key-event frame (key-event->keymap-path (current-display) #\a))
+      (dispatch-key-event frame (key-event->key (current-display) C-u))
+      (dispatch-key-event frame (key-event->key (current-display) #\a))
       (pending-uarg))))
 
 ;; An undefined key ends the chord and discards the prefix with it.
@@ -360,9 +360,9 @@
   (let* ((ed (new-text-editor))
         (frame (test-frame ed)))
     (parameterize ((*current-frame* frame))
-      (dispatch-key-event frame (key-event->keymap-path (current-display) C-u))
-      (dispatch-key-event frame (key-event->keymap-path (current-display) (integer->char 24)))
-      (dispatch-key-event frame (key-event->keymap-path (current-display) #\a))
+      (dispatch-key-event frame (key-event->key (current-display) C-u))
+      (dispatch-key-event frame (key-event->key (current-display) (integer->char 24)))
+      (dispatch-key-event frame (key-event->key (current-display) #\a))
       (pending-uarg))))
 
 (test-end "schemacs_ncurses_editor_prefix_argument")

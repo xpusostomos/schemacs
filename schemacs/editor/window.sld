@@ -68,7 +68,7 @@
           set-buffer-modified-p with-current-buffer *inhibit-read-only*)
     ;; `run-hooks' is `subr.el''s, and the two temp-buffer hooks below
     ;; are run through it.
-    (only (schemacs editor subr) run-hooks)
+    (only (schemacs editor subr) kbd run-hooks)
     ;; `temp-buffer-window-show' puts point at the beginning of the
     ;; buffer it is about to show, which `goto-char' is.
     (only (schemacs editor editfns) goto-char point-min)
@@ -816,22 +816,22 @@ by this function.  This happens in an interactive call."
         result))
 
     ;; The window keys, on the ones GNU Emacs binds them to.
-    (define-key *default-keymap* (list (list 'ctrl #\x) #\2)
+    (define-key *default-keymap* (kbd "C-x 2")
       split-window-below)
-    (define-key *default-keymap* (list (list 'ctrl #\x) #\3)
+    (define-key *default-keymap* (kbd "C-x 3")
       split-window-right)
-    (define-key *default-keymap* (list (list 'ctrl #\x) #\1)
+    (define-key *default-keymap* (kbd "C-x 1")
       delete-other-windows)
-    (define-key *default-keymap* (list (list 'ctrl #\x) #\0)
+    (define-key *default-keymap* (kbd "C-x 0")
       delete-window)
-    (define-key *default-keymap* (list (list 'ctrl #\x) #\o)
+    (define-key *default-keymap* (kbd "C-x o")
       other-window)
     ;; `bindings.el' binds scroll-left and scroll-right here - the keys
     ;; for which GNU Emacs has the disabled-command guard this tree
     ;; cannot express yet.
-    (define-key *default-keymap* (list (list 'ctrl #\x) #\<)
+    (define-key *default-keymap* (kbd "C-x <")
       scroll-left)
-    (define-key *default-keymap* (list (list 'ctrl #\x) #\>)
+    (define-key *default-keymap* (kbd "C-x >")
       scroll-right)
 
     (define *temp-buffer-window-setup-hook* (make-parameter '()))

@@ -26,6 +26,8 @@
   ;; See LAYOUT-PLAN.txt for the rule this library is a step of.
 
   (import
+    ;; `kbd' - see `character.sld''s export note for why it is there
+    (only (schemacs editor character) kbd)
     (scheme base)
     (scheme char)
     (only (schemacs editor engine)
@@ -266,12 +268,12 @@
 
     ;; The keys GNU Emacs binds them to, beside the commands as the
     ;; other libraries state theirs.
-    (define-key *default-keymap* (list (list 'ctrl #\x) (list 'ctrl #\u))
+    (define-key *default-keymap* (kbd "C-x C-u")
       upcase-region)
-    (define-key *default-keymap* (list (list 'ctrl #\x) (list 'ctrl #\l))
+    (define-key *default-keymap* (kbd "C-x C-l")
       downcase-region)
-    (define-key *default-keymap* (list (list 'meta #\u)) upcase-word)
-    (define-key *default-keymap* (list (list 'meta #\l)) downcase-word)
-    (define-key *default-keymap* (list (list 'meta #\c)) capitalize-word)
+    (define-key *default-keymap* (kbd "M-u") upcase-word)
+    (define-key *default-keymap* (kbd "M-l") downcase-word)
+    (define-key *default-keymap* (kbd "M-c") capitalize-word)
 
     ))

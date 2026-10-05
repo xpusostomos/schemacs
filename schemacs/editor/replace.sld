@@ -57,15 +57,13 @@
           search-backward search-forward set-match-data string-match)
     ;; The key reads: the loop reads one key at a time, exactly the
     ;; command loop's own read, and pushes a key it does not know back
-    ;; onto `*unread-command-events*'. `read-key-event' answers the key's
-    ;; *path* - the display's own form is normalised away at the read - so
-    ;; what is pushed back is a path, which is what the command loop reads
-    ;; next and what `dispatch-key-path' takes.
+    ;; onto `*unread-command-events*'. `read-key-event' answers the key
+    ;; *event* - the display's own form is normalised away at the read -
+    ;; so what is pushed back is an event, which is what the command
+    ;; loop reads next and what `dispatch-input-event' takes.
     (only (schemacs editor keyboard)
           *unread-command-events* read-key-event recursive-edit
           signal-quit)
-    (only (schemacs editor dispnew)
-          current-display key-event->keymap-path)
     (only (schemacs editor minibuffer)
           *minibuffer-setup-hook*
           format-prompt history-entries list-ref-or make<history>
@@ -99,7 +97,7 @@
     (only (schemacs editor keymap) define-key *default-keymap* *current-keymap*)
     (prefix (schemacs keymap) km:)
     (only (schemacs editor window) display-buffer)
-    (only (schemacs editor subr) add-to-history)
+    (only (schemacs editor subr) kbd add-to-history)
     (only (guile) cadr caddr cddr cdddr cadddr cddddr format string-contains)
     )
 
@@ -215,43 +213,46 @@ when `query-replace-highlight' is non-nil")
       ;; GNU Emacs's `query-replace-map' (replace.el:2788): "Keymap of
       ;; responses to questions posed by commands like `query-replace'.
       ;; The \"bindings\" in this map are not commands; they are
-      ;; answers." The keys and the answers are the C's, one exception
-      ;; being DEL: this tree folds a terminal's byte 8 (C-h) and byte
-      ;; 127 (DEL) into one key path, `\(ctrl #\h)', and the C binds
-      ;; THOSE to different answers (`\d' skip, `\C-h' help) - the
-      ;; shared path is skip's, and help is left on `?'.
+      ;; answers." The keys and the answers are the C's, DEL included:
+      ;; `"\d"' (127) is skip and `"\C-h"' (8) is help, two different
+      ;; answers to two different bytes.
       ;;--------------------------------------------------------------
       (km:keymap '*query-replace-map*))
 
     (define (fill-query-replace-map!)
       ;; The bindings, in the C's order.
       ;;--------------------------------------------------------------
-      (define-key *query-replace-map* (list #\space) 'act)
-      (define-key *query-replace-map* (list (list 'ctrl #\h)) 'skip)
-      (define-key *query-replace-map* (list #\y) 'act)
-      (define-key *query-replace-map* (list #\n) 'skip)
-      (define-key *query-replace-map* (list #\Y) 'act)
-      (define-key *query-replace-map* (list #\N) 'skip)
-      (define-key *query-replace-map* (list #\e) 'edit-replacement)
-      (define-key *query-replace-map* (list #\E) 'edit-replacement-exact-case)
-      (define-key *query-replace-map* (list #\,) 'act-and-show)
-      (define-key *query-replace-map* (list #\q) 'exit)
-      (define-key *query-replace-map* (list (list 'ctrl #\m)) 'exit)
-      (define-key *query-replace-map* (list #\.) 'act-and-exit)
-      (define-key *query-replace-map* (list (list 'ctrl #\r)) 'edit)
-      (define-key *query-replace-map* (list (list 'ctrl #\w)) 'delete-and-edit)
-      (define-key *query-replace-map* (list (list 'ctrl #\l)) 'recenter)
-      (define-key *query-replace-map* (list #\!) 'automatic)
-      (define-key *query-replace-map* (list #\^) 'backup)
-      (define-key *query-replace-map* (list #\u) 'undo)
-      (define-key *query-replace-map* (list #\U) 'undo-all)
-      (define-key *query-replace-map* (list #\d) 'diff)
-      (define-key *query-replace-map* (list #\?) 'help)
-      (define-key *query-replace-map* (list (list 'ctrl #\g)) 'quit)
-      (define-key *query-replace-map* (list (list 'ctrl #\])) 'quit)
-      (define-key *query-replace-map* (list (list 'ctrl #\v)) 'scroll-up)
-      (define-key *query-replace-map* (list (list 'meta #\v)) 'scroll-down)
-      (define-key *query-replace-map* (list (list 'ctrl #\[)) 'exit-prefix))
+      (define-key *query-replace-map* (kbd "SPC") 'act)
+      ;; Emacs binds all three spellings of the erase key: the byte
+      ;; (`"\d"'), and the two named keys a window system sends.
+      (define-key *query-replace-map* (kbd "DEL") 'skip)
+      (define-key *query-replace-map* (kbd "<delete>") 'skip)
+      (define-key *query-replace-map* (kbd "<backspace>") 'skip)
+      (define-key *query-replace-map* (kbd "y") 'act)
+      (define-key *query-replace-map* (kbd "n") 'skip)
+      (define-key *query-replace-map* (kbd "Y") 'act)
+      (define-key *query-replace-map* (kbd "N") 'skip)
+      (define-key *query-replace-map* (kbd "e") 'edit-replacement)
+      (define-key *query-replace-map* (kbd "E") 'edit-replacement-exact-case)
+      (define-key *query-replace-map* (kbd ",") 'act-and-show)
+      (define-key *query-replace-map* (kbd "q") 'exit)
+      (define-key *query-replace-map* (kbd "C-m") 'exit)
+      (define-key *query-replace-map* (kbd ".") 'act-and-exit)
+      (define-key *query-replace-map* (kbd "C-r") 'edit)
+      (define-key *query-replace-map* (kbd "C-w") 'delete-and-edit)
+      (define-key *query-replace-map* (kbd "C-l") 'recenter)
+      (define-key *query-replace-map* (kbd "!") 'automatic)
+      (define-key *query-replace-map* (kbd "^") 'backup)
+      (define-key *query-replace-map* (kbd "u") 'undo)
+      (define-key *query-replace-map* (kbd "U") 'undo-all)
+      (define-key *query-replace-map* (kbd "d") 'diff)
+      (define-key *query-replace-map* (kbd "C-h") 'help)
+      (define-key *query-replace-map* (kbd "?") 'help)
+      (define-key *query-replace-map* (kbd "C-g") 'quit)
+      (define-key *query-replace-map* (kbd "C-]") 'quit)
+      (define-key *query-replace-map* (kbd "C-v") 'scroll-up)
+      (define-key *query-replace-map* (kbd "M-v") 'scroll-down)
+      (define-key *query-replace-map* (kbd "C-[") 'exit-prefix))
 
     (fill-query-replace-map!)
 
@@ -1049,11 +1050,11 @@ re-executed as a normal key sequence.")
                                                      replacement-presentation))))
                                              (set!frame-message frame prompt)
                                              (render! frame)
-                                             (let* ((path (read-key-event -1))
+                                             (let* ((key (read-key-event -1))
                                                     (def (km:keymap-lookup
                                                           map
                                                           (km:keymap-index
-                                                           path))))
+                                                           key))))
                                                (cond
                                                 ((eq? def 'help)
                                                  (show-query-replace-help
@@ -1277,7 +1278,7 @@ re-executed as a normal key sequence.")
                                                 (else
                                                  (set! keep-going #f)
                                                  (*unread-command-events*
-                                                  (cons path
+                                                  (cons key
                                                         (*unread-command-events*)))
                                                  (response #t replaced))))))))))))
                      ;; the occurrence is handled: record the
@@ -1417,8 +1418,8 @@ This is a generic function; see `replace-regexp'."
       (perform-replace regexp to-string #f #t delimited
                        1 *query-replace-map* start end backward))
 
-    (define-key *default-keymap* (list (list 'meta #\%)) query-replace)
-    (define-key *default-keymap* (list (list 'meta 'ctrl #\%))
+    (define-key *default-keymap* (kbd "M-%") query-replace)
+    (define-key *default-keymap* (kbd "M-C-%")
       query-replace-regexp)
 
     ))

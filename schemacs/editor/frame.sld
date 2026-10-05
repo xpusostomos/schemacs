@@ -20,6 +20,7 @@
   ;; See LAYOUT-PLAN.txt for the rule this library is the first step of.
 
   (import
+    (only (schemacs editor subr) kbd)
     (scheme base)
     ;; `new-frame' takes an optional size, which is a `case-lambda': it
     ;; is not exported by `(scheme base)' and a missing import for it
@@ -730,8 +731,8 @@
     ;; library that owns the command (`bindings.el' has
     ;; `(define-key special-event-map ...)' and `keyboard.c:14550' does the
     ;; same in C)
-    (define-key *special-event-map* (list "focus-in") handle-focus-in)
-    (define-key *special-event-map* (list "focus-out") handle-focus-out)
+    (define-key *special-event-map* (kbd "<focus-in>") handle-focus-in)
+    (define-key *special-event-map* (kbd "<focus-out>") handle-focus-out)
 
     (define *minibuffer* (make-parameter #f))
     ;; ^ The minibuffer being read, or false: GNU Emacs's
@@ -1024,7 +1025,7 @@
 
     ;; The key GNU Emacs binds it to, beside the command as the other
     ;; libraries state theirs.
-    (define-key *default-keymap* (list (list 'ctrl #\z)) suspend-frame)
+    (define-key *default-keymap* (kbd "C-z") suspend-frame)
 
     (define (selected-window)
       ;; The window commands act on: GNU Emacs's `(selected-window)'.
@@ -1113,7 +1114,7 @@
 
     ;; The key GNU Emacs binds it to (C-l), beside the command as the
     ;; other libraries state theirs.
-    (define-key *default-keymap* (list (list 'ctrl #\l)) recenter)
+    (define-key *default-keymap* (kbd "C-l") recenter)
 
     ;; The selected window's buffer, scroll position and file, under the
     ;; names the rest of this file already uses. They are what Emacs's

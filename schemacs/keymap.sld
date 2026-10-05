@@ -30,9 +30,20 @@
           bin-hash-table-copy
           bin-hash-table->alist)
     (only (schemacs editor command) command-type? command-procedure)
+    ;; The event model, which is what a key *is*: `event-modifiers' and
+    ;; `event-basic-type' take an event apart into the modifiers and the
+    ;; basic type this keymap indexes by. They are `character.sld''s, the
+    ;; lowest editor library - see its export note.
+    (only (schemacs editor character)
+          event-modifiers event-basic-type
+          char-alt char-super char-hyper char-shift char-ctl char-meta)
     (only (srfi 1) fold concatenate find)
     (only (schemacs string) string-fold)
     (only (schemacs bitwise) bitwise-ior bitwise-and)
+    ;; `lognot' is the C's, and srfi 60's `(schemacs bitwise)' does
+    ;; not re-export it - `(guile)' is where the rest of the tree takes
+    ;; it from too (`character.sld' imports it the same way).
+    (only (guile) lognot)
     (only (schemacs comparator)
           make-eq-comparator  make-eqv-comparator
           make-equal-comparator
@@ -524,7 +535,12 @@
         (control . ,ctrl-bit)
         (M       . ,meta-bit)
         (meta    . ,meta-bit)
-        (S       . ,super-bit)
+        ;; `S-' is *shift* in Emacs and `s-' is super (`keyboard.c':7390);
+        ;; this table had them the other way round. A shifted *character*
+        ;; needs no bit - its case carries the shift, and `event-basic-type'
+        ;; folds it in - but a shifted *function* key (`S-up') has no bit
+        ;; here to be told by, which is the gap this keymap has always had.
+        (s       . ,super-bit)
         (super   . ,super-bit)
         (H       . ,hyper-bit)
         (hyper   . ,hyper-bit)
@@ -559,8 +575,66 @@
       ;; between a ~<KEYMAP-INDEX>~ structure and a procedure.
       ;;------------------------------------------------------------------
       (cond
+       ;; A *key sequence* - a vector of events, which is what `kbd'
+       ;; answers with and what Emacs's `define-key' takes. It is walked
+       ;; as the list it is.
+       ((vector? syms)
+        (keymap-index (vector->list syms)))
        ((string? syms)
         (keymap-index (string->keymap-index syms)))
+       ;; An Emacs *event*: an integer whose low bits are the character and
+       ;; whose high bits are the modifiers, or a symbol for a key that is
+       ;; not a character (`up', `f1'). It is one key, not a sequence, so it
+       ;; is decomposed straight into an index - `event-modifiers' and
+       ;; `event-basic-type' being the two halves that take it apart.
+       ;;
+       ;; The modifiers are mapped to *this* keymap's bits, which are ctrl,
+       ;; meta, super, hyper and alt. Emacs's `shift' has no bit here: a
+       ;; shifted character is carried by the character's own case - the
+       ;; character below is taken *as the event spells it*, which is the
+       ;; whole of the shift in that case - and a shifted *function* key
+       ;; (`S-up') cannot be told from the unshifted one, which is a gap
+       ;; this keymap has always had.
+       ;;
+       ;; The character of a *character* event is `event-basic-type''s
+       ;; first half only. That function answers the C's basic type and
+       ;; does two things: it unfolds the control range - `(logior base
+       ;; 64)', so `C-x' is the character `x' - and then it *downcases*
+       ;; (`subr.el:1876'). The unfolding is wanted: the index for `C-x'
+       ;; is `(ctrl #\x)', which is what every binding in this tree
+       ;; already spells. The downcasing is not - Emacs's `define-key'
+       ;; never asks `event-basic-type' anything, and `(kbd "X")' is
+       ;; `[88]' there, a key of its own beside `[120]'. Folding `X' onto
+       ;; `x' meant a capital could not be inserted at all.
+       ((or (integer? syms) (symbol? syms))
+        (let ((base (event-basic-type syms)))
+          (make<keymap-index>
+           (let loop ((mods (event-modifiers syms)) (mod 0))
+             (if (null? mods)
+                 mod
+                 (loop (cdr mods)
+                       (bitwise-ior mod
+                                    (or (modifier->integer (car mods)) 0)))))
+           (if (symbol? base)
+               (symbol->string base)
+               ;; The event's character: the modifier bits masked off,
+               ;; and the control range unfolded - `event-basic-type'
+               ;; as far as `uncontrolled' (`subr.el:1875'). The
+               ;; folding of the control range *is* a case fold - `C-x'
+               ;; arrives as 24 and unfolds to `X' - so the unfolded
+               ;; character is downcased here, to the `x' every binding
+               ;; in the tree spells it with. A character *above* the
+               ;; control range keeps its case: it came from the key
+               ;; itself, and `X' and `x' are two keys.
+               (let ((code (bitwise-and
+                            syms
+                            (lognot (bitwise-ior char-alt char-super
+                                                 char-hyper char-shift
+                                                 char-ctl char-meta)))))
+                 (if (< code 32)
+                     (char-downcase (integer->char (bitwise-ior code 64)))
+                     (integer->char code))))
+           #f)))
        ((pair? syms)
         ;; NOTE: the field accessors of <keymap-index-type> are
         ;; shadowed by the loop variables below, so aliases are bound
@@ -591,12 +665,25 @@
                   (make<keymap-index>
                    (%keymod sub) (%keychar sub)
                    (loop 0 next))))
+               ;; an *event* of the sequence: an integer is a character
+               ;; with its modifiers folded into it, and a symbol that
+               ;; names no modifier is a named key - `up`, `f1`. Both are
+               ;; one key, so each becomes one index, as the nested-list
+               ;; form above does.
+               ((integer? sym)
+                (let ((sub (keymap-index sym)))
+                  (make<keymap-index>
+                   (%keymod sub) (%keychar sub)
+                   (loop 0 next))))
                ((symbol? sym)
                 (let ((mod (modifier->integer sym)))
                   (cond
                    (mod (loop (bitwise-ior mod mod-index) next))
                    (else
-                    (error "unknown keymap-index modifier symbol" sym)))))
+                    (let ((sub (keymap-index sym)))
+                      (make<keymap-index>
+                       (%keymod sub) (%keychar sub)
+                       (loop 0 next)))))))
                (else
                 (error "keymap index must be composed of symbols or characters" sym)))))))))))
 

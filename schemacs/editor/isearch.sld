@@ -28,6 +28,8 @@
   ;; See LAYOUT-PLAN.txt for the rule this library is a step of.
 
   (import
+    ;; `kbd' - see `character.sld''s export note for why it is there
+    (only (schemacs editor character) kbd)
     (scheme base)
     (scheme char)
     (scheme case-lambda)
@@ -42,8 +44,11 @@
     ;; `*unread-command-events*' when something was. Reading through it is
     ;; what lets the search give the key that ended it back to the loop.
     (only (schemacs editor keyboard)
-          *unread-command-events* key-path->char-code read-key-event
-          read-wait-ms)
+          *unread-command-events* read-key-event read-wait-ms)
+    ;; `char-alt' is the event model's, in `character.sld': the lowest
+    ;; of the six modifier bits, `lisp.h''s `CHAR_ALT', which is the
+    ;; boundary between a plain character event and a modified one.
+    (only (schemacs editor subr) char-alt)
     ;; `define-key' and the global map: the keys C-s and C-r are stated
     ;; here, beside the commands they run.
     (only (schemacs editor keymap)
@@ -393,25 +398,32 @@
                                   (char-downcase
                                    (string-ref string i))))))))))
 
-    (define (isearch-printing-char path)
-      ;; The character PATH is a key *to search for*, or #f.
+    (define (isearch-printing-char key)
+      ;; The character the key *event* KEY is, or #f when it prints
+      ;; nothing - a function key, an arrow, a `M-` key.
       ;;
-      ;; A plain character key is itself. TAB and `C-j` are control keys -
-      ;; every decoder here folds them to `(ctrl #\i)` and `(ctrl #\j)` -
-      ;; and GNU Emacs's `isearch-printing-char' takes both, so a search
-      ;; can be given a tab or a line break to find: that is how `C-s foo
-      ;; C-j bar` searches for a string with a line break in it.
+      ;; A plain character key is itself, which the event spells as its
+      ;; own code. TAB and `C-j` are control keys - the decoders fold
+      ;; them to `(ctrl #\i)` and `(ctrl #\j)`, which are the events 9
+      ;; and 10 - and GNU Emacs's `isearch-printing-char' takes both, so
+      ;; a search can be given a tab or a line break to find: that is how
+      ;; `C-s foo C-j bar` searches for a string with a line break in
+      ;; it.
       ;;
-      ;; It is asked of the path and not of the character code the path
-      ;; stands for, because a code above 127 is ambiguous: it is a `M-`
-      ;; key's 128-set form, which the search must *not* take for a
-      ;; character, and it is also an ordinary accented letter, which it
-      ;; must.
+      ;; It compares the *event* rather than a character code, because
+      ;; a code above 127 is ambiguous: it is a `M-` key's `CHAR_META`
+      ;; form, which the search must *not* take for a character, and it
+      ;; is also an ordinary accented letter, which it must. What tells
+      ;; them apart is the modifier bits: `(kbd "M-a")' is `a' plus
+      ;; `CHAR_META', and the plain character is below every one of
+      ;; them - `char-alt' being the lowest of the six. A named key
+      ;; (`up', `f1') is a symbol and is not a character at all.
       ;;--------------------------------------------------------------
       (cond
-       ((and (= 1 (length path)) (char? (car path))) (car path))
-       ((equal? path (list 'ctrl #\i)) #\tab)
-       ((equal? path (list 'ctrl #\j)) #\newline)
+       ((not (integer? key)) #f)
+       ((= key 9) #\tab)
+       ((= key 10) #\newline)
+       ((and (< key char-alt) (>= key 32)) (integer->char key))
        (else #f)))
 
     (define (isearch forward?)
@@ -432,7 +444,9 @@
                    (wrapped? #f)
                    ;; a search folds case until an upper-case letter is
                    ;; typed into it (Emacs's `search-upper-case')
-                   (case-fold? #t))
+                   (case-fold? #t)
+                   ;; whether to draw before waiting for the next key
+                   (redraw? #t))
           (*search-pattern* (and (< 0 (string-length pattern)) pattern))
           (*search-case-fold?* case-fold?)
           ;; and record what was found as overlays for the display to
@@ -454,35 +468,33 @@
            frame
            (isearch-message pattern direction success? wrapped? case-fold?
                             (text-editor-get-cursor ed) opoint))
-          (render! frame)
-          ;; The read waits as long as any other interactive read may -
-          ;; `read-wait-ms', the command loop's own computation - and not
-          ;; for ever. A wait that never comes back gives nothing else a
-          ;; turn: on a terminal the read blocks in `getch` and the
-          ;; development REPL never answers between keys, and on Gtk the
-          ;; code that waits for a key is the same code that polls and
-          ;; pumps, so a blocking wait is one in which no key is ever seen.
-          ;; The key as `read-key-event' answers it: the *path* the key
-          ;; names, with the display's own form already normalised away at
-          ;; the read. Nothing below this line knows which front end is
-          ;; running, which is the whole point - a comparison against a
-          ;; character was a terminal-shaped test, and on Gtk every key is
-          ;; an integer, so a search there matched none of them and no key
+          ;; Draw only when there is something new to draw. The read is
+          ;; *timed* whenever the development REPL is open - `read-wait-ms',
+          ;; for the reason its note gives - so most iterations of this loop
+          ;; are a read that found nothing, and drawing on those repaints
+          ;; the whole terminal ten times a second for a search that has not
+          ;; moved. GNU Emacs draws from `isearch-update', which the *state*
+          ;; changes call, not from a read that timed out; same rule.
+          (when redraw? (render! frame))
+          ;; The key as `read-key-event' answers it: the *key event* GNU
+          ;; Emacs's `read_char' would have answered with, with the
+          ;; display's own form already normalised away at the read.
+          ;; Nothing below this line knows which front end is running,
+          ;; which is the whole point - a comparison against a character
+          ;; was a terminal-shaped test, and on Gtk every key is an
+          ;; integer, so a search there matched none of them and no key
           ;; did anything, `RET' and `C-g' included.
           ;;
-          ;; `key-path->char-code' is the character a path stands for, the
-          ;; same translation `read-quoted-char' makes, and is what the
-          ;; tests below compare: 13 is RET, 7 is `C-g', 19 is `C-s'. It is
-          ;; #f for a key that is not a character - `M-<', an arrow, a
-          ;; resize - which is what takes the exits below.
-          ;;
-          ;; The character the key *prints* is asked of the path and not of
-          ;; that code, because a code above 127 is ambiguous: it is a
-          ;; `M-' key's 128-set form and it is also an ordinary accented
-          ;; letter.
-          (let* ((path (read-key-event (read-wait-ms)))
-                 (code (and path (key-path->char-code path)))
-                 (printable (and path (isearch-printing-char path))))
+          ;; The exits below compare the event itself: 13 is RET, 7 is
+          ;; `C-g', 19 is `C-s', and that is what Emacs's
+          ;; `isearch-mode-map' binds them as - `(kbd "RET")' and the
+          ;; rest are those same integers. A key that is not a character
+          ;; - `M-<', an arrow, a resize - is a symbol or carries
+          ;; modifiers, and takes neither an exit nor a printing
+          ;; character.
+          (let* ((key (read-key-event (read-wait-ms)))
+                 (code (and (integer? key) key))
+                 (printable (and key (isearch-printing-char key))))
             (cond
              ;; ---- keys that end the search ----
              ((eqv? code 13)                                 ; isearch-exit
@@ -506,30 +518,32 @@
                     (set!frame-message frame "Quit"))
                   (let ((popped (isearch-pop-to-success ed states)))
                     (loop (car popped) direction (cdr popped) #t #f
-                          case-fold?))))
+                          case-fold? #t))))
              ;; ---- keys that move the search on ----
              ((eqv? code 19)                                 ; C-s
               (let ((next (isearch-repeat ed states pattern direction
                                           case-fold? success? wrapped?
                                           'forward)))
                 (loop (car next) 'forward (cadr next) (caddr next)
-                      (cadddr next) case-fold?)))
+                      (cadddr next) case-fold? #t)))
              ((eqv? code 18)                                 ; C-r
               (let ((next (isearch-repeat ed states pattern direction
                                           case-fold? success? wrapped?
                                           'backward)))
                 (loop (car next) 'backward (cadr next) (caddr next)
-                      (cadddr next) case-fold?)))
-             ;; isearch-delete-char: take back the last thing typed. A
-             ;; terminal's DEL and `C-h' are the same byte and both fold to
-             ;; `C-h', which is code 8 - the two spellings of backspace the
-             ;; `term.sld' decoder already unites.
-             ((eqv? code 8)
+                      (cadddr next) case-fold? #t)))
+             ;; isearch-delete-char, which GNU Emacs binds to `"\177"'
+             ;; (`isearch.el:607') - DEL is 127, its own key. `C-h' is
+             ;; unbound in `isearch-mode-map' there (`isearch.el:608'
+             ;; makes `[backspace]' explicitly undefined too), so it
+             ;; falls through to the give-the-key-back branch below.
+             ((eqv? code 127)
               (if (null? states)
-                  (loop pattern direction states success? wrapped? case-fold?)
+                  (loop pattern direction states success? wrapped?
+                        case-fold? #t)
                   (let ((popped (isearch-pop-state ed states)))
                     (loop (car popped) direction (cdr popped) #t #f
-                          case-fold?))))
+                          case-fold? #t))))
              ;; ---- keys that add to the search string ----
              ((eqv? code 23)                                 ; C-w
               ;; isearch-yank-word-or-char: the word (or character) at
@@ -539,7 +553,7 @@
                       (cons (list pattern (text-editor-get-cursor ed) success?)
                             states)
                       (isearch-search! ed new direction case-fold?)
-                      #f case-fold?)))
+                      #f case-fold? #t)))
              ((eqv? code 25)                                 ; C-y
               ;; `isearch-yank-kill`: "the latest kill joins the search
               ;; string" - Emacs's `(isearch-yank-string (current-kill 0))',
@@ -549,7 +563,7 @@
                       (cons (list pattern (text-editor-get-cursor ed) success?)
                             states)
                       (isearch-search! ed new direction case-fold?)
-                      #f case-fold?)))
+                      #f case-fold? #t)))
              ;; isearch-printing-char: the character joins the search
              ;; string. C-j and TAB count as characters to search for, as
              ;; they do in Emacs's isearch keymap - `isearch-printing-char'
@@ -565,7 +579,7 @@
                       (cons (list pattern (text-editor-get-cursor ed) success?)
                             states)
                       (isearch-search! ed new direction fold?)
-                      #f fold?)))
+                      #f fold? #t)))
              ;; a control key the search does not use ends it and gives the
              ;; key back to the command loop: GNU Emacs's
              ;; `isearch-other-control-char' exits the search
@@ -582,10 +596,10 @@
               ;; what pushes it onto `unread-command-events' - Emacs's
               ;; `isearch-other-control-char' does the same, the loop's
               ;; read answering a pushed-back key before the display's.
-              ;; The *path* is given back, which is the one form the
-              ;; command loop's own read answers with and the one
-              ;; `dispatch-key-path' takes.
-              (*unread-command-events* (cons path (*unread-command-events*))))
+              ;; The *event* is given back - the one form the command
+              ;; loop's own read answers with and the one
+              ;; `dispatch-input-event' takes.
+              (*unread-command-events* (cons key (*unread-command-events*))))
              ;; anything else that is a *key* is not an answer to the
              ;; search, and ends it: a meta key such as `M-<', a function
              ;; key, an arrow. The key is given back to the command loop to
@@ -601,16 +615,16 @@
              ;; is `#f', which is not a key and is not given back; the
              ;; search simply reads again.
              (else
-              (if path
+              (if key
                   (begin
                     (*search-pattern* #f)
                     (isearch-dehighlight)
                     (lazy-highlight-cleanup #t)
                     (set!frame-message frame "")
                     (*unread-command-events*
-                     (cons path (*unread-command-events*))))
+                     (cons key (*unread-command-events*))))
                   (loop pattern direction states success? wrapped?
-                        case-fold?))))))))
+                        case-fold? #f))))))))
 
     (define (isearch-pop-state ed states)
       ;; Take back the last state the search pushed, as DEL does.
@@ -698,8 +712,8 @@
       (isearch #f))
 
     ;; The keys GNU Emacs binds the search to, beside the commands.
-    (define-key *default-keymap* (list (list 'ctrl #\s)) isearch-forward)
-    (define-key *default-keymap* (list (list 'ctrl #\r)) isearch-backward)
+    (define-key *default-keymap* (kbd "C-s") isearch-forward)
+    (define-key *default-keymap* (kbd "C-r") isearch-backward)
 
     (define (minibuffer-lazy-highlight-setup highlight cleanup transform
                                              regexp case-fold)

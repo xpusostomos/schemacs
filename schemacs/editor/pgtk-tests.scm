@@ -66,38 +66,45 @@
 ;; `read-input-event' may answer only a character or an integer, so this
 ;; display folds `(MODIFIER-STATE . KEYSYM)' into one integer. These are
 ;; the exact values the plan records as measured.
+;;
+;; What the decode answers is the *key event* GNU Emacs's
+;; `make_lispy_event' would - an integer carrying the character in the
+;; low bits and the modifiers above it, or a symbol for a key that is
+;; not a character - which is the same form a terminal's decode answers
+;; with and the form `(kbd "M-x")' and every binding in the tree spell.
 ;;------------------------------------------------------------------
 
-(define (path ev) (dn:key-event->keymap-path (new-display) ev))
+(define (key-event ev) (dn:key-event->key (new-display) ev))
 
 (define (encode state keysym) (+ keysym (* state (expt 2 32))))
 
-(test-equal '(#\a) (path 97))
-(test-equal '(ctrl #\a) (path (encode 4 97)))
-(test-equal '(meta #\x) (path (encode 8 120)))
-(test-equal '("up") (path 65362))                  ; GDK_KEY_Up
-(test-equal '("left") (path 65361))
-;; A named key's path element is a *string* (`"up"'), as the terminal's
-;; is - so `(list 'ctrl "left")', not `'(ctrl left)', which `equal?' says
-;; differs from it while printing identically.
-(test-equal (list 'ctrl "left") (path (encode 4 65361))) ; C-<left>
+(test-equal 97 (key-event 97))                            ; `a'
+(test-equal 1 (key-event (encode 4 97)))                  ; C-a
+(test-equal 134217848 (key-event (encode 8 120)))         ; M-x
+(test-equal 'up (key-event 65362))                        ; GDK_KEY_Up
+(test-equal 'left (key-event 65361))
+;; A key that is not a character is a *symbol*, which is what Emacs
+;; reads a function key as - `(kbd "<up>")' is `#(up)' - and a
+;; modified one is the symbol with the modifier in its name, which is
+;; exactly `(kbd "C-<left>")' = `#(C-left)'.
+(test-equal 'C-left (key-event (encode 4 65361)))         ; C-<left>
 
-;; A control character folds to `C-<letter>', as the terminal folds it -
-;; which is what makes RET the `C-m' the keymap binds to `newline'.
-(test-equal '(ctrl #\m) (path 13))                 ; GDK_KEY_Return
-(test-equal '(ctrl #\i) (path 9))                  ; GDK_KEY_Tab
-(test-equal '(ctrl #\a) (path (encode 4 97)))
+;; A control character keeps its own event: RET is 13, which is the
+;; `(kbd "RET")' the minibuffer's map binds, and TAB is 9. The
+;; *terminal* folds these onto `(ctrl #\m)' and `(ctrl #\i)' because a
+;; terminal has one byte for the pair; a window system has the keysym,
+;; and Emacs's event there is the character.
+(test-equal 13 (key-event 13))                            ; GDK_KEY_Return
+(test-equal 9 (key-event 9))                              ; GDK_KEY_Tab
 
-;; A resize is a code, not a key: `read-input-event' cannot answer a pair,
-;; so the display uses one integer for it, as a terminal uses KEY_RESIZE.
-;; A named key is a *string* in a key path - the arrows are `(list "up")' -
-;; and `keymap-index' reads a bare symbol as a modifier, which `(resize)'
-;; would be.
-(test-equal '("resize") (path -1))
+;; A resize is a code, not a key: `read-input-event' cannot answer a
+;; pair, so the display uses one integer for it, as a terminal uses
+;; KEY_RESIZE.
+(test-equal 'resize (key-event -1))
 
 ;; A keysym with no name and no Unicode character is not a key this
 ;; editor can act on, and answers #f rather than inventing a name.
-(test-equal #f (path (encode 0 65515)))            ; GDK_KEY_Shift_L alone
+(test-equal #f (key-event (encode 0 65515)))              ; GDK_KEY_Shift_L alone
 
 ;;------------------------------------------------------------------
 ;; C-SPC sets the mark from a GTK window

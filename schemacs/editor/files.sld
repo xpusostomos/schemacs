@@ -63,7 +63,7 @@
     (only (schemacs editor simple) push-mark)
     ;; `string-prefix-p' is `subr.el''s and now lives in
     ;; `(schemacs editor subr)', which is below this library.
-    (only (schemacs editor subr) run-hook-with-args-until-success
+    (only (schemacs editor subr) kbd run-hook-with-args-until-success
           string-prefix-p)
     (only (schemacs editor buffer)
           current-buffer default-directory erase-buffer)
@@ -1945,34 +1945,34 @@ at point instead."
     ;; commands' values, and Guile resolves a binding when the form is
     ;; evaluated - a `define-key' before its command's `define-command' would
     ;; find the name unbound.
-    (define-key *default-keymap* (list (list 'ctrl #\x) (list 'ctrl #\f))
+    (define-key *default-keymap* (kbd "C-x C-f")
       find-file)
-    (define-key *default-keymap* (list (list 'ctrl #\x) (list 'ctrl #\s))
+    (define-key *default-keymap* (kbd "C-x C-s")
       save-buffer)
-    (define-key *default-keymap* (list (list 'ctrl #\x) (list 'ctrl #\w))
+    (define-key *default-keymap* (kbd "C-x C-w")
       write-file)
-    (define-key *default-keymap* (list (list 'ctrl #\x) (list 'ctrl #\c))
+    (define-key *default-keymap* (kbd "C-x C-c")
       save-buffers-kill-terminal)
     ;; The window manager's request to close the frame arrives as the key
     ;; event `(delete-frame (FRAME))', which `keyboard.c:6238' makes and
     ;; `keyboard.c:14550' binds to `handle-delete-frame' in
     ;; `special-event-map'. Here the binding is made where the command is,
     ;; as every binding in this tree is.
-    (define-key *special-event-map* (list "delete-frame")
+    (define-key *special-event-map* (kbd "<delete-frame>")
       handle-delete-frame)
-    (define-key *default-keymap* (list (list 'ctrl #\x) #\k)
+    (define-key *default-keymap* (kbd "C-x k")
       kill-buffer)
     ;; The rest of files.el's C-x map and M-~.
-    (define-key *default-keymap* (list (list 'ctrl #\x) #\i)
+    (define-key *default-keymap* (kbd "C-x i")
       insert-file)
-    (define-key *default-keymap* (list (list 'ctrl #\x) (list 'ctrl #\r))
+    (define-key *default-keymap* (kbd "C-x C-r")
       find-file-read-only)
     (define-key *default-keymap*
-      (list (list 'ctrl #\x) #\4 #\f)
+      (kbd "C-x 4 f")
       find-file-other-window)
-    (define-key *default-keymap* (list (list 'ctrl #\x) (list 'ctrl #\v))
+    (define-key *default-keymap* (kbd "C-x C-v")
       find-alternate-file)
-    (define-key *default-keymap* (list (list 'meta #\~)) not-modified)
+    (define-key *default-keymap* (kbd "M-~") not-modified)
 
     ;;----------------------------------------------------------------
     ;; insert-directory

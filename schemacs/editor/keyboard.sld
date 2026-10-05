@@ -35,7 +35,7 @@
     ;; reporting an error failed - and only a test that makes a command
     ;; signal one could see it, because the error path is not otherwise
     ;; reached.
-    (only (guile) format string-index)
+    (only (guile) format logior string-index)
     (prefix (schemacs keymap) km:)
     (only (schemacs editor engine)
           new-text-editor
@@ -51,7 +51,7 @@
     ;; table all belong to the driver, and this loop calls through the
     ;; interface.
     (only (schemacs editor dispnew)
-          current-display key-event->keymap-path read-input-event)
+          current-display key-event->key read-input-event)
     (only (schemacs editor frame)
           *current-frame* blink-cursor-check
           display-selections-p frame-keymap-state
@@ -110,7 +110,9 @@
     (only (scheme time) current-second)
     ;; `ignore' is what the special-event-map binds a key that the loop
     ;; must receive but not act on to - the frame's resize.
-    (only (schemacs editor subr) ignore)
+    (only (schemacs editor subr) kbd ignore)
+    (only (schemacs editor character)
+          char-meta event-convert-list key-path->event)
     )
 
   (export
@@ -121,12 +123,11 @@
    *unread-command-events*
    abort-recursive-edit
    command-loop
+   dispatch-key
    dispatch-key-event
    dispatch-input-event
-   dispatch-key-path
    event-loop
    exit-recursive-edit
-   key-path->char-code
    quoted-insert
    read-quoted-char
    read-key-event
@@ -327,7 +328,7 @@
     ;; which is what `render!' does by re-tiling. Emacs binds keys that
     ;; must be received but not acted on to `ignore' (`bindings.el:1757',
     ;; `[sigusr1]' in `special-event-map'), which is what this is.
-    (define-key *special-event-map* (list "resize") ignore)
+    (define-key *special-event-map* (kbd "<resize>") ignore)
 
     ;; `*default-keymap*' - which Emacs also creates in `keymap.c', and
     ;; which this tree put in the leaf for the same reason: the libraries
@@ -366,15 +367,20 @@
               (mode-keys (list *special-event-map* mode-keys *default-keymap*))
               (else (list *special-event-map* *default-keymap*)))))
 
-    (define (dispatch-key-event frame path)
-      ;; Dispatch one key event through the modal keymap lookup. The
+    (define (dispatch-key-event frame key)
+      ;; Dispatch one key *event* through the modal keymap lookup. The
       ;; modal lookup state persists across events while a chord
       ;; (such as C-x C-c) is being entered. C-u and digits are
       ;; consumed as prefix arguments before the keymap lookup; the
       ;; pending prefix is left alone for the rest of the chord and is
       ;; consumed by `dispatch-action' when a command finally runs.
+      ;;
+      ;; KEY is an event, which is what every read answers with now:
+      ;; `keymap-index' takes one apart into the modifiers and the
+      ;; character - `event-modifiers' and `event-basic-type''s first
+      ;; half.
       ;;--------------------------------------------------------------
-      (if (update-prefix! path)
+      (if (update-prefix! key)
           ;; C-u or a prefix digit was consumed. It is a command in
           ;; its own right, so like any other command it breaks a run
           ;; of consecutive kills - by *being* the last command, which
@@ -394,7 +400,7 @@
               (set!frame-keymap-state frame state)
               (let ((result
                      (km:modal-lookup-state-step!
-                      state (km:keymap-index path)
+                      state (km:keymap-index key)
                       (lambda (full-path action)
                         (dispatch-action frame action) #f)
                       (lambda (full-path action) #t)
@@ -415,60 +421,60 @@
                 (set!frame-keymap-state
                  frame (and result state)))))))
 
-    (define (dispatch-key-path frame path)
-      ;; Dispatch one key PATH, applying the Emacs ASCII protocol where ESC
+    (define (dispatch-key frame key)
+      ;; Dispatch one *key event* - the integer or symbol `read-key-event'
+      ;; answers with - applying the Emacs ASCII protocol where ESC
       ;; prefixes the next key with the meta modifier.
       ;;
-      ;; A path and not the display's own event, because the event has
-      ;; already been normalised into it - by `read-key-event' for the
-      ;; command loop and by `dispatch-input-event' for a caller holding a
-      ;; display's event. Nothing below this line knows which front end is
-      ;; running.
+      ;; Nothing here knows which front end is running: the display's own
+      ;; form was normalised away by `read-key-event' - or by
+      ;; `dispatch-input-event', for a caller holding one - into the very
+      ;; event GNU Emacs's `read_char' would have answered with.
       ;;--------------------------------------------------------------
-      (let* (;; The event the command is handed, which Emacs reads from the
-             ;; key sequence the loop recorded (`callint.c:287') and
-             ;; `(interactive "e")' takes from it (`callint.c:608'). A
-             ;; window-system event is the list `make_lispy_event' built -
-             ;; `(delete-frame (FRAME))' and `(focus-in (FRAME))' - with the
-             ;; frame as its argument, and an ordinary key's event is the
-             ;; key itself.
-             (event (if (and (pair? path) (string? (car path)))
-                        (list (string->symbol (car path)) (list frame))
-                        path)))
-        (cond
-         ;; ESC prefixes the next key with the meta modifier. Both displays
-         ;; name it `(ctrl #\[)': a terminal sends byte 27 and its decoder
-         ;; folds it there, Gtk sends the keysym 0xff1b and
-         ;; `character-path' folds that to the same thing - which is what
-         ;; its own note demands, "the two displays must name it the same
-         ;; way or a keymap binding one misses the other". Asking the path
-         ;; is therefore the whole test, and a test against the *character*
-         ;; was a terminal-shaped one: on Gtk a lone ESC was reported as an
-         ;; unhandled event instead of prefixing the next key.
-         ((equal? path (list 'ctrl #\[))
-          (*esc-pending* #t))
-         ((and (pair? path) (*esc-pending*))
-          (*esc-pending* #f)
-          (dispatch-key-event frame (cons 'meta path)))
-         (else
-          (*esc-pending* #f)
+      (cond
+       ;; ESC prefixes the next key with the meta modifier. Its event is
+       ;; 27, `(kbd "ESC")', and it is the same event from either display:
+       ;; a terminal sends byte 27, and Gtk sends the keysym 0xff1b, which
+       ;; `character-path' folds to `(ctrl #\[)' and so to the same event
+       ;; - "the two displays must name it the same way or a keymap
+       ;; binding one misses the other". A test against the *character*
+       ;; was a terminal-shaped one, and on Gtk a lone ESC came out an
+       ;; unhandled event instead of prefixing the next key.
+       ((eqv? key (key-path->event (list 'ctrl #\[)))
+        (*esc-pending* #t))
+       ;; and the next key takes the meta modifier, which is how a
+       ;; terminal's `ESC x' becomes `M-x'. A *character* event takes
+       ;; the C's `CHAR_META' bit - `(logior key char-meta)' is
+       ;; `make_lispy_event''s own arithmetic - and a named key becomes
+       ;; the symbol with `M-' on it, which is `M-up', exactly as
+       ;; `(kbd "M-<up>")' spells it. `event-convert-list' is the C's
+       ;; way from a description to an event and is what both do.
+       ((and (*esc-pending*) key)
+        (*esc-pending* #f)
+        (dispatch-key-event
+         frame (if (integer? key)
+                   (logior key char-meta)
+                   (event-convert-list (list 'meta key)))))
+       (else
+        (*esc-pending* #f)
+        (let ((event (if (symbol? key) (list key (list frame)) key)))
           (parameterize ((*this-event* event))
-            (dispatch-key-event frame path))))))
+            (dispatch-key-event frame key))))))
 
     (define (dispatch-input-event frame ev)
-      ;; Dispatch one event *as a display answered it*: normalise it into a
-      ;; key path and dispatch that. The command loop does not come through
-      ;; here - it reads through `read-key-event', which has already
-      ;; normalised - but a caller that holds a display's own event wants
-      ;; exactly that, and the harness that drives a front end by hand is
-      ;; such a caller: `AGENTS.md`\'s
+      ;; Dispatch one event *as a display answered it*: normalise it into
+      ;; the key event and dispatch that. The command loop does not come
+      ;; through here - it reads through `read-key-event', which has
+      ;; already normalised - but a caller that holds a display's own
+      ;; event wants exactly that, and the harness that drives a front end
+      ;; by hand is such a caller: `AGENTS.md`'s
       ;; `(dispatch-input-event f (+ #x20 (* 4 (expt 2 32))))` names the
-      ;; integer a Gtk key arrives as. The display\'s decode is called in
+      ;; integer a Gtk key arrives as. The display's decode is called in
       ;; these two places and nowhere else.
       ;;--------------------------------------------------------------
-      (let ((path (key-event->keymap-path (current-display) ev)))
-        (if path
-            (dispatch-key-path frame path)
+      (let ((key (key-event->key (current-display) ev)))
+        (if key
+            (dispatch-key frame key)
             (begin
               (*esc-pending* #f)
               (set!frame-message
@@ -520,23 +526,25 @@
       100)
 
     (define (key-event? ev)
-      ;; Whether a read produced a key: a key *path*, and not the `#f' a
+      ;; Whether a read produced a key: a key *event*, and not the `#f' a
       ;; read that produced nothing answers with. The driver's
       ;; `read-input-event' answers `#f' for a timed-out read, a
       ;; non-blocking read with no input, and the end of input alike, and
-      ;; `read-key-event' turns everything that is not `#f' into a path.
+      ;; `read-key-event' turns everything that is not `#f' into an
+      ;; event.
       ;;
       ;; The distinction this loses is end of input against a timeout.
       ;; It is recovered by the caller from the *timeout*: a blocking
       ;; read only comes back with nothing at the end of input, so the
       ;; editor is left then and not otherwise.
       ;;--------------------------------------------------------------
-      (pair? ev))
+      (not (eq? ev #f)))
 
     (define (read-key-event timeout)
       ;; Read one key for the command loop, TIMEOUT milliseconds allowed -
-      ;; a negative TIMEOUT blocks. The answer is the *key path* the key
-      ;; names - `(ctrl #\s)', `(#\a)', `("up")' - or `#f' for a read that
+      ;; a negative TIMEOUT blocks. The answer is the *key event* GNU
+      ;; Emacs's `read_char' would answer with - the integer 19 for
+      ;; `C-s', the symbol `up' for an arrow - or `#f' for a read that
       ;; produced nothing. A key put back on `*unread-command-events*' is
       ;; answered first, which is how the loop runs a key a command gave
       ;; back to it; otherwise the display is asked for one. GNU Emacs's
@@ -556,9 +564,9 @@
       ;; source produced, and every command above it compares events and
       ;; modifiers without asking where they came from. Everything above
       ;; this line needs the same freedom - and it already speaks the
-      ;; *path*, because that is what a key is looked up by:
+      ;; *event*, which is what a key is looked up by:
       ;; `dispatch-key-event', `y-or-n-p', `perform-replace' and
-      ;; `read-quoted-char' all take one. `key-event->keymap-path' is the
+      ;; `read-quoted-char' all take one. `key-event->key' is the
       ;; display's own decode into it, and this is the one call.
       ;;
       ;; `isearch' read the display's event itself and compared it to
@@ -569,7 +577,7 @@
       (let ((unread (*unread-command-events*)))
         (if (null? unread)
             (let ((ev (read-input-event (current-display) timeout)))
-              (and ev (key-event->keymap-path (current-display) ev)))
+              (and ev (key-event->key (current-display) ev)))
             (begin
               (*unread-command-events* (cdr unread))
               (car unread)))))
@@ -761,7 +769,7 @@
                (when (timer-check!) (render! frame))
                (cond
                   ((key-event? ev)
-                   (dispatch-key-path frame ev)
+                   (dispatch-key frame ev)
                    (render! frame))
                   ;; Nothing to read on a *blocking* read is the end of
                   ;; input - the read answers #f for that too - so leave
@@ -839,34 +847,6 @@
       ;;--------------------------------------------------------------
       (make-parameter 8))
 
-    (define (key-path->char-code path)
-      ;; The key decode's inverse: the CHARACTER CODE a single-key path
-      ;; stands for, or #f when the path is not one key - which is what
-      ;; `read-quoted-char''s translation (`local-function-key-map''s,
-      ;; which maps the TAB key to control-I and friends) comes to. A
-      ;; control-modified letter is its ASCII control code; a plain
-      ;; character is itself; a meta-modified one is the C's
-      ;; 128-set form; a named key (an arrow, a function key) is not a
-      ;; character at all.
-      ;;--------------------------------------------------------------
-      (cond
-       ((and (= 1 (length path)) (char? (car path)))
-        (char->integer (car path)))
-       ((and (= 2 (length path)) (eq? 'ctrl (car path)) (char? (cadr path)))
-        (let ((c (cadr path)))
-          (cond
-           ;; the lowercase letters the decoder spells a control with
-           ;; - the terminal's byte 7 is `\(ctrl #\g)' - and the
-           ;; uppercase spellings, which run @ through _
-           ((and (char<=? #\a c #\z))
-            (- (char->integer c) 96))
-           ((and (char<=? #\@ c #\_))
-            (- (char->integer c) 64))
-           (else #f))))
-       ((and (= 2 (length path)) (eq? 'meta (car path)) (char? (cadr path)))
-        (+ 128 (char->integer (cadr path))))
-       (else #f)))
-
     (define (read-quoted-char . args)
       ;; GNU Emacs's `read-quoted-char' (simple.el:986): "Like
       ;; `read-char', but do not allow quitting. Also, if the first
@@ -892,15 +872,20 @@
           (let loop ()
             (if done
                 code
-                (let* ((path (read-key-event -1))
-                       (code-read (and path (key-path->char-code path))))
+                ;; The key is the *event*, and the C is a character
+                ;; reader: `read-char' answers the character the event
+                ;; is, which for every key this asks about - a digit, a
+                ;; `C-g', RET - is the event itself. `key-path->event'
+                ;; names the event of a description, the C's
+                ;; `event-convert-list', so the tests below spell the
+                ;; keys the way Emacs's `(eq char ?\C-g)' does.
+                (let* ((key (read-key-event -1))
+                       (code-read (and (integer? key) key)))
                   (cond
                    ;; a C-g after the first character quits, as the
                    ;; C's quitting is enabled once `first' is past
                    ((and (not first)
-                         (= 2 (length path))
-                         (eq? 'ctrl (car path))
-                         (char=? (cadr path) #\g))
+                         (eqv? key (key-path->event (list 'ctrl #\g))))
                     (signal-quit))
                    ;; a digit of the radix: accumulate, and echo the
                    ;; digit after the prompt
@@ -928,9 +913,7 @@
                    ;; RET after the first digit terminates and is
                    ;; discarded; before that it is the character
                    ((and (not first)
-                         (= 2 (length path))
-                         (eq? 'ctrl (car path))
-                         (char=? (cadr path) #\m))
+                         (eqv? key (key-path->event (list 'ctrl #\m))))
                     (set! done #t)
                     (loop))
                    ;; any other terminator after the first digit is
@@ -938,7 +921,7 @@
                    ;; caller, and its code read
                    ((not first)
                     (*unread-command-events*
-                     (cons path (*unread-command-events*)))
+                     (cons key (*unread-command-events*)))
                     (set! done #t)
                     (loop))
                    ;; the first character, not a digit: it is the
@@ -996,6 +979,6 @@ With argument, insert ARG copies of the character."
            (set!frame-quit-cont frame k)
            (command-loop frame)))))
 
-    (define-key *default-keymap* (list (list 'ctrl #\q)) quoted-insert)
+    (define-key *default-keymap* (kbd "C-q") quoted-insert)
 
     ))

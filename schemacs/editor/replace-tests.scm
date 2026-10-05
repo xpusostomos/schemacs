@@ -10,6 +10,8 @@
  (schemacs editor simple)
  (schemacs editor replace)
  (only (schemacs editor isearch) *search-upper-case*)
+ ;; `kbd', so the two erase keys are spelled as the map binds them.
+ (only (schemacs editor subr) kbd)
  (prefix (schemacs keymap) km:)
  (only (srfi 64) test-assert test-equal test-begin test-end)
  )
@@ -40,8 +42,12 @@
 
 (test-equal "the map's space is act"
   'act (km:keymap-lookup *query-replace-map* (km:keymap-index (list #\space))))
+;; DEL and `C-h` are two different answers in Emacs's map - `"\d"` is
+;; skip and `"\C-h"` is help - because they are two different bytes.
 (test-equal "the map's DEL is skip"
-  'skip (km:keymap-lookup *query-replace-map* (km:keymap-index (list (list 'ctrl #\h)))))
+  'skip (km:keymap-lookup *query-replace-map* (km:keymap-index (kbd "DEL"))))
+(test-equal "the map's C-h is help"
+  'help (km:keymap-lookup *query-replace-map* (km:keymap-index (kbd "C-h"))))
 (test-equal "the map's ? is help"
   'help (km:keymap-lookup *query-replace-map* (km:keymap-index (list #\?))))
 (test-equal "the map's C-g is quit"

@@ -83,7 +83,8 @@
     (only (schemacs editor syntax) skip-chars-forward skip-chars-backward)
     ;; `kbd' is how the bindings below name their keys, as
     ;; `(define-key global-map (kbd "C-/") ...)' would in Emacs.
-    (only (schemacs editor subr) add-to-history kbd nthcdr)
+    (only (schemacs editor subr)
+          add-to-history kbd key-path->event nthcdr)
     ;; `define-key' and the global map, which this library fills with the
     ;; bindings for the commands it defines - as simple.el does with
     ;; `(define-key global-map ...)'.
@@ -1214,14 +1215,18 @@ non-nil."
         (* (if (*prefix-negative*) -1 1)
            (string->number (*prefix-digits*))))))
 
-    (define (update-prefix! path)
+    (define (update-prefix! key)
       ;; Handle C-u and digit key events while a prefix is pending.
       ;; Returns #t when the event was consumed as part of the prefix.
+      ;;
+      ;; The argument is a *key event*, which is what GNU Emacs reads:
+      ;; `C-u' is the event `(aref (kbd "C-u") 0)', which
+      ;; `key-path->event' answers here, and the digits are the events
+      ;; `universal-argument-map' binds as `(vector ?0)' through
+      ;; `(vector ?9)' - a bare character event, no modifier on it.
       ;;--------------------------------------------------------------
       (cond
-       ((and (= (length path) 2)
-             (eq? (car path) 'ctrl)
-             (char=? (cadr path) #\u))
+       ((eqv? key (key-path->event (list 'ctrl #\u)))
         (*prefix-cu* (+ 1 (or (*prefix-cu*) 0)))
         (request-prefix-echo!)
         #t)
@@ -1234,11 +1239,11 @@ non-nil."
              ;; `C-u 8 C-x 2' was taken as another digit of the prefix,
              ;; so the chord never completed and the argument became 82.
              (not (frame-keymap-state (*current-frame*)))
-             (= (length path) 1)
-             (char? (car path))
-             (char-numeric? (car path)))
+             (integer? key)
+             (<= (char->integer #\0) key (char->integer #\9)))
         (*prefix-digits*
-         (string-append (or (*prefix-digits*) "") (string (car path))))
+         (string-append (or (*prefix-digits*) "")
+                        (string (integer->char key))))
         (request-prefix-echo!)
         #t)
        (else #f)))
@@ -1677,18 +1682,23 @@ non-nil."
     ;; imported.
     ;;------------------------------------------------------------------
 
-    (define-key *default-keymap* (list (list 'ctrl #\f)) forward-char)
-    (define-key *default-keymap* (list (list 'ctrl #\b)) backward-char)
-    (define-key *default-keymap* (list (list 'ctrl #\n)) next-line)
-    (define-key *default-keymap* (list (list 'ctrl #\p)) previous-line)
-    (define-key *default-keymap* (list (list 'ctrl #\a)) beginning-of-line)
-    (define-key *default-keymap* (list (list 'ctrl #\e)) end-of-line)
-    (define-key *default-keymap* (list (list 'ctrl #\d)) delete-char)
-    (define-key *default-keymap* (list (list 'ctrl #\h)) backward-delete-char)
-    (define-key *default-keymap* (list (list 'ctrl #\k)) kill-line)
-    (define-key *default-keymap* (list (list 'ctrl #\m)) insert-newline)
-    (define-key *default-keymap* (list (list 'ctrl #\j)) insert-newline)
-    (define-key *default-keymap* (list (list 'ctrl #\g)) keyboard-quit)
+    (define-key *default-keymap* (kbd "C-f") forward-char)
+    (define-key *default-keymap* (kbd "C-b") backward-char)
+    (define-key *default-keymap* (kbd "C-n") next-line)
+    (define-key *default-keymap* (kbd "C-p") previous-line)
+    (define-key *default-keymap* (kbd "C-a") beginning-of-line)
+    (define-key *default-keymap* (kbd "C-e") end-of-line)
+    (define-key *default-keymap* (kbd "C-d") delete-char)
+    ;; DEL, the C's `""' (`bindings.el:1318'). It is *not* `C-h':
+    ;; that is `help-command' there (`help.el:124'), which this tree has
+    ;; not ported, so `C-h' is left unbound rather than made to delete -
+    ;; which is what it did while the terminal decoder folded the two
+    ;; bytes together.
+    (define-key *default-keymap* (kbd "DEL") backward-delete-char)
+    (define-key *default-keymap* (kbd "C-k") kill-line)
+    (define-key *default-keymap* (kbd "C-m") insert-newline)
+    (define-key *default-keymap* (kbd "C-j") insert-newline)
+    (define-key *default-keymap* (kbd "C-g") keyboard-quit)
     ;; The mark. GNU Emacs binds this to TWO keys, and outside a terminal
     ;; they are not the same key at all - `bindings.el' has both lines:
     ;;
@@ -1707,29 +1717,29 @@ non-nil."
     ;; Emacs's own `(define-key function-key-map [?\C-@] [?\C-\s])' the
     ;; other way round - Emacs folds the terminal's byte *to* the window
     ;; system's spelling, and calls C-SPC the advertised binding.
-    (define-key *default-keymap* (list (list 'ctrl #\@)) set-mark-command)
-    (define-key *default-keymap* (list (list 'ctrl #\space)) set-mark-command)
-    (define-key *default-keymap* (list (list 'ctrl #\x) #\h) mark-whole-buffer)
+    (define-key *default-keymap* (kbd "C-@") set-mark-command)
+    (define-key *default-keymap* (kbd "C-SPC") set-mark-command)
+    (define-key *default-keymap* (kbd "C-x h") mark-whole-buffer)
     ;; The named keys a terminal sends for its arrow, home and end keys:
     ;; GNU Emacs binds these in `global-map' too, and to the same
     ;; commands as the control keys beside them. Keeping them separate
     ;; from those control keys is what leaves `M-<up>' free to be
     ;; `minibuffer-previous-completion' in a minibuffer.
-    (define-key *default-keymap* (list (list "up")) previous-line)
-    (define-key *default-keymap* (list (list "down")) next-line)
-    (define-key *default-keymap* (list (list "left")) backward-char)
-    (define-key *default-keymap* (list (list "right")) forward-char)
-    (define-key *default-keymap* (list (list "home")) beginning-of-line)
-    (define-key *default-keymap* (list (list "end")) end-of-line)
-    (define-key *default-keymap* (list (list "delete")) delete-char)
+    (define-key *default-keymap* (kbd "<up>") previous-line)
+    (define-key *default-keymap* (kbd "<down>") next-line)
+    (define-key *default-keymap* (kbd "<left>") backward-char)
+    (define-key *default-keymap* (kbd "<right>") forward-char)
+    (define-key *default-keymap* (kbd "<home>") beginning-of-line)
+    (define-key *default-keymap* (kbd "<end>") end-of-line)
+    (define-key *default-keymap* (kbd "<delete>") delete-char)
     ;; PgUp and PgDn: `bindings.el:1418-1419' binds `[prior]' to
     ;; `scroll-down-command' and `[next]' to `scroll-up-command' - the
     ;; same two commands C-v and M-v run. Without them the keys were
     ;; unbound, and an unbound key was taken for a self-inserting
     ;; character, so in a read-only Dired buffer PgDn said only "Buffer is
     ;; read-only" and otherwise did nothing.
-    (define-key *default-keymap* (list (list "prior")) scroll-down-command)
-    (define-key *default-keymap* (list (list "next")) scroll-up-command)
+    (define-key *default-keymap* (kbd "<prior>") scroll-down-command)
+    (define-key *default-keymap* (kbd "<next>") scroll-up-command)
     ;; Undo, on the keys GNU Emacs binds it to - and there are *four* of
     ;; them, not one, because the two front ends do not spell them alike.
     ;; `bindings.el:1237-1238' has
@@ -1759,26 +1769,26 @@ non-nil."
     ;; not one: `kbd "C-_"' names the keysym, and the terminal's byte 31
     ;; is a different key that only the byte spelling reaches.
     (define-key *default-keymap*
-      (list (list 'ctrl (integer->char 31))) undo)
+      (kbd "C-_") undo)
     (define-key *default-keymap*
-      (list (list 'meta 'ctrl (integer->char 31))) undo-redo)
-    (define-key *default-keymap* (list (list 'ctrl #\x) #\u) undo)
+      (kbd "M-C-_") undo-redo)
+    (define-key *default-keymap* (kbd "C-x u") undo)
     ;; `read-only-mode' is C-x C-q, which is where files.el:9330 binds
     ;; it; `C-x q' is kbd-macro-query's key in Emacs, which is not
     ;; ported.
-    (define-key *default-keymap* (list (list 'ctrl #\x) (list 'ctrl #\q))
+    (define-key *default-keymap* (kbd "C-x C-q")
       read-only-mode)
-    (define-key *default-keymap* (list (list 'ctrl #\x) (list 'ctrl #\x))
+    (define-key *default-keymap* (kbd "C-x C-x")
       exchange-point-and-mark)
-    (define-key *default-keymap* (list (list 'ctrl #\i)) self-insert-tab)
-    (define-key *default-keymap* (list (list 'ctrl #\v)) scroll-up-command)
-    (define-key *default-keymap* (list (list 'meta #\v)) scroll-down-command)
-    (define-key *default-keymap* (list (list 'meta #\<)) beginning-of-buffer)
-    (define-key *default-keymap* (list (list 'meta #\>)) end-of-buffer)
+    (define-key *default-keymap* (kbd "C-i") self-insert-tab)
+    (define-key *default-keymap* (kbd "C-v") scroll-up-command)
+    (define-key *default-keymap* (kbd "M-v") scroll-down-command)
+    (define-key *default-keymap* (kbd "M-<") beginning-of-buffer)
+    (define-key *default-keymap* (kbd "M->") end-of-buffer)
     (define-key *default-keymap*
-      (list (list 'meta 'ctrl (integer->char 28))) beginning-of-buffer)
+      (kbd "M-C-\\") beginning-of-buffer)
     (define-key *default-keymap*
-      (list (list 'meta 'ctrl (integer->char 30))) end-of-buffer)
+      (kbd "M-C-^") end-of-buffer)
     ;; The numeric argument, on every key GNU Emacs binds it to:
     ;; `bindings.el' puts `digit-argument' on M-0 to M-9, on C-0 to C-9
     ;; and on C-M-0 to C-M-9, and `negative-argument' on M--, C-- and
@@ -1788,25 +1798,25 @@ non-nil."
     (let loop ((i 0))
       (when (<= i 9)
         (let ((digit (integer->char (+ (char->integer #\0) i))))
-          (define-key *default-keymap* (list (list 'meta digit)) digit-argument)
+          (define-key *default-keymap* (kbd "M-digit") digit-argument)
           (define-key *default-keymap*
-            (list (list 'ctrl digit)) digit-argument)
+            (kbd "C-digit") digit-argument)
           (define-key *default-keymap*
-            (list (list 'meta 'ctrl digit)) digit-argument))
+            (kbd "M-C-digit") digit-argument))
         (loop (+ 1 i))))
-    (define-key *default-keymap* (list (list 'meta #\-)) negative-argument)
-    (define-key *default-keymap* (list (list 'ctrl #\-)) negative-argument)
+    (define-key *default-keymap* (kbd "M--") negative-argument)
+    (define-key *default-keymap* (kbd "C--") negative-argument)
     (define-key *default-keymap*
-      (list (list 'meta 'ctrl #\-)) negative-argument)
-    (define-key *default-keymap* (list (list 'meta #\f)) forward-word)
-    (define-key *default-keymap* (list (list 'meta #\b)) backward-word)
-    (define-key *default-keymap* (list (list 'meta #\d)) kill-word)
+      (kbd "M-C--") negative-argument)
+    (define-key *default-keymap* (kbd "M-f") forward-word)
+    (define-key *default-keymap* (kbd "M-b") backward-word)
+    (define-key *default-keymap* (kbd "M-d") kill-word)
     (define-key *default-keymap*
-      (list (list 'meta 'ctrl #\h)) backward-kill-word)
-        (define-key *default-keymap* (list (list 'ctrl #\y)) yank)
-    (define-key *default-keymap* (list (list 'meta #\y)) yank-pop)
-    (define-key *default-keymap* (list (list 'ctrl #\w)) kill-region)
-    (define-key *default-keymap* (list (list 'meta #\w)) kill-ring-save)
+      (kbd "M-C-h") backward-kill-word)
+        (define-key *default-keymap* (kbd "C-y") yank)
+    (define-key *default-keymap* (kbd "M-y") yank-pop)
+    (define-key *default-keymap* (kbd "C-w") kill-region)
+    (define-key *default-keymap* (kbd "M-w") kill-ring-save)
 
     ;;----------------------------------------------------------------
     ;; Line surgery and whitespace - simple.el
@@ -2255,17 +2265,17 @@ non-nil."
              (backward-word (- x))))
        arg))
 
-    (define-key *default-keymap* (list (list 'ctrl #\o)) open-line-command)
+    (define-key *default-keymap* (kbd "C-o") open-line-command)
     (define-key *default-keymap*
-      (list (list 'meta 'ctrl (integer->char 30))) delete-indentation-command)
+      (kbd "M-C-^") delete-indentation-command)
     (define-key *default-keymap*
-      (list (list 'meta (integer->char 30))) delete-indentation-command)
-    (define-key *default-keymap* (list (list 'meta #\space)) just-one-space)
+      (kbd "M-C-^") delete-indentation-command)
+    (define-key *default-keymap* (kbd "M-SPC") just-one-space)
     (define-key *default-keymap*
-      (list (list 'ctrl #\x) (list 'ctrl #\o)) delete-blank-lines)
-    (define-key *default-keymap* (list (list 'meta #\\)) delete-horizontal-space)
-    (define-key *default-keymap* (list (list 'ctrl #\t)) transpose-chars)
-    (define-key *default-keymap* (list (list 'meta #\t)) transpose-words)
+      (kbd "C-x C-o") delete-blank-lines)
+    (define-key *default-keymap* (kbd "M-\\") delete-horizontal-space)
+    (define-key *default-keymap* (kbd "C-t") transpose-chars)
+    (define-key *default-keymap* (kbd "M-t") transpose-words)
 
     ;;----------------------------------------------------------------
     ;; `what-cursor-position' - simple.el:1856, C-x =
@@ -2319,7 +2329,7 @@ non-nil."
                                   shown code code code
                                   pos total percent col hscroll)))))
 
-    (define-key *default-keymap* (list (list 'ctrl #\x) #\=)
+    (define-key *default-keymap* (kbd "C-x =")
       what-cursor-position)
 
     (define self-insert-layer

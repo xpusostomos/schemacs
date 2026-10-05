@@ -16,6 +16,8 @@
   ;; See LAYOUT-PLAN.txt for the rule this library is a step of.
 
   (import
+    ;; `kbd' - see `character.sld''s export note for why it is there
+    (only (schemacs editor character) kbd)
     (scheme base)
     (only (schemacs editor engine)
           text-editor-char-count text-editor-get-char-index
@@ -232,9 +234,9 @@ it marks the next ARG paragraphs after the ones already marked."
 
     ;; The keys GNU Emacs binds them to, beside the commands as the
     ;; other libraries state theirs.
-    (define-key *default-keymap* (list (list 'meta #\k)) kill-paragraph)
-    (define-key *default-keymap* (list (list 'meta 'ctrl #\k))
+    (define-key *default-keymap* (kbd "M-k") kill-paragraph)
+    (define-key *default-keymap* (kbd "M-C-k")
       backward-kill-paragraph)
-    (define-key *default-keymap* (list (list 'meta #\h)) mark-paragraph)
+    (define-key *default-keymap* (kbd "M-h") mark-paragraph)
 
     ))
