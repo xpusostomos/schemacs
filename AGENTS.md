@@ -1179,131 +1179,108 @@ things three screens from its cause (see the warnings above). Once the
 class owns the length it stops existing as a separate field - make
 `buffer-text-length` the only answer.
 
-# WIP — engine onto `buffer-text` (branch `emacs-text-storage`)
+# The engine onto `buffer-text` — done (branch `emacs-text-storage`, 2026-10-05)
 
-**This branch is mid-rewrite and does NOT compile.** It is on a branch for
-exactly that reason. Do not merge until the suites pass.
+**Every suite passes.** All 24 in `tools/run-suites.py`, with no failures in
+any of them. The branch is still a branch because it has not been merged to
+`main` and `tools/pty-check.py` had not finished when this was written.
 
-## Done
+## What landed
 
 - `<text-editor-type>`: seven fields (`lines`, `count`, `line-ed`, `line-ch`,
   `moved`, `column`, `cdf`) collapse to two - `text` (a `buffer-text`) and
   `point` (a `buffer-text` position, one-based).
-- `new-text-editor` builds `(new-buffer-text 1 size)` and `point` 1.
+- The CDF, the line editor, the freeze machinery and the merge helpers are
+  gone; a line break is a character, so joining two lines is deleting it.
+  `cdf.sld`, `cdf-tests.scm`, `gap-buffer.sld` and `gap-buffer-tests.scm` are
+  deleted. `(schemacs arrays)` stays: `buffer-text` gets
+  `%array-copy-range!` and `%array-resize` from it.
+- The line arithmetic is Emacs's own scans, ported under their Emacs names
+  into `engine.sld`: `find-newline` (`search.c:675`),
+  `scan-newline-from-point` (:986), `bol` (`editfns.c:665`), `eol` (:723),
+  `find-before-next-newline` (`search.c:997`), `count-lines`
+  (`xdisp.c:29892`).
+- **The engine, and every caller above it, speaks Emacs's coordinates**:
+  `point-min` is 1, `point-max` is one past the last character, line numbers
+  count from 1, columns from 0. The interval/text-property layer too - a
+  buffer's intervals are 1-based, a string's are zero-based, as Emacs's are.
 
-## The conventions — the engine goes 1-based (Chris's call; he was right)
+## The conventions (Chris's call; he was right)
 
-I first wrote here that the engine's zero-based cursor must be preserved to
-avoid touching ~100 call sites. That was wrong, and it is worth saying why:
-**a zero-based buffer position is itself a departure from Emacs**, and the
-whole point of this work is to stop having departures. There are in fact two
-of them:
+I first wrote that the engine's zero-based cursor must be preserved to avoid
+touching ~100 call sites. That was wrong: **a zero-based position is itself a
+departure from Emacs**, and the point of the work is to stop having
+departures.
 
-| | Emacs | engine today | target |
+| | Emacs | was | now |
 |---|---|---|---|
-| character position | 1-based — `point` | **0-based** | 1-based |
-| line number | 1-based — `line-number-at-pos` (`fns.c:6688`) | **0-based** | 1-based |
+| character position | 1-based — `point` | 0-based | 1-based |
+| line number | 1-based — `line-number-at-pos` (`fns.c:6688`) | 0-based | 1-based |
 | column | 0-based — `current-column` (`indent.c:298`) | 0-based | 0-based |
 
-`text-editor-cursor-line-number` is `(gap-buffer-cursor (text-editor-lines ed))`,
-which is 0 on the first line; Emacs's `line-number-at-pos` is 1. So both the
-position and the line number have to move, and the column stays where it is -
-it is a *count*, and Emacs counts columns from zero.
+## The departs that were found and fixed — every one a `0` or a `1`
 
-Once the engine speaks Emacs's coordinates:
+The pattern is worth naming: **the port kept a ±1 at a seam**, and every seam
+was in a different file, so the suites found them one at a time. Each is
+listed with the commit that fixed it.
 
-- `point` **is** `(text-editor-point ed)`, a `buffer-text` position, with no
-  conversion anywhere.
-- `editfns.sld`'s `point` loses its `(+ 1 ...)` and the "everything here that
-  takes an Emacs position converts the same way" note.
-- The callers that read `(> (text-editor-get-cursor ed) 0)` to mean "not at
-  the start" (`paragraphs.sld:144`) become `(> (point) (point-min))` - which
-  is what they meant, and which is correct in **either** convention. Those
-  are the ones to look at first: a mechanical `0` → `1` fix would leave them
-  silently wrong.
-
-The alternative - keeping 0-based and converting in `editfns` - buys nothing
-and costs a permanent ±1 at the boundary between two conventions. AGENTS.md
-already records what that class of bug has cost here.
-
-## Done now (2026-10-05, second sitting)
-
-Steps 1-7, 9 and 10 of the list this section used to carry are done, and the
-tree loads end to end. **It is not green**: the suites run, and a set of them
-fail on expectations written for the old coordinates, plus one real bug (below).
-
-- **The CDF is gone**, and with it `text-editor-make-cdf-fill-range`,
-  `-fill-until`, `text-editor-index-line-offset`, `text-editor-text-line-ref`
-  and `text-editor-line-editor-ref`; `xdisp.sld`'s `buffer-line-string` is now
-  one call to the engine's `text-editor-line-string`.
-- **The merge helpers are gone.** A line break is a character, so joining two
-  lines is deleting it; `%text-editor-delete-forward`/`-backward` are
-  `del_range` over the one store, with the clamp the engine documents as its
-  own deviation from the C's `end-of-buffer`/`beginning-of-buffer` signals.
-- **The scans are in**, in `engine.sld`, under their Emacs names:
-  `find-newline` (`search.c:675`), `scan-newline-from-point` (:986), `bol`
-  (`editfns.c:665`), `eol` (:723), `find-before-next-newline`
-  (`search.c:997`), `count-lines` (`xdisp.c:29892`). `find-newline` keeps the
-  C's two conventions - the position past the COUNTth boundary, and END when
-  it runs out - and its `end` of `#f` means the C's `0`, "the end of the
-  buffer in the direction of travel".
-- **Every caller above the engine speaks positions.** `editfns`' `point`,
-  `point-min`, `point-max`, `goto-char`, `region-*`, `line-*-position`,
-  `line-number-at-pos`, `char-after/before`, `forward-line` lost their ±1;
-  `search.sld`, `isearch.sld`, `minibuffer.sld`, `simple.sld`,
-  `paragraphs.sld`, `casefiddle.sld`, `buff-menu.sld`, `tabulated-list.sld`,
-  `files.sld`, `buffer.sld`, `syntax.sld` and the display's line and
-  scroll arithmetic follow.
-- **`text-editor-cursor-line` is a line NUMBER** (1-based, Emacs's
-  `line-number-at-pos`) and `text-editor-cursor-column` a 0-based character
-  offset. The display layer's `window-top-line` and `buffer-line-string`
-  are line numbers too, and `xdisp`'s row walk compares them as such.
-- **The interval and text-property layer went to Emacs's positions as
-  well** (`intervals.sld`, `textprop.sld`): a buffer's intervals are 1-based
-  (`create_root_interval` sets `new->position = BEG`), a string's are
-  offset-based, and `interval-start-pos` now takes the origin from the
-  *object* rather than from the root's cached position field - which a tree
-  reproduced out of a string has not had corrected yet, and which is what
-  `find_interval` subtracts on its way in.
-
-## What is still wrong
-
-1. **A propertized insert into a buffer that already holds propertized text
-   walks `copy-intervals` off the end of the tree** - `(interval-length #f)`,
-   "Wrong type argument in position 1 (expecting struct): #f". `ls-lisp`'s
-   listing is where it shows: the first line goes in, and the second dies.
-   The tree's `total_length` agrees with the buffer's size at that point, so
-   the intervals do not tile it - something in the grafting or the offset
-   walk is still moving an interval wrongly. Find it by comparing our tree
-   against `../emacs/src/intervals.c`'s `copy_intervals`, which cannot reach
-   `#f` because the C's `got` covers LENGTH by construction.
-2. **The test suites are written for the old coordinates.** `engine-tests`
-   (51 failures), `ncurses-editor-tests` (55), `dired-mode-tests` (18),
-   `textprop-tests` (18), `search-tests` (16), `pgtk-tests` (16),
-   `ls-lisp-tests` (10), `font-lock-tests` (10), `select-tests` (9),
-   `replace-tests` (5), `buffer-tests` (2). Most are a `0` that must be a `1`
-   or a line *number* where a line *index* was meant; the ones that are not
-   are the real things to look at.
-3. **`cdf.sld`, `cdf-tests.scm`, `gap-buffer.sld` and `gap-buffer-tests.scm`
-   still exist** and are still in `build.scm`, `Makefile`, `run-suites.py`
-   and `run-tests.scm`. Nothing imports them any more except
-   `gap-buffer-tests.scm` itself, so they are ready to delete - it was left
-   for a pass that could watch the suites go green around it.
+- `find-interval` rebound `position` to the *relative* position and then used
+  it as the absolute one (intervals.sld).
+- `adjust_intervals_for_deletion` passed the buffer position to
+  `interval_deletion_adjustment` where the C passes `start - offset`
+  (`BUF_BEG`). A deletion at `point-min` took one character off the run that
+  should have gone and one off the run after it.
+- `search.sld`: `looking-at` handed the regexp engine a **position** where it
+  wanted an **offset**, so a pattern at point never matched - that is what
+  Dired's indent is built on. `%re-search` answered `(+ 1 POSITION)` and
+  translated the match data by `(+ base 1)`; `search-forward`/`-backward` had
+  the same pair.
+- `simple.sld`: `kill-region` subtracted one from BEG and END, so every kill
+  started a character to the left.
+- `simple.sld`: `isearch-find` referenced an unbound `count` - the caller
+  sweep had renamed the binding to `max`, which also shadowed the core `max`.
+  Every `isearch-find` call died.
+- `dired.sld`, `font-lock.sld`: every property site on the interval seam had
+  a `(- ... 1)`; at `point-min` one of them asked for position 0 and killed
+  `dired-noselect` outright. `font-lock-extend-region-multiline` keeps its
+  two: those `1-'s are Emacs's own.
+- `window.sld`, `frame.sld`: a window's `top-line` was built as 0, so the
+  display's row walk counted one row too many and drew the cursor a row low.
+- `files.sld`: `add-line-break-at-end!` used the character *count* where
+  `point-max` was wanted, so `require-final-newline` wrote `"a\nb"` for
+  `"ab"`.
+- `engine.sld`: `text-editor-to-string` was `text-dump-port`, which writes
+  `\n` as the buffer's line break. Emacs's `buffer-string` is the raw text,
+  and because `save-buffer` then ran `encode-line-breaks` over it, a CRLF
+  file was written with `\r\r\n` - **a real bug on the old branch too**. The
+  same pair of definitions (`text-load-port`/`text-dump-port`) was in the
+  file twice; one copy remains.
 
 ## Method that worked, and one that did not
 
-Reading the C is what landed these: `find_newline`'s two conventions, `bol`
-vs `forward_line`'s `count - 1`, `create_root_interval`'s `position = BEG`,
-`find_interval`'s `relative_position -= BUF_BEG` (from the *object*), and
-`graft_intervals_into_buffer`'s `buffer_intervals (buffer)->position =
-BUF_BEG (buffer)`. Every one of them was a place the port had written `0`.
-
-The one that did not work: a Python edit of the form
+Reading the C is what landed every one of the above. The one that did not
+work: a Python edit of the form
 `open(p,'w').write(open(p).read().replace(...))` **truncates the file before
-reading it** and wrote `replace.sld` out empty. It was committed empty and
-had to be restored. Read into a variable first, always.
+reading it** and wrote `replace.sld` out empty, which was then committed.
+Read into a variable first, always.
 
-## Why this is one change and not several
+Two tools that paid for themselves here and are worth reaching for first:
 
-The storage *is* the foundation: there is no stage that leaves `engine.sld`
-compiling except doing all of it. That is why it is on a branch.
+- `emacs -Q --batch --eval` for the expectation. Marker rules, `goto-line`
+  past the end, `insert-file-contents`' undo recording, `kill-line`'s
+  whitespace rule and the overlay front-advance rule were all settled by
+  asking Emacs rather than by reasoning.
+- printing stack frames with `(frame-procedure-name)` and
+  `(frame-source)` only - never the values. The `<text-editor-type>` record
+  printer crashes while Guile prints a backtrace, which hides the location;
+  frames printed without their values do not.
+
+## Still open
+
+- `tools/pty-check.py` had not been run to completion when this was written.
+- The renderer's line scans are O(n) per line: `find_newline`'s
+  `region_cache` (search.c) is not ported, so a window redraw is quadratic in
+  the buffer. It was quadratic before too, but by a different route.
+- `get-free-disk-space` is not ported, so `dired--insert-disk-space` leaves
+  the free-space `display` property off; the `total` line is still deleted as
+  Emacs 31 deletes it.
