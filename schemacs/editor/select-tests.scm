@@ -184,7 +184,7 @@
   (with-editor "hello world"
     (lambda (frame ed d)
       (keys! frame C-SPC)
-      (text-editor-set-cursor ed 5)
+      (text-editor-set-cursor ed 6)
       (M-w! frame)
       (stub-clipboard d))))
 
@@ -201,7 +201,7 @@
   (with-editor "hello world"
     (lambda (frame ed d)
       (keys! frame C-SPC)
-      (text-editor-set-cursor ed 5)
+      (text-editor-set-cursor ed 6)
       (M-w! frame)
       (stub-primary d))))
 
@@ -285,7 +285,7 @@
   (with-editor "selected text here"
     (lambda (frame ed d)
       (keys! frame C-SPC)
-      (text-editor-set-cursor ed 13)
+      (text-editor-set-cursor ed 14)
       (deactivate-mark)
       (stub-primary d))))
 
@@ -316,7 +316,7 @@
   (with-tty "hello world"
     (lambda (frame ed)
       (keys! frame C-SPC)
-      (text-editor-set-cursor ed 5)
+      (text-editor-set-cursor ed 6)
       (deactivate-mark)
       (mark-active))))
 

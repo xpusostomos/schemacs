@@ -30,7 +30,8 @@
     (only (schemacs editor command)
           current-prefix-arg define-command uarg->integer)
     (only (schemacs editor engine)
-          copy-marker new-text-editor set-marker! set!text-editor-buffer-name
+          copy-marker new-text-editor set-marker! marker-position
+          set!text-editor-buffer-name
           set!text-editor-file-name text-editor-buffer-name
           text-editor-get-cursor text-editor-modified? text-editor-set-cursor
           text-editor-type?)
@@ -52,20 +53,30 @@
           frame-selected-window frame-windows select-window
           selected-window set!frame-editor set!frame-message
           set!frame-windows set!window-children set!window-height
-          set!window-left set!window-parent set!window-top set!window-top-line
-          set!window-buffer set!window-width set-window-point!
+          set!window-left set!window-parent set!window-top
+          set-window-buffer! set!window-width set-window-point!
           window-buffer window-children
           window-edges window-height window-left window-list window-parent
-          window-body-width window-top window-top-line window-width)
+          window-body-width window-top window-width
+          %window-start set!%window-start
+          %window-start-at-line-beg set!%window-start-at-line-beg
+          %window-end-pos set!%window-end-pos
+          %window-end-vpos set!%window-end-vpos
+          %window-end-valid? set!%window-end-valid?
+          %window-base-line-number set!%window-base-line-number
+          %window-base-line-pos set!%window-base-line-pos
+          set-window-start! window-start-at-line-beg)
     ;; `display-buffer' puts what it shows in the buffer list's
     ;; most-recently-used order, which is Emacs's `record_buffer';
     ;; `pop-to-buffer' makes a buffer current by name when a string is
     ;; what it was given, and `switch-to-buffer' does the same.
     (only (schemacs editor buffer)
-          bury-buffer default-directory erase-buffer get-buffer-create
+          bury-buffer buffer-local-value default-directory erase-buffer
+          get-buffer-create
           kill-all-local-variables kill-buffer record-buffer! set-buffer
           set!buffer-default-directory set!buffer-file-name set!buffer-read-only
-          set-buffer-modified-p with-current-buffer *inhibit-read-only*)
+          set-buffer-modified-p set-buffer-local-value!
+          with-current-buffer *inhibit-read-only*)
     ;; `run-hooks' is `subr.el''s, and the two temp-buffer hooks below
     ;; are run through it.
     (only (schemacs editor subr) kbd run-hooks)
@@ -187,7 +198,11 @@
       ;; one. Only leaves hold a buffer or point, which is why this one has
       ;; neither.
       ;;--------------------------------------------------------------
-      (make<window> #f #f 0 top height left width
+      ;; An internal window shows no buffer, and so has neither a start
+      ;; nor a point: the C asserts exactly that of one
+      ;; (`eassert (!BUFFERP (w->contents) && NILP (w->start) && NILP
+      ;; (w->pointm))', `window.c:219').
+      (make<window> #f #f #f #f 0 0 #f 0 0 top height left width
                             (window-parent window) (list window new)
                             0 0 #f 0))
 
@@ -244,7 +259,13 @@
                           (window-buffer window)
                           (copy-marker (window-buffer window)
                                        (text-editor-get-cursor (window-buffer window)))
-                          (window-top-line window)
+                          ;; the start and whether it is a line beginning
+                          ;; are copied together, as the C copies them
+                          ;; (`save_window_save', `window.c:8374')
+                          (copy-marker (window-buffer window)
+                                       (marker-position (%window-start window)))
+                          (%window-start-at-line-beg window)
+                          0 0 #f 0 0
                           top
                           height
                           (+ start left)
@@ -274,7 +295,10 @@
                           (window-buffer window)
                           (copy-marker (window-buffer window)
                                        (text-editor-get-cursor (window-buffer window)))
-                          (window-top-line window)
+                          (copy-marker (window-buffer window)
+                                       (marker-position (%window-start window)))
+                          (%window-start-at-line-beg window)
+                          0 0 #f 0 0
                           (+ top upper)
                           lower
                           left
@@ -309,7 +333,8 @@
         (let ((new (make<window>
                     buffer
                     (copy-marker buffer (text-editor-get-cursor buffer))
-                    0
+                    (copy-marker buffer 1) #t
+                    0 0 #f 0 0
                     (+ top (- total size))
                     size
                     left
@@ -459,15 +484,11 @@
           (cond
            (same-window?
             (let ((window (selected-window)))
-              (set!window-buffer window buffer)
-              (set!window-top-line window 0)
-              (set-window-point! window (text-editor-get-cursor buffer))
+              (set-window-buffer! window buffer)
               (record-buffer! buffer)
               window))
            (showing (record-buffer! buffer) showing)
-           (other (set!window-buffer other buffer)
-                  (set!window-top-line other 0)
-                  (set-window-point! other (text-editor-get-cursor buffer))
+           (other (set-window-buffer! other buffer)
                   (record-buffer! buffer)
                   other)
            (else
@@ -477,16 +498,12 @@
                   ;; no room to split: the selected window shows it, which
                   ;; is Emacs's `display-buffer-use-some-window' fallback
                   (begin
-                    (set!window-buffer window buffer)
-                    (set!window-top-line window 0)
-                    (set-window-point! window (text-editor-get-cursor buffer))
+                    (set-window-buffer! window buffer)
                     (record-buffer! buffer)
                     window)
                   ;; split below, and the new window shows it
                   (let ((new (split-window window #f #f)))
-                    (set!window-buffer new buffer)
-                    (set!window-top-line new 0)
-                    (set-window-point! new (text-editor-get-cursor buffer))
+                    (set-window-buffer! new buffer)
                     (record-buffer! buffer)
                     new))))))))
 
@@ -550,10 +567,7 @@
       (let* ((norecord (if (pair? args) (car args) #f))
              (buffer (display-buffer--buffer-or-name buffer-or-name))
              (window (selected-window)))
-        (set!window-buffer window buffer)
-        (set!window-top-line window 0)
-        (set-marker! (%window-point window) (text-editor-get-cursor buffer)
-                     buffer)
+        (set-window-buffer! window buffer)
         (unless norecord (record-buffer! buffer))
         ;; The C's last line is `(set-buffer buffer)' (window.el:9706):
         ;; switching to a buffer *switches to it*, so the commands that

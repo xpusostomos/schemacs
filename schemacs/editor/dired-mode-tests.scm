@@ -482,7 +482,10 @@
   (let* ((b (listing))
          (name-face (lambda ()
                       (goto-file-line "a.txt")
-                      (get-text-property (- (dired-move-to-filename) 1)
+                      ;; `dired-move-to-filename' answers a buffer
+                      ;; position, which is what the property functions
+                      ;; take
+                      (get-text-property (dired-move-to-filename)
                                          'face (current-buffer)))))
     ;; `dired-mode' sets `font-lock-defaults' to `dired-font-lock-keywords'
     ;; but does not turn the mode on yet - see the measurement in

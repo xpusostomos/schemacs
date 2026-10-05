@@ -49,6 +49,7 @@
     (only (schemacs editor engine)
           text-editor-get-cursor text-editor-set-cursor text-editor-modified?
           text-editor-set-modified! text-editor-read-only?
+          text-editor-point-min text-editor-point-max
           text-editor-set-read-only! text-editor-char-count
           text-editor-file-name text-editor-buffer-name text-editor-insert
           text-editor-delete-from-cursor text-editor-undo-disable!
@@ -343,11 +344,11 @@
       ;; this project has.
       ;;--------------------------------------------------------------
       (let ((ed (current-buffer)))
-        (text-editor-set-cursor ed 0)
+        (text-editor-set-cursor ed (text-editor-point-min ed))
         ;; the newline ending the titles' line is the last character on it,
         ;; so one past it is the first character of the first buffer's line
         (text-editor-set-cursor
-         ed (min (text-editor-char-count ed)
+         ed (min (text-editor-point-max ed)
                  (+ 1 (text-editor-get-end-of-line ed))))))
 
     (define (Buffer-menu-buffer)
@@ -362,7 +363,7 @@
     (define (Buffer-menu--move-down!)
       (let ((ed (current-buffer)))
         (text-editor-set-cursor
-         ed (min (text-editor-char-count ed)
+         ed (min (text-editor-point-max ed)
                  (+ 1 (text-editor-get-end-of-line ed))))))
 
     (define-command (Buffer-menu-mark)
@@ -578,7 +579,8 @@
            (when (> n 0)
              (let ((ed (current-buffer)))
                (text-editor-set-cursor
-                ed (max 0 (- (text-editor-get-start-of-line ed) 2))))
+                ed (max (text-editor-point-min ed)
+                        (- (text-editor-get-start-of-line ed) 2))))
              (loop (- n 1)))))
     (define buffer-menu-mode-map
       ;; GNU Emacs's `Buffer-menu-mode-map', with the keys read from a

@@ -32,6 +32,7 @@
     (scheme char)
     (only (schemacs editor engine)
           text-editor-char-count text-editor-copy-string
+          text-editor-point-min text-editor-point-max
           text-editor-delete-from-cursor text-editor-get-cursor
           text-editor-insert text-editor-set-cursor
           text-editor-undo-boundary!)
@@ -172,19 +173,17 @@
       ;; and the rest lower, a word's start being a word-constituent
       ;; that follows one that is not; the C's `do_casify_*_region'
       ;; walk the characters in one pass, and so does this. The
-      ;; positions are one-based, the engine's are zero-based, and the
-      ;; conversion is at the edges only.
+      ;; positions are one-based and so are the engine's, so nothing is
+      ;; converted at the edges.
       ;;--------------------------------------------------------------
       ;; The edit is delete-then-insert, with one undo boundary, which
       ;; is what `modify_text' makes of it for a case change: the text
       ;; is the same length, so the markers either side are unchanged
       ;; and the answer is END.
       ;;--------------------------------------------------------------
-      (let ((ed (current-buffer))
-            (beg (- beg 1))
-            (end (- end 1)))
+      (let ((ed (current-buffer)))
         (if (= beg end)
-            (+ end 1)
+            end
             (let ((text (text-editor-copy-string ed beg end)))
               (text-editor-undo-boundary! ed)
               (let ((newtext
@@ -212,7 +211,7 @@
                 (text-editor-delete-from-cursor ed (- end beg))
                 (text-editor-insert ed newtext)
                 (text-editor-set-cursor ed beg)
-                (+ end 1))))))
+                end)))))
 
     (define (casify-word flag arg)
       ;; GNU Emacs's `casify_word' (casefiddle.c): FLAG the words from
@@ -225,12 +224,10 @@
              (pt (text-editor-get-cursor ed))
              (farend (or (scan-words arg)
                          (if (<= arg 0)
-                             0
-                             (text-editor-char-count ed)))))
+                             (text-editor-point-min ed)
+                             (text-editor-point-max ed)))))
         (text-editor-set-cursor
-         ed (casify-region flag
-                           (+ 1 (min pt farend))
-                           (+ 1 (max pt farend))))
+         ed (casify-region flag (min pt farend) (max pt farend)))
         #f))
 
     (define-command (upcase-region beg end)

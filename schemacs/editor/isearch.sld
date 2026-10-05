@@ -58,6 +58,7 @@
          set!text-editor-mark string-search-forward text-editor-char-count
          text-editor-copy-string
          text-editor-get-char-index text-editor-get-cursor
+         text-editor-point-min text-editor-point-max
          text-editor-search-backward text-editor-search-forward
          text-editor-set-cursor
          ;; what `minibuffer-lazy-highlight-setup' hangs its hook on
@@ -166,16 +167,16 @@
       ;; character before each repeat).
       ;;--------------------------------------------------------------
       (let* ((forward? (eq? direction 'forward))
-             (count (text-editor-char-count ed))
+             (bound (text-editor-point-max ed))
              (point (text-editor-get-cursor ed))
              (len (string-length pattern))
              (start (if step?
                         (if forward? (+ point 1) (- point 1))
                         point)))
-        (and (<= 0 start count)
+        (and (<= (text-editor-point-min ed) start bound)
              (let ((from (if forward?
-                             (max 0 (- start len))
-                             (min count (+ start len)))))
+                             (max (text-editor-point-min ed) (- start len))
+                             (min bound (+ start len)))))
                (if forward?
                    (text-editor-search-forward
                     ed pattern from case-fold?)
@@ -348,7 +349,7 @@
       (when (and (*isearch-lazy-highlight*)
                  (< 0 (string-length pattern))
                  (eq? (window-buffer window) ed))
-        (let* ((limit (min (window-end window) (text-editor-char-count ed)))
+        (let* ((limit (min (window-end window) (text-editor-point-max ed)))
                (start (min (window-start window) limit))
                (len (string-length pattern))
                (text (text-editor-copy-string ed start limit))
@@ -670,7 +671,9 @@
                      (else
                       ;; the search was failing, so this repeat wraps
                       (text-editor-set-cursor
-                       ed (if forward? 0 (text-editor-char-count ed)))
+                       ed (if forward?
+                              (text-editor-point-min ed)
+                              (text-editor-point-max ed)))
                       (isearch-find ed pattern new-direction
                                     case-fold? #f)))))
         (if found
@@ -689,13 +692,13 @@
       ;; of one - GNU Emacs's `isearch-yank-word-or-char'.
       ;;--------------------------------------------------------------
       (let* ((point (text-editor-get-cursor ed))
-             (count (text-editor-char-count ed))
-             (c (and (< point count) (text-editor-get-char-index ed point))))
+             (max (text-editor-point-max ed))
+             (c (and (< point max) (text-editor-get-char-index ed point))))
         (cond
          ((not c) "")
          ((word-char? c)
           (let loop ((i point) (acc '()))
-            (let ((ch (and (< i count) (text-editor-get-char-index ed i))))
+            (let ((ch (and (< i max) (text-editor-get-char-index ed i))))
               (if (and ch (word-char? ch))
                   (loop (+ 1 i) (cons ch acc))
                   (list->string (reverse acc))))))

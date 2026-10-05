@@ -36,7 +36,7 @@
     ;; because they never render.
     (only (scheme write) display)
     (only (schemacs editor engine)
-          text-editor-get-start-of-line text-editor-line-editor-ref)
+          text-editor-get-start-of-line text-editor-line-ref)
     ;; The `display' text property, which a substituted column is drawn
     ;; from - `handle_display_prop''s business, read here for the same
     ;; reason `current-line-display-column' is: it is the column side of
@@ -197,7 +197,7 @@
         (let loop ((j 0) (col 0))
           (if (>= j buffer-col)
               col
-              (let* ((ch (text-editor-line-editor-ref ed j))
+              (let* ((ch (text-editor-line-ref ed j))
                      (prop (and ed
                                 (get-text-property (+ line-start j)
                                                    'display ed))))

@@ -456,17 +456,17 @@
             (eol (if (and (pair? rest) (pair? (cdr rest))) (cadr rest)
                      (line-end-position))))
         (beginning-of-line)
-        ;; The interval tree's positions are *zero*-based and everything
-        ;; in this library is one-based, as Emacs's is; the property
-        ;; functions are the tree's, so the conversion is here at the
-        ;; seam. Without it the name comes out one character short and
-        ;; one character early.
-        (let ((change (next-single-property-change (- (point) 1)
+        ;; The interval tree's positions are the buffer's own, which are
+        ;; Emacs's - the C's `find_interval' subtracts `BUF_BEG' and BEG
+        ;; is 1, the tree's origin here - so the `(- ... 1)'s that used
+        ;; to be here were the tree's old zero-based numbering and moved
+        ;; the name one character early.
+        (let ((change (next-single-property-change (point)
                                                    dired-filename-property
-                                                   #f (- eol 1))))
+                                                   #f eol)))
           (cond
-           ((and change (< change (- eol 1)))
-            (goto-char (+ change 1))
+           ((and change (< change eol))
+            (goto-char change)
             (point))
            ((re-search-forward directory-listing-before-filename-regexp eol #t)
             (goto-char (match-end 0))
@@ -499,13 +499,13 @@
       ;; this did, means a hidden line answers nil instead of signalling.
       ;;--------------------------------------------------------------
       (let ((no-error (and (pair? rest) (car rest))))
-        (if (get-text-property (- (point) 1) dired-filename-property)
-            ;; no LIMIT, so "no further change" answers #f and the C's
-            ;; `(1- (point-max))' is the fallback; see
-            ;; `dired-move-to-filename' for the zero/one-based seam.
-            (let ((change (next-single-property-change (- (point) 1)
+        (if (get-text-property (point) dired-filename-property)
+            ;; no LIMIT, so "no further change" answers #f - the C's
+            ;; `(or (next-single-property-change (point) 'dired-filename)
+            ;; (1- (point-max)))', whose `1-' is Emacs's own and is kept
+            (let ((change (next-single-property-change (point)
                                                        dired-filename-property)))
-              (goto-char (if change (+ change 1) (- (point-max) 1))))
+              (goto-char (or change (- (point-max) 1))))
             (let ((opoint (point))
                   (used-f (dired-check-switches (dired-actual-switches)
                                                 "F" "classify"))
@@ -759,10 +759,12 @@
             (begin
               (if (or (not (*dired-free-space*))
                       (eq? (*dired-free-space*) 'first))
-                  ;; `delete-region' takes engine positions in this tree,
-                  ;; one below the Emacs-named layer's
-                  (delete-region (- (match-beginning 0) 1)
-                                 (- (line-beginning-position 2) 1))
+                  ;; `delete-region' takes the buffer's own positions,
+                  ;; which are Emacs's; the two `(- ... 1)'s that were
+                  ;; here were the old zero-based conversion, and at
+                  ;; `point-min' the first of them asked for position 0.
+                  (delete-region (match-beginning 0)
+                                 (line-beginning-position 2))
                   (replace-match "total used in directory" #f #f #f 1))
               (let ((available (get-free-disk-space file)))
                 (if (not available)
@@ -782,7 +784,11 @@
                       (when (and (looking-at " */")
                                  (begin (end-of-line)
                                         (char=? (char-after (- (point) 1)) #\:)))
-                        (put-text-property (- (point) 2) (- (point) 1) 'display
+                        ;; the C's `(put-text-property (1- (point))
+                        ;; (point) 'display ...)' - positions are the
+                        ;; buffer's own, so the two `(- ... 1)'s that
+                        ;; were here are gone
+                        (put-text-property (- (point) 1) (point) 'display
                                            (string-append ": (" available
                                                           " available)")
                                            (current-buffer)))
@@ -815,28 +821,29 @@
             (if (not (dired-move-to-filename))
                 (if (looking-at-p "^$")
                     #f
-                    ;; The property functions' positions are the
-                    ;; interval tree's, and this tree's is ZERO-based
-                    ;; where Emacs's is BEG-relative with BEG = 1 - the
-                    ;; C's `find_interval' subtracts `BUF_BEG'
-                    ;; (intervals.c:614). So every position that goes to
-                    ;; one is converted here at the seam, as
-                    ;; `dired-move-to-filename' converts its own. Doing
-                    ;; it in two places and not the third is what left
-                    ;; `dired-filename' one position to the right: the
-                    ;; name's property ran over the newline and into the
-                    ;; next line, so `next-single-property-change'
-                    ;; answered a position past the line and
-                    ;; `dired-get-filename' read a name with a newline
-                    ;; in it.
-                    (put-text-property (- (line-beginning-position) 1)
-                                       (line-end-position)
+                    ;; Emacs 31's `dired-insert-set-properties'
+                    ;; (dired.el:2100): "put-text-property
+                    ;; (line-beginning-position) (1+ (line-end-position))
+                    ;; 'invisible 'dired-hide-details-information". The
+                    ;; interval tree's positions are the buffer's own
+                    ;; now - the C's `find_interval' subtracts `BUF_BEG'
+                    ;; (intervals.c:614) and BEG is 1, which is where the
+                    ;; tree starts here too - so there is nothing to
+                    ;; convert at the seam. The two `(- ... 1)'s that
+                    ;; used to be here were the old zero-based
+                    ;; conversion; they left `dired-filename' a position
+                    ;; to the left of the name.
+                    (put-text-property (line-beginning-position)
+                                       (+ 1 (line-end-position))
                                        'invisible 'dired-hide-details-information))
                 (let ((opoint (point)))
                   (save-excursion
                     (dired-move-to-end-of-filename)
+                    ;; the C's `(let ((beg (point)) (end ...(1- (point))))
+                    ;; (add-text-properties beg (1+ end) ...))' is beg to
+                    ;; point
                     (add-text-properties
-                     (- opoint 1) (- (point) 1)
+                     opoint (point)
                      (list dired-filename-property #t
                            'mouse-face 'highlight
                            'help-echo "mouse-2: visit this file in other window"))))))

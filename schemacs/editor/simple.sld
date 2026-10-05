@@ -39,6 +39,7 @@
          text-editor-get-cursor text-editor-get-end-of-line 
          text-editor-get-start-of-line text-editor-insert 
          text-editor-line-count text-editor-mark text-editor-move-cursor 
+         text-editor-point-min text-editor-point-max
          text-editor-read-only? text-editor-set-cursor 
          text-editor-set-read-only! text-editor-undo 
          text-editor-undo-boundary! text-editor-undo-list)
@@ -47,9 +48,9 @@
          set-message!
          frame-keymap-state
          selected-window set!frame-keymap-state
-         set!frame-message set!window-top-line window-body-height
-         window-buffer window-list window-top-line
-         %window-hscroll)
+         set!frame-message window-body-height
+         window-buffer window-list
+         %window-hscroll %window-start set-window-start!)
     ;; The kill ring's window-system half: the cut and paste functions
     ;; are simple.el's `interprogram-*-function' variables' defaults,
     ;; and `deactivate-mark' sets PRIMARY through the low-level
@@ -238,21 +239,31 @@ rather than files.  These modes usually use read-only buffers."
                        (*temporary-goal-column*)
                        (text-editor-cursor-column ed))))
         (*temporary-goal-column* goal)
-        (let loop ((i 0))
+        ;; The walk carries the line's *position*: line numbers would be
+        ;; a scan of the buffer for every step, and one more to notice
+        ;; that the step did not move - the move below costs the lines it
+        ;; crosses and nothing above them.
+        (let loop ((i 0) (start (text-editor-get-start-of-line ed)))
           (when (< i count)
-            (let ((line (text-editor-cursor-line ed)))
-              (text-editor-set-cursor ed (+ 1 line) goal)
+            (let* ((end (text-editor-get-end-of-line ed start))
+                   ;; the buffer's last line starts no other
+                   (next (and (< end (text-editor-point-max ed))
+                              (+ end 1))))
               (cond
                ;; There was no line to move to: point is on the last
                ;; line, and the engine will not leave it. Emacs moves
                ;; point to the end of the buffer there - which is the
                ;; end of this line, there being no line break after it
                ;; - and reports `end-of-buffer'.
-               ((= line (text-editor-cursor-line ed))
+               ((not next)
                 (text-editor-set-cursor
                  ed (text-editor-get-end-of-line ed))
                 (error "End of buffer"))
-               (else (loop (+ 1 i)))))))))
+               (else
+                (text-editor-set-cursor
+                 ed (min (text-editor-get-end-of-line ed next)
+                         (+ next goal)))
+                (loop (+ 1 i) next))))))))
 
     (define-command (previous-line count)
       "Move point up N lines, keeping the column."
@@ -262,16 +273,18 @@ rather than files.  These modes usually use read-only buffers."
                        (*temporary-goal-column*)
                        (text-editor-cursor-column ed))))
         (*temporary-goal-column* goal)
-        (let loop ((i 0))
+        (let loop ((i 0) (start (text-editor-get-start-of-line ed)))
           (when (< i count)
-            (let ((line (text-editor-cursor-line ed)))
-              (text-editor-set-cursor ed (- line 1) goal)
-              (cond
-               ((= line (text-editor-cursor-line ed))
+            (cond
+             ((= start (text-editor-point-min ed))
+              (text-editor-set-cursor ed start)
+              (error "Beginning of buffer"))
+             (else
+              (let ((prev (text-editor-get-start-of-line ed (- start 1))))
                 (text-editor-set-cursor
-                 ed (text-editor-get-start-of-line ed))
-                (error "Beginning of buffer"))
-               (else (loop (+ 1 i)))))))))
+                 ed (min (text-editor-get-end-of-line ed prev)
+                         (+ prev goal)))
+                (loop (+ 1 i) prev))))))))
 
     (define-command (beginning-of-line)
       "Move point to the beginning of the current line."
@@ -450,6 +463,32 @@ rather than files.  These modes usually use read-only buffers."
               ((eq? uarg '-) (- full))
               (else (uarg->integer 1 uarg)))))
 
+    (define (window-move-lines ed pos n)
+      ;; POS moved N lines - forward when N is positive, backward when it
+      ;; is negative - stopping at the ends of the buffer. The walk
+      ;; steps one line break at a time, as the renderer's row walk does,
+      ;; so crossing N lines costs those lines.
+      ;;
+      ;; GNU Emacs reaches this through `vmotion' (`indent.c'), which
+      ;; measures *screen* lines and so differs when a line wraps; the
+      ;; arithmetic here is line arithmetic, as the two commands below
+      ;; have always been - the wrapped case is what `scroll-to-cursor!'
+      ;; handles after the fact.
+      ;;--------------------------------------------------------------
+      (if (<= n 0)
+          (let loop ((n (- n)) (pos pos))
+            (if (or (<= n 0) (= pos (text-editor-point-min ed)))
+                pos
+                (loop (- n 1)
+                      (text-editor-get-start-of-line ed (- pos 1)))))
+          (let loop ((n n) (pos pos))
+            (if (<= n 0)
+                pos
+                (let ((end (text-editor-get-end-of-line ed pos)))
+                  (if (< end (text-editor-point-max ed))
+                      (loop (- n 1) (+ end 1))
+                      pos))))))
+
     (define-command (scroll-up-command uarg)
       ;; Scroll the view toward the end of the buffer, with a two-line
       ;; overlap, like mg's `forwpage`. If the point falls outside the new
@@ -462,16 +501,19 @@ rather than files.  These modes usually use read-only buffers."
              (ed (window-buffer window))
              (vheight (window-body-height window))
              (n (scroll-amount uarg window))
-             (last-line (max 0 (- (text-editor-line-count ed) 1)))
-             (new-top (min (+ (window-top-line window) n) last-line)))
-        (if (<= new-top (window-top-line window))
+             (old (marker-position (%window-start window)))
+             (new (window-move-lines ed old n)))
+        (if (<= new old)
             (set!frame-message frame "; End of buffer")
             (begin
-              (set!window-top-line window new-top)
-              (let ((line (text-editor-cursor-line ed)))
-                (when (or (< line new-top)
-                          (>= line (+ new-top vheight)))
-                  (text-editor-set-cursor ed new-top 0)))))))
+              (set-window-start! window new)
+              ;; point is visible when it lies between this window's
+              ;; first line and its last - the same test the line
+              ;; numbers made, in positions
+              (let ((point (text-editor-get-cursor ed))
+                    (bottom (window-move-lines ed new vheight)))
+                (when (or (< point new) (>= point bottom))
+                  (text-editor-set-cursor ed new)))))))
 
     (define-command (scroll-down-command uarg)
       ;; Scroll the view toward the beginning of the buffer, the mirror
@@ -483,16 +525,19 @@ rather than files.  These modes usually use read-only buffers."
              (ed (window-buffer window))
              (vheight (window-body-height window))
              (n (scroll-amount uarg window))
-             (new-top (max 0 (- (window-top-line window) n))))
-        (if (= new-top (window-top-line window))
+             (old (marker-position (%window-start window)))
+             (new (window-move-lines ed old (- n))))
+        (if (= new old)
             (set!frame-message frame "; Beginning of buffer")
             (begin
-              (set!window-top-line window new-top)
-              (let ((line (text-editor-cursor-line ed)))
-                (when (or (< line new-top)
-                          (>= line (+ new-top vheight)))
+              (set-window-start! window new)
+              (let ((point (text-editor-get-cursor ed))
+                    (bottom (window-move-lines ed new vheight)))
+                (when (or (< point new) (>= point bottom))
+                  ;; point is off the bottom: it goes to the window's last
+                  ;; line, which is what the line arithmetic did
                   (text-editor-set-cursor
-                   ed (+ new-top (- vheight 1)) 0)))))))
+                   ed (window-move-lines ed new (- vheight 1)))))))))
 	
 	(define-command (toggle-truncate-lines arg)
       "Toggle truncating of long lines for the current buffer.
@@ -529,15 +574,14 @@ non-nil."
       "Move point to the beginning of the buffer."
       (interactive)
       (let ((window (selected-window)))
-        (set!window-top-line window 0)
-        (text-editor-set-cursor (window-buffer window) 0 0)))
+        (set-window-start! window 1)
+        (text-editor-set-cursor (window-buffer window) 1)))
 
     (define-command (end-of-buffer)
       "Move point to the end of the buffer."
       (interactive)
       (let ((ed (current-buffer)))
-        (text-editor-set-cursor
-         ed (text-editor-char-count ed))))
+        (text-editor-set-cursor ed (text-editor-point-max ed))))
 
     ;;----------------------------------------------------------------
     ;; Kill ring and word motion
@@ -592,13 +636,14 @@ non-nil."
 
     (define (forward-word-position ed)
       ;; Like mg's `forwword` (word.c:51): skip over non-word
-      ;; characters, then over word characters. Returns the absolute
-      ;; character index of the end of the next word.
+      ;; characters, then over word characters. Returns the *position*
+      ;; of the end of the next word - so `point-max' when there is no
+      ;; word left, and the end of the word otherwise.
       ;;--------------------------------------------------------------
-      (let ((count (text-editor-char-count ed)))
+      (let ((max (text-editor-point-max ed)))
         (let loop ((i (text-editor-get-cursor ed)) (phase 'skip))
           (cond
-           ((>= i count) count)
+           ((>= i max) max)
            ((eq? phase 'skip)
             (if (%inword-at ed i) (loop i 'word) (loop (+ i 1) 'skip)))
            (else
@@ -610,11 +655,12 @@ non-nil."
       ;; characters, and step forward once, landing on the first
       ;; character of the word.
       ;;--------------------------------------------------------------
-      (let ((i0 (text-editor-get-cursor ed)))
-        (if (<= i0 0) 0
+      (let ((i0 (text-editor-get-cursor ed))
+            (min (text-editor-point-min ed)))
+        (if (<= i0 min) min
             (let loop ((i (- i0 1)) (phase 'skip))
               (cond
-               ((< i 0) 0)
+               ((< i min) min)
                ((eq? phase 'skip)
                 (if (%inword-at ed i) (loop i 'word) (loop (- i 1) 'skip)))
                (else
@@ -941,22 +987,25 @@ non-nil."
       ;; `kill-read-only-ok' turns the signal into a message.
       "Kill (cut) the text between point and mark."
       (interactive (list (region-beginning) (region-end)))
-           (let* ((beg (- beg 1))
-                  (end (- end 1))
-                      (string (text-editor-copy-string (current-buffer) beg end))
-                      (read-only? (text-editor-read-only? (current-buffer))))
-                 ;; The ring takes the text first, as in Emacs, so that a
-                 ;; read-only buffer still gives up its text.
-                 (if (and (not read-only?)
-                          (eq? (*last-command*) kill-region))
-                     (kill-append string (< end beg))
-                     (kill-new string))
-                 (*this-command* kill-region)
-                 (set!text-editor-deactivate-mark! (current-buffer) #t)
-                (if read-only?
-                    (unless (*kill-read-only-ok*)
-                      (error "Buffer is read-only"))
-                    (delete-region beg end))))
+      ;; BEG and END are Emacs positions and the engine's are too, so
+      ;; there is nothing to convert: this used to subtract one from
+      ;; each, which is what the engine's old zero-based positions
+      ;; needed, and it silently killed one character too far to the
+      ;; left once the engine went to Emacs's own coordinates.
+      (let* ((string (text-editor-copy-string (current-buffer) beg end))
+             (read-only? (text-editor-read-only? (current-buffer))))
+        ;; The ring takes the text first, as in Emacs, so that a
+        ;; read-only buffer still gives up its text.
+        (if (and (not read-only?)
+                 (eq? (*last-command*) kill-region))
+            (kill-append string (< end beg))
+            (kill-new string))
+        (*this-command* kill-region)
+        (set!text-editor-deactivate-mark! (current-buffer) #t)
+        (if read-only?
+            (unless (*kill-read-only-ok*)
+              (error "Buffer is read-only"))
+            (delete-region beg end))))
 
     (define (copy-region-as-kill beg end)
       ;; GNU Emacs's `copy-region-as-kill': put the text in the kill ring
@@ -1526,13 +1575,13 @@ non-nil."
                    ;; `region-extract-function''s default for a nil
                    ;; METHOD is the region's text (`simple.el:1452');
                    ;; there is no `filter-buffer-substring' here. The
-                   ;; region answers are one-based, the engine's copy
-                   ;; zero-based - the conversion at the edge.
+                   ;; region's answers are positions, and so are the
+                   ;; engine's, so nothing is converted.
                    (gui-set-selection 'PRIMARY
                                       (text-editor-copy-string
                                        (current-buffer)
-                                       (- (region-beginning) 1)
-                                       (- (region-end) 1))))))
+                                       (region-beginning)
+                                       (region-end))))))
           ;; a temporarily-enabled Transient Mark mode goes back to what
           ;; it was
           (when (eq? (buffer-local-value (current-buffer)
@@ -1667,8 +1716,8 @@ non-nil."
       "Put point at beginning and mark at end of buffer."
       (interactive)
       (push-mark)
-      (push-mark (text-editor-char-count (current-buffer)) #f #t)
-      (text-editor-set-cursor (current-buffer) 0))
+      (push-mark (text-editor-point-max (current-buffer)) #f #t)
+      (text-editor-set-cursor (current-buffer) 1))
 
     ;;----------------------------------------------------------------
     ;; The keys GNU Emacs binds these commands to
@@ -2031,7 +2080,7 @@ non-nil."
       ;;--------------------------------------------------------------
       (save-excursion
         (let walk ((p pos))
-          (if (<= p 0)
+          (if (<= p (text-editor-point-min ed))
               #f
               (begin
                 ;; the newline that ends the line above POS, which is
@@ -2044,7 +2093,7 @@ non-nil."
                       ;; the first non-blank line: past it, which is
                       ;; `(forward-line 1)'
                       (let ((eol (text-editor-get-end-of-line ed)))
-                        (if (< eol (text-editor-char-count ed))
+                        (if (< eol (text-editor-point-max ed))
                             (+ eol 1)
                             eol)))))))))
 
@@ -2056,14 +2105,14 @@ non-nil."
       ;;--------------------------------------------------------------
       (save-excursion
         (let walk ((p pos))
-          (if (>= p (text-editor-char-count ed))
+          (if (>= p (text-editor-point-max ed))
               #f
               (begin
                 (text-editor-set-cursor ed p)
                 (text-editor-set-cursor ed (text-editor-get-start-of-line ed))
                 (if (%blank-line? ed)
                     (let ((eol (text-editor-get-end-of-line ed)))
-                      (if (< eol (text-editor-char-count ed))
+                      (if (< eol (text-editor-point-max ed))
                           (walk (+ eol 1))
                           #f))
                     (text-editor-get-cursor ed)))))))
@@ -2088,13 +2137,14 @@ non-nil."
                      ;; there is no second blank line after this one -
                      ;; the not of `looking-at "[ \t]*\n[ \t]*$"'
                      (let ((eol (text-editor-get-end-of-line ed)))
-                       (or (>= eol (text-editor-char-count ed))
+                       (or (>= eol (text-editor-point-max ed))
                            (begin
                              (text-editor-set-cursor ed (+ eol 1))
                              (not (%blank-line? ed)))))
                      ;; and the line before it is not blank - or there
                      ;; is none
-                     (or (<= (text-editor-get-start-of-line ed) 0)
+                     (or (<= (text-editor-get-start-of-line ed)
+                             (text-editor-point-min ed))
                          (begin
                            (text-editor-set-cursor
                             ed (- (text-editor-get-start-of-line ed) 1))
@@ -2107,10 +2157,11 @@ non-nil."
         (when thisblank
           (beginning-of-line)
           (delete-region
-           (or (%blank-line-up ed (text-editor-get-cursor ed)) 0)
+           (or (%blank-line-up ed (text-editor-get-cursor ed))
+               (text-editor-point-min ed))
            (if singleblank
                (let ((eol (text-editor-get-end-of-line ed)))
-                 (if (< eol (text-editor-char-count ed))
+                 (if (< eol (text-editor-point-max ed))
                      (+ eol 1)
                      eol))
                (text-editor-get-cursor ed))))
@@ -2118,12 +2169,12 @@ non-nil."
         ;; blank and there are no following blank lines.
         (if (not (and thisblank singleblank))
             (let ((eol (text-editor-get-end-of-line ed)))
-              (when (< eol (text-editor-char-count ed))
+              (when (< eol (text-editor-point-max ed))
                 ;; forward-line 1, then the walk down
                 (delete-region
                  (+ eol 1)
                  (or (%blank-line-down ed (+ eol 1))
-                     (text-editor-char-count ed))))))
+                     (text-editor-point-max ed))))))
         ;; Handle the special case where point is followed by newline
         ;; and eob. Delete the line, leaving point at eob - Emacs's
         ;; `(looking-at "^[ \t]*\n\\'")'.
@@ -2131,9 +2182,9 @@ non-nil."
                    (= (text-editor-get-cursor ed)
                       (text-editor-get-start-of-line ed))
                    (= (text-editor-get-end-of-line ed)
-                      (- (text-editor-char-count ed) 1)))
+                      (- (text-editor-point-max ed) 1)))
           (delete-region (text-editor-get-cursor ed)
-                         (text-editor-char-count ed)))))
+                         (text-editor-point-max ed)))))
     ;; Transposition - simple.el
     ;;
     ;; `transpose-chars' (C-t) and `transpose-words' (M-t) over

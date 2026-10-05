@@ -28,12 +28,10 @@
     (scheme char)
     (only (schemacs editor engine)
           text-editor-char-count text-editor-get-cursor text-editor-insert
+          text-editor-point-min
           text-editor-delete-from-cursor text-editor-set-cursor
-          text-editor-get-line-column
-          text-editor-undo-disable! text-editor-undo-enable!)
-    ;; `text-editor-get-line-column' answers with one of these, and the
-    ;; line it names is what says which entry a line is.
-    (only (schemacs ui text-buffer-impl) text-location-line))
+          text-editor-cursor-line
+          text-editor-undo-disable! text-editor-undo-enable!))
 
   (export
    tabulated-list-entries
@@ -87,7 +85,7 @@
       ;; buffer's first line (`tabulated-list--header'), so the first
       ;; entry is the second line and row 0 is line 2.
       ;;--------------------------------------------------------------
-      (- (text-location-line (text-editor-get-line-column ed)) 2))
+      (- (text-editor-cursor-line ed) 2))
 
     (define (tabulated-list-get-id ed)
       ;; The ID of the entry on the line point is on in ED, or #f when
@@ -192,7 +190,7 @@
         ;; point. Deleting forward from point instead would leave whatever
         ;; came before it and draw the new list onto the end of the old -
         ;; which is what a redraw with point down the list used to do.
-        (text-editor-set-cursor ed 0)
+        (text-editor-set-cursor ed (text-editor-point-min ed))
         (text-editor-delete-from-cursor ed (text-editor-char-count ed))
         (text-editor-insert ed (tabulated-list--header))
         (text-editor-insert ed "\n")
@@ -202,7 +200,7 @@
                     (text-editor-insert ed "\n"))
                   entries)
         (text-editor-undo-enable! ed)
-        (text-editor-set-cursor ed 0)
+        (text-editor-set-cursor ed (text-editor-point-min ed))
         entries))
 
     (define (tabulated-list-revert ed)

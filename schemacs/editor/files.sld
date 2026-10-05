@@ -36,6 +36,7 @@
           set!text-editor-buffer-name set!text-editor-file-name
           text-editor-buffer-name text-editor-char-count
           text-editor-file-name text-editor-get-char-index text-editor-get-cursor
+          text-editor-point-min text-editor-point-max
           text-editor-insert text-editor-modified? text-editor-read-only?
           text-editor-set-cursor text-editor-set-modified!
           text-editor-set-read-only! text-editor-to-string
@@ -1184,9 +1185,9 @@ save-buffer
       ;; Whether the last character of the buffer is a line break. False
       ;; for an empty buffer, which Emacs treats as needing nothing.
       ;;--------------------------------------------------------------
-      (let ((count (text-editor-char-count ed)))
-        (and (< 0 count)
-             (char=? (text-editor-get-char-index ed (- count 1)) #\newline))))
+      (let ((max (text-editor-point-max ed)))
+        (and (< (text-editor-point-min ed) max)
+             (char=? (text-editor-get-char-index ed (- max 1)) #\newline))))
 
     (define (add-line-break-at-end! ed)
       ;; Append a line break to the buffer, leaving the cursor where it
@@ -1196,7 +1197,11 @@ save-buffer
       ;; end.
       ;;--------------------------------------------------------------
       (let ((at (text-editor-get-cursor ed)))
-        (text-editor-set-cursor ed (text-editor-char-count ed))
+        ;; `point-max', not the character count: positions are one-based
+        ;; and `point-max' is one past the last character, which is where
+        ;; a break appended to the buffer goes. The count is one short of
+        ;; it, which put the break before the last character.
+        (text-editor-set-cursor ed (text-editor-point-max ed))
         (text-editor-insert ed #\newline)
         (text-editor-set-cursor ed at)))
 
@@ -1417,8 +1422,8 @@ save-buffer
         ;; which `find-file-noselect' sets to the file's directory
         (set!buffer-default-directory ed (file-name-directory-part path))
         ;; and point starts at the beginning of what was read, which is
-        ;; where GNU Emacs's `find-file-noselect' puts it
-        (text-editor-set-cursor ed 0 0)
+        ;; where GNU Emacs's `find-file-noselect' puts it - `point-min'
+        (text-editor-set-cursor ed 1 0)
         ed)))))
 
     (define (encode-line-breaks str line-break)

@@ -891,3 +891,590 @@ rather than assumed:
 So a warm-cache GTK start prints exactly the seven class-1 warnings and
 nothing else; a cold-cache one adds the two class-2 warnings while the
 modules compile; class 3 shows only under the compiler.
+
+# Handoff — `sequence.sld` is gone (2026-10-05)
+
+## What landed
+
+`schemacs/sequence.sld` (603 lines, the original author's, untouched since
+2026-09-25) is **deleted**. It was a portability shim: a ten-field
+`<sequence-iface>` record whose fourteen hand-written tables re-spelled,
+per element type, operations Guile already performs generically. Its
+consumers — `gap-buffer.sld`, `editor/cdf.sld`, `editor/engine.sld`, and
+`gap-buffer-tests.scm` — now call Guile directly.
+
+`plans/ORIG.md` had concluded it "could shrink a lot but can't disappear",
+because "there is no generic way to say *give me an empty u32vector of
+length n*". **That was wrong.** `make-typed-array` is exactly that call, and
+its type argument is exactly what `array-type` returns; the two round-trip
+for every array type. `sequence.sld` disappears.
+
+## The new leaf library, and why it must be a leaf
+
+`schemacs/arrays.sld` (new, ~120 lines) holds the two primitives Guile does
+not have, and **no growth policy** — a policy is a caller's business:
+
+- `%array-copy-range!` — R7RS `copy!' order, any two array types,
+  overlap-safe. This is `iface-sequence-copy!`, and it is the *only* part of
+  the iface the gap buffer could not do with a plain Guile call.
+- `%array-resize` — a new array of the same type with the old contents in
+  its prefix; answers the *same object* when the length is unchanged, which
+  `cdf-fill` tests with `eq?`.
+
+Everything else is a plain Guile call at the call site.
+
+It has to be a leaf because of the import graph, not for style:
+
+```
+        (schemacs arrays)          <- leaf (was (schemacs sequence))
+          /            \
+  gap-buffer.sld      cdf.sld
+          \            /
+     (schemacs editor engine)      <- imports both
+               |
+     (schemacs editor buffer)      <- imports engine
+```
+
+`buffer.sld` imports `engine`, `engine` imports `gap-buffer`, so a helper
+`gap-buffer.sld` needs cannot live in either — it would be a cycle. Of the
+Emacs files these operations belong to, `make_gap`/`make_gap_larger`/
+`gap_left`/`gap_right` are **insdel.c** (this tree's `engine.sld`),
+`enlarge_buffer_text` is **alloc.c**, and only the *shrink* policy
+(`compact_buffer`) is **buffer.c**. None is `buffer.c`'s management half,
+which is what `buffer.sld` mirrors.
+
+## The two Guile facts this rests on (measured on 3.0.11, not assumed)
+
+- `array-copy!` is `(_ _)` — **two arguments, whole arrays only** — and it
+  is a *forward loop*: shifting right within one array corrupts it
+  (`#u32(10 20 30 40 50)` → `#u32(10 10 10 10 50)`).
+- `vector-copy!` **refuses every SRFI-4 vector**: *"Wrong type argument in
+  position 1 (expecting mutable vector): #u32(...)"*. That, and only that,
+  is why `gap-buffer.sld` carried two hand-rolled element-by-element loops
+  under `cond-expand (guile ...)`. There is no `u32vector-copy!`, and
+  `uniform-vector-copy` / `uniform-vector-copy!` **do not exist**.
+  `(srfi srfi-63)` is not installed.
+
+`%array-copy-range!` gets a *range* by asking `make-shared-array` for a view
+of it, and gets the overlap right by **reversing both views** when the
+destination is above the source: the same forward copy then moves the
+elements in the opposite order, which is exactly memmove's backward case.
+Verified for all eleven array types. `array-copy!` is also cross-type
+(`vector` slice → `u32vector` slice works), so growth across types is free.
+
+The `cond-expand (guile ...)` in `gap-buffer-move-cursor` is **gone**.
+
+## The growth policy is Emacs's now (Chris's catch)
+
+The tree had **two doublings** — `sequence.sld`'s `default-allocate-function`
+and `gap-buffer.sld`'s `*gap-buffer-grow-size-function*`. Emacs does not
+double anywhere. `gap-buffer.sld` now ports `make_gap` (`insdel.c:583`) and
+`make_gap_larger` (`:467`):
+
+```c
+make_gap_larger (max (nbytes_added, (Z - BEG) / 64));
+nbytes_added = min (nbytes_added + GAP_BYTES_DFL, ...);   /* 2000 */
+```
+
+and the call shape from `insert_1_both` (`:915`):
+`if (GAP_SIZE < nbytes) make_gap (nbytes - GAP_SIZE);` — the argument is the
+**shortfall**, guarded outside. So `gap-buffer-grow` is now that shape and
+`*gap-buffer-grow-size-function*` is gone; `*gap-bytes-dfl*` (2000) and
+`*gap-bytes-min*` (20) are ported from `buffer.h:205,210`. `compact_buffer`'s
+shrink (`buffer.c:1857`) is ported as `gap-buffer-compact`, and **has no
+caller yet** — in Emacs its caller is the garbage collector, and there is no
+equivalent pass here.
+
+`gap-buffer-allocate` stays **grow-only** (a smaller request is ignored),
+which is its documented behaviour; shrinking is `gap-buffer-compact`'s.
+
+**`gap-buffer-tests.scm` changed numbers, and that is expected.** It encoded
+doubling (8→16, 4→8→16, `gap-buffer-allocate 50` → 64). Emacs's arithmetic on
+stores this small is dominated by the `+2000`: 8→2009 and 4→2005. The
+content, cursor and weight assertions were untouched — only the lengths moved.
+
+## The the-numbers-mean-something-else caveat
+
+Emacs's `GAP_BYTES_DFL` and `(Z - BEG) / 64` count **bytes**, because Emacs
+has exactly one gap buffer and it holds bytes. Ours are typed element stores
+— `u32vector` for the line editor, a `vector` of records for the lines — so
+these count *elements*, which are four bytes each in the line editor. The
+arithmetic is Emacs's; the unit is not, and that is a real departure.
+`BUF_BYTES_MAX`, the C's other bound, has no analogue and is not applied.
+
+## Per file
+
+- **`gap-buffer.sld`** — the `iface` field is `seq-type` (an array-type
+  symbol), `iface-*` are `array-*`, `seq-iface` is `seq-type`, and the two
+  copy loops are one call to `%array-copy-range!`. New:
+  `%gap-buffer-make-store` (the fill `make-typed-array` insists on, which
+  `make-vector` let you omit), `%gap-buffer-realloc!` (one body for growing
+  *and* shrinking, because where the segments go is decided by the new
+  length and the weight, never the old), `%gap-grow-size`,
+  `gap-buffer-compact`. Dead imports `get-sequence-iface` and
+  `typeof-vector?` dropped (`typeof-vector?` is `array?` if ever wanted;
+  note `(vector? (u32vector 1))` is `#f` while `array?` is `#t`).
+  **`array-set!` takes the value *before* the index** — several call sites
+  had to flip.
+- **`cdf.sld`** — `u64vector-sequence-iface` → `'u64`; `cdf-vector-iface`
+  renamed `cdf-vector-seq-type` (nothing imported it). The CDF's doubling
+  is kept but moved inline as `%cdf-allocate-size`/`%cdf-allocate`, marked
+  **non-Emacs and transitional**: Emacs answers what the CDF answers with
+  intervals, so there is no Emacs policy to copy. The `(max 1 len)` that
+  makes `(new-cdf 0)` work is kept.
+- **`engine.sld`** — `%line-editor-pre-freeze` returns `'vu8` / `'u16` /
+  `'u32`; the `text-line` record's `iface` is `type` (`text-line-seq-type`),
+  still `#f` for an empty line; `(get-sequence-iface string)` is
+  `(array-type string)` = `'a`. Five dead imports dropped, and the dead
+  `cdf-sequence-iface` define removed.
+- **`build.scm` / `Makefile`** — `(schemacs arrays)` added.
+
+## Bugs this work found
+
+- **`engine.sld`'s `text-line` was broken and never noticed**: its
+  `set-char!'` call omitted the index, passing two arguments to a
+  three-argument setter, so it failed on *any* non-empty string. Nothing in
+  the tree calls `text-line`, so it was exported and dead. Rewriting the
+  call to `array-set!` forced the index in; it is correct now.
+- **`get-sequence-iface` was broken on Guile**: it tested `bytevector?`
+  before the SRFI-4 predicates, and in Guile `(bytevector? (u16vector 1 2))`
+  is `#t` — so every typed vector got the *bytevector* iface, with lengths
+  counted in bytes and elements read as bytes. It survived only because
+  every caller passed a named iface. **The type-symbol replacement cannot
+  have this bug**, which is a real correctness win rather than a tidy-up.
+- Also found dead: `seq-min-max` (exported, never defined), `sequence-grow`
+  (always errored — passed a length where a sequence is wanted),
+  `line-editor-freeze` (the live path is `line-editor-freeze-part`).
+
+## Known departure to name
+
+The storage layer is now **Guile-only**: `make-typed-array` and `array-type`
+are Guile extensions, not SRFI-63. The library it replaces existed to be
+portable across Schemes — that is the price of the removal. The tree already
+`cond-expand`s heavily for Guile, and the non-Guile Makefile targets
+(chibi/gauche/gambit/chez/stklos) lose the editor core. Called out here so it
+is a decision on the record, not a discovery later.
+
+## Tests
+
+All 23 suites in `tools/run-suites.py` pass (engine-tests 113, buffer-tests
+28, ncurses-editor-tests 232, …). `gap-buffer-tests.scm` 23 (rewritten
+numbers), `cdf-tests.scm` 8, `vbal-tests.scm` 14, and `tools/pty-check.py`
+**53/53**. End-to-end through the engine: round-trips that exercise each
+freeze width (`vu8`/`u16`/`u32` by code-point range), a 20,000-character
+single line forcing repeated gap growth, and edits at line starts and ends.
+No new compiler warnings.
+
+## Step 2, still to do (Chris's plan)
+
+Nuke the `text-line` vector for the Emacs shape — one byte gap buffer, no
+line editor, no CDF. When that happens `gap-buffer.sld` dissolves into
+`engine.sld` (its Emacs counterpart, `insdel.c`), `cdf.sld` and
+`cdf-tests.scm` go with the CDF, and `%array-copy-range!`/`%array-resize`
+stop being a library at all and become `engine.sld`'s own functions. Step 1
+was deliberately shaped not to prejudge that.
+
+Step 2 also gives `gap-buffer-compact` its caller, and is where the
+element-versus-byte unit question above gets settled.
+
+# Handoff — `buffer-text`, the storage class (2026-10-05)
+
+## What landed
+
+`schemacs/editor/buffer-text.sld` (new) plus
+`schemacs/editor/buffer-text-tests.scm` (58 tests). Wired into `build.scm`,
+`Makefile` and `tools/run-suites.py`. **Nothing uses it yet** — the editor
+still runs on `gap-buffer.sld` + the line editor + the CDF. This is the
+class the conversion will move onto.
+
+It is **GNU Emacs's `struct buffer_text`** (`buffer.h:240`) as an object:
+the text, the gap, and where the gap is. The layout is Emacs's exactly -
+
+```
+store index   0 ......gpt-base......gpt-base+gap-size......z-base+gap-size
+contents      |  before  |    the gap    |       after        |
+```
+
+- `z` is a *position* and is `point-max`; the character count is
+  `(- z base)`, the allocation `(+ (- z base) gap-size)`. `BUF_Z_ADDR`
+  (`buffer.h:990`) is `beg + gap_size + z_byte - BEG_BYTE` — the store
+  ends at `z + gap_size`, which is why the after-segment is copied to the
+  end of the new store on a realloc and not to `z`.
+- `%at` is `BYTE_POS_ADDR` (`buffer.h:1078`) without the bytes.
+- `%move-gap!` is `move_gap_both` (`insdel.c:94`), with `gap_left` and
+  `gap_right`'s two directions as one `%array-copy-range!` each.
+- growth is `make_gap`/`make_gap_larger` (`insdel.c:583`, `:467`) — the
+  same arithmetic `gap-buffer.sld` got in the previous pass, `+2000` and
+  `/64`, no doubling.
+- insert and delete need **no shift at all**: `%move-gap!` has already
+  put the gap where the edit goes, so insert writes into the gap and
+  delete absorbs characters into it by growing `gap_size`.
+
+## The API
+
+Positions are **1-based at the API and array indices inside**; `base` is
+added or subtracted only at that edge. `new-buffer-text` takes `base`, and
+the one construction site passes 1.
+
+```scheme
+new-buffer-text base [size]     buffer-text-type?    buffer-text-base
+buffer-text-z                   buffer-text-length   buffer-text-allocation
+buffer-text-gap-size            buffer-text-ref      buffer-text-set!
+buffer-text-insert! pos str     buffer-text-delete! from to
+buffer-text-substring from to   buffer-text-for-each  buffer-text-clear!
+```
+
+`insert!` takes a **string**, on purpose: a Scheme string is a sequence of
+code points and it is what everything above deals in, so the element type
+never leaks out of the class. `ref` answers a code point as an exact
+integer, matching `FETCH_CHAR` and elisp, where a character *is* an
+integer.
+
+## Deliberate departures to record
+
+1. **The class itself.** Emacs has no such object; it has a C struct of
+   five fields reached through pointer macros (`BEG_ADDR`, `GPT`,
+   `Z`, `GAP_SIZE`, `BUF_GPT_ADDR`, ...). This is the same five fields and
+   the same arithmetic, named rather than smeared across macros. That is
+   the *point* - the representation can later become tiered or chunked
+   without anything above it changing.
+2. **`base` is a field.** Emacs hard-codes `BEG = 1`. It is a convention,
+   not a knob: two buffer-texts with different bases cannot exchange
+   positions, and positions do travel (markers, `insert-buffer-substring`),
+   so every instance must be built with the same base. There is a comment
+   on the constructor saying so.
+3. **`u32vector` of code points, not bytes.** Emacs's is `unsigned char *`
+   with the 1-to-5-byte `utf-8-emacs` encoding. This is one element per
+   character, which is what deletes the byte/char duality (see the earlier
+   handoff). Positions are therefore characters, and `PT_BYTE` has no
+   counterpart.
+4. **`compact_buffer`'s shrink is not ported.** `gap-buffer.sld` has
+   `gap-buffer-compact`; this class has no equivalent yet, because nothing
+   calls it. It belongs here when something does.
+5. **`BUF_BYTES_MAX`** has no analogue and is not applied.
+6. `buffer-text-clear!` is `erase-buffer` (`buffer.c:2472`) but keeps the
+   allocation, which is what `erase-buffer` does too.
+
+## The job this sets up
+
+Convert the editor onto it. Roughly, and in this order:
+
+1. `<text-editor>`'s `lines` gap buffer, `line-ed` line editor and `cdf`
+   become **one** `buffer-text`. The line editor, `load-current-line`, the
+   write-back, the freeze machinery and `%line-editor-pre-freeze` all go;
+   so do `cdf.sld`, `gap-buffer.sld` and their tests.
+2. `point` becomes the buffer-text position, and the line/column
+   arithmetic becomes index arithmetic over ports of `find_newline`
+   (`search.c:675`), `line-beginning-position` (`editfns.c:700`) and
+   `line-number-at-pos` (`fns.c:6688`) - Emacs scans for lines, it has no
+   index, and neither will we.
+3. The display layer (`disp-table.sld:200`, `xdisp.sld`) reads the line
+   editor directly today and assumes a line is contiguous; it converts
+   too, and it is the part most likely to break subtly.
+4. Several test suites encode the old model and will need rewriting. They
+   are the safety net for a rewrite this size.
+
+`text-editor-char-count` is a hand-maintained counter that has corrupted
+things three screens from its cause (see the warnings above). Once the
+class owns the length it stops existing as a separate field - make
+`buffer-text-length` the only answer.
+
+# The engine onto `buffer-text` — done (branch `emacs-text-storage`, 2026-10-05)
+
+**Every suite passes.** All 24 in `tools/run-suites.py`, with no failures in
+any of them. The branch is still a branch because it has not been merged to
+`main` and `tools/pty-check.py` had not finished when this was written.
+
+## What landed
+
+- `<text-editor-type>`: seven fields (`lines`, `count`, `line-ed`, `line-ch`,
+  `moved`, `column`, `cdf`) collapse to two - `text` (a `buffer-text`) and
+  `point` (a `buffer-text` position, one-based).
+- The CDF, the line editor, the freeze machinery and the merge helpers are
+  gone; a line break is a character, so joining two lines is deleting it.
+  `cdf.sld`, `cdf-tests.scm`, `gap-buffer.sld` and `gap-buffer-tests.scm` are
+  deleted. `(schemacs arrays)` stays: `buffer-text` gets
+  `%array-copy-range!` and `%array-resize` from it.
+- The line arithmetic is Emacs's own scans, ported under their Emacs names
+  into `engine.sld`: `find-newline` (`search.c:675`),
+  `scan-newline-from-point` (:986), `bol` (`editfns.c:665`), `eol` (:723),
+  `find-before-next-newline` (`search.c:997`), `count-lines`
+  (`xdisp.c:29892`).
+- **The engine, and every caller above it, speaks Emacs's coordinates**:
+  `point-min` is 1, `point-max` is one past the last character, line numbers
+  count from 1, columns from 0. The interval/text-property layer too - a
+  buffer's intervals are 1-based, a string's are zero-based, as Emacs's are.
+
+## The conventions (Chris's call; he was right)
+
+I first wrote that the engine's zero-based cursor must be preserved to avoid
+touching ~100 call sites. That was wrong: **a zero-based position is itself a
+departure from Emacs**, and the point of the work is to stop having
+departures.
+
+| | Emacs | was | now |
+|---|---|---|---|
+| character position | 1-based — `point` | 0-based | 1-based |
+| line number | 1-based — `line-number-at-pos` (`fns.c:6688`) | 0-based | 1-based |
+| column | 0-based — `current-column` (`indent.c:298`) | 0-based | 0-based |
+
+## The departs that were found and fixed — every one a `0` or a `1`
+
+The pattern is worth naming: **the port kept a ±1 at a seam**, and every seam
+was in a different file, so the suites found them one at a time. Each is
+listed with the commit that fixed it.
+
+- `find-interval` rebound `position` to the *relative* position and then used
+  it as the absolute one (intervals.sld).
+- `adjust_intervals_for_deletion` passed the buffer position to
+  `interval_deletion_adjustment` where the C passes `start - offset`
+  (`BUF_BEG`). A deletion at `point-min` took one character off the run that
+  should have gone and one off the run after it.
+- `search.sld`: `looking-at` handed the regexp engine a **position** where it
+  wanted an **offset**, so a pattern at point never matched - that is what
+  Dired's indent is built on. `%re-search` answered `(+ 1 POSITION)` and
+  translated the match data by `(+ base 1)`; `search-forward`/`-backward` had
+  the same pair.
+- `simple.sld`: `kill-region` subtracted one from BEG and END, so every kill
+  started a character to the left.
+- `simple.sld`: `isearch-find` referenced an unbound `count` - the caller
+  sweep had renamed the binding to `max`, which also shadowed the core `max`.
+  Every `isearch-find` call died.
+- `dired.sld`, `font-lock.sld`: every property site on the interval seam had
+  a `(- ... 1)`; at `point-min` one of them asked for position 0 and killed
+  `dired-noselect` outright. `font-lock-extend-region-multiline` keeps its
+  two: those `1-'s are Emacs's own.
+- `window.sld`, `frame.sld`: a window's `top-line` was built as 0, so the
+  display's row walk counted one row too many and drew the cursor a row low.
+- `files.sld`: `add-line-break-at-end!` used the character *count* where
+  `point-max` was wanted, so `require-final-newline` wrote `"a\nb"` for
+  `"ab"`.
+- `engine.sld`: `text-editor-to-string` was `text-dump-port`, which writes
+  `\n` as the buffer's line break. Emacs's `buffer-string` is the raw text,
+  and because `save-buffer` then ran `encode-line-breaks` over it, a CRLF
+  file was written with `\r\r\n` - **a real bug on the old branch too**. The
+  same pair of definitions (`text-load-port`/`text-dump-port`) was in the
+  file twice; one copy remains.
+
+## Method that worked, and one that did not
+
+Reading the C is what landed every one of the above. The one that did not
+work: a Python edit of the form
+`open(p,'w').write(open(p).read().replace(...))` **truncates the file before
+reading it** and wrote `replace.sld` out empty, which was then committed.
+Read into a variable first, always.
+
+Two tools that paid for themselves here and are worth reaching for first:
+
+- `emacs -Q --batch --eval` for the expectation. Marker rules, `goto-line`
+  past the end, `insert-file-contents`' undo recording, `kill-line`'s
+  whitespace rule and the overlay front-advance rule were all settled by
+  asking Emacs rather than by reasoning.
+- printing stack frames with `(frame-procedure-name)` and
+  `(frame-source)` only - never the values. The `<text-editor-type>` record
+  printer crashes while Guile prints a backtrace, which hides the location;
+  frames printed without their values do not.
+
+## Still open
+
+- `tools/pty-check.py` had not been run to completion when this was written.
+- The renderer's line scans are O(n) per line: `find_newline`'s
+  `region_cache` (search.c) is not ported, so a window redraw is quadratic in
+  the buffer. It was quadratic before too, but by a different route.
+- `get-free-disk-space` is not ported, so `dired--insert-disk-space` leaves
+  the free-space `display` property off; the `total` line is still deleted as
+  Emacs 31 deletes it.
+
+# The window's start is a marker — done (2026-10-05)
+
+## The departure, and what it cost
+
+`<window>` kept its scroll position as `top-line` — a **buffer line
+number**. GNU Emacs's window has no such field: `w->start` is a marker,
+and the window's `top_line` is a *screen* coordinate ("The upper left
+corner coordinates of this window, relative to upper left corner of frame
+= 0, 0"). So we had taken Emacs's name for a screen row and used it for
+something Emacs stores a position in.
+
+Every use of it had to convert, and each conversion was a scan of the
+buffer. Measured on a 20,001-line / 508,891-character file with point at
+the end:
+
+| | before | after |
+|---|---|---|
+| the 24 rows of one window | 487 ms | **0.2 ms** |
+| 24 rows at the top of the same file | 0.4 ms | 0.4 ms |
+| the mode line | 93 ms | 0.2 ms |
+| `render!`, point at line 20001 | 296 ms | **19 ms** |
+| `render!`, point at line 1 | 52 ms | 19 ms |
+| **one keystroke** | **~440 ms** | **1-5 ms** |
+
+The last two rows are the point: the redisplay no longer depends on where
+you are in the buffer at all.
+
+## What the record holds now
+
+`w->start` as a marker, and everything Emacs stores beside it:
+
+| field | Emacs | what it is |
+|---|---|---|
+| `start` | `w->start` | a marker: where the text being displayed begins |
+| `start-at-line-beg` | `w->start_at_line_beg` | whether that was a line beginning |
+| `end-pos` | `w->window_end_pos` | **`Z -`** the position of the last glyph — a distance from the *end* of the buffer, so an edit before it leaves it valid |
+| `end-vpos` | `w->window_end_vpos` | the glyph matrix row of that last glyph |
+| `end-valid` | `w->window_end_valid` | whether those two mean anything |
+| `base-line-number`, `base-line-pos` | same | the `%l` cache: a line somewhere above the window, 0 = none, -1 = gave up |
+
+`set-window-start!` sets `start` and `start-at-line-beg` together, as
+every site in the C does. `set-window-buffer!` is `set_window_buffer`:
+everything the window recorded about the old buffer - the end, the
+cache, the hscroll - goes with it. The row walk begins at `window-start`
+and steps forward, as the C's display iterator does, and records
+`end-pos`/`end-vpos` as it draws instead of walking again for
+`window-end`.
+
+`%l` is the C's `'l'` case: `topline + count_lines (w->start, PT)`, with
+`topline` from the base-line cache. The same count measured 20.3ms from
+`point-min` and 0.033ms from the window's start - 620x - which is why
+counting from the window matters and why the cache is worth having on
+top of it.
+
+## Deliberately not stored yet
+
+Each of these has a reader in the C that this tree has no counterpart
+for, so adding the field would be state nothing consults:
+
+- **`b->last_window_start`** (`window.c:2521`): the start a buffer had in
+  the last window disconnected from it. It is a buffer-local slot and
+  `frame.sld`, where the record lives, is below the library that owns the
+  buffer's slots. It would also have no effect - `scroll-to-cursor!`
+  recomputes a window's start from its point on every redisplay, where
+  the C's `w->start` survives until redisplay decides otherwise.
+- **`w->force_start`, `w->optional_new_start`**: read by
+  `redisplay_window`'s start decision. `scroll-to-cursor!` is this tree's
+  stand-in for that decision and does not consult them.
+- **`w->column_number_displayed`**: read by `mode_line_update_needed` and
+  `redisplay_internal` to decide whether the mode line needs redrawing.
+  This renderer redraws unconditionally.
+
+## Deviations introduced by this work
+
+- `set_window_buffer` writes `start_at_line_beg = false` and lets
+  redisplay recompute it; `set-window-buffer!` has `set-window-start!`
+  compute it from the text at once. Same value, arrived at earlier.
+- `%l`'s give-up answer is `"??"`; the C pads it to the construct's
+  field width first.
+- `next-line`, `previous-line`, `scroll-up-command` and
+  `scroll-down-command` are *line* arithmetic, where Emacs uses
+  `vmotion` (indent.c) and so measures screen lines - they agree except
+  on a wrapped line. They were line arithmetic before; they are now
+  position-driven line arithmetic, which is what took next-line from
+  89ms a keystroke to 5ms.
+
+## Hazard worth knowing
+
+`text-editor-ref` is `char-after` and answers a **character**, not a code
+point, where `buffer-text-ref` answers an integer. Comparing its answer
+with `=` against `#x0a` crashes the editor with `In procedure =: Wrong
+type argument in position 1: #\newline`, several frames from the cause.
+Use `char=?` and `#\newline`.
+
+## Still open after this
+
+- `find_newline`'s `region_cache` was not ported at the time of writing;
+  it is now - see the next section.
+
+# The line-break cache — done (2026-10-05)
+
+## What landed
+
+`schemacs/editor/region-cache.sld` is a port of `region-cache.c`, and
+`find-newline` consults it, as `find_newline` does. `region-cache.h`
+says what it is for: "some applications, like gene editing, make use of
+very long lines --- on the order of tens of kilobytes", where scanning
+to the next line break costs tens of thousands of characters *every*
+time. The cache notes a stretch it has searched and found free of line
+breaks, and the next search steps over it whole.
+
+The buffer gained `newline-cache` - GNU Emacs's `buf->newline_cache` -
+made lazily the first time a search wants it (`search.c:640`), so a
+buffer whose lines are never searched never pays for one.
+
+## The bug that made it look useless
+
+The first measurement said the cache bought nothing: 225ms cold, 211ms
+warm. Two things were wrong, and both are worth knowing:
+
+1. **Nothing ever created the cache.** The field defaults to false and
+   `find-newline` used `(or (%text-editor-newline-cache ed) ...)` only
+   after I added the lazy creation the C does at `search.c:640`. Until
+   then every lookup answered "no cache" and the whole port was dead
+   code. A cache that is never populated is indistinguishable from one
+   that never helps.
+
+2. **`%line-end` did not go through `find-newline` at all.** It was a
+   private character-at-a-time loop - a hand-rolled duplicate of a scan
+   Emacs already has - so the most-called line scan in the engine
+   bypassed the cache entirely. It is `(find-before-next-newline ed
+   from 1)` now, which is `eol`'s own forward half.
+
+After both, on 4 MB of 20,000-character lines:
+
+| | ms |
+|---|---|
+| first pass over 200 long lines | 727 |
+| the same pass again | **2.8** |
+| a single `eol` cold / warm | 3.96 / **0.026** |
+| a single `bol` cold / warm | 1.49 / **0.012** |
+
+The hand-rolled loop this replaced cost 225ms for the first pass, so
+**the cold pass is about 3x slower and every pass after it is 80-260x
+faster.** That is the trade Emacs made too, and the redisplay repeats
+these scans many times per redraw, so the warm case is the one that is
+lived in.
+
+## Invalidation
+
+`text-editor-invalidate-caches!` is `invalidate_buffer_caches`
+(`insdel.c:2206`), which the C calls from `prepare_to_modify_buffer`
+before every change. It is called from the three writers in
+`engine.sld` - `text-editor-force-insert-char` and the two delete
+primitives. `erase-buffer` goes through `text-editor-delete-from-cursor`,
+so it is covered without a call of its own.
+
+The cache is told in the **HEAD/TAIL form** - "this many characters
+unchanged at the beginning, this many at the end" - and not with
+positions, because an insertion or a deletion moves everything after it
+and that form reads the same before and after the change. For an
+insertion at POINT the tail is `Z - POINT`, the same count either side.
+
+Nothing is *repaired* at invalidation time; it only records that the
+region is now unknown, and `revalidate_region_cache` cleans up in one go
+the next time the cache is read. That is why the cost of an edit does
+not depend on how much the cache knows.
+
+## Departures
+
+- The C reaches the buffer through `struct buffer *` and the `BEG`/`Z`
+  macros; `region-cache.sld` sits under the engine and cannot see a
+  `<text-editor-type>`, so the caller passes the two endpoints. A
+  boundary is a pair and the array is a Scheme vector; the gap
+  arithmetic and the relative-position scheme are the C's.
+- `xpalloc`'s growth - "about 50%", `n = n0 + n0 / 2`, raised to what
+  the caller needs - is `%grow-boundaries!`. No doubling.
+- The C counts the line breaks immediately following a known run before
+  consulting the cache again (`search.c:733-746`). This port consults
+  every time. The answers are identical; only the number of
+  consultations differs.
+- `pp_cache` (the `ENABLE_CHECKING` pretty-printer), the
+  `width_run_cache` and the `bidi_paragraph_cache` are not ported.
+  Nothing here asks for the last two.
+
+## Hazard found while porting it
+
+`%insert-cache-boundary!` must write the new boundary at the **raw**
+array index once `%move-cache-gap!` has put the gap there, as the C's
+`c->boundaries[i]` does. Reading it back through the before/after-gap
+arithmetic reads one slot past the end of the array - this failed with
+`vector-set!: Argument 2 out of range: 40`, which says nothing about
+which of the two branches is wrong.

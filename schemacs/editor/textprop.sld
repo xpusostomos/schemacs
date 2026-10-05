@@ -132,12 +132,13 @@
       ;; interval tree yet, make one rather than answering #f. Only a
       ;; function that is about to *put* a property needs that.
       ;;--------------------------------------------------------------
-      (let* ((length (iv:object-length object))
+      (let* ((lo (iv:object-beg-position object))
+             (hi (iv:object-end-position object))
              (start (if (> start end) end start))
              (end (if (> start end) start end)))
         (cond
          ((and (= start end)) (values #f start end))
-         ((or (< start 0) (< length end))
+         ((or (< start lo) (< hi end))
           (error "Args out of range" start end))
          (else
           (let ((i (or (iv:object-intervals object)
@@ -147,8 +148,9 @@
     (define (interval-of object position)
       ;; GNU Emacs's `interval_of': the interval POSITION is in, or #f.
       ;;--------------------------------------------------------------
-      (let ((length (iv:object-length object)))
-        (if (or (< position 0) (< length position))
+      (let ((lo (iv:object-beg-position object))
+            (hi (iv:object-end-position object)))
+        (if (or (< position lo) (< hi position))
             (error "Args out of range" position)
             (let ((i (iv:object-intervals object)))
               (and i (iv:find-interval i position))))))
@@ -696,9 +698,9 @@
       ;;--------------------------------------------------------------
       (let* ((object (object-or-current args))
              (limit (if (and (pair? args) (pair? (cdr args))) (cadr args) #f))
-             (length (iv:object-length object))
-             (end (or limit length)))
-        (let ((i (interval-of object (min position (max 0 (- length 1))))))
+             (end (or limit (iv:object-end-position object))))
+        (let ((i (interval-of object (min position
+                                          (iv:object-last-position object)))))
           (if (not i)
               limit
               (let ((here (iv:textget (iv:interval-plist i) prop)))
@@ -721,9 +723,9 @@
       ;; reported as being before it.
       ;;--------------------------------------------------------------
       (let* ((object (object-or-current args))
-             (limit (if (and (pair? args) (pair? (cdr args))) (cadr args) #f))
-             (length (iv:object-length object)))
-        (let* ((at (interval-of object (min position (max 0 (- length 1)))))
+             (limit (if (and (pair? args) (pair? (cdr args))) (cadr args) #f)))
+        (let* ((at (interval-of object (min position
+                                            (iv:object-last-position object))))
                (i (if (and at (= (iv:interval-position at) position))
                       (iv:previous-interval at)
                       at)))
@@ -737,7 +739,8 @@
                          (or (not limit) (> (iv:interval-last-pos previous) limit)))
                     (loop (iv:previous-interval previous)))
                    ((or (not previous)
-                        (<= (iv:interval-last-pos previous) (or limit 0)))
+                        (<= (iv:interval-last-pos previous)
+                            (or limit (iv:object-beg-position object))))
                     limit)
                    (else (iv:interval-last-pos previous)))))))))
     (define (text-property-list object start end prop)

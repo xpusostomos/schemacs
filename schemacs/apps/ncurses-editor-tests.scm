@@ -21,7 +21,7 @@
        frame-height frame-editor frame-message
        frame-message-expiry set!frame-message
        frame-selected-window new-frame set!frame-selected-window
-       set!window-buffer set!window-width
+       set-window-buffer! set!window-width
        window-internal?
        window-list
        set!window-height set!window-width
@@ -175,7 +175,7 @@
     (let* ((ed (new-text-editor))
            (frame (test-frame ed)))
       (parameterize ((*current-frame* frame) (*echo-area-buffer* #f))
-        (set!window-buffer (frame-selected-window frame) ed)
+        (set-window-buffer! (frame-selected-window frame) ed)
         (*current-buffer* ed)
         (text-editor-insert ed "abc")
         (dispatch-key-event frame name)
@@ -204,7 +204,7 @@
                    (*current-buffer* #f)
                    (*kill-buffer-query-functions* '()))
       (text-editor-insert ed text)
-      (text-editor-set-cursor ed 0 0)
+      (text-editor-set-cursor ed 1 0)
       (for-each (lambda (ev) (dispatch-input-event frame ev)) evs)
       (list (text-editor-to-string ed)
             (text-editor-get-cursor ed)
@@ -322,17 +322,17 @@
 
 ;; A bare C-u is 4, C-u C-u is 16, and digits typed after C-u replace
 ;; the count.
-(test-equal '("aaaaX" . 4) (run-keys "X" (list C-u #\a)))
-(test-equal '("aaaX" . 3) (run-keys "X" (list C-u #\3 #\a)))
-(test-equal (cons (string-append (make-string 16 #\a) "X") 16)
+(test-equal '("aaaaX" . 5) (run-keys "X" (list C-u #\a)))
+(test-equal '("aaaX" . 4) (run-keys "X" (list C-u #\3 #\a)))
+(test-equal (cons (string-append (make-string 16 #\a) "X") 17)
   (run-keys "X" (list C-u C-u #\a)))
 
 ;; The prefix reaches every count-taking command, not just self-insert.
-(test-equal '("\t\t\t\tX" . 4) (run-keys "X" (list C-u #\tab)))
-(test-equal '("\n\n\n\nX" . 4) (run-keys "X" (list C-u #\return)))
-(test-equal '("o" . 0) (run-keys "hello" (list C-u C-d)))
-(test-equal '("a\nb\nc\nd\ne" . 8) (run-keys "a\nb\nc\nd\ne" (list C-u C-n)))
-(test-equal '("one two three four" . 18)
+(test-equal '("\t\t\t\tX" . 5) (run-keys "X" (list C-u #\tab)))
+(test-equal '("\n\n\n\nX" . 5) (run-keys "X" (list C-u #\return)))
+(test-equal '("o" . 1) (run-keys "hello" (list C-u C-d)))
+(test-equal '("a\nb\nc\nd\ne" . 9) (run-keys "a\nb\nc\nd\ne" (list C-u C-n)))
+(test-equal '("one two three four" . 19)
   (run-keys "one two three four" (list C-u ESC #\f)))
 
 ;; The prefix is pending state: it survives the keys of a chord and is
@@ -376,9 +376,9 @@
 ;; C-k kills into the kill buffer, so C-y brings the text back. This
 ;; covers single-line buffers too, whose first character used to be
 ;; dropped by `text-editor-copy-string'.
-(test-equal '("hello\nworld" . 5) (run-keys "hello\nworld" (list C-k C-y)))
-(test-equal '("one two" . 7) (run-keys "one two" (list C-k C-y)))
-(test-equal '("X" . 1) (run-keys "X" (list C-k C-y)))
+(test-equal '("hello\nworld" . 6) (run-keys "hello\nworld" (list C-k C-y)))
+(test-equal '("one two" . 8) (run-keys "one two" (list C-k C-y)))
+(test-equal '("X" . 2) (run-keys "X" (list C-k C-y)))
 
 ;; Consecutive kills accumulate into one kill-buffer entry (the CFKILL
 ;; protocol), and any command that is not a kill starts a new entry.
@@ -387,29 +387,29 @@
 (test-equal "two" (caddr (run-keys* "one two three" (list ESC #\d C-f ESC #\d))))
 
 ;; ... and the accumulated entry is what C-y brings back.
-(test-equal '("hello\nworld" . 6) (run-keys "hello\nworld" (list C-k C-k C-y)))
+(test-equal '("hello\nworld" . 7) (run-keys "hello\nworld" (list C-k C-k C-y)))
 
 ;; `C-u C-y' is not "yank four times", which is what mg did: in Emacs a
 ;; bare `C-u' means the *latest* kill - it is the list `(4)', not the
 ;; number 4, so `(current-kill 0)' - and it leaves point *before* what it
 ;; inserted and the mark after it.
-(test-equal '("XX" . 1) (run-keys "X" (list C-k C-y C-u C-y)))
+(test-equal '("XX" . 2) (run-keys "X" (list C-k C-y C-u C-y)))
 
 ;; Kill-line follows mg's `killline': no argument kills to the end of
 ;; the line, taking the line break when only blanks remain before it.
-(test-equal '("foobar" . 3) (run-keys "foo   \nbar" (list C-f C-f C-f C-k)))
-(test-equal '("foo\nbaz" . 3) (run-keys "foo bar\nbaz" (list C-f C-f C-f C-k)))
+(test-equal '("foobar" . 4) (run-keys "foo   \nbar" (list C-f C-f C-f C-k)))
+(test-equal '("foo\nbaz" . 4) (run-keys "foo bar\nbaz" (list C-f C-f C-f C-k)))
 
 ;; ... with a numeric argument it kills that many lines, the last one's
 ;; break included, and with an argument of 0 it kills backward to the
 ;; start of the line.
-(test-equal '("c\nd" . 0) (run-keys "a\nb\nc\nd" (list C-u #\2 C-k)))
-(test-equal '("b" . 0) (run-keys "a\nb" (list C-u #\1 C-k)))
-(test-equal '("c" . 0) (run-keys "abc" (list C-f C-f C-u #\0 C-k)))
+(test-equal '("c\nd" . 1) (run-keys "a\nb\nc\nd" (list C-u #\2 C-k)))
+(test-equal '("b" . 1) (run-keys "a\nb" (list C-u #\1 C-k)))
+(test-equal '("c" . 1) (run-keys "abc" (list C-f C-f C-u #\0 C-k)))
 
 ;; Killing words with a prefix argument kills them as a single entry.
 (test-equal "one two three" (caddr (run-keys* "one two three" (list C-u ESC #\d))))
-(test-equal '("one two three" . 13)
+(test-equal '("one two three" . 14)
   (run-keys "one two three" (list C-u ESC #\d C-y)))
 
 (test-end "schemacs_ncurses_editor_kill_ring")
@@ -422,33 +422,33 @@
 ;; Typing is amalgamated: a run of self-inserting characters is one undo
 ;; step, so undoing after typing a word removes the whole word. Point
 ;; ends where the undone text began, as in GNU Emacs.
-(test-equal '("X" . 0) (run-keys "X" (list #\a #\b #\c C-underscore)))
+(test-equal '("X" . 1) (run-keys "X" (list #\a #\b #\c C-underscore)))
 
 ;; A command that edits the buffer is a step of its own.
-(test-equal '("abc" . 0) (run-keys "abc" (list #\K C-underscore)))
+(test-equal '("abc" . 1) (run-keys "abc" (list #\K C-underscore)))
 
 ;; Repeating the undo walks further back: the first restores what the
 ;; kill removed (leaving point where the killed text began), the second
 ;; takes back the typing before it.
-(test-equal '("abK" . 2)
+(test-equal '("abK" . 3)
   (run-keys "K" (list #\a #\b C-k C-underscore)))
-(test-equal '("K" . 0)
+(test-equal '("K" . 1)
   (run-keys "K" (list #\a #\b C-k C-underscore C-underscore)))
 
 ;; A command that changes nothing is not a step of its own; undo goes to
 ;; the last thing that actually changed. C-d here deleted the third
 ;; character, and undo puts it back with point at its beginning.
-(test-equal '("abc" . 2)
+(test-equal '("abc" . 3)
   (run-keys "abc" (list C-f C-f C-d C-underscore)))
 
 ;; C-x u is the same command as C-_ (both are bound to `undo').
-(test-equal '("X" . 0) (run-keys "X" (list #\a C-x #\u)))
+(test-equal '("X" . 1) (run-keys "X" (list #\a C-x #\u)))
 
 ;; A prefix argument undoes that many change groups. The C-k in the
 ;; middle kills nothing (point is at the end of the buffer, which has no
 ;; line break to take), so it contributes no group and the three groups
 ;; undone are the two inserts and the kill between them.
-(test-equal '("K" . 0)
+(test-equal '("K" . 1)
   (run-keys "K" (list #\a C-k #\b C-k C-u #\3 C-underscore)))
 
 ;; When the undo list is exhausted there is nothing further to undo.
@@ -457,7 +457,7 @@
 
 ;; Redo re-applies what was undone: the records an undo creates are
 ;; ordinary undo entries, so redoing one is undoing it.
-(test-equal '("abX" . 0) (run-keys "X" (list #\a #\b C-underscore ESC C-underscore)))
+(test-equal '("abX" . 1) (run-keys "X" (list #\a #\b C-underscore ESC C-underscore)))
 (test-equal "Redo"
   (cadddr (run-keys* "X" (list #\a C-underscore ESC C-underscore))))
 
@@ -468,7 +468,7 @@
 ;; Undoing a kill does not disturb the kill ring: the killed text is
 ;; still there to be yanked again (Emacs's undo deletes without touching
 ;; the kill ring).
-(test-equal '("XX" . 1)
+(test-equal '("XX" . 2)
   (run-keys "X" (list C-k C-underscore C-y)))
 
 ;; Visiting a file leaves nothing to undo: the buffer's contents are not
@@ -483,11 +483,11 @@
 ;; Amalgamation is bounded: a boundary goes in every
 ;; `amalgamating-undo-limit' (20) commands, so a run of 21 self-inserts
 ;; undoes as the last character, then as the twenty before it.
-(test-equal '("abcdefghijklmnopqrst" . 20)
+(test-equal '("abcdefghijklmnopqrst" . 21)
   (run-keys "" (append (letters 21) (list C-underscore))))
-(test-equal '("" . 0)
+(test-equal '("" . 1)
   (run-keys "" (append (letters 21) (list C-underscore C-underscore))))
-(test-equal '("" . 0)
+(test-equal '("" . 1)
   (run-keys "" (append (letters 20) (list C-underscore))))
 
 (test-end "schemacs_ncurses_editor_undo")
@@ -787,13 +787,13 @@
 
 ;; Forward searches leave point past the match; backward ones leave it at
 ;; the match's start.
-(test-equal '(10 21 6)
+(test-equal '(11 22 7)
   (let ((ed (isearch-buffer)))
-    (text-editor-set-cursor ed 0)
+    (text-editor-set-cursor ed 1)
     (let ((first (isearch-find ed "beta" 'forward #f #f)))
       (text-editor-set-cursor ed first)
       (let ((second (isearch-find ed "beta" 'forward #f #t)))
-        (text-editor-set-cursor ed 16)
+        (text-editor-set-cursor ed 17)
         (list first second (isearch-find ed "beta" 'backward #f #f))))))
 
 ;; A failing search reports nothing and leaves the caller's point alone.
@@ -805,9 +805,9 @@
 ;; Whether the search folds case is the caller's to decide - the
 ;; argument is Emacs's `case-fold-search', the right way round - and the
 ;; incremental search turns it off when an upper-case letter is typed in.
-(test-equal '(10 #f)
+(test-equal '(11 #f)
   (let ((ed (isearch-buffer)))
-    (text-editor-set-cursor ed 0)
+    (text-editor-set-cursor ed 1)
     (list (isearch-find ed "BETA" 'forward #t #f)
           (isearch-find ed "BETA" 'forward #f #f))))
 
@@ -947,7 +947,7 @@
 ;; itself, and dispatching it while the minibuffer is being read still
 ;; moves point forward - in the *minibuffer's* buffer, because that is the
 ;; current buffer while it is read.
-(test-equal '(#f 1 0)
+(test-equal '(#f 2 1)
   (let* ((ed (new-text-editor))
          (frame (test-frame ed))
          (mb-ed (new-text-editor))
@@ -1060,7 +1060,7 @@
   (let* ((frame (test-frame (new-text-editor)))
          (ed (frame-editor frame)))
     (text-editor-insert ed "abc")
-    (text-editor-set-cursor ed 0 0)
+    (text-editor-set-cursor ed 1 0)
     (text-editor-move-cursor ed 100)
     (cursor-screen-position (window-of frame))))
 
@@ -1071,7 +1071,7 @@
          (ed (frame-editor frame))
          (window (window-of frame)))
     (text-editor-insert ed "abc")
-    (text-editor-set-cursor ed 0 0)
+    (text-editor-set-cursor ed 1 0)
     (text-editor-move-cursor ed 100)
     (let ((at-end (cursor-screen-position window)))
       (text-editor-move-cursor ed -1)
@@ -1085,7 +1085,7 @@
   (let* ((frame (test-frame (new-text-editor)))
          (ed (frame-editor frame)))
     (text-editor-insert ed "abc\n")
-    (text-editor-set-cursor ed 0 0)
+    (text-editor-set-cursor ed 1 0)
     (text-editor-move-cursor ed 100)
     (cursor-screen-position (window-of frame))))
 
@@ -1115,7 +1115,7 @@
          (mb (make<minibuffer> ed "Find file: " minibuffer-local-map
                               #f minibuffer-history 0 #f)))
     (text-editor-insert ed "abc")
-    (text-editor-set-cursor ed 0 0)
+    (text-editor-set-cursor ed 1 0)
     (parameterize ((*minibuffer* mb))
       (let ((at-start (minibuffer-cursor-column)))
         (text-editor-move-cursor ed 100)
@@ -1165,7 +1165,7 @@
   (let* ((ed (new-text-editor))
          (frame (test-frame ed)))
     (text-editor-insert ed text)
-    (text-editor-set-cursor ed 0 0)
+    (text-editor-set-cursor ed 1 0)
     frame))
 
 (define (run-window-keys frame . evs)
@@ -1204,7 +1204,7 @@
 ;; C-x 2 splits it into two, one above the other, sharing the rows as
 ;; evenly as they divide - and both showing the same buffer at the same
 ;; point, because `split-window-keep-point' is t in GNU Emacs.
-(test-equal '(#t 2 ((0 12) (12 11)) #t (0 0 0))
+(test-equal '(#t 2 ((0 12) (12 11)) #t (1 1 1))
   (let ((frame (run-window-keys (frame-with "alpha\nbeta\n") C-x #\2)))
     (let ((windows (window-list frame)))
       (list (tiles? frame)
@@ -1257,7 +1257,7 @@
 ;; C-x o selects the next window, and each window keeps its own point:
 ;; the buffer's point is the selected window's, and the window left
 ;; behind holds the point it had.
-(test-equal '(#t 0 0 3)
+(test-equal '(#t 1 1 4)
   (let* ((frame (run-window-keys (frame-with "alpha\nbeta\n") C-x #\2))
          (ed (frame-editor frame)))
     ;; move point forward in the upper window, then change windows: the
@@ -1274,7 +1274,7 @@
 
 ;; C-x o cycles back round to the first window, and takes the point that
 ;; window was holding.
-(test-equal '(#t 3)
+(test-equal '(#t 4)
   (let* ((frame (run-window-keys (frame-with "alpha\nbeta\n") C-x #\2))
          (ed (frame-editor frame)))
     (text-editor-move-cursor ed 3)
@@ -1460,7 +1460,7 @@
 ;; come back: the point is on the same character still, which is what a
 ;; real Emacs reports for the same sequence (point 5 becomes 7 when two
 ;; characters are inserted in front of it).
-(test-equal '(5 0 7 7)
+(test-equal '(5 1 7 7)
   (let* ((frame (frame-with "one two three"))
          (ed (frame-editor frame)))
     (parameterize ((*current-frame* frame))
@@ -1615,9 +1615,9 @@
     (text-editor-insert unix "unix\n")
     (set-buffer-local-value! dos 'buffer-file-coding-system line-break-crlf)
     (set-buffer-local-value! unix 'buffer-file-coding-system line-break-newline)
-    (set!window-buffer window dos)
+    (set-window-buffer! window dos)
     (let ((dos-mode (format-in frame (*mode-line-format*))))
-      (set!window-buffer window unix)
+      (set-window-buffer! window unix)
       (let ((unix-mode (format-in frame (*mode-line-format*))))
         (list (and (string-search-forward dos-mode "(DOS)" 0 #f) #t)
               (not (string-search-forward unix-mode "(DOS)" 0 #f))
@@ -1835,7 +1835,7 @@
                    (*buffer-list* '())
                    ;; #f: the buffer is made below, and the frame's
                    ;; notion is the window's buffer, which the
-                   ;; `set!window-buffer' below sets to it
+                   ;; `set-window-buffer!' below sets to it
                    (*current-buffer* #f)
                    (*current-keymap* #f)
                    (*search-pattern* #f)
@@ -1848,7 +1848,7 @@
                    (*last-change-was-undo* #f))
      (let ((frame (*current-frame*))
            (buffer (get-buffer-create "*own-keys*")))
-      (set!window-buffer (frame-selected-window frame) buffer)
+      (set-window-buffer! (frame-selected-window frame) buffer)
       (when local?
         (set!buffer-local-keymap
          buffer
@@ -1881,7 +1881,7 @@
                    (*pending-undo-list* #f))
       (let* ((buffer (get-buffer-create "*m-z*"))
              (frame (*current-frame*)))
-        (set!window-buffer (frame-selected-window frame) buffer)
+        (set-window-buffer! (frame-selected-window frame) buffer)
         (*current-buffer* buffer)
         (dispatch-key-event frame (list (list 'meta #\Z)))
         (list (text-editor-read-only? buffer)
@@ -1910,7 +1910,7 @@
     (let* ((ed (get-buffer-create "shown.txt"))
            (frame (test-frame ed)))
       (parameterize ((*current-frame* frame) (*echo-area-buffer* #f))
-        (set!window-buffer (frame-selected-window frame) ed)
+        (set-window-buffer! (frame-selected-window frame) ed)
         (for-each (lambda (spec)
                     (let ((buffer (get-buffer-create (car spec))))
                       (when (cadr spec) (text-editor-set-read-only! buffer #t))
@@ -1988,14 +1988,14 @@
     (let* ((ed (get-buffer-create "shown.txt"))
            (frame (test-frame ed)))
       (parameterize ((*current-frame* frame) (*echo-area-buffer* #f))
-        (set!window-buffer (frame-selected-window frame) ed)
+        (set-window-buffer! (frame-selected-window frame) ed)
         (for-each (lambda (spec)
                     (let ((buffer (get-buffer-create (car spec))))
                       (when (cadr spec) (text-editor-set-read-only! buffer #t))
                       (when (caddr spec) (text-editor-insert buffer "x"))))
                   extra)
         (let ((list (list-buffers-noselect)))
-          (set!window-buffer (frame-selected-window frame) list)
+          (set-window-buffer! (frame-selected-window frame) list)
           (*current-buffer* list)
           (thunk list (lambda (ev) (dispatch-input-event frame ev))))))))
 
@@ -2062,12 +2062,12 @@
            ;; the list is made from this buffer, so its line is marked `.`
            (frame (test-frame ed)))
       (parameterize ((*current-frame* frame) (*echo-area-buffer* #f))
-        (set!window-buffer (frame-selected-window frame) ed)
+        (set-window-buffer! (frame-selected-window frame) ed)
         (*current-buffer* ed)
         (text-editor-insert ed "saved\n")
         ;; now into the list, which becomes the current buffer - so if
         ;; `x' saved "the current buffer" it would save the list
-        (set!window-buffer (frame-selected-window frame)
+        (set-window-buffer! (frame-selected-window frame)
                            (list-buffers-noselect))
         (*current-buffer* (get-buffer "*Buffer List*"))
         ;; `s' marks the buffer on this line for saving, `x' does it
@@ -2129,7 +2129,7 @@
          (mb (make<minibuffer> mb-ed prompt minibuffer-local-map
                               #f minibuffer-history 0 #f)))
     (text-editor-insert ed "abc")
-    (text-editor-set-cursor ed 0 0)
+    (text-editor-set-cursor ed 1 0)
     (when initial (text-editor-insert mb-ed initial))
     (text-editor-set-cursor mb-ed (text-editor-char-count mb-ed))
     (parameterize ((*current-frame* frame)
@@ -2525,10 +2525,10 @@
 (test-equal '(5 5 3 5)
   (with-mark-frame "hello"
     (lambda (frame ed)
-      (text-editor-set-cursor ed 4)
-      (keys! frame C-SPC)                       ; mark at 4, active
+      (text-editor-set-cursor ed 5)
+      (keys! frame C-SPC)                       ; mark at 5, active
       (let ((at-point (list (region-beginning) (region-end))))
-        (text-editor-set-cursor ed 2)
+        (text-editor-set-cursor ed 3)
         (append at-point (list (region-beginning) (region-end)))))))
 
 ;; `use-region-p' is false for an *empty* active region unless
@@ -2577,7 +2577,7 @@
 ;; `mark-whole-buffer' (C-x h) puts point at the beginning and the mark
 ;; at the end, and leaves the region active so that a command can act on
 ;; it.
-(test-equal '(0 5 #t)
+(test-equal '(1 6 #t)
   (with-mark-frame "hello"
     (lambda (frame ed)
       (keys! frame C-x #\h)
@@ -2673,11 +2673,11 @@
   (with-ring (lambda () (guard (e (else #t)) (current-kill 0) #f))))
 
 ;; C-k twice joins the two lines into one kill, and C-y brings both back.
-(test-equal '("hello\nworld" . 6)
+(test-equal '("hello\nworld" . 7)
   (run-keys "hello\nworld" (list C-k C-k C-y)))
 
 ;; ... and C-w kills the region, which C-y then puts back where point is.
-(test-equal '("hello" . 2)
+(test-equal '("hello" . 3)
   (run-keys "hello" (list C-SPC C-f C-f C-w C-y)))
 
 ;; M-w copies the selected text, then consumes the deferred mark flag
@@ -2701,13 +2701,13 @@
       (keys! frame C-f)
       (list (mark-active) (text-editor-cursor-column ed)))))
 
-(test-equal '("hellohe" . 7)
+(test-equal '("hellohe" . 8)
   (run-keys "hello" (append (list C-SPC C-f C-f) M-w (list C-e C-y))))
 
 ;; C-w with an *empty* region puts the empty string in the ring and does
 ;; nothing else, which is what GNU Emacs's `C-w' does with point on the
 ;; mark - checked against `emacs --batch' rather than guessed at.
-(test-equal '("hello" . 0)
+(test-equal '("hello" . 1)
   (run-keys "hello" (list C-SPC C-w)))
 
 ;; A region that is not there at all is the error, in Emacs's words.
@@ -2724,7 +2724,7 @@
 ;; "hello" underneath it: "hellohello", with the first C-k having taken
 ;; no line break, mg's `killline' rule that a break comes only when the
 ;; rest of the line is blank.
-(test-equal '("hellohello" . 10)
+(test-equal '("hellohello" . 11)
   (run-keys "hello\n" (append (list C-k C-y C-k C-y) M-y)))
 
 ;; Three things in the ring, and C-y M-y M-y M-y M-y: the ring goes

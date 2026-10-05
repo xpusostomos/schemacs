@@ -48,6 +48,7 @@
           *command-table* command-value-of command-interactive-spec)
     (only (schemacs editor engine)
           new-text-editor text-editor-char-count text-editor-copy-string
+          text-editor-point-min text-editor-point-max
           text-editor-cursor-column text-editor-cursor-line
           text-editor-delete-from-cursor text-editor-get-cursor
           text-editor-insert text-editor-line-count text-editor-set-cursor
@@ -309,7 +310,7 @@ read-number-history
         ;; that was there stayed in front of the new text. Stepping
         ;; through the history, and choosing a completion, both put the
         ;; answer one keystroke in front of the previous one.
-        (text-editor-set-cursor ed 0)
+        (text-editor-set-cursor ed (text-editor-point-min ed))
         (text-editor-delete-from-cursor ed (text-editor-char-count ed))
         (text-editor-insert ed text)))
 
@@ -355,15 +356,15 @@ read-number-history
                      #f
                      (let ((n (cdr initial)))
                        (cond ((not (integer? n)) #f)
-                             ((< n 1) 0)
-                             (else (- n 1)))))))
+                             ((< n 1) 1)
+                             (else n))))))
         ;; Emacs disables undo in the minibuffer.
         (text-editor-undo-disable! ed)
         (when text (text-editor-insert ed text))
         (text-editor-set-cursor ed
                                 (if at
-                                    (min at (text-editor-char-count ed))
-                                    (text-editor-char-count ed)))
+                                    (min at (text-editor-point-max ed))
+                                    (text-editor-point-max ed)))
         (let ((mb (make<minibuffer>
                    ed prompt (or keymap minibuffer-local-map) default
                    (or history minibuffer-history) 0 #f)))
@@ -1003,7 +1004,7 @@ read-number-history
       (let ((mb (*minibuffer*)))
         (when mb
           (let ((ed (minibuffer-editor mb)))
-            (text-editor-set-cursor ed 0)
+            (text-editor-set-cursor ed (text-editor-point-min ed))
             (text-editor-delete-from-cursor ed (text-editor-char-count ed))
             (text-editor-insert ed completion)))))
 
@@ -1324,7 +1325,7 @@ read-number-history
       ;; why Emacs's line does not offer to click.
       ;;--------------------------------------------------------------
       (when (*completion-show-help*)
-        (text-editor-set-cursor buffer 0)
+        (text-editor-set-cursor buffer (text-editor-point-min buffer))
         (text-editor-insert buffer "Type M-RET on a completion to select it.\n")
         (text-editor-insert buffer
                             (string-append
@@ -1366,9 +1367,12 @@ read-number-history
       ;; candidates.
       ;;--------------------------------------------------------------
       (when (*completions-header-format*)
-        (let ((start (text-editor-char-count buffer)))
+        ;; The property range is in *positions*, so it starts where the
+        ;; text will go - `point-max' before the insert - and ends where
+        ;; it went: `point-max' after it.
+        (let ((start (text-editor-point-max buffer)))
           (text-editor-insert buffer (completions-header-string count))
-          (put-text-property start (text-editor-char-count buffer)
+          (put-text-property start (text-editor-point-max buffer)
                              'face 'shadow buffer))))
 
     (define (insert-completion-cell! buffer candidate)
@@ -1378,9 +1382,9 @@ read-number-history
       ;; two faces to the candidate *strings*; a string here cannot
       ;; carry a property, so the faces go straight on the buffer text.)
       ;;--------------------------------------------------------------
-      (let ((start (text-editor-char-count buffer)))
+      (let ((start (text-editor-point-max buffer)))
         (text-editor-insert buffer candidate)
-        (put-text-property start (text-editor-char-count buffer)
+        (put-text-property start (text-editor-point-max buffer)
                            'completion--string candidate buffer)
         (set-completion-line-faces!
          buffer start (+ start (string-length candidate)) #f)))
@@ -1396,9 +1400,9 @@ read-number-history
       ;; no property", which only works while the separator between two
       ;; cells stays clean.
       ;;--------------------------------------------------------------
-      (let ((start (text-editor-char-count buffer)))
+      (let ((start (text-editor-point-max buffer)))
         (text-editor-insert buffer str)
-        (remove-text-properties start (text-editor-char-count buffer)
+        (remove-text-properties start (text-editor-point-max buffer)
                                 '(completion--string) buffer)))
 
     (define *completions-format*
@@ -1494,7 +1498,7 @@ read-number-history
         (if (null? rest)
             (begin
               (text-editor-set-cursor
-               buffer (- (text-editor-char-count buffer) 1))
+               buffer (- (text-editor-point-max buffer) 1))
               (text-editor-delete-from-cursor buffer 1))
             (begin
               (insert-completion-cell! buffer (car rest))
@@ -1534,7 +1538,7 @@ read-number-history
         (with-current-buffer buffer
           (set!buffer-local-keymap buffer completion-list-mode-map)
           (text-editor-set-read-only! buffer #f)
-          (text-editor-set-cursor buffer 0)
+          (text-editor-set-cursor buffer (text-editor-point-min buffer))
           (text-editor-delete-from-cursor buffer (text-editor-char-count buffer))
           (*completions-common-substring* common-substring)
           (insert-completions-header! buffer (length completions))
@@ -1878,7 +1882,7 @@ read-number-history
       ;; each candidate was written with, and so does this - an index
       ;; kept where it is through the help insertion and the layout.
       ;;--------------------------------------------------------------
-      (let ((last (text-editor-char-count buffer)))
+      (let ((last (text-editor-point-max buffer)))
         (let loop ((i (+ from 1)))
           (cond ((>= i last) #f)
                 ((completion-start-at? buffer i) i)
@@ -1888,7 +1892,7 @@ read-number-history
       ;; The last completion cell start before FROM, or #f.
       ;;--------------------------------------------------------------
       (let loop ((i (- from 1)))
-        (cond ((< i 0) #f)
+        (cond ((< i (text-editor-point-min buffer)) #f)
               ((completion-start-at? buffer i) i)
               (else (loop (- i 1))))))
 
@@ -1897,7 +1901,7 @@ read-number-history
       ;; Emacs's `completion--move-to-candidate-end', which is where a
       ;; selection face stops on its cell.
       ;;--------------------------------------------------------------
-      (let ((last (text-editor-char-count buffer))
+      (let ((last (text-editor-point-max buffer))
             (value (get-text-property start 'completion--string buffer)))
         (let loop ((i (+ start 1)))
           (cond ((>= i last) i)
@@ -2296,11 +2300,15 @@ read-number-history
         ;; Leave mark at previous position
         (or (region-active-p) (push-mark)))
       ;; Move to the specified line number in that buffer.
-      (let ((ed (current-buffer))
-            (target (max 0 (- line 1))))
+      ;; `let*', not `let': TARGET's initializer reads ED, and Elisp's
+      ;; `let' binds its names one at a time the way `let*' does. Under
+      ;; `let' ED is unbound there and the command dies with "Unbound
+      ;; variable: ed" in the echo area - which is what `M-g g' did.
+      (let* ((ed (current-buffer))
+             (target (max (text-editor-point-min ed) line)))
         (text-editor-set-cursor ed target 0)
         (when (< (text-editor-cursor-line ed) target)
-          (text-editor-set-cursor ed (text-editor-char-count ed)))))
+          (text-editor-set-cursor ed (text-editor-point-max ed)))))
 
     ;; The keys GNU Emacs binds it to (M-g g, and M-g M-g, which is the
     ;; same command), beside the command as the other libraries state

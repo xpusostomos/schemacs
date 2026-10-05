@@ -66,6 +66,7 @@
           text-editor-read-only? text-editor-set-read-only!
           text-editor-get-cursor text-editor-set-cursor
           text-editor-delete-from-cursor text-editor-char-count
+          text-editor-point-min text-editor-point-max
           ;; an overlay's two ends are markers: `marker.c''s, which is
           ;; also the engine's, and they are what makes an overlay follow
           ;; the text as it is edited
@@ -75,8 +76,7 @@
           *current-frame*
           current-editor
           selected-window
-          set!window-buffer
-          set!window-top-line
+          set-window-buffer!
           window-buffer))
 
   (export
@@ -797,9 +797,11 @@
                       ;; that is gone
                       (unless replacement
                         (set! replacement (other-buffer buffer)))
-                      (let ((window (car windows)))
-                        (set!window-buffer window replacement)
-                        (set!window-top-line window 0))
+                      ;; `replace_buffer_in_windows' (`buffer.c') puts
+                      ;; the replacement in through `set_window_buffer',
+                      ;; so everything the window recorded about the
+                      ;; buffer being killed goes with it
+                      (set-window-buffer! (car windows) replacement)
                       (loop (cdr windows)))))
                 (hashq-remove! buffer-slots-table buffer)
                 ;; Emacs sets the killed buffer's `name' to nil and keeps
@@ -1076,7 +1078,7 @@
       (let ((buffer (current-buffer)))
         (let loop ((l (buffer-overlays buffer)) (best #f))
           (cond ((null? l)
-                 (or best (text-editor-char-count buffer)))
+                 (or best (text-editor-point-max buffer)))
                 (else
                  (let ((s (overlay-start (car l)))
                        (e (overlay-end (car l))))
@@ -1353,7 +1355,7 @@
                  (not (*inhibit-read-only*)))
         (error "Buffer is read-only"))
       (let ((ed (current-buffer)))
-        (text-editor-set-cursor ed 0)
+        (text-editor-set-cursor ed (text-editor-point-min ed))
         (text-editor-delete-from-cursor ed (text-editor-char-count ed)))
       #f)
 

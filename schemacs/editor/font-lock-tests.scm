@@ -21,11 +21,10 @@
 ;; running the same sequence on the same text; the two that are derived
 ;; from the C instead of measured say so on the test.
 ;;
-;; Positions: the tests read and write text properties through the
-;; interval layer, whose indices are ZERO-based, while the positions
-;; font-lock works in (point, match-end, line-end-position) are the
-;; Emacs-named layer's one-based ones. A test that says "at 4" means the
-;; interval layer's 4, which is Emacs's position 5.
+;; Positions are the buffer's own, one-based - the interval layer's are
+;; Emacs's now, the same as the positions `font-lock' works in (point,
+;; match-end, line-end-position). A test that says "at 5" means position
+;; 5, which is the first character of "foo" in "aaa foo bbb".
 
 ;; One frame for the whole file, as the other editor suites have: without
 ;; it every command that reads the current buffer dies, and the failure is
@@ -82,7 +81,7 @@
   (let ((ed (fresh "aaa foo bbb\n")))
     (set!font-lock-defaults! (list (list (list "foo" (list 0 'bold)))))
     (font-lock-mode #t)
-    (face-at ed 4)))
+    (face-at ed 5)))
 
 ;; measured: `override prepend => (bold)' and `append => (bold)' - with
 ;; nothing on the text but the unfontified state, both make a ONE-element
@@ -94,7 +93,7 @@
     (set!font-lock-defaults!
      (list (list (list "foo" (list 0 'bold 'prepend)))))
     (font-lock-mode #t)
-    (face-at ed 4)))
+    (face-at ed 5)))
 
 (test-equal "an overriding keyword appends into a face list"
   '(bold)
@@ -102,7 +101,7 @@
     (set!font-lock-defaults!
      (list (list (list "foo" (list 0 'bold 'append)))))
     (font-lock-mode #t)
-    (face-at ed 4)))
+    (face-at ed 5)))
 
 ;; ------------------------------------------------------------------
 ;; the four OVERRIDE arms, called directly
@@ -117,11 +116,11 @@
   '(underline bold (bold underline) (underline bold) underline)
   (map (lambda (override)
          (let ((ed (fresh "aaa foo bbb\n")))
-           (put-text-property 4 7 'face 'underline ed)
+           (put-text-property 5 8 'face 'underline ed)
            (goto-char (point-min))
            (re-search-forward "foo")
            (font-lock-apply-highlight (list 0 'bold override))
-           (face-at ed 4)))
+           (face-at ed 5)))
        (list #f #t 'prepend 'append 'keep)))
 
 (test-assert "font-lock-apply-highlight: a subexpression is highlighted, not the whole match"
@@ -129,7 +128,7 @@
     (goto-char (point-min))
     (re-search-forward "fu\\(bar\\)")
     (font-lock-apply-highlight (list 1 'bold))
-    (list (face-at ed 3) (face-at ed 4) (face-at ed 7))))
+    (list (face-at ed 4) (face-at ed 5) (face-at ed 8))))
 
 ;; ------------------------------------------------------------------
 ;; MATCH-ANCHORED: Dired's own keyword shape
@@ -153,7 +152,7 @@
     (set!font-lock-defaults! (list keywords))
     (font-lock-mode #t)
     ;; the D line starts at Emacs position 34, its name at 44
-    (list (face-at ed 33) (face-at ed 44))))
+    (list (face-at ed 34) (face-at ed 45))))
 
 ;; ------------------------------------------------------------------
 ;; adding and removing
@@ -169,7 +168,7 @@
     (font-lock-add-keywords #f (list (list "bar" (list 0 'underline))) 'set)
     (font-lock-add-keywords #f (list (list "foo" (list 0 'bold))) 'set)
     (font-lock-mode #t)
-    (list (face-at ed 4))))
+    (list (face-at ed 5))))
 
 (test-equal "font-lock-remove-keywords takes a keyword off again"
   '(bold #f)
@@ -178,10 +177,10 @@
     (font-lock-add-keywords #f (list (list "foo" (list 0 'bold))
                                      (list "bbb" (list 0 'underline))) 'set)
     (font-lock-mode #t)
-    (let ((before (face-at ed 4)))
+    (let ((before (face-at ed 5)))
       (font-lock-remove-keywords #f (list (list "bbb" (list 0 'underline))))
       (font-lock-fontify-buffer)
-      (list before (face-at ed 11)))))
+      (list before (face-at ed 12)))))
 
 ;; ------------------------------------------------------------------
 ;; unfontifying, and the change hook
@@ -190,11 +189,11 @@
   (let ((ed (fresh "aaa foo bbb\n")))
     (set!font-lock-defaults! (list (list (list "foo" (list 0 'bold)))))
     (font-lock-mode #t)
-    (let ((on (face-at ed 4)))
+    (let ((on (face-at ed 5)))
       (font-lock-flush)
-      (let ((off (face-at ed 4)))
+      (let ((off (face-at ed 5)))
         (font-lock-ensure)
-        (list on off (face-at ed 4))))))
+        (list on off (face-at ed 5))))))
 
 (test-assert "font-lock-after-change-function refontifies an edit"
   ;; The mode's hook is on `*after-change-functions*' while the mode is
@@ -207,16 +206,16 @@
                                 (*after-change-functions*))))
       (goto-char (point-max))
       (insert "foo")
-      (list (and hook-installed #t) (face-at ed 4)))))
+      (list (and hook-installed #t) (face-at ed 5)))))
 
 (test-assert "turning the mode off takes the hook and the faces off"
   (let ((ed (fresh "aaa foo bbb\n")))
     (set!font-lock-defaults! (list (list (list "foo" (list 0 'bold)))))
     (font-lock-mode #t)
-    (let ((on (face-at ed 4)))
+    (let ((on (face-at ed 5)))
       (font-lock-mode -1)
       (list on
-            (face-at ed 4)
+            (face-at ed 5)
             (memq font-lock-after-change-function (*after-change-functions*))))))
 
 (test-end "schemacs_editor_font_lock")

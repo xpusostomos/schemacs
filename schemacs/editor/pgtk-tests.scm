@@ -146,7 +146,7 @@
          (frame (fr:new-frame ed 24 80)))
     (parameterize ((fr:*current-frame* frame))
       (text-editor-insert ed "hello world")
-      (text-editor-set-cursor ed 0)
+      (text-editor-set-cursor ed 1)
       (dispatch-input-event frame key)
       ;; C-f is a *motion* command, which keeps the mark active - it is how
       ;; a region is made at all.
@@ -158,13 +158,13 @@
 
 (define c-spc-mark (mark-after key-c-spc))
 (test-equal #t (car c-spc-mark))
-(test-equal 0 (cadr c-spc-mark))
+(test-equal 1 (cadr c-spc-mark))
 ;; and the motion still worked, so the mark is a region and not a
 ;; deactivated leftover
-(test-equal 2 (caddr c-spc-mark))
+(test-equal 3 (caddr c-spc-mark))
 
 ;; C-@ keeps working - a terminal can only ever send that one.
-(test-equal (list #t 0 2) (mark-after key-c-at))
+(test-equal (list #t 1 3) (mark-after key-c-at))
 
 ;;------------------------------------------------------------------
 ;; Faces intern to integers, 0 meaning "plain"
@@ -244,8 +244,9 @@
       (delete-file path)
       pixel)))
 
-;; The region [2, 5) of "hello world": cells 2, 3 and 4, with point on 5.
-(define pixel (shot-of (render-region "hello world" 5 2)))
+;; The region [3, 6) of "hello world" - Emacs's positions, so the three
+;; `l', `l' and `o' at columns 2, 3 and 4 - with point at 6.
+(define pixel (shot-of (render-region "hello world" 6 3)))
 
 ;; One character is 9x18 logical pixels. Sample the bottom of the first
 ;; text row, below the glyphs, so what is read is the *background* the
@@ -267,7 +268,7 @@
 ;; A wide character takes two cells - in the drawing, not just in the
 ;; arithmetic
 ;;
-;; The region [0, 3) of "x<CJK>y|Z" is four cells: one for `x', two for
+;; The region [1, 4) of "x<CJK>y|Z" is four cells: one for `x', two for
 ;; the CJK character, one for `y'. Drawing the run's background by its
 ;; `string-length' makes it three and leaves the fourth cell white, which
 ;; is the same mistake one layer down from where the arithmetic is tested -
@@ -275,7 +276,7 @@
 ;;------------------------------------------------------------------
 
 (define wide-text (string-append "x" (string (integer->char #x4E2D)) "y|Z"))
-(define wide-pixel (shot-of (render-region wide-text 3 0)))
+(define wide-pixel (shot-of (render-region wide-text 4 1)))
 (define (wide-cell-pixel cell) (wide-pixel (+ (* cell 9) 4) 16))
 
 (test-equal lightgoldenrod2 (wide-cell-pixel 0))
@@ -417,12 +418,12 @@
              (if (eq? (overlay-get (car ovs) 'face) 'isearch)
                  'isearch
                  (loop (cdr ovs))))))
-    ;; one overlay per match, so the count is of the cells a match
-    ;; *starts* at - "alpha" twice in "alpha beta alpha"
+    ;; one overlay per match, so the list holds the position each match
+    ;; *starts* at - "alpha" twice in "alpha beta alpha", at 1 and at 12
     (test-equal "and the lazy highlighter a `lazy-highlight' one per match"
-      '(11 0)
-      (let loop ((i 0) (acc '()))
-        (if (>= i 16)          ; the text's length
+      '(12 1)
+      (let loop ((i 1) (acc '()))
+        (if (> i 16)           ; the text's length, from `point-min'
             acc
             (loop (+ i 1)
                   (if (let loop-ovs ((ovs (overlays-at i #t)))
@@ -436,7 +437,7 @@
                       acc)))))
     (is:isearch-dehighlight)
     (test-assert "isearch-dehighlight takes the `isearch' overlay away"
-      (not (let loop ((ovs (overlays-at 2 #t)))
+      (not (let loop ((ovs (overlays-at 3 #t)))
              (and (pair? ovs)
                   (if (eq? (overlay-get (car ovs) 'face) 'isearch)
                       #t

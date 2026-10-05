@@ -493,15 +493,14 @@
       ;; "Wrong type to apply: #f". The question mark keeps the name and
       ;; loses the collision.
       ;;--------------------------------------------------------------
-      ;; START and END arrive as one-based positions of the Emacs-named
-      ;; layer, and the interval layer's are zero-based: they lose one
-      ;; here, and the walk below runs in the interval layer's own
-      ;; numbering. This is the seam dired.sld converts at too.
+      ;; START and END are the buffer's own positions, which is what the
+      ;; interval layer speaks too - the C's `find_interval' subtracts
+      ;; `BUF_BEG' and BEG is 1, the tree's origin here. There used to be
+      ;; a `(- ... 1)' on each; it belonged to the tree's old zero-based
+      ;; numbering and moved every property one character left.
       (let ((val (if (and (pair? value) (not (keyword? (car value))))
                      value
-                     (list value)))
-            (start (- start 1))
-            (end (- end 1)))
+                     (list value))))
         (let loop ((start start))
           (when (< start end)
             (let* ((next (next-single-property-change start prop object end))
@@ -553,11 +552,7 @@
       ;; specify the property and value to put where none are already in
       ;; place. Therefore existing property values are not overwritten."
       ;;--------------------------------------------------------------
-      ;; the positions are the Emacs-named layer's; the interval layer's
-      ;; are zero-based, so they lose one here and the walk stays in it
-      (let ((object (if (pair? args) (car args) #f))
-            (start (- start 1))
-            (end (- end 1)))
+      (let ((object (if (pair? args) (car args) #f)))
         (let loop ((start (text-property-any start end prop #f object)))
           (when start
             (let ((next (next-single-property-change start prop object end)))
@@ -584,13 +579,12 @@
       ;; comment.
       ;;--------------------------------------------------------------
       (let* ((match (car highlight))
-             ;; one-based, as every `match-beginning' of the Emacs-named
-             ;; layer is; `beg' and `end' below are the interval layer's
-             ;; zero-based pair for the same characters.
+             ;; `match-beginning'/`match-end' are the buffer's own
+             ;; positions, which is what the property functions take.
              (start (match-beginning match))
              (end (match-end match))
-             (beg (if start (- start 1) #f))
-             (end (if end (- end 1) #f))
+             (beg start)
+             (end end)
              ;; Elisp's `(nth 2 highlight)' and `(nth 3 highlight)':
              ;; a highlight list is `(SUBEXP FACENAME [OVERRIDE
              ;; [LAXMATCH]])' and may stop short, where `cdddr' of a
@@ -677,14 +671,15 @@
           (when (procedure? form) (form)))
         (when (and *font-lock-multiline*
                    (>= limit (line-beginning-position 2)))
-          ;; "this is a multiline anchored match"
-          ;; `limit', `lead-start' and `point' are the Emacs-named
-          ;; layer's one-based positions; the property goes on the
-          ;; interval layer's zero-based pair for the same text.
+          ;; "this is a multiline anchored match" - the C's
+          ;; `(put-text-property (if (= limit (line-beginning-position 2))
+          ;; (1- limit) (min lead-start (point))) limit
+          ;; 'font-lock-multiline t)'. The end is LIMIT, not one below
+          ;; it: that extra `(- ... 1)' was the tree's old numbering.
           (put-text-property (if (= limit (line-beginning-position 2))
                                  (- limit 1)
-                                 (- (min lead-start (point)) 1))
-                             (- limit 1)
+                                 (min lead-start (point)))
+                             limit
                              'font-lock-multiline #t
                              (current-buffer)))
         #f))
@@ -753,11 +748,13 @@
                           (save-excursion (goto-char (match-beginning 0))
                                           (forward-line 1)
                                           (point))))
+                     ;; the C's `(if (= (point) next-line-start)
+                     ;; (1- (point)) (match-beginning 0))' to `(point)'
                      (put-text-property
                       (if (= (point) next-line-start)
                           (- (point) 1)
-                          (- (match-beginning 0) 1))
-                      (- (point) 1)
+                          (match-beginning 0))
+                      (point)
                       'font-lock-multiline #t
                       (current-buffer))))
                  (for-each
@@ -848,7 +845,7 @@
       ;; ported.
       ;;--------------------------------------------------------------
       (remove-list-of-text-properties
-       (- beg 1) (- end 1)
+       beg end
        (append (*font-lock-extra-managed-props*) (list 'face 'font-lock-multiline))
        (current-buffer)))
 
@@ -867,17 +864,19 @@
       ;; `parameterize' here, which is why these are parameters.
       ;;--------------------------------------------------------------
       (let ((changed #f))
+        ;; the C's `(get-text-property (1- font-lock-beg) ...)': the
+        ;; `1-' is Emacs's own, not the tree's old numbering
         (when (and (> (*font-lock-beg*) (point-min))
                    (get-text-property (- (*font-lock-beg*) 1)
                                       'font-lock-multiline (current-buffer)))
           (set! changed #t)
-          ;; the property walk answers the interval layer's zero-based
-          ;; index; `font-lock-beg' is one-based
+          ;; the property walk answers buffer positions, as
+          ;; `font-lock-beg' is
           (*font-lock-beg*
-           (let ((found (previous-single-property-change
-                         (- (*font-lock-beg*) 1) 'font-lock-multiline
-                         (current-buffer))))
-             (if found (+ found 1) (point-min)))))
+           (or (previous-single-property-change
+                (*font-lock-beg*) 'font-lock-multiline
+                (current-buffer))
+               (point-min))))
         ;; "If `font-lock-multiline' starts at `font-lock-end', do not
         ;; extend the region."
         ;; The C's `(setq new-end ...)' inside a `when': the answer has to
@@ -885,15 +884,15 @@
         ;; `when' whose test fails answers an *unspecified* value, and an
         ;; unspecified value is true - so `(and new-end ...)' below would
         ;; run and `=' would be handed one.
+        ;; the C's `(max (point-min) (1- font-lock-end))'
         (let* ((before-end (max (point-min) (- (*font-lock-end*) 1)))
-               (new-end (if (get-text-property (- before-end 1)
+               (new-end (if (get-text-property before-end
                                                'font-lock-multiline
                                                (current-buffer))
-                            (or (let ((found (text-property-any
-                                              (- before-end 1) (- (point-max) 1)
-                                              'font-lock-multiline #f
-                                              (current-buffer))))
-                                  (if found (+ found 1) #f))
+                            (or (text-property-any
+                                 before-end (point-max)
+                                 'font-lock-multiline #f
+                                 (current-buffer))
                                 (point-max))
                             #f)))
           (when (and new-end (not (= new-end (*font-lock-end*))))

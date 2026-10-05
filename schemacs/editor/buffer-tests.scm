@@ -8,7 +8,7 @@
  (only (schemacs editor textprop) get-char-property put-text-property)
  (only (schemacs editor frame)
        *current-frame* *echo-area-buffer* new-frame selected-window
-       set!window-buffer set!window-top-line window-buffer)
+       set-window-buffer! window-buffer)
  (schemacs editor buffer)
  )
 
@@ -126,7 +126,7 @@
    (lambda ()
      (let* ((start (get-buffer-create "start"))
             (other (get-buffer-create "other")))
-       (set!window-buffer (selected-window) start)
+       (set-window-buffer! (selected-window) start)
        (set-buffer other)
        (list (buffer-name (current-buffer))
              ;; the window still shows what it showed: `set-buffer' does
@@ -206,7 +206,7 @@
    (lambda ()
      (let* ((doomed (get-buffer-create "doomed"))
             (window (selected-window)))
-       (set!window-buffer window doomed)
+       (set-window-buffer! window doomed)
        (get-buffer-create "other")
        (kill-buffer doomed)
        (list (buffer-name (window-buffer window)))))))
@@ -250,40 +250,40 @@
 ;; follow the text as it is edited, which is the difference between an
 ;; overlay and a text property.
 (test-equal "an overlay spans the range it was made with"
-  '(0 5)
+  '(1 6)
   (with-buffers
    (lambda ()
      (let ((b (get-buffer-create "ov.txt")))
        (parameterize ((*current-buffer* b))
          (text-editor-insert b "hello world")
-         (let ((o (make-overlay 0 5)))
+         (let ((o (make-overlay 1 6)))
            (list (overlay-start o) (overlay-end o))))))))
 
 ;; It follows the text: inserting at its *start*, with `front-advance'
 ;; nil, puts the new text inside it - the start stays and the end moves.
 (test-equal "an overlay keeps text inserted at its start"
-  '(0 8)
+  '(1 9)
   (with-buffers
    (lambda ()
      (let ((b (get-buffer-create "ov.txt")))
        (parameterize ((*current-buffer* b))
          (text-editor-insert b "hello world")
-         (let ((o (make-overlay 0 5)))
-           (text-editor-set-cursor b 0)
+         (let ((o (make-overlay 1 6)))
+           (text-editor-set-cursor b 1)
            (text-editor-insert b "abc")
            (list (overlay-start o) (overlay-end o))))))))
 
 ;; and `front-advance' says the opposite: the text inserted at the start
 ;; goes *before* it, so both ends move
 (test-equal "an overlay with front-advance moves with text at its start"
-  '(3 8)
+  '(4 9)
   (with-buffers
    (lambda ()
      (let ((b (get-buffer-create "ov.txt")))
        (parameterize ((*current-buffer* b))
          (text-editor-insert b "hello world")
-         (let ((o (make-overlay 0 5 #f #t)))   ; front-advance
-           (text-editor-set-cursor b 0)
+         (let ((o (make-overlay 1 6 #f #t)))   ; front-advance
+           (text-editor-set-cursor b 1)
            (text-editor-insert b "abc")
            (list (overlay-start o) (overlay-end o))))))))
 
@@ -385,7 +385,7 @@
      (let ((b (get-buffer-create "ov.txt")))
        (parameterize ((*current-buffer* b))
          (text-editor-insert b "hello world")
-         (overlay-put (make-overlay 0 5) 'face 'ov-face)
+         (overlay-put (make-overlay 1 6) 'face 'ov-face)
          (get-char-property 2 'face))))))
 
 (test-equal "and the text property answers when no overlay has one"
@@ -395,8 +395,8 @@
      (let ((b (get-buffer-create "ov.txt")))
        (parameterize ((*current-buffer* b))
          (text-editor-insert b "hello world")
-         (put-text-property 0 5 'face 'text-face)
-         (overlay-put (make-overlay 0 5) 'priority 1)
+         (put-text-property 1 6 'face 'text-face)
+         (overlay-put (make-overlay 1 6) 'priority 1)
          (get-char-property 2 'face))))))
 
 (test-end "schemacs_editor_buffer")

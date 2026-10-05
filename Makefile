@@ -7,6 +7,7 @@ SCHEME_LIBRARIES := \
   ./schemacs/bitwise.sld \
   ./schemacs/string.sld \
   ./schemacs/vector.sld \
+  ./schemacs/arrays.sld \
   ./schemacs/comparator.sld \
   ./schemacs/hash-table.sld \
   ./schemacs/lens.sld \
@@ -42,6 +43,8 @@ SCHEME_LIBRARIES := \
   ./schemacs/editor/indentc.sld \
   ./schemacs/editor/replace.sld \
   ./schemacs/editor/buffer.sld \
+  ./schemacs/editor/buffer-text.sld \
+  ./schemacs/editor/region-cache.sld \
   ./schemacs/editor/font-core.sld \
   ./schemacs/editor/font-lock.sld \
   ./schemacs/editor/pages.sld \

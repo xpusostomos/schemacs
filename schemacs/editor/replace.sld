@@ -27,6 +27,7 @@
     (only (schemacs editor engine)
           copy-marker marker-position marker-type? set-marker!
           text-editor-char-count text-editor-get-cursor
+          text-editor-point-max
           text-editor-undo-boundary!)
     ;; `*case-fold-search*' is the case folding `perform-replace'
     ;; parameterizes around its loop (the C's
@@ -562,7 +563,7 @@ re-executed as a normal key sequence.")
                 ;; the buffer's edge is there
                 (let* ((beg (- found (string-length search-string)))
                        (before (and (> beg 1) (char-after (- beg 1))))
-                       (after (and (< found (text-editor-char-count ed))
+                       (after (and (< found (text-editor-point-max ed))
                                    (char-after found))))
                   (if (and before (word-char? before))
                       (and (not backward) (loop))

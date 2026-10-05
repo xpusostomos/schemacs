@@ -38,7 +38,8 @@
           screen-size suspend-display!)
     (only (schemacs editor engine)
           copy-marker  marker-position  set-marker!
-          text-editor-cursor-line
+          text-editor-cursor-line  text-editor-ref  text-editor-point-min
+          text-editor-get-start-of-line
           text-editor-get-cursor  text-editor-set-cursor)
     ;; `suspend-frame' is a command and states its own key as the other
     ;; command libraries do.
@@ -129,8 +130,22 @@
    set!window-height
    set!window-left
    set!window-top
-   set!window-top-line
    set!window-width
+   ;; GNU Emacs's `w->start' and what is stored beside it: where the
+   ;; window's display begins, whether that was a line beginning, where
+   ;; its last glyph was, and the line-number cache `%l' counts from.
+   %window-start set!%window-start
+   %window-start-at-line-beg set!%window-start-at-line-beg
+   %window-end-pos set!%window-end-pos
+   %window-end-vpos set!%window-end-vpos
+   %window-end-valid? set!%window-end-valid?
+   %window-base-line-number set!%window-base-line-number
+   %window-base-line-pos set!%window-base-line-pos
+   set-window-start!
+   set-window-buffer!
+   window-start-at-line-beg
+   window-base-line-number
+   window-base-line-pos
    resize-frame-windows!
    recenter
    suspend-frame
@@ -157,7 +172,6 @@
    window-point
    window-right-border?
    window-top
-   window-top-line
    window-width
    )
 
@@ -196,7 +210,9 @@
 
     (define-record-type <window>
       (make<window>
-       buffer point top-line top height left width parent children
+       buffer point start start-at-line-beg
+       end-pos end-vpos end-valid base-line-number base-line-pos
+       top height left width parent children
        hscroll min-hscroll suspend-auto-hscroll? old-point)
       window-type?
       (buffer    window-buffer      set!window-buffer)
@@ -213,11 +229,49 @@
       ;; is the function that settles which point a window has - GNU
       ;; Emacs's `window-point', which answers with the buffer's own
       ;; point for the selected window.
-      (top-line  window-top-line    set!window-top-line)
-      ;; ^ The zero-based index of the buffer line drawn on the window's
-      ;; first row: Emacs's `window-start', which is a buffer position
-      ;; there, kept here as a line index because that is the unit the
-      ;; renderer walks lines in.
+      (start     %window-start      set!%window-start)
+      ;; ^ A marker pointing to where in the text to start displaying -
+      ;; GNU Emacs's `w->start' (`window.h'), a marker for the same
+      ;; reason `point' above is one: the text can change under it and
+      ;; the window must still begin at the same character.
+      ;;
+      ;; It is a marker and not a line index, which is what it was: a
+      ;; line number is not a buffer position, so every use of it had to
+      ;; convert, and each conversion is a scan of the buffer. The
+      ;; renderer walks rows by position now, as the C's display iterator
+      ;; does, and never converts.
+      (start-at-line-beg %window-start-at-line-beg
+                         set!%window-start-at-line-beg)
+      ;; ^ Whether `start' was the beginning of a line when it was
+      ;; chosen: GNU Emacs's `w->start_at_line_beg', which every site
+      ;; that sets `start' sets beside it as
+      ;; `(pos == BEGV || FETCH_BYTE (pos_byte - 1) == '\n')'. The row
+      ;; walk relies on it - a window whose start is not a line
+      ;; beginning would begin part way down a line.
+      (end-pos   %window-end-pos    set!%window-end-pos)
+      ;; ^ `Z - the buffer position of the last glyph in the current
+      ;; matrix', GNU Emacs's `w->window_end_pos' - an offset from the
+      ;; *end* of the buffer rather than a position, so that an edit
+      ;; before the window's end leaves the number valid with no
+      ;; adjustment.
+      (end-vpos  %window-end-vpos   set!%window-end-vpos)
+      ;; ^ The glyph matrix row of that last glyph: GNU Emacs's
+      ;; `w->window_end_vpos', recorded as the window is drawn. It is
+      ;; what says where the window's text stops on the screen without
+      ;; walking the rows to find out.
+      (end-valid %window-end-valid? set!%window-end-valid?)
+      ;; ^ Whether the two above mean anything: GNU Emacs's
+      ;; `w->window_end_valid', which redisplay sets false whenever the
+      ;; window is redrawn or its buffer changes.
+      (base-line-number %window-base-line-number set!%window-base-line-number)
+      ;; ^ "Line number and position of a line somewhere above the top
+      ;; of the screen. If this field is zero, it means we don't have a
+      ;; base line": GNU Emacs's `w->base_line_number', the cache `%l'
+      ;; counts from so that it does not count from `point-min'.
+      (base-line-pos %window-base-line-pos set!%window-base-line-pos)
+      ;; ^ Where that line begins. GNU Emacs's `w->base_line_pos',
+      ;; where 0 means "no base line" and -1 means "do not display the
+      ;; line number as long as this window shows this buffer".
       (top       window-top         set!window-top)
       ;; ^ The zero-based screen row of the window's first row.
       (height    window-height      set!window-height)
@@ -358,12 +412,111 @@
             (+ (window-left window) (window-width window))
             (+ (window-top window) (window-height window))))
 
+    (define (set-window-start! window position)
+      ;; Make WINDOW's display begin at buffer position POSITION - GNU
+      ;; Emacs's `set-window-start' (`window.c'), whose body is
+      ;;
+      ;;     set_marker_restricted (w->start, pos, w->contents);
+      ;;     w->start_at_line_beg = (pos == BEGV || FETCH_BYTE (pos - 1) == '\n');
+      ;;
+      ;; The C sets the two together at *every* site that touches
+      ;; `start', so they cannot disagree, and this is that pair. The
+      ;; character before the start is a line break exactly when the
+      ;; start begins a line.
+      ;;--------------------------------------------------------------
+      (let ((buffer (window-buffer window)))
+        (set-marker! (%window-start window) position buffer)
+        ;; `text-editor-ref' is `char-after', so the comparison is `char=?'
+        ;; and `#\newline' - and a position with no character before it is
+        ;; the beginning of the buffer by definition.
+        (set!%window-start-at-line-beg
+         window
+         (or (= position (text-editor-point-min buffer))
+             (let ((before (text-editor-ref buffer (- position 1))))
+               (and (char? before) (char=? #\newline before)))))
+        position))
+
+    (define (set-window-buffer! window buffer)
+      ;; Show BUFFER in WINDOW - GNU Emacs's `set_window_buffer'
+      ;; (`window.c:4337'). For a window that is actually changing
+      ;; buffer the C does:
+      ;;
+      ;;   w->window_end_pos = 0;
+      ;;   w->window_end_vpos = 0;
+      ;;   w->hscroll = w->min_hscroll = 0;
+      ;;   w->suspend_auto_hscroll = false;
+      ;;   set_marker_both (w->pointm, buffer, BUF_PT (b), ...);
+      ;;   set_marker_restricted (w->start, b->last_window_start, buffer);
+      ;;   w->start_at_line_beg = false;
+      ;;   w->base_line_number = 0;
+      ;;
+      ;; Everything the window recorded about what it was showing is
+      ;; discarded, because all of it described the old buffer.
+      ;;
+      ;; Not ported: `b->last_window_start' (`window.c:2521'), the start
+      ;; the buffer had in the last window to be disconnected from it -
+      ;; it is a buffer-local slot, and this library is below the one
+      ;; that owns the buffer's slots. It would also have no effect here:
+      ;; `scroll-to-cursor!' recomputes a window's start from its point
+      ;; on every redisplay, where the C's `w->start' survives until
+      ;; redisplay decides otherwise. A buffer with no remembered start
+      ;; is at `BEG', which is what `allocate_buffer' gives it too.
+      ;;
+      ;; One deliberate difference: the C writes `start_at_line_beg =
+      ;; false' here and lets redisplay recompute it, where
+      ;; `set-window-start!' computes it from the text at once. The
+      ;; value is the same one redisplay would arrive at; writing it now
+      ;; keeps the invariant that the flag always describes the start.
+      ;;--------------------------------------------------------------
+      (let ((old (window-buffer window)))
+        (set!window-buffer window buffer)
+        (set!%window-end-pos window 0)
+        (set!%window-end-vpos window 0)
+        (set!%window-end-valid? window #f)
+        (set!%window-base-line-number window 0)
+        (set!%window-base-line-pos window 0)
+        (set!%window-hscroll window 0)
+        (set!%window-min-hscroll window 0)
+        (set!%window-suspend-auto-hscroll? window #f)
+        (set-marker! (%window-point window) (text-editor-get-cursor buffer)
+                     buffer)
+        (set-window-start! window 1)
+        window))
+
+    (define (window-start-at-line-beg window)
+      ;; Whether WINDOW's display begins at the beginning of a line.
+      ;; GNU Emacs's `window-start-at-line-beg'? There is no Elisp
+      ;; function for it - `w->start_at_line_beg' is read by `xdisp.c'
+      ;; and `window.c' alone - so this is the accessor under this
+      ;; tree's name for it.
+      ;;--------------------------------------------------------------
+      (%window-start-at-line-beg window))
+
+    (define (window-base-line-number window)
+      ;; The cached line number of `window-base-line-pos', or 0 when
+      ;; there is none: the field GNU Emacs's `decode_mode_spec' reads
+      ;; for `%l'. See `mode-line-construct' in `xdisp'.
+      ;;--------------------------------------------------------------
+      (%window-base-line-number window))
+
+    (define (window-base-line-pos window)
+      ;; Where that cached line begins - a buffer position, 0 for "no
+      ;; base line", -1 for "do not show a line number in this window".
+      ;;--------------------------------------------------------------
+      (%window-base-line-pos window))
+
     (define (make-frame-window buffer top height left width)
       ;; A window filling the given rectangle, showing BUFFER with point
       ;; at its beginning: a leaf the frame holds directly.
       ;;--------------------------------------------------------------
-      (make<window> buffer (copy-marker buffer 0)
-                            0 top height left width #f '()
+      ;; The window's display begins at position 1, which is where GNU
+      ;; Emacs's `set_window_buffer' puts `w->start' - and at `BEG' the
+      ;; start *is* a line beginning, so `start-at-line-beg' is true
+      ;; here exactly as the C's `(pos == BEGV || ...)' makes it.
+      (make<window> buffer (copy-marker buffer 1)
+                            (copy-marker buffer 1) #t
+                            0 0 #f 0 0
+                            top height left width #f '()
                             0 0 #f 0))
 
     ;;----------------------------------------------------------------
@@ -1111,8 +1264,13 @@
         ;; Set the new window start: the line IARG screen lines above
         ;; point's, or the top when there are not that many lines
         ;; above it - which is where `vmotion' stops, at `point-min'.
-        (set!window-top-line
-         window (max 0 (- (text-editor-cursor-line ed) iarg)))))
+        (set-window-start!
+         window
+         (let loop ((n iarg) (pos (text-editor-get-start-of-line ed)))
+           (if (or (<= n 0) (= pos (text-editor-point-min ed)))
+               pos
+               (loop (- n 1)
+                     (text-editor-get-start-of-line ed (- pos 1))))))))
 
     ;; The key GNU Emacs binds it to (C-l), beside the command as the
     ;; other libraries state theirs.
@@ -1128,6 +1286,10 @@
       (window-buffer (frame-selected-window frame)))
 
     (define (set!frame-editor frame editor)
-      (set!window-buffer (frame-selected-window frame) editor))
+      ;; Showing a buffer in the frame's selected window is
+      ;; `set_window_buffer' and nothing less: the window's start, its
+      ;; end position and its line-number cache all described the buffer
+      ;; that was there.
+      (set-window-buffer! (frame-selected-window frame) editor))
 
     ))
