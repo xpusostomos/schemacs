@@ -88,8 +88,7 @@
     (only (schemacs editor indentc) current-line-display-column)
     ;; `mode-line-eol-desc' reads the buffer's coding system: its eol
     ;; half is what the mnemonic is drawn from.
-    (only (schemacs editor coding)
-          as-coding-system coding-system-eol-type)
+    (only (schemacs editor coding) coding-system-eol-type)
     ;; The `face' text property, and the faces themselves. A face reaches
     ;; the display through these libraries and no others: the property
     ;; says which faces are in effect, `xfaces' merges them and folds
@@ -812,11 +811,10 @@
       ;; giving `eol-mnemonic-undecided', which is `":"' too.
       ;;--------------------------------------------------------------
       (let* ((window (*mode-line-window*))
-             (cs (as-coding-system
-                  (buffer-local-value (window-buffer window)
-                                      'buffer-file-coding-system
-                                      'utf-8-unix)))
-             (eol (and cs (coding-system-eol-type cs))))
+             (cs (buffer-local-value (window-buffer window)
+                                     'buffer-file-coding-system
+                                     'utf-8-unix))
+             (eol (coding-system-eol-type cs)))
         (cond ((eq? eol 'dos) "(DOS)")
               ((eq? eol 'mac) "(Mac)")
               (else ":"))))

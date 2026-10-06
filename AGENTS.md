@@ -3140,3 +3140,77 @@ accessors take one or the other.**
   system changed.
 
 All 31 suites pass and `tools/pty-check.py` is 61/61.
+
+# The coding-system API takes names (2026-10-06)
+
+Chris, on the four `expecting struct: #f` bugs: *"it was probably ok to use a
+record and a table to store them, but where you fucked up was changing the
+shape of the api to use records instead of symbols, because you changed the
+shape. And you shouldn't have used a simple vector, you should have used a
+guile make-hash-table for speed."*
+
+Both halves are right, and the distinction is the useful part: **storing them
+as records in a table was fine; letting the record reach the API was the
+mistake.** Emacs has *one* way to name a coding system - the symbol - so
+`(coding-system-eol-type 'utf-8-unix)` and `(coding-system-eol-type
+buffer-file-coding-system)` are the same call and nothing anywhere has to
+coerce. This tree had two shapes, so every entry point had to pick one, and
+the two disagreed: `find-coding-system` took a name, the accessors took a
+record. Every call site that guessed wrong got a silent `#f` and then
+"expecting struct: #f" *somewhere else* - the mode line, `merge-coding-systems`,
+twice in `mule-cmds`.
+
+## What changed
+
+- **The table is a Guile hash table** keyed by the *symbol*, which is
+  Emacs's `Vcoding_system_hash_table`: `CODING_SYSTEM_SPEC` is one
+  `Fgethash`. It was a list with a linear `eq?` walk.
+- **The record is what the table stores and nothing more.** `make-coding-system`
+  and `find-coding-system` still traffic in it; nothing else does.
+- **Every public accessor takes a name**, and looks the record up itself -
+  Emacs's `CODING_ATTR_*` over `CODING_SYSTEM_SPEC`. The generated accessors
+  are renamed `-of` so the public names could take the names.
+- **`as-coding-system` is deleted**, and with it the seven hand-written
+  copies of `(if (coding-system? coding) coding (find-coding-system coding))`
+  that were in `coding.sld`.
+- **`buffer-file-coding-system` holds a name** - `'utf-8-dos`, not a record -
+  which is what Emacs's holds.
+- `coding-system-base` answers a *name* even for a variant, whose record
+  points at its parent's record rather than its parent's name.
+
+## Measured (compiled, 200k calls)
+
+| | before | after |
+|---|---|---|
+| the registry lookup | 0.19 µs (list walk) | **0.035 µs** (`hashq-ref`) |
+| `(coding-system-eol-type 'utf-8-unix)` | — (was an error) | **0.04 µs** |
+| a raw field read, `-of` | 0.004 µs | 0.004 µs |
+
+So a name-taking accessor costs about ten raw field reads and is still five
+times faster than the lookup it replaces - and it is the shape Emacs has, so
+the mode line's per-redisplay call is free.
+
+## Bugs this found
+
+1. **`coding-system-alist` mapped over the table**, which is now a hash
+   table: `(map ... (*coding-system-table*))` → `Not a list:
+   #<hash-table ...>`. It walks with `hash-map->list` now.
+2. **Three free variables introduced by the mechanical edit.** Deleting the
+   `(let ((cs (%coding-of coding)))` lines left two functions referring to a
+   `coding` that no longer existed, and one where `cs` (a *record*) was
+   passed to a public accessor that now wants a name - which is how
+   `encode-coding-string` came to answer `"Unknown coding system: ?"` for a
+   coding system that exists. All three were caught by the tests, which is
+   the argument for having them.
+3. **`%decode-with-fallback`'s parameter is `cs`** (a record) and a blanket
+   replace gave it a free `coding`. Worth remembering: a mechanical rename
+   across a file where the *same thing* is spelled `cs` in one function and
+   `coding` in the next.
+
+## The lesson
+
+The bug was not the record and not the table. It was that the *boundary*
+moved: a value that Emacs passes as a symbol started being passed as an
+object, and every function on the other side had to be told which. When a
+port changes a representation, the API in front of it has to keep the shape
+of the original - otherwise each caller silently picks a side.

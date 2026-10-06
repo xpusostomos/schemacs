@@ -37,7 +37,7 @@
     (only (schemacs editor coding)
           coding-setup-port! coding-read-char coding-write-char
           coding-system-p coding-system-name coding-system-eol-type
-          find-coding-system coding-system-change-eol-conversion
+          coding-system-change-eol-conversion
           detect-eol bytes-have-null? adjust-coding-eol-type
           detect-coding-bytes
           decode-eol encode-eol *last-coding-system-used*
@@ -330,7 +330,7 @@ save-buffer
                       'unix
                       (detect-eol bytes))))
         (or (adjust-coding-eol-type base eol)
-            (find-coding-system base))))
+            base)))
 
     (define (decode-file-bytes bytes coding)
       ;; BYTES through CODING: the code points out, with the coding

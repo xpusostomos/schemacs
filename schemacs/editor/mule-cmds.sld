@@ -31,8 +31,7 @@
     ;; The coding systems, and the two variables that let one command's
     ;; I/O use a coding system the buffer's own does not name.
     (only (schemacs editor coding)
-          coding-system-p find-coding-system coding-system-name
-          as-coding-system
+          coding-system-p coding-system-name
           *coding-system-table*
           *coding-system-for-read* *coding-system-for-write*)
     ;; `merge-coding-systems' is `mule.el''s, which is `mule.sld'.
@@ -50,8 +49,10 @@
           completing-read make<history> history-entries set!history-entries)
     (only (schemacs editor command) define-command current-prefix-arg
           *pending-coding-system*)
-    ;; `delq' is Guile's list `delete' - R7RS has no destructive one.
-    (only (guile) delq)
+    ;; `delq' is Guile's list `delete' - R7RS has no destructive one -
+    ;; and `hash-map->list' is how the registry is walked now that it is a
+    ;; hash table rather than a list.
+    (only (guile) delq hash-map->list)
     (only (schemacs editor keymap) define-key *default-keymap*)
     ;; The keymap constructor is `keymap` in `(schemacs keymap)`.
     (only (schemacs keymap) keymap)
@@ -82,8 +83,14 @@
       ;; argument." Each element is a one-element *list* because that is
       ;; how `completing-read' expects a collection entry to be shaped.
       ;;--------------------------------------------------------------
-      (map (lambda (cs) (list (symbol->string (coding-system-name cs))))
-           (*coding-system-table*)))
+      ;;
+      ;; The table is a hash table keyed by the name, as Emacs's
+      ;; `Vcoding_system_hash_table' is, so this walks it rather than
+      ;; mapping over a list.
+      ;;--------------------------------------------------------------
+      (hash-map->list
+       (lambda (name cs) (list (symbol->string name)))
+       (*coding-system-table*)))
 
     (define (read-coding-system prompt . args)
       ;; GNU Emacs's `read-coding-system' (`coding.c:8625'): "Read a
@@ -125,14 +132,7 @@
       ;; buffer's current coding system, which is the useful one.
       ;;--------------------------------------------------------------
       (read-coding-system "Coding system for saving file"
-                          (coding-system-name
-                           ;; `as-coding-system' and not `find-coding-system':
-                           ;; the variable holds the *record* and
-                           ;; `find-coding-system' takes a name, so looking a
-                           ;; record up answers #f and the next accessor dies
-                           ;; with "expecting struct: #f".
-                           (as-coding-system
-                            (buffer-file-coding-system (current-buffer)))))) 
+                          (buffer-file-coding-system (current-buffer))))
 
     (define-command (set-buffer-file-coding-system coding-system force nomodify)
       ;; C-x RET f runs this. GNU Emacs's `set-buffer-file-coding-system'
@@ -175,8 +175,7 @@ don't want to mark the buffer modified, specify t for NOMODIFY."
         (unless nomodify
           (set-buffer-modified-p #t))
         (message "Coding system for saving this buffer is now %s"
-                 (coding-system-name
-                  (as-coding-system (buffer-file-coding-system buffer))))))
+                 (buffer-file-coding-system buffer))))
 
     (define-command (revert-buffer-with-coding-system coding-system force)
       ;; C-x RET r runs this. GNU Emacs's
@@ -211,12 +210,7 @@ For a list of possible values of CODING-SYSTEM, use \\[list-coding-systems]."
       "Execute an I/O command using the specified CODING-SYSTEM."
       (interactive (list (read-coding-system
                           "Coding system for following command"
-                          ;; The *name*: a parameter holds the record, and
-                          ;; `read-coding-system''s default is what
-                          ;; `completing-read' is handed.
-                          (coding-system-name
-                           (as-coding-system
-                            (buffer-file-coding-system (current-buffer)))))))
+                          (buffer-file-coding-system (current-buffer)))))
       ;; **This is the whole of it, and Emacs needs three hooks and a
       ;; rewritten `this-command' to do the same thing.** The command loop
       ;; reads `*pending-coding-system*' where it reads the prefix

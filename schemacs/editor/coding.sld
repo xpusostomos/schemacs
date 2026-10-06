@@ -58,6 +58,7 @@
     ;; opposite of `vector-set!'. `put-u8' / `get-u8' and the three port
     ;; settings are Guile's too.
     (only (guile) array-length array-ref array-set! catch logand logior
+          make-hash-table hashq-set! hashq-ref
           make-typed-array
           set-port-conversion-strategy! set-port-encoding!)
     (only (rnrs io ports) get-u8 put-u8)
@@ -72,7 +73,11 @@
    coding-system? make-coding-system
    coding-system-name coding-system-base coding-system-eol-type
    coding-system-iconv-name coding-system-raw?
-   coding-system-p find-coding-system as-coding-system
+   coding-system-p
+   ;; The registry lookup, Emacs's `CODING_SYSTEM_SPEC'. It is here for
+   ;; the tests; nothing outside this file needs it, because the public
+   ;; accessors take a name and do it themselves.
+   find-coding-system
    coding-system-base-name coding-system-change-eol-conversion
    eol-type->line-break line-break->eol-type
    *coding-system-table*
@@ -110,66 +115,127 @@
       ;;                not a conversion at all
       (make-coding-system name base eol-type iconv-name raw?)
       coding-system?
-      (name coding-system-name)
-      (base coding-system-base)
-      (eol-type coding-system-eol-type)
-      (iconv-name coding-system-iconv-name)
-      (raw? coding-system-raw?))
+      ;; The generated accessors are `-of' because they take the *record*:
+      ;; the public names above take a coding system *name*, which is what
+      ;; every caller has.
+      (name coding-system-name-of)
+      (base coding-system-base-of)
+      (eol-type coding-system-eol-type-of)
+      (iconv-name coding-system-iconv-name-of)
+      (raw? coding-system-raw?-of))
 
     (define *coding-system-table* (make-parameter #f))
-    ;; ^ The registry, name symbol to coding system. A parameter so that a
-    ;; test can bind an empty one - `*command-table*''s reason.
+    ;; ^ The registry, coding system *name* to `<coding-system>`. A
+    ;; parameter so that a test can bind an empty one -
+    ;; `*command-table*''s reason.
+    ;;
+    ;; **A hash table keyed by the symbol, which is GNU Emacs's shape** -
+    ;; its `Vcoding_system_hash_table' is keyed by the coding system
+    ;; symbol and `CODING_SYSTEM_SPEC' is one `Fgethash'. It was a list
+    ;; with a linear walk, which is a different thing: measured, a
+    ;; `hashq-ref' on a symbol is 0.017 us against 0.19 us for the walk,
+    ;; and it does not get slower as the table grows.
 
     (define (%table)
       (or (*coding-system-table*)
-          (let ((t (list)))
+          (let ((t (make-hash-table)))
             (*coding-system-table* t)
             t)))
 
     (define (register-coding-system! cs)
+      ;; Put one in the registry under its own name. Emacs's
+      ;; `Fputhash (this_name, this_spec, Vcoding_system_hash_table)'.
+      ;;--------------------------------------------------------------
       (%table)
-      (*coding-system-table* (cons cs (*coding-system-table*)))
+      (hashq-set! (*coding-system-table*) (coding-system-name-of cs) cs)
       cs)
 
     (define (coding-system-p thing)
-      ;; GNU Emacs's `coding-system-p': "Return t if OBJECT is a coding
-      ;; system." A *name* counts, which is why this asks the table rather
-      ;; than the record.
+      ;; GNU Emacs's `coding-system-p' (`coding.c:8594'): "Return t if
+      ;; OBJECT is nil or a coding-system."
+      ;;
+      ;; **"or nil", and ours used to answer #f for it.** The docstring
+      ;; this was copied from has those words in its first line and they
+      ;; were dropped on the way in. Emacs reads a nil coding system as
+      ;; "none named", which passes every check it makes; see
+      ;; `check-coding-system' in `coding.sld''s neighbours for what a
+      ;; nil would then mean on a save, which is the `undecided' case this
+      ;; tree does not carry.
       ;;--------------------------------------------------------------
-      (cond ((coding-system? thing) #t)
+      (cond ((not thing) #t)
             ((symbol? thing) (if (find-coding-system thing) #t #f))
             (else #f)))
 
     (define (find-coding-system name)
-      ;; The coding system NAME, or #f. Emacs interns coding systems in
-      ;; `Vcoding_system_hash_table' and this is the lookup.
-      ;;--------------------------------------------------------------
-      (let loop ((cs (*coding-system-table*)))
-        ;; `null?' and not `not': an empty list is *true* in Scheme where
-        ;; Elisp's `nil' is false, so `(not cs)' never fires and the walk
-        ;; runs off the end into `(car '())'. That is the class AGENTS.md
-        ;; has a section on, and it is how a *string* argument - which has
-        ;; no name in the table - became an assertion failure rather than
-        ;; the #f this answers.
-        (cond ((null? cs) #f)
-              ((eq? (coding-system-name (car cs)) name) (car cs))
-              (else (loop (cdr cs))))))
-
-    (define (as-coding-system coding)
-      ;; CODING as a coding system *record*, whether it is given as one
-      ;; already or by name - or #f.
+      ;; The `<coding-system>` NAME names, or #f.
       ;;
-      ;; **This exists because Emacs has no split to bridge.** A coding
-      ;; system in Emacs is a symbol carrying a plist, so
-      ;; `coding-system-eol-type' takes `utf-8-unix' and takes
-      ;; `buffer-file-coding-system' directly. Here a coding system is a
-      ;; record, and both a name and a record get asked for one - so the
-      ;; coercion is in one place rather than repeated, which is what
-      ;; several call sites were doing by hand.
+      ;; Emacs's `CODING_SYSTEM_SPEC (coding_system_symbol)', which is
+      ;; `Fgethash' on the hash table - one lookup, no walk.
       ;;--------------------------------------------------------------
-      (cond ((not coding) #f)
-            ((coding-system? coding) coding)
-            (else (find-coding-system coding))))
+      (let ((table (*coding-system-table*)))
+        (and table (hashq-ref table name))))
+
+    (define (%coding-of name)
+      ;; NAME as a `<coding-system>` record, or an error. The one place a
+      ;; *record* is reached for, and it is internal: everything outside
+      ;; this file names a coding system with its symbol, as Emacs does.
+      ;;--------------------------------------------------------------
+      (or (find-coding-system name)
+          (error (string-append "Unknown coding system: "
+                                (if (symbol? name)
+                                    (symbol->string name)
+                                    "?")))))
+
+    ;;------------------------------------------------------------------
+    ;; Reading a coding system's attributes
+    ;;------------------------------------------------------------------
+    ;;
+    ;; **These take the *name*, which is the whole of the shape.** GNU
+    ;; Emacs's `coding-system-eol-type' takes `utf-8-unix' and takes
+    ;; `buffer-file-coding-system' - one shape, because a coding system in
+    ;; Emacs *is* the symbol. Ours were `define-record-type' accessors
+    ;; taking the record, so every caller had to know which of two things
+    ;; it held, and the seven places that guessed wrong got a silent #f
+    ;; followed by "expecting struct: #f" somewhere else.
+    ;;
+    ;; The record is now what the table *stores* and nothing more: the
+    ;; lookup below is Emacs's `CODING_ATTR_*' over `CODING_SYSTEM_SPEC'.
+
+    (define (coding-system-name cs)
+      ;; The coding system's own name - the symbol it is registered under,
+      ;; which is Emacs's `CODING_ID_NAME' reading the hash *key*.
+      ;;--------------------------------------------------------------
+      (if (find-coding-system cs)
+          cs
+          (error "Not a coding system:" cs)))
+
+    (define (coding-system-base cs)
+      ;; GNU Emacs's `coding-system-base': "Return the base coding system
+      ;; of CODING-SYSTEM" - a *name*, and for a base it is its own:
+      ;; `(coding-system-base 'utf-8)' is `utf-8'.
+      ;;
+      ;; The record's BASE field holds the base's *name* for a base and the
+      ;; base's <coding-system> for a variant - Emacs's own shape, where a
+      ;; variant's spec points at its parent - and this is the one place
+      ;; that distinction is read.
+      ;;--------------------------------------------------------------
+      (let ((b (and cs (coding-system-base-of (%coding-of cs)))))
+        (and b (if (coding-system? b) (coding-system-name-of b) b))))
+
+    (define (coding-system-eol-type cs)
+      ;; GNU Emacs's `coding-system-eol-type' (`coding.c:11657'): "Return
+      ;; eol-type of CODING-SYSTEM. An eol-type is an integer 0, 1, 2, or
+      ;; a vector of coding systems." Emacs answers a *number*; this tree
+      ;; has always spoken the names `unix', `dos' and `mac', which is
+      ;; what the C's integers are spelled with everywhere else in it.
+      ;;--------------------------------------------------------------
+      (coding-system-eol-type-of (%coding-of cs)))
+
+    (define (coding-system-iconv-name cs)
+      (coding-system-iconv-name-of (%coding-of cs)))
+
+    (define (coding-system-raw? cs)
+      (coding-system-raw?-of (%coding-of cs)))
 
     (define (%define-coding-system name eol-type iconv-name raw?)
       ;; One entry, and with it the two EOL variants Emacs derives. Its
@@ -246,13 +312,6 @@
     ;; signal instead, and the offending byte is still on the port - which
     ;; is what makes the recovery below exact rather than approximate.
 
-    (define (%coding-of coding)
-      (let ((cs (if (coding-system? coding) coding (find-coding-system coding))))
-        (or cs (error (string-append "Unknown coding system: "
-                                     (if (symbol? coding)
-                                         (symbol->string coding)
-                                         "?"))))))
-
     (define (coding-setup-port! port coding)
       ;; The port half of `setup_coding_system': what the port converts
       ;; with, and that a byte it cannot decode is an error rather than a
@@ -262,13 +321,12 @@
       ;; all - nothing here calls `read-char' or `write-char' on one, so
       ;; there is nothing for an encoding to spoil.
       ;;--------------------------------------------------------------
-      (let ((cs (%coding-of coding)))
-        (if (coding-system-raw? cs)
+      (if (coding-system-raw? coding)
             port
             (begin
-              (set-port-encoding! port (coding-system-iconv-name cs))
+              (set-port-encoding! port (coding-system-iconv-name coding))
               (set-port-conversion-strategy! port 'error)
-              port))))
+              port)))
 
     (define (%error-port rest)
       ;; The port out of a `decoding-error''s arguments, where the byte
@@ -297,8 +355,7 @@
       ;; same three files it answers `#\A (bad 195) #\( #\B',
       ;; `#\A (bad 226) (bad 130) #\B' and `#\A #\é #\B'.
       ;;--------------------------------------------------------------
-      (let ((cs (%coding-of coding)))
-        (if (coding-system-raw? cs)
+      (if (coding-system-raw? coding)
             (let ((b (get-u8 port)))
               (if (eof-object? b) b (unibyte-to-char b)))
             ;; `char->integer' so that *every* answer is a code point:
@@ -315,7 +372,7 @@
                   (if err
                       (let ((b (get-u8 err)))
                         (if (eof-object? b) b (byte8-to-char b)))
-                      (error "coding-read-char: decoding error with no port"))))))))
+                      (error "coding-read-char: decoding error with no port")))))))
 
     (define (coding-write-char port c coding)
       ;; One code point to PORT, encoded by CODING - and a *byte character*
@@ -330,12 +387,11 @@
       ;; character at all - and they take the byte branch before any
       ;; encoding sees them.
       ;;--------------------------------------------------------------
-      (let ((cs (%coding-of coding)))
-        (if (or (coding-system-raw? cs) (char-byte8? c))
-            (put-u8 port (char-to-byte8 c))
-            ;; `write-char' takes the *character first* and the port
-            ;; second - the opposite of `put-u8'.
-            (write-char (integer->char c) port)))
+      (if (or (coding-system-raw? coding) (char-byte8? c))
+          (put-u8 port (char-to-byte8 c))
+          ;; `write-char' takes the *character first* and the port
+          ;; second - the opposite of `put-u8'.
+          (write-char (integer->char c) port))
       c)
 
     (define (decode-coding-string bytes coding)
@@ -361,14 +417,11 @@
       ;; makes a file whose bytes are not valid in any charset survive a
       ;; round trip. Everything else is iconv's, by name.
       ;;--------------------------------------------------------------
-      (let ((cs (if (coding-system? coding) coding (find-coding-system coding))))
+      ;; CS is the *record*, because this is where the fields are read in
+      ;; bulk; the `-of' accessors take it and the public ones take a name.
+      (let ((cs (%coding-of coding)))
         (cond
-         ((not cs)
-          (error (string-append "Unknown coding system: "
-                                (if (symbol? coding)
-                                    (symbol->string coding)
-                                    "?"))))
-         ((coding-system-raw? cs)
+         ((coding-system-raw?-of cs)
           (let* ((bv (if (string? bytes) (string->utf8 bytes) bytes))
                  (n (bytevector-length bv))
                  (out (make-typed-array 'u32 0 n)))
@@ -386,7 +439,7 @@
          (else
           (let ((bv (if (string? bytes) (string->utf8 bytes) bytes)))
             (guard (e (#t (%decode-with-fallback bv cs)))
-              (let* ((str (bytevector->string bv (coding-system-iconv-name cs)))
+              (let* ((str (bytevector->string bv (coding-system-iconv-name-of cs)))
                      (n (string-length str))
                      (out (make-typed-array 'u32 0 n)))
                 (let loop ((i 0))
@@ -416,7 +469,7 @@
       ;; never comes here, which is why the walk can afford to ask iconv
       ;; once per character.
       ;;--------------------------------------------------------------
-      (let* ((enc (coding-system-iconv-name cs))
+      (let* ((enc (coding-system-iconv-name-of cs))
              (n (bytevector-length bv))
              (acc '()))
         (let loop ((i 0) (out '()))
@@ -451,18 +504,13 @@
       ;; not a string, because Emacs's answer is a unibyte string - a
       ;; string of bytes - and this tree has no such thing.
       ;;--------------------------------------------------------------
-      (let* ((cs (if (coding-system? coding) coding (find-coding-system coding)))
+      (let* ((cs (%coding-of coding))
              ;; TEXT is a `u32vector' of code points, as a string's
              ;; characters are - see the note on `decode-coding-string' for
              ;; why it cannot be a Scheme string.
              (n (array-length string)))
         (cond
-         ((not cs)
-          (error (string-append "Unknown coding system: "
-                                (if (symbol? coding)
-                                    (symbol->string coding)
-                                    "?"))))
-         ((coding-system-raw? cs)
+         ((coding-system-raw?-of cs)
           (let ((out (make-bytevector n)))
             (let loop ((i 0))
               (if (>= i n)
@@ -474,12 +522,12 @@
           (let ((s (make-string n)))
             (let loop ((i 0))
               (if (>= i n)
-                  (string->bytevector s (coding-system-iconv-name cs))
+                  (string->bytevector s (coding-system-iconv-name-of cs))
                   (let ((c (array-ref string i)))
                     (if (> c #x10FFFF)
                         (error (string-append
                                 "Character out of range for "
-                                (symbol->string (coding-system-name cs))
+                                (symbol->string (coding-system-name-of cs))
                                 ": " (number->string c)))
                         (begin
                           (string-set! s i (integer->char c))
@@ -512,31 +560,22 @@
         ((line-break-return) 'mac)
         (else #f)))
 
-    (define (coding-system-base-name cs)
-      ;; GNU Emacs's `coding-system-base': "Return the base coding system
-      ;; of CODING-SYSTEM" - a *name*, and for a base it is its own. The
-      ;; BASE field is the name for a base and the record for a variant,
-      ;; which is Emacs's shape: `(coding-system-base 'utf-8)' is `utf-8'.
-      ;;--------------------------------------------------------------
-      (let ((found (cond ((not cs) #f)
-                         ((coding-system? cs) cs)
-                         (else (find-coding-system cs)))))
-        (and found
-             (let ((b (coding-system-base found)))
-               (if (coding-system? b) (coding-system-name b) b)))))
+    (define coding-system-base-name coding-system-base)
+    ;; ^ The same function under the name it had before `coding-system-base'
+    ;; was written - Emacs's `CODING_ATTR_BASE_NAME''s spelling. Kept so
+    ;; that the eol helper below and the tests read as they did.
 
     (define (coding-system-change-eol-conversion coding eol-type)
       ;; GNU Emacs's `coding-system-change-eol-conversion': "Return a
       ;; coding system based on CODING-SYSTEM but with a new EOL
       ;; type" - the name rebuilt, and the coding system looked up again.
       ;;--------------------------------------------------------------
-      (let* ((cs (if (coding-system? coding) coding (find-coding-system coding)))
-             (base (and cs (coding-system-base-name cs))))
-        (and base
-             (find-coding-system
-              (string->symbol
-               (string-append (symbol->string base) "-"
-                              (symbol->string eol-type)))))))
+      (let* ((base (and coding (coding-system-base-name coding)))
+             (name (and base
+                        (string->symbol
+                         (string-append (symbol->string base) "-"
+                                        (symbol->string eol-type))))))
+        (and name (coding-system-p name) name)))
 
     ;;------------------------------------------------------------------
     ;; Which end of line a file uses
@@ -632,11 +671,13 @@
       ;; named one already, that being what the C's `(VECTORP
       ;; (eol_type))' test says.
       ;;--------------------------------------------------------------
-      (let ((cs (if (coding-system? coding) coding (find-coding-system coding))))
-        (cond ((not cs) #f)
-              ((coding-system-eol-type cs) cs)
-              ((eq? eol-type 'none) cs)
-              (else (coding-system-change-eol-conversion cs eol-type)))))
+      (cond ((not coding) #f)
+            ;; `(coding-system-eol-type coding)' is #f when the name does
+            ;; not settle the eol - which is what "undecided" is here, and
+            ;; is the C's `(VECTORP (eol_type))' test.
+            ((coding-system-eol-type coding) coding)
+            ((eq? eol-type 'none) coding)
+            (else (coding-system-change-eol-conversion coding eol-type))))
 
     ;;------------------------------------------------------------------
     ;; Converting the line ends of a value
@@ -661,8 +702,7 @@
       ;; pair goes for `dos', every CR goes for `mac', and `unix' is left
       ;; alone. POINTS is a list of code points.
       ;;--------------------------------------------------------------
-      (let ((eol (coding-system-eol-type
-                  (if (coding-system? coding) coding (find-coding-system coding)))))
+      (let ((eol (coding-system-eol-type coding)))
         (case eol
           ((mac) (map (lambda (c) (if (= c 13) 10 c)) points))
           ((dos)
@@ -679,8 +719,7 @@
       ;; leaves it - the round trip is then the identity for a file whose
       ;; only CRs are DOS line ends.
       ;;--------------------------------------------------------------
-      (let ((eol (coding-system-eol-type
-                  (if (coding-system? coding) coding (find-coding-system coding)))))
+      (let ((eol (coding-system-eol-type coding)))
         (case eol
           ((mac) (map (lambda (c) (if (= c 10) 13 c)) points))
           ((dos)
@@ -931,8 +970,7 @@
       ;;--------------------------------------------------------------
       (set!detection-info-checked info
         (logior (detection-info-checked info) *category-mask-charset*))
-      (let* ((cs (find-coding-system 'iso-latin-1))
-             (name (symbol->string (coding-system-name cs)))
+      (let* ((name (symbol->string 'iso-latin-1))
              (check-latin-extra
               (or (and (<= 9 (string-length name))
                        (string=? "iso-8859-" (substring name 0 9)))
@@ -1103,10 +1141,7 @@
       (let* ((found (detect-coding-system bytes highest))
              (eol (if (bytes-have-null? bytes) 'unix (detect-eol bytes))))
         (and found
-             (map (lambda (name)
-                    (coding-system-name
-                     (or (adjust-coding-eol-type name eol)
-                         (find-coding-system name))))
+             (map (lambda (name) (or (adjust-coding-eol-type name eol) name))
                   found))))
 
     (define *coding-system-for-read* (make-parameter #f))

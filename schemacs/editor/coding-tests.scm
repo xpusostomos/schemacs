@@ -4,12 +4,12 @@
  (only (srfi 64) test-assert test-equal test-begin test-end)
  (only (guile) setvbuf u32vector->list)
  (only (schemacs editor coding)
-       coding-system-p find-coding-system coding-system-name
-       coding-system-base-name coding-system-change-eol-conversion
+       coding-system-p coding-system-name coding-system-base
+       coding-system-change-eol-conversion
        decode-coding-string encode-coding-string
        coding-setup-port! coding-read-char coding-write-char
        detect-eol bytes-have-null? adjust-coding-eol-type
-       decode-eol encode-eol as-coding-system coding-system?
+       decode-eol encode-eol coding-system?
        detect-coding-bytes
        coding-system-eol-type)
  (scheme file)
@@ -72,19 +72,19 @@
 
 (test-equal "a variant is a coding system, and its bare name is its base"
   '(#t utf-8 utf-8)
+  ;; the coding system *is* the name, as in Emacs: there is nothing to
+  ;; look up before asking it a question
   (list (coding-system-p 'utf-8-dos)
-        (coding-system-base-name (find-coding-system 'utf-8-dos))
-        (coding-system-base-name (find-coding-system 'utf-8))))
+        (coding-system-base 'utf-8-dos)
+        (coding-system-base 'utf-8)))
 
 (test-equal "the EOL variants of a base are all there"
   '(utf-8-unix utf-8-dos utf-8-mac)
-  (map (lambda (n) (coding-system-name (find-coding-system n)))
-       '(utf-8-unix utf-8-dos utf-8-mac)))
+  (map coding-system-name '(utf-8-unix utf-8-dos utf-8-mac)))
 
 (test-equal "changing the EOL conversion gives the named variant"
   'utf-8-dos
-  (coding-system-name
-   (coding-system-change-eol-conversion (find-coding-system 'utf-8-unix) 'dos)))
+  (coding-system-change-eol-conversion 'utf-8-unix 'dos))
 
 (test-equal "an unknown name is not a coding system"
   '(#f #f)
@@ -249,34 +249,37 @@
 ;; between a file saying `-*- coding: utf-8 -*-' (which gets what its bytes
 ;; turn out to be) and one saying `utf-8-unix' (which keeps UNIX).
 (test-equal '(utf-8-dos utf-8-unix)
-  (list (coding-system-name (adjust-coding-eol-type 'utf-8 'dos))
-        (coding-system-name (adjust-coding-eol-type 'utf-8-unix 'dos))))
+  (list (adjust-coding-eol-type 'utf-8 'dos)
+        (adjust-coding-eol-type 'utf-8-unix 'dos)))
 
 ;; decoding, both directions - Emacs's own numbers, measured
 (test-equal '(dos-decodes (97 10 98) unix-keeps-the-cr (97 13 10 98))
   (list 'dos-decodes
-        (decode-eol (list 97 13 10 98) (find-coding-system 'utf-8-dos))
+        (decode-eol (list 97 13 10 98) 'utf-8-dos)
         'unix-keeps-the-cr
-        (decode-eol (list 97 13 10 98) (find-coding-system 'utf-8-unix))))
+        (decode-eol (list 97 13 10 98) 'utf-8-unix)))
 
 (test-equal "mac decoding turns every CR into a line feed"
   '(97 10 98)
-  (decode-eol (list 97 13 98) (find-coding-system 'utf-8-mac)))
+  (decode-eol (list 97 13 98) 'utf-8-mac))
 
 (test-equal '(dos (97 13 10 98) unix (97 10 98) mac (97 13 98))
-  (list 'dos (encode-eol (list 97 10 98) (find-coding-system 'utf-8-dos))
-        'unix (encode-eol (list 97 10 98) (find-coding-system 'utf-8-unix))
-        'mac (encode-eol (list 97 10 98) (find-coding-system 'utf-8-mac))))
+  (list 'dos (encode-eol (list 97 10 98) 'utf-8-dos)
+        'unix (encode-eol (list 97 10 98) 'utf-8-unix)
+        'mac (encode-eol (list 97 10 98) 'utf-8-mac)))
 
-;; `as-coding-system' takes a name or a coding system already, which is the
-;; split Emacs has no equivalent of: `(coding-system-eol-type
-;; buffer-file-coding-system)' works there because a coding system is a
-;; symbol. Missing it is not subtle - the mode line said `:' for every
-;; buffer, because a lookup on a record answers #f.
-(test-equal '(#t unix)
-  (let ((cs (as-coding-system 'utf-8-unix)))
-    (list (coding-system? (as-coding-system cs))
-          (coding-system-eol-type (as-coding-system cs)))))
+;; **A coding system *is* the name**, so `(coding-system-eol-type
+;; 'utf-8-unix)' is the same call `(coding-system-eol-type
+;; buffer-file-coding-system)' is - which is Emacs's shape. This tree used
+;; to hand out a record instead, and then the two were different types:
+;; looking a record up answered #f and the next accessor died with
+;; "expecting struct: #f". The mode line said `:' for every buffer.
+(test-equal '(utf-8 unix #f)
+  ;; `coding-system-base' answers a *name* even for a variant, whose
+  ;; record points at its parent's record rather than at its name
+  (list (coding-system-base 'utf-8-unix)
+        (coding-system-eol-type 'utf-8-unix)
+        (coding-system-eol-type 'utf-8)))
 
 ;; ------------------------------------------------------------------
 ;; the statistical detector

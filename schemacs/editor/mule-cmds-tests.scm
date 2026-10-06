@@ -5,7 +5,7 @@
   (only (schemacs keymap) keymap->layers-list keymap-layer-type?
         keymap-layer->alist)
   (only (schemacs editor coding)
-        coding-system-name find-coding-system as-coding-system)
+        coding-system-name coding-system-base)
   (only (schemacs editor mule) merge-coding-systems)
   (only (schemacs editor mule-cmds)
         mule-keymap coding-system-alist *coding-system-history*))
@@ -24,23 +24,17 @@
 
 (test-equal "an unspecified eol is filled in from the other"
   'utf-8-dos
-  (coding-system-name
-   (as-coding-system
-    (merge-coding-systems 'utf-8 (find-coding-system 'utf-8-dos)))))
+  (merge-coding-systems 'utf-8 'utf-8-dos))
 
 (test-equal "... and an eol already named is kept"
   'utf-8-unix
-  (coding-system-name
-   (as-coding-system
-    (merge-coding-systems 'utf-8-unix (find-coding-system 'utf-8-dos)))))
+  (merge-coding-systems 'utf-8-unix 'utf-8-dos))
 
 (test-equal "the coding system's *own* name is what comes back"
   ;; the first is a name and the second settles its eol, so this is the
   ;; variant and not the bare name
   'iso-latin-1-unix
-  (coding-system-name
-   (as-coding-system
-    (merge-coding-systems 'iso-latin-1 (find-coding-system 'utf-8-unix)))))
+  (merge-coding-systems 'iso-latin-1 'utf-8-unix))
 
 ;; ------------------------------------------------------------------
 ;; the keymap and the completion table

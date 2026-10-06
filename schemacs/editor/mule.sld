@@ -32,9 +32,8 @@
     (scheme char)
     (only (guile) string-contains)
     (only (schemacs editor coding)
-          coding-system-p find-coding-system coding-system-name
-          as-coding-system
-          coding-system-eol-type coding-system-change-eol-conversion)
+          coding-system-p coding-system-eol-type
+          coding-system-change-eol-conversion)
     ;; `string->utf8', which the encoding test needs, is `(scheme base)''s
     ;; here - as `xterm.sld' notes of the same call for the clipboard.
     )
@@ -362,22 +361,22 @@
                                 (or v (loop (%line-after-break text (+ je 1)))))))))))))))))
 
     (define (coding-system-from-file-name name)
-      ;; The coding system a *name* stands for, as Emacs's
-      ;; `find-coding-system' does - with the aliases a tag may use. A tag
-      ;; says `latin-1' where the coding system is `iso-latin-1', so the
-      ;; few spellings Emacs accepts are listed rather than guessed at.
+      ;; The coding system a *tag* names, or #f - the coding system *name*
+      ;; it stands for, since that is what a coding system is here as in
+      ;; Emacs. A tag says `latin-1' where the coding system is
+      ;; `iso-latin-1', so the few spellings Emacs accepts are listed
+      ;; rather than guessed at.
       ;;--------------------------------------------------------------
       (let ((sym (if (symbol? name) name (string->symbol name))))
-        (or (find-coding-system sym)
-            (find-coding-system
-             (case sym
-               ((latin-1 iso-latin-1 iso-8859-1) 'iso-latin-1)
-               ((utf-8 utf8) 'utf-8)
-               ((ascii us-ascii) 'us-ascii)
-               ((binary no-conversion) 'no-conversion)
-               ((raw-text text) 'raw-text)
-               ((utf-16 utf-16le utf-16be) sym)
-               (else sym))))))
+        (let ((alias (case sym
+                       ((latin-1 iso-latin-1 iso-8859-1) 'iso-latin-1)
+                       ((utf-8 utf8) 'utf-8)
+                       ((ascii us-ascii) 'us-ascii)
+                       ((binary no-conversion) 'no-conversion)
+                       ((raw-text text) 'raw-text)
+                       ((utf-16 utf-16le utf-16be) sym)
+                       (else sym))))
+          (and (coding-system-p alias) alias))))
 
     (define (merge-coding-systems first second)
       ;; GNU Emacs's `merge-coding-systems' (`mule.el:1202'): "Fill in any
@@ -391,11 +390,11 @@
       ;; a file made it `utf-8-dos', and merging is what stops `C-x RET f
       ;; utf-8' from throwing away the line ends the buffer was read with.
       ;;--------------------------------------------------------------
-      (let ((eol (coding-system-eol-type (as-coding-system second))))
-        (if (and (not (coding-system-eol-type (as-coding-system first))) eol)
-            (coding-system-change-eol-conversion
-             (coding-system-name (as-coding-system first)) eol)
-            (coding-system-name (as-coding-system first)))))
+      ;; FIRST and SECOND are coding system *names*, as everywhere else.
+      (let ((eol (and second (coding-system-eol-type second))))
+        (if (and first (not (coding-system-eol-type first)) eol)
+            (coding-system-change-eol-conversion first eol)
+            first)))
 
     (define (%byte-order-mark bytes)
       ;; The coding system a byte order mark at the front says: `EF BB BF'
@@ -424,13 +423,13 @@
         (cond ((and (>= n 3) (= (bytevector-u8-ref bytes 0) #xEF)
                     (= (bytevector-u8-ref bytes 1) #xBB)
                     (= (bytevector-u8-ref bytes 2) #xBF))
-               (find-coding-system 'utf-8))
+               'utf-8)
               ((and (>= n 2)
                     (or (and (= (bytevector-u8-ref bytes 0) #xFF)
                              (= (bytevector-u8-ref bytes 1) #xFE))
                         (and (= (bytevector-u8-ref bytes 0) #xFE)
                              (= (bytevector-u8-ref bytes 1) #xFF))))
-               (find-coding-system 'utf-16))
+               'utf-16)
               (else #f))))
 
     (define (find-auto-coding filename bytes)
