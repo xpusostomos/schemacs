@@ -8,7 +8,8 @@
        set!buffer-overwrite-mode)
  (only (schemacs editor editfns)
        insert goto-char point buffer-string)
- (only (schemacs editor cmds) internal-self-insert))
+ (only (schemacs editor cmds)
+       backward-char forward-char internal-self-insert))
 
 ;; Unbuffered output, so a run that hangs shows where it got to.
 (setvbuf (current-output-port) 'none)
@@ -119,5 +120,56 @@
     (list (buffer-overwrite-mode b)
           (buffer-overwrite-mode a)
           (buffer-overwrite-mode b))))
+
+;; ------------------------------------------------------------------
+;; forward-char and backward-char, which are `move_point' (`cmds.c:40')
+;;
+;; Three things the C does and this tree did none of until 2026-10-06:
+;; N is *optional* and a nil N is 1; the move stops at the buffer's
+;; boundary; and it then **signals**, so a command that runs off the end
+;; fails rather than quietly clamping. Every row is Emacs 31.1's, from
+;; `emacs -Q --batch' over the same calls.
+
+(define (move-result text position thunk)
+  ;; (the error message or `no-error', point afterwards).
+  ;;--------------------------------------------------------------
+  (let ((ed (get-buffer-create "*cmds-move*")))
+    (set-buffer ed)
+    (erase-buffer)
+    (insert text)
+    (goto-char position)
+    (let ((outcome (guard (e (#t (if (error-object? e)
+                                    (error-object-message e)
+                                    'ERR)))
+                     (thunk)
+                     'no-error)))
+      (list outcome (point)))))
+
+(test-equal "backward-char at the beginning of the buffer signals"
+  '("Beginning of buffer" 1)
+  (move-result "ab" 1 (lambda () (backward-char))))
+
+(test-equal "forward-char at the end of the buffer signals"
+  '("End of buffer" 3)
+  (move-result "ab" 3 (lambda () (forward-char))))
+
+(test-equal "...and stops there rather than running past it"
+  '("End of buffer" 3)
+  (move-result "ab" 3 (lambda () (forward-char 5))))
+
+;; "If N is omitted or nil, move point 1 character forward" - the
+;; arity bug this was found by. `(forward-char)' was a
+;; "Wrong number of arguments" error here.
+(test-equal "forward-char with no argument moves one character"
+  '(no-error 3)
+  (move-result "ab" 2 (lambda () (forward-char))))
+
+(test-equal "forward-char with a nil argument moves one character"
+  '(no-error 3)
+  (move-result "ab" 2 (lambda () (forward-char #f))))
+
+(test-equal "a negative N goes the other way"
+  '(no-error 1)
+  (move-result "ab" 2 (lambda () (forward-char -1))))
 
 (test-end "schemacs_editor_cmds")

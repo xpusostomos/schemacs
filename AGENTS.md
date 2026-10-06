@@ -2365,3 +2365,48 @@ backtrace. Both are now checked at a pty.
   dropped, so it is invisible, but it is not the same object.
 - **`read-function`**, the fourth argument, which lets a caller supply its
   own reader. Nothing here would pass one.
+
+## `move_point`: forward-char was two departures, not one (2026-10-06)
+
+Found by the backtrace port, which calls `(forward-char)` with no argument
+the way `debugger-setup-buffer` does, and got "Wrong number of arguments".
+Reading `cmds.c` showed the arity was the smaller half.
+
+`forward-char` and `backward-char` are both `move_point (n, forward)`
+(`cmds.c:40`):
+
+```c
+  if (NILP (n)) XSETFASTINT (n, 1); else CHECK_FIXNUM (n);
+  new_point = PT + (forward ? XFIXNUM (n) : - XFIXNUM (n));
+  if (new_point < BEGV) { SET_PT (BEGV); xsignal0 (Qbeginning_of_buffer); }
+  if (new_point > ZV)   { SET_PT (ZV);   xsignal0 (Qend_of_buffer); }
+  SET_PT (new_point);
+```
+
+Three things, and this tree had none of them. Two of the three are
+departures a *test* could not have caught, because the port and Emacs
+agreed on every in-range move:
+
+1. **N is optional** and a nil N is 1. Ours was a required parameter, so
+   `(forward-char)` was an error. This is the one that was found.
+2. **It stops at the boundary** - ours did that much, by way of
+   `text-editor-move-cursor`'s clamping.
+3. **...and then signals** - "On reaching end or beginning of buffer, stop
+   and signal error." Ours clamped and said nothing, so a command that ran
+   off the end succeeded quietly where Emacs fails. `move_point` is the
+   only thing in this tree that raises `beginning-of-buffer` and
+   `end-of-buffer`; nothing needed the signal yet, which is why it had gone
+   unnoticed.
+
+Both are fixed, in one `%move-point` that is the C's four lines, and
+`forward-char`/`backward-char` are `(0, 1, "^p")` over it. The measured
+table is in `cmds-tests.scm` (17): both ends, past the end, no argument, a
+nil argument, and a negative N.
+
+**The neighbouring commands have the same shape and were not touched.**
+`beginning-of-line` and `end-of-line` are also `(0, 1, "^p")` in `cmds.c`,
+and their N is not merely optional: `(beginning-of-line N)` moves forward
+N - 1 lines first, and this tree's take no argument at all, so the call is
+an error *and* the behaviour is missing. That is a bigger change than an
+arity default - it changes what the command does - so it is on the record
+here rather than guessed at.

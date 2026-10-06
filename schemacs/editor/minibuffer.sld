@@ -2609,10 +2609,10 @@ Just \\[universal-argument] as argument means to use the current column."
           (when (and (< (point) (line-end-position))
                      (let ((c (char-after (point))))
                        (and c (char=? c #\space))))
-            ;; `(forward-char 1)': Emacs's C primitive defaults N to 1,
-            ;; and this tree's `forward-char' is the *command*, whose
-            ;; count is required - see the note in `cmds.sld'.
-            (forward-char 1)))
+            ;; `(forward-char)' with no argument, which is Emacs's own
+            ;; call and its `(&optional N)' default of 1 - see the note
+            ;; on `move_point' in `cmds.sld' for what that cost.
+            (forward-char)))
         ;; `pop-to-buffer' and not `display-buffer'. Emacs shows the
         ;; debugger's buffer *and selects its window* (`debug.el:270'),
         ;; which is why a backtrace has the focus the moment it appears;

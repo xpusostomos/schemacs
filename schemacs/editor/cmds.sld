@@ -37,9 +37,11 @@
     (only (schemacs editor frame) *current-frame* frame-keymap-state)
     (prefix (schemacs keymap) km:)
     (only (schemacs editor engine)
-          text-editor-delete-from-cursor text-editor-get-end-of-line
+          text-editor-delete-from-cursor text-editor-get-cursor
+          text-editor-get-end-of-line
           text-editor-get-start-of-line text-editor-insert
-          text-editor-move-cursor text-editor-set-cursor)
+          text-editor-move-cursor text-editor-point-min text-editor-point-max
+          text-editor-set-cursor)
     )
 
   (export
@@ -203,15 +205,69 @@
           (text-editor-insert (current-buffer) #\tab)
           (loop (+ 1 i)))))
 
-    (define-command (forward-char count)
-      "Move point N characters forward."
-      (interactive "p")
-      (text-editor-move-cursor (current-buffer) count))
+    (define (%move-point n forward)
+      ;; GNU Emacs's `move_point' (`cmds.c:40'), which `forward-char' and
+      ;; `backward-char' below both are:
+      ;;
+      ;;     if (NILP (n)) XSETFASTINT (n, 1); else CHECK_FIXNUM (n);
+      ;;     new_point = PT + (forward ? XFIXNUM (n) : - XFIXNUM (n));
+      ;;     if (new_point < BEGV) { SET_PT (BEGV); xsignal0 (Qbeginning_of_buffer); }
+      ;;     if (new_point > ZV)   { SET_PT (ZV);   xsignal0 (Qend_of_buffer); }
+      ;;     SET_PT (new_point);
+      ;;
+      ;; Three things there, and until 2026-10-06 this tree had none of
+      ;; them: N is *optional* and a nil N is 1; the move stops at the
+      ;; boundary; and it then **signals** - "On reaching end or beginning
+      ;; of buffer, stop and signal error" - so a command that runs off
+      ;; the end fails with `end-of-buffer' rather than quietly clamping.
+      ;; The tree's `text-editor-move-cursor' clamps and says nothing.
+      ;;
+      ;; Emacs signals `beginning-of-buffer' and `end-of-buffer'; the
+      ;; messages their error symbols carry, measured, are "Beginning of
+      ;; buffer" and "End of buffer".
+      ;;--------------------------------------------------------------
+      (let ((n (if (or (not n) (eq? n #f)) 1 n)))
+        (let* ((ed (current-buffer))
+               (pt (text-editor-get-cursor ed))
+               (new (if forward (+ pt n) (- pt n)))
+               (low (text-editor-point-min ed))
+               (high (text-editor-point-max ed)))
+          (cond
+           ((< new low)
+            (text-editor-set-cursor ed low)
+            (error "Beginning of buffer"))
+           ((> new high)
+            (text-editor-set-cursor ed high)
+            (error "End of buffer"))
+           (else
+            (text-editor-set-cursor ed new)
+            #f)))))
 
-    (define-command (backward-char count)
-      "Move point N characters backward."
+    (define-command (forward-char . rest)
+      ;; GNU Emacs's `forward-char' (`cmds.c:69'), whose DEFUN is
+      ;; `(0, 1, "^p")' - **N is optional**, and "If N is omitted or nil,
+      ;; move point 1 character forward". It was a required parameter
+      ;; here, so `(forward-char)' was a "Wrong number of arguments"
+      ;; error where Emacs moves one character - which is how the bug was
+      ;; found, by the backtrace port calling `(forward-char)' the way
+      ;; Emacs's `debugger-setup-buffer' does.
+      "Move point N characters forward (backward if N is negative).
+On reaching end or beginning of buffer, stop and signal error.
+Interactively, N is the numeric prefix argument.
+If N is omitted or nil, move point 1 character forward."
       (interactive "p")
-      (text-editor-move-cursor (current-buffer) (- count)))
+      (%move-point (if (pair? rest) (car rest) #f) #t))
+
+    (define-command (backward-char . rest)
+      ;; ...and its mirror, `(0, 1, "^p")' the same way: it is
+      ;; `(move_point (n, 0))', so every word of the above holds with the
+      ;; sign turned round.
+      "Move point N characters backward (forward if N is negative).
+On attempt to pass beginning or end of buffer, stop and signal error.
+Interactively, N is the numeric prefix argument.
+If N is omitted or nil, move point 1 character backward."
+      (interactive "p")
+      (%move-point (if (pair? rest) (car rest) #f) #f))
 
     (define-command (beginning-of-line)
       "Move point to the beginning of the current line."
