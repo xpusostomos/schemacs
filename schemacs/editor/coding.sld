@@ -82,6 +82,7 @@
    coding-system-name coding-system-base coding-system-eol-type
    coding-system-iconv-name coding-system-raw?
    coding-system-mnemonic coding-system-bom
+   check-coding-system
    coding-system-p
    ;; The registry lookup, Emacs's `CODING_SYSTEM_SPEC'. It is here for
    ;; the tests; nothing outside this file needs it, because the public
@@ -187,14 +188,44 @@
       ;; **"or nil", and ours used to answer #f for it.** The docstring
       ;; this was copied from has those words in its first line and they
       ;; were dropped on the way in. Emacs reads a nil coding system as
-      ;; "none named", which passes every check it makes; see
-      ;; `check-coding-system' in `coding.sld''s neighbours for what a
-      ;; nil would then mean on a save, which is the `undecided' case this
-      ;; tree does not carry.
+      ;; "none named", which passes every check it makes - and
+      ;; `check-coding-system' below answers nil for it too, so what a nil
+      ;; then means on a save is the `undecided' case this tree carries as
+      ;; the `undecided' coding system.
       ;;--------------------------------------------------------------
       (cond ((not thing) #t)
             ((symbol? thing) (if (find-coding-system thing) #t #f))
             (else #f)))
+
+    (define (check-coding-system coding-system)
+      ;; GNU Emacs's `check-coding-system' (`coding.c:8605'): "Check
+      ;; validity of CODING-SYSTEM. If valid, return CODING-SYSTEM, else
+      ;; signal a `coding-system-error' error. It is valid if it is nil or
+      ;; a symbol defined as a coding system by the function
+      ;; `define-coding-system'."
+      ;;
+      ;; Measured on Emacs 31.1: nil answers nil; a symbol that names
+      ;; nothing signals with the message "Invalid coding system: X"; and
+      ;; anything that is not a symbol at all - a string, a number - is a
+      ;; `wrong-type-argument' *before* the lookup, which is why a string
+      ;; is an error here where `coding-system-p' merely answers nil.
+      ;;
+      ;; Two departures, both named rather than hidden: Emacs's
+      ;; `coding-system-error' is a condition *type* a caller can catch by
+      ;; name, and this raises through `error', the one condition this
+      ;; tree signals; and the offending object is not shown in the
+      ;; type-error message, because printing an arbitrary Scheme object
+      ;; the Emacs way needs `prin1', which lives above this library.
+      ;; The callers that care are `set-buffer-file-coding-system' and
+      ;; `select-safe-coding-system', both in `mule-cmds.sld'.
+      ;;--------------------------------------------------------------
+      (cond ((not coding-system) coding-system)
+            ((not (symbol? coding-system))
+             (error "Wrong type argument: symbolp"))
+            ((find-coding-system coding-system) coding-system)
+            (else
+             (error (string-append "Invalid coding system: "
+                                   (symbol->string coding-system))))))
 
     (define (find-coding-system name)
       ;; The `<coding-system>` NAME names, or #f.

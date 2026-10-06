@@ -12,7 +12,7 @@
        decode-eol encode-eol coding-system?
        detect-coding-bytes detect-coding-system
        find-operation-coding-system *file-coding-system-alist*
-       coding-system-bom coding-system-eol-type)
+       coding-system-bom check-coding-system coding-system-eol-type)
  (only (schemacs editor search) string-match)
  (scheme file)
  (rnrs io ports)
@@ -605,5 +605,36 @@
   (map (lambda (cs)
          (bv->ints (encode-coding-string (u32vector 97 10 98) cs)))
        '(utf-8-dos utf-8-unix raw-text no-conversion)))
+
+
+;; ------------------------------------------------------------------
+;; check-coding-system
+;;
+;; Emacs 31.1's own answers: nil passes and is returned; a symbol that
+;; names a coding system is returned; a symbol that names nothing signals
+;; "Invalid coding system: X"; and anything that is not a symbol at all is
+;; a type error *before* the lookup - which is why a string is an error
+;; here where `coding-system-p' merely answers nil.
+
+(define (signals? thunk)
+  (guard (e (#t #t)) (thunk) #f))
+
+(define (message-of thunk)
+  (guard (e ((error-object? e) (error-object-message e)) (else #f)) (thunk) #f))
+
+(test-equal "check-coding-system returns what it is given, when it names one"
+  '(utf-8 iso-latin-1 #f)
+  (list (check-coding-system 'utf-8)
+        (check-coding-system 'iso-latin-1)
+        (check-coding-system #f)))
+
+(test-equal "... and signals otherwise, with Emacs's message"
+  '(#t "Invalid coding system: nonsense" #t #f)
+  (list (signals? (lambda () (check-coding-system 'nonsense)))
+        (message-of (lambda () (check-coding-system 'nonsense)))
+        (signals? (lambda () (check-coding-system "utf-8")))
+        ;; a string is a type error but a *symbol* is not: `coding-system-p'
+        ;; answers nil for it, and this goes on to the lookup
+        (message-of (lambda () (check-coding-system 'utf-8)))))
 
 (test-end "schemacs_editor_coding")

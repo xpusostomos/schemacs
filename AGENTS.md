@@ -4064,3 +4064,67 @@ forms, the NUL case, and the encode direction.
 
 All 32 suites pass, `tools/pty-check.py` still passes, `coding-diff.py` is
 19 identical / 2 known / 0 new.
+
+# `check-coding-system`, and two more plan lines that are wrong (2026-10-06)
+
+## Item 3 is done
+
+`coding-system-p` already answered `#t` for nil (the docstring's "or nil"
+was restored earlier); what was missing was **`check-coding-system`**
+(`coding.c:8605`), which is now in `coding.sld`. Measured on Emacs 31.1:
+
+| argument | Emacs | now |
+|---|---|---|
+| `'utf-8` | `utf-8` | same |
+| nil | nil | `#f` |
+| `'nonsense` | signals "Invalid coding system: nonsense" | same message |
+| `"utf-8"` | `wrong-type-argument` | signals |
+
+The last row is the distinction worth having: a **string** is an error here
+where `coding-system-p` merely answers nil, because Emacs checks `symbolp`
+before the lookup.
+
+Two departures, named in the source rather than hidden: Emacs's
+`coding-system-error` is a condition *type* a caller can catch by name and
+this raises through `error`, the one condition this tree signals; and the
+offending object is not shown in the type-error message, because printing
+an arbitrary object the Emacs way needs `prin1`, which lives above this
+library.
+
+## Item 5 is not small either: there are no unibyte buffers
+
+The plan says `decode-coding-region` and `encode-coding-region` are
+"a copy rather than a conversion here, since the buffer is already code
+points". That is the wrong reason but the right conclusion by accident -
+and the real blocker is different. Both are thin wrappers over
+`code_convert_region`, which is ~70 lines at the DEFUN level, so the size
+was never the problem. The problem is what they *mean*:
+
+> If, for instance, you have a region that contains data that represents
+> the two bytes #xc2 #xa9, after calling this function with the utf-8
+> coding system, the region will contain the single character ©
+
+This tree has **no unibyte buffers** - `enable-multibyte-characters` is
+always true here, and `mule.sld` says why - so there is no way to say "this
+region holds bytes" and the decode direction has no input to work on. The
+contract is not expressible, not merely unimplemented. Porting it needs the
+unibyte/multibyte distinction first, which is a different job.
+
+## Item 4 needs a chain, and the docstrings are the point
+
+`list-coding-systems` (`mule-diag.el:748`) is a dozen lines, but
+`print-coding-system-briefly` wants `coding-system-list`,
+`sort-coding-systems`, `coding-system-aliases` and
+`coding-system-doc-string`, and **our coding systems carry no docstrings at
+all** - which is what the command exists to show ("This shows the mnemonic
+letter, name, and description of each coding system"). Its alias branch also
+reads `coding-system-eol-type` as an *integer index into the base's vector*
+of variants, which is not the shape this tree settled on (`mule-cmds.sld`
+records that departure).
+
+So item 4 is: docstrings as data (script-emittable from Emacs, the charset
+registry's method), four small accessors, a `*Help*` buffer - one exists in
+`replace.sld` to copy - and then the command. Bounded, but a pass of its
+own, not the "small buffer" the plan implies.
+
+**All 32 suites pass (coding-tests 56), no new warnings.**
