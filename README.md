@@ -23,6 +23,7 @@ Here's what works already:
 * isearch, query-replace, query-replace-regexp 
 * Completions, query-replace have color highlighting like real emacs
 * eval-expression, eval-region
+* Character set detection and conversion (C-x RET f, C-x RET c)
 * Buffer list
 * Dired
 * Modes, minor modes, special mode handling
