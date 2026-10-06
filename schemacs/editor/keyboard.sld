@@ -801,7 +801,7 @@
       ;;--------------------------------------------------------------
       (read-timeout-or -1 #f (and (repl-open?) 100)))
 
-    (define (command-loop frame)
+    (define (command-loop frame . args)
       ;; Read key events and dispatch them, until something leaves this
       ;; level with `exit-recursive-edit' - or, at the outermost level,
       ;; until the editor is quit.
@@ -823,6 +823,20 @@
            ;; after a key is typed looks like nothing happened
            (render! frame)
            (let loop ()
+             ;; **Re-read the selected frame each time round, if this is
+             ;; the outermost loop.** Selecting another frame - `C-x 5 o',
+             ;; or a click in another window once there is one - has to
+             ;; take effect on the *next* command, and Emacs's loop reads
+             ;; `selected_frame' every iteration the same way. The frame
+             ;; this loop was *called* with is what a nested loop keeps:
+             ;; `recursive-edit' passes no flag, so a prompt stays on the
+             ;; frame it was asked from. That pinning is a deliberate
+             ;; departure - Emacs gives every frame its own minibuffer, and
+             ;; this tree has a single `*minibuffer*' parameter
+             ;; (`frame.sld'), so following focus mid-prompt would move the
+             ;; prompt's state to another frame.
+             (when (and (pair? args) (car args))
+               (set! frame (or (*current-frame*) frame)))
              ;; Give the development REPL a turn before waiting for a key.
              ;; A no-op unless `SCHEMACS_REPL' opened it. A terminal's read
              ;; blocks in `getch' with nothing to hang the poll on, so
@@ -1100,7 +1114,9 @@ With argument, insert ARG copies of the character."
         (call/cc
          (lambda (k)
            (set!frame-quit-cont frame k)
-           (command-loop frame)))))
+           ;; #t: the outermost loop follows the selected frame, which is
+           ;; what makes `C-x 5 o' take effect (`recursive-edit' does not).
+           (command-loop frame #t)))))
 
     (define-key *default-keymap* (kbd "C-q") quoted-insert)
 

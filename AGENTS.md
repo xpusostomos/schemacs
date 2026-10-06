@@ -4169,3 +4169,105 @@ honest subset of the priority rule, then the command and its `*Help*`
 buffer.
 
 **All 32 suites pass (coding-tests 62), no new warnings.**
+
+# Frames: the list, the selection, and C-x 5 (2026-10-06)
+
+The editor had **exactly one frame**, made at startup, and no way to have
+another. That is now the Emacs model.
+
+## First: does a tty have frames? Yes, and I checked
+
+Emacs on a terminal really does create them - `emacs -nw` in a pty with
+`(make-frame)` answers `frames=2`. What differs is only what it *looks* like:
+
+- **GUI**: a frame is an OS window; a second frame is a second window.
+- **tty**: a frame is a *screen* on that terminal. There are no windows, so a
+  second frame is **invisible** - it exists, it is in `frame-list`, it is
+  selectable, and the terminal still shows one frame at a time until `C-x 5 o`
+  switches. `make_terminal_frame`'s own docstring (`frame.c:1741'): "You can
+  create multiple frames on a single text terminal, but only one of them (the
+  selected terminal frame) is actually displayed."
+
+That is why nobody has seen a tty frame. It is not that they do not exist.
+
+**Scope agreed with Chris: GUI frames first.** A GTK frame is a window you
+can see; the tty backend is a stub that Emacs's own design anticipates
+(`frame-creation-function` is a `cl-defgeneric` with one method per
+window-system, `frame.el:30-46`).
+
+## The bug the design review caught in my own plan
+
+I first planned to replace `(current-display)` with the frame's output at the
+~40 draw call sites in `xdisp.sld`. That was wrong twice over:
+
+- It is the most fragile code in the tree and ncurses shares it.
+- **It would not have worked.** `render-window!` picks the mode-line face
+  through `selected-window`, which is `(frame-selected-window
+  (*current-frame*))` (`frame.sld:1185', used at `xdisp.sld:2322'), and the
+  cursor type comes from `*frame-focus*`. Frame B would have been drawn with
+  **A's** selected mode line and A's cursor.
+
+The fix is to bind **both** parameters at the `render!' boundary and leave
+the body alone. With one frame it is an identity rebind - which is why the
+suites passed unchanged - and it makes `frame-output' live instead of dead.
+
+## Two facts read out of the source, because the design rests on them
+
+- `f->terminal` is assigned **only at creation** (`frame.c:1446' in
+  `make_frame', `:1566' in `make_terminal_frame') and nulled at death
+  (`:2940'). Never reassigned. So a frame's display is fixed for its life,
+  which is what makes reading `frame-output' safe rather than re-deriving it.
+- Redisplay reaches the terminal **through the frame**:
+  `FRAME_TERMINAL (f)->...' throughout `dispnew.c'/`xdisp.c'. There is no
+  global terminal.
+
+## A finding that shapes the next phase
+
+**Emacs's redisplay is a loop over every frame** -
+`FOR_EACH_FRAME (tail, frame)` at `xdisp.c:14350' and `:14291', with
+`consider_all_windows_p' deciding whether to mend all windows on all frames
+or only the selected frame's. Our `render!' renders **one** frame, the one
+the command loop hands it. So with two windows, editing in A leaves B stale:
+Emacs redraws both because redisplay is a frame loop, not a call.
+
+## Bugs in my own work, and how each was caught
+
+1. **`make-frame` passed parameter *objects* to `run-hooks`.** I wrote
+   `(run-hooks *before-make-frame-hook*)' where a parameter is a
+   *procedure* - so `run-hooks` called it with no arguments, discarded the
+   value, and ran nothing. It is `(*before-make-frame-hook*)'. Caught by the
+   test asserting the hook order.
+2. **A missing import** (`*before-make-frame-hook*` in the test file) - the
+   class this file has a section about, for the umpteenth time.
+3. **A paren splice that broke the file, and I did not re-run
+   `syntax-check` after it.** The symptom was the worst kind: the suite ran
+   four test groups, printed four PASSes, then **died with exit 1 and no
+   error at all**, which read as a hang or a record-printer crash and sent me
+   guessing. `guile -s tools/syntax-check.scm` named it in one line. Run it
+   after *every* scripted edit, including a splice you are sure about.
+4. **Tests asserting literal frame names.** Emacs hands out `F1', `F2', ...
+   off a counter that lives as long as the editor, so by the time a test runs
+   the numbers are in the hundreds and a literal `F2' means nothing. The
+   tests assert by frame *identity* now.
+5. **A test passed `#t' as FRAME** where Emacs's second argument is FORCE -
+   and that exposed a real gap: my `delete-frame` returned `nil` for
+   something that is not a frame at all. Emacs type-errors there
+   (`CHECK_LIVE_FRAME`) and answers nil only for a frame that is merely
+   *dead* (`frame.c:2611'). Fixed.
+
+## What is named as not carried
+
+Frame **parameters** - which is most of what Emacs's `make-frame` does, since
+it merges `window-system-default-frame-alist`, `default-frame-alist` and
+`frame-inherited-parameters` before creating anything. A frame here has no
+parameters to merge. Also not carried: aliases, child frames, tooltip frames,
+surrogate minibuffer frames, iconification, the MRU list
+(`delete-frame-choose-selected`), the `delete-frame-functions` and
+`after-delete-frame-functions` hooks, and the exit-70 path for forcibly
+deleting the last frame. `display-make-frame` is not a display generic yet,
+so with no `frame-creation-function` installed `make-frame` reports "This
+display cannot make more frames" instead of making one.
+
+**Verified:** 32 suites, ncurses-editor-tests 250 (was 240), no new
+warnings. `tools/pty-check.py` is the ncurses regression check for the
+`render!` change and is run on its own.
