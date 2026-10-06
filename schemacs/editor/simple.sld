@@ -21,6 +21,12 @@
     ;; `format' fills in `what-cursor-position''s message - Guile's,
     ;; which `(scheme base)' does not have.
     (only (guile) format)
+    ;; `eval-region' reads the region with the runtime's reader and runs
+    ;; it with the runtime's evaluator, as `eval-expression' does.
+    (only (scheme read) read)
+    (scheme eval)
+    (only (scheme write) write)
+    (only (guile) current-module)
     ;; `caddr' is `(scheme cxr)'s, and `push-mark' takes Emacs's three
     ;; optional arguments.
     (only (scheme cxr) caddr)
@@ -78,7 +84,7 @@
           set-buffer-local-value! transient-mark-mode)
     (only (schemacs editor command) *mark-even-if-inactive*)
     (only (schemacs editor editfns)
-          bolp buffer-size delete-and-extract-region delete-region eobp
+          bolp buffer-size buffer-substring delete-and-extract-region delete-region eobp
           eolp following-char forward-line insert line-beginning-position
           current-message line-end-position goto-char message point point-max
           preceding-char region-beginning region-end save-excursion)
@@ -150,6 +156,9 @@
    set!mark-ring use-region-p
 prefix-argument-description
    what-cursor-position
+   ;; `eval-region' is `lread.c''s, M-x only as it is in Emacs -
+   ;; `(where-is-internal 'eval-region)' is nil.
+   eval-region
    open-line open-line-command delete-indentation-command
 just-one-space delete-horizontal-space delete-blank-lines
    *kill-whole-line*
@@ -2441,4 +2450,65 @@ non-nil."
        (lambda () #f)))
 
     (add-keymap-layer! *default-keymap* self-insert-layer)
+
+    ;;----------------------------------------------------------------
+    ;; eval-region - `lread.c:2420'
+    ;;------------------------------------------------------------------
+    ;;
+    ;; **Its Emacs home is `lread.c', and this is `simple.sld'.** There is
+    ;; no `lread.sld' here, and the command needs nothing the minibuffer
+    ;; has - it reads the *region*, not a prompt - so it sits beside the
+    ;; other commands that work on one (`kill-region' above). The reader
+    ;; and the evaluator are the runtime's, which is the same departure
+    ;; `eval-expression' carries.
+
+    (define (%eval-region-value->string value)
+      (call-with-port (open-output-string)
+        (lambda (port) (write value port) (get-output-string port))))
+
+    (define-command (eval-region start end printflag)
+      "Execute the region as Scheme code.
+When called from programs, expects two arguments,
+giving starting and ending indices in the current buffer
+of the text to be executed.
+Programs can pass third argument PRINTFLAG which controls output:
+ a value of nil means discard it; anything else is stream for printing it.
+
+This function does not move point."
+      ;; `(interactive "r")' in Emacs, and PRINTFLAG nil - which is what
+      ;; Emacs's own interactive form passes, its spec taking two
+      ;; arguments where the function takes three. The tree spells a
+      ;; region spec as the two calls.
+      (interactive (list (region-beginning) (region-end) #f))
+      ;; "This function does not move point" - and none is moved here,
+      ;; because the region's text is read from a *string*; Emacs narrows
+      ;; the buffer and reads from point, which is why it has to say so.
+      ;;
+      ;; **An error does not put up a backtrace, and that is Emacs's own
+      ;; division rather than an omission.** `eval-expression-debug-on-error'
+      ;; says "If non-nil set `debug-on-error' to t in `eval-expression'"
+      ;; - `eval-expression' and nothing else - and `Feval_region' has no
+      ;; handler at all, so an error is the command loop's and comes out
+      ;; as the echo-area message the command loop makes of any error.
+      (let ((text (buffer-substring start end)))
+        ;; `Feval_region' binds `standard-output' to a stream that
+        ;; discards - Emacs's is the symbol `symbolp', which is called
+        ;; with each character and throws it away - so anything the code
+        ;; prints goes nowhere. A string port is the sink here, Guile
+        ;; having no void port; what accumulates in it is dropped.
+        (parameterize ((current-output-port (open-output-string)))
+          (let ((port (open-input-string text)))
+            (let loop ()
+              (let ((form (read port)))
+                (unless (eof-object? form)
+                  (let ((value (eval form (current-module))))
+                    ;; "if (printflag) { Vvalues = Fcons (val, Vvalues);
+                    ;; ... }" - with PRINTFLAG nil, which is every
+                    ;; interactive call, nothing is printed at all.
+                    (when printflag
+                      (if (eq? printflag #t)
+                          (message "%s" (%eval-region-value->string value))
+                          (write value printflag))))
+                  (loop))))))))
+
     ))

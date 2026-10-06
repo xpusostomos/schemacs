@@ -1624,6 +1624,57 @@ def check_eval_expression():
     return problems
 
 
+def check_eval_region():
+    """M-x eval-region runs the region, and says nothing when it works.
+
+    GNU Emacs's `eval-region' is `lread.c:2420'. It evaluates the text
+    between point and mark and prints *nothing* - its PRINTFLAG is nil
+    for an interactive call, and the C only prints "if (printflag)".
+    The text it runs is Scheme here, the same departure `M-: ' carries.
+
+    An error is the command loop's, not the debugger's: `Feval_region'
+    has no handler at all, and `eval-expression-debug-on-error' binds
+    `debug-on-error' for `eval-expression' and nothing else. So a bad
+    region gives the echo-area message and *no* backtrace buffer, which
+    is the difference between this and `M-:'.
+    """
+    problems = []
+    # a region that runs: point and mark over the whole buffer, then the
+    # command. C-x h is `mark-whole-buffer'.
+    path = "/tmp/pty-check-eval-region.txt"
+    open(path, "w").write("(+ 40 2)\n")
+    out = drive([C_x + C_f, path.encode(), RET, C_x, b"h", ESC, b"x",
+                 b"eval-region", RET], path)
+    screen = screen_of(out)
+    if "42" in screen:
+        problems.append("eval-region printed the value; it prints nothing "
+                        "(screen %r)" % screen[:300])
+    if "Debugger entered" in out:
+        problems.append("eval-region on a good region showed a backtrace")
+    # ...and it really ran: a region that cannot be read or evaluated
+    # says so, so silence here is the command working rather than never
+    # being reached
+    for complaint in ("Unbound variable", "Wrong type", "not found"):
+        if complaint in out:
+            problems.append("eval-region on a good region reported %r - the "
+                            "command did not complete (screen %r)"
+                            % (complaint, screen[:300]))
+    # a region that does not run: the message, and no *Backtrace*
+    path = "/tmp/pty-check-eval-region-bad.txt"
+    open(path, "w").write("(car (quote ()))\n")
+    out = drive([C_x + C_f, path.encode(), RET, C_x, b"h", ESC, b"x",
+                 b"eval-region", RET], path)
+    if "Debugger entered" in out:
+        problems.append("eval-region on a bad region showed a backtrace; "
+                        "`eval-expression-debug-on-error' is for "
+                        "`eval-expression' alone")
+    if "Wrong type" not in out:
+        problems.append("eval-region on a bad region did not report the "
+                        "error in the echo area (screen %r)"
+                        % screen_of(out)[:300])
+    return problems
+
+
 def check_resize():
     """Split the frame, then make the terminal wider, narrower and taller.
 
@@ -2454,6 +2505,7 @@ CHECKS = {
     "minibuffer": check_minibuffer,
     "pagedown": check_pagedown,
     "eval-expression": check_eval_expression,
+    "eval-region": check_eval_region,
     "scroll": check_scroll,
     "save": check_save,
     "save-y-n": check_save_y_n,

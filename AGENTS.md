@@ -2312,3 +2312,56 @@ lives in `files.sld`, which is above `simple.sld`; and `:suppress` needs a
 way to make a buffer's map refuse printing characters, which the tree has
 no spelling for. It wants its own pass, and it is more than the backtrace
 buffer: it is dired and the Buffer Menu too.
+
+## `eval-region` (2026-10-06)
+
+Chris: *"can you implement eval-region. It seems to have silent output,
+unless there is an error in which case you just get minibuffer message."*
+Both halves of that are the C, and they are two different mechanisms.
+
+**It is `lread.c:2420`, not `simple.el`** - `Feval_region`, over
+`readevalloop` (`:2132`). Emacs has no `lread.el`, so there is no
+`lread.sld` to put it in; it sits in `simple.sld` beside the other
+commands that work on a region, which is the same seam
+`locate-file-internal` took into `fileio.sld`.
+
+**Silence** is the PRINTFLAG. `Feval_region` binds `standard-output` and
+calls `readevalloop` with `!NILP (printflag)`; the loop ends with
+
+```c
+      if (printflag)
+	{
+	  Vvalues = Fcons (val, Vvalues);
+	  if (EQ (Vstandard_output, Qt)) Fprin1 (val, Qnil, Qnil);
+	  else Fprint (val, Qnil);
+	}
+```
+
+and the interactive spec is `"r"` - **two** arguments where the function
+takes four - so every interactive call passes a nil PRINTFLAG and nothing
+is printed. (The discard stream Emacs binds `standard-output` to is the
+*symbol* `symbolp`: a function stream is called with each character, and
+`symbolp` is a function that throws its argument away.)
+
+**The minibuffer message on an error is not this function's either.**
+`Feval_region` has no handler at all; what catches the error is the command
+loop's `report-command-error!`, which is what any command's error becomes.
+That is the difference from `M-:` and it is deliberate on Emacs's side:
+`eval-expression-debug-on-error` says "If non-nil set `debug-on-error' to t
+in **`eval-expression`**" - that command and nothing else - so a bad region
+gets an echo-area message and no backtrace, and a bad expression gets a
+backtrace. Both are now checked at a pty.
+
+`eval-region` is **M-x only**, as in Emacs: `(where-is-internal
+'eval-region)` is nil.
+
+### Not carried
+
+- **The region is read from a string**, where Emacs narrows the buffer and
+  reads from point. The docstring's "This function does not move point"
+  comes free that way; the narrowing is not needed.
+- **`standard-output` is a string port**, not a void one - Guile has no
+  `open-output-void` and no `void-port` (checked). What accumulates is
+  dropped, so it is invisible, but it is not the same object.
+- **`read-function`**, the fourth argument, which lets a caller supply its
+  own reader. Nothing here would pass one.
