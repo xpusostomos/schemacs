@@ -47,7 +47,7 @@
           current-prefix-arg define-command run-command uarg->integer
           *command-table* command-value-of command-interactive-spec)
     (only (schemacs editor engine)
-          new-text-editor text-editor-char-count text-editor-copy-string
+          new-text-editor text-editor-char-count text-editor-point-min text-editor-copy-string
           text-editor-point-min text-editor-point-max
           text-editor-cursor-column text-editor-cursor-line
           text-editor-delete-from-cursor text-editor-get-cursor
@@ -70,8 +70,8 @@
           buffer-fill-column set!buffer-fill-column
           buffer-local-keymap set!buffer-local-keymap set!buffer-default-directory
           ;; `completion-base-position' is a variable local to `*Completions*'
-          buffer-local-value erase-buffer set-buffer-local-value!
-          with-current-buffer)
+          buffer-local-value erase-buffer set!mode-name
+          set-buffer-local-value! use-local-map with-current-buffer)
     ;; `getcwd' is Guile's, for a buffer that has no `default-directory'.
     (only (guile) getcwd)
     ;; `(scheme eval)''s `eval' is the evaluator `eval-expression' runs,
@@ -84,7 +84,8 @@
     (only (scheme write) display write)
     (only (schemacs editor keymap) set-keymap-parent)
     (only (schemacs editor window)
-          delete-window display-buffer get-buffer-window quit-window
+          delete-window display-buffer get-buffer-window pop-to-buffer
+          quit-window
           split-main-window-below switch-to-buffer-other-window
           window-min-height)
     ;; `line-number-at-pos' is `editfns.c''s: the default `goto-line'
@@ -92,7 +93,10 @@
     ;; `search.c''s, which have their own library now (`zap-to-char'
     ;; walks with them).
     (only (schemacs editor editfns)
-          insert line-number-at-pos message point)
+          char-after goto-char insert line-end-position
+          line-number-at-pos message point)
+    ;; `forward-char' is `cmds.c''s and lives in `(schemacs editor cmds)'.
+    (only (schemacs editor cmds) forward-char)
     (only (schemacs editor search) search-backward search-forward)
     ;; `current-column' is indent.c's, which this library is the first
     ;; user of - `set-fill-column''s bare-C-u case reads it.
@@ -101,7 +105,10 @@
     ;; (`minibuffer-local-filename-completion-map' below), and
     ;; `with-current-buffer' and the line motion are the ordinary
     ;; commands the minibuffer's own keys fall back on.
-    (only (schemacs editor simple) self-insert-command
+    ;; `special-mode' is the backtrace buffer's mode - see the note on
+    ;; `%eval-expression-backtrace'.
+    (only (schemacs editor simple) special-mode special-mode-map
+       self-insert-command
        kill-region push-mark region-active-p
        *this-command* *last-command*)
     (only (schemacs editor frame)
@@ -202,6 +209,7 @@ read-number-history
    ;; `eval-expression' and its variables, from `simple.el'
    eval-expression eval-expression-print-format read--expression
    read--expression-map read--expression-try-read
+   debugger-quit debugger-mode-map
    *eval-expression-print-maximum-character* *eval-expression-debug-on-error*
    read-expression-history
    set-fill-column
@@ -501,6 +509,19 @@ read-number-history
                     (or (minibuffer-typed-content mb) "")
                     (list-ref entries (- next 1))))))))
 
+    (define (minibuffer-local-bindings)
+      ;; The keys GNU Emacs's `minibuffer-local-map' carries, as (KEY .
+      ;; COMMAND) pairs. One list, because two maps are built from it:
+      ;; the minibuffer's own, and the expression prompt's - see the note
+      ;; on `read--expression-map' for why the second cannot inherit the
+      ;; first.
+      ;;--------------------------------------------------------------
+      (list (cons (kbd "RET") exit-minibuffer)
+            (cons (kbd "C-j") exit-minibuffer)
+            (cons (kbd "C-g") abort-recursive-edit)
+            (cons (kbd "M-p") previous-history-element)
+            (cons (kbd "M-n") next-history-element)))
+
     (define minibuffer-local-map
       ;; GNU Emacs's `minibuffer-local-map': the minibuffer's own bindings.
       ;; RET and C-j both leave the minibuffer, C-g abandons the command
@@ -516,12 +537,7 @@ read-number-history
       ;;--------------------------------------------------------------
       (km:keymap
        '*minibuffer-local-map*
-       (km:alist->keymap-layer
-        (list (cons (kbd "RET") exit-minibuffer)
-              (cons (kbd "C-j") exit-minibuffer)
-              (cons (kbd "C-g") abort-recursive-edit)
-              (cons (kbd "M-p") previous-history-element)
-              (cons (kbd "M-n") next-history-element)))))
+       (km:alist->keymap-layer (minibuffer-local-bindings))))
 
 
     ;;----------------------------------------------------------------
@@ -2565,8 +2581,45 @@ Just \\[universal-argument] as argument means to use the current column."
           (insert "Debugger entered--Scheme error: ")
           (insert (%condition-message condition))
           (insert "\n")
-          (insert frames))
-        (display-buffer buffer)))
+          (insert frames)
+          ;; The mode, which is what makes the buffer what it is: GNU
+          ;; Emacs's `debugger-mode' (`debug.el:624') derives from
+          ;; `backtrace-mode' (`backtrace.el:830') derives from
+          ;; `special-mode' (`simple.el:589'), and `special-mode' is what
+          ;; sets `buffer-read-only' and gives the buffer its map.
+          (special-mode)
+          (set!mode-name "Debugger")
+          (use-local-map debugger-mode-map)
+          ;; "Place point on \"stack frame 0\"" (`debug.el:372'):
+          ;;
+          ;;     (goto-char (point-min))
+          ;;     (search-forward ":" (line-end-position) t)
+          ;;     (when (and (< (point) (line-end-position))
+          ;;                (= (char-after) ?\s))
+          ;;       (forward-char))
+          ;;
+          ;; The header's line, which is what makes the buffer open showing
+          ;; *why* it is there rather than its last frame - the backtrace
+          ;; is longer than the window, and point left at the end of the
+          ;; insertion would have shown the bottom of it.
+          (goto-char (text-editor-point-min buffer))
+          (search-forward ":" (line-end-position) #t)
+          ;; `(char-after)' defaults to point in Emacs; this tree's takes
+          ;; the position it is asked about, so point is passed.
+          (when (and (< (point) (line-end-position))
+                     (let ((c (char-after (point))))
+                       (and c (char=? c #\space))))
+            ;; `(forward-char 1)': Emacs's C primitive defaults N to 1,
+            ;; and this tree's `forward-char' is the *command*, whose
+            ;; count is required - see the note in `cmds.sld'.
+            (forward-char 1)))
+        ;; `pop-to-buffer' and not `display-buffer'. Emacs shows the
+        ;; debugger's buffer *and selects its window* (`debug.el:270'),
+        ;; which is why a backtrace has the focus the moment it appears;
+        ;; `display-buffer' shows it in some other window and leaves point
+        ;; where it was, so the buffer is on screen and the keyboard is not
+        ;; talking to it.
+        (pop-to-buffer buffer)))
 
     (define (%eval-expression-run exp)
       ;; Evaluate EXP, and on an error fill and show `*Backtrace*' - GNU
@@ -2593,6 +2646,35 @@ Just \\[universal-argument] as argument means to use the current column."
           (if failed
               (begin (%eval-expression-backtrace value stack) #f)
               value))))
+
+    (define-command (debugger-quit)
+      ;; GNU Emacs's `debugger-quit' (`debug.el:773'): "Quit debugging and
+      ;; return to the top level." Emacs's body is
+      ;;
+      ;;     (if (= (recursion-depth) 0) (quit-window) (top-level))
+      ;;
+      ;; and there is no recursive edit to return from here, so it is
+      ;; `quit-window' - which is also what `special-mode-map''s own `q'
+      ;; would do, this binding being the debugger's refinement of it.
+      "Quit debugging and return to the top level."
+      (interactive)
+      (quit-window))
+
+    (define debugger-mode-map
+      ;; GNU Emacs's `debugger-mode-map' (`debug.el:574'). Of its keys only
+      ;; `q' is carried: `c', `d', `j', `r' and `u' are the stepper's, and
+      ;; there is no debugger here to step - the port fills the buffer and
+      ;; hands the keyboard back.
+      ;;
+      ;; Its parent is `special-mode-map', as Emacs's is, so the buffer
+      ;; gets `q' from here and whatever else the mode binds.
+      ;;--------------------------------------------------------------
+      (let ((map (km:keymap
+                  '*debugger-mode-map*
+                  (km:alist->keymap-layer
+                   (list (cons (kbd "q") debugger-quit))))))
+        (set-keymap-parent map special-mode-map)
+        map))
 
     (define-command (read--expression-try-read)
       ;; GNU Emacs's `read--expression-try-read' (`simple.el:2083'): "Try
@@ -2624,18 +2706,23 @@ Exit the minibuffer if successful, else report the error to the user."
 
     (define read--expression-map
       ;; GNU Emacs's `read--expression-map': the minibuffer's own map with
-      ;; RET bound to `read--expression-try-read'. Emacs builds it with
-      ;; `(set-keymap-parent read--expression-map minibuffer-local-map)',
-      ;; which is what keeps C-g and the history keys - a map handed to
-      ;; `read-from-minibuffer' *replaces* `minibuffer-local-map' rather
-      ;; than adding to it, so the parent is what puts them back.
+      ;; RET bound to `read--expression-try-read'.
+      ;;
+      ;; Emacs gets there with `(set-keymap-parent read--expression-map
+      ;; minibuffer-local-map)'. The entries are *copied* here instead,
+      ;; because this tree's lookup does not follow a keymap's parent: it
+      ;; searches a map's own layers and then the next map in
+      ;; `lookup-keymaps'' list, and a parent is neither - which is why
+      ;; the first version of this had no M-p and answered "; undefined
+      ;; key: (meta #\p)". Copying is also what the map means:
+      ;; `read-from-minibuffer' *replaces* `minibuffer-local-map', so
+      ;; whatever the expression prompt does not carry it loses.
       ;;--------------------------------------------------------------
-      (let ((map (km:keymap
-                  '*read--expression-map*
-                  (km:alist->keymap-layer
-                   (list (cons (kbd "RET") read--expression-try-read))))))
-        (set-keymap-parent map minibuffer-local-map)
-        map))
+      (km:keymap
+       '*read--expression-map*
+       (km:alist->keymap-layer
+        (cons (cons (kbd "RET") read--expression-try-read)
+              (minibuffer-local-bindings)))))
 
     (define (read--expression prompt)
       ;; GNU Emacs's `read--expression' (`simple.el:2063'): "Read an Emacs

@@ -2235,3 +2235,80 @@ serves - `C-u` to insert the value into the buffer rather than echo it,
 the Scheme printer has no truncation to bind. And moving point to the
 reader's error in `read--expression-try-read', which needs a reader that
 can be asked where it stopped - see above.
+
+## The backtrace buffer's three missing properties (2026-10-06)
+
+Chris, using it: *"eval-expression should have a mini-buffer history ... and
+the Backtrace window .. it should be a readonly window, and it should accept
+"q" as a keystroke which closes that window. Also when the error happens the
+backgrace window should gain focus."*
+
+All three, and each is Emacs's own mechanism rather than a special case.
+
+**The history** was a bug of mine with a good lesson in it. The first
+`read--expression-map` was built with `(set-keymap-parent map
+minibuffer-local-map)`, which is Emacs's own line - and M-p answered
+`; undefined key: (meta #\p)`. **This tree's lookup does not follow a
+keymap's parent**: `keymap-lookup` walks a map's own *layers* and then the
+next map in `lookup-keymaps`' list, and a parent is neither. The bindings
+are copied instead, from one shared `minibuffer-local-bindings` list, so
+the two maps cannot drift apart. Copying is also what the map means:
+`read-from-minibuffer` *replaces* `minibuffer-local-map`, so whatever the
+expression prompt does not carry it loses.
+
+**Read-only and `q`** are `special-mode`, not two settings. Emacs's
+`debugger-mode` (`debug.el:624`) derives from `backtrace-mode`
+(`backtrace.el:830`) derives from `special-mode` (`simple.el:589`), and
+`special-mode` is what sets `buffer-read-only` and gives the buffer its
+map; `debugger-mode-map` then refines `q` to `debugger-quit`, whose body
+at recursion depth 0 is `quit-window`. So the buffer runs `(special-mode)`,
+takes the mode name "Debugger", and gets a `debugger-mode-map` whose parent
+is `special-mode-map` and whose `q` is `debugger-quit`.
+
+**Focus** is one function: `pop-to-buffer` selects the window and
+`display-buffer` does not. Emacs's debugger uses `pop-to-buffer`
+(`debug.el:270`), which is why a backtrace has the keyboard the moment it
+appears.
+
+And a fourth thing that came out of testing it: **point must go to the
+top**. `debugger-setup-buffer` ends with `(goto-char (point-min))` and a
+search for the header's colon (`debug.el:372`, "Place point on stack frame
+0"), and without it the buffer opens scrolled to its *last* frame - the
+backtrace is longer than the window, so the header the user is meant to
+read is off-screen. That is what the first version did, and the pty check
+is what caught it.
+
+### Two arities that are not Emacs's
+
+- `char-after` here takes its position *required*; Emacs's `(char-after)`
+  defaults to point.
+- `forward-char` here is the *command*, so its count is required; Emacs's
+  is the C primitive `(&optional N)`, defaulting to 1.
+
+Both were found by the port failing with "Wrong number of arguments", and
+both are departures in `editfns.sld` and `cmds.sld` respectively rather
+than in this command. **`forward-char`'s is worth fixing**: `(forward-char)`
+with no argument is valid Emacs and would fail here.
+
+### Still empty: `special-mode-map`
+
+`special-mode-map` in `simple.sld` is `(km:keymap '*special-mode-map*)` -
+no bindings at all, with a note saying Emacs's carries the `special-mode`
+bindings. It does:
+
+```elisp
+(defvar-keymap special-mode-map
+  :suppress t
+  "q" #'quit-window  "SPC" #'scroll-up-command  "S-SPC" #'scroll-down-command
+  "DEL" #'scroll-down-command  "?" #'describe-mode  "h" #'describe-mode
+  ">" #'end-of-buffer  "<" #'beginning-of-buffer  "g" #'revert-buffer)
+```
+
+So `q`, SPC, DEL, `<` and `>` are missing from **every** special mode -
+`dired`, the Buffer Menu and now the backtrace buffer - and `g` with them,
+which is the binding the Buffer Menu's note already says it inherits. This
+was not fixed here because `describe-mode` does not exist and `revert-buffer`
+lives in `files.sld`, which is above `simple.sld`; and `:suppress` needs a
+way to make a buffer's map refuse printing characters, which the tree has
+no spelling for. It wants its own pass, and it is more than the backtrace
+buffer: it is dired and the Buffer Menu too.

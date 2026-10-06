@@ -1595,6 +1595,32 @@ def check_eval_expression():
     if "Debugger entered--Scheme error:" not in out:
         problems.append("M-: on an error did not fill *Backtrace* with "
                         "the header (screen %r)" % screen_of(out)[:300])
+    # ...and the buffer it fills is `special-mode''s: read-only, and with
+    # the keyboard, because `pop-to-buffer' selects the window where
+    # `display-buffer' would not have.
+    out = drive([C_x + C_f, path.encode(), RET,
+                 M_COLON, b"(car (quote ()))", RET, b"z"], path)
+    if "Buffer is read-only" not in out:
+        problems.append("typing in *Backtrace* did not say it was read-only "
+                        "- the window does not have the focus, or the buffer "
+                        "is writable (screen %r)" % screen_of(out)[:300])
+    if "(Debugger)" not in out:
+        problems.append("*Backtrace* mode line does not say (Debugger) "
+                        "(screen %r)" % screen_of(out)[:300])
+    # `q' closes its window, which is `debugger-quit' -> `quit-window'
+    out = drive([C_x + C_f, path.encode(), RET,
+                 M_COLON, b"(car (quote ()))", RET, b"q"], path)
+    if "*Backtrace*" in screen_of(out):
+        problems.append("`q' in *Backtrace* did not close its window "
+                        "(screen %r)" % screen_of(out)[:300])
+    # the expression prompt keeps the minibuffer's own keys, so the
+    # history is reachable: M-p recalls what was typed last
+    out = drive([C_x + C_f, path.encode(), RET,
+                 M_COLON, b"(+ 1 2)", RET,
+                 M_COLON, b"\x1b", b"p"], path)
+    if "(+ 1 2)" not in out.split("Eval: ")[-1]:
+        problems.append("M-p in the expression prompt did not recall the "
+                        "previous expression (screen %r)" % screen_of(out)[:300])
     return problems
 
 
