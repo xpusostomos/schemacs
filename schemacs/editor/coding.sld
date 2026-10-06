@@ -58,7 +58,7 @@
     ;; opposite of `vector-set!'. `put-u8' / `get-u8' and the three port
     ;; settings are Guile's too.
     (only (guile) array-length array-ref array-set! catch logand logior lognot list-head
-          make-hash-table hashq-set! hashq-ref
+          make-hash-table hashq-set! hashq-ref hash-map->list
           make-typed-array
           ;; the two conversions `decode-coding-string' and
           ;; `encode-coding-string' make around `decode-eol' / `encode-eol',
@@ -82,6 +82,7 @@
    coding-system-name coding-system-base coding-system-eol-type
    coding-system-iconv-name coding-system-raw?
    coding-system-mnemonic coding-system-bom
+   coding-system-doc-string coding-system-aliases coding-system-list
    check-coding-system
    coding-system-p
    ;; The registry lookup, Emacs's `CODING_SYSTEM_SPEC'. It is here for
@@ -142,7 +143,8 @@
       ;;                what keeps the byte order the file arrived in - an
       ;;                earlier version leaned on iconv's "UTF-16" and got
       ;;                the host's order instead.
-      (make-coding-system name base eol-type iconv-name raw? mnemonic bom)
+      (make-coding-system name base eol-type iconv-name raw? mnemonic bom
+                          docstring)
       coding-system?
       ;; The generated accessors are `-of' because they take the *record*:
       ;; the public names above take a coding system *name*, which is what
@@ -153,7 +155,8 @@
       (iconv-name coding-system-iconv-name-of)
       (raw? coding-system-raw?-of)
       (mnemonic coding-system-mnemonic-of)
-      (bom coding-system-bom-of))
+      (bom coding-system-bom-of)
+      (docstring coding-system-docstring-of))
 
     (define *coding-system-table* (make-parameter #f))
     ;; ^ The registry, coding system *name* to `<coding-system>`. A
@@ -310,6 +313,49 @@
       ;;--------------------------------------------------------------
       (coding-system-bom-of (%coding-of cs)))
 
+    (define (coding-system-doc-string cs)
+      ;; GNU Emacs's `coding-system-doc-string' (`mule.el:1045'): the
+      ;; documentation string CODING-SYSTEM was defined with, or #f.
+      ;;
+      ;; Emacs's is in `mule.el' and reads the `:docstring' attribute; the
+      ;; text is `*coding-system-docstrings*' above, which is Emacs 31.1's
+      ;; own.
+      ;;--------------------------------------------------------------
+      (coding-system-docstring-of (%coding-of cs)))
+
+    (define (coding-system-aliases cs)
+      ;; GNU Emacs's `coding-system-aliases': "Return the list of aliases
+      ;; of CODING-SYSTEM. The first element is CODING-SYSTEM itself."
+      ;;
+      ;; **Ours has no aliases at all** - `define-coding-system-alias' is
+      ;; not ported, so Emacs's `binary', `mule-utf-8', `latin-1' and the
+      ;; rest do not exist here - so the answer is the name alone. That is
+      ;; the shape its one caller wants: `print-coding-system-briefly'
+      ;; reads `(car aliases)' as the base and reports an `(alias: ...)'
+      ;; tail only when `(cdr aliases)' is non-empty.
+      ;;--------------------------------------------------------------
+      (list (coding-system-name cs)))
+
+    (define (coding-system-list . args)
+      ;; GNU Emacs's `coding-system-list': every coding system name in the
+      ;; registry, or - with a true BASE-ONLY - only the names that are
+      ;; their own base, which is every name that is not an
+      ;; `-unix'/`-dos'/`-mac' variant.
+      ;;
+      ;; The order is the table's and is not sorted; Emacs's own caller
+      ;; sorts what it gets with `sort-coding-systems'.
+      ;;--------------------------------------------------------------
+      (let ((base-only (and (pair? args) (car args)))
+            (names (map car (hash-map->list (lambda (k v) (cons k v))
+                                            (*coding-system-table*)))))
+        (if base-only
+            (let loop ((n names) (acc '()))
+              (cond ((null? n) (reverse acc))
+                    ((eq? (coding-system-base (car n)) (car n))
+                     (loop (cdr n) (cons (car n) acc)))
+                    (else (loop (cdr n) acc))))
+            names)))
+
     (define (coding-system-mnemonic cs)
       ;; GNU Emacs's `coding-system-mnemonic' (`mule.el:1019'): "Return
       ;; the mnemonic character of CODING-SYSTEM" - the one character the
@@ -317,6 +363,34 @@
       ;; this answers the same, and the caller makes a string of it.
       ;;--------------------------------------------------------------
       (coding-system-mnemonic-of (%coding-of cs)))
+
+    (define *coding-system-docstrings*
+      ;; GNU Emacs's `coding-system-doc-string' (`mule.el:1045'). The text
+      ;; each coding system was defined with - **Emacs 31.1's own words**,
+      ;; emitted by a script that read them out of a running Emacs, the
+      ;; method the charset registry's data used as well. Two of them
+      ;; (`no-conversion' and `raw-text') are multi-line paragraphs, which
+      ;; is why this is a table and not an argument at each call.
+      ;;
+      ;; A coding system with no entry here - every `-with-signature' one,
+      ;; and `undecided' - answers #f, as Emacs answers nil for one
+      ;; defined without a docstring.
+      ;;--------------------------------------------------------------
+      '((utf-8 . "UTF-8 (no signature (BOM))")
+    (iso-latin-1 . "ISO 2022 based 8-bit encoding for Latin-1 (MIME:ISO-8859-1).")
+    (iso-8859-1 . "ISO 2022 based 8-bit encoding for Latin-1 (MIME:ISO-8859-1).")
+    (us-ascii . "Encode ASCII as-is and encode non-ASCII characters to `?'.")
+    (no-conversion . "Do no conversion.\n\nWhen you visit a file with this coding, the file is read into a\nunibyte buffer as is, thus each byte of a file is treated as a\ncharacter.")
+    (raw-text . "Raw text, which means text contains random 8-bit codes.\nEncoding text with this coding system produces the actual byte\nsequence of the text in buffers and strings.  An exception is made for\ncharacters from the `eight-bit' character set.  Each of them is encoded\ninto a single byte.\n\nWhen you visit a file with this coding, the file is read into a\nunibyte buffer as is (except for EOL format), thus each byte of a file\nis treated as a character.")
+    (undecided . "No conversion on encoding, automatic conversion on decoding.")
+    (japanese-shift-jis . "Shift-JIS 8-bit encoding for Japanese (MIME:SHIFT_JIS)")
+    (chinese-big5 . "BIG5 8-bit encoding for Chinese (MIME:Big5)")
+    (utf-8-with-signature . "UTF-8 (with signature (BOM))")
+    (utf-16le-with-signature . "UTF-16 (little endian, with signature (BOM)).")
+    (utf-16be-with-signature . "UTF-16 (big endian, with signature (BOM)).")
+    (utf-16 . "UTF-16 (detect endian on decoding, use big endian on encoding with BOM).")
+    (utf-16le . "UTF-16LE (little endian, no signature (BOM)).")
+    (utf-16be . "UTF-16BE (big endian, no signature (BOM)).")))
 
     (define (%define-coding-system name eol-type iconv-name raw? mnemonic . rest)
       ;; REST is the optional byte order mark - `(coding-system-bom)`, a
@@ -329,8 +403,13 @@
       ;; is why `buffer-file-coding-system' can hold either.
       ;;--------------------------------------------------------------
       (let* ((bom (if (pair? rest) (car rest) #f))
+             ;; The `:docstring' attribute, from the table below - Emacs's
+             ;; definition carries it inline, and it is a table here because
+             ;; two of them are multi-line paragraphs.
+             (docstring (let ((e (assq name *coding-system-docstrings*)))
+                          (and e (cdr e))))
              (base (make-coding-system name name eol-type iconv-name raw?
-                                       mnemonic bom)))
+                                       mnemonic bom docstring)))
         (register-coding-system! base)
         (for-each
          (lambda (eol)
@@ -338,7 +417,7 @@
             (make-coding-system
              (string->symbol (string-append (symbol->string name)
                                             "-" (symbol->string eol)))
-             base eol iconv-name raw? mnemonic bom)))
+             base eol iconv-name raw? mnemonic bom docstring)))
          '(unix dos mac))
         base))
 
@@ -357,7 +436,9 @@
       ;; one. Nothing else in the table is defined this way.
       ;;--------------------------------------------------------------
       (let ((cs (make-coding-system name name eol-type iconv-name raw?
-                                    mnemonic #f)))
+                                    mnemonic #f
+                                    (let ((e (assq name *coding-system-docstrings*)))
+                                      (and e (cdr e))))))
         (register-coding-system! cs)
         cs))
 

@@ -4128,3 +4128,44 @@ registry's method), four small accessors, a `*Help*` buffer - one exists in
 own, not the "small buffer" the plan implies.
 
 **All 32 suites pass (coding-tests 56), no new warnings.**
+
+# Coding-system docstrings, and what is left of item 4 (2026-10-06)
+
+Item 4's first half: **the docstrings existed nowhere in this tree**. Emacs
+carries one per coding system and `list-coding-systems` exists to show it
+("This shows the mnemonic letter, name, and description of each coding
+system"), so the command could not have been written without them.
+
+Landed:
+
+- `*coding-system-docstrings*` in `coding.sld` - **Emacs 31.1's own text
+  for all fifteen** of this tree's coding systems, emitted by a script from
+  a running Emacs, the method the charset registry used. Kept as a table
+  rather than inline because two (`no-conversion`, `raw-text`) are
+  multi-line paragraphs.
+- A `docstring` field on the record, inherited by the `-unix`/`-dos`/`-mac`
+  variants.
+- `coding-system-doc-string` (`mule.el:1045`), `coding-system-aliases`, and
+  `coding-system-list` with its `base-only` form - which is the names that
+  are their own `base`, so every eol variant drops out.
+
+Two departures, both named in the source: **this tree has no coding-system
+aliases** (`define-coding-system-alias` is not ported, so Emacs's `binary`,
+`mule-utf-8`, `latin-1` do not exist here), so `coding-system-aliases`
+answers the name alone - `(car ...)` is the name in both, which is what its
+one caller reads; and `iso-8859-1` is a coding system *here* where in Emacs
+it is an alias of `iso-latin-1`.
+
+## What item 4 still needs
+
+`list-coding-systems` itself, and `sort-coding-systems` underneath it.
+**`sort-coding-systems` (`mule-cmds.el:429`) is blocked on the language
+environment** - its priority is a `logior` over "is the most preferred",
+"has a MIME charset", "is in `current-language-environment`'s `coding-system`
+key", "is in the category list", and "is ISO-2022 and which of 0..3".
+`language-info-alist` and the language environments are not ported at all.
+So item 4 is: this (done), then the language-environment machinery or an
+honest subset of the priority rule, then the command and its `*Help*`
+buffer.
+
+**All 32 suites pass (coding-tests 62), no new warnings.**

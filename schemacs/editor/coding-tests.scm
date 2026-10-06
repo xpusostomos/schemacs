@@ -12,7 +12,8 @@
        decode-eol encode-eol coding-system?
        detect-coding-bytes detect-coding-system
        find-operation-coding-system *file-coding-system-alist*
-       coding-system-bom check-coding-system coding-system-eol-type)
+       coding-system-bom check-coding-system coding-system-eol-type
+       coding-system-doc-string coding-system-aliases coding-system-list)
  (only (schemacs editor search) string-match)
  (scheme file)
  (rnrs io ports)
@@ -636,5 +637,59 @@
         ;; a string is a type error but a *symbol* is not: `coding-system-p'
         ;; answers nil for it, and this goes on to the lookup
         (message-of (lambda () (check-coding-system 'utf-8)))))
+
+
+;; ------------------------------------------------------------------
+;; the documentation strings
+;;
+;; Emacs's `coding-system-doc-string' (`mule.el:1045'). **The text is
+;; Emacs 31.1's own**, emitted from a running Emacs; ours had none at all,
+;; which is what `list-coding-systems' exists to show.
+
+(test-equal "a coding system carries the docstring Emacs gives it"
+  '("UTF-8 (no signature (BOM))"
+    "ISO 2022 based 8-bit encoding for Latin-1 (MIME:ISO-8859-1)."
+    "Shift-JIS 8-bit encoding for Japanese (MIME:SHIFT_JIS)")
+  (map coding-system-doc-string '(utf-8 iso-latin-1 japanese-shift-jis)))
+
+(test-equal "... and a multi-line one keeps every line"
+  "Do no conversion.\n\nWhen you visit a file with this coding, the file is read into a\nunibyte buffer as is, thus each byte of a file is treated as a\ncharacter."
+  (coding-system-doc-string 'no-conversion))
+
+(test-equal "... and every base coding system carries one"
+  ;; All fifteen do; a coding system defined without one would answer #f,
+  ;; as Emacs answers nil for one defined with no docstring.
+  '(15 0)
+  (let ((base (coding-system-list #t)))
+    (list (length base)
+          (let loop ((n base) (missing 0))
+            (cond ((null? n) missing)
+                  ((coding-system-doc-string (car n)) (loop (cdr n) missing))
+                  (else (loop (cdr n) (+ missing 1))))))))
+
+(test-equal "a -with-signature variant inherits its base's docstring"
+  "UTF-8 (with signature (BOM))"
+  (coding-system-doc-string 'utf-8-with-signature-dos))
+
+(test-equal "coding-system-list is the registry, base-only drops the eol variants"
+  '(15 #t #t)
+  (let ((all (coding-system-list))
+        (base (coding-system-list #t)))
+    (list (length base)
+          (and (memq 'utf-8 base) #t)
+          ;; every `-unix'/`-dos'/`-mac' name is out of the base-only list
+          (let loop ((n all) (ok #t))
+            (cond ((null? n) ok)
+                  ((memq (car n) base)
+                   (loop (cdr n) (eq? (coding-system-base (car n)) (car n))))
+                  (else (loop (cdr n) ok)))))))
+
+(test-equal "coding-system-aliases leads with the name itself"
+  ;; Emacs answers `(utf-8 mule-utf-8 cp65001)' - it has aliases and this
+  ;; tree does not - but `(car ...)' is the name in both, which is what
+  ;; its one caller reads.
+  '(utf-8 utf-8)
+  (list (car (coding-system-aliases 'utf-8))
+        (car (coding-system-aliases 'utf-8))))
 
 (test-end "schemacs_editor_coding")
