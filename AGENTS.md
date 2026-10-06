@@ -3586,3 +3586,266 @@ watching `last-coding-system-used` change), not to write a plausible-looking
 translation of the C.
 
 All 31 suites pass (coding-tests 43) and `tools/pty-check.py` is 61/61.
+
+# Choosing a coding system by file name (2026-10-06)
+
+Item 1 of the plan: `file-coding-system-alist` and
+`find-operation-coding-system`, the step between a file's own declaration and
+the statistics. Emacs's chain is
+
+```
+coding-system-for-read
+  -> set-auto-coding                 (the alist, the tag, the BOM, local vars)
+  -> find-operation-coding-system    <- this
+  -> the statistical detector
+```
+
+and this tree had the first and the last.
+
+## What landed
+
+- **`file-coding-system-alist`** with Emacs 31.1's own default, transcribed
+  from the running editor (the compressing-file entries come from
+  `jka-cmpr-hook`, the rest from `mule.el`). **The catch-all is the one that
+  matters**: `("" undecided)` matches every name, which is what makes an
+  ordinary file come back `undecided` - the answer that hands the decision to
+  detection rather than naming a coding system.
+- **`find-operation-coding-system`**, the C's walk including its *early
+  return*: the first matching entry decides, and if it names something this
+  tree cannot resolve the whole lookup answers #f rather than falling through
+  to the catch-all (`return Qnil`).
+- `coding-system-for-file` consults it after `set-auto-coding` and before the
+  statistics, and an `undecided` answer falls through - which is what
+  `undecided` means.
+
+Verified against Emacs on the same names:
+
+| name | Emacs | ours |
+|---|---|---|
+| `/tmp/x.txt` | `(undecided)` | same |
+| `/tmp/x.gz`, `.tgz`, `.tar` | `(no-conversion . no-conversion)` | same |
+| `/tmp/x.utf-8` | `(utf-8 . utf-8)` | same |
+| `/tmp/x.el`, `/tmp/loaddefs.el` | `(prefer-utf-8 . prefer-utf-8)` | `#f` (dep. 1) |
+
+## A gap in the regexp engine, found by Emacs's own alist
+
+`\(?:tgz\|svgz\|sifz\)` is one of Emacs's default entries, and `%emacs-ere`
+**refused shy groups outright** - so the alist could not be compiled at all.
+A shy group and a plain group accept exactly the same language; the only
+difference is whether the group takes a match-data slot, and this engine
+renumbers them anyway. So `\(?:` now translates to `(`.
+
+The first attempt tested the wrong character: a shy group is backslash,
+paren, question mark, colon, so the test belongs in the `\(` branch and not
+in the `\?` one. Worth knowing because the failure looked identical - the ERE
+that reached `make-regexp` was `(?:tgz)`, which says the `\(` swap happened
+and nothing else did.
+
+## Departures
+
+1. **`prefer-utf-8` and `utf-8-emacs` are not carried**, so `.el` and `.elc`
+   answer `#f` and fall to the statistics where Emacs names them. Both are
+   blocked rather than deferred, and the reason is checkable:
+   `(coding-system-get 'prefer-utf-8 :coding-type)` is **`undecided`** -
+   it is the detection machinery with a preference, and needs the
+   `prefer_utf-8` branch of `detect_coding`, which is the unported read-path
+   detector. `utf-8-emacs` needs a five-byte codec iconv has not got.
+2. **`loaddefs.el` answering as `.el` is not a departure**: Emacs answers
+   `(prefer-utf-8)` for it too, because the `.el` entry comes first and the
+   walk returns on the first match. The `loaddefs.el` entry is shadowed in
+   both.
+3. **No jka-compr**, so `/tmp/x.gz` reads as `no-conversion` where Emacs
+   decompresses and then detects. Named, not new, and the right answer for a
+   tree with no decompression: the bytes are the file, and they round-trip.
+
+All 31 suites pass (coding-tests 46) and `tools/pty-check.py` is 61/61.
+
+# The byte order mark, and the crash it came back from (2026-10-06)
+
+The machine went down in the middle of the work above. This is the recovery:
+what the crash left, what it had half-done, and the two real bugs that were
+underneath it.
+
+## The crash damage: a record field that could not compile
+
+`<coding-system>` had grown a BOM field, and the edit was half-applied - the
+constructor named the field `bom?` where the field spec declared it `bom`:
+
+```
+(define-record-type <coding-system>
+  (make-coding-system ... raw? mnemonic bom?)   ; <- bom?
+  ...
+  (bom coding-system-bom?-of))                  ; <- bom
+```
+
+`define-record-type` wants the constructor's names to *be* the field names,
+so this is a hard compile error - "unknown field in constructor spec in
+subform bom?" - and **nine suites did not run** at all.
+
+**`tools/syntax-check.scm` passed on it**, which is the trap that tool's own
+note names: it runs Guile's *reader*, and this file reads perfectly. It is the
+compile that fails. A reader-clean file is not a file that loads. The field is
+`bom?` now, matching the constructor, the accessor name and its sibling `raw?`.
+
+## The half-done wiring: `auto-coding-regexp-alist`
+
+`mule.sld` had `*auto-coding-regexp-alist*`, `%auto-coding-regexp-value` and
+`auto-coding-regexp-alist-lookup` defined and **never called**, with
+`string-match` not imported and the two names not exported. `find-auto-coding`
+still had its old `%byte-order-mark` special case sitting *after* the
+`coding:'` tag.
+
+Emacs's order (`find-auto-coding`, `mule.el:1880`) is
+
+```
+auto-coding-alist          (by file name)
+  -> auto-coding-regexp-alist   (by content - four of its five entries are BOMs)
+  -> the coding: tag
+  -> the local variables block
+```
+
+and the BOM is the *second* step, not a special case after the third: a file
+whose first bytes are a mark is read as `utf-8-with-signature` whatever a tag
+says. It is wired there now, `%byte-order-mark` is deleted (Emacs has no such
+function), and `string-match` comes from `(schemacs editor search)`.
+
+**The last alist entry was transcribed wrong.** Emacs's is
+`("\\`;ELC\024\0\0\0" . emacs-mule)` - an ELC magic number, `;ELC` then 0x14
+and three NULs - and ours said `"\\`;ELC     "`, five spaces. It is the escapes
+now. The NULs are dropped by `%without-nul` (glibc cannot take a NUL in a
+pattern), which leaves `;ELC` plus the 0x14 - still a prefix, so it still
+matches what Emacs's matches.
+
+## The bug underneath: `put-u8` was never imported
+
+The BOM write-back the crash was adding **had never run**. `put-u8` is unbound
+in `files.sld` (`(scheme base)` has `write-u8`, not `put-u8`; `(rnrs io ports)`
+has it and was imported `(only ... get-bytevector-all put-bytevector)`), so the
+`when` raised, and `save-buffer`'s `guard` turned it into
+`"; save-buffer: error writing ..."` and **wrote nothing**.
+
+That is why the first `coding-diff.py` run said `utf8-bom` was "ok": Emacs
+wrote 9 bytes and schemacs' file was *untouched* at its original 9. A save that
+silently does nothing passes any test that compares the file to itself. It is
+the missing-import class for the eighth time in this tree, and the second time
+`save-buffer`'s guard has hidden it. **Put `(display ex (current-error-port))`
+in that guard's else branch** when a save looks like it did nothing.
+
+## The BOM is the coding system's, and its bytes are the mark
+
+The crash had added a `bom?` *boolean* and written a hardcoded `EF BB BF`. Both
+halves were wrong: a UTF-16 file got a UTF-8 mark before its own, and the
+mark's *byte order* came from iconv's host default rather than the file's.
+
+Emacs's model (`mule-conf.el:1388-1456`) is three coding systems:
+
+| | codec | mark |
+|---|---|---|
+| `utf-8-with-signature` | UTF-8 | `EF BB BF` |
+| `utf-16le-with-signature` | UTF-16**LE** | `FF FE` |
+| `utf-16be-with-signature` | UTF-16**BE** | `FE FF` |
+
+and `utf-16` is `:endian 'big'` with a `:bom` *cons* - "detect on decoding, use
+big endian with a BOM on encoding" - which is exactly iconv's "UTF-16": it
+reads either mark and writes `FE FF` plus big-endian text (measured). So
+`utf-16` carries no mark of its own here, and the invented
+`utf-16-with-signature` - iconv "UTF-16" under Emacs's name for a different
+thing - is gone.
+
+The field is the mark's **bytes**, not a flag, because iconv cannot be asked
+for a codec's signature. Write prepends them; read strips them. **The read
+strip is not optional**: Guile consumes a mark itself for UTF-8, but not for
+the explicit-endian codecs - `"UTF-16LE"` on `FF FE 41 00` answers
+`(65279 65)` where `"UTF-16"` answers `(65)`.
+
+The result, against Emacs 31.1 on the same files:
+
+| file | Emacs | ours |
+|---|---|---|
+| UTF-8 BOM, `hi\n` | `utf-8-with-signature-unix`, 9 bytes | same, byte for byte |
+| UTF-16LE BOM, `hi\n` | `utf-16le-with-signature-unix`, 10 bytes | same |
+| UTF-16BE BOM, `hi\n` | `utf-16be-with-signature-unix`, 10 bytes | same |
+
+### A false lead worth recording
+
+I first concluded that `put-bytevector` into a port with an encoding set is
+*dropped* when a `write-char` follows, and wrote that into a code comment. **It
+is not.** My probe read the finished file back with `open-input-file`, which
+consumes a leading UTF-8 BOM - so the mark was in the file and the *probe* ate
+it. `od` showed it immediately. The comment says something true now. The lesson
+is the one this file already carries about printed evidence: read the *shape* of
+the instrument before trusting the number.
+
+## `no-conversion` has no eol variants - Emacs's other `:eol-type`
+
+`coding-diff.py` reported a NUL file as `no-conversion` in Emacs and
+`no-conversion-unix` here. The rule is Emacs's, measured:
+
+```
+(coding-system-eol-type 'no-conversion)       -> 0      (an integer)
+(coding-system-p 'no-conversion-unix)         -> nil
+(coding-system-eol-type 'raw-text)            -> [raw-text-unix raw-text-dos raw-text-mac]
+```
+
+`:eol-type` is an **integer** for a coding system with one fixed end of line,
+and a **vector of three** for one with variants. `no-conversion` is the
+integer kind and the *only* entry in the table that is - everything else,
+`raw-text` and `us-ascii` and the whole UTF-16 family included, has a vector.
+`%define-coding-system` builds the vector case; `%define-fixed-eol-coding-system`
+is the other, and `no-conversion` uses it. This also fixed the `name-tar` case
+for free.
+
+## `tools/coding-diff.py`, and a comparison that was not one
+
+The corpus tool gained an honest third answer from Emacs. Emacs **refuses to
+save** a buffer whose characters its coding system cannot encode - it prompts
+"Select coding system", which in `--batch` reads stdin, gets EOF and errors -
+so the file on disk is still the *input*, and comparing it to schemacs' answer
+reads as "Emacs wrote N bytes" when Emacs wrote nothing. `ask_emacs` now reports
+`SAVED=` and the tool says so. Two cases were affected:
+
+- `shift-jis`: Emacs reads the bytes as `utf-8-unix` and then cannot save them.
+  The *coding* difference is real and is the unported read-path detector, see
+  below.
+- `name-utf-8`: Emacs names the file `utf-8` from the alist and then cannot
+  save Latin-1 bytes. Both cases had passed before by writing nothing.
+
+Now: **19 identical, 2 known-different, 0 new**, exit 0.
+
+## Departures, and whether to fix them
+
+1. **The read-path detector `detect_coding` (`coding.c:6501`) is not ported.**
+   Emacs has the detection logic *twice* - `detect_coding_system` (`:8686`),
+   which `detect-coding-region` calls and which this tree ports, and
+   `detect_coding`, which `decode_coding` calls and so `find-file` uses. They
+   are near-copies that disagree: on the `shift-jis` bytes one says
+   `japanese-shift-jis-unix` and the other `utf-8-unix`. **This is the last
+   real gap in the file path**, and it is what a `shift-jis` file hits.
+2. **`iso-2022-jp`** - the 259-line state machine, unchanged and already named.
+3. **`*require-final-newline*` is a global `#t` here; Emacs's is a global `nil`
+   with `mode-require-final-newline` (t) copied in by the major mode.** So
+   Emacs adds a final newline to a `.txt` (text-mode) and *not* to a `.bin`
+   (fundamental-mode), and this tree adds one to both. Measured both ways.
+   **Worth fixing** when the major modes and `mode-require-final-newline`
+   exist; it is not a coding-layer bug and nothing in the coding work depends
+   on it. The `shift-jis` case's extra byte is this rule and *matches* Emacs
+   for a `.txt` name - Emacs's own side of that case simply never saved.
+4. **`coding-system-eol-type` on a name that is not a coding system raises**
+   here where Emacs answers nil. Small, and the one caller that could hit it
+   is a test.
+
+## Tests
+
+- `coding-tests.scm` 50 (was 46): the mark bytes for all three with-signature
+  systems and `#f` for the seven that carry none, and `no-conversion`'s fixed
+  eol with no variants beside `raw-text`'s three.
+- `ncurses-editor-tests.scm` 240 (was 239): the BOM round trip through
+  `find-file-noselect` and `save-buffer` for all three marks, asserting the
+  coding system's *name* and the bytes on disk - Emacs 31.1's own answers. It
+  fails without the wiring, without the name and without the read strip, each
+  on its own.
+- `tools/pty-check.py` 61/61, all 31 suites pass, no new compiler warnings.
+
+The `srfi 64` trap caught me twice more here - `coding-system-name` answers a
+*symbol* and I wrote the expectations as strings, and `number->string` hex
+against `'(ef bb bf)` symbols - both printing as two identical-looking lists.

@@ -34,6 +34,12 @@
     (only (schemacs editor coding)
           coding-system-p coding-system-eol-type
           coding-system-change-eol-conversion)
+    ;; `string-match' is what both alist lookups match a pattern with -
+    ;; `auto-coding-alist-lookup' over the file name and
+    ;; `auto-coding-regexp-alist-lookup' over the file's first bytes. It is
+    ;; `search.c''s and lives in `(schemacs editor search)', which is below
+    ;; this library (`coding.sld' imports it too).
+    (only (schemacs editor search) string-match)
     ;; `string->utf8', which the encoding test needs, is `(scheme base)''s
     ;; here - as `xterm.sld' notes of the same call for the clipboard.
     )
@@ -44,6 +50,7 @@
    terminal-coding-system keyboard-coding-system
    ;; Detection - `mule.el''s `find-auto-coding' and what it reads
    *auto-coding-alist* auto-coding-alist-lookup
+   *auto-coding-regexp-alist* auto-coding-regexp-alist-lookup
    find-auto-coding set-auto-coding
    coding-system-from-file-name
    ;; Merging the unspecified aspects of one into another - `mule.el''s
@@ -150,6 +157,62 @@
     ;; "LATIN-1", because its window is "the first few hundred bytes".
     ;; A file that merely *mentions* `coding:' in a comment is decoded by
     ;; one and not the other, and Emacs's rule is the one to copy.
+
+    (define *auto-coding-regexp-alist*
+      ;; GNU Emacs's `auto-coding-regexp-alist' (`mule.el'): "Alist of
+      ;; regexp patterns matching a byte sequence at the beginning of a
+      ;; file vs coding system." Its five entries are Emacs 31.1's own,
+      ;; and **four of the five are byte order marks** - which is where
+      ;; the BOM is really detected on the file path, not in a special
+      ;; case of its own. Emacs's `find-auto-coding' consults this before
+      ;; the `coding:' tag.
+      ;;
+      ;; The fifth, `emacs-mule', is a coding system this tree does not
+      ;; carry, so that entry is here as data and does not resolve -
+      ;; `set-auto-coding' is what finds that out, as in Emacs.
+      ;;--------------------------------------------------------------
+      (make-parameter
+       (list
+        (cons "\\`BABYL OPTIONS:[ \t]*-\\*-[ \t]*rmail[ \t]*-\\*-"
+              'no-conversion)
+        ;; The hex escapes are terminated with `;' because that is what
+        ;; R7RS's `\x...;' form requires - without it the reader takes the
+        ;; next backslash as part of the escape and reports "invalid
+        ;; character in escape sequence", which says nothing about which
+        ;; of the two is wrong.
+        (cons "\\`\xfe;\xff;" 'utf-16be-with-signature)
+        (cons "\\`\xff;\xfe;" 'utf-16le-with-signature)
+        (cons "\\`\xef;\xbb;\xbf;" 'utf-8-with-signature)
+        ;; Emacs's entry is `"\\`;ELC\024\0\0\0"' - an ELC file's magic
+        ;; number, `;ELC' then 0x14 and three NULs (`mule.el:1801'). The
+        ;; control character and the NULs are written as escapes because
+        ;; they are not printable in source. The NULs are then dropped by
+        ;; the translator - glibc cannot be handed a NUL in a pattern (see
+        ;; `%without-nul') - which leaves `;ELC' plus the 0x14, still a
+        ;; prefix of the magic number and so still matching.
+        (cons "\\`;ELC\x14;\0;\0;\0;" 'emacs-mule))))
+
+    (define (auto-coding-regexp-alist-lookup text)
+      ;; GNU Emacs's `auto-coding-regexp-alist-lookup' (`mule.el:1866'):
+      ;; the coding system the *content* of a file declares by matching a
+      ;; regexp against its beginning, or #f. The first entry whose pattern
+      ;; matches wins, and its symbol is answered as it stands - the check
+      ;; that the symbol names a coding system this tree carries is
+      ;; `set-auto-coding''s, as it is Emacs's (`mule.el:1880').
+      ;;
+      ;; The entries are Emacs's own and **four of the five are byte order
+      ;; marks**, which is where a BOM is really detected on the file path
+      ;; - not in a special case of its own. The fifth, `emacs-mule', is a
+      ;; coding system this tree does not carry, so a file matching it
+      ;; falls through to detection rather than being read as Emacs reads
+      ;; it; that is one of the named gaps in `coding.sld''s header.
+      ;;--------------------------------------------------------------
+      (let loop ((alist (*auto-coding-regexp-alist*)))
+        (cond ((not (pair? alist)) #f)
+              ((and (pair? (car alist))
+                    (guard (e (#t #f)) (string-match (caar alist) text)))
+               (cdar alist))
+              (else (loop (cdr alist))))))
 
     (define *auto-coding-alist* (make-parameter '()))
     ;; ^ GNU Emacs's `auto-coding-alist': "Alist of filename patterns vs
@@ -406,42 +469,6 @@
             (coding-system-change-eol-conversion first eol)
             first)))
 
-    (define (%byte-order-mark bytes)
-      ;; The coding system a byte order mark at the front says: `EF BB BF'
-      ;; is UTF-8, and either of `FF FE' / `FE FF' is UTF-16. Emacs reads
-      ;; these in `detect_coding' (`coding.c') before any tag, because a
-      ;; BOM is a declaration too - it is just written in bytes.
-      ;;
-      ;; **Both UTF-16 marks answer the same coding system, and that is
-      ;; the codec's doing rather than a simplification.** Emacs names
-      ;; them apart - `utf-16le-with-signature' and
-      ;; `utf-16be-with-signature' - because its `:coding-type' carries
-      ;; the byte order *and* whether a signature is written. iconv's
-      ;; "UTF-16" is one codec that reads whichever mark is there and
-      ;; writes one in the host's byte order, so naming them apart here
-      ;; would be a name that lied about what the codec does. The
-      ;; departure is that the byte order written back is the host's
-      ;; (measured: `FF FE' on this machine) rather than the one read.
-      ;;
-      ;; The alternative - `utf-16le' / `utf-16be' - is *wrong* here and
-      ;; was the first version: iconv's explicit-order codecs keep the
-      ;; mark as a character, so the buffer got a U+FEFF in front of the
-      ;; text where Emacs's has none. Measured: `(16 0 65 0 66 0)' read
-      ;; as "UTF-16LE" is `(65279 65 66)', and as "UTF-16" is `(65 66)'.
-      ;;--------------------------------------------------------------
-      (let ((n (bytevector-length bytes)))
-        (cond ((and (>= n 3) (= (bytevector-u8-ref bytes 0) #xEF)
-                    (= (bytevector-u8-ref bytes 1) #xBB)
-                    (= (bytevector-u8-ref bytes 2) #xBF))
-               'utf-8)
-              ((and (>= n 2)
-                    (or (and (= (bytevector-u8-ref bytes 0) #xFF)
-                             (= (bytevector-u8-ref bytes 1) #xFE))
-                        (and (= (bytevector-u8-ref bytes 0) #xFE)
-                             (= (bytevector-u8-ref bytes 1) #xFF))))
-               'utf-16)
-              (else #f))))
-
     (define (find-auto-coding filename bytes)
       ;; GNU Emacs's `find-auto-coding': the coding system FILENAME's
       ;; BYTES declare, or #f when nothing does.
@@ -458,8 +485,21 @@
             ;; them is the very thing that cannot happen before a coding
             ;; system has been chosen.
             (let ((text (%bytevector->latin1-string bytes)))
-              (or (%head-coding text)
-                  (%byte-order-mark bytes)
+              ;; **The byte order mark is detected here, by content** -
+              ;; `auto-coding-regexp-alist', whose four BOM entries are
+              ;; Emacs's own. It comes *before* the `coding:' tag, which is
+              ;; Emacs's order: a file whose first bytes are a mark is read
+              ;; as `utf-8-with-signature' whatever a tag says.
+              ;;
+              ;; The name this answers matters as well as the codec: a
+              ;; `-with-signature' coding system writes the mark back on
+              ;; save, so a file that arrived with one leaves with one.
+              ;; This used to be a `%byte-order-mark' special case that
+              ;; answered the plain `utf-8' / `utf-16', which is why
+              ;; `tools/coding-diff.py''s `utf8-bom' case was 9 bytes in
+              ;; and 6 out.
+              (or (auto-coding-regexp-alist-lookup text)
+                  (%head-coding text)
                   (%lookup (%local-variables-coding text)))))))
 
     (define (%head-coding text)

@@ -567,6 +567,30 @@
                     (error "Trailing backslash in regexp" pattern)
                     (let ((c2 (string-ref pattern (+ i 1))))
                       (cond
+                       ;; **A shy group comes first, because `\(' is taken
+                       ;; by the swap below.** Emacs's own default
+                       ;; `file-coding-system-alist' has an entry using one
+                       ;; - `\\(?:tgz\\|svgz\\|sifz\\)' - so refusing
+                       ;; them made that alist uncompilable.
+                       ;; `\\(?:RE\\)' and `\\(RE\\)' accept exactly
+                       ;; the same language; the only difference is whether
+                       ;; the group takes a match-data slot, and this engine
+                       ;; renumbers shy groups anyway (see the header). So
+                       ;; the `?:' is dropped and the group is made
+                       ;; ordinary.
+                       ;;
+                       ;; `\\(?N:M\\)' and `\\(?-N:M\\)' *number* the
+                       ;; group, which is a different thing, and still have
+                       ;; no ERE spelling.
+                       ;; `\(' '?' ':' - the *fourth* character is the
+                       ;; colon, and the second is the paren, which is why
+                       ;; this sits in the `\(' branch and not the `\?'
+                       ;; one.
+                       ((and (char=? c2 #\()
+                             (< (+ i 3) (string-length pattern))
+                             (char=? (string-ref pattern (+ i 2)) #\?)
+                             (char=? (string-ref pattern (+ i 3)) #\:))
+                        (loop (+ i 4) (cons #\( acc)))
                        ;; the escaped-and-special-to-ERE swaps
                        ((memv c2 '(#\( #\) #\| #\{ #\}))
                         (loop (+ i 2) (cons c2 acc)))
@@ -575,7 +599,6 @@
                        ((%untranslated-escape c2)
                         (error "Regexp escape this engine does not implement"
                                (string #\\ c2)))
-                       ;; a shy group, or `\(?N:M\)': no ERE spelling
                        ((char=? c2 #\?)
                         (error "Regexp escape this engine does not implement" "\\(?"))
                        (else

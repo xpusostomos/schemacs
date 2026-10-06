@@ -672,6 +672,46 @@
        (list (list "/tmp/fe-latin1.txt" #vu8(99 97 102 233 32 110 97 239 118 101 10))
              (list "/tmp/fe-c1.txt" #vu8(97 133 98 10)))))
 
+;; ... and a file that arrives with a **byte order mark** leaves with the
+;; same one, in the same byte order. This is the third route: the mark is
+;; a *declaration* like a `coding:' tag, so `find-auto-coding' names the
+;; coding system from it (`auto-coding-regexp-alist'), the name it gives is
+;; a `-with-signature' one, and the save writes that coding system's own
+;; mark back at the front.
+;;
+;; All three names and all three byte-for-byte results are Emacs 31.1's own
+;; for these files, and each fails without a piece of the machinery: the
+;; UTF-8 one loses its mark to a plain `utf-8' coding system, and the
+;; UTF-16 ones come back in the *host's* byte order if the mark is left to
+;; iconv's "UTF-16" instead of to the coding system's own.
+(test-equal '(utf-8-with-signature-unix
+              utf-16le-with-signature-unix
+              utf-16be-with-signature-unix
+              #vu8(239 187 191 104 105 10)
+              #vu8(255 254 104 0 105 0 10 0)
+              #vu8(254 255 0 104 0 105 0 10))
+  (parameterize ((*buffer-list* '()) (*current-buffer* #f))
+    (append
+     (map (lambda (spec)
+            (let ((path (car spec)) (bytes (cadr spec)))
+              (when (file-exists? path) (chmod path #o644))
+              (call-with-port (open-output-file path #:encoding #f)
+                (lambda (port) (put-bytevector port bytes)))
+              (let ((ed (find-file-noselect path)))
+                (coding-system-name (buffer-file-coding-system ed)))))
+          (list (list "/tmp/fe-bom8.txt" #vu8(239 187 191 104 105 10))
+                (list "/tmp/fe-bomle.txt" #vu8(255 254 104 0 105 0 10 0))
+                (list "/tmp/fe-bombe.txt" #vu8(254 255 0 104 0 105 0 10))))
+     (map (lambda (path)
+            (let* ((ed (find-file-noselect path))
+                   (frame (test-frame ed)))
+              (parameterize ((*current-frame* frame))
+                (text-editor-set-modified! ed #t)
+                (save-buffer)))
+            (call-with-port (open-input-file path #:encoding #f)
+              get-bytevector-all))
+          (list "/tmp/fe-bom8.txt" "/tmp/fe-bomle.txt" "/tmp/fe-bombe.txt")))))
+
 ;; ... and the coding system it was read with is *recorded*, so the save
 ;; cannot choose differently from the read. Both of these are Emacs 31.1's
 ;; own answers for the same two files: the *statistical* detector reads

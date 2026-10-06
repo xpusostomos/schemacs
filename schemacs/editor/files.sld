@@ -39,7 +39,8 @@
           coding-system-p coding-system-name coding-system-eol-type
           coding-system-change-eol-conversion
           detect-eol bytes-have-null? adjust-coding-eol-type
-          detect-coding-bytes
+          detect-coding-bytes find-operation-coding-system
+          coding-system-bom
           decode-eol encode-eol *last-coding-system-used*
           *coding-system-for-read* *coding-system-for-write*)
     (only (schemacs editor mule) set-auto-coding)
@@ -317,10 +318,25 @@ save-buffer
                        ;; `undecided', which is a file that is all 7-bit
                        ;; text and declares nothing: the default, as it
                        ;; was before there was a detector at all.
-                       ;; Nothing declared and nothing detected - the
-                       ;; file is all 7-bit text - so the answer is
-                       ;; `undecided', which is what Emacs answers for
-                       ;; such a file and what its mode line shows as `-'.
+                       ;; **The by-name step comes next**, and it is
+                       ;; Emacs's: `find-operation-coding-system' matches
+                       ;; the file name against `file-coding-system-alist',
+                       ;; whose catch-all entry is `("" undecided)'. That
+                       ;; entry matches every name, which is what makes it
+                       ;; mean "decide by detection" rather than "no
+                       ;; coding system" - so an `undecided' answer falls
+                       ;; through to the statistics below, exactly as it
+                       ;; does in Emacs.
+                       (let ((by-name (find-operation-coding-system
+                                       'insert-file-contents path)))
+                         (and by-name (car by-name)
+                              (not (eq? (car by-name) 'undecided))
+                              (car by-name)))
+                       ;; and finally the statistics. Nothing declared and
+                       ;; nothing detected means the file is all 7-bit
+                       ;; text, whose answer is `undecided' - what Emacs
+                       ;; answers for such a file and what its mode line
+                       ;; shows as `-'.
                        (let ((detected (detect-coding-bytes bytes #t)))
                          (or (and detected (car detected)) 'undecided))))
              ;; The eol is detected only when the name has not settled it
@@ -345,24 +361,58 @@ save-buffer
       ;; it has to be: a byte the coding system cannot decode becomes a
       ;; byte character, and `#x3FFFE9' is above Guile's `#x10FFFF', so
       ;; there is no string that holds it.
+      ;;
+      ;; **The byte order mark is consumed here**, as the C's
+      ;; `decode_coding' consumes it for a `-with-signature' coding system:
+      ;; it is a signature on the byte stream and not text, so it is not in
+      ;; the buffer and cannot come back out of it. Guile's ports do this
+      ;; themselves for UTF-8, but *not* for the explicit-endian codecs -
+      ;; measured, `"UTF-16LE"' on `FF FE 41 00' answers `(65279 65)'
+      ;; where `"UTF-16"' answers `(65)' - so it is done at the byte level
+      ;; here for every coding system that carries one.
       ;;--------------------------------------------------------------
-      (call-with-port (open-input-bytevector bytes)
-          (lambda (port)
-            (coding-setup-port! port coding)
-            (let loop ((acc '()))
-              (let ((c (coding-read-char port coding)))
-                (if (eof-object? c)
-                    (decode-eol (reverse acc) coding)
-                    (loop (cons c acc))))))))
+      (let* ((mark (coding-system-bom coding))
+             (n (if mark (bytevector-length mark) 0))
+             (bytes (if (and mark
+                             (>= (bytevector-length bytes) n)
+                             (equal? (bytevector-copy bytes 0 n) mark))
+                        ;; `mark' is the signature the coding system declares,
+                        ;; so a match *is* the mark - no search, and no
+                        ;; stripping of a U+FEFF that is really text.
+                        (bytevector-copy bytes n (bytevector-length bytes))
+                        bytes)))
+        (call-with-port (open-input-bytevector bytes)
+            (lambda (port)
+              (coding-setup-port! port coding)
+              (let loop ((acc '()))
+                (let ((c (coding-read-char port coding)))
+                  (if (eof-object? c)
+                      (decode-eol (reverse acc) coding)
+                      (loop (cons c acc)))))))))
 
     (define (write-file-code-points path points coding)
       ;; The encode half: the line ends first, then the codec, then the
       ;; bytes to the file. The mirror of `read-file-code-points'.
+      ;;
+      ;; **The byte order mark is written here, once, at the front**, and
+      ;; its bytes come from the coding system - Emacs's `:bom', applied by
+      ;; `encode_coding'. The mark is not in the buffer (the read consumed
+      ;; it), so without this a file that arrived with one left without it,
+      ;; and a file that arrived little-endian left big-endian - the two
+      ;; data losses `tools/coding-diff.py' found on its first run, its
+      ;; `utf8-bom' case being 9 bytes in and 6 out.
+      ;;
+      ;; `put-bytevector' writes the mark *raw* into a port whose encoding
+      ;; is already set, while the `write-char's after it are encoded -
+      ;; the same mixing `coding-write-char' relies on for its byte
+      ;; characters, in a run rather than one byte at a time.
       ;;--------------------------------------------------------------
       (let ((bytes
              (call-with-port (open-output-bytevector)
                (lambda (port)
                  (coding-setup-port! port coding)
+                 (let ((mark (coding-system-bom coding)))
+                   (when mark (put-bytevector port mark)))
                  (for-each (lambda (c) (coding-write-char port c coding))
                            (encode-eol points coding))
                  (get-output-bytevector port)))))

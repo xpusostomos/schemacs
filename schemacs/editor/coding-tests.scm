@@ -11,7 +11,9 @@
        detect-eol bytes-have-null? adjust-coding-eol-type
        decode-eol encode-eol coding-system?
        detect-coding-bytes detect-coding-system
-       coding-system-eol-type)
+       find-operation-coding-system *file-coding-system-alist*
+       coding-system-bom coding-system-eol-type)
+ (only (schemacs editor search) string-match)
  (scheme file)
  (rnrs io ports)
  (only (schemacs editor character)
@@ -331,7 +333,12 @@
         (detected 97 160 98 10)))                     ; 0xA0, a Latin-1 byte
 
 (test-equal "a NUL byte means binary, which is no-conversion"
-  'no-conversion-unix
+  ;; The *bare* name: `no-conversion' is Emacs's one coding system whose
+  ;; `:eol-type' is an integer and not a vector of three, so there is no
+  ;; `no-conversion-unix' for the eol adjustment to name. Measured -
+  ;; `(coding-system-eol-type 'no-conversion)' is 0 and
+  ;; `(coding-system-p 'no-conversion-unix)' is nil.
+  'no-conversion
   (detected 97 0 98 10))
 
 (test-equal "an ASCII control byte does not stop a Latin-1 file"
@@ -382,7 +389,7 @@
   ;; `set-auto-coding' that names the last one and the detector is never
   ;; asked - which is the order the file layer uses.
   '(undecided iso-latin-1-unix iso-latin-1-unix japanese-shift-jis-unix
-    utf-8-unix no-conversion-unix)
+    utf-8-unix no-conversion)
   (map (lambda (e)
          (let ((found (detect-coding-bytes (cadr e) #t)))
            (if found (car found) 'undecided)))
@@ -422,7 +429,7 @@
   ;; `detect-coding-region' on the UTF-16 fixture's bytes answers
   ;; `(no-conversion)' in Emacs too - the *file* path is what names it
   ;; `utf-16le-with-signature', from the BOM, before the walk is reached.
-  '(no-conversion-unix no-conversion-unix)
+  '(no-conversion no-conversion)
   (list (detected 97 0 98 10)
         (detected 255 254 112 0 114 0 101 0)))
 
@@ -447,5 +454,102 @@
   '(raw-text-unix raw-text)
   (list (detected 45 78 135)
         (car (detect-coding-system (list->u8vector (list 45 78 135)) #f))))
+
+;; ------------------------------------------------------------------
+;; choosing a coding system by file name
+;;
+;; `find-operation-coding-system' and `file-coding-system-alist'. **Every
+;; expectation here is Emacs 31.1's own answer** for the same name:
+;;
+;;   /tmp/x.txt     (undecided)
+;;   /tmp/x.gz      (no-conversion . no-conversion)
+;;   /tmp/x.utf-8   (utf-8 . utf-8)
+;;   /tmp/x.el      (prefer-utf-8 . prefer-utf-8)
+;;   /tmp/loaddefs.el (prefer-utf-8 . prefer-utf-8)
+;;
+;; The last two differ here, and both for a reason this tree can state:
+;; `prefer-utf-8` is an *undecided*-type coding system (`(coding-system-get
+;; 'prefer-utf-8 :coding-type)` is `undecided`, measured), so it is the
+;; detection machinery with a preference rather than a codec - it needs the
+;; `prefer_utf-8` branch of `detect_coding`, which is not ported. And
+;; `loaddefs.el` answers the same as `.el` in *Emacs too*: the `.el` entry
+;; comes first and the walk returns on the first match, so the
+;; `loaddefs.el` entry never gets a chance.
+
+(test-equal "the file name decides, the way Emacs's alist does"
+  '((undecided . undecided)
+    (no-conversion . no-conversion)
+    (no-conversion . no-conversion)
+    (no-conversion . no-conversion)
+    (utf-8 . utf-8)
+    #f #f)
+  (map (lambda (name)
+         (find-operation-coding-system 'insert-file-contents name))
+       (list "/tmp/x.txt" "/tmp/x.gz" "/tmp/x.tgz" "/tmp/x.tar"
+             "/tmp/x.utf-8" "/tmp/x.el" "/tmp/loaddefs.el")))
+
+(test-equal "a catch-all entry is what makes an ordinary file undecided"
+  '(0 (undecided . undecided))
+  (list (string-match (caar (reverse (*file-coding-system-alist*))) "/tmp/x.txt")
+        (find-operation-coding-system 'insert-file-contents "/tmp/x.txt")))
+
+(test-equal "... and an operation with no alist answers #f"
+  '(#f #f)
+  (list (find-operation-coding-system 'call-process "/tmp/x.txt")
+        (find-operation-coding-system 'open-network-stream "example.com")))
+
+;; ------------------------------------------------------------------
+;; the byte order mark a coding system carries
+;;
+;; Emacs's `:bom'. **The three entries and their bytes are Emacs 31.1's
+;; own** (`mule-conf.el:1388-1456'): `utf-8-with-signature' is `:bom t'
+;; over the plain UTF-8 codec, and the two UTF-16 ones are `:bom t' over
+;; the *little* and *big* codecs. The bytes are spelled out here because
+;; iconv cannot be asked for a codec's signature, and each is the mark the
+;; save writes and the read consumes.
+
+(test-equal "a -with-signature coding system carries its mark; nothing else does"
+  ;; **The strings and not symbols**: the hex comes out of `number->string`,
+  ;; and `test-equal` is `equal?` - `'(ef)` and `'("ef")` print the same and
+  ;; are not the same.
+  '(("ef" "bb" "bf") ("ff" "fe") ("fe" "ff") #f #f #f #f)
+  (map (lambda (n)
+         (let ((bom (coding-system-bom n)))
+           (if bom
+               (let loop ((i 0) (acc '()))
+                 (if (>= i (bytevector-length bom))
+                     (reverse acc)
+                     (loop (+ i 1)
+                           (cons (number->string (bytevector-u8-ref bom i) 16)
+                                 acc))))
+               #f)))
+       '(utf-8-with-signature utf-16le-with-signature
+         utf-16be-with-signature utf-8 utf-16 utf-16le utf-16be)))
+
+(test-equal "... and each of the three is a variant in its own right"
+  '(3 2 2)
+  (map (lambda (n)
+         (bytevector-length (coding-system-bom n)))
+       '(utf-8-with-signature-unix
+         utf-16le-with-signature-unix
+         utf-16be-with-signature-unix)))
+
+;; `no-conversion' is the *one* coding system whose `:eol-type' is an
+;; integer and not a vector of three, so it has no `-unix'/`-dos'/`-mac'
+;; variants. Measured on Emacs 31.1: `(coding-system-eol-type
+;; 'no-conversion)' is `0', `(coding-system-p 'no-conversion-unix)' is nil,
+;; and `find-file' on a NUL file answers the bare `no-conversion'.
+(test-equal "no-conversion has a fixed eol and no variants"
+  ;; The last is `no-conversion' and not `#f': a *fixed* eol means the
+  ;; detected one is ignored rather than followed, so the name stands.
+  '(unix #f no-conversion)
+  (list (coding-system-eol-type 'no-conversion)
+        (coding-system-p 'no-conversion-unix)
+        (adjust-coding-eol-type 'no-conversion 'dos)))
+
+(test-equal "... where raw-text, its near neighbour, has all three"
+  '(#t #t #t)
+  (map (lambda (n) (coding-system-p n))
+       '(raw-text-unix raw-text-dos raw-text-mac)))
 
 (test-end "schemacs_editor_coding")

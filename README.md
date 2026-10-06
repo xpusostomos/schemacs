@@ -23,7 +23,9 @@ Here's what works already:
 * isearch, query-replace, query-replace-regexp 
 * Completions, query-replace have color highlighting like real emacs
 * eval-expression, eval-region
-* Character set detection and conversion (C-x RET f, C-x RET c)
+* Multiple character set detection and conversion
+* Handling of illegal characters
+* Multiple Frames
 * Buffer list
 * Dired
 * Modes, minor modes, special mode handling
@@ -45,6 +47,12 @@ one guy in a short time.
 
 Github forum is turned on above, you should feel free to discuss the
 project there.
+
+## Development philosophy
+
+Schemacs is designed to be as close as possible to real emacs in 
+the way it works, not just at the user level but at the code level.
+There is very little that departs from the algorithms of emacs.
 
 ## History of scheme and emacs
 
@@ -75,25 +83,24 @@ handling, no marks, no kill ring, no undo, no mode line, no faces, no
 modes, no minibuffer and none of the commands you would recognise as
 emacs.
 
-This Schemacs project took Ramin's work in progress and used AI to
-duplicate emacs functionality exactly, file for file, function for
-function, parameter for parameter, loop for loop. One thing that's
-surprising is how well AI can translate the mess of emacs C code into
-scheme. Sure, it's not the prettiest code in the world, but it's
-actually more readable than the spaghetti of the original C. And if
-one cares to, you can compare the logic variable for variable, loop
-for loop and see that it is the same.
+I started this project by taking Ramin's work in progress and trying
+to implement the missing bits. After a while I came to the conclusion
+there was nothing there that I really wanted or needed and started
+from scratch, from the bottom up, and used AI to
+duplicate emacs functionality exactly. One thing that's
+surprising is how well AI can replace the mess of emacs C code into
+a scheme file that does the same thing. 
 
 
 ## Ramin's Schemacs Project Goals
 
 Ramins' project seems fairly clear that he's "not in a hurry" and
-doesn't want AI help, which is what this project is. Perhap at some
-point we can collaborate somehow, but for now, I've accepted his
-project statement that "we don't need it". I'm sure if he continues to
-make progress we can absorb some of his work. However at his current
-rate of progress, I don't see anything coming out of it for a decade.
-
+doesn't want AI help, which is what this project is. At first I
+thought, using his base a starting point with its elisp work was the
+way to go. However at his current rate of progress, I don't see
+anything coming out of it for a decade. Meanwhile I can port elisp
+code to scheme in hours, and ignore the whole thought of elisp
+compatibility. 
 
 Myself I am in a hurry...
 
@@ -107,35 +114,40 @@ Myself I am in a hurry...
 * "Status is strictly a function of what you build, not what you claim you can build." — Eric S. Raymond
 * "An imperfect solution delivered today is far better than a perfect solution delivered tomorrow." - General George S. Patton
 
-Guile-scheme and Ramin's schemacs has done a lot of great work on elisp compatibility.
-I welcome such work, I encourage such work.
+Guile-scheme and Ramin's schemacs has done a lot of great work on
+elisp compatibility.  I welcome such work, I encourage such work.
 
-But it has failed since 1999. It is not the future. This is 2026
-not 1999. AI can port a large complex elisp project to scheme in less
-than an hour, and write all the test cases for you. The code it
-generates will be function for function, variable for variable, loop
-for loop identical to the original elisp. It will not be tripped up by
-elispisms like '() vs nil, nil vs #f, funcall, quoting rules, etc, it
+But it has failed since 1999. It is not the future. It seemed logical
+in 2024. It seemed like a good idea in 2015. This is 2026 not 1999. AI
+can port a large complex elisp project to scheme in less than an hour,
+and write all the test cases for you. The code it generates will be
+function for function, variable for variable, loop for loop identical
+to the original elisp. It will not be tripped up by elispisms like '()
+vs nil, nil vs #f, funcall, quoting rules, dynamic binding etc, it
 will write its own test harnesses, and it will root out any
 errors. After it does it, you typically go through another half hour
 of human testing, then it's usually done, finished and wrapped up. The
 community has the ability to port all the interesting melpa / elpa
 packages to scheme in months, and leave Emacs legacy implementation
-behind.
+behind. I'm not under the delusion that this will all be as stable
+as a multi decades code base. But it can get there. Fast.
 
 Those are my delusions of grandeur. People have had Scheme / Emacs
-delusions for decades. In reality, the emacs community is
-conservative, and slow to move. However this time it's different. You
-don't need the whole community anymore, you just need a small team of
-motivated people, and AI tokens. If Schemacs can gain a following, and
-Emacs releases a new feature, we can port it in hours, not years. We
-don't need to be beholden to the old ways.
+delusions for decades. I'm just another guy with delusions. In
+reality, the emacs community is conservative, and slow to
+move. However this time it's different. You don't need the whole
+community anymore, you just need a small team of motivated people, and
+AI tokens. If Schemacs can gain a following, and Emacs releases a new
+feature, we can port it in hours, not years. We don't need to be
+beholden to the old ways. Software isn't the scarce resource it once
+was.
 
 ## How to build
 
 As of right now, this project only runs on Guile Scheme, although
-certain libraries (`lens.sld`, `pretty."Design is fine, but implementation is everything."sld`, `keymap.sld`) can build
-and run on other Schemes. The only GUI available right now is for
+certain libraries (`lens.sld`, `pretty."Design is fine, but
+implementation is everything."sld`, `keymap.sld`) can build and run on
+other Schemes. The only GUI available right now is for
 [Guile-GI](https://github.com/spk121/guile-gi), but the Editor is
 designed specifically to be able to run on other Scheme platforms with
 other GUI toolkits. All platform specific calls are parameterized.
@@ -153,6 +165,26 @@ But guile has had a lot of work done making it easier to integrate with
 C libraries.. not that Chez is hard.. it's not really, but guile is
 much easier. Also more work has been done to integrate it with elisp...
 if that ever comes to anything.
+
+## Departures from real emacs
+
+For the most part, schemacs is extremely similar to real emacs in its
+implementation.  Ironically, Ramin was aiming for elisp compatibility
+which requires uber compatibility, but I abandoned that code base
+partly because I felt it actually departed too much from real
+emacs. One of the few things different is that Schemacs internally
+represents a UTF-32 array which is much easier to deal with and saves
+tens of thousands of lines of cruft compared to emacs, which attempts
+to have fully variable sized code sizes. The interface is fully hidden
+in the text-buffer interface, and later I will optimise it to chunk so
+that it uses the minimal memory as possible. If you have just one
+emoji in a large file, only one chunk will be utf-32. For now it just
+plain makes the whole thing a lot easier to deal with as a fixed sized
+array. This is 2026 where memory is important but not *that*
+important. There may be other departures, but they are very
+small. Small enough that AI conversion of your packages should be
+smooth... *very* smooth.
+
 
 ### Running it
 
