@@ -55,7 +55,8 @@
    buffer-text-base  buffer-text-z
    buffer-text-length  buffer-text-allocation  buffer-text-gap-size
    buffer-text-ref  buffer-text-set!
-   buffer-text-insert!  buffer-text-delete!  buffer-text-substring
+   buffer-text-insert!  buffer-text-insert-code-points!
+   buffer-text-delete!  buffer-text-substring
    buffer-text-for-each
    buffer-text-clear!
    buffer-text-beg-unchanged  set!buffer-text-beg-unchanged
@@ -364,6 +365,38 @@
               )
             ;; The characters took the front of the gap, so the gap
             ;; shrinks by exactly that much and the end moves with it.
+            (set!buffer-text-gpt bt (+ (buffer-text-gpt bt) n))
+            (set!buffer-text-z bt (+ (buffer-text-z bt) n))
+            (set!buffer-text-gap-size bt (- (buffer-text-gap-size bt) n))
+            )))))
+
+    (define (buffer-text-insert-code-points! bt pos points)
+      ;; The same insert over *code points* rather than the characters of a
+      ;; string, which is the difference that matters: a byte character is
+      ;; exactly the value a Scheme string cannot hold - `#x3FFFE9' is
+      ;; above Guile's `#x10FFFF' - so decoding a file whose bytes no
+      ;; charset can read has nowhere else to put it.
+      ;;
+      ;; `POINTS' is a `u32vector', the same type the store is, so this is
+      ;; a copy rather than a conversion. Emacs needs no such pair: its
+      ;; strings hold its characters, so `insert_from_string_1' is one
+      ;; function. Here the string form is the special case.
+      ;;--------------------------------------------------------------
+      (cond
+       ((not (u32vector? points)) (error "buffer-text-insert-code-points!: not a u32vector" points))
+       ((= 0 (u32vector-length points)) (values))
+       (else
+        (let ((n (u32vector-length points)))
+          (%ensure! bt n)
+          (%move-gap! bt pos)
+          (let*((base  (buffer-text-base bt))
+                (store (buffer-text-store bt))
+                (gpt-i (- (buffer-text-gpt bt) base))
+                )
+            (let loop ((i 0))
+              (when (< i n)
+                (u32vector-set! store (+ gpt-i i) (u32vector-ref points i))
+                (loop (+ 1 i))))
             (set!buffer-text-gpt bt (+ (buffer-text-gpt bt) n))
             (set!buffer-text-z bt (+ (buffer-text-z bt) n))
             (set!buffer-text-gap-size bt (- (buffer-text-gap-size bt) n))

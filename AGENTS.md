@@ -2738,3 +2738,31 @@ Two Guile details worth keeping:
   code point. That is not tidiness: a byte character is precisely the
   value that cannot be a character, so a caller must never have to ask
   which it got.
+
+## Inserting code points, and the full round trip (2026-10-06)
+
+The walk answers *code points* - including byte characters - and the insert
+path only took strings, so a decoded file had nowhere to go. This is the
+wall I hit two passes ago and mistook for a blocker on everything; it is
+one function.
+
+`buffer-text-insert-code-points!` is the sibling of
+`buffer-text-insert!`, the same loop without `char->integer`, taking a
+`u32vector` - the store's own type, so it is a copy rather than a
+conversion. Emacs needs no such pair, because its strings hold its
+characters; here the string form is the special case.
+
+**And the round trip through a real buffer, measured:**
+
+```
+file bytes                  41 c3 28 42
+  decode as utf-8         -> buffer holds (65 4194243 40 66)   <- Emacs's answer
+  encode back from buffer -> 41 c3 28 42                       <- the original bytes
+```
+
+That is the whole chain - bytes, decoder, buffer, encoder, bytes - and it
+is what makes the `no-conversion` fallback safe rather than lossy: a file
+whose bytes nothing can read goes into the buffer as byte characters and
+comes back out as the bytes it was.
+
+All 30 suites pass; `buffer-text-tests.scm` 59 and `coding-tests.scm` 21.

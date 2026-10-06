@@ -3,6 +3,8 @@
   (schemacs editor buffer-text)
   (only (srfi 1) iota)
   (only (srfi 64) test-assert test-equal test-begin test-end)
+  ;; `make-typed-array' and `array-set!' are Guile's, not R7RS's.
+  (only (guile) array-set! make-typed-array)
   )
 
 ;; `buffer-text' is GNU Emacs's `struct buffer_text' as an object. The
@@ -179,5 +181,28 @@
   (buffer-text-insert! bt 1 (string (integer->char #x4E2D)))
   (test-equal #x4E2D (buffer-text-ref bt 1))
   (test-equal 19 (buffer-text-length bt)))
+
+;; ------------------------------------------------------------------
+;; inserting *code points* rather than the characters of a string
+;;
+;; A byte character is exactly the value a Scheme string cannot hold -
+;; `#x3FFFE9' is above Guile's `#x10FFFF' - so decoding a file whose bytes
+;; no charset can read needs this rather than the string form. Emacs needs
+;; no such pair: its strings hold its characters, so `insert_from_string_1'
+;; is one function. Here the string form is the special case.
+
+(test-equal "a byte character in a buffer survives the round trip"
+  '(65 4194243 40 66)
+  (let* ((bt (new-buffer-text 1 16))
+         (v (make-typed-array 'u32 0 4)))
+    (array-set! v 65 0)
+    (array-set! v 4194243 1)
+    (array-set! v 40 2)
+    (array-set! v 66 3)
+    (buffer-text-insert-code-points! bt 1 v)
+    (let loop ((i 1) (acc '()))
+      (if (> i (buffer-text-length bt))
+          (reverse acc)
+          (loop (+ i 1) (cons (buffer-text-ref bt i) acc))))))
 
 (test-end "schemacs_editor_buffer_text")
