@@ -1,7 +1,0 @@
-** Warnings from MIT Scheme <2026-09-13 Sun>
-#+begin_example
-;  Loading "/usr/local/lib/mit-scheme-svm1-64le-12.1/libraries/srfi-133.comld"... done
-;Warning: Library exports refer to unbound identifiers: (s8vector? make-s8vector s8vector s8vector-length s8vector-ref ...)
-;Warning: Library exports refer to unbound identifiers: (elisp-void-macro)
-;Warning: Library exports refer to unbound identifiers: (make<macro> macro-procedure)
-#+end_example

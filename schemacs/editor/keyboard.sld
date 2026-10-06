@@ -67,7 +67,7 @@
     (only (schemacs editor keymap)
           *current-keymap*
           *default-keymap*
-          *special-event-map* define-key)
+          *special-event-map* define-key keymap-parent)
     ;; The keys the current buffer has of its own - what gives a buffer
     ;; like `*Completions*' its own bindings - and which buffer is current.
     (only (schemacs editor buffer)
@@ -410,11 +410,36 @@
         ;; system's events up in it before the ordinary maps, which is how
         ;; `(delete-frame (FRAME))' runs its handler rather than being read
         ;; as an ordinary key.
-        (cond ((and buffer-keys mode-keys)
-               (list *special-event-map* buffer-keys mode-keys *default-keymap*))
-              (buffer-keys (list *special-event-map* buffer-keys *default-keymap*))
-              (mode-keys (list *special-event-map* mode-keys *default-keymap*))
-              (else (list *special-event-map* *default-keymap*)))))
+        (append
+         (list *special-event-map*)
+         (if buffer-keys (%keymap-and-parents buffer-keys) '())
+         (if mode-keys (%keymap-and-parents mode-keys) '())
+         (%keymap-and-parents *default-keymap*))))
+
+    (define (%keymap-and-parents keymap)
+      ;; KEYMAP and its parents, nearest first.
+      ;;
+      ;; **This is what makes `set-keymap-parent' mean anything**, and
+      ;; without it the tree had a map-inheritance mechanism that did
+      ;; nothing. GNU Emacs searches a keymap and then its parent - a
+      ;; child's binding shadows the parent's, which is the whole point of
+      ;; `define-derived-mode''s `(set-keymap-parent CHILD-map
+      ;; (current-local-map))' and of dired's `(set-keymap-parent map
+      ;; special-mode-map)'.
+      ;;
+      ;; What the lookup did instead was walk a map's own *layers* and stop
+      ;; (`keymap-lookup-binding-key' in `(schemacs keymap)'), and no map
+      ;; in this tree has one of its parents among its layers. So every
+      ;; parent was decorative: a mode that inherited a key did not have
+      ;; it, and the only reason nothing showed is that the modes which
+      ;; need a key tend to bind it themselves rather than inherit it.
+      ;; The Buffer Menu's note about `g' being "inherited from
+      ;; `special-mode-map'' was true of Emacs and not of here.
+      ;;--------------------------------------------------------------
+      (let loop ((map keymap) (out '()))
+        (if (not map)
+            (reverse out)
+            (loop (keymap-parent map) (cons map out)))))
 
     (define (dispatch-key-event frame key)
       ;; Dispatch one key *event* through the modal keymap lookup. The

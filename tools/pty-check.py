@@ -1675,6 +1675,45 @@ def check_eval_region():
     return problems
 
 
+def check_special_mode_keys():
+    """A special mode inherits `special-mode-map''s keys through its parent.
+
+    `special-mode-map' (`simple.el:580') carries `q' -> `quit-window',
+    SPC and DEL -> the scroll commands, and `<'/`>' -> beginning and end
+    of buffer. A mode that *derives* from `special-mode' gets them through
+    `keymap-parent'.
+
+    Neither half worked here until 2026-10-06. The map was empty, and -
+    worse and less visible - **the lookup did not follow a keymap's
+    parent at all**: `keymap-lookup-binding-key' walks a map's own layers
+    and stops, so `define-derived-mode''s `(set-keymap-parent CHILD-map
+    (current-local-map))' and dired's parent were decorative. Filling the
+    map without fixing that would have helped only a mode that *is*
+    `special-mode'.
+
+    The Buffer Menu is the special mode whose inheritance is observable
+    from outside: it is shown in a window of its own, so `q' either closes
+    that window or does nothing at all.
+    """
+    path = "/tmp/pty-check-special-mode.txt"
+    open(path, "w").write("hi\n")
+    problems = []
+    # open the list, select its window, and ask it to quit
+    out = drive([C_x + C_f, path.encode(), RET, C_x, b"\x02", C_x, b"o",
+                 b"q"], path)
+    screen = screen_of(out)
+    if "*Buffer List*" in screen:
+        problems.append("*Buffer List* is still on screen after `q'; the "
+                        "Buffer Menu did not inherit `q' from "
+                        "`special-mode-map' through its parent "
+                        "(screen %r)" % screen[:300])
+    if "qhi" in screen:
+        problems.append("`q' went to the file and self-inserted, so the "
+                        "Buffer Menu's map did not have it (screen %r)"
+                        % screen[:300])
+    return problems
+
+
 def check_resize():
     """Split the frame, then make the terminal wider, narrower and taller.
 
@@ -2506,6 +2545,7 @@ CHECKS = {
     "pagedown": check_pagedown,
     "eval-expression": check_eval_expression,
     "eval-region": check_eval_region,
+    "special-mode-keys": check_special_mode_keys,
     "scroll": check_scroll,
     "save": check_save,
     "save-y-n": check_save_y_n,

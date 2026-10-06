@@ -67,7 +67,8 @@
          *saved-region-selection*)
     ;; `toggle-truncate-lines' resets the `hscroll' of every window
     ;; showing the buffer, which is `set-window-hscroll''s
-    (only (schemacs editor window) set-window-hscroll!)
+    ;; `quit-window' is what `special-mode-map''s `q' is.
+    (only (schemacs editor window) quit-window set-window-hscroll!)
     (only (schemacs editor command)
          called-interactively? current-prefix-arg new-command uarg->integer
          define-command)
@@ -178,9 +179,11 @@ just-one-space delete-horizontal-space delete-blank-lines
     (define special-mode-map
       ;; GNU Emacs's `special-mode-map', which `define-derived-mode'
       ;; makes for the mode below: the keys every special mode shares.
-      ;; It has no keys of its own here yet - Emacs's carries the
-      ;; `special-mode' bindings - so it is an empty map for the modes
-      ;; that derive from this one to layer over.
+      ;;
+      ;; What it carries is bound at the *end* of this file, not here,
+      ;; because a binding is a value and the commands it names
+      ;; (`scroll-up-command' and `end-of-buffer' below) are not defined
+      ;; yet at this point.
       ;;--------------------------------------------------------------
       (km:keymap '*special-mode-map*))
 
@@ -2510,5 +2513,43 @@ This function does not move point."
                           (message "%s" (%eval-region-value->string value))
                           (write value printflag))))
                   (loop))))))))
+
+
+    ;;------------------------------------------------------------------
+    ;; special-mode-map
+    ;;------------------------------------------------------------------
+    ;;
+    ;; GNU Emacs's `special-mode-map' (`simple.el:580'):
+    ;;
+    ;;     (defvar-keymap special-mode-map
+    ;;       :suppress t
+    ;;       "q" #'quit-window  "SPC" #'scroll-up-command
+    ;;       "S-SPC" #'scroll-down-command  "DEL" #'scroll-down-command
+    ;;       "?" #'describe-mode  "h" #'describe-mode
+    ;;       ">" #'end-of-buffer  "<" #'beginning-of-buffer
+    ;;       "g" #'revert-buffer)
+    ;;
+    ;; The map was empty here - "Emacs's carries the `special-mode'
+    ;; bindings" - so `q', SPC, DEL, `<', `>' and `g' were missing from
+    ;; every special mode: dired, the Buffer Menu, and the backtrace
+    ;; buffer the eval work added. They reach it through the parent chain
+    ;; now that the lookup follows it; before that, filling this map
+    ;; would have helped only a mode that *is* `special-mode' and not the
+    ;; modes that derive from it - see the note on
+    ;; `%keymap-and-parents' in `(schemacs editor keyboard)'.
+    ;;
+    ;; **Not carried**, each needing something this library cannot
+    ;; reach: `?' and `h' are `describe-mode', which does not exist here;
+    ;; `g' is `revert-buffer', which is `files.sld''s and that library is
+    ;; above this one. And `:suppress t' - `(suppress-keymap map)' -
+    ;; which makes a special buffer's printing characters *undefined*:
+    ;; that needs a layer a buffer's own map can put over the
+    ;; self-insert fallback, which is a layer of the global map.
+    (define-key special-mode-map (kbd "q") quit-window)
+    (define-key special-mode-map (kbd "SPC") scroll-up-command)
+    (define-key special-mode-map (kbd "S-SPC") scroll-down-command)
+    (define-key special-mode-map (kbd "DEL") scroll-down-command)
+    (define-key special-mode-map (kbd ">") end-of-buffer)
+    (define-key special-mode-map (kbd "<") beginning-of-buffer)
 
     ))

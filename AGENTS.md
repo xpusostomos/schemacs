@@ -2466,3 +2466,71 @@ and was right; the returned count was not.
 
 All eighteen rows of the measured table (`cmds-tests.scm', 22) match Emacs
 31.1, and all 29 suites pass.
+
+## `special-mode-map`, and the keymap parents that did nothing (2026-10-06)
+
+Two things, and the second is the one that mattered. Chris asked for the
+map; filling it turned out to be pointless without the other.
+
+**The lookup did not follow a keymap's parent.** `keymap-lookup-binding-key'
+in `(schemacs keymap)' walks `(keymap->layers-list keymap)' and stops:
+
+```scheme
+(let loop ((layers (keymap->layers-list keymap)))
+  (cond ((null? layers) #f)
+        (else (let ((result (keymap-layer-lookup-binding-key (car layers) binding)))
+                (or result (loop (cdr layers)))))))
+```
+
+A parent is not a layer. Emacs walks `keymap-parent' after the map itself,
+and that walk is the *whole* mechanism of keymap inheritance - it is what
+`define-derived-mode''s `(set-keymap-parent CHILD-map (current-local-map))'
+means, and what dired's `(set-keymap-parent map special-mode-map)' means.
+
+So every parent in this tree was decorative, and nothing showed it because
+the modes that need a key tend to bind it themselves: the Buffer Menu binds
+`g' explicitly rather than inheriting it, which is why the note saying `g'
+"is inherited from `special-mode-map'' was true of Emacs and not of here.
+
+`lookup-keymaps' now expands each map through `%keymap-and-parents'
+(`keyboard.sld'), nearest first, and a child's binding shadows its
+parent's - which is the point.
+
+**Then the map.** GNU Emacs's (`simple.el:580'):
+
+```elisp
+(defvar-keymap special-mode-map
+  :suppress t
+  "q" #'quit-window  "SPC" #'scroll-up-command
+  "S-SPC" #'scroll-down-command  "DEL" #'scroll-down-command
+  "?" #'describe-mode  "h" #'describe-mode
+  ">" #'end-of-buffer  "<" #'beginning-of-buffer
+  "g" #'revert-buffer)
+```
+
+Six of the nine are bound at the end of `simple.sld' - where the commands
+they name are defined, a binding being a value. **Not carried**: `?' and
+`h' are `describe-mode', which does not exist here; `g' is `revert-buffer',
+which is `files.sld''s and that library is above this one; and `:suppress t'
+- `(suppress-keymap map)' - which makes a special buffer's printing
+characters *undefined*, and which needs a layer a buffer's own map can put
+over the self-insert fallback, that being a layer of the global map.
+
+The pty check is the Buffer Menu's `q': open the list, select its window,
+and the window closes - which is only possible if the binding is inherited,
+since the Buffer Menu binds no `q' of its own.
+
+### A departure found while testing it
+
+`quit-window' on a frame's **only** window buries the buffer and stops:
+
+```scheme
+(bury-buffer buffer)
+(if (> (length (window-list)) 1) (delete-window window) #f)
+```
+
+Emacs's `quit-window' also switches that window to the previous buffer
+(`switch-to-prev-buffer'), so the dired buffer being buried shows something
+else. Ours leaves it showing the buried buffer, which is why `q' in dired
+looks like it did nothing. Not fixed here; named because it made the first
+version of this check read as a failure when the inheritance was working.
