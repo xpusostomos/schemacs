@@ -3849,3 +3849,69 @@ Now: **19 identical, 2 known-different, 0 new**, exit 0.
 The `srfi 64` trap caught me twice more here - `coding-system-name` answers a
 *symbol* and I wrote the expectations as strings, and `number->string` hex
 against `'(ef bb bf)` symbols - both printing as two identical-looking lists.
+
+# iso-2022 is not a 259-line job — corrected sizing (2026-10-06)
+
+Reconnaissance only; no code. This is here so the next session does not repeat
+the estimate. The plan (`zany-stargazing-hare.md`, item 7) says:
+
+> `detect_coding_iso_2022` — 259 lines. A genuine state machine, the one big
+> detector. iconv has the codecs (`ISO-2022-JP` works), so the detector is the
+> whole cost.
+
+**Both sentences are wrong**, and in opposite directions.
+
+## The detector is the small part
+
+`detect_coding_iso_2022` (`coding.c:2923`, ~260 lines) decides each ISO
+category with `SAFE_CHARSET_P`, whose `safe_charsets` string comes from
+`setup_iso_safe_charsets` (`coding.c:2855`) over the coding system's
+`:charset-list`. Measured on Emacs 31.1:
+
+```
+iso-2022-7bit        type=iso-2022   charsets=iso-2022
+iso-2022-8bit-ss2    type=iso-2022   charsets=iso-2022
+iso-2022-7bit-lock   type=iso-2022   charsets=iso-2022
+iso-2022-jp          type=iso-2022   charsets=4
+```
+
+Three of the four categories answer the *symbol* `iso-2022` — the whole
+charset registry, resolved at run time. The designation sequence is turned
+into a charset id by `iso_charset_table`, which `define_charset_internal`
+(`charset.c:1157`) populates from the charset definitions and their
+`charsets/` map files. None of that exists here; it is **item 8** of the same
+plan, `charset.c`, 2464 lines.
+
+## iconv does *not* have the codec
+
+This is the part that makes it not-bounded. The corpus case in
+`tools/coding-diff.py` is named `iso-2022-7bit` by Emacs — and:
+
+```
+$ iconv -l | grep ^ISO-2022
+ISO-2022-CN-EXT// ISO-2022-CN// ISO-2022-JP-2// ISO-2022-JP-3//
+ISO-2022-JP// ISO-2022-KR//
+```
+
+There is no `iso-2022-7bit` in iconv. Emacs's is its own coding system —
+`CODING_ISO_FLAG_FULL_SUPPORT` over every registered charset, which is why
+its `:charset-list` is the whole registry — and iconv's `ISO-2022-JP` is a
+much narrower coding system that merely *agrees on these bytes* (measured:
+it does decode them, `あいうえお`). So the port needs
+`decode_coding_iso_2022` (`coding.c:3449`, ~900 lines) and
+`encode_coding_iso_2022` (`:4364`, ~200) written by hand.
+
+**This is the first place in the whole coding layer where iconv is not the
+codec.** Every other family — UTF-8, UTF-16, Latin-1, Shift-JIS, Big5 — leaned
+on it, which is what made them cheap; this one cannot.
+
+## The corrected estimate
+
+Item 7 is **~1400 lines of `coding.c` plus the charset registry (item 8)**.
+It is not a detector with a codec underneath; it is the registry, a decoder,
+an encoder and a detector, in that order, and item 8 comes first. The
+honest order is item 8, then item 7 on top of it.
+
+A JISX0208-only table would make the corpus case pass and would be a lie of
+the kind this file already has a section about ("a decision I made and then
+dressed as fidelity"). Don't.
