@@ -55,13 +55,18 @@
     ;; `make-typed-array', `array-ref' and `array-set!' are Guile's, not
     ;; R7RS's - `(scheme base)' has no generic array. NOTE that
     ;; `array-set!' takes the *value before the index*, which is the
-    ;; opposite of `vector-set!'.
-    (only (guile) array-length array-ref array-set! logand make-typed-array)
+    ;; opposite of `vector-set!'. `put-u8' / `get-u8' and the three port
+    ;; settings are Guile's too.
+    (only (guile) array-length array-ref array-set! catch logand make-typed-array
+          set-port-conversion-strategy! set-port-encoding!)
+    (only (rnrs io ports) get-u8 put-u8)
     (only (schemacs editor character)
           byte8-to-char char-byte8? char-to-byte8 unibyte-to-char)
     )
 
   (export
+   ;; Reading and writing a stream one character at a time
+   coding-setup-port! coding-read-char coding-write-char
    ;; The coding systems
    coding-system? make-coding-system
    coding-system-name coding-system-base coding-system-eol-type
@@ -190,6 +195,123 @@
     ;;------------------------------------------------------------------
     ;; Converting
     ;;------------------------------------------------------------------
+
+    ;;------------------------------------------------------------------
+    ;; A stream, one character at a time
+    ;;------------------------------------------------------------------
+    ;;
+    ;; GNU Emacs's `coding.c' converts a *stream* with a state machine -
+    ;; `decode_coding' and `encode_coding' - and the shape here is the
+    ;; same walk: read or write one character, and where the coding system
+    ;; cannot handle what it meets, put or take the raw byte instead.
+    ;;
+    ;; The mechanism is a Guile port that is both binary and encoded, and
+    ;; it is worth writing down because it is not obvious: `put-u8' writes
+    ;; a byte *unconverted* while `write-char' on the same port goes
+    ;; through the encoding, and on the reading side `get-u8' takes a raw
+    ;; byte while `read-char' decodes. Measured, both directions - a port
+    ;; with "UTF-8" set wrote `61 e9 c3 a9 7a' from a char, a raw byte, a
+    ;; char and a char, and read the four back as themselves.
+    ;;
+    ;; The one thing that has to be turned on is the *conversion
+    ;; strategy*: by default a byte the encoding cannot decode is silently
+    ;; replaced by U+FFFD, which is the mangling this whole layer exists
+    ;; to stop, and there is then no way to tell that it happened.
+    ;; `(set-port-conversion-strategy! port 'error)' makes `read-char'
+    ;; signal instead, and the offending byte is still on the port - which
+    ;; is what makes the recovery below exact rather than approximate.
+
+    (define (%coding-of coding)
+      (let ((cs (if (coding-system? coding) coding (find-coding-system coding))))
+        (or cs (error (string-append "Unknown coding system: "
+                                     (if (symbol? coding)
+                                         (symbol->string coding)
+                                         "?"))))))
+
+    (define (coding-setup-port! port coding)
+      ;; The port half of `setup_coding_system': what the port converts
+      ;; with, and that a byte it cannot decode is an error rather than a
+      ;; substitution.
+      ;;
+      ;; A `no-conversion' or `raw-text' port is left with no encoding at
+      ;; all - nothing here calls `read-char' or `write-char' on one, so
+      ;; there is nothing for an encoding to spoil.
+      ;;--------------------------------------------------------------
+      (let ((cs (%coding-of coding)))
+        (if (coding-system-raw? cs)
+            port
+            (begin
+              (set-port-encoding! port (coding-system-iconv-name cs))
+              (set-port-conversion-strategy! port 'error)
+              port))))
+
+    (define (%error-port rest)
+      ;; The port out of a `decoding-error''s arguments, where the byte
+      ;; that could not be read still is.
+      ;;--------------------------------------------------------------
+      (let loop ((r rest))
+        (cond ((null? r) #f)
+              ((port? (car r)) (car r))
+              (else (loop (cdr r))))))
+
+    (define (coding-read-char port coding)
+      ;; One character from PORT, decoded by CODING. EOF is the eof
+      ;; object, as `read-char''s is.
+      ;;
+      ;; **A byte the coding system cannot decode becomes its byte
+      ;; character**, which is Emacs's rule and not a recovery invented
+      ;; here: measured on Emacs 31.1, the bytes `41 c3 28 42' read as
+      ;; `utf-8' give `(65 4194243 40 66)' - `0x3FFFC3' for the C3, and
+      ;; then `0x28' as an ordinary `(' because the scan *carries on from
+      ;; the next byte*. The truncated `41 e2 82 42' gives
+      ;; `0x3FFFE2, 0x3FFF82' - two byte characters - because 0x82 alone
+      ;; is not a valid start either.
+      ;;
+      ;; Guile's recovery is the same, byte for byte, and that is what
+      ;; makes this a port rather than an approximation: measured over the
+      ;; same three files it answers `#\A (bad 195) #\( #\B',
+      ;; `#\A (bad 226) (bad 130) #\B' and `#\A #\é #\B'.
+      ;;--------------------------------------------------------------
+      (let ((cs (%coding-of coding)))
+        (if (coding-system-raw? cs)
+            (let ((b (get-u8 port)))
+              (if (eof-object? b) b (unibyte-to-char b)))
+            ;; `char->integer' so that *every* answer is a code point:
+            ;; `read-char' gives a character and `byte8-to-char' an
+            ;; integer, and a caller walking a buffer must not have to ask
+            ;; which it got - a byte character is precisely the one that
+            ;; cannot be a character.
+            (catch 'decoding-error
+              (lambda ()
+                (let ((c (read-char port)))
+                  (if (eof-object? c) c (char->integer c))))
+              (lambda (key . rest)
+                (let ((err (%error-port rest)))
+                  (if err
+                      (let ((b (get-u8 err)))
+                        (if (eof-object? b) b (byte8-to-char b)))
+                      (error "coding-read-char: decoding error with no port"))))))))
+
+    (define (coding-write-char port c coding)
+      ;; One code point to PORT, encoded by CODING - and a *byte character*
+      ;; written as its raw byte instead, which is how the bytes above come
+      ;; back out unchanged.
+      ;;
+      ;; The test is `char-byte8?' and not a caught error, because a
+      ;; character the charset cannot represent is *not* an error: Emacs
+      ;; answers `"?"' for `(encode-coding-string "é" 'us-ascii)' and
+      ;; Guile's port does the same by the same strategy setting. The byte
+      ;; characters are a different thing - a reserved range that is not a
+      ;; character at all - and they take the byte branch before any
+      ;; encoding sees them.
+      ;;--------------------------------------------------------------
+      (let ((cs (%coding-of coding)))
+        (if (or (coding-system-raw? cs) (char-byte8? c))
+            (put-u8 port (char-to-byte8 c))
+            ;; `write-char' takes the *character first* and the port
+            ;; second - the opposite of `put-u8'.
+            (write-char (integer->char c) port)))
+      c)
 
     (define (decode-coding-string bytes coding)
       ;; GNU Emacs's `decode-coding-string' (`coding.c'): "Decode the

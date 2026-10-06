@@ -6,7 +6,10 @@
  (only (schemacs editor coding)
        coding-system-p find-coding-system coding-system-name
        coding-system-base-name coding-system-change-eol-conversion
-       decode-coding-string encode-coding-string)
+       decode-coding-string encode-coding-string
+       coding-setup-port! coding-read-char coding-write-char)
+ (scheme file)
+ (rnrs io ports)
  (only (schemacs editor character)
        char-byte8? byte8-to-char char-to-byte8 char-to-byte-safe
        unibyte-to-char *max-5-byte-char*))
@@ -143,5 +146,66 @@
   (bytes-of (encode-coding-string
              (decode-coding-string latin-1-bytes 'no-conversion)
              'no-conversion)))
+
+;; ------------------------------------------------------------------
+;; a stream, one character at a time - which is how a file is really read
+;;
+;; The mechanism is a port that is both binary and encoded: `put-u8'
+;; writes a byte unconverted while `write-char' on the same port goes
+;; through the encoding, and `get-u8' / `read-char' mirror that. The one
+;; thing that must be turned on is `(set-port-conversion-strategy! port
+;; 'error)' - by default a byte the encoding cannot decode is silently
+;; replaced by U+FFFD, which is the mangling this layer exists to stop and
+;; is invisible when it happens.
+
+(define (read-stream bytes coding)
+  (call-with-port (open-input-bytevector bytes)
+    (lambda (p)
+      (coding-setup-port! p coding)
+      (let loop ((acc '()))
+        (let ((c (coding-read-char p coding)))
+          (if (eof-object? c) (reverse acc) (loop (cons c acc))))))))
+
+(define (write-stream cps coding)
+  (call-with-port (open-output-bytevector)
+    (lambda (p)
+      (coding-setup-port! p coding)
+      (for-each (lambda (c) (coding-write-char p c coding)) cps)
+      (get-output-bytevector p))))
+
+(define (bytes-of bv)
+  (let loop ((i 0) (acc '()))
+    (if (>= i (bytevector-length bv)) (reverse acc)
+        (loop (+ i 1) (cons (bytevector-u8-ref bv i) acc)))))
+
+;; **A byte the coding system cannot decode becomes its byte character**,
+;; and the scan carries on from the *next* byte. Both are Emacs 31.1's,
+;; measured over the same bytes: `41 c3 28 42' read as utf-8 gives
+;; `(65 4194243 40 66)' - one byte character for the C3, and then `0x28'
+;; as an ordinary `(' - and the truncated `41 e2 82 42' gives two of them,
+;; because 0x82 is not a valid start either.
+(test-equal "a bad continuation gives one byte character, then rescans"
+  '(65 4194243 40 66)
+  (read-stream #vu8(65 195 40 66) 'utf-8-unix))
+
+(test-equal "a truncated sequence gives a byte character per byte"
+  '(65 4194274 4194178 66)
+  (read-stream #vu8(65 226 130 66) 'utf-8-unix))
+
+(test-equal "a valid sequence is decoded"
+  '(65 233 66)
+  (read-stream #vu8(65 195 169 66) 'utf-8-unix))
+
+;; and writing is the same rule backwards: `char-byte8?' takes the byte
+;; branch, everything else goes through the encoding.
+(test-equal "byte characters write back as their own byte"
+  '(65 195 40 66)
+  (bytes-of (write-stream '(65 4194243 40 66) 'utf-8-unix)))
+
+(test-equal "so a file we cannot classify survives a round trip"
+  '(99 97 102 233 32 110 97 239 118 101 10)
+  (bytes-of (write-stream (read-stream #vu8(99 97 102 233 32 110 97 239 118 101 10)
+                                       'no-conversion)
+                          'no-conversion)))
 
 (test-end "schemacs_editor_coding")

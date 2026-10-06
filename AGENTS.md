@@ -2652,3 +2652,89 @@ Not carried from `coding.c`, each named where it would go: `utf-8-emacs`
 (Emacs's five-byte form, which iconv has no equivalent of, so it is the
 one codec that would be hand-written), `undecided` as a *deferred* choice,
 `:charset-list` and the rest of the plist, and the ISO-2022/CJK families.
+
+## Reading and writing a file, one character at a time (2026-10-06)
+
+The half of the coding work that has no exception in it, and it is smaller
+than the two versions I proposed before it. Chris found both of the pieces
+I had wrong.
+
+### "You wouldn't be writing to the default port" - and the mixed port
+
+I had framed Guile's port as destroying characters. It does not; we never
+chose an encoding. Then I said a coding walk needed one path for chars and
+another for bytes. Chris:
+
+> I believe that you can set an encoding on a binary port, then you can
+> write bytes to it but if you write a char to it it will use the encoding,
+> so you can mix and match. (set-port-encoding! port "Shift_JIS")
+
+Measured, and he is right - a port with "UTF-8" set, written to with
+`write-char #\a`, `put-u8 #xe9`, `write-char (integer->char 233)`,
+`write-char #\z`, gives `61 e9 c3 a9 7a`; the byte went out untouched and
+the two characters were encoded. Read back with `read-char` and `get-u8`
+mixed the same way it answers `#\a`, `233`, `#\é`, `#\z`.
+
+### "Catch and record the bad bytes" - and the conversion strategy
+
+I said reading could *not* work that way, because `read-char` substitutes
+`U+FFFD` for a byte it cannot decode and you never learn it happened.
+Chris:
+
+> I think it might be possible to read the char through the input port, but
+> still catch and record the bad bytes when they occur.
+
+with `(set-port-conversion-strategy! in 'error)`. That is the missing
+setting: by default the strategy *substitutes*, and `'error` makes
+`read-char` signal instead, with the offending byte still on the port -
+which is what makes the recovery exact. Measured over three files:
+
+| bytes | Emacs 31.1 | Guile, `'error` + `get-u8` |
+|---|---|---|
+| `41 c3 28 42` | `65 4194243 40 66` | same |
+| `41 e2 82 42` | `65 4194274 4194178 66` | same |
+| `41 c3 a9 42` | `65 233 66` | same |
+
+### What a bad sequence becomes - Chris's question
+
+> what you will do with it so it comes out again... You store them together
+> in our u32 array? But our u32 array is an array of UTF-32 right? Isn't it
+> possible that those 2 bytes which are illegal in UTF8 are actually legal
+> in UTF32? Or you have a special strategy for that with using the high
+> bits or something?
+
+The high bits, and it is Emacs's `character.h`:
+
+- **One code point per byte**, never a sequence stored together. The
+  `41 c3 28 42` row is the proof: the C3 became one byte character and the
+  `28` then came out as an ordinary `(` - **the scan carries on from the
+  next byte**, so a byte that is valid on its own is not dragged down with
+  the sequence it was in.
+- **A byte is not stored as itself**, because it *would* be a legal code
+  point - `0xE9` is `é` in Latin-1, and a buffer could not tell the two
+  apart. It is stored as `0x3FFF00 + byte`, a range above
+  `MAX_5_BYTE_CHAR` (`0x3FFF7F`), where `CHAR_BYTE8_P` can recognise it and
+  where no character can ever live. So writing it back is unambiguous: the
+  test is the range, not a guess.
+
+### What landed
+
+`schemacs/editor/coding.sld` gained `coding-setup-port!`,
+`coding-read-char` and `coding-write-char` - the stream walk `decode_coding`
+and `encode_coding` are - and `coding-tests.scm` (21) has the three files
+above plus the round trip: **`no-conversion` reads the Latin-1 file and
+writes back `99 97 102 233 32 110 97 239 118 101 10` - the original
+bytes.**
+
+Two Guile details worth keeping:
+
+- `write-char` takes the **character first and the port second**, the
+  opposite of `put-u8`; and `read-char` takes the port first like
+  `get-u8`. Getting that backwards was a "Wrong type argument" that named
+  a port where a character was expected, which is at least honest about
+  which of the two it is.
+- `read-char` answers a *character* and `byte8-to-char` an *integer*, so
+  the walk converts the first with `char->integer` and every answer is a
+  code point. That is not tidiness: a byte character is precisely the
+  value that cannot be a character, so a caller must never have to ask
+  which it got.
