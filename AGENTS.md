@@ -2766,3 +2766,168 @@ whose bytes nothing can read goes into the buffer as byte characters and
 comes back out as the bytes it was.
 
 All 30 suites pass; `buffer-text-tests.scm` 59 and `coding-tests.scm` 21.
+
+# The coding system a buffer is using (2026-10-06)
+
+Steps 2 and 3 of Chris's plan: `buffer-file-coding-system` holds a real
+coding system rather than a line-break convention, and `find-file`,
+`insert-file-contents` and `save-buffer` read and write through it. **This
+is the change that stopped the two test files being mangled**, and it is
+the first time the coding machinery landing over the previous three
+commits is called by anything.
+
+## What landed
+
+- **`coding.sld`** — the EOL half, which is what a coding system carries
+  beside its codec: `detect-eol` (`coding.c:6374`), `adjust-coding-eol-type`
+  (`:6470`), `decode-eol`/`encode-eol`, `as-coding-system`, and the
+  variable `*last-coding-system-used*`. Plus `*max-eol-check-count*` and
+  `bytes-have-null?`.
+- **`files.sld`** — `default-buffer-file-coding-system`,
+  `buffer-file-coding-system`/`set!buffer-file-coding-system` over it,
+  `coding-system-for-file` (the detect-and-settle step),
+  `decode-file-bytes`, `write-file-code-points`, and the three call sites
+  rewired. `detect-line-break`, `decode-dos-returns`, `encode-line-breaks`
+  and the frame-era `line-break-*` imports are **gone**.
+- **`engine.sld`** — `text-editor-insert` takes a *list of code points* as
+  well as a string, `text-editor-force-insert-code-point`,
+  `text-editor-to-code-points`.
+- **`buffer-text.sld`** — `code-point->char`, and `buffer-text-substring`
+  goes through it instead of `integer->char`.
+- **`xdisp.sld`** — `mode-line-eol-desc` reads `coding-system-eol-type`.
+- **`mule.sld`** — the BOM answers `utf-16`, and the local-variables block
+  now has Emacs's window and anchors.
+
+## The measurements this was written against
+
+Every rule below was read out of the C or the lisp *and* checked against
+Emacs 31.1, and three of the four disagreements found were mine:
+
+| | Emacs | ours, now |
+|---|---|---|
+| a new buffer's coding system | `utf-8-unix` | same |
+| `a\r\nb` decoded as `utf-8-dos` | `(97 10 98)` | same |
+| ... as `utf-8-unix` | `(97 13 10 98)` — the CR stays | same |
+| ... as `utf-8-mac` (`a\rb`) | `(97 10 98)` | same |
+| `a\nb` encoded as `utf-8-dos` | `(97 13 10 98)` | same |
+| a CRLF file, no tag | `undecided-dos` | `utf-8-dos` (dep. 1) |
+| a CRLF file tagged `utf-8` | `utf-8-dos` | same |
+| ... tagged `utf-8-unix` | `utf-8-unix` | same |
+| `café naïve` in Latin-1, no tag | `iso-latin-1-unix` | `utf-8-unix` (dep. 2) |
+| a UTF-16LE BOM'd file | `utf-16le-with-signature-unix` | `utf-16-unix` (dep. 3) |
+
+**The eol is detected only when the coding system has not named one** —
+the C's `(VECTORP (eol_type))` test at `coding.c:8933`. That is why a file
+saying `-*- coding: utf-8 -*-` on a CRLF file is `utf-8-dos` and the same
+file saying `utf-8-unix` keeps UNIX. Getting this wrong is not visible on
+an LF file.
+
+**The eol conversion is a whole-value pass after the codec**, not part of
+the character state machine — `decode_eol` runs over what `decode_coding`
+produced, and `encode_eol` mirrors it. So the walk in `coding.sld` stays
+character-by-character and the EOL half is its own pair of functions.
+
+## Bugs found, each three functions from its symptom
+
+1. **`detect-eol` answered `'lf`/`'crlf`/`'cr` and the caller wanted
+   `'unix`/`'dos`/`'mac`.** The C's `adjust_coding_eol_type` is that
+   mapping and I left it out, so the name built was `utf-8-lf` — no table
+   has it, and the failure surfaced as "Unknown coding system: ?" from
+   `coding-setup-port!`, with a `?` where the name should be because the
+   value was not a symbol.
+2. **`encode-eol`'s DOS branch consed the CR-LF pair in the wrong order.**
+   The accumulator is built backwards and reversed at the end, so the LF
+   goes on first. Written the readable way round it produces `10 13`, and
+   the file is still a file — the round trip test is what caught it.
+3. **`find-coding-system` takes a name and `buffer-file-coding-system`
+   holds a record.** Emacs has no such split: a coding system there *is* a
+   symbol, so `(coding-system-eol-type buffer-file-coding-system)` works.
+   The lookup on a record answered `#f`, so **the mode line said `:` for
+   every buffer**. Fixed with `as-coding-system`, one coercion in one
+   place, which several call sites were already doing by hand.
+4. **`files.sld` never imported `text-editor-to-code-points`** — the
+   missing-import class, for the sixth time in this tree. It reported as
+   `; save-buffer: error writing /tmp/fe-mod.txt` and *the save silently
+   did nothing*: `save-buffer`'s `guard` turns any error into an echo-area
+   message. The way to see it is to put `(display ex (current-error-port))`
+   in the guard's else branch.
+5. **`%byte-order-mark` answered `utf-16le`, which keeps the BOM as a
+   character.** Read that way the buffer got a U+FEFF in front of the text
+   where Emacs's has none — iconv's explicit-order codecs do not strip the
+   signature, its plain "UTF-16" does. A latent bug: nothing called the
+   function until this pass.
+6. **`%local-variables-coding` searched the whole file for the phrase**
+   with no line anchor and no `End:` bound, so a file merely *mentioning*
+   `Local Variables:` near its top was read as declaring one. Now the last
+   3K (`(- size 3072)`), the `[\r\n]PREFIX...SUFFIX[\r\n]` anchors with the
+   block's own prefix and suffix, and the block ends at its `End:` line.
+   Checked against Emacs on five files, all five matching.
+7. **The renderer crashed on a byte character.** Opening the Latin-1 file
+   killed the editor: `buffer-text-substring` called `integer->char` on
+   `#x3FFFE9`, which is above Guile's `#x10FFFF` *on purpose*. See the
+   departure below — this is the one place the port cannot be faithful.
+
+## Departures, and whether to fix them
+
+1. **There is no `undecided` coding system**, so a file that declares
+   nothing resolves immediately: Emacs answers `undecided-dos` and we
+   answer `utf-8-dos`. Same bytes either way. *Not worth fixing* until
+   there is something that consults `undecided` — it exists in Emacs to
+   let a later operation re-decide.
+2. **The statistical detector (`detect_coding`) is not ported**, so a
+   Latin-1 file with no declaration is read as UTF-8 — but the *bytes
+   survive*, which is the point: `café naïve` in Latin-1 comes back byte
+   for byte, where before this pass it was written back as U+FFFD twice.
+   The remaining difference is the *name* Emacs gives the choice
+   (`iso-latin-1-unix`) and the fact that Emacs shows `é` where we show
+   the eight-bit byte. **Worth fixing, and it is the last big piece**: it
+   is `detect_coding` (`coding.c`) and it needs `:charset-list`.
+3. **iconv has no "UTF-16LE with signature"**, so both BOMs answer `utf-16`
+   and the byte order *written back* is the host's rather than the one
+   read. Reading is exact (`utf-16` strips the signature; `utf-16le` keeps
+   it as U+FEFF, which is wrong). *Fixable* by adding Emacs's
+   `utf-16le-with-signature`/`utf-16be-with-signature` as coding systems
+   whose walk writes and strips the BOM itself — worth doing, and small,
+   but it is a codec-level BOM step this pass did not have.
+4. **A byte character has no character to be.** `buffer-text-substring`
+   renders it as U+FFFD where Emacs writes the raw byte to the terminal.
+   Nothing that must be lossless goes through it — saving reads with
+   `text-editor-to-code-points` — but the *display* of such a file differs
+   from Emacs's, and so does the kill ring for a region holding one.
+   **Worth fixing** (Emacs's path is `write_glyphs` handing the byte to the
+   terminal), and it needs a terminal output path that can write a byte
+   rather than a character.
+5. **`raw-text`'s EOL conversion is not carried**: both `no-conversion` and
+   `raw-text` leave every byte alone, where Emacs converts a CRLF in a
+   `raw-text` buffer. The distinction is a third field on the coding
+   system, and nothing here asks for one. *Low priority.*
+6. **`eval-region`'s and `eval-expression`'s earlier departures stand.**
+
+## Tests
+
+- `coding-tests.scm` 30 (was 21) — `detect-eol` including the
+  CR-forgiveness rule (measured: Emacs says `undecided-dos`), the NUL rule,
+  `adjust-coding-eol-type`'s only-when-undecided, both EOL directions for
+  all three conventions, and `as-coding-system`.
+- `ncurses-editor-tests.scm` 239 (was 237) — the round trip: a Latin-1
+  file's bytes come back unchanged after a visit and a save, which is what
+  used to fail; and the coding system recorded for two files.
+- `buffer-text-tests.scm` 61 — the byte-character rendering.
+- `tools/pty-check.py` 60 (was 59) — `coding-roundtrip`, which drives `X`
+  then `C-x C-s` through the real command loop and compares the bytes on
+  disk, and re-checks the CRLF mode line.
+
+## The method note
+
+Reading the C gave every rule here; asking Emacs corrected three of my
+expectations and found one bug I had not suspected (the BOM). One of my
+own *test* expectations was wrong and the measurement caught it — the
+CR-forgiveness case reads `dos` in Emacs and I had written `unix`, then
+wrote a case that actually exercises it.
+
+And the paren note: **the reader is the answer, not a hand count.** A
+paren-counter written in Python over this file disagreed with Guile for an
+hour because it mishandled `#\"` — a character literal whose *name* is a
+quote — and so silently started a string at the wrong place. It reported
+the pristine file as unbalanced too, which is what should have been the
+tell. When the reader and the counter disagree, the counter is wrong.

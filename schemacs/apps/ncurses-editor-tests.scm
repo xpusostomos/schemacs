@@ -2,6 +2,7 @@
  (scheme base)
  (scheme char)
  (scheme file)
+ (only (rnrs io ports) get-bytevector-all put-bytevector)
  (only (guile) chmod mkdir sort)
  ;; `make' is GOOPS's: the test display object is made with it.
  (only (oop goops) make)
@@ -78,8 +79,10 @@
        *require-final-newline* ensure-final-newline-on-visit
        file-name-completion-table files--buffers-needing-to-be-saved
        find-file-noselect note-file-read-only!
+       save-buffer buffer-file-coding-system
        save-answer-char->decision)
  ;; `try-completion' and `all-completions' are `minibuf.c''s.
+ (only (schemacs editor coding) coding-system-name)
  (only (schemacs editor minibuf) all-completions try-completion)
  (only (schemacs editor minibuffer)
        completion-all-completions completion-boundaries
@@ -619,6 +622,48 @@
            (switch-to-buffer (get-buffer "fe-crlf.txt"))
            (type frame #\X)
            (type frame (integer->char 24) save-key)))))
+
+;; **A file whose bytes the coding system cannot decode survives the round
+;; trip**, which is the whole point of the eight-bit representation.
+;; `café naïve' in Latin-1 declares nothing, so it is read as UTF-8 - and
+;; UTF-8 cannot read `233'. Emacs does not fail on that: it makes the byte
+;; an eight-bit character (`CHAR_BYTE8_P', above `MAX_5_BYTE_CHAR' where no
+;; real character lives) and carries on. What matters is that saving writes
+;; the *same bytes* back. Before the coding work this file was read with
+;; U+FFFD in place of both accented bytes and written back that way, so
+;; merely opening it destroyed it.
+(test-equal #vu8(99 97 102 233 32 110 97 239 118 101 10)
+  (let ((path "/tmp/fe-latin1.txt"))
+    (when (file-exists? path) (chmod path #o644))
+    ;; written raw: `(display ...)' on a text port would encode it and
+    ;; there would be nothing left to test
+    (call-with-port (open-output-file path #:encoding #f)
+      (lambda (port)
+        (put-bytevector port #vu8(99 97 102 233 32 110 97 239 118 101 10))))
+    (parameterize ((*buffer-list* '()) (*current-buffer* #f))
+      (let* ((ed (find-file-noselect path))
+             (frame (test-frame ed)))
+        (parameterize ((*current-frame* frame))
+          (text-editor-set-modified! ed #t)
+          (save-buffer)))
+      (call-with-port (open-input-file path #:encoding #f) get-bytevector-all))))
+
+;; ... and the coding system it was read with is *recorded*, so the save
+;; cannot choose differently from the read. Emacs answers `iso-latin-1-unix'
+;; for this file - it has a statistical detector that recognises Latin-1 by
+;; its bytes and this tree has none, so it answers `utf-8-unix' and keeps
+;; the bytes as eight-bit characters instead. Same file, same bytes, a
+;; different name for what happened - which is why the round trip above is
+;; the property that matters and the name is the departure.
+(test-equal '(utf-8-unix utf-8-dos)
+  (parameterize ((*buffer-list* '()) (*current-buffer* #f))
+    (call-with-output-file "/tmp/fe-crlf-coding.txt"
+      (lambda (port) (display "a\r\nb\r\n" port)))
+    (list (coding-system-name
+           (buffer-file-coding-system (find-file-noselect "/tmp/fe-latin1.txt")))
+          (coding-system-name
+           (buffer-file-coding-system
+            (find-file-noselect "/tmp/fe-crlf-coding.txt"))))))
 
 ;; The answer to "Save file X? " decides what happens: y and SPC save the
 ;; buffer, ! saves it and the rest without asking, . saves it and stops
@@ -1665,8 +1710,10 @@
          (unix (new-text-editor)))
     (text-editor-insert dos "dos\n")
     (text-editor-insert unix "unix\n")
-    (set-buffer-local-value! dos 'buffer-file-coding-system line-break-crlf)
-    (set-buffer-local-value! unix 'buffer-file-coding-system line-break-newline)
+    ;; The buffer's variable holds a *coding system* now, as in Emacs -
+    ;; its eol half is what the mnemonic is drawn from.
+    (set-buffer-local-value! dos 'buffer-file-coding-system 'utf-8-dos)
+    (set-buffer-local-value! unix 'buffer-file-coding-system 'utf-8-unix)
     (set-window-buffer! window dos)
     (let ((dos-mode (format-in frame (*mode-line-format*))))
       (set-window-buffer! window unix)
@@ -1824,12 +1871,14 @@
     (list (cadddr result) (caddr result))))
 
 ;; The visit-time rule is a function of the text and whether the file can
-;; be written, which is how Emacs's `after-find-file' asks it.
-(test-equal '("ab\n" "ab\n" "ab")
+;; be written, which is how Emacs's `after-find-file' asks it. The text is
+;; a *list of code points* rather than a string: what is being visited may
+;; hold a byte character, which no string can.
+(test-equal (list (list 97 98 10) (list 97 98 10) (list 97 98))
   (parameterize ((*require-final-newline* 'visit))
-    (list (ensure-final-newline-on-visit "ab" #f)
-          (ensure-final-newline-on-visit "ab\n" #f)
-          (ensure-final-newline-on-visit "ab" #t))))
+    (list (ensure-final-newline-on-visit (list 97 98) #f)
+          (ensure-final-newline-on-visit (list 97 98 10) #f)
+          (ensure-final-newline-on-visit (list 97 98) #t))))
 
 ;; ... and with the default, which adds at saving rather than visiting,
 ;; it leaves the text alone.

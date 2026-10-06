@@ -1299,6 +1299,41 @@ def check_goto_line():
     return problems
 
 
+def check_coding_roundtrip():
+    """A file whose bytes no charset can read is not destroyed by opening it.
+
+    `caf\xe9 na\xefve' in Latin-1 declares nothing, so it is read as UTF-8,
+    which cannot read `233' - and Emacs does not fail on that: the byte
+    becomes an eight-bit character above `MAX_5_BYTE_CHAR' and the scan
+    carries on.  What matters is the *bytes on disk* after a save: this file
+    used to come back as `EF BF BD' (U+FFFD) twice, so merely visiting and
+    saving it destroyed it.
+
+    The key path is the point: the check drives `C-x C-s' through the real
+    command loop rather than calling `save-buffer', so what it proves is
+    that the editor's own save path carries the coding system.
+    """
+    path = "/tmp/pty-check-latin1.txt"
+    original = b"caf\xe9 na\xefve\n"
+    with open(path, "wb") as port:
+        port.write(original)
+    problems = []
+    # a change and a save, so the file is really written
+    drive([b"X", C_x + C_s, C_x + C_c], path)
+    with open(path, "rb") as port:
+        written = port.read()
+    if written != b"X" + original:
+        problems.append("the Latin-1 bytes did not survive: %r" % written)
+    # a CRLF file keeps its carriage returns, and the mode line says (DOS)
+    crlf = "/tmp/pty-check-crlf.txt"
+    with open(crlf, "wb") as port:
+        port.write(b"one\r\ntwo\r\n")
+    screen = screen_of(drive([], crlf))
+    if "(DOS)" not in screen:
+        problems.append("a CRLF file's mode line did not say (DOS)")
+    return problems
+
+
 def check_write_file():
     """C-x C-w writes the buffer under a new name.
 
@@ -2571,6 +2606,7 @@ CHECKS = {
     "region-highlight": check_region_highlight,
     "continuation": check_continuation,
     "mode-line-eol": check_mode_line_eol,
+    "coding-roundtrip": check_coding_roundtrip,
     "wide-columns": check_wide_columns,
     "kill-ring": check_kill_ring,
     "osc52": check_osc52,

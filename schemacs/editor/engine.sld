@@ -33,7 +33,12 @@
     ;; held weakly with a constant for its value, which `(schemacs
     ;; weak)' used to spell `new-weak-set'.
     (only (guile)
-          make-weak-key-hash-table  hashq-set!  hashq-remove!  hash-for-each)
+          make-weak-key-hash-table  hashq-set!  hashq-remove!  hash-for-each
+          ;; `make-typed-array' is how a `u32vector' of a given length is
+          ;; made - `(scheme base)' has no generic array, and R7RS has no
+          ;; `u32vector' constructor at all. `u32vector-set!' takes the value before
+          ;; the index, as `array-set!' does.
+          make-typed-array  u32vector-set!)
     ;; The buffer's text. Emacs's `struct buffer_text' as an object -
     ;; the characters, the gap and where the gap is - so the four
     ;; structures this file used to keep (a gap buffer of `<text-line>'
@@ -45,7 +50,8 @@
           buffer-text-base  buffer-text-z  buffer-text-length
           buffer-text-gap-size  buffer-text-allocation
           buffer-text-ref  buffer-text-set!
-          buffer-text-insert!  buffer-text-delete!
+          buffer-text-insert!  buffer-text-insert-code-points!
+          buffer-text-delete!
           buffer-text-substring  buffer-text-for-each
           buffer-text-clear!
           buffer-text-beg-unchanged  set!buffer-text-beg-unchanged
@@ -74,6 +80,7 @@
    *init-text-editor-line-count*
    text-editor-char-count
    text-load-port  text-dump-port  text-editor-to-string
+   text-editor-to-code-points
    text-editor-insert
    text-editor-delete-from-cursor
    text-editor-copy-string
@@ -1382,6 +1389,24 @@
        ((and (input-port? thing) (input-port-open? thing))
         (text-editor-insert-from-port ed thing)
         )
+       ((list? thing)
+        ;; **The code-point door, and a file has to come in this way.**
+        ;; What a decoder produces is code points, and the one value a
+        ;; Scheme string cannot hold is a *byte character* - `#x3FFFE9' is
+        ;; above Guile's `#x10FFFF' - so `text-editor-insert' cannot be
+        ;; handed the text of a file whose bytes no charset can read.
+        ;; Emacs needs no second door: its strings hold its characters,
+        ;; so `insert_from_string_1' is one function and the string form
+        ;; is the special case here rather than there.
+        ;;
+        ;; A character is taken as well as an integer: a caller with a
+        ;; plain list of characters means the same thing by it.
+        (for-each
+         (lambda (cp)
+           (text-editor-force-insert-code-point
+            ed (if (char? cp) (char->integer cp) cp)))
+         thing
+         ))
        (else (error "editor cannot insert text from" thing))
        ))
 
@@ -1406,6 +1431,41 @@
         (set!text-editor-point ed (+ 1 point))
         ch
         ))
+
+    (define %one-code-point (make-typed-array 'u32 0 1))
+    ;; ^ The scratch a single code point goes through. `array-set!' takes
+    ;; the *value before the index*, and this is a module-level value
+    ;; rather than a fresh vector per character because this is the
+    ;; per-character path of reading a whole file.
+
+    (define (text-editor-force-insert-code-point ed cp)
+      ;; `text-editor-force-insert-char' for a *code point*, which is what
+      ;; a decoder answers and what the store holds. It exists for the one
+      ;; value a character cannot be: a byte character. Emacs has one
+      ;; function here - `insert_1_both' - because its characters and its
+      ;; store's elements are the same thing.
+      ;;--------------------------------------------------------------
+      (let ((text  (text-editor-text ed))
+            (point (text-editor-point ed))
+            )
+        (text-editor-invalidate-caches! ed point point)
+        (u32vector-set! %one-code-point 0 cp)
+        (buffer-text-insert-code-points! text point %one-code-point)
+        (set!text-editor-point ed (+ 1 point))
+        cp
+        ))
+
+    (define (text-editor-to-code-points ed)
+      ;; The buffer's characters, as a list of code points - the answer
+      ;; `text-editor-to-string' gives, without the one conversion that
+      ;; can fail. A buffer holding a byte character has no string form,
+      ;; which is why writing a file cannot go through a string either.
+      ;;--------------------------------------------------------------
+      (let ((text (text-editor-text ed)))
+        (let loop ((pos (buffer-text-base text)) (acc '()))
+          (if (>= pos (buffer-text-z text))
+              (reverse acc)
+              (loop (+ pos 1) (cons (buffer-text-ref text pos) acc))))))
 
     ;; Deleting text
     ;;

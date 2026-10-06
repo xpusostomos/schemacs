@@ -7,7 +7,10 @@
        coding-system-p find-coding-system coding-system-name
        coding-system-base-name coding-system-change-eol-conversion
        decode-coding-string encode-coding-string
-       coding-setup-port! coding-read-char coding-write-char)
+       coding-setup-port! coding-read-char coding-write-char
+       detect-eol bytes-have-null? adjust-coding-eol-type
+       decode-eol encode-eol as-coding-system coding-system?
+       coding-system-eol-type)
  (scheme file)
  (rnrs io ports)
  (only (schemacs editor character)
@@ -207,5 +210,71 @@
   (bytes-of (write-stream (read-stream #vu8(99 97 102 233 32 110 97 239 118 101 10)
                                        'no-conversion)
                           'no-conversion)))
+
+;; ------------------------------------------------------------------
+;; which end of line a file uses - `detect_eol', `decode_eol' and
+;; `encode_eol'
+;;
+;; The EOL convention is the *second half* of a coding system: `utf-8-unix'
+;; and `utf-8-dos' are different coding systems with the same codec, and
+;; every expectation below was measured on Emacs 31.1 first.
+
+(test-equal "an LF file is unix, a CRLF file is dos, a CR file is mac"
+  '(unix dos mac)
+  (list (detect-eol #vu8(97 10 98))
+        (detect-eol #vu8(97 13 10 98))
+        (detect-eol #vu8(97 13 98))))
+
+(test-equal "a file with no line break at all is unix"
+  'unix
+  (detect-eol #vu8(97 98 99)))
+
+;; It is not "the first break wins": up to `MAX_EOL_CHECK_COUNT' (3) breaks
+;; are read and a file whose breaks disagree is a UNIX file - except that a
+;; stray CR in a DOS file is forgiven, which is what the C's own comment
+;; calls out.
+;; Both of these are measured on Emacs 31.1, which answers
+;; `undecided-unix' and `undecided-dos' for the two files.
+(test-equal '(unix dos)
+  (list (detect-eol #vu8(97 10 98 13 10 99))         ; LF then CRLF -> unix
+        (detect-eol #vu8(97 13 10 98 13 99 13 10 100)))) ; CRLF, stray CR, CRLF
+
+(test-equal "a NUL byte means binary, so the line ends are not converted"
+  '(#t #f)
+  (list (bytes-have-null? #vu8(97 0 98)) (bytes-have-null? #vu8(97 98))))
+
+;; The detected convention only settles a coding system that has not named
+;; one - the C's `(VECTORP (eol_type))' test. This is the difference
+;; between a file saying `-*- coding: utf-8 -*-' (which gets what its bytes
+;; turn out to be) and one saying `utf-8-unix' (which keeps UNIX).
+(test-equal '(utf-8-dos utf-8-unix)
+  (list (coding-system-name (adjust-coding-eol-type 'utf-8 'dos))
+        (coding-system-name (adjust-coding-eol-type 'utf-8-unix 'dos))))
+
+;; decoding, both directions - Emacs's own numbers, measured
+(test-equal '(dos-decodes (97 10 98) unix-keeps-the-cr (97 13 10 98))
+  (list 'dos-decodes
+        (decode-eol (list 97 13 10 98) (find-coding-system 'utf-8-dos))
+        'unix-keeps-the-cr
+        (decode-eol (list 97 13 10 98) (find-coding-system 'utf-8-unix))))
+
+(test-equal "mac decoding turns every CR into a line feed"
+  '(97 10 98)
+  (decode-eol (list 97 13 98) (find-coding-system 'utf-8-mac)))
+
+(test-equal '(dos (97 13 10 98) unix (97 10 98) mac (97 13 98))
+  (list 'dos (encode-eol (list 97 10 98) (find-coding-system 'utf-8-dos))
+        'unix (encode-eol (list 97 10 98) (find-coding-system 'utf-8-unix))
+        'mac (encode-eol (list 97 10 98) (find-coding-system 'utf-8-mac))))
+
+;; `as-coding-system' takes a name or a coding system already, which is the
+;; split Emacs has no equivalent of: `(coding-system-eol-type
+;; buffer-file-coding-system)' works there because a coding system is a
+;; symbol. Missing it is not subtle - the mode line said `:' for every
+;; buffer, because a lookup on a record answers #f.
+(test-equal '(#t unix)
+  (let ((cs (as-coding-system 'utf-8-unix)))
+    (list (coding-system? (as-coding-system cs))
+          (coding-system-eol-type (as-coding-system cs)))))
 
 (test-end "schemacs_editor_coding")

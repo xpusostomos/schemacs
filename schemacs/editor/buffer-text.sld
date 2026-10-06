@@ -48,6 +48,9 @@
     (only (schemacs arrays)
           %array-copy-range!
           )
+    ;; `char-byte8?' is the eight-bit test, from `character.h' - the one
+    ;; predicate that says "this code point is a byte, not a character".
+    (only (schemacs editor character) char-byte8?)
     )
 
   (export
@@ -56,6 +59,7 @@
    buffer-text-length  buffer-text-allocation  buffer-text-gap-size
    buffer-text-ref  buffer-text-set!
    buffer-text-insert!  buffer-text-insert-code-points!
+   code-point->char
    buffer-text-delete!  buffer-text-substring
    buffer-text-for-each
    buffer-text-clear!
@@ -292,6 +296,30 @@
       (u32vector-set! (buffer-text-store bt) (%at bt (%index bt pos)) cp)
       )
 
+    (define (code-point->char cp)
+      ;; CP as a Scheme character, for the callers that must have one.
+      ;;
+      ;; **A *byte character* has no character to be**, and that is the one
+      ;; place this class cannot be faithful. Emacs's strings hold its
+      ;; characters, so `buffer-substring' gives back exactly what is in
+      ;; the buffer however odd the character is; Guile's stop at
+      ;; `#x10FFFF', and a byte character is `#x3FFF00 + byte' - above it
+      ;; on purpose, so that no real character can collide with one
+      ;; (`character.h:104'). What comes back here instead is U+FFFD, the
+      ;; replacement character, which is what the byte *means*: a byte the
+      ;; coding system could not decode.
+      ;;
+      ;; **Nothing that must be lossless goes through this.** Saving reads
+      ;; the buffer with `text-editor-to-code-points', which is why a file
+      ;; of undecodable bytes survives a round trip; this is for the
+      ;; display, the kill ring and the other string-shaped callers, where
+      ;; the value being unrepresentable is the caller's problem rather
+      ;; than something to crash on. Before it existed, opening such a file
+      ;; killed the editor while it drew the first line.
+      ;;--------------------------------------------------------------
+      (if (char-byte8? cp) #\xfffd (integer->char cp))
+      )
+
     (define (buffer-text-substring bt from to)
       ;; The characters in positions `FROM' up to `TO' as a string -
       ;; Emacs's `buffer-substring', and the same half-open range.
@@ -305,7 +333,7 @@
           (cond
            ((< i n)
             (string-set! out i
-                         (integer->char
+                         (code-point->char
                           (u32vector-ref store (%at bt (+ first i)))))
             (loop (+ 1 i))
             ))

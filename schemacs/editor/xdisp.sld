@@ -40,7 +40,6 @@
           draw-window-cursor! flush-display!
           realize-face)
     (only (schemacs editor engine)
-         line-break-newline line-break-crlf line-break-return
          string-search-forward text-editor-buffer-name text-editor-text-props
          text-editor-char-count text-editor-file-name marker-position
          text-editor-cursor-column text-editor-cursor-line
@@ -87,6 +86,10 @@
     ;; `disp-table.sld' on 2026-10-06, when it stopped being a second copy
     ;; of `scan_for_column' and became that function asked one question.
     (only (schemacs editor indentc) current-line-display-column)
+    ;; `mode-line-eol-desc' reads the buffer's coding system: its eol
+    ;; half is what the mnemonic is drawn from.
+    (only (schemacs editor coding)
+          as-coding-system coding-system-eol-type)
     ;; The `face' text property, and the faces themselves. A face reaches
     ;; the display through these libraries and no others: the property
     ;; says which faces are in effect, `xfaces' merges them and folds
@@ -798,18 +801,25 @@
 
     (define (mode-line-eol-desc)
       ;; The mode-line mnemonic for the EOL convention of WINDOW's buffer:
-      ;; GNU Emacs's `mode-line-eol-desc', which reads the buffer-local
-      ;; `buffer-file-coding-system' in the window being rendered.
+      ;; GNU Emacs's `mode-line-eol-desc' (`bindings.el:101'), which reads
+      ;; `coding-system-eol-type' of `buffer-file-coding-system'.
+      ;;
+      ;; **It is the coding system's *eol type* and not a `line-break-*'
+      ;; value**, which is what this read while the buffer's variable held
+      ;; an eol convention instead of a coding system. The mnemonics are
+      ;; `coding-system-eol-type-mnemonic''s (`mule.el'): `":"' for UNIX,
+      ;; `"(DOS)"' for DOS and `"(Mac)"' for Mac, with an undecided eol
+      ;; giving `eol-mnemonic-undecided', which is `":"' too.
       ;;--------------------------------------------------------------
       (let* ((window (*mode-line-window*))
-             (line-break
-              (buffer-local-value (window-buffer window)
-                                  'buffer-file-coding-system
-                                  line-break-newline)))
-        (cond ((eq? line-break line-break-crlf) "(DOS)")
-              ((eq? line-break line-break-return) "(Mac)")
-              ((eq? line-break line-break-newline) ":")
-              (else ""))))
+             (cs (as-coding-system
+                  (buffer-local-value (window-buffer window)
+                                      'buffer-file-coding-system
+                                      'utf-8-unix)))
+             (eol (and cs (coding-system-eol-type cs))))
+        (cond ((eq? eol 'dos) "(DOS)")
+              ((eq? eol 'mac) "(Mac)")
+              (else ":"))))
 
     (define (mode-line-mode-name)
       ;; GNU Emacs's `mode-line-modes'' first element: the buffer's

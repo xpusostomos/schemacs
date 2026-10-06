@@ -71,10 +71,14 @@
    coding-system? make-coding-system
    coding-system-name coding-system-base coding-system-eol-type
    coding-system-iconv-name coding-system-raw?
-   coding-system-p find-coding-system
+   coding-system-p find-coding-system as-coding-system
    coding-system-base-name coding-system-change-eol-conversion
    eol-type->line-break line-break->eol-type
    *coding-system-table*
+   ;; The end-of-line half
+   *max-eol-check-count* detect-eol bytes-have-null? adjust-coding-eol-type
+   decode-eol encode-eol
+   *last-coding-system-used*
    ;; Converting
    decode-coding-string encode-coding-string
    )
@@ -145,6 +149,22 @@
         (cond ((null? cs) #f)
               ((eq? (coding-system-name (car cs)) name) (car cs))
               (else (loop (cdr cs))))))
+
+    (define (as-coding-system coding)
+      ;; CODING as a coding system *record*, whether it is given as one
+      ;; already or by name - or #f.
+      ;;
+      ;; **This exists because Emacs has no split to bridge.** A coding
+      ;; system in Emacs is a symbol carrying a plist, so
+      ;; `coding-system-eol-type' takes `utf-8-unix' and takes
+      ;; `buffer-file-coding-system' directly. Here a coding system is a
+      ;; record, and both a name and a record get asked for one - so the
+      ;; coercion is in one place rather than repeated, which is what
+      ;; several call sites were doing by hand.
+      ;;--------------------------------------------------------------
+      (cond ((not coding) #f)
+            ((coding-system? coding) coding)
+            (else (find-coding-system coding))))
 
     (define (%define-coding-system name eol-type iconv-name raw?)
       ;; One entry, and with it the two EOL variants Emacs derives. Its
@@ -512,5 +532,169 @@
               (string->symbol
                (string-append (symbol->string base) "-"
                               (symbol->string eol-type)))))))
+
+    ;;------------------------------------------------------------------
+    ;; Which end of line a file uses
+    ;;------------------------------------------------------------------
+    ;;
+    ;; GNU Emacs's `detect_eol' (`coding.c:6374') and `adjust_coding_eol_type'
+    ;; (`:6470'). **The convention is detected only when the coding system
+    ;; has not already named one** - the C's `(VECTORP (eol_type))', the
+    ;; eol-type of an `undecided' coding system - so a file that says
+    ;; `-*- coding: utf-8-unix -*-' keeps UNIX whatever its bytes look
+    ;; like, and a file that says only `utf-8' gets what it turns out to
+    ;; be. Measured on Emacs 31.1: a CRLF file with `-*- coding: utf-8 -*-'
+    ;; is `utf-8-dos', and the same file with `-*- coding: utf-8-unix -*-'
+    ;; is `utf-8-unix'.
+
+    (define *max-eol-check-count* 3)   ;; coding.c:6371
+
+    (define (%eol-seen seen this)
+      ;; The C's inner rule: the first break sets the answer, an agreeing
+      ;; one changes nothing, a stray CR in a DOS file is forgiven (CR
+      ;; followed by CRLF is CRLF), and any other disagreement collapses
+      ;; to LF and stops the scan.
+      ;;
+      ;; The C `break's on the collapse; this does not, and that is the
+      ;; same answer - `'lf' can never be changed to anything else by the
+      ;; rules above, so carrying on reads the same as stopping.
+      ;;--------------------------------------------------------------
+      (cond ((eq? seen 'none) this)
+            ((eq? seen this) seen)
+            ((or (and (eq? seen 'cr) (eq? this 'crlf))
+                 (and (eq? seen 'crlf) (eq? this 'cr)))
+             'crlf)
+            (else 'lf)))
+
+    (define (%eol-seen->eol-type seen)
+      ;; The mapping `adjust_coding_eol_type' makes (`coding.c:6476'):
+      ;; the C's `detect_eol' answers a bitmask - `EOL_SEEN_LF',
+      ;; `EOL_SEEN_CRLF' or `EOL_SEEN_CR' - and this is the coding
+      ;; system's eol type it stands for.
+      ;;
+      ;; Leaving it out is not a small omission: `'lf' is not a coding
+      ;; system's eol type, so the name built from it is `utf-8-lf', which
+      ;; no table has - and the failure surfaces as "Unknown coding
+      ;; system: ?" from three functions away.
+      ;;--------------------------------------------------------------
+      (case seen
+        ((lf) 'unix)
+        ((crlf) 'dos)
+        ((cr) 'mac)
+        (else 'unix)))
+
+    (define (detect-eol bytes)
+      ;; GNU Emacs's `detect_eol': the end-of-line convention BYTES use,
+      ;; as `'unix', `'dos' or `'mac'.
+      ;;
+      ;; It is not "the first break wins": up to `MAX_EOL_CHECK_COUNT'
+      ;; breaks are read, and a file whose breaks disagree is a UNIX file.
+      ;; Emacs reads whole *bytes* here rather than characters, and so
+      ;; does this - the scan runs before anything has been decoded, which
+      ;; is the point of it.
+      ;;
+      ;; The C's UTF-16 half is not carried: it is the same scan looking
+      ;; every other byte, and it needs the coding system's byte order,
+      ;; which is what `detect_coding' decided just above it.
+      ;;--------------------------------------------------------------
+      (let ((n (bytevector-length bytes)))
+        (let loop ((i 0) (total 0) (seen 'none))
+          (if (or (>= i n) (= total *max-eol-check-count*))
+              (%eol-seen->eol-type seen)
+              (let ((b (bytevector-u8-ref bytes i)))
+                (cond
+                 ((and (= b 13) (< (+ i 1) n)
+                       (= (bytevector-u8-ref bytes (+ i 1)) 10))
+                  (loop (+ i 2) (+ total 1) (%eol-seen seen 'crlf)))
+                 ((= b 10) (loop (+ i 1) (+ total 1) (%eol-seen seen 'lf)))
+                 ((= b 13) (loop (+ i 1) (+ total 1) (%eol-seen seen 'cr)))
+                 (else (loop (+ i 1) total seen))))))))
+
+    (define (bytes-have-null? bytes)
+      ;; Whether a NUL byte appears - the C's `null_byte_found'
+      ;; (`coding.c:8930'): "if the text contains NUL, it is binary, so
+      ;; end of line is UNIX and there is nothing to convert."
+      ;;--------------------------------------------------------------
+      (let ((n (bytevector-length bytes)))
+        (let loop ((i 0))
+          (cond ((>= i n) #f)
+                ((= 0 (bytevector-u8-ref bytes i)) #t)
+                (else (loop (+ i 1)))))))
+
+    (define (adjust-coding-eol-type coding eol-type)
+      ;; GNU Emacs's `adjust_coding_eol_type' (`coding.c:6470'): CODING
+      ;; with EOL-TYPE settled - which it does *only* when CODING has not
+      ;; named one already, that being what the C's `(VECTORP
+      ;; (eol_type))' test says.
+      ;;--------------------------------------------------------------
+      (let ((cs (if (coding-system? coding) coding (find-coding-system coding))))
+        (cond ((not cs) #f)
+              ((coding-system-eol-type cs) cs)
+              ((eq? eol-type 'none) cs)
+              (else (coding-system-change-eol-conversion cs eol-type)))))
+
+    ;;------------------------------------------------------------------
+    ;; Converting the line ends of a value
+    ;;------------------------------------------------------------------
+    ;;
+    ;; GNU Emacs's `decode_eol' and `encode_eol' (`coding.c'): the EOL
+    ;; half of a coding system, run over what the codec produced - a
+    ;; whole-value pass in the C too, not part of the character state
+    ;; machine. Measured on Emacs 31.1, both directions:
+    ;;
+    ;;   decode `utf-8-dos'   "a\r\nb" -> (97 10 98)
+    ;;   decode `utf-8-unix'  "a\r\nb" -> (97 13 10 98)   ; the CR stays
+    ;;   decode `utf-8-mac'   "a\rb"   -> (97 10 98)
+    ;;   encode `utf-8-dos'   "a\nb"   -> (97 13 10 98)
+    ;;   encode `utf-8-mac'   "a\nb"   -> (97 13 98)
+    ;;
+    ;; The `unix' case is the C's first line - "if UNIX, return" - which
+    ;; is why a UNIX coding system never touches a CR.
+
+    (define (decode-eol points coding)
+      ;; The characters the file's line ends become: every CR of a CR-LF
+      ;; pair goes for `dos', every CR goes for `mac', and `unix' is left
+      ;; alone. POINTS is a list of code points.
+      ;;--------------------------------------------------------------
+      (let ((eol (coding-system-eol-type
+                  (if (coding-system? coding) coding (find-coding-system coding)))))
+        (case eol
+          ((mac) (map (lambda (c) (if (= c 13) 10 c)) points))
+          ((dos)
+           (let loop ((p points) (acc '()))
+             (cond ((null? p) (reverse acc))
+                   ((and (= (car p) 13) (pair? (cdr p)) (= (cadr p) 10))
+                    (loop (cdr p) acc))
+                   (else (loop (cdr p) (cons (car p) acc))))))
+          (else points))))
+
+    (define (encode-eol points coding)
+      ;; ... and back out: every LF becomes CR-LF for `dos' and CR for
+      ;; `mac'. A CR of its own is left where it is, exactly as the C
+      ;; leaves it - the round trip is then the identity for a file whose
+      ;; only CRs are DOS line ends.
+      ;;--------------------------------------------------------------
+      (let ((eol (coding-system-eol-type
+                  (if (coding-system? coding) coding (find-coding-system coding)))))
+        (case eol
+          ((mac) (map (lambda (c) (if (= c 10) 13 c)) points))
+          ((dos)
+           ;; ACC is built backwards and reversed at the end, so the CR-LF
+           ;; pair goes on in *reverse* - the LF first, then the CR. The
+           ;; other way round reads correctly and writes `10 13'.
+           (let loop ((p points) (acc '()))
+             (cond ((null? p) (reverse acc))
+                   ((= (car p) 10) (loop (cdr p) (cons 10 (cons 13 acc))))
+                   (else (loop (cdr p) (cons (car p) acc))))))
+          (else points))))
+
+    (define *last-coding-system-used* (make-parameter #f))
+    ;; ^ GNU Emacs's `last-coding-system-used' (`coding.c'): "Coding system
+    ;; used for last file I/O operation." Emacs's answer can be the
+    ;; *undecided* coding system it started with, when the file turned out
+    ;; to need no conversion at all - measured, a pure ASCII file leaves
+    ;; it `undecided' while `buffer-file-coding-system' is `utf-8-unix'.
+    ;; There is no `undecided' here (the deferred choice is not carried),
+    ;; so it is always the coding system actually used.
 
     ))

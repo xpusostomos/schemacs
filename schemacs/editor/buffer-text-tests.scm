@@ -205,4 +205,20 @@
           (reverse acc)
           (loop (+ i 1) (cons (buffer-text-ref bt i) acc))))))
 
+(test-equal "a byte character renders as the replacement character"
+  '("a\ufffdb" #x3FFFE9)   ; the *display* substitutes; the buffer keeps the byte
+  (let* ((bt (new-buffer-text 1 16))
+         (v (make-typed-array 'u32 0 3)))
+    (array-set! v 97 0)
+    (array-set! v 4194281 1)
+    (array-set! v 98 2)
+    (buffer-text-insert-code-points! bt 1 v)
+    (list (buffer-text-substring bt 1 4)
+          (buffer-text-ref bt 2))))
+
+;; ... and the substitution is only for the string-shaped callers. The
+;; code-point path is what a save goes through, and it keeps the byte.
+(test-equal '(#\xfffd 97)
+  (list (code-point->char 4194281) (char->integer (code-point->char 97))))
+
 (test-end "schemacs_editor_buffer_text")

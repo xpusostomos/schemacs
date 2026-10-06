@@ -31,13 +31,23 @@
     ;; the first time Dired deleted anything.
     (except (scheme file) delete-file)
     (only (scheme write) display)
+    (only (rnrs io ports) get-bytevector-all put-bytevector)
+    ;; The coding system layer, which is where reading and writing
+    ;; a file stopped going through the default port encoding.
+    (only (schemacs editor coding)
+          coding-setup-port! coding-read-char coding-write-char
+          coding-system-p coding-system-name coding-system-eol-type
+          find-coding-system coding-system-change-eol-conversion
+          detect-eol bytes-have-null? adjust-coding-eol-type
+          decode-eol encode-eol *last-coding-system-used*)
+    (only (schemacs editor mule) set-auto-coding)
     (only (schemacs editor engine)
-          line-break-newline line-break-crlf line-break-return
           set!text-editor-buffer-name set!text-editor-file-name
           text-editor-buffer-name text-editor-char-count
           text-editor-file-name text-editor-get-char-index text-editor-get-cursor
           text-editor-point-min text-editor-point-max
-          text-editor-insert text-editor-modified? text-editor-read-only?
+          text-editor-insert text-editor-to-code-points
+          text-editor-modified? text-editor-read-only?
           text-editor-set-cursor text-editor-set-modified!
           text-editor-set-read-only! text-editor-to-string
           text-editor-undo-disable! text-editor-undo-enable!)
@@ -171,9 +181,13 @@
    delete-file
    *require-final-newline*
    buffer-ends-with-newline?
-   decode-dos-returns
    default-directory
-   detect-line-break
+   default-buffer-file-coding-system
+   buffer-file-coding-system
+   set!buffer-file-coding-system
+   coding-system-for-file
+   decode-file-bytes
+   write-file-code-points
    files--message
    find-alternate-file
    find-file-other-window
@@ -201,7 +215,6 @@
    file-relative-name
    file-truename
    directory-path?
-   encode-line-breaks
    ensure-final-newline-on-save!
    ensure-final-newline-on-visit
    expand-file-name
@@ -240,66 +253,96 @@ save-buffer
 
   (begin
 
-    (define (detect-line-break contents)
-      ;; Detect the line-break protocol from the first line break in
-      ;; the file contents, the way mg does on file load: CRLF, CR or
-      ;; LF, defaulting to LF. Files with mixed line breaks get the
-      ;; protocol of their first break.
-      ;;--------------------------------------------------------------
-      (let scan ((i 0) (n (string-length contents)))
-        (cond
-         ((>= i n) line-break-newline)
-         ((char=? (string-ref contents i) #\newline)
-          line-break-newline)
-         ((char=? (string-ref contents i) #\return)
-          (if (and (< (+ i 1) n)
-                   (char=? (string-ref contents (+ i 1)) #\newline))
-              line-break-crlf
-              line-break-return))
-         (else (scan (+ i 1) n)))))
+    (define default-buffer-file-coding-system 'utf-8-unix)
+    ;; ^ GNU Emacs's `buffer-file-coding-system' in a buffer that visits no
+    ;; file, measured on Emacs 31.1 rather than assumed: `(default-value
+    ;; 'buffer-file-coding-system)' answers `utf-8-unix'. Emacs used to
+    ;; answer `undecided' here and chooses UTF-8 outright now, and the
+    ;; behaviour is the same either way for us - there is no statistical
+    ;; detector, so `undecided' could only resolve to `utf-8'.
 
     (define (buffer-file-coding-system buffer)
-      ;; The line-break convention BUFFER's file was read with, so that
-      ;; saving encodes the breaks back the way it found them: GNU Emacs's
+      ;; The coding system BUFFER's file was read with, so that saving
+      ;; writes the bytes back the way it found them: GNU Emacs's
       ;; `buffer-file-coding-system', the buffer-local variable its
       ;; `after-find-file' sets from what the file turned out to be.
       ;;
-      ;; Emacs's value is a coding system - `utf-8-unix', `undecided-dos' -
-      ;; whose eol-type is the part that matters here; there are no coding
-      ;; systems yet, so what is kept is the eol-type itself, in the
-      ;; engine's vocabulary (`detect-line-break' answers with one of
-      ;; those). It is buffer-local, and not a slot on the frame, because
-      ;; one frame shows buffers visiting files with different
-      ;; conventions, and each must save in its own.
+      ;; **It is a coding system, not a line-break convention.** Emacs's
+      ;; value is `utf-8-unix' or `iso-latin-1-dos' - the *charset* and
+      ;; the *end of line* in one name - and the eol half is only half of
+      ;; it. This used to hold the eol-type alone (in the engine's
+      ;; `line-break-*' vocabulary), which is why every file was read as
+      ;; UTF-8 whatever it was.
+      ;;
+      ;; It is buffer-local, and not a slot on the frame, because one
+      ;; frame shows buffers visiting files with different conventions and
+      ;; each must save in its own.
       ;;--------------------------------------------------------------
       (buffer-local-value buffer 'buffer-file-coding-system
-                          line-break-newline))
+                          default-buffer-file-coding-system))
 
-    (define (set!buffer-file-coding-system buffer line-break)
-      ;; Record the convention BUFFER's file was read with: the
+    (define (set!buffer-file-coding-system buffer coding)
+      ;; Record the coding system BUFFER's file was read with: the
       ;; `make-local-variable' half of what Emacs's `after-find-file' does
       ;; with `buffer-file-coding-system'.
       ;;--------------------------------------------------------------
-      (set-buffer-local-value! buffer 'buffer-file-coding-system line-break))
+      (set-buffer-local-value! buffer 'buffer-file-coding-system coding))
 
-    (define (decode-dos-returns str)
-      ;; Decode the file's CRLF pairs into line feeds: the carriage
-      ;; return of every CR-LF pair is removed, the way GNU Emacs's
-      ;; coding system decodes a DOS file on visit. A stray carriage
-      ;; return NOT followed by a line feed stays in the buffer, where
-      ;; the display layer draws it as the two-cell glyph ^M (one
-      ;; character to cross).
+    (define (coding-system-for-file path bytes)
+      ;; The coding system to read PATH's BYTES with: what they declare
+      ;; (`set-auto-coding'), or the default - with the end of line
+      ;; settled from the bytes themselves when the name does not settle
+      ;; it.
+      ;;
+      ;; **The eol half is the piece that is easy to leave out.** Emacs
+      ;; detects the convention only when the coding system has not named
+      ;; one (the C's `(VECTORP (eol_type))' test, `coding.c:8933'), so a
+      ;; file saying `-*- coding: utf-8 -*-' on a CRLF file is `utf-8-dos'
+      ;; while the same file saying `utf-8-unix' keeps UNIX. Measured on
+      ;; Emacs 31.1, both.
       ;;--------------------------------------------------------------
-      (let* ((n (string-length str)))
-        (let loop ((i 0) (acc (list)))
-          (if (>= i n)
-              (list->string (reverse acc))
-              (let ((c (string-ref str i)))
-                (if (and (char=? c #\return)
-                         (< (+ i 1) n)
-                         (char=? (string-ref str (+ i 1)) #\newline))
-                    (loop (+ i 1) acc)
-                    (loop (+ i 1) (cons c acc))))))))
+      (let* ((base (or (set-auto-coding path bytes) 'utf-8))
+             (eol (if (bytes-have-null? bytes)
+                      ;; "if the text contains NUL, it is binary" -
+                      ;; `coding.c:8930' - so the line ends are not
+                      ;; converted whatever they look like.
+                      'unix
+                      (detect-eol bytes))))
+        (adjust-coding-eol-type base eol)))
+
+    (define (decode-file-bytes bytes coding)
+      ;; BYTES through CODING: the code points out, with the coding
+      ;; system's end-of-line conversion applied - GNU Emacs's
+      ;; `decode_coding', which `after-insert-file-set-coding' runs over
+      ;; what `insert-file-contents' put in the buffer.
+      ;;
+      ;; The answer is a *list of code points* rather than a string, and
+      ;; it has to be: a byte the coding system cannot decode becomes a
+      ;; byte character, and `#x3FFFE9' is above Guile's `#x10FFFF', so
+      ;; there is no string that holds it.
+      ;;--------------------------------------------------------------
+      (call-with-port (open-input-bytevector bytes)
+          (lambda (port)
+            (coding-setup-port! port coding)
+            (let loop ((acc '()))
+              (let ((c (coding-read-char port coding)))
+                (if (eof-object? c)
+                    (decode-eol (reverse acc) coding)
+                    (loop (cons c acc))))))))
+
+    (define (write-file-code-points path points coding)
+      ;; The encode half: the line ends first, then the codec, then the
+      ;; bytes to the file. The mirror of `read-file-code-points'.
+      ;;--------------------------------------------------------------
+      (let ((bytes
+             (call-with-port (open-output-bytevector)
+               (lambda (port)
+                 (coding-setup-port! port coding)
+                 (for-each (lambda (c) (coding-write-char port c coding))
+                           (encode-eol points coding))
+                 (get-output-bytevector port)))))
+        (call-with-port (open-output-file path #:encoding #f)
+          (lambda (port) (put-bytevector port bytes)))))
 
     (define (file-write-protected? path)
       ;; Whether PATH cannot be written. This is GNU Emacs's `(not
@@ -1248,20 +1291,27 @@ save-buffer
                                            " does not end in newline.  Add one? "))))
             (add-line-break-at-end! ed)))))
 
-    (define (ensure-final-newline-on-visit text write-protected?)
+    (define (ensure-final-newline-on-visit points write-protected?)
       ;; Emacs's visit-time rule (`after-find-file'): the text being
       ;; visited, with a line break added when the variable says to add
       ;; one at visit time. A file that cannot be written is visited
       ;; read-only, and Emacs does not add anything to a read-only
       ;; buffer.
+      ;;
+      ;; POINTS is a list of code points and not a string, because what
+      ;; is being visited may contain a byte character, which a string
+      ;; cannot hold. Emacs's own version works on the buffer - it is
+      ;; `(goto-char (point-max)) (insert "\n")' after the file is in -
+      ;; and answers a list for the same reason: the text has to exist
+      ;; somewhere before it is inserted here, and a list is the only
+      ;; place it can be.
       ;;--------------------------------------------------------------
       (if (and (memq (*require-final-newline*) '(visit visit-save))
-               (< 0 (string-length text))
-               (not (char=? (string-ref text (- (string-length text) 1))
-                            #\newline))
+               (pair? points)
+               (not (= 10 (car (reverse points))))
                (not write-protected?))
-          (string-append text "\n")
-          text))
+          (append points (list 10))
+          points))
 
     (define (note-file-read-only! frame)
       ;; Say so when the buffer just visited cannot be written, in GNU
@@ -1380,27 +1430,25 @@ save-buffer
        ;; is already in would *append* a second copy to it.
        (find-buffer-visiting path)
        (let* ((new? (not (file-exists-p path)))
-              (contents
-               (if new?
-                   ""
-                   (call-with-input-file path
-                     (lambda (port)
-                       (let loop ((acc (list)))
-                         (let ((c (read-char port)))
-                           (if (eof-object? c)
-                               (list->string (reverse acc))
-                               (loop (cons c acc)))))))))
-             (line-break (detect-line-break contents))
-             ;; named after the file without its directory, as Emacs's
-             ;; `create-file-buffer' names it, and put in the buffer list
-             (ed (get-buffer-create (file-name-nondirectory-part path))))
+              ;; The file's *bytes*, read before anything is decoded: what
+              ;; coding system to use is a question about them, and the
+              ;; answer cannot come from text that has already been read
+              ;; as something.
+              (bytes (if new?
+                         #vu8()
+                         (call-with-port (open-input-file path #:encoding #f)
+                           get-bytevector-all)))
+              (coding (coding-system-for-file path bytes))
+              ;; named after the file without its directory, as Emacs's
+              ;; `create-file-buffer' names it, and put in the buffer list
+              (ed (get-buffer-create (file-name-nondirectory-part path))))
         ;; Visiting a file leaves nothing to undo, as in GNU Emacs: what
         ;; is in the buffer is not an edit the user made. Re-enabling
         ;; undo discards what the load recorded.
         (text-editor-undo-disable! ed)
         (unless new?
           (text-editor-insert ed (ensure-final-newline-on-visit
-                                  (decode-dos-returns contents)
+                                  (decode-file-bytes bytes coding)
                                   (file-write-protected? path))))
         (text-editor-undo-enable! ed)
         ;; The echo area says what Emacs's `after-find-file' says about a
@@ -1422,10 +1470,15 @@ save-buffer
         ;; (a visiting buffer keeps the name it already had, which is what
         ;; Emacs does when it finds the file already in a buffer).
         (set!text-editor-file-name ed path)
-        ;; and the convention it was read with, which is the buffer's
+        ;; and the coding system it was read with, which is the buffer's
         ;; rather than the frame's - so that this buffer saves the way it
         ;; was loaded however many other files have been visited since
-        (set!buffer-file-coding-system ed line-break)
+        (set!buffer-file-coding-system ed coding)
+        ;; and it is the coding system that was *used*, which Emacs
+        ;; records separately because reading a file can resolve an
+        ;; undecided one into a real choice that the buffer's variable was
+        ;; never told about - GNU Emacs's `last-coding-system-used'.
+        (unless new? (*last-coding-system-used* coding))
         ;; and the directory its file is in, which its relative file names
         ;; are relative to: GNU Emacs's `default-directory', buffer-local,
         ;; which `find-file-noselect' sets to the file's directory
@@ -1434,27 +1487,6 @@ save-buffer
         ;; where GNU Emacs's `find-file-noselect' puts it - `point-min'
         (text-editor-set-cursor ed 1 0)
         ed)))))
-
-    (define (encode-line-breaks str line-break)
-      ;; Encode the buffer's line-feed breaks back into the file's
-      ;; line-break convention on save. A CRLF file gets its carriage
-      ;; returns back; the other conventions are stored as they were read -
-      ;; `decode-dos-returns' takes the carriage return out of a CR-LF pair
-      ;; and leaves every other one in the buffer - so there is nothing to
-      ;; put back.
-      ;;--------------------------------------------------------------
-      (if (not (eq? line-break line-break-crlf))
-          str
-          (call-with-port (open-output-string)
-            (lambda (port)
-              (string-for-each
-               (lambda (c)
-                 (if (char=? c #\newline)
-                     (begin (write-char #\return port)
-                            (write-char #\newline port))
-                     (write-char c port)))
-               str)
-              (get-output-string port)))))
 
     (define *save-silently* (make-parameter #f))
     ;; ^ GNU Emacs's `save-silently' (files.el:830), nil by default: "If
@@ -1491,7 +1523,7 @@ save-buffer
       ;; buffer's whole contents instead of adding to them - the C's
       ;; replace-the-accessible-portion, which keeps markers either
       ;; side of what it changes. What is inserted is the file's text
-      ;; with its line-break convention decoded, as
+      ;; decoded by the coding system the file declares, as
       ;; `find-file-noselect''s reading is; the buffer's
       ;; `buffer-file-coding-system' is not touched - the C sets it
       ;; through `after-insert-file-set-coding', which the visit-time
@@ -1500,27 +1532,22 @@ save-buffer
       ;;--------------------------------------------------------------
       (let* ((visit (and (pair? args) (car args)))
              (replace (and (pair? args) (pair? (cdr args)) (cadr args)))
-             (contents
-              (call-with-input-file filename
-                (lambda (port)
-                  (let loop ((acc (list)))
-                    (let ((c (read-char port)))
-                      (if (eof-object? c)
-                          (list->string (reverse acc))
-                          (loop (cons c acc))))))))
-             (decoded (decode-dos-returns contents))
+             (bytes (call-with-port (open-input-file filename #:encoding #f)
+                      get-bytevector-all))
+             (coding (coding-system-for-file filename bytes))
+             (decoded (decode-file-bytes bytes coding))
              (ed (current-buffer)))
         (when replace
           (erase-buffer)
-          ;; the whole buffer is the file's: the convention is the
+          ;; the whole buffer is the file's: the coding system is the
           ;; file's again, as `revert-buffer-insert-file-contents'
           ;; makes of it
-          (set!buffer-file-coding-system ed (detect-line-break contents)))
+          (set!buffer-file-coding-system ed coding))
         (text-editor-insert ed decoded)
         ;; the visit: the buffer is what the file is now, so there is
         ;; nothing in it the file does not have
         (when visit (text-editor-set-modified! ed #f))
-        (list filename (string-length decoded))))
+        (list filename (length decoded))))
 
     (define (insert-file-1 filename insert-func)
       ;; GNU Emacs's `insert-file-1' (files.el:2836): the common shape
@@ -1834,14 +1861,14 @@ at point instead."
                             name))))
             ;; Emacs settles the buffer's final line break before writing it.
             (ensure-final-newline-on-save! buffer)
-            (call-with-output-file
-                path
-              (lambda (port)
-                (display
-                 (encode-line-breaks
-                  (text-editor-to-string buffer)
-                  (buffer-file-coding-system buffer))
-                 port)))
+            ;; The buffer's own coding system, which is the character set
+            ;; *and* the end of line - and the code points go out rather
+            ;; than a string, because a buffer holding a byte character
+            ;; has no string form.
+            (let ((coding (buffer-file-coding-system buffer)))
+              (write-file-code-points path (text-editor-to-code-points buffer)
+                                      coding)
+              (*last-coding-system-used* coding))
             (text-editor-set-modified! buffer #f)
             (set!frame-message (*current-frame*)
                                        (string-append "Wrote " path))

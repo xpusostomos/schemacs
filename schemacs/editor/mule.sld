@@ -193,25 +193,169 @@
                            (else (val (+ k 1)))))))))
          (else (loop (+ i 1))))))
 
-    (define (%local-variables-coding text)
-      ;; The coding system a local-variables block names, or #f.
+    (define *auto-coding-tail-size* 3072)
+    ;; ^ `find-auto-coding''s `(- size 3072)': the local-variables block is
+    ;; searched in the last 3K bytes of the file and *nowhere else*, so a
+    ;; file that merely mentions the phrase near its top is not read as
+    ;; one that declares a coding system.
+
+    (define (%line-after-break text i)
+      ;; The start of the line containing I - the index just past the
+      ;; *nearest* preceding line break - or #f when there is none.
       ;;
-      ;; Emacs searches the last 3k for `Local Variables:' and then for a
-      ;; `coding:' entry inside the block, bounded by the prefix and
-      ;; suffix the `Local Variables:' line carries and by `End:'. What is
-      ;; ported here is the entry: a `coding:' tag on a line of the block.
-      ;; The prefix/suffix machinery (`(prefix = regexp-quote ...)' and
-      ;; the anchored `re-coding') is not, and would matter only for a
-      ;; block whose delimiters are not the usual ones.
+      ;; The C's pattern begins `[\r\n]PREFIX' with `PREFIX' being
+      ;; `[^\r\n]*', so a prefix starts right after a break and never
+      ;; crosses one. Taking the *nearest* preceding break is what makes
+      ;; that true for a CR-LF file, where the two characters are two
+      ;; breaks and only the second one begins the line.
+      ;;--------------------------------------------------------------
+      (let loop ((j i))
+        (cond ((<= j 0) #f)
+              ((memv (string-ref text (- j 1)) '(#\newline #\return)) j)
+              (else (loop (- j 1))))))
+
+    (define (%line-break-at-or-after text i)
+      ;; The index of the break ending the line containing I, or #f for a
+      ;; line with no break after it - the C's trailing `[\r\n]', which
+      ;; every one of these patterns requires.
       ;;--------------------------------------------------------------
       (let ((n (string-length text)))
-        (let loop ((i 0))
-          (cond
-           ((>= i n) #f)
-           ((and (<= (+ i 16) n)
-                 (string=? "Local Variables:" (substring text i (+ i 16))))
-            (%tag-in text (+ i 16) n))
-           (else (loop (+ i 1)))))))
+        (let loop ((j i))
+          (cond ((>= j n) #f)
+                ((memv (string-ref text j) '(#\newline #\return)) j)
+                (else (loop (+ j 1)))))))
+
+    (define (%skip-while s i pred)
+      ;; The first index at or after I at which PRED is false.
+      ;;--------------------------------------------------------------
+      (let loop ((j i))
+        (if (and (< j (string-length s)) (pred (string-ref s j)))
+            (loop (+ j 1))
+            j)))
+
+    (define (%block-strip line prefix suffix)
+      ;; LINE with the block's PREFIX off its front and its SUFFIX off its
+      ;; back, or #f when it does not carry them. The two are what the
+      ;; C's `(regexp-quote (match-string 1))' and `... 2)' carry from the
+      ;; block's own `Local Variables:' line onto every entry's line, so
+      ;; a block with unusual delimiters keeps them.
+      ;;--------------------------------------------------------------
+      (let* ((n (string-length line))
+             (p (string-length prefix))
+             (s (string-length suffix)))
+        (and (>= n (+ p s))
+             (string=? prefix (substring line 0 p))
+             (string=? suffix (substring line (- n s) n))
+             (substring line p (- n s)))))
+
+    (define (%block-line-value line prefix suffix key)
+      ;; The value of a `KEY ... : VALUE' line whose whole text is the
+      ;; block's `PREFIX' then that entry then its `SUFFIX' - the C's
+      ;; `re-coding', which is exactly
+      ;;
+      ;;   "[\r\n]" prefix "[ \t]*coding[ \t]*:[ \t]*\([^ \t\r\n]+\)[ \t]*" suffix "[\r\n]"
+      ;;
+      ;; with the two `[\r\n]'s already consumed by the caller. LINE is
+      ;; one line with no break in it, so `[^\r\n]' is free.
+      ;;--------------------------------------------------------------
+      (let* ((mid (%block-strip line prefix suffix))
+             (k (string-length key)))
+        (and mid
+             (let* ((i (%skip-while mid 0 (lambda (c) (memv c '(#\space #\tab)))))
+                    (j (and (<= (+ i k) (string-length mid))
+                            (string=? key (substring mid i (+ i k)))
+                            (%skip-while mid (+ i k)
+                                         (lambda (c) (memv c '(#\space #\tab))))))
+                    (v (and j (< j (string-length mid))
+                            (char=? (string-ref mid j) #\:)
+                            (%skip-while mid (+ j 1)
+                                         (lambda (c) (memv c '(#\space #\tab)))))))
+               (and v (< v (string-length mid))
+                    ;; `\([^ \t\r\n]+\)': up to a space, a tab or the end
+                    (let* ((e (%skip-while mid v
+                                           (lambda (c) (not (memv c '(#\space #\tab))))))
+                           (t (%skip-while mid e
+                                           (lambda (c) (memv c '(#\space #\tab))))))
+                      (and (= t (string-length mid))
+                           (substring mid v e))))))))
+
+    (define (%block-line-is? line prefix suffix key)
+      ;; Whether LINE is the block's `End:' line - `re-end', which is
+      ;;
+      ;;   "[\r\n]" prefix "[ \t]*End *:[ \t]*" suffix "[\r\n]?"
+      ;;
+      ;; and carries no value at all. That ` *' where every other entry
+      ;; has `[ \t]*' is the C's own, and it means spaces may precede the
+      ;; colon but tabs may not.
+      ;;--------------------------------------------------------------
+      (let* ((mid (%block-strip line prefix suffix))
+             (k (string-length key)))
+        (and mid
+             (let* ((i (%skip-while mid 0 (lambda (c) (memv c '(#\space #\tab)))))
+                    (j (and (<= (+ i k) (string-length mid))
+                            (string=? key (substring mid i (+ i k)))
+                            (%skip-while mid (+ i k)
+                                         (lambda (c) (char=? c #\space))))))
+               (and j (< j (string-length mid)) (char=? (string-ref mid j) #\:)
+                    (= (%skip-while mid (+ j 1)
+                                    (lambda (c) (memv c '(#\space #\tab))))
+                       (string-length mid)))))))
+
+    (define (%local-variables-coding text)
+      ;; The coding system a local-variables block names, or #f - the
+      ;; tail half of `find-auto-coding'.
+      ;;
+      ;; The window and the anchors are Emacs's and all three matter: the
+      ;; search begins at `(max (- size 3072) 0)', the first line must be
+      ;; a whole line (`[\r\n]PREFIX[ \t]*Local Variables:[ \t]*SUFFIX
+      ;; [\r\n]', so a block on the file's very first line - which has no
+      ;; break before it - does not match, and neither does one on a last
+      ;; line with no break after it), the prefix and suffix the block's
+      ;; own line carries must appear on every entry's line, and the
+      ;; block *ends at its `End:' line*, so a `coding:' after it is not
+      ;; in the block. A search with none of those bounds answers for a
+      ;; file that merely mentions the phrase.
+      ;;--------------------------------------------------------------
+      (let* ((n (string-length text))
+             (tail-start (max 0 (- n *auto-coding-tail-size*)))
+             (at (let loop ((i tail-start))
+                   (cond
+                    ((>= i n) #f)
+                    ((and (<= (+ i 16) n)
+                          (string=? "Local Variables:" (substring text i (+ i 16))))
+                     (let ((ls (%line-after-break text i)))
+                       (and ls (cons ls i))))
+                    (else (loop (+ i 1)))))))
+        (and at
+             (let* ((ls (car at))
+                    (hit (cdr at))
+                    (le (%line-break-at-or-after text ls)))
+               (and le
+                    (let* ((prefix (substring text ls hit))
+                           (suffix (substring text (+ hit 16) le))
+                           (from (%line-after-break text (+ le 1)))
+                           (end (let loop ((j from))
+                                  (cond
+                                   ((or (not j) (>= j n)) n)
+                                   (else
+                                    (let ((je (%line-break-at-or-after text j)))
+                                      (cond
+                                       ((not je) n)
+                                       ((%block-line-is? (substring text j je)
+                                                         prefix suffix "End")
+                                        je)
+                                       (else (loop (%line-after-break text (+ je 1)))))))))))
+                      (let loop ((j from))
+                        (cond
+                         ((or (not j) (>= j end)) #f)
+                         (else
+                          (let ((je (%line-break-at-or-after text j)))
+                            (cond
+                             ((not je) #f)
+                             (else
+                              (let ((v (%block-line-value (substring text j je)
+                                                          prefix suffix "coding")))
+                                (or v (loop (%line-after-break text (+ je 1)))))))))))))))))
 
     (define (coding-system-from-file-name name)
       ;; The coding system a *name* stands for, as Emacs's
@@ -233,21 +377,38 @@
 
     (define (%byte-order-mark bytes)
       ;; The coding system a byte order mark at the front says: `EF BB BF'
-      ;; is UTF-8, `FF FE' is UTF-16LE and `FE FF' UTF-16BE. Emacs reads
+      ;; is UTF-8, and either of `FF FE' / `FE FF' is UTF-16. Emacs reads
       ;; these in `detect_coding' (`coding.c') before any tag, because a
       ;; BOM is a declaration too - it is just written in bytes.
+      ;;
+      ;; **Both UTF-16 marks answer the same coding system, and that is
+      ;; the codec's doing rather than a simplification.** Emacs names
+      ;; them apart - `utf-16le-with-signature' and
+      ;; `utf-16be-with-signature' - because its `:coding-type' carries
+      ;; the byte order *and* whether a signature is written. iconv's
+      ;; "UTF-16" is one codec that reads whichever mark is there and
+      ;; writes one in the host's byte order, so naming them apart here
+      ;; would be a name that lied about what the codec does. The
+      ;; departure is that the byte order written back is the host's
+      ;; (measured: `FF FE' on this machine) rather than the one read.
+      ;;
+      ;; The alternative - `utf-16le' / `utf-16be' - is *wrong* here and
+      ;; was the first version: iconv's explicit-order codecs keep the
+      ;; mark as a character, so the buffer got a U+FEFF in front of the
+      ;; text where Emacs's has none. Measured: `(16 0 65 0 66 0)' read
+      ;; as "UTF-16LE" is `(65279 65 66)', and as "UTF-16" is `(65 66)'.
       ;;--------------------------------------------------------------
       (let ((n (bytevector-length bytes)))
         (cond ((and (>= n 3) (= (bytevector-u8-ref bytes 0) #xEF)
                     (= (bytevector-u8-ref bytes 1) #xBB)
                     (= (bytevector-u8-ref bytes 2) #xBF))
                (find-coding-system 'utf-8))
-              ((and (>= n 2) (= (bytevector-u8-ref bytes 0) #xFF)
-                    (= (bytevector-u8-ref bytes 1) #xFE))
-               (find-coding-system 'utf-16le))
-              ((and (>= n 2) (= (bytevector-u8-ref bytes 0) #xFE)
-                    (>= n 2) (= (bytevector-u8-ref bytes 1) #xFF))
-               (find-coding-system 'utf-16be))
+              ((and (>= n 2)
+                    (or (and (= (bytevector-u8-ref bytes 0) #xFF)
+                             (= (bytevector-u8-ref bytes 1) #xFE))
+                        (and (= (bytevector-u8-ref bytes 0) #xFE)
+                             (= (bytevector-u8-ref bytes 1) #xFF))))
+               (find-coding-system 'utf-16))
               (else #f))))
 
     (define (find-auto-coding filename bytes)
@@ -259,11 +420,16 @@
       ;; saying `-*- coding: latin-1 -*-' is right even when its first 1k
       ;; would score as UTF-8.
       ;;--------------------------------------------------------------
-      (or (let ((by-name (auto-coding-alist-lookup filename)))
-            (and by-name (coding-system-from-file-name by-name)))
-          (%head-coding (%bytevector->latin1-string bytes))
-          (%byte-order-mark bytes)
-          (%lookup (%local-variables-coding (%bytevector->latin1-string bytes)))))
+      (let ((by-name (auto-coding-alist-lookup filename)))
+        (or (and by-name (coding-system-from-file-name by-name))
+            ;; The bytes as a string, one character per byte, made *once*:
+            ;; the search is over bytes - a tag is ASCII - and decoding
+            ;; them is the very thing that cannot happen before a coding
+            ;; system has been chosen.
+            (let ((text (%bytevector->latin1-string bytes)))
+              (or (%head-coding text)
+                  (%byte-order-mark bytes)
+                  (%lookup (%local-variables-coding text)))))))
 
     (define (%head-coding text)
       ;; The `coding:' tag in the first line's `-*- ... -*-' form, or #f.
