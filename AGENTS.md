@@ -3995,3 +3995,72 @@ and `:iso-usage`, and is **not written yet**.
 Still missing after that: the four ISO categories as coding systems, the
 detector (the 260 lines), and - the large part - `decode_coding_iso_2022`
 and `encode_coding_iso_2022`, which have no iconv codec to stand on.
+
+# The line ends were missing from the coding-string API (2026-10-06)
+
+Item 6's other half, plus something bigger that fell out of looking at it.
+
+## The bug
+
+`decode-coding-string` and `encode-coding-string` did **no end-of-line
+conversion at all**. Measured on Emacs 31.1 for the same input (`"a\r\nb"`
+decoded, `"a\nb"` encoded):
+
+| coding system | Emacs decode | was | now |
+|---|---|---|---|
+| `utf-8-dos` | `(97 10 98)` | `(97 13 10 98)` | same as Emacs |
+| `utf-8-unix` | `(97 13 10 98)` | `(97 13 10 98)` | same |
+| `utf-8-mac` | `(97 10 10 98)` | `(97 13 10 98)` | same |
+| `raw-text` | `(97 10 98)` | `(97 13 10 98)` | same |
+| `no-conversion` | `(97 13 10 98)` | `(97 13 10 98)` | same |
+
+and `utf-8-dos` encoding `"a\nb"` is `(97 13 10 98)` there and was
+`(97 10 98)` here.
+
+**It was invisible because the file path does the eol itself.** `files.sld`'s
+`decode-file-bytes` walks the codec and then calls `decode-eol`, and
+`write-file-code-points` calls `encode-eol` before the codec - so every file
+this editor read and wrote came out right while the public API was wrong. Two
+copies of a rule, one of them missing, and the tests all went through the
+copy that had it.
+
+The C puts it where the name says: `decode_coding` runs the codec over the
+bytes and *then* `decode_eol` over what it produced; `encode_coding` runs
+`encode_eol` first.
+
+## The undecided case, which is not the same rule
+
+A coding system that has **not named** an end of line takes one from the text
+- the C's `detect_eol` inside the decoder, where `coding->eol_type` is a
+vector. Measured: `(decode-coding-string "a\r\nb" 'utf-8)` is `(97 10 98)`,
+and so are the CR-only and LF-only forms; every line ending comes back as LF.
+So `utf-8`, `raw-text`, `undecided` and the rest detect, while a name that
+carries an eol (`utf-8-dos`) does not.
+
+On the **encode** side there is nothing to detect, and Emacs inserts nothing:
+`(encode-coding-string "a\nb" 'utf-8)` is `(97 10 98)` - the undecided case
+is unix. That half already agreed, because `encode-eol` leaves an unnamed eol
+alone.
+
+## The NUL rule is the file path's, not this one
+
+`coding-system-for-file` turns a NUL into `unix`, so a binary file's line
+ends are left alone - that is `detect_coding_system`'s rule. **This API does
+not apply it**, and that is measured rather than assumed: Emacs answers
+`(97 0 10 98)` for `"a\0\r\nb"` read as `utf-8` *or* as `raw-text`, the CRLF
+gone. I wrote the NUL guard in here first, on the reasoning that the rule
+would be shared, and the measurement took it out again.
+
+## Not yet reachable
+
+Nothing calls either function outside `coding.sld` - checked. So this is an
+API conformance fix with no user-visible effect *yet*; item 5,
+`decode-coding-region` and `encode-coding-region`, is what will use it.
+
+## Tests
+
+`coding-tests.scm` 54 (was 50): the decode table above, the three undecided
+forms, the NUL case, and the encode direction.
+
+All 32 suites pass, `tools/pty-check.py` still passes, `coding-diff.py` is
+19 identical / 2 known / 0 new.

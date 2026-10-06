@@ -60,6 +60,11 @@
     (only (guile) array-length array-ref array-set! catch logand logior lognot list-head
           make-hash-table hashq-set! hashq-ref
           make-typed-array
+          ;; the two conversions `decode-coding-string' and
+          ;; `encode-coding-string' make around `decode-eol' / `encode-eol',
+          ;; which walk *lists* because the file path in `files.sld' hands
+          ;; them one
+          list->u32vector u32vector->list
           set-port-conversion-strategy! set-port-encoding!)
     (only (rnrs io ports) get-u8 put-u8)
     (only (schemacs editor character)
@@ -545,35 +550,65 @@
       ;;--------------------------------------------------------------
       ;; CS is the *record*, because this is where the fields are read in
       ;; bulk; the `-of' accessors take it and the public ones take a name.
-      (let ((cs (%coding-of coding)))
-        (cond
-         ((coding-system-raw?-of cs)
-          (let* ((bv (if (string? bytes) (string->utf8 bytes) bytes))
-                 (n (bytevector-length bv))
-                 (out (make-typed-array 'u32 0 n)))
-            (let loop ((i 0))
-              (if (>= i n)
-                  out
-                  (begin
-                    ;; `UNIBYTE_TO_CHAR' and not `BYTE8_TO_CHAR': ASCII
-                    ;; is itself. Measured - Emacs decodes the Latin-1
-                    ;; file with `no-conversion' to `(99 97 102 4194281
-                    ;; ...)', the letters unchanged and only the two high
-                    ;; bytes as byte characters.
-                    (array-set! out (unibyte-to-char (bytevector-u8-ref bv i)) i)
-                    (loop (+ i 1)))))))
-         (else
-          (let ((bv (if (string? bytes) (string->utf8 bytes) bytes)))
-            (guard (e (#t (%decode-with-fallback bv cs)))
-              (let* ((str (bytevector->string bv (coding-system-iconv-name-of cs)))
-                     (n (string-length str))
-                     (out (make-typed-array 'u32 0 n)))
-                (let loop ((i 0))
-                  (if (>= i n)
-                      out
-                      (begin
-                        (array-set! out (char->integer (string-ref str i)) i)
-                        (loop (+ i 1))))))))))))
+      ;;
+      ;; **The line ends are converted last**, because that is where the C
+      ;; puts it: `decode_coding' runs the codec over the bytes and then
+      ;; `decode_eol' over what it produced. It is easy to leave out here
+      ;; because the *file* path in `files.sld' applies it itself - so
+      ;; every file read and written was right while this API was not, and
+      ;; `(decode-coding-string "a\r\nb" 'utf-8-dos)' answered the CR as
+      ;; well as the LF. Measured on Emacs 31.1: `utf-8-dos' gives
+      ;; `(97 10 98)', `utf-8-unix' `(97 13 10 98)', `utf-8-mac'
+      ;; `(97 10 10 98)', `raw-text' `(97 10 98)' and `no-conversion'
+      ;; `(97 13 10 98)'.
+      (let* ((bv (if (string? bytes) (string->utf8 bytes) bytes))
+             ;; **A coding system that has not named an end of line gets
+             ;; one from the text**, which is the C's `detect_eol' inside
+             ;; the decoder: `coding->eol_type' is a *vector* for an
+             ;; undecided one and the C settles it from the bytes. Measured
+             ;; on Emacs 31.1, `(decode-coding-string "a\r\nb" 'utf-8)' is
+             ;; `(97 10 98)' and so are the CR-only and LF-only forms -
+             ;; every line ending comes back as LF.
+             ;;
+             ;; **The NUL rule is *not* applied here, and that is
+             ;; measured.** `coding-system-for-file' turns a NUL into
+             ;; `unix' so a binary file's line ends are left alone - that
+             ;; is `detect_coding_system''s rule - but this function still
+             ;; converts: Emacs answers `(97 0 10 98)' for `"a\0\r\nb"'
+             ;; read as `utf-8' or as `raw-text', the CRLF gone.
+             (coding (if (coding-system-eol-type coding)
+                         coding
+                         (or (adjust-coding-eol-type coding (detect-eol bv))
+                             coding)))
+             (cs (%coding-of coding))
+             (out
+              (cond
+               ((coding-system-raw?-of cs)
+                (let* ((n (bytevector-length bv))
+                       (out (make-typed-array 'u32 0 n)))
+                  (let loop ((i 0))
+                    (if (>= i n)
+                        out
+                        (begin
+                          ;; `UNIBYTE_TO_CHAR' and not `BYTE8_TO_CHAR': ASCII
+                          ;; is itself. Measured - Emacs decodes the Latin-1
+                          ;; file with `no-conversion' to `(99 97 102 4194281
+                          ;; ...)', the letters unchanged and only the two high
+                          ;; bytes as byte characters.
+                          (array-set! out (unibyte-to-char (bytevector-u8-ref bv i)) i)
+                          (loop (+ i 1)))))))
+               (else
+                (guard (e (#t (%decode-with-fallback bv cs)))
+                  (let* ((str (bytevector->string bv (coding-system-iconv-name-of cs)))
+                         (n (string-length str))
+                         (out (make-typed-array 'u32 0 n)))
+                    (let loop ((i 0))
+                      (if (>= i n)
+                          out
+                          (begin
+                            (array-set! out (char->integer (string-ref str i)) i)
+                            (loop (+ i 1)))))))))))
+        (list->u32vector (decode-eol (u32vector->list out) coding))))
 
     (define (%decode-with-fallback bv cs)
       ;; What a coding system does with a byte its charset cannot read.
@@ -629,11 +664,20 @@
       ;; characters and the answer is the file's *bytes*. A bytevector and
       ;; not a string, because Emacs's answer is a unibyte string - a
       ;; string of bytes - and this tree has no such thing.
+      ;;
+      ;; **The line ends go in first**, the mirror of the read and for the
+      ;; same reason: `encode_coding' runs `encode_eol' and then the codec.
+      ;; Measured on Emacs 31.1, `"a\nb"' out: `utf-8-dos' gives
+      ;; `(97 13 10 98)', `utf-8-unix' `(97 10 98)', and both `raw-text'
+      ;; and `no-conversion' `(97 10 98)'.
       ;;--------------------------------------------------------------
       (let* ((cs (%coding-of coding))
              ;; TEXT is a `u32vector' of code points, as a string's
              ;; characters are - see the note on `decode-coding-string' for
-             ;; why it cannot be a Scheme string.
+             ;; why it cannot be a Scheme string. The round trip through a
+             ;; list is `encode-eol''s, which walks one because the file
+             ;; path in `files.sld' hands it one.
+             (string (list->u32vector (encode-eol (u32vector->list string) coding)))
              (n (array-length string)))
         (cond
          ((coding-system-raw?-of cs)

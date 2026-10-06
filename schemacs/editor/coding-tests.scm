@@ -552,4 +552,58 @@
   (map (lambda (n) (coding-system-p n))
        '(raw-text-unix raw-text-dos raw-text-mac)))
 
+
+;; ------------------------------------------------------------------
+;; the end of line in the coding-string API
+;;
+;; **`decode-coding-string' and `encode-coding-string' convert the line
+;; ends**, which is where the C puts it: `decode_coding' runs the codec over
+;; the bytes and then `decode_eol' over what it produced, and `encode_coding'
+;; the other way round. It is easy to leave out because the *file* path in
+;; `files.sld' applies the eol itself - so every file that was read and
+;; written came out right while this API did not, and
+;; `(decode-coding-string "a\r\nb" 'utf-8-dos)' answered the CR as well as
+;; the LF.
+;;
+;; Every row below is Emacs 31.1's own answer for the same input.
+
+(define (bv->ints bv)
+  (let loop ((i 0) (acc '()))
+    (if (>= i (bytevector-length bv))
+        (reverse acc)
+        (loop (+ i 1) (cons (bytevector-u8-ref bv i) acc)))))
+
+(test-equal "decode-coding-string converts the line ends"
+  ;; utf-8-dos / utf-8-unix / utf-8-mac, raw-text / raw-text-dos /
+  ;; no-conversion, and a bare `utf-8' whose eol is undecided.
+  '((97 10 98) (97 13 10 98) (97 10 10 98)
+    (97 10 98) (97 10 98) (97 13 10 98)
+    (97 10 98))
+  (map (lambda (cs)
+         (u32vector->list (decode-coding-string #vu8(97 13 10 98) cs)))
+       '(utf-8-dos utf-8-unix utf-8-mac raw-text raw-text-dos
+         no-conversion utf-8)))
+
+(test-equal "... and one that has not named one takes it from the text"
+  ;; The C's `detect_eol' inside the decoder: every line ending comes back
+  ;; as LF, whichever of the three it was.
+  '((97 10 98) (97 10 98) (97 10 98))
+  (map (lambda (bv) (u32vector->list (decode-coding-string bv 'utf-8)))
+       (list #vu8(97 13 10 98) #vu8(97 10 98) #vu8(97 13 98))))
+
+(test-equal "... and a NUL does not stop it, unlike on the file path"
+  ;; `coding-system-for-file' turns a NUL into `unix' - a binary file's
+  ;; line ends are left alone - but this function still converts. Measured:
+  ;; Emacs answers `(97 0 10 98)' here for `"a\0\r\nb"' read as `utf-8'.
+  '(97 0 10 98)
+  (u32vector->list (decode-coding-string #vu8(97 0 13 10 98) 'utf-8)))
+
+(test-equal "encode-coding-string converts them too, the other way"
+  ;; The undefined-eol ones - `raw-text' and `no-conversion' - insert
+  ;; nothing: there is nothing in the text to detect a convention from.
+  '((97 13 10 98) (97 10 98) (97 10 98) (97 10 98))
+  (map (lambda (cs)
+         (bv->ints (encode-coding-string (u32vector 97 10 98) cs)))
+       '(utf-8-dos utf-8-unix raw-text no-conversion)))
+
 (test-end "schemacs_editor_coding")
