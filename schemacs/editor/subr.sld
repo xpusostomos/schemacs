@@ -54,6 +54,7 @@
    parse-solitary-modifier make-ctrl-char
    parse-modifiers-uncached event-symbol-elements
    event-modifiers event-basic-type apply-modifiers event-convert-list
+   run-hook-with-args
    run-hook-with-args-until-success
    *after-change-major-mode-hook*
    *change-major-mode-after-body-hook*
@@ -224,6 +225,25 @@
                         ((procedure? hook) (hook))
                         (else (for-each (lambda (f) (f)) hook))))
                 hooks))
+
+    (define (run-hook-with-args hook . args)
+      ;; GNU Emacs's `run-hook-with-args' (`eval.c:2908'): "Run HOOK with
+      ;; the specified arguments ARGS. ... Call each function in order
+      ;; with arguments ARGS. The final return value is unspecified."
+      ;;
+      ;; The C is `run_hook_with_args (nargs, args, funcall_nil)'
+      ;; (`:2921') - the same walk as the `-until-success' form below,
+      ;; with a handler that always answers nil, so every function runs
+      ;; and no answer is used. HOOK is the list of procedures rather than
+      ;; a symbol naming one, for `run-hooks'' reason.
+      ;;--------------------------------------------------------------
+      (let loop ((rest (cond ((not hook) '())
+                             ((procedure? hook) (list hook))
+                             (else hook))))
+        (cond ((null? rest) #f)
+              (else
+               (apply (car rest) args)
+               (loop (cdr rest))))))
 
     (define (run-hook-with-args-until-success hook . args)
       ;; GNU Emacs's `run-hook-with-args-until-success' (`eval.c:2927'):

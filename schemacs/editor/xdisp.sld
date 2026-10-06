@@ -55,6 +55,10 @@
          *current-frame* *echo-area-buffer* *echo-area-prompt*
          *frame-cursor-type* *frame-focus* frame-height frame-width
          frame-message frame-selected-window
+         ;; `render!' binds the display from the frame it was handed: the
+         ;; frame's `output' is Emacs's `output_data', and this is what
+         ;; makes it load-bearing rather than a slot nobody reads
+         frame-output
          ;; `w->cursor_off_p', which `internal-show-cursor' turns off and
          ;; the cursor type is resolved against
          window-cursor-off?
@@ -2339,6 +2343,27 @@
       ;; mode line, as GNU Emacs gives each window one; the echo area
       ;; belongs to the frame and is drawn last, over the bottom row.
       ;;--------------------------------------------------------------
+      ;; **Draw on the frame's own display, and *as* that frame.** Both
+      ;; bindings are needed and neither alone is enough:
+      ;;
+      ;;   * `current-display' is what every draw call below reaches for
+      ;;     (Emacs reaches `FRAME_TERMINAL' the same way, through the
+      ;;     selected frame). With one frame this is an identity rebind;
+      ;;     with two it is what stops frame B being drawn into A's
+      ;;     window. The `or' is for the test frames, whose output is #f.
+      ;;   * `*current-frame*' is what `selected-window' and the cursor
+      ;;     type read - `render-window!' picks its mode-line face from
+      ;;     `(frame-selected-window (*current-frame*))' and
+      ;;     `get-window-cursor-type' from `*frame-focus*'. Binding only
+      ;;     the display would draw frame B with frame A's selected mode
+      ;;     line and A's cursor.
+      ;;
+      ;; The call sites below are deliberately *not* rewritten to take a
+      ;; display: they are the redisplay's oldest and most fragile code,
+      ;; and rebinding here is the same answer for every one of them.
+      (parameterize ((current-display (or (frame-output frame)
+                                          (current-display)))
+                     (*current-frame* frame))
       (sync-frame-size! frame)
       (let ((width (frame-width frame))
             (height (frame-height frame))
@@ -2445,6 +2470,6 @@
         ;; asked for (partial-update optimizations desync the physical
         ;; terminal when lines merge).
         (flush-display! (current-display))
-        ))
+        )))
 
     ))

@@ -20,7 +20,7 @@
   ;; See LAYOUT-PLAN.txt for the rule this library is the first step of.
 
   (import
-    (only (schemacs editor subr) kbd)
+    (only (schemacs editor subr) kbd run-hooks run-hook-with-args)
     (scheme base)
     ;; `new-frame' takes an optional size, which is a `case-lambda': it
     ;; is not exported by `(scheme base)' and a missing import for it
@@ -44,7 +44,7 @@
     ;; `suspend-frame' is a command and states its own key as the other
     ;; command libraries do.
     (only (schemacs editor command) current-prefix-arg define-command
-          uarg->integer)
+          register-command! uarg->integer)
     ;; `special-event-map' is where the window system's events are
     ;; bound, as Emacs's is (`keyboard.c:14550').
     (only (schemacs editor keymap)
@@ -69,7 +69,12 @@
 
   (export
    %window-point
-   *current-frame*
+   *current-frame* *frame-list* *frame-creation-function*
+   *before-make-frame-hook* *after-make-frame-functions*
+   frame? frame-list frame-live-p selected-frame select-frame
+   next-frame previous-frame other-frame delete-frame
+   delete-other-frames make-frame make-frame-command
+   display-graphic-p frame-name
    *blink-cursor-blinks*
    *blink-cursor-delay*
    *blink-cursor-interval*
@@ -525,7 +530,7 @@
     (define-record-type <frame>
       (make<frame>
        windows selected-window height width
-       message message-expiry keymap-state quit-cont output)
+       message message-expiry keymap-state quit-cont output name)
       frame-type?
       (windows   frame-windows   set!frame-windows)
       ;; ^ The frame's windows, top to bottom. Emacs's `window-list'.
@@ -573,7 +578,21 @@
       ;; a frame-wide one meant that saving a CRLF file after visiting an
       ;; LF file rewrote it with LF, and the other way round. It is
       ;; buffer-local in `(schemacs editor files)' now.
+      (name       frame-name       set!frame-name)
+      ;; ^ The frame's name: `F1', `F2', ... - Emacs's `f->name', which
+      ;; `fset_name (f, frame_next_F_name ())' sets as the frame is made
+      ;; (`frame.c:1562'). The mode line shows it through `%F'
+      ;; (`mode-line-frame-identification'), which this tree does not draw
+      ;; yet; the name is here because a frame has one and it is what the
+      ;; frame commands report.
       )
+
+    (define (frame? thing)
+      ;; GNU Emacs's `framep' (`frame.c'): "Return t if OBJECT is a
+      ;; frame". Emacs also answers `t', `x', `w32' and the rest for the
+      ;; *type*; this tree has one frame type, so it is a predicate.
+      ;;--------------------------------------------------------------
+      (frame-type? thing))
 
     (define (set!frame-message frame text)
       ;; Put TEXT in FRAME's echo area, taking down any timeout the
@@ -971,7 +990,13 @@
       ;;--------------------------------------------------------------
       (or (and (memq (*window-system*) '(x w32 ns pgtk)) #t)
           (and (not (*window-system*))
-               (let ((d (current-display)))
+               ;; The selected frame's terminal, as Emacs asks it of the
+               ;; frame - `(current-display)' is the same object today, and
+               ;; reading it off the frame is what stays right when there
+               ;; are several.
+               (let ((d (or (let ((f (*current-frame*)))
+                              (and f (frame-output f)))
+                            (current-display))))
                  (and d (display-selections-supported? d))))))
 
     (define (display-rows-cols display)
@@ -992,6 +1017,50 @@
         (cons (quotient (cdr size) unit-height)
               (quotient (car size) unit-width))))
 
+    (define *frame-list* (make-parameter '()))
+    ;; ^ GNU Emacs's `Vframe_list' (`frame.c:284'): every live frame, most
+    ;; recently made first. It is pushed as each frame is made (`Fcons',
+    ;; `frame.c:1438' and `:1560'), removed when one is deleted
+    ;; (`delq_no_quit', `:2895'), and `frame-list' answers a *copy*
+    ;; (`Fcopy_sequence', `:2176'). Selecting a frame does **not**
+    ;; reorder it - `norecord' in `do_switch_frame' is about the window
+    ;; and buffer record, not this list - so the order is creation order.
+    ;;
+    ;; A parameter for the reason `*coding-system-table*' is one: it is a
+    ;; registry, and a test wants to build one from nothing.
+
+    (define %next-frame-name
+      ;; GNU Emacs's `frame_next_F_name' (`frame.c'): the name a frame is
+      ;; given as it is made - `F1', `F2', and on. Emacs keeps a counter
+      ;; on the keyboard object; a counter here, since there is one
+      ;; keyboard (`kboard') in this editor too.
+      ;;--------------------------------------------------------------
+      (let ((n 0))
+        (lambda ()
+          (set! n (+ n 1))
+          (string->symbol (string-append "F" (number->string n))))))
+
+    (define (new-frame-on display editor height width)
+      ;; A frame of HEIGHT x WIDTH showing EDITOR, drawn on DISPLAY -
+      ;; GNU Emacs's `make_frame' given a terminal, which is what a frame
+      ;; *is*: `f->terminal' is fixed when it is made and never changes
+      ;; (`frame.c:1446' and `:1566' are the only assignments; `:2940'
+      ;; nulls it as the frame dies).
+      ;;
+      ;; **The display is an argument and not `(current-display)` read
+      ;; here**, because the whole point of a second frame is that it is
+      ;; built for a display that is not the current one. Everything that
+      ;; needs a frame on a particular display comes through here;
+      ;; `new-frame' below is the common case and reads the ambient one.
+      ;;--------------------------------------------------------------
+      (let* ((window (make-frame-window editor 0 (max 1 (- height 1)) 0 width))
+             (frame (make<frame> (list window) window height width
+                                 "" #f #f #f display (%next-frame-name))))
+        ;; Every frame joins the list as it is made, exactly as
+        ;; `make_frame' and `make_terminal_frame' push it.
+        (*frame-list* (cons frame (*frame-list*)))
+        frame))
+
     (define new-frame
       ;; A frame holding one window that fills the text area and shows
       ;; EDITOR. GNU Emacs's `frame-root-window' is the whole frame, and
@@ -1007,9 +1076,248 @@
         (let ((size (display-rows-cols (current-display))))
           (new-frame editor (car size) (cdr size))))
        ((editor height width)
-        (let ((window (make-frame-window editor 0 (max 1 (- height 1)) 0 width)))
-          (make<frame> (list window) window height width
-                       "" #f #f #f (current-display))))))
+        (new-frame-on (current-display) editor height width))))
+
+    ;;------------------------------------------------------------------
+    ;; Frames: the list, the selection, and the commands
+    ;;------------------------------------------------------------------
+
+    (define (selected-frame)
+      ;; GNU Emacs's `selected-frame' (`frame.c:2140'): "Return the
+      ;; selected frame." The command loop binds it; every command that
+      ;; does not take a frame acts on this one.
+      ;;--------------------------------------------------------------
+      (*current-frame*))
+
+    (define (frame-live-p frame)
+      ;; GNU Emacs's `frame-live-p' (`frame.c'): "Return non-nil if
+      ;; OBJECT is a live frame." `CHECK_LIVE_FRAME' is this test.
+      ;;--------------------------------------------------------------
+      (and (frame-type? frame) (memq frame (*frame-list*)) #t))
+
+    (define (frame-list)
+      ;; GNU Emacs's `frame-list' (`frame.c:2161'): "Return a list of all
+      ;; live frames." A *copy* - `Fcopy_sequence (Vframe_list)'
+      ;; (`:2176') - so a caller cannot reorder the real list.
+      ;;--------------------------------------------------------------
+      (append (*frame-list*) '()))
+
+    (define (select-frame frame)
+      ;; GNU Emacs's `select-frame' (`frame.c:2097'): "Select FRAME.
+      ;; Subsequent editing commands apply to its selected window."
+      ;;
+      ;; Emacs's `do_switch_frame' ends with `Fselect_window
+      ;; (f->selected_window, norecord)' (`frame.c:2131'), so selecting a
+      ;; frame selects its window too. Nothing is owed for that here:
+      ;; `selected-window' answers from the current frame, so the window
+      ;; moves with it.
+      ;;
+      ;; **The display follows the frame.** A frame's `output' is its
+      ;; terminal and only the selected frame's terminal is the editor's,
+      ;; which is what makes input and redisplay look at the right one.
+      ;;--------------------------------------------------------------
+      (unless (frame-type? frame)
+        (error "Wrong type argument: framep"))
+      (unless (frame-live-p frame)
+        (error "Wrong type argument: frame-live-p"))
+      (*current-frame* frame)
+      (current-display (frame-output frame))
+      frame)
+
+    (define (%frame-step frame back?)
+      ;; The frame after - or before - FRAME in the cyclic order, or #f
+      ;; when FRAME is not in the list. Emacs's `next_frame' and
+      ;; `prev_frame' (`frame.c:2380'-`:2415') walk the same list.
+      ;;--------------------------------------------------------------
+      (let* ((ordered (if back? (reverse (*frame-list*)) (*frame-list*)))
+             (tail (memq frame ordered)))
+        (and tail
+             (let ((rest (cdr tail)))
+               (if (null? rest) (car ordered) (car rest))))))
+
+    (define (next-frame . args)
+      ;; GNU Emacs's `next-frame' (`frame.c:2415'): "Return the next frame
+      ;; in the cyclic ordering of frames." Emacs's MINIBUF argument picks
+      ;; among minibuffer-only frames; this tree has none, so it is not
+      ;; carried - the same departure `delete-frame' names.
+      ;;--------------------------------------------------------------
+      (let ((frame (if (pair? args) (car args) (*current-frame*))))
+        (or (%frame-step frame #f) frame)))
+
+    (define (previous-frame . args)
+      ;; GNU Emacs's `previous-frame' (`frame.c:2441').
+      ;;--------------------------------------------------------------
+      (let ((frame (if (pair? args) (car args) (*current-frame*))))
+        (or (%frame-step frame #t) frame)))
+
+    (define-command (other-frame arg)
+      ;; GNU Emacs's `other-frame' (`frame.el:1290'): "Select the next
+      ;; frame in the cyclic ordering of frames." With a prefix argument,
+      ;; that many frames along; a negative one goes backwards.
+      ;;
+      ;; Emacs's loop also skips frames whose `frame-visible-p' is not
+      ;; `t'. Nothing here is iconified - there is no iconification to
+      ;; do - so every frame is visible and the skip could never fire,
+      ;; which is why the loop is not carried. `select-frame-set-input-
+      ;; focus', which Emacs ends with, is an `x-focus-frame' call that
+      ;; only means something on a window system; on a terminal Emacs's
+      ;; own `display-multi-frame-p' guard skips it (`frame.el:1281').
+      "Select the next frame (bound to C-x 5 o)."
+      (interactive (list (uarg->integer 1 (current-prefix-arg))))
+      (let ((frame (*current-frame*)))
+        (let loop ((i (abs arg)))
+          (when (> i 0)
+            (set! frame (if (< arg 0) (previous-frame frame) (next-frame frame)))
+            (loop (- i 1))))
+        (select-frame frame)))
+
+    (define (delete-frame . args)
+      ;; **Spelled with a rest argument rather than `define-command''s
+      ;; fixed parameters**, because Emacs's is `(delete-frame &optional
+      ;; frame force)' (`frame.c:3150') and a command here whose arguments
+      ;; the interactive *expression* supplies must be given all of them
+      ;; by a programmatic caller - so `(delete-frame)' and
+      ;; `(delete-frame frame)' would both be arity errors. It is
+      ;; registered as a command below, which is what `define-command'
+      ;; does for a fixed list.
+      ;;
+      ;; GNU Emacs's `delete-frame' (`frame.c:3150', over `delete_frame'
+      ;; at `:2598'): "Delete FRAME, eliminating it from use. ... The
+      ;; frame is removed from `frame-list'."
+      ;;
+      ;; **The last frame is never silently deleted.** Without FORCE Emacs
+      ;; signals "Attempt to delete the sole visible or iconified frame"
+      ;; (`frame.c:2614'); with it, "Attempt to delete the only frame"
+      ;; (`:2617'). Both are here as Emacs writes them.
+      ;;
+      ;; When the deleted frame was selected, Emacs picks a replacement
+      ;; (`frame.c:2736'-`:2839') - the most recently used other frame,
+      ;; else any other visible one on the terminal. With no iconification
+      ;; and no MRU list, "the next in the list" is that rule reduced.
+      ;;
+      ;; Not carried, and named: `delete-frame-functions' and
+      ;; `after-delete-frame-functions', `delete-before' child frames,
+      ;; tooltip and surrogate-minibuffer frames, and the case where the
+      ;; last frame is *forcibly* deleted, which exits Emacs with status
+      ;; 70 (`:2835') - there is no forcible path here, since the last
+      ;; frame is refused above.
+      "Delete FRAME (bound to C-x 5 0)."
+      (let ((frame (if (pair? args) (car args) (*current-frame*)))
+            (force (and (pair? args) (pair? (cdr args)) (cadr args))))
+      (cond
+       ;; Emacs's `CHECK_LIVE_FRAME' first: something that is not a frame
+       ;; at all is a type error, while a frame that is merely *dead* is
+       ;; not - `delete_frame' answers nil for that (`frame.c:2611').
+       ((not (frame-type? frame)) (error "Wrong type argument: framep"))
+       ((not (frame-live-p frame)) #f)
+       ((= 1 (length (*frame-list*)))
+        (error (if force
+                   "Attempt to delete the only frame"
+                   "Attempt to delete the sole visible or iconified frame")))
+       (else
+        (let ((was-selected (eq? frame (*current-frame*))))
+          (*frame-list*
+           (let loop ((l (*frame-list*)) (acc '()))
+             (cond ((null? l) (reverse acc))
+                   ((eq? (car l) frame) (loop (cdr l) acc))
+                   (else (loop (cdr l) (cons (car l) acc))))))
+          (when was-selected
+            (select-frame (car (*frame-list*))))
+          frame)))))
+
+    (define (delete-other-frames . args)
+      ;; GNU Emacs's `delete-other-frames' (`frame.el:3224'): "Delete all
+      ;; frames on FRAME's terminal except FRAME, and make FRAME selected."
+      ;; Spelled with a rest argument for `delete-frame''s reason: Emacs's
+      ;; is `(delete-other-frames &optional frame iconify)'.
+      ;;
+      ;; Emacs's version has two rounds and a long list of frames it
+      ;; spares - minibuffer frames, child frames, ancestors, and its
+      ;; ICONIFY argument, which iconifies rather than deletes. None of
+      ;; those exist here, so what is left is the plain rule.
+      ;;--------------------------------------------------------------
+      "Delete all other frames (bound to C-x 5 1)."
+      (let ((frame (if (pair? args) (car args) (*current-frame*))))
+        (let ((others (let loop ((l (*frame-list*)) (acc '()))
+                        (cond ((null? l) (reverse acc))
+                              ((eq? (car l) frame) (loop (cdr l) acc))
+                              (else (loop (cdr l) (cons (car l) acc)))))))
+          (for-each (lambda (f) (delete-frame f #f)) others)
+          (when (frame-live-p frame) (select-frame frame)))))
+
+    (define (display-graphic-p . args)
+      ;; GNU Emacs's `display-graphic-p' (`frame.c'): "Return non-nil if
+      ;; DISPLAY is a graphic display." The window system the frame is on
+      ;; is what the face machinery records, and it is #f on a terminal.
+      ;;--------------------------------------------------------------
+      (and (memq (*window-system*) '(x w32 ns pgtk)) #t))
+
+    (define *frame-creation-function* (make-parameter #f))
+    ;; ^ GNU Emacs's `frame-creation-function' (`frame.el:30'): a
+    ;; `cl-defgeneric' with one method per window system, `tty-create-
+    ;; frame-with-faces' being the `(window-system nil)' one. Here it is a
+    ;; parameter holding the front end's hook, so that this library never
+    ;; imports a front end - the same arrangement that keeps `dispnew.sld'
+    ;; free of ncurses and GTK.
+
+    (define *before-make-frame-hook* (make-parameter '()))
+    (define *after-make-frame-functions* (make-parameter '()))
+
+    (define (make-frame . args)
+      ;; GNU Emacs's `make-frame' (`frame.el:1021'): "Create a new frame
+      ;; on DISPLAY... The new frame is returned."
+      ;;
+      ;; **It does not select the new frame.** Emacs's own docstring says
+      ;; so (`frame.el:1055': "On graphical displays, this function does
+      ;; not itself make the new frame the selected frame") - selecting is
+      ;; `make-frame-command''s business, and only on a terminal.
+      ;;
+      ;; The order is Emacs's: `before-make-frame-hook', then
+      ;; `frame-creation-function', then `after-make-frame-functions'
+      ;; (`frame.el:1127', `:1129', `:1179').
+      ;;
+      ;; **Frame parameters are not carried**, and that is most of what
+      ;; Emacs's `make-frame' does: it merges `window-system-default-
+      ;; frame-alist', `default-frame-alist' and `frame-inherited-
+      ;; parameters' (`frame.el:1096'-`:1109') before creating anything.
+      ;; A frame here has no parameters to merge, so ARGS is taken for
+      ;; shape and ignored. That is the named gap, not an oversight.
+      ;;--------------------------------------------------------------
+      ;; `(*before-make-frame-hook*)' and not `*before-make-frame-hook*':
+      ;; a hook is a *parameter* here, so the bare name is the procedure
+      ;; holding the list, not the list - `run-hooks' would call it with no
+      ;; arguments and discard the value, running nothing at all.
+      (run-hooks (*before-make-frame-hook*))
+      (let ((create (*frame-creation-function*)))
+        (unless create
+          (error "This display cannot make more frames"))
+        (let ((frame (create)))
+          (run-hook-with-args (*after-make-frame-functions*) frame)
+          frame)))
+
+    (define-command (make-frame-command)
+      ;; GNU Emacs's `make-frame-command' (`frame.el:936'): "Make a new
+      ;; frame, on the same terminal as the selected frame. If the
+      ;; terminal is a text-only terminal, this also selects the new
+      ;; frame."
+      ;;--------------------------------------------------------------
+      "Make a new frame (bound to C-x 5 2)."
+      (interactive)
+      (if (display-graphic-p)
+          (make-frame)
+          (select-frame (make-frame))))
+
+    ;; `delete-frame' and `delete-other-frames' are registered here rather
+    ;; than by `define-command', because their Emacs shape has optional
+    ;; arguments - see the note on `delete-frame'. The spec is the
+    ;; interactive expression `define-command' would have generated.
+    (register-command! delete-frame (list (*current-frame*) #f))
+    (register-command! delete-other-frames (list (*current-frame*)))
+
+    (define-key *default-keymap* (kbd "C-x 5 2") make-frame-command)
+    (define-key *default-keymap* (kbd "C-x 5 0") delete-frame)
+    (define-key *default-keymap* (kbd "C-x 5 1") delete-other-frames)
+    (define-key *default-keymap* (kbd "C-x 5 o") other-frame)
 
     (define min-safe-window-height 1)
     (define min-safe-window-width 2)
@@ -1033,7 +1341,12 @@
       ;; the rectangle it was made with, and a terminal made smaller
       ;; draws its mode line off the bottom row.
       ;;--------------------------------------------------------------
-      (let ((display (current-display)))
+      ;; The frame's own display, not the process's: a second frame's
+      ;; size is its own window's. `render!' binds the display to the
+      ;; frame's anyway, so this is the explicit form of the same thing -
+      ;; and it is the correct one when a frame is sized from outside a
+      ;; redisplay. The `or' covers the test frames, whose output is #f.
+      (let ((display (or (frame-output frame) (current-display))))
         (when display
           (let* ((size (display-rows-cols display))
                  (old-height (frame-height frame))
@@ -1174,9 +1487,14 @@
       ;;--------------------------------------------------------------
       "Stop the editor and return to the shell (bound to C-z)."
       (interactive)
-      (suspend-display! (current-display))
-      (kill (getpid) SIGTSTP)
-      (resume-display! (current-display)))
+      ;; The selected frame's terminal - the thing that was stopped is
+      ;; the frame's, not the process's.
+      (let ((d (or (let ((f (*current-frame*)))
+                     (and f (frame-output f)))
+                   (current-display))))
+        (suspend-display! d)
+        (kill (getpid) SIGTSTP)
+        (resume-display! d)))
 
     ;; The key GNU Emacs binds it to, beside the command as the other
     ;; libraries state theirs.

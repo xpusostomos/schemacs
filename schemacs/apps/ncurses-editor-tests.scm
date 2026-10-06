@@ -23,6 +23,10 @@
        frame-height frame-editor frame-message
        frame-message-expiry set!frame-message
        frame-selected-window new-frame set!frame-selected-window
+       *frame-list* *frame-creation-function* frame? frame-list frame-live-p
+       frame-output *before-make-frame-hook* *after-make-frame-functions*
+       frame-name selected-frame select-frame next-frame previous-frame
+       delete-frame delete-other-frames other-frame make-frame
        set-window-buffer! set!window-width
        window-internal?
        window-list
@@ -3252,3 +3256,155 @@
                 (> start start-before)))))))
 
 (test-end "schemacs_ncurses_editor_recenter")
+
+(test-begin "schemacs_ncurses_editor_frames")
+
+;; Frames are a *list* now, and the model is GNU Emacs's: `Vframe_list'
+;; (`frame.c:284') is pushed as each frame is made (`Fcons', `:1438',
+;; `:1560'), `frame-list' answers a copy (`:2176'), selection does *not*
+;; reorder it - `norecord' in `do_switch_frame' is about the window and
+;; buffer record, not this list - and deletion `delq's (`:2895').
+;;
+;; Everything here is headless: `test-frame' is `(new-frame ed 24 80)', a
+;; frame with no terminal to ask, so several can be held at once.
+;;
+;; **The assertions are by frame identity, not by name.** Emacs names
+;; frames `F1', `F2', ... off a counter that lives as long as the editor
+;; (`frame_next_F_name', kept on the keyboard object), so by the time a
+;; test runs the numbers are in the hundreds and a literal `F2' is
+;; meaningless.
+
+(define (with-frames n thunk)
+  (parameterize ((*frame-list* '()) (*current-frame* #f)
+                 (*buffer-list* '()) (*current-buffer* #f))
+    (let ((ed (get-buffer-create "*scratch*")))
+      (let ((frames (let loop ((i 0) (acc '()))
+                      (if (>= i n) (reverse acc)
+                          (loop (+ i 1) (cons (new-frame ed 24 80) acc))))))
+        (thunk frames)))))
+
+(test-equal "frames join the list as they are made, newest first"
+  ;; `make_frame' *pushes*, so the list runs newest-first, and the names
+  ;; are handed out in creation order.
+  '(#t #t)
+  (with-frames 3
+    (lambda (frames)
+      (let ((created (map frame-name frames)))
+        (list (equal? (*frame-list*) (reverse frames))
+              (let loop ((n created) (ok #t))
+                (cond ((null? n) ok)
+                      ((char=? (string-ref (symbol->string (car n)) 0) #\F)
+                       (loop (cdr n) ok))
+                      (else #f))))))))
+
+(test-equal "selecting a frame does not reorder the list, and moves the display"
+  '(#t #t #t)
+  (with-frames 3
+    (lambda (frames)
+      (let ((a (car frames)) (b (cadr frames)))
+        (select-frame a)
+        (let ((before (*frame-list*)))
+          (select-frame b)
+          (list (equal? before (*frame-list*))
+                (eq? (selected-frame) b)
+                (eq? (current-display) (frame-output b))))))))
+
+(test-equal "next and previous frame cycle, and wrap at both ends"
+  ;; list is (c b a)
+  '(#t #t #t #t #t #t)
+  (with-frames 3
+    (lambda (frames)
+      (let ((a (car frames)) (b (cadr frames)) (c (caddr frames)))
+        (list (eq? (next-frame a) c)        ; a is last, so it wraps
+              (eq? (next-frame c) b)
+              (eq? (next-frame b) a)
+              (eq? (previous-frame a) b)
+              (eq? (previous-frame b) c)
+              (eq? (previous-frame c) a)))))) ; c is first, so it wraps
+
+(test-equal "other-frame walks N frames, and backwards for a negative N"
+  '(#t #t #t)
+  (with-frames 3
+    (lambda (frames)
+      (let ((a (car frames)) (b (cadr frames)) (c (caddr frames)))
+        (select-frame a)
+        (other-frame 1)
+        (let ((one (eq? (selected-frame) c)))
+          (other-frame 1)
+          (let ((two (eq? (selected-frame) b)))
+            (other-frame -1)
+            (list one two (eq? (selected-frame) c))))))))
+
+(test-equal "delete-frame removes it from the list, and returns it"
+  '(#t #t #t #t)
+  (with-frames 3
+    (lambda (frames)
+      (let ((a (car frames)) (b (cadr frames)) (c (caddr frames)))
+        (select-frame a)
+        (let ((gone (delete-frame b)))
+          (list (eq? gone b)
+                (equal? (*frame-list*) (list c a))
+                (frame-live-p a)
+                (not (frame-live-p b))))))))
+
+(test-equal "deleting the selected frame selects another one"
+  '(#t #t)
+  (with-frames 2
+    (lambda (frames)
+      (let ((a (car frames)) (b (cadr frames)))
+        (select-frame a)
+        (delete-frame a)
+        (list (not (frame-live-p a))
+              (eq? (selected-frame) b))))))
+
+;; **The last frame is never silently deleted.** Emacs signals "Attempt to
+;; delete the sole visible or iconified frame" without force
+;; (`frame.c:2614') and "Attempt to delete the only frame" with it
+;; (`:2617').
+(test-equal "the last frame is refused, with Emacs's two messages"
+  '("Attempt to delete the sole visible or iconified frame"
+    "Attempt to delete the only frame")
+  (with-frames 1
+    (lambda (frames)
+      (select-frame (car frames))
+      (list (guard (e (#t (error-object-message e))) (delete-frame))
+            ;; the second argument is FORCE, not the frame
+            (guard (e (#t (error-object-message e)))
+              (delete-frame (selected-frame) #t))))))
+
+(test-equal "delete-other-frames leaves one, and selects it"
+  '(#t #t)
+  (with-frames 3
+    (lambda (frames)
+      (let ((a (car frames)) (c (caddr frames)))
+        (select-frame c)
+        (delete-other-frames a)
+        (list (equal? (*frame-list*) (list a))
+              (eq? (selected-frame) a))))))
+
+(test-equal "make-frame runs the hooks and the creation function, and does not select"
+  '((before created after) #f)
+  (parameterize ((*frame-list* '()) (*current-frame* #f))
+    (let ((ed (get-buffer-create "*scratch*"))
+          (log '()))
+      (parameterize ((*before-make-frame-hook*
+                      (list (lambda () (set! log (cons 'before log)))))
+                     (*after-make-frame-functions*
+                      (list (lambda (f) (set! log (cons 'after log)))))
+                     (*frame-creation-function*
+                      (lambda ()
+                        (set! log (cons 'created log))
+                        (new-frame ed 24 80))))
+        (let ((f (make-frame)))
+          (list (reverse log)
+                ;; Emacs: "On graphical displays, this function does not
+                ;; itself make the new frame the selected frame" - so
+                ;; nothing is selected afterwards, the first frame or not.
+                (selected-frame)))))))
+
+(test-equal "with no creation function the display says so rather than crashing"
+  '("This display cannot make more frames")
+  (parameterize ((*frame-list* '()) (*current-frame* #f))
+    (list (guard (e (#t (error-object-message e))) (make-frame)))))
+
+(test-end "schemacs_ncurses_editor_frames")
