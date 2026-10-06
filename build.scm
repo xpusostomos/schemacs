@@ -67,6 +67,7 @@
     (schemacs editor minibuffer)
     (schemacs editor search)
     (schemacs editor indentc)
+    (schemacs editor coding)
     (schemacs editor cmds)
     (schemacs editor easy-mmode)
     (schemacs editor replace)

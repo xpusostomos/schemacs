@@ -2534,3 +2534,121 @@ Emacs's `quit-window' also switches that window to the previous buffer
 else. Ours leaves it showing the buried buffer, which is why `q' in dired
 looks like it did nothing. Not fixed here; named because it made the first
 version of this check read as a failure when the inheritance was working.
+
+# The character set machinery, first pass (2026-10-06)
+
+Chris: *"now that all our characters are in a u32 array, it's critical we
+have good character set machinery to make sure it is saved in the right
+format. It's a confusing area, but I'm guessing we need work."* He was
+right, and then he was right about the shape of it too - *"(1) detecting
+the char set, (2) saving the char set somewhere in memory. (3) possibly
+changing the char set in some circumstances. (4) writing the file,
+presumably one char at a time through a guile text port."*
+
+## The state before this
+
+The tree had the **EOL half** of a coding system - `line-break-*` - and no
+character-coding half at all. `buffer-file-coding-system` held a
+`line-break-*` value where Emacs holds `utf-8-unix`; that is the seam.
+Reading and writing went through the *default* port encoding, so every
+file was treated as UTF-8 and `café naïve` in Latin-1 came in as
+`(99 97 102 65533 ...)`: both accented bytes replaced by U+FFFD, **and
+written back out that way**. Emacs on the same file gives
+`(99 97 102 233 ...)` and `iso-latin-1-unix`.
+
+## The codecs are Guile's, and I nearly missed that
+
+My first framing was that Guile's port "destroys characters". Chris:
+*"I don't know why you're telling me that the guile default port destroys
+characters, because you wouldn't be writing to the default port would you.
+You'd be opening a port and specifying the character set right?"* Right.
+Nothing is destroyed; we never chose. Measured both directions:
+
+| | bytes |
+|---|---|
+| `#:encoding "ISO-8859-1"` | `63 61 66 e9 20 6e` |
+| `#:encoding "UTF-8"` | `63 61 66 c3 a9 20 6e` |
+| Emacs, `utf-8-unix` | `63 61 66 c3 a9 20 6e` |
+
+So `coding.c`'s twelve thousand lines are almost entirely *decoder
+implementations we skip* - the UTF-8 machinery, the ISO-2022 state
+machines. This is the "integrate core guile functions" case in AGENTS.md,
+and what is left to port is the vocabulary, the buffer's choice, and the
+detection.
+
+## What landed
+
+- **`character.sld`**: the eight-bit representation (`CHAR_BYTE8_P`,
+  `BYTE8_TO_CHAR`, `CHAR_TO_BYTE8`, `CHAR_TO_BYTE_SAFE`,
+  `UNIBYTE_TO_CHAR`, `MAX_5_BYTE_CHAR`) - five one-liners, and the one
+  piece of the whole area that has to be written by hand, because "do not
+  convert" is not a charset conversion and no iconv name expresses it.
+- **`coding.sld`** (new, mirrors `coding.c`): the coding-system record and
+  table with Emacs's naming - `utf-8`, `iso-latin-1`, `us-ascii`,
+  `no-conversion`, `raw-text`, `utf-16`/`-le`/`-be`, each with its
+  `-unix`/`-dos`/`-mac` variants derived the way Emacs derives them -
+  `find-coding-system`, `coding-system-p`, `coding-system-base-name`,
+  `coding-system-change-eol-conversion`, the EOL/g`line-break-*` tables,
+  and `decode-coding-string`/`encode-coding-string` over iconv.
+- **`coding-tests.scm`** (16), every expectation measured on Emacs 31.1.
+
+## Two things only measuring could have settled
+
+**Emacs does not fail on undecodable bytes.** `(decode-coding-string
+(unibyte-string 99 97 102 233) 'utf-8)' is `"caf\351"` - the *eight-bit*
+character, not an error - and reading the file gives the same. That is
+`DECODE_COMPOSITION_FAILURE` in the C: the decoder writes the raw bytes out
+as byte characters and carries on. Guile's iconv refuses the input
+outright, so `%decode-with-fallback` walks the bytes *only when iconv has
+refused the whole input*, taking the longest sequence that decodes on its
+own and making a byte character of one that does not.
+
+**A Scheme string cannot hold the eight-bit characters.** `(integer->char
+4194281)` is out of range; Guile's ceiling is `#x10FFFF`. Our `u32vector`
+holds it. So `decode-coding-string` returns a **`u32vector` of code
+points** where Emacs's returns a string - deviation #3 surfacing at the API
+rather than in the store - and `decode-coding-region` (which Emacs has and
+this does not yet) will be a *copy* rather than a conversion.
+
+## The measured table these are written against
+
+| file | coding system | Emacs | now |
+|---|---|---|---|
+| `café naïve` Latin-1 | `iso-latin-1` | `(99 97 102 233 ...)` | same |
+| ... | `no-conversion` | `(99 97 102 4194281 ...)` | same |
+| ... | `utf-8` | the same, **not an error** | same |
+| `AB` UTF-16LE BOM | `utf-16` | `(65 66)` | same |
+
+...and `no-conversion` round-trips the Latin-1 file byte for byte, which
+is the safety net: a file we cannot classify can be read and written
+without being mangled.
+
+## Found on the way
+
+`find-coding-system` walked its table with `(cond ((not cs) #f) ...)` -
+**an empty list is *true* in Scheme** where Elisp's `nil` is false, so the
+walk ran off the end into `(car '())`. It only showed because a *string*
+argument reached it, which is the class AGENTS.md already has a section
+on. `null?` and not `not`.
+
+## Still to do, in the order Chris named
+
+1. **Detecting** (`set-auto-coding`, `detect-coding-region`,
+   `find-operation-coding-system`): the `-*- coding: -*-` tag, the
+   local-variables block, the BOM, `file-coding-system-alist`.
+2. **`buffer-file-coding-system` holding a real coding system** - the
+   variable absorbs the existing `line-break-*` machinery as its EOL half
+   rather than sitting beside it - plus the write-back of
+   `last-coding-system-used` after a successful save, which is what makes
+   the choice stick.
+3. **Changing it** (`set-buffer-file-coding-system` C-x RET f,
+   `universal-coding-system-argument` C-x RET c,
+   `revert-buffer-with-coding-system`).
+4. **`find-file`/`save-buffer` using it** instead of the default port.
+   Until this is done none of the above changes what a user sees, and the
+   two files above are still being mangled.
+
+Not carried from `coding.c`, each named where it would go: `utf-8-emacs`
+(Emacs's five-byte form, which iconv has no equivalent of, so it is the
+one codec that would be hand-written), `undecided` as a *deferred* choice,
+`:charset-list` and the rest of the plist, and the ISO-2022/CJK families.

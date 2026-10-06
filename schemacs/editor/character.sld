@@ -41,7 +41,11 @@
    *tab-width*
    char-width
    char-width-default
-   sanitize-char-width)
+   sanitize-char-width
+   ;; The eight-bit representation - GNU Emacs's `CHAR_BYTE8_P' and the
+   ;; four beside it. See the note where they are defined.
+   *max-5-byte-char*
+   char-byte8? byte8-to-char char-to-byte8 char-to-byte-safe unibyte-to-char)
 
   (begin
 
@@ -65,6 +69,66 @@
     ;; ^ `Vchar_width_table = Fmake_char_table (Qnil, make_fixnum (1))'
     ;; in `syms_of_character'. A character in none of the table's ranges
     ;; is one column wide.
+
+    ;;------------------------------------------------------------------
+    ;; The eight-bit representation - `character.h:104'
+    ;;------------------------------------------------------------------
+    ;;
+    ;; "True iff C is a character that corresponds to a raw 8-bit byte."
+    ;; Emacs has a *character* for every byte it cannot decode, so that a
+    ;; file whose bytes are not valid in the buffer's charset can still be
+    ;; held and written back unchanged: the byte becomes the code point
+    ;; `0x3FFF00 + byte', and `CHAR_TO_BYTE8' turns it back into the byte.
+    ;; That range sits above every character the five-byte
+    ;; `utf-8-emacs' form can encode, which is what makes the test cheap.
+    ;;
+    ;; It is the one piece of coding machinery that has to be written by
+    ;; hand: "do not convert" is not a charset conversion, so no iconv
+    ;; encoding name expresses it - see `(schemacs editor coding)'. Every
+    ;; other coding system here is Guile's iconv under a Lisp name.
+    ;;
+    ;; The arguments are *code points*, as the C's are, and not
+    ;; characters: these are arithmetic on the numbers.
+    (define *max-5-byte-char* #x3FFF7F)
+    ;; ^ `MAX_5_BYTE_CHAR' (`character.h:59'), the largest character the
+    ;; five-byte `utf-8-emacs' form holds.
+
+    (define (char-byte8? c)
+      ;; `CHAR_BYTE8_P' (`character.h:104'): "True iff C is a character
+      ;; that corresponds to a raw 8-bit byte."
+      ;;--------------------------------------------------------------
+      (> c *max-5-byte-char*))
+
+    (define (byte8-to-char byte)
+      ;; `BYTE8_TO_CHAR' (`character.h:112'): "Return the character code
+      ;; for raw 8-bit byte BYTE." 0x80 becomes #x3FFF80 and 0xFF #x3FFFFF.
+      ;;--------------------------------------------------------------
+      (+ byte #x3FFF00))
+
+    (define (unibyte-to-char byte)
+      ;; `UNIBYTE_TO_CHAR' (`character.h:117'): ASCII is itself; anything
+      ;; else is the byte character above. This is how a *unibyte* buffer
+      ;; holds its bytes, which is the same trick.
+      ;;--------------------------------------------------------------
+      (if (< byte #x80) byte (byte8-to-char byte)))
+
+    (define (char-to-byte8 c)
+      ;; `CHAR_TO_BYTE8' (`character.h:125'): "Return the raw 8-bit byte
+      ;; for character C." A byte character gives its byte back; anything
+      ;; else is masked to eight bits, which is the C's `c & 0xFF'.
+      ;;--------------------------------------------------------------
+      (if (char-byte8? c) (- c #x3FFF00) (logand c #xFF)))
+
+    (define (char-to-byte-safe c)
+      ;; `CHAR_TO_BYTE_SAFE' (`character.h:133'): "Return the raw 8-bit
+      ;; byte for character C, or -1 if C doesn't correspond to a byte."
+      ;; A *character* that is not ASCII and not a byte character has no
+      ;; byte, and -1 says so where `char-to-byte8''s mask would quietly
+      ;; invent one.
+      ;;--------------------------------------------------------------
+      (cond ((< c #x80) c)
+            ((char-byte8? c) (- c #x3FFF00))
+            (else -1)))
 
     (define (sanitize-char-width width)
       ;; Emacs's `sanitize_char_width': a width outside 0..1000 is taken
