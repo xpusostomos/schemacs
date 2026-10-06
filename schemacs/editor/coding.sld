@@ -73,6 +73,7 @@
    coding-system? make-coding-system
    coding-system-name coding-system-base coding-system-eol-type
    coding-system-iconv-name coding-system-raw?
+   coding-system-mnemonic
    coding-system-p
    ;; The registry lookup, Emacs's `CODING_SYSTEM_SPEC'. It is here for
    ;; the tests; nothing outside this file needs it, because the public
@@ -113,7 +114,9 @@
       ;;                pair
       ;;   RAW?         #t for `no-conversion' and `raw-text', which are
       ;;                not a conversion at all
-      (make-coding-system name base eol-type iconv-name raw?)
+      ;;   MNEMONIC     the character the mode line shows for it - the
+      ;;                C's `coding_attr_mnemonic', which `%z' reads
+      (make-coding-system name base eol-type iconv-name raw? mnemonic)
       coding-system?
       ;; The generated accessors are `-of' because they take the *record*:
       ;; the public names above take a coding system *name*, which is what
@@ -122,7 +125,8 @@
       (base coding-system-base-of)
       (eol-type coding-system-eol-type-of)
       (iconv-name coding-system-iconv-name-of)
-      (raw? coding-system-raw?-of))
+      (raw? coding-system-raw?-of)
+      (mnemonic coding-system-mnemonic-of))
 
     (define *coding-system-table* (make-parameter #f))
     ;; ^ The registry, coding system *name* to `<coding-system>`. A
@@ -237,14 +241,22 @@
     (define (coding-system-raw? cs)
       (coding-system-raw?-of (%coding-of cs)))
 
-    (define (%define-coding-system name eol-type iconv-name raw?)
+    (define (coding-system-mnemonic cs)
+      ;; GNU Emacs's `coding-system-mnemonic' (`mule.el:1019'): "Return
+      ;; the mnemonic character of CODING-SYSTEM" - the one character the
+      ;; mode line shows for it through `%z'. Emacs answers a *character*;
+      ;; this answers the same, and the caller makes a string of it.
+      ;;--------------------------------------------------------------
+      (coding-system-mnemonic-of (%coding-of cs)))
+
+    (define (%define-coding-system name eol-type iconv-name raw? mnemonic)
       ;; One entry, and with it the two EOL variants Emacs derives. Its
       ;; naming is the C's: the base is the bare name, and a variant is
       ;; `NAME-EOLTYPE' - so `utf-8' gives `utf-8-unix', `utf-8-dos' and
       ;; `utf-8-mac', and each is a coding system in its own right, which
       ;; is why `buffer-file-coding-system' can hold either.
       ;;--------------------------------------------------------------
-      (let* ((base (make-coding-system name name eol-type iconv-name raw?)))
+      (let* ((base (make-coding-system name name eol-type iconv-name raw? mnemonic)))
         (register-coding-system! base)
         (for-each
          (lambda (eol)
@@ -252,7 +264,7 @@
             (make-coding-system
              (string->symbol (string-append (symbol->string name)
                                             "-" (symbol->string eol)))
-             base eol iconv-name raw?)))
+             base eol iconv-name raw? mnemonic)))
          '(unix dos mac))
         base))
 
@@ -264,24 +276,28 @@
     ;; C's: the bare name is the base, and every actual use is one of its
     ;; three variants.
 
-    (define utf-8 (%define-coding-system 'utf-8 #f "UTF-8" #f))
-    (define iso-latin-1 (%define-coding-system 'iso-latin-1 #f "ISO-8859-1" #f))
-    (define iso-8859-1 (%define-coding-system 'iso-8859-1 #f "ISO-8859-1" #f))
-    (define us-ascii (%define-coding-system 'us-ascii #f "US-ASCII" #f))
+    ;; The mnemonic each carries is Emacs 31.1's own answer for it -
+    ;; `(coding-system-mnemonic 'utf-8)' is `?U', `iso-latin-1' `?1',
+    ;; `us-ascii' `?-' and `no-conversion' `?=' - and it is the character
+    ;; `%z' puts in the mode line.
+    (define utf-8 (%define-coding-system 'utf-8 #f "UTF-8" #f #\U))
+    (define iso-latin-1 (%define-coding-system 'iso-latin-1 #f "ISO-8859-1" #f #\1))
+    (define iso-8859-1 (%define-coding-system 'iso-8859-1 #f "ISO-8859-1" #f #\1))
+    (define us-ascii (%define-coding-system 'us-ascii #f "US-ASCII" #f #\-))
     ;; `no-conversion' and `raw-text' are the same bytes; they differ in
     ;; what Emacs does with the *end of line* - `raw-text' converts a CRLF
     ;; that looks like a DOS line end where `no-conversion' leaves every
     ;; byte alone - and that difference is in the EOL half, not the codec.
-    (define no-conversion (%define-coding-system 'no-conversion #f #f #t))
-    (define raw-text (%define-coding-system 'raw-text #f #f #t))
+    (define no-conversion (%define-coding-system 'no-conversion #f #f #t #\=))
+    (define raw-text (%define-coding-system 'raw-text #f #f #t #\t))
     ;; The UTF-16 family, which iconv has and Emacs names by whether the
     ;; byte order mark is written: `utf-16' is
     ;; `utf-16-with-signature', and the two explicit ones are the BOM
     ;; kept as a character - measured, `(decode-coding-string #vu8(255 254
     ;; 65 0 66 0) 'utf-16)' is `(65 66)' and `utf-16le' is `(65279 65 66)'.
-    (define utf-16 (%define-coding-system 'utf-16 #f "UTF-16" #f))
-    (define utf-16le (%define-coding-system 'utf-16le #f "UTF-16LE" #f))
-    (define utf-16be (%define-coding-system 'utf-16be #f "UTF-16BE" #f))
+    (define utf-16 (%define-coding-system 'utf-16 #f "UTF-16" #f #\U))
+    (define utf-16le (%define-coding-system 'utf-16le #f "UTF-16LE" #f #\U))
+    (define utf-16be (%define-coding-system 'utf-16be #f "UTF-16BE" #f #\U))
 
     ;;------------------------------------------------------------------
     ;; Converting

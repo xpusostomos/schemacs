@@ -289,6 +289,46 @@
 
 
 ;;------------------------------------------------------------------
+;; A character the monospace face has no glyph for is drawn with the
+;; glyph its *fallback* font has, and not as the missing-glyph box
+;;
+;; This is the one thing Cairo's own toy text API cannot do:
+;; `cairo-show-text' draws with the single face `cairo-select-font-face'
+;; chose, and a character that face has no glyph for comes out as the
+;; box. `U+10400' - Deseret, in the supplementary plane, and the fourth
+;; line of `encoding-test-files/utf8.txt' - is such a character here.
+;;
+;; **The test compares it against a character nothing can draw.** A
+;; *noncharacter* (`U+10FFFD') has no glyph in any font, so Pango draws
+;; the box for it; if `U+10400' were also drawn as the box the two
+;; renderings would be pixel-for-pixel the same. They were, under the toy
+;; API - measured, the same md5 over the same crop - and they are not now.
+;; Comparing against the box rather than asserting "there is ink" is what
+;; makes this a test of *fallback*: the box is ink too.
+;;------------------------------------------------------------------
+
+(define (render-one-character ch)
+  (let* ((d (new-display))
+         (ed (new-text-editor)))
+    (text-editor-insert ed (string ch))
+    (let ((frame (fr:new-frame ed 24 80)))
+      (parameterize ((fr:*current-frame* frame))
+        (xd:render! frame)))
+    (shot-of d)))
+
+(define (glyph-band pix)
+  ;; The pixels of the first cell's glyph band, as a list - what the
+  ;; character actually drew, ignoring the rest of the screen.
+  (let loop ((x 0) (y 3) (out '()))
+    (cond ((>= x 9) (reverse out))
+          ((>= y 18) (loop (+ x 1) 3 out))
+          (else (loop x (+ y 1) (cons (pix x y) out))))))
+
+(test-assert "a character outside the font is drawn with a fallback glyph"
+  (not (equal? (glyph-band (render-one-character (integer->char #x10400)))
+               (glyph-band (render-one-character (integer->char #x10FFFD))))))
+
+;;------------------------------------------------------------------
 ;; A search match keeps the face that was under it
 ;;
 ;; `isearch' and `lazy-highlight' are *overlay* faces in GNU Emacs:
@@ -363,9 +403,25 @@
 ;; the word is drawn in a colour of its own without a search...
 (test-assert "a font-locked word is drawn in its face's colour"
   (not (equal? keyword-ink white)))
-;; ...and the same colour with one, which is the merge
+;; ...and the same colour with one, which is the merge.
+;;
+;; **The test is a *nearness* and not an equality, and Pango is why.**
+;; The glyph is rasterized by Pango now rather than by Cairo's toy text
+;; API, and the two antialias it slightly differently: measured, the toy
+;; path leaves thirteen *fully inked* pixels in this glyph and Pango
+;; leaves none, so its darkest pixel is a coverage blend - and a blend
+;; over the search face's background is a different `(R G B)' from the
+;; same blend over the cell's own, by one or two in each channel. The two
+;; renderings are otherwise pixel-for-pixel the same picture (checked by
+;; eye at 400%), so what the assertion is for - the *face* the word is
+;; drawn in is unchanged by the search, only the background under it - is
+;; measured as "as dark as before", which a face colour change would fail.
 (test-assert "a search match keeps the face colour that was under it"
-  (and keyword-ink (member keyword-ink searching-colours)))
+  (let ((search-ink (inkiest searching-colours)))
+    (and keyword-ink search-ink
+         (<= (- (apply + (map (lambda (v) (- 255 v)) search-ink)))
+             (- (apply + (map (lambda (v) (- 255 v)) keyword-ink)))
+             16))))
 ;; and the search face is drawn there at all - the cell's background is
 ;; what `lazy-highlight' changes
 (test-assert "and the search face is drawn over it"

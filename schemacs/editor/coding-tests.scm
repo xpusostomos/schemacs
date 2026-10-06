@@ -340,4 +340,74 @@
   ;; rejects every one of them and *no* Latin-1 file is ever detected
   (detected 9 99 97 102 233 10))
 
+;; ------------------------------------------------------------------
+;; The `encoding-test-files' fixtures
+;;
+;; The bytes of <https://github.com/.../encoding-test-files> - six files
+;; holding the same four lines in six encodings, and the fourth line is
+;; the interesting one: `\U00010400' (Deseret) is in the supplementary
+;; plane, so a coding system that mangles it is visible in one line rather
+;; than in a whole file. The bytes are *here* rather than read from the
+;; directory, so the suite is self-contained.
+;;
+;; **The expectations are Emacs 31.1's own answers**, asked with
+;; `find-file' on each of the six. Five match; the sixth is `cp865', whose
+;; `\x8a' is a C1 byte, so the `charset' category rejects it - Emacs then
+;; finds `japanese-shift-jis' and this tree has no such coding system, so
+;; it answers `no-conversion' and the bytes survive instead. That is the
+;; named departure on `detect-coding-utf-8' in `coding.sld'.
+
+(define encoding-fixture-bytes
+  (list
+   (list "ascii"
+         #vu8(112 114 101 109 105 63 114 101 32 105 115 32 102 105 114 115 116 10 112 114 101 109 105 101 63 114 101 32 105 115 32 115 108 105 103 104 116 108 121 32 100 105 102 102 101 114 101 110 116 10 63 63 63 63 63 63 63 63 63 32 105 115 32 67 121 114 105 108 108 105 99 10 63 32 97 109 32 68 101 115 101 114 101 116 10))
+   (list "latin1"
+         #vu8(112 114 101 109 105 232 114 101 32 105 115 32 102 105 114 115 116 10 112 114 101 109 105 101 63 114 101 32 105 115 32 115 108 105 103 104 116 108 121 32 100 105 102 102 101 114 101 110 116 10 63 63 63 63 63 63 63 63 63 32 105 115 32 67 121 114 105 108 108 105 99 10 63 32 97 109 32 68 101 115 101 114 101 116 10))
+   (list "koi8_r"
+         #vu8(112 114 101 109 105 63 114 101 32 105 115 32 102 105 114 115 116 10 112 114 101 109 105 101 63 114 101 32 105 115 32 115 108 105 103 104 116 108 121 32 100 105 102 102 101 114 101 110 116 10 235 201 210 201 204 204 201 195 193 32 105 115 32 67 121 114 105 108 108 105 99 10 63 32 97 109 32 68 101 115 101 114 101 116 10))
+   (list "cp865"
+         #vu8(112 114 101 109 105 138 114 101 32 105 115 32 102 105 114 115 116 10 112 114 101 109 105 101 63 114 101 32 105 115 32 115 108 105 103 104 116 108 121 32 100 105 102 102 101 114 101 110 116 10 63 63 63 63 63 63 63 63 63 32 105 115 32 67 121 114 105 108 108 105 99 10 63 32 97 109 32 68 101 115 101 114 101 116 10))
+   (list "utf8"
+         #vu8(112 114 101 109 105 195 168 114 101 32 105 115 32 102 105 114 115 116 10 112 114 101 109 105 101 204 128 114 101 32 105 115 32 115 108 105 103 104 116 108 121 32 100 105 102 102 101 114 101 110 116 10 208 154 208 184 209 128 208 184 208 187 208 187 208 184 209 134 208 176 32 105 115 32 67 121 114 105 108 108 105 99 10 240 144 144 128 32 97 109 32 68 101 115 101 114 101 116 10))
+   (list "utf16"
+         #vu8(255 254 112 0 114 0 101 0 109 0 105 0 232 0 114 0 101 0 32 0 105 0 115 0 32 0 102 0 105 0 114 0 115 0 116 0 10 0 112 0 114 0 101 0 109 0 105 0 101 0 0 3 114 0 101 0 32 0 105 0 115 0 32 0 115 0 108 0 105 0 103 0 104 0 116 0 108 0 121 0 32 0 100 0 105 0 102 0 102 0 101 0 114 0 101 0 110 0 116 0 10 0 26 4 56 4 64 4 56 4 59 4 59 4 56 4 70 4 48 4 32 0 105 0 115 0 32 0 67 0 121 0 114 0 105 0 108 0 108 0 105 0 99 0 10 0 1 216 0 220 32 0 97 0 109 0 32 0 68 0 101 0 115 0 101 0 114 0 101 0 116 0 10 0))
+   ))
+
+(define (encoding-fixture name)
+  (let ((entry (assoc name encoding-fixture-bytes)))
+    (and entry (cadr entry))))
+
+(test-equal "what the detector makes of the six fixtures"
+  ;; Emacs: undecided, iso-latin-1, iso-latin-1, japanese-shift-jis,
+  ;; utf-8, utf-16le-with-signature. The BOM is a *declaration*, so it is
+  ;; `set-auto-coding' that names the last one and the detector is never
+  ;; asked - which is the order the file layer uses.
+  '(undecided iso-latin-1-unix iso-latin-1-unix no-conversion-unix
+    utf-8-unix no-conversion-unix)
+  (map (lambda (e)
+         (let ((found (detect-coding-bytes (cadr e) #t)))
+           (if found (car found) 'undecided)))
+       encoding-fixture-bytes))
+
+;; **The property that matters for every one of them**: whatever the
+;; detector decided, the bytes on disk come back. This is what the coding
+;; work exists for - a file whose bytes no charset can read is read as
+;; eight-bit characters and written back as itself.
+(test-equal "every fixture survives being decoded and encoded again"
+  (map cadr encoding-fixture-bytes)
+  (map (lambda (e)
+         (let ((coding (or (let ((found (detect-coding-bytes (cadr e) #t)))
+                             (and found (car found)))
+                           'utf-8)))
+           (encode-coding-string (decode-coding-string (cadr e) coding) coding)))
+       encoding-fixture-bytes))
+
+;; and the text is *right*, not merely round-tripped: the four lines the
+;; fixtures hold, read from the UTF-8 one.
+(test-equal "the UTF-8 fixture decodes to the four lines"
+  (list 112 114 101 109 105 232 114 101 32 105 115 32 102 105 114 115 116 10)
+  (let ((v (decode-coding-string (encoding-fixture "utf8") 'utf-8-unix)))
+    (let loop ((i 0) (out '()))
+      (if (= i 18) (reverse out) (loop (+ i 1) (cons (u32vector-ref v i) out))))))
+
 (test-end "schemacs_editor_coding")

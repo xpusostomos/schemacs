@@ -559,12 +559,22 @@
 (define save-key (integer->char 19))   ; C-x C-s
 
 (define (mode-line-modification-indicator mode-line)
-  (let ((offset (if (or (string-prefix? "(DOS) " mode-line)
-                        (string-prefix? "(Mac) " mode-line)
-                        (string-prefix? ": " mode-line))
-                    2
-                    0)))
-    (substring mode-line offset (+ offset 2))))
+  ;; The `--' / `**' / `%%' field, which is `mode-line-modified' -
+  ;; `("%1*" "%1+")' - and what precedes it is `mode-line-front-space'
+  ;; and then `mode-line-mule-info': a dash on a terminal, the coding
+  ;; system mnemonics (`%z' - `UUU' for a UTF-8 buffer in a UTF-8
+  ;; terminal) and the end-of-line mnemonic, which is `:' or `(DOS)' or
+  ;; `(Mac)'. So the field starts just after the end-of-line part, and
+  ;; this skips to it rather than counting cells - the run before it is
+  ;; as long as the frame's coding systems make it.
+  ;;--------------------------------------------------------------
+  (let loop ((i 0))
+    (cond ((>= i (string-length mode-line)) "")
+          ((char=? (string-ref mode-line i) #\:)    ; unix, and undecided
+           (substring mode-line (+ i 1) (+ i 3)))
+          ((char=? (string-ref mode-line i) #\))    ; `(DOS)' or `(Mac)'
+           (substring mode-line (+ i 1) (+ i 3)))
+          (else (loop (+ i 1))))))
 
 ;; A buffer just visited is unmodified: the mode-line modification field is
 ;; `--', after the EOL mnemonic as in GNU Emacs.
@@ -1391,8 +1401,8 @@
 ;; the two different numbers are here to catch.
 ;; The mode name is on the end of the line now: `mode-line-modes' is
 ;; where Emacs puts it, two spaces after the position.
-(test-equal '(": ** alpha.txt    -- L1 C3  (Fundamental)"
-              ": ** alpha.txt    -- L1 C0  (Fundamental)")
+(test-equal '("-UUU:** alpha.txt    -- L1 C3  (Fundamental)"
+              "-UUU:** alpha.txt    -- L1 C0  (Fundamental)")
   (let* ((frame (frame-with "alpha\nbeta\n"))
          (ed (frame-editor frame)))
     (set!text-editor-buffer-name ed "alpha.txt")
@@ -1435,9 +1445,9 @@
 ;; The lighter is what makes the key visible at all: until the next
 ;; character is typed the buffer is unchanged, so without it the Insert
 ;; key looks like it did nothing. It toggles back off on a second press.
-(test-equal '(": ** alpha.txt    -- L1 C0  (Fundamental)"
-              ": ** alpha.txt    -- L1 C0  (Fundamental Ovwrt)"
-              ": ** alpha.txt    -- L1 C0  (Fundamental)")
+(test-equal '("-UUU:** alpha.txt    -- L1 C0  (Fundamental)"
+              "-UUU:** alpha.txt    -- L1 C0  (Fundamental Ovwrt)"
+              "-UUU:** alpha.txt    -- L1 C0  (Fundamental)")
   (let* ((frame (frame-with "alpha\nbeta\n"))
          (ed (frame-editor frame)))
     (set!text-editor-buffer-name ed "alpha.txt")
@@ -1729,7 +1739,7 @@
       (let ((unix-mode (format-in frame (*mode-line-format*))))
         (list (and (string-search-forward dos-mode "(DOS)" 0 #f) #t)
               (not (string-search-forward unix-mode "(DOS)" 0 #f))
-              (and (string-search-forward dos-mode "(DOS) **" 0 #f) #t))))))
+              (and (string-search-forward dos-mode "(DOS)**" 0 #f) #t))))))
 
 ;; The default format is the editor's mode line, and it says the buffer,
 ;; its own window's position and its modification state.
@@ -1740,7 +1750,7 @@
     (text-editor-insert ed "X")
     ;; point is where the insert left it, one character in, and `%c'
     ;; counts from zero - so C1, not C0
-    (string=? ": ** probe.txt    -- L1 C1  (Fundamental)"
+    (string=? "-UUU:** probe.txt    -- L1 C1  (Fundamental)"
               (format-in frame (*mode-line-format*)))))
 
 ;; The `%l' cache is only good while nothing *before the line it names*

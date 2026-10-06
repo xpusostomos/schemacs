@@ -57,9 +57,19 @@ SUITES = [
 ]
 
 
+# The newer guile-cairo built into the tree, first on the path exactly as
+# `seg' puts it there: `pgtk.sld' needs `cairo-context->pointer' and
+# `cairo-pointer->context', and the *system* guile-cairo has neither - so
+# the GTK suite fails with "Unbound variable" the moment it draws anything.
+# A path that is not there is harmless, so this needs no condition; the
+# build is not committed, and a checkout without it loses the GTK suite.
+CAIRODIR = os.path.join(REPO, '.guile-cairo', 'share', 'guile', 'site', '3.0')
+
+
 def run(path):
     proc = subprocess.run(
-        ['guile', '--no-auto-compile', '--r7rs', '-L', REPO, '-s', path],
+        ['guile', '--no-auto-compile', '--r7rs',
+         '-L', CAIRODIR, '-L', REPO, '-s', path],
         capture_output=True, text=True, cwd=REPO, timeout=900,
         env=dict(os.environ, GUILE_WARN_DEPRECATED='no'))
     out = proc.stdout + proc.stderr

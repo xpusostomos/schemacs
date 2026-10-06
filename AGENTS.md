@@ -3214,3 +3214,157 @@ moved: a value that Emacs passes as a symbol started being passed as an
 object, and every function on the other side had to be told which. When a
 port changes a representation, the API in front of it has to keep the shape
 of the original - otherwise each caller silently picks a side.
+
+# Font fallback in the GTK front end (2026-10-06)
+
+Chris, opening `encoding-test-files/utf8.txt`: *"row 4 of the file doesn't
+look right in any file, even UTF8 and UTF16, possibly a font issue. It does
+look ok in real emacs."* Then, having checked: *"it does work in schemacs
+ncurses, but not gtk."*
+
+Row 4 is `𐐀 am Deseret` - `U+10400`, in the supplementary plane - and it
+was the only row drawn wrong.
+
+## What it was
+
+**Cairo's toy text API does no font fallback.** `pgtk.sld` drew every run
+with `cairo-select-font-face cr "monospace"` + `cairo-show-text`, which
+draws with the one face chosen and renders a character that face has no
+glyph for as the *missing-glyph box*. That is the whole of it.
+
+Both halves of the report are explained by it: the terminal front end is
+fine because the *terminal* asks its own font stack for the glyph, and
+Emacs is fine because its GTK front end draws through Pango, which lays a
+run out glyph by glyph against every font that can answer.
+
+The encoding was never in question - measured, schemacs and `emacs -nw`
+send **byte-identical** output for all four rows (`\xf0\x90\x90\x80` for
+the Deseret character from both).
+
+## The fix, and why it is FFI
+
+Text now goes through Pango: one `PangoLayout` per display, made from the
+pangocairo font map's default context and reused for every run, drawn with
+`pango_cairo_show_layout`. `pango_layout_get_baseline` places it, so the
+call is a drop-in for `cairo-show-text` (whose point *is* the baseline).
+
+**`PangoCairo` is already loaded** - `pgtk-names.scm:36` has loaded it all
+along, and `create-layout`/`show-layout`/`layout:get-baseline` are bound.
+It is still unreachable: guile-gi's `create-layout` is a generic that
+accepts only a context gi itself made, and the context here is
+guile-cairo's - a different Goops class around the same pointer. Handing
+over the context fails with "No applicable method", and so does the raw
+pointer from `cairo-context->pointer`. So the functions are called
+directly through `dynamic-func`, the same FFI the clipboard section below
+uses, and `cairo-context->pointer` carries the `cairo_t *` across.
+
+## Two things that had to be measured rather than reasoned about
+
+1. **Pango's size is in points, Cairo's in device units.** A description
+   string `"monospace 15"` is 15 *points* - 20 pixels here - where
+   `cairo-set-font-size cr 15` is 15 pixels. The glyphs came out a quarter
+   larger, which the `wide-cell` pixel test caught as a descender reaching
+   a pixel it had not. `pango_font_description_set_absolute_size` is the
+   device-unit spelling, and that is what is used.
+
+2. **Pango antialiases differently, and one test was asserting on it.**
+   `pgtk-tests`' "a search match keeps the face colour that was under it"
+   compared the *darkest pixel* between two renders and wanted them byte
+   equal. Measured: the toy path leaves thirteen fully-inked pixels in a
+   glyph and Pango leaves none, so Pango's darkest is a coverage blend -
+   and a blend over the search face's background differs from the same
+   blend over the cell's own by a channel value or two. The two
+   renderings are otherwise the same picture (checked at 400%), so the
+   assertion is now a *nearness*: the ink is "as dark as before", which a
+   face colour change would still fail.
+
+## The regression test
+
+`pgtk-tests` renders `U+10400` and a *noncharacter* (`U+10FFFD`, which
+has no glyph in any font, so Pango draws the box for it) and asserts the
+two are **not** pixel-for-pixel the same. Comparing against the box rather
+than asserting "there is ink" is what makes it a test of fallback - the
+box is ink too.
+
+Verified to fail with the fix reverted: under the toy API the two render
+to the *same md5* over the same crop, which is the bug exactly.
+
+## Also in this pass
+
+`tools/run-suites.py` now puts the tree's own guile-cairo build first on
+the load path, as `seg` does and for the same reason: `pgtk.sld` needs
+`cairo-context->pointer`, the *system* guile-cairo has neither that nor
+`cairo-pointer->context`, and the GTK suite died with "Unbound variable"
+the moment it drew anything. A path that is not there is harmless, so
+there is no condition; a checkout without the build loses the GTK suite.
+
+All 31 suites pass (pgtk-tests 47, one new) and `tools/pty-check.py` is
+61/61.
+
+# The mode line's character set (2026-10-06)
+
+Chris: *"part of the character set work should be the mode line
+notification of its charset."* Right, and the tree said so itself - the
+`%z`/`%Z` constructs were listed in `mode-line-construct`'s own docstring
+as "printed as they stand".
+
+## What landed
+
+- **`coding-system-mnemonic`** - the `:mnemonic` field, Emacs's
+  `coding_attr_mnemonic`, which `%z` reads. Measured on Emacs 31.1:
+  `utf-8*`/`utf-16*` are `U`, `iso-latin-1`/`iso-8859-1` are `1`,
+  `us-ascii` is `-`, `no-conversion` is `=`, `raw-text` is `t`.
+- **`decode-mode-spec-coding`** (`xdisp.c:29334`) and the `%z`/`%Z` cases
+  of `decode_mode_spec`. On a *terminal* frame `%z` names the keyboard's
+  and the terminal's coding systems first - "the terminal never needs to
+  do EOL conversion" - and then the buffer's.
+- **`keyboard-coding-system`** (`mule.sld`), which had no counterpart.
+- **`mode-line-front-space`** and **`mode-line-mule-info`** (`bindings.el`),
+  and both are in `*mode-line-format*` now, where Emacs's default has them.
+
+Result, against a real Emacs on the same terminal, for the fixtures in
+`encoding-test-files/`:
+
+| file | Emacs | schemacs |
+|---|---|---|
+| `latin1.txt` | `-UU1:--- F1  latin1.txt ...` | `-UU1:-- latin1.txt ...` |
+| `utf16.txt` | `-UUU:--- F1  utf16.txt ...` | `-UUU:-- utf16.txt ...` |
+| `utf8.txt` | `-UUU:--- F1  utf8.txt ...` | `-UUU:-- utf8.txt ...` |
+| `cp865.txt` | `-UUS:--- F1  cp865.txt ...` | `-UU=:-- cp865.txt ...` |
+
+The mule info is exact. `cp865`'s `S` is `japanese-shift-jis`, which this
+tree does not carry, so it reads `=` (`no-conversion`) - the departure
+named on `detect-coding-utf-8`, now visible in the mode line, which is an
+argument for closing it. The `---` against `--` is `mode-line-remote`,
+and everything from `F1` on (`mode-line-frame-identification`,
+`mode-line-position`, VC, the mode name) is a pre-existing gap unrelated
+to this work.
+
+## The space that was a bug, and how a test came to pin it
+
+The format had a space between the end-of-line mnemonic and the modified
+flags - `: **` - and a test asserting it. **Emacs has none**: measured,
+`-UU-:---` for an LF file and `-UU-(DOS)---` for a CRLF one, so the
+mnemonic runs straight into `mode-line-modified`.
+
+Chris caught the shape of the mistake while I was in the middle of it:
+*"fix the tests? Don't you mean fix the code?"* - I had been updating the
+expectations to match my new output, and one of them, `(DOS) **` in the
+CRLF mnemonic test, was pinning the wrong space. `(DOS)**` is what Emacs
+draws. Changing the format first and letting the tests follow is the
+right order; changing the tests to agree with the format is not.
+
+## Two things worth knowing about `%z` here
+
+1. **It reads the buffer-local raw.** `buffer-file-coding-system` is
+   `files.sld`'s and that library is *above* `xdisp.sld`, so `%z` cannot
+   call it - the same wall `mode-line-eol-desc` already works around by
+   reading `(buffer-local-value ... 'buffer-file-coding-system
+   'utf-8-unix)`.
+2. **The missing `undecided` is now visible.** Emacs reads an ASCII file
+   that declares nothing as `undecided`, whose mnemonic is `-`, so its
+   mode line is `-UU-:`; ours is `utf-8-unix` and reads `-UUU:`. That is
+   the same departure as before, showing through one more surface.
+
+All 31 suites pass (ncurses-editor-tests 239, coding-tests 40) and
+`tools/pty-check.py` is 61/61.

@@ -88,7 +88,13 @@
     (only (schemacs editor indentc) current-line-display-column)
     ;; `mode-line-eol-desc' reads the buffer's coding system: its eol
     ;; half is what the mnemonic is drawn from.
-    (only (schemacs editor coding) coding-system-eol-type)
+    (only (schemacs editor coding)
+          coding-system-eol-type coding-system-p coding-system-mnemonic)
+    ;; `%z' names the terminal's coding systems on a terminal frame, and
+    ;; `coding-system-eol-type-mnemonic' is `mule.el''s.
+    (only (schemacs editor mule)
+          terminal-coding-system keyboard-coding-system
+          *enable-multibyte-characters*)
     ;; The `face' text property, and the faces themselves. A face reaches
     ;; the display through these libraries and no others: the property
     ;; says which faces are in effect, `xfaces' merges them and folds
@@ -113,7 +119,9 @@
     ;; below is what names them.
     (only (schemacs editor simple)
           *overwrite-mode-textual* *overwrite-mode-binary*)
-    (only (schemacs editor faces) *undefined-face-attribute*)
+    (only (schemacs editor faces) *undefined-face-attribute*
+          ;; `%z' asks whether this frame has a window system behind it.
+          *window-system*)
     (only (schemacs editor xfaces)
           attribute-value face-attributes-empty face-realized-attributes
           merge-face-ref merge-face-vectors)
@@ -927,6 +935,33 @@
                                 ""))
                           (*minor-mode-alist*)))))))
 
+    (define (mode-line-front-space)
+      ;; GNU Emacs's `mode-line-front-space' (`bindings.el:185'): "Mode
+      ;; line construct to put at the front of the mode line." It is
+      ;; `(:eval (if (display-graphic-p) " " "-"))' - a space in a window
+      ;; and a dash on a terminal, and the dash is what makes a terminal
+      ;; mode line read `-UUU:--' rather than starting at the mnemonic.
+      ;;--------------------------------------------------------------
+      (if (graphical-frame?) " " "-"))
+
+    (define (mode-line-mule-info)
+      ;; GNU Emacs's `mode-line-mule-info' (`bindings.el:203'): "Mode line
+      ;; construct to report the multilingual environment. Normally it
+      ;; displays current input method (if any activated) and mnemonics of
+      ;; the following coding systems: coding system for saving or writing
+      ;; the current buffer / coding system for keyboard input (on a text
+      ;; terminal) / coding system for terminal output (on a text
+      ;; terminal)."
+      ;;
+      ;; Emacs's is `("" (current-input-method ...) "%z" (:eval
+      ;; (mode-line-eol-desc)))'. The input-method part is a conditional
+      ;; construct on a variable and there are no input methods here, so
+      ;; what is left is the two that matter - and they are spelled out
+      ;; rather than named, because a symbol in this tree's format
+      ;; resolves to nothing (see `*mode-line-format*').
+      ;;--------------------------------------------------------------
+      (list "%z" (list ':eval mode-line-eol-desc)))
+
     (define *mode-line-format*
       ;; GNU Emacs's `mode-line-format': the template a window's mode line is
       ;; drawn from, evaluated by `FORMAT-MODE-LINE' below.
@@ -947,8 +982,19 @@
       ;; registry, the names go back in.
       ;;--------------------------------------------------------------
       (make-parameter
-       (list (list ':eval mode-line-eol-desc)
-             " "
+       ;; `mode-line-front-space' and `mode-line-mule-info' first, which
+       ;; is where Emacs's default puts them: the dash, then the coding
+       ;; system mnemonics, then the end-of-line mnemonic - so a terminal
+       ;; mode line reads `-UUU:' with a UTF-8 buffer in a UTF-8 terminal.
+       ;;
+       ;; **No space between the mnemonics and the flags**, and that is
+       ;; measured rather than chosen: Emacs draws `-UU-:---' for an LF
+       ;; file and `-UU-(DOS)---' for a CRLF one, so the end-of-line
+       ;; mnemonic runs straight into `mode-line-modified'. This tree had
+       ;; a space there and a test that pinned it, which is how a wrong
+       ;; space becomes load-bearing.
+       (list (list ':eval mode-line-front-space)
+             (list ':eval mode-line-mule-info)
              (list "%1*" "%1+")
              " "
              "%12b"
@@ -1070,6 +1116,43 @@
                           (+ topline (nlines-from-start))))))
                  (else (+ topline (nlines-from-start)))))))))
 
+    (define (decode-mode-spec-coding cs eol-flag)
+      ;; GNU Emacs's `decode_mode_spec_coding' (`xdisp.c:29334'): the
+      ;; mnemonic of the coding system CS, and - when EOL-FLAG - of its
+      ;; end-of-line conversion after it. CS nil, or a name that is not a
+      ;; coding system at all, is the C's "not yet decided" case: it
+      ;; answers `-' on a multibyte buffer and the undecided eol.
+      ;;
+      ;; Emacs reaches the mnemonics through the coding system's plist;
+      ;; here it is `coding-system-mnemonic', which is the same character.
+      ;;--------------------------------------------------------------
+      (if (not (coding-system-p cs))
+          (string-append (if (*enable-multibyte-characters*) "-" " ")
+                         (if eol-flag (eol-type-mnemonic #f) ""))
+          (string-append (string (coding-system-mnemonic cs))
+                         (if eol-flag (eol-type-mnemonic (coding-system-eol-type cs)) ""))))
+
+    (define (eol-type-mnemonic eol)
+      ;; GNU Emacs's `coding-system-eol-type-mnemonic' (`mule.el:1054'):
+      ;; `eol-mnemonic-unix' is `:', `eol-mnemonic-dos' is `(DOS)',
+      ;; `eol-mnemonic-mac' is `(Mac)' and `eol-mnemonic-undecided' is
+      ;; `:' - which is the same question `mode-line-eol-desc' asks, and
+      ;; answered the same way.
+      ;;--------------------------------------------------------------
+      (case eol
+        ((dos) "(DOS)")
+        ((mac) "(Mac)")
+        (else ":")))
+
+    (define (graphical-frame?)
+      ;; GNU Emacs's `FRAME_WINDOW_P': whether this frame has a window
+      ;; system behind it. It is what tells `%z' whether to name the
+      ;; *terminal's* coding systems as well as the buffer's - a terminal
+      ;; needs them and a window does not, "the terminal never needs to do
+      ;; EOL conversion".
+      ;;--------------------------------------------------------------
+      (if (memq (*window-system*) '(x w32 ns pgtk)) #t #f))
+
     (define (mode-line-construct spec window)
       ;; The text one `%'-construct stands for: GNU Emacs's
       ;; `decode_mode_spec'. SPEC is the character after the `%'.
@@ -1144,6 +1227,25 @@
                          (else
                           (string-append (number->string (quotient n 1000000))
                                          "M")))))
+          ;; `%z' is the buffer's coding system, `%Z' the same with its
+          ;; end-of-line conversion. On a *terminal* Emacs names the
+          ;; keyboard's and the terminal's first, in that order - so a
+          ;; terminal frame showing a UTF-8 buffer reads `UUU'.
+          ((#\z #\Z)
+           (let ((eol? (char=? spec #\Z))
+                 ;; The *buffer-local*, read raw, as `mode-line-eol-desc'
+                 ;; reads it and for the same reason: `buffer-file-coding-
+                 ;; system' is `files.sld''s and that library is above
+                 ;; this one. The default is the same literal.
+                 (buffer-cs (buffer-local-value (window-buffer window)
+                                                'buffer-file-coding-system
+                                                'utf-8-unix)))
+             (if (graphical-frame?)
+                 (decode-mode-spec-coding buffer-cs eol?)
+                 (string-append
+                  (decode-mode-spec-coding (keyboard-coding-system) #f)
+                  (decode-mode-spec-coding (terminal-coding-system) #f)
+                  (decode-mode-spec-coding buffer-cs eol?)))))
           ;; `%-' is "enough dashes to fill the mode line": how many is only
           ;; known when the line is placed, so the drawing code pads instead
           ((#\-) "")

@@ -41,7 +41,7 @@
   (export
    *enable-multibyte-characters*
    char-displayable-p
-   terminal-coding-system
+   terminal-coding-system keyboard-coding-system
    ;; Detection - `mule.el''s `find-auto-coding' and what it reads
    *auto-coding-alist* auto-coding-alist-lookup
    find-auto-coding set-auto-coding
@@ -63,6 +63,16 @@
       ;; "Maybe there's a font for it, but we can't put it in the buffer."
       ;;--------------------------------------------------------------
       (make-parameter #t))
+
+    (define (keyboard-coding-system)
+      ;; GNU Emacs's `keyboard-coding-system' (`coding.c'): "Return coding
+      ;; system for encoding keyboard input." Emacs derives it from the
+      ;; locale in `set-locale-environment', which is not ported; on this
+      ;; machine's `en_US.UTF-8' terminal it answers `utf-8-unix' -
+      ;; measured, as is `terminal-coding-system' beside it, and `%z' shows
+      ;; both of them on a terminal frame.
+      ;;--------------------------------------------------------------
+      'utf-8-unix)
 
     (define (terminal-coding-system)
       ;; GNU Emacs's `terminal-coding-system' (`coding.c'): "Return coding

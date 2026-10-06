@@ -1331,6 +1331,21 @@ def check_coding_roundtrip():
         written = port.read()
     if written != b"X" + original:
         problems.append("the Latin-1 bytes did not survive: %r" % written)
+    # **the four lines of the `encoding-test-files' fixture reach the
+    # terminal as themselves** - including `U+10400' (Deseret), which is
+    # in the supplementary plane and is the character the GTK front end
+    # could not draw. On a terminal it is the *terminal's* font stack that
+    # answers, so this pins the bytes and not the glyph.
+    fixture = "/home/chris/GITE/encoding-test-files/utf8.txt"
+    if os.path.exists(fixture):
+        screen = screen_of(drive([], fixture))
+        for line in ("premi\u00e8re is first",
+                     "premie\u0300re is slightly different",
+                     "\u041a\u0438\u0440\u0438\u043b\u043b\u0438\u0446\u0430 is Cyrillic",
+                     "\U00010400 am Deseret"):
+            if line not in screen:
+                problems.append("the fixture line %r did not reach the screen"
+                                % line)
     # a CRLF file keeps its carriage returns, and the mode line says (DOS)
     crlf = "/tmp/pty-check-crlf.txt"
     with open(crlf, "wb") as port:

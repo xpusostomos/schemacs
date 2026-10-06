@@ -40,7 +40,7 @@
     ;; and `dynamic-func' are core bindings, which an R7RS library
     ;; reaches through `(guile)' - as `frame.sld''s SIGTSTP does.
     (only (system foreign) pointer->procedure string->pointer pointer->string
-          null-pointer? int void)
+          null-pointer? int void double)
     (only (guile) dynamic-link dynamic-func assq-ref filter)
     ;; `alist-delete' removes one selection from the ownership record.
     (only (srfi srfi-1) alist-delete)
@@ -162,6 +162,119 @@
 
     (define (cell-x x) (* x *cell-width*))
     (define (cell-y y) (* y *cell-height*))
+
+    ;;----------------------------------------------------------------
+    ;; Text, through Pango
+    ;;----------------------------------------------------------------
+    ;;
+    ;; **Cairo's own `cairo-show-text' does no font fallback, and this
+    ;; editor's text needs it.** It draws with the one face
+    ;; `cairo-select-font-face' chose - "monospace" - and a character that
+    ;; face has no glyph for comes out as the *missing glyph box*.
+    ;; Measured: `\U00010400' (Deseret) draws as a box through the toy API
+    ;; and as the glyph through Pango, on this machine, with the same
+    ;; bytes arriving in both cases. A terminal is unaffected, which is why
+    ;; this is the GTK front end only: the terminal asks its own font stack
+    ;; for the glyph, and `ncurses' draws the character correctly.
+    ;;
+    ;; Pango lays a run out glyph by glyph, asking every font that can
+    ;; answer, which is exactly the fallback that is missing - and it is
+    ;; what every toolkit widget and Emacs's own GTK front end do.
+    ;;
+    ;; **It is reached by FFI rather than through the `PangoCairo'
+    ;; typelib, and that is a real limitation rather than a preference.**
+    ;; `pango_cairo_create_layout' takes a `cairo_t *'; the typelib's
+    ;; binding of it is a guile-gi generic that accepts only a context gi
+    ;; itself made, and the context here is guile-cairo's - a different
+    ;; Goops class wrapping the same pointer. Handing it over fails with
+    ;; "No applicable method", and so does the raw pointer from
+    ;; `cairo-context->pointer'. So the functions are called directly,
+    ;; through the same `dynamic-func' the clipboard FFI below uses, and
+    ;; the pointer bridge takes the `cairo_t *' across.
+    ;;
+    ;; `pango_layout_new' needs no cairo at all - only a font map - so the
+    ;; layout is made once from the font map's default context and reused
+    ;; for every run, which is also what keeps this off the per-character
+    ;; path.
+
+    (define pango-foreign-fn
+      (lambda (lib name ret args)
+        (pointer->procedure ret (dynamic-func name (dynamic-link lib)) args)))
+
+    (define pango-font-map-default
+      (pango-foreign-fn "libpangocairo-1.0.so.0" "pango_cairo_font_map_get_default"
+                        '* '()))
+    (define pango-font-map-create-context
+      (pango-foreign-fn "libpango-1.0.so.0" "pango_font_map_create_context"
+                        '* (list '*)))
+    (define pango-layout-new
+      (pango-foreign-fn "libpango-1.0.so.0" "pango_layout_new" '* (list '*)))
+    (define pango-layout-set-text
+      (pango-foreign-fn "libpango-1.0.so.0" "pango_layout_set_text"
+                        void (list '* '* int)))
+    (define pango-layout-set-font-description
+      (pango-foreign-fn "libpango-1.0.so.0" "pango_layout_set_font_description"
+                        void (list '* '*)))
+    (define pango-font-description-from-string
+      (pango-foreign-fn "libpango-1.0.so.0" "pango_font_description_from_string"
+                        '* (list '*)))
+    (define pango-font-description-set-absolute-size
+      (pango-foreign-fn "libpango-1.0.so.0"
+                        "pango_font_description_set_absolute_size"
+                        void (list '* double)))
+    (define pango-layout-get-baseline
+      (pango-foreign-fn "libpango-1.0.so.0" "pango_layout_get_baseline"
+                        int (list '*)))
+    (define pango-cairo-update-layout
+      (pango-foreign-fn "libpangocairo-1.0.so.0" "pango_cairo_update_layout"
+                        void (list '* '*)))
+    (define pango-cairo-show-layout
+      (pango-foreign-fn "libpangocairo-1.0.so.0" "pango_cairo_show_layout"
+                        void (list '* '*)))
+
+    (define *pango-scale* 1024)
+    ;; ^ `PANGO_SCALE': Pango counts in 1/1024 of a device unit, and
+    ;; `pango_layout_get_baseline' answers in those.
+
+    (define (pgtk-ensure-layout! d)
+      ;; D's text layout, made once. It belongs to a font map and not to a
+      ;; cairo context, so a resize - which remakes the surface and the
+      ;; context - does not invalidate it.
+      ;;--------------------------------------------------------------
+      (or (pgtk-layout d)
+          (let ((layout (pango-layout-new
+                         (pango-font-map-create-context (pango-font-map-default)))))
+            ;; **The size is set in *device* units and not through the
+            ;; description string.** Pango reads a size in a description
+            ;; string as *points*, which at this resolution is a quarter
+            ;; again as large - `monospace 15' drew 20-pixel glyphs where
+            ;; `cairo-set-font-size cr 15' drew 15 - and the difference is
+            ;; visible as a descender reaching a pixel it did not before.
+            ;; `set_absolute_size' is the device-unit spelling, which is
+            ;; what `cairo_set_font_size' is.
+            (let ((fd (pango-font-description-from-string
+                       (string->pointer "monospace"))))
+              (pango-font-description-set-absolute-size
+               fd (* *font-size* *pango-scale*))
+              (pango-layout-set-font-description layout fd))
+            (set! (pgtk-layout d) layout)
+            layout)))
+
+    (define (pgtk-show-text! d text x baseline)
+      ;; TEXT with its left edge at X and its *baseline* at BASELINE.
+      ;;
+      ;; Pango places a layout by its top-left corner, so the move
+      ;; subtracts the layout's own baseline - which is what makes this a
+      ;; drop-in for `cairo-show-text', whose point is the baseline.
+      ;;--------------------------------------------------------------
+      (let* ((cr (pgtk-cr d))
+             (cairo-t (cairo-context->pointer cr))
+             (layout (pgtk-ensure-layout! d)))
+        (pango-layout-set-text layout (string->pointer text "UTF-8") -1)
+        (pango-cairo-update-layout cairo-t layout)
+        (cairo-move-to cr x (- baseline (/ (pango-layout-get-baseline layout)
+                                           *pango-scale*)))
+        (pango-cairo-show-layout cairo-t layout)))
 
     ;;----------------------------------------------------------------
     ;; Faces
@@ -369,6 +482,9 @@
       (area    #:init-value #f #:accessor pgtk-area)
       (surface #:init-value #f #:accessor pgtk-surface)
       (cr      #:init-value #f #:accessor pgtk-cr)
+      (layout  #:init-value #f #:accessor pgtk-layout)
+      ;; ^ The Pango layout the text is drawn through. It belongs to a
+      ;; font map rather than to the surface, so it outlives a resize.
       ;; The grid, in character cells: what the redisplay thinks the
       ;; display is, and what `screen-size' answers.
       (columns #:init-value 80 #:accessor pgtk-columns)
@@ -495,8 +611,6 @@
         (let* ((surface (cairo-image-surface-create 'argb32
                                                     (car size) (cdr size)))
                (cr (cairo-create surface)))
-          (cairo-select-font-face cr "monospace" 'normal 'normal)
-          (cairo-set-font-size cr *font-size*)
           (set! (pgtk-surface d) surface)
           (set! (pgtk-cr d) cr))))
 
@@ -715,9 +829,9 @@
                                 (scan (+ j 1))
                                 j)))
                      (c (string-ref text i)))
-                (cairo-move-to cr (cell-x (+ x col))
-                               (+ (cell-y y) (- *cell-height* 5)))
-                (cairo-show-text cr (substring text i end))
+                (pgtk-show-text! d (substring text i end)
+                                 (cell-x (+ x col))
+                                 (+ (cell-y y) (- *cell-height* 5)))
                 (loop end (+ col (char-display-width c col)))))))))
 
     (define (cursor-box-colour) (list 0.0 0.0 0.0))
@@ -765,8 +879,7 @@
                (cairo-fill cr)
                ;; the glyph again, in the ink colour, so it is visible
                (apply cairo-set-source-rgb cr (cursor-ink-colour token))
-               (cairo-move-to cr left (+ top (- *cell-height* 5)))
-               (cairo-show-text cr text))
+               (pgtk-show-text! d text left (+ top (- *cell-height* 5))))
               ((hollow-box-cursor)
                (apply cairo-set-source-rgb cr (cursor-box-colour))
                (cairo-set-line-width cr 1)
