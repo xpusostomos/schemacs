@@ -38,6 +38,7 @@ SUITES = [
     'schemacs/editor/files-tests.scm',
     'schemacs/editor/indentc-tests.scm',
     'schemacs/editor/coding-tests.scm',
+    'schemacs/editor/charset-tests.scm',
     'schemacs/editor/mule-cmds-tests.scm',
     'schemacs/elisp-eval/print-tests.scm',
     'schemacs/editor/cmds-tests.scm',

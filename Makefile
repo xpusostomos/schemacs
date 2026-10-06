@@ -43,6 +43,7 @@ SCHEME_LIBRARIES := \
   ./schemacs/editor/search.sld \
   ./schemacs/editor/indentc.sld \
   ./schemacs/editor/coding.sld \
+  ./schemacs/editor/charset.sld \
   ./schemacs/editor/cmds.sld \
   ./schemacs/editor/easy-mmode.sld \
   ./schemacs/editor/replace.sld \

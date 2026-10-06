@@ -3915,3 +3915,83 @@ honest order is item 8, then item 7 on top of it.
 A JISX0208-only table would make the corpus case pass and would be a lie of
 the kind this file already has a section about ("a decision I made and then
 dressed as fidelity"). Don't.
+
+# The charset registry, metadata first (2026-10-06)
+
+Item 8 of the plan, taken as far as it can be independently verified.
+**`schemacs/editor/charset.sld` is new and nothing consumes it yet** - which
+is the point: `iso-2022` (item 7) is blocked on it, and this is the half of
+it that can be checked against Emacs before anything is built on top.
+
+## What is here, and what is deliberately not
+
+A charset in Emacs is **two things**: its metadata - an id, a dimension, an
+ISO final char, a code space, a code offset - and the code-to-character map
+that its `:map` names (`charsets/JISX0208.map` and its like). This is the
+first. `define-charset` records `:map` and does not load it, so the maps
+have their pointer when they come and nothing here pretends to convert a
+character.
+
+That split is what makes the job checkable: the entire ISO-2022
+designation machinery reads only the metadata.
+
+| | |
+|---|---|
+| `charset.sld` | the registry: `define-charset`, the charset record, `iso-charset-table`, `*iso-2022-charset-list*` |
+| `charset-tests.scm` | 8 tests, every expectation Emacs 31.1's own |
+| not here | the `charsets/*.map` maps, `define-charset-alias`, `declare-equiv-charset`, the docstring/short-name/long-name strings |
+
+The data at the bottom of the file is **Emacs 31.1's whole charset set, 179
+of them**, emitted by a script that read a running Emacs's registry in id
+order - the same method `xterm.sld`'s decode map was transcribed by.
+
+## The three things that had to be measured, not reasoned
+
+1. **`:iso-chars-96` is not a property.** My first probe asked Emacs for it
+   and got `nil` for every charset, which reads as "no charset is a
+   96-character set" and is false. It is *derived*:
+   `charset.iso_chars_96 = charset.code_space[2] == 96` (`charset.c:904`) -
+   the count of the **first** dimension. 23 of the 54 are 96-char sets.
+
+2. **`define-charset` normalises before the C sees anything**, in Lisp, in
+   two ways that both change the answer. `:code-space` is padded to eight
+   elements (`mule.el:270`) because the C's walk reads four pairs whatever
+   the caller gave; and `:dimension` is settled from the **original**
+   length (`mule.el:251`), so `#(0 127)` is dimension **1** and not the 4
+   that padding to eight would suggest. Both are ported, in `define-charset`.
+
+3. **The ids are Emacs's, sparse and shared.** They are handed out across
+   *all* 179 charsets, so `iso_charset_table`'s cells hold ids like 5 and 148
+   and not 0..53; and an alias shares its target's id - `ucs` *is* `unicode`,
+   id 2, and `(get-charset-property s :name)` is how you tell which symbol
+   is the canonical one (`:base` is `nil` on every charset the C defines
+   itself, so it cannot be used as the test).
+
+## How it is verified, and why that is not circular
+
+`iso-charset` (`charset.c`) is a *reader* of `iso_charset_table` - it takes
+a dimension, a character count and a final byte and answers the charset. So
+Emacs's own table can be dumped without going through the code being
+tested, and that is what the golden list in `charset-tests.scm` is.
+
+It is checked in **both directions**: every one of Emacs's 53 cells answers
+the right charset, and a sweep of all 2 x 2 x 79 in-range cells finds no
+cell populated that Emacs does not populate. A port that wrote cells too
+generously cannot pass the second half.
+
+**53 cells and not 54 charsets**, and the difference is a finding in
+itself: `thai-iso8859-11` (id 28) and `thai-tis620` (id 37) are both
+designated `ESC ( T`, so the later definition overwrites the earlier one
+and the cell holds `thai-tis620`. The port reproduces it because it writes
+the cell in definition order too, and there is a test that says so by name.
+
+## What this unblocks, and what is still missing for `iso-2022`
+
+Unblocked: `iso_charset_table` (done, verified), `iso-2022-charset-list`
+(done, verified), and `setup_iso_safe_charsets` - which is now a small
+function over `iso-2022-charset-list` and each category's `:iso-request`
+and `:iso-usage`, and is **not written yet**.
+
+Still missing after that: the four ISO categories as coding systems, the
+detector (the 260 lines), and - the large part - `decode_coding_iso_2022`
+and `encode_coding_iso_2022`, which have no iconv codec to stand on.
