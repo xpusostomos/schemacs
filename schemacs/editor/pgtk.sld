@@ -70,7 +70,7 @@
           widget:show-all widget:hide widget:destroy widget:queue-draw
           widget:can-focus widget:grab-focus widget:set-size-request
           widget:hexpand widget:vexpand window:resizable
-          window:resize
+          window:resize window:title
           container:add
           connect main-iteration-do? set-prgname set-program-class
           source-remove? timeout-add
@@ -105,7 +105,11 @@
     ;; The frame's focus, which the window tells us about: it decides
     ;; whether the cursor blinks and whether it is drawn hollow.
     (only (schemacs editor frame)
-          *current-frame* *frame-focus* blink-cursor--rescan-frames)
+          *current-frame* *frame-focus* blink-cursor--rescan-frames
+          ;; `pgtk-open-window' titles a window with its frame's name, as
+          ;; Emacs titles one with `f->name' when there is no `title'
+          ;; parameter (`gtkutil.c:1656-1663').
+          frame-name)
     ;; The development back door. `poll-repl!' is a no-op unless
     ;; `main-gtk.scm' was asked to open it; this loop is the only place a
     ;; windowed editor is ever idle, so it is where the REPL gets its turn.
@@ -976,25 +980,47 @@
       (*frame-background-mode* 'light)
       (for-each face-spec-recalc (face-list)))
 
-    (define (with-gtk-display thunk)
-      ;; Open a GTK window, make it the editor's display, run THUNK, and
-      ;; take it down afterwards. The counterpart of `with-terminal'.
+    (define *pgtk-displays* (make-parameter '()))
+    ;; ^ The windows this process has open, newest first. Emacs keeps the
+    ;; same information on its terminal - `tty->top_frame' and the frame
+    ;; list; here it is the *backend* that knows a window exists, and the
+    ;; input path needs it to find which frame an event belongs to. A
+    ;; frame points at its display through `frame-output', which is the
+    ;; direction redisplay uses; this is the other one.
+
+    (define (pgtk-open-window frame columns rows)
+      ;; Make one GTK window with a drawing area and wire its signals, and
+      ;; answer the display that draws into it. The counterpart of one
+      ;; `x_window (f)', which is what Emacs's `frame-creation-function'
+      ;; method for pgtk ends up calling per frame.
+      ;;
+      ;; **The widgets are the frame's**, as Emacs's are -
+      ;; `FRAME_GTK_OUTER_WIDGET (f) = wtop' and `FRAME_GTK_WIDGET (f) =
+      ;; wfixed' (`gtkutil.c:1670') are fields of the frame, not of a
+      ;; terminal - so FRAME is an argument here and not ambient state.
+      ;; The display returned becomes that frame's `frame-output' and
+      ;; nothing else's.
+      ;;
+      ;; **Every handler closes over its OWN `d', and that is the point of
+      ;; the function.** While there was only `with-gtk-display' the
+      ;; handlers could close over the one display and nothing could tell
+      ;; them apart; with two windows each must queue into and repaint its
+      ;; own.
+      ;;
+      ;; The title is the frame's *name*, which is what Emacs titles a
+      ;; window with when the frame carries no `title' parameter
+      ;; (`gtkutil.c:1656-1663': `f->title', else `f->name'). A frame's
+      ;; name is `F1', `F2', ... - so two windows are tellable apart in
+      ;; the window manager, which is how you see which one `C-x 5 o'
+      ;; selected. The editor set no title at all before this.
       ;;--------------------------------------------------------------
-      ;; The name the window manager knows this window by. On Wayland
-      ;; the app-id comes from the program name, which would otherwise be
-      ;; `guile' - so a compositor rule cannot name this editor. Setting
-      ;; both before Gtk is initialised is what makes it `schemacs'.
-      ;;--------------------------------------------------------------
-      (set-prgname "schemacs")
-      (set-program-class "schemacs")
-      (init-check!)
-      (let* ((columns 80)
-             (rows 24)
-             (width (* columns *cell-width*))
+      (let* ((width (* columns *cell-width*))
              (height (* rows *cell-height*))
              (win (make <GtkWindow>))
              (area (make <GtkDrawingArea>))
              (d (make <pgtk-display>)))
+        (when (and frame (frame-name frame))
+          (set! (window:title win) (symbol->string (frame-name frame))))
         (set! (pgtk-window d) win)
         (set! (pgtk-area d) area)
         (set! (pgtk-columns d) columns)
@@ -1086,14 +1112,46 @@
         (set! (widget:can-focus win) #t)
         (widget:show-all win)
         (widget:grab-focus win)
+        (*pgtk-displays* (cons d (*pgtk-displays*)))
+        d))
+
+    (define (pgtk-close-window! d)
+      ;; Destroy a window `pgtk-open-window' made, and forget it. Emacs's
+      ;; counterpart is the teardown `x_free_frame_resources' does.
+      ;;--------------------------------------------------------------
+      (let ((win (pgtk-window d)))
+        (when win (widget:destroy win)))
+      (*pgtk-displays*
+       (let loop ((l (*pgtk-displays*)) (acc '()))
+         (cond ((null? l) (reverse acc))
+               ((eq? (car l) d) (loop (cdr l) acc))
+               (else (loop (cdr l) (cons (car l) acc))))))
+      d)
+
+    (define (with-gtk-display thunk)
+      ;; Open the editor's GTK window, make it the editor's display, run
+      ;; THUNK, and take it down afterwards. The counterpart of
+      ;; `with-terminal'.
+      ;;--------------------------------------------------------------
+      ;; The name the window manager knows this window by. On Wayland the
+      ;; app-id comes from the program name, which would otherwise be
+      ;; `guile' - so a compositor rule cannot name this editor. Setting
+      ;; both before Gtk is initialised is what makes it `schemacs'.
+      ;;--------------------------------------------------------------
+      (set-prgname "schemacs")
+      (set-program-class "schemacs")
+      (init-check!)
+      (let ((d (pgtk-open-window #f 80 24)))
         (current-display d)
         (initialize-pgtk-faces! d)
         (dynamic-wind
          (lambda () #t)
          thunk
          (lambda ()
-           (widget:destroy win)
-           (current-display #f)))))
+           (pgtk-close-window! d)
+           ;; Clear the editor's display only when this was the last
+           ;; window: with a second one open the editor still has one.
+           (unless (pair? (*pgtk-displays*)) (current-display #f))))))
 
     ;;----------------------------------------------------------------
     ;; The selections
