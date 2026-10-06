@@ -322,10 +322,11 @@
 ;; **The C1 rule, which is the one that is easy to get wrong.** A byte in
 ;; 0x80-0x9F rejects the `charset' category unless `latin-extra-code-table'
 ;; allows it - and it allows nothing - so such a file is *not* Latin-1.
-;; Emacs answers `japanese-shift-jis-unix' there because it carries that
-;; coding system and this tree does not, so the answer here is
-;; `no-conversion'; 0xA0 is Latin-1 in both.
-(test-equal '(no-conversion-unix iso-latin-1-unix)
+;; Emacs then reaches `japanese-shift-jis', which matches - measured,
+;; `(find-file "/tmp/c1.txt")` on `a\x85b' answers
+;; `japanese-shift-jis-unix' - and so does this now that the sjis detector
+;; is ported. 0xA0 is Latin-1 in both.
+(test-equal '(japanese-shift-jis-unix iso-latin-1-unix)
   (list (detected 97 133 98 10)                       ; 0x85, a C1 byte
         (detected 97 160 98 10)))                     ; 0xA0, a Latin-1 byte
 
@@ -351,11 +352,9 @@
 ;; directory, so the suite is self-contained.
 ;;
 ;; **The expectations are Emacs 31.1's own answers**, asked with
-;; `find-file' on each of the six. Five match; the sixth is `cp865', whose
-;; `\x8a' is a C1 byte, so the `charset' category rejects it - Emacs then
-;; finds `japanese-shift-jis' and this tree has no such coding system, so
-;; it answers `no-conversion' and the bytes survive instead. That is the
-;; named departure on `detect-coding-utf-8' in `coding.sld'.
+;; `find-file' on each of the six - and all six match, including `cp865',
+;; whose `\x8a' is a C1 byte: the `charset' category rejects it and
+;; `japanese-shift-jis' is the next category that matches.
 
 (define encoding-fixture-bytes
   (list
@@ -378,11 +377,11 @@
     (and entry (cadr entry))))
 
 (test-equal "what the detector makes of the six fixtures"
-  ;; Emacs: undecided, iso-latin-1, iso-latin-1, japanese-shift-jis,
-  ;; utf-8, utf-16le-with-signature. The BOM is a *declaration*, so it is
+  ;; **These are Emacs 31.1's own answers, all six of them.** The BOM is a
+  ;; *declaration*, so it is
   ;; `set-auto-coding' that names the last one and the detector is never
   ;; asked - which is the order the file layer uses.
-  '(undecided iso-latin-1-unix iso-latin-1-unix no-conversion-unix
+  '(undecided iso-latin-1-unix iso-latin-1-unix japanese-shift-jis-unix
     utf-8-unix no-conversion-unix)
   (map (lambda (e)
          (let ((found (detect-coding-bytes (cadr e) #t)))

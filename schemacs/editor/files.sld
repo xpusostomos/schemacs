@@ -317,9 +317,12 @@ save-buffer
                        ;; `undecided', which is a file that is all 7-bit
                        ;; text and declares nothing: the default, as it
                        ;; was before there was a detector at all.
+                       ;; Nothing declared and nothing detected - the
+                       ;; file is all 7-bit text - so the answer is
+                       ;; `undecided', which is what Emacs answers for
+                       ;; such a file and what its mode line shows as `-'.
                        (let ((detected (detect-coding-bytes bytes #t)))
-                         (and detected (car detected)))
-                       'utf-8))
+                         (or (and detected (car detected)) 'undecided))))
              ;; The eol is detected only when the name has not settled it
              ;; (`adjust-coding-eol-type'), so a coding system the
              ;; *detector* chose arrives here already carrying one.

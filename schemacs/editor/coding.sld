@@ -295,6 +295,28 @@
     ;; `utf-16-with-signature', and the two explicit ones are the BOM
     ;; kept as a character - measured, `(decode-coding-string #vu8(255 254
     ;; 65 0 66 0) 'utf-16)' is `(65 66)' and `utf-16le' is `(65279 65 66)'.
+    ;; `undecided' is the coding system that says nothing about the text
+    ;; conversion - Emacs reads an all-ASCII file that declares nothing as
+    ;; `undecided-unix', and its mnemonic is `-' (measured), which is the
+    ;; `-' the mode line shows for such a file. Emacs carries it as a
+    ;; *deferred* choice that a later operation can re-decide; here it
+    ;; resolves at once, which is the departure named in this file's
+    ;; header. The codec it resolves to is UTF-8, which is what Emacs 31
+    ;; answers for it with `utf-8' preferred.
+    (define undecided (%define-coding-system 'undecided #f "UTF-8" #f #\-))
+    ;; `japanese-shift-jis' - the coding system the `sjis' category is
+    ;; bound to, and the one Emacs reads the `encoding-test-files'
+    ;; fixture `cp865.txt' as: its `\x8a' is a C1 control, which the
+    ;; `charset' category rejects, and this is the next category that
+    ;; matches. The *codec* is iconv's ("SHIFT-JIS"); what had to be
+    ;; ported is the detector, below.
+    (define japanese-shift-jis
+      (%define-coding-system 'japanese-shift-jis #f "SHIFT-JIS" #f #\S))
+    ;; `chinese-big5' - the `big5' category's coding system, and the same
+    ;; story: iconv has the codec ("BIG5" - `a4 a4' is `\u4e2d', measured)
+    ;; and what was missing is the detector.
+    (define chinese-big5
+      (%define-coding-system 'chinese-big5 #f "BIG5" #f #\B))
     (define utf-16 (%define-coding-system 'utf-16 #f "UTF-16" #f #\U))
     (define utf-16le (%define-coding-system 'utf-16le #f "UTF-16LE" #f #\U))
     (define utf-16be (%define-coding-system 'utf-16be #f "UTF-16BE" #f #\U))
@@ -764,23 +786,37 @@
     ;; The three masks are the C's own: `checked' (this detector has run),
     ;; `rejected' (this category cannot be it) and `found' (it can).
     ;;
-    ;; **What is not carried, and why that is a configuration rather than
-    ;; a hole.** `detect_coding_iso_2022', `sjis', `big5', `ccl',
-    ;; `emacs-mule' and `detect_coding_utf_16' are not ported, and nor are
-    ;; the coding systems they detect. The C already has a branch for a
-    ;; category with nothing bound to it -
+    ;; **What is not carried, and what each thing would actually take.**
+    ;; Written this way because the first version of this paragraph said
+    ;; the unbound categories were "a configuration the C already has a
+    ;; branch for" - which is true of the code and tells you nothing about
+    ;; the work, and which turned out to hide five detectors that are 40
+    ;; to 80 lines of arithmetic behind one that is a state machine.
     ;;
-    ;;     if (this->id < 0)
-    ;;       /* No coding system of this category is defined.  */
-    ;;       detect_info.rejected |= (1 << category);
+    ;;   `detect_coding_iso_2022'   259 lines, and it *is* a state
+    ;;                              machine. The one genuinely large
+    ;;                              detector. iconv has the codecs
+    ;;                              (`ISO-2022-JP' works), so the
+    ;;                              detector is the whole of the cost.
+    ;;   `emacs-mule'               80 lines, and *no iconv equivalent
+    ;;                              exists* - Emacs's own encoding. The
+    ;;                              detector alone would be useless.
+    ;;   `detect_coding_utf_16'     79 lines, plus the `utf-16-auto'
+    ;;                              mapping in the walk and two category
+    ;;                              bindings. Would close BOM-less UTF-16,
+    ;;                              which currently falls to `undecided'.
+    ;;   `ccl'                      38 lines - and **Emacs has nothing
+    ;;                              bound to this category either**
+    ;;                              (`coding-system-priority-list' has no
+    ;;                              ccl entry). Not a gap at all: the
+    ;;                              unbound branch is Emacs's own answer.
+    ;;   `sjis', `big5'             50 and 42 lines, arithmetic, no
+    ;;                              charsets. **Both ported** - they were
+    ;;                              never in the hard group.
     ;;
-    ;; - so the walk below is the C's with those categories unbound. The
-    ;; difference it makes is measurable and narrow: Emacs answers
-    ;; `japanese-shift-jis-unix' for a file holding a C1 control byte,
-    ;; `emacs-mule-unix' for another, `iso-2022-7bit-unix' for an escape
-    ;; sequence (all measured); here those fall through to
-    ;; `no-conversion', in which the *bytes* survive. The cases that
-    ;; matter - UTF-8, ISO-8859-1 and plain ASCII - are exact.
+    ;; What is left is therefore iso-2022, emacs-mule, and the BOM-less
+    ;; UTF-16 detection. A file whose bytes none of them can read still
+    ;; falls to `no-conversion', in which the *bytes* survive.
 
     (define *coding-categories*
       ;; The categories in the C's enum order (`coding.c:476'), because a
@@ -840,6 +876,8 @@
       ;; the C's `this->id < 0' case.
       '((utf-8-nosig . utf-8)
         (charset     . iso-latin-1)
+        (sjis        . japanese-shift-jis)
+        (big5        . chinese-big5)
         (raw-text    . raw-text)))
 
     (define-record-type <detection-info>
@@ -1017,6 +1055,84 @@
                (else (loop (+ i 1)
                            (if (>= c #x80) *category-mask-charset* found))))))))))
 
+    (define *sjis-max-first-byte*
+      ;; `detect_coding_sjis''s `max_first_byte_of_2_byte_code'
+      ;; (`coding.c:5888'): `list_length (charset_list) <= 3 ? 0xEF : 0xFC'.
+      ;; `japanese-shift-jis''s `:charset-list' is `(ascii
+      ;; katakana-jisx0201 japanese-jisx0208)' - three, measured on Emacs
+      ;; 31.1 - so it is 0xEF.
+      ;;--------------------------------------------------------------
+      #xEF)
+
+    (define (detect-coding-sjis bytes head-ascii info)
+      ;; GNU Emacs's `detect_coding_sjis' (`coding.c:5885'): whether BYTES
+      ;; could be Shift-JIS. The same shape as the UTF-8 detector - set
+      ;; the masks on INFO, and answer whether the source ran out before
+      ;; anything invalid was found.
+      ;;
+      ;; No charsets are needed: the code space is arithmetic on the byte,
+      ;; which is why this one *is* portable where `detect_coding_charset'
+      ;; is not. A byte in 0x81-0x9F or 0xE0-0xEF leads a two-byte
+      ;; character whose second byte is 0x40-0xFC except 0x7F; a byte in
+      ;; 0xA0-0xDF is a single-byte character on its own.
+      ;;--------------------------------------------------------------
+      (set!detection-info-checked info
+        (logior (detection-info-checked info) (%mask 'sjis)))
+      (let ((n (bytevector-length bytes)))
+        (let loop ((i head-ascii) (found 0))
+          (cond
+           ((>= i n) (%found! info found) #t)
+           (else
+            (let ((c (bytevector-u8-ref bytes i)))
+              (cond
+               ((< c #x80) (loop (+ i 1) found))
+               ((or (and (>= c #x81) (<= c #x9F))
+                    (and (>= c #xE0) (<= c *sjis-max-first-byte*)))
+                (if (>= (+ i 1) n)
+                    ;; the source ran out inside a two-byte character
+                    (begin (%reject! info (%mask 'sjis)) #f)
+                    (let ((c1 (bytevector-u8-ref bytes (+ i 1))))
+                      (if (or (< c1 #x40) (= c1 #x7F) (> c1 #xFC))
+                          (begin (%reject! info (%mask 'sjis)) #f)
+                          (loop (+ i 2) (%mask 'sjis))))))
+               ((and (>= c #xA0) (< c #xE0)) (loop (+ i 1) (%mask 'sjis)))
+               (else (%reject! info (%mask 'sjis)) #f))))))))
+
+    (define (detect-coding-big5 bytes head-ascii info)
+      ;; GNU Emacs's `detect_coding_big5' (`coding.c:5900'): whether BYTES
+      ;; could be Big5. A byte at or above 0xA1 leads a two-byte
+      ;; character whose second byte is 0x40-0x7E or 0xA1-0xFE; anything
+      ;; below 0x80 is ASCII; anything else is not Big5.
+      ;;
+      ;; **The C returns without rejecting on one of those paths**, and
+      ;; that is copied rather than tidied: a *bad second byte*
+      ;; (`c < 0x40 || (c >= 0x7F && c <= 0xA0)') returns 0 having set
+      ;; neither `found' nor `rejected', where the "not a lead byte" path
+      ;; below it rejects. The category is still marked `checked', so the
+      ;; walk treats it as run and moves on - and it is left out of the
+      ;; rejected set, which only matters in `%finish-detection''s
+      ;; last-resort branch.
+      ;;--------------------------------------------------------------
+      (set!detection-info-checked info
+        (logior (detection-info-checked info) (%mask 'big5)))
+      (let ((n (bytevector-length bytes)))
+        (let loop ((i head-ascii) (found 0))
+          (cond
+           ((>= i n) (%found! info found) #t)
+           (else
+            (let ((c (bytevector-u8-ref bytes i)))
+              (cond
+               ((< c #x80) (loop (+ i 1) found))
+               ((>= c #xA1)
+                (if (>= (+ i 1) n)
+                    ;; the source ran out inside a two-byte character
+                    (begin (%reject! info (%mask 'big5)) #f)
+                    (let ((c1 (bytevector-u8-ref bytes (+ i 1))))
+                      (cond ((< c1 #x40) #f)          ; the C's bare `return 0'
+                            ((and (>= c1 #x7F) (<= c1 #xA0)) #f)
+                            (else (loop (+ i 2) (%mask 'big5)))))))
+               (else (%reject! info (%mask 'big5)) #f))))))))
+
     (define (%scan-head bytes)
       ;; The C's opening `for (; src < src_end; src++)' in
       ;; `detect_coding_system' (`coding.c:8712'). Three answers: the
@@ -1087,6 +1203,8 @@
       (case category
         ((utf-8-nosig) detect-coding-utf-8)
         ((charset) detect-coding-charset)
+        ((sjis) detect-coding-sjis)
+        ((big5) detect-coding-big5)
         (else #f)))
 
     (define (detect-coding-system bytes highest)

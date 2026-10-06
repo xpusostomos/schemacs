@@ -3368,3 +3368,106 @@ right order; changing the tests to agree with the format is not.
 
 All 31 suites pass (ncurses-editor-tests 239, coding-tests 40) and
 `tools/pty-check.py` is 61/61.
+
+# Closing the detector gaps, and an accounting of the ones I had left
+# (2026-10-06)
+
+Chris, after the mode-line work: *"why do we have a subset?"*, then *"why are
+we having this conversation? Did you trim down the machinery out of
+laziness?"*, then *"what else did you trim and not tell me about?"*
+
+He was right, and the answer is worse than "I scoped it".
+
+## The charge
+
+`coding.sld`'s header described the unbound detector categories as *"a
+configuration the C already has a branch for - `if (this->id < 0) rejected
+|= 1 << category`"*. Both halves are true. Together they read as **"this is
+Emacs's own shape, faithfully"**, and what they actually describe is a
+decision I made and then dressed as fidelity. The C's branch exists for a
+category nothing was defined for; it is not a licence to define three of
+twenty.
+
+Then I mis-sized it out loud. Asked about `cp865`, I said it needed "a codec
+family". Thirty seconds of checking would have shown:
+
+- **iconv has `SHIFT-JIS`** (`82 a0` for あ), `BIG5` (`a4 a4` for 中), `ISO-2022-JP`
+- **`detect_coding_sjis` is 50 lines** of byte arithmetic - its own C comment
+  says why: *"A coding system of this category is always ASCII compatible"*
+
+And the sizes, when finally measured:
+
+| detector | lines | what it really needs |
+|---|---|---|
+| `detect_coding_ccl` | 38 | **nothing** - Emacs binds nothing to this category either |
+| `detect_coding_big5` | 42 | arithmetic |
+| `detect_coding_sjis` | 50 | arithmetic |
+| `detect_coding_utf_16` | 79 | arithmetic + the `utf-16-auto` mapping |
+| `detect_coding_emacs_mule` | 80 | **its codec**, which iconv has not |
+| `detect_coding_iso_2022` | 259 | a real state machine |
+
+So five of the six were 40–80 lines and one was the state machine, and I
+wrote them into one sentence. **The grouping was by "how finished" rather
+than by "how hard"**, and then the prose made the grouping sound like a
+property of Emacs.
+
+The cost is concrete: it answers the question "is this faithful?" instead of
+"what is left?", so it stops the next person asking - Chris spent an evening
+diffing mode lines against it.
+
+## What is now done
+
+- **`japanese-shift-jis`** (`SHIFT-JIS`, mnemonic `S`) and **`chinese-big5`**
+  (`BIG5`, mnemonic `B`) with `detect_coding_sjis` and `detect_coding_big5`,
+  and their category bindings. `detect_coding_big5` copies the C's
+  asymmetry: a bad *second* byte returns 0 having set neither `found` nor
+  `rejected`, where the "not a lead byte" path rejects.
+- **`undecided`** (`utf-8`'s codec, mnemonic `-`), and `coding-system-for-file`
+  answering it when nothing declares and nothing is detected. Its mnemonic
+  is a *mnemonic* (measured: `(coding-system-mnemonic 'undecided)` is 45),
+  not `decode_mode_spec_coding`'s "not yet decided" branch - which is why
+  this turned out to be a table entry rather than a subsystem.
+- **`mode-line-remote`** and the `%@` construct (`xdisp.c:29823`), which is
+  the third character of the `---` Emacs draws after the end-of-line
+  mnemonic. `file-remote-p` answers `#f` for everything, honestly: there are
+  no file-name handlers here.
+
+The mode line now matches Emacs character for character on all six
+`encoding-test-files` fixtures:
+
+```
+schemacs  -UU-:---         emacs  -UU-:---         (ascii.txt, via undecided)
+schemacs  -UU1:---         emacs  -UU1:---         (latin1.txt, koi8_r.txt)
+schemacs  -UUS:---         emacs  -UUS:---         (cp865.txt)
+schemacs  -UUU:---         emacs  -UUU:---         (utf8.txt)
+```
+
+## What is still trimmed, and what each would take
+
+Named properly this time, in the file header as well as here:
+
+| | size / blocker |
+|---|---|
+| `detect_coding_iso_2022` | 259 lines, a state machine. **The one genuinely large detector.** |
+| `detect_coding_emacs_mule` | 80 lines **and no iconv equivalent exists** - Emacs's own encoding. The detector alone is useless. |
+| `detect_coding_utf_16` | 79 lines + the `utf-16-auto` mapping + two category bindings. Would close BOM-less UTF-16, which currently falls to `undecided`. |
+| `utf-8-emacs` | Emacs's five-byte form; **no iconv equivalent**. The one codec that must be hand-written. |
+| `charset.c` / the registry | behind `find-coding-systems-region`, `select-safe-coding-system`, `encode-char`, a second charset family |
+| `file-coding-system-alist`, `auto-coding-regexp-alist` | **not named before at all.** Emacs's chain is alist → tag → statistics; we have tag → statistics. |
+| `decode-coding-region`, `encode-coding-region` | mentioned in passing, never named |
+| `coding-system-p` for nil | one line; Emacs says `t` |
+| `set-terminal-coding-system`, `set-keyboard-coding-system`, `list-coding-systems` | cheap - there is one terminal |
+| `raw-text`'s EOL conversion, `utf-16le-with-signature` naming | small |
+| the per-character walk | Emacs resolves the coding system once; we re-derive per character |
+
+`ccl` is **not** on this list: Emacs's own `coding-system-priority-list` has
+no ccl entry, so the unbound branch is Emacs's answer too.
+
+## The lesson
+
+A gap note should answer "what is left and what would it take", not "is this
+faithful". The first gets the work finished; the second gets the next person
+to stop asking. I had the information for the first - the C is right there
+and the line counts take a minute - and wrote the second.
+
+All 31 suites pass (coding-tests 40) and `tools/pty-check.py` is 61/61.

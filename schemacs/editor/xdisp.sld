@@ -996,6 +996,9 @@
        (list (list ':eval mode-line-front-space)
              (list ':eval mode-line-mule-info)
              (list "%1*" "%1+")
+             ;; `mode-line-remote', which Emacs has right here - between
+             ;; `mode-line-modified' and `mode-line-window-dedicated'.
+             "%1@"
              " "
              "%12b"
              " -- L" "%l" " C" "%c"
@@ -1144,6 +1147,23 @@
         ((mac) "(Mac)")
         (else ":")))
 
+    (define (file-remote-p filename)
+      ;; GNU Emacs's `file-remote-p' (`files.el'): "Test whether FILE
+      ;; specifies a location on a remote system." Emacs asks the file
+      ;; name handlers - `(find-file-name-handler file 'file-remote-p)' -
+      ;; and returns nil when none matches.
+      ;;
+      ;; **Every name is local here, and that is the honest answer rather
+      ;; than a stub.** `*file-name-handler-alist*' is empty - there is no
+      ;; Tramp and no archive handler - so `find-file-name-handler'
+      ;; answers #f for everything, which is the same thing Emacs answers
+      ;; on a machine with no handlers loaded. It lives *here* rather than
+      ;; in `files.sld' because `%@' is in this library and `files.sld' is
+      ;; above it; when a handler list arrives it moves down beside
+      ;; `find-file-name-handler', which is `fileio.sld''s.
+      ;;--------------------------------------------------------------
+      (if (string? filename) #f #f))
+
     (define (graphical-frame?)
       ;; GNU Emacs's `FRAME_WINDOW_P': whether this frame has a window
       ;; system behind it. It is what tells `%z' whether to name the
@@ -1246,6 +1266,18 @@
                   (decode-mode-spec-coding (keyboard-coding-system) #f)
                   (decode-mode-spec-coding (terminal-coding-system) #f)
                   (decode-mode-spec-coding buffer-cs eol?)))))
+          ;; `%@' is `mode-line-remote': "@" when the buffer's
+          ;; `default-directory' is on a remote system and "-" when it is
+          ;; not (`xdisp.c:29823'). It is the third character of the
+          ;; `---' Emacs draws after the end-of-line mnemonic - measured,
+          ;; `-UU-:---' for an LF file - and it is why this tree's mode
+          ;; line read `--' there.
+          ((#\@)
+           (if (file-remote-p
+                (buffer-local-value (window-buffer window)
+                                    'default-directory
+                                    "/"))
+               "@" "-"))
           ;; `%-' is "enough dashes to fill the mode line": how many is only
           ;; known when the line is placed, so the drawing code pads instead
           ((#\-) "")
