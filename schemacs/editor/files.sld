@@ -40,7 +40,8 @@
           find-coding-system coding-system-change-eol-conversion
           detect-eol bytes-have-null? adjust-coding-eol-type
           detect-coding-bytes
-          decode-eol encode-eol *last-coding-system-used*)
+          decode-eol encode-eol *last-coding-system-used*
+          *coding-system-for-read* *coding-system-for-write*)
     (only (schemacs editor mule) set-auto-coding)
     (only (schemacs editor engine)
           set!text-editor-buffer-name set!text-editor-file-name
@@ -302,7 +303,13 @@ save-buffer
       ;; while the same file saying `utf-8-unix' keeps UNIX. Measured on
       ;; Emacs 31.1, both.
       ;;--------------------------------------------------------------
-      (let* ((base (or (set-auto-coding path bytes)
+      (let* ((base (or (*coding-system-for-read*)
+                       ;; `coding-system-for-read' is the outermost word
+                       ;; on the subject - `insert-file-contents' checks it
+                       ;; before the tag and before detection
+                       ;; (`fileio.c:4317') - and it is what C-x RET c and
+                       ;; C-x RET r set.
+                       (set-auto-coding path bytes)
                        ;; Nothing declared, so the *statistical* detector
                        ;; is asked - GNU Emacs's `detect-coding-region',
                        ;; which `find-operation-coding-system' falls back
@@ -1880,7 +1887,10 @@ at point instead."
             ;; *and* the end of line - and the code points go out rather
             ;; than a string, because a buffer holding a byte character
             ;; has no string form.
-            (let ((coding (buffer-file-coding-system buffer)))
+            ;; `coding-system-for-write' first, as `write-region' does:
+            ;; it is what C-x RET c sets for the following command.
+            (let ((coding (or (*coding-system-for-write*)
+                              (buffer-file-coding-system buffer))))
               (write-file-code-points path (text-editor-to-code-points buffer)
                                       coding)
               (*last-coding-system-used* coding))

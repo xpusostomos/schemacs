@@ -29,6 +29,7 @@ SCHEME_LIBRARIES := \
   ./schemacs/editor/fileio.sld \
   ./schemacs/editor/disp-table.sld \
   ./schemacs/editor/mule.sld \
+  ./schemacs/editor/mule-cmds.sld \
   ./schemacs/editor/files.sld \
   ./schemacs/editor/select.sld \
   ./schemacs/editor/syntax.sld \

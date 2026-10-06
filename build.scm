@@ -55,6 +55,7 @@
     (schemacs editor fileio)
     (schemacs editor disp-table)
     (schemacs editor mule)
+    (schemacs editor mule-cmds)
     (schemacs editor files)
     (schemacs editor select)
     (schemacs editor syntax)

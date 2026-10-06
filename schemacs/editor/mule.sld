@@ -32,7 +32,9 @@
     (scheme char)
     (only (guile) string-contains)
     (only (schemacs editor coding)
-          coding-system-p find-coding-system coding-system-name)
+          coding-system-p find-coding-system coding-system-name
+          as-coding-system
+          coding-system-eol-type coding-system-change-eol-conversion)
     ;; `string->utf8', which the encoding test needs, is `(scheme base)''s
     ;; here - as `xterm.sld' notes of the same call for the clipboard.
     )
@@ -45,6 +47,8 @@
    *auto-coding-alist* auto-coding-alist-lookup
    find-auto-coding set-auto-coding
    coding-system-from-file-name
+   ;; Merging the unspecified aspects of one into another - `mule.el''s
+   merge-coding-systems
    )
 
   (begin
@@ -374,6 +378,24 @@
                ((raw-text text) 'raw-text)
                ((utf-16 utf-16le utf-16be) sym)
                (else sym))))))
+
+    (define (merge-coding-systems first second)
+      ;; GNU Emacs's `merge-coding-systems' (`mule.el:1202'): "Fill in any
+      ;; unspecified aspects of coding system FIRST from SECOND."
+      ;;
+      ;; Two aspects can be unspecified. Emacs's `undecided' is one - it
+      ;; is the coding system that says nothing about *text* conversion -
+      ;; and it is not carried here, so the branch that merges it has no
+      ;; case to fire on. The *eol* is the other, and it is one this tree
+      ;; does have: a coding system whose eol-type is #f is `utf-8' before
+      ;; a file made it `utf-8-dos', and merging is what stops `C-x RET f
+      ;; utf-8' from throwing away the line ends the buffer was read with.
+      ;;--------------------------------------------------------------
+      (let ((eol (coding-system-eol-type (as-coding-system second))))
+        (if (and (not (coding-system-eol-type (as-coding-system first))) eol)
+            (coding-system-change-eol-conversion
+             (coding-system-name (as-coding-system first)) eol)
+            (coding-system-name (as-coding-system first)))))
 
     (define (%byte-order-mark bytes)
       ;; The coding system a byte order mark at the front says: `EF BB BF'

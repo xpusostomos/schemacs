@@ -31,6 +31,7 @@ import os, pty, select, sys, time, base64
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 C_x = b"\x18"
+RET = b"\r"
 C_c = b"\x03"
 C_f = b"\x06"
 C_a = b"\x01"
@@ -1340,6 +1341,48 @@ def check_coding_roundtrip():
     return problems
 
 
+def check_set_coding_system():
+    """`C-x RET f` and `C-x RET c` decide how a save is written.
+
+    Both are Emacs's own commands on `mule-keymap' (`mule-cmds.el`), which
+    `C-x RET` is bound to - RET and `C-m` being one key, as in Emacs.
+
+    The two are different commands with the same effect on one save:
+    `C-x RET f` sets the *buffer's* coding system, so the buffer's mode
+    line and every later save use it; `C-x RET c` sets it for the one
+    following command and leaves the buffer alone.  Both are checked here
+    by what lands on disk: the text is UTF-8 in the buffer either way, and
+    what must change is the bytes.
+
+    The prompt starts with the buffer's current coding system as its
+    default, so `C-a C-k` clears it before the name is typed - the same
+    thing the other prompting checks do.
+    """
+    problems = []
+    e_acute = "\u00e9"                       # one character, two UTF-8 bytes
+    # `C-x RET f': set the buffer's coding system, then save
+    path = "/tmp/pty-check-coding-f.txt"
+    with open(path, "w", encoding="utf-8") as port:
+        port.write("caf" + e_acute + "\n")
+    drive([C_x + RET, b"f", C_a, C_k, b"iso-latin-1", RET, C_x + C_s, C_x + C_c],
+          path)
+    with open(path, "rb") as port:
+        written = port.read()
+    if written != b"caf\xe9\n":
+        problems.append("C-x RET f did not write Latin-1: %r" % written)
+    # `C-x RET c': the coding system applies to the next command only
+    path = "/tmp/pty-check-coding-c.txt"
+    with open(path, "w", encoding="utf-8") as port:
+        port.write("caf" + e_acute + "\n")
+    drive([C_x + RET, b"c", C_a, C_k, b"iso-latin-1", RET,
+           C_x + C_s, C_x + C_c], path)
+    with open(path, "rb") as port:
+        written = port.read()
+    if written != b"caf\xe9\n":
+        problems.append("C-x RET c did not write Latin-1: %r" % written)
+    return problems
+
+
 def check_write_file():
     """C-x C-w writes the buffer under a new name.
 
@@ -2613,6 +2656,7 @@ CHECKS = {
     "continuation": check_continuation,
     "mode-line-eol": check_mode_line_eol,
     "coding-roundtrip": check_coding_roundtrip,
+    "set-coding-system": check_set_coding_system,
     "wide-columns": check_wide_columns,
     "kill-ring": check_kill_ring,
     "osc52": check_osc52,

@@ -32,6 +32,9 @@
     (only (schemacs editor paragraphs))
     ;; `replace.el' - the ncurses.sld note says why.
     (only (schemacs editor replace))
+    ;; The multilingual commands (`C-x RET ...`), which install their own
+    ;; keys - `mule-cmds.el`. Not for a name: for the load.
+    (only (schemacs editor mule-cmds))
     ;; `dired.el': C-x d binds at load, the same reason again.
     (only (schemacs editor dired)))
 

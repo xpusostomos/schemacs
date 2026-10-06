@@ -22,6 +22,7 @@
    *mark-even-if-inactive*
    *this-event*
    current-prefix-arg
+   *pending-coding-system*
    *called-interactively*
    called-interactively?
    uarg->integer
@@ -118,6 +119,26 @@
       ;; the evaluation; a command body that wants the raw prefix asks
       ;; with `(interactive "P")' instead, which is Emacs's "less
       ;; clean" way.
+      ;;--------------------------------------------------------------
+      (make-parameter #f))
+
+    (define *pending-coding-system*
+      ;; The coding system the *next* command's I/O should use, or #f -
+      ;; GNU Emacs's `mule-cmds--prefixed-command-next-coding-system'
+      ;; (`mule-cmds.el:290'), which `universal-coding-system-argument'
+      ;; (C-x RET c) sets.
+      ;;
+      ;; **It lives beside the prefix argument because C-x RET c *is* a
+      ;; prefix command** - Emacs's own implementation calls
+      ;; `prefix-command-preserve-state' - and this tree's prefix
+      ;; argument already has exactly the extent this needs: the loop
+      ;; reads it at the top of an iteration and clears it, so the value
+      ;; a command leaves is consumed by the command that follows and by
+      ;; no other. Emacs instead rewrites `this-command' into a closure
+      ;; that *binds* the two coding-system variables around the real
+      ;; command; the binding is what this loop's `parameterize' does
+      ;; with this value, and it covers the command's own minibuffer read
+      ;; as well, which is why a prefix survives a prompt.
       ;;--------------------------------------------------------------
       (make-parameter #f))
 

@@ -3045,3 +3045,98 @@ the masks got me nowhere: a hook that printed each `%reject!` argument
 showed `511 1 16384 16 32 262144 ...` and the answer was in the plain
 fact that the same bit appeared twice. **When the numbers are masks and
 the answer is wrong, print the operations, not the state.**
+
+# Changing a buffer's coding system (2026-10-06)
+
+Step 5 of the coding plan, and the last of it: the commands that *change*
+what a buffer's bytes are. `schemacs/editor/mule-cmds.sld` (new) mirrors
+`lisp/international/mule-cmds.el`, and `C-x RET` reaches it - RET and `C-m`
+being one key, measured: `(event-convert-list '(ctrl ?m))` is 13 and
+`(kbd "C-x RET f")` and `(kbd "C-x C-m f")` are the same key sequence.
+
+| key | command | what it does |
+|---|---|---|
+| `C-x RET f` | `set-buffer-file-coding-system` | the buffer's own coding system, marked modified so the next save happens |
+| `C-x RET r` | `revert-buffer-with-coding-system` | visit the file again reading it that way |
+| `C-x RET c` | `universal-coding-system-argument` | the *next* command's I/O, the buffer untouched |
+
+Beside them: `coding-system-for-read` and `coding-system-for-write` in
+`coding.sld`, which `coding-system-for-file` and `save-buffer` now consult
+first (the outermost word on the subject - `fileio.c:4317` checks it before
+the tag and before detection); `merge-coding-systems` in `mule.sld` (it is
+`mule.el`'s); and `read-coding-system` and `read-buffer-file-coding-system`
+for the prompts.
+
+## `C-x RET c` is a prefix command, and that is where it went
+
+Emacs implements it with three hooks, two variables and a rewritten
+`this-command`: `mule-cmds--prefixed-command-pch` replaces the next command
+with a closure that *binds* the two coding-system variables around it, which
+is what makes the coding system cover the command's own minibuffer read.
+
+This tree's command loop dispatches the action it looked up, not
+`this-command`, so a wrapper has nowhere to sit - and the first version here
+(first `pre-command-hook`, then clearing at the next one) gave the values a
+*keystroke* of extent rather than a command's, so they were gone before the
+save ran.
+
+The answer was already in the tree: **`C-x RET c` is a prefix command in
+Emacs too** - its own implementation calls `prefix-command-preserve-state` -
+and the prefix argument already has exactly the extent this needs. So
+`*pending-coding-system*` sits in `command.sld` beside `current-prefix-arg`,
+the loop reads it where it reads `pending-uarg` and clears it where it calls
+`clear-prefix!`, and it binds the two variables with `parameterize` around
+the command. Emacs's three hooks are three statements here; the extent is
+the same and covers the prompt for the same reason.
+
+## Bugs
+
+Every one is the same shape as the last pass's, which is worth saying out
+loud: **a coding system is a record here and a name in Emacs, and the
+accessors take one or the other.**
+
+1. `find-coding-system` on a *record* answers `#f` - so
+   `(coding-system-name (find-coding-system (buffer-file-coding-system ...)))`
+   died with "expecting struct: #f" in three places in `mule-cmds.sld` and in
+   `merge-coding-systems`. `as-coding-system` is the answer, and it is the
+   third time this has been the answer.
+2. `keyboard.sld` used the two new variables without importing them - the
+   missing-import class, **seventh** time in this tree, and this one took the
+   whole editor down on the first keypress ("Unbound variable:
+   `*coding-system-for-read*`" behind a `Backtrace:` that the screen had
+   scrolled past).
+3. **The lookup does not descend into a submap.** Emacs binds `C-x C-m` to
+   `mule-keymap` and looks the command up *inside* it; this tree's lookup
+   walks a map's own layers and the maps beside it, which is why
+   `find-file-other-window` is bound as a flat `C-x 4 f`. Binding
+   `(kbd "C-x RET")` to `mule-keymap` therefore bound nothing. `mule-keymap`
+   stays as Emacs's object and the three commands are bound flat; the
+   departure is named in the file.
+
+## Departures
+
+1. **`mule-keymap` is not the thing that is looked up** (above).
+2. **`select-safe-coding-system` is not carried**, so `set-buffer-file-coding-system`
+   does not warn about characters the chosen coding system cannot encode. It
+   needs `find-coding-systems-region`, which needs charsets - the same wall
+   `detect-coding-charset` stops at. Emacs skips the check itself when the
+   region's answer is `undecided`, which is the branch this is equivalent to.
+3. **Seven of `mule-keymap`'s ten entries are not carried**, each for want of
+   the thing it needs: `F` (file names), `t`/`k` (the terminal's and the
+   keyboard's - there is one terminal here and its encoding is the
+   process's), `p` (no subprocesses), `x`/`X` (the selection's), `C-\`
+   (an input method - `quail`, a project of its own), `l` (the language
+   environment, which is a table of defaults for all of the above). They are
+   listed in the file header.
+
+## Tests
+
+- `mule-cmds-tests.scm` (new, 6) - `merge-coding-systems` both ways, the
+  completion table's shape, what is *in* `mule-keymap`.
+- `tools/pty-check.py` 61 (was 60) - `set-coding-system`, which drives
+  `C-x RET f` and `C-x RET c` through the real command loop and compares the
+  bytes on disk. The two are the same effect reached two ways, and the check
+  is what tells them apart: only one of them leaves the buffer's own coding
+  system changed.
+
+All 31 suites pass and `tools/pty-check.py` is 61/61.

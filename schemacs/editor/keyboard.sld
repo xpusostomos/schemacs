@@ -84,7 +84,13 @@
           barf-if-buffer-read-only insert)
     ;; `uarg->integer' is `callint.c''s, in the command library the
     ;; commands' interactive specs come from.
-    (only (schemacs editor command) uarg->integer current-prefix-arg)
+    (only (schemacs editor command) uarg->integer current-prefix-arg
+          *pending-coding-system*)
+    ;; The two variables C-x RET c names for the next command. They are
+    ;; `coding.c`'s, and they are bound here because the command loop is
+    ;; what has the extent Emacs binds them for.
+    (only (schemacs editor coding)
+          *coding-system-for-read* *coding-system-for-write*)
     ;; The primary selection the command loop keeps updated while the
     ;; region stays active - the call `keyboard.c:1639' makes.
     (only (schemacs editor select) gui-set-selection
@@ -250,6 +256,10 @@
       ;; something to redo.
       ;;--------------------------------------------------------------
       (let* ((uarg (pending-uarg))
+             ;; C-x RET c leaves a coding system for *this* command, the
+             ;; way C-u leaves a prefix argument - read here so that
+             ;; `clear-prefix!' below is what consumes both.
+             (coding (*pending-coding-system*))
              (buffer (current-buffer)))
         ;; Emacs clears its buffer-local deferred flag before every command;
         ;; edits and region commands may set it again while they run.
@@ -263,6 +273,7 @@
         (unless (or (eq? action undo) (eq? action undo-redo))
           (*last-change-was-undo* #f))
         (clear-prefix!)
+        (*pending-coding-system* #f)
         (set!frame-message frame "")
         ;; `pre-command-hook', run here because Emacs runs it here: after
         ;; `this-command' is set and before the command itself
@@ -275,6 +286,12 @@
         ;; read-only buffer, say - signals an error, and the command
         ;; loop reports it in the echo area and carries on, as GNU Emacs
         ;; does. Letting it out would take the editor down with it.
+        ;; Bound around the command, as Emacs's rewritten `this-command'
+        ;; binds them: the extent has to cover the command's own
+        ;; minibuffer read, which is where a coding system is usually
+        ;; *named* - a `let' would leave the prompt outside it.
+        (parameterize ((*coding-system-for-read* coding)
+                       (*coding-system-for-write* coding))
         (guard (ex (else (report-command-error! frame ex)))
           (cond
            ((command-type? action)
@@ -295,7 +312,7 @@
                       (run-command record uarg)
                       (run-command record))
                   (action))))
-           (else (error "not a command" action))))
+           (else (error "not a command" action)))))
         ;; Commands such as `kill-ring-save' set the buffer's deferred
         ;; `deactivate-mark' flag. Apply it after the command, as Emacs does,
         ;; so later motion does not extend the copied region. Not

@@ -80,6 +80,7 @@
    *max-eol-check-count* detect-eol bytes-have-null? adjust-coding-eol-type
    decode-eol encode-eol
    *last-coding-system-used*
+   *coding-system-for-read* *coding-system-for-write*
    ;; Which coding system a file's bytes are in
    detect-coding-bytes detect-coding-system
    *coding-category-priority* *coding-categories-bound*
@@ -1107,6 +1108,17 @@
                      (or (adjust-coding-eol-type name eol)
                          (find-coding-system name))))
                   found))))
+
+    (define *coding-system-for-read* (make-parameter #f))
+    (define *coding-system-for-write* (make-parameter #f))
+    ;; ^ GNU Emacs's `coding-system-for-read' and
+    ;; `coding-system-for-write' (`coding.c'): the coding system to use
+    ;; for the *next* read or write whatever the buffer's own says. They
+    ;; are what `universal-coding-system-argument' (C-x RET c) and
+    ;; `revert-buffer-with-coding-system' (C-x RET r) bind, and
+    ;; `insert-file-contents' checks the first of them before the `coding:'
+    ;; tag and before detection (`fileio.c:4317') - it is the outermost
+    ;; word on the subject.
 
     (define *last-coding-system-used* (make-parameter #f))
 
