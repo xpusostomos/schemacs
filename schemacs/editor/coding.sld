@@ -57,7 +57,7 @@
     ;; `array-set!' takes the *value before the index*, which is the
     ;; opposite of `vector-set!'. `put-u8' / `get-u8' and the three port
     ;; settings are Guile's too.
-    (only (guile) array-length array-ref array-set! catch logand logior
+    (only (guile) array-length array-ref array-set! catch logand logior lognot list-head
           make-hash-table hashq-set! hashq-ref
           make-typed-array
           set-port-conversion-strategy! set-port-encoding!)
@@ -855,6 +855,23 @@
       ;; stops before it and why it is not in here.
       (%category-mask-through 'emacs-mule))
 
+    (define *category-mask-utf-16*
+      ;; `CATEGORY_MASK_UTF_16': the five UTF-16 categories are one
+      ;; question, and this is the one detector that answers *which* byte
+      ;; order as well as whether - so it sets and clears the five
+      ;; separately rather than all at once as the UTF-8 one does.
+      (let loop ((cs '(utf-16-auto utf-16-be utf-16-le
+                       utf-16-be-nosig utf-16-le-nosig))
+                 (m 0))
+        (if (null? cs) m (loop (cdr cs) (logior m (%mask (car cs)))))))
+
+    (define *category-mask-not-utf-16*
+      ;; The C's `~CATEGORY_MASK_UTF_16` - every category *except* the
+      ;; five, which is what a NUL byte rules out. Intersected with
+      ;; `CATEGORY_MASK_ANY' because the C's `~' also covers the
+      ;; categories the walk never visits, and those cannot matter.
+      (logand *category-mask-any* (lognot *category-mask-utf-16*)))
+
     (define *category-mask-charset* (%mask 'charset))
     (define *category-mask-raw-text* (%mask 'raw-text))
 
@@ -878,6 +895,20 @@
         (charset     . iso-latin-1)
         (sjis        . japanese-shift-jis)
         (big5        . chinese-big5)
+        ;; The UTF-16 family. Emacs names the three with-signature ones
+        ;; apart - `utf-16-with-signature', `utf-16be-with-signature',
+        ;; `utf-16le-with-signature' - because its `:coding-type' carries
+        ;; the byte order *and* whether a mark is written. iconv's "UTF-16"
+        ;; is one codec that reads whichever mark is there, so all three
+        ;; answer it here; the detector still tells the walk which order it
+        ;; saw, which is what the `utf-16-auto' mapping below is for. The
+        ;; two `-nosig' ones are the explicit-order codecs, which is what
+        ;; iconv's "UTF-16BE"/"UTF-16LE" are.
+        (utf-16-auto . utf-16)
+        (utf-16-be   . utf-16)
+        (utf-16-le   . utf-16)
+        (utf-16-be-nosig . utf-16be)
+        (utf-16-le-nosig . utf-16le)
         (raw-text    . raw-text)))
 
     (define-record-type <detection-info>
@@ -1133,6 +1164,87 @@
                             (else (loop (+ i 2) (%mask 'big5)))))))
                (else (%reject! info (%mask 'big5)) #f))))))))
 
+    (define (detect-coding-utf-16 bytes head-ascii info)
+      ;; GNU Emacs's `detect_coding_utf_16' (`coding.c:6100'): whether
+      ;; BYTES could be UTF-16, and which byte order.
+      ;;
+      ;; **It does not skip the ASCII head**, unlike every other detector:
+      ;; a UTF-16 file has no ASCII head to skip, and the C reads from
+      ;; `coding->source'. HEAD-ASCII is taken for the walk's sake and not
+      ;; used.
+      ;;
+      ;; Two questions, in the C's order. A byte order mark answers both
+      ;; at once. Without one it *measures*: it counts the distinct bytes
+      ;; at even positions and at odd ones, and a side with 128 or more of
+      ;; them cannot be the half a UTF-16 ASCII file pads with - so that
+      ;; side's `-nosig' category is rejected. A file with no BOM and
+      ;; neither side rich is left with both, and the walk's closing
+      ;; last-resort branch picks between them by priority.
+      ;;--------------------------------------------------------------
+      (set!detection-info-checked info
+        (logior (detection-info-checked info) *category-mask-utf-16*))
+      (let ((n (bytevector-length bytes)))
+        (cond
+         ;; `CODING_MODE_LAST_BLOCK && (src_chars & 1)': the whole block
+         ;; is always here, and an odd number of bytes cannot be UTF-16.
+         ((odd? n) (%reject! info *category-mask-utf-16*) #f)
+         ;; `TWO_MORE_BYTES' ran out - the C's `goto no_more_source',
+         ;; which answers 1 having set nothing.
+         ((< n 2) #t)
+         (else
+          (let ((c1 (bytevector-u8-ref bytes 0))
+                (c2 (bytevector-u8-ref bytes 1)))
+            (cond
+             ((and (= c1 #xFF) (= c2 #xFE))
+              (%found! info (logior (%mask 'utf-16-le) (%mask 'utf-16-auto)))
+              (%reject! info (logior (%mask 'utf-16-be)
+                                     (%mask 'utf-16-be-nosig)
+                                     (%mask 'utf-16-le-nosig)))
+              #t)
+             ((and (= c1 #xFE) (= c2 #xFF))
+              (%found! info (logior (%mask 'utf-16-be) (%mask 'utf-16-auto)))
+              (%reject! info (logior (%mask 'utf-16-le)
+                                     (%mask 'utf-16-be-nosig)
+                                     (%mask 'utf-16-le-nosig)))
+              #t)
+             (else
+              ;; No mark: measure the two halves.
+              (let ((e (make-vector 256 #f))
+                    (o (make-vector 256 #f))
+                    (e-num 1)
+                    (o-num 1)
+                    (rejected 0))
+                (vector-set! e c1 #t)
+                (vector-set! o c2 #t)
+                (%reject! info
+                          (logior (%mask 'utf-16-auto) (%mask 'utf-16-be)
+                                  (%mask 'utf-16-le)))
+                (let loop ((i 2) (e-num 1) (o-num 1))
+                  (let ((done? (= *category-mask-utf-16*
+                                  (logand (detection-info-rejected info)
+                                          *category-mask-utf-16*))))
+                    (cond
+                     (done? #t)
+                     ((>= (+ i 1) n) #t)       ; `c2 < 0' - the source ran out
+                     (else
+                      (let ((x (bytevector-u8-ref bytes i))
+                            (y (bytevector-u8-ref bytes (+ i 1))))
+                        (let ((rejected rejected)
+                              (e-num e-num)
+                              (o-num o-num))
+                          (unless (vector-ref e x)
+                            (vector-set! e x #t)
+                            (set! e-num (+ e-num 1))
+                            (when (>= e-num 128)
+                              (%reject! info (%mask 'utf-16-be-nosig))))
+                          (unless (vector-ref o y)
+                            (vector-set! o y #t)
+                            (set! o-num (+ o-num 1))
+                            (when (>= o-num 128)
+                              (%reject! info (%mask 'utf-16-le-nosig))))
+                          (loop (+ i 2) e-num o-num)))))))
+                #f))))))))
+
     (define (%scan-head bytes)
       ;; The C's opening `for (; src < src_end; src++)' in
       ;; `detect_coding_system' (`coding.c:8712'). Three answers: the
@@ -1205,6 +1317,7 @@
         ((charset) detect-coding-charset)
         ((sjis) detect-coding-sjis)
         ((big5) detect-coding-big5)
+        ((utf-16-auto) detect-coding-utf-16)
         (else #f)))
 
     (define (detect-coding-system bytes highest)
@@ -1227,14 +1340,52 @@
                 ;; Every byte was 7-bit and nothing was found: the C's
                 ;; `undecided'. It skips the whole walk for this case.
                 #f
-                (let walk ((ps *coding-category-priority*))
+                (begin
+                  ;; **A NUL byte rules out everything but UTF-16**, and
+                  ;; this is the key that makes UTF-16 detection reachable
+                  ;; at all: a UTF-16 file of ASCII text is half NULs, and
+                  ;; without this the `charset' category - which is *second*
+                  ;; in priority order - accepts those bytes as Latin-1 and
+                  ;; wins, because 0xFF is a perfectly good Latin-1 byte.
+                  ;; The C marks every category but the five both `checked'
+                  ;; and `rejected' so that only they can match
+                  ;; (`coding.c:8926').
+                  (when null-byte-found
+                    (set!detection-info-checked
+                     info (logior (detection-info-checked info)
+                                  *category-mask-not-utf-16*))
+                    (%reject! info *category-mask-not-utf-16*))
+                ;; **The walk is bounded by a *position* compared
+                ;; against raw_text's *index* - the C's won't-fix wart,
+                ;; and it is what makes a file no category claims answer
+                ;; `raw-text' rather than `no-conversion'.**
+                ;;
+                ;; The C's loop is `for (i = 0; i < coding_category_raw_text;
+                ;; i++)' (`coding.c:8799'): `i' is a priority *position*
+                ;; and `coding_category_raw_text' is a category *index*,
+                ;; and the two are the same number only because the enum
+                ;; happens to have nineteen detector categories before
+                ;; raw_text. The effect is that the last two priority
+                ;; entries are never visited - and since `ccl' is never
+                ;; *rejected* either, `(rejected & ANY) != ANY' holds, so
+                ;; the last-resort branch below never fires and the answer
+                ;; is found by priority instead.
+                ;;
+                ;; Measured against Emacs: a three-byte file ending in a
+                ;; C1 control is `(raw-text)' from `detect-coding-region'.
+                ;; Answering `no-conversion' there - which this did, by
+                ;; walking the whole list - is the bug this bounds.
+                (let walk ((ps (list-head *coding-category-priority*
+                                          (%category-index 'raw-text))))
                   (cond
                    ((null? ps)
                     (%finish-detection #f info null-byte-found))
                    ((eq? (car ps) 'raw-text)
-                    ;; `raw_text' is where the C's loop *stops*
-                    ;; (`i < coding_category_raw_text'), so it is skipped
-                    ;; rather than rejected.
+                    ;; `raw_text' is inside the bound and is *skipped*
+                    ;; rather than rejected - the C's
+                    ;; `category >= coding_category_raw_text: continue' -
+                    ;; which is why it is still standing when the
+                    ;; last-resort branch looks for something unrejected.
                     (walk (cdr ps)))
                    (else
                     (let* ((category (car ps))
@@ -1260,8 +1411,21 @@
                                                (detector bytes head-ascii info))))
                             (if (and accepted highest
                                      (not (= 0 (logand (detection-info-found info) bit))))
-                                (%finish-detection category info null-byte-found)
-                                (walk (cdr ps))))))))))))))))
+                                ;; The C's one special case: a coding
+                                ;; system of the `utf-16-auto' category is
+                                ;; narrowed to the byte order the detector
+                                ;; saw, so that what is recorded is
+                                ;; `utf-16le...' and not "some UTF-16"
+                                ;; (`coding.c:8821').
+                                (%finish-detection
+                                 (if (eq? category 'utf-16-auto)
+                                     (if (not (= 0 (logand (detection-info-found info)
+                                                           (%mask 'utf-16-le))))
+                                         'utf-16-le
+                                         'utf-16-be)
+                                     category)
+                                 info null-byte-found)
+                                (walk (cdr ps)))))))))))))))))
 
     (define (detect-coding-bytes bytes highest)
       ;; `detect-coding-system' under the name the file layer calls it by.

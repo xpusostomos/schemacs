@@ -3471,3 +3471,118 @@ to stop asking. I had the information for the first - the C is right there
 and the line counts take a minute - and wrote the second.
 
 All 31 suites pass (coding-tests 40) and `tools/pty-check.py` is 61/61.
+
+# UTF-16 detection, and the walk's bound (2026-10-06)
+
+Item 1 of the plan: `detect_coding_utf_16`, the `utf-16-auto` mapping, the
+NUL-byte restriction, and the `-nosig` category bindings. It turned up three
+things, and only one of them was the detector.
+
+## The finding that matters: the walk was unbounded, and it changed an answer
+
+The C's loop is a **priority position compared against a category index**:
+
+```c
+for (i = 0; i < coding_category_raw_text; i++)     /* coding.c:8799 */
+  { category = coding_priorities[i]; ... }
+```
+
+`i` is a position in the priority list and `coding_category_raw_text` is an
+*index* — nineteen, because the enum happens to have nineteen detector
+categories before raw_text. So the **last two priority entries are never
+visited at all**, and `raw_text` is skipped rather than rejected, which is
+what leaves it standing for the last-resort branch.
+
+The port walked the whole list and rejected `ccl` on the way past. Measured
+on a three-byte file ending in a C1 control:
+
+| | |
+|---|---|
+| Emacs `detect-coding-region` | `(raw-text)` |
+| ours, before | `(no-conversion)` |
+| ours, after | `(raw-text)` |
+
+`coding.sld`'s walk now takes `(list-head *coding-category-priority*
+(%category-index 'raw-text))`, and the comment says why the C's wart is
+copied rather than tidied.
+
+**This also settles `ccl` properly.** It is not merely that Emacs binds
+nothing to that category — it is never *tested*. `ccl` sits at priority
+position 19, past the bound. So the unbound branch is not even the reason it
+cannot match.
+
+## The detector itself: faithful, and almost unreachable
+
+`detect_coding_utf_16` is ported whole, including the dispersion heuristic
+that counts distinct bytes at even and odd positions to decide which half a
+UTF-16 file pads with. Verified against Emacs's own `detect-coding-region`:
+
+| bytes | Emacs | ours |
+|---|---|---|
+| the UTF-16 fixture (BOM, ASCII) | `(no-conversion)` | `no-conversion` |
+| BOM-less UTF-16LE/BE of ASCII | `no-conversion` | `no-conversion` |
+| BOM-less UTF-16 of CJK, no NULs | `japanese-shift-jis-unix` | same |
+| an odd byte count | `(raw-text)` | `raw-text` |
+
+**A UTF-16 file is nearly always read by something else first**, and that is
+Emacs's behaviour rather than a gap: a NUL byte makes the walk answer
+`no-conversion` (`null_byte_found`), and UTF-16 text *without* NULs is CJK,
+where `charset` or `sjis` is reached first. The detector earns its place for
+the dispersion case and for the `-nosig` categories, and both are rare.
+
+**The BOM stays in `find-auto-coding`.** The plan said to move it into the
+detector, and that would have been a regression: Emacs's *file* path names
+the UTF-16 fixture `utf-16le-with-signature-unix` while its own
+`detect-coding-region` answers `(no-conversion)` — so the file path gets its
+BOM from outside the category walk, which is where this tree has it too. The
+departure named in `a66999e` is smaller than it looked.
+
+## A structural finding: Emacs has the detection logic *twice*
+
+For the odd-C1 file Emacs's `find-file` answers `utf-8-unix` where its own
+`detect-coding-region` answers `(raw-text)`. That is not a subtlety in the
+walk — it is **a second detector**:
+
+| | |
+|---|---|
+| `detect_coding_system` (`coding.c:8686`) | the entry `detect-coding-region` and `detect-coding-string` call. **This is the one ported.** |
+| `detect_coding` (`coding.c:6501`) | the *decode path*'s, called from `decode_coding` (`:7926`, `:8128`) — i.e. by `insert-file-contents`, so it is what `find-file` uses. |
+
+They are near-copies of each other — the same scan, the same masks, the same
+walk — but `detect_coding` also records the eol as it scans
+(`coding->eol_seen`) rather than leaving it to the caller, and its fallback
+chain when nothing is found ends at `raw_text` where
+`detect_coding_system`'s ends at `no_conversion`.
+
+**So the file path's detector is not ported, and everything measured against
+`find-file` has been measured against a function this tree does not have.**
+The walk underneath is the same, which is why the fixtures match.
+
+### And an open question I could not answer from the source
+
+I first wrote here that `prefer-utf-8` explained it. **That was wrong, and
+the measurement says so**: `(coding-system-get 'undecided :prefer-utf-8)` is
+`nil`, so that branch never runs.
+
+What is measured for `/tmp/odd.bin`, three bytes `2D 4E 87`:
+
+| | |
+|---|---|
+| `find-file` | `utf-8-unix` |
+| `last-coding-system-used` | `utf-8` |
+| `detect-coding-region` | `(raw-text)` |
+| `find-operation-coding-system` | `(undecided)`, from `file-coding-system-alist`'s catch-all `("" undecided)` |
+| `(coding-system-get 'undecided :prefer-utf-8)` | `nil` |
+
+Reading `detect_coding`'s ending — `null_byte_found → no_conversion`,
+everything-rejected → `raw_text`, else the first unrejected priority
+position — traces to `raw-text` three different ways, and **none of them
+reaches `utf-8`**. So the read path has a step this reading has not found.
+
+`detect_coding` is therefore *not* ported, and deliberately not written from
+a model that cannot explain the measurement. The next move is to find the
+missing step (probably by driving `insert-file-contents` on crafted files and
+watching `last-coding-system-used` change), not to write a plausible-looking
+translation of the C.
+
+All 31 suites pass (coding-tests 43) and `tools/pty-check.py` is 61/61.

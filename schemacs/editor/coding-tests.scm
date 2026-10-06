@@ -10,7 +10,7 @@
        coding-setup-port! coding-read-char coding-write-char
        detect-eol bytes-have-null? adjust-coding-eol-type
        decode-eol encode-eol coding-system?
-       detect-coding-bytes
+       detect-coding-bytes detect-coding-system
        coding-system-eol-type)
  (scheme file)
  (rnrs io ports)
@@ -408,5 +408,44 @@
   (let ((v (decode-coding-string (encoding-fixture "utf8") 'utf-8-unix)))
     (let loop ((i 0) (out '()))
       (if (= i 18) (reverse out) (loop (+ i 1) (cons (u32vector-ref v i) out))))))
+
+;; ------------------------------------------------------------------
+;; UTF-16, and the NUL rule that shadows it
+;;
+;; The UTF-16 detector is ported and is exercised by the UTF-16 fixture
+;; only through the *declaration* path, because a UTF-16 file of ASCII
+;; text is half NUL bytes - and a NUL byte makes the walk answer
+;; `no-conversion', in Emacs as here. These four cases are what Emacs's
+;; `detect-coding-region' answers for the same bytes, all measured.
+
+(test-equal "a NUL byte rules the whole walk out, UTF-16 included"
+  ;; `detect-coding-region' on the UTF-16 fixture's bytes answers
+  ;; `(no-conversion)' in Emacs too - the *file* path is what names it
+  ;; `utf-16le-with-signature', from the BOM, before the walk is reached.
+  '(no-conversion-unix no-conversion-unix)
+  (list (detected 97 0 98 10)
+        (detected 255 254 112 0 114 0 101 0)))
+
+(test-equal "BOM-less UTF-16 of CJK text is Shift-JIS in both"
+  ;; measured: Emacs answers `japanese-shift-jis-unix' for these bytes -
+  ;; the C1 byte 0x87 is what takes it past the `charset' category, and
+  ;; `sjis' is reached before any of the UTF-16 categories.
+  '(japanese-shift-jis-unix japanese-shift-jis-unix)
+  (list (detected 45 78 135 101 45 78)
+        (detected 78 45 101 135 78 45)))
+
+(test-equal "an odd byte count cannot be UTF-16, and raw-text is the fallback"
+  ;; The detector's first test - `(coding->src_chars & 1)' with the whole
+  ;; block present - rejects the five UTF-16 categories outright. What
+  ;; comes back is `raw-text' and not `no-conversion', and that is the
+  ;; *other* thing this case pins: the walk is bounded by a priority
+  ;; *position* compared against raw_text's *index* - the C's
+  ;; `for (i = 0; i < coding_category_raw_text; i++)' - so the last two
+  ;; entries are never tested at all, and raw_text, never rejected, is
+  ;; what the last-resort branch finds. Emacs's `detect-coding-region' on
+  ;; these bytes answers `(raw-text)', measured.
+  '(raw-text-unix raw-text)
+  (list (detected 45 78 135)
+        (car (detect-coding-system (list->u8vector (list 45 78 135)) #f))))
 
 (test-end "schemacs_editor_coding")
