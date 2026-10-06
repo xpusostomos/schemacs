@@ -39,6 +39,7 @@
           coding-system-p coding-system-name coding-system-eol-type
           find-coding-system coding-system-change-eol-conversion
           detect-eol bytes-have-null? adjust-coding-eol-type
+          detect-coding-bytes
           decode-eol encode-eol *last-coding-system-used*)
     (only (schemacs editor mule) set-auto-coding)
     (only (schemacs editor engine)
@@ -301,14 +302,28 @@ save-buffer
       ;; while the same file saying `utf-8-unix' keeps UNIX. Measured on
       ;; Emacs 31.1, both.
       ;;--------------------------------------------------------------
-      (let* ((base (or (set-auto-coding path bytes) 'utf-8))
+      (let* ((base (or (set-auto-coding path bytes)
+                       ;; Nothing declared, so the *statistical* detector
+                       ;; is asked - GNU Emacs's `detect-coding-region',
+                       ;; which `find-operation-coding-system' falls back
+                       ;; to for a file. It answers #f for the C's
+                       ;; `undecided', which is a file that is all 7-bit
+                       ;; text and declares nothing: the default, as it
+                       ;; was before there was a detector at all.
+                       (let ((detected (detect-coding-bytes bytes #t)))
+                         (and detected (car detected)))
+                       'utf-8))
+             ;; The eol is detected only when the name has not settled it
+             ;; (`adjust-coding-eol-type'), so a coding system the
+             ;; *detector* chose arrives here already carrying one.
              (eol (if (bytes-have-null? bytes)
                       ;; "if the text contains NUL, it is binary" -
                       ;; `coding.c:8930' - so the line ends are not
                       ;; converted whatever they look like.
                       'unix
                       (detect-eol bytes))))
-        (adjust-coding-eol-type base eol)))
+        (or (adjust-coding-eol-type base eol)
+            (find-coding-system base))))
 
     (define (decode-file-bytes bytes coding)
       ;; BYTES through CODING: the code points out, with the coding

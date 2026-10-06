@@ -2931,3 +2931,117 @@ hour because it mishandled `#\"` — a character literal whose *name* is a
 quote — and so silently started a string at the wrong place. It reported
 the pristine file as unbalanced too, which is what should have been the
 tell. When the reader and the counter disagree, the counter is wrong.
+
+# The statistical detector (2026-10-06)
+
+Step 4 of the coding plan, and the one that closes the last departure of
+substance from the previous pass: **a file that declares nothing is now
+read as what its bytes are**, not as UTF-8 by default. `café naïve` in
+Latin-1 comes back as `iso-latin-1-unix` with the letters themselves in the
+buffer - Emacs 31.1's own answer for the same file - where before it was
+`utf-8-unix` with two eight-bit characters in place of the accented ones.
+
+## What landed, and the shape it has
+
+`detect-coding-system` and everything it rests on, in `coding.sld`
+(`coding.c`'s own file):
+
+- the **category table** with `coding.c:476`'s enum order, because a mask
+  is a bit position and the order has to be the C's;
+- `coding-category-list` **as Emacs 31.1 answers it** (measured, not taken
+  from the C's default), and `coding-system-priority-list` narrowed to the
+  coding systems this tree carries;
+- the **three-mask protocol** - `<detection-info>` is the C's
+  `struct coding_detection_info` - and `detect_coding_system`'s walk,
+  including the branch that stops at `raw_text`;
+- `detect_coding_utf_8`, `detect_coding_charset`, and the C's opening
+  head-ASCII scan;
+- `%finish-detection` is the C's closing `if` chain, which turns the masks
+  into coding systems and settles the eol on top.
+
+`files.sld`'s `coding-system-for-file` now asks it when the file declares
+nothing, in Emacs's order: declaration first, then detection.
+
+## The measurements it was written against
+
+Every expectation is Emacs 31.1's own answer for the same bytes, by
+writing them to a file and asking what `buffer-file-coding-system` became:
+
+| bytes | Emacs | ours |
+|---|---|---|
+| `hello\n` | `undecided-unix` | undecided ✓ |
+| `café` in UTF-8 | `utf-8-unix` | `utf-8-unix` ✓ |
+| `café` in Latin-1 | `iso-latin-1-unix` | `iso-latin-1-unix` ✓ |
+| `a\xc3(b` (bad UTF-8) | `iso-latin-1-unix` | `iso-latin-1-unix` ✓ |
+| `a\xa0b` | `iso-latin-1-unix` | `iso-latin-1-unix` ✓ |
+| `a\x85b` (a C1 byte) | `japanese-shift-jis-unix` | `no-conversion-unix` (dep. 1) |
+| `a\x9fb` (another) | `emacs-mule-unix` | `no-conversion-unix` (dep. 1) |
+| `a\x00b` | `no-conversion` | `no-conversion-unix` ✓ |
+| `a\x1b$B$"b` (an escape) | `iso-2022-7bit-unix` | undecided (dep. 1) |
+| Latin-1 with CRLF | `iso-latin-1-dos` | `iso-latin-1-dos` ✓ |
+
+## Three bugs, and one of them is the kind that hides
+
+1. **`%reject!` summed where the C ORs.** The masks are bit *sets* and the
+   C writes them with `|=`; `+` makes a bit set twice carry into the one
+   above. The utf-8 detector's mask *overlaps* the per-category bits the
+   walk sets beside it, so carries landed immediately - and the symptom
+   was three functions away: `(logand rejected CATEGORY_MASK_ANY) ==
+   CATEGORY_MASK_ANY` never held, so a file no detector accepted was not
+   reported as `no-conversion`. **`logior`, everywhere.**
+2. **The C1 rule lost its upper guard.** In the C the whole test sits
+   inside `if (c >= 0x80)`, so `c < 0xA0 && check_latin_extra` means
+   0x80-0x9F and nothing else. Written as a bare `(< c #xA0)` it also
+   rejects every ASCII control byte - and then **no Latin-1 file is ever
+   detected at all**, because every one of them holds a line feed. The
+   isolated table above would not have shown it either: the ASCII cases
+   pass for a different reason.
+3. **`(= c #\return)`** - an integer compared with a character. The tree's
+   own hazard note, in the other direction.
+
+## Departures
+
+1. **The detector families this tree does not carry** - ISO-2022, SJIS,
+   Big5, CCL, emacs-mule, and `detect_coding_utf_16`. The walk is the C's
+   *with those categories unbound*, which is a configuration the C already
+   has a branch for (`if (this->id < 0) ... rejected |= 1 << category`), so
+   it is the same algorithm rather than a shortcut. The cost is the four
+   rows above: a file whose bytes are neither UTF-8 nor valid ISO-8859-1
+   is `no-conversion` here where Emacs names a family. **In every one of
+   them the bytes survive a round trip, which is the property that
+   matters** - and `café` in Latin-1, which is the case that comes up, is
+   exact. Worth closing one day for completeness; not worth it for
+   behaviour.
+2. **`charset.c` is not ported**, so `detect_coding_charset` drives from
+   what the tree has rather than from a charset registry: one charset
+   family (`iso-8859-1`), whose code space is `0x00-0xFF` at dimension 1,
+   and `latin-extra-code-table` as the constant `#f` (which is what this
+   Emacs answers for every byte in it - measured). The *algorithm* is the
+   C's. A second charset family - `iso-8859-2`, Thai, Devanagari - would
+   need the registry.
+3. **`undecided` is answered as `#f`**, "the file declares nothing", which
+   is what it means to every caller here. Emacs carries it as a coding
+   system so a later operation can re-decide.
+4. **The encoder's BOM byte order** (from the previous pass) stands.
+5. **`detect-coding-region` takes bytes, not a region**, because nothing
+   here has a buffer to take one from. Same algorithm, same answers.
+
+## Tests
+
+- `coding-tests.scm` 37 (was 30) - the nine measured files above, plus a
+  NUL byte, plus the ASCII-control case that pinpoints the C1 guard.
+- `ncurses-editor-tests.scm` 239 - the round-trip test now runs **two**
+  files, because there are two routes a byte can take: one the codec
+  decodes, and one only the eight-bit representation can carry.
+- `tools/pty-check.py` 60/60 - `coding-roundtrip` also asserts the Latin-1
+  file *displays* as Latin-1 and not as a placeholder.
+
+## The method note
+
+Reading the C gave the algorithm; the measurements gave three of the
+expectations and caught two of the bugs. The third - the `+`-for-`logior`
+- was caught by *tracing which rejections happen*, after reasoning about
+the masks got me nowhere: a hook that printed each `%reject!` argument
+showed `511 1 16384 16 32 262144 ...` and the answer was in the plain
+fact that the same bit appeared twice. **When the numbers are masks and
+the answer is wrong, print the operations, not the state.**

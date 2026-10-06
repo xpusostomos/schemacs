@@ -57,7 +57,8 @@
     ;; `array-set!' takes the *value before the index*, which is the
     ;; opposite of `vector-set!'. `put-u8' / `get-u8' and the three port
     ;; settings are Guile's too.
-    (only (guile) array-length array-ref array-set! catch logand make-typed-array
+    (only (guile) array-length array-ref array-set! catch logand logior
+          make-typed-array
           set-port-conversion-strategy! set-port-encoding!)
     (only (rnrs io ports) get-u8 put-u8)
     (only (schemacs editor character)
@@ -79,6 +80,9 @@
    *max-eol-check-count* detect-eol bytes-have-null? adjust-coding-eol-type
    decode-eol encode-eol
    *last-coding-system-used*
+   ;; Which coding system a file's bytes are in
+   detect-coding-bytes detect-coding-system
+   *coding-category-priority* *coding-categories-bound*
    ;; Converting
    decode-coding-string encode-coding-string
    )
@@ -688,7 +692,424 @@
                    (else (loop (cdr p) (cons (car p) acc))))))
           (else points))))
 
+    ;;------------------------------------------------------------------
+    ;; Which coding system a file's bytes are in
+    ;;------------------------------------------------------------------
+    ;;
+    ;; GNU Emacs's `detect_coding_system' (`coding.c:8686'): the bytes in,
+    ;; the coding system that could have produced them out. This is the
+    ;; *statistical* detector, which `set-auto-coding' is not: a
+    ;; declaration a file makes is used as given and this is never
+    ;; consulted, so a file saying `-*- coding: latin-1 -*-' is right even
+    ;; when its bytes would score as UTF-8.
+    ;;
+    ;; **It is a walk over *categories*, each with a detector**, and each
+    ;; detector is asked only what the ones before it have not settled.
+    ;; The three masks are the C's own: `checked' (this detector has run),
+    ;; `rejected' (this category cannot be it) and `found' (it can).
+    ;;
+    ;; **What is not carried, and why that is a configuration rather than
+    ;; a hole.** `detect_coding_iso_2022', `sjis', `big5', `ccl',
+    ;; `emacs-mule' and `detect_coding_utf_16' are not ported, and nor are
+    ;; the coding systems they detect. The C already has a branch for a
+    ;; category with nothing bound to it -
+    ;;
+    ;;     if (this->id < 0)
+    ;;       /* No coding system of this category is defined.  */
+    ;;       detect_info.rejected |= (1 << category);
+    ;;
+    ;; - so the walk below is the C's with those categories unbound. The
+    ;; difference it makes is measurable and narrow: Emacs answers
+    ;; `japanese-shift-jis-unix' for a file holding a C1 control byte,
+    ;; `emacs-mule-unix' for another, `iso-2022-7bit-unix' for an escape
+    ;; sequence (all measured); here those fall through to
+    ;; `no-conversion', in which the *bytes* survive. The cases that
+    ;; matter - UTF-8, ISO-8859-1 and plain ASCII - are exact.
+
+    (define *coding-categories*
+      ;; The categories in the C's enum order (`coding.c:476'), because a
+      ;; mask is a bit position and the order has to be the C's.
+      '(iso-7 iso-7-tight iso-8-1 iso-8-2 iso-7-else iso-8-else
+        utf-8-auto utf-8-nosig utf-8-sig
+        utf-16-auto utf-16-be utf-16-le utf-16-be-nosig utf-16-le-nosig
+        charset sjis big5 ccl emacs-mule
+        raw-text undecided))
+
+    (define (%category-index category)
+      (let loop ((cs *coding-categories*) (i 0))
+        (cond ((null? cs) #f)
+              ((eq? (car cs) category) i)
+              (else (loop (cdr cs) (+ i 1))))))
+
+    (define (%mask category)
+      (expt 2 (%category-index category)))
+
+    (define (%category-mask-through last)
+      ;; The C's masks-as-a-union idiom: the OR of every category up to
+      ;; and including LAST in the enum order.
+      (let loop ((cs *coding-categories*) (m 0))
+        (cond ((null? cs) m)
+              (else (let ((m (logior m (%mask (car cs)))))
+                      (if (eq? (car cs) last) m (loop (cdr cs) m)))))))
+
+    (define *category-mask-utf-8*
+      ;; `CATEGORY_MASK_UTF_8': the three UTF-8 categories are one
+      ;; question - a detector rejects or accepts all three at once.
+      (%category-mask-through 'utf-8-sig))
+
+    (define *category-mask-any*
+      ;; `CATEGORY_MASK_ANY': every category that *has* a detector.
+      ;; `raw-text''s is NULL (`coding.c:5856'), which is why the walk
+      ;; stops before it and why it is not in here.
+      (%category-mask-through 'emacs-mule))
+
+    (define *category-mask-charset* (%mask 'charset))
+    (define *category-mask-raw-text* (%mask 'raw-text))
+
+    (define *coding-category-priority*
+      ;; `coding-category-list' as Emacs 31.1 answers it, measured rather
+      ;; than taken from the C - the list is Emacs's to change, and this
+      ;; is the order every answer below was checked against.
+      '(utf-8-nosig iso-7 charset iso-7-else iso-8-else emacs-mule
+        raw-text iso-7-tight iso-8-1 iso-8-2
+        utf-8-auto utf-8-sig
+        utf-16-auto utf-16-be utf-16-le utf-16-be-nosig utf-16-le-nosig
+        sjis big5 ccl))
+
+    (define *coding-categories-bound*
+      ;; Which coding system each category has, which is Emacs's
+      ;; `(coding-system-priority-list)' - `utf-8 iso-2022-7bit
+      ;; iso-latin-1 ...' - narrowed to the coding systems this tree
+      ;; carries. A category not here has *nothing* bound to it, which is
+      ;; the C's `this->id < 0' case.
+      '((utf-8-nosig . utf-8)
+        (charset     . iso-latin-1)
+        (raw-text    . raw-text)))
+
+    (define-record-type <detection-info>
+      ;; GNU Emacs's `struct coding_detection_info': the three masks a
+      ;; walk carries between its detectors.
+      (make-detection-info checked rejected found)
+      detection-info?
+      (checked detection-info-checked set!detection-info-checked)
+      (rejected detection-info-rejected set!detection-info-rejected)
+      (found detection-info-found set!detection-info-found))
+
+    (define (%reject! info mask)
+      ;; **`logior', not `+`.** The C's masks are bit sets and it writes
+      ;; them with `|=`. Summed, a bit that is set twice carries into the
+      ;; one above it - and the utf-8 detector's mask overlaps the
+      ;; per-category bits the walk sets beside it, so the carries land
+      ;; immediately. The symptoms are not subtle and not near the cause:
+      ;; `(logand rejected CATEGORY_MASK_ANY) == CATEGORY_MASK_ANY' then
+      ;; never holds, so a file no detector accepted was *not* reported as
+      ;; `no-conversion'.
+      ;;--------------------------------------------------------------
+      (set!detection-info-rejected info
+        (logior (detection-info-rejected info) mask)))
+
+    (define (%found! info mask)
+      (set!detection-info-found info
+        (logior (detection-info-found info) mask)))
+
+    (define (%utf-8-bom? bytes)
+      ;; The three bytes of a UTF-8 byte order mark, which the C requires
+      ;; to be at the head of the source (`coding.c:5818').
+      (and (<= 3 (bytevector-length bytes))
+           (= (bytevector-u8-ref bytes 0) #xEF)
+           (= (bytevector-u8-ref bytes 1) #xBB)
+           (= (bytevector-u8-ref bytes 2) #xBF)))
+
+    (define (%utf-8-sequence-length c)
+      ;; How many bytes the sequence C leads, or 0 when C cannot lead one.
+      ;;
+      ;; The C's five-octet case (`UTF_8_5_OCTET_LEADING_P (c) && c <
+      ;; MAX_MULTIBYTE_LEADING_CODE') can never be taken - a five-octet
+      ;; lead has bit 3 of the top nibble set, and `MAX_MULTIBYTE_LEADING_CODE'
+      ;; is `0xF8' (`character.h:65') - so a five-byte form is refused,
+      ;; exactly as the C refuses it.
+      ;;--------------------------------------------------------------
+      (cond ((= (logand c #xE0) #xC0) 2)
+            ((= (logand c #xF0) #xE0) 3)
+            ((= (logand c #xF8) #xF0) 4)
+            (else 0)))
+
+    (define (detect-coding-utf-8 bytes head-ascii info)
+      ;; GNU Emacs's `detect_coding_utf_8' (`coding.c:5811'): whether BYTES
+      ;; could be UTF-8. It sets the masks on INFO and answers whether the
+      ;; source ran out before anything invalid was found.
+      ;;
+      ;; A *valid* sequence is not the question - whether one can be read
+      ;; from the start to the end is, which is why a truncated sequence at
+      ;; the end rejects (`if (src_base < src && LAST_BLOCK)').
+      ;;--------------------------------------------------------------
+      (set!detection-info-checked info
+        (logior (detection-info-checked info) *category-mask-utf-8*))
+      (let* ((n (bytevector-length bytes))
+             (bom? (and (= head-ascii 0) (< (+ 3 0) n) (%utf-8-bom? bytes)))
+             (start (if bom? 3 head-ascii)))
+        (let loop ((i start) (nchars (if bom? (+ head-ascii 1) head-ascii)))
+          (cond
+           ((>= i n)
+            (cond
+             (bom?
+              ;; "The first character 0xFFFE doesn't necessarily mean a
+              ;; BOM." - with one, all three categories are possible.
+              (%found! info *category-mask-utf-8*))
+             (else
+              (%reject! info (%mask 'utf-8-sig))
+              (when (< nchars n)
+                ;; The characters found are fewer than the source bytes,
+                ;; which means a valid non-ASCII character was read.
+                (%found! info (+ (%mask 'utf-8-auto) (%mask 'utf-8-nosig))))))
+            #t)
+           (else
+            (let ((c (bytevector-u8-ref bytes i)))
+              (if (< c #x80)
+                  ;; ASCII. A CR-LF pair is two bytes and one character,
+                  ;; which is the C's own bookkeeping.
+                  (loop (if (and (= c 13) (< (+ i 1) n)
+                                 (= (bytevector-u8-ref bytes (+ i 1)) 10))
+                            (+ i 2)
+                            (+ i 1))
+                        (+ nchars 1))
+                  (let ((len (%utf-8-sequence-length c)))
+                    (cond
+                     ((or (= len 0) (> (+ i len) n))
+                      ;; Not a lead byte, or the source ran out inside the
+                      ;; sequence.
+                      (%reject! info *category-mask-utf-8*)
+                      #f)
+                     ((let bad ((j (+ i 1)))
+                        ;; Every other byte is `10xxxxxx'.
+                        (cond ((= j (+ i len)) #f)
+                              ((= (logand (bytevector-u8-ref bytes j) #xC0) #x80)
+                               (bad (+ j 1)))
+                              (else #t)))
+                      (%reject! info *category-mask-utf-8*)
+                      #f)
+                     (else (loop (+ i len) (+ nchars 1))))))))))))
+
+    (define (%latin-extra-code? byte)
+      ;; GNU Emacs's `latin-extra-code-table' (`charset.c'), which is nil
+      ;; for every byte in this Emacs - measured, 0x80, 0x85, 0x9F and
+      ;; 0xA0 all answer nil. It is what makes `check_latin_extra' reject
+      ;; the C1 range for an `iso-8859-*' coding system, and it is why a
+      ;; file holding one is *not* read as Latin-1: Emacs answers
+      ;; `japanese-shift-jis-unix' for `a\205b', measured.
+      ;;--------------------------------------------------------------
+      #f)
+
+    (define (%iso-8859-start-byte? byte)
+      ;; Whether BYTE can begin a character of the charset this coding
+      ;; system uses. Emacs asks the charset's `code_space'
+      ;; (`charset->code_space', `charset.c'); `charset.c' is not ported,
+      ;; so what this asks is the question for the one charset family
+      ;; this tree has a coding system for - `iso-8859-1', whose code
+      ;; space is `0x00-0xFF' and whose dimension is 1. Every byte can
+      ;; begin a character, so the answer is always yes and the C1 rule
+      ;; below is what actually decides.
+      ;;--------------------------------------------------------------
+      #t)
+
+    (define (detect-coding-charset bytes head-ascii info)
+      ;; GNU Emacs's `detect_coding_charset' (`coding.c:5900'): whether
+      ;; BYTES could be text in the charset the `charset' category's
+      ;; coding system uses.
+      ;;
+      ;; A byte in the C1 range (0x80-0x9F) is *rejected* for an
+      ;; `iso-8859-*' or `iso-latin-*' coding system unless
+      ;; `latin-extra-code-table' allows it - the C's `check_latin_extra',
+      ;; whose test is that the coding system's name begins `iso-8859-' or
+      ;; `iso-latin-'.
+      ;;
+      ;; `found' is 0 until a byte with the high bit set is seen, so an
+      ;; all-ASCII input is *accepted* (the source ran out cleanly) while
+      ;; claiming nothing - which is what the C does, and is why the walk
+      ;; does not stop at `charset' for an ASCII file.
+      ;;--------------------------------------------------------------
+      (set!detection-info-checked info
+        (logior (detection-info-checked info) *category-mask-charset*))
+      (let* ((cs (find-coding-system 'iso-latin-1))
+             (name (symbol->string (coding-system-name cs)))
+             (check-latin-extra
+              (or (and (<= 9 (string-length name))
+                       (string=? "iso-8859-" (substring name 0 9)))
+                  (and (<= 10 (string-length name))
+                       (string=? "iso-latin-" (substring name 0 10)))))
+             (n (bytevector-length bytes)))
+        (let loop ((i head-ascii) (found 0))
+          (cond
+           ((>= i n)
+            (%found! info found)
+            #t)
+           (else
+            (let ((c (bytevector-u8-ref bytes i)))
+              (cond
+               ((not (%iso-8859-start-byte? c))
+                (%reject! info *category-mask-charset*)
+                #f)
+               ((and (>= c #x80) (< c #xA0)
+                     check-latin-extra (not (%latin-extra-code? c)))
+                ;; **The `(>= c #x80)' is the C's and it is easy to drop**:
+                ;; the whole test sits inside the C's `if (c >= 0x80)', so
+                ;; what it says is 0x80-0x9F and nothing else. Written as a
+                ;; bare `(< c #xA0)' it also rejects every ASCII control
+                ;; byte, and then *no* Latin-1 file is ever detected -
+                ;; every one of them holds a line feed.
+                (%reject! info *category-mask-charset*)
+                #f)
+               (else (loop (+ i 1)
+                           (if (>= c #x80) *category-mask-charset* found))))))))))
+
+    (define (%scan-head bytes)
+      ;; The C's opening `for (; src < src_end; src++)' in
+      ;; `detect_coding_system' (`coding.c:8712'). Three answers: the
+      ;; count of leading ASCII bytes, whether a NUL byte was seen, and
+      ;; whether an eight-bit byte was.
+      ;;
+      ;; **The ISO-2022 half is not carried.** The C asks
+      ;; `detect_coding_iso_2022' about an ESC, SI or SO byte and can stop
+      ;; the scan there; here those are ordinary control bytes. The
+      ;; difference shows on a file holding an escape sequence - Emacs
+      ;; says `iso-2022-7bit-unix', this says whatever the rest of the
+      ;; bytes say - and the bytes survive either way.
+      ;;--------------------------------------------------------------
+      (let ((n (bytevector-length bytes)))
+        (let loop ((i 0) (head 0) (null? #f) (eight-bit? #f))
+          (cond
+           ((>= i n) (values head null? eight-bit?))
+           (else
+            (let ((c (bytevector-u8-ref bytes i)))
+              (cond
+               ((>= c #x80)
+                (if (and null? (not eight-bit?))
+                    (values head null? #t)      ; the C breaks out here
+                    (loop (+ i 1) head null? #t)))
+               ((and (= c 0) (not null?))
+                (if eight-bit?
+                    (values head #t eight-bit?)
+                    (loop (+ i 1) head #t eight-bit?)))
+               ((not eight-bit?)
+                ;; Both of the C's remaining arms are this: a byte that is
+                ;; neither eight-bit nor already behind one counts as head,
+                ;; whether it is a control or is printable.
+                (loop (+ i 1) (+ head 1) null? eight-bit?))
+               (else (loop (+ i 1) head null? eight-bit?)))))))))
+
+    (define (%finish-detection category info null-byte-found)
+
+      ;; The C's closing `if' chain (`coding.c:8834'), which turns the
+      ;; masks into coding systems.
+      ;;
+      ;; `undecided' is not carried here, so the "nothing rejected and
+      ;; nothing found" case answers #f - which every caller reads as "the
+      ;; file declares nothing", the same thing `undecided' means to them.
+      ;;--------------------------------------------------------------
+      (cond
+       ((or (= (logand (detection-info-rejected info) *category-mask-any*)
+               *category-mask-any*)
+            null-byte-found)
+        (list 'no-conversion))
+       ((and (= 0 (detection-info-rejected info))
+             (= 0 (detection-info-found info)))
+        #f)
+       (category
+        ;; `found' is non-zero: the category the walk stopped at.
+        (let ((bound (assq category *coding-categories-bound*)))
+          (and bound (list (cdr bound)))))
+       (else
+        ;; Nothing stopped the walk and nothing was found: the first
+        ;; category in priority order that was not rejected.
+        (let loop ((ps *coding-category-priority*))
+          (cond ((null? ps) #f)
+                ((= 0 (logand (detection-info-rejected info) (%mask (car ps))))
+                 (let ((bound (assq (car ps) *coding-categories-bound*)))
+                   (and bound (list (cdr bound)))))
+                (else (loop (cdr ps))))))))
+
+    (define (%detector-for category)
+      (case category
+        ((utf-8-nosig) detect-coding-utf-8)
+        ((charset) detect-coding-charset)
+        (else #f)))
+
+    (define (detect-coding-system bytes highest)
+      ;; GNU Emacs's `detect_coding_system': "Detect a coding system for
+      ;; the text SRC of length SRC_BYTES ... If HIGHEST is nonzero, it
+      ;; returns the coding system of the highest priority."
+      ;;
+      ;; The answer is a list of coding system *names*, or #f for the
+      ;; C's `undecided'. With HIGHEST the walk stops at the first
+      ;; category that accepts, which is the answer a file read wants and
+      ;; is what Emacs's own file path takes.
+      ;;--------------------------------------------------------------
+      (let ((info (make-detection-info 0 0 0))
+            (n (bytevector-length bytes)))
+        (call-with-values (lambda () (%scan-head bytes))
+          (lambda (head-ascii null-byte-found eight-bit-found)
+            (if (and (not null-byte-found) (not eight-bit-found)
+                     (>= head-ascii n)
+                     (= 0 (detection-info-found info)))
+                ;; Every byte was 7-bit and nothing was found: the C's
+                ;; `undecided'. It skips the whole walk for this case.
+                #f
+                (let walk ((ps *coding-category-priority*))
+                  (cond
+                   ((null? ps)
+                    (%finish-detection #f info null-byte-found))
+                   ((eq? (car ps) 'raw-text)
+                    ;; `raw_text' is where the C's loop *stops*
+                    ;; (`i < coding_category_raw_text'), so it is skipped
+                    ;; rather than rejected.
+                    (walk (cdr ps)))
+                   (else
+                    (let* ((category (car ps))
+                           (bound (assq category *coding-categories-bound*))
+                           (bit (%mask category)))
+                      (cond
+                       ((not bound)
+                        ;; A category with nothing bound to it is rejected
+                        ;; outright - the C's own branch, and the one this
+                        ;; tree's unbound families take.
+                        (%reject! info bit)
+                        (walk (cdr ps)))
+                       ((not (= 0 (logand (detection-info-checked info) bit)))
+                        ;; This detector has already run; the C asks only
+                        ;; whether it found anything.
+                        (if (and highest
+                                 (not (= 0 (logand (detection-info-found info) bit))))
+                            (%finish-detection category info null-byte-found)
+                            (walk (cdr ps))))
+                       (else
+                        (let ((detector (%detector-for category)))
+                          (let ((accepted (and detector
+                                               (detector bytes head-ascii info))))
+                            (if (and accepted highest
+                                     (not (= 0 (logand (detection-info-found info) bit))))
+                                (%finish-detection category info null-byte-found)
+                                (walk (cdr ps))))))))))))))))
+
+    (define (detect-coding-bytes bytes highest)
+      ;; `detect-coding-system' under the name the file layer calls it by.
+      ;; `detect-coding-region' is the C's name for the public function and
+      ;; it takes a *buffer region*; nothing here has one, so the bytes are
+      ;; the argument and the algorithm is the same one. The answer is
+      ;; settled against the line ends, as `detect_coding_system''s own
+      ;; closing loop does, so what comes back is `iso-latin-1-unix' and
+      ;; not `iso-latin-1'.
+      ;;--------------------------------------------------------------
+      (let* ((found (detect-coding-system bytes highest))
+             (eol (if (bytes-have-null? bytes) 'unix (detect-eol bytes))))
+        (and found
+             (map (lambda (name)
+                    (coding-system-name
+                     (or (adjust-coding-eol-type name eol)
+                         (find-coding-system name))))
+                  found))))
+
     (define *last-coding-system-used* (make-parameter #f))
+
     ;; ^ GNU Emacs's `last-coding-system-used' (`coding.c'): "Coding system
     ;; used for last file I/O operation." Emacs's answer can be the
     ;; *undecided* coding system it started with, when the file turned out

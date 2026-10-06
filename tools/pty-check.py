@@ -1318,6 +1318,12 @@ def check_coding_roundtrip():
     with open(path, "wb") as port:
         port.write(original)
     problems = []
+    # the detector reads it as Latin-1, so the screen shows the letters
+    # themselves and not a byte character standing in for each
+    screen = screen_of(drive([], path))
+    if "caf\u00e9 na\u00efve" not in screen:
+        problems.append("a Latin-1 file did not display as Latin-1: %r"
+                        % [row for row in screen.split("\n") if "caf" in row])
     # a change and a save, so the file is really written
     drive([b"X", C_x + C_s, C_x + C_c], path)
     with open(path, "rb") as port:

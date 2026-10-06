@@ -10,6 +10,7 @@
        coding-setup-port! coding-read-char coding-write-char
        detect-eol bytes-have-null? adjust-coding-eol-type
        decode-eol encode-eol as-coding-system coding-system?
+       detect-coding-bytes
        coding-system-eol-type)
  (scheme file)
  (rnrs io ports)
@@ -276,5 +277,64 @@
   (let ((cs (as-coding-system 'utf-8-unix)))
     (list (coding-system? (as-coding-system cs))
           (coding-system-eol-type (as-coding-system cs)))))
+
+;; ------------------------------------------------------------------
+;; the statistical detector
+;;
+;; **Every expectation here is Emacs 31.1's own answer** for the same
+;; bytes, measured by writing them to a file and asking Emacs what
+;; `buffer-file-coding-system' became. The four that differ are named on
+;; `detect-coding-utf-8' in `coding.sld': they are the files whose bytes
+;; Emacs reads as a coding system family this tree does not carry
+;; (`japanese-shift-jis', `emacs-mule', `iso-2022-7bit'), and in every one
+;; of them the *bytes* still survive a round trip.
+
+(define (detected . bytes)
+  (let ((found (detect-coding-bytes (list->u8vector bytes) #t)))
+    (if found (car found) 'undecided)))
+
+(test-equal "a file that declares nothing and is 7-bit is undecided"
+  '(undecided undecided)
+  (list (detected 104 101 108 108 111 10)
+        (detected 97 98 99)))
+
+(test-equal "valid UTF-8, with and without non-ASCII"
+  '(undecided utf-8-unix utf-8-unix)
+  (list (detected 97 98 99 10)                        ; pure ASCII
+        (detected 99 97 102 195 169 10)               ; cafe-acute
+        (detected 239 187 191 65 10)))                ; a BOM and "A"
+
+;; The one the whole detector is here for: `caf\xe9' is not valid UTF-8,
+;; and Emacs reads it as Latin-1 rather than leaving it undecoded.
+(test-equal "Latin-1 is recognised by its bytes"
+  '(iso-latin-1-unix iso-latin-1-unix)
+  (list (detected 99 97 102 233 10)                   ; 233 is e-acute
+        (detected 97 195 40 98 10)))                  ; a truncated UTF-8 lead
+
+(test-equal "the line ends are settled on top of the character set"
+  '(iso-latin-1-dos utf-8-dos)
+  (list (detected 99 97 102 233 13 10)
+        (detected 99 97 102 195 169 13 10)))
+
+;; **The C1 rule, which is the one that is easy to get wrong.** A byte in
+;; 0x80-0x9F rejects the `charset' category unless `latin-extra-code-table'
+;; allows it - and it allows nothing - so such a file is *not* Latin-1.
+;; Emacs answers `japanese-shift-jis-unix' there because it carries that
+;; coding system and this tree does not, so the answer here is
+;; `no-conversion'; 0xA0 is Latin-1 in both.
+(test-equal '(no-conversion-unix iso-latin-1-unix)
+  (list (detected 97 133 98 10)                       ; 0x85, a C1 byte
+        (detected 97 160 98 10)))                     ; 0xA0, a Latin-1 byte
+
+(test-equal "a NUL byte means binary, which is no-conversion"
+  'no-conversion-unix
+  (detected 97 0 98 10))
+
+(test-equal "an ASCII control byte does not stop a Latin-1 file"
+  'iso-latin-1-unix
+  ;; the line feed and the tab are below 0xA0 and above 0x80-free, and the
+  ;; C1 rule must not touch them - written as a bare `(< c 0xA0)' it
+  ;; rejects every one of them and *no* Latin-1 file is ever detected
+  (detected 9 99 97 102 233 10))
 
 (test-end "schemacs_editor_coding")

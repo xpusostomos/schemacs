@@ -623,39 +623,48 @@
            (type frame #\X)
            (type frame (integer->char 24) save-key)))))
 
-;; **A file whose bytes the coding system cannot decode survives the round
-;; trip**, which is the whole point of the eight-bit representation.
-;; `café naïve' in Latin-1 declares nothing, so it is read as UTF-8 - and
-;; UTF-8 cannot read `233'. Emacs does not fail on that: it makes the byte
-;; an eight-bit character (`CHAR_BYTE8_P', above `MAX_5_BYTE_CHAR' where no
-;; real character lives) and carries on. What matters is that saving writes
-;; the *same bytes* back. Before the coding work this file was read with
-;; U+FFFD in place of both accented bytes and written back that way, so
-;; merely opening it destroyed it.
-(test-equal #vu8(99 97 102 233 32 110 97 239 118 101 10)
-  (let ((path "/tmp/fe-latin1.txt"))
-    (when (file-exists? path) (chmod path #o644))
-    ;; written raw: `(display ...)' on a text port would encode it and
-    ;; there would be nothing left to test
-    (call-with-port (open-output-file path #:encoding #f)
-      (lambda (port)
-        (put-bytevector port #vu8(99 97 102 233 32 110 97 239 118 101 10))))
-    (parameterize ((*buffer-list* '()) (*current-buffer* #f))
-      (let* ((ed (find-file-noselect path))
-             (frame (test-frame ed)))
-        (parameterize ((*current-frame* frame))
-          (text-editor-set-modified! ed #t)
-          (save-buffer)))
-      (call-with-port (open-input-file path #:encoding #f) get-bytevector-all))))
+;; **A file survives the round trip whatever its bytes are**, which is the
+;; property that matters and the one the coding work exists for. Two files,
+;; because they take the two different routes:
+;;
+;;   * `café naïve' in Latin-1, which the detector reads correctly, so what
+;;     brings the bytes back is the codec;
+;;   * a file holding a C1 control byte (`0x85'), which no coding system
+;;     this tree carries can decode - Emacs answers `japanese-shift-jis'
+;;     for it, measured - so the bytes come back through the *eight-bit*
+;;     representation (`CHAR_BYTE8_P', above `MAX_5_BYTE_CHAR' where no real
+;;     character lives).
+;;
+;; Before the coding work both were read with U+FFFD in place of the bytes
+;; that did not decode and written back that way, so merely opening either
+;; one destroyed it.
+(test-equal (list #vu8(99 97 102 233 32 110 97 239 118 101 10)
+                  #vu8(97 133 98 10))
+  (map (lambda (spec)
+         (let ((path (car spec)) (bytes (cadr spec)))
+           (when (file-exists? path) (chmod path #o644))
+           ;; written raw: `(display ...)' on a text port would encode it
+           ;; and there would be nothing left to test
+           (call-with-port (open-output-file path #:encoding #f)
+             (lambda (port) (put-bytevector port bytes)))
+           (parameterize ((*buffer-list* '()) (*current-buffer* #f))
+             (let* ((ed (find-file-noselect path))
+                    (frame (test-frame ed)))
+               (parameterize ((*current-frame* frame))
+                 (text-editor-set-modified! ed #t)
+                 (save-buffer)))
+             (call-with-port (open-input-file path #:encoding #f)
+               get-bytevector-all))))
+       (list (list "/tmp/fe-latin1.txt" #vu8(99 97 102 233 32 110 97 239 118 101 10))
+             (list "/tmp/fe-c1.txt" #vu8(97 133 98 10)))))
 
 ;; ... and the coding system it was read with is *recorded*, so the save
-;; cannot choose differently from the read. Emacs answers `iso-latin-1-unix'
-;; for this file - it has a statistical detector that recognises Latin-1 by
-;; its bytes and this tree has none, so it answers `utf-8-unix' and keeps
-;; the bytes as eight-bit characters instead. Same file, same bytes, a
-;; different name for what happened - which is why the round trip above is
-;; the property that matters and the name is the departure.
-(test-equal '(utf-8-unix utf-8-dos)
+;; cannot choose differently from the read. Both of these are Emacs 31.1's
+;; own answers for the same two files: the *statistical* detector reads
+;; `caf\xe9' as Latin-1 rather than as the UTF-8 it is not, and the line
+;; ends are settled on top of that. Neither file declares anything, so both
+;; names come from `detect-coding-system' and not from `set-auto-coding'.
+(test-equal '(iso-latin-1-unix utf-8-dos)
   (parameterize ((*buffer-list* '()) (*current-buffer* #f))
     (call-with-output-file "/tmp/fe-crlf-coding.txt"
       (lambda (port) (display "a\r\nb\r\n" port)))
