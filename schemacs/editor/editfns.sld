@@ -48,6 +48,8 @@
           text-editor-point-min text-editor-point-max
           text-editor-get-cursor count-lines
           text-editor-mark text-editor-set-cursor
+          bol
+          eol
           text-editor-undo-boundary!)
     ;; `mark-active' and `transient-mark-mode' are `buffer.c''s
     ;; variables, and `mark-even-if-inactive' is `callint.c''s, which is
@@ -375,52 +377,44 @@ point-marker
       (char-before (point)))
 
     (define (line-beginning-position . rest)
-      ;; GNU Emacs's `line-beginning-position' (editfns.c): "Return the
-      ;; character position of the beginning of the current line. With
-      ;; argument N, forward N lines first" - the N-line walk being
-      ;; `line-move''s, which is `save-excursion''s to keep point off.
+      ;; GNU Emacs's `line-beginning-position' (`editfns.c:700'), whose
+      ;; whole body is
+      ;;
+      ;;     ptrdiff_t count, charpos = bol (n, &count);
+      ;;     return Fconstrain_to_field (make_fixnum (charpos), ...);
+      ;;
+      ;; - `bol' being `editfns.c:665', which this tree has as the
+      ;; engine's `bol'. The field constraint is not carried: there are
+      ;; no fields here, and `bol' is what every caller wants.
+      ;;
+      ;; What stood here was `forward-line' and then the line's start. It
+      ;; answers the same for the Ns anyone passes and is a *second*
+      ;; implementation of the walk `bol' already is - the shape that has
+      ;; gone wrong twice in this tree (see `scan_for_column').
+      ;;
+      ;; "With argument N not nil or 1, move forward N - 1 lines first":
+      ;; an absent N is the C's `count = 1', and 0 and negatives move
+      ;; *back*, which is `bol''s `count - 1' scan.
       ;; The answer is one-based, as every position answer here is.
       ;;--------------------------------------------------------------
-      (let* ((ed (current-buffer))
-             ;; an optional argument explicitly given as nil - Elisp's
-             ;; `(line-beginning-position (and arg 2))' with ARG nil -
-             ;; behaves as absent, as it does in Emacs
-             ;;
-             ;; The absent value is 1, which is the C's `count = 1'
-             ;; (`Fline_beginning_position', editfns.c:727) and not 0:
-             ;; `(forward-line (- n 1))' below is then `(forward-line 0)',
-             ;; no move at all. With a 0 here it was `(forward-line -1)',
-             ;; so every call without an N answered the *previous* line's
-             ;; beginning - measured, `emacs -Q --batch' answers 5 for
-             ;; position 5 of "aaa\nbbb\nccc\n" and this answered 1.
-             (n (if (and (pair? rest) (car rest)) (car rest) 1)))
-        (save-excursion
-          ;; "With argument N not nil or 1, move forward N - 1 lines
-          ;; first" - so N moves N - 1, and the binding above has already
-          ;; turned an absent N into 1, which is no move. The line
-          ;; arithmetic that used to be here added
-          ;; `text-editor-cursor-line' - a *line number* - to N and passed
-          ;; the sum as a *character position* to `text-editor-set-cursor',
-          ;; so every line but the first answered the first line's
-          ;; boundary.
-          (forward-line (- n 1))
-          (text-editor-get-start-of-line ed))))
+      (bol (current-buffer) (if (pair? rest) (car rest) #f)))
 
     (define (line-end-position . rest)
-      ;; GNU Emacs's `line-end-position' (editfns.c): "Return the
-      ;; character position of the end of the current line" - with a N,
-      ;; of the end of the line N lines away. One-based, as
-      ;; `line-beginning-position' is.
+      ;; GNU Emacs's `line-end-position' (`editfns.c:755'), whose whole
+      ;; body is `(make_fixnum (eol (n)))' - `eol' being `editfns.c:723',
+      ;; which this tree has as the engine's `eol' and which is where the
+      ;; `count - (count <= 0)' adjustment lives.
+      ;;
+      ;; It was `forward-line (- n 1)' and then the line's end until
+      ;; 2026-10-06, and that is *not* the same answer below N = 1:
+      ;; `(line-end-position 0)' at the first line is position 1 in Emacs
+      ;; - the backward scan runs off the beginning of the buffer and
+      ;; stops there - and was the end of line 1, position 4, here.
+      ;; Measured on Emacs 31.1. Nothing could see it while
+      ;; `end-of-line' took no argument at all, which is why giving it one
+      ;; is what found this.
       ;;--------------------------------------------------------------
-      (let* ((ed (current-buffer))
-             ;; "N not nil or 1" - an absent N is 1, which moves no
-             ;; lines; see the note below.
-             (n (if (and (pair? rest) (car rest)) (car rest) 1)))
-        (save-excursion
-          ;; `forward-line' and then the line's end - the C's shape, and
-          ;; N - 1 lines as `line-beginning-position' explains.
-          (forward-line (- n 1))
-          (text-editor-get-end-of-line ed))))
+      (eol (current-buffer) (if (pair? rest) (car rest) #f)))
 
     (define (buffer-substring beg end)
       ;; GNU Emacs's `buffer-substring' (editfns.c): "Return the contents

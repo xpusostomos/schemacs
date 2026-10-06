@@ -1846,8 +1846,19 @@
                          (else
                           (when (and cache (< nl pos))
                             (know-region-cache cache beg z nl pos))
+                          ;; The count of boundaries found is
+                          ;; `found - 1' here, and it was a hardcoded
+                          ;; `-1' until 2026-10-06 - so every backward
+                          ;; scan answered "one found" however many it
+                          ;; had crossed. That is what the C's
+                          ;; `counted' is, and `find_before_next_newline'
+                          ;; reads it to decide whether to step back
+                          ;; onto the newline. A COUNT of -2 found two
+                          ;; breaks and said one, and nothing saw it
+                          ;; until `line-end-position' was given the
+                          ;; optional N that reaches a count below -1.
                           (if (= left -1)
-                              (values nl -1)
+                              (values nl (- found 1))
                               (outer (- nl 1) (+ left 1) (- found 1)))))))))))))))
 
     (define (scan-newline-from-point ed count)

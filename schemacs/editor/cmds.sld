@@ -25,8 +25,8 @@
     (only (schemacs editor buffer)
           buffer-overwrite-mode current-buffer)
     (only (schemacs editor editfns)
-          char-after char-before delete-region goto-char insert point
-          point-max)
+          char-after char-before delete-region goto-char insert
+          line-beginning-position line-end-position point point-max)
     (only (schemacs editor indentc) current-column move-to-column)
     ;; the commands below are `define-command`s, and `self-insert-command`
     ;; is still on the record form `new-command` builds.
@@ -269,19 +269,37 @@ If N is omitted or nil, move point 1 character backward."
       (interactive "p")
       (%move-point (if (pair? rest) (car rest) #f) #f))
 
-    (define-command (beginning-of-line)
-      "Move point to the beginning of the current line."
-      (interactive)
-      (text-editor-set-cursor (current-buffer)
-                              (text-editor-get-start-of-line
-                               (current-buffer))))
+    (define-command (beginning-of-line . rest)
+      ;; GNU Emacs's `beginning-of-line' (`cmds.c:148'), whose DEFUN is
+      ;; `(0, 1, "^p")' and which is
+      ;;
+      ;;     if (NILP (n)) XSETFASTINT (n, 1); else CHECK_FIXNUM (n);
+      ;;     SET_PT (XFIXNUM (Fline_beginning_position (n)));
+      ;;
+      ;; - so the whole of it is the N-line arithmetic `line-beginning-
+      ;; position' does, and the movement. Ours took **no argument at
+      ;; all**, which made `(beginning-of-line 2)' an error *and* left the
+      ;; behaviour out: N moves forward N - 1 lines first, and 0 and
+      ;; negatives move back, which is `bol`'s `count - 1' scan
+      ;; (`editfns.c:665').
+      "Move point to beginning of current line (in the logical order).
+With argument N not nil or 1, move forward N - 1 lines first.
+If point reaches the beginning or end of buffer, it stops there."
+      (interactive "p")
+      (goto-char (line-beginning-position (if (pair? rest) (car rest) #f))))
 
-    (define-command (end-of-line)
-      "Move point to the end of the current line."
-      (interactive)
-      (text-editor-set-cursor (current-buffer)
-                              (text-editor-get-end-of-line
-                               (current-buffer))))
+    (define-command (end-of-line . rest)
+      ;; ...and `(0, 1, "^p")' the same way, over `line-end-position'.
+      ;;
+      ;; The C's `while (1)' loop around it (`cmds.c:186') is the
+      ;; intangible-text dance - "If we skipped over a newline that
+      ;; follows an invisible intangible run..." - and there is no
+      ;; intangibility or invisibility here for it to correct for.
+      "Move point to end of current line (in the logical order).
+With argument N not nil or 1, move forward N - 1 lines first.
+If point reaches the beginning or end of buffer, it stops there."
+      (interactive "p")
+      (goto-char (line-end-position (if (pair? rest) (car rest) #f))))
 
     (define-command (delete-char count)
       "Delete N characters after point."

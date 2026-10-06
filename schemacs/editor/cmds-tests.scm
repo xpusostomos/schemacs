@@ -9,7 +9,8 @@
  (only (schemacs editor editfns)
        insert goto-char point buffer-string)
  (only (schemacs editor cmds)
-       backward-char forward-char internal-self-insert))
+       backward-char beginning-of-line end-of-line forward-char
+       internal-self-insert))
 
 ;; Unbuffered output, so a run that hangs shows where it got to.
 (setvbuf (current-output-port) 'none)
@@ -171,5 +172,55 @@
 (test-equal "a negative N goes the other way"
   '(no-error 1)
   (move-result "ab" 2 (lambda () (forward-char -1))))
+
+;; ------------------------------------------------------------------
+;; beginning-of-line and end-of-line, which take an optional N too
+;;
+;; Both are `(0, 1, "^p")' in `cmds.c' and both are one call over the
+;; N-line arithmetic - `line-beginning-position' and `line-end-position'
+;; with it. This tree's took **no argument at all**, so `(end-of-line 0)'
+;; was an error and the behaviour was missing as well. Giving them the
+;; argument is what then found the two bugs underneath: `line-end-position'
+;; was not the C's `eol (n)', and `find-newline''s backward scan answered
+;; one boundary found however many it had crossed.
+;;
+;; The table is Emacs 31.1's, from `emacs -Q --batch' over
+;; "aaa\nbbb\nccc\nddd\n" from three starting points.
+
+(define (bol-and-eol start n)
+  ;; (bol, eol) from START with that N.
+  ;;--------------------------------------------------------------
+  (let ((ed (get-buffer-create "*cmds-lines*")))
+    (set-buffer ed)
+    (erase-buffer)
+    (insert "aaa\nbbb\nccc\nddd\n")
+    (goto-char start)
+    (beginning-of-line n)
+    (let ((b (point)))
+      (goto-char start)
+      (end-of-line n)
+      (list b (point)))))
+
+(test-equal "beginning-of-line and end-of-line with no argument"
+  '(1 4)
+  (bol-and-eol 1 #f))
+
+(test-equal "...and with N moving forward N - 1 lines"
+  '((5 8) (9 12))
+  (list (bol-and-eol 1 2) (bol-and-eol 1 3)))
+
+(test-equal "...and a positive N from a line that is not the first"
+  '((13 16) (17 17))
+  (list (bol-and-eol 9 2) (bol-and-eol 9 3)))
+
+;; "They stop there": N of 0 and below scans *backward*, and runs off the
+;; beginning of the buffer rather than wrapping.
+(test-equal "an N of zero is the previous line"
+  '((1 4) (5 8))
+  (list (bol-and-eol 5 0) (bol-and-eol 9 0)))
+
+(test-equal "a negative N scans further back and stops at the beginning"
+  '((1 1) (1 1) (1 4))
+  (list (bol-and-eol 1 -1) (bol-and-eol 5 -1) (bol-and-eol 9 -1)))
 
 (test-end "schemacs_editor_cmds")

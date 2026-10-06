@@ -2410,3 +2410,59 @@ N - 1 lines first, and this tree's take no argument at all, so the call is
 an error *and* the behaviour is missing. That is a bigger change than an
 arity default - it changes what the command does - so it is on the record
 here rather than guessed at.
+
+## `beginning-of-line`/`end-of-line`, and the two bugs underneath (2026-10-06)
+
+The arity fix was one line each; finding it uncovered two more, one level
+down each time. This is the bottom-up rule paying for itself, and it is
+worth reading as a sequence.
+
+**The commands.** Both are `(0, 1, "^p")' in `cmds.c' and each is one call
+over the N-line arithmetic:
+
+```c
+  if (NILP (n)) XSETFASTINT (n, 1); else CHECK_FIXNUM (n);
+  SET_PT (XFIXNUM (Fline_beginning_position (n)));
+```
+
+This tree's took **no argument at all**, so `(end-of-line 0)' was an error
+*and* the behaviour was missing - N moves forward N - 1 lines, 0 and
+negatives move back.
+
+**Bug 1, under `line-end-position'.** It was `forward-line (- n 1)' and then
+the line's end, where the C is `(make_fixnum (eol (n)))' - and `eol' is
+`editfns.c:723', which this tree *already had* as the engine's `eol',
+complete with the `count - (count <= 0)' adjustment. So the primitive was
+right and the wrapper did not use it. The two agree for N of 1 and above
+and differ below: `(line-end-position 0)' at the first line is position 1
+in Emacs - the backward scan runs off the beginning of the buffer and stops
+there - and was the end of line 1, position 4. `line-beginning-position'
+had the same shape over `bol' and is now that one call too; it happened to
+agree on every N anyone passes, which is exactly the condition under which
+a second implementation survives.
+
+**Bug 2, under `eol' -> `find_before_next_newline' -> `find_newline'.**
+With the wrapper fixed, one row was still wrong, and the primitive
+underneath answered it:
+
+```
+(find-newline ed 9 -2 #f)  ->  pos 5, found -1     ;; Emacs: found -2
+```
+
+`find-newline-backward' returned a **hardcoded `-1'** for the count of
+boundaries found, however many it had crossed. That count is the C's
+`counted' (`search.c:942', `*counted -= count'), and
+`find_before_next_newline' reads it to decide whether to step back onto the
+newline - so a wrong count is a wrong position, one boundary out. It was
+invisible for as long as nothing asked for a backward count below -1:
+`bol' passes exactly -1 and `eol' reached -2 only through the N the
+commands did not have.
+
+The fix is `-1' -> `(- found 1)'. **My first attempt fixed the wrong
+half** - I changed the loop's termination from `(= left -1)' to
+`(= left 0)' and made every backward scan one boundary *longer*, which the
+probe showed at once. The termination test is the C's `if (++count == 0)'
+and was right; the returned count was not.
+
+All eighteen rows of the measured table (`cmds-tests.scm', 22) match Emacs
+31.1, and all 29 suites pass.
