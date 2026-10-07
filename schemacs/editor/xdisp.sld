@@ -29,7 +29,11 @@
     (only (scheme cxr) caddr)
     ;; `filter' and `sort' order the overlay strings at a position, as
     ;; `load_overlay_strings' does with qsort.
-    (only (guile) filter sort)
+    ;; `inexact->exact' is `posn-at-x-y''s: a mouse event's
+    ;; coordinates arrive as inexact numbers and every cell here
+    ;; is an exact one - `pgtk.sld''s `pgtk-ensure-surface!' makes
+    ;; the same conversion for the same reason.
+    (only (guile) filter sort inexact->exact)
     ;; The display interface: the redisplay draws through these generics
     ;; and never touches a terminal itself. `dispnew.sld' defines them,
     ;; and `term.sld' answers them for the curses terminal.
@@ -38,7 +42,11 @@
           write-glyphs! clear-frame-area!
           update-window-begin! update-window-end!
           draw-window-cursor! flush-display!
-          realize-face)
+          realize-face
+          ;; how many pixels a cell is, which is what turns a mouse
+          ;; event's coordinates into the cells the windows are
+          ;; measured in - see `posn-at-x-y'.
+          column-width line-height)
     (only (schemacs editor engine)
          string-search-forward text-editor-buffer-name text-editor-text-props
          text-editor-char-count text-editor-file-name marker-position
@@ -169,6 +177,7 @@
    window-end
    window-line-rows
    window-line-slices
+   posn-at-x-y buffer-posn-from-coords
    window-start
    window-truncates-lines?
    )
@@ -2611,4 +2620,121 @@
         (flush-display! (current-display))
         )))
 
+
+    ;;----------------------------------------------------------------
+    ;; Where the mouse is
+    ;;
+    ;; What a mouse event carries: GNU Emacs's `make_lispy_position'
+    ;; (`keyboard.c') as `posn-at-x-y' (`keyboard.c:13009') reaches it.
+    ;; It is here rather than in `keyboard.sld' for the reason the rest
+    ;; of this file's walks are: the half that finds a *character* is
+    ;; `buffer_posn_from_coords', which is `xdisp.c''s, and it has to
+    ;; walk rows exactly as the renderer does or the two will disagree
+    ;; about which row a wrapped line's second half is on.
+    ;;------------------------------------------------------------------
+
+    (define (%posn-char-at line-string from to column)
+      ;; The offset within LINE-STRING of the character drawn at display
+      ;; COLUMN, walking `from' to `to' and adding each character's own
+      ;; width - a wide character takes two columns, so counting
+      ;; characters would land a cell to the left of what was clicked.
+      ;;
+      ;; The accumulation is `text-cells'' and `scan_for_column''s, and
+      ;; it stops at `to': a click past the end of a slice is the end of
+      ;; the slice.
+      ;;--------------------------------------------------------------
+      (let loop ((i from) (c 0))
+        (if (or (>= i to) (>= c column))
+            (min i to)
+            (loop (+ i 1)
+                  (+ c (char-display-width (string-ref line-string i) c))))))
+
+    (define (buffer-posn-from-coords window row column)
+      ;; GNU Emacs's `buffer_posn_from_coords' (`xdisp.c'): the buffer
+      ;; position of the character at ROW and COLUMN within WINDOW, both
+      ;; counted from the window's own top-left corner. This tree counts
+      ;; *cells* where the C counts pixels and glyphs.
+      ;;
+      ;; The walk is the renderer's own - the same `line-string-at',
+      ;; `line-display-texts' and `%window-line-slices' that
+      ;; `render-window-rows!' uses, advanced by the same
+      ;; `line-next-start' - which is what makes the answer agree with
+      ;; what is on the screen. A second walk written by hand would be
+      ;; free to disagree, and this file has a section on how that goes.
+      ;;
+      ;; #f when the coordinates are past the end of the text: there is
+      ;; no character there to point at.
+      ;;--------------------------------------------------------------
+      (let ((ed (window-buffer window))
+            (vheight (window-body-height window))
+            (start (window-start window)))
+        (let loop ((r 0) (line-start start))
+          (cond
+           ((>= r vheight) #f)
+           ((not line-start) #f)
+           (else
+            (let* ((line-string (line-string-at ed line-start))
+                   (texts (line-display-texts ed line-start line-string))
+                   (slices (%window-line-slices window texts)))
+              (cond
+               ((null? slices) #f)
+               ((< row (+ r (length slices)))
+                (let ((slice (list-ref slices (- row r))))
+                  (+ line-start
+                     (%posn-char-at line-string (car slice) (cdr slice)
+                                    column))))
+               ((not (line-next-start ed line-start)) #f)
+               (else
+                (loop (+ r (length slices))
+                      (line-next-start ed line-start))))))))))
+
+    (define (posn-at-x-y x y frame)
+      ;; GNU Emacs's `posn-at-x-y' (`keyboard.c:13009'), which is
+      ;; `make_lispy_position' with a timestamp of 0 and the frame's
+      ;; default text area: the *position list* a mouse event carries,
+      ;;
+      ;;   (WINDOW AREA-OR-POS (X . Y) TIMESTAMP)
+      ;;
+      ;; which the `posn-' accessors in `subr.sld' walk.
+      ;;
+      ;; **X and Y are pixels, and everything below is cells**, so this
+      ;; is where the display is asked how big a cell is. Emacs's
+      ;; `window_from_coordinates' takes pixels and converts against each
+      ;; window's own edges; a cell is one column and one row of the
+      ;; frame here, for every window in it.
+      ;;
+      ;; The window is found by its own screen rectangle, which every
+      ;; window carries (`window-top', `window-left', `window-width',
+      ;; `window-height' - Emacs's `w->top_line' and its neighbours). A
+      ;; response on its last row is the mode line, which is the one
+      ;; non-text area this tree has: a press on a border, a fringe or a
+      ;; scroll bar has no window here to be on, and Emacs's other area
+      ;; symbols are not answered.
+      ;;--------------------------------------------------------------
+      (let ((column (quotient (inexact->exact (round x))
+                              (column-width (current-display))))
+            (row (quotient (inexact->exact (round y))
+                           (line-height (current-display)))))
+        (let loop ((rest (window-list frame)))
+          (cond
+           ((null? rest)
+            ;; Outside every window: Emacs answers the frame, and the
+            ;; position of a frame is the frame.
+            (list frame #f (cons x y) 0))
+           (else
+            (let* ((w (car rest))
+                   (top (window-top w))
+                   (left (window-left w))
+                   (height (window-height w))
+                   (width (window-width w)))
+              (if (and (>= row top) (< row (+ top height))
+                       (>= column left) (< column (+ left width)))
+                  (if (= row (+ top height -1))
+                      ;; the window's last row is its mode line
+                      (list w 'mode-line (cons x y) 0)
+                      (list w (buffer-posn-from-coords
+                               w (- row top) (- column left))
+                            (cons x y) 0))
+                  (loop (cdr rest))))))))
+)
     ))

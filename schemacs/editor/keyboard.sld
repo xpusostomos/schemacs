@@ -133,7 +133,7 @@
    command-loop
    dispatch-key
    dispatch-key-event
-   dispatch-input-event
+   dispatch-input-event *last-read-event*
    function-key-translate
    event-loop
    ;; The outermost loop for a front end that owns its own: no loop at
@@ -561,7 +561,16 @@
                    (event-convert-list (list 'meta key)))))
        (else
         (*esc-pending* #f)
-        (let ((event (if (symbol? key) (list key (list frame)) key)))
+        (let ((event (if (symbol? key)
+                         (let ((raw (*last-read-event*)))
+                           ;; A mouse event keeps its own value - the one
+                           ;; that has the window and the position in it.
+                           (if (and (pair? raw) (memq (car raw) *mouse-keys*))
+                               raw
+                               ;; A frame event's value is the frame:
+                               ;; `(focus-in (FRAME))', as Emacs builds it.
+                               (list key (list frame))))
+                         key)))
           (parameterize ((*this-event* event))
             (dispatch-key-event frame key))))))
 
@@ -578,7 +587,15 @@
       ;;--------------------------------------------------------------
       (let ((key (key-event->key (current-display) ev)))
         (if key
-            (dispatch-key frame key)
+            (begin
+              ;; **The event's own value goes with the key.** A mouse
+              ;; click's value is where it happened, and `dispatch-key-
+              ;; event' hands it to the command as `(interactive "e")'
+              ;; does; a key has no value of its own and is dispatched
+              ;; from the key alone. Emacs carries the same thing in
+              ;; `last-input-event'.
+              (*last-read-event* ev)
+              (dispatch-key frame key))
             (begin
               (*esc-pending* #f)
               (set!frame-message
@@ -674,6 +691,7 @@
       (let ((unread (*unread-command-events*)))
         (if (null? unread)
             (let ((ev (read-input-event (current-display) timeout)))
+              (*last-read-event* ev)
               (and ev (key-event->key (current-display) ev)))
             (begin
               (*unread-command-events* (cdr unread))
@@ -782,6 +800,32 @@
       ;; parameter and gets no cap at all, so its read blocks properly.
       ;;--------------------------------------------------------------
       (read-timeout-or -1 #f (and (repl-open?) (not (repl-wake)) 100)))
+
+    (define *mouse-keys*
+      ;; The buttons this front end makes events for - `mouse-1''s press
+      ;; and its click. GNU Emacs's `mouse-event-p' (subr.el) asks the
+      ;; same question of a whole family of buttons; this tree's front
+      ;; ends produce button 1 only, so the list is that one, named here
+      ;; where the dispatch that needs it can see it.
+      ;;--------------------------------------------------------------
+      '(down-mouse-1 mouse-1))
+
+    (define *last-read-event*
+      ;; The display's *own* event value for the last key read, or #f.
+      ;;
+      ;; **A key path element cannot carry a position.** A mouse event in
+      ;; GNU Emacs is a list - `(down-mouse-1 (WINDOW POS (X . Y)
+      ;; TIMESTAMP))' - and the command bound to it receives the whole
+      ;; thing through `(interactive "e")'. This tree's reader answers the
+      ;; *key* (`key-event->key'), which is what a keymap is looked up
+      ;; by, so the value it came from is kept here and `dispatch-key-
+      ;; event' hands it on when the key is a mouse key. Without it a
+      ;; click would reach the command as `(down-mouse-1 (FRAME))' - the
+      ;; shape Emacs uses for a *frame* event, which is right for
+      ;; `focus-in' and wrong for a click - and `posn-set-point' would
+      ;; refuse it with "Position not in text area of window".
+      ;;--------------------------------------------------------------
+      (make-parameter #f))
 
     (define *dispatch-event* (make-parameter #f))
     ;; ^ How a front end that owns its own loop hands an event to the

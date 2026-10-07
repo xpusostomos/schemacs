@@ -68,6 +68,9 @@
     (only (schemacs editor pgtk-names)
           init-check! <GtkWindow> <GtkDrawingArea> <GtkContainer> <GtkWidget>
           widget:show-all widget:hide widget:destroy widget:queue-draw
+          ;; a *child* widget has to select the events it wants -
+          ;; see the button handlers below
+          widget:add-events
           widget:can-focus widget:grab-focus widget:set-size-request
           widget:hexpand widget:vexpand window:resizable
           window:resize window:title
@@ -77,12 +80,23 @@
           ;; The main loop the read waits in. Gtk drives it; see
           ;; `pgtk-wait!'.
           main-loop:new main-loop:run main-loop:quit
+          ;; `pgtk-wait!' drops a nested loop with it, and this
+          ;; name had been used there *without* being imported
+          ;; since the nested loops were written - the tree's
+          ;; recurring missing-import class, invisible until the
+          ;; branch that releases a nested loop is taken.
+          main-loop:unref
           ;; Running Gtk's own main loop, which is what stage 2 of the
           ;; front-end work is: the loop is Gtk's, not ours.
           main main-quit
           modifier-type->number widget:get-allocated-width
           widget:get-allocated-height
-          event:get-state event:get-keyval keyval-to-unicode)
+          event:get-state event:get-keyval keyval-to-unicode
+          ;; where a button event happened - `pgtk-event-cell' -
+          ;; which was used there without being imported, so the
+          ;; first click raised inside the signal handler, where
+          ;; Gtk swallows it: a click that did nothing at all.
+          event:get-coords)
     ;; The display interface this implements.
     (only (schemacs editor dispnew)
           <display> clear-frame-area! column-width current-display
@@ -108,6 +122,9 @@
     (only (schemacs editor character)
           apply-modifiers char-ctl char-hyper char-meta char-shift
           char-super function-key-name make-ctrl-char)
+    ;; A mouse event needs the *position* it happened at, which is the
+    ;; redisplay's own walk - see `posn-at-x-y'.
+    (only (schemacs editor xdisp) posn-at-x-y)
     ;; The frame's focus, which the window tells us about: it decides
     ;; whether the cursor blinks and whether it is drawn hollow.
     (only (schemacs editor frame)
@@ -130,7 +147,10 @@
     ;; the procedure an event is handed to and `command-loop-ready?' says
     ;; whether it can take one now; both are #f/the-loop's when a read is
     ;; outstanding instead. See `Pgtk-ENQUEUE!`.
-    (only (schemacs editor keyboard) *dispatch-event* command-loop-ready?)
+    (only (schemacs editor keyboard)
+          *dispatch-event* command-loop-ready?
+          ;; a mouse event's own value, for the hand-over path above
+          *last-read-event*)
     ;; A colour *name* means what `term/tty-colors.el' says it means.
     (only (schemacs editor tty-colors) tty-color-standard-values))
 
@@ -680,6 +700,17 @@
                    (event (and raw
                                (not (eq? raw *pgtk-skip*))
                                (key-event->key d raw))))
+              ;; **The event's own value goes with the key here too.** This
+              ;; path dispatches straight from the signal handler and never
+              ;; goes through `read-key-event', so a mouse click handed
+              ;; over here arrived at the command as `(down-mouse-1
+              ;; (FRAME))' - the shape for a frame event - and
+              ;; `posn-set-point' then selected the window the editor was
+              ;; already in: a click that did nothing at all, with no
+              ;; error, because selecting the window you are in is not an
+              ;; error. The read path and `dispatch-input-event' both set
+              ;; this; this one did not.
+              (*last-read-event* raw)
               (when event (dispatch event)))
             (begin
               (set! (pgtk-queue d) (append (pgtk-queue d) (list ev)))
@@ -712,6 +743,48 @@
       ;;--------------------------------------------------------------
       (let*-values (((_ keysym) (event:get-keyval e)))
         keysym))
+
+    (define (pgtk-event-cell e)
+      ;; Where a Gtk button event happened, as the CELL the frame's
+      ;; windows are measured in. A Gdk event carries pixels and every
+      ;; window here is placed in cells, so this is the one conversion -
+      ;; `gdk_event_get_coords' is the accessor, the same shape as
+      ;; `event:get-keyval' above it.
+      ;;--------------------------------------------------------------
+      ;;
+      ;; `gdk_event_get_coords' returns a *boolean* and two out
+      ;; parameters, so guile-gi answers three values - the same shape as
+      ;; `event:get-keyval' above it, which the tree binds as
+      ;; `((_ keysym) ...)'. Binding two here put the boolean in X and
+      ;; the X coordinate in Y, and then `round' raised on a boolean
+      ;; *inside the signal handler*, where Gtk swallows it: the symptom
+      ;; was a click that did nothing at all, which is the thing this
+      ;; whole path exists to fix.
+      ;;--------------------------------------------------------------
+      (let*-values (((_ok x y) (event:get-coords e)))
+        (cons (quotient (inexact->exact (round x)) *cell-width*)
+              (quotient (inexact->exact (round y)) *cell-height*))))
+
+    (define (pgtk-mouse-event from e symbol)
+      ;; A Gtk button event as the *mouse event* GNU Emacs makes of one:
+      ;;
+      ;;   (SYMBOL (WINDOW POS-OR-AREA (X . Y) TIMESTAMP))
+      ;;
+      ;; which is what `subr.sld''s `posn-' accessors walk and what
+      ;; `(interactive "e")' hands to a command - `mouse-drag-region'
+      ;; being the one bound to `down-mouse-1'.
+      ;;
+      ;; The frame comes first, as it does for a key: a click in a window
+      ;; that is not the selected frame's selects that frame before the
+      ;; command runs, which is Emacs's own order for a mouse event -
+      ;; the frame is selected and *then* the window inside it.
+      ;;--------------------------------------------------------------
+      (let ((f (or (pgtk-frame-for from) (*current-frame*))))
+        (when (and f (not (eq? f (*current-frame*))))
+          (select-frame f))
+        (let* ((cell (pgtk-event-cell e))
+               (pos (posn-at-x-y (car cell) (cdr cell) f)))
+          (list symbol pos))))
 
     (define (pgtk-encode-event e)
       ;; A GTK key press as the single INTEGER the interface carries: the
@@ -885,6 +958,13 @@
        ((eq? item 'focus-in) *focus-in-code*)
        ((eq? item 'focus-out) *focus-out-code*)
        ((eq? item 'delete-frame) *delete-frame-code*)
+       ;; A button, tagged by the handler that queued it: its event is
+       ;; a mouse event and not a key, so it must not be asked for a
+       ;; keysym.
+       ((and (pair? item) (eq? (car item) 'button-press))
+        (pgtk-mouse-event from (cdr item) 'down-mouse-1))
+       ((and (pair? item) (eq? (car item) 'button-release))
+        (pgtk-mouse-event from (cdr item) 'mouse-1))
        ((memv (pgtk-event-keysym item) modifier-keysyms) *pgtk-skip*)
        (else
           ;; A key from a window that is not the selected frame's selects
@@ -1019,6 +1099,10 @@
       ;; them (`(kbd "<resize>")' and the three beside it).
       ;;--------------------------------------------------------------
       (cond
+       ;; A mouse event needs no decoding: the display made it, in the
+       ;; shape `subr.sld''s `posn-' accessors walk, and its *key* is the
+       ;; symbol at its head.
+       ((and (pair? ev) (memq (car ev) '(down-mouse-1 mouse-1))) (car ev))
        ((eqv? ev *resize-code*) 'resize)
        ((eqv? ev *focus-in-code*) 'focus-in)
        ((eqv? ev *focus-out-code*) 'focus-out)
@@ -1330,6 +1414,40 @@
         (connect win (make <signal> #:name "key-press-event")
                  (lambda (w e)
                    (pgtk-enqueue! d e)
+                   #t))
+        ;; **The press and the release, on the drawing area.** A click
+        ;; lands on the widget that draws, and that area IS the frame's
+        ;; grid: its top-left corner is cell (0, 0), so an event's own
+        ;; coordinates are the frame's. Both buttons are queued *tagged*,
+        ;; because a Gdk button event must not be asked for a keysym -
+        ;; `pgtk-item->event' tells the two apart by the tag.
+        ;;
+        ;; The press is what `mouse.el' binds: `[down-mouse-1]' starts a
+        ;; drag, and the release is what ends one. A click is a drag of
+        ;; no distance, which is why the release is queued at all.
+        ;; **A child widget has to ask for the events; a toplevel must
+        ;; not.** Gtk hands a button press to the widget under the
+        ;; pointer only if that widget's window *selected* it, and this
+        ;; area selected nothing - so the press went to the toplevel,
+        ;; whose handler is the key one and knows nothing about buttons.
+        ;; **The masks are 256 and 512, from Gdk's own enum** -
+        ;; `GDK_BUTTON_PRESS_MASK = 1 << 8' and `GDK_BUTTON_RELEASE_MASK
+        ;; = 1 << 9' (`gdktypes.h:436'). `1 << 2' and `1 << 3', which
+        ;; stood here first, are `GDK_POINTER_MOTION_MASK' and its hint -
+        ;; so the area asked for *motion* and the press went to whatever
+        ;; else was listening, which is why a click did nothing at all
+        ;; and, worse, why nothing at all was the symptom: no handler
+        ;; ran, so there was no error to see. (The warning about setting
+        ;; an event mask two hundred lines above is about the
+        ;; *toplevel*, where it crashes Gtk.)
+        (widget:add-events area 768)
+        (connect area (make <signal> #:name "button-press-event")
+                 (lambda (w e)
+                   (pgtk-enqueue! d (cons 'button-press e))
+                   #t))
+        (connect area (make <signal> #:name "button-release-event")
+                 (lambda (w e)
+                   (pgtk-enqueue! d (cons 'button-release e))
                    #t))
         ;; A size is REQUESTED, not set as a default. `set-default-size'
         ;; pins the window: Gtk then never accepts the size a compositor

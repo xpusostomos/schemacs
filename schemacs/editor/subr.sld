@@ -67,6 +67,9 @@
    run-mode-hooks
    kbd
    nthcdr
+   ;; `nth' and the `posn-' cluster - see the note on them below.
+   nth event-start event-end
+   posn-window posn-area posn-point posn-x-y
    )
 
   (begin
@@ -398,5 +401,82 @@
                   (if (pair? tail) (set-cdr! tail '()))
                   history))))
             history-list)))
+
+    (define (nth n list)
+      ;; GNU Emacs's `nth': the Nth element of LIST, or nil - this tree's
+      ;; #f - when the list is shorter than that. Built on `nthcdr'
+      ;; above, which is the half that exists in a Scheme without
+      ;; Elisp's tolerance for running off the end.
+      ;;--------------------------------------------------------------
+      (let ((tail (nthcdr n list)))
+        (and (pair? tail) (car tail))))
+
+    ;;----------------------------------------------------------------
+    ;; Positions: the value a mouse event carries
+    ;;
+    ;; `subr.el''s `posn-' cluster, which is what a command bound to a
+    ;; mouse event reads. A mouse event's value is
+    ;;
+    ;;   (SYMBOL (WINDOW POS-OR-AREA (X . Y) TIMESTAMP))
+    ;;
+    ;; - SYMBOL is `down-mouse-1' for the press and `mouse-1' for the
+    ;; click that follows it - and everything below is a walk of that
+    ;; list, as `subr.el''s are.
+    ;;
+    ;; **`posn-set-point' is not here**, though `subr.el' is where Emacs
+    ;; keeps it, for a reason this tree has and Emacs does not: it needs
+    ;; `select-window' and `goto-char', and `(schemacs editor frame)'
+    ;; imports *this* library, so a definition here could not reach
+    ;; them. It lives in `mouse.sld', with the commands that call it.
+    ;;------------------------------------------------------------------
+
+    (define (event-start event)
+      ;; GNU Emacs's `event-start': where EVENT begins.
+      ;;
+      ;; Emacs's differs from `event-end' only after a drag, and asks
+      ;; `posn-at-point' when handed nil; this asks nothing and answers
+      ;; #f for something that is not an event at all, which is the
+      ;; shape every caller in this tree wants.
+      ;;--------------------------------------------------------------
+      (and (pair? event) (nth 1 event)))
+
+    (define (event-end event)
+      ;; GNU Emacs's `event-end'.
+      ;;--------------------------------------------------------------
+      (and (pair? event) (nth 1 event)))
+
+    (define (posn-window position)
+      ;; GNU Emacs's `posn-window': the window the event happened in, or
+      ;; the frame when it happened outside every window.
+      ;;--------------------------------------------------------------
+      (nth 0 position))
+
+    (define (posn-area position)
+      ;; GNU Emacs's `posn-area': the symbol naming the part of the
+      ;; window - `mode-line', `vertical-border' - or nil (this tree's
+      ;; #f) for the text area. The second element is a *position* in
+      ;; the text area and a symbol elsewhere, which is what the cons
+      ;; test is for.
+      ;;--------------------------------------------------------------
+      (let ((area (nth 1 position)))
+        (let ((area (if (pair? area) (car area) area)))
+          (and (symbol? area) area))))
+
+    (define (posn-point position)
+      ;; GNU Emacs's `posn-point' (`keyboard.c:13099'): the buffer
+      ;; position of POSITION, or nil when it names no buffer location -
+      ;; a click on a mode line or a scroll bar. The C answers the
+      ;; position as it stands, falls back to the first element of a
+      ;; cons, and gives up.
+      ;;--------------------------------------------------------------
+      (let ((posn (nth 1 position)))
+        (cond ((integer? posn) posn)
+              ((pair? posn) (car posn))
+              (else #f))))
+
+    (define (posn-x-y position)
+      ;; GNU Emacs's `posn-x-y': the pixel coordinates, as a pair.
+      ;;--------------------------------------------------------------
+      (nth 2 position))
 
     ))

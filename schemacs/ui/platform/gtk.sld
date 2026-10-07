@@ -39,6 +39,10 @@
     (only (schemacs editor casefiddle))
     (only (schemacs editor paragraphs))
     ;; `replace.el' - the ncurses.sld note says why.
+    ;; The mouse commands, imported for their *binding*: loading
+    ;; `mouse.sld' is what puts `[down-mouse-1]' in the global map,
+    ;; as Emacs's own line at the end of `mouse.el' does.
+    (only (schemacs editor mouse))
     (only (schemacs editor replace))
     ;; The multilingual commands (`C-x RET ...`), which install their own
     ;; keys - `mule-cmds.el`. Not for a name: for the load.
