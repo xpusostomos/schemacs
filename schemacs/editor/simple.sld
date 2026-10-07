@@ -30,8 +30,10 @@
     ;; `caddr' is `(scheme cxr)'s, and `push-mark' takes Emacs's three
     ;; optional arguments.
     (only (scheme cxr) caddr)
-    ;; The prefix echo is a time.
-    (only (scheme time) current-second)
+    ;; The prefix echo is a timer rather than a time now - Emacs waits
+    ;; `echo-keystrokes' out in `read_char' and this tree arms a one-shot
+    ;; timer for it, which is the same facility a message's timeout uses.
+    (only (schemacs editor timer) cancel-timer run-at-time)
     (prefix (schemacs keymap) km:)
     ;; `define-derived-mode' is `derived.el''s, and `special-mode' below
     ;; is defined with it.
@@ -1293,8 +1295,10 @@ non-nil."
       (*prefix-digits* #f)
       (*prefix-negative* #f)
       ;; ... and the description is not owed any more: the argument it
-      ;; described has been used or thrown away.
-      (*prefix-echo-due* #f))
+      ;; described has been used or thrown away. This is the "or until
+      ;; the next input event" half of `minibuffer-message''s rule,
+      ;; which Emacs reaches through `pre-command-hook'.
+      (cancel-prefix-echo!))
 
     (define (pending-uarg)
       ;; The universal argument the next command will receive: #f when
@@ -1366,24 +1370,46 @@ non-nil."
       ;;--------------------------------------------------------------
       (make-parameter 1))
 
-    (define *prefix-echo-due* (make-parameter #f))
-    ;; ^ When the prefix argument should be described in the echo area,
-    ;; or #f when there is nothing to describe or it has been described.
-    ;; The command loop watches this the same way it watches a message
-    ;; that times out.
+    (define *prefix-echo-timer* (make-parameter #f))
+    ;; ^ The timer that will describe the prefix argument in the echo
+    ;; area, or #f when there is nothing to describe or it has been
+    ;; described. GNU Emacs has no such variable: it asks `read_char' to
+    ;; wait out `echo-keystrokes' and then echo, and the pending wait is
+    ;; the C stack rather than a value - see `REQUEST-PREFIX-ECHO!'.
 
     (define (request-prefix-echo!)
       ;; The prefix was just changed, so its description is owed to the
       ;; echo area once the keyboard has been idle for `echo-keystrokes'.
+      ;;
+      ;; GNU Emacs expresses that idleness as a *wait*: `read_char'
+      ;; calls `sit_for (Vecho_keystrokes, 1, 1)' before reading the key
+      ;; (`keyboard.c:2887') and echoes only if that wait elapsed with
+      ;; nothing typed. A front end that owns its own loop has no such
+      ;; wait to time - there is no `read_char' to sit in - so the same
+      ;; condition is expressed as the same one-shot timer a message's
+      ;; timeout is: armed here, cancelled when the next key arrives
+      ;; (`clear-prefix!'), and run by `timer-check!'. A key inside the
+      ;; second cancels it and nothing is echoed, which is what Emacs's
+      ;; `save_getcjmp' dance achieves the other way round.
       ;;--------------------------------------------------------------
-      (*prefix-echo-due*
-       (and (*echo-keystrokes*) (+ (current-second) (*echo-keystrokes*)))))
+      (cancel-prefix-echo!)
+      (*prefix-echo-timer*
+       (and (*echo-keystrokes*)
+            (run-at-time (*echo-keystrokes*) #f show-prefix-echo!))))
+
+    (define (cancel-prefix-echo!)
+      ;; Stop owing the echo area a description, whether because it has
+      ;; been given one or because the argument it described is gone.
+      ;;--------------------------------------------------------------
+      (let ((timer (*prefix-echo-timer*)))
+        (when timer (cancel-timer timer))
+        (*prefix-echo-timer* #f)))
 
     (define (prefix-echo-pending?)
       ;; Whether a prefix description is waiting for the keyboard to go
       ;; quiet.
       ;;--------------------------------------------------------------
-      (*prefix-echo-due*))
+      (*prefix-echo-timer*))
 
     (define (prefix-argument-description)
       ;; GNU Emacs's `universal-argument--description': what the echo
@@ -1417,10 +1443,11 @@ non-nil."
          (else (string-append "C-u " (number->string n))))))
 
     (define (show-prefix-echo!)
-      ;; Describe the prefix argument, if its time has come: the echo
-      ;; area's half of `prefix-command-echo-keystrokes-functions', which
-      ;; GNU Emacs's `read_char' calls once `sit_for' has waited out
-      ;; `echo-keystrokes'.
+      ;; Describe the prefix argument: the echo area's half of
+      ;; `prefix-command-echo-keystrokes-functions', which GNU Emacs's
+      ;; `read_char' calls once `sit_for' has waited out
+      ;; `echo-keystrokes'. It is a timer's function here, and the timer
+      ;; *is* that wait - see `REQUEST-PREFIX-ECHO!'.
       ;;
       ;; Only in the ordinary way of things, though: Emacs's `read_char'
       ;; starts that echo "if in middle of key sequence and minibuffer
@@ -1431,13 +1458,11 @@ non-nil."
       ;; it is silent there: the echo area *is* the minibuffer, and what
       ;; it is showing is the answer being typed.
       ;;--------------------------------------------------------------
-      (let ((due (*prefix-echo-due*)))
-        (when (and due (<= due (current-second)))
-          (*prefix-echo-due* #f)
-          (when (not (*echo-area-buffer*))
-            (let ((description (prefix-argument-description)))
-              (when description
-                (set!frame-message (*current-frame*) description)))))))
+      (cancel-prefix-echo!)
+      (when (not (*echo-area-buffer*))
+        (let ((description (prefix-argument-description)))
+          (when description
+            (set!frame-message (*current-frame*) description)))))
 
     (define (last-command-event-digit)
       ;; The digit the key that reached this command spelled, or #f.

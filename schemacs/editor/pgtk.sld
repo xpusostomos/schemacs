@@ -77,6 +77,9 @@
           ;; The main loop the read waits in. Gtk drives it; see
           ;; `pgtk-wait!'.
           main-loop:new main-loop:run main-loop:quit
+          ;; Running Gtk's own main loop, which is what stage 2 of the
+          ;; front-end work is: the loop is Gtk's, not ours.
+          main main-quit
           modifier-type->number widget:get-allocated-width
           widget:get-allocated-height
           event:get-state event:get-keyval keyval-to-unicode)
@@ -121,7 +124,13 @@
     ;; The development back door. `poll-repl!' is a no-op unless
     ;; `main-gtk.scm' was asked to open it; this loop is the only place a
     ;; windowed editor is ever idle, so it is where the REPL gets its turn.
-    (only (schemacs repl) poll-repl! *repl-wake*)
+    (only (schemacs repl) poll-repl! set-repl-wake!)
+    ;; **The command loop's two hooks into this display.** When the front
+    ;; end's own loop is the one absorbing input, `*dispatch-event*' is
+    ;; the procedure an event is handed to and `command-loop-ready?' says
+    ;; whether it can take one now; both are #f/the-loop's when a read is
+    ;; outstanding instead. See `Pgtk-ENQUEUE!`.
+    (only (schemacs editor keyboard) *dispatch-event* command-loop-ready?)
     ;; A colour *name* means what `term/tty-colors.el' says it means.
     (only (schemacs editor tty-colors) tty-color-standard-values))
 
@@ -138,6 +147,14 @@
    ;; The blocking read, exported for tests that drive it without a
    ;; window; nothing in the editor uses it by name.
    pgtk-read-event
+   ;; Call me back in MS milliseconds: how the timer module is told when
+   ;; to come back once Gtk owns the loop.
+   pgtk-arm-timer!
+   ;; Running Gtk's own main loop, and leaving it, for the front end that
+   ;; wants the loop to be Gtk's.
+   ;; The loop, and the way out of it. `main-gtk' runs the one and hands
+   ;; the other to the command loop as its `frame-quit-cont'.
+   pgtk-main pgtk-main-quit
    pgtk-enqueue!
    ;; The current frame written to a PNG: how a windowed editor is
    ;; checked without a pair of eyes on it.
@@ -563,18 +580,58 @@
              (else (cons cur (car q)))))))))
 
     (define *pgtk-loop* #f)
-    ;; ^ The main loop the read waits in, made once - a `GMainLoop' may
-    ;; be run again after it has been quit, so the wait does not need a
-    ;; new one each time. See `pgtk-wait!'.
+    ;; ^ The loop the *outermost* wait runs in, made once - a `GMainLoop'
+    ;; may be run again after it has been quit, so the common case does
+    ;; not need a new one each time. See `pgtk-wait!'.
 
-    (define *pgtk-waiting?* #f)
-    ;; ^ Whether a read is inside that loop right now, so that a signal
-    ;; handler arriving while a *command* is running does not quit a loop
-    ;; that is not running - GLib treats that as an error.
+    (define *pgtk-running* '())
+    ;; ^ The loops a wait is inside right now, innermost first, so that a
+    ;; signal handler arriving while a *command* is running does not quit
+    ;; a loop that is not running - GLib treats that as an error.
+    ;;
+    ;; **A list and not a flag, because a wait can nest.** GLib asserts
+    ;; that `g_main_loop_run' is not called on a loop that is already
+    ;; running, so a wait entered from inside another - which is what a
+    ;; reentrant read is, and what the command loop will be once Gtk owns
+    ;; it - needs a loop of its own. Nothing nests today: the
+    ;; minibuffer's read happens during dispatch, after the outer read has
+    ;; returned. It is built for nesting now so that it does not have to
+    ;; be rebuilt when that changes.
+
+    (define *timer-source* #f)
+    ;; ^ The one-shot Gtk source armed for the next timer, or #f when none
+    ;; is. See `pgtk-arm-timer!'.
+
+    (define (pgtk-arm-timer! ms thunk)
+      ;; Call THUNK in MS milliseconds, from Gtk's main loop, or cancel an
+      ;; arrangement already made when MS is #f.
+      ;;
+      ;; This is how the timer module is told when to come back
+      ;; (`(schemacs editor timer)''s `*timer-wake*') once Gtk owns the
+      ;; main loop - with no read to arm there is otherwise nothing to
+      ;; make an idle editor fire a timer.
+      ;;
+      ;; One at a time on purpose: the timer module reschedules whenever
+      ;; the lists change, and a source per change would leave a trail of
+      ;; them. The callback clears the slot before running THUNK, because
+      ;; THUNK almost always reschedules.
+      ;;--------------------------------------------------------------
+      (when *timer-source*
+        (source-remove? *timer-source*)
+        (set! *timer-source* #f))
+      (when ms
+        (set! *timer-source*
+              (timeout-add 0 (max 1 ms)
+                           (lambda (data)
+                             (set! *timer-source* #f)
+                             (thunk)
+                             ;; one shot: Gtk drops the source
+                             #f)
+                           #f))))
 
     (define (pgtk-main-loop)
-      ;; The loop the read waits in, made on first use. A windowless
-      ;; display never asks for one.
+      ;; The loop the outermost wait runs in, made on first use. A
+      ;; windowless display never asks for one.
       ;;--------------------------------------------------------------
       (or *pgtk-loop*
           (let ((ml (main-loop:new #f #f)))
@@ -587,19 +644,51 @@
     ;; object so that no real answer can be mistaken for it.
 
     (define (pgtk-enqueue! d ev)
-      ;; Put an input event on the display's queue, where the blocking
-      ;; read will find it. The signal handler calls this.
+      ;; Deliver one input event from a signal handler to the editor.
       ;;
-      ;; **And wake the read that is waiting for it.** This is the one
-      ;; place every queued thing goes through - a key, a resize, a focus
-      ;; change, a map, a deadline - so the wake belongs here rather than
-      ;; in each of the seven signal handlers or in a loop that watches
-      ;; the queue. A wake with nobody waiting is not an error and does
-      ;; nothing, which is what makes it safe to call from a handler that
-      ;; runs while a command is executing.
+      ;; **This is the one place every event goes through** - a key, a
+      ;; resize, a focus change, a map, a deadline - and it is also the
+      ;; one place that has to decide *how* to deliver it, because there
+      ;; are two ways and which one applies changes during the editor's
+      ;; life:
+      ;;
+      ;; - **Gtk owns the loop and the editor is waiting for input**: hand
+      ;;   it straight to the command loop, which runs one command and
+      ;;   returns, so control goes back to `gtk_main`. That is what makes
+      ;;   the loop absorbing input Gtk's own.
+      ;; - **A read is outstanding** - a minibuffer prompt, an isearch -
+      ;;   or a command is still running: queue it and wake the read. A
+      ;;   nested read is waiting for a key of its own and is the only
+      ;;   thing that can consume it.
+      ;;
+      ;; Doing the decision here rather than in the seven signal handlers
+      ;; means they need no policy of their own: each says what happened
+      ;; and this says where it goes.
       ;;--------------------------------------------------------------
-      (set! (pgtk-queue d) (append (pgtk-queue d) (list ev)))
-      (when *pgtk-waiting?* (main-loop:quit (pgtk-main-loop))))
+      (let ((dispatch (*dispatch-event*)))
+        (if (and dispatch
+                 (command-loop-ready?)
+                 (null? *pgtk-running*))
+            ;; Hand it over - through the *same two decodes a read uses*.
+            ;; `pgtk-item->event' is this display's own form of the event
+            ;; and `key-event->key' is the *key event* the command loop
+            ;; speaks - which is `read-key-event`'s one call, and the
+            ;; reason it exists. Handing `dispatch-key` the first without
+            ;; the second is what sent `-1` - the resize code - to
+            ;; `keymap-index`, which died in `integer->char` on it.
+            (let* ((raw (pgtk-item->event d ev))
+                   (event (and raw
+                               (not (eq? raw *pgtk-skip*))
+                               (key-event->key d raw))))
+              (when event (dispatch event)))
+            (begin
+              (set! (pgtk-queue d) (append (pgtk-queue d) (list ev)))
+              ;; Wake the read that is waiting for it. A wake with nobody
+              ;; waiting is not an error and does nothing, which is what
+              ;; makes it safe to call from a handler that runs while a
+              ;; command is executing.
+              (when (pair? *pgtk-running*)
+                (main-loop:quit (car *pgtk-running*)))))))
 
     (define modifier-keysyms
       ;; The keysyms of the modifier keys themselves. Pressing one is not
@@ -759,22 +848,45 @@
       (quotient (* 1000 (get-internal-real-time))
                 internal-time-units-per-second))
 
-    (define (pgtk-take-queued d found)
-      ;; Take the front of the queue and answer what the read should
-      ;; answer for it: the front is dropped either way, and an item that
-      ;; is not an event - a modifier key press - answers `*pgtk-skip*'
-      ;; so the caller reads again.
+    (define (pgtk-main-quit)
+      ;; Leave that loop: GNU Emacs's `Fkill_emacs' ends in `exit', and on
+      ;; Gtk the nearest honest thing is to stop the loop that is running
+      ;; the process and let the caller return.
       ;;--------------------------------------------------------------
-      (let ((from (car found)) (item (cdr found)))
-        (set! (pgtk-queue from) (cdr (pgtk-queue from)))
-        (cond
-         ((eq? item 'pgtk-deadline) #f)
-         ((eq? item 'resize) *resize-code*)
-         ((eq? item 'focus-in) *focus-in-code*)
-         ((eq? item 'focus-out) *focus-out-code*)
-         ((eq? item 'delete-frame) *delete-frame-code*)
-         ((memv (pgtk-event-keysym item) modifier-keysyms) *pgtk-skip*)
-         (else
+      (main-quit))
+
+    (define (pgtk-main)
+      ;; Run Gtk's own main loop. It returns when `pgtk-main-quit' stops
+      ;; it, and until then it is the loop that absorbs the editor's
+      ;; input: the editor leaves no loop of its own running, so every
+      ;; event - a key the command loop turns into a command, and equally
+      ;; anything else in the window - is dispatched by this one.
+      ;;
+      ;; There is no idle-callback trick here on purpose. An earlier
+      ;; version started the editor from inside `gtk_main' and then let
+      ;; its command loop run, with every read in a `GMainLoop' of the
+      ;; tree's own nested inside. That put `gtk_main' on the stack and
+      ;; then never let it iterate again, so it bought nothing.
+      ;;--------------------------------------------------------------
+      (main))
+
+    (define (pgtk-item->event from item)
+      ;; What ITEM means as an event: `*pgtk-skip*' for something that is
+      ;; not one - a modifier key press, which Gtk delivers and a terminal
+      ;; consumes - and #f for the deadline sentinel.
+      ;;
+      ;; Split out of `pgtk-take-queued' rather than inlined, because what
+      ;; an item *means* is a different question from where it is kept,
+      ;; and this is the half that knows about frames and key encoding.
+      ;;--------------------------------------------------------------
+      (cond
+       ((eq? item 'pgtk-deadline) #f)
+       ((eq? item 'resize) *resize-code*)
+       ((eq? item 'focus-in) *focus-in-code*)
+       ((eq? item 'focus-out) *focus-out-code*)
+       ((eq? item 'delete-frame) *delete-frame-code*)
+       ((memv (pgtk-event-keysym item) modifier-keysyms) *pgtk-skip*)
+       (else
           ;; A key from a window that is not the selected frame's selects
           ;; it first, so the command acts on the frame the user typed
           ;; in. `focus-in-event' has usually done this already; this is
@@ -783,19 +895,35 @@
           (let ((f (pgtk-frame-for from)))
             (when (and f (not (eq? f (*current-frame*))))
               (select-frame f)))
-          (pgtk-encode-event item)))))
+          (pgtk-encode-event item))))
+
+    (define (pgtk-take-queued d found)
+      ;; Take the front of the queue and answer what the read should
+      ;; answer for it: the front is dropped either way.
+      ;;--------------------------------------------------------------
+      (let ((from (car found)) (item (cdr found)))
+        (set! (pgtk-queue from) (cdr (pgtk-queue from)))
+        (pgtk-item->event from item)))
 
     (define (pgtk-wait! d timeout)
       ;; Wait until something has been queued, or TIMEOUT milliseconds
       ;; have passed. A negative TIMEOUT waits for as long as it takes.
       ;;
-      ;; **This is Gtk's main loop, not a pump of our own.** The wait is
-      ;; one `g_main_loop_run`, which blocks until `g_main_loop_quit` -
-      ;; and `pgtk-enqueue!` is what quits it, so the loop runs exactly
-      ;; until there is something to read. Gtk knows which descriptors to
-      ;; watch, how to sleep on them and what else it has to do while
-      ;; nothing is happening; driving its iteration by hand from Scheme
-      ;; made us answer those questions instead, badly.
+      ;; **A Gtk loop, not a pump of our own.** The wait is one
+      ;; `g_main_loop_run`, which blocks until `g_main_loop_quit` - and
+      ;; `pgtk-enqueue!` is what quits it, so the loop runs exactly until
+      ;; there is something to read. Gtk knows which descriptors to watch,
+      ;; how to sleep on them and what else it has to do while nothing is
+      ;; happening; driving its iteration by hand from Scheme made us
+      ;; answer those questions instead, badly.
+      ;;
+      ;; It is *nested* in Gtk's own main loop - `gtk_main', which
+      ;; `pgtk-main' runs and which is what dispatches the editor's keys
+      ;; in the ordinary way (`PGTK-ENQUEUE!`) - and that nesting is the
+      ;; one thing the editor's reentrancy cannot avoid and does not want
+      ;; to: a read that happens while a command is running (a minibuffer
+      ;; prompt, an isearch, a yes-or-no question) is a wait inside a
+      ;; wait, and every one of them is still a Gtk loop.
       ;;
       ;; Measured, on a window that is up and nothing happening: this
       ;; idles at nothing, while driving the loop by hand cost ~28 ms of
@@ -806,26 +934,37 @@
       ;; The loop is made once and run again each wait, which is allowed:
       ;; a `GMainLoop' is a flag around a context, and `quit' clears it.
       ;;
-      ;; **The deadline is a GSource, and the back door rides on it.**
-      ;; `keyboard.sld' shortens the wait to 100 ms while the REPL is
-      ;; open, precisely so that the server gets a turn; polling it from
-      ;; here, where that deadline fires, is that turn. A read with no
-      ;; deadline - the ordinary case, with no REPL - arms no source at
-      ;; all and blocks until a key, so an idle editor wakes for nothing.
+      ;; **The deadline is a GSource.** One is armed only when the caller
+      ;; asked for a timeout, which `keyboard.sld' does for the next timer
+      ;; that is due - and, on a front end that cannot be *woken* rather
+      ;; than one that can, to give the development REPL a turn. Gtk sets
+      ;; `SET-REPL-WAKE!', so for it the cap is gone and this fires only
+      ;; for timers; a read with no deadline arms no source at all and
+      ;; blocks until a key, so an idle editor wakes for nothing.
       ;;--------------------------------------------------------------
-      (let ((source (and (>= timeout 0)
+      ;; `let*' and not `let': `loop' asks whether this wait is nested,
+      ;; and a `let' binding's init is evaluated in the *enclosing* scope,
+      ;; where `nested?' does not exist yet.
+      (let* ((source (and (>= timeout 0)
                          (timeout-add
                           0 timeout
                           (lambda (data)
                             (poll-repl!)
                             (pgtk-enqueue! d 'pgtk-deadline)
                             #t)
-                          #f))))
+                          #f)))
+            ;; The outermost wait of *ours* runs the remembered loop, so
+            ;; that a keystroke does not pay for making one; a wait inside
+            ;; another needs a loop of its own, because GLib will not run
+            ;; one that is already running.
+            (nested? (pair? *pgtk-running*))
+            (loop (if nested? (main-loop:new #f #f) (pgtk-main-loop))))
         (dynamic-wind
-         (lambda () (set! *pgtk-waiting?* #t))
-         (lambda () (main-loop:run (pgtk-main-loop)))
+         (lambda () (set! *pgtk-running* (cons loop *pgtk-running*)))
+         (lambda () (main-loop:run loop))
          (lambda ()
-           (set! *pgtk-waiting?* #f)
+           (set! *pgtk-running* (cdr *pgtk-running*))
+           (when nested? (main-loop:unref loop))
            (when source (source-remove? source))))))
 
     (define (pgtk-read-event d timeout)
@@ -1179,8 +1318,19 @@
         ;; event is queued raw and decoded by the read. A toplevel window
         ;; receives key events without being told to ask for them;
         ;; setting an event mask on one crashes GTK.
+        ;; A key is *queued* and the read that is waiting for it is woken
+        ;; (`pgtk-enqueue!'). It is not dispatched from here even though
+        ;; Gtk now owns the loop: the editor's command loop is the thing
+        ;; that runs commands, it is reentrant, and it is *inside* a read
+        ;; at every moment it could act - including the outermost one,
+        ;; which nests in `gtk_main' like every other wait. Queuing is
+        ;; what GNU Emacs's `read_char' finds when it looks at the
+        ;; keyboard, and a key that arrives while a command is running is
+        ;; simply waiting for the next read.
         (connect win (make <signal> #:name "key-press-event")
-                 (lambda (w e) (pgtk-enqueue! d e) #t))
+                 (lambda (w e)
+                   (pgtk-enqueue! d e)
+                   #t))
         ;; A size is REQUESTED, not set as a default. `set-default-size'
         ;; pins the window: Gtk then never accepts the size a compositor
         ;; tiles it to, and the compositor - handed a window it cannot
@@ -1324,7 +1474,7 @@
       (set-program-class "schemacs")
       (init-check!)
       ;; **The back door can be woken here, so nothing has to poll for
-      ;; it.** `(schemacs repl)''s `*repl-wake*' is how a front end says
+      ;; it.** `(schemacs repl)''s `REPL-WAKE' is how a front end says
       ;; it can be told that the REPL has work; Gtk says it with an idle
       ;; callback, which the main loop runs out of the very
       ;; `g_main_loop_run' the read is blocked in. `keyboard.sld' asks
@@ -1333,8 +1483,16 @@
       ;; `pgtk-wait!': with the back door open the wait was capped at
       ;; 100 ms and every one of those turns cost ~13 ms of guile-gi
       ;; crossings).
-      (*repl-wake* (lambda ()
-                     (idle-add 0 (lambda (data) (poll-repl!) #f) #f)))
+      ;;
+      ;; **It is a global and not a parameter**, because the server's
+      ;; reader thread - which is what calls the wake - is made by
+      ;; `start-repl!' before this front end exists, and a fluid's value
+      ;; is captured per thread when the thread is made. As a parameter
+      ;; this read `#f' in every server thread for ever, so nothing ever
+      ;; woke the editor and only a keystroke let a queued expression
+      ;; run. See `(schemacs repl)''s `SET-REPL-WAKE!'.
+      (set-repl-wake! (lambda ()
+                        (idle-add 0 (lambda (data) (poll-repl!) #f) #f)))
       (let ((d (pgtk-open-window 80 24)))
         (current-display d)
         (initialize-pgtk-faces! d)

@@ -55,11 +55,8 @@
     (only (schemacs editor frame)
           *current-frame* blink-cursor-check
           display-selections-p frame-keymap-state
-          frame-message frame-message-expired?
-          frame-message-expiry
           frame-quit-cont run-pre-command-hook!
           set!frame-keymap-state set!frame-message
-          set!frame-message-expiry
           set!frame-quit-cont
           *echo-area-buffer* *echo-area-prompt*)
     ;; The global map the lookup falls back on, and the local map a
@@ -78,7 +75,6 @@
           *select-active-regions*
           deactivate-mark clear-prefix! delete-char pending-uarg
           place-undo-boundary!
-          prefix-echo-pending? show-prefix-echo!
           undo undo-redo update-prefix!)
     (only (schemacs editor editfns)
           barf-if-buffer-read-only insert)
@@ -101,7 +97,7 @@
     (only (schemacs editor xdisp) render! redisplay-frames!)
     ;; The development back door, which the command loop gives its turn
     ;; between keys. A no-op unless `SCHEMACS_REPL' opened it.
-    (only (schemacs repl) poll-repl! repl-open? *repl-wake*)
+    (only (schemacs repl) poll-repl! repl-open? repl-wake)
     ;; The clock. The read's timeout is shortened to the next timer
     ;; (`read-timeout-or'), and the timers are run when it expires - which
     ;; is how a cursor blink happens while the editor sits still.
@@ -109,7 +105,12 @@
           *timer-idle-list* *timer-list* cancel-timer current-idle-time
           set!timer-due-at timer-armed? timer-args timer-due-at
           timer-function timer-idle? timer-idle-start! timer-idle-stop!
-          timer-mark-run! timer-repeat timer-ripe?)
+          timer-mark-run! timer-repeat timer-ripe?
+          ;; The delay to the next timer and the front end's wake are the
+          ;; timer module's: "when is the next timer due" is a fact about
+          ;; the timer lists. This library keeps only the loop that acts
+          ;; on them. See `timer.sld'.
+          timer-next-delay timer-reschedule!)
     ;; `ceiling' and `inexact->exact' are Guile's; the delay is a
     ;; fractional number of seconds and the read wants whole milliseconds.
     (only (guile) ceiling inexact->exact)
@@ -135,6 +136,14 @@
    dispatch-input-event
    function-key-translate
    event-loop
+   ;; The outermost loop for a front end that owns its own: no loop at
+   ;; all, just these three - the hook an event is pushed into, and the
+   ;; two halves of what the loop does around one.
+   event-loop-on
+   *dispatch-event*
+   command-loop-key!
+   command-loop-idle!
+   command-loop-ready?
    exit-recursive-edit
    quoted-insert
    read-quoted-char
@@ -613,13 +622,6 @@
 
     (define *recursive-edit-exit* (make-parameter #f))
 
-    (define message-read-timeout
-      ;; How long the key read may wait when the echo area holds nothing
-      ;; that changes on its own. Giving up keeps the read from blocking
-      ;; forever on a message that has to be taken down.
-      ;;--------------------------------------------------------------
-      100)
-
     (define (key-event? ev)
       ;; Whether a read produced a key: a key *event*, and not the `#f' a
       ;; read that produced nothing answers with. The driver's
@@ -687,28 +689,6 @@
     ;; which is what waits in this editor.
     ;;------------------------------------------------------------------
 
-    (define (timer-next-delay)
-      ;; GNU Emacs's `timer_check' as the wait uses it: how many seconds
-      ;; the editor may sleep before the next timer is due, or #f when
-      ;; none is. A timer that cannot wake the read can only run when a
-      ;; key happens to arrive, which for a blinking cursor is never.
-      ;;--------------------------------------------------------------
-      (let ((idle (current-idle-time)))
-        (let loop ((timers (append (*timer-list*)
-                                   (if idle (*timer-idle-list*) '())))
-                   (least #f))
-          (cond
-           ((null? timers) least)
-           (else
-            (let* ((timer (car timers))
-                   (delay (if (timer-idle? timer)
-                              (and (timer-armed? timer)
-                                   (- (timer-due-at timer) idle))
-                              (- (timer-due-at timer) (current-second)))))
-              (loop (cdr timers)
-                    (if (and delay (or (not least) (< delay least)))
-                        delay least))))))))
-
     (define (timer-check!)
       ;; GNU Emacs's `timer_check': run every timer that is ripe. It
       ;; answers whether any ran rather than, as the C does, the time of
@@ -757,6 +737,10 @@
                          (append (*timer-list*) (list timer))))))
                     (apply (timer-function timer) (timer-args timer))))
               (loop (cdr timers)))))
+        ;; A repeating timer has been put back at its new time, and a
+        ;; one-shot one has gone: either way the front end has to be told
+        ;; when to come back.
+        (when ran? (timer-reschedule!))
         ran?))
 
     (define (read-timeout-or message-timeout timer-delay cap)
@@ -794,10 +778,102 @@
       ;; blocks for ever gives nothing else in the process a turn, and on
       ;; a terminal the read blocks in `getch' with nothing to poll, so
       ;; the development REPL would never answer between keys. A front
-      ;; end that can be woken - Gtk, through `*repl-wake*' - sets that
+      ;; end that can be woken - Gtk, through `REPL-WAKE' - sets that
       ;; parameter and gets no cap at all, so its read blocks properly.
       ;;--------------------------------------------------------------
-      (read-timeout-or -1 #f (and (repl-open?) (not (*repl-wake*)) 100)))
+      (read-timeout-or -1 #f (and (repl-open?) (not (repl-wake)) 100)))
+
+    (define *dispatch-event* (make-parameter #f))
+    ;; ^ How a front end that owns its own loop hands an event to the
+    ;; command loop, or #f when it has no loop of its own and the loop
+    ;; waits in a read instead.
+    ;;
+    ;; **This is what makes the loop the front end's.** A terminal cannot
+    ;; set it: ncurses has no callback, its keys can only be got by a
+    ;; blocking `getch', and so its loop must wait in the read. Gtk can:
+    ;; its signal handlers call this, so the loop *absorbing input* is
+    ;; `gtk_main` itself - which is the whole point, because a widget
+    ;; added to a frame (a menu, a popup, a drag) only receives its
+    ;; events if the loop dispatching them is the one Gtk expects.
+    ;;
+    ;; It is set for the **outermost** loop only. A nested one - the
+    ;; minibuffer's, an isearch's - is entered from inside a command and
+    ;; has to wait for a key of its own, so it reads, and reads nest
+    ;; inside Gtk's loop. That is the reentrancy Chris described: "run a
+    ;; reentrant gtk loop so you're still waiting in a gtk loop, just not
+    ;; the main loop".
+    ;;
+    ;; A parameter is safe here in a way `REPL-WAKE' was not: this is
+    ;; read and written on the one thread - Gtk's callbacks are the main
+    ;; thread - and the `parameterize' that sets it encloses the loop
+    ;; that runs the callbacks. See `(schemacs repl)` on what happens when
+    ;; that is not true.
+
+    (define (command-loop-idle! frame)
+      ;; The housekeeping that belongs to the moment the editor settles
+      ;; down to wait for input: give the development REPL its turn, arm
+      ;; the cursor blink, and mark the editor idle so that an idle timer
+      ;; counts from here.
+      ;;
+      ;; It is its own function because the two shapes of the loop need
+      ;; it at *different points*. A loop that waits itself calls it just
+      ;; before its read; a front end that owns the loop calls it after
+      ;; it has finished with a key and is handing control back. See
+      ;; `COMMAND-LOOP-KEY!` for the other half.
+      ;;--------------------------------------------------------------
+      (poll-repl!)
+      ;; Arm the mode that blinks the cursor, if the frame can and it is
+      ;; not armed already. Emacs does this from its focus-change hook;
+      ;; there is no such hook here, and this loop is the thing that
+      ;; always runs.
+      (blink-cursor-check)
+      ;; The editor is about to wait, which is what "idle" means.
+      (timer-idle-start!))
+
+    (define (command-loop-timers!)
+      ;; A timer that was due has now run. Redraw when one did, which is
+      ;; what makes a cursor blink visible without a keypress: Emacs's
+      ;; `internal-show-cursor' asks for a redisplay and this is where
+      ;; that lands here.
+      ;;--------------------------------------------------------------
+      (when (timer-check!) (redisplay-frames!)))
+
+    (define %dispatching #f)
+    ;; ^ Whether a command is running right now, so that a front end can
+    ;; tell "hand this event over" from "a command is already running, put
+    ;; it on the queue". A plain variable rather than a parameter for the
+    ;; reason `(schemacs repl)`'s wake is: it is read from a callback, and
+    ;; a fluid's value is captured per thread when the thread is made.
+
+    (define (command-loop-ready?)
+      ;; Whether the command loop can take an event right now.
+      ;;--------------------------------------------------------------
+      (not %dispatching))
+
+    (define (command-loop-key! frame ev)
+      ;; Everything the command loop does with one event *except* read
+      ;; it: stop the idle clock, run any timer that came due, dispatch
+      ;; the event, and redraw.
+      ;;
+      ;; A front end that owns its loop calls this straight from its own
+      ;; signal handler, through `*DISPATCH-EVENT*`. Everything the key
+      ;; needs is here or on the frame - `dispatch-key` keeps the chord
+      ;; state in `frame-keymap-state` and `dispatch-action` does
+      ;; `this-command`, the undo boundary, `pre-command-hook`,
+      ;; `last-command` and the region bookkeeping - so nothing is lost
+      ;; by the loop not being on the stack.
+      ;;--------------------------------------------------------------
+      (timer-idle-stop!)
+      (command-loop-timers!)
+      (set! %dispatching #t)
+      ;; `dynamic-wind`, because a quit or an error escaping from the
+      ;; command must not leave the editor believing a command is still
+      ;; running - it would then never accept another key.
+      (dynamic-wind
+       (lambda () #t)
+       (lambda () (dispatch-key frame ev))
+       (lambda () (set! %dispatching #f)))
+      (redisplay-frames!))
 
     (define (command-loop frame . args)
       ;; Read key events and dispatch them, until something leaves this
@@ -835,85 +911,53 @@
              ;; prompt's state to another frame.
              (when (and (pair? args) (car args))
                (set! frame (or (*current-frame*) frame)))
-             ;; Give the development REPL a turn before waiting for a key.
-             ;; A no-op unless `SCHEMACS_REPL' opened it. A terminal's read
-             ;; blocks in `getch' with nothing to hang the poll on, so
-             ;; between keys is the most a terminal can offer; the GTK
-             ;; display polls in its own loop, where it is idle far more
-             ;; often (`pgtk.sld''s `pgtk-read-event').
-             (poll-repl!)
-             ;; Arm the mode that blinks the cursor, if the frame can and
-             ;; it is not armed already. Emacs does this from its
-             ;; focus-change hook; there is no such hook here, and this
-             ;; loop is the thing that always runs.
-             (blink-cursor-check)
-             ;; The editor is about to wait, which is what "idle" means;
-             ;; an idle timer counts from here.
-             (timer-idle-start!)
+             ;; The half of the loop that belongs to *waiting*: give the
+             ;; development REPL a turn, arm the cursor blink, and mark
+             ;; the editor idle. A front end that owns its loop calls the
+             ;; same function after it has finished with a key, which is
+             ;; why it is a function - see `command-loop-idle!`.
+             (command-loop-idle! frame)
              (let ((want (read-timeout-or
-                          (if (or (frame-message-expiry frame)
-                                  ;; a prefix argument owes the echo
-                                  ;; area a description, and it is owed
-                                  ;; once the keyboard has been quiet
-                                  ;; for `echo-keystrokes' - so the read
-                                  ;; cannot block while that is owed
-                                  (prefix-echo-pending?))
-                              message-read-timeout
-                              -1)
+                          ;; **Nothing to wait for but a key.** The
+                          ;; echo area's two clock-driven habits - a
+                          ;; message that times out, and the prefix
+                          ;; description owed once `echo-keystrokes' has
+                          ;; passed - used to be a timeout on this read,
+                          ;; which is what made an idle editor wake up
+                          ;; ten times a second. Each is a timer now
+                          ;; and `timer-next-delay' already shortens the
+                          ;; read to the next one, so this read blocks
+                          ;; until a key arrives.
+                          -1
                           (timer-next-delay)
                           ;; **A wait is shortened for the development
                           ;; REPL only when this front end cannot be
                           ;; woken by it.** A front end that can sets
-                          ;; `*repl-wake*' and needs no cap at all; one
+                          ;; `REPL-WAKE' and needs no cap at all; one
                           ;; that cannot - a terminal, whose read blocks
                           ;; in `getch' with nothing to hang a poll on -
-                          ;; keeps the cap. See `*repl-wake*'.
-                          (and (repl-open?) (not (*repl-wake*)) 100))))
+                          ;; keeps the cap. See `REPL-WAKE'.
+                          (and (repl-open?) (not (repl-wake)) 100))))
              (let ((ev (read-key-event want)))
-               ;; A *key* means the editor is not idle any more. A timeout
-               ;; does not: nothing arrived, which is what idleness is.
-               (when (key-event? ev) (timer-idle-stop!))
-               ;; A timer that was due has now run. Redraw when one did,
-               ;; which is what makes a cursor blink visible without a
-               ;; keypress: Emacs's `internal-show-cursor' asks for a
-               ;; redisplay and this is where that lands here.
-               (when (timer-check!) (redisplay-frames!))
                (cond
-                  ((key-event? ev)
-                   (dispatch-key frame ev)
-                   ;; **Every frame, not just this one.** A second window
-                   ;; has to keep up while you type in the first - GNU
-                   ;; Emacs's redisplay is a loop over all frames
-                   ;; (`FOR_EACH_FRAME', `xdisp.c:14350'), and drawing
-                   ;; only the frame this loop was handed is what left a
-                   ;; newly made window black.
-                   (redisplay-frames!))
-                  ;; Nothing to read on a *blocking* read is the end of
-                  ;; input - the read answers #f for that too - so leave
-                  ;; the editor. "Blocking" is the test, and it has to be
-                  ;; the test rather than "no message is pending": a read
-                  ;; is also armed when a *timer* is due, and a timer that
-                  ;; is due must not read as the end of the input.
-                  ((< want 0)
-                   (let ((quit (frame-quit-cont frame)))
-                     (when quit (quit 'eof))))
-                  ;; A timed read that found nothing: take down a message
-                  ;; whose time is up, show the prefix description if its
-                  ;; second has come, and draw again if either did. A
-                  ;; timer that was due has already been run and drawn
-                  ;; above.
-                  (else
-                   (let ((drawn? #f))
-                     (when (frame-message-expired? frame)
-                       (set!frame-message frame "")
-                       (set!frame-message-expiry frame #f)
-                       (set! drawn? #t))
-                     ;; the prefix description, if its second has come
-                     (let ((before (frame-message frame)))
-                       (show-prefix-echo!)
-                       (when (not (eq? before (frame-message frame)))
-                         (set! drawn? #t)))
-                     (when drawn? (render! frame))))))
+                ((key-event? ev)
+                 ;; The half of the loop that belongs to *a key arriving*:
+                 ;; stop the idle clock, run any timer that came due,
+                 ;; dispatch, and redraw. The same function a front end
+                 ;; that owns its loop calls from its own signal handler.
+                 (command-loop-key! frame ev))
+                ;; Nothing to read on a *blocking* read is the end of
+                ;; input - the read answers #f for that too - so leave
+                ;; the editor. "Blocking" is the test, and it has to be
+                ;; the test rather than "no message is pending": a read
+                ;; is also armed when a *timer* is due, and a timer that
+                ;; is due must not read as the end of the input.
+                ((< want 0)
+                 (let ((quit (frame-quit-cont frame)))
+                   (when quit (quit 'eof))))
+                ;; A timed-out read: a timer was due, which is the only
+                ;; reason this read was armed at all. Run it and redraw.
+                (else (command-loop-timers!))))
                (loop)))))))
 
     (define (recursive-edit frame)
@@ -1114,7 +1158,15 @@ With argument, insert ARG copies of the character."
         #f))
 
     (define (event-loop frame)
-      ;; The outermost command loop: it runs until the editor is quit.
+      ;; The outermost command loop, as a *loop*: it runs until the editor
+      ;; is quit.
+      ;;
+      ;; This is the terminal's, and it is the terminal's because ncurses
+      ;; has no callback: there is nothing to push an event into, its keys
+      ;; can only be got by a blocking `getch', and so the loop has to
+      ;; wait in the read. A front end that *does* own an event loop uses
+      ;; `EVENT-LOOP-ON` instead, where there is no loop at all and Gtk's
+      ;; own loop is the one absorbing input.
       ;;--------------------------------------------------------------
       (parameterize ((*current-frame* frame)
                      (*current-keymap* *default-keymap*))
@@ -1125,6 +1177,54 @@ With argument, insert ARG copies of the character."
            ;; #t: the outermost loop follows the selected frame, which is
            ;; what makes `C-x 5 o' take effect (`recursive-edit' does not).
            (command-loop frame #t)))))
+
+    (define (event-loop-on frame run-loop quit-loop)
+      ;; The outermost command loop for a front end that owns its own
+      ;; loop: set up, hand control to RUN-LOOP, and let QUIT-LOOP leave
+      ;; it.
+      ;;
+      ;; **There is no loop here, and that is the point.** The editor's
+      ;; outermost level holds no state of its own - the chord is
+      ;; `frame-keymap-state` on the frame, the prefix argument and
+      ;; `this-command` are globals, idleness is the timer module's - so
+      ;; it does not need to be a loop at all; it needs to be something
+      ;; an event can be pushed into, which is `command-loop-key!`. That
+      ;; is what makes the loop absorbing input the *front end's* own:
+      ;; `gtk_main` calls the handler, the handler runs one command and
+      ;; returns, and control goes back to `gtk_main` - which is what a
+      ;; widget added to a frame (a menu, a popup, a drag) needs, since
+      ;; it is `gtk_main` that then gets its events.
+      ;;
+      ;; RUN-LOOP does not return until the editor is quit, and QUIT-LOOP
+      ;; is what `frame-quit-cont` calls. Both are the front end's, so
+      ;; that this library never names a display - the same arrangement
+      ;; that keeps `dispnew.sld` free of both.
+      ;;
+      ;; A *nested* loop - a prompt, an isearch - is still
+      ;; `COMMAND-LOOP`'s, and still blocks: it is entered from inside a
+      ;; command and has to wait for a key of its own. See
+      ;; `*DISPATCH-EVENT*`.
+      ;;--------------------------------------------------------------
+      (parameterize ((*current-frame* frame)
+                     (*current-keymap* *default-keymap*)
+                     (*dispatch-event*
+                      (lambda (ev)
+                        ;; The selected frame is read each time, as
+                        ;; `command_loop_1' reads `selected_frame' every
+                        ;; iteration: `C-x 5 o' has to take effect on the
+                        ;; next command.
+                        (command-loop-key! (or (*current-frame*) frame) ev)
+                        ;; Control is about to go back to the front end's
+                        ;; loop, which is what "waiting for input" now
+                        ;; means.
+                        (command-loop-idle! (or (*current-frame*) frame)))))
+        (set!frame-quit-cont frame (lambda (value) (quit-loop)))
+        ;; draw before the first event: a file's text, or a prompt, that
+        ;; appeared only after a key was typed looks like nothing happened
+        (redisplay-frames!)
+        ;; The editor starts out waiting for input.
+        (command-loop-idle! frame)
+        (run-loop)))
 
     (define-key *default-keymap* (kbd "C-q") quoted-insert)
 

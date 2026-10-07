@@ -55,8 +55,6 @@
     ;; `WINDOW-CURSOR-TABLE'. Guile's own weak table, a key held weakly.
     (only (guile) kill getpid SIGTSTP
           make-weak-key-hash-table hashq-ref hashq-set!)
-    ;; The message timeout is a time in seconds, and so is a timer's.
-    (only (scheme time) current-second)
     ;; `w->cursor_off_p' and the blink's timers are kept beside the
     ;; window and the frame rather than in the window, for the reason
     ;; `buffer.sld' gives for its own slots: the record is shared and
@@ -65,7 +63,7 @@
     ;; is on, which is what the face machinery records.
     (only (schemacs editor faces) *window-system*)
     (only (schemacs editor timer)
-          cancel-timer run-with-idle-timer run-with-timer))
+          cancel-timer run-at-time run-with-idle-timer run-with-timer))
 
   (export
    %window-point
@@ -110,8 +108,7 @@
    frame-editor
    frame-keymap-state
    frame-message
-   frame-message-expired?
-   frame-message-expiry
+   frame-message-timer
    frame-quit-cont
    frame-output
    frame-selected-window
@@ -128,7 +125,7 @@
    set!frame-keymap-state
    set-message!
    set!frame-message
-   set!frame-message-expiry
+   set!frame-message-timer
    set!frame-quit-cont
    set!frame-selected-window
    set!frame-windows
@@ -567,7 +564,7 @@
     (define-record-type <frame>
       (make<frame>
        windows selected-window height width
-       message message-expiry keymap-state quit-cont output name)
+       message message-timer keymap-state quit-cont output name)
       frame-type?
       (windows   frame-windows   set!frame-windows)
       ;; ^ The frame's windows, top to bottom. Emacs's `window-list'.
@@ -585,16 +582,20 @@
       ;; ^ The frame's width in columns, GNU Emacs's `frame-width'.
       (message    frame-message    set!frame-message-text)
       ;; ^ A message string drawn in the echo area, or false.
-      (message-expiry frame-message-expiry
-                      set!frame-message-expiry)
-      ;; ^ When that message should be taken down again, as a time in
-      ;; seconds in the sense of `current-second', or false for a
-      ;; message that stays until the next key. GNU Emacs arms a timer
-      ;; for this (`minibuffer-message-timeout', two seconds) and also
-      ;; clears on the next input event, which is what the command loop
-      ;; does here by setting the message to "" before every command.
-      ;; This editor has no timers, so the time is kept and the command
-      ;; loop's read is given a timeout while one is pending.
+      (message-timer frame-message-timer set!frame-message-timer)
+      ;; ^ The timer that will take that message down, or false for a
+      ;; message that stays until the next key. GNU Emacs keeps the same
+      ;; timer in `minibuffer-message-timer': `minibuffer-message' arms
+      ;; it with `run-at-time' (`minibuffer.el:861') and
+      ;; `clear-minibuffer-message' cancels it (`:1050'), which the C's
+      ;; `clear_message' reaches through `clear-message-function'
+      ;; (`xdisp.c:13663').
+      ;;
+      ;; The timer *is* the timeout - there is no separate time to
+      ;; compare against, which is what lets a front end that owns its
+      ;; loop wait for a key rather than for a clock. The command loop
+      ;; used to hold a time here and give its key read a timeout while
+      ;; one was pending; that poll is what this replaced.
       (keymap-state frame-keymap-state set!frame-keymap-state)
       ;; ^ A pending modal keymap lookup state, or false. It persists
       ;; between key events when a key chord (such as C-x C-s) is
@@ -631,6 +632,17 @@
       ;;--------------------------------------------------------------
       (frame-type? thing))
 
+    (define (frame-cancel-message-timer! frame)
+      ;; Take down the timer that would clear FRAME's message, if one is
+      ;; armed. GNU Emacs's `clear-minibuffer-message'
+      ;; (`minibuffer.el:1050') is exactly this, and it is what
+      ;; `clear-message-function' is set to (`minibuffer.el:1075') so
+      ;; that the C's `clear_message' reaches it (`xdisp.c:13663').
+      ;;--------------------------------------------------------------
+      (let ((timer (frame-message-timer frame)))
+        (when timer (cancel-timer timer))
+        (set!frame-message-timer frame #f)))
+
     (define (set!frame-message frame text)
       ;; Put TEXT in FRAME's echo area, taking down any timeout the
       ;; message it replaces had. A timeout belongs to the message it
@@ -639,28 +651,29 @@
       ;; reported - is not meant to inherit the previous one's and
       ;; disappear early.
       ;;--------------------------------------------------------------
-      (set!frame-message-text frame text)
-      (set!frame-message-expiry frame #f))
-
-    (define (frame-message-expired? frame)
-      ;; Whether FRAME's message has been up for as long as it was
-      ;; given. A message with no expiry - the great majority, which
-      ;; stay until the next key - is never expired.
-      ;;--------------------------------------------------------------
-      (let ((limit (frame-message-expiry frame)))
-        (and limit (< limit (current-second)))))
+      (frame-cancel-message-timer! frame)
+      (set!frame-message-text frame text))
 
     (define (set-message! frame text . args)
       ;; Put TEXT in FRAME's echo area, taking it down again after
       ;; ARGS' first element seconds - or leaving it until the next key
       ;; when there is none. GNU Emacs's `message' pairs a string with
-      ;; the timer `minibuffer-message' arms for it; the two are set
-      ;; together here so that a message cannot be left with the
-      ;; previous message's expiry.
+      ;; the timer `minibuffer-message' arms for it (`minibuffer.el:861',
+      ;; `minibuffer-message-timeout' being the two seconds it uses);
+      ;; the two are set together here so that a message cannot be left
+      ;; with neither the previous message's timer nor its own.
+      ;;
+      ;; The timer clears the message by setting it to "", which is
+      ;; Emacs's `(message nil)' from `minibuffer--delete-message-overlay'
+      ;; (`minibuffer.el:846'). `timer-check!' answers whether it ran, so
+      ;; the redisplay that shows the message gone is the same one a key
+      ;; would have caused.
       ;;--------------------------------------------------------------
       (set!frame-message frame text)
-      (set!frame-message-expiry
-       frame (and (pair? args) (car args) (+ (current-second) (car args)))))
+      (when (and (pair? args) (car args))
+        (set!frame-message-timer
+         frame (run-at-time (car args) #f
+                            (lambda () (set!frame-message frame ""))))))
 
     ;; The frame currently dispatching a key event. Commands read the
     ;; frame through this parameter.

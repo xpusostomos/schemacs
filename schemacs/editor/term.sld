@@ -41,7 +41,16 @@
     (only (schemacs editor faces)
           *display-color-cells* *display-type* *frame-background-mode*
           face-list face-spec-recalc)
-    (only (guile) getenv string-prefix? logior))
+    ;; The wait this library owns: `select' over the keyboard and the
+    ;; back door's pipe, the pipe itself, and the clock its deadline is
+    ;; measured with. `internal-time-units-per-second' is a VALUE and not
+    ;; a call, as `pgtk.sld''s `pgtk-now-ms' reads it.
+    (only (guile) getenv string-prefix? logior
+          select pipe setvbuf fileno
+          get-internal-real-time internal-time-units-per-second)
+    ;; A terminal can be *told* that the back door has work, rather than
+    ;; asking on a timer - see `with-terminal' and `read-input-event'.
+    (only (schemacs repl) poll-repl! set-repl-wake!))
 
   (export
    with-terminal
@@ -137,6 +146,13 @@
           (idcok! (stdscr) #f)
           (idlok! (stdscr) #f)
           (curs-set 1)
+          ;; **The back door can be woken here, so nothing has to poll
+          ;; for it.** A terminal has no event loop to call back into, so
+          ;; its wake is a byte in a pipe that the wait below selects on
+          ;; beside the keyboard. It is the same hook `pgtk.sld''s
+          ;; `with-gtk-display' sets with an `idle-add', and the
+          ;; reasoning for a global rather than a parameter is there.
+          (install-repl-wake!)
           )
         thunk
         (lambda () (endwin))
@@ -340,6 +356,74 @@
       ;;--------------------------------------------------------------
       (refresh (stdscr)))
 
+    ;;----------------------------------------------------------------
+    ;; The back door's wake
+    ;;
+    ;; A terminal has no event loop to call back into, so the REPL's
+    ;; notification has to arrive as something this display's wait can
+    ;; see: a byte in a pipe, selected on beside the keyboard.
+    ;; `set-repl-wake!' is the same hook Gtk sets with an `idle-add' -
+    ;; `pgtk.sld''s `with-gtk-display' is where the reasoning for what it
+    ;; is and why it is a global lives, and what follows is the
+    ;; terminal's half of it.
+    ;;------------------------------------------------------------------
+
+    (define %wake-read #f)
+    (define %wake-write #f)
+    (define %wake-read-fd #f)
+    ;; ^ The wake pipe and the descriptor the wait selects on, or #f
+    ;; before the terminal is open.
+
+    (define %keyboard-fd 0)
+    ;; ^ The descriptor ncurses reads keys from. `initscr' takes the
+    ;; terminal from stdin and `wgetch' reads `sp->_ifd', the same file
+    ;; description, so this is that number - asked for rather than
+    ;; assumed.
+
+    (define (install-repl-wake!)
+      ;; Say that this front end can be woken, with a pipe the server's
+      ;; reader thread writes a byte to.
+      ;;
+      ;; **The write end is unbuffered and that is not optional.** A
+      ;; buffered port holds the byte in its own buffer, where the
+      ;; descriptor the wait selects on never sees it, and the wake then
+      ;; silently does nothing - Guile's `(pipe)' hands back buffered
+      ;; ports. `'none' is Guile's spelling of `_IONBF'.
+      ;;--------------------------------------------------------------
+      (unless %wake-write
+        (set! %keyboard-fd
+              (guard (e (else 0)) (fileno (current-input-port))))
+        (let* ((p (pipe))
+               (rd (car p))
+               (wr (cdr p)))
+          (setvbuf rd 'none)
+          (setvbuf wr 'none)
+          (set! %wake-read rd)
+          (set! %wake-read-fd (fileno rd))
+          (set! %wake-write wr)
+          (set-repl-wake!
+           ;; Writing must not raise into the server's reader thread - a
+           ;; wake that fails is a wake that did not happen, and the poll
+           ;; that follows the byte is what does the work.
+           (lambda () (guard (e (else #f)) (write-u8 1 wr)))))))
+
+    (define (tty-now-ms)
+      ;; The clock the deadline in `read-input-event' is measured
+      ;; against.
+      ;;--------------------------------------------------------------
+      (quotient (* 1000 (get-internal-real-time))
+                internal-time-units-per-second))
+
+    (define (drain-repl-wake)
+      ;; Take out the bytes the server has written to the pipe. One byte
+      ;; is written per queued operation, and a byte left unread would
+      ;; make every later `select' return at once for ever. What is
+      ;; queued is `poll-repl!''s to run, not this.
+      ;;--------------------------------------------------------------
+      (when (and %wake-read (char-ready? %wake-read))
+        (unless (eof-object? (read-u8 %wake-read))
+          (drain-repl-wake))))
+
     (define-method (read-input-event (d <tty-display>) timeout)
       ;; Read one key event, TIMEOUT milliseconds allowed - a negative
       ;; TIMEOUT blocks until one is there. What comes back is what the
@@ -348,17 +432,76 @@
       ;; of input, the caller telling the two apart by the TIMEOUT it
       ;; asked for.
       ;;
+      ;; **`select' owns every wait.** What stood here was `timeout!' and
+      ;; a `getch', and the back door could then only be answered by
+      ;; cutting the timeout short and asking again - a poll, ten times a
+      ;; second, which is the last one in the tree and is what
+      ;; `keyboard.sld' still asks for on behalf of a front end that
+      ;; cannot be told it has work (`repl-wake'). The wait is now on two
+      ;; descriptors: the keyboard, and the pipe `install-repl-wake!' has
+      ;; the server write to.
+      ;;
+      ;; **`getch' is then called with no delay set**, because a byte is
+      ;; already on the descriptor and a wait inside it would be a second
+      ;; way to miss the caller's deadline. `nodelay' does not bound the
+      ;; sequence-assembly wait - a lone ESC sits in that for ESCDELAY
+      ;; before coming back - but it is reached only once a byte has been
+      ;; *read*: ncurses consults the window's delay only while its own
+      ;; buffer is empty, so the peek below is a zero-delay read when
+      ;; there is nothing to read, and that is also what lets it report
+      ;; KEY_RESIZE after a signal.
+      ;;
       ;; The keypad's Backspace is answered as DEL, the byte the
       ;; terminal sends for it (`kbs=^?'): ncurses has matched that byte
       ;; to `kbs' and hands back its own code, and DEL is what GNU Emacs
       ;; would have read there.
       ;;--------------------------------------------------------------
-      (timeout! (stdscr) timeout)
-      (let ((ev (getch (stdscr))))
-        (cond
-         ((or (eqv? ev ERR) (eqv? ev #f)) #f)
-         ((and (integer? ev) (= ev KEY_BACKSPACE)) (integer->char 127))
-         (else ev))))
+      (let* ((deadline (and (>= timeout 0) (+ (tty-now-ms) timeout)))
+             (wake %wake-read-fd))
+        (let loop ((spins 0))
+          ;; What ncurses is already holding comes first: a byte it took
+          ;; while assembling a sequence, or the KEY_RESIZE a signal told
+          ;; it about.
+          (nodelay! (stdscr) #t)
+          (let ((ev (getch (stdscr))))
+            (if (not (or (eqv? ev ERR) (eqv? ev #f)))
+                (if (and (integer? ev) (= ev KEY_BACKSPACE))
+                    (integer->char 127)
+                    ev)
+                (let ((left (and deadline (- deadline (tty-now-ms)))))
+                  (cond
+                   ((and left (<= left 0)) #f)
+                   ((>= spins 1)
+                    ;; The descriptor said there was a key and `getch'
+                    ;; found none, twice: that is the end of input, where
+                    ;; a readable descriptor means `read' answers 0 for
+                    ;; ever. A spurious readiness must not become a loop
+                    ;; with nothing to end it, so it answers #f - which
+                    ;; is what the caller reads as the end of input.
+                    #f)
+                   (else
+                    ;; **`select' answers ONE value here: the three
+                    ;; lists, not three values.** A `let' binding of
+                    ;; the call therefore holds `((read) (write)
+                    ;; (except))', and a `memq' against that is always
+                    ;; false - which reads as "nothing is ever ready"
+                    ;; and, with a blocking timeout, spins for ever
+                    ;; without ever polling. The read set is the `car'.
+                    (let ((ready (car (select (if wake (list %keyboard-fd wake)
+                                                (list %keyboard-fd))
+                                             '() '()
+                                             (if left
+                                                 (max 0.001 (/ left 1000.0))
+                                                 #f)))))
+                      (when (and wake (memq wake ready))
+                        (drain-repl-wake)
+                        (poll-repl!))
+                      ;; Whether the keyboard, the back door or a signal
+                      ;; ended the wait, the next turn reads the key if
+                      ;; there is one - a resize announcing itself as an
+                      ;; empty ready set must not lose the keypress that
+                      ;; caused it.
+                      (loop (if (memq %keyboard-fd ready) (+ spins 1) 0)))))))))))
 
     (define-method (screen-size (d <tty-display>))
       ;; The terminal's size in pixels, which for a terminal is its

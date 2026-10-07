@@ -33,7 +33,10 @@
     (only (scheme time) current-second)
     ;; `delq' is `subr.el''s in Emacs - it is what `cancel-timer' uses -
     ;; and Guile has it as a primitive rather than in `(scheme base)'.
-    (only (guile) delq))
+    ;; `ceiling' and `inexact->exact' are here for `timer-reschedule!':
+    ;; the delay is a fractional number of seconds and a front end wants
+    ;; whole milliseconds.
+    (only (guile) ceiling delq inexact->exact))
 
   (export
    *timer-idle-list*
@@ -51,6 +54,9 @@
    timer-mark-run!
    timer-ripe?
    timer?
+   *timer-wake*
+   timer-next-delay
+   timer-reschedule!
    timer-due-at
    timer-function
    timer-idle?
@@ -120,13 +126,15 @@
       (unless *idle-since*
         (set! *idle-since* (current-second))
         ;; A new idle period: every idle timer is armed again.
-        (set! *timer-idle-run* '())))
+        (set! *timer-idle-run* '())
+        (timer-reschedule!)))
 
     (define (timer-idle-stop!)
       ;; Input arrived, so the editor is not idle: GNU Emacs clearing
       ;; `timer_idleness_start_time' when `read_char' finds something.
       ;;--------------------------------------------------------------
-      (set! *idle-since* #f))
+      (set! *idle-since* #f)
+      (timer-reschedule!))
 
     (define (run-at-time time repeat function . args)
       ;; GNU Emacs's `run-at-time': do FUNCTION with ARGS in TIME
@@ -139,6 +147,7 @@
       (let ((timer (make-timer #f (+ (current-second) time) repeat
                                function args)))
         (*timer-list* (append (*timer-list*) (list timer)))
+        (timer-reschedule!)
         timer))
 
     (define (run-with-timer secs repeat function . args)
@@ -156,6 +165,7 @@
       ;;--------------------------------------------------------------
       (let ((timer (make-timer #t secs repeat function args)))
         (*timer-idle-list* (append (*timer-idle-list*) (list timer)))
+        (timer-reschedule!)
         timer))
 
     (define (cancel-timer timer)
@@ -166,6 +176,7 @@
       ;;--------------------------------------------------------------
       (*timer-list* (delq timer (*timer-list*)))
       (*timer-idle-list* (delq timer (*timer-idle-list*)))
+      (timer-reschedule!)
       ;; Emacs answers nil here; this tree's nil is #f
       #f)
 
@@ -200,6 +211,68 @@
       ;; Note that TIMER has run in this idle period, so that it does not
       ;; run again until the editor has been idle afresh.
       ;;--------------------------------------------------------------
-      (set! *timer-idle-run* (cons timer *timer-idle-run*)))
+      (set! *timer-idle-run* (cons timer *timer-idle-run*))
+      (timer-reschedule!))
+
+    ;;------------------------------------------------------------------
+    ;; Telling the front end when to come back
+    ;;
+    ;; **A front end must be *told*, not polled.** Until now the command
+    ;; loop armed its read with `timer-next-delay' and ran `timer-check!'
+    ;; when the read came back, so a timer could only fire while
+    ;; something was waiting to read a key. That is about to stop being
+    ;; true: once Gtk owns the main loop there is no read to arm, and an
+    ;; editor sitting idle would never fire a timer at all.
+    ;;
+    ;; So the delay is asked for when it changes rather than when a read
+    ;; begins, and handed to `*timer-wake*' - the same shape as the
+    ;; REPL's wake, for the same reason.
+    ;;
+    ;; The computation is Emacs's `timer_check' as the wait uses it, and
+    ;; it lives *here* rather than in `keyboard.sld' where it was: "when
+    ;; is the next timer due" is a fact about the timer lists, and the
+    ;; timer module cannot ask the command loop without importing it.
+    ;;------------------------------------------------------------------
+
+    (define *timer-wake* (make-parameter #f))
+    ;; ^ `(LAMBDA (MS) ...)' to arrange to be called back in MS
+    ;; milliseconds, and with `#f' to cancel an arrangement already made
+    ;; - or #f itself when this front end cannot be woken, in which case
+    ;; the loop that waits keeps deriving its own timeout from
+    ;; `timer-next-delay'.
+
+    (define (timer-next-delay)
+      ;; How many seconds the editor may sleep before the next timer is
+      ;; due, or #f when none is. A negative answer means one is already
+      ;; due. An idle timer counts from the start of the current idle
+      ;; period, an ordinary one from now.
+      ;;--------------------------------------------------------------
+      (let ((idle (current-idle-time)))
+        (let loop ((timers (append (*timer-list*)
+                                   (if idle (*timer-idle-list*) '())))
+                   (least #f))
+          (cond
+           ((null? timers) least)
+           (else
+            (let* ((timer (car timers))
+                   (delay (if (timer-idle? timer)
+                              (and (timer-armed? timer)
+                                   (- (timer-due-at timer) idle))
+                              (- (timer-due-at timer) (current-second)))))
+              (loop (cdr timers)
+                    (if (and delay (or (not least) (< delay least)))
+                        delay least))))))))
+
+    (define (timer-reschedule!)
+      ;; Tell the front end when to come back for the next timer, if it
+      ;; can be told. Called whenever the timer lists change and whenever
+      ;; one has run.
+      ;;--------------------------------------------------------------
+      (let ((wake (*timer-wake*)))
+        (when wake
+          (let ((delay (timer-next-delay)))
+            (wake (if delay
+                      (max 0 (inexact->exact (ceiling (* 1000 delay))))
+                      #f))))))
 
     ))

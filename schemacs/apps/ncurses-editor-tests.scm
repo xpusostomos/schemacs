@@ -21,7 +21,7 @@
  (only (schemacs editor frame)
        *current-frame* *echo-area-buffer* *echo-area-prompt* *minibuffer*
        frame-height frame-editor frame-message
-       frame-message-expiry set!frame-message
+       frame-message-timer set!frame-message
        frame-selected-window new-frame set!frame-selected-window
        *frame-list* *frame-creation-function* frame? frame-list frame-live-p
        frame-output *before-make-frame-hook* *after-make-frame-functions*
@@ -37,7 +37,7 @@
        window-height window-point window-right-border? window-top
        window-width)
  (only (schemacs editor keyboard)
-       dispatch-key-event dispatch-input-event)
+       dispatch-key-event dispatch-input-event timer-check!)
  ;; The cursor's type, which `xdisp.sld' resolves from the buffer's
  ;; `cursor-type' - the tests below are its rule, not the drawing of it.
  (only (schemacs editor xdisp)
@@ -2442,14 +2442,32 @@
 ;; error report - gets none, and setting either takes the other's away.
 ;; Otherwise a message that was meant to stay would inherit the timeout
 ;; of the one before it and vanish early.
+;;
+;; The timeout is a *timer* and not a time, which is GNU Emacs's shape:
+;; `minibuffer-message' arms `minibuffer-message-timer' with `run-at-time'
+;; (minibuffer.el:861) and clearing the message cancels it
+;; (`clear-minibuffer-message', :1050). So the test asks whether one is
+;; armed, and that it is gone again.
 (test-equal '(#t #f)
   (let ((frame (message-frame)))
     (parameterize ((*current-frame* frame)
                    (*minibuffer-message-timeout* 2))
       (minibuffer-message "No match")
-      (list (and (frame-message-expiry frame) #t)
+      (list (and (frame-message-timer frame) #t)
             (begin (set!frame-message frame "plain")
-                   (frame-message-expiry frame))))))
+                   (frame-message-timer frame))))))
+
+;; And the timer really does take the message down, which is what the
+;; command loop used to do by timing its read. Run it by hand here: two
+;; seconds is longer than a test can wait, and `timer-check!' is what the
+;; loop calls to run whatever is ripe.
+(test-equal '(" [No match]" "")
+  (let ((frame (message-frame)))
+    (parameterize ((*current-frame* frame)
+                   (*minibuffer-message-timeout* 0))
+      (minibuffer-message "No match")
+      (list (frame-message frame)
+            (begin (timer-check!) (frame-message frame))))))
 
 ;; `completion--message' says nothing at all when
 ;; `completion-show-inline-help' is off, which is what a user who has

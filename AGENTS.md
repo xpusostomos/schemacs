@@ -4730,8 +4730,10 @@ the first connection. `tools/syntax-check.scm` cannot see either class.
 
 ### Still to do here
 
-- **The terminal onto `select` + a self-pipe**, so both front ends have
-  one shape and no cap is needed anywhere. SIGWINCH needs no plumbing:
+- **DONE - the terminal is onto `select` + a self-pipe**, so both front
+  ends have one shape and no cap is needed anywhere. See "The terminal's
+  wake: landed" at the end of this file; the notice below asking for it is
+  kept only for the shape of the problem. SIGWINCH needs no plumbing:
   `select(2)` is in the documented never-restarted list (`man 7 signal`),
   so the signal interrupts the wait, and `getch` with `nodelay` then
   picks up ncurses's `KEY_RESIZE`. Confirmed both in the manual and by
@@ -4746,3 +4748,484 @@ the first connection. `tools/syntax-check.scm` cannot see either class.
   threading the expectations through `drive` and its sixty-odd callers -
   is the fix; it has not been done. A green battery before that change
   was a race that happened to be won.
+
+# The echo area's timers, and the REPL wake that never fired (2026-10-07)
+
+Two things, and the second is a correction to the section above it: **the
+"woken, 0.0%" row in the idle-CPU table was measuring a REPL that had
+stopped working.** The burn really was the cap, and the cap really is
+gone - but for a while the editor could not hear the back door at all,
+and 0% CPU is what that looks like too.
+
+## 1. The echo area's two clock-driven habits are timers now
+
+Chris chose the option, and it is Emacs's: *"the first option, arm a one
+shot timer sounds more elegant, and if that's what emacs does, that's
+another thing in its favor."* It is what Emacs does - `minibuffer-message`
+ends with
+
+```elisp
+(setq minibuffer--message-timer
+      (run-at-time (or minibuffer-message-timeout 1000000) nil
+                   #'minibuffer--delete-message-overlay))
+(add-hook 'pre-command-hook #'minibuffer--delete-message-overlay)
+```
+
+and `clear-minibuffer-message` (`minibuffer.el:1050`) cancels that timer.
+So the **timer is owned by whoever set the message**, and cancelled when
+the message is cleared - not a timestamp the command loop polls.
+
+- **`<frame>`'s `message-expiry` field is gone; `message-timer` holds the
+  timer**, which is Emacs's `minibuffer-message-timer`. `set-message!`
+  arms it; `set!frame-message` cancels it (`frame-cancel-message-timer!`).
+  `frame-message-expired?` is deleted - there is nothing left to compare.
+- **The prefix description is a timer too** (`simple.sld`'s
+  `*prefix-echo-timer*`, armed by `request-prefix-echo!` and cancelled by
+  `clear-prefix!`). This one is a *translation* rather than a copy, and
+  the difference is named in the source: Emacs expresses "the keyboard has
+  been quiet for `echo-keystrokes`" as `sit_for (Vecho_keystrokes, 1, 1)`
+  in `read_char` (`keyboard.c:2887`) - a *wait* - and a front end that
+  owns its loop has no wait to time. Same condition, same one-shot timer
+  as the message's.
+- **`keyboard.sld`'s command loop loses the whole housekeeping branch.**
+  `message-read-timeout` is deleted. The read is now `(read-timeout-or -1
+  (timer-next-delay) cap)` - `-1`, blocking, with `timer-next-delay`
+  shortening it to the next timer, which is where a message timeout and a
+  pending prefix echo now arrive.
+
+Verified live on GTK through the REPL, which is the only way to see it:
+`(set-message! f "hello there" 1)` leaves `("hello there" #t)` and two
+seconds later, with **no keypress**, it is `("" #f)`. And dispatching a
+real `C-u` gives `((4) "")` at once and `((4) "C-u")` a second later with
+nothing typed; dispatching `C-u` and then a key gives `(#f "")` and
+stays empty - both halves of "whichever comes first".
+
+## 2. `*repl-wake*` was a parameter, so the wake never fired
+
+**The bug.** `wake!` is called from the server's *reader thread*. A
+`make-parameter` value is a fluid, and **a fluid's value is captured per
+thread at the moment the thread is made**. `main-gtk.scm` runs
+`start-repl!` *before* `main-gtk`, so the accept thread - and every reader
+thread it spawns - was made before `with-gtk-display` set `*repl-wake*`.
+Measured, both ways:
+
+```
+made-inside: set
+made-before: root
+```
+
+So the main thread saw the wake (and so dropped its cap) while every
+server thread saw `#f` (and so never woke anything). Result: an idle
+editor that answered a REPL only after a keystroke, at **0% CPU**. That
+0% is exactly what the previous section recorded as the fix working.
+
+**How it was caught.** `tools/repl.py -p <port> '(+ 1 2)'` against an
+idle editor timed out - including against an editor started *before* this
+session's edits, which is what makes it pre-existing rather than
+introduced here. And `ps -o pcpu` is not evidence either way; it said 25%
+for an editor that was doing nothing, because it is a lifetime average
+over a cold-cache compile (AGENTS.md already warns about this, twice).
+
+**The fix.** `*repl-wake*` is gone; `(schemacs repl)` exports `repl-wake`
+and `set-repl-wake!` over a plain variable. The value is a fact about the
+process - which front end this is - not state that varies with the dynamic
+extent, so a fluid was the wrong tool for it. `pgtk.sld` sets it with
+`set-repl-wake!`; `keyboard.sld` reads it with `(repl-wake)`.
+
+**And it is still not enough to be idle-correct on a terminal**, where the
+wake has to be a byte written to a descriptor the wait selects on - which
+is the next thing, below.
+
+## Verified
+
+32 suites, `ncurses-editor-tests` 258 (one new: the timer really clears
+the message, run by hand through `timer-check!`), `pty-check.py` 61/61 on
+its own, no new compiler warnings, and the REPL back door answering an
+idle editor both immediately and with no keystroke.
+
+## Still to do
+
+- **Stage 2 is not done.** The outermost command loop still blocks in a
+  nested `GMainLoop` per key rather than Gtk's loop dispatching into it.
+  What this session removed is the *last thing that stood in its way*: the
+  housekeeping that used to ride on a timed read. The inversion itself -
+  `*dispatch-event*` set by `main-gtk`, one loop iteration per event
+  instead of a `read-key-event` inside a loop - has its pieces in
+  `pgtk.sld` already (inert: `*dispatch-event*` is unset, so the key
+  handler enqueues exactly as before) and the switch-over is not made.
+- **DONE - the terminal's REPL cap, the one poll left, is gone**; the
+  terminal's wait is `select` over the keyboard and a self-pipe. See "The
+  terminal's wake: landed".
+- `tools/pty-check.py` still does not exercise the back door at all: it
+  points `XDG_CONFIG_HOME` at an empty directory, so nothing opens a REPL
+  and a dead one cannot fail the battery. A check that drives `tools/repl.py`
+  against a running editor would have caught this bug.
+
+# Stage 2: Gtk owns the main loop (2026-10-07)
+
+**`gtk_main` is now the outermost loop of the process.** The editor is
+started *from inside it*, and every wait the editor makes nests in it.
+
+```
+gtk_main
+  └ idle callback → command-line-1, event-loop
+       └ read-input-event → nested g_main_loop_run
+```
+
+Chris asked for this twice: *"the solution is to run a reentrant gtk loop
+so you're still waiting in a gtk loop, just not the main loop"* - and that
+is exactly what the shape above is. The editor is reentrant (a minibuffer
+prompt, an isearch, a yes-or-no question all read keys from inside a
+command) and always will be, so the reads nest; the *outermost* loop is
+Gtk's.
+
+## What it cost, and what it replaced
+
+`pgtk.sld` gained `pgtk-main-with` - arm THUNK on an idle callback, run
+`gtk_main`, leave it when THUNK returns:
+
+```scheme
+(idle-add 0 (lambda (data)
+              (dynamic-wind (lambda () #t) thunk (lambda () (pgtk-main-quit)))
+              #f)
+          #f)
+(main)
+```
+
+and `(schemacs ui platform gtk)`'s `main-gtk` now calls it with what it
+used to run in the open:
+
+```scheme
+(parameterize ((*current-frame* frame) (*frame-creation-function* gtk-create-frame))
+  (pgtk-main-with (lambda () (command-line-1 args) (note-file-read-only! frame) (event-loop frame))))
+```
+
+**The `parameterize` encloses the *loop*, not just the setup**, and that is
+deliberate: the idle callback is invoked from `gtk_main`, which is called
+from inside that body, so the fluid values bound there are the ones the
+editor and the REPL see.
+
+Before this, `main-gtk` ran `event-loop` directly and the read made a
+`GMainLoop` of its own (`pgtk-wait!`). That is a Gtk loop in every way that
+mattered to this editor - it is what let the idle burn be fixed - but
+`gtk_main_level` stayed 0, so any Gtk call that wants the main loop running
+(a modal dialog, a popup menu, a drag) would have started a second,
+unrelated loop rather than nesting in the editor's.
+
+## The inversion I planned and did not do
+
+The plan was an *inversion*: `main-gtk` sets a dispatch hook,
+`pgtk.sld`'s key handler calls it when no read is outstanding, and the
+command loop becomes one iteration per event instead of a
+`read-key-event` inside a loop. **That scaffolding was written, and then
+deleted.** Reason: with `gtk_main` owning the process, a key that arrives
+while no read is outstanding is simply a key waiting for the next read -
+which is what GNU Emacs's `read_char` finds when it looks at the keyboard -
+and dispatching it from the signal handler would run a command from inside
+a Gtk callback *outside* the command loop, losing `pre-command-hook`, the
+redisplay, and the prefix/`this-command` bookkeeping that the loop owns.
+The pieces removed: `*dispatch-event*`, its export, `pgtk-main` (nothing
+runs the loop without a thunk now), and the dispatch branch in the
+`key-press-event` handler, which is back to a plain `pgtk-enqueue!`.
+
+## Verified live (screenshots and the REPL back door)
+
+- **It draws.** `pgtk-write-screenshot!` on a real window: the buffer, the
+  mode line (`-:**-  live5.txt  -- L1 C1  (Fundamental)`) and a message in
+  the echo area, all correct.
+- **Keys work.** `(dispatch-input-event f #x41)` inserts `A`.
+- **Timers work with no key.** `(set-message! f "still fine" 0.5)` is gone
+  two seconds later, and the read was blocking the whole time.
+- **Idle is 0.0%** measured from `/proc/PID/stat` over 10 s - *with* the
+  back door answering `(+ 1 2)`, which is the point of the note above.
+- **`C-x C-c` on a pristine buffer exits the process**: the `call/cc` in
+  `event-loop` is escaped, `pgtk-main-with`'s wind calls `pgtk-main-quit`,
+  `gtk_main` returns, the window closes, `main-gtk` returns.
+- **The REPL answers from inside a nested read.** With a modified buffer,
+  `C-x C-c` puts up `"Save file /tmp/live6.txt? (y, n, !, ., q, or C-g) "`
+  - a minibuffer read nested inside the read nested inside `gtk_main` -
+  and `tools/repl.py` still answers while it is up.
+
+**Not verified, and named rather than implied:** answering that prompt with
+a *real* key. A Gdk event cannot be synthesized from outside, and driving
+the window with `wtype`/`xdotool` is the compositor method AGENTS.md warns
+about (a silent mis-focus produces a screenshot of another window that
+looks exactly like evidence). What that path rests on is the terminal
+battery, which answers prompts through the same command loop.
+
+32 suites, `pty-check.py` 61/61 on its own, no new compiler warnings.
+
+## Still to do
+
+- **DONE - the terminal's REPL cap is gone** (it was
+  `(repl-open?) (not (repl-wake)) 100` in two places). The terminal's wait
+  is a `select` over the keyboard and a self-pipe, and `set-repl-wake!`
+  writes the byte through a thunk that writes to a descriptor - which is
+  what that shape was chosen for. See "The terminal's wake: landed".
+- **`tools/pty-check.py` does not exercise the back door at all** - it
+  points `XDG_CONFIG_HOME` at an empty directory, so nothing opens a REPL
+  and a dead one cannot fail the battery. A check that drives
+  `tools/repl.py` against a running editor would have caught the wake bug
+  recorded above.
+- Incremental redraw: `render!` still clears the whole surface for a
+  keystroke that only moved the cursor.
+
+# The REPL notification, designed into Guile's file (2026-10-07)
+
+Chris's idea, and a better one than what was there: take Guile's
+`coop-server.scm` **whole, under its own name**, and design the
+notification into it as a hook that could be submitted upstream.
+
+## What was wrong with the old arrangement
+
+`schemacs/repl.sld` *was* `(system repl coop-server)` copied, plus one
+line - `(wake!)` after the enqueue. It worked, but the change had no home:
+the copy was invisible as a copy, and the one line that mattered looked
+like a hack because it was sitting in a file that was supposed to be
+project code.
+
+## What is there now
+
+**`schemacs/coop-server.scm`** - upstream's file, verbatim, with two
+changes. The diff is checkable:
+
+    diff -u /usr/share/guile/3.0/system/repl/coop-server.scm schemacs/coop-server.scm
+
+and it is exactly: the file header, the module line (`(schemacs
+coop-server)` so it does not shadow Guile's), and the two changes below.
+Every other line is upstream's, comments included.
+
+1. **The server record carries a `notify` procedure**, given to
+   `spawn-coop-repl-server` with `#:notify`, called by
+   `coop-repl-server-eval` **after** the enqueue and **outside the
+   mutex**. Upstream's polling contract is unchanged - `#:notify` is how
+   you know when a poll is worth making, not a replacement for polling.
+2. **`poll-coop-repl-server` answers whether it applied anything**, so a
+   consumer whose wake is level-triggered can drain the queue rather than
+   guess how many items a wake stood for.
+
+Four decisions inside that, each of which is a trap if got wrong, and each
+of which is in the docstring rather than in a reviewer's head:
+
+- **Outside the mutex.** `notify` is the caller's procedure; running it
+  with the server's lock held deadlocks the moment it touches the server -
+  which is exactly what a consumer that drains the queue from its notify
+  does.
+- **Called with the server.** `spawn-coop-repl-server` starts the
+  accepting thread *before* it returns the server, so a notify that wants
+  to poll cannot capture it in a closure - there is nothing to name yet.
+- **Called from any thread, possibly two at once.** It runs on the accept
+  thread for `new-repl` and on a reader thread for `eval`, and nothing
+  serialises it. A consumer calling into a GUI toolkit has to use a
+  thread-safe post (`g_idle_add` is documented thread-safe) and not touch
+  a widget.
+- **Never before the enqueue**, which is what makes the wake safe to
+  trust: a level-triggered wake cannot miss an operation, because the
+  thing it watches is not raised until the operation is on the queue.
+  This is the difference between a wake that is *a byte for an enqueued
+  item* and a wake that is *the socket being readable* - the latter has a
+  real lost-wakeup race, because readable does not mean a whole datum has
+  arrived.
+
+**`schemacs/repl.sld`** is now only what is ours: the port file,
+`start-repl!`, `repl-open?`, and the wake. It went from ~430 lines to
+~230, and with it went the whole `@@` import list - `start-repl*`,
+`prompting-meta-read`, `run-server*`, `add-open-socket!`, `close-socket!`,
+`guard-against-http-request`, `*repl-stack*` - because that machinery now
+lives where it is a copy of something. `poll-repl!` drains the queue:
+
+```scheme
+(let loop () (when (poll-coop-repl-server server) (loop)))
+```
+
+## Verified
+
+- The REPL answers while the editor is idle, and `tools/repl.py` drives it.
+- **Idle CPU 0.0%** measured from `/proc/PID/stat` over 10 s, *with* the
+  back door answering.
+- `(pair? (@@ (schemacs editor pgtk) *pgtk-running*))` is `#f`: no read
+  loop of ours is outstanding, so `gtk_main` is the loop in charge.
+- Keys dispatch, `C-x C-c`'s continuation still leaves `gtk_main`, and
+  the port file is removed on the way out.
+- 32 suites pass; `tools/pty-check.py` 61/61.
+
+## Facts about pipes that cost time to establish
+
+Both of these would silently defeat a self-pipe, so they are recorded
+before anyone builds the terminal half:
+
+- **`_IONBF` is not a Guile binding.** Guile's `setvbuf` takes the symbol
+  `'none` (with `'line` and `'block` beside it). `(setvbuf port 'none)`
+  works; `_IONBF` is the C constant and is unbound.
+- **Guile's `(pipe)` gives *buffered* ports.** A `put-u8` on the write end
+  goes into the buffer and never reaches the descriptor, so `select` on
+  the read end reports nothing - measured. The write must be unbuffered
+  (`setvbuf` first) or go to the raw fd, or the waiter never wakes.
+- Guile ports are thread-safe (transparently so since 2.2), so an
+  unbuffered one-byte write from a reader thread is fine.
+- A full pipe blocking its writer is only a hazard when the reader is the
+  *same* thread. Here the reader is the main loop, so the write unblocks
+  as soon as it drains, and it cannot deadlock.
+
+## Still to do
+
+- **The terminal's notify.** It cannot be given a callback - ncurses has
+  no event loop to call back into - so its wake is a pipe the coop server
+  writes a byte to, and the terminal's `select` includes it alongside
+  stdin. That removes the last poll in the tree: the two
+  `(repl-open?) (not (repl-wake)) 100` sites and the cap in
+  `read-wait-ms`. SIGWINCH needs no plumbing - `select(2)` is never
+  restarted after a signal handler, so it interrupts the wait and
+  `getch` with `nodelay` picks up `KEY_RESIZE`.
+- **`tools/pty-check.py` does not exercise the back door at all** - it
+  points `XDG_CONFIG_HOME` at an empty directory, so nothing opens a REPL
+  and a dead one cannot fail the battery. That is how the fluid bug
+  survived a "61/61"; a check that drives `tools/repl.py` against a
+  running editor is the fix.
+
+# The terminal's wake: landed (2026-10-07)
+
+The last poll in the tree is gone. A terminal front end can be *told* that
+the back door has work, the same way Gtk is told, and `keyboard.sld` now
+asks for no cap on its behalf.
+
+## What landed
+
+- **`term.sld` owns the wait**: `read-input-event` waits in
+  `select {keyboard, wake-pipe}` instead of `timeout!` + `getch`.
+- **`install-repl-wake!`**, called by `with-terminal`, makes an unbuffered
+  pipe and gives `set-repl-wake!` a thunk that writes one byte to it - the
+  terminal's counterpart of Gtk's `idle-add`. The wait drains that byte and
+  runs `poll-repl!`.
+- **`getch` is now called only because `select` said the descriptor is
+  readable**, with `nodelay` set: the byte is already there, and a second
+  wait inside `getch` would be a second way to miss the caller's deadline.
+
+Measured at a pty, back door open, nothing typed:
+
+| | HEAD (the 100 ms cap) | now (woken) |
+|---|---|---|
+| idle CPU | 0.2% | **0.0%** |
+| back door answers an idle editor | 0.26 s | **0.13 s** |
+
+**The terminal's poll was cheap** - there is no guile-gi crossing in it -
+so what this buys is one fewer moving part in the tree, not a rescue. The
+27%-to-0% number in the section above is Gtk's and is a different thing.
+
+## The bug, and why four attempts failed on it
+
+**Guile's `select` answers ONE value: the list of three lists.** Not three
+values:
+
+    (select (list fd) '() '() 0)   =>   ((fd) () ())
+
+so a `let` binding of the call holds `((read) (write) (except))`, and every
+`(memq fd ready)` against *that* is #f. The read set is the `car`.
+
+That is what broke the earlier attempts, and it explains their shape
+exactly: with the ready set never matching, the loop fell through to its
+"nothing arrived" answer on **every** call, so the command loop was told
+there was no key over and over - which is why eight checks failed at once
+rather than one of them going subtly wrong. The spins guard in the code is
+what turns that into a spin rather than a hang.
+
+**This is the third time in this file that printed evidence was read for
+its gist instead of its shape.** The isolated test printed
+`select ((11) () ())`, and that reads as "fd 11 is ready" - which is what
+it would have said if the code had been right. Only the editor's own trace,
+printing `ready=` and `wake=` side by side, made the mismatch visible.
+**Print both sides of a comparison, not the one you expect to be true.**
+
+Everything this file used to say about the tty is still true - `raw!`
+clears ICANON, ncurses reads a byte at a time, there is no public "is
+anything buffered" call, `select` is on the descriptor `wgetch` reads.
+None of it was the fault.
+
+## A correction: `nodelay` does not bound the assembly wait
+
+A lone ESC already in the queue made a `nodelay` `getch` block **1002 ms**
+before returning the ESC. The delay wait consults the window's delay only
+while ncurses's own buffer is empty (`lib_getch.c:516`); the
+sequence-assembly wait is separate and uses `GetEscdelay`, which no window
+setting touches.
+
+An earlier note in this file said that wait "cannot fire on the case that
+occurs, because what survives in the fifo is only the tail of a *failed*
+sequence". That was **wrong**: a fresh ESC straight off the terminal is
+itself a prefix, so it fires on the ordinary case of pressing ESC. What
+does hold is the other half - a non-empty buffer skips the delay wait
+entirely, which is why draining with `nodelay` after a key is cheap.
+
+## A gotcha that cost more than the fix
+
+**`display` is not bound in `term.sld`.** It is `(scheme write)`'s, and
+that library imports `(scheme base)`, which does not export it - so a
+tracing helper written with `display` died on its first line, inside a
+`catch`, and left an empty log file behind, which read as "this code never
+ran". `write-u8`, `read-u8`, `char-ready?` and `eof-object?` *are*
+`(scheme base)`'s and are fine.
+
+Ask the library rather than assuming, which is one line:
+
+    (module-variable (resolve-module '(schemacs editor term)) 'display)   => #f
+
+## The harnesses this needs, which are still in /tmp
+
+Two Python drivers were written for this and are **not checked in** - they
+should be, and each covers a gap `tools/pty-check.py` has by design:
+
+- **A keystroke-level driver**: sends one key, prints the screen, repeats.
+  It says *which* key was misread instead of "the last line was not scrolled
+  into view", which is the distinction 61 aggregate checks cannot make. The
+  headless scenario now matches HEAD key for key.
+- **A back-door driver**: opens the REPL, leaves the editor alone, and
+  measures idle CPU from `/proc/PID/stat` before and after poking it.
+  `tools/pty-check.py` points `XDG_CONFIG_HOME` at an empty directory, so
+  nothing opens a REPL in it and a *dead* one cannot fail the battery - a
+  probe like this would have caught the fluid bug in the section above, and
+  the `select` bug in this one, in one run each.
+
+## The back door's module was the editor's module
+
+Found by driving the terminal's new wake at a pty with a prompt up, and it
+is the reason `tools/repl.py -m` could fail "intermittently".
+
+**Guile's REPL reads and evaluates every expression in
+`(current-module)`** - `(system repl repl)` does `(eval form
+(current-module))` and builds the prompt from the same call. So the back
+door's expressions were resolving in whatever module the editor's thread
+was nested in at the moment the server's work was resumed. It is one
+thread and one dispatch, as Chris pointed out; the variable is not timing
+but *nesting*.
+
+Measured, both pokes through the same `poll-repl!`:
+
+| where the thread was waiting | `(module-name (current-module))` |
+|---|---|
+| at idle, in the read | `(guile-user)` |
+| while "Find file:" was up | **unbound** - `module-name` itself was |
+
+The second is `(schemacs editor files)`: a command's interactive
+expression is run with `(eval spec module)`, and `eval` binds the module
+for the *whole* of that evaluation - which for `find-file` includes its
+prompt's read. A library has no `import` to offer, so
+`tools/repl.py -m '(schemacs editor xdisp)' ...` worked at idle and failed
+while a prompt was up.
+
+**`poll-repl!` pins it now**: `save-module-excursion` around the drain,
+with `set-current-module` to `(guile-user)` - where a name like `import`
+lives, and what `tools/repl.py`'s docstring already promised. Verified
+with "Find file:" up: `(current-module)` is `(guile-user)`, `import` is
+visible, and `-m` works.
+
+**Not a leak in the command machinery** - that was the first guess and it
+was wrong, measured: `eval` restores the module when it returns
+(`eval leaked the module? #f`). The machinery is sound; the back door was
+reading the thread's dynamic state rather than having a namespace of its
+own. Pinning is the whole fix, and it is the same shape as the file's
+earlier lesson about fluids: **state that belongs to the process should
+not be inherited from whatever dynamic extent happens to be current.**
+
+The nested read is also now verified on the terminal for the first time:
+with a minibuffer prompt up, the back door still answers, in 0.13 s, at
+0.0% CPU.

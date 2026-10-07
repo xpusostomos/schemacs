@@ -11,14 +11,20 @@
     (scheme base)
     ;; The display, and the editor that runs on it.
     (only (schemacs editor pgtk) with-gtk-display
-          pgtk-open-window pgtk-title-frame! initialize-pgtk-faces!)
+          pgtk-open-window pgtk-title-frame! initialize-pgtk-faces!
+          pgtk-arm-timer! pgtk-main pgtk-main-quit)
     (only (schemacs editor engine) new-text-editor set!text-editor-buffer-name)
     (only (schemacs editor frame) *current-frame* new-frame new-frame-on
           *frame-creation-function* frame-editor)
     (only (schemacs editor buffer) *scratch-buffer-name* get-buffer-create)
     (only (schemacs editor files) note-file-read-only!)
     (only (schemacs editor startup) command-line-1)
-    (only (schemacs editor keyboard) event-loop)
+    (only (schemacs editor keyboard) event-loop-on timer-check!)
+    ;; The timer module is *told* when to come back rather than polled -
+    ;; see `*timer-wake*'. `redisplay-frames!' is what draws when one has
+    ;; run, which is what makes a cursor blink visible with no keypress.
+    (only (schemacs editor xdisp) redisplay-frames!)
+    (only (schemacs editor timer) *timer-wake*)
     ;; Imported only so their `define-key' forms run at load time, which
     ;; is what installs C-x C-f, C-s, C-x 2 and C-x C-b: a binding is
     ;; made by the library that owns the command, so the library has to
@@ -74,21 +80,61 @@
 
     (define (main-gtk . args)
       ;; Open the editor on a GTK window and run it until it is quit.
+      ;;
+      ;; **Gtk's own main loop absorbs the keys.** There is no command
+      ;; loop here at all: `event-loop-on' installs a handler and returns
+      ;; control to `gtk_main', which then calls that handler once per
+      ;; event - the handler runs one command and *returns*, so control
+      ;; goes back to `gtk_main` every time, and it is `gtk_main` that
+      ;; dispatches whatever else is in the frame's window (a menu, a
+      ;; popup, a drag).
+      ;;
+      ;; A prompt or an isearch is still a blocking read and still nests
+      ;; - that is the editor being reentrant, and `ptk-enqueue!` tells
+      ;; the two cases apart.
       ;;--------------------------------------------------------------
       (let ((scratch (get-buffer-create *scratch-buffer-name*)))
         (with-gtk-display
          (lambda ()
            (let ((frame (new-frame scratch)))
              (pgtk-title-frame! frame)
+             ;; **The timer module is told, not polled.** Until now a
+             ;; timer could only fire while something was waiting to read
+             ;; a key: the command loop armed its read with
+             ;; `timer-next-delay' and ran `timer-check!' when the read
+             ;; came back. That is enough while the read is the wait, and
+             ;; it stops being enough the moment Gtk owns the loop -
+             ;; there is then no read to arm, and an idle editor would
+             ;; never fire a timer at all.
+             ;;
+             ;; `*timer-wake*' is the arrangement: the timer module says
+             ;; how long it wants, and this arms a one-shot Gtk source to
+             ;; come back and run whatever is due.
+             (*timer-wake* (lambda (ms)
+                             (pgtk-arm-timer!
+                              ms
+                              (lambda ()
+                                (when (timer-check!)
+                                  (redisplay-frames!))))))
              ;; **The frame backend, installed before the command loop
              ;; runs** - so `C-x 5 2' makes a window from the first
              ;; keystroke. A parameter rather than a call here, so that
              ;; `frame.sld' never imports a front end - the same
              ;; arrangement that keeps `dispnew.sld' free of both.
+             ;;
+             ;; The `parameterize' encloses the *loop*: `event-loop-on'
+             ;; installs its handler and `gtk_main' calls it from within
+             ;; this body, so the fluid values bound here are the ones the
+             ;; commands run under.
              (parameterize ((*current-frame* frame)
                             (*frame-creation-function* gtk-create-frame))
                (command-line-1 args)
                (note-file-read-only! frame)
-               (event-loop frame)))))))
+               ;; `event-loop-on' hands control to `gtk_main' and does not
+               ;; return until `frame-quit-cont' - which it sets to
+               ;; `pgtk-main-quit' - stops it. So the window closes and
+               ;; `main-gtk' returns exactly as it did when the loop was
+               ;; ours, and `main-gtk.scm' removes the REPL port file.
+               (event-loop-on frame pgtk-main pgtk-main-quit)))))))
 
     ))
