@@ -59,12 +59,18 @@
          ;; frame's `output' is Emacs's `output_data', and this is what
          ;; makes it load-bearing rather than a slot nobody reads
          frame-output
+         ;; `redisplay-frames!' walks them, as Emacs's redisplay does
+         *frame-list*
          ;; `w->cursor_off_p', which `internal-show-cursor' turns off and
          ;; the cursor type is resolved against
          window-cursor-off?
          sync-frame-size! window-body-height
          window-body-width window-buffer window-height window-left
          window-list
+         ;; `WINDOW_XFRAME (w)': the frame a window is on, which is what
+         ;; the drawing of a window asks when the frame being drawn is
+         ;; not the selected one
+         window-frame
          selected-window window-point window-right-border?
          window-top
          window-width
@@ -157,7 +163,7 @@
    line-display-rows
    line-display-width
    mode-line-string
-   render!
+   render! redisplay-frames!
    scroll-to-cursor!
    status-string
    window-end
@@ -382,9 +388,20 @@
       ;; Whether WINDOW spans the whole frame: GNU Emacs's
       ;; `WINDOW_FULL_WIDTH_P'. This editor's windows are tiled the same
       ;; way, so a window is full width when it is as wide as the frame.
+      ;;
+      ;; **The window's own frame**, not the selected one: the C is
+      ;;
+      ;;   WINDOW_PIXEL_WIDTH (W)
+      ;;    == WINDOW_PIXEL_WIDTH (FRAME_ROOT_WINDOW (WINDOW_XFRAME (W)))
+      ;;
+      ;; (`window.h:701'). It read `(*current-frame*)' while `render!'
+      ;; bound that to the frame being drawn, which made the two the same
+      ;; thing by accident; with the binding gone they are not, and a
+      ;; window in a second frame has to be measured against its own.
       ;;--------------------------------------------------------------
-      (and (*current-frame*)
-           (= (window-width window) (frame-width (*current-frame*)))))
+      (let ((frame (window-frame window)))
+        (and frame
+             (= (window-width window) (frame-width frame)))))
 
     (define (window-truncates-lines? window)
       ;; Whether WINDOW cuts long lines off instead of continuing them:
@@ -696,9 +713,23 @@
       ;; needs from the display: whether the cursor's own row is on the
       ;; screen, which is a question about rows and not about lines.
       ;;--------------------------------------------------------------
+      ;; **The point of *this window*, not of the buffer.** The C's
+      ;; redisplay asks `window_point (w)' for the position a window is
+      ;; to be scrolled to (`xdisp.c:16809'):
+      ;;
+      ;;   if (w == XWINDOW (selected_window)) pt = PT;
+      ;;   else pt = clip_to_bounds (BEGV, marker_position (w->pointm), ZV);
+      ;;
+      ;; Reading the buffer's own cursor instead is what made two frames
+      ;; on one buffer scroll as one: every frame's window was scrolled
+      ;; to the buffer's point, and only the selected window's point is
+      ;; the buffer's. Measured on Emacs 31.1 with point at 300 in a
+      ;; 24-row frame: the selected frame's start is 232 and the other
+      ;; frame's is still 1.
       (let* ((ed (window-buffer window))
              (vheight (window-body-height window))
-             (cursor-start (text-editor-get-start-of-line ed))
+             (pt (window-point window))
+             (cursor-start (text-editor-get-start-of-line ed pt))
              (start (window-start window)))
         (cond
          ((< cursor-start start)
@@ -715,7 +746,7 @@
               ;; the cursor's line: visible only if its own row is
               (let ((k (rows-row-of-column
                         (window-line-slices-at window pos)
-                        (text-editor-cursor-column ed))))
+                        (- pt cursor-start))))
                 (when (>= (+ used k) vheight)
                   ;; its row is below the window, so point is not visible
                   (recenter-window-on-cursor! window ed cursor-start vheight))))
@@ -780,13 +811,19 @@
           ;; changed, no more suspend auto hscrolling" (`xdisp.c:16756')
           (set!%window-suspend-auto-hscroll? window #f))
         (set!%window-old-point window point)
-        (let* ((texts (buffer-line-texts-at
-                       window (text-editor-get-start-of-line ed)))
+        ;; The column is the *window's* point's, as the C's is
+        ;; (`xdisp.c:16809' reads `marker_position (w->pointm)' for a
+        ;; window that is not the selected one) - the buffer's own
+        ;; cursor is only this window's point when it is the selected
+        ;; one, so hscrolling a second frame's window would otherwise
+        ;; follow the first frame's cursor.
+        (let* ((start-of-point (text-editor-get-start-of-line ed point))
+               (texts (buffer-line-texts-at window start-of-point))
                (width (window-body-width window))
                (margin (max 0 (buffer-hscroll-margin ed)))
                (point-x (if texts
                             (current-line-display-column
-                             ed (text-editor-cursor-column ed))
+                             ed (- point start-of-point))
                             0))
                (cursor-x (max 0 (- point-x h)))
                (truncated-right?
@@ -2005,13 +2042,29 @@
       ;; this renderer does not have).
       ;;--------------------------------------------------------------
       (let* ((buffer (window-buffer window))
-             (selected (frame-selected-window (*current-frame*)))
+             ;; **The window's own frame.** The C's first line is
+             ;; `f = XFRAME (w->frame)' and its test is against *that*
+             ;; frame's selected window (`xdisp.c:34847'):
+             ;;
+             ;;   else if (w != XWINDOW (f->selected_window)
+             ;;            || f != FRAME_DISPLAY_INFO (f)->highlight_frame)
+             (frame (window-frame window))
+             (selected (and frame (frame-selected-window frame)))
              ;; Emacs: "Detect a nonselected window or nonselected
              ;; frame" - a frame that is not the display's highlight
              ;; frame is treated as a non-selected one, so its cursor is
              ;; a hollow box rather than a filled one.
+             ;;
+             ;; `*frame-focus*' is this tree's stand-in for
+             ;; `highlight_frame', and it is a flag where the C has a
+             ;; frame - so "the window's frame is the highlight frame" is
+             ;; that flag *and* the frame being the selected one. With a
+             ;; single frame this is exactly `(*frame-focus*)', which is
+             ;; what the test used to read.
+             (highlighted? (and (*frame-focus*)
+                                (eq? frame (*current-frame*))))
              (non-selected (or (not (eq? window selected))
-                               (not (*frame-focus*))))
+                               (not highlighted?)))
              (active? (not non-selected))
              (wanted (buffer-cursor-type buffer))
              (frame-cursor (*frame-cursor-type*))
@@ -2048,9 +2101,9 @@
           ;; yet (`x_draw_window_cursor' takes it and never reads it)
           (list (car shown) (cdr shown) active?))))
 
-    (define (cursor-glyph ed)
-      ;; The buffer character ED's cursor is drawn over, and the face in
-      ;; effect there, as `(TEXT . TOKEN)'.
+    (define (cursor-glyph ed position)
+      ;; The buffer character POSITION in ED is drawn over, and the face
+      ;; in effect there, as `(TEXT . TOKEN)'.
       ;;
       ;; A display that can only fill a rectangle needs both: Emacs's
       ;; cursor does not *hide* what is under it, it redraws the glyph in
@@ -2059,26 +2112,34 @@
       ;; Past the end of the line there is no character, and what is
       ;; under the cursor is the space beyond the text - Emacs draws the
       ;; cursor there too.
+      ;;
+      ;; **POSITION and not the buffer's own cursor.** The glyph under
+      ;; the cursor is the one at the *window's* point
+      ;; (`draw_phys_cursor_glyph' gets it from the glyph row the display
+      ;; iterator stopped on), and only the selected window's point is
+      ;; the buffer's. The echo area has no window and passes its
+      ;; buffer's cursor.
       ;;--------------------------------------------------------------
-      (let* ((line-string (line-string-at ed (text-editor-get-start-of-line ed)))
-             (column (text-editor-cursor-column ed))
-             (position (text-editor-get-cursor ed)))
+      (let* ((line-start (text-editor-get-start-of-line ed position))
+             (line-string (line-string-at ed line-start))
+             (column (- position line-start)))
         (if (< column (string-length line-string))
             (cons (string (string-ref line-string column))
                   (face-at-buffer-position ed position))
             (cons " " (face->attribute 'default)))))
 
-    (define (cursor-cells ed)
-      ;; How many cells wide the cursor over ED's point is drawn: the
-      ;; width of the character at point.
+    (define (cursor-cells ed position)
+      ;; How many cells wide the cursor over POSITION is drawn: the
+      ;; width of the character there.
       ;;
       ;; Emacs puts the cursor on the glyph at point, so over a
       ;; double-width character it is two cells wide. Past the end of the
       ;; line there is no character to sit on, and Emacs draws a one-cell
       ;; cursor in the space beyond it - which is what this answers there.
       ;;--------------------------------------------------------------
-      (let* ((line-string (line-string-at ed (text-editor-get-start-of-line ed)))
-             (column (text-editor-cursor-column ed)))
+      (let* ((line-start (text-editor-get-start-of-line ed position))
+             (line-string (line-string-at ed line-start))
+             (column (- position line-start)))
         (if (< column (string-length line-string))
             (char-display-cursor-width
              (string-ref line-string column)
@@ -2092,7 +2153,11 @@
       ;;
       ;; It is the *window's* point that is placed, and only the
       ;; selected window shows a cursor - a terminal has one cursor, as
-      ;; GNU Emacs draws only the selected window's.
+      ;; GNU Emacs draws only the selected window's. "The window's point"
+      ;; is `window-point' and not the buffer's cursor: a window that is
+      ;; not the selected one holds its own, and placing the cursor by
+      ;; the buffer's put a second frame's cursor wherever the first
+      ;; frame's point was.
       ;;
       ;; Point is always on a line the buffer really has - the engine
       ;; reports the end of a buffer whose last line has no break after
@@ -2102,8 +2167,9 @@
       ;; start an empty line, and that line gets a row of its own.
       ;;--------------------------------------------------------------
       (let* ((ed (window-buffer window))
-             (line-start (text-editor-get-start-of-line ed))
-             (column (text-editor-cursor-column ed))
+             (pt (window-point window))
+             (line-start (text-editor-get-start-of-line ed pt))
+             (column (- pt line-start))
              (line-string (line-string-at ed line-start))
              (texts (line-display-texts ed line-start line-string))
              (rows (window-line-slices-at window line-start))
@@ -2119,7 +2185,14 @@
              ;; screen column zero, so the cursor's display column is
              ;; measured from where its row begins, not the line.
              (row-start (car (list-ref rows (rows-row-of-column rows column)))))
-        (when (and (>= screen-row 0) (< screen-row vheight))
+        ;; **`if' and not `when'.** A `when' whose test fails answers the
+        ;; *unspecified* value, which is true in Scheme - so the caller's
+        ;; `(when at ...)' drew a cursor at `(car #<unspecified>)' and
+        ;; died. Measured: two frames, point 300 in the selected one, and
+        ;; the other frame's cursor placement raised "Wrong type argument
+        ;; in position 1 (expecting pair)". The docstring above has
+        ;; always said `#f' here.
+        (if (and (>= screen-row 0) (< screen-row vheight))
           (cons (+ screen-row (window-top window))
                 (+ (window-left window)
                    (if (window-wraps? window)
@@ -2141,7 +2214,8 @@
                        (max 0
                             (min (- (current-line-display-column ed column)
                                     (%window-hscroll window))
-                                 (- width 1)))))))))
+                                 (- width 1))))))
+          #f)))
 
     (define (window-start window)
       ;; GNU Emacs's `window-start': "Return the position of the start of
@@ -2317,6 +2391,11 @@
         ;; `mode-line' for the selected window and `mode-line-inactive'
         ;; for the others - and on a terminal `mode-line' is
         ;; `:inverse-video t', which is what this used to hardcode.
+        ;;
+        ;; The test is `EQ (window, selected_window)` (`xdisp.c:29108'),
+        ;; against the *global* selected window - so a window in a frame
+        ;; that is not the selected one gets the inactive face, however
+        ;; that frame's own selected window compares.
         (write-glyphs! (current-display)
                        (pad-line (truncate-line (mode-line-string window)
                                                 width)
@@ -2337,33 +2416,68 @@
               (loop (+ 1 row) end)))))
       (update-window-end! (current-display)))
 
+    (define (redisplay-frames!)
+      ;; Draw every frame. **GNU Emacs's redisplay is a loop over all of
+      ;; them** - `FOR_EACH_FRAME (tail, frame)' (`xdisp.c:14350',
+      ;; `:14291') - and that is why a second window keeps up when you
+      ;; type in the first. This tree drew only the frame the command loop
+      ;; was handed, so a frame that was *not* selected was drawn by
+      ;; nobody at all: `make-frame' does not select the new frame (Emacs
+      ;; is explicit about that, `frame.el:1055'), so `C-x 5 2' made a
+      ;; window and then painted nothing into it.
+      ;;
+      ;; **One frame per display.** A terminal shows one frame at a time -
+      ;; Emacs's `tty->top_frame' - so frames that share a display are
+      ;; drawn only where the selected frame's display is, or each would
+      ;; be painted over the last on a terminal holding several. A GUI
+      ;; frame has its own display here, so all of them are drawn.
+      ;;--------------------------------------------------------------
+      (let ((selected (*current-frame*)))
+        (let loop ((frames (*frame-list*)))
+          (cond ((null? frames) #f)
+                (else
+                 (let ((f (car frames)))
+                   (when (or (eq? f selected)
+                             (not (eq? (frame-output f)
+                                       (and selected (frame-output selected)))))
+                     (render! f)))
+                 (loop (cdr frames)))))))
+
     (define (render! frame)
       ;; Draw every window, then the echo area, then place the terminal
       ;; cursor at the selected window's point. Each window has its own
       ;; mode line, as GNU Emacs gives each window one; the echo area
       ;; belongs to the frame and is drawn last, over the bottom row.
       ;;--------------------------------------------------------------
-      ;; **Draw on the frame's own display, and *as* that frame.** Both
-      ;; bindings are needed and neither alone is enough:
+      ;; **Draw on the frame's own display, and only the display.**
+      ;; `current-display' is what every draw call below reaches for
+      ;; (Emacs reaches `FRAME_TERMINAL (f)' the same way). With one
+      ;; frame this is an identity rebind; with two it is what stops
+      ;; frame B being drawn into A's window. The `or' is for the test
+      ;; frames, whose output is #f.
       ;;
-      ;;   * `current-display' is what every draw call below reaches for
-      ;;     (Emacs reaches `FRAME_TERMINAL' the same way, through the
-      ;;     selected frame). With one frame this is an identity rebind;
-      ;;     with two it is what stops frame B being drawn into A's
-      ;;     window. The `or' is for the test frames, whose output is #f.
-      ;;   * `*current-frame*' is what `selected-window' and the cursor
-      ;;     type read - `render-window!' picks its mode-line face from
-      ;;     `(frame-selected-window (*current-frame*))' and
-      ;;     `get-window-cursor-type' from `*frame-focus*'. Binding only
-      ;;     the display would draw frame B with frame A's selected mode
-      ;;     line and A's cursor.
+      ;; **`*current-frame*' is deliberately not bound here.** It was, so
+      ;; that `selected-window' inside the drawing would answer the
+      ;; frame being drawn - but `selected-window' is not "the frame
+      ;; being drawn", it is Emacs's `selected_window', the selected
+      ;; window of the *selected* frame, and redisplay's frame loop
+      ;; (`FOR_EACH_FRAME', `xdisp.c:14350') never changes it. Binding it
+      ;; made the drawn frame look selected, and `window-point'
+      ;; (`frame.sld') answers *the buffer's* point for the selected
+      ;; window - so while frame B was drawn it was scrolled to frame A's
+      ;; point, and the two frames scrolled together however far apart
+      ;; they were left.
+      ;;
+      ;; What the drawing actually needs about the frame it now asks for
+      ;; by name: `window-frame' (`WINDOW_XFRAME (w)') for the mode-line
+      ;; face and the cursor type, `(frame-selected-window frame)' and
+      ;; `(window-list frame)' below for the rest.
       ;;
       ;; The call sites below are deliberately *not* rewritten to take a
       ;; display: they are the redisplay's oldest and most fragile code,
       ;; and rebinding here is the same answer for every one of them.
       (parameterize ((current-display (or (frame-output frame)
-                                          (current-display)))
-                     (*current-frame* frame))
+                                          (current-display))))
       (sync-frame-size! frame)
       (let ((width (frame-width frame))
             (height (frame-height frame))
@@ -2438,8 +2552,15 @@
               ;; not drag the cursor along with it - a long one (the
               ;; completion candidates, say) would pin the cursor to the
               ;; right edge of the screen whatever point did.
-              (let ((cursor (get-window-cursor-type
-                             (frame-selected-window frame))))
+              (let* ((cursor (get-window-cursor-type
+                              (frame-selected-window frame)))
+                     ;; **The echo area is not a window**, so its cursor is
+                     ;; its buffer's own point - while the frame's windows
+                     ;; are placed by `window-point' above. Emacs keeps the
+                     ;; echo area's point in the minibuffer buffer, which
+                     ;; is the same thing here.
+                     (at (text-editor-get-cursor reading))
+                     (glyph (cursor-glyph reading at)))
                 (draw-window-cursor! (current-display)
                                      (- height 1)
                                      (min (+ (line-display-width
@@ -2448,21 +2569,26 @@
                                               reading
                                               (text-editor-cursor-column reading)))
                                           (- width 1))
-                                     (cursor-cells reading)
+                                     (cursor-cells reading at)
                                      (car cursor)
                                      (cadr cursor)
-                                     (car (cursor-glyph reading))
-                                     (cdr (cursor-glyph reading))))
+                                     (car glyph)
+                                     (cdr glyph)))
               (let ((selected (frame-selected-window frame)))
                 (when selected
                   (let ((at (cursor-screen-position selected)))
                     (when at
                       (let* ((buffer (window-buffer selected))
                              (cursor (get-window-cursor-type selected))
-                             (glyph (cursor-glyph buffer)))
+                             ;; the glyph under the cursor is the one at
+                             ;; the *window's* point, as Emacs's is (the
+                             ;; glyph row the display iterator stopped on)
+                             (glyph (cursor-glyph buffer
+                                                  (window-point selected))))
                         (draw-window-cursor! (current-display)
                                              (car at) (cdr at)
-                                             (cursor-cells buffer)
+                                             (cursor-cells buffer
+                                                           (window-point selected))
                                              (car cursor) (cadr cursor)
                                              (car glyph) (cdr glyph)))))))))
         ;; The screen is what was drawn: the display's flush, which for

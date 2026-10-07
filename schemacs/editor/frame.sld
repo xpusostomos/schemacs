@@ -71,7 +71,7 @@
    %window-point
    *current-frame* *frame-list* *frame-creation-function*
    *before-make-frame-hook* *after-make-frame-functions*
-   frame? frame-list frame-live-p selected-frame select-frame
+   frame? frame-list frame-live-p selected-frame select-frame new-frame-on
    next-frame previous-frame other-frame delete-frame
    delete-other-frames make-frame make-frame-command
    display-graphic-p frame-name
@@ -171,6 +171,7 @@
    window-body-width
    window-buffer
    window-edges
+   window-frame
    window-height
    window-left
    window-list
@@ -342,6 +343,37 @@
                          (walk (cdr windows))))
                 (else (cons (car windows) (walk (cdr windows))))))))
 
+    (define (window-frame window)
+      ;; The frame WINDOW is on: GNU Emacs's `window-frame'
+      ;; (`frame.c'). Redisplay asks it - `WINDOW_XFRAME (w)' is
+      ;; `(XFRAME (w->frame))' - to find the frame a window belongs to
+      ;; when the frame being *drawn* is not the selected one, which is
+      ;; what a second `C-x 5 2' window is.
+      ;;
+      ;; **A departure in mechanism, not in answer.** The C reads
+      ;; `w->frame', a field every window carries; this tree has no such
+      ;; field on `<window>', so the frame is found by asking each live
+      ;; frame whether the window is in its tree. Adding the field would
+      ;; be more faithful and is deliberately not done here: changing a
+      ;; record's layout invalidates every cached `.go' that uses it
+      ;; (AGENTS.md has the section on what that does to a test run), and
+      ;; the search is over one or two frames.
+      ;;
+      ;; Unlike `window-list' the walk descends into internal windows -
+      ;; they are windows too, and Emacs's would answer for one.
+      ;;--------------------------------------------------------------
+      (let walk-frames ((frames (*frame-list*)))
+        (cond
+         ((null? frames) #f)
+         (else
+          (let in-tree? ((windows (frame-windows (car frames))))
+            (cond ((null? windows) (walk-frames (cdr frames)))
+                  ((eq? (car windows) window) (car frames))
+                  ((window-internal? (car windows))
+                   (let ((found (in-tree? (window-children (car windows)))))
+                     (if found found (in-tree? (cdr windows)))))
+                  (else (in-tree? (cdr windows)))))))))
+
     (define (window-point window)
       ;; The character index point is at in WINDOW: GNU Emacs's
       ;; `window-point'. For the selected window that is the buffer's
@@ -379,8 +411,15 @@
       ;; drawn down a text terminal as `|' - and the column belongs to
       ;; the window on its left, which is why that window's width is one
       ;; more than the text it can show.
+      ;;
+      ;; **The window's own frame**, Emacs's `WINDOW_RIGHTMOST_P`
+      ;; (`window.h:687') over `WINDOW_XFRAME (W)'. Reading the selected
+      ;; frame meant a window in a second frame was tested against the
+      ;; first frame's window tree - and `window-body-width' below is
+      ;; this test, so the error reaches the wrapping and the cursor's
+      ;; screen position.
       ;;--------------------------------------------------------------
-      (let ((frame (*current-frame*)))
+      (let ((frame (window-frame window)))
         (and frame
              (let ((right (+ (window-left window) (window-width window)))
                    (top (window-top window))
@@ -511,14 +550,24 @@
       (%window-base-line-pos window))
 
     (define (make-frame-window buffer top height left width)
-      ;; A window filling the given rectangle, showing BUFFER with point
-      ;; at its beginning: a leaf the frame holds directly.
+      ;; A window filling the given rectangle, showing BUFFER: a leaf the
+      ;; frame holds directly.
       ;;--------------------------------------------------------------
       ;; The window's display begins at position 1, which is where GNU
       ;; Emacs's `set_window_buffer' puts `w->start' - and at `BEG' the
       ;; start *is* a line beginning, so `start-at-line-beg' is true
       ;; here exactly as the C's `(pos == BEGV || ...)' makes it.
-      (make<window> buffer (copy-marker buffer 1)
+      ;;
+      ;; **The point is the buffer's, not 1.** `set_window_buffer` sets
+      ;; the point marker from the buffer (`window.c:4375'):
+      ;;
+      ;;   set_marker_both (w->pointm, buffer, BUF_PT (b), BUF_PT_BYTE (b));
+      ;;
+      ;; so a frame made while point is in the middle of a buffer opens
+      ;; showing that place. Written as 1, `C-x 5 2' put the new window
+      ;; at the top of the file wherever the old one was - measured on
+      ;; Emacs 31.1: point at 21, the new frame's `window-point' is 21.
+      (make<window> buffer (copy-marker buffer (text-editor-get-cursor buffer))
                             (copy-marker buffer 1) #t
                             0 0 #f 0 0
                             top height left width #f '()
@@ -1106,11 +1155,24 @@
       ;; GNU Emacs's `select-frame' (`frame.c:2097'): "Select FRAME.
       ;; Subsequent editing commands apply to its selected window."
       ;;
-      ;; Emacs's `do_switch_frame' ends with `Fselect_window
-      ;; (f->selected_window, norecord)' (`frame.c:2131'), so selecting a
-      ;; frame selects its window too. Nothing is owed for that here:
-      ;; `selected-window' answers from the current frame, so the window
-      ;; moves with it.
+      ;; **The point moves with the frame.** `do_switch_frame' ends with
+      ;;
+      ;;   Fselect_window (f->selected_window, norecord);   (`frame.c')
+      ;;
+      ;; and that call is what runs `select_window_1' (`window.c:591'):
+      ;; the window being left keeps the buffer's point in its `pointm',
+      ;; and the window being selected hands its `pointm' to the buffer.
+      ;; Two frames on one buffer therefore hold two points and the
+      ;; buffer's is whichever frame is selected.
+      ;;
+      ;; Without it every frame was pinned to one point: typing in a
+      ;; second frame moved the first frame's point too, so the two
+      ;; scrolled together however far apart you left them.
+      ;;
+      ;; The swap is written out here rather than delegated to
+      ;; `select-window' below, because that one reads `(selected-window)'
+      ;; - which is `(frame-selected-window (*current-frame*))', the frame
+      ;; this function is in the middle of changing.
       ;;
       ;; **The display follows the frame.** A frame's `output' is its
       ;; terminal and only the selected frame's terminal is the editor's,
@@ -1120,8 +1182,33 @@
         (error "Wrong type argument: framep"))
       (unless (frame-live-p frame)
         (error "Wrong type argument: frame-live-p"))
-      (*current-frame* frame)
-      (current-display (frame-output frame))
+      ;; `let*' and not `let': `changing?' reads `old', and a `let'
+      ;; binding's init is evaluated in the enclosing scope.
+      (let* ((old (*current-frame*))
+             ;; Emacs's `select_window' does nothing at all when the
+             ;; window is already selected (`window.c:545'): it returns
+             ;; through `record_and_return' without touching point.
+             (changing? (not (eq? old frame))))
+        (when changing?
+          ;; the frame being left keeps the point its window had ...
+          (let ((old-window (and old (frame-selected-window old))))
+            (when old-window
+              (set-marker! (%window-point old-window)
+                           (text-editor-get-cursor (window-buffer old-window))
+                           (window-buffer old-window)))))
+        (*current-frame* frame)
+        (current-display (frame-output frame))
+        ;; ... and the frame being selected gives the buffer its point.
+        ;; This is `set_point_from_marker (XWINDOW (window)->pointm)',
+        ;; which the C runs whether or not a window was left behind -
+        ;; here that is the case of selecting the first frame, when
+        ;; `*current-frame*' is still #f.
+        (when changing?
+          (let ((new-window (frame-selected-window frame)))
+            (when new-window
+              (text-editor-set-cursor
+               (window-buffer new-window)
+               (marker-position (%window-point new-window)))))))
       frame)
 
     (define (%frame-step frame back?)

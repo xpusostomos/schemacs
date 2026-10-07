@@ -608,4 +608,43 @@
           (> (rm 'dired-flagged) 0)
           (> (rm 'dired-mark) 0))))
 
+;;------------------------------------------------------------------
+;; Two frames, two windows, two scroll positions
+;;
+;; `render!' is a loop over frames here as it is in GNU Emacs
+;; (`FOR_EACH_FRAME', `xdisp.c:14350'), and each frame's window is
+;; scrolled to *its own* point. It used to bind `*current-frame*' to the
+;; frame being drawn, which made that frame's window look like the
+;; selected one - and `window-point' answers the buffer's point for the
+;; selected window - so a second frame's window was scrolled to the
+;; first frame's point and the two moved together.
+;;
+;; Measured on Emacs 31.1 with two frames on one buffer, point at 300 in
+;; a 24-row frame: the selected frame's `window-start' is 232 and the
+;; other frame's is still 1.
+;;------------------------------------------------------------------
+(test-equal '(#t #t)
+  (parameterize ((fr:*frame-list* '()))
+    (let* ((d1 (make <pgtk-display>))
+           (d2 (make <pgtk-display>)))
+      (dn:current-display d1)
+      (initialize-pgtk-faces! d1)
+      (initialize-pgtk-faces! d2)
+      (let ((ed (new-text-editor)))
+        (text-editor-insert
+         ed (apply string-append
+                   (map (lambda (i) "aaaaaaaaaa\n")
+                        (let loop ((i 1) (acc '()))
+                          (if (> i 60) (reverse acc)
+                              (loop (+ i 1) (cons i acc)))))))
+        (text-editor-set-cursor ed 1)
+        (let ((f1 (fr:new-frame-on d1 ed 24 80))
+              (f2 (fr:new-frame-on d2 ed 24 80)))
+          (parameterize ((fr:*current-frame* f1))
+            (text-editor-set-cursor ed 300)
+            (xd:render! f1)
+            (xd:render! f2)
+            (list (= 1 (xd:window-start (fr:frame-selected-window f2)))
+                  (> (xd:window-start (fr:frame-selected-window f1)) 1))))))))
+
 (test-end "schemacs_editor_pgtk")

@@ -1178,13 +1178,18 @@
 
 ;; Point at the end of a buffer with no trailing line break is drawn
 ;; after the last character of the line, on the line's own row.
+;;
+;; The frame is *selected* for these, because the cursor's position is
+;; `window-point''s and only the selected window's point is the buffer's
+;; - the same binding `render!' is called under.
 (test-equal '(0 . 3)
   (let* ((frame (test-frame (new-text-editor)))
          (ed (frame-editor frame)))
     (text-editor-insert ed "abc")
     (text-editor-set-cursor ed 1 0)
     (text-editor-move-cursor ed 100)
-    (cursor-screen-position (window-of frame))))
+    (parameterize ((*current-frame* frame))
+      (cursor-screen-position (window-of frame)))))
 
 ;; ... and it is a column on the last line, so moving point backward and
 ;; forward again returns to it.
@@ -1195,11 +1200,12 @@
     (text-editor-insert ed "abc")
     (text-editor-set-cursor ed 1 0)
     (text-editor-move-cursor ed 100)
-    (let ((at-end (cursor-screen-position window)))
-      (text-editor-move-cursor ed -1)
-      (let ((back (cursor-screen-position window)))
-        (text-editor-move-cursor ed 1)
-        (list at-end back (cursor-screen-position window))))))
+    (parameterize ((*current-frame* frame))
+      (let ((at-end (cursor-screen-position window)))
+        (text-editor-move-cursor ed -1)
+        (let ((back (cursor-screen-position window)))
+          (text-editor-move-cursor ed 1)
+          (list at-end back (cursor-screen-position window)))))))
 
 ;; A line break at the end of the buffer does start a line, and point at
 ;; the very end is drawn on that empty line, one row down.
@@ -1209,7 +1215,8 @@
     (text-editor-insert ed "abc\n")
     (text-editor-set-cursor ed 1 0)
     (text-editor-move-cursor ed 100)
-    (cursor-screen-position (window-of frame))))
+    (parameterize ((*current-frame* frame))
+      (cursor-screen-position (window-of frame)))))
 
 ;; A vertical run keeps its original goal after a short line clamps point;
 ;; an intervening command starts a new run from its resulting column.
@@ -3408,3 +3415,100 @@
     (list (guard (e (#t (error-object-message e))) (make-frame)))))
 
 (test-end "schemacs_ncurses_editor_frames")
+
+;;--------------------------------------------------------------------
+;; Two frames on one buffer
+;;
+;; A frame's window has its own point, and the buffer's point is the
+;; selected frame's - GNU Emacs's `select_window_1' (`window.c:591'),
+;; which `do_switch_frame' reaches through `Fselect_window'. Without it
+;; every frame was pinned to one point and the two scrolled together.
+;;
+;; Every number below is Emacs 31.1's, measured in a pty on the same
+;; twenty 11-character lines: point on line 10 is 111, on line 19 is 205.
+;;--------------------------------------------------------------------
+
+(test-begin "schemacs_ncurses_editor_frame_points")
+
+(define (lines-text n)
+  ;; N lines of eleven characters, which is what the positions below were
+  ;; measured on: line K begins at 1 + (K - 1) * 11.
+  ;;--------------------------------------------------------------
+  (apply string-append
+         (map (lambda (i) "aaaaaaaaaa\n")
+              (let loop ((i 1) (acc '()))
+                (if (> i n) (reverse acc) (loop (+ i 1) (cons i acc)))))))
+
+(define (with-two-frames text thunk)
+  ;; Two frames over the same buffer, the buffer's point at 1, and
+  ;; nothing about frames left behind.
+  ;;--------------------------------------------------------------
+  (parameterize ((*frame-list* '()) (*current-frame* #f)
+                 (*buffer-list* '()) (*current-buffer* #f))
+    (let ((ed (new-text-editor)))
+      (text-editor-insert ed text)
+      (text-editor-set-cursor ed 1)
+      (thunk ed (test-frame ed) (test-frame ed)))))
+
+;; Each frame keeps its own point, and selecting a frame hands its
+;; window's point to the buffer - in both directions.
+(test-equal '(111 1 205 111 205)
+  (with-two-frames
+   (lines-text 20)
+   (lambda (ed f1 f2)
+     (select-frame f1)
+     (text-editor-set-cursor ed 111)
+     (select-frame f2)
+     (let ((f2-point (text-editor-get-cursor ed)))
+       (text-editor-set-cursor ed 205)
+       (select-frame f1)
+       (let ((f1-point (text-editor-get-cursor ed)))
+         (select-frame f2)
+         (list 111 f2-point 205 f1-point
+               (text-editor-get-cursor ed)))))))
+
+;; A window that is not selected answers its own point, not the
+;; buffer's - which is what `window-point' is (`window.c:1778': the
+;; buffer's point only for the window `selected_window' names).
+(test-equal '(111 205)
+  (with-two-frames
+   (lines-text 20)
+   (lambda (ed f1 f2)
+     (select-frame f1)
+     (text-editor-set-cursor ed 111)
+     (select-frame f2)
+     (text-editor-set-cursor ed 205)
+     (select-frame f1)
+     (list (text-editor-get-cursor ed)
+           (window-point (frame-selected-window f2))))))
+
+;; A frame made while point is in the middle of a buffer opens there:
+;; `set_window_buffer' sets the point marker from the buffer
+;; (`window.c:4375'), so `C-x 5 2' shows the place you are, not the top.
+(test-equal 111
+  (with-two-frames
+   (lines-text 20)
+   (lambda (ed f1 f2)
+     (select-frame f1)
+     (text-editor-set-cursor ed 111)
+     (let ((new (test-frame ed)))
+       (window-point (frame-selected-window new))))))
+
+;; Scrolling is per window: the selected frame's window follows the
+;; buffer's point, and the other frame's stays where its own point left
+;; it. Measured on Emacs 31.1 with point at 300 in a 24-row frame: the
+;; selected frame's start is 232 and the other frame's is still 1.
+(test-equal '(#t #t)
+  (with-two-frames
+   (lines-text 60)
+   (lambda (ed f1 f2)
+     (let ((w1 (frame-selected-window f1))
+           (w2 (frame-selected-window f2)))
+       (select-frame f1)
+       (text-editor-set-cursor ed 300)
+       (parameterize ((*current-frame* f1))
+         (scroll-to-cursor! w1)
+         (scroll-to-cursor! w2)
+         (list (= 1 (window-start w2)) (> (window-start w1) 1)))))))
+
+(test-end "schemacs_ncurses_editor_frame_points")

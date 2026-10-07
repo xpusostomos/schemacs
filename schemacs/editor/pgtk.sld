@@ -106,10 +106,15 @@
     ;; whether the cursor blinks and whether it is drawn hollow.
     (only (schemacs editor frame)
           *current-frame* *frame-focus* blink-cursor--rescan-frames
-          ;; `pgtk-open-window' titles a window with its frame's name, as
-          ;; Emacs titles one with `f->name' when there is no `title'
-          ;; parameter (`gtkutil.c:1656-1663').
-          frame-name)
+          ;; `pgtk-title-frame!' gives a window its frame's name as a
+          ;; title, as Emacs's `x_window' does from `f->name'
+          ;; (`gtkutil.c:1656-1663').
+          frame-name frame-output
+          ;; The input path finds an event's frame through the window it
+          ;; arrived on, and selecting it is what makes typing in a second
+          ;; window work - Emacs's `focus-in-event' ends in
+          ;; `select-frame-set-input-focus' (`frame.el:1264').
+          *frame-list* select-frame)
     ;; The development back door. `poll-repl!' is a no-op unless
     ;; `main-gtk.scm' was asked to open it; this loop is the only place a
     ;; windowed editor is ever idle, so it is where the REPL gets its turn.
@@ -136,6 +141,8 @@
    pgtk-write-screenshot!
    ;; The window, so a test can push a synthetic key at it.
    pgtk-window
+   ;; Opening one window and titling it, for the frame backend.
+   pgtk-open-window pgtk-title-frame!
    )
 
   (begin
@@ -514,6 +521,36 @@
       ;; tell when what is on screen no longer matches the window.
       (drawn-size #:init-value #f #:accessor pgtk-drawn-size))
 
+    (define (pgtk-frame-for d)
+      ;; The frame drawn on display D, or #f if none is. A window knows its
+      ;; display and a frame knows its display (`frame-output'), so this is
+      ;; the walk from one to the other - which is what tells an input
+      ;; event which frame it belongs to.
+      ;;--------------------------------------------------------------
+      (let loop ((l (*frame-list*)))
+        (cond ((null? l) #f)
+              ((eq? (frame-output (car l)) d) (car l))
+              (else (loop (cdr l))))))
+
+    (define (%pgtk-next-queued d)
+      ;; The first queued item across every open window, as
+      ;; `(DISPLAY . ITEM)', or #f. D is looked at first so that *its*
+      ;; deadline sentinel is honoured; a sentinel belonging to another
+      ;; display is skipped, since it is that read's business and not this
+      ;; one's.
+      ;;--------------------------------------------------------------
+      (let loop ((ds (cons d (*pgtk-displays*))))
+        (cond
+         ((null? ds) #f)
+         (else
+          (let* ((cur (car ds))
+                 (q (pgtk-queue cur)))
+            (cond
+             ((not (pair? q)) (loop (cdr ds)))
+             ((and (eq? (car q) 'pgtk-deadline) (not (eq? cur d)))
+              (loop (cdr ds)))
+             (else (cons cur (car q)))))))))
+
     (define (pgtk-enqueue! d ev)
       ;; Put an input event on the display's queue, where the blocking
       ;; read will find it. The signal handler calls this.
@@ -692,29 +729,45 @@
         (dynamic-wind
          (lambda () #t)
          (lambda ()
+           ;; **Every window's queue, not just this one's.** With more than
+           ;; one window open a keystroke arrives on the window that has
+           ;; the focus, which need not be the display this read was
+           ;; called with (`read-input-event' is given
+           ;; `(current-display)') - and draining one queue meant the keys
+           ;; typed into a second window were never read at all. Emacs has
+           ;; one queue per terminal with each event tagged by frame; a
+           ;; queue per window scanned together is the same thing here.
            (let loop ()
-             (let ((queue (pgtk-queue d)))
+             (let ((found (%pgtk-next-queued d)))
                (cond
-                ((and (pair? queue) (eq? (car queue) 'pgtk-deadline))
-                 (set! (pgtk-queue d) (cdr queue))
-                 #f)
-                ((pair? queue)
-                 (set! (pgtk-queue d) (cdr queue))
-                 (let ((item (car queue)))
+                ((not found)
+                 (poll-repl!)
+                 (catch #t
+                   (lambda () (main-iteration-do? #t))
+                   (lambda args #f))
+                 (loop))
+                (else
+                 (let ((from (car found)) (item (cdr found)))
+                   (set! (pgtk-queue from) (cdr (pgtk-queue from)))
                    (cond
+                    ((eq? item 'pgtk-deadline) #f)
                     ((eq? item 'resize) *resize-code*)
                     ((eq? item 'focus-in) *focus-in-code*)
                     ((eq? item 'focus-out) *focus-out-code*)
                     ((eq? item 'delete-frame) *delete-frame-code*)
                     ((memv (pgtk-event-keysym item) modifier-keysyms)
                      (loop))
-                    (else (pgtk-encode-event item)))))
-                (else
-                 (poll-repl!)
-                 (catch #t
-                   (lambda () (main-iteration-do? #t))
-                   (lambda args #f))
-                 (loop))))))
+                    (else
+                     ;; A key from a window that is not the selected
+                     ;; frame's selects it first, so the command acts on
+                     ;; the frame the user typed in. `focus-in-event' has
+                     ;; usually done this already; this is the belt to its
+                     ;; braces, and it is what makes the second window work
+                     ;; when the window manager gives no focus event.
+                     (let ((f (pgtk-frame-for from)))
+                       (when (and f (not (eq? f (*current-frame*))))
+                         (select-frame f)))
+                     (pgtk-encode-event item)))))))))
          (lambda ()
            (when source (source-remove? source))))))
 
@@ -988,7 +1041,7 @@
     ;; frame points at its display through `frame-output', which is the
     ;; direction redisplay uses; this is the other one.
 
-    (define (pgtk-open-window frame columns rows)
+    (define (pgtk-open-window columns rows)
       ;; Make one GTK window with a drawing area and wire its signals, and
       ;; answer the display that draws into it. The counterpart of one
       ;; `x_window (f)', which is what Emacs's `frame-creation-function'
@@ -1007,20 +1060,18 @@
       ;; them apart; with two windows each must queue into and repaint its
       ;; own.
       ;;
-      ;; The title is the frame's *name*, which is what Emacs titles a
-      ;; window with when the frame carries no `title' parameter
-      ;; (`gtkutil.c:1656-1663': `f->title', else `f->name'). A frame's
-      ;; name is `F1', `F2', ... - so two windows are tellable apart in
-      ;; the window manager, which is how you see which one `C-x 5 o'
-      ;; selected. The editor set no title at all before this.
+      ;; The title is set separately, by `pgtk-title-frame!', because it
+      ;; is the *frame's* name and the frame is made after its display is
+      ;; (a frame's `output' is a constructor argument here). Emacs gets
+      ;; the other order - `make_frame' names the frame, then `x_window
+      ;; (f)' titles the window from it (`gtkutil.c:1656-1663') - and this
+      ;; arrives at the same place one call later.
       ;;--------------------------------------------------------------
       (let* ((width (* columns *cell-width*))
              (height (* rows *cell-height*))
              (win (make <GtkWindow>))
              (area (make <GtkDrawingArea>))
              (d (make <pgtk-display>)))
-        (when (and frame (frame-name frame))
-          (set! (window:title win) (symbol->string (frame-name frame))))
         (set! (pgtk-window d) win)
         (set! (pgtk-area d) area)
         (set! (pgtk-columns d) columns)
@@ -1073,6 +1124,15 @@
         ;; here.
         (connect win (make <signal> #:name "focus-in-event")
                  (lambda (w e)
+                   ;; **Select the frame this window draws**, which is what
+                   ;; makes typing in a second window work: Gtk delivers
+                   ;; `focus-in-event' before the keys addressed to the
+                   ;; newly focused widget, so the command that follows
+                   ;; acts on the right frame. Emacs does the same thing -
+                   ;; its `focus-in-event' ends in
+                   ;; `select-frame-set-input-focus' (`frame.el:1264').
+                   (let ((f (pgtk-frame-for d)))
+                     (when f (select-frame f)))
                    (when (*current-frame*) (pgtk-enqueue! d 'focus-in))
                    #f))
         ;; The window manager's request to close the frame - the X
@@ -1115,6 +1175,24 @@
         (*pgtk-displays* (cons d (*pgtk-displays*)))
         d))
 
+    (define (pgtk-title-frame! frame)
+      ;; Give FRAME's window the frame's name as its title. GNU Emacs's
+      ;; `x_window' sets the title from `f->title', else `f->name'
+      ;; (`gtkutil.c:1656-1663'), and a frame's name is `F1', `F2', ... -
+      ;; so two windows are tellable apart in the window manager, which is
+      ;; how you see which one `C-x 5 o' selected. The editor titled its
+      ;; one window with nothing at all before this.
+      ;;
+      ;; Called by whatever has *both* the frame and its window to hand:
+      ;; the display is made first here (it is a constructor argument of
+      ;; the frame), so the title cannot be set at open time.
+      ;;--------------------------------------------------------------
+      (let ((d (and frame (frame-output frame))))
+        (when (and d (pgtk-window d) (frame-name frame))
+          (set! (window:title (pgtk-window d))
+                (symbol->string (frame-name frame))))
+        d))
+
     (define (pgtk-close-window! d)
       ;; Destroy a window `pgtk-open-window' made, and forget it. Emacs's
       ;; counterpart is the teardown `x_free_frame_resources' does.
@@ -1141,7 +1219,7 @@
       (set-prgname "schemacs")
       (set-program-class "schemacs")
       (init-check!)
-      (let ((d (pgtk-open-window #f 80 24)))
+      (let ((d (pgtk-open-window 80 24)))
         (current-display d)
         (initialize-pgtk-faces! d)
         (dynamic-wind

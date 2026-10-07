@@ -4271,3 +4271,153 @@ display cannot make more frames" instead of making one.
 **Verified:** 32 suites, ncurses-editor-tests 250 (was 240), no new
 warnings. `tools/pty-check.py` is the ncurses regression check for the
 `render!` change and is run on its own.
+
+# Two frames on one buffer: the point is per window (2026-10-07)
+
+Chris: *"C-x 5 2 opens another frame but they both scroll together."*
+
+Frames landed over `474a99f`, `1762d75` and `279d4b3` plus the uncommitted
+work that lets a second GTK window draw and take input. This is the pass that
+made a frame its own view of the buffer rather than a second pane on one.
+
+## The root cause, and the one line of C that names it
+
+`window_point` (`window.c:1778`) is
+
+```c
+return (w == XWINDOW (selected_window)
+        ? BUF_PT (XBUFFER (w->contents))
+        : XMARKER (w->pointm)->charpos);
+```
+
+`selected_window` is a **global** - the selected window of the selected frame
+- and redisplay's frame loop (`FOR_EACH_FRAME`, `xdisp.c:14350`) never changes
+it. Two things here departed from that, and both are the same mistake seen
+from different sides: *the window being drawn* was being treated as *the
+selected window*.
+
+### 1. `render!` bound `*current-frame*` to the frame it was drawing
+
+`schemacs/editor/xdisp.sld`'s `render!` wrapped its whole body in
+`(parameterize ((current-display …) (*current-frame* frame)) …)`. But
+`*current-frame*` is also what `selected-window`, `window-point` and the
+mode-line face read. So while frame B was drawn, B's window *was* the selected
+window, and `window-point` answered the buffer's point - which is where frame
+A was scrolled to.
+
+The binding is gone; the display binding stays (that is `FRAME_TERMINAL (f)').
+The three draw-path readers that genuinely needed the *drawn* frame now ask
+the window for it - `window-frame`, below - because Emacs does:
+
+- `window-full-width?` → `WINDOW_FULL_WIDTH_P`, `WINDOW_XFRAME (W)`
+  (`window.h:701`);
+- `window-right-border?` (and so `window-body-width`, and so the wrapping) →
+  `WINDOW_RIGHTMOST_P`, `WINDOW_XFRAME (W)` (`window.h:687`);
+- `get-window-cursor-type` → `XFRAME (w->frame)`'s selected window plus the
+  highlight frame (`xdisp.c:34847`).
+
+The mode-line face and `window-point` are the other way round: Emacs compares
+both against the **global** selected window (`EQ (window, selected_window)`,
+`xdisp.c:29108`), so *removing* the binding is what made them right.
+
+### 2. `select-frame` never swapped the point
+
+`select-window` (`frame.sld`) already ported `select_window_1`
+(`window.c:591`) correctly. `select-frame` did not, and Emacs's
+`do_switch_frame` ends with
+
+```c
+Fselect_window (f->selected_window, norecord);   /* frame.c */
+```
+
+which is what runs that swap. So switching frames saved nothing and restored
+nothing and every frame was pinned to one point. `select-frame` now does the
+two steps - save the old frame's selected window's point into its
+`%window-point`, then give the buffer the new one's - guarded on the frame
+actually changing, which is `select_window`'s early return (`window.c:545`).
+
+**`let*` and not `let`** for that guard: a `let` binding's init is evaluated in
+the enclosing scope, so `(eq? old frame)` in a `let` is an unbound `old`. The
+repro caught it in one run.
+
+### 3. A new frame's window started at point 1
+
+`make-frame-window` built the window with `(copy-marker buffer 1)` for both
+point and start. `set_window_buffer` sets the point marker from the buffer
+(`window.c:4375`), so `C-x 5 2` should open at the place you are. Measured on
+Emacs 31.1: point at 21, the new frame's `window-point` is 21.
+
+## Two more, found underneath
+
+### `scroll-to-cursor!` and `hscroll-window!` read the *buffer's* cursor
+
+Fixing the binding alone did nothing, and this is why: `scroll-to-cursor!`
+scrolled every window to `(text-editor-cursor-column ed)` - the buffer's own
+point - rather than to the window's. The C asks `window_point (w)`
+(`xdisp.c:16809`):
+
+```c
+if (w == XWINDOW (selected_window)) pt = PT;
+else pt = clip_to_bounds (BEGV, marker_position (w->pointm), ZV);
+```
+
+Both functions now work from `(window-point window)`. `cursor-screen-position`,
+`cursor-glyph` and `cursor-cells` had the same shape and are fixed with them -
+`cursor-glyph`/`cursor-cells` took the buffer and now take a *position*, so the
+echo area (which is not a window) passes its buffer's cursor and the window
+path passes the window's point.
+
+### `cursor-screen-position` answered *unspecified*, not `#f`
+
+Its docstring has always said "or `#f` when it is scrolled out of view", and
+it was a `(when …)`: a `when` whose test fails answers the *unspecified* value,
+**which is true in Scheme**. So the caller's `(when at …)` drew a cursor at
+`(car #<unspecified>)` and died -
+
+```
+Wrong type argument in position 1 (expecting pair): #<unspecified>
+```
+
+- which only became reachable once a frame that is not selected had its own
+cursor placed. It is an `if` with a `#f` now. Worth remembering: a `when` used
+as an expression is not Emacs's `nil`.
+
+## Tests
+
+- `schemacs/apps/ncurses-editor-tests.scm` +5 (`..._frame_points`, 254): two
+  frames on one buffer - point per frame across `select-frame` in both
+  directions, `window-point` of a *non-selected* frame's window, a new frame
+  inheriting the buffer's point, and scrolling being per window. Every number
+  is Emacs 31.1's, measured in a pty on the same text.
+- `schemacs/editor/pgtk-tests.scm` +1 (48): two frames on **two** displays,
+  both rendered, asserting their `window-start`s differ. This is the only test
+  that reaches the `render!` binding; the ncurses suite cannot call `render!`.
+- Three existing `cursor_position` tests now bind `*current-frame*`, because
+  the cursor's position is `window-point`'s and only the selected window's
+  point is the buffer's - the binding `render!` is called under.
+- Each new test was run with its fix reverted and seen to fail:
+  `(#f #t)` for the scroll rule, `(111 111 205 205 205)` for the swap,
+  `(#f #t)` for the render binding.
+
+All 32 suites pass, `tools/pty-check.py` passes, no new compiler warnings.
+
+## Departures introduced or named
+
+- **`window-frame` is a search, not a field.** Emacs reads `w->frame`; this
+  tree has no frame field on `<window>`, so `window-frame` walks
+  `*frame-list*` for the frame whose tree holds the window. Same function,
+  same answer, different mechanism - named on the definition. A field would
+  be more faithful, and is deliberately not done: a `<window>` layout change
+  invalidates every cached `.go`.
+- **The echo area is still one global** (`*echo-area-buffer*`), where Emacs
+  keeps one per frame.
+- **`*frame-focus*` is still one flag**, where Emacs's `highlight_frame` is
+  per display. `get-window-cursor-type` now reads it as "the display has
+  focus *and* that frame is the selected one", which is the nearest this tree
+  can say; with a single frame it is exactly what it read before.
+- **`select-frame` does not make the new frame's buffer current.** Emacs's
+  `Fselect_window` starts with `Fset_buffer (w->contents)` (`window.c:534`);
+  that half lives in `window.sld` here, since `frame.sld` is below
+  `buffer.sld`. It does not bite yet because `gtk-create-frame` gives every
+  new frame the selected frame's buffer.
+- **No C-x 5 test exists anywhere** though the bindings do (`frame.sld`).

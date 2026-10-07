@@ -98,7 +98,7 @@
     ;; The region's text, which the update is of.
     (only (schemacs editor editfns) region-beginning region-end)
     ;; `render!' after every key: the loop is what drives the display.
-    (only (schemacs editor xdisp) render!)
+    (only (schemacs editor xdisp) render! redisplay-frames!)
     ;; The development back door, which the command loop gives its turn
     ;; between keys. A no-op unless `SCHEMACS_REPL' opened it.
     (only (schemacs repl) poll-repl! repl-open?)
@@ -821,7 +821,7 @@
          (parameterize ((*recursive-edit-exit* exit))
            ;; draw before the first key is read: a prompt that appears only
            ;; after a key is typed looks like nothing happened
-           (render! frame)
+           (redisplay-frames!)
            (let loop ()
              ;; **Re-read the selected frame each time round, if this is
              ;; the outermost loop.** Selecting another frame - `C-x 5 o',
@@ -875,11 +875,17 @@
                ;; which is what makes a cursor blink visible without a
                ;; keypress: Emacs's `internal-show-cursor' asks for a
                ;; redisplay and this is where that lands here.
-               (when (timer-check!) (render! frame))
+               (when (timer-check!) (redisplay-frames!))
                (cond
                   ((key-event? ev)
                    (dispatch-key frame ev)
-                   (render! frame))
+                   ;; **Every frame, not just this one.** A second window
+                   ;; has to keep up while you type in the first - GNU
+                   ;; Emacs's redisplay is a loop over all frames
+                   ;; (`FOR_EACH_FRAME', `xdisp.c:14350'), and drawing
+                   ;; only the frame this loop was handed is what left a
+                   ;; newly made window black.
+                   (redisplay-frames!))
                   ;; Nothing to read on a *blocking* read is the end of
                   ;; input - the read answers #f for that too - so leave
                   ;; the editor. "Blocking" is the test, and it has to be
@@ -1110,7 +1116,7 @@ With argument, insert ARG copies of the character."
       ;;--------------------------------------------------------------
       (parameterize ((*current-frame* frame)
                      (*current-keymap* *default-keymap*))
-        (render! frame)
+        (redisplay-frames!)
         (call/cc
          (lambda (k)
            (set!frame-quit-cont frame k)
