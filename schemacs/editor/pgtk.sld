@@ -72,8 +72,11 @@
           widget:hexpand widget:vexpand window:resizable
           window:resize window:title
           container:add
-          connect main-iteration-do? set-prgname set-program-class
+          connect set-prgname set-program-class idle-add
           source-remove? timeout-add
+          ;; The main loop the read waits in. Gtk drives it; see
+          ;; `pgtk-wait!'.
+          main-loop:new main-loop:run main-loop:quit
           modifier-type->number widget:get-allocated-width
           widget:get-allocated-height
           event:get-state event:get-keyval keyval-to-unicode)
@@ -118,7 +121,7 @@
     ;; The development back door. `poll-repl!' is a no-op unless
     ;; `main-gtk.scm' was asked to open it; this loop is the only place a
     ;; windowed editor is ever idle, so it is where the REPL gets its turn.
-    (only (schemacs repl) poll-repl!)
+    (only (schemacs repl) poll-repl! *repl-wake*)
     ;; A colour *name* means what `term/tty-colors.el' says it means.
     (only (schemacs editor tty-colors) tty-color-standard-values))
 
@@ -517,9 +520,17 @@
       ;; owns, which is what `pgtk-selection-owner-p' answers from, Gtk
       ;; recording no owner for a plain `set_text'.
       (selections #:init-value '() #:accessor pgtk-selections)
-      ;; The pixel size the surface was last DRAWN at, so the read can
-      ;; tell when what is on screen no longer matches the window.
-      (drawn-size #:init-value #f #:accessor pgtk-drawn-size))
+      ;; The widget's allocation in PIXELS, as `size-allocate' last
+      ;; reported it - GNU Emacs's `FRAME_PIXEL_WIDTH' and
+      ;; `FRAME_PIXEL_HEIGHT'. Those are fields of `struct frame' which
+      ;; its GTK backend refreshes from the configure event
+      ;; (`pgtk_configure_event' into `x_set_window_size'), and redisplay
+      ;; reads the field: it never asks the toolkit how big the window is.
+      ;;
+      ;; This slot was `drawn-size', set by nobody, guarding a comparison
+      ;; in `pgtk-read-event' that therefore never fired. It is the same
+      ;; question, asked usefully.
+      (allocated-size #:init-value #f #:accessor pgtk-allocated-size))
 
     (define (pgtk-frame-for d)
       ;; The frame drawn on display D, or #f if none is. A window knows its
@@ -551,11 +562,44 @@
               (loop (cdr ds)))
              (else (cons cur (car q)))))))))
 
+    (define *pgtk-loop* #f)
+    ;; ^ The main loop the read waits in, made once - a `GMainLoop' may
+    ;; be run again after it has been quit, so the wait does not need a
+    ;; new one each time. See `pgtk-wait!'.
+
+    (define *pgtk-waiting?* #f)
+    ;; ^ Whether a read is inside that loop right now, so that a signal
+    ;; handler arriving while a *command* is running does not quit a loop
+    ;; that is not running - GLib treats that as an error.
+
+    (define (pgtk-main-loop)
+      ;; The loop the read waits in, made on first use. A windowless
+      ;; display never asks for one.
+      ;;--------------------------------------------------------------
+      (or *pgtk-loop*
+          (let ((ml (main-loop:new #f #f)))
+            (set! *pgtk-loop* ml)
+            ml)))
+
+    (define *pgtk-skip* (list 'skip))
+    ;; ^ What a read answers for an item that is not an event: a modifier
+    ;; key press, which Gtk delivers and a terminal consumes. A unique
+    ;; object so that no real answer can be mistaken for it.
+
     (define (pgtk-enqueue! d ev)
       ;; Put an input event on the display's queue, where the blocking
       ;; read will find it. The signal handler calls this.
+      ;;
+      ;; **And wake the read that is waiting for it.** This is the one
+      ;; place every queued thing goes through - a key, a resize, a focus
+      ;; change, a map, a deadline - so the wake belongs here rather than
+      ;; in each of the seven signal handlers or in a loop that watches
+      ;; the queue. A wake with nobody waiting is not an error and does
+      ;; nothing, which is what makes it safe to call from a handler that
+      ;; runs while a command is executing.
       ;;--------------------------------------------------------------
-      (set! (pgtk-queue d) (append (pgtk-queue d) (list ev))))
+      (set! (pgtk-queue d) (append (pgtk-queue d) (list ev)))
+      (when *pgtk-waiting?* (main-loop:quit (pgtk-main-loop))))
 
     (define modifier-keysyms
       ;; The keysyms of the modifier keys themselves. Pressing one is not
@@ -670,20 +714,36 @@
           (pgtk-enqueue! d 'resize))))
 
     (define (pgtk-allocation d)
-      ;; What the widget is actually allocated, in pixels, asked for each
-      ;; time rather than remembered.
+      ;; What the widget is actually allocated, in pixels.
       ;;
-      ;; Asking rather than remembering is what keeps the surface and the
-      ;; widget from disagreeing: a size remembered from a `size-allocate'
-      ;; signal is stale between the window changing and the signal being
-      ;; handled, or when no signal comes at all.
+      ;; **Remembered, not asked.** The answer is recorded by the
+      ;; `size-allocate' signal - which is the *same* signal that is this
+      ;; display's only notice that the window has been resized at all
+      ;; (`pgtk-resize!'), so reading the size from it adds no staleness
+      ;; that did not already exist: a resize nobody hears about is a
+      ;; resize that never gets redrawn either.
+      ;;
+      ;; Asking each time cost **3.2 ms per property** - measured, 3.18
+      ;; and 3.22 - and a redisplay asked twice (`pgtk-ensure-surface!'
+      ;; and `screen-size'), so four property reads were about 13 ms of
+      ;; the ~21 ms a keystroke's redisplay cost. Emacs reads a field.
+      ;;
+      ;; The widget is asked only when nothing has been recorded, which
+      ;; is the display-without-a-window case a test makes: it has no
+      ;; widget to send a signal, and used to fall back on its remembered
+      ;; pixel size - which the `or' at each caller still does.
       ;;--------------------------------------------------------------
-      (let ((area (pgtk-area d)))
-        (if area
-            (let ((w (widget:get-allocated-width area))
-                  (h (widget:get-allocated-height area)))
-              (if (and (> w 0) (> h 0)) (cons w h) #f))
-            #f)))
+      (or (pgtk-allocated-size d)
+          (let ((area (pgtk-area d)))
+            (if area
+                (let ((w (widget:get-allocated-width area))
+                      (h (widget:get-allocated-height area)))
+                  (if (and (> w 0) (> h 0))
+                      (begin
+                        (set! (pgtk-allocated-size d) (cons w h))
+                        (cons w h))
+                      #f))
+                #f))))
 
     (define (pgtk-cells d)
       ;; The grid, from the allocation. Falls back to what is remembered
@@ -699,77 +759,114 @@
       (quotient (* 1000 (get-internal-real-time))
                 internal-time-units-per-second))
 
+    (define (pgtk-take-queued d found)
+      ;; Take the front of the queue and answer what the read should
+      ;; answer for it: the front is dropped either way, and an item that
+      ;; is not an event - a modifier key press - answers `*pgtk-skip*'
+      ;; so the caller reads again.
+      ;;--------------------------------------------------------------
+      (let ((from (car found)) (item (cdr found)))
+        (set! (pgtk-queue from) (cdr (pgtk-queue from)))
+        (cond
+         ((eq? item 'pgtk-deadline) #f)
+         ((eq? item 'resize) *resize-code*)
+         ((eq? item 'focus-in) *focus-in-code*)
+         ((eq? item 'focus-out) *focus-out-code*)
+         ((eq? item 'delete-frame) *delete-frame-code*)
+         ((memv (pgtk-event-keysym item) modifier-keysyms) *pgtk-skip*)
+         (else
+          ;; A key from a window that is not the selected frame's selects
+          ;; it first, so the command acts on the frame the user typed
+          ;; in. `focus-in-event' has usually done this already; this is
+          ;; the belt to its braces, and it is what makes the second
+          ;; window work when the window manager gives no focus event.
+          (let ((f (pgtk-frame-for from)))
+            (when (and f (not (eq? f (*current-frame*))))
+              (select-frame f)))
+          (pgtk-encode-event item)))))
+
+    (define (pgtk-wait! d timeout)
+      ;; Wait until something has been queued, or TIMEOUT milliseconds
+      ;; have passed. A negative TIMEOUT waits for as long as it takes.
+      ;;
+      ;; **This is Gtk's main loop, not a pump of our own.** The wait is
+      ;; one `g_main_loop_run`, which blocks until `g_main_loop_quit` -
+      ;; and `pgtk-enqueue!` is what quits it, so the loop runs exactly
+      ;; until there is something to read. Gtk knows which descriptors to
+      ;; watch, how to sleep on them and what else it has to do while
+      ;; nothing is happening; driving its iteration by hand from Scheme
+      ;; made us answer those questions instead, badly.
+      ;;
+      ;; Measured, on a window that is up and nothing happening: this
+      ;; idles at nothing, while driving the loop by hand cost ~28 ms of
+      ;; CPU per wake-up - guile-gi crossings plus Gtk's own handling -
+      ;; and the old read woke once per 100 ms for as long as the back
+      ;; door was open.
+      ;;
+      ;; The loop is made once and run again each wait, which is allowed:
+      ;; a `GMainLoop' is a flag around a context, and `quit' clears it.
+      ;;
+      ;; **The deadline is a GSource, and the back door rides on it.**
+      ;; `keyboard.sld' shortens the wait to 100 ms while the REPL is
+      ;; open, precisely so that the server gets a turn; polling it from
+      ;; here, where that deadline fires, is that turn. A read with no
+      ;; deadline - the ordinary case, with no REPL - arms no source at
+      ;; all and blocks until a key, so an idle editor wakes for nothing.
+      ;;--------------------------------------------------------------
+      (let ((source (and (>= timeout 0)
+                         (timeout-add
+                          0 timeout
+                          (lambda (data)
+                            (poll-repl!)
+                            (pgtk-enqueue! d 'pgtk-deadline)
+                            #t)
+                          #f))))
+        (dynamic-wind
+         (lambda () (set! *pgtk-waiting?* #t))
+         (lambda () (main-loop:run (pgtk-main-loop)))
+         (lambda ()
+           (set! *pgtk-waiting?* #f)
+           (when source (source-remove? source))))))
+
     (define (pgtk-read-event d timeout)
       ;; Read one input event, TIMEOUT milliseconds allowed - a negative
-      ;; TIMEOUT blocks. This is `read-input-event''s body: it pumps the
-      ;; GTK main loop until the queue has something or the deadline
-      ;; passes.
+      ;; TIMEOUT blocks. This is `read-input-event''s body: wait in Gtk's
+      ;; main loop until the queue has something or the deadline passes.
       ;;
-      ;; The deadline is a GLib timeout that pushes a sentinel, so the
-      ;; loop is woken by GLib rather than by a clock. An event is
-      ;; `(MODIFIER-STATE . KEYSYM)'.
+      ;; An event is `(MODIFIER-STATE . KEYSYM)'.
       ;;
       ;; A blocking read must never answer #f: `keyboard.sld' takes that
-      ;; for the end of input and leaves the editor.
+      ;; for the end of input and leaves the editor. Nor may it answer
+      ;; anything for an item that is not a key, which is what
+      ;; `*pgtk-skip*' keeps out of the answer.
+      ;;
+      ;; **Every window's queue, not just this one's.** With more than one
+      ;; window open a keystroke arrives on the window that has the focus,
+      ;; which need not be the display this read was called with
+      ;; (`read-input-event' is given `(current-display)') - and draining
+      ;; one queue meant the keys typed into a second window were never
+      ;; read at all. Emacs has one queue per terminal with each event
+      ;; tagged by frame; a queue per window scanned together is the same
+      ;; thing here.
       ;;--------------------------------------------------------------
-      (let ((drawn (pgtk-drawn-size d))
-            (now (pgtk-allocation d)))
-        (when (and drawn now
-                   (or (not (= (car drawn) (car now)))
-                       (not (= (cdr drawn) (cdr now)))))
-          (pgtk-enqueue! d 'resize)))
-      (let* ((deadline (and (>= timeout 0) (+ (pgtk-now-ms) timeout)))
-             (source (and deadline
-                          (timeout-add
-                           0 timeout
-                           (lambda (data)
-                             (pgtk-enqueue! d 'pgtk-deadline)
-                             #t)
-                           #f))))
-        (dynamic-wind
-         (lambda () #t)
-         (lambda ()
-           ;; **Every window's queue, not just this one's.** With more than
-           ;; one window open a keystroke arrives on the window that has
-           ;; the focus, which need not be the display this read was
-           ;; called with (`read-input-event' is given
-           ;; `(current-display)') - and draining one queue meant the keys
-           ;; typed into a second window were never read at all. Emacs has
-           ;; one queue per terminal with each event tagged by frame; a
-           ;; queue per window scanned together is the same thing here.
-           (let loop ()
-             (let ((found (%pgtk-next-queued d)))
-               (cond
-                ((not found)
-                 (poll-repl!)
-                 (catch #t
-                   (lambda () (main-iteration-do? #t))
-                   (lambda args #f))
-                 (loop))
-                (else
-                 (let ((from (car found)) (item (cdr found)))
-                   (set! (pgtk-queue from) (cdr (pgtk-queue from)))
-                   (cond
-                    ((eq? item 'pgtk-deadline) #f)
-                    ((eq? item 'resize) *resize-code*)
-                    ((eq? item 'focus-in) *focus-in-code*)
-                    ((eq? item 'focus-out) *focus-out-code*)
-                    ((eq? item 'delete-frame) *delete-frame-code*)
-                    ((memv (pgtk-event-keysym item) modifier-keysyms)
-                     (loop))
-                    (else
-                     ;; A key from a window that is not the selected
-                     ;; frame's selects it first, so the command acts on
-                     ;; the frame the user typed in. `focus-in-event' has
-                     ;; usually done this already; this is the belt to its
-                     ;; braces, and it is what makes the second window work
-                     ;; when the window manager gives no focus event.
-                     (let ((f (pgtk-frame-for from)))
-                       (when (and f (not (eq? f (*current-frame*))))
-                         (select-frame f)))
-                     (pgtk-encode-event item)))))))))
-         (lambda ()
-           (when source (source-remove? source))))))
+      (let ((deadline (and (>= timeout 0) (+ (pgtk-now-ms) timeout))))
+        (let loop ()
+          (let ((found (%pgtk-next-queued d)))
+            (cond
+             (found
+              (let ((answer (pgtk-take-queued d found)))
+                (if (eq? answer *pgtk-skip*) (loop) answer)))
+             (else
+              (let ((left (and deadline (- deadline (pgtk-now-ms)))))
+                (if (and left (<= left 0))
+                    ;; The deadline passed while nothing arrived.
+                    #f
+                    (begin
+                      (pgtk-wait! d (if left (max 1 left) -1))
+                      ;; Whatever woke it is on the queue now - or a
+                      ;; source that is not ours was ready and the queue
+                      ;; is still empty, in which case this waits again.
+                      (loop))))))))))
 
     (define-method (read-input-event (d <pgtk-display>) timeout)
       (pgtk-read-event d timeout))
@@ -1092,10 +1189,17 @@
         ;; sensible shape but follows whatever it is given.
         (set! (window:resizable win) #t)
         (window:resize win width height)
+        ;; The allocation is read here and *kept*, because this is where
+        ;; the size is known for free: `widget:get-allocated-*' costs
+        ;; 3.2 ms apiece, and asking during redisplay asked again on
+        ;; every frame for an answer that changes only when this signal
+        ;; fires. `pgtk-allocation' answers from what is recorded here.
         (connect win (make <signal> #:name "size-allocate")
                  (lambda (w rect)
-                   (pgtk-resize! d (widget:get-allocated-width w)
-                                   (widget:get-allocated-height w))
+                   (let ((aw (widget:get-allocated-width w))
+                         (ah (widget:get-allocated-height w)))
+                     (set! (pgtk-allocated-size d) (cons aw ah))
+                     (pgtk-resize! d aw ah))
                    #t))
         ;; Draw again once the window has actually been mapped and
         ;; allocated: the first frame is drawn before that, and if the
@@ -1219,6 +1323,18 @@
       (set-prgname "schemacs")
       (set-program-class "schemacs")
       (init-check!)
+      ;; **The back door can be woken here, so nothing has to poll for
+      ;; it.** `(schemacs repl)''s `*repl-wake*' is how a front end says
+      ;; it can be told that the REPL has work; Gtk says it with an idle
+      ;; callback, which the main loop runs out of the very
+      ;; `g_main_loop_run' the read is blocked in. `keyboard.sld' asks
+      ;; whether a wake exists and only shortens its waits when none does
+      ;; - which is where this editor's idle CPU went (see
+      ;; `pgtk-wait!': with the back door open the wait was capped at
+      ;; 100 ms and every one of those turns cost ~13 ms of guile-gi
+      ;; crossings).
+      (*repl-wake* (lambda ()
+                     (idle-add 0 (lambda (data) (poll-repl!) #f) #f)))
       (let ((d (pgtk-open-window 80 24)))
         (current-display d)
         (initialize-pgtk-faces! d)

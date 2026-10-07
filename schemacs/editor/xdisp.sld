@@ -2500,52 +2500,65 @@
         ;; each window's own point decides
         (for-each hscroll-window! windows)
         (for-each render-window! windows)
-        ;; Echo area: the minibuffer when one is active, exactly as GNU
-        ;; Emacs draws it (the minibuffer *is* the echo area while it is
-        ;; being read), otherwise whatever message is pending.
-        (let ((reading (*echo-area-buffer*)))
-          (cond
-           ;; While a minibuffer is being read its line is the prompt and
-           ;; what has been typed, with any pending message appended after
-           ;; it - which is what Emacs's `minibuffer-message' does, and it
-           ;; is where the completion candidates have to go or they would
-           ;; hide the very text being completed.
-           ;;
-           ;; The buffer and its prompt come from the frame, which is
-           ;; where GNU Emacs keeps them too (`echo_area_buffer[0]', and
-           ;; the prompt as text in that buffer). Nothing here knows what
-           ;; a minibuffer is: it draws a buffer that happens to have a
-           ;; prompt beside it, which is what the echo area is.
-           (reading
-            ;; Two writes, because the prompt carries a face and the
-            ;; typed text does not. In GNU Emacs the prompt is text in
-            ;; the minibuffer buffer carrying `minibuffer-prompt-properties'
-            ;; - whose `face' is `minibuffer-prompt' - and the input after
-            ;; it carries nothing, which is what `xdisp.c' draws. Drawing
-            ;; the two as one plain string is why a prompt here had no
-            ;; colour at all.
-            (let* ((prompt (truncate-line (or (*echo-area-prompt*) "") width))
-                   (pwidth (min (line-display-width prompt) width)))
-              (when (> pwidth 0)
+        ;; **The echo area is drawn on one frame only.** GNU Emacs's
+        ;; `echo_area_window' is `FRAME_MINIBUF_WINDOW (SELECTED_FRAME ())'
+        ;; (`xdisp.c:13782') and `redisplay_window' draws the message only
+        ;; for a window that *is* that one (`:20526'): "We've already
+        ;; displayed the echo area glyphs in this window" is the answer
+        ;; every other frame's minibuffer window gets. Drawing it on all
+        ;; of them is what put the prompt - and, with it, everything typed
+        ;; into the minibuffer - into every frame at once.
+        (when (eq? frame (*current-frame*))
+          ;; Echo area: the minibuffer when one is active, exactly as GNU
+          ;; Emacs draws it (the minibuffer *is* the echo area while it is
+          ;; being read), otherwise whatever message is pending.
+          (let ((reading (*echo-area-buffer*)))
+            (cond
+             ;; While a minibuffer is being read its line is the prompt and
+             ;; what has been typed, with any pending message appended after
+             ;; it - which is what Emacs's `minibuffer-message' does, and it
+             ;; is where the completion candidates have to go or they would
+             ;; hide the very text being completed.
+             ;;
+             ;; The buffer and its prompt come from the frame, which is
+             ;; where GNU Emacs keeps them too (`echo_area_buffer[0]', and
+             ;; the prompt as text in that buffer). Nothing here knows what
+             ;; a minibuffer is: it draws a buffer that happens to have a
+             ;; prompt beside it, which is what the echo area is.
+             (reading
+              ;; Two writes, because the prompt carries a face and the
+              ;; typed text does not. In GNU Emacs the prompt is text in
+              ;; the minibuffer buffer carrying `minibuffer-prompt-properties'
+              ;; - whose `face' is `minibuffer-prompt' - and the input after
+              ;; it carries nothing, which is what `xdisp.c' draws. Drawing
+              ;; the two as one plain string is why a prompt here had no
+              ;; colour at all.
+              (let* ((prompt (truncate-line (or (*echo-area-prompt*) "") width))
+                     (pwidth (min (line-display-width prompt) width)))
+                (when (> pwidth 0)
+                  (write-glyphs! (current-display)
+                                 prompt
+                                 (- height 1) 0
+                                 (face->attribute 'minibuffer-prompt)))
                 (write-glyphs! (current-display)
-                               prompt
-                               (- height 1) 0
-                               (face->attribute 'minibuffer-prompt)))
+                               (truncate-line
+                                (string-append (text-editor-to-string reading)
+                                               (frame-message frame))
+                                (- width pwidth))
+                               (- height 1) pwidth #f)))
+             (else
               (write-glyphs! (current-display)
-                             (truncate-line
-                              (string-append (text-editor-to-string reading)
-                                             (frame-message frame))
-                              (- width pwidth))
-                             (- height 1) pwidth #f)))
-           (else
-            (write-glyphs! (current-display)
-                           (truncate-line (frame-message frame) width)
-                           (- height 1) 0 #f))))
+                             (truncate-line (frame-message frame) width)
+                             (- height 1) 0 #f)))))
         ;; Place the terminal cursor: in the minibuffer while one is
         ;; active (Emacs's `cursor-in-echo-area'), else at the selected
         ;; window's point - the only window whose cursor is drawn, there
         ;; being one cursor on a terminal.
-        (let ((reading (*echo-area-buffer*)))
+        ;; The cursor follows the same rule: the echo area's cursor
+        ;; belongs to the frame whose echo area it is, and every other
+        ;; frame draws its own window's cursor as usual.
+        (let ((reading (and (eq? frame (*current-frame*))
+                            (*echo-area-buffer*))))
           (if reading
               ;; At point in the input, where Emacs's `cursor-in-echo-area'
               ;; leaves it: a message is shown after the input, and it must

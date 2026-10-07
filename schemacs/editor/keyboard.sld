@@ -101,7 +101,7 @@
     (only (schemacs editor xdisp) render! redisplay-frames!)
     ;; The development back door, which the command loop gives its turn
     ;; between keys. A no-op unless `SCHEMACS_REPL' opened it.
-    (only (schemacs repl) poll-repl! repl-open?)
+    (only (schemacs repl) poll-repl! repl-open? *repl-wake*)
     ;; The clock. The read's timeout is shortened to the next timer
     ;; (`read-timeout-or'), and the timers are run when it expires - which
     ;; is how a cursor blink happens while the editor sits still.
@@ -790,16 +790,14 @@
       ;; command that reads its *own* keys has to wait the same way and
       ;; must not drift from it. `isearch' is that command.
       ;;
-      ;; The cap is the whole point: a read that blocks for ever gives
-      ;; nothing else in the process a turn. On a terminal the read blocks
-      ;; in `getch' with nothing to poll, so the development REPL never
-      ;; answers between keys; on Gtk the *pump* that waits for a key is
-      ;; the same code that polls, and a wait that never comes back is a
-      ;; wait in which no key is ever seen - which is what made an
-      ;; incremental search on Gtk look like it had hung the moment it
-      ;; started, with every key doing nothing, `C-g' included.
+      ;; The cap is for a front end that cannot be *woken*: a read that
+      ;; blocks for ever gives nothing else in the process a turn, and on
+      ;; a terminal the read blocks in `getch' with nothing to poll, so
+      ;; the development REPL would never answer between keys. A front
+      ;; end that can be woken - Gtk, through `*repl-wake*' - sets that
+      ;; parameter and gets no cap at all, so its read blocks properly.
       ;;--------------------------------------------------------------
-      (read-timeout-or -1 #f (and (repl-open?) 100)))
+      (read-timeout-or -1 #f (and (repl-open?) (not (*repl-wake*)) 100)))
 
     (define (command-loop frame . args)
       ;; Read key events and dispatch them, until something leaves this
@@ -863,10 +861,14 @@
                               message-read-timeout
                               -1)
                           (timer-next-delay)
-                          ;; With the development REPL open the wait is
-                          ;; capped - see `read-wait-ms', which is the
-                          ;; same computation `isearch' waits by.
-                          (and (repl-open?) 100))))
+                          ;; **A wait is shortened for the development
+                          ;; REPL only when this front end cannot be
+                          ;; woken by it.** A front end that can sets
+                          ;; `*repl-wake*' and needs no cap at all; one
+                          ;; that cannot - a terminal, whose read blocks
+                          ;; in `getch' with nothing to hang a poll on -
+                          ;; keeps the cap. See `*repl-wake*'.
+                          (and (repl-open?) (not (*repl-wake*)) 100))))
              (let ((ev (read-key-event want)))
                ;; A *key* means the editor is not idle any more. A timeout
                ;; does not: nothing arrived, which is what idleness is.

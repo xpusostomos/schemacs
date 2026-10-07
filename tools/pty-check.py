@@ -26,7 +26,21 @@ Each check starts `main-ncurses.scm` on a real terminal, sends keys, and
 asserts on the screen and on the files left behind. Exit status is 0 when
 every check passes.
 """
-import os, pty, select, sys, time, base64
+import os, pty, select, sys, time, base64, tempfile
+
+# The editor loads `$XDG_CONFIG_HOME/schemacs/init.scm' as it starts
+# (`startup.sld', GNU Emacs's `user-init-file' search). A developer's own
+# init file is not part of what these checks test, and one that does
+# anything at all changes what they see: the author's opens the REPL back
+# door, which - because an open REPL shortens the editor's wait so the
+# server gets a turn - changes how the editor waits for every key. Each
+# editor here is given an empty config directory, so a run depends on the
+# tree and on nothing else.
+#
+# The legacy `$HOME/.schemacs' is still reachable when a developer has
+# one; there is no way to close that without moving HOME, which these
+# checks do use.
+TEST_CONFIG_HOME = tempfile.mkdtemp(prefix='schemacs-test-config-')
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -68,6 +82,15 @@ def resize(fd, pid, rows, cols):
     os.kill(pid, signal.SIGWINCH)
 
 
+# How long the editor must be silent before a check is considered to have
+# seen everything it is going to see, and the longest it will wait in all.
+QUIET = 0.4
+SETTLE_MAX = 20.0
+# The longest a single key waits for the editor to finish with it, before
+# the harness gives up and sends the next one anyway.
+KEY_MAX = 10.0
+
+
 def drive(keys, path, settle=1.5, gap=0.3, term=None, background="0000/0000/0000",
           report_exit=False):
     """Run the editor on PATH, send KEYS, and return everything it drew.
@@ -89,6 +112,7 @@ def drive(keys, path, settle=1.5, gap=0.3, term=None, background="0000/0000/0000
     pid, fd = pty.fork()
     if pid == 0:
         os.environ["GUILE_WARN_DEPRECATED"] = "no"
+        os.environ["XDG_CONFIG_HOME"] = TEST_CONFIG_HOME
         os.environ["TERM"] = term or os.environ.get("SCHEMACS_TEST_TERM", "xterm")
         os.chdir(REPO)
         os.execvp("guile", ["guile", "--no-auto-compile", "--r7rs", "-L", ".",
@@ -104,7 +128,11 @@ def drive(keys, path, settle=1.5, gap=0.3, term=None, background="0000/0000/0000
     answered = set()
 
     def drain(timeout):
+        # Read whatever is available within TIMEOUT, and answer how many
+        # bytes arrived. The count is what lets the settle below wait for
+        # the editor to go *quiet* instead of for a fixed time.
         nonlocal out
+        got = 0
         while select.select([fd], [], [], timeout)[0]:
             try:
                 d = os.read(fd, 65536)
@@ -113,11 +141,13 @@ def drive(keys, path, settle=1.5, gap=0.3, term=None, background="0000/0000/0000
             if not d:
                 break
             out += d
+            got += len(d)
             for query, reply in answers.items():
                 if query in out and query not in answered:
                     answered.add(query)
                     if reply is not None:
                         os.write(fd, reply)
+        return got
 
     # the settle time is spent watching for the terminal queries, which
     # come as the editor starts
@@ -125,19 +155,47 @@ def drive(keys, path, settle=1.5, gap=0.3, term=None, background="0000/0000/0000
     while time.time() < end:
         drain(0.05)
 
+    # **A key is sent only once the editor has finished with the last
+    # one.** The gap was a fixed sleep, which is a guess at how long a
+    # command takes: a machine busier than the guess sends `C-a' before
+    # the prompt a `C-x C-r' put up has been drawn, and `C-a' then acts on
+    # the buffer instead of the prompt. That is a race, and it is why a
+    # check could pass on its own and fail inside a full run.
+    #
+    # Quiet for GAP means the editor has drawn everything this key
+    # produced. GAP is still the floor, so a key the editor answers with
+    # nothing still gets the pause it always had.
+    def settle(quiet_for, longest):
+        quiet = 0.0
+        end = time.time() + longest
+        while time.time() < end and quiet < quiet_for:
+            quiet = 0.0 if drain(0.05) else quiet + 0.05
+
     for k in keys:
         if isinstance(k, tuple):
             # ("resize" rows cols): make the terminal that size, as a
             # window manager does, and let the editor notice
             resize(fd, pid, k[1], k[2])
-            time.sleep(gap)
-            drain(0.05)
+            settle(gap, KEY_MAX)
             continue
         os.write(fd, k)
-        time.sleep(gap)
-        drain(0.05)
-    time.sleep(0.6)
-    drain(0.2)
+        settle(gap, KEY_MAX)
+    # **Wait for the editor to go quiet, not for a fixed time.** The keys
+    # have been sent; what the check is about to assert on is whatever
+    # the editor drew in response. Sleeping a fixed 0.6 s and reading
+    # whatever happened to arrive made every check a race with the
+    # editor's redisplay: it passed or failed according to how fast the
+    # machine got through the commands, which is why a loaded machine
+    # failed a scattered and *different* set of checks each run.
+    #
+    # Quiet for QUIET seconds means the editor has finished - a redisplay
+    # is one burst of output, so no output for a while is the end of it -
+    # and the deadline is the backstop for a check that expects something
+    # to arrive later.
+    quiet = 0.0
+    deadline = time.time() + SETTLE_MAX
+    while time.time() < deadline and quiet < QUIET:
+        quiet = 0.0 if drain(0.05) else quiet + 0.05
     # If the editor quit on its own - a command like C-x C-c, or a file
     # it could not open - the wait below reaps it; otherwise it is still
     # running and gets killed. The distinction is what REPORT-EXIT asks

@@ -56,7 +56,8 @@
           set!window-left set!window-parent set!window-top
           set-window-buffer! set!window-width set-window-point!
           window-buffer window-children
-          window-edges window-height window-left window-list window-parent
+          window-edges window-frame window-height window-left window-list
+          window-parent
           window-body-width window-top window-width
           %window-start set!%window-start
           %window-start-at-line-beg set!%window-start-at-line-beg
@@ -202,7 +203,8 @@
       ;; nor a point: the C asserts exactly that of one
       ;; (`eassert (!BUFFERP (w->contents) && NILP (w->start) && NILP
       ;; (w->pointm))', `window.c:219').
-      (make<window> #f #f #f #f 0 0 #f 0 0 top height left width
+      (make<window> (window-frame window) #f #f #f #f 0 0 #f 0 0
+                            top height left width
                             (window-parent window) (list window new)
                             0 0 #f 0))
 
@@ -256,6 +258,11 @@
                   (height (window-height window)))
               (set!window-width window left)
               (let ((new (make<window>
+                          ;; the new window is on the frame of the one
+                          ;; it split: `frame = WINDOW_FRAME (o)'
+                          ;; (`window.c:5412'), `wset_frame (n, frame)'
+                          ;; (`:5583')
+                          (window-frame window)
                           (window-buffer window)
                           (copy-marker (window-buffer window)
                                        (text-editor-get-cursor (window-buffer window)))
@@ -292,6 +299,11 @@
                   (width (window-width window)))
               (set!window-height window upper)
               (let ((new (make<window>
+                          ;; the new window is on the frame of the one
+                          ;; it split: `frame = WINDOW_FRAME (o)'
+                          ;; (`window.c:5412'), `wset_frame (n, frame)'
+                          ;; (`:5583')
+                          (window-frame window)
                           (window-buffer window)
                           (copy-marker (window-buffer window)
                                        (text-editor-get-cursor (window-buffer window)))
@@ -331,6 +343,7 @@
         ;; the frame's windows give up SIZE rows at the bottom
         (absorb-into! main 'bottom (- size))
         (let ((new (make<window>
+                    (window-frame main)
                     buffer
                     (copy-marker buffer (text-editor-get-cursor buffer))
                     (copy-marker buffer 1) #t

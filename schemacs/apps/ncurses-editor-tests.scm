@@ -26,6 +26,7 @@
        *frame-list* *frame-creation-function* frame? frame-list frame-live-p
        frame-output *before-make-frame-hook* *after-make-frame-functions*
        frame-name selected-frame select-frame next-frame previous-frame
+       select-window window-frame
        delete-frame delete-other-frames other-frame make-frame
        set-window-buffer! set!window-width
        window-internal?
@@ -66,6 +67,7 @@
        *buffer-list* *current-buffer* *kill-buffer-query-functions*
        buffer-cursor-in-non-selected-windows buffer-cursor-type
        buffer-list buffer-name get-buffer get-buffer-create set-buffer-local-value!
+       current-buffer set-buffer
        buffer-local-keymap set!buffer-local-keymap set!buffer-default-directory
        set!buffer-cursor-in-non-selected-windows set!buffer-cursor-type
        set!buffer-truncate-lines set!buffer-word-wrap)
@@ -1435,7 +1437,13 @@
 (test-equal '(#t ((0 23)))
   (let* ((frame (run-window-keys (frame-with "alpha\nbeta\n") C-x #\2))
          (windows (window-list frame)))
-    (parameterize ((*current-frame* frame))
+    ;; `*current-buffer*' is bound for the same reason `run-window-keys'
+    ;; binds it: deleting the selected window selects another, and a
+    ;; selection makes that window's buffer current - Emacs's
+    ;; `Fselect_window' does it (`window.c:534') - so without this
+    ;; binding the buffer this frame was showing stays current for every
+    ;; test after this one.
+    (parameterize ((*current-frame* frame) (*current-buffer* #f))
       (delete-window (car windows)))
     (list (tiles? frame) (window-rects frame))))
 
@@ -3510,5 +3518,78 @@
          (scroll-to-cursor! w1)
          (scroll-to-cursor! w2)
          (list (= 1 (window-start w2)) (> (window-start w1) 1)))))))
+
+;; **Selecting a frame makes its window's buffer current.** Emacs's
+;; `do_switch_frame' ends with
+;;
+;;   Fselect_window (f->selected_window, norecord);
+;;
+;; and `Fselect_window' *begins* with
+;;
+;;   Fset_buffer (w->contents);      /* `window.c:534' */
+;;
+;; - "Make the selected window's buffer current". Without that line the
+;; current buffer stayed wherever the last `set-buffer' put it, so after
+;; `C-x 5 o' every command still acted on the buffer the frame you *left*
+;; was showing while the screen showed the other one. Each half is
+;; checked by pinning the buffer with `set-buffer' first: with the
+;; parameter unset the right answer arrives by accident, through
+;; `current-editor', and the test would pass either way.
+(test-equal '(#t #t)
+  (parameterize ((*frame-list* '()) (*current-frame* #f)
+                 (*buffer-list* '()) (*current-buffer* #f))
+    (let ((a (new-text-editor))
+          (b (new-text-editor)))
+      (let ((fa (test-frame a))
+            (fb (test-frame b)))
+        (select-frame fa)
+        (set-buffer b)
+        (select-frame fb)
+        (let ((at-b (eq? (current-buffer) b)))
+          (select-frame fa)
+          (list at-b (eq? (current-buffer) a)))))))
+
+;; ...and selecting a *window* does it too, which is the same line of the
+;; same function. `C-x o' between two windows on two buffers has to leave
+;; commands acting on the one you switched to.
+(test-equal '(#t #t)
+  (parameterize ((*frame-list* '()) (*current-frame* #f)
+                 (*buffer-list* '()) (*current-buffer* #f))
+    (let* ((a (new-text-editor))
+           (b (new-text-editor))
+           (f (test-frame a)))
+      (parameterize ((*current-frame* f))
+        (run-window-keys f C-x #\2)
+        (let ((w1 (car (window-list f)))
+              (w2 (cadr (window-list f))))
+          (set-window-buffer! w2 b)
+          (set-buffer b)
+          (select-window w1)
+          (let ((at-a (eq? (current-buffer) a)))
+            (select-window w2)
+            (list at-a (eq? (current-buffer) b))))))))
+
+;; **Every window knows the frame it is on** - GNU Emacs's `w->frame',
+;; which is set as the window is made and never changes. A window the
+;; split made is on the frame of the window it split: `frame =
+;; WINDOW_FRAME (o)' (`window.c:5412'), `wset_frame (n, frame)'
+;; (`:5583'). Redisplay reads it to find the frame a window belongs to
+;; when the frame being *drawn* is not the selected one, which is the
+;; whole of what a second `C-x 5 2' window is.
+(test-equal '((#t #t) #t #t)
+  (parameterize ((*frame-list* '()) (*current-frame* #f)
+                 (*buffer-list* '()) (*current-buffer* #f))
+    (let ((ed (new-text-editor)))
+      (let ((f1 (test-frame ed))
+            (f2 (test-frame ed)))
+        (parameterize ((*current-frame* f1))
+          (run-window-keys f1 C-x #\2)
+          (list ;; both windows the split left are on that frame
+                (map (lambda (w) (eq? (window-frame w) f1))
+                     (window-list f1))
+                (eq? (window-frame (frame-selected-window f2)) f2)
+                ;; and the answer is the window's frame and not the
+                ;; *selected* one, which is f1 throughout
+                (not (eq? (window-frame (frame-selected-window f2)) f1))))))))
 
 (test-end "schemacs_ncurses_editor_frame_points")

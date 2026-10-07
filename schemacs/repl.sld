@@ -1,5 +1,5 @@
 (define-library (schemacs repl)
-  ;; A development back door: talk to a *running* editor through Guile's
+  ;; A development back door: talk to a *running* editor through a Guile
   ;; REPL server, so its own state can be read and poked without keys,
   ;; without a compositor, and without restarting it.
   ;;
@@ -11,24 +11,30 @@
   ;; one was believed here before the mis-focus was noticed. A REPL cannot
   ;; mis-focus: it is the process.
   ;;
-  ;; It must be the *cooperative* server, not `--listen`. Guile's ordinary
-  ;; REPL server runs the REPL in a thread of its own, and `make-parameter`
-  ;; makes a fluid - a fluid binding is thread-local - so that thread sees
-  ;; the *default* of every parameter the editor set with `parameterize`.
-  ;; `(*current-frame*)` is #f there and `(buffer-list)` is empty, which is
-  ;; no use at all. The cooperative server evaluates in the thread that
-  ;; polls it, which is the editor's own.
+  ;; **This is Guile's cooperative server, with one line added.** The
+  ;; machinery below - the queue, the reader thread, the prompt that
+  ;; suspends the session so the editor keeps running - is
+  ;; `(system repl coop-server)`, copied rather than imported because of
+  ;; the one line: the original cannot be told that it has work, so a
+  ;; program using it must *poll* it. Polling is what made the GTK editor
+  ;; burn a quarter of a processor doing nothing (`pgtk.sld`'s
+  ;; `pgtk-wait!` has the measurements): with the back door open,
+  ;; `keyboard.sld` shortened every wait to 100 ms so the server got a
+  ;; turn, and each of those turns cost ~13 ms in guile-gi crossings.
   ;;
-  ;; So the editor polls, where it waits:
+  ;; So `coop-repl-server-eval` - the *one* place every queued operation
+  ;; goes through, whether it is a new client or an expression - calls
+  ;; `(*repl-wake*)` after queueing. A front end that can be woken sets
+  ;; that parameter and needs no cap at all; one that cannot leaves it #f
+  ;; and keeps polling, which is what `keyboard.sld` asks about.
   ;;
-  ;;   * `pgtk.sld` polls once per turn of the loop it waits in, so a
-  ;;     windowed editor answers while it is idle;
-  ;;   * `keyboard.sld` polls once per command, so a terminal one answers
-  ;;     between keys - its read blocks in `getch` and there is nothing
-  ;;     else to hang it on.
-  ;;
-  ;; Both are no-ops until `start-repl!` has been called, so a normal run
-  ;; pays a `#f` test per key and nothing else.
+  ;; **The session must be evaluated in the main thread.** A parameter
+  ;; binding is thread-local, so a REPL running in a thread of its own
+  ;; sees the *default* of everything the editor set with `parameterize` -
+  ;; `(*current-frame*)` is #f there and `(buffer-list)` is empty. That is
+  ;; why the reader runs in a thread but the evaluation does not: the
+  ;; reader posts, and the main thread's `poll-repl!` is what resumes the
+  ;; session's continuation.
   ;;
   ;; **The port is written down**, in `$XDG_RUNTIME_DIR/schemacs-repl-PID`
   ;; (or `/tmp`, when the variable is unset; the runtime directory is a
@@ -56,15 +62,255 @@
     ;; a message needs saying, and `display' is `(scheme write)''s
     ;; (`newline' is `(scheme base)''s)
     (only (scheme write) display)
-    (only (guile) catch getenv getpid)
-    (only (system repl coop-server)
-          spawn-coop-repl-server poll-coop-repl-server)
+    ;; `@@' reaches the private bindings of Guile's REPL, which is how
+    ;; `(system repl coop-server)' reaches them too.
+    ;;
+    ;; The rest of this list is what Guile's own cooperative server gets
+    ;; for free by being a `define-module' with `#:use-module (guile)'.
+    ;; This is an R7RS `define-library' with an explicit import list, so
+    ;; every core binding the ported code uses has to be named - and a
+    ;; name that is missing is *not* a load error, because it sits inside
+    ;; a procedure body. It is an unbound variable the first time that
+    ;; procedure runs, which for `with-continuation-barrier' is the first
+    ;; connection.
+    (only (guile) @@ call-with-prompt abort-to-prompt with-continuation-barrier
+          save-module-excursion false-if-exception
+          fluid-ref with-fluids current-module set-current-module
+          fileno close-fdes current-warning-port
+          catch getenv getpid)
+    (only (system base language) current-language)
+    ;; The cooperative machinery, as `(system repl coop-server)' uses it.
+    (ice-9 match)
+    (ice-9 threads)
+    (ice-9 q)
+    (srfi srfi-9)
     (only (system repl server) make-tcp-server-socket))
 
-  (export poll-repl! remove-repl-port-file! repl-open? repl-port-file
+  (export *repl-wake*
+          poll-repl! remove-repl-port-file! repl-open? repl-port-file
           start-repl!)
 
   (begin
+
+    ;;------------------------------------------------------------------
+    ;; The private bindings, reached the way Guile's own cooperative
+    ;; server reaches them
+    ;;------------------------------------------------------------------
+
+    ;; `start-repl*' is the REPL loop itself and `prompting-meta-read' is
+    ;; how it reads one thing at a time; `run-server*' is the accept loop
+    ;; and the three beside it are its bookkeeping. None is exported, and
+    ;; `@@' is the sanctioned way in - `(system repl coop-server)' does
+    ;; exactly this, which is what makes it a technique rather than a
+    ;; trick.
+    (define start-repl*        (@@ (system repl repl) start-repl*))
+    (define prompting-meta-read (@@ (system repl repl) prompting-meta-read))
+    (define run-server*        (@@ (system repl server) run-server*))
+    (define add-open-socket!   (@@ (system repl server) add-open-socket!))
+    (define close-socket!      (@@ (system repl server) close-socket!))
+    (define guard-against-http-request
+      (@@ (system repl server) guard-against-http-request))
+    ;; The session's stack, which the reader thread carries across when it
+    ;; takes over the read (`make-coop-reader').
+    (define *repl-stack* (@@ (system repl repl) *repl-stack*))
+
+    ;;------------------------------------------------------------------
+    ;; Telling the front end there is work
+    ;;------------------------------------------------------------------
+
+    (define *repl-wake* (make-parameter #f))
+    ;; ^ How this front end is told that the back door has something to
+    ;; do, or #f when it cannot be told. A front end that sets it needs no
+    ;; polling: Gtk puts the wake on the GLib main loop (`idle-add'), and
+    ;; a terminal will write a byte to the descriptor its wait selects on.
+    ;;
+    ;; `keyboard.sld' is the reader: with a wake it does not shorten its
+    ;; waits at all, which is where the GTK editor's idle CPU went.
+
+    (define (wake!)
+      ;; Called from whichever thread has queued something - never from
+      ;; the main thread, which is the one being woken. Cheap and safe to
+      ;; call when nobody can be woken.
+      ;;--------------------------------------------------------------
+      (let ((w (*repl-wake*)))
+        (when w (w))))
+
+    ;;------------------------------------------------------------------
+    ;; The server, and its queue
+    ;;
+    ;; From `(system repl coop-server)' - the record, the queue it holds,
+    ;; and the two ends of it: `coop-repl-server-eval' queues, and
+    ;; `poll-coop-repl-server' runs what has been queued.
+    ;;------------------------------------------------------------------
+
+    (define-record-type <coop-repl-server>
+      (%make-coop-repl-server mutex queue)
+      coop-repl-server?
+      (mutex coop-repl-server-mutex)
+      (queue coop-repl-server-queue))
+
+    (define (make-coop-repl-server)
+      (%make-coop-repl-server (make-mutex) (make-q)))
+
+    (define (coop-repl-server-eval coop-server opcode . args)
+      ;; Queue a new instruction with the symbolic name OPCODE and an
+      ;; arbitrary number of arguments, to be processed the next time
+      ;; COOP-SERVER is polled.
+      ;;
+      ;; **This is the one place everything queued goes through** - a new
+      ;; client and an expression alike - which is why the wake belongs
+      ;; here and nowhere else. It is the single line this file adds to
+      ;; Guile's.
+      ;;--------------------------------------------------------------
+      (with-mutex (coop-repl-server-mutex coop-server)
+        (enq! (coop-repl-server-queue coop-server)
+              (cons opcode args)))
+      (wake!))
+
+    (define (poll-coop-repl-server coop-server)
+      ;; Apply a pending operation, if there is one, such as evaluating an
+      ;; expression typed at the REPL prompt. This must be called from the
+      ;; same thread that made the server - the editor's own.
+      ;;--------------------------------------------------------------
+      (let ((op (with-mutex (coop-repl-server-mutex coop-server)
+                  (let ((queue (coop-repl-server-queue coop-server)))
+                    (and (not (q-empty? queue))
+                         (deq! queue))))))
+        (when op
+          (match op
+            (('new-repl client)
+             (start-repl-client coop-server client))
+            (('eval coop-repl exp)
+             ((coop-repl-cont coop-repl) exp))))))
+
+    ;;------------------------------------------------------------------
+    ;; One REPL session
+    ;;
+    ;; Also from `(system repl coop-server)'. The trick is the prompt: the
+    ;; session runs `start-repl*' to its prompt, the prompt's escape
+    ;; continuation is kept, and control returns to the editor. Evaluating
+    ;; the next expression means calling that continuation, which is what
+    ;; `poll-coop-repl-server' does with the `eval' it dequeued - so the
+    ;; session is *suspended* rather than blocking, and the editor is free
+    ;; between expressions.
+    ;;------------------------------------------------------------------
+
+    (define-record-type <coop-repl>
+      (%make-coop-repl mutex condvar thunk cont)
+      coop-repl?
+      (mutex coop-repl-mutex)
+      (condvar coop-repl-condvar)   ; signaled when thunk becomes non-#f
+      (thunk coop-repl-read-thunk set-coop-repl-read-thunk!)
+      (cont coop-repl-cont set-coop-repl-cont!))
+
+    (define (make-coop-repl)
+      (%make-coop-repl (make-mutex) (make-condition-variable) #f #f))
+
+    (define (coop-repl-read coop-repl)
+      ;; Read an expression via the thunk stored in COOP-REPL - which the
+      ;; reader thread fills in, and signals this condition variable for.
+      ;;--------------------------------------------------------------
+      (let ((thunk
+             (with-mutex (coop-repl-mutex coop-repl)
+               (unless (coop-repl-read-thunk coop-repl)
+                 (wait-condition-variable (coop-repl-condvar coop-repl)
+                                          (coop-repl-mutex coop-repl)))
+               (let ((thunk (coop-repl-read-thunk coop-repl)))
+                 (unless thunk
+                   (error "coop-repl-read: condvar signaled, but thunk is #f!"))
+                 (set-coop-repl-read-thunk! coop-repl #f)
+                 thunk))))
+        (thunk)))
+
+    (define (store-repl-cont cont coop-repl)
+      ;; Save the partial continuation CONT within COOP-REPL.
+      ;;--------------------------------------------------------------
+      (set-coop-repl-cont! coop-repl
+                           (lambda (exp)
+                             (coop-repl-prompt
+                              (lambda () (cont exp))))))
+
+    (define (coop-repl-prompt thunk)
+      (call-with-prompt 'coop-repl-prompt thunk store-repl-cont))
+
+    (define (make-coop-reader coop-repl)
+      ;; A reader for `start-repl*' that hands the job of reading to
+      ;; another thread and suspends this one at the prompt.
+      ;;--------------------------------------------------------------
+      (lambda (repl)
+        (let ((read-thunk
+               ;; The REPL stack and the current module have to be carried
+               ;; across to the thread that reads.
+               (let ((stack (fluid-ref *repl-stack*))
+                     (module (current-module)))
+                 (lambda ()
+                   (with-fluids ((*repl-stack* stack))
+                     (set-current-module module)
+                     (prompting-meta-read repl))))))
+          (with-mutex (coop-repl-mutex coop-repl)
+            (when (coop-repl-read-thunk coop-repl)
+              (error "coop-reader: read-thunk is not #f!"))
+            (set-coop-repl-read-thunk! coop-repl read-thunk)
+            (signal-condition-variable (coop-repl-condvar coop-repl))))
+        (abort-to-prompt 'coop-repl-prompt coop-repl)))
+
+    (define (reader-loop coop-server coop-repl)
+      ;; Read an expression for COOP-REPL and store it in COOP-SERVER for
+      ;; later evaluation, for ever. Runs in a thread of its own.
+      ;;--------------------------------------------------------------
+      (coop-repl-server-eval coop-server 'eval coop-repl
+                             (coop-repl-read coop-repl))
+      (reader-loop coop-server coop-repl))
+
+    (define (start-coop-repl coop-server)
+      ;; A new REPL session: a thread to read for it, and the session
+      ;; itself here, in the thread that polls - which is the editor's.
+      ;;--------------------------------------------------------------
+      ;; `stop-server-and-clients!' from a REPL closes the socket it is
+      ;; reading, so the read raises; that is not an error worth dying of.
+      (catch #t
+        (lambda ()
+          (let ((coop-repl (make-coop-repl)))
+            (make-thread reader-loop coop-server coop-repl)
+            (start-repl* (current-language) #f (make-coop-reader coop-repl))))
+        (lambda (key . args) #f)))
+
+    (define (start-repl-client coop-server client)
+      ;; Run a cooperative REPL for COOP-SERVER, with all its input and
+      ;; output over the socket CLIENT. Runs here, in the polling thread.
+      ;;--------------------------------------------------------------
+      ;; The client joins the list of open sockets with a `force-close'
+      ;; that closes the descriptor: the port itself cannot safely be
+      ;; closed from another thread.
+      (add-open-socket! client (lambda () (close-fdes (fileno client))))
+      (guard-against-http-request client)
+      (with-continuation-barrier
+       (lambda ()
+         (coop-repl-prompt
+          (lambda ()
+            (parameterize ((current-input-port client)
+                           (current-output-port client)
+                           (current-error-port client)
+                           (current-warning-port client))
+              (with-fluids ((*repl-stack* '()))
+                (save-module-excursion
+                 (lambda ()
+                   (start-coop-repl coop-server)))))
+
+            ;; This may fail if the server is being stopped, because the
+            ;; `force-close' above closes the descriptor rather than the
+            ;; port. It is *inside* the prompt, as Guile's is: the lambda
+            ;; is what the prompt runs, and the close belongs to the
+            ;; session's end rather than to its setup.
+            (false-if-exception (close-socket! client)))))))
+
+    (define (make-coop-client-proc coop-server)
+      (lambda (client addr)
+        (coop-repl-server-eval coop-server 'new-repl client)))
+
+    ;;------------------------------------------------------------------
+    ;; The back door
+    ;;------------------------------------------------------------------
 
     (define server #f)
     ;; ^ The cooperative server, or #f when the back door is shut.
@@ -92,9 +338,11 @@
       ;;--------------------------------------------------------------
       (catch #t
         (lambda ()
-          (set! server (spawn-coop-repl-server
-                        (make-tcp-server-socket #:port port)))
-          #t)
+          (let ((coop-server (make-coop-repl-server))
+                (socket (make-tcp-server-socket #:port port)))
+            (set! server coop-server)
+            (make-thread run-server* socket (make-coop-client-proc coop-server))
+            #t))
         (lambda (key . args) #f)))
 
     (define (start-repl! . args)
@@ -125,16 +373,15 @@
                   (else (loop (+ candidate 1) (- left 1))))))))
 
     (define (repl-open?)
-      ;; Whether the back door is open, so a wait can be shortened to give
-      ;; the server a turn. The wait *blocks* otherwise, and a blocked
-      ;; wait never polls: with this, a session that has opened the door
-      ;; answers promptly and one that has not is not slowed at all.
+      ;; Whether the back door is open. A front end that can be woken by
+      ;; `*repl-wake*' never has to ask - see the note on it.
       ;;--------------------------------------------------------------
       (and server #t))
 
     (define (poll-repl!)
-      ;; Give the server a turn, if it is open. Called from the loops that
-      ;; wait; cheap enough to call unconditionally.
+      ;; Run whatever the back door has queued, if anything. Called by the
+      ;; loops that wait: from `*repl-wake*''s wake where the front end
+      ;; can give one, and from a timed turn where it cannot.
       ;;--------------------------------------------------------------
       (when server
         (poll-coop-repl-server server)))

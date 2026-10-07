@@ -70,6 +70,7 @@
   (export
    %window-point
    *current-frame* *frame-list* *frame-creation-function*
+   *current-buffer*
    *before-make-frame-hook* *after-make-frame-functions*
    frame? frame-list frame-live-p selected-frame select-frame new-frame-on
    next-frame previous-frame other-frame delete-frame
@@ -172,6 +173,7 @@
    window-buffer
    window-edges
    window-frame
+   set!window-frame
    window-height
    window-left
    window-list
@@ -216,11 +218,28 @@
 
     (define-record-type <window>
       (make<window>
+       frame
        buffer point start start-at-line-beg
        end-pos end-vpos end-valid base-line-number base-line-pos
        top height left width parent children
        hscroll min-hscroll suspend-auto-hscroll? old-point)
       window-type?
+      (frame     window-frame       set!window-frame)
+      ;; ^ The frame this window is on: GNU Emacs's `w->frame', the first
+      ;; field of `struct window' (`window.h'). A window belongs to the
+      ;; frame that made it and never moves: `make_frame' sets it as each
+      ;; of the frame's windows is made (`frame.c:1237', `:1248') and
+      ;; `Fsplit_window_internal' gives the new window the frame of the
+      ;; window it split (`window.c:5583', `wset_frame (n, frame)' with
+      ;; `frame = WINDOW_FRAME (o)' at `:5412').
+      ;;
+      ;; Redisplay asks it - `WINDOW_XFRAME (w)' is `(XFRAME (w->frame))'
+      ;; - to find the frame a window belongs to *when the frame being
+      ;; drawn is not the selected one*, which is exactly what a second
+      ;; `C-x 5 2' window is. `WINDOW_FULL_WIDTH_P' (`window.h:701'),
+      ;; `WINDOW_RIGHTMOST_P' (`:687') and `get_window_cursor_type'
+      ;; (`xdisp.c:34813') all read it; asking the selected frame instead
+      ;; is what made two frames on one buffer draw as one view.
       (buffer    window-buffer      set!window-buffer)
       ;; ^ The <text-editor-type> this window shows. Emacs's
       ;; `window-buffer'.
@@ -342,37 +361,6 @@
                  (append (walk (window-children (car windows)))
                          (walk (cdr windows))))
                 (else (cons (car windows) (walk (cdr windows))))))))
-
-    (define (window-frame window)
-      ;; The frame WINDOW is on: GNU Emacs's `window-frame'
-      ;; (`frame.c'). Redisplay asks it - `WINDOW_XFRAME (w)' is
-      ;; `(XFRAME (w->frame))' - to find the frame a window belongs to
-      ;; when the frame being *drawn* is not the selected one, which is
-      ;; what a second `C-x 5 2' window is.
-      ;;
-      ;; **A departure in mechanism, not in answer.** The C reads
-      ;; `w->frame', a field every window carries; this tree has no such
-      ;; field on `<window>', so the frame is found by asking each live
-      ;; frame whether the window is in its tree. Adding the field would
-      ;; be more faithful and is deliberately not done here: changing a
-      ;; record's layout invalidates every cached `.go' that uses it
-      ;; (AGENTS.md has the section on what that does to a test run), and
-      ;; the search is over one or two frames.
-      ;;
-      ;; Unlike `window-list' the walk descends into internal windows -
-      ;; they are windows too, and Emacs's would answer for one.
-      ;;--------------------------------------------------------------
-      (let walk-frames ((frames (*frame-list*)))
-        (cond
-         ((null? frames) #f)
-         (else
-          (let in-tree? ((windows (frame-windows (car frames))))
-            (cond ((null? windows) (walk-frames (cdr frames)))
-                  ((eq? (car windows) window) (car frames))
-                  ((window-internal? (car windows))
-                   (let ((found (in-tree? (window-children (car windows)))))
-                     (if found found (in-tree? (cdr windows)))))
-                  (else (in-tree? (cdr windows)))))))))
 
     (define (window-point window)
       ;; The character index point is at in WINDOW: GNU Emacs's
@@ -549,9 +537,9 @@
       ;;--------------------------------------------------------------
       (%window-base-line-pos window))
 
-    (define (make-frame-window buffer top height left width)
-      ;; A window filling the given rectangle, showing BUFFER: a leaf the
-      ;; frame holds directly.
+    (define (make-frame-window frame buffer top height left width)
+      ;; A window filling the given rectangle, showing BUFFER: a leaf
+      ;; FRAME holds directly.
       ;;--------------------------------------------------------------
       ;; The window's display begins at position 1, which is where GNU
       ;; Emacs's `set_window_buffer' puts `w->start' - and at `BEG' the
@@ -567,7 +555,7 @@
       ;; showing that place. Written as 1, `C-x 5 2' put the new window
       ;; at the top of the file wherever the old one was - measured on
       ;; Emacs 31.1: point at 21, the new frame's `window-point' is 21.
-      (make<window> buffer (copy-marker buffer (text-editor-get-cursor buffer))
+      (make<window> frame buffer (copy-marker buffer (text-editor-get-cursor buffer))
                             (copy-marker buffer 1) #t
                             0 0 #f 0 0
                             top height left width #f '()
@@ -677,6 +665,29 @@
     ;; The frame currently dispatching a key event. Commands read the
     ;; frame through this parameter.
     (define *current-frame* (make-parameter #f))
+
+    (define *current-buffer* (make-parameter #f))
+    ;; ^ The buffer commands act on: GNU Emacs's `current_buffer', the C
+    ;; global that `set-buffer' writes and that the *window code* writes
+    ;; too. False means "no choice has been made", and `(schemacs editor
+    ;; buffer)''s `current-buffer' answers `(current-editor)' for it.
+    ;;
+    ;; **It lives here, below the buffers, because `select-window'
+    ;; writes it.** Emacs's `Fselect_window' begins with
+    ;;
+    ;;   Fset_buffer (w->contents);   /* `window.c:534' */
+    ;;
+    ;; - "Make the selected window's buffer current" - and
+    ;; `do_switch_frame' reaches that same line for every frame switch,
+    ;; since it ends in `Fselect_window (f->selected_window, norecord)'.
+    ;; That is the whole of Emacs's rule that the current buffer follows
+    ;; the selected window, and it is what keeps two frames on one
+    ;; buffer - or a `C-x 5 o' between them - acting on the buffer you
+    ;; are looking at instead of the one you were looking at when you
+    ;; last called `set-buffer'. This library cannot import `set-buffer',
+    ;; because `(schemacs editor buffer)' is built on it; the parameter
+    ;; is the part both libraries can see, so it is here with the frame
+    ;; state, beside `*echo-area-buffer*' and for the same reason.
 
     (define *frame-cursor-type* (make-parameter (cons 'filled-box-cursor 1)))
     ;; ^ The cursor the *frame* wants, as `(TYPE . WIDTH)', which is what
@@ -1102,9 +1113,18 @@
       ;; needs a frame on a particular display comes through here;
       ;; `new-frame' below is the common case and reads the ambient one.
       ;;--------------------------------------------------------------
-      (let* ((window (make-frame-window editor 0 (max 1 (- height 1)) 0 width))
-             (frame (make<frame> (list window) window height width
-                                 "" #f #f #f display (%next-frame-name))))
+      ;; **The frame is made first and its windows second**, which is
+      ;; the order `make_frame' itself uses (`frame.c:1229'): the frame
+      ;; object is allocated, then `root_window = make_window ()', then
+      ;; `wset_frame (rw, frame)' tells the window which frame it is on.
+      ;; A window's frame is fixed for its life, so it cannot be filled
+      ;; in afterwards - the window has to be built knowing it.
+      (let* ((frame (make<frame> '() #f height width
+                                 "" #f #f #f display (%next-frame-name)))
+             (window (make-frame-window frame editor
+                                        0 (max 1 (- height 1)) 0 width)))
+        (set!frame-windows frame (list window))
+        (set!frame-selected-window frame window)
         ;; Every frame joins the list as it is made, exactly as
         ;; `make_frame' and `make_terminal_frame' push it.
         (*frame-list* (cons frame (*frame-list*)))
@@ -1208,7 +1228,17 @@
             (when new-window
               (text-editor-set-cursor
                (window-buffer new-window)
-               (marker-position (%window-point new-window)))))))
+               (marker-position (%window-point new-window))))))
+        ;; **... and it makes that window's buffer current**, which is the
+        ;; other thing `Fselect_window' does and the reason
+        ;; `do_switch_frame' reaches it at all: "Make the selected
+        ;; window's buffer current" (`window.c:534'). This is the half a
+        ;; frame switch was missing - switch frames and every command
+        ;; still acted on the buffer the frame you left was showing,
+        ;; because nothing had told the buffer that the window had
+        ;; changed. `(current-editor)' reads the *new* frame now, so it
+        ;; answers that frame's buffer.
+        (*current-buffer* (current-editor)))
       frame)
 
     (define (%frame-step frame back?)
@@ -1611,16 +1641,22 @@
           ;; ... and the one being selected gives the buffer its point
           (text-editor-set-cursor (window-buffer window)
                                   (marker-position (%window-point window))))
-        ;; The C's `Fselect_window' also makes the window's buffer current
-        ;; when it differs (window.c:3803-3806), and that half is done by
-        ;; the *callers* that switch buffers rather than here:
-        ;; `switch-to-buffer', `pop-to-buffer' and `other-window' are all
-        ;; in `(schemacs editor window)', which can import `set-buffer' -
-        ;; this library cannot, because `(schemacs editor buffer)' is built
-        ;; on it. What is set is `(current-editor)' and not the window's
-        ;; buffer: in Emacs the minibuffer *is* a window so the two are one
-        ;; thing, while here the echo area is not, and a prompt is the case
-        ;; the fallback exists for.
+        ;; **`Fset_buffer (w->contents)' - the first line of
+        ;; `Fselect_window' (`window.c:534'), which runs before the C
+        ;; even tests whether the window is already selected.** "Make
+        ;; the selected window's buffer current." Without it the current
+        ;; buffer stayed wherever the last `set-buffer' put it, so a
+        ;; `C-x 5 o' to another frame - or `C-x o' to another window -
+        ;; left every command acting on the buffer you were looking at
+        ;; *before* you switched, while the screen showed the other one.
+        ;;
+        ;; The answer is `(current-editor)' and not `(window-buffer
+        ;; window)' because during a minibuffer read the selected window
+        ;; in Emacs *is* the minibuffer window and what it shows is the
+        ;; prompt's buffer. This tree has no minibuffer window, so the
+        ;; echo area stands for it - which is exactly the case
+        ;; `current-editor' exists for.
+        (*current-buffer* (current-editor))
         window))
 
     (define-command (recenter arg)

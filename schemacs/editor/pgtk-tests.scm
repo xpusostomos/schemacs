@@ -647,4 +647,51 @@
             (list (= 1 (xd:window-start (fr:frame-selected-window f2)))
                   (> (xd:window-start (fr:frame-selected-window f1)) 1))))))))
 
+;;------------------------------------------------------------------
+;; The echo area belongs to one frame
+;;
+;; GNU Emacs's `echo_area_window' is
+;; `FRAME_MINIBUF_WINDOW (SELECTED_FRAME ())' (`xdisp.c:13782'), and
+;; `redisplay_window' draws the message only for a window that *is* that
+;; one (`:20526'); every other frame's minibuffer window is left blank.
+;; Drawing it on all of them is what put the prompt - and, with it, every
+;; character typed into the minibuffer - into every frame at once.
+;;
+;; This is a pixel check because that is where the bug was: the message
+;; still *belonged* to the right frame all along, and what was wrong was
+;; which frames it got painted on.
+;;------------------------------------------------------------------
+
+(define (echo-row-ink pix)
+  ;; How many pixels of the frame's last row are not the background -
+  ;; the echo area's row, which is where a message is drawn. A character
+  ;; cell is 9x18 pixels and the frame is 24 rows, so the last row is
+  ;; rows 414 to 431.
+  ;;--------------------------------------------------------------
+  (let loop ((x 0) (y (* 23 18)) (n 0))
+    (cond ((>= y (* 24 18)) n)
+          ((>= x (* 80 9)) (loop 0 (+ y 1) n))
+          (else (loop (+ x 1) y
+                      (if (equal? (pix x y) white) n (+ n 1)))))))
+
+(test-equal '(#t #t)
+  (parameterize ((fr:*frame-list* '()))
+    (let* ((d1 (make <pgtk-display>))
+           (d2 (make <pgtk-display>)))
+      (dn:current-display d1)
+      (initialize-pgtk-faces! d1)
+      (initialize-pgtk-faces! d2)
+      (let* ((ed (new-text-editor))
+             (f1 (fr:new-frame-on d1 ed 24 80))
+             (f2 (fr:new-frame-on d2 ed 24 80)))
+        (parameterize ((fr:*current-frame* f1))
+          ;; F1 is the selected frame and F2 is not, so the message F2 is
+          ;; holding is one that is not being shown anywhere.
+          (fr:set!frame-message f2 "a message for the frame that is not selected")
+          (xd:render! f2)
+          (let ((blank (zero? (echo-row-ink (shot-of d2)))))
+            (fr:set!frame-message f1 "a message for the selected frame")
+            (xd:render! f1)
+            (list blank (> (echo-row-ink (shot-of d1)) 0))))))))
+
 (test-end "schemacs_editor_pgtk")

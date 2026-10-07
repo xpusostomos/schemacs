@@ -75,6 +75,10 @@
           set-marker!)
     (only (schemacs editor frame)
           *current-frame*
+          ;; `SET-BUFFER' writes it and `CURRENT-BUFFER' reads it; the
+          ;; window code writes it too, which is why it is defined down
+          ;; there - see the note on it in `frame.sld'.
+          *current-buffer*
           current-editor
           selected-window
           set-window-buffer!
@@ -205,16 +209,6 @@
       ;; Emacs runs it from `Fset_buffer_list'; so does this.
       ;;--------------------------------------------------------------
       (make-parameter '()))
-
-    (define *current-buffer*
-      ;; The dynamically current buffer, or false when the choice belongs
-      ;; to the frame: `SET-BUFFER' sets it, `SAVE-CURRENT-BUFFER' and
-      ;; `WITH-CURRENT-BUFFER' restore it. Emacs has no such variable - its
-      ;; `current_buffer' is the C global that both `set-buffer' and the
-      ;; window code write - so this is that global, with false meaning
-      ;; "whatever the frame says" rather than "no buffer".
-      ;;--------------------------------------------------------------
-      (make-parameter #f))
 
     (define *case-fold-search*
       ;; GNU Emacs's `case-fold-search' (buffer.c:6009): "Non-nil if

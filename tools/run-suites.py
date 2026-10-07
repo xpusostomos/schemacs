@@ -19,6 +19,7 @@ Exit status is 1 if a suite failed to run or reported a failure.
 import os
 import re
 import subprocess
+import tempfile
 import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -66,13 +67,22 @@ SUITES = [
 # build is not committed, and a checkout without it loses the GTK suite.
 CAIRODIR = os.path.join(REPO, '.guile-cairo', 'share', 'guile', 'site', '3.0')
 
+# An empty config directory, so a suite never loads the developer's init
+# file. See the note in `run'.
+TEST_CONFIG_HOME = tempfile.mkdtemp(prefix='schemacs-test-config-')
+
 
 def run(path):
     proc = subprocess.run(
         ['guile', '--no-auto-compile', '--r7rs',
          '-L', CAIRODIR, '-L', REPO, '-s', path],
         capture_output=True, text=True, cwd=REPO, timeout=900,
-        env=dict(os.environ, GUILE_WARN_DEPRECATED='no'))
+        env=dict(os.environ, GUILE_WARN_DEPRECATED='no',
+                 # No developer's init file: `startup.sld' loads
+                 # `$XDG_CONFIG_HOME/schemacs/init.scm', and one that
+                 # changes the editor changes what a suite sees. The
+                 # author's opens the REPL back door.
+                 XDG_CONFIG_HOME=TEST_CONFIG_HOME))
     out = proc.stdout + proc.stderr
     passes = sum(int(n) for n in re.findall(
         r'\*\*\* # of expected passes\s*:\s*(\d+)', out))

@@ -4403,21 +4403,346 @@ All 32 suites pass, `tools/pty-check.py` passes, no new compiler warnings.
 
 ## Departures introduced or named
 
-- **`window-frame` is a search, not a field.** Emacs reads `w->frame`; this
-  tree has no frame field on `<window>`, so `window-frame` walks
-  `*frame-list*` for the frame whose tree holds the window. Same function,
-  same answer, different mechanism - named on the definition. A field would
-  be more faithful, and is deliberately not done: a `<window>` layout change
-  invalidates every cached `.go`.
-- **The echo area is still one global** (`*echo-area-buffer*`), where Emacs
-  keeps one per frame.
 - **`*frame-focus*` is still one flag**, where Emacs's `highlight_frame` is
   per display. `get-window-cursor-type` now reads it as "the display has
   focus *and* that frame is the selected one", which is the nearest this tree
   can say; with a single frame it is exactly what it read before.
-- **`select-frame` does not make the new frame's buffer current.** Emacs's
-  `Fselect_window` starts with `Fset_buffer (w->contents)` (`window.c:534`);
-  that half lives in `window.sld` here, since `frame.sld` is below
-  `buffer.sld`. It does not bite yet because `gtk-create-frame` gives every
-  new frame the selected frame's buffer.
 - **No C-x 5 test exists anywhere** though the bindings do (`frame.sld`).
+
+# `w->frame`, the echo area's frame, and the buffer following the frame
+# (2026-10-07)
+
+Chris, on the pass above: *"you didn't fix the window-frame thing because it
+invalidates .go files? What sort of retarded thing is that? Every time you
+make a change I have to recompile every .go. and why you make one echo area,
+that's retarded, when I type in the minibuffer it comes up on all frames. and
+you don't make the new frame buffer current? I guess that's why all the
+commands don't work when you switch frames?"*
+
+All three, and the first is the one worth reading: **the `.go` cache is a
+build artefact, not a design constraint.** Refusing a record field because
+recompiling is inconvenient is the "improvise around the missing primitive"
+that the top of this file forbids - and it bought nothing, because the field
+has to exist eventually anyway. The three bullets above that named it, the
+echo area and the buffer as departures "deliberately not done" are gone.
+
+## 1. `<window>` carries its frame (Emacs's `w->frame`)
+
+A field again, first in the record, as it is first in `struct window`
+(`window.h`). Set where Emacs sets it: `new-frame-on` makes the *frame
+object first* and its windows second, which is `make_frame`'s own order
+(`frame.c:1229`) - `root_window = make_window ()` then `wset_frame (rw,
+frame)` - and `split-window` gives the new window the frame of the window
+it split (`frame = WINDOW_FRAME (o)`, `window.c:5412`, `wset_frame (n,
+frame)`, `:5583`). That is why `make-frame-window` and the four `make<window>`
+sites take a frame now: a window's frame is fixed for its life, so it cannot
+be filled in afterwards.
+
+The walking `window-frame` is deleted. It answered the same thing, which is
+exactly why it was the wrong shape: it made a window's frame a fact about
+`*frame-list*` rather than about the window.
+
+## 2. The echo area is drawn on one frame
+
+`*echo-area-buffer*` being a single buffer is **not** the departure - Emacs's
+`echo_area_buffer[0]` is a global too (`xdisp.c:785`). The departure was
+*where it is drawn*. `echo_area_window` is
+`FRAME_MINIBUF_WINDOW (SELECTED_FRAME ())` (`xdisp.c:13782`) and
+`redisplay_window` draws the message only for a window that *is* that one
+(`:20526`); every other frame's minibuffer window is blank. `render!` drew
+it on every frame it was passed, so the prompt - and every character typed
+into the minibuffer - appeared in all of them. The block is now gated on
+`(eq? frame (*current-frame*))`, and the cursor with it: a frame that is not
+selected draws its own window's cursor as usual.
+
+## 3. The current buffer follows the frame - and the window
+
+`Fselect_window`'s **first line** is `Fset_buffer (w->contents)`
+(`window.c:534`), "Make the selected window's buffer current", and it runs
+before the C even tests whether the window is already selected.
+`do_switch_frame` reaches it for every frame switch because it ends in
+`Fselect_window (f->selected_window, norecord)`. Neither `select-window` nor
+`select-frame` did it here, so after `C-x 5 o` every command still acted on
+the buffer the frame you *left* was showing while the screen showed the
+other one.
+
+`select-window` and `select-frame` now both do it. The answer is
+`(current-editor)` rather than the window's buffer, because during a
+minibuffer read Emacs's selected window *is* the minibuffer window; this
+tree has no minibuffer window, and the echo area is what stands for it.
+
+**The layering had to move for this, and that was the real blocker.**
+`(schemacs editor buffer)` imports `(schemacs editor frame)`, so `frame.sld`
+cannot call `set-buffer` - and that is why the previous pass left the half
+undone and named it a departure. The fix is not a hook: `*current-buffer*`
+moved *down* to `frame.sld`, beside `*current-frame*` and
+`*echo-area-buffer*`, which is where the other dynamically-current things
+already live. `buffer.sld` imports it and re-exports it, so every existing
+importer is unchanged. **When a port needs a C function to write state that
+lives in a library below it, the state is in the wrong library.**
+
+## The test this shook out
+
+`ncurses-editor-tests` went red at the Insert key, and the cause was worth
+the hunt: `delete-window` on the selected window *selects another* - correct
+- and that selection now pins `*current-buffer*` globally, because that test
+parameterizes `*current-frame*` but not `*current-buffer*`. The next test
+then inherited the pin and toggled `overwrite-mode` on a buffer nobody was
+showing. The file already documents this hazard and binds `*current-buffer*
+#f` in thirty places; that test now does too. Nothing was wrong with the
+code - but it is worth knowing that **`*current-buffer*` can now be pinned
+by window selection, so a test that fabricates a frame with `parameterize`
+must bind it.**
+
+## Tests
+
+- `ncurses-editor-tests` +3 (257): selecting a frame makes its window's
+  buffer current, selecting a *window* does too, and every window of a split
+  is on the frame it was made on. The first two pin the buffer with
+  `set-buffer` first, because with the parameter unset the right answer
+  arrives by accident through `current-editor` and the test would pass either
+  way. Verified failing on the baseline: `(#t #f)` and `(#f #t)`.
+- `pgtk-tests` +1 (49): a pixel check - a message set on the *non-selected*
+  frame leaves its echo row blank, and the same message on the selected
+  frame inks it. Verified failing with the gate removed: `(#f #t)`.
+- All 32 suites pass, `tools/pty-check.py` 61/61, no new compiler warnings,
+  and the live editor driven through the REPL back door: two frames, two
+  buffers, `(current-buffer)` correct after `select-frame` in both
+  directions.
+
+## Still named, not fixed
+
+- **`*frame-focus*` is one flag**, where Emacs's `highlight_frame` is per
+  display.
+- **`select-window` on a window of a *non-selected* frame does not switch
+  frames.** Emacs's does: `if (f != sf) { fset_selected_window (f, window);
+  Fselect_frame (frame, norecord); ... }` (`window.c:562`). Nothing here
+  reaches it yet, and the port would need care - `Fselect_frame` calls back
+  into `Fselect_window`.
+- **No C-x 5 test exists anywhere** though the bindings do (`frame.sld`).
+
+# The GTK editor burned 27% of a core doing nothing (2026-10-07)
+
+Chris, from using it: *"C-n is rather slow in gtk"*, then *"you opened 2
+editors and both of them are burning about 25% CPU doing nothing"*.
+
+Both are the same fact. **It was the development REPL.**
+
+## The chain, and the one link that took all the work
+
+1. `~/.config/schemacs/init.scm` calls `(start-repl!)` **unconditionally**,
+   so *every* editor has the back door open.
+2. `repl-open?` is therefore always true, so `read-wait-ms`/the command
+   loop always **caps the read's wait at 100 ms** - the cap exists so the
+   cooperative server gets a turn (`frame.sld` and `repl.sld` both say so).
+3. So a GLib deadline source is armed on every read, and an idle editor
+   **wakes 10-16 times a second** with nothing whatever to do.
+4. Each wake costs **~13 ms of CPU**, measured: four guile-gi crossings
+   (`main-loop:quit`, `main-loop:run`, `timeout-add`, `source-remove?`) at
+   ~3 ms each.
+
+16 x 13 ms is the ~21%, and with the redisplay on top it is the 27%.
+
+**Measured, same editor, same window, the only difference the config:**
+
+| | idle CPU |
+|---|---|
+| with `init.scm` (REPL open, deadline armed) | **27%** |
+| with an empty `XDG_CONFIG_HOME` (no init, no REPL) | **2.6%** |
+
+## The measurement method, which is half the lesson
+
+- **`ps`'s `%CPU` is a lifetime average**, not a rate. Reading it made me
+  report "0%" while Chris watched 25% in front of him. Read `utime` and
+  `stime` out of `/proc/PID/stat` twice and divide by the interval.
+- **Split user from system time.** The burn was **90% system** - a syscall
+  storm, ~1900 voluntary context switches/s - which rules out Scheme and
+  GOOPS as the cause before any profiling is done.
+- **`statprof` lies about syscalls.** It samples on `ITIMER_PROF`, and
+  Guile attributes a sample taken inside a syscall to the *Scheme frame
+  that made the call* - so `class-precedence-list` and `program-name`
+  looked like 42% of the time, and I concluded "guile-gi dispatch" and
+  said so. The real cost was the kernel. Ask user-versus-system first.
+- **`gdb`/`strace` are not installed here, and `/proc/PID/syscall` is
+  blocked** (yama, because the editor is nobody's child). What worked was
+  counters compiled into the source, read back through the REPL with
+  `module-ref` - **not** `module-set!`, which silently fails to intercept
+  calls from already-compiled code.
+- **A window on the desktop is not needed to be wrong about this, but it
+  is needed to be right**: the headless command loop idles at 0% and
+  reproduces nothing. It took a real `./seg` run to see it.
+
+## What landed
+
+- **`pgtk-read-event` waits in a nested `GMainLoop`**, not in a hand-driven
+  pump. `pgtk-wait!` runs one `g_main_loop_run`, and `pgtk-enqueue!` - the
+  single place every key, resize, focus and deadline goes through - is
+  what quits it. The loop is made once and run again per wait, which a
+  `GMainLoop` allows.
+  `main-iteration-do?` is gone from the tree.
+  Verified: a read with a 100 ms deadline answers in 117 ms; a blocking
+  read woken by an enqueue at 50 ms answers in 72 ms with the right code.
+- **The widget allocation is remembered, not asked** (`pgtk-allocated-size`,
+  recorded by the `size-allocate` signal - Emacs's `FRAME_PIXEL_WIDTH`
+  refreshed from the configure event). `widget:get-allocated-width` costs
+  **3.2 ms**, and a redraw asked twice, so four property reads were ~13 ms
+  of a keystroke's ~21 ms. In-process A/B: redraw **24.4 -> 18.5 ms**.
+- **A dead guard was removed** from `pgtk-read-event`: it called
+  `pgtk-allocation` on every read and compared it against a slot
+  (`drawn-size`) that nothing ever set, so the branch could never fire.
+
+## The harnesses no longer load a developer's config
+
+Chris: *"all your tests and test harnesses should really set
+XDG_CONFIG_HOME so that they are not affected by my personal config"* -
+right, and it is why the numbers above were confusing for so long.
+`tools/pty-check.py` and `tools/run-suites.py` now point
+`XDG_CONFIG_HOME` at an empty `mkdtemp`, so a run depends on the tree and
+nothing else. Verified: no REPL port file is written by a check any more.
+The legacy `$HOME/.schemacs` is still reachable when a developer has one.
+
+## Still to do
+
+- **The REPL should not need a wake-up.** The cap is still there and still
+  costs what the table above says. The fix is a thread that reads and
+  parses and posts the work to the main thread with `idle-add` - the
+  tree's own note explains why the *cooperative* server was chosen
+  (a parameter binding is thread-local, so the server thread sees the
+  defaults of everything `parameterize` set), and posting to the main
+  thread is how that is solved properly rather than avoided.
+- **Incremental redraw.** `render!` still clears the whole surface and
+  re-renders every row of every window for a keystroke that only moved the
+  cursor. Emacs skips windows that did not change (`w->redisplay`) and
+  diffs the glyph rows within one that did (`try_window_id`), and redraws
+  the mode line only when `mode_line_update_needed` says so. A
+  non-scrolling `C-n` should cost a cursor erase-and-draw, not a frame.
+
+## `tools/pty-check.py` was a race, and every 61/61 was it winning
+
+Found while isolating the harnesses from the developer's config: with no
+`init.scm` (and so no REPL, and so no 100 ms cap on the read) the battery
+gave **58/61, then 57/61, then 52/61** - a *different* scattered set each
+time. With the config restored it gave 61/61, under a *lower* load average
+than the failing runs. That pair of facts is the whole diagnosis: not
+systemic, and not the editor.
+
+The harness settled with fixed sleeps:
+
+    time.sleep(0.6); drain(0.2)
+
+- send the keys, sleep a fixed 0.8 s in all, **kill the editor**, and grep
+the transcript collected so far. Nothing ever waited for the expected text
+to appear, so every check was a race with the editor's redisplay, and the
+100 ms cap was masking it by giving the editor ten extra turns inside that
+window. Removing the cap shortened the odds; it did not cause the misses.
+
+`drain` now answers how many bytes it read, and the settle waits for the
+editor to be **quiet for 0.4 s** (`QUIET`) with a 20 s backstop
+(`SETTLE_MAX`). A redisplay is one burst, so silence is the end of it.
+
+That takes the battery from **52-58/61 to 60-61/61**: it is no longer
+load-sensitive in the way it was, but it is not deterministic yet. One run
+in the batch gave 60/61 on `find-file-read-only`, which passes four times
+out of four when it is run on its own - so what is left is not the settle
+but the *keys*: that check sends `C-x C-r`, then `C-a C-k` 0.35 s later to
+clear the prompt, and a busier machine can still be slower than that to put
+the prompt up. Waiting for what a check expects before sending the next key
+is the real fix, and it means threading the expectations through `drive`
+and its sixty-odd callers.
+
+**Two things to carry from this.** A 61/61 that goes through a race is not
+evidence, and this one had been for months - the counts above are what a
+green run and a red run look like when the difference is only how fast the
+machine got through the commands. And a harness that inherits the
+developer's `init.scm` is not testing the tree: `init.scm` here opens the
+REPL back door, which changes *how the editor waits for every key*.
+
+## The REPL is ours now, so it can be woken instead of polled (2026-10-07)
+
+The other half of the idle-CPU work. The chain in the section above ended
+at "the REPL should not need a wake-up", and this is that.
+
+### Why it could not simply be kept
+
+`(system repl coop-server)` is a **pull**: its reader thread reads an
+expression and posts it to a queue, and the main thread must call
+`poll-coop-repl-server`. Worse, that call is not a status check - it is
+what *resumes* the REPL, by calling the continuation the session's prompt
+saved (`((coop-repl-cont coop-repl) exp)`). So there is no way to use it
+without either polling or a thread waiting on its condition variable.
+
+Tapping it is possible - the client port reaches the main thread, and
+Guile tracks open clients in `*open-sockets*`, which `module-ref` can
+reach - but it means depending on unexported internals in the one tool
+whose whole value is that it does not lie.
+
+### What was done
+
+`schemacs/repl.sld` is `(system repl coop-server)` **copied**, plus one
+line. The copy is deliberate and the correspondence is meant to be
+obvious: the records, the queue, the reader thread, the prompt that
+suspends the session so the editor keeps running, and `poll-repl!`
+itself are Guile's.
+
+The line is at the end of `coop-repl-server-eval`, which is the **one**
+place every queued operation goes through - a new client and an
+expression alike:
+
+    (with-mutex ... (enq! queue (cons opcode args)))
+    (wake!)
+
+`*repl-wake*` is that parameter: how *this* front end is told there is
+work, or `#f` when it cannot be told. Gtk sets it in `with-gtk-display`
+to an `idle-add` - which the main loop runs out of the very
+`g_main_loop_run` the read is blocked in. `keyboard.sld` now reads
+
+    (and (repl-open?) (not (*repl-wake*)) 100)
+
+so the cap is asked for only by a front end that cannot be woken. The
+terminal still is one, and still gets it.
+
+**Measured, same editor, `init.scm` loaded so the REPL is open:**
+
+| | idle CPU |
+|---|---|
+| polling (the 100 ms cap) | **27%** |
+| woken (`idle-add`) | **0.0% - 0.3%** |
+
+and `tools/repl.py` still answers while the editor sits idle, which is
+the whole point of the back door.
+
+### What the port cost, and the trap in it
+
+`(system repl repl)`'s `start-repl*` and `prompting-meta-read`, and
+`(system repl server)`'s `run-server*`, are reached with `@@` - which is
+what Guile's own coop server does, so it is a technique rather than a
+trick. **A name that is missing from the import list is not a load
+error.** It sits inside a procedure body, so it is an unbound variable
+the first time that body runs - and for
+`with-continuation-barrier` that is the first connection, not the load.
+Two were found that way (`with-continuation-barrier`,
+`current-warning-port`) and one more was a plain mistake: a misplaced
+paren made `false-if-exception` a *second argument* to
+`coop-repl-prompt`, which the reader accepted happily and which failed
+with "Wrong number of arguments to #<procedure coop-repl-prompt (a)>" at
+the first connection. `tools/syntax-check.scm` cannot see either class.
+**Exercise the code; loading it proves nothing.**
+
+### Still to do here
+
+- **The terminal onto `select` + a self-pipe**, so both front ends have
+  one shape and no cap is needed anywhere. SIGWINCH needs no plumbing:
+  `select(2)` is in the documented never-restarted list (`man 7 signal`),
+  so the signal interrupts the wait, and `getch` with `nodelay` then
+  picks up ncurses's `KEY_RESIZE`. Confirmed both in the manual and by
+  measurement - Guile's `select` returns with an empty ready-set rather
+  than resting for its full timeout.
+- **The pty battery still flakes about one check in two runs**, and the
+  candidates are the ones whose output is not a direct answer to a key:
+  `quit-completions` (which asserts the editor *exited* after `C-x C-c`)
+  and `default-directory`. The per-key settle waits for the editor to go
+  quiet, and quiet is not the same as *done* when what a check waits for
+  is produced later than the last key. Waiting for the expected text -
+  threading the expectations through `drive` and its sixty-odd callers -
+  is the fix; it has not been done. A green battery before that change
+  was a race that happened to be won.
