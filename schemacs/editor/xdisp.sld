@@ -178,6 +178,7 @@
    window-line-rows
    window-line-slices
    posn-at-x-y buffer-posn-from-coords
+   *track-mouse*
    window-start
    window-truncates-lines?
    )
@@ -2633,6 +2634,22 @@
     ;; about which row a wrapped line's second half is on.
     ;;------------------------------------------------------------------
 
+    (define *track-mouse*
+      ;; GNU Emacs's `track-mouse' - a C variable of `xdisp.c' - which is
+      ;; whether the display makes an *event* of pointer motion at all.
+      ;; Nil, this tree's #f, means it does not: an ordinary pass of the
+      ;; pointer over a window is not a key, because Emacs does not make
+      ;; one, and a front end that reported motion whenever it happened
+      ;; would hand the command loop a `mouse-movement' it has nothing
+      ;; bound for - "undefined key" on every move.
+      ;;
+      ;; `mouse-drag-track' binds it to t for as long as a drag is being
+      ;; tracked, which is the only time the editor wants to know where
+      ;; the pointer is, and `pgtk.sld''s motion handler reads it before
+      ;; queueing anything.
+      ;;--------------------------------------------------------------
+      (make-parameter #f))
+
     (define (%posn-char-at line-string from to column)
       ;; The offset within LINE-STRING of the character drawn at display
       ;; COLUMN, walking `from' to `to' and adding each character's own
@@ -2668,25 +2685,33 @@
       (let ((ed (window-buffer window))
             (vheight (window-body-height window))
             (start (window-start window)))
-        (let loop ((r 0) (line-start start))
+        ;; LAST-END carries the end of the line the walk last passed, and
+        ;; is what a click *below* the text answers: there is no character
+        ;; on that row, and Emacs's `buffer_posn_from_coords' walks the
+        ;; rows it can and stops at the last one it reached, so a click
+        ;; under a short file puts point at the end of the text. #f means
+        ;; the window had no text at all to answer with.
+        (let loop ((r 0) (line-start start) (last-end #f))
           (cond
-           ((>= r vheight) #f)
-           ((not line-start) #f)
+           ((>= r vheight) last-end)
+           ((not line-start) last-end)
            (else
             (let* ((line-string (line-string-at ed line-start))
                    (texts (line-display-texts ed line-start line-string))
                    (slices (%window-line-slices window texts)))
               (cond
-               ((null? slices) #f)
+               ((null? slices) last-end)
                ((< row (+ r (length slices)))
                 (let ((slice (list-ref slices (- row r))))
                   (+ line-start
                      (%posn-char-at line-string (car slice) (cdr slice)
                                     column))))
-               ((not (line-next-start ed line-start)) #f)
+               ((not (line-next-start ed line-start))
+                (text-editor-get-end-of-line ed line-start))
                (else
                 (loop (+ r (length slices))
-                      (line-next-start ed line-start))))))))))
+                      (line-next-start ed line-start)
+                      (text-editor-get-end-of-line ed line-start))))))))))
 
     (define (posn-at-x-y x y frame)
       ;; GNU Emacs's `posn-at-x-y' (`keyboard.c:13009'), which is

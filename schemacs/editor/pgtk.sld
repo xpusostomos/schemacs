@@ -41,7 +41,8 @@
     ;; reaches through `(guile)' - as `frame.sld''s SIGTSTP does.
     (only (system foreign) pointer->procedure string->pointer pointer->string
           null-pointer? int void double)
-    (only (guile) dynamic-link dynamic-func assq-ref filter)
+    (only (guile) dynamic-link dynamic-func assq-ref filter
+          open-file catch)            ; TEMPORARY, for clicklog
     ;; `alist-delete' removes one selection from the ownership record.
     (only (srfi srfi-1) alist-delete)
     (only (scheme write) display write)
@@ -124,7 +125,7 @@
           char-super function-key-name make-ctrl-char)
     ;; A mouse event needs the *position* it happened at, which is the
     ;; redisplay's own walk - see `posn-at-x-y'.
-    (only (schemacs editor xdisp) posn-at-x-y)
+    (only (schemacs editor xdisp) posn-at-x-y *track-mouse*)
     ;; The frame's focus, which the window tells us about: it decides
     ;; whether the cursor blinks and whether it is drawn hollow.
     (only (schemacs editor frame)
@@ -744,6 +745,22 @@
       (let*-values (((_ keysym) (event:get-keyval e)))
         keysym))
 
+
+    (define (clicklog line)
+      ;; TEMPORARY: append a line to a file, from wherever.
+      (catch #t
+        (lambda ()
+          (let ((out (open-file "/tmp/pgtk-click.log" "a")))
+            ;; `for-each' is R7RS's and takes a *list*; a string needs
+            ;; `string-for-each'. Getting that wrong is what made the
+            ;; first version of this log write nothing at all.
+            (string-for-each
+             (lambda (c) (write-u8 (char->integer c) out))
+             line)
+            (write-u8 10 out)
+            (close-port out)))
+        (lambda (k . a) #f)))
+
     (define (pgtk-event-cell e)
       ;; Where a Gtk button event happened, as the CELL the frame's
       ;; windows are measured in. A Gdk event carries pixels and every
@@ -965,6 +982,8 @@
         (pgtk-mouse-event from (cdr item) 'down-mouse-1))
        ((and (pair? item) (eq? (car item) 'button-release))
         (pgtk-mouse-event from (cdr item) 'mouse-1))
+       ((and (pair? item) (eq? (car item) 'motion))
+        (pgtk-mouse-event from (cdr item) 'mouse-movement))
        ((memv (pgtk-event-keysym item) modifier-keysyms) *pgtk-skip*)
        (else
           ;; A key from a window that is not the selected frame's selects
@@ -1102,7 +1121,8 @@
        ;; A mouse event needs no decoding: the display made it, in the
        ;; shape `subr.sld''s `posn-' accessors walk, and its *key* is the
        ;; symbol at its head.
-       ((and (pair? ev) (memq (car ev) '(down-mouse-1 mouse-1))) (car ev))
+       ((and (pair? ev) (memq (car ev) '(down-mouse-1 mouse-1 mouse-movement)))
+        (car ev))
        ((eqv? ev *resize-code*) 'resize)
        ((eqv? ev *focus-in-code*) 'focus-in)
        ((eqv? ev *focus-out-code*) 'focus-out)
@@ -1440,14 +1460,34 @@
         ;; ran, so there was no error to see. (The warning about setting
         ;; an event mask two hundred lines above is about the
         ;; *toplevel*, where it crashes Gtk.)
-        (widget:add-events area 768)
+        ;; 768 is press|release; 4 more is `GDK_POINTER_MOTION_MASK'
+        ;; (`1 << 2'), which the drag needs to see the pointer move
+        ;; with the button held.
+        (widget:add-events area 772)
         (connect area (make <signal> #:name "button-press-event")
                  (lambda (w e)
+                   (clicklog "press seen")
                    (pgtk-enqueue! d (cons 'button-press e))
                    #t))
         (connect area (make <signal> #:name "button-release-event")
                  (lambda (w e)
                    (pgtk-enqueue! d (cons 'button-release e))
+                   #t))
+        ;; The pointer moving. Emacs sees these as `mouse-movement'
+        ;; events, and they are what a drag is made of.
+        (connect area (make <signal> #:name "motion-notify-event")
+                 (lambda (w e)
+                   ;; **Only while a drag is being tracked.** Emacs's
+                   ;; `track-mouse' is what decides whether motion is an
+                   ;; event at all, and without the test every pass of the
+                   ;; pointer over the window queued a `mouse-movement'
+                   ;; that the command loop had nothing bound for: an
+                   ;; "undefined key" for moving the mouse.
+                   (if (*track-mouse*)
+                       (begin
+                         (clicklog "motion: tracked, queued")
+                         (pgtk-enqueue! d (cons 'motion e)))
+                       (clicklog "motion: NOT tracked, dropped"))
                    #t))
         ;; A size is REQUESTED, not set as a default. `set-default-size'
         ;; pins the window: Gtk then never accepts the size a compositor

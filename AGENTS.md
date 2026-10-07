@@ -5229,3 +5229,142 @@ not be inherited from whatever dynamic extent happens to be current.**
 The nested read is also now verified on the terminal for the first time:
 with a minibuffer prompt up, the back door still answers, in 0.13 s, at
 0.0% CPU.
+
+# The mouse: clicking a window selects it (2026-10-08)
+
+Chris: *"in real emacs if I click in a window in gui mode, it activates
+that window. in schemacs I have to C-x o to get to the right window."*
+
+Emacs's chain is short: `(global-set-key [down-mouse-1] #'mouse-drag-region)`
+(`mouse.el:3781`), no motion ⇒ `mouse-set-point` (`mouse.el:1586`) ⇒
+`posn-set-point` (`subr.el:2013`), which is `(select-window (posn-window
+position))` and `(goto-char (posn-point position))`. That is the whole of
+"the window I clicked in becomes the selected window".
+
+## What landed
+
+- **`subr.sld`** — `nth` and the `posn-` cluster: `event-start`,
+  `event-end`, `posn-window`, `posn-area`, `posn-point`, `posn-x-y`,
+  walking the event list `(SYMBOL (WINDOW POS-OR-AREA (X . Y) TIMESTAMP))`
+  exactly as `subr.el` does.
+- **`mouse.sld`** (NEW, mirrors `mouse.el`) — `posn-set-point`,
+  `mouse-set-point`, `mouse-drag-region`, `mouse-drag-track`, `mouse-key?`,
+  and mouse.el:3781's own binding line. **`posn-set-point` is `subr.el`'s
+  but lives here**, because it needs `select-window` and `goto-char` and
+  `(schemacs editor frame)` imports `subr`: a definition in `subr.sld`
+  could not reach either. Named in both files.
+- **`xdisp.sld`** — `posn-at-x-y` (`keyboard.c:13009`, which is
+  `make_lispy_position`) and `buffer-posn-from-coords` (`xdisp.c`). The
+  row walk is the renderer's own helpers (`line-string-at`,
+  `line-display-texts`, `%window-line-slices`, `line-next-start`), so the
+  answer agrees with what is on the screen; a hand-written second walk
+  would be free to disagree.
+- **`keyboard.sld`** — `*last-read-event*`: the display's *own* event
+  value, carried to the command, because a key path element cannot hold a
+  position. Emacs's `last-input-event` exists for the same reason.
+- **`pgtk.sld`** — `button-press-event`/`button-release-event` on the
+  drawing area, tagged into the queue, and the decode that answers
+  `down-mouse-1`/`mouse-1`.
+
+**Point moves on the *press*, not on the release.** `mouse-drag-track`
+calls `mouse-set-point` in its `let*` - `mouse.el:1939`, "let's jump to
+the place of the event, where things are happening" - before it reads a
+single motion event. So the click needs no motion machinery at all, and
+that is why this was worth doing before the drag.
+
+## The five faults it took, four of them mine
+
+1. **`event:get-coords` used and never imported.** The first click raised
+   `Unbound variable` *inside the signal handler*, where Gtk swallows it:
+   a click that did nothing, with no message. The tree's recurring
+   missing-import class - and the compiler had said so, in a warning I
+   read past while chasing parentheses.
+2. **Two values bound where it returns three.** `gdk_event_get_coords`
+   returns a boolean and two out-parameters, the same shape as
+   `event:get-keyval` (which the tree binds as `((_ keysym) ...)`):
+   binding two put the boolean in X and made `round` raise on `#t`.
+3. **The event mask was `12`.** I recalled `GDK_BUTTON_PRESS_MASK` as
+   `1 << 2`; the header says otherwise (`gdktypes.h:436`):
+
+       GDK_POINTER_MOTION_MASK = 1 << 2      GDK_BUTTON_PRESS_MASK   = 1 << 8
+       GDK_POINTER_MOTION_HINT_MASK = 1 << 3 GDK_BUTTON_RELEASE_MASK = 1 << 9
+
+   So `12` asked for *motion* and the press went elsewhere. The symptom
+   was **nothing at all** - no handler, so no error to see - which is the
+   worst kind, and it is why the fix was found by asking the editor what
+   the widget had selected (`widget:get-events` → 768, and the GdkWindow's
+   own mask) rather than by reading anything.
+4. **The hand-over path.** `*dispatch-event*` *is* set, so an idle editor
+   dispatches an event straight from the signal handler and never goes
+   through `read-key-event`. `*last-read-event*` was set on two of the
+   three paths an event can take, so a click arrived at the command as
+   `(down-mouse-1 (FRAME))` - the shape for a *frame* event - and
+   `posn-set-point` selected the window the editor was already in. No
+   error, no message, no change: selecting the window you are in is not an
+   error.
+5. **`main-loop:unref` used at `pgtk.sld:1018` and never imported**
+   (pre-existing): the nested-loop teardown would have raised the first
+   time that branch was taken.
+
+## The lesson worth keeping
+
+**I verified through `dispatch-input-event`, the one path that already
+worked, and treated it as proof.** A test that drives only the path you
+just fixed says nothing about the paths it bypasses - and four of the five
+faults above were on paths my "end-to-end" test never took. What actually
+found them was asking the *live* editor questions (`widget:get-events`,
+`(*dispatch-event*)`, `(widget:get-queue)`) in a `broadwayd` display, and
+temporarily logging to a *file* rather than to the echo area, which only
+ever shows the last message and so cannot say what a click did.
+
+## The drag, the region, and a click below the text (same day)
+
+- **Motion events.** `pgtk.sld` asks for `GDK_POINTER_MOTION_MASK` beside
+  the button masks (`768 + 4`), queues them tagged, and decodes them as
+  `mouse-movement`.
+- **`mouse-drag-track`'s real loop.** The mark goes down with the *press*,
+  every motion event moves point (`mouse--drag-set-mark-and-point`,
+  `mouse.el:2044`, ported verbatim, including the two `eqv?` cases that
+  stop a drag back over its own start turning the region inside out), and
+  the release leaves the region active. The motion's *position* is read
+  from `*last-read-event*`, because `read-key-event` answers only the key -
+  which is what that parameter was added for.
+- **`mouse-start-end`** and **`mouse-set-region`** are ported. Mode 0 only:
+  every event this tree makes is a single click, and a click count needs a
+  clock.
+- **A click below the text** now answers the end of the last line, as
+  Emacs's `buffer_posn_from_coords` does by walking the rows it can and
+  stopping at the last one. It used to answer `#f`, which left point where
+  it was. And **motion is gated on `*track-mouse*`** (below), which is a
+  fault worth its own line:
+
+## The sixth fault: motion is not an event unless `track-mouse` says so
+
+`xdisp.sld` now has `*track-mouse*` - GNU Emacs's `track-mouse`, a C
+variable of `xdisp.c` - and it is *whether pointer motion is an event at
+all*, not which events to look at. `mouse-drag-track` binds it to t around
+the tracking loop; `pgtk.sld`'s motion handler asks it before queueing
+anything.
+
+Connecting the motion signal unconditionally, which is what this did
+first, makes **every pass of the pointer over the window** queue a
+`mouse-movement` that the command loop has nothing bound for:
+
+    ; undefined key : ("mouse-movement")
+
+Emacs does not have this failure because its display never makes the event
+in the first place. A front end that reports everything and filters later
+would have the same bug in a different place.
+
+Verified headlessly - the four cases of the drag rule, which are what the
+`eqv?` cases exist for:
+
+    press at 10:    mark=10 point=10   drag to 20:  mark=10 point=20
+    drag back to 5: mark=10 point=5    drag to 25:  mark=10 point=25
+
+and a click's posn still names the window it landed in and the character
+under it.
+
+Still named: the click count (double and triple click), `mouse-face`, the
+mode-line and scroll-bar areas beyond `'mode-line`, and
+`mouse-autoselect-window` (nil in Emacs by default).
