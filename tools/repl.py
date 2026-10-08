@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
 """Talk to a running schemacs through Guile's REPL server.
 
-`seg` passes `--listen` to Guile when `SCHEMACS_REPL` names a port, so an
-editor that is already running - blocked in its own event loop, with a
-window up - can be asked what it is doing and told to do something else.
+`se` opens the door when `SCHEMACS_REPL` names a port, or when it was
+started with `--server[=PORT]` - the same thing from the command line. Then
+an editor that is already running - blocked in its own event loop, with a
+window up - can be asked what it is doing and told to do something else:
 
-    SCHEMACS_REPL=37146 ./seg /tmp/file.txt &
+    SCHEMACS_REPL=37146 ./se -w /tmp/file.txt &
     tools/repl.py '(+ 1 2)'                  # a plain expression
-    tools/repl.py -m '(schemacs editor xdisp)' '(render! (*current-frame*))'
+    tools/repl.py '(render! (*current-frame*))'
+
+`se --repl[=PORT]` is the same conversation without Python: a REPL client
+(`schemacs/repl-client.sld`) that connects to a running editor's door and
+hands the terminal over to it.
 
 Why this exists: the alternative for driving the GTK backend is a
 compositor - `wtype` to type at it and `grim` to look at it - and that is
@@ -18,10 +23,19 @@ that looks like evidence. Every conclusion drawn that way is worthless, and
 one was drawn here before the mis-focus was noticed. A REPL cannot
 mis-focus: it is the process itself.
 
-Expressions are evaluated in `(guile-user)`, so a module's names are
-reached by naming it:
+Expressions are evaluated in `(guile-user)` - **a module the editor has
+already given its own names to** (`start-repl!` runs
+`open-editor-namespace!`, which imports every `(schemacs editor ...)`
+library there, because GNU Emacs reaches `find-file` from `eval` and a bare
+Guile module has no `find-file` at all). So an expression names nothing:
 
-    tools/repl.py -m '(schemacs editor engine)' '(text-editor-to-string (car (buffer-list)))'
+    tools/repl.py '(text-editor-to-string (car (buffer-list)))'
+
+`-m MODULE` still imports first, for a name an editor does not export, and
+is no longer needed for the editor's own. **A running editor only has this
+if it was started with this code** - the import happens as the door opens -
+so an editor left over from an earlier session answers like one from before
+the change.
 """
 import argparse
 import os
@@ -55,7 +69,9 @@ def talk(port, text, timeout=25.0):
                 break
             buf += chunk
 
-    read_until_prompt()             # the banner, up to the first prompt
+    read_until_prompt()             # up to the first prompt - and nothing
+                                    # before it: the editor suppresses the
+                                    # welcome banner (`%inhibit-welcome-message')
     if b'[1]>' in buf or b'[2]>' in buf:
         # a previous call left the REPL in an error's nested prompt; get
         # back to the top level rather than evaluating inside it
@@ -146,7 +162,7 @@ def main():
                          'door open: its port is found from the file it wrote')
     ap.add_argument('-p', '--port', type=int, default=None,
                     help="the port, when you know it: `SCHEMACS_REPL=37146 "
-                         "./seg FILE` opens the door there. Without this the "
+                         "./se FILE` opens the door there. Without this the "
                          "port is read from the file the editor wrote, which "
                          "is what an init file calling `(start-repl!)` makes.")
     ap.add_argument('-m', '--module', action='append', default=[],
@@ -171,7 +187,7 @@ def main():
         sys.stderr.write(
             'no editor with the back door open'
             + ('' if args.pid is None else ' (pid %d)' % args.pid)
-            + '.\nOpen one with `SCHEMACS_REPL=<port> ./seg ...`, or with\n'
+            + '.\nOpen one with `SCHEMACS_REPL=<port> ./se ...`, or with\n'
               '  (import (schemacs repl))\n  (start-repl!)\n'
               'in ~/.config/schemacs/init.scm - which writes the port to\n'
               '%s/schemacs-repl-<pid>.port, where this reads it.\n'

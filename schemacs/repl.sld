@@ -56,17 +56,27 @@
     ;; (`newline' is `(scheme base)''s)
     (only (scheme write) display)
     ;; `poll-repl!' pins the module every expression is read and
-    ;; evaluated in, which is the three below; see its comment.
-    (only (guile) catch getenv getpid
+    ;; evaluated in, which is the three below; see its comment. `eval' is
+    ;; there for the session's namespace, which is one `import' form
+    ;; evaluated in that module (`import' is `(guile)''s here; the
+    ;; `(scheme eval)' library is not what evaluates it).
+    (only (guile) catch eval getenv getpid
           resolve-module save-module-excursion set-current-module)
     ;; The server itself, and the two ends of it: `eval' queues, `poll'
     ;; runs what has been queued.
     (only (schemacs coop-server)
           spawn-coop-repl-server poll-coop-repl-server)
+    ;; `poll-repl!' draws after it has run something, because nothing else
+    ;; would: see its comment. `xdisp' is *below* `keyboard', which is
+    ;; what imports this library, so this is not a cycle.
+    (only (schemacs editor xdisp) redisplay-frames!)
+    (only (system repl repl) %inhibit-welcome-message)
     (only (system repl server) make-tcp-server-socket))
 
   (export repl-wake set-repl-wake!
           poll-repl! remove-repl-port-file! repl-open? repl-port-file
+          back-door-libraries back-door-excluded-libraries
+          open-editor-namespace!
           start-repl!)
 
   (begin
@@ -123,6 +133,142 @@
         (when w (w))))
 
     ;;------------------------------------------------------------------
+    ;; The session's namespace
+    ;;------------------------------------------------------------------
+
+    ;; **The back door is a REPL into the editor, so the editor's names
+    ;; have to be there.** GNU Emacs has one obarray: `find-file' is
+    ;; reachable from anywhere, including from `eval', which is why a bad
+    ;; expression typed into a running Emacs can still call every command
+    ;; there is. This tree's names live in one library per Emacs file, and
+    ;; a bare `(guile-user)' holds none of them - so the first thing
+    ;; anybody typed at `se --repl' was
+    ;;
+    ;;     scheme@(guile-user)> (find-file "README.md")
+    ;;     Unbound variable: find-file
+    ;;
+    ;; which reads as the back door being broken when it is working. The
+    ;; nearest thing this tree has to Emacs's obarray is the set of the
+    ;; editor's libraries, and the module the session is pinned to is
+    ;; `(guile-user)' (`poll-repl!'), so the two are put together: the
+    ;; session is *given* the editor.
+    ;;
+    ;; The list is written out rather than derived - the tree's root is
+    ;; not a thing the running editor knows - so it can go stale, and
+    ;; `repl-tests.scm' is what notices: it walks `schemacs/editor/*.sld'
+    ;; and fails on a library that is neither here nor in the excluded
+    ;; pair below.
+
+    (define %excluded-libraries
+      ;; The two libraries that bind a *toolkit* rather than state a part
+      ;; of the editor, and the reason neither can be in the list:
+      ;; `(schemacs editor term)' is the guile-ncurses binding and
+      ;; `(schemacs editor pgtk)' the guile-gi one, and an editor has one
+      ;; of them loaded and must never need the other - `schemacs/main.scm'
+      ;; says the same thing about the front ends ("a terminal editor has
+      ;; no business needing guile-gi, and a windowed one no business
+      ;; needing ncurses"). Importing these unconditionally would drag the
+      ;; other toolkit into whichever editor opened the door, and for a
+      ;; terminal editor the Gtk one is not merely wasteful but absent.
+      ;; A session that wants them can `(import (schemacs editor pgtk))'
+      ;; itself, which is a name the door's module now has.
+      '((schemacs editor pgtk)
+        (schemacs editor term)))
+
+    (define %editor-libraries
+      ;; Every `(schemacs editor ...)' there is, less the pair above:
+      ;; sorted, so a diff of this file shows the one library that moved.
+      ;;--------------------------------------------------------------
+      '((schemacs editor buff-menu)
+        (schemacs editor buffer)
+        (schemacs editor buffer-text)
+        (schemacs editor casefiddle)
+        (schemacs editor character)
+        (schemacs editor characters)
+        (schemacs editor charset)
+        (schemacs editor cmds)
+        (schemacs editor coding)
+        (schemacs editor command)
+        (schemacs editor data)
+        (schemacs editor derived)
+        (schemacs editor dired)
+        (schemacs editor diredc)
+        (schemacs editor disp-table)
+        (schemacs editor dispnew)
+        (schemacs editor easy-mmode)
+        (schemacs editor editfns)
+        (schemacs editor engine)
+        (schemacs editor env)
+        (schemacs editor faces)
+        (schemacs editor fileio)
+        (schemacs editor files)
+        (schemacs editor fns)
+        (schemacs editor font-core)
+        (schemacs editor font-lock)
+        (schemacs editor frame)
+        (schemacs editor indent)
+        (schemacs editor indentc)
+        (schemacs editor intervals)
+        (schemacs editor isearch)
+        (schemacs editor keyboard)
+        (schemacs editor keymap)
+        (schemacs editor ls-lisp)
+        (schemacs editor minibuf)
+        (schemacs editor minibuffer)
+        (schemacs editor mouse)
+        (schemacs editor mule)
+        (schemacs editor mule-cmds)
+        (schemacs editor pages)
+        (schemacs editor paragraphs)
+        (schemacs editor region-cache)
+        (schemacs editor replace)
+        (schemacs editor search)
+        (schemacs editor select)
+        (schemacs editor simple)
+        (schemacs editor startup)
+        (schemacs editor subr)
+        (schemacs editor syntax)
+        (schemacs editor tabulated-list)
+        (schemacs editor textprop)
+        (schemacs editor timefns)
+        (schemacs editor timer)
+        (schemacs editor tty-colors)
+        (schemacs editor window)
+        (schemacs editor xdisp)
+        (schemacs editor xfaces)
+        (schemacs editor xterm)))
+
+    (define (back-door-libraries)
+      ;; What the back door's session is given, and - with
+      ;; `back-door-excluded-libraries' - everything the editor is made
+      ;; of, the two together being the whole of `schemacs/editor'. The
+      ;; test that keeps them honest (`repl-tests.scm') reads both and the
+      ;; directory.
+      ;;--------------------------------------------------------------
+      %editor-libraries)
+
+    (define (back-door-excluded-libraries)
+      ;; The pair above, exported so that "the two lists are the whole
+      ;; editor" can be *checked* rather than hoped for.
+      ;;--------------------------------------------------------------
+      %excluded-libraries)
+
+    (define (open-editor-namespace! . module)
+      ;; Give MODULE - `(guile-user)' when none is named, which is what
+      ;; the session is pinned to - the editor's names. One `import'
+      ;; form, evaluated there, which is what typing it at the prompt
+      ;; does.
+      ;;
+      ;; **No guard.** A library that will not load is a broken list, and
+      ;; a back door that quietly has no `find-file' is the bug this
+      ;; exists to fix; better a backtrace at startup than a session that
+      ;; looks fine and is not.
+      ;;--------------------------------------------------------------
+      (eval (cons 'import %editor-libraries)
+            (if (pair? module) (car module)
+                (resolve-module '(guile-user)))))
+
+    ;;------------------------------------------------------------------
     ;; The back door
     ;;------------------------------------------------------------------
 
@@ -172,6 +318,10 @@
       ;; never has to be known by anyone: it is in the file.
       ;;--------------------------------------------------------------
       (unless server
+        ;; The session's namespace first, so that a client already
+        ;; connected when the first expression arrives finds the editor
+        ;; there (`open-editor-namespace!').
+        (open-editor-namespace!)
         (let ((port (if (pair? args) (car args)
                         (+ 20000 (modulo (getpid) 12000)))))
           (let loop ((candidate port) (left 32))
@@ -223,13 +373,40 @@
       ;; `(guile-user)` is what that tool's own docstring promises, and
       ;; it is where a name like `import` lives. Everyone else's module
       ;; is theirs; the back door's is ours.
+      ;;
+      ;; **Guile's welcome banner is suppressed here**, because the
+      ;; session is started from inside this call (`start-repl*', by way
+      ;; of the server's `new-repl'). `run-repl*' prints the copyright
+      ;; notice, the warranty line and "Enter `,help' for help." when
+      ;; its REPL is the outermost one on the *server process's* stack
+      ;; (`system/repl/repl.scm:158') unless `%inhibit-welcome-message'
+      ;; says otherwise - and a banner is for a program you started, not
+      ;; for one you connected to. It is the editor's Guile that would be
+      ;; printing it, over the socket, which is why a client cannot
+      ;; suppress it and why `tools/repl.py' had to read past it.
+      ;;--------------------------------------------------------------
+      ;; **It redraws afterwards**, and that is not a convenience: it is
+      ;; `redisplay`'s job in the C. Emacs displays a change made from
+      ;; outside the command loop because its main loop redisplays after
+      ;; it processes input, and a socket *is* input. Here nothing would
+      ;; repaint at all - measured, `se --remote` opened the file and the
+      ;; terminal went on showing the previous buffer until the next
+      ;; keypress - because the command loop's redisplay comes *after a
+      ;; command*, and this runs in the wait between them.
+      ;;
+      ;; `redisplay-frames!` and not `render!`: the C loops over every
+      ;; frame (`FOR_EACH_FRAME`, `xdisp.c:14350`), the same reason
+      ;; `read-key-event` draws with it after a special event.
       ;;--------------------------------------------------------------
       (when server
         (save-module-excursion
          (lambda ()
            (set-current-module (resolve-module '(guile-user)))
-           (let loop ()
-             (when (poll-coop-repl-server server) (loop)))))))
+           (parameterize ((%inhibit-welcome-message #t))
+             (let loop ((ran #f))
+               (if (poll-coop-repl-server server)
+                   (loop #t)
+                   (when ran (redisplay-frames!)))))))))
 
     (define (remove-repl-port-file!)
       ;; Delete the file this process wrote, if it wrote one. Called on

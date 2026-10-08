@@ -26,6 +26,16 @@
   ;; `print-escape-multibyte' and `print-escape-control-characters',
   ;; whose defaults are nil and whose branches this tree's all-multibyte
   ;; strings never take.
+  ;;
+  ;; **One of those sub-cases does occur and is right anyway**: a buffer,
+  ;; which `find-file' answers with. It reaches the unreadable form
+  ;; through the `else' below - `display', and the editor's own record
+  ;; printer - which writes `#<buffer NAME>', `print.c:1895`'s
+  ;; `escapeflag' branch, the one `prin1' takes. (The other branch, the
+  ;; bare name that `princ' writes, is not reachable from a Guile record
+  ;; printer: it is handed the record and a port and nothing that says
+  ;; which of the two is being asked for.) A buffer with no name is
+  ;; `#<killed buffer>', the C's `BUFFER_LIVE_P' branch.
 
   (import
     (scheme base)

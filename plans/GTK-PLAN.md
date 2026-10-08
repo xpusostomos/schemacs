@@ -585,13 +585,13 @@ gap, check the library's own source — not the installed module's exported name
 
 ### How to run it
 
-    ./seg GTK-PLAN.md        # or any file; *scratch* if none
+    ./se GTK-PLAN.md         # or any file; *scratch* if none
 
-`seg` puts `.guile-cairo/share/guile/site/3.0` **first** on the load path. That
+`se` puts `.guile-cairo/share/guile/site/3.0` **first** on the load path. That
 directory is a *built copy* of the newer guile-cairo, not committed. It used to
 fall back to the system guile-cairo silently and die with an unbound
 `cairo-pointer->context` at the first repaint — three frames away from the cause;
-`seg` now imports `(cairo)` from exactly that path before starting, and refuses to
+`se` now imports `(cairo)` from exactly that path before starting, and refuses to
 start with a message naming the directory if the bridge is not there. (The probe
 costs 25 ms.)
 

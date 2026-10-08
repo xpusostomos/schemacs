@@ -44,6 +44,8 @@ SUITES = [
     'schemacs/elisp-eval/print-tests.scm',
     'schemacs/editor/cmds-tests.scm',
     'schemacs/editor/mouse-tests.scm',
+    'schemacs/repl-client-tests.scm',
+    'schemacs/repl-tests.scm',
     'schemacs/editor/fns-tests.scm',
     'schemacs/editor/subr-tests.scm',
     'schemacs/editor/textprop-tests.scm',
@@ -61,7 +63,7 @@ SUITES = [
 
 
 # The newer guile-cairo built into the tree, first on the path exactly as
-# `seg' puts it there: `pgtk.sld' needs `cairo-context->pointer' and
+# `se' puts it there: `pgtk.sld' needs `cairo-context->pointer' and
 # `cairo-pointer->context', and the *system* guile-cairo has neither - so
 # the GTK suite fails with "Unbound variable" the moment it draws anything.
 # A path that is not there is harmless, so this needs no condition; the

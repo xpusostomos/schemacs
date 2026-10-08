@@ -188,15 +188,22 @@ smooth... *very* smooth.
 
 ### Running it
 
-There are 2 scripts in the top level:
+There is one script in the top level:
 
-* seg - the Scheme Editor, or if you like the Scheme Emacs. It reads a
-  command line of its own (`schemacs/main.scm`, through Guile's
-  `(ice-9 getopt-long)`): the terminal editor is the default,
-  `-w`/`--window` starts the Gtk one, `--chdir=DIR` changes directory
-  before starting, and `-h` prints the usage.
-* se - the terminal editor on its own, which is what `seg` starts by
-  default.
+* se - the Scheme Editor, or if you like the Scheme Emacs. It reads a
+  command line of its own (`schemacs/main.scm`, through SRFI 37's
+  `args-fold`): the terminal editor is the default, `-w`/`--window` starts
+  the Gtk one, `--chdir=DIR` (or `--chdir DIR`) changes directory before
+  starting, and `-h` prints the usage.
+
+  `-q`/`--no-init-file` skips the init file. `--server[=PORT]` opens the
+  development back door (see AGENTS.md), and `--repl[=PORT]` connects to a
+  *running* editor's back door as a REPL and starts no editor of its own -
+  `emacsclient` the other way round. `-r`/`--remote[=PORT] FILE...` is
+  `emacsclient` itself: it hands the file names to a running editor's
+  `find-file`, so they open in that editor, and starts no editor here
+  (with no file it prints the usage line and stops). An optional argument
+  is attached: `--server=37146`, not `--server 37146`.
 
 Right now I'm using Wayland, I presume the graphics will work on X11
 but haven't tried it.

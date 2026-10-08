@@ -88,6 +88,13 @@ After every piece of work, report anything you did or anything you found
 that is a departure from real emacs. Give insight on whether that departure
 should be fixed.
 
+When you are writing functions, especially define-command
+functions, pay special attention that the return value is
+the same thing as what emacs would return. If the
+user is connecting via the repl and running commands, they
+don't want to see some weird output because you decided to
+return something that they don't want to see.
+
 
 - `tools/syntax-check.scm` — after ANY scripted edit to a machinery
   `.scm` file, run `guile -s tools/syntax-check.scm <files>`: it runs
@@ -398,21 +405,116 @@ BASIC-FUNC.md groups 11-15, per the plan in
 **Use this before reaching for a keyboard.** A running editor can be read and
 poked from outside, in its own thread, with its own state:
 
-    SCHEMACS_REPL=37146 ./seg -w FILE &
-    tools/repl.py -m '(schemacs editor xdisp)' '(render! (*current-frame*))'
+    SCHEMACS_REPL=37146 ./se -w FILE &
+    tools/repl.py '(render! (*current-frame*))'
 
-`seg` is a Guile script now, and it reads its own command line
-(`schemacs/main.scm`, via `(ice-9 getopt-long)`): the **terminal** is the
+`se` is a Guile script now, and it reads its own command line
+(`schemacs/main.scm`, via SRFI 37's `args-fold`): the **terminal** is the
 default and `-w`/`--window` starts the Gtk one, so the example above says `-w`.
-`--chdir=DIR` is Emacs's `--chdir` (`emacs.c:1534`). `SCHEMACS_REPL` names a
+`--chdir=DIR` is Emacs's `--chdir` (`emacs.c:1534`); so is `--chdir DIR`,
+which `args-fold` cannot spell and `schemacs/main.scm` attaches for it.
+
+**`--server` is the same door from the command line** - `--server=PORT` on
+that port, a bare `--server` on one it chooses and writes to the port file -
+so `SCHEMACS_REPL` is no longer the only way to ask for it. And **`--repl`
+is the other end**: it connects to a *running* editor's back door and gives
+the terminal a REPL for it, starting no editor itself
+(`schemacs/repl-client.sld`; `emacsclient` the other way round). It is the
+quickest way to poke an editor that is already up:
+
+    printf '(buffer-file-name (current-buffer))\n' | se --repl=PORT
+
+which answers with the *editor's* file name, since that is where the
+expression was evaluated. `-q`/`--no-init-file` skips the init file
+(Emacs's `-q`, `startup.el:1407`); `schemacs/editor/startup.sld`'s
+`*init-file-user*` is what `load-init` consults, and an entry point binds
+it around the editor rather than setting a variable. `SCHEMACS_REPL` names a
 port; `schemacs/main.scm` opens Guile's REPL server there if it is set (as
 `main-gtk.scm` / `main-ncurses.scm` still do when they are run directly, which
 is how `tools/pty-check.py` drives the terminal one), and nothing in the editor
-proper knows the back door exists. `tools/repl.py` speaks to it (`-m MODULE`
-imports first; expressions evaluate in `(guile-user)`). It answers with the process's *real*
+proper knows the back door exists. `tools/repl.py` speaks to it. It answers with the process's *real*
 state, so `(buffer-list)`, `(*current-frame*)`, a buffer's text and its mark are
 all the live values, and `(render! f)` redraws for real. `pgtk-write-screenshot!`
 writes what the window is showing to a PNG, so pixels can be checked too.
+
+**The session is *given the editor*, and expressions are not qualified.**
+GNU Emacs has one obarray, so `find-file` is reachable from anywhere
+including `eval`; this tree's names live in one library per Emacs file and
+a bare `(guile-user)` has none of them. The day the door was first used by
+hand it answered
+
+    scheme@(guile-user)> (find-file "README.md")
+    Unbound variable: find-file
+
+which reads as a broken door when the door was fine. So `start-repl!` runs
+`open-editor-namespace!` (`schemacs/repl.sld`), which `import`s every
+`(schemacs editor ...)` library into the module the session is pinned to -
+and `repl-tests.scm` walks `schemacs/editor/*.sld` and fails on a library
+that is neither in that list nor in the excluded pair. **The two exclusions
+are the toolkit bindings**, `term` (guile-ncurses) and `pgtk` (guile-gi):
+an editor has one loaded and must never need the other, the same rule
+`schemacs/main.scm` states about the front ends. `-m` is therefore no
+longer needed in `tools/repl.py`, and no longer useful. **A running editor
+gets this when it is restarted, like every other change** - the list is
+imported as the door opens.
+
+**And the welcome banner is suppressed.** `run-repl*` prints Guile's
+copyright notice, warranty line and "Enter `,help' for help." when its
+REPL is the outermost one on the *server process's* stack
+(`system/repl/repl.scm:158`) - so a client sees a greeting for a program it
+did not start, printed by the editor's Guile over the socket, which is why
+no client can suppress it. `poll-repl!` binds `%inhibit-welcome-message`
+around the drain, which is where the session is started.
+
+**`-r`/`--remote[=PORT] FILE...` is `emacsclient`.** It connects to a
+running editor, sends one `(find-file "FILE")` per name and leaves; no
+editor is started, nothing is printed when it works, and with no file it
+prints the usage line and exits 1. It is deliberately *not* a port of
+`server.el`: no `-dir` handshake, no `find-file-noselect` plus window
+dance, no `nowait` - each name is one `find-file`, evaluated by the editor,
+which draws the result. Three things it does decide:
+
+- **A relative name is expanded against the *client's* directory**, not the
+  editor's, because that is the directory the command was typed in. Without
+  it `se --remote foo.txt` opens the file next to whatever the editor
+  happens to be visiting, which is not what anyone means.
+- **It reads answers by the prompt, not by "ends with `>`"** - which is what
+  `tools/repl.py` tests. A *value* can end with `>` (`#<buffer README.md>`),
+  so the loose test stops before the prompt and the next expression sent
+  gets the previous one's leftovers. Both readers are in
+  `schemacs/repl-client.sld`; `repl-client-tests.scm` pins the trap.
+- **`-r` takes no port; `--remote=PORT` names one.** SRFI 37 fills a
+  *short* option's argument out of the **next word** when nothing is
+  attached (`srfi-37.scm:143` - `-oARG` and `-o ARG` are one code path
+  there), so a `-r` with an *optional* argument reads `se -r foo.txt` as
+  "port foo.txt" and the file is never opened. The two spellings are
+  therefore two `option` records, and `-rPORT` (the attached form, which
+  is what getopt accepts for an optional argument) is rewritten to
+  `--remote=PORT` before the fold, the way `--chdir DIR` is. This is the
+  second time SRFI 37's argument rules have bitten this file; the first is
+  the attached-only long option.
+
+**A back-door change is displayed because `poll-repl!` redraws.** It used
+not to: measured, `se --remote` opened the file and the terminal went on
+showing the previous buffer until the next keypress. The command loop
+redisplays *after a command* and a back-door expression is not one - it
+runs from the wait between them - so the redisplay belongs to the back
+door. Emacs does the same thing for the same reason: its main loop
+redisplays as it processes input, and a socket is input. `poll-repl!` draws
+with `redisplay-frames!` only when it actually ran something, so an idle
+editor with the door open still costs nothing.
+
+**A bare `--repl` picks the newest editor that answers, and a stale one
+answers.** `repl-port-files` sorts the port files newest first and
+`repl-connect` keeps the first socket that accepts, which is the right rule
+- a port file outlives the editor that wrote it - and it cannot tell an
+editor you started a moment ago from one left running since this morning,
+*running that morning's code*. Measured while writing this: eighteen live
+editors from a day of testing, 198 port files behind them in
+`$XDG_RUNTIME_DIR` and only eighteen with a live pid. An old editor is
+exactly where a fix appears not to work. Name the port (`--repl=PORT`,
+`--remote=PORT`) when more than one editor is up, and kill test editors when
+they are done.
 
 It is the **cooperative** server (`(system repl coop-server)`), not
 `guile --listen`, and that is not a detail: `--listen` runs the REPL in a thread
@@ -4754,6 +4856,51 @@ the first connection. `tools/syntax-check.scm` cannot see either class.
   is the fix; it has not been done. A green battery before that change
   was a race that happened to be won.
 
+## The startup wait was a race too (2026-10-08)
+
+The same class, one level up, and it took a loaded machine to show it. On
+a desktop at load average 4 the battery gave **22/62** - forty checks,
+scattered, all failing as if the *bindings* were gone: `C-u 5 a` saved
+`5ahello`, `x` in Dired "was unbound and self-inserted", `C-q C-g` inserted
+nothing, `M-~` said nothing, `redisplay` reported "the buffer was never
+drawn". Re-running a few of them by hand they passed; re-running them on
+the same tree with the machine quiet they passed; and the tree had not
+changed between the two battery runs.
+
+**The cause is the terminal, not the editor.** A key sent before ncurses
+has put the tty into raw mode is eaten by the line discipline - `C-u` is
+`kill-line` there, `C-c` is SIGINT, `C-q` is `start` - so `C-u` in
+`C-u 5 a` vanished without a trace and the check failed for a reason that
+had nothing to do with what it tests. `drive` waited a fixed `settle`
+seconds (1.5 by default, and the checks that had been flaky pass 2.0-2.5,
+which is the tune-by-hand version of the same guess), and a loaded machine
+needs longer to load the libraries than that.
+
+`drive` now waits for the editor to *draw and go quiet* (the rule the
+per-key waits already use), with `settle` kept as the floor every
+check has always had and `SETTLE_MAX` as the backstop. Verified under
+deliberate load (six busy loops): 6/6 on checks that had failed. The full
+battery then gave **61/62** - `isearch-quit`, "after C-s C-s C-x C-c the
+editor is still running (the search ate the C-x)" - which is the
+*between-key* race the section above names, not this one: it passes 3/3 on
+its own and the whole isearch group with the other three known-flaky
+checks passes 8/8 together. **The startup race is fixed; the between-key
+one is still there, and its fix is still the one named above - waiting for
+what a check expects before sending the next key.**
+
+The lesson is the one this file keeps relearning: a fixed sleep standing in
+for "the editor is ready" is a race, and it loses exactly when the machine
+is busy - which is when you least want to be told the wrong thing about
+your own code. And note what the failure *looked like*: forty checks about
+key bindings, on a tree whose key bindings were fine.
+
+A separate note from the same run, because it looked like a regression and
+was not: `.go` cache state does *not* change how long this takes.
+Measured on this tree, start to first screen drawn: 0.28 s with a warm
+cache, 1.25 s with `~/.cache/guile/ccache` deleted (`--no-auto-compile`
+reads the sources and compiles nothing). Both are well inside the old
+1.5 s, which is why the cache was never the explanation.
+
 # The echo area's timers, and the REPL wake that never fired (2026-10-07)
 
 Two things, and the second is a correction to the section above it: **the
@@ -5373,3 +5520,134 @@ under it.
 Still named: the click count (double and triple click), `mouse-face`, the
 mode-line and scroll-bar areas beyond `'mode-line`, and
 `mouse-autoselect-window` (nil in Emacs by default).
+
+# The back door's session has the editor's names (2026-10-08)
+
+Chris, first use of `se --repl`:
+
+    ./se --repl
+    scheme@(guile-user)> (find-file "README.md")
+    ;;; socket:9:1: warning: possibly unbound variable `find-file'
+    Unbound variable: find-file
+
+"as far as I see, `--repl` is broken" - and the *door* was fine: the socket,
+the port file, the prompt, the evaluation in the editor's own process all
+worked. What was missing was the module's contents.
+
+## The departure, and what was done
+
+GNU Emacs has **one obarray**, which is why `find-file` is reachable from
+`eval` inside a running Emacs. This tree's names live in one library per
+Emacs file and the session is pinned to `(guile-user)` (`poll-repl!`), which
+has none of them - so `find-file` had never been bound there.
+
+`start-repl!` now runs **`open-editor-namespace!`** (`schemacs/repl.sld`),
+which evaluates one `import` form in that module listing every
+`(schemacs editor ...)` library. The list is written out (the tree's root is
+not a thing a running editor knows), so it can go stale - and
+**`schemacs/repl-tests.scm` is what notices**: it walks
+`schemacs/editor/*.sld` and fails on a library that is neither in the list
+nor in `back-door-excluded-libraries`. Verified by removing one entry: the
+test names it.
+
+**The two exclusions are the toolkit bindings** - `term` (guile-ncurses) and
+`pgtk` (guile-gi). An editor has one loaded and must never need the other,
+which is what `schemacs/main.scm` already says about the front ends; and for
+a terminal editor the Gtk bindings are not merely wasteful but absent. A
+session that wants them can `(import (schemacs editor pgtk))` - which it can,
+because the module it is in now has `import`.
+
+## The banner
+
+Chris: *"if the repl is connected to foreign process repl, why do I get the
+guile copyright message?"* - and then *"can we easily suppress it?"*.
+
+It is the **editor's** Guile printing it: `run-repl*` (`system/repl/repl.scm:158`)
+prints the copyright notice, the warranty line and "Enter `,help' for help."
+when the session is the outermost one on the *server process's* stack, and
+`start-repl*` is reached from `poll-coop-repl-server` on the editor's main
+thread. So it is a greeting for a program the user did not start, and no
+client can suppress it from its end - `tools/repl.py` had been reading past
+it. `poll-repl!` now binds `%inhibit-welcome-message` (the parameter Guile
+provides for exactly this) around the drain, because that is where the
+session starts.
+
+It is *evidence*, not a symptom: a client that shows the banner is talking to
+the other process. Nothing in `se --repl` prints it.
+
+## A check, because the battery had none
+
+`AGENTS.md` named this gap twice - "`tools/pty-check.py` does not exercise the
+back door at all... a *dead* one cannot fail the battery", "a check that
+drives `tools/repl.py` against a running editor would have caught the wake
+bug". It now does: **`back-door`**, with `drive`'s new `during` hook so the
+editor can be poked while it is still running. It asserts three things, each
+of which has been wrong: that an expression using the editor's names
+evaluates at all, that it evaluates *in the editor* (it answers the editor's
+own file name), and that the first thing a client hears is the prompt and not
+Guile's banner - read **raw**, because `repl.py` deliberately strips the
+banner. Both failure modes were reproduced by disabling their fix, and the
+banner one has to be the *first* connection: the banner is printed only when
+the session is the outermost on the stack.
+
+## Found while doing it
+
+- **A bare `--repl` picks the newest editor that answers, and a stale one
+  answers.** Eighteen live editors from a day's testing were holding port
+  files (198 files total in `$XDG_RUNTIME_DIR`, eighteen with a live pid),
+  each running the code of *its* session. An editor from this morning is
+  where a fix appears not to work. Named in the back-door section; the
+  leftovers were killed and the dead port files removed.
+- **The `overrides core binding 'map'` warning a session can print is
+  pre-existing** and not the import list: `se` itself imports
+  `(except (scheme base) error raise)` into `(guile-user)`, and Guile defers
+  that warning until the shadowed name is *first looked up*. Measured: the
+  editor's stderr at startup is empty, the warning arrives the first time a
+  session mentions `map`, and `for-each`/`map`/`assoc` from `(scheme base)`
+  are the same procedures as the core ones (which is why `se` only excludes
+  `error` and `raise`).
+- **The Gtk back door segfaults under `broadway` with the current tree** -
+  reproduced with the *legacy* entry point, and with `repl.sld` reverted to
+  `HEAD` and `~/.cache/guile/ccache` cleared, so it is not from this change
+  and not the launcher. It is not broadway alone either: an editor left
+  running since 10:53 answers `(+ 1 2)` and survives, and Chris's own
+  `./se -w` (real display) served a session and stayed up. So it is narrow -
+  broadway plus something that landed today - and **not diagnosed**: there is
+  no `gdb` or `strace` here, and the log holds only the pre-existing
+  AT-SPI and `Gtk-CRITICAL` noise. Worth chasing with a real debugger; the
+  terminal path (and so the new check) is unaffected.
+
+Still open: the namespace is imported **as the door opens**, so a running
+editor gets it when it is restarted, like every other change in this tree.
+
+## `--remote`, and the redisplay the back door was missing
+
+Chris asked for `-r`/`--remote[=PORT] FILE...`: `emacsclient` - the files
+go to a *running* editor's `find-file` and no editor is started - and
+warned *"in this case, I don't think copying emacs will be a win"*, which
+is how it is written: no `server.el` protocol, no `-dir` handshake, no
+`find-file-noselect`-plus-window dance. One `(find-file "FILE")` per name,
+sent as text and read by the editor. What the client does decide for
+itself is in the back-door section above (the client's directory for a
+relative name, and reading answers by the prompt rather than by a trailing
+`>`).
+
+Writing it found a **departure the back door had all along**: nothing
+repainted. Measured - `se --remote FILE` opened the file, `(buffer-list)`
+had it, the *screen* still showed the previous buffer, and it stayed that
+way until the next keypress. `poll-repl!` redraws now
+(`redisplay-frames!`, and only when it ran something). This is not a
+convenience: in Emacs the main loop redisplays as it processes input, and
+the socket is input - here the command loop's redisplay is *after a
+command*, and a back-door expression runs from the wait between them. It
+explains why `tools/repl.py '(find-file ...)'` has always needed a
+following `(render! ...)`, and it means a session that only *reads* the
+editor no longer has to know that the display is stale.
+
+`repl-tests.scm` (the namespace and the library list) and
+`repl-client-tests.scm` (the port files, the answer reader, the expression
+`--remote` sends) are the unit tests; `tools/pty-check.py`'s `back-door`
+check is the end-to-end one, and it now runs `./se --remote` against the
+editor it has open. Verified to fail with each fix reverted: the namespace
+(the session's names), the banner, and the repaint - each with its own
+message.

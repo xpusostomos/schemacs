@@ -26,7 +26,7 @@ Each check starts `main-ncurses.scm` on a real terminal, sends keys, and
 asserts on the screen and on the files left behind. Exit status is 0 when
 every check passes.
 """
-import os, pty, select, sys, time, base64, tempfile
+import os, pty, select, socket, subprocess, sys, time, base64, tempfile
 
 # The editor loads `$XDG_CONFIG_HOME/schemacs/init.scm' as it starts
 # (`startup.sld', GNU Emacs's `user-init-file' search). A developer's own
@@ -92,8 +92,13 @@ KEY_MAX = 10.0
 
 
 def drive(keys, path, settle=1.5, gap=0.3, term=None, background="0000/0000/0000",
-          report_exit=False):
+          report_exit=False, during=None):
     """Run the editor on PATH, send KEYS, and return everything it drew.
+
+    DURING, when given, is called once the editor is up and has gone quiet
+    and *before* it is killed - for a check that has to talk to the editor
+    while it is still running (the back door). Whatever the editor draws
+    in response is drained too, so the screen that comes back includes it.
 
     TERM is the terminal type the editor is told it has (default: the
     `xterm' of the 8-colour checks, or $SCHEMACS_TEST_TERM).  BACKGROUND
@@ -149,11 +154,26 @@ def drive(keys, path, settle=1.5, gap=0.3, term=None, background="0000/0000/0000
                         os.write(fd, reply)
         return got
 
-    # the settle time is spent watching for the terminal queries, which
-    # come as the editor starts
-    end = time.time() + settle
-    while time.time() < end:
-        drain(0.05)
+    # **The editor is ready when it has drawn and gone quiet, not when a
+    # fixed time has run out.** SETTLE stays as the *floor* every check has
+    # always had (the terminal queries arrive during it), and on top of
+    # that the startup wait ends when a screen has been drawn and the
+    # editor has been quiet for QUIET - the same rule the waits below use.
+    #
+    # It matters because a key sent before ncurses has put the terminal
+    # into raw mode is eaten by the line discipline, silently: `C-u' is
+    # `kill-line' there, `C-c' is SIGINT, `C-q' is `start'. Measured on a
+    # machine at load average 4 (a loaded desktop is enough): the same
+    # tree and the same checks gave **22/62**, with `C-u 5 a` saving
+    # `5ahello` - the C-u gone without a trace - and 62/62 when the
+    # machine was quiet. A fixed 1.5 s was a guess at the library load,
+    # and it is a guess that gets worse exactly when the machine is busy.
+    floor = time.time() + settle
+    deadline = time.time() + SETTLE_MAX
+    quiet = 0.0
+    while time.time() < floor or (time.time() < deadline
+                                  and (not out or quiet < QUIET)):
+        quiet = 0.0 if drain(0.05) else quiet + 0.05
 
     # **A key is sent only once the editor has finished with the last
     # one.** The gap was a fixed sleep, which is a guess at how long a
@@ -196,6 +216,13 @@ def drive(keys, path, settle=1.5, gap=0.3, term=None, background="0000/0000/0000
     deadline = time.time() + SETTLE_MAX
     while time.time() < deadline and quiet < QUIET:
         quiet = 0.0 if drain(0.05) else quiet + 0.05
+    if during is not None:
+        during()
+        # and let whatever it made the editor draw arrive
+        quiet = 0.0
+        deadline = time.time() + SETTLE_MAX
+        while time.time() < deadline and quiet < QUIET:
+            quiet = 0.0 if drain(0.05) else quiet + 0.05
     # If the editor quit on its own - a command like C-x C-c, or a file
     # it could not open - the wait below reaps it; otherwise it is still
     # running and gets killed. The distinction is what REPORT-EXIT asks
@@ -1294,6 +1321,186 @@ def check_default_directory():
     if not shown.endswith("pty-check-dd/"):
         problems.append("a file named with a directory in front of it "
                         "prompts with %r, expected its own directory" % shown)
+    return problems
+
+
+def free_port():
+    """A port number nothing is listening on, for the editor to take."""
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+def check_back_door():
+    """The REPL back door, driven from outside the editor.
+
+    `AGENTS.md' names this gap twice, in as many words: "`tools/pty-check.py'
+    does not exercise the back door at all - it points `XDG_CONFIG_HOME' at
+    an empty directory, so nothing opens a REPL and a *dead* one cannot fail
+    the battery". A "61/61" therefore said nothing about the one interface
+    every session here is driven through, and that is how two of its bugs
+    survived a green run: a wake that never fired (a fluid captured per
+    thread), and - the day it was first used by hand -
+
+        scheme@(guile-user)> (find-file "README.md")
+        ;;; socket:9:1: warning: possibly unbound variable `find-file'
+        Unbound variable: find-file
+
+    which read as the door being broken when what was broken was the
+    *namespace*: the session's module had none of the editor's names. See
+    `open-editor-namespace!' in `schemacs/repl.sld'.
+
+    Three things, each of which has been wrong at some point:
+
+      * an expression using the editor's names evaluates at all (the
+        namespace the prelude builds) - it would be `Unbound variable'
+        without it;
+      * it evaluates *in the editor*, answering the editor's own file name
+        rather than anything this process knows (the socket, the port, the
+        cooperative server reaching the right thread);
+      * and Guile's welcome banner is not printed at a client that did not
+        start the process (`%inhibit-welcome-message', set where the
+        session is started).
+    """
+    problems = []
+    port = free_port()
+    path = "/tmp/pty-check-door.txt"
+    open(path, "w").write("back door\n")
+    # and a second file, for `se --remote' to open in the *running* editor,
+    # with words in it that appear nowhere else so that finding them on
+    # screen means the editor drew that file
+    remote = "/tmp/pty-check-remote.txt"
+    open(remote, "w").write("opened remotely\n")
+
+    # The door is opened by the environment variable, which is the way the
+    # entry points have always offered it; `--server' is the launcher's
+    # spelling of the same thing. `XDG_RUNTIME_DIR' is pointed at a
+    # throwaway directory so the port file does not land in the live
+    # session's (`/run/user/NNNN'), where a killed editor leaves one.
+    saved = {k: os.environ.get(k) for k in ("SCHEMACS_REPL", "XDG_RUNTIME_DIR")}
+    os.environ["SCHEMACS_REPL"] = str(port)
+    os.environ["XDG_RUNTIME_DIR"] = tempfile.mkdtemp(prefix="schemacs-door-")
+
+    answer = {}
+
+    def greeting():
+        # What the editor says to a client the moment it connects, read
+        # raw. **It has to be the *first* connection**: the banner is
+        # printed by `run-repl*' only when the session is the outermost
+        # one on the editor's REPL stack (`system/repl/repl.scm:158'), so
+        # a second client would see none even if nothing suppressed it.
+        # `tools/repl.py' cannot be asked either - it reads up to the
+        # first prompt and throws away whatever came before.
+        s = socket.create_connection(("127.0.0.1", port), timeout=30)
+        s.settimeout(20)
+        buf = b""
+        try:
+            # up to the prompt, so that "there was no prompt" is a fact
+            # about the editor and not about how much one `recv' returned
+            while b">" not in buf:
+                try:
+                    chunk = s.recv(65536)
+                except socket.timeout:
+                    break
+                if not chunk:
+                    break
+                buf += chunk
+        finally:
+            s.close()
+        return buf.decode("utf-8", "replace")
+
+    def run_se(*args):
+        # `./se' and not `guile -s ...': the launcher is what parses
+        # `--remote', and this is the one check that drives it. It has to
+        # run from the tree, which is how it finds the tree.
+        return subprocess.run([os.path.join(REPO, "se")] + list(args),
+                              capture_output=True, text=True, cwd=REPO,
+                              timeout=120)
+
+    def poke():
+        # `buffer-file-name' and `current-buffer' are both the editor's
+        # names, which is the point: this is the expression a session had
+        # to be able to write on the day it could not.
+        answer["greeting"] = greeting()
+        answer["run"] = subprocess.run(
+            [sys.executable, "tools/repl.py", "-p", str(port),
+             "(buffer-file-name (current-buffer))"],
+            capture_output=True, text=True, cwd=REPO, timeout=120)
+        # ...and the launcher's `--remote', which is `emacsclient' from the
+        # other side: it opens a file in the running editor and starts none
+        # itself. Two things have to be true afterwards - the editor is
+        # visiting the file, and the *screen* shows it, which is what a
+        # back-door change did not do until `poll-repl!' was made to
+        # redisplay.
+        answer["remote"] = run_se("--remote=%d" % port, remote)
+        answer["after"] = subprocess.run(
+            [sys.executable, "tools/repl.py", "-p", str(port),
+             "(buffer-file-name (current-buffer))"],
+            capture_output=True, text=True, cwd=REPO, timeout=120)
+        answer["no-files"] = run_se("--remote=%d" % port)
+
+    try:
+        screen = drive([], path, during=poke)
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    # (the screen that came back is the one after the poke, so what it has
+    # to show by now is the file `se --remote' opened - asserted below. The
+    # first buffer's own drawing is not checked here: it has been left.)
+    if "run" not in answer:
+        problems.append("the poke never ran")
+        return problems
+
+    out = answer["run"].stdout + answer["run"].stderr
+    if "Unbound variable" in out:
+        problems.append("the session has none of the editor's names: %r"
+                        % out.strip()[-300:])
+    elif path not in out:
+        problems.append("the session answered %r, expected the editor's "
+                        "own %s" % (out.strip()[-300:], path))
+
+    # `se --remote FILE' - the whole point of it, which is the editor
+    # showing the file, with no key pressed and no other client.
+    if answer["remote"].returncode != 0:
+        problems.append("`se --remote' exited %d: %r"
+                        % (answer["remote"].returncode,
+                           (answer["remote"].stdout
+                            + answer["remote"].stderr).strip()[-200:]))
+    if remote not in (answer["after"].stdout + answer["after"].stderr):
+        problems.append("after `se --remote', the editor's current buffer "
+                        "is not %s: %r"
+                        % (remote, (answer["after"].stdout
+                                    + answer["after"].stderr).strip()[-200:]))
+    if "opened remotely" not in screen_of(screen):
+        problems.append("the editor did not *draw* the file `se --remote' "
+                        "opened: a back-door change is not displayed until "
+                        "something repaints")
+    # No file is a usage error, not a silent no-op.
+    if answer["no-files"].returncode == 0:
+        problems.append("`se --remote' with no file succeeded")
+    elif "needs a file" not in (answer["no-files"].stdout
+                                + answer["no-files"].stderr):
+        problems.append("`se --remote' with no file said %r"
+                        % (answer["no-files"].stdout
+                           + answer["no-files"].stderr).strip()[-200:])
+
+    greeting = answer["greeting"]
+    # the banner first: it is the more specific complaint, and a client
+    # that got the banner got the prompt after it
+    if "Enter `,help' for help." in greeting:
+        problems.append("Guile's welcome banner came over the socket: it is "
+                        "printed by the *editor's* Guile when the session "
+                        "starts, and `%inhibit-welcome-message' is what "
+                        "stops it")
+    elif "scheme@(guile-user)>" not in greeting:
+        problems.append("the first thing the editor said to a client was "
+                        "%r, which has no prompt in it" % greeting[:200])
     return problems
 
 
@@ -2739,6 +2946,7 @@ CHECKS = {
     "recenter": check_recenter,
     "split": check_split,
     "hscroll": check_hscroll,
+    "back-door": check_back_door,
 }
 
 

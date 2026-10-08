@@ -24,13 +24,16 @@
 ;;
 ;; Usage is `schemacs/main.scm''s:
 ;;
-;;     seg [OPTION]... [FILE]...
-;;     seg -w FILE          the Gtk window (the terminal is the default)
-;;     seg --chdir=/tmp FILE
+;;     se [OPTION]... [FILE]...
+;;     se -w FILE           the Gtk window (the terminal is the default)
+;;     se --chdir=/tmp FILE
 ;;
 ;; A running editor can be driven through a back door, off unless asked
-;; for: `SCHEMACS_REPL=37146 ./seg -w FILE &' then
-;; `tools/repl.py -m '(schemacs editor xdisp)' '(render! (*current-frame*))'.
+;; for: `se -w --server FILE &' then `tools/repl.py '(render! (*current-frame*))',
+;; or the terminal's own `se --repl'. The session is given the editor's
+;; names as the door opens, so an expression needs no import.
+;; `se --remote FILE...' is the other end of the same door with no REPL in
+;; it: the files are opened in the running editor's `find-file'.
 ;; For the Gtk backend that is the *only* reliable way to drive it - the
 ;; alternative is a compositor, `wtype' to type at the window and `grim' to
 ;; look at it, and a keyed run goes to whichever window the compositor has
@@ -44,7 +47,11 @@
 ;; parameterized. See the header of `schemacs/repl.sld'.
 ;;------------------------------------------------------------------
 
-(import (scheme base)
+(import ;; As in `schemacs/main.scm': `error' and `raise' are core bindings
+        ;; in `(guile-user)', and this file is loaded into it - importing
+        ;; `(scheme base)' on top of them makes Guile warn that it
+        ;; "overrides core binding". Nothing here uses either.
+        (except (scheme base) error raise)
         (scheme write)
         (only (guile) %load-path canonicalize-path dirname))
 
@@ -55,7 +62,7 @@
 ;; `(car (command-line))' is this file as it was invoked, so it is
 ;; resolved against the working directory - the same assumption the shell
 ;; version made with `dirname "$0"'. Run it by name from `PATH' and this
-;; is the wrong directory; run it as `./seg', as everything here does, and
+;; is the wrong directory; run it as `./se', as everything here does, and
 ;; it is the right one.
 (define tree (dirname (canonicalize-path (car (command-line)))))
 

@@ -18,7 +18,7 @@
 ;; A back door, off unless asked for. `SCHEMACS_REPL' names a port and the
 ;; editor opens Guile's cooperative REPL server on it, so a running editor
 ;; can be read and poked through `tools/repl.py' - see `schemacs/repl.sld'
-;; for why it is the cooperative server and not `--listen', and `seg' for
+;; for why it is the cooperative server and not `--listen', and `se' for
 ;; how it is usually started. Set here rather than in the editor so that
 ;; nothing in the editor proper knows the back door exists.
 ;;

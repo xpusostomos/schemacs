@@ -563,39 +563,50 @@
       )
 
     (define show-text-editor
-      ;; Write the whole content of a text editor to a port: where point
-      ;; is, then the buffer's lines, one per line, each indented two
-      ;; spaces - the shape this printer has had since it printed a gap
-      ;; buffer of lines, kept so that a printed buffer reads the same as
-      ;; it always did.
+      ;; Write a buffer to a port the way GNU Emacs writes one, which is
+      ;; `print_object`'s `PVEC_BUFFER` case (`print.c:1895`):
       ;;
-      ;; Point is printed as a character position with the line it is on
-      ;; and its column beside it, which is the pair `line-number-at-pos'
-      ;; and `current-column' answer. It used to be a `<text-location>'
-      ;; record - a `(line . column)' pair counting columns from 1, which
-      ;; is a type GNU Emacs does not have - and the engine no longer
-      ;; knows that type exists.
+      ;;     if (!BUFFER_LIVE_P (XBUFFER (obj)))
+      ;;       print_c_string ("#<killed buffer>", printcharfun);
+      ;;     else if (escapeflag)
+      ;;       { print_c_string ("#<buffer ", ...
+      ;;         print_string (BVAR (XBUFFER (obj), name), ...
+      ;;     else
+      ;;       print_string (BVAR (XBUFFER (obj), name), ...
+      ;;
+      ;; so `prin1` is `#<buffer NAME>`, `princ` is the bare name, and a
+      ;; buffer that is not live is `#<killed buffer>` - and `BUFFER_LIVE_P`
+      ;; is `!NILP (BVAR (b, name))` (`buffer.h:1143`), which makes
+      ;; liveness the name being there, which is the nearest thing this
+      ;; tree has to it. This is the `escapeflag` answer, because a Guile
+      ;; record printer is handed the record and a port and nothing that
+      ;; says which of the two it is - and `write`, which is what a REPL
+      ;; echoes with, is `prin1`.
+      ;;
+      ;; **It used to write the whole buffer out**, line by line and
+      ;; quoted, and that is what the first person to type
+      ;; `(find-file "README.md")` at the back door saw: a screenful of
+      ;; the file where the answer was one word. Emacs's `find-file`
+      ;; answers the *buffer*, and a buffer prints as its name and nothing
+      ;; else. It was also the expensive way round - a printed buffer
+      ;; looked like a list of strings because `text-editor-line-string`
+      ;; builds a fresh string for every line, so echoing a buffer
+      ;; allocated one string per line of it. The storage was never a list
+      ;; of strings: it is one `buffer-text`, a `u32vector` with a gap.
+      ;;
+      ;; **Cheap on purpose**, as well: a record printer is what runs when
+      ;; Guile prints a *backtrace*, and one that walks the buffer there
+      ;; has crashed before now.
       ;;--------------------------------------------------------------
       (case-lambda
        ((ed) (show-text-editor ed (current-output-port)))
        ((ed port)
-        (display "(text-editor (point " port)
-        (write (text-editor-point ed) port)
-        (display " line " port)
-        (write (text-editor-cursor-line ed) port)
-        (display " column " port)
-        (write (text-editor-cursor-column ed) port)
-        (display ")" port)
-        (newline port)
-        (let ((last (text-editor-line-count ed)))
-          (let loop ((line 1))
-            (when (<= line last)
-              (display "  " port)
-              (write (text-editor-line-string ed line) port)
-              (newline port)
-              (loop (+ line 1)))))
-        (display "  )\n" port)
-        )))
+        (let ((name (text-editor-buffer-name ed)))
+          (if name
+              (begin (display "#<buffer " port)
+                     (display name port)
+                     (display ">" port))
+              (display "#<killed buffer>" port))))))
 
     (cond-expand
      (guile

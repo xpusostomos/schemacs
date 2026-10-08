@@ -48,6 +48,9 @@
    command-line-1--display
    init-path
    load-init
+   ;; whether the init file is loaded at all - the command line's
+   ;; `--no-init-file' (`-q'), which an entry point binds
+   *init-file-user*
    )
 
   (begin
@@ -100,6 +103,21 @@
                                        (string-append home "/.config/schemacs/init.scm"))
                                   (and home (string-append home "/.schemacs")))))))
 
+    (define *init-file-user* (make-parameter #t))
+    ;; ^ GNU Emacs's `init-file-user' (`startup.el:341'), which is what
+    ;; `--no-init-file' (`-q') sets to nil (:1407) and what
+    ;; `startup--load-user-init-file' tests before it loads anything.
+    ;; **The value differs and the sense does not**: Emacs'
+    ;; is the login name of the user whose init file to read, or nil for
+    ;; none, because a `-u USER' can ask for someone else's. There is no
+    ;; `-u' here and no such use for the name, so this answers the one
+    ;; question `load-init' asks it - whether to load one at all - with
+    ;; #t for yes and #f for `--no-init-file'.
+    ;;
+    ;; A parameter, so that an entry point binds it around the editor it
+    ;; starts (`schemacs/main.scm' does) rather than setting a variable
+    ;; the whole process would keep.
+
     (define (load-init)
       ;; Load the init file, if there is one. An error in it is reported
       ;; and the editor starts anyway, as the shell's does.
@@ -108,7 +126,7 @@
       ;; `define-module' with Guile's own bindings, and this library is
       ;; an R7RS one, so `getenv' comes from `(guile)'.
       ;;--------------------------------------------------------------
-      (let ((path (init-path)))
+      (let ((path (and (*init-file-user*) (init-path))))
         (when path
           ;; In the *user's* module and not this library's, so that the
           ;; file has Guile's ordinary bindings - `display', `getenv' and
