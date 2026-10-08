@@ -35,11 +35,11 @@
     ;; `load' is Guile's own, and is what the init file is read with - the
     ;; same call the shell in `../guile-scsh/editor/init.scm' makes.
     ;; `%load-path' is where the splash screen's text is looked for.
-    (only (guile) %load-path catch current-module getenv load resolve-module
-          set-current-module)
-    ;; the editor's names, which the init file is given before it is
-    ;; loaded - see `load-init'
-    (only (schemacs editor loadup) open-editor-namespace!)
+    (only (guile) %load-path catch current-module format getenv load
+          resolve-module set-current-module)
+    ;; the editor's names are *not* given to the init file: it imports what
+    ;; it needs, as an Emacs init file requires what it needs - see
+    ;; `load-init'
     (only (schemacs editor buffer)
           *inhibit-read-only* erase-buffer get-buffer-create
           set!buffer-read-only set-buffer-modified-p use-local-map
@@ -48,6 +48,9 @@
     (only (schemacs editor editfns) goto-char)
     (only (schemacs editor fileio) file-exists-p locate-file-internal)
     (only (schemacs editor files) find-file-noselect insert-file-contents)
+    ;; an init file that failed is *said* in the echo area as well as on
+    ;; stdout - see `load-init'
+    (only (schemacs editor frame) *current-frame* set!frame-message)
     (only (schemacs editor buff-menu) list-buffers)
     (only (schemacs editor keymap) define-key)
     (prefix (schemacs keymap) km:)
@@ -140,6 +143,50 @@
     ;; starts (`schemacs/main.scm' does) rather than setting a variable
     ;; the whole process would keep.
 
+    (define (%template? s)
+      ;; Whether S is one of Guile's message *templates* - "Unbound
+      ;; variable: ~S" - rather than text to show as it stands.
+      ;;--------------------------------------------------------------
+      (and (string? s)
+           (let loop ((i 0))
+             (cond ((>= i (string-length s)) #f)
+                   ((char=? #\~ (string-ref s i)) #t)
+                   (else (loop (+ i 1)))))))
+
+    (define (init-error-text path key args)
+      ;; What is said about an init file that failed: the shell's wording,
+      ;; then the condition's own - and a Guile condition's text is a
+      ;; *format template* with its values in the irritants, so the two
+      ;; are put back together here the way `schemacs/main.scm''s
+      ;; `condition-text' does it for a bad command line.
+      ;;
+      ;; Measured, an unbound variable raises
+      ;;
+      ;;   (unbound-variable (#f "Unbound variable: ~S" (this-is-not-bound) #f))
+      ;;
+      ;; so without the join a user is shown `#f Unbound variable: ~S #f'
+      ;; and never learns *which* name was unbound - which is the one
+      ;; thing an init file's error most needs to say.
+      ;;--------------------------------------------------------------
+      (let ((words (let flatten ((x args) (out '()))
+                     (cond ((null? x) (reverse out))
+                           ((pair? (car x))
+                            (flatten (cdr x) (append (reverse (car x)) out)))
+                           (else (flatten (cdr x) (cons (car x) out)))))))
+        (let loop ((rest words))
+          (cond
+           ((null? rest)
+            (string-append "error: init file " path ": " (symbol->string key)))
+           ((%template? (car rest))
+            (let ((text (catch #t
+                          (lambda () (apply format #f (car rest) (cdr rest)))
+                          (lambda a #f))))
+              (string-append "error: init file " path ": "
+                             (if text text (symbol->string key)))))
+           ((and (string? (car rest)) (not (string=? (car rest) "")))
+            (string-append "error: init file " path ": " (car rest)))
+           (else (loop (cdr rest)))))))
+
     (define (load-init)
       ;; Load the init file, if there is one. An error in it is reported
       ;; and the editor starts anyway, as the shell's does.
@@ -151,21 +198,28 @@
       (let ((path (and (*init-file-user*) (init-path))))
         (when path
           ;; In the *user's* module and not this library's, so that the
-          ;; file has Guile's ordinary bindings - `display', `getenv` and
+          ;; file has Guile's ordinary bindings - `display', `getenv' and
           ;; the rest - and `(import (schemacs repl))' works, rather than
           ;; only what this library happens to import. Emacs's init file
           ;; has the same property: it runs with all of Emacs's Lisp to
           ;; hand, not with the internals of `startup.el'.
           ;;
-          ;; **And it is *given* the editor's names**, which is that
-          ;; property and not a convenience: Emacs's init file can say
-          ;; `(setq inhibit-startup-screen t)' because the variable is in
-          ;; the one obarray. Here the name has to be put in the module
-          ;; first, or `(set! inhibit-startup-screen #t)' - the spelling
-          ;; this tree documents - is an unbound variable. The back door
-          ;; is given the same names by the same call
-          ;; (`schemacs/editor/loadup.sld').
-          (open-editor-namespace! (resolve-module '(guile-user)))
+          ;; **The file imports what it needs, as an Emacs init file
+          ;; requires what it needs.** Emacs has one obarray, so `(setq
+          ;; inhibit-startup-screen t)' needs no `require'; here a name
+          ;; belongs to the library that mirrors its Emacs file -
+          ;; `inhibit-startup-screen' is `startup.el''s, and so it is in
+          ;; this one - and the init file says
+          ;;
+          ;;     (import (schemacs editor startup))
+          ;;     (set! inhibit-startup-screen #t)
+          ;;
+          ;; An `open-editor-namespace!' call stood here, importing *every*
+          ;; editor library into the user's module so that no import was
+          ;; needed. That is the wrong trade: it is one bloated namespace
+          ;; instead of one line, it makes "which library holds this name"
+          ;; unnecessary by making the question meaningless, and the rule
+          ;; is that a name lives in the file its Emacs source lives in.
           (let ((here (current-module)))
             (catch #t
               (lambda ()
@@ -174,9 +228,21 @@
                   (lambda () (load path))
                   (lambda () (set-current-module here))))
               (lambda (key . args)
-                (display "error: init file ") (display path)
-                (display ": ") (display key) (display " ") (display args)
-                (newline)))))))
+                (let ((text (init-error-text path key args)))
+                  ;; **In the echo area as well as on stdout**, because on
+                  ;; stdout is where the *terminal* front end hides it:
+                  ;; `display' writes to the normal screen, and ncurses
+                  ;; then switches to the alternate one, so the message is
+                  ;; there but unseeable until the editor exits - measured,
+                  ;; with the namespace call removed, where the failure of
+                  ;; `(set! inhibit-startup-screen #t)' is exactly the sort
+                  ;; of error a user would be staring at. A frame is current
+                  ;; by this point (both front ends make one before
+                  ;; `command-line-1'), so the echo area is where it goes.
+                  (display text)
+                  (newline)
+                  (when (*current-frame*)
+                    (set!frame-message (*current-frame*) text)))))))))
 
     ;;----------------------------------------------------------------
     ;; The startup screen
@@ -197,12 +263,19 @@
     ;; file (but NOT site-start.el), once you are familiar with the
     ;; contents of the startup screen."
     ;;
-    ;; **A variable, and the init file can `set!' it** - which needs the
-    ;; name to be *there* when the init file runs, and it is: `load-init'
-    ;; gives the init file's module the editor's names
-    ;; (`open-editor-namespace!'), the way Emacs's init file has all of
-    ;; Emacs's Lisp to hand. `(set! inhibit-startup-screen #t)' is exactly
-    ;; Emacs's `(setq inhibit-startup-screen t)'.
+    ;; **Here, as in Emacs, and the init file imports it.** Emacs has one
+    ;; obarray, so `(setq inhibit-startup-screen t)' needs no `require';
+    ;; this tree has one library per Emacs file and this one is
+    ;; `startup.el''s, so an init file that wants it says
+    ;;
+    ;;     (import (schemacs editor startup))
+    ;;     (set! inhibit-startup-screen #t)
+    ;;
+    ;; which is Emacs's `(require 'startup)' and `(setq ...)' in the same
+    ;; two lines. (An `open-editor-namespace!' call in `load-init' used to
+    ;; import *every* editor library into the user's module so that the
+    ;; second line alone would work; that is not how a name is reached here
+    ;; - it belongs to the file its Emacs source belongs to.)
     ;;
     ;; **`-q'/`--no-init-file' does not inhibit it**, in Emacs or here. In
     ;; Emacs it is `-Q' that does, and `-Q' is `-q' plus "no site file"

@@ -152,6 +152,8 @@
           *insert-default-directory*
           *minibuffer-completing-file-name*
           completing-read
+          *confirm-nonexistent-file-or-buffer*
+          confirm-nonexistent-file-or-buffer
           file-name-history
           list-ref-or
           read-char-from-minibuffer
@@ -1673,21 +1675,11 @@ Set mark after the inserted text."
       (insert-file-1 filename
                      (lambda (name) (insert-file-contents name))))
 
-    (define *confirm-nonexistent-file-or-buffer* (make-parameter #t))
-    ;; ^ GNU Emacs's `confirm-nonexistent-file-or-buffer' (files.el:1898):
-    ;; "Whether confirmation is requested before visiting a new file or
-    ;; buffer." t as in Emacs: any non-nil value means ask.
-
-    (define (confirm-nonexistent-file-or-buffer)
-      ;; GNU Emacs's `confirm-nonexistent-file-or-buffer' (files.el:1914):
-      ;; "Whether to request confirmation before visiting a new file or
-      ;; buffer" - the value to pass as `read-file-name''s REQUIRE-MATCH,
-      ;; which is why it answers the symbol `confirm' rather than t.
-      ;;--------------------------------------------------------------
-      (cond ((eq? (*confirm-nonexistent-file-or-buffer*) 'after-completion)
-             'confirm-after-completion)
-            ((*confirm-nonexistent-file-or-buffer*) 'confirm)
-            (else #f)))
+    ;; `*confirm-nonexistent-file-or-buffer*' and
+    ;; `confirm-nonexistent-file-or-buffer' are `files.el`'s (`:1898' and
+    ;; `:1914') and live in `(schemacs editor minibuffer)' here, because
+    ;; `read-buffer-to-switch' passes them and that function can only be
+    ;; there; they are imported above, as `completing-read' is.
 
     ;;----------------------------------------------------------------
     ;; The other ways to visit a file

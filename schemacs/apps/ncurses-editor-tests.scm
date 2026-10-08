@@ -89,7 +89,7 @@
        save-answer-char->decision)
  ;; `try-completion' and `all-completions' are `minibuf.c''s.
  (only (schemacs editor coding) coding-system-name)
- (only (schemacs editor minibuf) all-completions try-completion)
+ (only (schemacs editor minibuf) all-completions test-completion try-completion)
  (only (schemacs editor minibuffer)
        completion-all-completions completion-boundaries
        *completion-show-inline-help* *completions-header-format*
@@ -102,6 +102,11 @@
        make<minibuffer>
        minibuffer--bitset minibuffer-complete minibuffer-complete-and-exit
        minibuffer-complete-word minibuffer-completion-help
+       completion--complete-and-exit
+       *minibuffer-completion-table* *minibuffer-completion-predicate*
+       *minibuffer-completion-confirm* minibuffer-confirm-exit-commands
+       internal-complete-buffer internal-complete-buffer-except
+       buffer-name-history history? history-entries set!history-entries
        minibuffer-local-filename-completion-map
        minibuffer-local-must-match-map
        minibuffer-contents
@@ -1154,7 +1159,7 @@
                    (*echo-area-buffer* mb-ed)
                    (*current-keymap* minibuffer-local-completion-map))
       (let ((bits (completion--do-completion
-                   "ap" (table-of '("apple" "apricot")) #f 2)))
+                   "ap" (table-of '("apple" "apricot")) #f 2 #f)))
         (list (minibuffer-contents) bits)))))
 
 ;; ...and when what is typed is already the only candidate, `try-completion'
@@ -1171,8 +1176,146 @@
                    (*echo-area-buffer* mb-ed)
                    (*current-keymap* minibuffer-local-completion-map))
       (let ((bits (completion--do-completion
-                   "apple" (table-of '("apple")) #f 5)))
+                   "apple" (table-of '("apple")) #f 5 #f)))
         (list (minibuffer-contents) bits)))))
+
+;;--------------------------------------------------------------------
+;; Reading a buffer name
+;;
+;; `internal-complete-buffer' is `minibuf.c''s (`:2156') and completes
+;; over the buffer registry; `internal-complete-buffer-except'
+;; (`minibuffer.el:4211') is `C-x b''s table, which leaves the current
+;; buffer out of the *candidates* but still accepts its name - the
+;; `strict' nil of `completion-table-with-predicate'.
+;;
+;; Both rules are the C's, and each is checked against it: the
+;; strip-internal one applies only to the *empty* string and only while
+;; something ordinary is left (`if (NILP (bufs)) return ... res : bufs'),
+;; and the exceptional one is a *retry* rather than a filter.
+
+;; The internal buffers go, and the ordinary ones keep their order.
+;; `get-buffer-create' puts the newest first, so the registry reads
+;; (" *Messages*" "two" "one") here.
+(test-equal '(("two" "one") (" *Messages*"))
+  (parameterize ((*buffer-list* '()))
+    (get-buffer-create "one")
+    (get-buffer-create "two")
+    (get-buffer-create " *Messages*")
+    (list (internal-complete-buffer "" #f #t)
+          ;; ...and a *non-empty* string is never stripped: the rule is
+          ;; the empty-string case, and only that one.
+          (internal-complete-buffer " " #f #t))))
+
+;; When they are all internal they are all given back - Emacs's
+;; "If all bufs are internal don't strip them out", which is what keeps
+;; a session that has nothing but `*Messages*' completing at all.
+(test-equal '(" *Messages*")
+  (parameterize ((*buffer-list* '()))
+    (get-buffer-create " *Messages*")
+    (internal-complete-buffer "" #f #t)))
+
+;; `try-completion' and `test-completion' go straight to the registry.
+(test-equal '("two" "two")
+  (parameterize ((*buffer-list* '()))
+    (get-buffer-create "one")
+    (get-buffer-create "two")
+    (list (try-completion "tw" (*buffer-list*))
+          (if (test-completion "two" (*buffer-list*)) "two" "no"))))
+
+;; The current buffer is not *offered*, but its name is accepted: that
+;; is `completion-table-with-predicate''s STRICT nil, and it is what
+;; lets `C-x b` take the name of the buffer you are already in.
+(test-equal '(("one") #t #f)
+  (parameterize ((*buffer-list* '()) (*current-buffer* #f))
+    (get-buffer-create "one")
+    (let ((two (get-buffer-create "two")))
+      (parameterize ((*current-buffer* two))
+        (let ((table (internal-complete-buffer-except)))
+          (list (table "" #f #t)
+                (table "two" #f 'lambda)
+                (table "three" #f 'lambda)))))))
+
+;;--------------------------------------------------------------------
+;; Leaving a `require-match' minibuffer
+;;
+;; `completion--complete-and-exit' (`minibuffer.el:2128') is a chain of
+;; conditions, and RET leaves at the first that holds. Every case below
+;; is Emacs's own, checked against `emacs -nw' at a pty:
+;;
+;;   * an empty answer exits - it will answer the default;
+;;   * a valid completion exits;
+;;   * an answer that is *not* a valid completion exits too when
+;;     confirmation was asked for, unless the command just before the
+;;     RET was a TAB (`confirm-after-completion') - which is the rule
+;;     that makes `C-x b fresh RET' create a buffer while `cxb- TAB RET'
+;;     asks first;
+;;   * a second RET in a row exits, because then `last-command' is this
+;;     command.
+;;
+;; The `exit' the tests record stands for `exit-minibuffer'.
+
+(define (exit-trace string confirm last-command this-command)
+  ;; Answer what `completion--complete-and-exit' did - it either called
+  ;; the exit function, called the completion function, or neither (the
+  ;; "Confirm" case). A frame is needed because the "Confirm" is said in
+  ;; the echo area.
+  ;;--------------------------------------------------------------
+  (let ((frame (test-frame (new-text-editor))))
+    (parameterize ((*current-frame* frame)
+                   (*minibuffer-completion-table* (table-of '("apple")))
+                   (*minibuffer-completion-predicate* #f)
+                   (*minibuffer-completion-confirm* confirm)
+                   (*last-command* last-command)
+                   (*this-command* this-command)
+                   (*echo-area-buffer* #f))
+      (let ((calls '()))
+        (completion--complete-and-exit
+         string
+         (lambda () (set! calls (cons 'exit calls)))
+         (lambda () (set! calls (cons 'complete calls))))
+        (if (null? calls) 'nothing (car calls))))))
+
+(test-equal '(exit exit complete exit)
+  (list (exit-trace "" #f #f #f)
+        (exit-trace "apple" #f #f #f)
+        ;; nothing is valid here and no confirmation was asked for, so
+        ;; the completion function runs and answers for itself
+        (exit-trace "app" #f #f #f)
+        ;; ...and with `confirm-after-completion' it exits anyway: the
+        ;; command before this RET was not a TAB, so there is nothing to
+        ;; confirm (this is `C-x b fresh RET' making a buffer)
+        (exit-trace "app" 'confirm-after-completion
+                    'some-other-command minibuffer-complete-and-exit)))
+
+;; TAB first, then RET: "Confirm", and the minibuffer stays.
+(test-equal '(nothing exit)
+  (list (exit-trace "app" 'confirm-after-completion
+                    minibuffer-complete minibuffer-complete-and-exit)
+        ;; ...and RET again, when `last-command' has become this command.
+        (exit-trace "app" 'confirm-after-completion
+                    minibuffer-complete-and-exit minibuffer-complete-and-exit)))
+
+;; `confirm' asks whatever the last command was.
+(test-equal '(nothing nothing)
+  (list (exit-trace "app" 'confirm #f minibuffer-complete-and-exit)
+        (exit-trace "app" 'confirm minibuffer-complete minibuffer-complete-and-exit)))
+
+;; The list the `confirm-after-completion' rule consults is Emacs's:
+;; the TAB commands. `completion-at-point' is not ported, so it is the
+;; two here.
+(test-equal '(#t #t)
+  (list (and (memq minibuffer-complete minibuffer-confirm-exit-commands) #t)
+        (and (memq minibuffer-complete-word minibuffer-confirm-exit-commands) #t)))
+
+;; `buffer-name-history' is a history *record*, which is what the
+;; minibuffer adds to on the way out. It was a parameter, and a
+;; parameter is only *read* at that moment - so `C-x b` raised
+;; "Wrong type argument: #<<parameter> ..." at RET and would not leave,
+;; with the prompt looking perfectly healthy until then. This one line
+;; is the regression test for it.
+(test-equal '(#t #t)
+  (list (history? buffer-name-history)
+        (history? minibuffer-history)))
 
 (test-end "schemacs_ncurses_editor_minibuffer")
 

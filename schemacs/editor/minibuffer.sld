@@ -71,7 +71,10 @@
           buffer-local-keymap set!buffer-local-keymap set!buffer-default-directory
           ;; `completion-base-position' is a variable local to `*Completions*'
           buffer-local-value erase-buffer set!mode-name
-          set-buffer-local-value! use-local-map with-current-buffer)
+          set-buffer-local-value! use-local-map with-current-buffer
+          ;; `read-buffer''s completion is over the buffer registry, which
+          ;; is an alist of `(NAME . BUFFER)' - see `internal-complete-buffer'
+          *buffer-list* buffer-name bufferp other-buffer)
     ;; `getcwd' is Guile's, for a buffer that has no `default-directory'.
     (only (guile) getcwd)
     ;; `(scheme eval)''s `eval' is the evaluator `eval-expression' runs,
@@ -84,6 +87,9 @@
     (only (scheme write) display write)
     (only (schemacs editor keymap) set-keymap-parent)
     (only (schemacs editor window)
+          ;; how `switch-to-buffer` reads its buffer name - see
+          ;; `read-buffer-to-switch` below
+          *read-buffer-to-switch*
           delete-window display-buffer get-buffer-window pop-to-buffer
           quit-window
           split-main-window-below switch-to-buffer-other-window
@@ -121,7 +127,12 @@
     ;; them rather than defining them.
     (only (schemacs editor minibuf)
           *history-add-new-input*
+          *read-buffer-function*
+          *read-buffer-completion-ignore-case* *completion-ignore-case*
           all-completions test-completion try-completion)
+    ;; `apply-partially' is `subr.el''s, and `internal-complete-buffer-except'
+    ;; is written with it, as Emacs writes it.
+    (only (schemacs editor subr) apply-partially)
     ;; `caddr' is `(scheme cxr)'s: a style's entry in
     ;; `completion-styles-alist' is a four-element list.
     (only (scheme cxr) caddr)
@@ -152,6 +163,7 @@
    *completion-styles*
    choose-completion
    completion--do-completion
+   completion--complete-and-exit completion-complete-and-exit
    completion-list-mode-map
    display-completion-list
    completion--nth-completion
@@ -164,6 +176,13 @@
    completion-substring-try-completion
    completion-try-completion
    completing-read
+   read-buffer
+   read-buffer-to-switch
+   confirm-nonexistent-file-or-buffer
+   *confirm-nonexistent-file-or-buffer*
+   internal-complete-buffer internal-complete-buffer-except
+   complete-with-action completion-table-with-predicate
+   minibuffer-with-setup-hook
    minibuffer--bitset
    minibuffer-complete-and-exit
    minibuffer-complete-word
@@ -178,6 +197,7 @@
    completion-setup-function
    completions-header-string
    *minibuffer-completion-confirm*
+   minibuffer-confirm-exit-commands
    *minibuffer-completing-file-name*
    *insert-default-directory*
    list-ref-or
@@ -200,6 +220,7 @@
    common-prefix
    completion-candidates-message
 file-name-history
+   buffer-name-history
    minibuffer-default-prompt-format
    format-prompt
    read-number
@@ -236,7 +257,7 @@ read-number-history
    ;; the history record itself, for the libraries that hold their own
    ;; histories - `replace.el''s `query-replace-history' - the way
    ;; `read-number-history' would have wanted its accessors exported
-   make<history> history-entries set!history-entries
+   make<history> history? history-entries set!history-entries
    execute-extended-command *extended-command-history*
    yes-or-no-p
    )
@@ -279,6 +300,24 @@ read-number-history
     ;; the history records are this library's, and `subr.sld' cannot
     ;; import them: minibuffer.sld already imports keyboard.sld, which
     ;; imports subr.sld, so subr -> minibuffer would be a cycle.
+    (define buffer-name-history (make<history> '()))
+    ;; ^ GNU Emacs's `buffer-name-history' (`minibuf.c:2515', the C's
+    ;; `DEFSYM'/`Fset (..., Qnil)' pair - the same two lines that make
+    ;; `minibuffer-history' on the line above, which is why they are in the
+    ;; same place). It is the history `read-buffer' reads with, and so the
+    ;; one `C-x b' completes its names against.
+    ;;
+    ;; **What is *not* a departure is how a prompt is handed one.** Emacs's
+    ;; `completing-read' takes HIST as a *symbol* and looks the variable's
+    ;; value up itself, so passing `buffer-name-history' there costs
+    ;; nothing. This tree passes the `<history>' record. `read-buffer' was
+    ;; written against the parameter this variable used to be, which put a
+    ;; parameter where a record is wanted - and since a parameter is only
+    ;; read when the answer is *added* to it, the failure landed at RET:
+    ;; `Wrong type argument: #<<parameter> ...>' and a `C-x b' that would
+    ;; not leave the minibuffer. A value crossing this seam has to be the
+    ;; shape the receiving library wants, not the shape the library that
+    ;; declares it happens to use.
 
     (define-record-type <minibuffer-type>
       (make<minibuffer>
@@ -648,7 +687,8 @@ read-number-history
       (let ((typed (or (minibuffer-contents) "")))
         (completion--do-completion typed (*minibuffer-completion-table*)
                                    (*minibuffer-completion-predicate*)
-                                   (string-length typed))))
+                                   (string-length typed)
+                                   #f)))
 
     (define (read-char-from-minibuffer prompt)
       ;; GNU Emacs's `read-char-from-minibuffer': ask a question whose
@@ -995,10 +1035,26 @@ read-number-history
       (make-parameter #f))
 
     (define *minibuffer-completion-confirm*
-      ;; GNU Emacs's `minibuffer-completion-confirm': whether RET may
-      ;; leave the minibuffer holding something that is *not* a valid
-      ;; completion. #f means it may not, `confirm' means it asks first,
-      ;; and anything else means it may.
+      ;; GNU Emacs's `minibuffer-completion-confirm' (`minibuf.c:2630'):
+      ;; "Whether to demand confirmation of completion before exiting
+      ;; minibuffer.
+      ;;
+      ;; If nil, confirmation is not required.
+      ;; If the value is `confirm', the user may exit with an input that is
+      ;;  not a valid completion alternative, but Emacs asks for
+      ;;  confirmation.
+      ;; If the value is `confirm-after-completion', the user may exit with
+      ;;  an input that is not a valid completion alternative, but Emacs
+      ;;  asks for confirmation if the user submitted the input right after
+      ;;  any of the completion commands listed in
+      ;;  `minibuffer-confirm-exit-commands'."
+      ;;
+      ;; Note the shape: nil is *not* the same as any other value, and
+      ;; `confirm' is not the same as `confirm-after-completion' - which
+      ;; is why it was wrong as `#t'/`#f'. Emacs's `completing-read' binds
+      ;; it from REQUIRE-MATCH, and `completion--complete-and-exit' reads
+      ;; all four possibilities (including a predicate, which nothing here
+      ;; passes yet).
       ;;--------------------------------------------------------------
       (make-parameter #f))
 
@@ -1039,7 +1095,7 @@ read-number-history
             (text-editor-delete-from-cursor ed (text-editor-char-count ed))
             (text-editor-insert ed completion)))))
 
-    (define (completion--do-completion string table predicate point)
+    (define (completion--do-completion string table predicate point expect-exact)
       ;; GNU Emacs's `completion--do-completion': complete STRING, put the
       ;; result in the minibuffer, and answer the bitset saying what
       ;; happened.
@@ -1050,6 +1106,12 @@ read-number-history
       ;; completion that others also match, and the list of candidates
       ;; when it is not a valid completion at all.
       ;;
+      ;; EXPECT-EXACT is Emacs's ("there is no need to tell the user when
+      ;; the buffer's text is already an exact match") and is what this
+      ;; command's own caller - `completion-complete-and-exit', via RET -
+      ;; passes: RET is not TAB, so "Sole completion" and "Complete, but
+      ;; not unique" are not news to someone who has just pressed it.
+      ;;
       ;; Not ported: the `completion-cycle-threshold' cycling and the
       ;; metadata (`completion--field-metadata').
       ;;--------------------------------------------------------------
@@ -1059,7 +1121,8 @@ read-number-history
           (completion--message "No match")
           (minibuffer--bitset #f #f #f))
          ((eq? comp #t)
-          (completion--message "Sole completion")
+          (unless expect-exact
+            (completion--message "Sole completion"))
           (minibuffer--bitset #f #f #t))
          (else
           (let* ((completion (car comp))
@@ -1084,10 +1147,6 @@ read-number-history
             ;;     valid completion: "Complete, but not unique" - the
             ;;     text will do, but it is not the only candidate.
             ;;
-            ;;   * nothing was completed and what is there *is* a
-            ;;     valid completion: "Complete, but not unique" - the
-            ;;     text will do, but it is not the only candidate.
-            ;;
             ;; Saying "Complete, but not unique" in the first case
             ;; instead is what made TAB on a name that completes in full
             ;; look like a failure.
@@ -1108,46 +1167,133 @@ read-number-history
               (when (and (eq? (*this-command*) (*last-command*))
                          (*completion-auto-help*))
                 (minibuffer-completion-help))
-              (completion--message "Complete, but not unique")))
+              (unless expect-exact
+                (completion--message "Complete, but not unique"))))
             (minibuffer--bitset completed #t exact))))))
 
       ;; GNU Emacs's `minibuffer-complete-and-exit' (RET in a
       ;; `require-match' minibuffer): leave if what is typed is a valid
       ;; completion, and otherwise complete it and say why it did not.
       ;;
-      ;; The bitset is what decides, and the cases are Emacs's: an exact
-      ;; (and unique) completion leaves; a completion that reached an
-      ;; exact match leaves unless `minibuffer-completion-confirm' says to
-      ;; ask first; and anything else stays put.
+      ;; **The decision is Emacs 31's, across its three functions**:
+      ;; `minibuffer-complete-and-exit' (`:2087'),
+      ;; `completion-complete-and-exit' (`:2113') and
+      ;; `completion--complete-and-exit' (`:2128'). Emacs's is not a
+      ;; dispatch on the bitset of one completion; it is a chain of
+      ;; conditions tried *before* anything is completed at all, and the
+      ;; difference is visible in what the user gets:
+      ;;
+      ;;   * an *empty* answer exits at once (`(= beg end)' - "Allow user
+      ;;     to specify null string"), and `read_minibuf' answers with the
+      ;;     default. Ours used to show the candidates instead;
+      ;;   * an answer `test-completion' accepts exits - with the case
+      ;;     fixed up when completion ignores it;
+      ;;   * an answer it *rejects* still exits when confirmation was
+      ;;     asked for, which for `confirm-after-completion' means "unless
+      ;;     the command just before this RET was TAB". Ours refused, so a
+      ;;     name typed out in full and RET'd once could not create a
+      ;;     buffer, and `C-x b fresh RET' answered "[No match]";
+      ;;   * and only then is anything completed, and the bitset decides.
+      ;;
+      ;; That last rule is why `minibuffer-completion-confirm' has to hold
+      ;; the SYMBOL and not a boolean, which is what this tree had: with
+      ;; only `#t' there is no way to tell `confirm' from
+      ;; `confirm-after-completion', and `completing-read' now binds it
+      ;; from REQUIRE-MATCH with Emacs's own line.
       ;;--------------------------------------------------------------
-    (define-command (minibuffer-complete-and-exit)
+    (define (completion--complete-and-exit string exit-function completion-function)
+      ;; GNU Emacs's `completion--complete-and-exit' (`:2128'): "Exit from
+      ;; `require-match' minibuffer. COMPLETION-FUNCTION is called if the
+      ;; current buffer's content does not appear to be a match."
+      ;;
+      ;; Emacs's BEG and END address the completion *field*, which are
+      ;; buffer positions there because the prompt is the minibuffer's own
+      ;; text; here the field is the whole of what was typed, and they are
+      ;; the empty string and the whole of it.
+      ;;--------------------------------------------------------------
+      (cond
+       ;; Allow user to specify null string
+       ((= 0 (string-length string)) (exit-function))
+       ;; The CONFIRM argument is a predicate.
+       ((procedure? (*minibuffer-completion-confirm*))
+        (if ((*minibuffer-completion-confirm*) string)
+            (exit-function)
+            ;; Emacs rings the bell here first (`ding', keyboard.c's,
+            ;; which is not ported - there is no bell in this tree).
+            (completion--message "No match")))
+       ;; See if we have a completion from the table.
+       ((test-completion string (*minibuffer-completion-table*)
+                         (*minibuffer-completion-predicate*))
+        ;; "Fixup case of the field, if necessary."
+        (when (*completion-ignore-case*)
+          (let ((compl (try-completion string (*minibuffer-completion-table*)
+                                       (*minibuffer-completion-predicate*))))
+            (when (and (string? compl)
+                       (not (string=? string compl))
+                       ;; "If it weren't for this piece of paranoia, I'd
+                       ;; replace the whole thing with a call to
+                       ;; do-completion."
+                       (= (string-length string) (string-length compl)))
+              (completion--replace compl))))
+        (exit-function))
+       ;; The user is permitted to exit with an input that's rejected by
+       ;; test-completion, after confirming her choice.
+       ((memq (*minibuffer-completion-confirm*) '(confirm confirm-after-completion))
+        (if (or (eq? (*last-command*) (*this-command*))
+                ;; For `confirm-after-completion' we only ask for
+                ;; confirmation if trying to exit immediately after typing
+                ;; TAB (this catches most minibuffer typos).
+                (and (eq? (*minibuffer-completion-confirm*) 'confirm-after-completion)
+                     (not (memq (*last-command*) minibuffer-confirm-exit-commands))))
+            (exit-function)
+            ;; Emacs's `if' takes a *body* - several forms - for its else
+            ;; branch, which Scheme's does not; the two go in a `begin',
+            ;; and its answer (#f, Emacs's nil) is what the caller's
+            ;; `cond' falls through on.
+            (begin (minibuffer-message "Confirm")
+                   #f)))
+       (else (completion-function))))
+
+    (define (completion-complete-and-exit string exit-function)
+      ;; GNU Emacs's `completion-complete-and-exit' (`:2113'): complete
+      ;; the field, and let the bitset of that completion decide. The
+      ;; `condition-case'-to-1 is Emacs's, and it is not a formality - an
+      ;; error out of `completion--do-completion' reads as an exact and
+      ;; unique match (bit 1), so a table that raises is exited rather
+      ;; than swallowed.
+      ;;--------------------------------------------------------------
+      (completion--complete-and-exit
+       string exit-function
+       (lambda ()
+         (let ((bits (guard (e (else 1))
+                       (completion--do-completion
+                        string (*minibuffer-completion-table*)
+                        (*minibuffer-completion-predicate*)
+                        (string-length string)
+                        #t))))
+           (cond
+            ((or (= bits 1) (= bits 3)) (exit-function))
+            ((= bits 7)
+             (if (not (*minibuffer-completion-confirm*))
+                 (exit-function)
+                 (begin (minibuffer-message "Confirm")
+                        #f)))
+            (else #f))))))
+
+    (define-command (minibuffer-complete-and-exit no-exit)
       ;; A candidate chosen with M-<down> is taken before anything
       ;; else is tried, which is GNU Emacs's
       ;; `(when (completion--selected-candidate)
       ;;    (minibuffer-choose-completion t t))' at the head of its
-      ;; `minibuffer-complete-and-exit'.
+      ;; `minibuffer-complete-and-exit'. NO-EXIT is its prefix argument
+      ;; ("insert the selected completion, but do not leave").
       "Exit the minibuffer, if what is typed is a valid completion."
-      (interactive)
+      (interactive (list (current-prefix-arg)))
       (when (completion--selected-candidate)
-        (minibuffer-choose-completion))
-      (let* ((typed (or (minibuffer-contents) ""))
-             (bits (completion--do-completion
-                    typed (*minibuffer-completion-table*)
-                    (*minibuffer-completion-predicate*)
-                    (string-length typed))))
-        (cond
-         ;; `exit-minibuffer' is called, not run: `run-command' takes a
-         ;; command *record* and this is the command's own procedure.
-         ;; Nothing reached this until `read-file-name' began passing
-         ;; `confirm-nonexistent-file-or-buffer' as its REQUIRE-MATCH -
-         ;; M-x reads with REQUIRE-MATCH nil, so its RET is the plain
-         ;; `exit-minibuffer' binding and never comes here.
-         ((or (= bits 1) (= bits 3)) (exit-minibuffer))
-         ((= bits 7)
-          (if (*minibuffer-completion-confirm*)
-              (minibuffer-message "Confirm")
-              (exit-minibuffer)))
-         (else #f))))
+        (minibuffer-choose-completion #t #t))
+      (unless no-exit
+        (completion-complete-and-exit (or (minibuffer-contents) "")
+                                      exit-minibuffer)))
 
     (define (completion--try-word-completion string table predicate point)
       ;; GNU Emacs's `completion--try-word-completion': complete the text
@@ -1188,6 +1334,22 @@ read-number-history
           (completion--message "No match"))
          (else (minibuffer-completion-help)))))
 
+    (define minibuffer-confirm-exit-commands
+      ;; GNU Emacs's `minibuffer-confirm-exit-commands' (`:2075'): "List of
+      ;; commands which cause an immediately following
+      ;; `minibuffer-complete-and-exit' to ask for extra confirmation" -
+      ;; the TABs, in other words, which is what `confirm-after-completion'
+      ;; consults `last-command' for.
+      ;;
+      ;; Emacs lists the *symbols* `completion-at-point',
+      ;; `minibuffer-complete' and `minibuffer-complete-word'; a command
+      ;; is its procedure here (`*this-command*' holds one, see
+      ;; `simple.sld'), and `completion-at-point' is not ported. It is
+      ;; defined *after* the two commands for the same reason: a list of
+      ;; procedures can only be made once they exist.
+      ;;--------------------------------------------------------------
+      (list minibuffer-complete minibuffer-complete-word))
+
     ;;----------------------------------------------------------------
     ;; Reading with completion
 
@@ -1200,6 +1362,284 @@ read-number-history
         (cond ((null? rest) default)
               ((= n 0) (car rest))
               (else (loop (cdr rest) (- n 1))))))
+
+    ;;----------------------------------------------------------------
+    ;; Reading a buffer name
+    ;;----------------------------------------------------------------
+    ;;
+    ;; `read-buffer' is `minibuf.c''s (`:1522') and so is
+    ;; `internal-complete-buffer' (`:2156'); `complete-with-action'
+    ;; (`minibuffer.el:232') and `completion-table-with-predicate'
+    ;; (`:467') are that file's, and the strip-internal rule inside
+    ;; `internal-complete-buffer' is the C's own. They live here for the
+    ;; reason `completing-read' does: they read the minibuffer, and the
+    ;; table has to see the buffer registry, which is above `minibuf.sld'.
+
+    (define (%internal-buffer-name? name)
+      ;; Emacs's own test for a buffer that is "internal" - the C's
+      ;; `SREF (XCAR (bufs), 0) == ' '' - a name that begins with a space.
+      ;; `*scratch*' is not one; `*Messages*', `*Completions*' and the
+      ;; startup screen's `*Schemacs*' are.
+      ;;--------------------------------------------------------------
+      (and (> (string-length name) 0)
+           (char=? #\space (string-ref name 0))))
+
+    (define (complete-with-action action collection string predicate)
+      ;; GNU Emacs's `complete-with-action' (`minibuffer.el:232'): "Perform
+      ;; completion according to ACTION." A *function* collection is called
+      ;; directly, whatever the question is; otherwise the three questions
+      ;; are the three functions. ACTION is Emacs's own encoding of them -
+      ;; #f, #t and `lambda' - and `metadata'/`boundaries' answer nothing,
+      ;; as in Emacs (this tree's tables carry no metadata).
+      ;;--------------------------------------------------------------
+      (cond
+       ((procedure? collection) (collection string predicate action))
+       ((not action) (try-completion string collection predicate))
+       ((eq? action #t) (all-completions string collection predicate))
+       (else (test-completion string collection predicate))))
+
+    (define (internal-complete-buffer string predicate action)
+      ;; GNU Emacs's `internal-complete-buffer' (`minibuf.c:2156'):
+      ;; "Perform completion on buffer names."
+      ;;
+      ;; The table is the **buffer alist** - Emacs's `Vbuffer_alist', this
+      ;; tree's `*buffer-list*', which `other-buffer' and the Buffer Menu
+      ;; already read as an alist of `(NAME . BUFFER)'.
+      ;;
+      ;; The one piece of the C that is not a dispatch is the
+      ;; **strip-internal-buffers** rule, which applies only when the
+      ;; *empty* string is being completed: the internal buffers at the
+      ;; front are skipped, and then an internal one *after* the first
+      ;; ordinary one is dropped from the rest - so the ordinary buffers
+      ;; come first. When every candidate is internal they are given back
+      ;; as they are, but only if they are all the buffers there are
+      ;; (`list_length (res) == list_length (Vbuffer_alist)'), so a session
+      ;; with nothing but internal buffers still completes.
+      ;;--------------------------------------------------------------
+      (cond
+       ((not action)
+        (try-completion string (*buffer-list*) predicate))
+       ((eq? action #t)
+        (let ((res (all-completions string (*buffer-list*) predicate)))
+          (if (> (string-length string) 0)
+              res
+              (let loop ((rest res))
+                (cond
+                 ((null? rest)
+                  (if (= (length res) (length (*buffer-list*))) res #f))
+                 ((%internal-buffer-name? (car rest)) (loop (cdr rest)))
+                 (else
+                  (let drop ((tail (cdr rest)) (kept (list (car rest))))
+                    (cond
+                     ((null? tail) (reverse kept))
+                     ((%internal-buffer-name? (car tail))
+                      (drop (cdr tail) kept))
+                     (else (drop (cdr tail) (cons (car tail) kept)))))))))))
+       (else
+        (test-completion string (*buffer-list*) predicate))))
+
+    (define (completion-table-with-predicate table pred1 strict
+                                             string pred2 action)
+      ;; GNU Emacs's `completion-table-with-predicate' (`minibuffer.el:467'):
+      ;; "Make a completion table equivalent to TABLE but filtered through
+      ;; PRED1. ... If STRICT is non-nil, the predicate always applies; if
+      ;; nil it only applies if it does not reduce the set of possible
+      ;; completions to nothing."
+      ;;
+      ;; **The nil case is the one this tree needs**, and it is the two
+      ;; arms of Emacs's `cond': `test-completion' ignores PRED1 outright
+      ;; ("it doesn't really have to apply anyway"), and a *failed*
+      ;; completion is retried with PRED2 alone. That is what lets
+      ;; `read-buffer-to-switch' leave the current buffer out of the list
+      ;; you are offered while still taking its name if you type it.
+      ;;--------------------------------------------------------------
+      (cond
+       ((and (not strict) (eq? action 'lambda))
+        (test-completion string table pred2))
+       (else
+        (or (complete-with-action
+             action table string
+             (if (not (and pred1 pred2))
+                 (or pred1 pred2)
+                 (lambda (x) (and (pred1 x) (pred2 x)))))
+            (and (not strict)
+                 pred1
+                 (complete-with-action action table string pred2))))))
+
+    (define (internal-complete-buffer-except . args)
+      ;; GNU Emacs's `internal-complete-buffer-except'
+      ;; (`minibuffer.el:4211'): "Perform completion on all buffers
+      ;; excluding BUFFER. BUFFER nil or omitted means use the current
+      ;; buffer."
+      ;;
+      ;; Emacs writes it as `apply-partially' over
+      ;; `completion-table-with-predicate', fixing the table, the "not this
+      ;; one" predicate and STRICT nil - so what comes back is a completion
+      ;; table, called with the three arguments a table is called with.
+      ;;--------------------------------------------------------------
+      (let ((except (let ((buffer (if (pair? args) (car args) #f)))
+                      (if (string? buffer)
+                          buffer
+                          (buffer-name (if buffer buffer (current-buffer)))))))
+        (apply-partially completion-table-with-predicate
+                         internal-complete-buffer
+                         (lambda (name)
+                           (not (equal? (if (pair? name) (car name) name)
+                                        except)))
+                         #f)))
+
+    (define (minibuffer-with-setup-hook function thunk)
+      ;; GNU Emacs's `minibuffer-with-setup-hook' (`minibuffer.el'): run
+      ;; THUNK with FUNCTION added to `minibuffer-setup-hook' for the read
+      ;; it makes.
+      ;;
+      ;; **Why a hook and not an argument.** `read-buffer' passes its own
+      ;; table to `completing-read', and `read-buffer-to-switch' needs a
+      ;; different one, so the only place to say so is *inside* the read:
+      ;; `completing-read' binds `*minibuffer-completion-table*' before it
+      ;; and `read-minibuffer-1' runs the setup hook after the prompt is in
+      ;; place, so a hook that *sets* that parameter changes the table the
+      ;; rest of that read completes against.
+      ;;--------------------------------------------------------------
+      (parameterize ((*minibuffer-setup-hook*
+                      (append (*minibuffer-setup-hook*) (list function))))
+        (thunk)))
+
+    (define (%prompt-without-trailer prompt)
+      ;; The C's "we must change PROMPT, editing the default value in
+      ;; before the colon": drop a trailing ": " or ":" or " " from the
+      ;; prompt, and let `format-prompt' put the default back the way
+      ;; "Switch to buffer (default foo): " does (`minibuf.c:1557-1577').
+      ;;--------------------------------------------------------------
+      (let ((len (string-length prompt)))
+        (cond
+         ((and (>= len 2)
+               (char=? #\: (string-ref prompt (- len 2)))
+               (char=? #\space (string-ref prompt (- len 1))))
+          (substring prompt 0 (- len 2)))
+         ((and (>= len 1)
+               (or (char=? #\: (string-ref prompt (- len 1)))
+                   (char=? #\space (string-ref prompt (- len 1)))))
+          (substring prompt 0 (- len 1)))
+         (else prompt))))
+
+    (define (read-buffer prompt . args)
+      ;; GNU Emacs's `read-buffer' (`minibuf.c:1522'): "Read the name of a
+      ;; buffer and return it as a string.
+      ;;
+      ;;     (read-buffer PROMPT &optional DEF REQUIRE-MATCH PREDICATE)
+      ;;
+      ;; DEF is what an empty line answers; REQUIRE-MATCH has the same
+      ;; meaning as `completing-read''s; PREDICATE limits which buffers may
+      ;; be offered.
+      ;;
+      ;; Three things of the C's, in its order: a DEF that *is a buffer* is
+      ;; read as that buffer's name (which is how `switch-to-buffer' passes
+      ;; `(other-buffer)' as its default); `completion-ignore-case' is bound
+      ;; to `read-buffer-completion-ignore-case' for the length of the read;
+      ;; and with a DEF the prompt is re-made through `format-prompt' so
+      ;; that the default shows in it.
+      ;;
+      ;; `read-buffer-function' short-circuits all of it, as in Emacs -
+      ;; called "with the arguments passed to `read-buffer'".
+      ;;--------------------------------------------------------------
+      (let ((def (if (pair? args) (car args) #f))
+            (require-match (if (and (pair? args) (pair? (cdr args)))
+                               (cadr args)
+                               #f))
+            (predicate (if (and (pair? args)
+                                (pair? (cdr args))
+                                (pair? (cddr args)))
+                           (caddr args)
+                           #f)))
+        (if (bufferp def) (set! def (buffer-name def)))
+        (parameterize ((*completion-ignore-case*
+                        (*read-buffer-completion-ignore-case*)))
+          (if (*read-buffer-function*)
+              (let ((function (*read-buffer-function*)))
+                (if predicate
+                    (function prompt def require-match predicate)
+                    (function prompt def require-match)))
+              (let ((prompt (if def
+                                (format-prompt (%prompt-without-trailer prompt)
+                                               (if (pair? def) (car def) def))
+                                prompt)))
+                (completing-read prompt internal-complete-buffer predicate
+                                 require-match #f buffer-name-history
+                                 def))))))
+
+    (define *confirm-nonexistent-file-or-buffer* (make-parameter 'after-completion))
+    ;; ^ GNU Emacs's `confirm-nonexistent-file-or-buffer' (`files.el:1898'):
+    ;; "Whether confirmation is requested before visiting a new file or
+    ;; buffer. If nil, confirmation is not requested. If the value is
+    ;; `after-completion', confirmation is requested only if the user called
+    ;; `minibuffer-complete' right before `minibuffer-complete-and-exit'.
+    ;; Any other non-nil value means to request confirmation."
+    ;;
+    ;; **A placement departure: this is `files.el`'s variable and it is in
+    ;; this library.** `read-buffer-to-switch' passes it, as Emacs does, and
+    ;; that function can only live here (see its note) - so the variable has
+    ;; to be reachable from here, and `(schemacs editor files)' is above this
+    ;; library. `*minor-mode-alist*' was moved for the same reason. Its
+    ;; default is Emacs's `after-completion'; the tree had `#t' here with a
+    ;; comment claiming "any non-nil value means ask", which is not what
+    ;; Emacs's default does - with `after-completion' a name that is not
+    ;; followed by TAB does not ask.
+
+    (define (confirm-nonexistent-file-or-buffer)
+      ;; GNU Emacs's `confirm-nonexistent-file-or-buffer' (`files.el:1914'):
+      ;; "Whether to request confirmation before visiting a new file or
+      ;; buffer" - the value to pass as `read-file-name''s or
+      ;; `read-buffer''s REQUIRE-MATCH, which is why it answers the symbols
+      ;; `confirm' and `confirm-after-completion' rather than `t'.
+      ;;--------------------------------------------------------------
+      (cond ((eq? (*confirm-nonexistent-file-or-buffer*) 'after-completion)
+             'confirm-after-completion)
+            ((*confirm-nonexistent-file-or-buffer*) 'confirm)
+            (else #f)))
+
+    (define (read-buffer-to-switch prompt)
+      ;; GNU Emacs's `read-buffer-to-switch' (`window.el:9485'): "Read the
+      ;; name of a buffer to switch to, prompting with PROMPT. Return the
+      ;; name of the buffer as a string.
+      ;;
+      ;; This function is intended for the `switch-to-buffer' family of
+      ;; commands since these need to omit the name of the current buffer
+      ;; from the list of completions and default values."
+      ;;
+      ;; **`window.el''s` function, in this library**: `window.sld` cannot
+      ;; hold it - it is built on the minibuffer - and this needs
+      ;; `internal-complete-buffer-except', which is here. `window.sld`
+      ;; asks for it through `*read-buffer-to-switch*`, the way a front end
+      ;; installs `*frame-creation-function*`, and that library's
+      ;; `switch-to-buffer` calls what it finds there. It is the wall
+      ;; `goto-line' and `zap-to-char' sit behind, and the same answer.
+      ;;
+      ;; The table goes in through `minibuffer-with-setup-hook' rather than
+      ;; as an argument because `read-buffer' passes its own table to
+      ;; `completing-read' - the hook is the one place that can say
+      ;; otherwise. Emacs's hook also conses the table onto
+      ;; `icomplete-with-completion-tables' when icomplete is loaded; there
+      ;; is no icomplete here.
+      ;;
+      ;; The default is `(other-buffer (current-buffer))' - what `C-x b
+      ;; RET' switches to, which is Emacs's own argument.
+      ;;
+      ;; The last argument is `(confirm-nonexistent-file-or-buffer)' -
+      ;; Emacs's own - which is why that variable and its function are in
+      ;; *this* library rather than in `files.sld` where `files.el` has
+      ;; them; see the note on them below.
+      ;;--------------------------------------------------------------
+      (minibuffer-with-setup-hook
+       (lambda ()
+         (*minibuffer-completion-table* (internal-complete-buffer-except)))
+       (lambda ()
+         (read-buffer prompt (other-buffer (current-buffer))
+                      (confirm-nonexistent-file-or-buffer)))))
+
+    ;; `window.sld`'s `switch-to-buffer` reads its buffer name through
+    ;; this; see the note on `read-buffer-to-switch` above.
+    (*read-buffer-to-switch* read-buffer-to-switch)
 
     (define (completing-read prompt collection . args)
       ;; GNU Emacs's `completing-read': read a string in the minibuffer,
@@ -1227,11 +1667,15 @@ read-number-history
           (set! initial (cons (car initial) (+ 1 (cdr initial)))))
         (parameterize ((*minibuffer-completion-table* collection)
                        (*minibuffer-completion-predicate* predicate)
+                       ;; GNU Emacs's own line for this
+                       ;; (`minibuffer.el:5243'): the *symbol* REQUIRE-MATCH
+                       ;; named unless it is `t' - so `confirm' and
+                       ;; `confirm-after-completion' arrive as themselves
+                       ;; and a plain `t' arrives as nil. It was `#t' here,
+                       ;; which threw away the difference that
+                       ;; `completion--complete-and-exit' needs.
                        (*minibuffer-completion-confirm*
-                        (if (or (eq? require-match 'confirm)
-                                (eq? require-match 'confirm-after-completion))
-                            #t
-                            #f)))
+                        (if (eq? require-match #t) #f require-match)))
           (read-from-minibuffer
            prompt initial
            ;; The map to read it with. GNU Emacs layers

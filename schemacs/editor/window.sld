@@ -75,6 +75,7 @@
           bury-buffer buffer-local-value default-directory erase-buffer
           get-buffer-create
           kill-all-local-variables kill-buffer other-buffer record-buffer!
+          *scratch-buffer-name*
           set-buffer
           set!buffer-default-directory set!buffer-file-name set!buffer-read-only
           set-buffer-modified-p set-buffer-local-value!
@@ -104,6 +105,8 @@
    split-window-right
    switch-to-buffer
    switch-to-buffer-other-window
+   window-normalize-buffer-to-switch-to
+   *read-buffer-to-switch*
    window-absorb!
    window-min-height
    *cursor-in-echo-area*
@@ -123,6 +126,18 @@
    )
 
   (begin
+
+    (define *read-buffer-to-switch* (make-parameter #f))
+    ;; ^ How a buffer name is read for `switch-to-buffer' and the commands
+    ;; that use it. GNU Emacs reads it with `read-buffer-to-switch'
+    ;; (`window.el:9485'), which is *this file's* function - and it cannot
+    ;; be defined here: it completes with `internal-complete-buffer-except'
+    ;; and installs the table through `minibuffer-with-setup-hook', and
+    ;; both are `(schemacs editor minibuffer)', which is built on this
+    ;; library. So this library says *what* to read and the minibuffer
+    ;; library says *how*, the way `*frame-creation-function*' already
+    ;; works here: `(schemacs editor minibuffer)' sets it as it loads.
+    ;; The prompt it is given is Emacs's own, "Switch to buffer: ".
 
     (define *cursor-in-echo-area* (make-parameter #f))
     ;; ^ GNU Emacs's `cursor-in-echo-area', declared `DEFVAR_BOOL' in
@@ -521,14 +536,37 @@
                     (record-buffer! buffer)
                     new))))))))
 
-    (define (display-buffer--buffer-or-name thing)
-      ;; THING as a buffer, making one when it is a name no buffer has:
-      ;; GNU Emacs's `window-normalize-buffer-to-switch-to', which is what
-      ;; makes `C-x b newname' give a new buffer rather than an error.
+    (define (window-normalize-buffer-to-switch-to buffer-or-name)
+      ;; GNU Emacs's `window-normalize-buffer-to-switch-to'
+      ;; (`window.el:9508'): "If BUFFER-OR-NAME is nil, return the buffer
+      ;; returned by `other-buffer'. Else, if a buffer specified by
+      ;; BUFFER-OR-NAME exists, return that buffer. If no such buffer
+      ;; exists, create a buffer with the name BUFFER-OR-NAME and return
+      ;; that buffer." It is what makes `C-x b newname' give a new buffer
+      ;; rather than an error.
+      ;;
+      ;; Emacs's `pcase' has three arms and its middle one is `"*scratch*"'
+      ;; -> `(get-scratch-buffer-create)'. **Two pieces of that are not
+      ;; carried**: `get-scratch-buffer-create' is `simple.el''s
+      ;; (`:11547') and lives above this library, and what it adds over
+      ;; `get-buffer-create' - `initial-major-mode' and
+      ;; `initial-scratch-message' - are `startup.el''s variables, which
+      ;; this tree does not have (its `*scratch*' is made bare by the front
+      ;; ends). Its `set-buffer-major-mode' is `buffer.c''s and not ported
+      ;; either, so a buffer created *by name* here takes the default mode,
+      ;; which is Fundamental - what Emacs's own default gives it too.
       ;;--------------------------------------------------------------
-      (cond ((text-editor-type? thing) thing)
-            ((string? thing) (get-buffer-create thing))
-            (else (error "not a buffer or a buffer name" thing))))
+      (cond ((not buffer-or-name) (other-buffer))
+            ((and (string? buffer-or-name)
+                  (string=? buffer-or-name *scratch-buffer-name*))
+             (get-buffer-create *scratch-buffer-name*))
+            ;; Emacs's own `_` arm is `(or (get-buffer X) (get-buffer-create
+            ;; X))', and its `get-buffer' answers a *buffer* argument too.
+            ;; This tree's does not - `buffer.sld''s takes a name - so the
+            ;; buffer case is spelled out.
+            ((text-editor-type? buffer-or-name) buffer-or-name)
+            ((string? buffer-or-name) (get-buffer-create buffer-or-name))
+            (else (error "not a buffer or a buffer name" buffer-or-name))))
 
     (define (pop-to-buffer buffer-or-name . args)
       ;; Show BUFFER-OR-NAME in some window and select that window: GNU
@@ -540,7 +578,7 @@
              (norecord (if (and (pair? args) (pair? (cdr args)))
                            (cadr args)
                            #f))
-             (buffer (display-buffer--buffer-or-name buffer-or-name))
+             (buffer (window-normalize-buffer-to-switch-to buffer-or-name))
              (window (display-buffer buffer action)))
         ;; Emacs falls back to making the buffer current when
         ;; `display-buffer' found no window at all.
@@ -564,11 +602,64 @@
       (pop-to-buffer buffer display-buffer--same-window-action
                      (if (pair? args) (car args) #f)))
 
-    (define (switch-to-buffer buffer-or-name . args)
-      ;; Display BUFFER-OR-NAME in the *selected* window: GNU Emacs's
-      ;; `switch-to-buffer'. The window shows it from its first line, and
-      ;; the window's point is the buffer's - a window is a view of a
-      ;; buffer, not a copy of it.
+    (define-command (switch-to-buffer buffer-or-name . args)
+      "Display buffer BUFFER-OR-NAME in the selected window.
+
+WARNING: This is NOT the way to work on another buffer temporarily
+within a Lisp program!  Use `set-buffer' instead.  That avoids
+messing with the `window-buffer' correspondences.
+
+If the selected window cannot display the specified buffer
+because it is a minibuffer window or strongly dedicated to
+another buffer, call `pop-to-buffer' to select the buffer in
+another window.
+
+If called interactively, read the buffer name using `read-buffer'.
+The variable `confirm-nonexistent-file-or-buffer' determines
+whether to request confirmation before creating a new buffer.
+See `read-buffer' for features related to input and completion
+of buffer names.
+
+BUFFER-OR-NAME may be a buffer, a string (a buffer name), or nil.
+If BUFFER-OR-NAME is a string that does not identify an existing
+buffer, create a buffer with that name.  If BUFFER-OR-NAME is
+nil, switch to the buffer returned by `other-buffer'.
+
+If optional argument NORECORD is non-nil, do not put the buffer
+at the front of the buffer list, and do not make the window
+displaying it the most recently selected one.
+
+Return the buffer switched to."
+      ;; The interactive spec is Emacs's. Its first step computes
+      ;; `force-same-window' from `window-minibuffer-p' (this tree has no
+      ;; minibuffer window - the echo area stands for it),
+      ;; `window-dedicated-p' and `switch-to-buffer-in-dedicated-window'
+      ;; (there are no dedicated windows here), and for an ordinary window
+      ;; that answers `force-same-window' - so the list Emacs passes is
+      ;; `(list NEWNAME nil force-same-window)', and the two we can give it
+      ;; are nil for NORECORD and that symbol.
+      ;;
+      ;; **The name is read through `*read-buffer-to-switch*'** and not by
+      ;; calling `read-buffer-to-switch' directly: that function is
+      ;; `window.el''s but it completes with
+      ;; `internal-complete-buffer-except' and installs the table through
+      ;; `minibuffer-with-setup-hook', and both live in
+      ;; `(schemacs editor minibuffer)', which is built on this library.
+      ;; The minibuffer library sets this parameter as it loads.
+      (interactive (list (let ((read-name (*read-buffer-to-switch*)))
+                           (if read-name
+                               (read-name "Switch to buffer: ")
+                               (error "No buffer-name reader is installed")))
+                         #f 'force-same-window))
+      ;; Display BUFFER-OR-NAME in the *selected* window. The window shows
+      ;; it from its first line, and the window's point is the buffer's - a
+      ;; window is a view of a buffer, not a copy of it.
+      ;;
+      ;; **Emacs's next branches are not here**, each for the reason its
+      ;; test is missing: `(eq buffer (window-buffer nil))' is the no-op
+      ;; case, then the minibuffer window, a dedicated window, and
+      ;; `switch-to-buffer-obey-display-actions' (nil in Emacs by default
+      ;; and not ported). What is left is the C's ending.
       ;;
       ;; The argument may be a buffer or a name, as in Emacs, and a name
       ;; with no buffer behind it makes one - Emacs's `switch-to-buffer'
@@ -578,8 +669,13 @@
       ;; Emacs's third argument, FORCE-SAME-WINDOW, is about minibuffer and
       ;; dedicated windows, which are not modelled here.
       ;;--------------------------------------------------------------
+      ;; `. args' and not three fixed parameters: NORECORD and
+      ;; FORCE-SAME-WINDOW are optional in Emacs - "do not put the buffer at
+      ;; the front of the buffer list" and the error-rather-than-pop case -
+      ;; and this tree's callers inside the editor pass only the buffer, as
+      ;; Emacs's do. The interactive spec above supplies Emacs's three.
       (let* ((norecord (if (pair? args) (car args) #f))
-             (buffer (display-buffer--buffer-or-name buffer-or-name))
+             (buffer (window-normalize-buffer-to-switch-to buffer-or-name))
              (window (selected-window)))
         (set-window-buffer! window buffer)
         (unless norecord (record-buffer! buffer))
@@ -851,6 +947,12 @@ by this function.  This happens in an interactive call."
         result))
 
     ;; The window keys, on the ones GNU Emacs binds them to.
+    ;; GNU Emacs's `(define-key map "b" #'switch-to-buffer)' is in the
+    ;; `ctl-x-map' it builds at `subr.el:1746'. This tree has no
+    ;; `bindings.el' and binds a command's keys where the command is, as
+    ;; the C-x 2/3/1 window keys just below are bound here.
+    (define-key *default-keymap* (kbd "C-x b") switch-to-buffer)
+
     (define-key *default-keymap* (kbd "C-x 2")
       split-window-below)
     (define-key *default-keymap* (kbd "C-x 3")

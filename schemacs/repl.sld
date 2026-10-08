@@ -65,8 +65,8 @@
           spawn-coop-repl-server poll-coop-repl-server)
     ;; The editor's names, which the session is given when the door opens
     ;; - `(schemacs editor loadup)' is `loadup.el''s file, and holds what
-    ;; the editor is made of. The init file is given the same names
-    ;; (`schemacs/editor/startup.sld').
+    ;; the editor is made of. A user's *init file* is not given them: it
+    ;; imports what it needs, which is how a name is reached here.
     (only (schemacs editor loadup) open-editor-namespace!)
     ;; `poll-repl!' draws after it has run something, because nothing else
     ;; would: see its comment. `xdisp' is *below* `keyboard', which is

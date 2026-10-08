@@ -9,7 +9,7 @@ And it's 100% written in scheme.
 
 Here's what works already:
 * Both terminal and Gtk pixel based implementations
-* Buffers, and buffer manipulation commands
+* Buffers, buffer switching (C-x b) and buffer manipulation commands
 * Marks, kill ring, regions, copy, yank
 * Windows, window splitting, window sizing
 * The minibuffer, completions, exactly like emacs.
@@ -210,9 +210,11 @@ There is one script in the top level:
   tree ships one at `schemacs/splash.txt`, and a `splash.txt` of your own
   in any load-path directory wins over it. It is a read-only buffer and
   `q` leaves it. With file arguments the frame is split and the splash is
-  the *lower* window, again as in Emacs. An init file can turn it off with
-  Emacs's own spelling:
+  the *lower* window, again as in Emacs. An init file turns it off with
+  Emacs's own variable - which is `startup.el`'s, and so lives in
+  `(schemacs editor startup)`:
 
+      (import (schemacs editor startup))
       (set! inhibit-startup-screen #t)
 
 Right now I'm using Wayland, I presume the graphics will work on X11

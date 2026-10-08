@@ -17,8 +17,9 @@
   ;;  * **a hash table** - the keys that are strings or symbols;
   ;;  * **a function** - called with three arguments, `(STRING PREDICATE
   ;;    ACTION)', because the caller tells the table *which question* it
-  ;;    is asking: ACTION is #t for `test-completion', a procedure for
-  ;;    `all-completions', and #f for `try-completion'.
+  ;;    is asking: ACTION is #f for `try-completion', #t for
+  ;;    `all-completions', and the symbol `lambda' for `test-completion'
+  ;;    - which is Emacs's own encoding of the three, not a flag.
   ;;
   ;; Not ported: **obarrays**, which are one of Emacs's four forms and
   ;; are a Lisp object - a vector of symbols with a Lisp name table
@@ -48,6 +49,8 @@
    *history-add-new-input*
    *history-delete-duplicates*
    *history-length*
+   *read-buffer-function*
+   *read-buffer-completion-ignore-case*
    all-completions
    compare-strings
    test-completion
@@ -66,6 +69,28 @@
       ;; `(schemacs editor buffer)''s `buffer-local-value').
       ;;--------------------------------------------------------------
       (make-parameter #f))
+
+    ;; `buffer-name-history' is NOT here. It is `minibuf.c''s variable
+    ;; (`:2515', where the C does `DEFSYM' and then `Fset (..., Qnil)') -
+    ;; the same construct that makes `minibuffer-history' - but a history
+    ;; in this tree is a `<history>' record and that type is
+    ;; `minibuffer.sld''s, so both are defined there, beside
+    ;; `file-name-history' and `read-number-history'. What *is* in this
+    ;; file is `read-buffer-function' and
+    ;; `read-buffer-completion-ignore-case', which are ordinary values.
+
+    (define *read-buffer-function* (make-parameter #f))
+    ;; ^ GNU Emacs's `read-buffer-function' (`minibuf.c:2544'): "If this is
+    ;; non-nil, `read-buffer' does its work by calling this function. The
+    ;; function is called with the arguments passed to `read-buffer'." Nil
+    ;; by default, so `read-buffer' does the reading itself.
+
+    (define *read-buffer-completion-ignore-case* (make-parameter #f))
+    ;; ^ GNU Emacs's `read-buffer-completion-ignore-case'
+    ;; (`minibuf.c:2559'): "Non-nil means completion ignores case when
+    ;; reading a buffer name." False as in Emacs - which is not the same
+    ;; as `completion-ignore-case' above, and is why `read-buffer' binds
+    ;; that one to this one for the length of its read.
 
     (define *history-delete-duplicates*
       ;; GNU Emacs's `history-delete-duplicates' (`minibuf.c'): whether

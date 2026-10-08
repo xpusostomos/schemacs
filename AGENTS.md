@@ -5578,8 +5578,9 @@ Emacs file and the session is pinned to `(guile-user)` (`poll-repl!`), which
 has none of them - so `find-file` had never been bound there.
 
 `start-repl!` now runs **`open-editor-namespace!`** (`schemacs/editor/loadup.sld`
-since 2026-10-08, `schemacs/repl.sld` before that - the init file wants the
-same names, see the startup-screen section), which evaluates one `import`
+since 2026-10-08, `schemacs/repl.sld` before that - and it is the *back
+door's* alone: an init file imports what it needs, see the startup-screen
+section), which evaluates one `import`
 form in that module listing every `(schemacs editor ...)` library. The list
 is written out (the tree's root is not a thing a running editor knows), so
 it can go stale - and **`schemacs/editor/loadup-tests.scm` is what
@@ -5683,16 +5684,30 @@ path, first for `splash.txt` (a user's own) and then for
 Chris committed one, `a097a69`) — `locate-file-internal`, which is
 `lread.c`'s and already ported.
 
-**The init file is now *given the editor's names*.** `(set! inhibit-startup-screen
-#t)` cannot work otherwise: the init file is loaded into `(guile-user)`,
-which has none of the editor's names, so the variable was unbound. So the
-list that `repl.sld` was carrying moved to **`schemacs/editor/loadup.sld`**
-— `loadup.el`'s file, "the file that loads the editor" — and *both* callers
-use it: the back door and `load-init`. That is the same property Emacs's
-init file has ("it runs with all of Emacs's Lisp to hand"), which the
-comment in `load-init` had claimed in as many words while not doing it.
+**The init file imports what it needs, which is how a name is reached
+here.** `inhibit-startup-screen` is `startup.el`'s variable (`:68`), so it
+is in `schemacs/editor/startup.sld`, and an init file that wants it says
 
-### Three departures this turned up, all fixed
+    (import (schemacs editor startup))
+    (set! inhibit-startup-screen #t)
+
+which is Emacs's `(require 'startup)' and `(setq ...)` in the same two
+lines.
+
+**I first did it the other way and it was wrong.** `load-init` imported
+*every* editor library into the user's module (the `open-editor-namespace!`
+call, still in `schemacs/editor/loadup.sld` for the back door's sake) so
+that the bare second line alone would work, on the argument that Emacs's
+init file has one obarray to reach through. Chris: *"I never said 'with no
+import' ... It's a given that you have to import whatever feature you want
+to interact with ... have you fucking stick every bloody variable in the
+one bloated massive file, just to stop people needing to import things?"*
+The standing order settles it: a name lives in the file its Emacs source
+lives in, and the way to it is an import - so the call is gone from
+`load-init`, and the docs, the tests and the harness all use the two lines
+above.
+
+### Four departures this turned up, all fixed
 
 1. **`note-file-read-only!` tested the buffer's flag; Emacs tests the
    file.** `after-find-file` says "Note: file is write protected" of a file
@@ -5712,6 +5727,19 @@ comment in `load-init` had claimed in as many words while not doing it.
    `(set-window-buffer window (other-buffer ...))`; ours does
    `(switch-to-buffer (other-buffer buffer))` for that case now.
 3. **The whole tree did not compile.** See the gotcha below.
+4. **An init file's error was invisible.** `load-init`'s handler reported it
+   with `display` to stdout - and on stdout is exactly where the *terminal*
+   front end hides it: the text goes to the normal screen and ncurses then
+   switches to the alternate one, so it is unseeable until the editor
+   exits. Measured while checking the namespace call: with it removed, a
+   user's `(set! inhibit-startup-screen #t)' fails and **nothing appears** -
+   the feature just seems not to work. It is said in the echo area now as
+   well, where a frame is already current, and the text is put together the
+   way `main.scm`'s `condition-text' does it: measured, an unbound variable
+   raises `(unbound-variable (#f "Unbound variable: ~S" (this-is-not-bound) #f))`,
+   so the raw irritants read `#f Unbound variable: ~S #f' and never name
+   the variable. The echo area says
+   `error: init file PATH: Unbound variable: this-is-not-bound' now.
 
 ### Two harness changes
 
@@ -5760,3 +5788,132 @@ check is the end-to-end one, and it now runs `./se --remote` against the
 editor it has open. Verified to fail with each fix reverted: the namespace
 (the session's names), the banner, and the repaint - each with its own
 message.
+
+# `C-x b` — switch-to-buffer, and the two seams it crossed (2026-10-09)
+
+Chris: *"For now I want you to implement C-x b, switch-to-buffer. Look at
+emacs source code as usual"*, then *"finish it"*. It is in, and the two
+bugs under it are the interesting part.
+
+## What landed
+
+| Emacs | here |
+|---|---|
+| `switch-to-buffer` (`window.el:9581`), its docstring and its `"B"` interactive spec | `window.sld`, a `define-command`, bound to `C-x b` (`subr.el:1746`) |
+| `read-buffer-to-switch` (`window.el:9485`) | `minibuffer.sld` — see the placement note below |
+| `window-normalize-buffer-to-switch-to` (`window.el:9508`) | `window.sld` |
+| `read-buffer` (`minibuf.c:1522`), `internal-complete-buffer` (`:2156`) | `minibuffer.sld` |
+| `complete-with-action` (`minibuffer.el:232`), `completion-table-with-predicate` (`:467`), `internal-complete-buffer-except` (`:4211`), `minibuffer-with-setup-hook` | `minibuffer.sld` |
+| `buffer-name-history` (`minibuf.c:2515`), `read-buffer-function` (`:2544`), `read-buffer-completion-ignore-case` (`:2559`) | the first is a history record in `minibuffer.sld`; the other two are `minibuf.sld`'s |
+| `apply-partially` (`subr.el:129`) | `subr.sld` |
+| `minibuffer-complete-and-exit` (`:2087`), `completion-complete-and-exit` (`:2113`), `completion--complete-and-exit` (`:2128`) | `minibuffer.sld`, as the three functions Emacs has |
+
+**Two placements are departures, both forced by the import graph and both
+named in the source.** `read-buffer-to-switch` is `window.el`'s but needs
+the minibuffer and `internal-complete-buffer-except`, and `window.sld` is
+*below* `minibuffer.sld` — so it lives in `minibuffer.sld` and `window.sld`
+asks for it through `*read-buffer-to-switch*`, the way a front end installs
+`*frame-creation-function*`. `*confirm-nonexistent-file-or-buffer*` and
+`confirm-nonexistent-file-or-buffer` are `files.el`'s and **moved down**
+into `minibuffer.sld` for the same reason (`files.sld` is above it), which
+is what `*minor-mode-alist*` did. Its default was `#t` here with a comment
+claiming that was Emacs; Emacs's is `after-completion`, and the difference
+is visible — a name typed out in full and RET'd once is accepted without a
+question.
+
+## The bug Chris hit: `Wrong type argument: #<<parameter> ...>`
+
+Reported as the error text alone, reproduced in a pty in one run, and it
+was mine. `read-buffer` passed `*buffer-name-history*` — a **parameter** —
+where `completing-read` wants a **history record**. A history here is a
+`<history>` record (that is what a prompt adds to), and a parameter is only
+*read* at the moment the answer is added — so the prompt drew perfectly,
+the completion worked, and **RET** raised:
+
+    Switch to buffer (default *scratch*): *scratch*
+    Wrong type argument: #<<parameter> 7f499d9d29a0 proc: #<procedure ...>
+
+and the minibuffer never left. `C-x b fresh RET` answered `[No match]` for
+the same reason, seen from the other side.
+
+The name now lives beside `minibuffer-history` in `minibuffer.sld` — the
+same `DEFSYM`/`Fset` pair in the same C file, and the same reason
+`minibuffer-history` is there. **The generalisable bit**: a value crossing
+between two libraries has to have the shape the *receiving* library wants,
+not the shape the library that declares it happens to use. This is the
+third time a coding-system-shaped value crossed a seam in this tree and the
+first time it was a parameter.
+
+## The other departure: the confirm rule had nothing to read
+
+`minibuffer-complete-and-exit` was a dispatch on the bitset of one
+completion. Emacs 31's is a **chain of conditions tried before anything is
+completed**, and the difference is what a user sees:
+
+  * an *empty* answer exits at once (`(= beg end)`, "Allow user to specify
+    null string") and the answer is the default — ours showed the
+    candidates instead;
+  * a valid completion exits (with the case fixed up when completion
+    ignores it);
+  * an answer that is **not** valid still exits when confirmation was
+    asked for — for `confirm-after-completion`, unless the command just
+    before the RET was a TAB. Ours refused, so `C-x b fresh RET` could not
+    make a buffer;
+  * and only then is anything completed.
+
+That rule needs `minibuffer-completion-confirm` to hold the **symbol**
+(`nil`, `confirm`, `confirm-after-completion`, or a predicate), and this
+tree held `#t`/`#f` — a boolean cannot tell `confirm` from
+`confirm-after-completion`, which is the whole of the rule. `completing-read`
+now binds it with Emacs's own line (`(unless (eq require-match t)
+require-match)`, `minibuffer.el:5243`), `minibuffer-confirm-exit-commands`
+exists (`(list minibuffer-complete minibuffer-complete-word)` — a command
+is its procedure here, and `completion-at-point` is not ported), and
+`completion--do-completion` grew Emacs's `expect-exact` so that RET does
+not say "Sole completion" or "Complete, but not unique" — which is what the
+first version of this printed on a perfectly ordinary RET.
+
+**`ding` is not ported**, so the predicate-confirm branch says "No match"
+without a bell. Named rather than papered over.
+
+## Verified
+
+Every expectation is Emacs 31.1's, measured in an `emacs -nw` pty on the
+same keys, and the four cases agree:
+
+| keys | Emacs | here |
+|---|---|---|
+| `C-x b cxb RET` | buffer `cxb` (the name is taken as typed) | same |
+| `C-x b fresh RET` | buffer `fresh` made | same |
+| `C-x b RET` (empty) | the default, `*scratch*` | same |
+| `C-x b cxb- TAB RET` | `[Confirm]`, and the second RET exits | same |
+
+- `ncurses-editor-tests.scm` +9 (268): the strip-internal rule including the
+  all-internal branch, `internal-complete-buffer-except`'s STRICT nil (the
+  current buffer is not offered but its name is accepted), the four cases of
+  the exit chain, `minibuffer-confirm-exit-commands`, and one line that is
+  the regression test for the parameter — `(history? buffer-name-history)`.
+- `tools/pty-check.py` gained **`switch-buffer`** (64 checks): the prompt, a
+  name that exists, a name that does not, and TAB-then-RET asking to
+  confirm. Verified failing with the bug put back — the failure message
+  quotes the very error Chris pasted.
+- All 35 suites pass, no new compiler warnings.
+
+## Still open
+
+- **`read-file-name`'s own exit path is unchanged.** It passes its
+  MUSTMATCH through to `completing-read`, and `find-alternate-file`
+  (`C-x C-v`) is the one caller that gives it
+  `(confirm-nonexistent-file-or-buffer)` — so that command now gets the
+  real `confirm-after-completion` symbol where it used to get `#t`. It
+  wants a pty check of its own: `C-x C-v` a name that does not exist,
+  TAB then RET, which should ask to confirm.
+- `completion-at-point`/`completion-in-region` (step G of
+  COMPLETION-PLAN.txt) do not exist, so `minibuffer-confirm-exit-commands`
+  lists the two TABs that do.
+- `ding` (`keyboard.c`), named above.
+- Not carried, each because nothing here produces it: `get-scratch-buffer-create`
+  (`simple.el:11547`) and its `initial-major-mode`/`initial-scratch-message`
+  (`startup.el`), `set-buffer-major-mode` (`buffer.c:2271`), the three
+  `switch-to-buffer-*` options (no dedicated windows here, and a window
+  already keeps its own point), `window-dedicated-p` and `window-prev-buffers`.

@@ -65,6 +65,7 @@
    ignore
    run-hooks
    run-mode-hooks
+   apply-partially
    kbd
    nthcdr
    ;; `nth' and the `posn-' cluster - see the note on them below.
@@ -337,6 +338,23 @@
             (let ((after (reverse (*delayed-after-hook-functions*))))
               (*delayed-after-hook-functions* '())
               (for-each (lambda (f) (f)) after)))))
+
+    (define (apply-partially function . args)
+      ;; GNU Emacs's `apply-partially' (`subr.el:129'): "Return a function
+      ;; that is a partial application of FUN to ARGS. ARGS is a list of
+      ;; the first N arguments to pass to FUN. The result is a new
+      ;; function which does the same as FUN, except that the first N
+      ;; arguments are fixed at the values with which this function was
+      ;; called."
+      ;;
+      ;; `read-buffer-to-switch' reaches it the way Emacs does:
+      ;; `internal-complete-buffer-except' returns a *completion table*,
+      ;; and Emacs builds that table with this over
+      ;; `completion-table-with-predicate' - the arguments it fixes are
+      ;; the table, the predicate and STRICT, and what is left to be given
+      ;; is what a table is called with, `(STRING PREDICATE ACTION)'.
+      ;;--------------------------------------------------------------
+      (lambda args1 (apply function (append args args1))))
 
     (define (ignore . _arguments)
       ;; GNU Emacs's `ignore' (`subr.el:501'): accept any arguments, do

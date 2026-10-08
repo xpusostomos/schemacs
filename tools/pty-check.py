@@ -44,17 +44,19 @@ TEST_CONFIG_HOME = tempfile.mkdtemp(prefix='schemacs-test-config-')
 
 # **And it holds an init file that inhibits the startup screen.** The tree
 # ships a `schemacs/splash.txt', so every editor started with a file
-# argument now shows the file above and the splash below
+# argument shows the file above and the splash below
 # (`schemacs/editor/startup.sld') - which is what a user wants and what
-# these checks are not about. `(set! inhibit-startup-screen #t)' is
-# Emacs's own way to say so, and using it here has a second effect worth
-# having: every check then loads an init file, so the path that gives the
-# init file the editor's names is exercised 62 times a run. The checks
-# that *are* about the splash pass their own `config=' with no init file
-# in it.
+# these checks are not about. `inhibit-startup-screen' is `startup.el''s
+# variable and this tree keeps it in `startup.sld', so the init file
+# imports that library to reach it, exactly as a user's would. Every check
+# then loads an init file, which is worth having for its own sake. The
+# checks that *are* about the splash pass their own `config=' with no init
+# file in it.
+NO_SPLASH_INIT = ('(import (schemacs editor startup))\n'
+                  '(set! inhibit-startup-screen #t)\n')
 _CFG = os.path.join(TEST_CONFIG_HOME, 'schemacs')
 os.makedirs(_CFG, exist_ok=True)
-open(os.path.join(_CFG, 'init.scm'), 'w').write('(set! inhibit-startup-screen #t)\n')
+open(os.path.join(_CFG, 'init.scm'), 'w').write(NO_SPLASH_INIT)
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -82,6 +84,7 @@ M_DOWN = b"\x1b" + DOWN
 M_UP = b"\x1b" + UP
 RET = b"\r"
 ESC = b"\x1b"
+TAB = b"\t"
 
 
 def resize(fd, pid, rows, cols):
@@ -1538,7 +1541,7 @@ SPLASH_CONFIG_HOME = tempfile.mkdtemp(prefix='schemacs-splash-config-')
 NO_SPLASH_CONFIG_HOME = tempfile.mkdtemp(prefix='schemacs-nosplash-config-')
 os.makedirs(os.path.join(NO_SPLASH_CONFIG_HOME, 'schemacs'), exist_ok=True)
 open(os.path.join(NO_SPLASH_CONFIG_HOME, 'schemacs', 'init.scm'), 'w').write(
-    '(set! inhibit-startup-screen #t)\n')
+    NO_SPLASH_INIT)
 
 
 def check_splash():
@@ -1547,9 +1550,9 @@ def check_splash():
     GNU Emacs's splash is Lisp that builds its own text; this one is a
     file of text, `splash.txt', looked for on the load path - and the tree
     ships one at `schemacs/splash.txt', beside its libraries, which is
-    what a run here finds (`main-ncurses.scm' is started with `-L .').
+    what a run here finds (`main-ncurses.scm' is started with `-L REPO').
 
-    Three things, which are what Emacs's own splash does with
+    Four things, which are what Emacs's own splash does with
     `command-line-1''s `(display-startup-screen (> displayable-buffers-len
     0))' (`startup.el:3125'):
 
@@ -1559,8 +1562,10 @@ def check_splash():
       * `q' leaves it (`exit-splash-screen' is `quit-window'), which is
         only visible because `quit-window' now gives the window another
         buffer when it is the frame's only one;
-      * and an init file saying `(set! inhibit-startup-screen #t)' means
-        it never appears at all - Emacs's own way of saying so.
+      * and an init file that says `(import (schemacs editor startup))'
+        and `(set! inhibit-startup-screen #t)' - the variable is
+        `startup.el''s and lives in that library, so the file imports it -
+        means it never appears at all.
     """
     problems = []
 
@@ -1598,8 +1603,69 @@ def check_splash():
     # 4. and the init file's setting inhibits it
     screen = screen_of(drive([], None, config=NO_SPLASH_CONFIG_HOME))
     if "*Schemacs*" in screen:
-        problems.append("`(set! inhibit-startup-screen #t)' in an init file "
-                        "did not inhibit the startup screen")
+        problems.append("an init file that imports `(schemacs editor startup)' "
+                        "and sets `inhibit-startup-screen' did not inhibit the "
+                        "startup screen")
+    return problems
+
+
+def check_switch_buffer():
+    """`C-x b': the prompt, a name that exists, and a name that does not.
+
+    Three things, each of them Emacs 31's own behaviour, measured in an
+    `emacs -nw` pty on the same keys:
+
+      * `C-x b' prompts `Switch to buffer (default ...): ' - the default
+        is `(other-buffer)', which is what `read-buffer-to-switch' passes
+        to `read-buffer';
+      * a name typed out in full and RET'd takes it, and RET *leaves*:
+        `completion--complete-and-exit' exits on a valid completion
+        (`minibuffer.el:2145');
+      * a name that is *not* a buffer is accepted too, and the buffer is
+        made - with `confirm-after-completion' and no TAB before the RET
+        there is nothing to confirm, so Emacs creates it. That is what
+        used to answer "[No match]" and refuse.
+
+    And the failure this is really for: `buffer-name-history` was a
+    *parameter* where a history record was wanted, so RET raised
+    "Wrong type argument: #<<parameter> ...>" and the minibuffer never
+    left - while the prompt itself looked perfectly healthy, because a
+    history is only read when the answer is added to it.
+    """
+    path = "/tmp/pty-check-switch.txt"
+    open(path, "w").write("SWITCH-ONE\n")
+    problems = []
+
+    out = drive([C_x + b"b"], path)
+    if "Switch to buffer (default " not in out:
+        problems.append("C-x b did not prompt: %r" % out[-200:])
+
+    # a name that exists: RET takes it and leaves the minibuffer
+    out = drive([C_x + b"b", b"*scratch*", RET], path)
+    if "Wrong type argument" in out:
+        problems.append("RET reported a wrong type argument: %r" % out[-300:])
+    mode = [r for r in screen_of(out).split("\n") if "-- L" in r]
+    if not mode or "*scratch*" not in mode[-1]:
+        problems.append("C-x b *scratch* RET did not switch to it: %r"
+                        % (mode[-1][:60] if mode else None,))
+
+    # a name that does not exist: RET makes it
+    out = drive([C_x + b"b", b"pty-fresh", RET], path)
+    if "[No match]" in out:
+        problems.append("a name that is not a buffer yet was refused: %r"
+                        % out[-300:])
+    mode = [r for r in screen_of(out).split("\n") if "-- L" in r]
+    if not mode or "pty-fresh" not in mode[-1]:
+        problems.append("C-x b pty-fresh RET did not make and show the buffer: "
+                        "%r" % (mode[-1][:60] if mode else None,))
+
+    # TAB first, then RET: now there *is* something to confirm, and the
+    # prompt stays up - Emacs's `confirm-after-completion' rule, where
+    # `last-command' is one of `minibuffer-confirm-exit-commands'
+    out = drive([C_x + b"b", b"SWI", TAB, RET], path)
+    if "[Confirm]" not in out:
+        problems.append("TAB then RET did not ask for confirmation: %r"
+                        % out[-300:])
     return problems
 
 
@@ -3047,6 +3113,7 @@ CHECKS = {
     "hscroll": check_hscroll,
     "back-door": check_back_door,
     "splash": check_splash,
+    "switch-buffer": check_switch_buffer,
 }
 
 
