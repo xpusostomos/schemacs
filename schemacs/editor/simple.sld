@@ -84,7 +84,10 @@
           *show-trailing-whitespace*
           buffer-local-value buffer-truncate-lines current-buffer mark-active
           set!buffer-truncate-lines set!mark-active
-          set-buffer-local-value! transient-mark-mode)
+          set-buffer-local-value! transient-mark-mode
+          ;; the *global* value, which is what `kill-local-variable'
+          ;; falls back to
+          *transient-mark-mode*)
     (only (schemacs editor command) *mark-even-if-inactive*)
     (only (schemacs editor editfns)
           bolp buffer-size buffer-substring delete-and-extract-region delete-region eobp
@@ -1664,12 +1667,36 @@ non-nil."
                                        (current-buffer)
                                        (region-beginning)
                                        (region-end))))))
-          ;; a temporarily-enabled Transient Mark mode goes back to what
-          ;; it was
-          (when (eq? (buffer-local-value (current-buffer)
-                                         'transient-mark-mode #f)
-                     'lambda)
-            (set-buffer-local-value! (current-buffer) 'transient-mark-mode #f))
+          ;; **A temporarily-enabled Transient Mark mode goes back to
+          ;; what it was** - GNU Emacs's `cond' (`simple.el:7120'), whose
+          ;; two branches this is:
+          ;;
+          ;;   ((eq (car-safe transient-mark-mode) 'only)
+          ;;    (setq transient-mark-mode (cdr transient-mark-mode))
+          ;;    (if (eq transient-mark-mode (default-value 'transient-mark-mode))
+          ;;        (kill-local-variable 'transient-mark-mode)))
+          ;;   ((eq transient-mark-mode 'lambda)
+          ;;    (kill-local-variable 'transient-mark-mode)))
+          ;;
+          ;; The `only' branch was missing, and it is what makes a mouse
+          ;; drag's region survive: `mouse-set-region-1' sets the
+          ;; buffer-local to `(only . OLD)', and this is what puts OLD
+          ;; back when the region is finally deactivated.
+          ;;
+          ;; `kill-local-variable' has no counterpart here - the local
+          ;; value is a slot, and there is no way to remove one - so
+          ;; "back to the default" is written as the default's value.
+          ;; Every reader is `(transient-mark-mode)', which answers the
+          ;; same thing either way.
+          (let ((tmm (buffer-local-value (current-buffer)
+                                         'transient-mark-mode #f)))
+            (cond
+             ((eq? (and (pair? tmm) (car tmm)) 'only)
+              (set-buffer-local-value! (current-buffer)
+                                       'transient-mark-mode (cdr tmm)))
+             ((eq? tmm 'lambda)
+              (set-buffer-local-value! (current-buffer) 'transient-mark-mode
+                                       (*transient-mark-mode*)))))
           (set!mark-active #f)
           (for-each (lambda (hook) (hook)) (*deactivate-mark-hook*)))))
 

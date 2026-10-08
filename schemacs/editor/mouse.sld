@@ -14,6 +14,14 @@
   ;; The front end delivers motion events for this - `pgtk.sld' asks for
   ;; `GDK_POINTER_MOTION_MASK' beside the button masks.
   ;;
+  ;; **And dragging past the edge of the window scrolls it**, which is
+  ;; what makes a selection longer than a screen possible: when a motion
+  ;; event has left the window, `mouse-scroll-subr' (`mouse.el:1708')
+  ;; scrolls by the rows the pointer is past the edge and repeats every
+  ;; `mouse-scroll-delay' until some input arrives. That is Emacs's
+  ;; function and Emacs's arithmetic; what it is built on, `vertical-motion'
+  ;; (`indent.c:2207'), is in `xdisp.sld' - see the note there.
+  ;;
   ;; Still not here, named so that it is not mistaken for done:
   ;;
   ;;   the click count, and so the word a double click is on and the line
@@ -32,33 +40,58 @@
   ;;                       such frame: the echo area is a row
   (import
     (scheme base)
-    (only (guile) open-file catch format)   ; TEMPORARY, for clicklog
+    (only (guile) catch format open-file)   ; TEMPORARY, for draglog
+    (only (scheme time) current-jiffy jiffies-per-second) ; TEMPORARY
     ;; `posn-set-point' is `subr.el''s and lives here because it needs
     ;; the two below, and `(schemacs editor subr)' is beneath both of
     ;; them and cannot reach either - see the note on the posn cluster
     ;; there.
     (only (schemacs editor subr) event-start event-end posn-point posn-window
+          ;; where the pointer is, which a drag that has left its window
+          ;; asks for
+          posn-x-y
           ;; where a release lands if the tracking loop did not eat it
           ignore)
     (only (schemacs editor frame)
-          frame? frame-selected-window select-window window-type?)
-    (only (schemacs editor editfns) goto-char)
+          frame? frame-selected-window mouse-position select-window
+          selected-window set-window-start! window-buffer window-edges
+          window-height window-point window-type?)
+    (only (schemacs editor editfns) goto-char point)
     ;; The mark a drag sets, and the region it leaves active:
-    ;; `set-mark', `activate-mark' and `region-active-p' are simple.el's.
+    ;; `push-mark', `pop-mark', `activate-mark' and `region-active-p' are
+    ;; simple.el's. `push-mark' and not `set-mark', which is Emacs's own
+    ;; call in `mouse-drag-track': the mark that was there goes on the
+    ;; ring rather than being lost.
     (only (schemacs editor simple)
-          set-mark activate-mark deactivate-mark region-active-p)
-    (only (schemacs editor engine) text-editor-mark)
-    (only (schemacs editor buffer) current-buffer)
-    ;; a drag repaints as it moves, which is what Emacs's tracking loop
-    ;; does with `redisplay'.
-    (only (schemacs editor xdisp) redisplay-frames! *track-mouse*)
+          push-mark pop-mark set-mark activate-mark deactivate-mark
+          region-active-p use-region-p)
+    (only (schemacs editor engine)
+          set!text-editor-deactivate-mark! text-editor-mark)
+    (only (schemacs editor buffer)
+          buffer-auto-hscroll-mode current-buffer set!buffer-auto-hscroll-mode
+          set-buffer-local-value! transient-mark-mode)
+    ;; a drag repaints as it moves, which is what Emacs's tracking does
+    ;; with `redisplay'.
+    (only (schemacs editor xdisp)
+          redisplay-frames! *mode-line-format* track-mouse vertical-motion
+          window-end window-start)
+    ;; `mouse-position' - the pointer's own frame row, which is what
+    ;; decides whether a drag has left the window - is the display's
+    ;; answer, so the display is what is asked.
+    (only (schemacs editor dispnew) current-display line-height)
     (only (schemacs editor keymap) define-key *default-keymap*)
+    ;; a sparse keymap to hand to `set-transient-map', which is Emacs's
+    ;; `(make-sparse-keymap)' in that same place
+    (prefix (schemacs keymap) km:)
     (only (schemacs editor character) kbd)
     ;; A command that reads its own keys waits the way the command loop
     ;; does, and `read-key-event' is the read every key comes through -
-    ;; the same two calls `isearch' makes.
+    ;; the same two calls `isearch' makes. `sit-for' is that same read
+    ;; with a deadline, which is how the edge-of-window scrolling knows
+    ;; a drag has moved on.
     (only (schemacs editor keyboard)
-          *unread-command-events* read-key-event read-wait-ms
+          set-transient-map sit-for
+          *unread-command-events*        ; TEMPORARY, for draglog
           ;; the display's own event value, which is where a motion
           ;; event's *position* is - `read-key-event' answers only the key
           *last-read-event*)
@@ -67,6 +100,8 @@
 
   (export posn-set-point mouse-set-point mouse-drag-region mouse-drag-track
           mouse-set-region mouse-start-end mouse--drag-set-mark-and-point
+          mouse-scroll-subr mouse-set-region-1
+          *mouse-scroll-delay* *mouse-scroll-min-lines*
           mark mouse-key?)
 
   (begin
@@ -140,23 +175,29 @@ point determined by `mouse-select-region-move-to-beginning'."
       ;;--------------------------------------------------------------
       (and (symbol? key)
            (memq key '(mouse-1 mouse-2 mouse-3
-                       down-mouse-1 down-mouse-2 down-mouse-3))))
+                       down-mouse-1 down-mouse-2 down-mouse-3
+                       drag-mouse-1 drag-mouse-2 drag-mouse-3))))
 
 
-    (define (clicklog line)
-      ;; TEMPORARY: append a line to a file, from wherever.
+    (define (draglog line)
+      ;; TEMPORARY: append a line to a file, from wherever. A file and not
+      ;; the echo area, which only ever shows the last message.
+      ;;--------------------------------------------------------------
       (catch #t
         (lambda ()
-          (let ((out (open-file "/tmp/pgtk-click.log" "a")))
-            ;; `for-each' is R7RS's and takes a *list*; a string needs
-            ;; `string-for-each'. Getting that wrong is what made the
-            ;; first version of this log write nothing at all.
+          (let ((out (open-file "/tmp/pgtk-drag.log" "a")))
             (string-for-each
              (lambda (c) (write-u8 (char->integer c) out))
              line)
             (write-u8 10 out)
             (close-port out)))
         (lambda (k . a) #f)))
+
+    (define (car-safe-of object)
+      ;; GNU Emacs's `car-safe': the cons's car, or nil for anything that
+      ;; is not one.
+      ;;--------------------------------------------------------------
+      (and (pair? object) (car object)))
 
     (define (mark)
       ;; The mark as a *position*, which is what GNU Emacs's `(mark)'
@@ -195,133 +236,373 @@ point determined by `mouse-select-region-move-to-beginning'."
               ((and m (< click m)) (set-mark end) (goto-char beg))
               (else (set-mark beg) (goto-char end)))))
 
+    ;;----------------------------------------------------------------
+    ;; Dragging past the edge of a window
+    ;;------------------------------------------------------------------
+
+    (define *mouse-scroll-delay* (make-parameter 0.25))
+    ;; ^ GNU Emacs's `mouse-scroll-delay' (`mouse.el:1679'), "The pause
+    ;; between scroll steps caused by mouse drags, in seconds. ... Setting
+    ;; this to zero causes Emacs to scroll as fast as it can."
+
+    (define *mouse-scroll-min-lines* (make-parameter 1))
+    ;; ^ GNU Emacs's `mouse-scroll-min-lines' (`mouse.el:1687'): "The
+    ;; minimum number of lines scrolled by dragging mouse out of window."
+    ;; The pointer one row past the edge scrolls one line either way, so
+    ;; this only matters when it is set higher.
+
+    (define (mouse-scroll-subr window jump overlay start adjust)
+      ;; GNU Emacs's `mouse-scroll-subr' (`mouse.el:1708'): "Scroll the
+      ;; window WINDOW, JUMP lines at a time, until new input arrives. If
+      ;; OVERLAY is an overlay, let it stretch from START to the far edge
+      ;; of the newly visible text. ADJUST, if non-nil, is a function,
+      ;; without arguments, to call after setting point. Upon exit, point
+      ;; is at the far edge of the newly visible text."
+      ;;
+      ;; **The loop is the function.** One pass scrolls JUMP screen lines
+      ;; and leaves point on the far edge of what is now visible; the
+      ;; pass *repeats* while `sit-for' says the delay went by with no
+      ;; input. That is the whole of "until new input arrives", and it is
+      ;; why dragging the pointer out of the bottom and holding it still
+      ;; keeps scrolling a step every `mouse-scroll-delay', while moving
+      ;; back in or letting the button up - either of which is input - is
+      ;; what stops it. A single motion event therefore scrolls one step
+      ;; in a test that has already queued the next key, and the whole
+      ;; buffer in a drag that is simply held out there.
+      ;;
+      ;; The odd-looking `(window-end window)' below is Emacs's and has to
+      ;; stay: `set-window-start!' does not invalidate the recorded end,
+      ;; so `window-end' still answers the *old* end until the next
+      ;; redisplay - which is exactly what this wants, because the old end
+      ;; is now JUMP rows above the new bottom edge, and walking JUMP - 1
+      ;; rows down from it lands on the last row on the screen. (This
+      ;; tree's `window-end' behaves the same way and for the same reason:
+      ;; `set-window-start!' leaves `%window-end-valid?' alone.)
+      ;;
+      ;; NOT CARRIED: OVERLAY, which nothing here wants - the drag
+      ;; highlights the region itself, and the `SECONDARY' selection
+      ;; caller that would is not ported.
+      ;;--------------------------------------------------------------
+      (let ((jump (cond ((and (> jump 0)
+                              (< jump (*mouse-scroll-min-lines*)))
+                         (*mouse-scroll-min-lines*))
+                        ((and (< jump 0)
+                              (> jump (- (*mouse-scroll-min-lines*))))
+                         (- (*mouse-scroll-min-lines*)))
+                        (else jump))))
+        (let ((opoint (point)))
+          (let loop ()
+            ;; From the window's top, so that the walk is by screen rows
+            ;; and not by however far down a line point happens to be.
+            (goto-char (window-start window))
+            (when (not (= 0 (vertical-motion jump window)))
+              (draglog (format #f "  step jump=~a old-start=~a new-start=~a"
+                               jump (window-start window) (point)))
+              (set-window-start! window (point))
+              (if (>= jump 0)
+                  (if (window-end window)
+                      (begin
+                        (goto-char (window-end window))
+                        ;; window-end doesn't reflect the window's new
+                        ;; start position until the next redisplay
+                        (vertical-motion (- jump 1) window)
+                        ;; **And then one row further, off the bottom of
+                        ;; the window.** The walk above lands point on the
+                        ;; window's *last* row, which the redisplay is
+                        ;; happy with - the cursor is on the screen, so
+                        ;; nothing moves. Leaving it one row lower is
+                        ;; "the cursor has been pushed past the bottom",
+                        ;; which is the one thing the redisplay's start
+                        ;; decision acts on (`redisplay_window''s
+                        ;; `recenter:', ported here as
+                        ;; `scroll-to-cursor!'): it recentres, so the
+                        ;; window moves about half its height rather than
+                        ;; one line - the same thing that happens when the
+                        ;; *keyboard* cursor is moved off the bottom row.
+                        ;; Emacs reaches that state by a different route
+                        ;; (`mouse-scroll-subr''s walk ends on the last
+                        ;; row, and a GUI frame's last row is only
+                        ;; partly visible, so its redisplay recentres
+                        ;; too); this tree's rows are exact, so the row
+                        ;; has to be stepped onto deliberately.
+                        (vertical-motion 1 window))
+                      (vertical-motion (- (window-height window) 2) window))
+                  (goto-char (window-start window)))
+              ;; Now that we have scrolled WINDOW properly, put point back
+              ;; where it was for the redisplay so that we don't mess up
+              ;; the selected window.
+              (unless (eq? window (selected-window))
+                (goto-char opoint))
+              (when adjust
+                (adjust))
+              ;; TEMPORARY: the same call, with its answer written down -
+              ;; `#t' means the delay went by with nothing typed, which is
+              ;; what sends the loop round again.
+              (let ((more (sit-for (*mouse-scroll-delay*) #f)))
+                (draglog (format #f "  waited more=~a got=~a" more
+                                 (if (pair? (*unread-command-events*))
+                                     (car (*unread-command-events*))
+                                     '())))
+                (when more
+                  (loop)))))
+          (unless (eq? window (selected-window))
+            (goto-char opoint)))))
+
+    (define (%mouse-drag-motion start-window start-point top bottom)
+      ;; The body of Emacs's `[mouse-movement]' lambda (`mouse.el:1994'),
+      ;; which is the command the drag's transient map binds - so this is
+      ;; run by the *command loop*, once per motion event, and not from a
+      ;; loop of the drag's own.
+      ;;
+      ;; Inside the window the drag started in - and on a character, which
+      ;; is what `integer? END-POINT' asks - point follows the pointer and
+      ;; the region grows to meet it. Anywhere else the drag has left the
+      ;; window and the window scrolls, by the number of rows the pointer
+      ;; is above the top edge or below the bottom one, so that pulling it
+      ;; further out scrolls faster.
+      ;;
+      ;; **The second branch is not an error case.** A motion event
+      ;; outside the window has no buffer position - `posn-point' answers
+      ;; #f for a mode line and for the frame, and `posn-window' names
+      ;; something other than the window dragged in - and Emacs reads that
+      ;; as "keep scrolling", which is what makes a selection longer than
+      ;; a screen possible at all.
+      ;;--------------------------------------------------------------
+      (let* ((ev (*last-read-event*))
+             (end (and (pair? ev) (event-end ev)))
+             (end-window (and end (posn-window end)))
+             (end-point (and end (posn-point end))))
+        (if (and (eq? end-window start-window) (integer? end-point))
+            (begin
+              (draglog (format #f "motion t=~a INSIDE point=~a"
+                               (quotient (current-jiffy)
+                                         (quotient (jiffies-per-second) 1000))
+                               end-point))
+              (mouse--drag-set-mark-and-point start-point end-point 0))
+            ;; **The pointer's row comes from `mouse-position', not from
+            ;; the event.** The event's own coordinates are relative to
+            ;; whichever window the pointer was over, and are meaningless
+            ;; the moment it leaves that window - which is exactly the
+            ;; case this branch is for. Emacs asks its display where the
+            ;; pointer is (`XQueryPointer', `gdk_window_get_device_position')
+            ;; and this is that call; reading `posn-x-y' here instead is
+            ;; what made a drag past the edge scroll one line at a time,
+            ;; because the row it answered barely differed from the
+            ;; window's bottom edge.
+            (let ((mouse-row (cdr (cdr (mouse-position)))))
+              (draglog (format #f "motion t=~a row=~a top=~a bottom=~a"
+                               (quotient (current-jiffy)
+                                         (quotient (jiffies-per-second) 1000))
+                               mouse-row top bottom))
+              (cond
+               ((not (integer? mouse-row)) #f)
+               ((< mouse-row top)
+                (mouse-scroll-subr start-window (- mouse-row top)
+                                   #f start-point #f))
+               ((>= mouse-row bottom)
+                (mouse-scroll-subr start-window (+ 1 (- mouse-row bottom))
+                                   #f start-point #f)))))))
+
     (define-command (mouse-set-region click)
       "Set the region to the text dragged over, and copy to kill ring.
 This should be bound to a mouse drag event."
       (interactive "e")
-      ;; Emacs's body reads the click count through `mouse-drag-copy-region'
-      ;; and `mouse--last-click-count'; what is ported is the end of it -
-      ;; the mark and point of the drag - and a count of 0, which is what
-      ;; a single click has.
+      ;; GNU Emacs's `mouse-set-region' (`mouse.el:1799'). **This is what
+      ;; keeps the region after a drag.** The drag's transient map is
+      ;; popped by the release - a command the map does not bind - and
+      ;; its ON-EXIT deactivates the mark; `[drag-mouse-1]' is what then
+      ;; runs, and its `push-mark'/`set-mark'/`mouse-set-region-1' put
+      ;; the region back. That is why `mouse.el:3783' binds
+      ;; `[drag-mouse-1]' and not `[mouse-1]'.
+      ;;
+      ;; NOT CARRIED, each named: `mouse-minibuffer-check';
+      ;; `mouse-shift-adjust-point' (no shift-adjust machinery here);
+      ;; the `mouse-drag-start' terminal parameter and the click count it
+      ;; is read for; `mouse-drag-copy-region' (nil in Emacs by default,
+      ;; so nothing is copied); and the "(or transient-mark-mode
+      ;; (window-system) (sit-for 1))" cursor bounce, which is a text
+      ;; terminal's.
       ;;--------------------------------------------------------------
-      (let ((point (posn-point (event-start click))))
-        (when point
-          (goto-char point)
-          (set-mark point)
-          (activate-mark))))
+      (select-window (posn-window (event-start click)))
+      (let* ((beg (posn-point (event-start click)))
+             (end (if (eq? (posn-window (event-end click)) (selected-window))
+                      (posn-point (event-end click))
+                      ;; "If the mouse ends up in any other window or on
+                      ;; the menu bar, use `window-point' of the selected
+                      ;; window" (Bug#23707). Emacs's `window-point'
+                      ;; defaults to the selected window; this tree's takes
+                      ;; it, so it is passed.
+                      (window-point (selected-window))))
+             (click-count 0))
+        (when (and (integer? beg) (integer? end))
+          (let ((range (mouse-start-end beg end click-count)))
+            (if (< end beg)
+                (begin (set! end (car range)) (set! beg (cadr range)))
+                (begin (set! beg (car range)) (set! end (cadr range))))))
+        (when (integer? beg)
+          (goto-char beg))
+        (push-mark)
+        (set-mark (point))
+        (when (integer? end)
+          (goto-char end))
+        (mouse-set-region-1)))
+
+    (define (mouse-set-region-1)
+      ;; GNU Emacs's `mouse-set-region-1' (`mouse.el:1843'): "Set
+      ;; transient-mark-mode for a little while" - the `(cons 'only OLD)'
+      ;; value, whose `only' is what tells `deactivate-mark' to put the
+      ;; old value back rather than to stay off.
+      ;;--------------------------------------------------------------
+      (unless (eq? (car-safe-of (transient-mark-mode)) 'only)
+        (set-buffer-local-value!
+         (current-buffer) 'transient-mark-mode
+         (cons 'only (if (eq? (transient-mark-mode) 'lambda)
+                         #f
+                         (transient-mark-mode))))))
 
     (define (mouse-drag-track start-event)
-      ;; GNU Emacs's `mouse-drag-track' (`mouse.el:1919'), as far as the
-      ;; click goes. Not a command in Emacs either - `mouse-drag-region'
-      ;; calls it - so it is a plain definition here too.
+      ;; GNU Emacs's `mouse-drag-track' (`mouse.el:1919'). Not a command
+      ;; in Emacs either - `mouse-drag-region' calls it - so it is a
+      ;; plain definition here too.
       ;;
-      ;; **The `let*' is the event.** Emacs records the position, the
-      ;; point and the window the press happened in, then jumps to it:
-      ;;
-      ;;   (_ (mouse-set-point start-event))
-      ;;
-      ;; and that call is what selects the window and moves point. The
-      ;; tracking after it exists to grow a region, which is the part
-      ;; this tree does not have yet.
+      ;; **There is no read loop, and the shape is the point.** Emacs
+      ;; installs a *transient keymap* (`set-transient-map',
+      ;; `mouse.el:1996') binding `[mouse-movement]' to a lambda and
+      ;; returns. The **command loop** reads the motion events; the map
+      ;; answers for them; and the first command the map does not bind -
+      ;; the button coming up, or anything else at all - pops the map and
+      ;; runs the cleanup. This tree read the events itself for as long as
+      ;; it had no transient keymap, and every drag fault had to be
+      ;; patched in a place Emacs has no such place: a `<resize>' swallow
+      ;; in the loop, an `auto-hscroll-mode' `dynamic-wind' around it.
       ;;
       ;; `#f' for PROMOTE-TO-REGION, which Emacs's call leaves out: a
       ;; `define-command' here takes the arguments its interactive
       ;; expression supplies and has no `&optional' to make one skippable,
       ;; so a programmatic call passes the same two.
+      ;;
+      ;; NOT CARRIED, each named where Emacs has it: `mouse-minibuffer-
+      ;; check' (this tree has no minibuffer-only frame);
+      ;; `mouse-selection-click-count' and the click count itself, which
+      ;; need a clock; `echo-keystrokes' and `make-cursor-line-fully-
+      ;; visible', neither of which exists here; `mouse-shift-adjust-
+      ;; point'; and the `terminal-parameter' the drag's start event is
+      ;; recorded in for `mouse-drag-and-drop-region'.
       ;;--------------------------------------------------------------
-      (clicklog "track: entered")
-      (mouse-set-point start-event #f)
-      (clicklog "track: point set")
-      ;; The mark goes down with the *press*, so the drag has a far end to
-      ;; move from before the pointer has moved at all. Emacs sets it in
-      ;; this loop's `let*' the same way.
-      (let ((start-point (posn-point (event-start start-event))))
-        (clicklog (string-append "track: start-point="
-                                 (if start-point
-                                     (number->string start-point) "NONE")))
-        (when start-point
-          (set-mark start-point)
-          (activate-mark))
-        (clicklog "track: mark set, entering the loop")
-        ;; **The tracking loop, under `track-mouse'.** Emacs binds that
-        ;; variable around this loop and the *display* is what reads it:
-        ;; motion is only an event while it is set. It has to be bound
-        ;; before the loop reads anything - a move that arrived before
-        ;; the binding was never an event, which is why the front end
-        ;; checks it rather than the loop filtering afterwards.
-        ;;
-        ;; Emacs's loop also reads every event until the button comes up,
-        ;; moving the region with each motion; the click count is fixed at
-        ;; 0 here - a single click - because there is no clock to count
-        ;; with.
-        (parameterize ((*track-mouse* #t))
-        (clicklog (string-append "track: bound track-mouse, now "
-                                 (format #f "~a" (*track-mouse*))))
-        (let loop ()
-          (clicklog (string-append "loop: reading, wait="
-                                   (format #f "~a" (read-wait-ms))))
-          (let ((key (read-key-event (read-wait-ms))))
-            (clicklog (string-append "loop: key="
-                                     (if key (format #f "~a" key) "NONE")))
-            (cond
-             ((not key) #f)                     ; a read that produced nothing
-             ((eq? key 'mouse-1)                ; the release: the region stands
-              (clicklog "loop: release")
-              (activate-mark)
-              #f)
-             ((eq? key 'mouse-movement)
-              (clicklog (string-append
-                         "loop: motion, event has a point? "
-                         (let ((ev (*last-read-event*)))
-                           (if (and (pair? ev) (posn-point (event-start ev)))
-                               "yes" "no"))))
-              ;; The position comes from the *event*, which `read-key-event'
-              ;; does not answer - it answers the key - so it is read from
-              ;; `*last-read-event*', the value `keyboard.sld' keeps for
-              ;; exactly this.
-              (let* ((ev (*last-read-event*))
-                     (click (and (pair? ev)
-                                 (posn-point (event-start ev)))))
-                (when (and start-point click)
-                  (mouse--drag-set-mark-and-point start-point click 0)
-                  ;; A drag that does not show itself is a drag nobody can
-                  ;; aim: Emacs's loop redisplays here for the same reason.
-                  (redisplay-frames!)))
-              (loop))
-             ((eq? key 'down-mouse-1) (loop))   ; a second press, still tracking
-             ;; **Any other mouse key ends the tracking too, and is not
-             ;; pushed back.** A release that slipped past the line above
-             ;; - read by another reader first - would otherwise be handed
-             ;; to the command loop, which has nothing bound for it and
-             ;; says "undefined key" in the echo area: a click that
-             ;; worked, followed by a complaint about it.
-             ;; **A frame event is not input, and must not end the drag.**
-             ;; In GNU Emacs a frame's size change is not a key event at
-             ;; all - `keyboard.c` has no `RESIZE_EVENT` - so resizing the
-             ;; window mid-drag leaves `mouse-drag-track`'s transient map
-             ;; untouched and the drag carries on. Emacs is explicit about
-             ;; the same principle for the frame events it *does* make:
-             ;; its drag map binds `[switch-frame]' and `[select-window]'
-             ;; to `ignore' so that a frame event cannot end a drag.
-             ;;
-             ;; `<resize>' is this tree's invention standing in for that
-             ;; size change (`keyboard.sld` binds it in
-             ;; `special-event-map`), and a press is followed by one every
-             ;; time - measured, three drags out of three. Treating it as
-             ;; "an event I do not recognise" is what ended every drag
-             ;; before it had moved once.
-             ;;
-             ;; Swallowed rather than pushed back: the new size is already
-             ;; recorded by the `size-allocate' signal, which does not come
-             ;; through here, and a pushback would be read straight back
-             ;; out by the next iteration and spin.
-             ((eq? key 'resize) (loop))
-             ((mouse-key? key) #f)
-             (else
-              ;; Anything else belongs to the command loop, which is where
-              ;; Emacs's own readers leave it too.
-              (*unread-command-events* (cons key (*unread-command-events*)))
-              #f)))))))
+      (deactivate-mark)
+      (let* ((start-posn (event-start start-event))
+             (start-point (posn-point start-posn))
+             (start-window (posn-window start-posn))
+             ;; "We've recorded what we needed from the current buffer
+             ;; and window" - Emacs clears the buffer's deferred
+             ;; `deactivate-mark' flag here, because this drag is about to
+             ;; set its own region.
+             (_ (set!text-editor-deactivate-mark!
+                 (window-buffer start-window) #f))
+             ;; "now let's jump to the place of the event, where things
+             ;; are happening" - the call that selects the window and
+             ;; moves point, and that everything below depends on.
+             (_ (mouse-set-point start-event #f))
+             (bounds (window-edges start-window))
+             (top (list-ref bounds 1))
+             ;; "Don't count the mode line": the window's last row is its
+             ;; mode line, and a pointer on it is outside the text, which
+             ;; is why the scrolling test below is `>= BOTTOM'. Emacs
+             ;; takes the whole edge when a window has no mode line.
+             (bottom (if *mode-line-format*
+                         (- (list-ref bounds 3) 1)
+                         (list-ref bounds 3)))
+             ;; A single click, which is all this tree makes: the click
+             ;; count is what a double or triple click multiplies the
+             ;; region by, and counting needs a clock.
+             (click-count 0)
+             (auto-hscroll-saved
+              (buffer-auto-hscroll-mode (window-buffer start-window)))
+             ;; `track-mouse' is set for the drag and put back by the
+             ;; cleanup - Emacs's `old-track-mouse'. It is *whether the
+             ;; display makes an event of pointer motion at all*, so the
+             ;; front end reads it; `pgtk.sld''s motion handler does.
+             (old-track-mouse track-mouse)
+             (cleanup (lambda ()
+                        (set! track-mouse old-track-mouse)
+                        (set!buffer-auto-hscroll-mode
+                         (window-buffer start-window) auto-hscroll-saved))))
+        ;; "Cleanup on errors" - Emacs's `condition-case'.
+        (guard (ex (else (cleanup) (raise ex)))
+          ;; In case the down click is in the middle of some intangible
+          ;; text, use the end of that text. Below the `mouse-set-point'
+          ;; above, so this is the position the drag really starts from.
+          (when (< (point) start-point)
+            (goto-char start-point))
+          (set! start-point (point))
+          ;; **Automatic hscrolling off for the duration**, and restored
+          ;; by the cleanup, which is where Emacs turns it off and for the
+          ;; reason its own comment gives: it "interferes with the natural
+          ;; dragging behavior (point will unexpectedly be moved beneath
+          ;; the pointer, making selections in auto-scrolling margins
+          ;; impossible)". Emacs zeroes `scroll-margin' beside it; there
+          ;; is no `scroll-margin' in this tree to zero.
+          (set!buffer-auto-hscroll-mode (window-buffer start-window) #f)
+          ;; The region is highlighted for the rest of this drag and no
+          ;; longer than that: `(cons 'only ...)' is Emacs's own value
+          ;; here, and its `deactivate-mark' half is what turns it back.
+          ;;
+          ;; **`setq-local`, not `setq`** - Emacs writes the *buffer's*
+          ;; Transient Mark mode, and so must this: the mode a buffer sees
+          ;; is its own value, so a global set here would be invisible to
+          ;; `(transient-mark-mode)` and to `region-active-p`.
+          (set-buffer-local-value! (current-buffer) 'transient-mark-mode
+                                   (cons 'only (transient-mark-mode)))
+          ;; "Activate the region, using `mouse-start-end' to determine
+          ;; where to put point and mark".
+          (let ((range (mouse-start-end start-point start-point click-count)))
+            (push-mark (car range) #t #t)
+            (goto-char (cadr range)))
+          ;; **Never nil and never t**: Emacs sets this to something that
+          ;; is neither, so that mouse events are not reported to have
+          ;; happened on the tool bar or the tab bar - which would break a
+          ;; drag that started in the window body below them
+          ;; (`make_lispy_position', bug#51794). The front end's test is
+          ;; the C's `!NILP (track_mouse)'.
+          (set! track-mouse 'drag-tracking)
+          ;; **The map that makes the loop unnecessary.** It is emptied
+          ;; by `set-transient-map' when a command it does not bind runs,
+          ;; and that command is normally the button coming up.
+          ;;
+          ;; `[switch-frame]' and `[select-window]' are bound to `ignore'
+          ;; so that a *frame* event cannot end a drag - Emacs's own
+          ;; lines. This tree invents no such events, and its frame
+          ;; events (`<resize>' and the focus pair) do not need the
+          ;; binding: they are *special events*, which
+          ;; `dispatch-special-event' handles before any map is consulted
+          ;; and without `pre-command-hook', exactly as Emacs's
+          ;; `read_char' does (`keyboard.c:3113'). Running them as
+          ;; ordinary commands is what used to end a drag on a resize.
+          ;;
+          ;; The movement command is a plain procedure and not a
+          ;; `define-command', which is the one departure from Emacs's
+          ;; `(lambda (event) (interactive "e") ...)': a lambda cannot
+          ;; carry an interactive specification in this tree, and it does
+          ;; not need one - the event it would be handed is where
+          ;; `*last-read-event*' already is, which is how every command
+          ;; here reads a mouse event's position.
+          (set-transient-map
+           (let ((map (km:keymap '*mouse-drag-map*)))
+             (define-key map (kbd "<switch-frame>") ignore)
+             (define-key map (kbd "<select-window>") ignore)
+             (define-key map (kbd "<mouse-movement>")
+                         (lambda ()
+                           (%mouse-drag-motion start-window start-point
+                                               top bottom)))
+             map)
+           #t
+           ;; ON-EXIT: Emacs's own, minus the context-menu branch that
+           ;; keeps the region when `down-mouse-3' came next - there is no
+           ;; context menu here.
+           (lambda ()
+             (cleanup)
+             (deactivate-mark)
+             (pop-mark))))))
 
     (define-command (mouse-drag-region start-event)
       "Set the region to the text that the mouse is dragged over.
@@ -341,17 +622,18 @@ is dragged over to."
       ;;--------------------------------------------------------------
       (mouse-drag-track start-event))
 
-    ;; `mouse.el:3781''s own line. The *press* starts a drag, which is why
-    ;; the binding is on `down-mouse-1' and not on the click; `mouse-1' is
-    ;; what `mouse-drag-track' reads to learn the press is over, so it is
-    ;; deliberately bound to nothing.
+    ;; **`mouse.el:3781'\u2013`:3783', all three of them**, and the
+    ;; release's two are not decoration:
+    ;;
+    ;;   [down-mouse-1]  `mouse-drag-region'   the press starts the drag
+    ;;   [mouse-1]       `mouse-set-point'     a release with no movement
+    ;;   [drag-mouse-1]  `mouse-set-region'    a release *after* movement
+    ;;
+    ;; The third is what puts the region back after the drag's own
+    ;; cleanup has taken it down, so without it a drag highlights the
+    ;; text and then loses it the moment the button comes up.
     (define-key *default-keymap* (kbd "<down-mouse-1>") mouse-drag-region)
-
-    ;; The *release*, which no command wants: `mouse-drag-track' reads it
-    ;; to learn the click is over, and this is what it lands on if some
-    ;; other reader got to it first. Without it the echo area reports
-    ;; "undefined key" after an otherwise successful click, which reads
-    ;; as a failure and is not one.
-    (define-key *default-keymap* (kbd "<mouse-1>") ignore)
+    (define-key *default-keymap* (kbd "<mouse-1>") mouse-set-point)
+    (define-key *default-keymap* (kbd "<drag-mouse-1>") mouse-set-region)
 
     ))

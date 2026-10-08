@@ -41,13 +41,14 @@
     ;; reaches through `(guile)' - as `frame.sld''s SIGTSTP does.
     (only (system foreign) pointer->procedure string->pointer pointer->string
           null-pointer? int void double)
-    (only (guile) dynamic-link dynamic-func assq-ref filter
-          open-file catch)            ; TEMPORARY, for clicklog
+    (only (guile) dynamic-link dynamic-func assq-ref filter)
     ;; `alist-delete' removes one selection from the ownership record.
     (only (srfi srfi-1) alist-delete)
     (only (scheme write) display write)
-    (only (guile) catch ash logand logior lognot inexact->exact round
+    (only (guile) ash logand logior lognot inexact->exact round
           get-internal-real-time internal-time-units-per-second)
+    ;; TEMPORARY, for pgtk-reportlog
+    (only (guile) catch open-file)
     (oop goops)
     ;; The drawing primitives, which guile-gi does not bind.
     (cairo)
@@ -71,10 +72,14 @@
           widget:show-all widget:hide widget:destroy widget:queue-draw
           ;; a *child* widget has to select the events it wants -
           ;; see the button handlers below
-          widget:add-events
+          widget:add-events widget:get-window
           widget:can-focus widget:grab-focus widget:set-size-request
           widget:hexpand widget:vexpand window:resizable
           window:resize window:title
+          ;; the pointer's own position, which `mouse-position' asks for -
+          ;; Emacs's four calls in `pgtk_mouse_position' (`pgtkterm.c:3510')
+          display:get-default-seat seat:get-pointer
+          window:get-device-position window:get-display
           container:add
           connect set-prgname set-program-class idle-add
           source-remove? timeout-add
@@ -100,11 +105,13 @@
           event:get-coords)
     ;; The display interface this implements.
     (only (schemacs editor dispnew)
-          <display> clear-frame-area! column-width current-display
+          <display> *mouse-event-keys* clear-frame-area! column-width
+          current-display
           display-color-cells
           draw-window-cursor! flush-display! key-event->key
-          get-selection line-height read-input-event realize-face
-          resume-display! screen-size selection-exists? selection-owner?
+          get-selection line-height mouse-position read-input-event
+          realize-face resume-display! screen-size
+          selection-exists? selection-owner?
           set-selection! suspend-display! update-window-begin!
           update-window-end! write-glyphs!)
     ;; Opening a display initializes faces against it, as `term.sld''s
@@ -125,7 +132,7 @@
           char-super function-key-name make-ctrl-char)
     ;; A mouse event needs the *position* it happened at, which is the
     ;; redisplay's own walk - see `posn-at-x-y'.
-    (only (schemacs editor xdisp) posn-at-x-y *track-mouse*)
+    (only (schemacs editor xdisp) posn-at-x-y remember-mouse-glyph track-mouse)
     ;; The frame's focus, which the window tells us about: it decides
     ;; whether the cursor blinks and whether it is drawn hollow.
     (only (schemacs editor frame)
@@ -168,6 +175,11 @@
    ;; The blocking read, exported for tests that drive it without a
    ;; window; nothing in the editor uses it by name.
    pgtk-read-event
+   ;; The pointer's glyph filter, exported for the same reason: it is what
+   ;; decides whether a motion report is a movement at all, and that is
+   ;; worth a test of its own - see `note-mouse-movement'. Nothing in the
+   ;; editor calls either by name.
+   note-mouse-movement pgtk-mouse-moved
    ;; Call me back in MS milliseconds: how the timer module is told when
    ;; to come back once Gtk owns the loop.
    pgtk-arm-timer!
@@ -541,6 +553,13 @@
       ;; display is, and what `screen-size' answers.
       (columns #:init-value 80 #:accessor pgtk-columns)
       (rows    #:init-value 24 #:accessor pgtk-rows)
+      ;; Where the last button press was, and the *position list* that
+      ;; press was, both kept because a release afterwards is a different
+      ;; event - `drag-mouse-1' - which carries the press's position
+      ;; beside the release's. Emacs keeps the same two things in
+      ;; `f->mouse_moved' and in the drag's start event.
+      (press-cell #:init-value #f #:accessor pgtk-press-cell)
+      (press-posn #:init-value #f #:accessor pgtk-press-posn)
       ;; The allocation in PIXELS to use when there is no widget to ask -
       ;; a display opened without a window, as a test does. With a widget,
       ;; `pgtk-allocation' asks it and these are never consulted.
@@ -568,7 +587,27 @@
       ;; This slot was `drawn-size', set by nobody, guarding a comparison
       ;; in `pgtk-read-event' that therefore never fired. It is the same
       ;; question, asked usefully.
-      (allocated-size #:init-value #f #:accessor pgtk-allocated-size))
+      (allocated-size #:init-value #f #:accessor pgtk-allocated-size)
+      ;; Whether the pointer has left the glyph it was last reported on and
+      ;; nothing has been made of it yet: GNU Emacs's `f->mouse_moved',
+      ;; which its Gtk backend sets from the motion signal
+      ;; (`note_mouse_movement') and its reader consumes to *make* a
+      ;; `mouse-movement' event (`some_mouse_moved', `keyboard.c:1292').
+      ;;
+      ;; **A flag and not a queued event, and that is the whole mechanism.**
+      ;; Gtk reports the pointer many times a second; one queued event per
+      ;; report means one command per report, and a drag past the edge of a
+      ;; window then scrolls a step per report instead of continuously. See
+      ;; `note-mouse-movement'.
+      ;;
+      ;; Emacs keeps it on the *frame* and `some_mouse_moved' walks the
+      ;; frames; a display here belongs to one frame, so it lives here and
+      ;; the walk is over the displays.
+      (mouse-moved #:init-value #f #:accessor pgtk-mouse-moved)
+      ;; The glyph the pointer was last reported on, as `remember-mouse-glyph'
+      ;; answers it - GNU Emacs's `dpyinfo->last_mouse_glyph' and
+      ;; `last_mouse_glyph_frame'. #f before the first report.
+      (last-mouse-glyph #:init-value #f #:accessor pgtk-last-mouse-glyph))
 
     (define (pgtk-frame-for d)
       ;; The frame drawn on display D, or #f if none is. A window knows its
@@ -715,12 +754,163 @@
               (when event (dispatch event)))
             (begin
               (set! (pgtk-queue d) (append (pgtk-queue d) (list ev)))
-              ;; Wake the read that is waiting for it. A wake with nobody
-              ;; waiting is not an error and does nothing, which is what
-              ;; makes it safe to call from a handler that runs while a
-              ;; command is executing.
-              (when (pair? *pgtk-running*)
-                (main-loop:quit (car *pgtk-running*)))))))
+              (pgtk-wake!)))))
+
+    (define (pgtk-wake!)
+      ;; Wake the read that is waiting, if one is. "A wake with nobody
+      ;; waiting is not an error and does nothing", which is what makes it
+      ;; safe to call from a signal handler that runs while a command is
+      ;; executing.
+      ;;
+      ;; **It is its own function because two things need it**: the queue
+      ;; path, and a pointer movement, which wakes a read the moment it
+      ;; happens - the read is what makes the event out of it
+      ;; (`pgtk-mouse-movement-event').
+      ;;--------------------------------------------------------------
+      (when (pair? *pgtk-running*)
+        (main-loop:quit (car *pgtk-running*))))
+
+    (define (pgtk-reportlog line)
+      ;; TEMPORARY: every pointer report, before the glyph filter, so the
+      ;; log says whether reports go on arriving while the pointer is held
+      ;; still. Remove with the call and the import.
+      ;;--------------------------------------------------------------
+      (catch #t
+        (lambda ()
+          (let ((p (open-file "/tmp/pgtk-report.log" "a")))
+            (write line p)
+            (newline p)
+            (close-port p)))
+        (lambda args #f)))
+
+    (define (note-mouse-movement d x y)
+      ;; GNU Emacs's `note_mouse_movement' (`pgtkterm.c:5892'), for one
+      ;; motion report at frame cell X, Y:
+      ;;
+      ;;   "We have received a mouse movement event ... If the mouse is
+      ;;    over a different glyph than it was last time, tell the
+      ;;    mainstream emacs code by setting mouse_moved. If not, ask for
+      ;;    another motion event, so we can check again the next time it
+      ;;    moves."
+      ;;
+      ;; **This filter is what makes a drag that has left the window keep
+      ;; scrolling.** The scroll loop runs `mouse-scroll-delay' apart
+      ;; "until new input arrives" (`mouse-scroll-subr'), so *any* event
+      ;; ends it - and a mouse held past the edge of a window goes on
+      ;; reporting its position many times a second. Emacs turns all of
+      ;; those into no event at all, because they are inside the glyph the
+      ;; pointer was already on; the loop therefore goes on scrolling, a
+      ;; step every quarter second, which is the "scrolls half a page at a
+      ;; time" a drag past the edge looks like. Queueing an event per
+      ;; report - which is what this did - ends the loop on every one of
+      ;; them, and the drag then scrolls a step per report and stops the
+      ;; moment the pointer stops reporting.
+      ;;
+      ;; Emacs sets the flag for a motion whose window is not the frame's
+      ;; edit widget without comparing glyphs (`pgtkterm.c:5908'). A Gtk
+      ;; motion signal is delivered to the widget it belongs to, so there
+      ;; is no such event here; the comparison below is the whole of it.
+      ;;--------------------------------------------------------------
+      (let ((glyph (remember-mouse-glyph (or (pgtk-frame-for d) (*current-frame*))
+                                         x y)))
+        (pgtk-reportlog                          ; TEMPORARY
+         (list 'report
+               (quotient (* 1000 (get-internal-real-time))
+                         internal-time-units-per-second)
+               x y
+               (if (equal? glyph (pgtk-last-mouse-glyph d)) 'same 'NEW)))
+        (if (equal? glyph (pgtk-last-mouse-glyph d))
+            #f
+            (begin
+              (set! (pgtk-last-mouse-glyph d) glyph)
+              ;; **One marker per movement, not one per report.** The flag
+              ;; is Emacs's `f->mouse_moved' doing its job: it says "the
+              ;; reader has not been told about this movement yet", so the
+              ;; reports that arrive before it is told are already covered
+              ;; and make no further marker. It is cleared where the event
+              ;; is finally made (`pgtk-mouse-movement-event'), which is
+              ;; Emacs's `pgtk_mouse_position' clearing it.
+              (unless (pgtk-mouse-moved d)
+                (set! (pgtk-mouse-moved d) #t)
+                ;; **The marker goes through `pgtk-enqueue!', and that is
+                ;; this front end's departure from Emacs.** Emacs's reader
+                ;; *polls* `some_mouse_moved' (`keyboard.c:4525') each time
+                ;; it wants an event; here Gtk's loop delivers every event
+                ;; instead - an idle editor has no read outstanding at all
+                ;; - so the movement is *posted* the way a key is, and the
+                ;; event is still made when that item is delivered, from
+                ;; the pointer's position at that moment.
+                (pgtk-enqueue! d 'pgtk-mouse-moved))
+              #t))))
+
+    (define (pgtk-pointer-cell d)
+      ;; Where the pointer is, in this display's own cells, or #f.
+      ;;
+      ;; **Asked of Gdk, every time** - GNU Emacs's `pgtk_mouse_position'
+      ;; (`pgtkterm.c:3478'), whose calls these are:
+      ;;
+      ;;   win = gtk_widget_get_window (FRAME_GTK_WIDGET (f));
+      ;;   seat = gdk_display_get_default_seat (dpyinfo->gdpy);
+      ;;   device = gdk_seat_get_pointer (seat);
+      ;;   win = gdk_window_get_device_position (win, device, &win_x,
+      ;;                                        &win_y, &mask);
+      ;;
+      ;; **Answered as cells**, like every other coordinate this display
+      ;; hands out - `posn-at-x-y' takes cells and `column-width' is 1 -
+      ;; so the Gdk pixels are divided here.
+      ;;
+      ;; **The *edit widget*, not the toplevel.** `FRAME_GTK_WIDGET (f)'
+      ;; is `FRAME_X_OUTPUT (f)->edit_widget' (`pgtkterm.h:484') - the
+      ;; widget the frame's text is drawn in - and the drawing area is
+      ;; this tree's edit widget. Asking the toplevel window instead was
+      ;; what this did, and it is a different question with a different
+      ;; answer.
+      ;;
+      ;; **Asked, not read off an event**: an event's coordinates are
+      ;; relative to the window the pointer was over, and the pointer is
+      ;; outside the window by definition whenever a drag is scrolling a
+      ;; window's edge. It is also what makes one event enough however many
+      ;; times the pointer was reported - see `note-mouse-movement'.
+      ;;--------------------------------------------------------------
+      (let ((area (pgtk-area d)))
+        (if (not area)
+            #f
+            (let ((gdkwin (widget:get-window area)))
+              (if (not gdkwin)
+                  #f
+                  (let* ((seat (display:get-default-seat
+                                (window:get-display gdkwin)))
+                         (device (seat:get-pointer seat)))
+                    (let*-values (((_win x y _mask)
+                                   (window:get-device-position gdkwin device)))
+                      (cons (truncate (/ x *cell-width*))
+                            (truncate (/ y *cell-height*))))))))))
+
+    (define (pgtk-mouse-movement-event d)
+      ;; The `mouse-movement' event GNU Emacs's `make_lispy_movement'
+      ;; (`keyboard.c:7309') makes of a pointer that has moved: the key and
+      ;; a position list built from the *queried* position.
+      ;;
+      ;; It is called when the marker `note-mouse-movement' posted is
+       ;; delivered - by a read, or straight from the signal handler when
+       ;; Gtk's loop is the one delivering - and it asks the pointer where
+       ;; it is *now*, so every report that arrived in the meantime is
+       ;; answered by this one event.
+       ;;
+      ;; The flag is cleared here, as `pgtk_mouse_position' clears it for
+      ;; every frame on the display (`pgtkterm.c:3497'): asking where the
+      ;; pointer is *is* reporting the movement. It is cleared for every
+      ;; display and not just D's, which is Emacs's shape - its frames on
+      ;; one connection share the one display-info - and this tree's front
+      ;; end has one Gdk display behind all of them.
+      ;;--------------------------------------------------------------
+      (let ((cell (pgtk-pointer-cell d)))
+        (for-each (lambda (other) (set! (pgtk-mouse-moved other) #f))
+                  (cons d (*pgtk-displays*)))
+        (and cell
+             (list 'mouse-movement
+                   (posn-at-x-y (car cell) (cdr cell)
+                                (or (pgtk-frame-for d) (*current-frame*)))))))
 
     (define modifier-keysyms
       ;; The keysyms of the modifier keys themselves. Pressing one is not
@@ -744,22 +934,6 @@
       ;;--------------------------------------------------------------
       (let*-values (((_ keysym) (event:get-keyval e)))
         keysym))
-
-
-    (define (clicklog line)
-      ;; TEMPORARY: append a line to a file, from wherever.
-      (catch #t
-        (lambda ()
-          (let ((out (open-file "/tmp/pgtk-click.log" "a")))
-            ;; `for-each' is R7RS's and takes a *list*; a string needs
-            ;; `string-for-each'. Getting that wrong is what made the
-            ;; first version of this log write nothing at all.
-            (string-for-each
-             (lambda (c) (write-u8 (char->integer c) out))
-             line)
-            (write-u8 10 out)
-            (close-port out)))
-        (lambda (k . a) #f)))
 
     (define (pgtk-event-cell e)
       ;; Where a Gtk button event happened, as the CELL the frame's
@@ -799,9 +973,19 @@
       (let ((f (or (pgtk-frame-for from) (*current-frame*))))
         (when (and f (not (eq? f (*current-frame*))))
           (select-frame f))
-        (let* ((cell (pgtk-event-cell e))
-               (pos (posn-at-x-y (car cell) (cdr cell) f)))
-          (list symbol pos))))
+        (list symbol (pgtk-posn-for from e))))
+
+    (define (pgtk-posn-for from e)
+      ;; The *position list* a Gdk event makes:
+      ;;
+      ;;   (WINDOW AREA-OR-POS (X . Y) TIMESTAMP)
+      ;;
+      ;; which `subr.sld''s `posn-' accessors walk and `(interactive
+      ;; "e")' hands to a command.
+      ;;--------------------------------------------------------------
+      (let* ((f (or (pgtk-frame-for from) (*current-frame*)))
+             (cell (pgtk-event-cell e)))
+        (posn-at-x-y (car cell) (cdr cell) f)))
 
     (define (pgtk-encode-event e)
       ;; A GTK key press as the single INTEGER the interface carries: the
@@ -982,8 +1166,26 @@
         (pgtk-mouse-event from (cdr item) 'down-mouse-1))
        ((and (pair? item) (eq? (car item) 'button-release))
         (pgtk-mouse-event from (cdr item) 'mouse-1))
-       ((and (pair? item) (eq? (car item) 'motion))
-        (pgtk-mouse-event from (cdr item) 'mouse-movement))
+       ;; **A release *after* the pointer moved is a different event** -
+       ;; GNU Emacs's `drag-mouse-1', which `mouse.el:3783' binds to
+       ;; `mouse-set-region'. It is what re-establishes the region the
+       ;; drag's own cleanup takes down, and so what makes the highlight
+       ;; survive letting the button go. The position list carries the
+       ;; press's position *and* the release's, which is what
+       ;; `event-end' reads the second of.
+       ((and (pair? item) (eq? (car item) 'drag-release))
+        (list 'drag-mouse-1 (pgtk-press-posn from)
+              (pgtk-posn-for from (cdr item))))
+       ;; The pointer moved and nobody has been told yet: **this is where
+       ;; the `mouse-movement' event is made** - GNU Emacs's
+       ;; `make_lispy_movement' (`keyboard.c:7309') reaching it from
+       ;; `kbd_buffer_get_event''s `some_mouse_moved' branch (`:4525').
+       ;; Making it here and not in the signal handler is the whole
+       ;; mechanism: whichever reports arrived before this one are
+       ;; answered by the *queried* pointer position, so a hundred
+       ;; twitches are one event, and a drag's scroll loop - which ends on
+       ;; any input at all - is not ended by each of them.
+       ((eq? item 'pgtk-mouse-moved) (pgtk-mouse-movement-event from))
        ((memv (pgtk-event-keysym item) modifier-keysyms) *pgtk-skip*)
        (else
           ;; A key from a window that is not the selected frame's selects
@@ -1121,7 +1323,15 @@
        ;; A mouse event needs no decoding: the display made it, in the
        ;; shape `subr.sld''s `posn-' accessors walk, and its *key* is the
        ;; symbol at its head.
-       ((and (pair? ev) (memq (car ev) '(down-mouse-1 mouse-1 mouse-movement)))
+       ;;
+       ;; **The list is `dispnew.sld''s, and it was written out here
+       ;; first** - which is how `drag-mouse-1' came to be missing from
+       ;; it. A release after the pointer has moved is a `drag-mouse-1',
+       ;; and while that name was absent this answered `#f' for it: the
+       ;; read produced *nothing*, the release was thrown away, the
+       ;; drag's transient map was never popped, and the pointer went on
+       ;; moving the region after the button came up.
+       ((and (pair? ev) (memq (car ev) *mouse-event-keys*))
         (car ev))
        ((eqv? ev *resize-code*) 'resize)
        ((eqv? ev *focus-in-code*) 'focus-in)
@@ -1138,6 +1348,55 @@
       ;; follows the window with no signal to keep in step.
       ;;--------------------------------------------------------------
       (pgtk-cells d))
+
+    (define-method (mouse-position (d <pgtk-display>))
+      ;; **The generic has to be imported, or this defines a new one.** A
+      ;; `define-method' on a name that is not bound makes a *fresh*
+      ;; generic in this module with only this method on it, and the
+      ;; caller - `(schemacs editor frame)''s `mouse-position', through
+      ;; dispnew's generic - then has none at all: "No applicable method
+      ;; for #<generic> mouse-position (0>". It compiles cleanly too, and
+      ;; the "possibly unbound variable" warning does not fire, because
+      ;; `define-method' is allowed to create the binding.
+      ;;
+      ;; Where the pointer is, asked of Gdk - GNU Emacs's
+      ;; `pgtk_mouse_position' (`pgtkterm.c:3478'), whose calls these are:
+      ;;
+      ;;   win = gtk_widget_get_window (FRAME_GTK_WIDGET (f));
+      ;;   seat = gdk_display_get_default_seat (dpyinfo->gdpy);
+      ;;   device = gdk_seat_get_pointer (seat);
+      ;;   win = gdk_window_get_device_position (win, device, &win_x,
+      ;;                                        &win_y, &mask);
+      ;;
+      ;; **Answered as cells**, like every other coordinate this display
+      ;; hands out - `posn-at-x-y` takes cells and `column-width` is 1 -
+      ;; so the Gdk pixels are divided here.
+      ;;
+      ;; **Asked, not read off an event**: an event's coordinates are
+      ;; relative to the window the pointer was over, and the pointer is
+      ;; outside the window by definition whenever a drag is scrolling a
+      ;; window's edge.
+      ;;--------------------------------------------------------------
+      ;; **The *edit widget*, not the toplevel.** `FRAME_GTK_WIDGET (f)'
+      ;; is `FRAME_X_OUTPUT (f)->edit_widget' (`pgtkterm.h:484') - the
+      ;; widget the frame's text is drawn in - and the drawing area is
+      ;; this tree's edit widget. Asking the toplevel window instead was
+      ;; what this did, and it is a different question with a different
+      ;; answer.
+      ;;--------------------------------------------------------------
+      (let ((area (pgtk-area d)))
+        (if (not area)
+            #f
+            (let ((gdkwin (widget:get-window area)))
+              (if (not gdkwin)
+                  #f
+                  (let* ((seat (display:get-default-seat
+                                (window:get-display gdkwin)))
+                         (device (seat:get-pointer seat)))
+                    (let*-values (((_win x y _mask)
+                                   (window:get-device-position gdkwin device)))
+                      (cons (truncate (/ x *cell-width*))
+                            (truncate (/ y *cell-height*))))))))))
 
     (define-method (column-width (d <pgtk-display>)) 1)
     (define-method (line-height (d <pgtk-display>)) 1)
@@ -1466,28 +1725,51 @@
         (widget:add-events area 772)
         (connect area (make <signal> #:name "button-press-event")
                  (lambda (w e)
-                   (clicklog "press seen")
+                   ;; The press's own position is kept, not just queued:
+                   ;; the release is a *different event* when the pointer
+                   ;; has moved, and that event carries both positions.
+                   (set! (pgtk-press-cell d) (pgtk-event-cell e))
+                   (set! (pgtk-press-posn d) (pgtk-posn-for d e))
                    (pgtk-enqueue! d (cons 'button-press e))
                    #t))
         (connect area (make <signal> #:name "button-release-event")
                  (lambda (w e)
-                   (pgtk-enqueue! d (cons 'button-release e))
+                   ;; Emacs's test (`keyboard.c:6638') is whether the
+                   ;; pointer has moved since the press by more than
+                   ;; `double_click_fuzz', a few pixels. Measured in
+                   ;; *cells* here, where a cell is 9 by 18 pixels and
+                   ;; the fuzz is less than one, that is "a different
+                   ;; cell" - named rather than guessed at.
+                   (let ((moved? (not (equal? (pgtk-event-cell e)
+                                              (pgtk-press-cell d)))))
+                     (pgtk-enqueue! d
+                                    (cons (if moved? 'drag-release
+                                              'button-release)
+                                          e)))
                    #t))
-        ;; The pointer moving. Emacs sees these as `mouse-movement'
-        ;; events, and they are what a drag is made of.
+        ;; The pointer moving: GNU Emacs's `motion_notify_event'
+        ;; (`pgtkterm.c:5943'). **It does not make a `mouse-movement'
+        ;; event.** It asks `note_mouse_movement' whether the pointer has
+        ;; left the glyph it was on, and if it has, records that it moved;
+        ;; the event is made once, when that marker is delivered
+        ;; (`pgtk-mouse-movement-event'), from the pointer's position at
+        ;; that moment. A queued
+        ;; event per Gtk report is what made a drag past the edge of the
+        ;; window scroll a step per report and stop when the pointer
+        ;; stopped: the scroll loop ends on any input at all.
         (connect area (make <signal> #:name "motion-notify-event")
                  (lambda (w e)
                    ;; **Only while a drag is being tracked.** Emacs's
-                   ;; `track-mouse' is what decides whether motion is an
-                   ;; event at all, and without the test every pass of the
-                   ;; pointer over the window queued a `mouse-movement'
-                   ;; that the command loop had nothing bound for: an
-                   ;; "undefined key" for moving the mouse.
-                   (if (*track-mouse*)
-                       (begin
-                         (clicklog "motion: tracked, queued")
-                         (pgtk-enqueue! d (cons 'motion e)))
-                       (clicklog "motion: NOT tracked, dropped"))
+                   ;; `track-mouse' decides whether motion is noticed at
+                   ;; all here; the alternative is Emacs's own, a
+                   ;; `[mouse-movement]' binding in the global map that
+                   ;; ignores the event, which this tree does not have and
+                   ;; does not want yet (mouse-face and the help echo are
+                   ;; what read it there).
+                   (if track-mouse
+                       (let ((cell (pgtk-event-cell e)))
+                         (note-mouse-movement d (car cell) (cdr cell)))
+                       #f)
                    #t))
         ;; A size is REQUESTED, not set as a default. `set-default-size'
         ;; pins the window: Gtk then never accepts the size a compositor

@@ -38,6 +38,8 @@
    screen-size
    column-width
    line-height
+   mouse-position
+   *mouse-event-keys*
    display-color-cells
    ;; the selections, which `select' reads and writes through
    get-selection
@@ -101,6 +103,62 @@
     (define-generic update-window-end!)
     ;; The window being updated is done: Emacs's
     ;; `update_window_end_hook'. `(update-window-end! display)'.
+
+    (define *mouse-event-keys*
+      ;; The mouse events this tree's front ends make, by the symbol at
+      ;; their head. GNU Emacs's `mouse-event-p' (`subr.el') answers the
+      ;; same question of `event-basic-type'; this is the set itself,
+      ;; because two places have to agree about it and a list written out
+      ;; twice does not stay agreed.
+      ;;
+      ;;   `down-mouse-1'  `mouse-1'  `drag-mouse-1'       button 1
+      ;;   `mouse-movement'                                the pointer
+      ;;
+      ;; **A release after the pointer has moved is `drag-mouse-1'**, not
+      ;; `mouse-1' - `mouse.el:3781-3783' binds all three, and the third
+      ;; is what re-establishes the region a drag leaves behind. A
+      ;; front end whose decode drops it drops the *release*: the drag's
+      ;; transient map is never popped and the pointer goes on moving the
+      ;; region after the button is up.
+      ;;
+      ;; It lives here rather than in `keyboard.sld' because both sides
+      ;; need it and neither can see the other: the command loop reads it
+      ;; to know an event carries a position, and the display reads it to
+      ;; know an event is one it made rather than a key to decode.
+      ;;--------------------------------------------------------------
+      '(down-mouse-1 mouse-1 drag-mouse-1
+        down-mouse-2 mouse-2 drag-mouse-2
+        down-mouse-3 mouse-3 drag-mouse-3
+        mouse-movement))
+
+    (define-generic mouse-position)
+    ;; Where the pointer is on this display, as `(X . Y)' in the display's
+    ;; own cell units, or `#f' when there is no pointer to be found - a
+    ;; terminal, or a window that is not on the screen yet.
+    ;;
+    ;; GNU Emacs's `mouse_position_hook' (`terminal->mouse_position_hook'),
+    ;; which `Fmouse_position' (`frame.c') calls through the frame's
+    ;; terminal. `xterm.c''s `XTmouse_position' and `pgtkterm.c''s
+    ;; `pgtk_mouse_position' are the two implementations Emacs has.
+    ;;
+    ;; **It is asked, not inferred from an event.** An event's coordinates
+    ;; are relative to the window the pointer was over and mean nothing
+    ;; once it leaves that window - so the one caller that needs the
+    ;; position while the pointer is *outside* the frame, a drag past the
+    ;; edge of a window, cannot read it off an event. Emacs resolves this
+    ;; by querying the pointer (`XQueryPointer',
+    ;; `gdk_window_get_device_position') every time, and so does this.
+    ;;
+    ;; `(mouse-position display)'.
+    ;;
+    ;; The default answers `#f' - "no position" - which is what a terminal
+    ;; that cannot report one answers (`term.c:4383' leaves
+    ;; `mouse_position_hook' null for a terminal with no mouse at all, and
+    ;; `term_mouse_position', `term.c:2973', returns early leaving X and Y
+    ;; nil when GPM has never been active). `frame.sld''s `mouse-position'
+    ;; then gives the selected frame with nil coordinates, as the C's
+    ;; docstring describes for "a mouseless terminal".
+    (define-method (mouse-position (d <display>)) #f)
 
     (define-generic draw-window-cursor!)
     ;; Put the display cursor at pixel ROW, COLUMN (frame coordinates),

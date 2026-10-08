@@ -43,6 +43,7 @@ SUITES = [
     'schemacs/editor/mule-cmds-tests.scm',
     'schemacs/elisp-eval/print-tests.scm',
     'schemacs/editor/cmds-tests.scm',
+    'schemacs/editor/mouse-tests.scm',
     'schemacs/editor/fns-tests.scm',
     'schemacs/editor/subr-tests.scm',
     'schemacs/editor/textprop-tests.scm',

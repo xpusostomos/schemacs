@@ -22,8 +22,10 @@
  (only (guile) setvbuf delete-file getpid)
  (only (srfi 64) test-assert test-equal test-begin test-end)
  (only (oop goops) make)
- (only (schemacs editor pgtk)
-       <pgtk-display> initialize-pgtk-faces! pgtk-write-screenshot!)
+ (prefix (only (schemacs editor pgtk)
+               <pgtk-display> initialize-pgtk-faces! pgtk-write-screenshot!
+               note-mouse-movement pgtk-mouse-moved)
+         pt:)
  (prefix (schemacs editor faces) f:)
  (prefix (schemacs editor xfaces) x:)
  (prefix (schemacs editor xdisp) xd:)
@@ -55,9 +57,9 @@
 ;;------------------------------------------------------------------
 
 (define (new-display)
-  (let ((d (make <pgtk-display>)))
+  (let ((d (make pt:<pgtk-display>)))
     (dn:current-display d)
-    (initialize-pgtk-faces! d)
+    (pt:initialize-pgtk-faces! d)
     d))
 
 ;;------------------------------------------------------------------
@@ -186,7 +188,7 @@
 ;; Two faces that draw *differently* must not intern to the same token,
 ;; or the redisplay would draw one as the other.
 (let ((d (new-display)))
-  (initialize-pgtk-faces! d)
+  (pt:initialize-pgtk-faces! d)
   (let ((region (dn:realize-face d (x:face-realized-attributes 'region)))
         (mode-line (dn:realize-face d (x:face-realized-attributes 'mode-line))))
     (test-assert (and (integer? region) (not (= 0 region))))
@@ -239,7 +241,7 @@
   ;; Render what DISPLAY is showing to a PNG, read it back, and delete it.
   (let ((path (string-append "/tmp/schemacs-pgtk-tests-"
                              (number->string (getpid)) ".png")))
-    (pgtk-write-screenshot! display path)
+    (pt:pgtk-write-screenshot! display path)
     (let ((pixel (pixel-reader path)))
       (delete-file path)
       pixel)))
@@ -625,11 +627,11 @@
 ;;------------------------------------------------------------------
 (test-equal '(#t #t)
   (parameterize ((fr:*frame-list* '()))
-    (let* ((d1 (make <pgtk-display>))
-           (d2 (make <pgtk-display>)))
+    (let* ((d1 (make pt:<pgtk-display>))
+           (d2 (make pt:<pgtk-display>)))
       (dn:current-display d1)
-      (initialize-pgtk-faces! d1)
-      (initialize-pgtk-faces! d2)
+      (pt:initialize-pgtk-faces! d1)
+      (pt:initialize-pgtk-faces! d2)
       (let ((ed (new-text-editor)))
         (text-editor-insert
          ed (apply string-append
@@ -676,11 +678,11 @@
 
 (test-equal '(#t #t)
   (parameterize ((fr:*frame-list* '()))
-    (let* ((d1 (make <pgtk-display>))
-           (d2 (make <pgtk-display>)))
+    (let* ((d1 (make pt:<pgtk-display>))
+           (d2 (make pt:<pgtk-display>)))
       (dn:current-display d1)
-      (initialize-pgtk-faces! d1)
-      (initialize-pgtk-faces! d2)
+      (pt:initialize-pgtk-faces! d1)
+      (pt:initialize-pgtk-faces! d2)
       (let* ((ed (new-text-editor))
              (f1 (fr:new-frame-on d1 ed 24 80))
              (f2 (fr:new-frame-on d2 ed 24 80)))
@@ -693,5 +695,46 @@
             (fr:set!frame-message f1 "a message for the selected frame")
             (xd:render! f1)
             (list blank (> (echo-row-ink (shot-of d1)) 0))))))))
+
+;;------------------------------------------------------------------
+;; The pointer's glyph filter
+;;
+;; GNU Emacs's `note_mouse_movement' (`pgtkterm.c:5892'): "If the mouse is
+;; over a different glyph than it was last time, tell the mainstream emacs
+;; code by setting mouse_moved. If not, ask for another motion event, so we
+;; can check again the next time it moves." The `mouse-movement' event is
+;; then made by the *reader* (`some_mouse_moved', `keyboard.c:4525'), once,
+;; from a queried position - not by the signal, once per report.
+;;
+;; This is what makes a drag past the edge of a window keep scrolling, and
+;; a front end that makes an event per raw report cannot do it: the scroll
+;; loop ends on any input, so it ends on every twitch of the mouse.
+;;------------------------------------------------------------------
+
+(define (movement-report! d column row)
+  ;; One Gtk motion report, through the front end's own entry point.
+  ;;--------------------------------------------------------------
+  (pt:note-mouse-movement d column row))
+
+(let* ((d (new-display))
+       (f (fr:new-frame-on d (new-text-editor) 24 80)))
+  (parameterize ((fr:*current-frame* f))
+    (test-equal #f (pt:pgtk-mouse-moved d))
+    (test-equal "the first report is a movement, there being no glyph yet"
+      #t (movement-report! d 3 4))
+    (test-equal #t (pt:pgtk-mouse-moved d))
+    ;; ...and having been made into an event, it is not one any more.
+    (set! (pt:pgtk-mouse-moved d) #f)
+    (test-equal "a report on the cell the pointer is already on is not one"
+      #f (movement-report! d 3 4))
+    (test-equal #f (pt:pgtk-mouse-moved d))
+    (test-equal "a report on another cell is a movement again"
+      #t (movement-report! d 3 5))))
+
+(test-equal "the glyph a report is compared against is its cell"
+  (list 7 9 1 1)
+  (let ((d (new-display)))
+    (parameterize ((fr:*current-frame* (fr:new-frame-on d (new-text-editor) 24 80)))
+      (xd:remember-mouse-glyph (fr:*current-frame*) 7 9))))
 
 (test-end "schemacs_editor_pgtk")

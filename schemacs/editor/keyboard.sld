@@ -35,7 +35,7 @@
     ;; reporting an error failed - and only a test that makes a command
     ;; signal one could see it, because the error path is not otherwise
     ;; reached.
-    (only (guile) format logior string-index)
+    (only (guile) format inexact->exact logior string-index)
     (prefix (schemacs keymap) km:)
     (only (schemacs editor engine)
           new-text-editor
@@ -51,9 +51,10 @@
     ;; table all belong to the driver, and this loop calls through the
     ;; interface.
     (only (schemacs editor dispnew)
-          current-display key-event->key read-input-event)
+          *mouse-event-keys* current-display key-event->key
+          read-input-event)
     (only (schemacs editor frame)
-          *current-frame* blink-cursor-check
+          *current-frame* *pre-command-hook* blink-cursor-check
           display-selections-p frame-keymap-state
           frame-quit-cont run-pre-command-hook!
           set!frame-keymap-state set!frame-message
@@ -113,9 +114,12 @@
           timer-next-delay timer-reschedule!)
     ;; `ceiling' and `inexact->exact' are Guile's; the delay is a
     ;; fractional number of seconds and the read wants whole milliseconds.
-    (only (guile) ceiling inexact->exact)
+    (only (guile) ceiling delq inexact->exact)
     ;; the clock the next timer's delay is measured against
     (only (scheme time) current-second)
+    ;; the millisecond clock a timed read's deadline is measured against -
+    ;; the same two calls the front ends' own `now-ms' are made of
+    (only (guile) get-internal-real-time internal-time-units-per-second)
     ;; `ignore' is what the special-event-map binds a key that the loop
     ;; must receive but not act on to - the frame's resize.
     (only (schemacs editor subr) kbd ignore)
@@ -147,9 +151,15 @@
    exit-recursive-edit
    quoted-insert
    read-quoted-char
+   *overriding-terminal-local-map*
+   *this-command-keys*
+   internal-pop-keymap
+   internal-push-keymap
    read-key-event
    read-wait-ms
    recursive-edit
+   set-transient-map
+   sit-for
    report-command-error!
    signal-quit
    ;; `timer_check' and the read's deadline are the command loop's, so
@@ -166,6 +176,71 @@
     ;; `*esc-pending*' is keyboard.c's own state (its meta-prefix
     ;; resolution), which is why it lives here and not on the frame.
     (define *esc-pending* (make-parameter #f))
+
+    (define *this-command-keys* (make-parameter '()))
+    ;; ^ GNU Emacs's `this-command-keys' - "the key sequence that invoked
+    ;; this command" - which `keyboard.c' keeps for the command being run
+    ;; and `read_key_sequence' fills in as the chord is entered. Emacs
+    ;; answers it as a *vector of events* (`this-command-keys-vector');
+    ;; here it is the chord as one `keymap-index', which is this tree's
+    ;; currency for a key sequence and what `keymap-lookup' takes. Its
+    ;; one reader for now is `set-transient-map''s keep test, which is
+    ;; exactly Emacs's `(lookup-key map (this-command-keys-vector))'.
+
+    (define *overriding-terminal-local-map* #f)
+    ;; ^ GNU Emacs's `overriding-terminal-local-map' (`keyboard.c',
+    ;; `Voverriding_terminal_local_map'), which `keyboard.c:8704' puts
+    ;; **first** of all the maps a key is looked up in - ahead of the
+    ;; buffer's own map, the mode maps and `global-map'. It is what
+    ;; `set-transient-map' installs into, and the only thing that does.
+    ;;
+    ;; **A plain variable, not a parameter**, because Emacs's is a
+    ;; kboard slot with no dynamic binding of its own: the transient map
+    ;; is pushed and popped by name, and the pop happens from
+    ;; `pre-command-hook', long after any `parameterize' that installed
+    ;; it would have unwound.
+    ;;
+    ;; **A list of keymaps, most recently pushed first, where Emacs's is
+    ;; one composed keymap.** A keymap here is a record, and
+    ;; `make-composed-keymap' - the list `(keymap add-keymap-witness MAP
+    ;; ...)' - would be a second representation of the same idea; the
+    ;; order is what matters to the lookup, so the list carries the order
+    ;; and `lookup-keymaps' splices it in. `add-keymap-witness' exists in
+    ;; Emacs to tell a bare keymap from a composed one in this same
+    ;; variable, and nothing here sets it to a bare keymap.
+
+    (define (internal-push-keymap keymap)
+      ;; GNU Emacs's `internal-push-keymap' (`subr.el:6976'), which takes
+      ;; the variable as its second argument because Lisp can `set' a
+      ;; symbol and Scheme cannot; there is one such variable here.
+      ;;
+      ;; "Add KEYMAP to the front of the list, unless it is already
+      ;; there" - which is Emacs's `(unless (memq keymap map) ...)', and
+      ;; it is what makes pushing the same map twice a no-op rather than
+      ;; a duplicate that has to be popped twice.
+      ;;--------------------------------------------------------------
+      ;;
+      ;; Emacs's `(memq keymap map)' reads nil as the empty list; here the
+      ;; variable's empty value is #f (Emacs's nil, spelled the way this
+      ;; tree spells nil where a list is expected), and `memq' on #f would
+      ;; be a type error rather than an empty answer.
+      ;;--------------------------------------------------------------
+      (when (not (memq keymap (or *overriding-terminal-local-map* '())))
+        (set! *overriding-terminal-local-map*
+              (cons keymap (or *overriding-terminal-local-map* '())))))
+
+    (define (internal-pop-keymap keymap)
+      ;; GNU Emacs's `internal-pop-keymap' (`subr.el:6985'): take KEYMAP
+      ;; back off. Emacs also collapses the composed keymap back to the
+      ;; bare map it started as when the last transient map goes; here
+      ;; the empty list *is* the bare state, so dropping the map is the
+      ;; whole of it.
+      ;;--------------------------------------------------------------
+      (when (memq keymap (or *overriding-terminal-local-map* '()))
+        (set! *overriding-terminal-local-map*
+              (delq keymap (or *overriding-terminal-local-map* '()))))
+      (when (null? *overriding-terminal-local-map*)
+        (set! *overriding-terminal-local-map* #f)))
 
     (define *function-key-map*
       ;; GNU Emacs's `function-key-map' (`keyboard.c':14209', filled by
@@ -432,12 +507,20 @@
       ;;--------------------------------------------------------------
       (let ((buffer-keys (buffer-local-keymap (current-buffer)))
             (mode-keys (*current-keymap*)))
-        ;; `special-event-map' first: `keyboard.c:3113' looks the window
-        ;; system's events up in it before the ordinary maps, which is how
-        ;; `(delete-frame (FRAME))' runs its handler rather than being read
-        ;; as an ordinary key.
+        ;; **`overriding-terminal-local-map' first**, which is where
+        ;; `keyboard.c:8704' puts it: ahead of the buffer's own map, the
+        ;; mode maps and `global-map'. That is the whole of what makes a
+        ;; `set-transient-map' transient map take precedence.
+        ;;
+        ;; `special-event-map' used to be listed first here - "the window
+        ;; system's events are looked up in it before the ordinary maps".
+        ;; It is not a map of this list at all any more:
+        ;; `dispatch-special-event' looks an event up in it before this
+        ;; lookup is reached, which is where Emacs does it (`read_char',
+        ;; `keyboard.c:3113') and is what keeps a frame event out of the
+        ;; command loop's head.
         (append
-         (list *special-event-map*)
+         (or *overriding-terminal-local-map* '())
          (if buffer-keys (%keymap-and-parents buffer-keys) '())
          (if mode-keys (%keymap-and-parents mode-keys) '())
          (%keymap-and-parents *default-keymap*))))
@@ -467,6 +550,40 @@
             (reverse out)
             (loop (keymap-parent map) (cons map out)))))
 
+    (define (dispatch-special-event frame key)
+      ;; Whether KEY is a *special event* and has been handled as one -
+      ;; GNU Emacs's `read_char' (`keyboard.c:3113'), which looks the
+      ;; event up in `special-event-map' by itself and, when it hits,
+      ;; runs the handler with `command-execute' and goes back to
+      ;; reading. These are the window system's events: a frame's focus,
+      ;; its deletion, its resize.
+      ;;
+      ;; **The handler runs with the command loop's duties left undone**,
+      ;; which is what `command-execute' from `read_char' means: no undo
+      ;; boundary is placed, the handler does not become `this-command',
+      ;; and `pre-command-hook' does not run. That last is the one that
+      ;; matters to `set-transient-map' - its clearfun lives on that hook
+      ;; - and it is why this is here rather than in `lookup-keymaps',
+      ;; where the map used to sit first of all the maps: a frame event
+      ;; that ran through `dispatch-action' popped any transient map, and
+      ;; a window is resized the moment a drag's pointer leaves it.
+      ;;--------------------------------------------------------------
+      (let ((handler (km:keymap-lookup *special-event-map*
+                                       (km:keymap-index key))))
+        (and handler
+             (begin
+               (*last-read-event* (list key (list frame)))
+               (let ((record (if (command-type? handler)
+                                 handler
+                                 (command-record-of handler))))
+                 (if record
+                     (parameterize ((*this-event* (list key (list frame))))
+                       (if (command-interactive-spec record)
+                           (run-command record #f)
+                           (run-command record)))
+                     (handler)))
+               #t))))
+
     (define (dispatch-key-event frame key)
       ;; Dispatch one key *event* through the modal keymap lookup. The
       ;; modal lookup state persists across events while a chord
@@ -480,7 +597,9 @@
       ;; character - `event-modifiers' and `event-basic-type''s first
       ;; half.
       ;;--------------------------------------------------------------
-      (if (update-prefix! key)
+      (if (dispatch-special-event frame key)
+          #t
+          (if (update-prefix! key)
           ;; C-u or a prefix digit was consumed. It is a command in
           ;; its own right, so like any other command it breaks a run
           ;; of consecutive kills - by *being* the last command, which
@@ -502,7 +621,18 @@
                      (km:modal-lookup-state-step!
                       state (km:keymap-index key)
                       (lambda (full-path action)
-                        (dispatch-action frame action) #f)
+                        ;; **The chord that ran the command**, which
+                        ;; `set-transient-map''s keep test reads - GNU
+                        ;; Emacs's `this-command-keys'. It has to be
+                        ;; bound around `dispatch-action' and not merely
+                        ;; set, because it must cover `pre-command-hook'
+                        ;; (which runs inside it, just before the
+                        ;; command) as well as the command itself.
+                        (parameterize
+                            ((*this-command-keys*
+                              (km:modal-lookup-state-key-index state)))
+                          (dispatch-action frame action))
+                        #f)
                       (lambda (full-path action) #t)
                       (lambda (full-path)
                         ;; An undefined key ends the chord: the pending
@@ -519,7 +649,7 @@
                               (write (km:keymap-index->list full-path) port)
                               (get-output-string port)))))))))
                 (set!frame-keymap-state
-                 frame (and result state)))))))
+                 frame (and result state))))))))
 
     (define (dispatch-key frame key)
       ;; Dispatch one *key event* - the integer or symbol `read-key-event'
@@ -654,6 +784,12 @@
       ;;--------------------------------------------------------------
       (not (eq? ev #f)))
 
+    (define (%now-ms)
+      ;; Milliseconds since some fixed point, for a read's deadline.
+      ;;--------------------------------------------------------------
+      (quotient (* 1000 (get-internal-real-time))
+                internal-time-units-per-second))
+
     (define (read-key-event timeout)
       ;; Read one key for the command loop, TIMEOUT milliseconds allowed -
       ;; a negative TIMEOUT blocks. The answer is the *key event* GNU
@@ -688,14 +824,172 @@
       ;; was a number that matched nothing, and no key did anything,
       ;; `C-g' included.
       ;;--------------------------------------------------------------
-      (let ((unread (*unread-command-events*)))
-        (if (null? unread)
-            (let ((ev (read-input-event (current-display) timeout)))
-              (*last-read-event* ev)
-              (and ev (key-event->key (current-display) ev)))
-            (begin
-              (*unread-command-events* (cdr unread))
-              (car unread)))))
+      ;;
+      ;; **A special event is handled here and the read goes on**, which
+      ;; is the other half of `read_char''s own arrangement
+      ;; (`keyboard.c:3108'): "Process special events within read_char and
+      ;; loop around to read another event", then `goto retry'. The
+      ;; handler runs, and the event is *not* returned to whoever asked -
+      ;; so a read keeps waiting through a frame resize or a focus change
+      ;; instead of being ended by one. That is what makes a drag that has
+      ;; left the window keep scrolling: `mouse-scroll-subr''s loop ends
+      ;; on any input at all, and a window resize is not input. Returning
+      ;; it here is what made the drag scroll one step per resize event.
+      ;;
+      ;; The deadline is *absolute* across those retries, as the C's is:
+      ;; `read_filtered_event' computes the end time once and hands
+      ;; `read_char' the same one every time round, so a special event
+      ;; does not extend the wait.
+      ;;
+      ;; The redisplay is here for the same reason the event exists at
+      ;; all: Emacs re-frames a resized window from its own redisplay, and
+      ;; this tree's `render!' is what re-tiles from the display's size.
+      ;; Emacs has no such event - a GUI frame resize is not input there -
+      ;; so there is nothing of its own for this line to copy; what it
+      ;; copies is that the *next* redisplay is what acts on the resize.
+      ;;--------------------------------------------------------------
+      (let ((deadline (and (>= timeout 0) (+ (%now-ms) timeout))))
+        (let loop ()
+          (let* ((unread (*unread-command-events*))
+                 (ev (if (null? unread)
+                         (let ((raw (read-input-event
+                                     (current-display)
+                                     (if deadline
+                                         (max 0 (- deadline (%now-ms)))
+                                         timeout))))
+                           (*last-read-event* raw)
+                           (and raw (key-event->key (current-display) raw)))
+                         (begin
+                           (*unread-command-events* (cdr unread))
+                           (car unread)))))
+            (if (and ev (dispatch-special-event (*current-frame*) ev))
+                (begin
+                  (redisplay-frames!)
+                  (loop))
+                ev)))))
+
+    (define (sit-for seconds nodisp)
+      ;; GNU Emacs's `sit-for' (`subr.el:3836'): "Redisplay, then wait
+      ;; for SECONDS seconds; stop when input is available. ... Value is
+      ;; t if waited the full time with no input arriving, and nil
+      ;; otherwise."
+      ;;
+      ;; **Here and not in `subr.sld', where Emacs's is.** Waiting for
+      ;; input is `read-key-event' and redisplaying is
+      ;; `redisplay-frames!', and both of those are this library's;
+      ;; `subr.sld' is a leaf beneath them and can reach neither.
+      ;;
+      ;; A key that arrives inside the wait is put back on
+      ;; `*unread-command-events*', which is Emacs's own move - it does
+      ;; `(push (cons t read) unread-command-events)' so that the key is
+      ;; both not lost and not recorded in the *current* command's
+      ;; `this-command-keys'. There is no `this-command-keys' recording
+      ;; here for the cons to be about, so the key goes back as itself,
+      ;; which is the shape every other push-back in this tree has.
+      ;;
+      ;; Not carried: `input-pending-p' (`keyboard.c'), so a key that is
+      ;; already waiting is *read* rather than tested for. The answer is
+      ;; the same and the read returns at once; what differs is that the
+      ;; redisplay happens, where Emacs skips it in that case. Also not
+      ;; carried: `sleep-for', which is what Emacs's version uses on a
+      ;; noninteractive frame - there is no `noninteractive' here, and
+      ;; this editor always has a display to wait on.
+      ;;--------------------------------------------------------------
+      (when (not nodisp)
+        (redisplay-frames!))
+      (if (<= seconds 0)
+          #t
+          (let ((key (read-key-event
+                      (inexact->exact (round (* seconds 1000))))))
+            (if key
+                (begin
+                  (*unread-command-events*
+                   (cons key (*unread-command-events*)))
+                  #f)
+                #t))))
+
+    (define (set-transient-map map keep-pred on-exit)
+      ;; GNU Emacs's `set-transient-map' (`subr.el:7006'): "Set MAP as a
+      ;; temporary keymap taking precedence over other keymaps.
+      ;; Normally, MAP is used only once, to look up the very next key.
+      ;; However, if the optional argument KEEP-PRED is t, MAP stays
+      ;; active if a key from MAP is used. ... Optional arg ON-EXIT, if
+      ;; non-nil, specifies a function that is called, with no arguments,
+      ;; after MAP is deactivated."
+      ;;
+      ;; Three parts, and they are Emacs's:
+      ;;
+      ;;   * the map goes on **`overriding-terminal-local-map'**, where
+      ;;     the key lookup finds it before every other map;
+      ;;   * a *clearfun* goes on **`pre-command-hook'**, which runs
+      ;;     before every command and asks whether the map should survive
+      ;;     the command about to run;
+      ;;   * and what it asks is whether "the command about to run is the
+      ;;     one this map binds at the key that selected it" - Emacs's
+      ;;
+      ;;         (let ((mc (lookup-key map (this-command-keys-vector))))
+      ;;           (and mc (eq this-command mc)))
+      ;;
+      ;; **That is the whole of "a transient map is used until a command
+      ;; that is not its own runs"**, and it is why a caller like
+      ;; `mouse-drag-track' needs no read loop of its own: the command
+      ;; loop reads every key as it always does, the map answers for the
+      ;; ones it binds, and the first command it does not bind - the
+      ;; button coming up, a self-insert, anything - pops it and runs
+      ;; ON-EXIT. Emacs chases the binding through
+      ;; `command-remapping' as well; nothing here remaps commands.
+      ;;
+      ;; Emacs also removes the clearfun with `remove-hook' and installs
+      ;; it with `add-hook'; the hook here is a parameter holding a list
+      ;; of procedures, which is this tree's shape for a hook, and the
+      ;; two lines below are what `add-hook' would do to it.
+      ;;
+      ;; NOT CARRIED: MESSAGE and TIMEOUT. A prompt for a transient map
+      ;; and an idle-timeout that deactivates one are both more
+      ;; machinery than anything here asks for - the drag passes neither -
+      ;; and the timeout needs a timer per map.
+      ;;--------------------------------------------------------------
+      (internal-push-keymap map)
+      (let ((exitfun #f))
+        (let ((clearfun
+               (lambda ()
+                 ;; **`cond' true means KEEP, and `exitfun' is what
+                 ;; happens when it is false** - Emacs's
+                 ;; `(if (cond ...) t (funcall exitfun))', whose `t' is
+                 ;; the whole of "and do nothing".
+                 (if (cond
+                      ((not keep-pred)
+                         ;; a one-shot map: the next command ends it
+                         #f)
+                      ((and (not (eq? map
+                                      (car (or *overriding-terminal-local-map*
+                                               '()))))
+                            (memq map (or *overriding-terminal-local-map*
+                                          '())))
+                       ;; some *other* transient map is on top of this
+                       ;; one, so wait for that one to finish first -
+                       ;; Emacs's own nesting rule: the lifetime of the
+                       ;; outer map is not ended by a command of the
+                       ;; inner one
+                       #t)
+                      ((eq? keep-pred #t)
+                       ;; "the command about to run is the one this map
+                       ;; binds at the key that selected it"
+                       (let ((mc (km:keymap-lookup
+                                  map (*this-command-keys*))))
+                         (and mc (eq? (*this-command*) mc))))
+                      (else (keep-pred)))
+                     #t
+                     (exitfun)))))
+          (set! exitfun
+                (lambda ()
+                  (internal-pop-keymap map)
+                  (*pre-command-hook*
+                   (delq clearfun (*pre-command-hook*)))
+                  (when on-exit
+                    (on-exit))))
+          (*pre-command-hook* (cons clearfun (*pre-command-hook*)))
+          exitfun)))
 
     ;;----------------------------------------------------------------
     ;; Timers
@@ -802,13 +1096,19 @@
       (read-timeout-or -1 #f (and (repl-open?) (not (repl-wake)) 100)))
 
     (define *mouse-keys*
-      ;; The buttons this front end makes events for - `mouse-1''s press
-      ;; and its click. GNU Emacs's `mouse-event-p' (subr.el) asks the
-      ;; same question of a whole family of buttons; this tree's front
-      ;; ends produce button 1 only, so the list is that one, named here
-      ;; where the dispatch that needs it can see it.
+      ;; The mouse events this front end makes - what `dispatch-key' asks
+      ;; before handing an event to a command. An event not in it is
+      ;; replaced by `(KEY (FRAME))', which is the shape a *frame* event
+      ;; has, and a mouse event whose value has been thrown away like that
+      ;; reaches `mouse-set-region' as nothing to drag over.
+      ;;
+      ;; **The list itself is `dispnew.sld''s**, because the display needs
+      ;; it too - to tell an event it made from a key it must decode - and
+      ;; the two copies did not stay equal: `drag-mouse-1' was in this one
+      ;; and not in that one, so the release decoded to nothing at all.
+      ;; The name is kept here, where every reader already knows it.
       ;;--------------------------------------------------------------
-      '(down-mouse-1 mouse-1))
+      *mouse-event-keys*)
 
     (define *last-read-event*
       ;; The display's *own* event value for the last key read, or #f.

@@ -32,10 +32,16 @@
     ;; stopping and resuming the terminal on C-z is the display's
     ;; business too (`suspend-display!' / `resume-display!', which
     ;; `suspend-frame' asks through the interface).
-    (only (schemacs editor dispnew)
-          column-width current-display display-selections-supported?
-          line-height resume-display!
-          screen-size suspend-display!)
+    ;; `Fmouse_position' asks the frame's terminal where the pointer is
+    ;; (`FRAME_TERMINAL (f)->mouse_position_hook'), so the display's
+    ;; answer is imported under a name of its own and the DEFUN below
+    ;; takes Emacs's.
+    (rename
+     (only (schemacs editor dispnew)
+           column-width current-display display-selections-supported?
+           line-height mouse-position resume-display!
+           screen-size suspend-display!)
+     (mouse-position display-mouse-position))
     (only (schemacs editor engine)
           copy-marker  marker-position  set-marker!
           text-editor-cursor-line  text-editor-ref  text-editor-point-min
@@ -112,6 +118,7 @@
    frame-quit-cont
    frame-output
    frame-selected-window
+   mouse-position
    frame-type?
    frame-windows
    window-type?
@@ -382,6 +389,36 @@
       (when (eq? window (selected-window))
         (text-editor-set-cursor (window-buffer window) index))
       index)
+
+    (define (mouse-position)
+      ;; GNU Emacs's `mouse-position' (`frame.c'): "Return a list
+      ;; (FRAME X . Y) giving the current mouse frame and position. The
+      ;; position is given in canonical character cells, where (0, 0) is
+      ;; the upper-left corner of the frame ... If Emacs is running on a
+      ;; mouseless terminal or hasn't been programmed to read the mouse
+      ;; position, it returns the selected frame for FRAME and nil for X
+      ;; and Y."
+      ;;
+      ;; **The display is asked, every time.** That is the C's shape -
+      ;; `Fmouse_position' calls the terminal's `mouse_position_hook',
+      ;; which on X is `XQueryPointer' - and it is not a detail: an
+      ;; event's coordinates are relative to the window under the
+      ;; pointer and say nothing once the pointer has left it, and the
+      ;; one caller that needs the position there is a drag scrolling a
+      ;; window's edge.
+      ;;
+      ;; `mouse-position-function' is not carried, and that is the one
+      ;; departure: it is how a terminal answers the question (the
+      ;; `xt-mouse.el' advice that reads it off the last mouse event),
+      ;; so a drag in the terminal front end gets `nil' here and does not
+      ;; scroll. Nothing in this tree reads a mouse on a terminal yet.
+      ;;--------------------------------------------------------------
+      (let* ((frame (*current-frame*))
+             (position (and frame
+                            (display-mouse-position (frame-output frame)))))
+        (if position
+            (cons frame position)
+            (cons frame (cons #f #f)))))
 
     (define (window-body-height window)
       ;; The rows of the window available to text: everything above its

@@ -441,9 +441,28 @@
       (and (pair? event) (nth 1 event)))
 
     (define (event-end event)
-      ;; GNU Emacs's `event-end'.
+      ;; GNU Emacs's `event-end' (`subr.el:1952'): "Return the ending
+      ;; position of EVENT. EVENT should be a click, drag, or key press
+      ;; event."
+      ;;
+      ;; **A drag event carries two positions and a click carries one**,
+      ;; which is the whole of the difference from `event-start':
+      ;;
+      ;;   (mouse-1      POSN)             a click
+      ;;   (drag-mouse-1 START-POSN END-POSN)
+      ;;
+      ;; and Emacs tells them apart by asking whether the *third*
+      ;; element is a position: `(nth (if (consp (nth 2 event)) 2 1)
+      ;; event)'. A drag that ran off the end of a line and back has a
+      ;; third element that is not a position, because Emacs puts the
+      ;; click count there instead - `(drag-mouse-1 POSN 2)' - so the
+      ;; test is what it is and not "is there a third element".
+      ;;
+      ;; The `posn-at-point' fallback for a nil event is not carried:
+      ;; nothing here asks for the end of an event it does not have.
       ;;--------------------------------------------------------------
-      (and (pair? event) (nth 1 event)))
+      (and (pair? event)
+           (nth (if (pair? (nth 2 event)) 2 1) event)))
 
     (define (posn-window position)
       ;; GNU Emacs's `posn-window': the window the event happened in, or

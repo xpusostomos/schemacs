@@ -51,7 +51,8 @@
          string-search-forward text-editor-buffer-name text-editor-text-props
          text-editor-char-count text-editor-file-name marker-position
          text-editor-cursor-column text-editor-cursor-line
-         text-editor-get-cursor text-editor-mark text-editor-get-end-of-line
+         text-editor-get-cursor text-editor-set-cursor text-editor-mark
+         text-editor-get-end-of-line
          text-editor-get-start-of-line text-editor-copy-string
          text-editor-line-count count-lines
          text-editor-point-min
@@ -178,9 +179,13 @@
    window-line-rows
    window-line-slices
    posn-at-x-y buffer-posn-from-coords
-   *track-mouse*
+   ;; the glyph the pointer is on, which is what decides whether a motion
+   ;; report is a movement at all - see `remember-mouse-glyph'
+   remember-mouse-glyph
+   track-mouse
    window-start
    window-truncates-lines?
+   vertical-motion
    )
 
   (begin
@@ -653,6 +658,95 @@
         (cond ((null? rest) 0)
               ((< column (cdr (car rest))) k)
               (else (loop (cdr rest) (+ k 1))))))
+
+    (define (%row-of-position window line-start column)
+      ;; Which screen row of the line beginning at LINE-START the buffer
+      ;; column COLUMN is drawn on.
+      ;;
+      ;; A COLUMN at or past the end of the line is on its *last* row, and
+      ;; that is not a corner case to shrug at: `vertical-motion' is asked
+      ;; to move from `window-end', which is exactly such a position - the
+      ;; far edge of the last row that fits, i.e. the line's own length.
+      ;; `rows-row-of-column' answers 0 there, which is where the cursor
+      ;; never is at the callers it was written for.
+      ;;--------------------------------------------------------------
+      (let loop ((rest (window-line-slices-at window line-start)) (k 0))
+        (cond ((null? rest) (max 0 (- k 1)))
+              ((< column (cdr (car rest))) k)
+              (else (loop (cdr rest) (+ k 1))))))
+
+    (define (%row-beginning line row-slices k)
+      ;; The buffer position of the first character drawn on row K of the
+      ;; line at LINE - the position `vertical-motion' leaves point on. A
+      ;; line with no rows to speak of (the empty line a final line break
+      ;; starts) begins where it begins.
+      ;;--------------------------------------------------------------
+      (if (or (null? row-slices) (>= k (length row-slices)))
+          line
+          (+ line (car (list-ref row-slices k)))))
+
+    (define (vertical-motion lines window)
+      ;; GNU Emacs's `vertical-motion' (`indent.c:2207'): "Move point to
+      ;; start of the screen line LINES lines down" - up when LINES is
+      ;; negative - and answer "number of screen lines moved over; that
+      ;; usually equals LINES, but may be closer to zero if beginning or
+      ;; end of buffer was reached."
+      ;;
+      ;; **Here, and not in `indentc.sld' where `indent.c' is.** What a
+      ;; *screen* line is in this tree is the renderer's row walk -
+      ;; `window-line-slices-at' advanced by `line-next-start' - and that
+      ;; walk is this library's. Emacs asks its display iterator, which
+      ;; every C file can reach; here the library that owns the walk has
+      ;; to be the library that owns the function.
+      ;;
+      ;; WINDOW supplies the width, the wrapping and the horizontal
+      ;; scroll, as the C's second argument does. The buffer is the one
+      ;; the window shows, which is the buffer Emacs moves point in for
+      ;; every caller here: `mouse-scroll-subr' has just selected the
+      ;; window with `mouse-set-point'.
+      ;;
+      ;; Not carried: the third argument `cur-col' (a caller saying where
+      ;; on its line it already is, to save the scan), and the
+      ;; pixel-level partial scrolls of `move_it_vertically' - a row
+      ;; here is a whole row.
+      ;;--------------------------------------------------------------
+      (let* ((window (or window (selected-window)))
+             (ed (window-buffer window))
+             (pt (text-editor-get-cursor ed))
+             (line-start (text-editor-get-start-of-line ed pt))
+             (slices (window-line-slices-at window line-start))
+             (k (%row-of-position window line-start (- pt line-start)))
+             (left (abs lines))
+             (down? (>= lines 0))
+             (answer
+              (let loop ((line line-start) (row-slices slices) (k k)
+                         (left left) (moved 0))
+                (cond
+                 ((= left 0)
+                  (list (%row-beginning line row-slices k) moved))
+                 (down?
+                  (if (< (+ k 1) (length row-slices))
+                      (loop line row-slices (+ k 1) (- left 1) (+ moved 1))
+                      (let ((next (line-next-start ed line)))
+                        (if next
+                            (loop next (window-line-slices-at window next)
+                                  0 (- left 1) (+ moved 1))
+                            ;; the end of the buffer: the C's walk stops
+                            ;; at ZV and says how far it got
+                            (list (text-editor-point-max ed) moved)))))
+                 ((> k 0)
+                  (loop line row-slices (- k 1) (- left 1) (+ moved 1)))
+                 ((= line (text-editor-point-min ed))
+                  ;; the beginning of the buffer, the other edge
+                  (list (text-editor-point-min ed) moved))
+                 (else
+                  (let* ((prev (text-editor-get-start-of-line ed (- line 1)))
+                         (prev-slices (window-line-slices-at window prev)))
+                    (loop prev prev-slices
+                          (max 0 (- (length prev-slices) 1))
+                          (- left 1) (+ moved 1))))))))
+        (text-editor-set-cursor ed (car answer))
+        (if down? (cadr answer) (- (cadr answer)))))
 
     (define (recenter-window-on-cursor! window ed cursor-start vheight)
       ;; Put WINDOW's start half a window's height *backward* from its
@@ -2319,10 +2413,34 @@
               ;; written down as the window is drawn rather than walked
               ;; for a second time when `window-end' asks.
               (let* ((drawn (min (length slices) (- vheight row)))
-                     (end (if (= drawn (length slices))
-                              (text-editor-get-end-of-line ed line-start)
-                              (+ line-start
-                                 (cdr (list-ref slices (- drawn 1)))))))
+                     (next (line-next-start ed line-start))
+                     (end (cond
+                           ;; The line is cut off by the bottom of the
+                           ;; window: the window ends where the last row
+                           ;; that fits ends.
+                           ((< drawn (length slices))
+                            (+ line-start (cdr (list-ref slices (- drawn 1)))))
+                           ;; The whole line fitted and it has a line
+                           ;; break. **The end is one past that break, not
+                           ;; the break itself.** The C's row ends at
+                           ;; `MATRIX_ROW_END_CHARPOS' - "the position of
+                           ;; the first character *after* the glyphs of
+                           ;; this row" - and a line break *is* one of the
+                           ;; row's glyphs, so `window_end_pos' for a
+                           ;; window whose last row ends a line points at
+                           ;; the next line. Answering the break's own
+                           ;; position instead is one character short, and
+                           ;; `mouse-scroll-subr' measures from here:
+                           ;; `(goto-char (window-end window))' then
+                           ;; `(vertical-motion (1- jump))', so being one
+                           ;; short left point a row above the bottom of
+                           ;; the window - the last line never selected,
+                           ;; and the redisplay's recentre decided from a
+                           ;; cursor that was still on the screen.
+                           (next next)
+                           ;; The buffer's last line has no line break, so
+                           ;; its end is the end of its text.
+                           (else (text-editor-get-end-of-line ed line-start)))))
                 (set!%window-end-pos window
                                      (- (text-editor-point-max ed) end))
                 (set!%window-end-vpos window (+ row (- drawn 1)))
@@ -2634,21 +2752,29 @@
     ;; about which row a wrapped line's second half is on.
     ;;------------------------------------------------------------------
 
-    (define *track-mouse*
-      ;; GNU Emacs's `track-mouse' - a C variable of `xdisp.c' - which is
-      ;; whether the display makes an *event* of pointer motion at all.
-      ;; Nil, this tree's #f, means it does not: an ordinary pass of the
-      ;; pointer over a window is not a key, because Emacs does not make
-      ;; one, and a front end that reported motion whenever it happened
-      ;; would hand the command loop a `mouse-movement' it has nothing
-      ;; bound for - "undefined key" on every move.
-      ;;
-      ;; `mouse-drag-track' binds it to t for as long as a drag is being
-      ;; tracked, which is the only time the editor wants to know where
-      ;; the pointer is, and `pgtk.sld''s motion handler reads it before
-      ;; queueing anything.
-      ;;--------------------------------------------------------------
-      (make-parameter #f))
+    (define track-mouse #f)
+    ;; ^ GNU Emacs's `track-mouse' - a C variable of `xdisp.c' - which is
+    ;; whether the display makes an *event* of pointer motion at all.
+    ;; Nil, this tree's #f, means it does not: an ordinary pass of the
+    ;; pointer over a window is not a key, because Emacs does not make
+    ;; one, and a front end that reported motion whenever it happened
+    ;; would hand the command loop a `mouse-movement' it has nothing
+    ;; bound for - "undefined key" on every move.
+    ;;
+    ;; `mouse-drag-track' sets it for as long as a drag is being tracked,
+    ;; which is the only time the editor wants to know where the pointer
+    ;; is, and `pgtk.sld''s motion handler reads it before queueing
+    ;; anything (the other values Emacs knows - `drag-tracking',
+    ;; `dropping', `drag-source' - are all true here, which is the same
+    ;; test the C's front ends make: `!NILP (track_mouse)').
+    ;;
+    ;; **A plain variable and not a parameter**, because Emacs's is a
+    ;; plain Lisp variable: `mouse-drag-track' `setq's it, saves the old
+    ;; value in `old-track-mouse' and puts it back from the cleanup its
+    ;; transient map runs on exit. There is no dynamic extent for a
+    ;; parameter to be the analogue of - the cleanup runs after the
+    ;; command that installed it has returned.
+    ;;--------------------------------------------------------------
 
     (define (%posn-char-at line-string from to column)
       ;; The offset within LINE-STRING of the character drawn at display
@@ -2665,6 +2791,43 @@
             (min i to)
             (loop (+ i 1)
                   (+ c (char-display-width (string-ref line-string i) c))))))
+
+    (define (remember-mouse-glyph frame x y)
+      ;; GNU Emacs's `remember_mouse_glyph' (`xdisp.c:2778'): "Return the
+      ;; extents of glyph in FRAME for mouse event generation", as
+      ;; `(X Y WIDTH HEIGHT)' in the frame's own units.
+      ;;
+      ;; **What it is for.** `note_mouse_movement' (`pgtkterm.c:5892')
+      ;; remembers the glyph the pointer was last reported on and treats a
+      ;; report that is still inside it as *no movement at all* - "If not,
+      ;; ask for another motion event, so we can check again the next time
+      ;; it moves." That filter is what makes a drag past the edge of a
+      ;; window keep scrolling while the pointer is held out there: a
+      ;; mouse reports its position many times a second, and only the
+      ;; reports that leave the glyph become events a command can see.
+      ;;
+      ;; **A glyph here is the cell.** Emacs's version reads the window's
+      ;; *glyph matrix* and answers the rectangle of the glyph under the
+      ;; pointer in pixels - two cells wide for a wide character, the whole
+      ;; row for a mode line glyph. This tree has no glyph matrix: a window
+      ;; is drawn from the buffer a line at a time, and a character is one
+      ;; cell wide except a wide one, which is two (`char-display-width').
+      ;; So the extents are the cell, which is what Emacs answers for an
+      ;; ordinary character anyway, and its `virtual_glyph' branch - "if
+      ;; there is no glyph under the mouse, divide the screen into a grid
+      ;; of the smallest glyph in the frame" - is the same answer for
+      ;; everything else.
+      ;;
+      ;; The one place the two differ is a *wide* character: Emacs
+      ;; remembers it as two cells wide, so a pointer moving within it is
+      ;; not movement, where here it is. The difference can only make this
+      ;; tree report *more* movement than Emacs and never less, and the
+      ;; `mouse-position' query the drag scrolls by is unaffected by it.
+      ;;--------------------------------------------------------------
+      (let ((display (frame-output frame)))
+        (list x y
+              (if display (column-width display) 1)
+              (if display (line-height display) 1))))
 
     (define (buffer-posn-from-coords window row column)
       ;; GNU Emacs's `buffer_posn_from_coords' (`xdisp.c'): the buffer
