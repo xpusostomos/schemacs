@@ -398,13 +398,18 @@ BASIC-FUNC.md groups 11-15, per the plan in
 **Use this before reaching for a keyboard.** A running editor can be read and
 poked from outside, in its own thread, with its own state:
 
-    SCHEMACS_REPL=37146 ./seg FILE &
+    SCHEMACS_REPL=37146 ./seg -w FILE &
     tools/repl.py -m '(schemacs editor xdisp)' '(render! (*current-frame*))'
 
-`SCHEMACS_REPL` names a port; `main-gtk.scm` / `main-ncurses.scm` open Guile's
-REPL server there if it is set, and nothing in the editor proper knows the back
-door exists. `tools/repl.py` speaks to it (`-m MODULE` imports first;
-expressions evaluate in `(guile-user)`). It answers with the process's *real*
+`seg` is a Guile script now, and it reads its own command line
+(`schemacs/main.scm`, via `(ice-9 getopt-long)`): the **terminal** is the
+default and `-w`/`--window` starts the Gtk one, so the example above says `-w`.
+`--chdir=DIR` is Emacs's `--chdir` (`emacs.c:1534`). `SCHEMACS_REPL` names a
+port; `schemacs/main.scm` opens Guile's REPL server there if it is set (as
+`main-gtk.scm` / `main-ncurses.scm` still do when they are run directly, which
+is how `tools/pty-check.py` drives the terminal one), and nothing in the editor
+proper knows the back door exists. `tools/repl.py` speaks to it (`-m MODULE`
+imports first; expressions evaluate in `(guile-user)`). It answers with the process's *real*
 state, so `(buffer-list)`, `(*current-frame*)`, a buffer's text and its mark are
 all the live values, and `(render! f)` redraws for real. `pgtk-write-screenshot!`
 writes what the window is showing to a PNG, so pixels can be checked too.

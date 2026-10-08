@@ -40,8 +40,6 @@
   ;;                       such frame: the echo area is a row
   (import
     (scheme base)
-    (only (guile) catch format open-file)   ; TEMPORARY, for draglog
-    (only (scheme time) current-jiffy jiffies-per-second) ; TEMPORARY
     ;; `posn-set-point' is `subr.el''s and lives here because it needs
     ;; the two below, and `(schemacs editor subr)' is beneath both of
     ;; them and cannot reach either - see the note on the posn cluster
@@ -91,7 +89,6 @@
     ;; a drag has moved on.
     (only (schemacs editor keyboard)
           set-transient-map sit-for
-          *unread-command-events*        ; TEMPORARY, for draglog
           ;; the display's own event value, which is where a motion
           ;; event's *position* is - `read-key-event' answers only the key
           *last-read-event*)
@@ -178,20 +175,6 @@ point determined by `mouse-select-region-move-to-beginning'."
                        down-mouse-1 down-mouse-2 down-mouse-3
                        drag-mouse-1 drag-mouse-2 drag-mouse-3))))
 
-
-    (define (draglog line)
-      ;; TEMPORARY: append a line to a file, from wherever. A file and not
-      ;; the echo area, which only ever shows the last message.
-      ;;--------------------------------------------------------------
-      (catch #t
-        (lambda ()
-          (let ((out (open-file "/tmp/pgtk-drag.log" "a")))
-            (string-for-each
-             (lambda (c) (write-u8 (char->integer c) out))
-             line)
-            (write-u8 10 out)
-            (close-port out)))
-        (lambda (k . a) #f)))
 
     (define (car-safe-of object)
       ;; GNU Emacs's `car-safe': the cons's car, or nil for anything that
@@ -296,8 +279,6 @@ point determined by `mouse-select-region-move-to-beginning'."
             ;; and not by however far down a line point happens to be.
             (goto-char (window-start window))
             (when (not (= 0 (vertical-motion jump window)))
-              (draglog (format #f "  step jump=~a old-start=~a new-start=~a"
-                               jump (window-start window) (point)))
               (set-window-start! window (point))
               (if (>= jump 0)
                   (if (window-end window)
@@ -335,16 +316,11 @@ point determined by `mouse-select-region-move-to-beginning'."
                 (goto-char opoint))
               (when adjust
                 (adjust))
-              ;; TEMPORARY: the same call, with its answer written down -
-              ;; `#t' means the delay went by with nothing typed, which is
-              ;; what sends the loop round again.
-              (let ((more (sit-for (*mouse-scroll-delay*) #f)))
-                (draglog (format #f "  waited more=~a got=~a" more
-                                 (if (pair? (*unread-command-events*))
-                                     (car (*unread-command-events*))
-                                     '())))
-                (when more
-                  (loop)))))
+              ;; `sit-for' answers #t when the delay went by with
+              ;; nothing typed, which is what sends the loop round again -
+              ;; "until new input arrives".
+              (when (sit-for (*mouse-scroll-delay*) #f)
+                (loop))))
           (unless (eq? window (selected-window))
             (goto-char opoint)))))
 
@@ -373,12 +349,7 @@ point determined by `mouse-select-region-move-to-beginning'."
              (end-window (and end (posn-window end)))
              (end-point (and end (posn-point end))))
         (if (and (eq? end-window start-window) (integer? end-point))
-            (begin
-              (draglog (format #f "motion t=~a INSIDE point=~a"
-                               (quotient (current-jiffy)
-                                         (quotient (jiffies-per-second) 1000))
-                               end-point))
-              (mouse--drag-set-mark-and-point start-point end-point 0))
+            (mouse--drag-set-mark-and-point start-point end-point 0)
             ;; **The pointer's row comes from `mouse-position', not from
             ;; the event.** The event's own coordinates are relative to
             ;; whichever window the pointer was over, and are meaningless
@@ -390,10 +361,6 @@ point determined by `mouse-select-region-move-to-beginning'."
             ;; because the row it answered barely differed from the
             ;; window's bottom edge.
             (let ((mouse-row (cdr (cdr (mouse-position)))))
-              (draglog (format #f "motion t=~a row=~a top=~a bottom=~a"
-                               (quotient (current-jiffy)
-                                         (quotient (jiffies-per-second) 1000))
-                               mouse-row top bottom))
               (cond
                ((not (integer? mouse-row)) #f)
                ((< mouse-row top)

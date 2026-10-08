@@ -47,8 +47,6 @@
     (only (scheme write) display write)
     (only (guile) ash logand logior lognot inexact->exact round
           get-internal-real-time internal-time-units-per-second)
-    ;; TEMPORARY, for pgtk-reportlog
-    (only (guile) catch open-file)
     (oop goops)
     ;; The drawing primitives, which guile-gi does not bind.
     (cairo)
@@ -770,19 +768,6 @@
       (when (pair? *pgtk-running*)
         (main-loop:quit (car *pgtk-running*))))
 
-    (define (pgtk-reportlog line)
-      ;; TEMPORARY: every pointer report, before the glyph filter, so the
-      ;; log says whether reports go on arriving while the pointer is held
-      ;; still. Remove with the call and the import.
-      ;;--------------------------------------------------------------
-      (catch #t
-        (lambda ()
-          (let ((p (open-file "/tmp/pgtk-report.log" "a")))
-            (write line p)
-            (newline p)
-            (close-port p)))
-        (lambda args #f)))
-
     (define (note-mouse-movement d x y)
       ;; GNU Emacs's `note_mouse_movement' (`pgtkterm.c:5892'), for one
       ;; motion report at frame cell X, Y:
@@ -813,12 +798,6 @@
       ;;--------------------------------------------------------------
       (let ((glyph (remember-mouse-glyph (or (pgtk-frame-for d) (*current-frame*))
                                          x y)))
-        (pgtk-reportlog                          ; TEMPORARY
-         (list 'report
-               (quotient (* 1000 (get-internal-real-time))
-                         internal-time-units-per-second)
-               x y
-               (if (equal? glyph (pgtk-last-mouse-glyph d)) 'same 'NEW)))
         (if (equal? glyph (pgtk-last-mouse-glyph d))
             #f
             (begin

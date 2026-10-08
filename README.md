@@ -188,10 +188,15 @@ smooth... *very* smooth.
 
 ### Running it
 
-There are 2 scripts in the top level: 
+There are 2 scripts in the top level:
 
-* se - the Scheme Editor, or if you like the Scheme Emacs.
-* seg - the Scheme Editor, Graphical.
+* seg - the Scheme Editor, or if you like the Scheme Emacs. It reads a
+  command line of its own (`schemacs/main.scm`, through Guile's
+  `(ice-9 getopt-long)`): the terminal editor is the default,
+  `-w`/`--window` starts the Gtk one, `--chdir=DIR` changes directory
+  before starting, and `-h` prints the usage.
+* se - the terminal editor on its own, which is what `seg` starts by
+  default.
 
 Right now I'm using Wayland, I presume the graphics will work on X11
 but haven't tried it.
