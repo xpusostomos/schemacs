@@ -42,6 +42,20 @@ import os, pty, select, socket, subprocess, sys, time, base64, tempfile
 # checks do use.
 TEST_CONFIG_HOME = tempfile.mkdtemp(prefix='schemacs-test-config-')
 
+# **And it holds an init file that inhibits the startup screen.** The tree
+# ships a `schemacs/splash.txt', so every editor started with a file
+# argument now shows the file above and the splash below
+# (`schemacs/editor/startup.sld') - which is what a user wants and what
+# these checks are not about. `(set! inhibit-startup-screen #t)' is
+# Emacs's own way to say so, and using it here has a second effect worth
+# having: every check then loads an init file, so the path that gives the
+# init file the editor's names is exercised 62 times a run. The checks
+# that *are* about the splash pass their own `config=' with no init file
+# in it.
+_CFG = os.path.join(TEST_CONFIG_HOME, 'schemacs')
+os.makedirs(_CFG, exist_ok=True)
+open(os.path.join(_CFG, 'init.scm'), 'w').write('(set! inhibit-startup-screen #t)\n')
+
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 C_x = b"\x18"
@@ -92,13 +106,20 @@ KEY_MAX = 10.0
 
 
 def drive(keys, path, settle=1.5, gap=0.3, term=None, background="0000/0000/0000",
-          report_exit=False, during=None):
+          report_exit=False, during=None, config=None):
     """Run the editor on PATH, send KEYS, and return everything it drew.
+
+    PATH of None starts the editor with **no file arguments**, which is
+    what the startup screen is shown for.
 
     DURING, when given, is called once the editor is up and has gone quiet
     and *before* it is killed - for a check that has to talk to the editor
     while it is still running (the back door). Whatever the editor draws
     in response is drained too, so the screen that comes back includes it.
+
+    CONFIG is the `XDG_CONFIG_HOME' the editor is given; the default is
+    the empty one above, whose init file inhibits the startup screen. A
+    check about the splash passes a directory with no init file in it.
 
     TERM is the terminal type the editor is told it has (default: the
     `xterm' of the 8-colour checks, or $SCHEMACS_TEST_TERM).  BACKGROUND
@@ -117,11 +138,14 @@ def drive(keys, path, settle=1.5, gap=0.3, term=None, background="0000/0000/0000
     pid, fd = pty.fork()
     if pid == 0:
         os.environ["GUILE_WARN_DEPRECATED"] = "no"
-        os.environ["XDG_CONFIG_HOME"] = TEST_CONFIG_HOME
+        os.environ["XDG_CONFIG_HOME"] = config or TEST_CONFIG_HOME
         os.environ["TERM"] = term or os.environ.get("SCHEMACS_TEST_TERM", "xterm")
         os.chdir(REPO)
-        os.execvp("guile", ["guile", "--no-auto-compile", "--r7rs", "-L", ".",
-                            "-s", "main-ncurses.scm", path])
+        argv = ["guile", "--no-auto-compile", "--r7rs", "-L", REPO,
+                "-s", "main-ncurses.scm"]
+        if path is not None:
+            argv.append(path)
+        os.execvp("guile", argv)
     out = b""
     answers = {
         # Secondary DA: an xterm of a version that reports its colours
@@ -1501,6 +1525,81 @@ def check_back_door():
     elif "scheme@(guile-user)>" not in greeting:
         problems.append("the first thing the editor said to a client was "
                         "%r, which has no prompt in it" % greeting[:200])
+    return problems
+
+
+# A config directory with **no init file**, for the checks that are about
+# the startup screen: everything else here inhibits it, which is the point
+# of the one in TEST_CONFIG_HOME.
+SPLASH_CONFIG_HOME = tempfile.mkdtemp(prefix='schemacs-splash-config-')
+
+# And one that inhibits it explicitly, for the check that the init file is
+# *how* it is inhibited.
+NO_SPLASH_CONFIG_HOME = tempfile.mkdtemp(prefix='schemacs-nosplash-config-')
+os.makedirs(os.path.join(NO_SPLASH_CONFIG_HOME, 'schemacs'), exist_ok=True)
+open(os.path.join(NO_SPLASH_CONFIG_HOME, 'schemacs', 'init.scm'), 'w').write(
+    '(set! inhibit-startup-screen #t)\n')
+
+
+def check_splash():
+    """The startup screen, from `schemacs/editor/startup.sld'.
+
+    GNU Emacs's splash is Lisp that builds its own text; this one is a
+    file of text, `splash.txt', looked for on the load path - and the tree
+    ships one at `schemacs/splash.txt', beside its libraries, which is
+    what a run here finds (`main-ncurses.scm' is started with `-L .').
+
+    Three things, which are what Emacs's own splash does with
+    `command-line-1''s `(display-startup-screen (> displayable-buffers-len
+    0))' (`startup.el:3125'):
+
+      * with no file arguments it *is* the screen;
+      * with one, the frame is split and the splash is the **lower**
+        window - Emacs's `display-buffer' against its `switch-to-buffer';
+      * `q' leaves it (`exit-splash-screen' is `quit-window'), which is
+        only visible because `quit-window' now gives the window another
+        buffer when it is the frame's only one;
+      * and an init file saying `(set! inhibit-startup-screen #t)' means
+        it never appears at all - Emacs's own way of saying so.
+    """
+    problems = []
+
+    # 1. no file arguments: the splash, read-only, in the whole frame
+    rows = screen_of(drive([], None, config=SPLASH_CONFIG_HOME)).split("\n")
+    modelines = [r for r in rows if "*Schemacs*" in r]
+    if not modelines:
+        problems.append("with no file argument the startup screen is not the "
+                        "buffer on show: %r" % "\n".join(rows[-3:]))
+    elif "%%" not in modelines[0]:
+        problems.append("its mode line does not say the buffer is read-only: "
+                        "%r" % modelines[0])
+
+    # 2. a file argument: the file above, the splash below
+    path = "/tmp/pty-check-splash.txt"
+    open(path, "w").write("the file above\n")
+    screen = screen_of(drive([], path, config=SPLASH_CONFIG_HOME))
+    rows = screen.split("\n")
+    above = [i for i, r in enumerate(rows) if "the file above" in r]
+    below = [i for i, r in enumerate(rows) if "*Schemacs*" in r]
+    if not above:
+        problems.append("the file named on the command line is not shown")
+    if not below:
+        problems.append("the splash is not shown below it: %r"
+                        % "\n".join(rows[-4:]))
+    elif above and below[0] < above[0]:
+        problems.append("the splash is *above* the file it should be below")
+
+    # 3. `q' leaves it
+    screen = screen_of(drive([b"q"], None, config=SPLASH_CONFIG_HOME))
+    if "*Schemacs*" in screen:
+        problems.append("`q' did not leave the startup screen: %r"
+                        % screen[-300:])
+
+    # 4. and the init file's setting inhibits it
+    screen = screen_of(drive([], None, config=NO_SPLASH_CONFIG_HOME))
+    if "*Schemacs*" in screen:
+        problems.append("`(set! inhibit-startup-screen #t)' in an init file "
+                        "did not inhibit the startup screen")
     return problems
 
 
@@ -2947,6 +3046,7 @@ CHECKS = {
     "split": check_split,
     "hscroll": check_hscroll,
     "back-door": check_back_door,
+    "splash": check_splash,
 }
 
 

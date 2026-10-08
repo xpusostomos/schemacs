@@ -34,13 +34,27 @@
     (only (scheme write) display)
     ;; `load' is Guile's own, and is what the init file is read with - the
     ;; same call the shell in `../guile-scsh/editor/init.scm' makes.
-    (only (guile) catch current-module getenv load resolve-module
+    ;; `%load-path' is where the splash screen's text is looked for.
+    (only (guile) %load-path catch current-module getenv load resolve-module
           set-current-module)
-    (only (schemacs editor fileio) file-exists-p)
-    (only (schemacs editor files) find-file-noselect)
+    ;; the editor's names, which the init file is given before it is
+    ;; loaded - see `load-init'
+    (only (schemacs editor loadup) open-editor-namespace!)
+    (only (schemacs editor buffer)
+          *inhibit-read-only* erase-buffer get-buffer-create
+          set!buffer-read-only set-buffer-modified-p use-local-map
+          with-current-buffer)
+    (only (schemacs editor command) define-command)
+    (only (schemacs editor editfns) goto-char)
+    (only (schemacs editor fileio) file-exists-p locate-file-internal)
+    (only (schemacs editor files) find-file-noselect insert-file-contents)
     (only (schemacs editor buff-menu) list-buffers)
+    (only (schemacs editor keymap) define-key)
+    (prefix (schemacs keymap) km:)
+    (only (schemacs editor simple) scroll-down-command scroll-up-command)
+    (only (schemacs editor subr) kbd)
     (only (schemacs editor window)
-          display-buffer other-window switch-to-buffer
+          display-buffer other-window quit-window switch-to-buffer
           switch-to-buffer-other-window))
 
   (export
@@ -48,6 +62,14 @@
    command-line-1--display
    init-path
    load-init
+   ;; the startup screen and its one setting - `startup.el''s
+   ;; `inhibit-startup-screen', which an init file says `set!' to
+   inhibit-startup-screen
+   splash-file
+   display-startup-screen
+   normal-splash-screen
+   exit-splash-screen
+   splash-screen-keymap
    ;; whether the init file is loaded at all - the command line's
    ;; `--no-init-file' (`-q'), which an entry point binds
    *init-file-user*
@@ -129,11 +151,21 @@
       (let ((path (and (*init-file-user*) (init-path))))
         (when path
           ;; In the *user's* module and not this library's, so that the
-          ;; file has Guile's ordinary bindings - `display', `getenv' and
+          ;; file has Guile's ordinary bindings - `display', `getenv` and
           ;; the rest - and `(import (schemacs repl))' works, rather than
           ;; only what this library happens to import. Emacs's init file
           ;; has the same property: it runs with all of Emacs's Lisp to
           ;; hand, not with the internals of `startup.el'.
+          ;;
+          ;; **And it is *given* the editor's names**, which is that
+          ;; property and not a convenience: Emacs's init file can say
+          ;; `(setq inhibit-startup-screen t)' because the variable is in
+          ;; the one obarray. Here the name has to be put in the module
+          ;; first, or `(set! inhibit-startup-screen #t)' - the spelling
+          ;; this tree documents - is an unbound variable. The back door
+          ;; is given the same names by the same call
+          ;; (`schemacs/editor/loadup.sld').
+          (open-editor-namespace! (resolve-module '(guile-user)))
           (let ((here (current-module)))
             (catch #t
               (lambda ()
@@ -145,6 +177,127 @@
                 (display "error: init file ") (display path)
                 (display ": ") (display key) (display " ") (display args)
                 (newline)))))))
+
+    ;;----------------------------------------------------------------
+    ;; The startup screen
+    ;;----------------------------------------------------------------
+    ;;
+    ;; GNU Emacs's is Lisp that builds its own text (`normal-splash-screen`,
+    ;; `startup.el:2372', and the image version beside it); this one is a
+    ;; **file of text**, `splash.txt', looked for on the load path - which
+    ;; is schemacs' own arrangement and the only departure of substance.
+    ;; Everything around it is Emacs's: the buffer is `*GNU Emacs*' there
+    ;; and `*Schemacs*' here, read-only, with a map of its own whose `q'
+    ;; leaves; the command line's files are shown *first*, and the splash
+    ;; goes in the window below them.
+
+    (define inhibit-startup-screen #f)
+    ;; ^ GNU Emacs's `inhibit-startup-screen' (`startup.el:68'): "Non-nil
+    ;; inhibits the startup screen. This is for use in your personal init
+    ;; file (but NOT site-start.el), once you are familiar with the
+    ;; contents of the startup screen."
+    ;;
+    ;; **A variable, and the init file can `set!' it** - which needs the
+    ;; name to be *there* when the init file runs, and it is: `load-init'
+    ;; gives the init file's module the editor's names
+    ;; (`open-editor-namespace!'), the way Emacs's init file has all of
+    ;; Emacs's Lisp to hand. `(set! inhibit-startup-screen #t)' is exactly
+    ;; Emacs's `(setq inhibit-startup-screen t)'.
+    ;;
+    ;; **`-q'/`--no-init-file' does not inhibit it**, in Emacs or here. In
+    ;; Emacs it is `-Q' that does, and `-Q' is `-q' plus "no site file"
+    ;; plus `--no-splash' - so this tree, which has no site file and no
+    ;; `-Q', leaves `--no-splash' to be added if anyone wants it.
+
+    (define (splash-file)
+      ;; The path of the splash screen's text, or #f when there is none.
+      ;;
+      ;; Two places, in this order:
+      ;;
+      ;;   `splash.txt' in a directory on the load path - a user's own, and
+      ;;   the tree's root is one of those (`se' puts it there);
+      ;;   `schemacs/splash.txt' in one of those directories - beside this
+      ;;   tree's libraries, which is where the copy it ships lives.
+      ;;
+      ;; Emacs searches for its splash *image* the same way
+      ;; (`fancy-splash-image-file', `startup.el:2087', through the image
+      ;; load path); for a text file there is nothing to copy.
+      ;;--------------------------------------------------------------
+      (or (locate-file-internal "splash.txt" %load-path)
+          (locate-file-internal "schemacs/splash.txt" %load-path)))
+
+    (define-command (exit-splash-screen)
+      "Stop displaying the splash screen buffer."
+      (interactive)
+      ;; Emacs's is `(quit-window t)' - leave the window and *kill* the
+      ;; buffer. This tree's `quit-window' takes no argument (its KILL and
+      ;; WINDOW are window.el's optional pair, not ported), so the splash
+      ;; is buried and comes back on `C-x b' rather than being killed.
+      ;; Named rather than papered over: the buffer is one `insert-file-
+      ;; contents' away from being remade, and `normal-splash-screen'
+      ;; erases it first anyway.
+      (quit-window))
+
+    (define splash-screen-keymap
+      ;; GNU Emacs's `splash-screen-keymap' (`startup.el:2039'), which is
+      ;; these four keys and nothing else: SPC and DEL scroll, S-SPC
+      ;; scrolls down, `q' leaves.
+      ;;
+      ;; Two departures, both from what this tree has: Emacs's parent is
+      ;; `button-buffer-map' and it is `:suppress t' - there are no buttons
+      ;; here (the splash is text, not a `fancy-splash-screen' with links)
+      ;; and no `suppress-keymap', which AGENTS.md lists with what it would
+      ;; need. So a printing character reaches `self-insert-command' and is
+      ;; refused by the read-only buffer, where Emacs makes it undefined.
+      ;;--------------------------------------------------------------
+      (let ((map (km:keymap '*splash-screen-keymap*)))
+        (define (bind! key command)
+          (define-key map (kbd key) command))
+        (bind! "SPC" scroll-up-command)
+        (bind! "DEL" scroll-down-command)
+        (bind! "S-SPC" scroll-down-command)
+        (bind! "q" exit-splash-screen)
+        map))
+
+    (define (normal-splash-screen concise)
+      ;; GNU Emacs's `normal-splash-screen' (`startup.el:2372'), the text
+      ;; one: a buffer holding the text, read-only, with the splash map as
+      ;; its local map - shown in this window when it is all there is to
+      ;; show, and in *another* window when the command line named files,
+      ;; which is Emacs's `(display-buffer splash-buffer)' against its
+      ;; `(switch-to-buffer splash-buffer)'.
+      ;;
+      ;; The buffer is not a *visiting* one: the text is read into
+      ;; `*Schemacs*' with `insert-file-contents' and the buffer's file
+      ;; name stays nil, which is also why read-only is the right flag
+      ;; rather than merely "do not save this".
+      ;;--------------------------------------------------------------
+      (let ((buffer (get-buffer-create "*Schemacs*"))
+            (path (splash-file)))
+        (with-current-buffer buffer
+          ;; writing into it needs the flag off, as everywhere else
+          (parameterize ((*inhibit-read-only* #t))
+            (erase-buffer)
+            (insert-file-contents path))
+          (use-local-map splash-screen-keymap)
+          (set!buffer-read-only buffer #t)
+          (set-buffer-modified-p #f)
+          ;; Emacs: `(goto-char (point-min))'
+          (goto-char 1))
+        (if concise
+            (display-buffer buffer)
+            (switch-to-buffer buffer))))
+
+    (define (display-startup-screen concise)
+      ;; GNU Emacs's `display-startup-screen' (`startup.el:2724'), and the
+      ;; test at the end of its `command-line-1' (`:3075'): the screen when
+      ;; there is one and nothing has inhibited it. CONCISE is Emacs's own
+      ;; argument - "display a concise version in another window" - and it
+      ;; is `(> displayable-buffers-len 0)': the files the command line
+      ;; named are already displayed, so the splash goes below them.
+      ;;--------------------------------------------------------------
+      (when (and (not inhibit-startup-screen) (splash-file))
+        (normal-splash-screen concise)))
 
     (define (command-line-1--display displayable-buffers)
       ;; Show the buffers the command line named: the `let' at the end of
@@ -211,6 +364,11 @@
            (set! displayable-buffers
                  (cons (find-file-noselect name) displayable-buffers)))
          args)
-        (command-line-1--display displayable-buffers)))
+        (command-line-1--display displayable-buffers)
+        ;; The startup screen comes *after* the files, which is Emacs's
+        ;; order (`startup.el:3125') and what puts the splash in the
+        ;; window below them rather than over them. CONCISE is Emacs's
+        ;; argument: #t when the command line named something to show.
+        (display-startup-screen (> (length displayable-buffers) 0))))
 
     ))

@@ -205,6 +205,16 @@ There is one script in the top level:
   (with no file it prints the usage line and stops). An optional argument
   is attached: `--server=37146`, not `--server 37146`.
 
+  Starting with no file arguments shows the **startup screen**, the way
+  GNU Emacs does: the text of a `splash.txt` found on the load path - the
+  tree ships one at `schemacs/splash.txt`, and a `splash.txt` of your own
+  in any load-path directory wins over it. It is a read-only buffer and
+  `q` leaves it. With file arguments the frame is split and the splash is
+  the *lower* window, again as in Emacs. An init file can turn it off with
+  Emacs's own spelling:
+
+      (set! inhibit-startup-screen #t)
+
 Right now I'm using Wayland, I presume the graphics will work on X11
 but haven't tried it.
 

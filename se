@@ -28,6 +28,11 @@
 ;;     se -w FILE           the Gtk window (the terminal is the default)
 ;;     se --chdir=/tmp FILE
 ;;
+;; With no FILE it shows the startup screen - the text of a `splash.txt'
+;; found on the load path (`schemacs/editor/startup.sld'), which is the
+;; whole window when it is all there is and the lower one when files were
+;; named. `(set! inhibit-startup-screen #t)' in the init file turns it off.
+;;
 ;; A running editor can be driven through a back door, off unless asked
 ;; for: `se -w --server FILE &' then `tools/repl.py '(render! (*current-frame*))',
 ;; or the terminal's own `se --repl'. The session is given the editor's

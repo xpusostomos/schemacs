@@ -26,7 +26,7 @@
        closedir eof-object? opendir readdir sort)
  (only (srfi srfi-13) string-drop-right string-suffix?)
  (only (srfi 64) test-assert test-equal test-begin test-end)
- (only (schemacs repl) back-door-libraries back-door-excluded-libraries
+ (only (schemacs editor loadup) editor-libraries editor-excluded-libraries
        open-editor-namespace!))
 
 (define (bound? module name)
@@ -40,7 +40,7 @@
   ;;-------------------------------------------------------------
   (catch #t (lambda () (module-ref module name) #t) (lambda args #f)))
 
-(test-begin "schemacs_repl")
+(test-begin "schemacs_loadup")
 
 ;;-------------------------------------------------------------
 ;; The session's namespace
@@ -97,8 +97,8 @@
 
 (define (unclassified rest)
   (cond ((null? rest) '())
-        ((member (car rest) (back-door-libraries)) (unclassified (cdr rest)))
-        ((member (car rest) (back-door-excluded-libraries))
+        ((member (car rest) (editor-libraries)) (unclassified (cdr rest)))
+        ((member (car rest) (editor-excluded-libraries))
          (unclassified (cdr rest)))
         (else (cons (car rest) (unclassified (cdr rest))))))
 
@@ -111,17 +111,17 @@
 
 (test-equal "nothing is in both lists"
   '()
-  (let loop ((rest (back-door-excluded-libraries)) (out '()))
+  (let loop ((rest (editor-excluded-libraries)) (out '()))
     (cond ((null? rest) (reverse out))
-          ((member (car rest) (back-door-libraries))
+          ((member (car rest) (editor-libraries))
            (loop (cdr rest) (cons (car rest) out)))
           (else (loop (cdr rest) out)))))
 
 (test-equal "the session's list has no duplicates"
   '()
-  (let loop ((rest (back-door-libraries)) (seen '()) (out '()))
+  (let loop ((rest (editor-libraries)) (seen '()) (out '()))
     (cond ((null? rest) (reverse out))
           ((member (car rest) seen) (loop (cdr rest) seen (cons (car rest) out)))
           (else (loop (cdr rest) (cons (car rest) seen) out)))))
 
-(test-end "schemacs_repl")
+(test-end "schemacs_loadup")

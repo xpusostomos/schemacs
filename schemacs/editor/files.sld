@@ -196,6 +196,10 @@
    find-file-other-window
    find-file-read-only
    insert-file
+   ;; `fileio.c''s primitive that `insert-file' and `revert-buffer' rest
+   ;; on, and what the startup screen reads its text with - a file that is
+   ;; *not* visited, so the buffer's file name stays nil.
+   insert-file-contents
    not-modified
    pwd
    *save-silently*
@@ -1389,12 +1393,22 @@ save-buffer
           points))
 
     (define (note-file-read-only! frame)
-      ;; Say so when the buffer just visited cannot be written, in GNU
-      ;; Emacs's words. Emacs warns at visit time rather than waiting
-      ;; for the first edit to be refused.
+      ;; Say so when the buffer's *file* cannot be written, in GNU Emacs's
+      ;; words: `after-find-file''s "Note: file is write protected"
+      ;; (`files.el:2940'), which Emacs says of a file that is not
+      ;; writable - the buffer's read-only flag is a *consequence* of that
+      ;; in Emacs (`:2920'), never the test.
+      ;;
+      ;; **The test here was the flag**, and it showed the moment a
+      ;; read-only buffer that visits nothing was current: the startup
+      ;; screen is read-only and fileless, and the front end's call to
+      ;; this said "file is write protected" about it. `file-write-
+      ;; protected?' is Emacs's own test - and the one `find-file-noselect'
+      ;; already used to set the flag in the first place.
       ;;--------------------------------------------------------------
-      (when (text-editor-read-only? (frame-editor frame))
-        (set!frame-message frame "Note: file is write protected")))
+      (let ((file (buffer-file-name (frame-editor frame))))
+        (when (and file (file-write-protected? file))
+          (set!frame-message frame "Note: file is write protected"))))
 
     (define *find-file-run-dired* (make-parameter #t))
     ;; ^ GNU Emacs's `find-file-run-dired' (files.el:579): "Non-nil means

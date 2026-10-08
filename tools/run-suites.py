@@ -45,7 +45,7 @@ SUITES = [
     'schemacs/editor/cmds-tests.scm',
     'schemacs/editor/mouse-tests.scm',
     'schemacs/repl-client-tests.scm',
-    'schemacs/repl-tests.scm',
+    'schemacs/editor/loadup-tests.scm',
     'schemacs/editor/fns-tests.scm',
     'schemacs/editor/subr-tests.scm',
     'schemacs/editor/textprop-tests.scm',

@@ -74,7 +74,8 @@
     (only (schemacs editor buffer)
           bury-buffer buffer-local-value default-directory erase-buffer
           get-buffer-create
-          kill-all-local-variables kill-buffer record-buffer! set-buffer
+          kill-all-local-variables kill-buffer other-buffer record-buffer!
+          set-buffer
           set!buffer-default-directory set!buffer-file-name set!buffer-read-only
           set-buffer-modified-p set-buffer-local-value!
           with-current-buffer *inhibit-read-only*)
@@ -730,12 +731,19 @@ windows it was combined with."
     ;; `switch-to-buffer' do it with their own NORECORD argument.
 
     (define-command (quit-window)
-      ;; GNU Emacs's `quit-window' (q in the Buffer Menu), which is
-      ;; `window.el''s: take this window off the frame and bury the buffer
-      ;; it was showing. A frame's only window cannot be removed, and then
-      ;; the buffer is just buried. It is window.el's plain function, and
-      ;; a command at the same time - which is why the Buffer Menu can
-      ;; bind it to q directly.
+      ;; GNU Emacs's `quit-window' (q in the Buffer Menu, Dired and the
+      ;; startup screen), which is `window.el''s: take this window off the
+      ;; frame and bury the buffer it was showing. It is window.el's plain
+      ;; function, and a command at the same time - which is why those
+      ;; three can bind it to q directly.
+      ;;
+      ;; **A frame's only window cannot be removed, and then the *window*
+      ;; is given another buffer.** Emacs's `quit-restore-window' ends
+      ;; `(set-window-buffer window (other-buffer ...))' for that case
+      ;; (`window.el'), which this did not: it buried the buffer and left
+      ;; the window *showing* it, so `q' in Dired - or on the startup
+      ;; screen - looked like it had done nothing at all. Burying a buffer
+      ;; is not the same as showing a different one.
       "Leave the selected window and bury the buffer it was showing."
       (interactive)
       (let* ((frame (*current-frame*))
@@ -744,7 +752,7 @@ windows it was combined with."
         (bury-buffer buffer)
         (if (> (length (window-list)) 1)
             (delete-window window)
-            #f)))
+            (switch-to-buffer (other-buffer buffer)))))
 
     (define-command (other-window count)
       "Select another window in cyclic ordering of windows, COUNT

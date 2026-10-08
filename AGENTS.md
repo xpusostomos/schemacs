@@ -447,13 +447,14 @@ hand it answered
     Unbound variable: find-file
 
 which reads as a broken door when the door was fine. So `start-repl!` runs
-`open-editor-namespace!` (`schemacs/repl.sld`), which `import`s every
-`(schemacs editor ...)` library into the module the session is pinned to -
-and `repl-tests.scm` walks `schemacs/editor/*.sld` and fails on a library
-that is neither in that list nor in the excluded pair. **The two exclusions
-are the toolkit bindings**, `term` (guile-ncurses) and `pgtk` (guile-gi):
-an editor has one loaded and must never need the other, the same rule
-`schemacs/main.scm` states about the front ends. `-m` is therefore no
+`open-editor-namespace!` (`schemacs/editor/loadup.sld`, `loadup.el`'s file),
+which `import`s every `(schemacs editor ...)` library into the module the
+session is pinned to - and `loadup-tests.scm` walks `schemacs/editor/*.sld`
+and fails on a library that is neither in that list nor in the excluded
+pair. **The exclusions are the toolkit bindings**, `term` (guile-ncurses)
+and `pgtk` (guile-gi), and `loadup` itself: an editor has one toolkit
+loaded and must never need the other, the same rule `schemacs/main.scm`
+states about the front ends. `-m` is therefore no
 longer needed in `tools/repl.py`, and no longer useful. **A running editor
 gets this when it is restarted, like every other change** - the list is
 imported as the door opens.
@@ -548,6 +549,26 @@ automatically on the next call.
 - A missing import reports as an **unbound variable at run time, never at load**.
   This class of bug has recurred five times. After any edit that adds a name, run
   `tools/check-missing-imports.py`.
+- **`tools/syntax-check.scm` runs the *reader*; compile a library to check a
+  library.** A file that reads perfectly can be one the compiler refuses, and
+  the interpreter is a third opinion that is more forgiving than either. Sweep
+  the tree with
+
+      for f in schemacs/**/*.sld; do guile --r7rs -L . -c "(compile-file \"$f\")"; done
+
+  **and `-L .` is not optional**: without it the imports do not resolve and the
+  sweep lies about what it checked. Two traps found this way (both in the
+  `loadup.sld` written 2026-10-08, both invisible to the reader and neither one
+  an error to the interpreter):
+  - a `define-library` here does **not** get R7RS's implicit `(scheme base)`.
+    Without importing it `define` is not a macro in that library, and the
+    compiler's complaint names something *inside* the file instead - it said
+    "source expression failed to match any pattern in form
+    (open-editor-namespace! . module)", which sent me hunting a dotted
+    procedure header that is in fact legal.
+  - `(case-lambda (() ...) ...)` - the zero-argument clause - is "unexpected
+    syntax in form ()" to the compiler and fine to the interpreter. Use
+    `(lambda args ...)` for a variadic procedure that must compile.
 - `text-editor-char-count` is the buffer size in characters and **every position
   is an index into it**, so anything that leaves it out of step with the text
   corrupts every later edit. It is maintained by hand, and the engine's own line
@@ -4901,6 +4922,21 @@ cache, 1.25 s with `~/.cache/guile/ccache` deleted (`--no-auto-compile`
 reads the sources and compiles nothing). Both are well inside the old
 1.5 s, which is why the cache was never the explanation.
 
+**But the cache *does* reach the screen.** A source file newer than its
+`.go` makes Guile print
+
+    ;;; note: source file ./schemacs/editor/startup.sld
+    ;;;       newer than compiled /home/chris/.cache/.../startup.sld.go
+
+and the editor's stderr *is the terminal* here, so that note lands in the
+middle of what a check reads - twice during the splash work a check failed
+on a screen full of notes rather than on the thing it was testing. Compile
+the tree (`for f in schemacs/**/*.sld; do guile --r7rs -L . -c "(compile-file \"$f\")"; done`)
+before a battery run, and after editing anything, so that the cache is
+newer than every source. A scripted edit-and-compile can still lose the
+race on mtime *granularity* - the write and the compile inside one second
+- which shows up the same way.
+
 # The echo area's timers, and the REPL wake that never fired (2026-10-07)
 
 Two things, and the second is a correction to the section above it: **the
@@ -5541,14 +5577,15 @@ GNU Emacs has **one obarray**, which is why `find-file` is reachable from
 Emacs file and the session is pinned to `(guile-user)` (`poll-repl!`), which
 has none of them - so `find-file` had never been bound there.
 
-`start-repl!` now runs **`open-editor-namespace!`** (`schemacs/repl.sld`),
-which evaluates one `import` form in that module listing every
-`(schemacs editor ...)` library. The list is written out (the tree's root is
-not a thing a running editor knows), so it can go stale - and
-**`schemacs/repl-tests.scm` is what notices**: it walks
-`schemacs/editor/*.sld` and fails on a library that is neither in the list
-nor in `back-door-excluded-libraries`. Verified by removing one entry: the
-test names it.
+`start-repl!` now runs **`open-editor-namespace!`** (`schemacs/editor/loadup.sld`
+since 2026-10-08, `schemacs/repl.sld` before that - the init file wants the
+same names, see the startup-screen section), which evaluates one `import`
+form in that module listing every `(schemacs editor ...)` library. The list
+is written out (the tree's root is not a thing a running editor knows), so
+it can go stale - and **`schemacs/editor/loadup-tests.scm` is what
+notices**: it walks `schemacs/editor/*.sld` and fails on a library that is
+neither in the list nor in `editor-excluded-libraries`. Verified by
+removing one entry: the test names it.
 
 **The two exclusions are the toolkit bindings** - `term` (guile-ncurses) and
 `pgtk` (guile-gi). An editor has one loaded and must never need the other,
@@ -5620,6 +5657,78 @@ the session is the outermost on the stack.
 Still open: the namespace is imported **as the door opens**, so a running
 editor gets it when it is restarted, like every other change in this tree.
 
+## The startup screen (2026-10-08)
+
+Chris: *"on startup schemacs searches for a file splash.txt on your load
+path. if it finds it, it will be the opening screen if there are no file
+arguments. If there are file arguments, the screen will be split and it
+will be the lower screen. Like emacs it will be a special read-only buffer
+that if you hit q it will close the buffer. Similar to emacs, if your init
+file has this in it: `(set! inhibit-startup-screen #t)` then the splash
+screen will never come up."*
+
+All of it is `schemacs/editor/startup.sld`, which is `startup.el`'s file,
+and the shape is Emacs's (`normal-splash-screen` `:2372`,
+`display-startup-screen` `:2724`, the call at the end of `command-line-1`
+`:3125`): the buffer is read-only with a map of its own whose `q` leaves,
+`goto-char (point-min)`, and **`display-buffer` when the command line named
+files against `switch-to-buffer` when it did not** — which is exactly the
+split-below-the-file behaviour asked for. The buffer is `*Schemacs*`
+(Emacs's is `*GNU Emacs*`) and `exit-splash-screen` is `quit-window`.
+
+**The text is a file, and that is the one departure of substance**: Emacs's
+splash is Lisp that builds its own text. `splash-file` looks on the load
+path, first for `splash.txt` (a user's own) and then for
+`schemacs/splash.txt` (the copy the tree ships, beside its libraries —
+Chris committed one, `a097a69`) — `locate-file-internal`, which is
+`lread.c`'s and already ported.
+
+**The init file is now *given the editor's names*.** `(set! inhibit-startup-screen
+#t)` cannot work otherwise: the init file is loaded into `(guile-user)`,
+which has none of the editor's names, so the variable was unbound. So the
+list that `repl.sld` was carrying moved to **`schemacs/editor/loadup.sld`**
+— `loadup.el`'s file, "the file that loads the editor" — and *both* callers
+use it: the back door and `load-init`. That is the same property Emacs's
+init file has ("it runs with all of Emacs's Lisp to hand"), which the
+comment in `load-init` had claimed in as many words while not doing it.
+
+### Three departures this turned up, all fixed
+
+1. **`note-file-read-only!` tested the buffer's flag; Emacs tests the
+   file.** `after-find-file` says "Note: file is write protected" of a file
+   that is not writable and makes the buffer read-only *because* of it. The
+   startup screen is read-only and visits nothing, so the front end's call
+   announced "Note: file is write protected" about it. It asks
+   `file-write-protected?` of `buffer-file-name` now — and a fileless
+   buffer says nothing, which the test in `ncurses-editor-tests.scm` now
+   checks (the old one set the flag on a fileless buffer and expected the
+   message).
+2. **`quit-window` on a frame's only window buried the buffer and left the
+   window showing it**, so `q` in Dired, the Buffer Menu and the startup
+   screen looked like it did nothing — a departure this file already named
+   ("so the dired buffer being buried shows something else. Ours leaves it
+   showing the buried buffer, which is why `q' in dired looks like it did
+   nothing"). Emacs's `quit-restore-window` ends
+   `(set-window-buffer window (other-buffer ...))`; ours does
+   `(switch-to-buffer (other-buffer buffer))` for that case now.
+3. **The whole tree did not compile.** See the gotcha below.
+
+### Two harness changes
+
+`tools/pty-check.py`'s editors are given an init file saying
+`(set! inhibit-startup-screen #t)`: the tree ships a splash, so every check
+that starts the editor on a file would otherwise have a split screen it is
+not about — and, usefully, every check now loads an init file, so the path
+that gives the init file the editor's names runs 63 times a battery. The
+`splash` check passes its own `config=` with no init file in it.
+
+And `drive` now passes **`-L REPO` and not `-L .`**: `locate-file`'s rule —
+the C's own, `openp` — expands a *relative* load-path entry against
+`default-directory`, which by then is the *visited file's* directory, so
+with `-L .` the tree's own `schemacs/splash.txt` was invisible. `se` has
+always put the absolute tree on the path, so only the harness was affected
+— but it is worth knowing before writing the next load-path search.
+
 ## `--remote`, and the redisplay the back door was missing
 
 Chris asked for `-r`/`--remote[=PORT] FILE...`: `emacsclient` - the files
@@ -5644,7 +5753,7 @@ explains why `tools/repl.py '(find-file ...)'` has always needed a
 following `(render! ...)`, and it means a session that only *reads* the
 editor no longer has to know that the display is stale.
 
-`repl-tests.scm` (the namespace and the library list) and
+`loadup-tests.scm` (the namespace and the library list) and
 `repl-client-tests.scm` (the port files, the answer reader, the expression
 `--remote` sends) are the unit tests; `tools/pty-check.py`'s `back-door`
 check is the end-to-end one, and it now runs `./se --remote` against the

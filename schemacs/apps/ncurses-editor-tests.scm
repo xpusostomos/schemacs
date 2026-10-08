@@ -855,18 +855,37 @@
 (test-equal '("%*" "Buffer is read-only" "content\n" "Xcontent\n")
   (visit* "/tmp/fe-rw.txt" "content\n" (list #\X C-x C-q C-underscore)))
 
-;; The visit-time warning is a rule of its own: it appears when the
-;; buffer is read-only and stays quiet when it is not.
-(define (message-after-note read-only?)
+;; The visit-time warning is the **file**'s rule, not the buffer's: GNU
+;; Emacs says "Note: file is write protected" of a file that cannot be
+;; written (`after-find-file', `files.el:2940') and turns the buffer
+;; read-only *because* of it. The test here used to be the buffer's flag,
+;; which is a consequence in Emacs - and it meant that any read-only buffer
+;; that visits nothing was warned about as though it were a file, which is
+;; what the startup screen is (`*Schemacs*' in `startup.sld').
+(define (message-after-note path read-only?)
+  (when (file-exists? path) (chmod path #o644))
+  (call-with-output-file path (lambda (port) (display "content\n" port)))
+  (when read-only? (chmod path #o444))
+  (parameterize ((*buffer-list* '()) (*current-buffer* #f))
+    (let* ((ed (find-file-noselect path))
+           (frame (test-frame ed)))
+      (parameterize ((*current-frame* frame))
+        (switch-to-buffer ed)
+        (note-file-read-only! frame)
+        (frame-message frame)))))
+
+(test-equal '("Note: file is write protected" "")
+  (list (message-after-note "/tmp/fe-note.txt" #t)
+        (message-after-note "/tmp/fe-note.txt" #f)))
+
+;; ...and a buffer with no file says nothing at all, whatever its flag.
+(test-equal ""
   (let* ((ed (new-text-editor))
          (frame (test-frame ed)))
     (parameterize ((*current-frame* frame))
-      (text-editor-set-read-only! ed read-only?)
+      (text-editor-set-read-only! ed #t)
       (note-file-read-only! frame)
       (frame-message frame))))
-
-(test-equal '("Note: file is write protected" "")
-  (list (message-after-note #t) (message-after-note #f)))
 
 (test-end "schemacs_ncurses_editor_read_only")
 
