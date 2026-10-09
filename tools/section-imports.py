@@ -28,7 +28,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # The front end this asks about: one file per toolkit now, under
 # `schemacs/ui/'. It was `schemacs/apps/ncurses-editor.sld' before the
 # LAYOUT pass dissolved that file into the editor's libraries.
-FRONT = os.path.join(REPO, 'schemacs/ui/ncurses/ncurses-main.sld')
+FRONT = os.path.join(REPO, 'schemacs/ui/ncurses/ncurses-main.scm')
 
 # Libraries a section may reach, and the form to import them with.
 LIBS = [
@@ -93,7 +93,7 @@ def r7rs_names():
     names = set()
     for lib in R7RS_MODULES:
         out = subprocess.run(
-            ['guile', '--no-auto-compile', '--r7rs', '-L', REPO, '-c',
+            ['guile', '--no-auto-compile', '-L', REPO, '-c',
              '(import (scheme base) (scheme write))\n' + expr % lib],
             capture_output=True, text=True,
             env=dict(os.environ, GUILE_WARN_DEPRECATED='no')).stdout
@@ -116,7 +116,7 @@ def guile_names():
 def exports():
     specs = ' '.join("'(%s . \"%s\")" % (lib, form) for lib, form in LIBS)
     out = subprocess.run(
-        ['guile', '--no-auto-compile', '--r7rs', '-L', REPO, '-c', QUERY % specs],
+        ['guile', '--no-auto-compile', '-L', REPO, '-c', QUERY % specs],
         capture_output=True, text=True,
         env=dict(os.environ, GUILE_WARN_DEPRECATED='no')).stdout
     table = {}

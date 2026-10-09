@@ -95,7 +95,7 @@ def lib_exports(lib):
             '(for-each (lambda (p) (display (car p)) (display " ")) '
             '(module-map (lambda (k v) (cons k v)) m)))) (lambda a #f))' % lib)
     out = subprocess.run(
-        ['guile', '--no-auto-compile', '--r7rs', '-L', REPO, '-c',
+        ['guile', '--no-auto-compile', '-L', REPO, '-c',
          '(import (scheme base) (scheme write))\n' + expr],
         capture_output=True, text=True,
         env=dict(os.environ, GUILE_WARN_DEPRECATED='no')).stdout

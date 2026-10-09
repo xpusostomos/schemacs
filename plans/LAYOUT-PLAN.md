@@ -718,11 +718,11 @@ windows are next worked on, and it will be a change confined to
   `tools/pty-check.py` is now that check, kept in the repo: it was verified
   against this exact bug (it fails with the import removed and passes with
   it restored), so it is not a vacuous test. Run it, plus
-  `guile --no-auto-compile --r7rs -L . -c '(import (<the new library>))'`,
+  `guile --no-auto-compile -L . -c '(import (<the new library>))'`,
   after every move.
 - The three hand-maintained lists were already missing `editor/engine.sld`,
   so the Gambit/MIT/STklos builds had a hole predating these moves. `build.scm`
-  is checkable here (`guile --r7rs -L . -c '(load "./build.scm")'`, which is
+  is checkable here (`guile -L . -c '(load "./build.scm")'`, which is
   what `make schemacs-guile` runs); the Makefile's `SCHEME_LIBRARIES` and
   `platform/guile/main.scm` are not.
 - The pty check for this area: `C-x C-f`, then `C-a`, `C-k`, a path, RET.

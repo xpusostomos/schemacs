@@ -41,14 +41,13 @@
   ;;     exactly what the terminal's display is given by `getch'.
   ;;
   ;;     Leaving them as characters is not a stub that draws nowhere, it
-  ;;     is a stub that answers a value no display produces - and
-  ;;     `(schemacs keymap)''s `keymap-index' takes an *event*, so a
-  ;;     character falls through it to `#<unspecified>', which is true,
-  ;;     so the lookup proceeds and dies three frames away in
-  ;;     `=>keymap-layer-index!' with "key not a list or a
-  ;;     <KEYMAP-INDEX-TYPE>". That is what 111 of
-  ;;     `ncurses-editor-tests'' tests did the day this display replaced
-  ;;     the terminal one there.
+  ;;     is a stub that answers a value no display produces: a terminal
+  ;;     hands up the byte *21*, and Emacs has no character type for it to
+  ;;     be a character of. `keymap-index' does read a character as the
+  ;;     event its code point names, so the stub is not fatal today - but a
+  ;;     test written in the Emacs idiom feeds the integer, and one that
+  ;;     feeds a character is asserting on this tree's own convenience
+  ;;     rather than on the terminal's behaviour.
   ;;
   ;; The selection generics are not implemented here: `dispnew.sld' gives
   ;; `<display>' defaults that answer nil, which is what a display with no

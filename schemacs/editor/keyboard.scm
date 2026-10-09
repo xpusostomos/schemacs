@@ -181,13 +181,12 @@
     ;; resolution), which is why it lives here and not on the frame.
     (define *esc-pending* (make-parameter #f))
 
-    (define *this-command-keys* (make-parameter '()))
+    (define *this-command-keys* (make-parameter #()))
     ;; ^ GNU Emacs's `this-command-keys' - "the key sequence that invoked
     ;; this command" - which `keyboard.c' keeps for the command being run
-    ;; and `read_key_sequence' fills in as the chord is entered. Emacs
-    ;; answers it as a *vector of events* (`this-command-keys-vector');
-    ;; here it is the chord as one `keymap-index', which is this tree's
-    ;; currency for a key sequence and what `keymap-lookup' takes. Its
+    ;; and `read_key_sequence' fills in as the chord is entered. It is a
+    ;; **vector of events**, which is exactly Emacs's
+    ;; `this-command-keys-vector', and what `keymap-lookup' takes. Its
     ;; one reader for now is `set-transient-map''s keep test, which is
     ;; exactly Emacs's `(lookup-key map (this-command-keys-vector))'.
 
@@ -572,8 +571,7 @@
       ;; that ran through `dispatch-action' popped any transient map, and
       ;; a window is resized the moment a drag's pointer leaves it.
       ;;--------------------------------------------------------------
-      (let ((handler (km:keymap-lookup *special-event-map*
-                                       (km:keymap-index key))))
+      (let ((handler (km:keymap-lookup *special-event-map* key)))
         (and handler
              (begin
                (*last-read-event* (list key (list frame)))
@@ -596,10 +594,9 @@
       ;; pending prefix is left alone for the rest of the chord and is
       ;; consumed by `dispatch-action' when a command finally runs.
       ;;
-      ;; KEY is an event, which is what every read answers with now:
-      ;; `keymap-index' takes one apart into the modifiers and the
-      ;; character - `event-modifiers' and `event-basic-type''s first
-      ;; half.
+      ;; KEY is an event, which is what every read answers with and what
+      ;; the keymap is keyed by - one event per step of the walk, as
+      ;; `read_key_sequence' reads one key at a time.
       ;;--------------------------------------------------------------
       (if (dispatch-special-event frame key)
           #t
@@ -623,7 +620,7 @@
               (set!frame-keymap-state frame state)
               (let ((result
                      (km:modal-lookup-state-step!
-                      state (km:keymap-index key)
+                      state key
                       (lambda (full-path action)
                         ;; **The chord that ran the command**, which
                         ;; `set-transient-map''s keep test reads - GNU
@@ -634,7 +631,8 @@
                         ;; command) as well as the command itself.
                         (parameterize
                             ((*this-command-keys*
-                              (km:modal-lookup-state-key-index state)))
+                              (list->vector
+                               (km:modal-lookup-state-key-index state))))
                           (dispatch-action frame action))
                         #f)
                       (lambda (full-path action) #t)

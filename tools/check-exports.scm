@@ -14,11 +14,7 @@
 ;;;
 ;;;     tools/check-exports.scm [FILE...]     # the editor libraries by default
 ;;;
-;;; Run it the way the editor is run - `--r7rs' is what makes Guile's
-;;; module system look for `.sld' files at all, so without it every
-;;; library reports as one that did not load:
-;;;
-;;;     guile --no-auto-compile --r7rs -L . -s tools/check-exports.scm
+;;;     guile --no-auto-compile -L . -s tools/check-exports.scm
 ;;;
 ;;; Exit status is 1 when something is exported but not defined.
 
@@ -33,7 +29,7 @@
       ;; `schemacs/apps' is the retiring legacy layer, and has names
       ;; exported that nothing defines - pre-existing, and its own
       ;; business. Name it explicitly to look at it:
-      ;;     tools/check-exports.scm schemacs/apps/debugui.sld
+      ;;     tools/check-exports.scm schemacs/apps/debugui.scm
       ;; The UI directories are walked too: the toolkit libraries moved
       ;; there when they stopped being `(schemacs editor ...)'
       ;; (`schemacs/ui/gtk' and `schemacs/ui/ncurses').
@@ -46,7 +42,7 @@
                            (map (lambda (name) (string-append (car dirs) "/" name))
                                 (scandir (car dirs)
                                          (lambda (n)
-                                           (and (string-suffix? ".sld" n)
+                                           (and (string-suffix? ".scm" n)
                                                 (not (string=? "." n))
                                                 (not (string=? ".." n)))))))
                           acc))))

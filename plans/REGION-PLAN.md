@@ -278,7 +278,7 @@ and the text-property transfer of a yank, and `kill-region''s
 The habits that have been finding the real bugs here:
 
   * `tools/syntax-check.scm` after every scripted edit, **and**
-    `guile --no-auto-compile --r7rs -L . -c '(import ...)'` - the reader
+    `guile --no-auto-compile -L . -c '(import ...)'` - the reader
     can pass a file the expander rejects.
   * Unit tests for the parts that are pure: the ring (push, max, append
     and prepend on consecutive kills, `current-kill''s rotation and its

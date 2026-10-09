@@ -96,7 +96,7 @@ TEST_CONFIG_HOME = tempfile.mkdtemp(prefix='schemacs-test-config-')
 
 def run(path):
     proc = subprocess.run(
-        ['guile', '--no-auto-compile', '--r7rs',
+        ['guile', '--no-auto-compile',
          '-L', CAIRODIR, '-L', REPO, '-s', path],
         capture_output=True, text=True, cwd=REPO, timeout=900,
         env=dict(os.environ, GUILE_WARN_DEPRECATED='no',

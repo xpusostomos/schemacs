@@ -106,7 +106,7 @@ def lib_exports(lib):
             '(for-each (lambda (p) (display (car p)) (display " ")) '
             '(module-map (lambda (k v) (cons k v)) m)))) (lambda a #f))' % lib)
     out = subprocess.run(
-        ['guile', '--no-auto-compile', '--r7rs', '-L', REPO, '-c',
+        ['guile', '--no-auto-compile', '-L', REPO, '-c',
          '(import (scheme base) (scheme write))\n' + expr],
         capture_output=True, text=True,
         env=dict(os.environ, GUILE_WARN_DEPRECATED='no')).stdout
@@ -153,8 +153,11 @@ def resolve(import_set, cache):
 
 def main():
     args = [a for a in sys.argv[1:] if not a.startswith('-')]
-    paths = args or sorted(glob.glob(
-        os.path.join(REPO, 'schemacs/**/*.sld'), recursive=True))
+    # The libraries, and not the test suites that live beside them: the
+    # two were told apart by extension while the libraries were `.sld'.
+    paths = args or sorted(p for p in glob.glob(
+        os.path.join(REPO, 'schemacs/**/*.scm'), recursive=True)
+        if not p.endswith('-tests.scm'))
     cache, reported = {}, 0
     for path in paths:
         text = open(path).read()

@@ -1,6 +1,6 @@
 # Project Schemacs
 
-#### A clone of Emacs and Emacs Lisp written in R7RS Scheme
+#### A clone of Emacs and Emacs Lisp written in Scheme
 
 ### Project State
 
@@ -258,7 +258,7 @@ ways.
     Guix garbage collector). The full command is this:
 
     ```sh
-      guix shell -m ./manifest_guile-gi.scm -- guile --r7rs ;
+      guix shell -m ./manifest_guile-gi.scm -- guile
     ```
 
  2. The second way is to installing packages in a local profile
@@ -269,7 +269,7 @@ ways.
 
     ```sh
       guix package -p ./.guix-profile -m ./manifest_guile-gi.scm -i ;
-      guix shell -p ./.guix-profile -- guile --r7rs -L "${PWD}" ;
+      guix shell -p ./.guix-profile -- guile -L "${PWD}" ;
     ```
 
     And then, when you see the Guile REPL prompt `scheme@(guile-user)>`

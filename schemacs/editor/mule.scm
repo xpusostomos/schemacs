@@ -175,14 +175,18 @@
        (list
         (cons "\\`BABYL OPTIONS:[ \t]*-\\*-[ \t]*rmail[ \t]*-\\*-"
               'no-conversion)
-        ;; The hex escapes are terminated with `;' because that is what
-        ;; R7RS's `\x...;' form requires - without it the reader takes the
-        ;; next backslash as part of the escape and reports "invalid
-        ;; character in escape sequence", which says nothing about which
-        ;; of the two is wrong.
-        (cons "\\`\xfe;\xff;" 'utf-16be-with-signature)
-        (cons "\\`\xff;\xfe;" 'utf-16le-with-signature)
-        (cons "\\`\xef;\xbb;\xbf;" 'utf-8-with-signature)
+        ;; The escapes are the *default* reader's `\xBB' - two hex digits
+        ;; and nothing after them. They used to be written `\xff;', which
+        ;; is R7RS's form: the editor ran under `guile --r7rs', where the
+        ;; `;' belongs to the escape and ends it. The default reader takes
+        ;; that `;' as an *ordinary character*, so `"\xff;\xfe;"' was the
+        ;; four characters `0xFF ; 0xFE ;' - and not one of the three byte
+        ;; order marks was recognised on the file path. See
+        ;; `files.scm''s `directory-listing-before-filename-regexp', whose
+        ;; comment measures the two readers against each other.
+        (cons "\\`\xfe\xff" 'utf-16be-with-signature)
+        (cons "\\`\xff\xfe" 'utf-16le-with-signature)
+        (cons "\\`\xef\xbb\xbf" 'utf-8-with-signature)
         ;; Emacs's entry is `"\\`;ELC\024\0\0\0"' - an ELC file's magic
         ;; number, `;ELC' then 0x14 and three NULs (`mule.el:1801'). The
         ;; control character and the NULs are written as escapes because
@@ -190,7 +194,7 @@
         ;; the translator - glibc cannot be handed a NUL in a pattern (see
         ;; `%without-nul') - which leaves `;ELC' plus the 0x14, still a
         ;; prefix of the magic number and so still matching.
-        (cons "\\`;ELC\x14;\0;\0;\0;" 'emacs-mule))))
+        (cons "\\`;ELC\x14\0\0\0" 'emacs-mule))))
 
     (define (auto-coding-regexp-alist-lookup text)
       ;; GNU Emacs's `auto-coding-regexp-alist-lookup' (`mule.el:1866'):

@@ -1053,9 +1053,7 @@ re-executed as a normal key sequence.")
                                              (render! frame)
                                              (let* ((key (read-key-event -1))
                                                     (def (km:keymap-lookup
-                                                          map
-                                                          (km:keymap-index
-                                                           key))))
+                                                          map key)))
                                                (cond
                                                 ((eq? def 'help)
                                                  (show-query-replace-help

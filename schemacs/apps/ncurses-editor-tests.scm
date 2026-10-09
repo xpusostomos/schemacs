@@ -322,8 +322,8 @@
 ;; ------------------------------------------------------------------
 ;; An unbound key is *undefined*, and is not a self-inserting character
 ;;
-;; `km:keymap-index-to-char' handed the catch-all self-insert layer the
-;; char-index of *any* unmodified key, so an unbound *named* key
+;; `km:keymap-index-to-char' handed the catch-all self-insert layer a
+;; character for *any* unmodified key, so an unbound *named* key
 ;; (`<f13>', `<select>') reached `self-insert-command' and it inserted
 ;; the key's *name* as text. In a read-only buffer the same keys said
 ;; only "Buffer is read-only" and otherwise did nothing, which is how
@@ -1114,7 +1114,9 @@
                    (*current-buffer* #f)
                    (*echo-area-buffer* mb-ed)
                    (*current-keymap* minibuffer-local-map))
-      (dispatch-key-event frame (vector 6))
+      ;; `dispatch-key-event' takes one *event*, which is what
+      ;; `read-key-event' answers with; `(vector 6)' is a key sequence.
+      (dispatch-key-event frame 6)
       (list (bound-in minibuffer-local-map (vector 6))
             (text-editor-get-cursor mb-ed)
             (text-editor-get-cursor ed)))))

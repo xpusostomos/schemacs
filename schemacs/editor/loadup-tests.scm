@@ -73,10 +73,10 @@
 ;;-------------------------------------------------------------
 ;; The list is the whole editor, or it has gone stale
 ;;-------------------------------------------------------------
-;; The list of libraries is written out in `repl.sld' rather than derived,
+;; The list of libraries is written out in `repl.scm' rather than derived,
 ;; because the tree's root is not a thing a running editor knows - so a
 ;; library added tomorrow would silently be missing from every session
-;; until somebody noticed. This is what notices: every `schemacs/editor/*.sld'
+;; until somebody noticed. This is what notices: every `schemacs/editor/*.scm'
 ;; on disk has to be either given to the session or excluded on purpose.
 ;;-------------------------------------------------------------
 (define (library<? a b)
@@ -84,12 +84,25 @@
             (symbol->string (car (reverse b)))))
 
 (define (editor-libraries-on-disk)
+  ;; The `(schemacs editor ...)' libraries this directory holds.
+  ;;
+  ;; **The test suites live here too, and are not libraries.** They are
+  ;; scripts - they `import', they do not `define-library' - so nothing
+  ;; could hand one to a session, and asking whether one is in the list is
+  ;; asking about the wrong population. Until the tree moved off `guile
+  ;; --r7rs' the two kinds were told apart by *extension*, libraries being
+  ;; `.sld' and suites `.scm'; now everything here is `.scm' and it takes
+  ;; the name. A suite that is ever named without the `-tests' tail is a
+  ;; false failure here rather than a missed library, which is the safe
+  ;; direction.
+  ;;-------------------------------------------------------------
   (let ((dir (opendir "schemacs/editor")))
     (let loop ((out '()))
       (let ((name (readdir dir)))
         (if (eof-object? name)
             (begin (closedir dir) (sort out library<?))
-            (loop (if (string-suffix? ".sld" name)
+            (loop (if (and (string-suffix? ".scm" name)
+                           (not (string-suffix? "-tests.scm" name)))
                       (cons (list 'schemacs 'editor
                                   (string->symbol (string-drop-right name 4)))
                             out)

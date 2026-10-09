@@ -1,4 +1,4 @@
-#!/usr/bin/env -S GUILE_WARN_DEPRECATED=no guile --no-auto-compile --r7rs
+#!/usr/bin/env -S GUILE_WARN_DEPRECATED=no guile --no-auto-compile
 !#
 ;;--------------------------
 ;; se - the schemacs editor

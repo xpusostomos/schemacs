@@ -361,7 +361,7 @@ half-build the new one.
 The habits that have been finding the real bugs here:
 
 - `tools/syntax-check.scm` after every scripted edit to a `.sld`, **and**
-  `guile --no-auto-compile --r7rs -L . -c '(import ...)'` - the reader can
+  `guile --no-auto-compile -L . -c '(import ...)'` - the reader can
   pass a file the expander rejects, which has cost time twice now.
 - Unit tests for the table layer: the four forms, the predicate, the
   function form's three arguments, `test-completion` disagreeing with

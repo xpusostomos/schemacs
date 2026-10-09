@@ -206,11 +206,10 @@
     ;; `(kbd "C-x C-f")' is `#(24 6)' and `(kbd "C-/")' is `#(31)' -
     ;; which is what `define-key' takes there ("a string or a vector of
     ;; symbols and characters", `keymap.c':1084') and what every read in
-    ;; this tree answers with. The older spelling this parser also
-    ;; produces, a list of modifier symbols and characters, is
-    ;; `(schemacs keymap)''s own key representation and is what
-    ;; `keymap-index' converts an event into; it is kept as an input
-    ;; because the keymap layer tables are written in it.
+    ;; this tree answers with. It is also what the keymap is keyed by now:
+    ;; `(schemacs keymap)''s `keymap-index' normalises any spelling - this
+    ;; vector, that description string, a list of events, a single event -
+    ;; to the list of events the key is made of.
     ;;----------------------------------------------------------------
 
     (define *key-parse-modifiers*

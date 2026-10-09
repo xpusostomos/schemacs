@@ -2,117 +2,104 @@
   (scheme base)
   (only (scheme lazy) force)
   (schemacs keymap)
-  (only (schemacs lens) view update lens-set)
+  (only (schemacs lens) view lens-set)
   ;; `kbd' is the tree's spelling of a *key* - `(kbd "C-x")' is the event
   ;; vector `#(24)' - and it is `character.sld''s, where the C's
-  ;; `make_lispy_event' arithmetic lives.
-  (only (schemacs editor character) kbd char-meta char-ctl char-shift)
-  (only (srfi 64) test-begin test-end test-skip test-error
-        test-assert test-equal test-eqv test-eq)
-  (schemacs hash-table)
-  )
-
-(cond-expand
-  (guile
-   ;; This conditional clause exists because the (library (srfi 60))
-   ;; condition causes a bug in Guile.
-   (import
-     (only (srfi 60) ; Integers as Bits
-           bitwise-ior
-           bitwise-and))
-   )
-  (gambit
-   ;; do nothing: Gambit provides the SRFI-60 APIs
-   ;; but not the (SRFI 60) library.
-   )
-  ((library (srfi 60))
-   (import
-     (only (srfi 60) ; Integers as Bits
-           bitwise-ior
-           bitwise-and)))
-  ((library (srfi 151))
-   (import
-     (only (srfi 151) ; Integers as Bits
-           bitwise-ior
-           bitwise-and)))
-  (else
-   (error "SRFI-60 bitwise operators are not provided"))
+  ;; `make_lispy_event' arithmetic lives. `event-convert-list' is
+  ;; `keyboard.c''s consumer of a Lucid event type list.
+  (only (schemacs editor character) kbd event-convert-list)
+  (only (srfi 64) test-begin test-end
+        test-assert test-equal test-eq)
   )
 
 (test-begin "schemacs_keymap")
 
-(define empty-kt (char-table '()))
-(test-assert (not empty-kt))
-(test-assert (not (char-table-type? empty-kt))) ;; should be #f, not an empty table
-(test-assert (char-table-empty? empty-kt))
-
-(define kt
-  (char-table
-   '((#\a . "A")
-     (#\b . "B")
-     (#\c . "C"))))
-
-(test-assert (char-table-type? kt))
-(test-assert (not (char-table-empty? kt)))
-
-(test-assert (equal? "A" (char-table-view kt #\a)))
-(test-assert (equal? "B" (char-table-view kt #\b)))
-(test-assert (equal? "C" (char-table-view kt #\c)))
-
-(char-table-set! #t "D" kt #\d)
-(test-equal "D" (char-table-view kt #\d))
-
-(char-table-set! #t "AAA" kt #\a)
-(test-equal "AAA" (char-table-view kt #\a))
-
-(char-table-set! #f "zzz" kt #\Z)
-(test-equal "zzz" (char-table-view kt #\Z))
-
-(test-assert (not (char-table-view kt #\X)))
-(test-assert (not (char-table-view kt #\null)))
-
-(char-table-update! (lambda (_) (values "[Z]" #f)) kt #\Z)
-(test-equal "[Z]" (char-table-view kt #\Z))
-
-(char-table-update! (lambda (_) (values #f #f)) kt #\Z)
-(test-assert (not (char-table-view kt #\Z)))
-
-(update (lambda (_) (values "X" #f)) kt (=>char-table-char! #t #\x))
-(test-equal "X" (view kt (=>char-table-char! #t #\x)))
-
-;; Test if char tables are canonical, i.e. you can assign to #f to
-;; create a char table, and a char table becomes #f when they become empty.
-
-(define kt1 (lens-set "Y" #f (=>char-table-char! #t #\y)))
-(test-equal "Y" (view kt1 (=>char-table-char! #t #\y)))
-
-(set! kt1 (lens-set #f kt1 (=>char-table-char! #t #\y)))
-(test-assert (not kt1))
-
 ;; -------------------------------------------------------------------------------------------------
+;;
+;; **A key is a string or a vector of *events*, and nothing else.** In GNU
+;; Emacs an event is an integer carrying its own modifier bits - `C-x' is
+;; 24 and `(kbd "C-x")' is `#(24)' - or a symbol naming a key that is not
+;; a character (`left', `f10', `M-up').
+;;
+;; A modifier *name* is allowed in exactly one place: the Lucid event type
+;; list `(control ?x)', which goes through `event-convert-list'
+;; (`keyboard.c:7832') as `Fdefine_key' does (`keymap.c:1156'). A bare
+;; list of *modifier symbols* is not a key in Emacs at all, and is what
+;; this tree was purged of - `'ctrl' appeared in no Emacs file.
+;;
+;; `keymap-index' normalises any spelling to the list of events the key
+;; is made of, and `keymap-index->events' reads a key back. The two are
+;; the same function, because a key IS its events here.
 
-;; **A key is written with `kbd', and never as a list of modifier
-;; symbols.** In GNU Emacs a key is a *string or a vector of events* -
-;; `(kbd "C-x C-c")' is `#(24 3)' - and an event is an integer carrying
-;; its own modifier bits, or a symbol naming a key that is not a
-;; character (`left', `f10'). A modifier *name* is allowed in exactly one
-;; place: the Lucid event type list `(control ?x)', which `keymap-index'
-;; routes through `event-convert-list' (`keyboard.c:7832') as
-;; `Fdefine_key' does (`keymap.c:1156'). A bare list of *modifier symbols*
-;; is not a key in Emacs at all, and is what this tree was purged of; the
-;; same sequence of *events* `(kbd ...)' answers with is what
-;; `keymap-index->events' reads back, so the two are compared directly.
-(define (kbd->events s) (vector->list (kbd s)))
+(define (kbd->events s) (keymap-index (kbd s)))
+
 (define C-M-x (kbd->events "C-M-x"))
-(define kmix_C-M-x (keymap-index C-M-x))
 (define C-c_C-c (kbd->events "C-c C-c"))
-(define kmix_C-c_C-c (keymap-index C-c_C-c))
 (define C-g (kbd->events "C-g"))
-(define kmix_C-g (keymap-index C-g))
 (define left-arrow-key (kbd->events "<left>"))
 (define C-left-arrow-key (kbd->events "C-<left>"))
-(define kmix_C-left-arrow-key (keymap-index C-left-arrow-key))
-(define kmix_left-arrow-key   (keymap-index left-arrow-key))
+
+(test-equal "the events of a chord" '(24 3) (kbd->events "C-x C-c"))
+(test-equal "a named key is a symbol event" '(left) left-arrow-key)
+(test-equal "a modifier on a named key is part of its name"
+  '(C-left) C-left-arrow-key)
+
+(test-equal "the same key spelled with kbd and as a raw event vector"
+  (kbd->events "C-x") (keymap-index #(24)))
+
+(test-equal "a key description string and its events agree"
+  (kbd->events "C-x C-c") (keymap-index "C-x C-c"))
+
+(test-equal "a bare character is the event its code point names"
+  '(97) (keymap-index #\a))
+(test-equal "...and so is a character above the control range"
+  '(90) (keymap-index #\Z))
+
+;; `keymap-index' is idempotent, which is what lets every reader in the
+;; library call it without asking which spelling it was handed.
+(test-equal "a key that is already events comes back as itself"
+  '(24 3) (keymap-index (keymap-index (kbd "C-x C-c"))))
+
+(test-equal "no key at all" #f (keymap-index '()))
+(test-equal "...and a false key" #f (keymap-index #f))
+
+;; A *Lucid event type list* is one event, and it is an element of a key
+;; sequence rather than the sequence itself. `(control #\x)' is C-x, whose
+;; event is 24 - the code the control column folds to, not a bit.
+(test-equal "a Lucid event type list is one event, and it is C-x"
+  (list 24)
+  (keymap-index (list (list 'control #\x))))
+(test-equal "...and it is what event-convert-list answers"
+  (list (event-convert-list '(control #\x)))
+  (keymap-index (list (list 'control #\x))))
+
+;; Anything else is an error, and not the unspecified value. #t is not a
+;; key.
+(test-assert "a value that is not a key is an error"
+  (guard (e (#t #t))
+    (keymap-index #t)
+    #f))
+
+;; `reverse-list->keymap-index' joins a *reversed* list of key sequences,
+;; which is the shape the modal lookup state keeps its stack in.
+(test-equal "joining key sequences"
+  (keymap-index (kbd "C-c C-c C-M-x C-g"))
+  (keymap-index-append C-c_C-c C-M-x C-g))
+
+(test-equal "a reversed list of one-event sequences"
+  C-c_C-c
+  (reverse-list->keymap-index
+   (list (keymap-index (kbd "C-c"))
+         (keymap-index (kbd "C-c")))))
+
+(test-equal "and of a longer one"
+  C-M-x
+  (reverse-list->keymap-index (list (keymap-index (kbd "C-M-x")))))
+
+(test-assert "no sequences at all is #f"
+  (not (reverse-list->keymap-index '())))
+
+;; -------------------------------------------------------------------------------------------------
 
 (define (el:keyboard-quit) "el:keyboard-quit")
 (define (el:self-insert-command) "el:self-insert-command")
@@ -121,18 +108,15 @@
 (define (el:comint-interrupt-subjob) "el:comint-interrupt-subjob")
 (define el:left-char "el:left-char")
 (define el:left-word "el:left-word")
-(define el:minibuffer-cancel "el:minibuffer-cancel")
+(define el:local-command "el:local-command")
+(define el:global-command "el:global-command")
+(define el:find-file "el:find-file")
 (define unassigned-key (keymap-index (kbd "C-u RET")))
 
+;; The `=>keymap-layer-index!' lens, over a key spelled anyway `kbd' can
+;; write it.
 (define kml (lens-set "c" (keymap-layer) (=>keymap-layer-index! '(#\c))))
 (test-equal "c" (view kml (=>keymap-layer-index! '(#\c))))
-
-;; A key may be spelled as the *string* `(kbd ...)' reads - `read-kbd-macro'
-;; is what Emacs's `define-key' takes such a string through - and that is
-;; the string branch of `keymap-index'. The library's own string parser,
-;; which built a modifier-symbol list by hand, was deleted in the purge;
-;; `kbd' is the one parser and this is the one seam.
-(test-equal kmix_C-c_C-c (keymap-index "C-c C-c"))
 
 (set! kml (lens-set "x" #f (=>keymap-layer-index! '(#\x))))
 (test-equal "x" (view kml (=>keymap-layer-index! '(#\x))))
@@ -142,31 +126,31 @@
 
 (set! kml
   (keymap-layer
-   (cons kmix_C-M-x   el:eval-defun)
-   (cons kmix_C-c_C-c el:compile)))
+   (cons C-M-x   el:eval-defun)
+   (cons C-c_C-c el:compile)))
 
 (test-assert (keymap-layer-type? kml))
-(test-assert (keymap-index-type? kmix_C-M-x))
-(test-assert (keymap-index-type? kmix_C-c_C-c))
-(test-assert (equal? C-M-x (keymap-index->events kmix_C-M-x)))
-(test-assert (equal? C-c_C-c (keymap-index->events kmix_C-c_C-c)))
-(test-eq el:eval-defun (keymap-layer-lookup kml kmix_C-M-x))
-(test-eq el:compile (keymap-layer-lookup kml kmix_C-c_C-c))
+(test-eq el:eval-defun (keymap-layer-lookup kml C-M-x))
+(test-eq el:compile (keymap-layer-lookup kml C-c_C-c))
+;; ...and the same lookup by a kbd description string, because the lens
+;; normalises whatever it is handed.
+(test-eq el:compile (keymap-layer-lookup kml "C-c C-c"))
+
 (test-assert
     (keymap-layer-type?
      (keymap-layer-update!
       (lambda (_old new) new)
-      kml (list (cons kmix_C-c_C-c el:comint-interrupt-subjob)))))
+      kml (list (cons C-c_C-c el:comint-interrupt-subjob)))))
 
-(test-eq el:comint-interrupt-subjob (keymap-layer-lookup kml kmix_C-c_C-c))
-(test-assert (not (keymap-layer-lookup kml kmix_C-g)))
+(test-eq el:comint-interrupt-subjob (keymap-layer-lookup kml C-c_C-c))
+(test-assert (not (keymap-layer-lookup kml C-g)))
 (test-assert
     (keymap-layer-type?
      (keymap-layer-update!
       prefer-new-bindings kml
-      (list (cons kmix_C-g el:keyboard-quit)))))
+      (list (cons C-g el:keyboard-quit)))))
 
-(test-eq el:keyboard-quit (keymap-layer-lookup kml kmix_C-g))
+(test-eq el:keyboard-quit (keymap-layer-lookup kml C-g))
 (test-assert
     (keymap-layer-type?
      (keymap-layer-update!
@@ -178,15 +162,31 @@
       prefer-new-bindings kml
       (list (map-key '(#\b) el:self-insert-command)))))
 
-(test-eq el:self-insert-command (keymap-layer-lookup kml (keymap-index '(#\a))))
-(test-eq el:self-insert-command (keymap-layer-lookup kml (keymap-index '(#\b))))
+(test-eq el:self-insert-command (keymap-layer-lookup kml #\a))
+(test-eq el:self-insert-command (keymap-layer-lookup kml #\b))
 
 (keymap-layer-update! prefer-new-bindings kml
-                      (list (cons kmix_C-left-arrow-key el:left-word)))
+                      (list (cons C-left-arrow-key el:left-word)))
 (keymap-layer-update! prefer-new-bindings kml
-                      (list (cons kmix_left-arrow-key el:left-char)))
-(test-eq el:left-word (keymap-layer-lookup kml kmix_C-left-arrow-key))
-(test-eq el:left-char (keymap-layer-lookup kml kmix_left-arrow-key))
+                      (list (cons left-arrow-key el:left-char)))
+(test-eq el:left-word (keymap-layer-lookup kml C-left-arrow-key))
+(test-eq el:left-char (keymap-layer-lookup kml left-arrow-key))
+
+;; A layer's alist is one association per key, and a prefix is flattened
+;; into an association for each key under it. The order `hash-table->alist'
+;; answers in is not specified, so this asserts the set.
+(test-equal "a layer's alist has one entry per binding"
+  7 (length (keymap-layer->alist kml)))
+(test-assert "a prefix is flattened into the association for the whole key"
+  (and (assoc C-c_C-c (keymap-layer->alist kml))
+       (not (assoc (keymap-index (kbd "C-c")) (keymap-layer->alist kml)))))
+(test-equal "...and its binding is the one under it"
+  el:comint-interrupt-subjob
+  (cdr (assoc C-c_C-c (keymap-layer->alist kml))))
+
+;; `keymap-lookup-binding-key' is the reverse lookup `[rebind ...]` wants.
+(test-equal "a key found by its binding"
+  C-M-x (keymap-lookup-binding-key (keymap kml) el:eval-defun))
 
 ;; -------------------------------------------------------------------------------------------------
 ;; Check if keymap-layer-copy really creates a deep copy
@@ -195,13 +195,13 @@
 (keymap-layer-update!
  prefer-new-bindings kml-copy
  (list
-  (cons kmix_left-arrow-key "<-")
-  (cons kmix_C-left-arrow-key "<==<")
+  (cons left-arrow-key "<-")
+  (cons C-left-arrow-key "<==<")
   ))
-(test-assert el:left-word (keymap-layer-lookup kml kmix_C-left-arrow-key))
-(test-assert el:left-char (keymap-layer-lookup kml kmix_left-arrow-key))
-(test-equal "<==<" (keymap-layer-lookup kml-copy kmix_C-left-arrow-key))
-(test-equal "<-" (keymap-layer-lookup kml-copy kmix_left-arrow-key))
+(test-assert el:left-word (keymap-layer-lookup kml C-left-arrow-key))
+(test-assert el:left-char (keymap-layer-lookup kml left-arrow-key))
+(test-equal "<==<" (keymap-layer-lookup kml-copy C-left-arrow-key))
+(test-equal "<-" (keymap-layer-lookup kml-copy left-arrow-key))
 
 ;; -------------------------------------------------------------------------------------------------
 ;; `keymap-index->ascii' stood here, and is gone: it reconstructed an
@@ -214,41 +214,6 @@
 ;; -------------------------------------------------------------------------------------------------
 ;; testing modal-lookup-state-step!
 
-(test-equal (keymap-index (kbd "C-c C-c C-M-x C-g"))
-  (keymap-index-append kmix_C-c_C-c kmix_C-M-x kmix_C-g))
-
-(test-equal kmix_C-c_C-c
-  (reverse-list->keymap-index
-   (list (keymap-index (kbd "C-c"))
-         (keymap-index (kbd "C-c")))))
-
-(test-equal kmix_C-M-x
-  (reverse-list->keymap-index
-   (list (keymap-index (kbd "C-M-x")))))
-
-(test-assert (not (reverse-list->keymap-index '())))
-
-(set! kml
-  (keymap-layer
-   (cons kmix_C-M-x   el:eval-defun)
-   (cons kmix_C-c_C-c el:compile)))
-
-(keymap-layer-update!
- (lambda (_old new) new)
- kml (list (cons kmix_C-c_C-c el:comint-interrupt-subjob)))
-
-(keymap-layer-update!
- prefer-new-bindings kml
- (list (cons kmix_C-g el:keyboard-quit)))
-
-(keymap-layer-update!
- prefer-new-bindings kml
- (list (map-key '(#\a) el:self-insert-command)))
-
-(keymap-layer-update!
- prefer-new-bindings kml
- (list (map-key '(#\b) el:self-insert-command)))
-
 (define (iden id) id)
 (define (const-f) #f)
 
@@ -257,32 +222,14 @@
 (define unctrl-char   (new-self-insert-keymap-layer #f iden const-f))
 
 ;; `key' reads a key the way the tree spells one - a `kbd' string, which
-;; is `read-kbd-macro''s own input in Emacs - and answers the index
-;; `keymap-index' makes of it. It used to take varargs of modifier
-;; symbols and characters, which is the vocabulary this tree was purged of.
+;; is `read-kbd-macro''s own input in Emacs - and answers the events of
+;; it, which is what every reader here takes.
 (define (key s) (keymap-index (kbd s)))
 
-;; **The two fields are the event's own split.** `mod-index' is the
-;; `CHAR_*' bits the event carries - and only those, so `C-M-@' has meta
-;; and no control bit, because the *code* 0 is what says control for that
-;; key - and `char-index' is the code below the bits, as a character.
-;; What stood here was a *folded* reading: control was unfolded
-;; (`C-x' became the letter `x') and the letter downcased, which is
-;; exactly what made the index lossy.
-(test-equal (list char-meta #\nul #f)
-  (let ((kix (key "C-M-@")))
-    (list (mod-index kix) (char-index kix) (next-index kix))
-    ))
-
-(test-equal (list char-meta #\return 0 (integer->char 3) #f)
-  (let*((kix (key "C-M-m C-c"))
-        (kix2 (next-index kix))
-        )
-    (list (mod-index kix) (char-index kix)
-          (mod-index kix2) (char-index kix2)
-          (next-index kix2))
-    ))
-
+;; The predicate is applied to the key's *events*, and answers the
+;; character the key names. An unmodified key is a character; a key with
+;; a modifier on it is not, and a key of more than one event is a prefix
+;; and is not either.
 (define (cheq? mk-char val kbd-string)
   (let*((expected-result (if (integer? val) (integer->char val) val))
         (predicate-result
@@ -336,21 +283,14 @@
 (test-assert (not (app-kmp unctrl-char (key "C-m C-c"))))
 (test-assert (not (app-kmp ctrl-char   (key "C-m C-c"))))
 ;; --------------------------------------------------
-(test-assert (not (app-kmp unctrl-char (key "C-M-m C-c"))))
-(test-assert (not (app-kmp ctrl-char   (key "C-M-m C-c"))))
-(test-assert (not (app-kmp unctrl-char (key "M-m C-c"))))
-(test-assert (not (app-kmp ctrl-char   (key "M-m C-c"))))
-(test-assert (not (app-kmp unctrl-char (key "C-m C-c"))))
-(test-assert (not (app-kmp ctrl-char   (key "C-m C-c"))))
-;; --------------------------------------------------
 
 (define km (keymap '*test-keymap kml unctrl-char))
 
-(test-assert (eq? el:self-insert-command (keymap-lookup km (keymap-index '(#\a)))))
-(test-assert (eq? el:self-insert-command (keymap-lookup km (keymap-index '(#\b)))))
-(test-assert (eq? el:comint-interrupt-subjob (keymap-lookup km kmix_C-c_C-c)))
+(test-assert (eq? el:self-insert-command (keymap-lookup km '(#\a))))
+(test-assert (eq? el:self-insert-command (keymap-lookup km '(#\b))))
+(test-assert (eq? el:comint-interrupt-subjob (keymap-lookup km C-c_C-c)))
 (test-assert (char=? #\c (keymap-lookup km (keymap-index '(#\c)))))
-(test-assert (char=? #\null (keymap-lookup (keymap ctrl-char km) (keymap-index (kbd "C-@")))))
+(test-assert (char=? #\null (keymap-lookup (keymap ctrl-char km) (kbd "C-@"))))
 (test-assert (not (keymap-lookup km unassigned-key)))
 
 (test-equal "hello"
@@ -362,26 +302,37 @@
 
 (test-equal "hello"
   (let ((km (keymap)))
-    ;; Test the =>keymap-top-layer! lens on a keymap with 1 no layers,
+    ;; Test the =>keymap-top-layer! lens on a keymap with no layers,
     ;; should be canonical and add a new layer.
     (lens-set "hello" km =>keymap-top-layer! (=>keymap-layer-index! C-c_C-c))
     (view km =>keymap-top-layer! (=>keymap-layer-index! C-c_C-c))
     ))
+
+;; The two choke points `keymap.c''s `store_in_keymap' and
+;; `access_keymap' are, and that they are keyed by ONE event.
+(define store-km (keymap '*store*))
+(store-in-keymap store-km 24 el:eval-defun)
+(test-eq el:eval-defun (access-keymap store-km 24))
+(test-assert (not (access-keymap store-km 25)))
+(test-assert "a non-event is refused"
+  (guard (e (#t #t))
+    (access-keymap store-km "C-x")
+    #f))
 
 (define modal #f)
 
 (define (reset-modal! kml)
   (set! modal (new-modal-lookup-state km)))
 
-(define (lookup-modal! key-index)
-    (let*((key-index
-           (if (keymap-index-type? key-index)
-               key-index
-               (keymap-index key-index)))
+;; The step takes ONE *event* - what `read_key_sequence' reads at a time -
+;; and the chord is accumulated in the state. The stack is a list of
+;; events, and the key sequence is that reversed.
+(define (lookup-modal! key)
+  (let*((event (car (keymap-index key)))
         (result #f)
         (keep
          (modal-lookup-state-step!
-          modal key-index
+          modal event
           (lambda (key-index action) ;; do action
             (set! result
               (list
@@ -402,7 +353,7 @@
 
 (test-assert (modal-lookup-state-type? modal))
 (test-eq el:comint-interrupt-subjob
-  (keymap-lookup (modal-lookup-state-keymap modal) kmix_C-c_C-c))
+  (keymap-lookup (modal-lookup-state-keymap modal) C-c_C-c))
 
 (test-assert (keymap-layer-type? (keymap-layer-ref kml (keymap-index (kbd "C-c")))))
 
@@ -502,50 +453,5 @@
              "C-x C-f"))
 
 (test-end "schemacs_keymap_precedence")
-
-;; A bare *character* is an event, and it is the event its code point
-;; names: GNU Emacs has no character type, so `?a` there is 97 and `#\a`
-;; here is the same key. It used to fall off the end of `keymap-index`'s
-;; `cond` and come back as the unspecified value, which is true in
-;; Scheme - see that function's final `else`.
-(test-equal "a bare character is the event its code point names"
-  (list 97)
-  (keymap-index->events (keymap-index #\a)))
-
-(test-equal "...and so is a character above the control range"
-  (list 90) (keymap-index->events (keymap-index #\Z)))
-
-;; **`(kbd ...)` is the spelling to compare against**, and never a
-;; hand-written list of modifier symbols: a key in this tree is `kbd`'s
-;; event vector - `(kbd "C-x")` is `#(24)`, which is exactly what the C's
-;; `buf.code = cbuf[i]` produces - and `keymap-index` walks the vector
-;; itself. Writing the key out by hand as a symbol list is how a test
-;; comes to assert on the keymap library's *private* representation
-;; instead of on the key, and the two spellings of one character - as a
-;; character and as a bare symbol - print identically under `test-equal`
-;; (which is `equal?`), which is a mistake that has already been made once
-;; in this file's tests.
-;;
-;; So each of these says what a *key* is and that the index agrees, with
-;; no modifier-symbol list anywhere.
-(test-equal "the same key spelled with kbd and with the raw event"
-  (keymap-index->events (keymap-index (kbd "C-x")))
-  (keymap-index->events (keymap-index 24)))
-
-(test-equal "a character and its kbd spelling are one key"
-  (keymap-index->events (keymap-index (kbd "a")))
-  (keymap-index->events (keymap-index #\a)))
-
-(test-equal "and a chord is the two events of its kbd spelling"
-  (keymap-index->events (keymap-index (kbd "C-x C-c")))
-  (append (keymap-index->events (keymap-index (kbd "C-x")))
-          (keymap-index->events (keymap-index (kbd "C-c")))))
-
-;; **Anything else is an error, and not the unspecified value.** #t is
-;; not a key.
-(test-assert "a value that is not a key is an error"
-  (guard (e (#t #t))
-    (keymap-index #t)
-    #f))
 
 (test-end "schemacs_keymap")

@@ -1698,7 +1698,13 @@ for SWITCHES."
       ;; listing, since this port's listing never carries them - the `\'
       ;; doubling above it is unconditional in the C and is here too.
       ;;--------------------------------------------------------------
-      (let* ((str (string-replace "\x0d;" "\\^m" file))
+      ;; The `\x0d' is a carriage return - the *default* reader's escape,
+      ;; two hex digits and nothing after them. It was written `"\x0d;"'
+      ;; while the editor ran under `guile --r7rs', where the `;' is the
+      ;; end of the escape; the default reader takes it as an ordinary
+      ;; character, so the search string was `CR ;' and dired's `^M'
+      ;; quoting stopped working.
+      (let* ((str (string-replace "\x0d" "\\^m" file))
              (str (string-replace "\\" "\\\\" str))
              (search-string (string-append " " str)))
         (let loop ((found #f))

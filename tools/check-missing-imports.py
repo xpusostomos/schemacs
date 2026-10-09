@@ -155,8 +155,11 @@ SYNTAX = set("""and begin case cond define define-record-type define-syntax
 
 def main():
     args = [a for a in sys.argv[1:] if not a.startswith('-')]
-    paths = args or sorted(glob.glob(
-        os.path.join(REPO, 'schemacs/**/*.sld'), recursive=True))
+    # The libraries, and not the test suites that live beside them: the
+    # two were told apart by extension while the libraries were `.sld'.
+    paths = args or sorted(p for p in glob.glob(
+        os.path.join(REPO, 'schemacs/**/*.scm'), recursive=True)
+        if not p.endswith('-tests.scm'))
 
     known, guile = {}, set()
     for lib in EDITOR_LIBS:

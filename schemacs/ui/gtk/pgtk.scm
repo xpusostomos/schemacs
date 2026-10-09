@@ -760,8 +760,9 @@
             ;; and `key-event->key' is the *key event* the command loop
             ;; speaks - which is `read-key-event`'s one call, and the
             ;; reason it exists. Handing `dispatch-key` the first without
-            ;; the second is what sent `-1` - the resize code - to
-            ;; `keymap-index`, which died in `integer->char` on it.
+            ;; the second is what sent `-1` - the resize code - to the
+            ;; keymap as if it were a key, which is not a key and has no
+            ;; binding.
             (let* ((raw (pgtk-item->event d ev))
                    (event (and raw
                                (not (eq? raw *pgtk-skip*))

@@ -1407,14 +1407,14 @@ non-nil."
       ;; other elements of the chord, so nothing has to be masked.
       ;;--------------------------------------------------------------
       (let* ((state (frame-keymap-state (*current-frame*)))
-             (ix (and state (km:modal-lookup-state-key-index state)))
              ;; The *events* the chord was, which is what Emacs's
-             ;; `this-single-command-keys' answers with. The reader used
-             ;; to be `keymap-index->list', this keymap's private spelling
-             ;; of a key, and the last element of that was a *character*;
-             ;; an event is an integer, so the C's own mask
+             ;; `this-single-command-keys' answers with and what
+             ;; `modal-lookup-state-key-index' reads back. The reader
+             ;; used to be `keymap-index->list', this keymap's private
+             ;; spelling of a key, and the last element of that was a
+             ;; *character*; an event is an integer, so the C's own mask
              ;; is what takes the character out of it.
-             (events (and ix (km:keymap-index->events ix)))
+             (events (and state (km:modal-lookup-state-key-index state)))
              (last (and (pair? events) (car (reverse events))))
              (char (and (integer? last) (logand last #o177))))
         (and char

@@ -153,7 +153,7 @@ def ask_schemacs(path):
     script = os.path.join(TMP, "schemacs-side.scm")
     with open(script, "w") as port:
         port.write(elisp)
-    out = run(["guile", "--no-auto-compile", "--r7rs", "-L", REPO, "-s", script])
+    out = run(["guile", "--no-auto-compile", "-L", REPO, "-s", script])
     coding = None
     for line in out.stdout.split("\n"):
         if line.startswith("CODING="):

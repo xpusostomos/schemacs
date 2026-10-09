@@ -561,7 +561,7 @@ automatically on the next call.
   the interpreter is a third opinion that is more forgiving than either. Sweep
   the tree with
 
-      for f in schemacs/**/*.sld; do guile --r7rs -L . -c "(compile-file \"$f\")"; done
+      for f in schemacs/**/*.sld; do guile -L . -c "(compile-file \"$f\")"; done
 
   **and `-L .` is not optional**: without it the imports do not resolve and the
   sweep lies about what it checked. Two traps found this way (both in the
@@ -671,7 +671,7 @@ automatically on the next call.
 - Guile: `(scheme base)` exports `newline`, so a library cannot define it — use
   `(export (rename (internal external)))`.
 - `(scheme base)`'s `raise` shadows Guile's signal `raise`.
-- Run with `guile --no-auto-compile --r7rs -L . -s <file>`, `GUILE_WARN_DEPRECATED=no`.
+- Run with `guile --no-auto-compile -L . -s <file>`, `GUILE_WARN_DEPRECATED=no`.
 - A suite that dies at load prints "0 FAIL"; `tools/run-suites.py` requires at least
   one expected pass so that cannot pass silently.
 
@@ -772,7 +772,7 @@ pass fixed it, wired the build, and added the terminal half.
   `display-selections-p' in frame.sld with `tty-select-active-regions'. Set is
   on for an xterm >= 203; the read stays opt-in (`xterm--get-selection'), as
   xterm.el keeps it.
-- tools/syntax-check.scm re-execs itself with --r7rs: Guile's default reader
+- tools/syntax-check.scm re-execs itself with : Guile's default reader
   misreads `|sym;with;semis|' (select.sld's `text/plain;charset=utf-8' target),
   which made a clean file report a phantom unbalanced paren.
 - Tests: select-tests.scm grew the empty-ring cases and the OSC 52 write-path
@@ -2252,7 +2252,7 @@ there.
 ## Where the expression is evaluated, and how that was found
 
 `(interaction-environment)' was the first answer and it was wrong: under
-`--r7rs' it is a minimal environment, and `(+ 40 2)' answered **"Unbound
+`it is a minimal environment, and `(+ 40 2)' answered **"Unbound
 variable: +"**. What is used is `(current-module)' - the module current
 when the command runs, which is where the editor's own bindings are. A
 name the editor defines is reachable from M-: as a result, which is the
@@ -4938,7 +4938,7 @@ reads the sources and compiles nothing). Both are well inside the old
 and the editor's stderr *is the terminal* here, so that note lands in the
 middle of what a check reads - twice during the splash work a check failed
 on a screen full of notes rather than on the thing it was testing. Compile
-the tree (`for f in schemacs/**/*.sld; do guile --r7rs -L . -c "(compile-file \"$f\")"; done`)
+the tree (`for f in schemacs/**/*.sld; do guile -L . -c "(compile-file \"$f\")"; done`)
 before a battery run, and after editing anything, so that the cache is
 newer than every source. A scripted edit-and-compile can still lose the
 race on mtime *granularity* - the write and the compile inside one second

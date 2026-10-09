@@ -1,4 +1,4 @@
 
-
+make clean-cache
 python3 tools/run-suites.py        # all 37 suites (pure Scheme, fast-ish)
 python3 tools/pty-check.py         # 65 end-to-end pty checks
