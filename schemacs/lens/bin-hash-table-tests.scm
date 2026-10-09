@@ -4,8 +4,6 @@
   (schemacs lens)
   (schemacs lens bin-hash-table)
   (only (schemacs lens) view)
-  (only (schemacs pretty)
-         pretty print bracketed newline-indent line-break)
   (only (srfi 64)
         test-begin test-end test-assert test-equal)
   )
@@ -33,10 +31,6 @@
      ))
 
 (test-assert (not (bin-hash-table-empty? testbht)))
-
-(test-equal
-    (pretty #f (print (bin-hash-table-print testbht) (line-break)))
-  "(alist->bin-hash-table\n '((two . 2)\n   (zero . 0)\n   (one . 1)\n   ))\n")
 
 (define permute3
   (case-lambda

@@ -49,7 +49,7 @@
  ;; all the character events these tests feed ever need (only an extended
  ;; keycode would ask the terminal's terminfo, and none is used here).
  (only (schemacs editor dispnew) current-display key-event->key)
- (only (schemacs ui ncurses term) <tty-display>)
+ (only (schemacs editor test-display) <test-display>)
  (only (schemacs editor keymap) *current-keymap* *default-keymap*)
  (only (schemacs editor dired)
        dired dired-directory dired-noselect dired-revert)
@@ -158,15 +158,13 @@
 ;; Harness
 
 (define *test-display*
-  ;; The display the dispatch asks what an event means. It is a terminal
-  ;; object with nothing behind it - no curses is started, so `lines',
-  ;; `getch' and the rest would fail if anything asked them - and the
-  ;; character events these tests feed need none of that: naming a
-  ;; character is a question about the terminal's key table, which
-  ;; answers without a terminal. It is the same trick `faces-tests.scm'
-  ;; uses for its display.
+  ;; The display the dispatch asks what an event means. It is
+  ;; `(schemacs editor test-display)''s: an object that answers the
+  ;; interface and draws nowhere, so this suite needs no front end - which
+  ;; is the point of it (it used to borrow a `<tty-display>' and drag the
+  ;; terminal's library in with it).
   ;;--------------------------------------------------------------
-  (make <tty-display>))
+  (make <test-display>))
 
 (current-display *test-display*)
 

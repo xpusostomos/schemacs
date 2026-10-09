@@ -3,9 +3,6 @@
   (only (scheme lazy) force)
   (schemacs keymap)
   (only (schemacs lens) view update lens-set)
-  (only (schemacs pretty)
-        pretty print qstr repeat join-by bracketed
-        indent-by newline-indent line-break)
   (schemacs test)
   (schemacs hash-table)
   )
@@ -126,16 +123,6 @@
    (cons kmix_C-M-x   el:eval-defun)
    (cons kmix_C-c_C-c el:compile)))
 
-(test-equal "(ctrl meta #\\x)" (pretty #f (keymap-index-print kmix_C-M-x)))
-(test-equal "(ctrl #\\c ctrl #\\c)" (pretty #f (keymap-index-print kmix_C-c_C-c)))
-(test-equal "(\"left\")" (pretty #f (keymap-index-print kmix_left-arrow-key)))
-(test-equal
-    (string-append
-     "(alist->keymap-layer\n"
-     "  '((ctrl meta #\\x) #<procedure el:eval-defun ()>)\n"
-     "  '((ctrl #\\c ctrl #\\c) #<procedure el:compile ()>))")
-  (pretty #f (keymap-layer-print kml))
-  )
 (test-assert (keymap-layer-type? kml))
 (test-assert (keymap-index-type? kmix_C-M-x))
 (test-assert (keymap-index-type? kmix_C-c_C-c))
@@ -386,10 +373,6 @@
             (set! result
               (list 'fail (keymap-index->list key-index)))))))
     (cons keep result)))
-
-(define (show-modal-state-map)
-  (pretty (keymap-print (modal-lookup-state-keymap modal)))
-  (newline))
 
 (reset-modal! km)
 

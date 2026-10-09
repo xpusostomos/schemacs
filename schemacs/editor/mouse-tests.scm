@@ -10,9 +10,9 @@
 ;; events are made by hand, and the dispatch is `dispatch-key' - the same
 ;; call the command loop and both front ends make for one event. The one
 ;; piece that needs a display is the *row* a motion event is on
-;; (`%mouse-event-row'), and a `<pgtk-display>' answers `line-height' -
-;; one cell is one row - without ever being opened, the way
-;; `pgtk-tests.scm' makes one.
+;; (`%mouse-event-row'), and a display answers `line-height' - one cell is
+;; one row - without ever being opened. That display is
+;; `(schemacs editor test-display)'s stub.
 ;;
 ;; **The events are delivered by key, not by coordinate.** Emacs's map
 ;; binds `[mouse-movement]' and the front end is what says which event
@@ -32,7 +32,10 @@
  (only (guile) setvbuf)
  (only (srfi 64) test-assert test-equal test-begin test-end)
  (only (oop goops) define-class define-method make)
- (only (schemacs ui gtk pgtk) <pgtk-display> initialize-pgtk-faces!)
+ ;; The display the events are read from and the row is measured against:
+ ;; `(schemacs editor test-display)'s stub, so this suite needs no front
+ ;; end - it borrowed `<pgtk-display>' before, for a display object.
+ (prefix (only (schemacs editor test-display) <test-display>) stub:)
  ;; the display's generic, renamed: the test defines a method on it,
  ;; and `mouse-position' below is the frame-level function that calls it
  (rename (only (schemacs editor dispnew)
@@ -61,13 +64,12 @@
 
 (test-begin "schemacs_editor_mouse")
 
-(define-class <test-display> (<pgtk-display>)
-  (pointer #:init-value #f #:accessor test-display-pointer)
-  ;; The raw events the read is to answer with, in order - #f when the
-  ;; list runs out, which is what the real display answers for a wait
-  ;; that timed out. `note-mouse-movement' and the drag are tested through
-  ;; `dispatch-key'; this is for the *read's* own behaviour.
-  (script #:init-value '() #:accessor test-display-script))
+(define-class <test-display> (stub:<test-display>)
+  ;; Only the pointer is this suite's own. The *script* of raw events the
+  ;; read answers with, and the read itself, are the stub's: its
+  ;; `read-input-event' pops `test-display-script' and answers #f when the
+  ;; script runs out, which is what a wait that timed out answers.
+  (pointer #:init-value #f #:accessor test-display-pointer))
 ;; ^ A display that answers `mouse-position' with a row the test sets.
 ;; The real one asks Gdk where the pointer is; the question is the same
 ;; and that is the point - the drag must not be reading the pointer's row
@@ -77,17 +79,8 @@
 (define-method (display-mouse-position (d <test-display>))
   (test-display-pointer d))
 
-(define-method (display-read-input-event (d <test-display>) timeout)
-  (let ((script (test-display-script d)))
-    (if (null? script)
-        #f
-        (begin
-          (set! (test-display-script d) (cdr script))
-          (car script)))))
-
 (define d (make <test-display>))
 (current-display d)
-(initialize-pgtk-faces! d)
 
 (define (pointer-at! row)
   ;; Where the pointer is, as the display would answer it.

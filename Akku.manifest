@@ -5,7 +5,6 @@
   (synopsis "A clone of Emacs and Emacs Lisp written in R7RS Scheme")
   (description
    "A Scheme clone of Emacs")
-  (authors "Chris Bitmead")
   (license "LGPL-2.1")
   (depends
    ("akku-r7rs" "^1.0.1")

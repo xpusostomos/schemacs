@@ -8,8 +8,6 @@
           lens record-unit-lens view lens-set
           =>self =>hash-key! =>on-update
           =>canonical =>encapsulate)
-    (only (schemacs pretty)
-           pretty print bracketed newline-indent line-break)
     (only (schemacs comparator) make-equal-comparator)
     (only (schemacs hash-table) ; Standard hash tables
           hash-table-empty?
@@ -37,7 +35,6 @@
    bin-hash-table-fold
    hash-table-copy-with
    bin-hash-table-copy
-   bin-hash-table-print
    )
 
   (begin
@@ -232,32 +229,7 @@
            bht
            )))))
 
-    (define (default-pair-printer pair)
-      (print
-       (bracketed 1 #\( #\) (print (car pair) " . " (cdr pair)))
-       (newline-indent)
-       ))
-
-    (define bin-hash-table-print
-      ;; A (SCHEMACS PRETTY) pretty-printer for the `<BIN-HASH-TABLE-TYPE>`.
-      ;; Takes a `PAIR-PRINT` argument to print each association in the
-      ;; table.
-      (case-lambda
-        ((bht) (bin-hash-table-print bht default-pair-printer))
-        ((bht pair-print)
-         (let ((binsz (get-bin-hash-table-store-size bht)))
-           (bracketed 1 #\( #\)
-            "alist->bin-hash-table"
-            (if (bin-hash-table-empty? bht) " '()"
-                (print
-                 (newline-indent)
-                 (apply bracketed 2 "'(" ")"
-                  (map pair-print (hash-table->alist (get-bin-hash-table-hash bht))))
-                 (if (= binsz (*bin-hash-table-init-size*)) #f
-                     (print #\space (number->string binsz))
-                     ))))))))
-
-    (define (bin-hash-table-fold bht fold init)
+            (define (bin-hash-table-fold bht fold init)
       (hash-table-fold (get-bin-hash-table-hash bht) fold init)
       )
 

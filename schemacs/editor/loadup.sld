@@ -74,19 +74,25 @@
       ;;   be in itself: what it hands out is the editor, and it is the
       ;;   hand.
       ;;
+      ;;   `(schemacs editor test-display)' is *test support*: a display
+      ;;   with nothing behind it, which the suites use so that none of
+      ;;   them has to import a front end. It is excluded for the same
+      ;;   reason the toolkits are - the back door has no business handing
+      ;;   a session a display that draws nowhere.
+      ;;
       ;;   **The toolkit libraries are not `(schemacs editor ...)' at all
-      ;;   any more** - `(schemacs ui gtk pgtk)' and `(schemacs ui ncurses
-      ;;   term)' are under `schemacs/ui/', beside the front ends that
-      ;;   bind them. This list used to name them so that a terminal
-      ;;   editor's session would not drag guile-gi in, and the Gtk one
-      ;;   would not drag guile-ncurses in; moving them out of
-      ;;   `schemacs/editor/' is the same decision made where it cannot be
-      ;;   forgotten - `loadup-tests.scm' walks *this* directory, so a
+      ;;   any more**: they belong to whichever front end binds them, and
+      ;;   they live beside it. This list used to name them so that a
+      ;;   terminal editor's session would not drag guile-gi in, and the
+      ;;   windowed one would not drag guile-ncurses in; moving them out
+      ;;   of `schemacs/editor/' is the same decision made where it cannot
+      ;;   be forgotten - `loadup-tests.scm' walks *this* directory, so a
       ;;   library that is not in it cannot be handed out by accident.
       ;;   `schemacs/main.scm' says the same thing about the front ends
       ;;   ("a terminal editor has no business needing guile-gi, and a
       ;;   windowed one no business needing ncurses").
-      '((schemacs editor loadup)))
+      '((schemacs editor loadup)
+        (schemacs editor test-display)))
 
     (define %editor-libraries
       ;; Every `(schemacs editor ...)' there is, less the pair above:

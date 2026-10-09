@@ -7,7 +7,7 @@
  ;; for the run walk at the end: a buffer, a property on it, and the
  ;; computation that turns the two into runs
  (prefix (schemacs editor xdisp) xd:)
- (prefix (schemacs ui ncurses term) term:)
+ (only (schemacs editor test-display) <test-display>)
  (prefix (schemacs editor dispnew) dn:)
  (only (oop goops) define-class make)
  (only (schemacs editor engine)
@@ -37,11 +37,9 @@
 
 ;; Rendering realizes a face on the *display* (`realize-face' is a
 ;; display method), so the tests that ask what a face draws as run
-;; against a display object. A terminal display is made without opening
-;; a terminal: realizing only consults the pair table when there are
-;; colours, and `has-colors?' answers #f before `initscr' - so a
-;; display-less machine stays monochrome and no curses call is made.
-(define-class <test-display> (term:<tty-display>))
+;; against a display object: `(schemacs editor test-display)'s, which
+;; draws nowhere and needs no terminal at all.
+;;--------------------------------------------------------------
 
 (define (with-display thunk color-cells type background)
   ;; Run THUNK with the display described, then realize the standard
@@ -213,20 +211,29 @@
 
 ;; A line with no faces is one run with no attributes - the case the
 ;; renderer takes the fast path for.
+;;
+;; **LINE-START is a buffer position and positions are one-based** (the
+;; tree's convention since 2026-10-05): these tests passed `0` for a line
+;; at the start of the buffer, which is out of range, and
+;; `attrs-at-buffer-position' raised `Args out of range: 0' - so they had
+;; been failing, unnoticed, because `tools/run-suites.py' could not see
+;; failures in a suite that aborts.
 (test-equal '(1 ((0 6 0)))
   (let ((ed (new-text-editor)))
     (text-editor-insert ed "abcdef")
-    (let ((runs (xd:line-face-runs ed 0 "abcdef")))
+    (let ((runs (xd:line-face-runs ed 1 "abcdef")))
       (list (length runs) runs))))
 
 ;; A face on the middle of a line cuts it into three runs, and each run
 ;; carries the attribute number for its face - bold, on this display.
+;; `put-text-property 2 5' is positions 2, 3 and 4, which of a line
+;; starting at position 1 are the offsets 1 to 4.
 (test-equal 3
-  (length (xd:line-face-runs (buffer-with-face "abcdefgh" 2 5 'bold) 0
+  (length (xd:line-face-runs (buffer-with-face "abcdefgh" 2 5 'bold) 1
                              "abcdefgh")))
 
 (test-equal '(#f #t #f)
-  (let ((runs (xd:line-face-runs (buffer-with-face "abcdefgh" 2 5 'bold) 0
+  (let ((runs (xd:line-face-runs (buffer-with-face "abcdefgh" 2 5 'bold) 1
                                  "abcdefgh")))
     (let loop ((rest runs) (acc '()))
       (if (null? rest)
@@ -234,29 +241,27 @@
           (loop (cdr rest) (cons (not (= 0 (caddr (car rest)))) acc))))))
 
 ;; ...and the runs cover the line exactly, with no gap and no overlap.
-(test-equal '((0 2) (2 5) (5 8))
+(test-equal '((0 1) (1 4) (4 8))
   (map (lambda (run) (list (car run) (cadr run)))
-       (xd:line-face-runs (buffer-with-face "abcdefgh" 2 5 'bold) 0 "abcdefgh")))
+       (xd:line-face-runs (buffer-with-face "abcdefgh" 2 5 'bold) 1 "abcdefgh")))
 
-;; The runs are bounded by the *line*, and their positions are buffer
-;; columns offset by where the line starts - which is what makes the
-;; renderer's per-line walk work at all.
 ;; The runs are bounded by the *line*, and their positions are buffer
 ;; columns offset by where the line starts - which is what makes the
 ;; renderer's per-line walk work at all. The attribute numbers themselves
-;; are ncurses's bit flags and are not asserted: only that the middle run
-;; is a *different* run from its neighbours.
-;; ...and the columns are offset by where the line starts. The line here
-;; is "bcd" starting at buffer column 4, and the face is on buffer column
-;; 5 - the "c" - so it is the *middle* column that is bold.
+;; are the display's and are not asserted: only that the middle run is a
+;; *different* run from its neighbours.
+;;
+;; ...and the columns are offset by where the line starts. The line here is
+;; "def", starting at buffer position 4, and the face is on position 5 -
+;; the "e" - so it is the *middle* column that is bold.
 (test-equal '((0 1) (1 2) (2 3))
   (let ((ed (buffer-with-face "abcdefgh" 5 6 'bold)))
     (map (lambda (run) (list (car run) (cadr run)))
-         (xd:line-face-runs ed 4 "bcd"))))
+         (xd:line-face-runs ed 4 "def"))))
 
 (test-equal #t
   (let* ((ed (buffer-with-face "abcdefgh" 5 6 'bold))
-         (runs (xd:line-face-runs ed 4 "bcd")))
+         (runs (xd:line-face-runs ed 4 "def")))
     (and (not (= (caddr (car runs)) (caddr (cadr runs))))
          (not (= (caddr (cadr runs)) (caddr (caddr runs)))))))
 

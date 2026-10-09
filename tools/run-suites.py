@@ -56,6 +56,11 @@ SUITES = [
     'schemacs/ui/gtk/pgtk-tests.scm',
     'schemacs/editor/timer-tests.scm',
     'schemacs/editor/select-tests.scm',
+    ;; The terminal's own OSC 52 selection, which came out of
+    ;; `select-tests.scm' when the platform libraries moved under
+    ;; `schemacs/ui/': an editor test that asserts the terminal's
+    ;; behaviour belongs beside `xterm.sld'.
+    'schemacs/ui/ncurses/xterm-tests.scm',
     'schemacs/editor/startup-tests.scm',
     'schemacs/apps/ncurses-editor-tests.scm',
 ]
@@ -90,7 +95,15 @@ def run(path):
         r'\*\*\* # of expected passes\s*:\s*(\d+)', out))
     failures = sum(int(n) for n in re.findall(
         r'\*\*\* # of unexpected failures\s*:\s*(\d+)', out))
-    return passes, failures, out
+    # **A suite that aborts is not a suite that passed.** `srfi 64' prints
+    # its failure count in the summary at `test-end', so a run that dies
+    # inside a test - an error escaping srfi-64's own handler - prints
+    # *passes* and no failure count at all, and counting only the summary
+    # line reports it green. `faces-tests.scm' did exactly that with four
+    # failing tests in it for as long as anyone looked. The summary's last
+    # line is the tell.
+    finished = '*** Test suite finished' in out
+    return passes, failures, finished, out
 
 
 def main():
@@ -98,7 +111,7 @@ def main():
     bad = 0
     for p in paths:
         try:
-            passes, failures, out = run(p)
+            passes, failures, finished, out = run(p)
         except subprocess.TimeoutExpired:
             print('%-44s TIMED OUT' % os.path.basename(p))
             bad += 1
@@ -110,8 +123,13 @@ def main():
             for line in out.strip().split('\n')[-6:]:
                 print('      %s' % line)
             bad += 1
-        elif failures:
-            print('%-44s %d passed, %d FAILED' % (name, passes, failures))
+        elif failures or not finished:
+            if finished:
+                print('%-44s %d passed, %d FAILED' % (name, passes, failures))
+            else:
+                print('%-44s %d passed, then ABORTED' % (name, passes))
+                for line in out.strip().split('\n')[-4:]:
+                    print('      %s' % line)
             for line in out.split('\n'):
                 if 'source-line' in line or 'actual-value' in line:
                     print('      %s' % line.strip())

@@ -13,9 +13,6 @@
           =>head  =>encapsulate
           =>trace
           )
-    (only (schemacs pretty)
-          pretty print qstr repeat join-by bracketed
-          indent-by newline-indent line-break)
     (only (schemacs lens vector) vector-copy-with)
     (only (schemacs lens bin-hash-table)
           make<bin-hash-table>
@@ -59,7 +56,6 @@
   (cond-expand
     (guile-3
      (import
-       (only (srfi srfi-9 gnu) set-record-type-printer!)
        ))
     (else)
     )
@@ -86,7 +82,6 @@
    reverse-list->keymap-index
    keymap-index->ascii
    =>kbd! =>keymap-layer-index!
-   keymap-index-print
    keymap-index-to-char
    mod-index char-index next-index
    ctrl-bit meta-bit super-bit hyper-bit alt-bit
@@ -97,7 +92,6 @@
    keymap-layer->alist
    keymap-layer-assoc-split
    keymap-layer-copy
-   keymap-layer-print
    keymap-layer-action
    map-key
    keymap-layer-lookup
@@ -121,7 +115,6 @@
    keymap keymap-lookup
    keymap->layers-list
    keymap-lookup-binding-key
-   keymap-print
 
    modal-lookup-state-type?
    new-modal-lookup-state
@@ -415,23 +408,7 @@
                (else (list ascii utf))
                )))))
 
-    (define (char-table-print kt)
-      (bracketed
-       2 #\( #\) "char-table"
-       (if (char-table-empty? kt) " '()"
-           (apply print (newline-indent)
-            (map
-             (lambda (pair)
-               (bracketed 1 #\( #\) (qstr (car pair)) " . "
-                (let ((val (cdr pair)))
-                  (cond
-                   ((char-table-type? val) (char-table-print val))
-                   ((keymap-layer-type? val) (keymap-layer-print val))
-                   (else (print val)))
-                  )))
-             (char-table->alist kt))))))
-
-    ;; -------------------------------------------------------------------------------------------------
+        ;; -------------------------------------------------------------------------------------------------
 
     (define-record-type <keymap-index-type>
       ;; This defines a data structure fore defining keymap indicies, that
@@ -816,27 +793,6 @@
 
     (define keymap-index->expr keymap-index->list)
 
-    (define keymap-index-print
-      (case-lambda
-        ((kmix) (keymap-index-print #f kmix))
-        ((label kmix)
-         (cond
-          ((keymap-index-type? kmix)
-           (bracketed 1 #\( #\)
-             (let ((content (apply join-by #\space (map qstr (keymap-index->list kmix)))))
-               (if label (print label (bracketed 1 " '(" ")" content)) content))
-             ))
-          ((not kmix) (print "#f"))
-          (else (error "not a <keymap-index-type>" kmix))
-          ))))
-
-    ;;(cond-expand
-    ;;  (guile-3
-    ;;   (set-record-type-printer!
-    ;;    <keymap-index-type>
-    ;;    (lambda (km port) (pretty port (keymap-index-print "keymap-index" km)))))
-    ;;  (else))
-
     ;; -------------------------------------------------------------------------------------------------
 
     (define-record-type <keymap-layer-type>
@@ -1190,38 +1146,6 @@
             (or result (loop (cdr layers)))
             )))))
 
-    (define (keymap-layer-print km)
-      (cond
-       ((keymap-layer-type? km)
-        (let ((alt (keymap-layer-alt-action km))
-              (mod (keymap-layer-mod-table km))
-              )
-          (bracketed 2 #\( #\)
-           "alist->keymap-layer"
-           (if (or (not mod) (hash-table-empty? mod)) '(" '()")
-               (apply print
-                (map
-                 (lambda (pair)
-                   (print (line-break)
-                    (bracketed 2 "'(" ")"
-                     (keymap-index-print #f (car pair))
-                     #\space
-                     (print (cdr pair)))))
-                 (keymap-layer->alist km)))))
-          ))
-       ((keymap-index-predicate-type? km)
-        (print (qstr km)))
-       (else
-        (error "not a <keymap-layer-type> or <keymap-index-predicate-type>" km)
-        )))
-
-    ;;(cond-expand
-    ;;  (guile-3
-    ;;   (set-record-type-printer!
-    ;;    <keymap-layer-type>
-    ;;    (lambda (km port) (pretty port (keymap-layer-print km)))))
-    ;;  (else))
-
     ;; -------------------------------------------------------------------------------------------------
 
     (define-record-type <keymap-index-predicate-type>
@@ -1457,39 +1381,6 @@
            (else found)
            )))))
 
-    (define (keymap-print km)
-      (cond
-       ((not km) (print "#f"))
-       (else
-        (let*((separator (make-string 20 #\-))
-               (items (keymap->layers-list km))
-               (head (if (null? items) #f (car items))))
-          (bracketed 2 "(keymap" ")"
-            (apply join-by (line-break)
-              (cond
-               ((or (string? head) (symbol? head))
-                (print #\space (qstr (if (symbol? head) (symbol->string head) head))))
-               (else #f))
-              (let loop ((count 0) (items items))
-                (cond
-                 ((null? items) '())
-                 (else
-                  (cons
-                    (print
-                      #\; separator " layer " count #\space separator
-                      (line-break) (keymap-layer-print (car items))
-                      )
-                    (loop (+ 1 count) (cdr items))
-                    )))
-                )))))))
-
-    ;;(cond-expand
-    ;;  (guile-3
-    ;;   (set-record-type-printer!
-    ;;    <keymap-type>
-    ;;    (lambda (km port) (pretty port (keymap-print km)))))
-    ;;  (else))
-
     ;; -------------------------------------------------------------------------------------------------
 
     (define-record-type <modal-lookup-state-type>
@@ -1508,28 +1399,7 @@
       (keymap  modal-lookup-state-keymap       set!modal-lookup-state-keymap)
       (stack   modal-lookup-state-index-stack  set!modal-lookup-state-index-stack))
 
-    (define (modal-lookup-state-print km)
-      (bracketed 2 #\( #\)
-        "make<modal-lookup-state-type>" (line-break)
-        (join-by (line-break)
-          ";modal-lookup-state-keymap"
-          (keymap-print (modal-lookup-state-keymap km))
-          ";modal-lookup-state-index-stack"
-          (bracketed 2 #\( #\)
-            "map keymap-index" (line-break)
-            (bracketed 2 "'(" ")"
-              (line-break)
-              (apply join-by #\space
-                (map keymap-index-print
-                     (modal-lookup-state-index-stack km)))
-              )))))
 
-    ;;(cond-expand
-    ;;  (guile-3
-    ;;   (set-record-type-printer!
-    ;;    <modal-lookup-state-type>
-    ;;    (lambda (km port) (pretty port (modal-lookup-state-print km)))))
-    ;;  (else))
 
     (define (new-modal-lookup-state km)
       ;; Construct a new <modal-lookup-state-type> with either a
