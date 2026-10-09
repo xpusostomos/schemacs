@@ -30,6 +30,7 @@ Here's what works already:
 * Dired
 * Modes, minor modes, special mode handling
 * Clipboard integration
+* Mouse support
 * And many more...
 
 How does it feel? Zippy! They say they fixed Emacs' performance, 
@@ -142,7 +143,6 @@ feature, we can port it in hours, not years. We don't need to be
 beholden to the old ways. Software isn't the scarce resource it once
 was.
 
-
 ## Why guile? Why not...Chez or...
 
 Mostly because there seems to be more packages and more developer
@@ -160,10 +160,7 @@ if that ever comes to anything.
 ## Departures from real emacs
 
 For the most part, schemacs is extremely similar to real emacs in its
-implementation.  Ironically, Ramin was aiming for elisp compatibility
-which requires uber compatibility, but I abandoned that code base
-partly because I felt it actually departed too much from real
-emacs. One of the few things different is that Schemacs internally
+implementation. One of the few things different is that Schemacs internally
 represents a UTF-32 array which is much easier to deal with and saves
 tens of thousands of lines of cruft compared to emacs, which attempts
 to have fully variable sized code sizes. The interface is fully hidden
@@ -173,8 +170,8 @@ emoji in a large file, only one chunk will be utf-32. For now it just
 plain makes the whole thing a lot easier to deal with as a fixed sized
 array. This is 2026 where memory is important but not *that*
 important. There may be other departures, but they are very
-small. Small enough that AI conversion of your packages should be
-smooth... *very* smooth.
+small. Small enough that AI conversion of elisp packages should be
+*very* smooth.
 
 ### Prerequisites
 
