@@ -381,16 +381,38 @@
       ;; writable when its directory is, which is Emacs's rule and the
       ;; one `write-file' works from - a buffer made writable by the
       ;; file it now visits.
+      ;;
+      ;; The C expands the name once, first thing - `absname =
+      ;; Fexpand_file_name (filename, Qnil);' (`fileio.c:3047') - and
+      ;; works with that from then on; so does this, since the `access?'
+      ;; below is a syscall that would otherwise resolve a relative name
+      ;; against the *process's* directory rather than the buffer's.
       ;;--------------------------------------------------------------
-      (if (file-exists-p path)
-          (access? path W_OK)
-          (let ((dir (file-name-directory-part path)))
-            (access? (if (string=? dir "") "." dir) W_OK))))
+      (let ((path (expand-file-name path)))
+        (if (file-exists-p path)
+            (access? path W_OK)
+            (let ((dir (file-name-directory-part path)))
+              (access? (if (string=? dir "") "." dir) W_OK)))))
 
     (define (file-exists-p path)
       ;; GNU Emacs's `file-exists-p': whether PATH names something that
       ;; exists. Emacs's is true of a directory as well as of a file, and
       ;; so is this.
+      ;;
+      ;; **The name is expanded first.** The C does it in
+      ;; `check_file_access' (`fileio.c:2992') - the shared body of
+      ;; `file-exists-p', `file-executable-p' and `file-readable-p' -
+      ;; whose first line is `file = Fexpand_file_name (file, Qnil);'.
+      ;; Every *other* predicate in this library already expanded
+      ;; (`file-readable-p', `file-directory-p', `file-regular-p',
+      ;; `file-symlink-p', `file-modes', and diredc's `directory-files'
+      ;; and `file-attributes'), and this one did not - which nothing
+      ;; noticed while every caller passed an absolute path. A `~' is
+      ;; what finds it: `(file-exists-p "~/x")' answered nil for a file
+      ;; that is there, and the file-name completion table asks exactly
+      ;; this question to decide whether what has been typed is already a
+      ;; name - so `C-x C-f' TAB in a prompt holding an abbreviated
+      ;; directory could not tell a real name from an unknown one.
       ;;
       ;; `guard', not `with-exception-handler': the exception `stat'
       ;; raises is *non-continuable*, and a handler that returns from one
@@ -398,7 +420,7 @@
       ;; this started as answered nothing at all and let the error out.
       ;;--------------------------------------------------------------
       (guard (e (else #f))
-        (stat path)
+        (stat (expand-file-name path))
         #t))
 
     (define (%file-name-case-insensitive-err path)

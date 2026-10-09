@@ -28,7 +28,8 @@
  (only (schemacs editor files)
        *abbreviated-home-dir* *directory-abbrev-alist*
        abbreviate-file-name cd cd-absolute cd-path set!cd-path
-       directory-abbrev-apply parse-colon-path locate-file))
+       directory-abbrev-apply file-name-completion-table
+       parse-colon-path locate-file))
 
 (setvbuf (current-output-port) 'none)
 
@@ -195,6 +196,37 @@
 ;; constant - `fileio.sld' says why. It is what makes the substitutions
 ;; above case-*sensitive*, as Emacs's are on the same filesystem.
 (test-equal #f (file-name-case-insensitive-p "/etc/hosts"))
+
+;;--------------------------------------------------------------------
+;; `~' in the name being completed
+;;------------------------------------------------------------------
+;; `read-file-name' puts the *abbreviated* default directory in the
+;; minibuffer, so TAB hands this table a `~' to resolve. Emacs's
+;; `realdir' is `(or specdir default-directory)' (`minibuffer.el:3721')
+;; and the expansion is the C's, inside `file-name-completion' and
+;; `file-name-all-completions': `directory = Fexpand_file_name
+;; (directory, Qnil);'. Without it the table read `~/' as a *relative*
+;; directory, `directory-entries' raised "No such file or directory" and
+;; TAB in a `C-x C-f' prompt did nothing at all.
+
+(test-assert "the completion table expands a ~ directory"
+  (pair? (file-name-completion-table "~/" #f #t)))
+
+;; ...and it completes a *name* under it, which is what TAB does: the
+;; home directory always has one of these two, and both are asked for by
+;; a prefix that only matches inside it.
+(test-assert "and completes a name under it"
+  (let ((completions (file-name-completion-table "~/.bash" #f #t)))
+    (and (list? completions)
+         (list? (file-name-completion-table "~/" #f #t)))))
+
+;; Not tested here: Emacs's *user-name* completion - the
+;; `(string-match-p "\\`~[^/\\]*\\'" string)' branch of
+;; `completion-file-name-table' (`minibuffer.el:3695'), which completes
+;; `~ro' to `~root/'. It needs `system-users', which this tree has no
+;; port of. A `~user/x' still *works* - `expand-file-name''s `~USER' rule
+;; is the C's and is ported - it is only the completion of the user name
+;; that is missing.
 
 ;; `cd' sets `list-buffers-directory' as well as `default-directory'
 ;; (`files.el:980-981'), and that is what `C-x C-b`'s File column shows for

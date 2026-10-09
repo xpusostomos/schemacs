@@ -26,7 +26,7 @@ Each check starts `main-ncurses.scm` on a real terminal, sends keys, and
 asserts on the screen and on the files left behind. Exit status is 0 when
 every check passes.
 """
-import os, pty, select, shutil, socket, subprocess, sys, time, base64, tempfile
+import os, pty, re, select, shutil, socket, subprocess, sys, time, base64, tempfile
 
 # The editor loads `$XDG_CONFIG_HOME/schemacs/init.scm' as it starts
 # (`startup.sld', GNU Emacs's `user-init-file' search). A developer's own
@@ -1792,6 +1792,22 @@ def check_abbreviate():
         if short not in screen_of(out):
             problems.append("the buffer list does not show %r in its File "
                             "column: %r" % (short, screen_of(out)[-400:]))
+
+        # **And completion must work *in* the abbreviated prompt.** This
+        # is the half the check was missing, and the bug it let through:
+        # the table that completes a file name resolved the directory it
+        # was handed with `(string-append (default-directory) specdir)'
+        # and never expanded it, so the `~/...' this very prompt now puts
+        # in the minibuffer became a *relative* path, `directory-entries'
+        # raised "No such file or directory", and TAB did nothing. The
+        # name completed here is made by the check, so what it proves is
+        # about the prompt and not about the tree's contents.
+        open(os.path.join(where, "completed-by-tab.txt"), "w").write("x\n")
+        out = drive([C_x + C_f, WAIT(b"Find file: "), b"completed-by-",
+                     TAB], path)
+        if not re.search(r"completed-by-tab\.txt", out):
+            problems.append("TAB in a prompt holding %r did not complete a "
+                            "name in it: %r" % (shortdir, out[-300:]))
     finally:
         shutil.rmtree(where, ignore_errors=True)
     return problems

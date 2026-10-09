@@ -6128,3 +6128,90 @@ check that knows what it is waiting for should say so.
   is no `system-type` here, and the branch is about `C:/`).
 - The handler arm is there and answers nothing, because no file-name
   handler is registered — as Emacs's does on a machine with none.
+
+# The `~` completion bug my own `~` change let through (2026-10-09)
+
+Chris, the same day the abbreviation landed: *"you seem to have broken file
+completion with your tilde ~ changes."* He was right, and the shape of it
+is worth keeping.
+
+## The symptom
+
+`C-x C-f` in a buffer under the home directory, then TAB:
+
+    Find file: ~/GITE/schemacs/No such file or directory
+
+The prompt was right - that was the feature - and completion in it was
+dead, which my checking had missed: the pty check I wrote for it asserted
+the *prompt text* and the *File column* and never once pressed TAB.
+
+## The two departures, both "a primitive that does not expand where the C does"
+
+1. **The completion table resolved the directory by hand.**
+   `file-name-completion-table` had
+
+       (realdir (cond ((string=? specdir "") (default-directory))
+                      ((char=? (string-ref specdir 0) #\/) specdir)
+                      (else (string-append (default-directory) specdir))))
+
+   - a branch Emacs does not have, because **the C expands the directory
+   inside `file-name-completion` and `file-name-all-completions`**
+   (`directory = Fexpand_file_name (directory, Qnil);`), and makes sure it
+   ends in a slash. With an absolute `specdir` the hand-rolled branch
+   agreed with the C by luck; with `~/GITE/schemacs/` it produced
+   `/home/chris/GITE/schemacs/~/GITE/schemacs/`, `opendir` raised, and TAB
+   reported the errno. It is Emacs's own line now -
+   `(realdir (or specdir default-directory))` (`minibuffer.el:3721`), then
+   the expansion and the slash the C does.
+
+2. **`file-exists-p` was the one predicate that did not expand its
+   argument.** The C's shared body `check_file_access` (`fileio.c:2992`)
+   opens with `Fexpand_file_name`, and so do `file-writable-p`,
+   `file-directory-p` and everything else in that family — `readable-p`,
+   `executable-p`, `symlink-p`, `regular-p`, `modes`, `diredc`'s
+   `directory-files` and `file-attributes`, all of which already expanded
+   here. Measured, before the fix:
+
+   | call | Emacs | was | now |
+   |---|---|---|---|
+   | `(file-exists-p "~/GITE")` | `t` | **`#f`** | `t` |
+   | `(file-directory-p "~/GITE")` | `t` | `t` | `t` |
+   | `(file-exists-p "~")` | `t` | **`#f`** | `t` |
+
+   The asymmetry inside one family is what makes this class dangerous:
+   `file-directory-p` expanding and `file-exists-p` not looks like it
+   works, right up to the call that uses the one that does not — here the
+   table's "is what has been typed already a name?" question
+   (`file-exists-p`, `minibuffer.el`'s ACTION `lambda` branch), which
+   answered nil for every abbreviation. `file-writable-p` now expands once
+   at the top as the C does, since its `access?` is a syscall that would
+   otherwise resolve a relative name against the *process's* directory
+   rather than the buffer's.
+
+**The lesson, and it is the file's oldest one**: the change that exposed
+this was itself a *correct* port. It failed because a primitive underneath
+it did not do what the C does, and no test passed a `~` to a file
+predicate before. When a port is built on top of another, the cheaper port
+is the one that has never been asked the question.
+
+## Named, not done
+
+`completion-file-name-table`'s **user-name** branch
+(`minibuffer.el:3695`, completing `~ro` to `~root/`) is not ported: it
+needs `system-users`. A `~user/x` still resolves, because
+`expand-file-name`'s `~USER` rule is the C's and is ported — what is
+missing is completing the user's *name*.
+
+## Tests, and the gap in the old one
+
+- `fileio-tests.scm` 60 (was 55): `file-exists-p` on `~`, `~/`, `~/.` and
+  a missing `~/...` name, plus the whole family on `~` in one row
+  (`(t t t nil nil nil t)`), every answer Emacs 31.1's.
+- `files-tests.scm` 29: the completion table with `~` in the directory,
+  through `all-completions` and through `test-completion`.
+- **`tools/pty-check.py`'s `abbreviate` check now presses TAB** in the
+  abbreviated prompt and asserts the name completes — the assertion whose
+  absence is the whole reason this shipped. Verified failing with the old
+  `realdir` put back: the message is the symptom, "TAB in a prompt holding
+  '~/sc-.../' did not complete a name in it: ... `No such file or
+  directory`".

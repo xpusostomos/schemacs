@@ -1184,6 +1184,15 @@ save-buffer
       ;;
       ;; Directories are offered with a trailing slash so that completing
       ;; one descends into it.
+      ;;
+      ;; Not ported: Emacs's **user-name** completion - the
+      ;; `(string-match-p "\\`~[^/\\]*\\'" string)' branch of
+      ;; `completion-file-name-table' (`minibuffer.el:3695'), which
+      ;; completes `~ro' to `~root/' - because it needs `system-users',
+      ;; which this tree has no port of. A `~user/x' still *works*:
+      ;; `expand-file-name''s `~USER' rule is the C's (`fileio.c:1393')
+      ;; and is ported, so the name resolves; only the completion of the
+      ;; user name itself is absent.
       ;;--------------------------------------------------------------
       (cond
        ((and (pair? action) (eq? (car action) 'boundaries))
@@ -1207,9 +1216,24 @@ save-buffer
        (else
         (let* ((name (file-name-nondirectory-part string))
                (specdir (file-name-directory-part string))
-               (realdir (cond ((string=? specdir "") (default-directory))
-                              ((char=? (string-ref specdir 0) #\/) specdir)
-                              (else (string-append (default-directory) specdir))))
+               ;; **Emacs's own line** (`minibuffer.el:3721'):
+               ;; `(realdir (or specdir default-directory))'. The
+               ;; expansion and the trailing slash are the *C's*, from the
+               ;; two functions this stands for - `file-name-completion'
+               ;; and `file-name-all-completions' both open with
+               ;; `directory = Fexpand_file_name (directory, Qnil);'
+               ;; (`fileio.c'), and then "Make sure the last byte is a
+               ;; slash". That is why a `specdir' of `~/...' is legal
+               ;; here: a relative `sub/' is resolved by the expansion,
+               ;; and a `~' is expanded out of it. This used to hand-roll
+               ;; the relative case as `(string-append (default-directory)
+               ;; specdir)' and never expand, so the abbreviated directory
+               ;; `read-file-name' now puts in the prompt
+               ;; (`~/GITE/schemacs/') came out as
+               ;; `/home/chris/GITE/schemacs/~/GITE/schemacs/' and every
+               ;; TAB in it raised "No such file or directory".
+               (realdir (file-name-as-directory
+                         (expand-file-name (or specdir (default-directory)))))
                ;; `file-name-all-completions name realdir': the entries
                ;; NAME is a prefix of, as names, a slash on the directories
                (names (let loop ((entries (directory-entries realdir name)) (acc '()))

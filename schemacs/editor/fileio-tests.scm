@@ -28,6 +28,37 @@
 (test-equal "file-regular-p on a directory" #f (file-regular-p "/tmp"))
 (test-equal "file-regular-p on something missing" #f (file-regular-p "/tmp/no-such-entry"))
 
+;; ------------------------------------------------------------------
+;; every predicate expands its argument first
+;;
+;; The C's `check_file_access' (`fileio.c:2992'), the shared body of
+;; `file-exists-p', `file-executable-p' and `file-readable-p', opens with
+;; `file = Fexpand_file_name (file, Qnil);', and `file-writable-p' and
+;; `file-directory-p' do the same in their own bodies. `file-exists-p' was
+;; the one that did not, and nothing noticed while every caller passed an
+;; absolute name: with a `~' it answered nil for a file that is there.
+;; Every expectation here is Emacs 31.1's - `emacs -Q --batch` answers t,
+;; t and nil for these three.
+
+(test-equal "file-exists-p expands a leading ~" #t (file-exists-p "~"))
+(test-equal "and a ~ with its slash" #t (file-exists-p "~/"))
+(test-equal "and a ~ with a dot" #t (file-exists-p "~/."))
+(test-equal "a ~ name that is not there" #f
+  (file-exists-p "~/no-such-entry-for-schemacs-tests"))
+
+;; ...and the whole family, so that a `~' cannot come to be a special
+;; case that one of them forgets. Emacs's own answers, in order:
+;; t t t nil nil nil t (the last is `file-writable-p' - a name that does
+;; not exist is writable when its directory is).
+(test-equal '(#t #t #t #f #f #f #t)
+  (list (file-directory-p "~")
+        (file-readable-p "~")
+        (file-executable-p "~")
+        (file-regular-p "~")
+        (file-symlink-p "~")
+        (file-exists-p "~/no-such-entry-for-schemacs-tests")
+        (file-writable-p "~/no-such-entry-for-schemacs-tests")))
+
 (test-equal "file-readable-p on a file" #t (file-readable-p "/etc/hostname"))
 (test-equal "file-readable-p on something missing" #f (file-readable-p "/tmp/no-such-entry"))
 (test-equal "file-executable-p on a program" #t (file-executable-p "/bin/sh"))
