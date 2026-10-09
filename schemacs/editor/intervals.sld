@@ -142,6 +142,13 @@
    interval-deletion-adjustment
    ;; properties, as this file has them (`textprop.c' has the rest)
    textget
+   ;; `get' and `put' are `fns.c''s, and they are here for now because
+   ;; `textget' was their only caller in the ported code - see the note
+   ;; on them below. `files.sld''s `abbreviate-file-name' is the second:
+   ;; its cache records the home directory as a property of the symbol
+   ;; `abbreviated-home-dir', as Emacs's does.
+   get
+   put
    lookup-char-property
    interval-plist-get
    *text-property-default-nonsticky*

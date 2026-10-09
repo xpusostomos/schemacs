@@ -90,6 +90,7 @@
    expand-file-name
    file-directory-p
    file-exists-p
+   file-name-case-insensitive-p
    file-name-directory-part
    file-name-nondirectory-part
    file-writable-p
@@ -399,6 +400,61 @@
       (guard (e (else #f))
         (stat path)
         #t))
+
+    (define (%file-name-case-insensitive-err path)
+      ;; GNU Emacs's `file_name_case_insensitive_err' (fileio.c:2646):
+      ;; "Return -1 if FILE is a case-insensitive file name, 0 if not, and
+      ;; 1 if the result cannot be determined."
+      ;;
+      ;; **On this platform the C's answer is a constant, and so is
+      ;; this.** Its two ways of asking the filesystem are
+      ;; `pathconf (filename, _PC_CASE_INSENSITIVE)' and
+      ;; `pathconf (filename, _PC_CASE_SENSITIVE)', and glibc defines
+      ;; neither macro (Cygwin has the first, macOS the second), so the C
+      ;; compiles its own `#else return 0' branch: case-sensitive. The
+      ;; second reason it cannot ask is Guile's: `pathconf' is not bound
+      ;; anywhere in the tree or in the core.
+      ;;
+      ;; PATH is unused, as it is in that branch - and it is a parameter
+      ;; rather than nothing because `file-name-case-insensitive-p' below
+      ;; is the C's walk, and a walk wants a function of the name.
+      ;;--------------------------------------------------------------
+      0)
+
+    (define (file-name-case-insensitive-p filename)
+      ;; GNU Emacs's `file-name-case-insensitive-p' (fileio.c:2688):
+      ;; "Return t if file FILENAME is on a case-insensitive filesystem.
+      ;; Return nil if FILENAME does not exist or is not on a
+      ;; case-insensitive filesystem, or if there was trouble determining
+      ;; whether the filesystem is case-insensitive."
+      ;;
+      ;; The walk is the C's: it asks about FILENAME, and while the answer
+      ;; is "cannot tell" (1) it climbs to the parent - a name that does
+      ;; not exist yet has to be judged by the directory it would be
+      ;; created in - stopping at the root, where a directory has no
+      ;; parent and the C answers nil rather than looping.
+      ;;
+      ;; Where this is *used*: `abbreviate-file-name' binds
+      ;; `case-fold-search' to it, so that `~' is substituted
+      ;; case-insensitively on a filesystem that does not distinguish
+      ;; case. Answering nil here is the answer for every filesystem this
+      ;; editor runs on, so that binding is nil - which is what Emacs
+      ;; gives on the same machine.
+      ;;--------------------------------------------------------------
+      (let ((filename (expand-file-name filename)))
+        (let ((handler (find-file-name-handler
+                        filename 'file-name-case-insensitive-p)))
+          (if handler
+              (handler 'file-name-case-insensitive-p filename)
+              (let loop ((filename filename))
+                (let ((err (%file-name-case-insensitive-err filename)))
+                  (cond ((<= err 0) (< err 0))
+                        (else
+                         (let ((parent (file-name-directory-part filename)))
+                           (if (or (not (string? parent))
+                                   (string=? parent filename))
+                               #f
+                               (loop parent)))))))))))
 
     ;;----------------------------------------------------------------
     ;; File name handlers

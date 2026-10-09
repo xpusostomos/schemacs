@@ -80,6 +80,7 @@
     (only (schemacs editor subr) kbd run-hook-with-args-until-success
           string-prefix-p)
     (only (schemacs editor buffer)
+          *case-fold-search*
           current-buffer default-directory erase-buffer)
     ;; The file primitives that were here and have moved to the library
     ;; that mirrors the C file they are really from, `fileio.c':
@@ -91,6 +92,7 @@
           directory-file-name directory-name-p expand-file-name
           file-directory-p file-exists-p file-name-absolute-p
           file-name-as-directory
+          file-name-case-insensitive-p
           file-name-directory-part file-name-nondirectory-part
           file-symlink-p file-system-info file-writable-p
           find-file-name-handler
@@ -109,7 +111,16 @@
     ;; `file-name-sans-extension' does
     (only (guile) canonicalize-path getenv string-rindex)
     ;; `file-name-sans-versions' matches a regexp, as the C's does
-    (only (schemacs editor search) match-string string-match)
+    ;; `regexp-quote' and the match-data accessors are what
+    ;; `abbreviate-file-name`'s regexp and its `match-beginning 1' need.
+    (only (schemacs editor search)
+          match-beginning match-end match-string regexp-quote string-match)
+    ;; `get' and `put' are `fns.c`'s - symbol properties, which is where
+    ;; `abbreviate-file-name`'s cache records the home directory it was
+    ;; built for. They live in `intervals.sld` for now (see the note
+    ;; there); the property is on the *symbol*, which is what Emacs's
+    ;; `(put 'abbreviated-home-dir 'home ...)' is too.
+    (only (schemacs editor intervals) get put)
     ;; Buffers by name, and killing one: `buffer.c'. `BUFFER-FILE-NAME' and
     ;; the buffer-local store are what `save-buffer' writes and what the
     ;; visited file's line-break convention is kept in.
@@ -209,6 +220,8 @@
    revert-buffer--default
    abbreviate-file-name
    *directory-abbrev-alist*
+   *abbreviated-home-dir*
+   directory-abbrev-apply directory-abbrev-make-regexp
    directory-listing-before-filename-regexp
    directory-entries
    file-name-base
@@ -767,49 +780,141 @@ save-buffer
     ;;------------------------------------------------------------------
 
     (define *directory-abbrev-alist* (make-parameter '()))
-    ;; ^ GNU Emacs's `directory-abbrev-alist': "Alist of abbreviations for
-    ;; directories. Each element looks like (FROM . TO), meaning if FROM
-    ;; is a prefix of a directory, replace it by TO. If FROM starts with
-    ;; a regexp..." - the regexp form is not ported, for the reason
-    ;; `match-at-end' below gives.
+    ;; ^ GNU Emacs's `directory-abbrev-alist' (files.el:43): "Alist of
+    ;; abbreviations for file directories.
+    ;;
+    ;; A list of elements of the form (FROM . TO), each meaning to replace
+    ;; a match for FROM with TO when a directory name matches FROM.  This
+    ;; replacement is done when setting up the default directory of a
+    ;; newly visited file buffer.
+    ;;
+    ;; FROM is a regexp that is matched against directory names anchored at
+    ;; the first character, so it should start with a \"\\\\\\=`\", or, if
+    ;; directory names cannot have embedded newlines, with a \"^\"."
+    ;;
+    ;; Nil by default, as in Emacs - the variable exists so a user can map
+    ;; a symlinked path onto the name they normally use.
+
+    (define *abbreviated-home-dir* (make-parameter #f))
+    ;; ^ GNU Emacs's `abbreviated-home-dir' (files.el:2294): the home
+    ;; directory as a regexp, cached by `abbreviate-file-name' so it is
+    ;; not rebuilt on every call. It is set to `#f' to have it
+    ;; recalculated, which is what Emacs's docstring tells a user who has
+    ;; changed their home directory to do.
+    ;;
+    ;; **The other half of the cache is a symbol property**, and that is
+    ;; Emacs's arrangement rather than a Scheme one: `(put
+    ;; 'abbreviated-home-dir 'home ...)' records *which* home the regexp
+    ;; was built for, so that a home directory that has changed since is
+    ;; ignored rather than believed (a temporary change of HOME is the
+    ;; case that cares). `get'/`put' are `fns.c''s and live in
+    ;; `intervals.sld' here, which is where the text-property layer put
+    ;; them; the property is on the *symbol*, exactly as in Emacs, so the
+    ;; variable above and the property are two places as Emacs has two.
+
+    (define (directory-abbrev-make-regexp directory)
+      ;; GNU Emacs's `directory-abbrev-make-regexp' (files.el:71):
+      ;; "Create a regexp to match DIRECTORY for `directory-abbrev-alist'."
+      ;;
+      ;; The group is the point of it: the regexp matches the whole
+      ;; directory *and* the slash after it (or the end of the name), so
+      ;; that `/usr/foobar' is not taken for the home directory `/usr/foo'
+      ;; - the comment in the C's original. `match-beginning 1' is then
+      ;; where the slash is, which is what `abbreviate-file-name' keeps.
+      ;;--------------------------------------------------------------
+      (string-append "\\`" (regexp-quote directory) "\\(/\\|\\'\\)"))
 
     (define (directory-abbrev-apply filename)
-      ;; GNU Emacs's `directory-abbrev-apply': "Apply
-      ;; `directory-abbrev-alist' to FILENAME. All the elements of
-      ;; `directory-abbrev-alist' that apply are abbreviated. If FROM
-      ;; does not begin with a `\\`', it is a literal prefix."
+      ;; GNU Emacs's `directory-abbrev-apply' (files.el:87): "Apply the
+      ;; abbreviations in `directory-abbrev-alist' to FILENAME. Note that
+      ;; when calling this, you should set `case-fold-search' as
+      ;; appropriate for the filesystem used for FILENAME."
+      ;;
+      ;; **Every matching element applies, in order**, and each replaces
+      ;; from the end of what it matched - `(match-end 0)', not the length
+      ;; of FROM - which is why FROM being a regexp and not a prefix
+      ;; matters. This was a literal-prefix `string-prefix?' walk that
+      ;; stopped at the first match, which is a different function: it
+      ;; could not take a regexp at all, and Emacs's docstring says FROM
+      ;; is one and should be anchored.
       ;;--------------------------------------------------------------
       (let loop ((rest (*directory-abbrev-alist*)) (name filename))
         (cond ((null? rest) name)
-              ((and (pair? (car rest))
-                    (string? (caar rest))
-                    (string-prefix? (caar rest) name))
-               ;; the FIRST match returns, as Emacs's `catch' does
-               (string-append (cdar rest)
-                              (substring name (string-length (caar rest))
-                                         (string-length name))))
+              ((not (and (pair? (car rest))
+                         (string? (caar rest))
+                         (string? (cdar rest))))
+               (loop (cdr rest) name))
+              ((string-match (caar rest) name)
+               (loop (cdr rest)
+                     (string-append (cdar rest)
+                                    (substring name (match-end 0)
+                                               (string-length name)))))
               (else (loop (cdr rest) name)))))
 
     (define (abbreviate-file-name filename)
-      ;; GNU Emacs's `abbreviate-file-name' (files.el): "Return a version
-      ;; of FILENAME shortened using `directory-abbrev-alist'. This also
-      ;; substitutes \"~\" for the user's home directory (unless the home
-      ;; directory is a root directory)."
+      ;; GNU Emacs's `abbreviate-file-name' (files.el:2298): "Return a
+      ;; version of FILENAME shortened using `directory-abbrev-alist'.
+      ;; This also substitutes \"~\" for the user's home directory (unless
+      ;; the home directory is a root directory)."
       ;;
-      ;; Not ported: `abbreviated-home-dir', the cache Emacs keeps so the
-      ;; home directory is not re-read every call; the home directory is
-      ;; read each time here, which is slower and never stale.
+      ;; The order is the C's and each step matters:
+      ;;
+      ;;   1. a file name handler, if one claims the name;
+      ;;   2. the `directory-abbrev-alist' pass, which may rewrite the
+      ;;      name before the home directory is looked for;
+      ;;   3. the `~' substitution, against the *cached* regexp - built by
+      ;;      abbreviating `(expand-file-name "~")' through this same
+      ;;      function (with `*abbreviated-home-dir*' bound to an
+      ;;      impossible regexp, so the recursion does not try to
+      ;;      substitute `~' into the home directory itself), which is how
+      ;;      an abbreviation covering the home directory is respected;
+      ;;   4. and the guard that the home directory has not changed since
+      ;;      that cache was made.
+      ;;
+      ;; `case-fold-search' is bound from
+      ;; `file-name-case-insensitive-p' for the length of it: `string-match'
+      ;; reads that variable, as the C's does, so on a filesystem that
+      ;; does not distinguish case - `/HOME/chris' for `/home/chris' -
+      ;; the substitution happens case-insensitively. On this platform
+      ;; that function answers `#f' (`fileio.sld' says why), which is
+      ;; Emacs's own answer for the same filesystem.
+      ;;
+      ;; `(aref filename 0)' is `(string-ref filename 0)' here, and the
+      ;; MS-DOS drive-letter guard is not carried: `system-type' is not a
+      ;; thing this tree has, and the branch it guards is about `C:/'.
       ;;--------------------------------------------------------------
-      (let* ((name (directory-abbrev-apply filename))
-             (home (getenv "HOME"))
-             (homedir (and home (file-name-as-directory home))))
-        (if (and homedir
-                 ;; "unless the home directory is a root directory"
-                 (not (string=? homedir "/"))
-                 (string-prefix? homedir name))
-            (string-append "~" (substring name (- (string-length homedir) 1)
-                                          (string-length name)))
-            name)))
+      (let ((handler (find-file-name-handler filename 'abbreviate-file-name)))
+        (if handler
+            (handler 'abbreviate-file-name filename)
+            (parameterize ((*case-fold-search*
+                            (file-name-case-insensitive-p filename)))
+              (let* ((name (directory-abbrev-apply filename))
+                     (home (expand-file-name "~")))
+                (unless (*abbreviated-home-dir*)
+                  (put 'abbreviated-home-dir 'home home)
+                  (*abbreviated-home-dir*
+                   (directory-abbrev-make-regexp
+                    (parameterize ((*abbreviated-home-dir* "\\`\\'."))
+                      (abbreviate-file-name home)))))
+                ;; **`mb1` is saved, as the C saves it.** Emacs's
+                ;; `(setq mb1 (match-beginning 1))' is inside the `and'
+                ;; and the body uses the *variable* - so a condition
+                ;; further along that runs a search of its own (the
+                ;; `expand-file-name "~"' below asks the filesystem, but
+                ;; a port of this that asked something that searched
+                ;; would) cannot move the answer out from under the
+                ;; `substring'.
+                (let ((mb1 #f))
+                  (if (and (string-match (*abbreviated-home-dir*) name)
+                           (set! mb1 (match-beginning 1))
+                           ;; "If the homedir is just /, don't change it."
+                           (not (and (= (match-end 0) 1)
+                                     (char=? #\/ (string-ref name 0))))
+                           (equal? (get 'abbreviated-home-dir 'home)
+                                   (expand-file-name "~")))
+                      (string-append "~" (substring name mb1
+                                                    (string-length name)))
+                      name)))))))
 
     (define (file-truename filename . rest)
       ;; GNU Emacs's `file-truename' (files.el): "Return the truename of
@@ -1180,7 +1285,12 @@ save-buffer
       ;; `insert-default-directory' the minibuffer holds an absolute name
       ;; already and this changes nothing.
       ;;--------------------------------------------------------------
-      (let* ((dir (or (list-ref-or rest 0 #f) (default-directory)))
+      (let* ((dir (let ((d (or (list-ref-or rest 0 #f) (default-directory))))
+                    ;; Emacs's own two lines here: `(unless dir (setq dir (or
+                    ;; default-directory "~/")))' - which the `or' above is -
+                    ;; and `(unless (file-name-absolute-p dir) (setq dir
+                    ;; (expand-file-name dir)))', which this is.
+                    (if (file-name-absolute-p d) d (expand-file-name d))))
              (named-default (list-ref-or rest 1 #f))
              (mustmatch (list-ref-or rest 2 #f))
              (initial (list-ref-or rest 3 #f))
@@ -1189,6 +1299,15 @@ save-buffer
                   (cond ((not initial) (buffer-file-name (current-buffer)))
                         ((string=? "" initial) dir)
                         (else (expand-file-name initial dir)))))
+             ;; **"If dir starts with user's homedir, change that to ~"**
+             ;; (minibuffer.el:4085), and the same for the default. This is
+             ;; where the `C-x C-f' prompt gets its `~': the directory is
+             ;; put *in* the minibuffer here, so abbreviating it is what
+             ;; the user sees, and `expand-file-name' below turns it back
+             ;; into a path (it expands a leading `~').
+             (dir (abbreviate-file-name dir))
+             (default-filename (and default-filename
+                                    (abbreviate-file-name default-filename)))
              ;; What is inserted, and where point is left in it: the
              ;; directory, then INITIAL, with point at the directory's
              ;; own length - Emacs's `insdef', whose cdr is that length
@@ -2432,8 +2551,20 @@ at point instead."
             ;; irritants and print a message without it
             (error (if (file-exists-p dir)
                        (format #f "~a is not a directory" dir)
-                       (format #f "~a: no such directory" dir))))
-            (set!buffer-default-directory (current-buffer) dir)))
+                       (format #f "~a: no such directory" dir)))
+            ;; `(setq default-directory dir)' and `(setq
+            ;; list-buffers-directory dir)' are the C's last two lines
+            ;; (`files.el:980-981'), and they are Emacs's else *body* -
+            ;; which is two forms, so it is a `begin' here. The second is
+            ;; what `C-x C-b' shows in the File column for a buffer that
+            ;; visits no file, which is why `cd' in `*scratch*' is visible
+            ;; there at all. The variable is `menu-bar.el''s and needs no
+            ;; definition: this tree's buffer-local variables are a
+            ;; per-buffer table keyed by a symbol.
+            (begin
+              (set!buffer-default-directory (current-buffer) dir)
+              (set-buffer-local-value! (current-buffer)
+                                       'list-buffers-directory dir)))))
 
     (define-command (cd dir)
       "Make DIR become the current buffer's default directory.

@@ -1877,6 +1877,19 @@ for SWITCHES."
         (set-buffer-local-value! (current-buffer) 'revert-buffer-function
                                  dired-revert)
         (set!dired-directory! (or dirname (default-directory)))
+        ;; "list-buffers uses this to display the dir being edited in this
+        ;; buffer" (`dired.el:2912') - the File column of `C-x C-b' for a
+        ;; buffer that visits no file. `list-buffers-directory' is
+        ;; `menu-bar.el''s variable and this tree's buffer-local table
+        ;; needs no definition of it, so the key is the symbol.
+        (set-buffer-local-value!
+         (current-buffer) 'list-buffers-directory
+         ;; `(listp dired-directory)' in Emacs, which is also true of nil
+         ;; and whose `(car nil)' is nil; `pair?' is the same test without
+         ;; the nil case, which `expand-file-name' could not take.
+         (expand-file-name (if (pair? (dired-directory))
+                               (car (dired-directory))
+                               (dired-directory))))
         (set!dired-actual-switches! (or switches (*dired-listing-switches*)))
         (set!dired-subdir-alist! '())
         ;; The C's last act is `(dired-sort-other dired-actual-switches t)':

@@ -2479,6 +2479,41 @@
             ;; the list is off the frame's window, so nothing shows it
             (get-buffer-window (get-buffer "*Buffer List*"))))))
 
+;;--------------------------------------------------------------------
+;; The File column is `abbreviate-file-name`'d
+;;
+;; `Buffer-menu--pretty-file-name' (`buff-menu.el:890') shortens the file
+;; a buffer visits - `~' for the home directory - and falls back to the
+;; buffer's `list-buffers-directory', which is how a Dired buffer has
+;; anything to show there at all. Emacs 31.1 gives the three answers
+;; below for the same three buffers.
+
+(test-equal '(#t #t #t #f)
+  (parameterize ((*buffer-list* '())
+                 (*current-buffer* #f)
+                 (*Buffer-menu-marks* '())
+                 (*kill-buffer-query-functions* '()))
+    (let* ((ed (get-buffer-create "shown.txt"))
+           (frame (test-frame ed)))
+      (parameterize ((*current-frame* frame) (*echo-area-buffer* #f))
+        (set-window-buffer! (frame-selected-window frame) ed)
+        ;; one under the home directory, one under /tmp
+        (set!text-editor-file-name
+         (get-buffer-create "home.txt") (expand-file-name "~/x.txt"))
+        (set!text-editor-file-name
+         (get-buffer-create "tmp.txt") "/tmp/y.txt")
+        ;; and one that visits nothing but is *about* a directory, as a
+        ;; Dired buffer is
+        (set-buffer-local-value! (get-buffer-create "dir")
+                                 'list-buffers-directory
+                                 (expand-file-name "~/GITE/schemacs"))
+        (let ((text (text-editor-to-string (list-buffers-noselect))))
+          (list (mentions? text "~/x.txt")
+                (mentions? text "/tmp/y.txt")
+                (mentions? text "~/GITE/schemacs")
+                ;; the un-abbreviated form is not there
+                (mentions? text (expand-file-name "~/x.txt"))))))))
+
 (test-end "schemacs_ncurses_editor_buffer_menu")
 
 

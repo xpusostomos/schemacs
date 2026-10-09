@@ -26,7 +26,7 @@ Each check starts `main-ncurses.scm` on a real terminal, sends keys, and
 asserts on the screen and on the files left behind. Exit status is 0 when
 every check passes.
 """
-import os, pty, select, socket, subprocess, sys, time, base64, tempfile
+import os, pty, select, shutil, socket, subprocess, sys, time, base64, tempfile
 
 # The editor loads `$XDG_CONFIG_HOME/schemacs/init.scm' as it starts
 # (`startup.sld', GNU Emacs's `user-init-file' search). A developer's own
@@ -106,6 +106,38 @@ SETTLE_MAX = 20.0
 # The longest a single key waits for the editor to finish with it, before
 # the harness gives up and sends the next one anyway.
 KEY_MAX = 10.0
+# **A check may put a condition in its key list instead of guessing a
+# delay** - see WAIT and EXITED below. When one of those times out, the
+# harness says so *inside the screen text* the check prints on failure
+# (`WAIT_TIMED_OUT`), because a check that waited for the wrong thing
+# otherwise fails somewhere else entirely and reads as an editor bug.
+WAIT_TIMED_OUT = "[[harness: gave up waiting for %r]]"
+
+
+def WAIT(text):
+    """A key-list element: wait until TEXT has been drawn.
+
+    The editor is ready for the next key when the thing that key is
+    *about* is on the screen - not when it has gone quiet, and not after
+    a fixed pause. `C-x C-f` followed by `C-a C-k` is the case that
+    matters: send `C-a` before the prompt is up and it acts on the
+    buffer, and the check then fails about a minibuffer that was never
+    entered. Under load the pause has to be longer and under no load it
+    is wasted time, which is the definition of a race.
+
+    TEXT is a byte string, as the check spells the screen text it waits
+    for. It is given up on after KEY_MAX seconds, which is as long as a
+    single key is given anywhere else here.
+    """
+    return ("wait", text)
+
+
+# A key-list element: wait until the editor process has exited. A check
+# whose condition is "the editor quit" asks this rather than reading the
+# silence after its last key - a `C-x C-c` on a modified buffer saves its
+# file, goes quiet while the write lands, and exits only after that.
+EXITED = ("exited",)
+
 
 
 def drive(keys, path, settle=1.5, gap=0.3, term=None, background="0000/0000/0000",
@@ -137,6 +169,14 @@ def drive(keys, path, settle=1.5, gap=0.3, term=None, background="0000/0000/0000
     With REPORT-EXIT true, the return is (SCREEN . EXITED-P): whether
     the editor had already quit on its own when the harness went to kill
     it - which a command like C-x C-c is supposed to make it do.
+
+    **A key is bytes, or one of three conditions.** `("resize" ROWS COLS)`
+    resizes the terminal; `WAIT (TEXT)` waits until TEXT has been drawn;
+    `EXITED` waits until the process has exited. The last two exist so a
+    check can say what it is waiting *for*: a check that waits for the
+    thing it is about to assert on cannot race the editor, and one that
+    waits for a quiet terminal can - which is what `save-y-n` did, and
+    what `C-x C-f` then `C-a` did for four other checks.
     """
     pid, fd = pty.fork()
     if pid == 0:
@@ -218,8 +258,41 @@ def drive(keys, path, settle=1.5, gap=0.3, term=None, background="0000/0000/0000
         while time.time() < end and quiet < quiet_for:
             quiet = 0.0 if drain(0.05) else quiet + 0.05
 
+    def wait_until(criterion, longest):
+        # Drain (which also answers the terminal's questions) until the
+        # criterion holds or LONGEST runs out. Answers whether it held.
+        deadline = time.time() + longest
+        while time.time() < deadline:
+            drain(0.05)
+            if criterion():
+                return True
+        return False
+
+    def process_has_exited():
+        # Reap if it is gone, and *remember* it: the check's answer comes
+        # from `exited' at the end, and a process reaped here must not be
+        # looked for again.
+        nonlocal exited_early
+        done, _ = os.waitpid(pid, os.WNOHANG)
+        if done == pid:
+            exited_early = True
+            return True
+        return False
+
+    exited_early = False
+
     for k in keys:
         if isinstance(k, tuple):
+            if k[0] == "wait":
+                # **the test of the condition, not a pause**: drain until
+                # TEXT has been drawn, and say so in the screen text if it
+                # never is - `out` is what the check reads.
+                if not wait_until(lambda: k[1] in out, KEY_MAX):
+                    out += (WAIT_TIMED_OUT % (k[1],)).encode()
+                continue
+            if k[0] == "exited":
+                exited_early = wait_until(process_has_exited, KEY_MAX)
+                continue
             # ("resize" rows cols): make the terminal that size, as a
             # window manager does, and let the editor notice
             resize(fd, pid, k[1], k[2])
@@ -255,8 +328,11 @@ def drive(keys, path, settle=1.5, gap=0.3, term=None, background="0000/0000/0000
     # running and gets killed. The distinction is what REPORT-EXIT asks
     # for: a quit command that leaves the editor alive reads as a
     # command that did nothing.
-    done, _ = os.waitpid(pid, os.WNOHANG)
-    exited = done == pid
+    if exited_early:
+        exited = True
+    else:
+        done, _ = os.waitpid(pid, os.WNOHANG)
+        exited = done == pid
     if not exited:
         try:
             os.kill(pid, 9)
@@ -279,7 +355,8 @@ def check_minibuffer():
     open(target, "w").write("TARGET-ONE\nTARGET-TWO\n")
     open(other, "w").write("other\n")
 
-    screen = drive([C_x + C_f, C_a, C_k, target.encode(), RET, C_x + C_c],
+    screen = drive([C_x + C_f, WAIT(b"Find file: "), C_a, C_k,
+                    target.encode(), RET, C_x + C_c, EXITED],
                    other)
     problems = []
     for want in ("TARGET-ONE", "pty-check-target.txt"):
@@ -316,8 +393,11 @@ def check_save_y_n():
     problems = []
 
     open(path, "w").write("hello\n")
-    screen, exited = drive([b"X", C_x + C_c, b"y"], path,
-                           report_exit=True, gap=0.4)
+    # `C-x C-c' asks, and `y' answers: the answer is given once the
+    # question is on the screen, and the exit is *waited for* rather than
+    # inferred from silence.
+    screen, exited = drive([b"X", C_x + C_c, WAIT(b"Save file"), b"y", EXITED],
+                           path, report_exit=True, gap=0.4)
     if not exited or open(path).read() != "Xhello\n":
         problems.append("a bare `y' did not save the buffer and quit "
                         "(exited=%s file=%r)" % (exited, open(path).read()))
@@ -697,7 +777,8 @@ def check_isearch_quit():
     """
     path = "/tmp/pty-check-isearch-quit.txt"
     open(path, "w").write("alpha alpha\n")
-    screen, exited = drive([C_s, C_s, C_x + C_c], path, report_exit=True)
+    screen, exited = drive([C_s, WAIT(b"I-search"), C_s, C_x + C_c, EXITED],
+                           path, report_exit=True)
     if not exited:
         return ["after C-s C-s C-x C-c the editor is still running (the "
                 "search ate the C-x)"]
@@ -888,8 +969,10 @@ def check_quit_after_completion():
     for name in ("alpha.txt", "beta.txt"):
         open(os.path.join(directory, name), "w").write("x\n")
     path = os.path.join(directory, "alpha.txt")
-    screen, exited = drive([C_x + C_f, (directory.rstrip("/") + "/").encode(),
-                            b"?", C_x + C_c],
+    screen, exited = drive([C_x + C_f, WAIT(b"Find file: "),
+                            (directory.rstrip("/") + "/").encode(),
+                            b"?", WAIT(b"possible completions"),
+                            C_x + C_c, EXITED],
                            path, report_exit=True)
     problems = []
     if not exited:
@@ -1319,7 +1402,7 @@ def check_default_directory():
     """
     problems = []
     # a bare name, relative to the editor's directory: REPO/build.scm
-    screen = screen_of(drive([C_x + C_f], "build.scm"))
+    screen = screen_of(drive([C_x + C_f, WAIT(b"Find file: ")], "build.scm"))
     if "Find file: " not in screen:
         problems.append("no `Find file: ' prompt at all")
     else:
@@ -1666,6 +1749,51 @@ def check_switch_buffer():
     if "[Confirm]" not in out:
         problems.append("TAB then RET did not ask for confirmation: %r"
                         % out[-300:])
+    return problems
+
+
+def check_abbreviate():
+    """`~' for the home directory, in the file prompt and the buffer list.
+
+    `abbreviate-file-name' is GNU Emacs's `files.el:2298', and two of its
+    callers are user-visible:
+
+      * `read-file-name-default' abbreviates the directory it puts in the
+        minibuffer (`minibuffer.el:4085'), so a `C-x C-f' under your home
+        directory prompts `Find file: ~/...' and not the full path;
+      * `Buffer-menu--pretty-file-name' (`buff-menu.el:890') abbreviates
+        the File column of `C-x C-b', which is how a list of files under
+        your home reads.
+
+    The home directory is the one thing this cannot fake, so the file is
+    made *under* it - in a temp directory, which is removed again - rather
+    than assuming the tree is checked out there.
+    """
+    home = os.path.expanduser("~")
+    problems = []
+    if not (home and os.path.isdir(home) and os.access(home, os.W_OK)):
+        return ["no writable home directory (%r) to test against" % home]
+    # A short name, because the buffer list's File column is 31 columns
+    # wide: a longer one wraps mid-name and no single row holds it.
+    where = tempfile.mkdtemp(prefix="sc-", dir=home)
+    try:
+        path = os.path.join(where, "visited.txt")
+        open(path, "w").write("VISITED-ONE\n")
+        # what Emacs would draw: the path with the home directory as `~'
+        short = "~" + path[len(home):]
+        shortdir = "~" + os.path.dirname(path)[len(home):] + "/"
+
+        out = drive([C_x + C_f], path)
+        if shortdir not in out:
+            problems.append("C-x C-f prompted without the abbreviated "
+                            "directory %r: %r" % (shortdir, out[-300:]))
+
+        out = drive([C_x + b"\x02"], path)          # C-x C-b
+        if short not in screen_of(out):
+            problems.append("the buffer list does not show %r in its File "
+                            "column: %r" % (short, screen_of(out)[-400:]))
+    finally:
+        shutil.rmtree(where, ignore_errors=True)
     return problems
 
 
@@ -2738,7 +2866,8 @@ def check_find_file_read_only():
     path = "/tmp/pty-check-rfro.txt"
     open(path, "w").write("readonly content\n")
     problems = []
-    out = drive([C_x + C_r, C_a, C_k, path.encode(), RET, b"X"], path, gap=0.35)
+    out = drive([C_x + C_r, WAIT(b"Find file read-only: "), C_a, C_k,
+                 path.encode(), RET, b"X"], path, gap=0.35)
     if "Buffer is read-only" not in out:
         problems.append("editing a C-x C-r buffer did not say `Buffer is read-only'")
     return problems
@@ -2751,8 +2880,9 @@ def check_find_alternate_file():
     open(a, "w").write("file a\n")
     open(b, "w").write("file b\n")
     problems = []
-    out = drive([C_x + C_f, C_a, C_k, a.encode(), RET,
-                 C_x, C_v, C_a, C_k, b.encode(), RET], a, gap=0.35)
+    out = drive([C_x + C_f, WAIT(b"Find file: "), C_a, C_k, a.encode(), RET,
+                 C_x, C_v, WAIT(b"Find alternate file: "),
+                 C_a, C_k, b.encode(), RET], a, gap=0.35)
     if "file b" not in out:
         problems.append("C-x C-v did not show the new file's text")
     if "pty-check-faf-b.txt" not in out:
@@ -3114,6 +3244,7 @@ CHECKS = {
     "back-door": check_back_door,
     "splash": check_splash,
     "switch-buffer": check_switch_buffer,
+    "abbreviate": check_abbreviate,
 }
 
 

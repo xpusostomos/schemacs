@@ -55,7 +55,7 @@
           match:substring match:start match:end match:count)
     ;; the cxr accessors are Guile's, as `(schemacs editor editfns)'s
     ;; import of them is
-    (only (guile) cadr caddr cddr cdddr cadddr
+    (only (guile) cadr caddr cddr cdddr cadddr logior
           make-regexp regexp-exec
           regexp/icase regexp/newline regexp/notbol regexp/noteol
           string-index)
@@ -627,9 +627,25 @@
           ;; because Emacs's `.' does not match a newline and POSIX's
           ;; does until this flag is given. The string anchors `\`' and
           ;; `\'' keep their own meaning under it.
+          ;;
+          ;; **The flags are ONE integer, and it must not be 0.**
+          ;; `make-regexp' takes any number of flag arguments, and a list
+          ;; containing a 0 makes Guile compile a POSIX *basic* regular
+          ;; expression - measured: `(make-regexp "a|b" 0)' matches only
+          ;; the literal "a|b", while `(make-regexp "a|b" 4)' matches
+          ;; "a". So the ERE this translator produces - `(', `)', `|',
+          ;; `+', `?', `{' - would be read literally. The call here used
+          ;; to pass `(if icase? regexp/icase 0)' beside
+          ;; `regexp/newline', which means **every case-sensitive search
+          ;; was compiled as a basic regexp**: with `case-fold-search'
+          ;; nil, `(string-match "a\\|b" "b")' answered #f where Emacs
+          ;; answers 0, and `"a+"' matched only a literal "a+". Found by
+          ;; `abbreviate-file-name', which binds `case-fold-search' to
+          ;; `file-name-case-insensitive-p' (nil here) and whose own
+          ;; pattern is `\\(/\\|\\'\\)'.
           (let ((rx (make-regexp (%translate-emacs-regexp pattern)
-                                 (if icase? regexp/icase 0)
-                                 regexp/newline)))
+                                 (logior (if icase? regexp/icase 0)
+                                         regexp/newline))))
             (set! %regexp-cache
                   (cons (list key rx)
                         (let trim ((l %regexp-cache) (n 0))

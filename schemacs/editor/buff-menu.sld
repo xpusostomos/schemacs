@@ -68,7 +68,8 @@
     ;; current buffer there, and `Buffer-menu-beginning' has to put
     ;; *its* point on the first line.
     (only (schemacs editor buffer)
-          buffer-list buffer-live-p buffer-local-keymap buffer-modified-p
+          buffer-list buffer-live-p buffer-local-keymap buffer-local-value
+          buffer-modified-p
           buffer-name bury-buffer current-buffer get-buffer-create
           kill-buffer set!buffer-local-keymap set!buffer-name
           set-buffer-local-value!
@@ -81,7 +82,8 @@
     ;; `Buffer-menu-execute' saves the buffers marked `s' with
     ;; `save-buffer', as Emacs's does - in the buffer, so it writes that
     ;; buffer's own file.
-    (only (schemacs editor files) save-buffer revert-buffer)
+    (only (schemacs editor files)
+          abbreviate-file-name revert-buffer save-buffer)
     ;; `g' in the Buffer List runs the GLOBAL `revert-buffer' - in
     ;; Emacs `g' is inherited from `special-mode-map' and runs the
     ;; global command, which dispatches through the buffer-local
@@ -201,13 +203,28 @@
       ;;--------------------------------------------------------------
       name)
 
-    (define (Buffer-menu--pretty-file-name file)
-      ;; GNU Emacs's `Buffer-menu--pretty-file-name': the file without its
-      ;; directory, or the empty string for a buffer visiting no file.
-      ;; (`abbreviate-file-name' is not here; Emacs shortens a long
-      ;; directory to `~' and elides what is in the middle.)
+    (define (Buffer-menu--pretty-file-name file buffer)
+      ;; GNU Emacs's `Buffer-menu--pretty-file-name' (`buff-menu.el:890'):
+      ;; the file the buffer visits, shortened - "~" for the home
+      ;; directory - or the directory a dired buffer is showing, or
+      ;; nothing at all.
+      ;;
+      ;; **`(bound-and-true-p list-buffers-directory)' is a buffer-local
+      ;; read here**, and the BUFFER is passed for it: Emacs's row runs
+      ;; inside a `with-current-buffer', and this tree's row takes its
+      ;; buffer explicitly. `list-buffers-directory' is `menu-bar.el''s
+      ;; (`:2404') and is set by dired (`dired.el:2913', to the directory
+      ;; it lists) and by `cd' (`files.el:981') - a buffer that visits no
+      ;; file can still have something to show in this column. It is not
+      ;; *defined* anywhere here, because this tree's buffer-local
+      ;; variables are a per-buffer table keyed by a symbol: reading one
+      ;; that was never set answers the default, as Emacs's unbound-but-
+      ;; nil variable does.
       ;;--------------------------------------------------------------
-      (or file ""))
+      (cond (file (abbreviate-file-name file))
+            ((buffer-local-value buffer 'list-buffers-directory #f)
+             => abbreviate-file-name)
+            (else "")))
 
     (define (Buffer-menu--row-for buffer old-buffer)
       ;; One row of the list: the seven fields of GNU Emacs's
@@ -236,7 +253,8 @@
               (Buffer-menu--pretty-name (buffer-name buffer))
               (number->string (text-editor-char-count buffer))
               "Fundamental"
-              (Buffer-menu--pretty-file-name (text-editor-file-name buffer)))))
+              (Buffer-menu--pretty-file-name (text-editor-file-name buffer)
+                                                buffer))))
 
     (define (Buffer-menu--listed? buffer)
       ;; Whether the list shows this buffer: GNU Emacs's filter, which is

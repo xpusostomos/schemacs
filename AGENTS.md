@@ -253,8 +253,10 @@ yet (step G of the plan).
   is the empty string - so `emacs foo` then `C-x C-f` prompted with
   nothing. Emacs expands the name first thing in `find-file-noselect`;
   so does this now. The pty battery gained a `default-directory` check.
-  (`abbreviate-file-name`, the other half of that line, is not
-  implemented - there is no home directory here to shorten against.)
+  (`abbreviate-file-name`, the other half of that line - the `~` in the
+  prompt - was still missing when this was written; it landed with the
+  dired pass and was made faithful in the 2026-10-09 pass below, which is
+  where the prompt got its `~/`.)
 * **`default-directory` needed a global default.** It is a buffer-local
   variable, and it has to answer when there is no current buffer at all -
   a `find-file` from a script or a test - with the process's directory,
@@ -4937,6 +4939,24 @@ newer than every source. A scripted edit-and-compile can still lose the
 race on mtime *granularity* - the write and the compile inside one second
 - which shows up the same way.
 
+**And do not edit the tree while a battery run is in flight.** The battery
+takes ten minutes and starts a *fresh* editor per check, so a `.sld` edited
+half way through is newer than its `.go` for every check after that, and
+each of them reads the note as part of its screen. Measured, on the
+`abbreviate-file-name` pass: editing `files.sld` mid-run produced
+**53/65**, with failures in eight checks that have nothing to do with the
+edit - `replace-string`, `dired`, `quoted-insert`, `find-file-read-only`,
+`revert-buffer` among them - and one of the messages carried the evidence
+instead of the thing it was testing:
+
+    with overwrite mode off, X did not insert before abcdef
+      (screen ';;; note: source file .../files.sld;;;    ')
+
+Recompiling the tree and running the battery again - on a tree that is then
+left alone - is the whole cure.
+**A scattered, cross-cutting failure set is this, or load, before it is the
+code** - and the note names itself if you read the screen the check printed.
+
 # The echo area's timers, and the REPL wake that never fired (2026-10-07)
 
 Two things, and the second is a correction to the section above it: **the
@@ -5917,3 +5937,194 @@ same keys, and the four cases agree:
   (`startup.el`), `set-buffer-major-mode` (`buffer.c:2271`), the three
   `switch-to-buffer-*` options (no dedicated windows here, and a window
   already keeps its own point), `window-dedicated-p` and `window-prev-buffers`.
+
+# `~` in the prompt and the buffer list — and the regexp bug under them
+# (2026-10-09)
+
+Chris: *"in real emacs, when you C-x C-f it abbreviates your path that it
+prompts you with, using the ~ ... Also the buffer list lists files below
+your home directory with ~ rather than the full root path."*, and then
+*"use emacs as a reference as usual"*.
+
+## What was actually missing
+
+`abbreviate-file-name` **was** in the tree — the dired pass brought it, and
+`dired.sld` already called it for its buffer name and its
+`dired-file-name-at-point`. What was missing was:
+
+1. **The call sites Chris was looking at.** `read-file-name` never
+   abbreviated the directory it puts in the minibuffer, and
+   `Buffer-menu--pretty-file-name` was `(or file "")` with a comment saying
+   the abbreviation was not here.
+2. **Most of the function.** Our version was a `string-prefix?` until-the-
+   first-match walk over `directory-abbrev-alist` with the home directory
+   re-read on every call, and its own comment said the regexp form of FROM
+   was "not ported". Emacs's `directory-abbrev-apply` (`files.el:87`) is a
+   `string-match` per element that **applies every matching element, in
+   order**, and replaces from `(match-end 0)`; and
+   `directory-abbrev-make-regexp` (`:71`) is where the `\(/\|\'\)` group
+   comes from — the thing that stops `/usr/foobar` being taken for the home
+   directory `/usr/foo`.
+
+All of it is ported now, including the pieces the simplification had left
+out: `abbreviated-home-dir` as the **cache** (with the symbol property
+`'home` recording which home it was built for, so a *changed* HOME is
+ignored rather than believed — `get`/`put` are `fns.c`'s and are exported
+from `intervals.sld` for it), the "if the home directory is just `/` don't
+change it" guard, and `case-fold-search` bound from
+`file-name-case-insensitive-p` so that `~` is substituted
+case-insensitively only on a filesystem that does not distinguish case.
+
+**New primitive**: `file-name-case-insensitive-p` (`fileio.c:2688`) with
+`file_name_case_insensitive_err` beneath it. On this platform the C's answer
+is a **constant** — its two probes are `pathconf (…, _PC_CASE_INSENSITIVE)`
+and `pathconf (…, _PC_CASE_SENSITIVE)`, glibc defines neither macro, so it
+compiles its own `#else return 0` branch — and Guile binds no `pathconf`
+either. The walk up to an existing directory is written anyway, because it
+is the C's and would be right the day one of the macros appears.
+
+## The four call sites, each where Emacs has it
+
+| Emacs | here | what it shows |
+|---|---|---|
+| `read-file-name-default` (`minibuffer.el:4085-4092`) | `files.sld`'s `read-file-name` | `Find file: ~/GITE/schemacs/` |
+| `Buffer-menu--pretty-file-name` (`buff-menu.el:890`) | `buff-menu.sld` | `~/GITE/schemacs/README.md` in `C-x C-b`'s File column |
+| `dired-mode` (`dired.el:2912`) | `dired.sld`, setting `list-buffers-directory` | a Dired buffer's own directory in that column |
+| `cd-absolute` (`files.el:980-981`) | `files.sld` | `cd` in `*scratch*` is visible there too |
+
+`list-buffers-directory` is `menu-bar.el`'s variable and **needs no
+definition here**: this tree's buffer-local variables are a per-buffer
+table keyed by a symbol, so `dired` and `cd` `set-buffer-local-value!` it
+and `Buffer-menu--pretty-file-name` reads it — which is exactly Emacs's
+`(bound-and-true-p list-buffers-directory)`, and it is the arm that gives a
+fileless buffer anything to show. `read-file-name` also grew Emacs's
+`(unless (file-name-absolute-p dir) (setq dir (expand-file-name dir)))`,
+which the port had skipped.
+
+Measured in a pty against Emacs 31.1: the prompt is `Find file:
+~/GITE/schemacs/`, the File column reads `~/GITE/schemacs/README.md` for a
+buffer under the home directory and `/tmp/notinhome.txt` unchanged for one
+outside it, and a Dired buffer shows `~/GITE/schemacs/`.
+
+## The bug underneath: every case-sensitive regexp was a *basic* one
+
+`abbreviate-file-name` binds `case-fold-search` to
+`file-name-case-insensitive-p`, which is nil here — and its own pattern is
+`\(/\|\'\)`. It matched nothing, and that is how this was found:
+
+    (parameterize ((*case-fold-search* #f)) (string-match "a\\|b" "b"))   ; #f
+    (let ((case-fold-search nil))              (string-match "a\\|b" "b")) ; 0 in Emacs
+
+`%compile-emacs-regexp' called
+
+    (make-regexp (%translate-emacs-regexp pattern) (if icase? regexp/icase 0) regexp/newline)
+
+and **a flag list containing a 0 makes Guile compile a POSIX *basic*
+regular expression**. Measured:
+
+| call | `"a\|b"` against `"a"` |
+|---|---|
+| `(make-regexp "a\|b")` | matches (extended) |
+| `(make-regexp "a\|b" 0)` | **no match** (basic — `\|` is literal) |
+| `(make-regexp "a\|b" 4)` | matches |
+| `(make-regexp "a\|b" 0 4)` | **no match** |
+
+So with `case-fold-search` nil the ERE our translator produces — `(`, `)`,
+`|`, `+`, `?`, `{` — was read literally: `a+` matched only a literal "a+",
+`\(ab\)+` only "(ab)+". It went unnoticed because `case-fold-search`'
+default is `t` (as in Emacs), so only a *case-sensitive* search reached it,
+and no test did one with a pattern that says so. The flags are now one
+integer (`(logior (if icase? regexp/icase 0) regexp/newline)`), and
+`search-tests.scm` has six cases with the folding off — `a\|b`, `a+`,
+`\(ab\)+`, `ab\{2\}`, a case that must *not* match, and one with folding on
+— every expectation Emacs 31.1's.
+
+This is the second bug of its shape in this tree: the first was
+`(or ring (error ...))` where `'()` is true in Scheme. **A port can be
+wrong in the one branch its tests never take**, and here the branch was
+"case folding is off" — a whole mode of the editor, reached by
+`isearch-toggle-case-fold` and by any buffer whose `case-fold-search` is
+nil.
+
+## Departure left standing
+
+**`default-directory` itself is not abbreviated at startup.** Emacs's
+`normal-top-level` does `(setq default-directory (abbreviate-file-name
+default-directory))` (`startup.el:771`, and again after the init file at
+`:782`), so `(default-directory)` reads `~/...` in Emacs. Here it is
+computed from `(getcwd)` at the point of use (`buffer.sld`), and that
+library is *below* `files.sld`, so it cannot call the abbreviation — there
+is no stored global to abbreviate. Everything a user *sees* goes through a
+call site above it and is fixed; what remains is the value the variable
+itself reports, and a buffer created with no directory of its own inherits
+the unabbreviated form where Emacs's would inherit the global. Closing it
+means giving `buffer.sld` a settable global for the process directory and
+letting startup set it, which is a small change to a variable every layer
+reads — named rather than done in a pass about two prompts.
+
+## Tests
+
+- `search-tests.scm` 64 (was 58): the six case-folding-off cases above.
+- `files-tests.scm` 27 (was 13): the nine names (home, home with its slash,
+  deeper, `/usr/foobar`-shaped, a shared last-component prefix, `/etc`,
+  relative, `/`), the `directory-abbrev-alist` regexp rule,
+  `directory-abbrev-apply`'s replace-from-`match-end-0`, the **warm-versus-
+  cold cache** case (both answers measured — `"~/chris/y"` and `"~/y"`,
+  which is what the cached regexp being the *abbreviated* home means), and
+  `file-name-case-insensitive-p` answering `#f`.
+- `ncurses-editor-tests.scm` 269: the File column for a file under the home
+  directory, one under `/tmp`, and one with `list-buffers-directory` set.
+- `tools/pty-check.py` gained **`abbreviate`** (65 checks), driving the
+  prompt and the File column against a file made in a temp directory
+  *under* the home directory (the home directory is the one thing it cannot
+  fake), removed again afterwards. Verified failing with the abbreviation
+  taken out of `read-file-name`: `Find file: /home/chris/sc-.../`.
+- `files-tests.scm` also has `cd` setting `list-buffers-directory`
+  (`files.el:981`) - the other way a File column gets filled.
+
+### The harness races, fixed rather than slept over
+
+`save-y-n` failed one run in three with the file **correctly saved**
+(`'Xhello\n'`) and `exited=False`: the save writes its file, the editor
+goes quiet while the write lands, and it exits only after that - and
+`drive` reaped it at the silence. That is the same "quiet is not done"
+note this file carries about the per-key settles, and it is the last of
+them: **a key list can now carry the condition a check is waiting for**
+instead of relying on a pause.
+
+    drive([C_x + C_c, WAIT(b"Save file"), b"y", EXITED], path, report_exit=True)
+
+Two markers, and nothing else changed:
+
+  * **`WAIT (TEXT)`** - drain until TEXT has been drawn, then send the
+    next key. The check says what the next key is *about*: `C-x C-f` then
+    `C-a` was a race because `C-a` sent before the prompt is up acts on
+    the buffer, and now it waits for `b"Find file: "`.
+  * **`EXITED`** - wait until the process is gone, and remember it. A
+    check whose condition *is* "the editor quit" asks this rather than
+    reading the silence after its last key.
+
+Both give up after `KEY_MAX`, and **a timeout is named in the screen text
+the check prints on failure** (`WAIT_TIMED_OUT`), so a check that waited
+for the wrong thing no longer fails three assertions later looking like an
+editor bug.
+
+Seven checks were converted - `save-y-n`, `isearch-quit`,
+`quit-completions`, `default-directory`, `find-file-read-only`,
+`find-alternate-file` and `minibuffer` - which is every check this file has
+ever named as flaky, plus two more with exactly the same shape. Measured:
+**7/7, three runs in a row, with the machine held at load average 5.1 by
+six busy loops** - the condition the old fixed pauses lost under (22/62
+once, from the startup race alone).
+
+The lesson this file keeps relearning, now with the mechanism to act on it:
+a pause is a guess at how long the editor takes, and a guess is a race. A
+check that knows what it is waiting for should say so.
+
+## Still open
+
+- The startup abbreviation above.
+- `abbreviate-file-name`'s MS-DOS drive-letter guard is not carried (there
+  is no `system-type` here, and the branch is about `C:/`).
+- The handler arm is there and answers nothing, because no file-name
+  handler is registered — as Emacs's does on a machine with none.

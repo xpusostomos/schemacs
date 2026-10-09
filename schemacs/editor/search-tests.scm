@@ -366,4 +366,34 @@
        (goto-char 5)
        (re-search-backward "z" #f #t)))))
 
+;; ------------------------------------------------------------------
+;; case folding off, and the trap that made every one of these fail
+;;
+;; `%compile-emacs-regexp' passed `(if icase? regexp/icase 0)' among
+;; `make-regexp''s flags, and **a flag list containing a 0 makes Guile
+;; compile a POSIX *basic* regular expression** - so with
+;; `case-fold-search' nil the ERE this translator produces was read
+;; literally: `a\|b' matched only "a|b", and `a+' only "a+". Every
+;; expectation here is Emacs 31.1's, from
+;; `(let ((case-fold-search nil)) (string-match PATTERN STRING))`.
+
+(test-equal "case-off: alternation is still an alternation"
+  0 (with-buffer (lambda () (string-match "a\\|b" "b"))))
+
+(test-equal "case-off: a plus is still a repetition"
+  0 (with-buffer (lambda () (string-match "a+" "aaa"))))
+
+(test-equal "case-off: groups are still groups"
+  0 (with-buffer (lambda () (string-match "\\(ab\\)+" "abab"))))
+
+(test-equal "case-off: intervals are still intervals"
+  0 (with-buffer (lambda () (string-match "ab\\{2\\}" "abb"))))
+
+;; ...and case is still significant: `A' does not match "a".
+(test-equal "case-off: case matters"
+  #f (with-buffer (lambda () (string-match "A" "abc"))))
+
+(test-equal "case-on: case does not matter"
+  0 (parameterize ((*case-fold-search* #t)) (string-match "A" "abc")))
+
 (test-end)
