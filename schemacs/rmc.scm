@@ -138,7 +138,14 @@
       ;; read to `kill-buffer--possibly-save' as "do not kill", which is
       ;; a safe-looking answer to a question nobody was asked.
       ;;--------------------------------------------------------------
-      (let ((long-form (list-ref-or rest 3 #f)))
+      ;; REST is `(HELP-STRING SHOW-HELP LONG-FORM)', so LONG-FORM is
+      ;; index **2**. It was `3' - one past the end - so the answer was
+      ;; always the default `#f' and **every** call took the branch this
+      ;; library does not implement: `C-x k' on a modified buffer did not
+      ;; ask its question, it raised. Emacs's own argument list is
+      ;; `(PROMPT CHOICES &optional HELP-STRING SHOW-HELP LONG-FORM)'
+      ;; (`rmc.el:133'), and its `cond' tests LONG-FORM first.
+      (let ((long-form (list-ref-or rest 2 #f)))
         (if long-form
             (read-multiple-choice--long-answers prompt choices)
             (error "read-multiple-choice: the minibuffer and modal paths are not ported; pass LONG-FORM"))))

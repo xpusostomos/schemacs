@@ -173,8 +173,9 @@
       ;; one level up.
       ;;
       ;; **The character used to be re-derived here instead**, from the
-      ;; chord in the frame's keymap lookup state, through
-      ;; `keymap-index-to-char'. It worked, and it was a departure with
+      ;; chord in the frame's keymap lookup state, through the helper that
+      ;; has since been deleted (`keymap-index-to-char'). It worked, and it
+      ;; was a departure with
       ;; two costs: the command loop had to store the lookup state *before*
       ;; the lookup so that this command could still find it (a coupling
       ;; Emacs does not have, and there was a NOTE saying so), and a caller

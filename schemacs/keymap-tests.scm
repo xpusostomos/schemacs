@@ -8,6 +8,10 @@
   ;; `make_lispy_event' arithmetic lives. `event-convert-list' is
   ;; `keyboard.c''s consumer of a Lucid event type list.
   (only (schemacs editor character) kbd event-convert-list)
+  ;; `define-key' is `keymap.c''s, stated in `editor/keymap.sld' beside the
+  ;; global map it binds into - `(schemacs keymap)' below it has only the
+  ;; two choke points a store and a lookup go through.
+  (only (schemacs editor keymap) define-key)
   (only (srfi 64) test-begin test-end
         test-assert test-equal test-eq)
   )
@@ -214,83 +218,74 @@
 ;; -------------------------------------------------------------------------------------------------
 ;; testing modal-lookup-state-step!
 
-(define (iden id) id)
-(define (const-f) #f)
-
-(define ctrl-char     (new-self-insert-keymap-layer #t iden const-f))
 (define app-kmp       apply-keymap-index-predicate)
-(define unctrl-char   (new-self-insert-keymap-layer #f iden const-f))
 
 ;; `key' reads a key the way the tree spells one - a `kbd' string, which
 ;; is `read-kbd-macro''s own input in Emacs - and answers the events of
 ;; it, which is what every reader here takes.
 (define (key s) (keymap-index (kbd s)))
 
-;; The predicate is applied to the key's *events*, and answers the
-;; character the key names. An unmodified key is a character; a key with
-;; a modifier on it is not, and a key of more than one event is a prefix
-;; and is not either.
-(define (cheq? mk-char val kbd-string)
-  (let*((expected-result (if (integer? val) (integer->char val) val))
-        (predicate-result
-         (apply-keymap-index-predicate mk-char (key kbd-string)))
-        )
-    (char=? predicate-result expected-result)))
+;; The catch-all self-insert layer. Emacs reaches `self-insert-command'
+;; for a plain character in 32..126 (`subr.el:1763''s loop) and for every
+;; character from 128 up (`international/mule-conf.el:1671''s `(cons 128
+;; (max-char))' on `global-map'), and for nothing else. The layer answers
+;; the *command* - it is the keymap's binding that is being asked for, not
+;; a character - so every expectation below is that command or `#f', and
+;; each is Emacs 31.1's own answer, measured.
+(define sil-layer (self-insert-keymap-layer el:self-insert-command))
 
-(test-assert (cheq? ctrl-char    #\null    "C-@"))
-(test-assert (cheq? ctrl-char    #\return  "C-m"))
-(test-assert (cheq? ctrl-char    #\tab     "C-i"))
+(define (self-inserting? kbd-string)
+  (eq? el:self-insert-command (app-kmp sil-layer (key kbd-string))))
+
+;; A plain printing character does ...
+;; (`(kbd " ")` is the empty key in Emacs too - a lone space is a
+;; separator in a `kbd' string, and `SPC' is how the space key is spelled.)
+(test-assert (self-inserting? "SPC"))
+(test-assert (self-inserting? "!"))
+(test-assert (self-inserting? "@"))
+(test-assert (self-inserting? "M"))
+(test-assert (self-inserting? "_"))
+(test-assert (self-inserting? "~"))
+;; ... and so does every character from 128 up.
+(test-assert (eq? el:self-insert-command
+                 (app-kmp sil-layer
+                          (keymap-index (list (integer->char 200))))))
+(test-assert (eq? el:self-insert-command
+                 (app-kmp sil-layer
+                          (keymap-index (list (integer->char 12354))))))
 ;; --------------------------------------------------
-(test-assert (cheq? unctrl-char  #\@  "@"))
-(test-assert (cheq? unctrl-char  #\_  "_"))
-(test-assert (cheq? unctrl-char  #\M  "M"))
-(test-assert (cheq? unctrl-char  #\i  "i"))
+;; A control character is not a plain character.
+(test-assert (not (self-inserting? "C-@")))
+(test-assert (not (self-inserting? "C-i")))
+(test-assert (not (self-inserting? "C-m")))
+(test-assert (not (self-inserting? "C-t")))
+(test-assert (not (self-inserting? "C-_")))
+;; DEL is not self-inserting either - it is `delete-backward-char'.
+(test-assert (not (self-inserting? "DEL")))
 ;; --------------------------------------------------
-(test-assert (cheq? ctrl-char    #\null    "C-@"))
-(test-assert (cheq? ctrl-char    #\x1F     "C-_"))
-(test-assert (cheq? ctrl-char    #\return  "C-m"))
-(test-assert (cheq? ctrl-char    #\tab     "C-i"))
+;; A modified event is not a plain character, and a char table cannot even
+;; be indexed by one.
+(test-assert (not (self-inserting? "M-@")))
+(test-assert (not (self-inserting? "M-m")))
+(test-assert (not (self-inserting? "C-M-@")))
+(test-assert (not (self-inserting? "C-M-m")))
 ;; --------------------------------------------------
-(test-assert (not (app-kmp unctrl-char (key "C-@"))))
-(test-assert (not (app-kmp unctrl-char (key "C-_"))))
-(test-assert (not (app-kmp unctrl-char (key "C-m"))))
-(test-assert (not (app-kmp unctrl-char (key "C-t"))))
-;; --------------------------------------------------
-(test-assert (not (app-kmp ctrl-char   (key "M-@"))))
-(test-assert (not (app-kmp ctrl-char   (key "M-_"))))
-(test-assert (not (app-kmp ctrl-char   (key "M-m"))))
-(test-assert (not (app-kmp ctrl-char   (key "M-t"))))
-;; --------------------------------------------------
-(test-assert (not (app-kmp unctrl-char (key "M-@"))))
-(test-assert (not (app-kmp unctrl-char (key "M-_"))))
-(test-assert (not (app-kmp unctrl-char (key "M-m"))))
-(test-assert (not (app-kmp unctrl-char (key "M-t"))))
-;; --------------------------------------------------
-(test-assert (not (app-kmp ctrl-char   (key "C-M-@"))))
-(test-assert (not (app-kmp ctrl-char   (key "C-M-_"))))
-(test-assert (not (app-kmp ctrl-char   (key "C-M-m"))))
-(test-assert (not (app-kmp ctrl-char   (key "C-M-t"))))
-;; --------------------------------------------------
-(test-assert (not (app-kmp unctrl-char (key "C-M-@"))))
-(test-assert (not (app-kmp unctrl-char (key "C-M-_"))))
-(test-assert (not (app-kmp unctrl-char (key "C-M-m"))))
-(test-assert (not (app-kmp unctrl-char (key "C-M-t"))))
-;; --------------------------------------------------
-(test-assert (not (app-kmp unctrl-char (key "C-M-m C-c"))))
-(test-assert (not (app-kmp ctrl-char   (key "C-M-m C-c"))))
-(test-assert (not (app-kmp unctrl-char (key "M-m C-c"))))
-(test-assert (not (app-kmp ctrl-char   (key "M-m C-c"))))
-(test-assert (not (app-kmp unctrl-char (key "C-m C-c"))))
-(test-assert (not (app-kmp ctrl-char   (key "C-m C-c"))))
+;; Neither is a key of more than one event: that is a prefix.
+(test-assert (not (self-inserting? "M-m C-c")))
+(test-assert (not (self-inserting? "C-m C-c")))
 ;; --------------------------------------------------
 
-(define km (keymap '*test-keymap kml unctrl-char))
+(define km (keymap '*test-keymap kml sil-layer))
 
 (test-assert (eq? el:self-insert-command (keymap-lookup km '(#\a))))
 (test-assert (eq? el:self-insert-command (keymap-lookup km '(#\b))))
 (test-assert (eq? el:comint-interrupt-subjob (keymap-lookup km C-c_C-c)))
-(test-assert (char=? #\c (keymap-lookup km (keymap-index '(#\c)))))
-(test-assert (char=? #\null (keymap-lookup (keymap ctrl-char km) (kbd "C-@"))))
+;; `c' is bound by no layer of `km' above the catch-all one, so the lookup
+;; falls through to it and answers the command.
+(test-assert (eq? el:self-insert-command (keymap-lookup km (keymap-index '(#\c)))))
+;; And `C-@' finds nothing at all: a control character is not a plain
+;; character, so the catch-all layer refuses it too.
+(test-assert (not (keymap-lookup km (kbd "C-@"))))
 (test-assert (not (keymap-lookup km unassigned-key)))
 
 (test-equal "hello"
@@ -318,6 +313,62 @@
   (guard (e (#t #t))
     (access-keymap store-km "C-x")
     #f))
+
+;; -------------------------------------------------------------------------------------------------
+;; Every event but the last must already be a prefix
+;;
+;; `Fdefine_key''s loop (`keymap.c:1196') looks up each event but the last,
+;; makes a fresh prefix where there was nothing (`define_as_prefix'), and
+;; refuses anything that is not a keymap **by name** -
+;;
+;;   error ("Key sequence %s starts with non-prefix key %s%s", ...)
+;;
+;; Without that test the walk went ahead anyway and the store *replaced*
+;; the command with a prefix layer, so a binding was silently destroyed.
+;; Every string below is Emacs 31.1's own, measured in `emacs -Q --batch'.
+
+(define (define-key-error keymap keys command)
+  ;; The message `define-key' signals, or #f when it signals nothing.
+  ;; `guard' and not `with-exception-handler': a handler that *returns*
+  ;; re-raises the non-continuable exception, so it looks like it did
+  ;; nothing.
+  (guard (e ((error-object? e) (error-object-message e))
+            (else #f))
+    (define-key keymap keys command)
+    #f))
+
+(define nonprefix-km (keymap '*nonprefix*))
+(define-key nonprefix-km (kbd "C-x") 'some-command)
+
+(test-equal "Key sequence C-x f starts with non-prefix key C-x"
+  (define-key-error nonprefix-km (kbd "C-x f") 'other-command))
+
+;; ... and the binding that was there is *still* there: the refused
+;; definition changed nothing.
+(test-eq 'some-command (keymap-lookup nonprefix-km (kbd "C-x")))
+
+;; A sequence whose events really are prefixes is not an error, and the
+;; binding lands.
+(define prefix-km (keymap '*prefix*))
+(test-assert (not (define-key-error prefix-km (kbd "C-x C-f") 'find-file)))
+(test-eq 'find-file (keymap-lookup prefix-km (kbd "C-x C-f")))
+
+;; The name in the message is the whole prefix, not just the offending
+;; event: here `C-x' is a prefix and `C-x C-f' is not.
+(test-equal "Key sequence C-x C-f g starts with non-prefix key C-x C-f"
+  (define-key-error prefix-km (kbd "C-x C-f g") 'g))
+
+;; **A parent's binding does not count** - the C looks up with `noinherit'
+;; set - so a child is free to define a sequence the parent has bound to a
+;; command, and makes its own prefix for it.
+(define child-km  (keymap '*child*))
+(define parent-km (keymap '*parent*))
+(define-key parent-km (kbd "C-x") 'parent-command)
+(set-keymap-parent child-km parent-km)
+(test-assert (not (define-key-error child-km (kbd "C-x f") 'child-command)))
+(test-eq 'child-command (keymap-lookup child-km (kbd "C-x f")))
+;; The parent's own binding is untouched.
+(test-eq 'parent-command (keymap-lookup parent-km (kbd "C-x")))
 
 (define modal #f)
 
@@ -390,7 +441,7 @@
 
 (reset-modal! km)
 
-(test-equal (list #f 'action '(99) #\c)
+(test-equal (list #f 'action '(99) el:self-insert-command)
   (lookup-modal! '(#\c)))
 
 (test-equal '(#f fail (99 99))

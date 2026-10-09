@@ -73,7 +73,7 @@
     (only (schemacs editor window) quit-window set-window-hscroll!)
     (only (schemacs editor command)
          called-interactively? current-prefix-arg new-command uarg->integer
-         define-command)
+         define-command *last-command-event*)
     ;; The buffer-local store, for `mark-ring' - which is the buffer's
     ;; own - and the variables that come from the libraries Emacs
     ;; declares them in: `mark-active' and `transient-mark-mode' are
@@ -2461,13 +2461,10 @@ non-nil."
       ;; *modified* event like `M-x' is unbound, because a char-table
       ;; cannot even be indexed by one. A range entry is the one thing this
       ;; tree's keymap cannot hold, so the two ranges are one predicate
-      ;; layer; `(schemacs keymap)''s `new-self-insert-keymap-layer' is
+      ;; layer; `(schemacs keymap)''s `self-insert-keymap-layer' is
       ;; that predicate.
       ;;--------------------------------------------------------------
-      (km:new-self-insert-keymap-layer
-       #f
-       (lambda (c) self-insert-command)
-       (lambda () #f)))
+      (km:self-insert-keymap-layer self-insert-command))
 
     (add-keymap-layer! *default-keymap* self-insert-layer)
 

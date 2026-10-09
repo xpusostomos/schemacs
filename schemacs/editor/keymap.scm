@@ -93,15 +93,55 @@
       ;; representing a sequence of keystrokes and events",
       ;; `keymap.c':1084'). The tree's own spelling, a list of modifier
       ;; symbols and characters, still converts too.
+      ;;
+      ;; **Every event but the last must already be a prefix, and one that
+      ;; is not is an error.** That is `Fdefine_key''s loop
+      ;; (`keymap.c:1196'): each event but the last is looked up, a nil
+      ;; answer becomes a fresh prefix (`define_as_prefix'), and an answer
+      ;; that is *not* a keymap is refused by name -
+      ;;
+      ;;   error ("Key sequence %s starts with non-prefix key %s%s", ...)
+      ;;
+      ;; The C looks up with `noinherit' set (`access_keymap (keymap, c,
+      ;; 0, 1)'), so a *parent''s* binding does not count; that comes free
+      ;; here, because a layer belongs to its keymap and `(km:keymap map)'
+      ;; is this keymap with its parent dropped, so only its own layers are
+      ;; asked.
+      ;;
+      ;; Without the test the walk went ahead regardless and the lens
+      ;; *replaced* the command that was there with a prefix layer:
+      ;; `(define-key m (kbd "C-x") 'c)' followed by
+      ;; `(define-key m (kbd "C-x f") 'f)' left `C-x' a prefix and `c'
+      ;; unreachable, where Emacs 31.1 signals "Key sequence C-x f starts
+      ;; with non-prefix key C-x".
       ;;--------------------------------------------------------------
-      (update (lambda (layer)
-                (values
-                 (km:keymap-layer-update!
-                  km:prefer-new-bindings layer
-                  (list (km:map-key keys command)))
-                 #f))
-              keymap km:=>keymap-top-layer!)
-      command)
+      (let ((events (km:keymap-index keys)))
+        (let loop ((rest events) (seen '()) (map keymap))
+          (unless (null? (cdr rest))
+            (let ((cmd (km:keymap-lookup (km:keymap map) (car rest))))
+              (cond
+               ;; Nothing there yet: Emacs makes a prefix here, and a prefix
+               ;; it has just made is empty - so no later event in the
+               ;; sequence can be a non-prefix either, and the walk is done.
+               ((not cmd) #f)
+               ;; A keymap is a prefix, and the event after it is looked up
+               ;; in that.
+               ((km:keymap-type? cmd)
+                (loop (cdr rest) (cons (car rest) seen) cmd))
+               (else
+                (error (string-append
+                        "Key sequence " (key-description events)
+                        " starts with non-prefix key "
+                        (key-description
+                         (reverse (cons (car rest) seen))))))))))
+        (update (lambda (layer)
+                  (values
+                   (km:keymap-layer-update!
+                    km:prefer-new-bindings layer
+                    (list (km:map-key keys command)))
+                   #f))
+                keymap km:=>keymap-top-layer!)
+        command))
 
     (define (add-keymap-layer! keymap layer)
       ;; Put LAYER at the *end* of KEYMAP's layers, where a lookup reaches it
@@ -114,7 +154,7 @@
       ;; (`(cons 128 (max-char))' on `global-map') - and this tree has a
       ;; predicate layer instead only because a layer here is an
       ;; event-to-binding table and cannot hold a range. See
-      ;; `(schemacs keymap)''s `new-self-insert-keymap-layer'.
+      ;; `(schemacs keymap)''s `self-insert-keymap-layer'.
       ;;--------------------------------------------------------------
       (update (lambda (layers) (values (append layers (list layer)) #f))
               keymap km:=>keymap-layers*!)

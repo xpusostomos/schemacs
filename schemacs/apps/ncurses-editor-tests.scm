@@ -322,7 +322,7 @@
 ;; ------------------------------------------------------------------
 ;; An unbound key is *undefined*, and is not a self-inserting character
 ;;
-;; `km:keymap-index-to-char' handed the catch-all self-insert layer a
+;; The old helper handed the catch-all self-insert layer a
 ;; character for *any* unmodified key, so an unbound *named* key
 ;; (`<f13>', `<select>') reached `self-insert-command' and it inserted
 ;; the key's *name* as text. In a read-only buffer the same keys said

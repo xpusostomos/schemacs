@@ -1816,6 +1816,68 @@ def check_kill_buffer():
     if "[No match]" not in out:
         problems.append("C-x k with a name that is not a buffer was not "
                         "refused by the prompt: %r" % out[-300:])
+
+    # **The modified-buffer question**, which is a second question and only
+    # asked when the buffer visits a file and has unsaved changes
+    # (`kill-buffer--possibly-save', `simple.el:11568'). Emacs 31.1's own
+    # text on this key, measured in a pty:
+    #
+    #   Buffer pty-check-kill.txt modified; kill anyway? (yes/no/save and then kill)
+    #
+    # It went unasked for a long time and the command *raised* instead:
+    # `read-multiple-choice' read its LONG-FORM argument from index 3 of
+    # its rest list, where the value is at 2, so LONG-FORM was never true,
+    # the branch that is not implemented was taken every time, and `C-x k'
+    # on a modified buffer reported an internal error to the user. The
+    # three answers below are the whole of the question: `n' leaves the
+    # buffer and the file alone, `y' kills without saving, and `s' saves
+    # and *then* kills, which is the one an answer can be seen in the file
+    # on disk for.
+    #
+    # **The assertion is on the choices, not on the words the WAIT was
+    # waiting for.** `WAIT` writes the text it gave up on into the screen
+    # it returns (`[[harness: gave up waiting for ...]]`), so asserting on
+    # that text passes even when the prompt never came up at all - which
+    # is exactly how the first version of this check passed while the
+    # editor was raising.
+    asked = "(yes/no/save and then kill)"
+
+    open(path, "w").write("KILL-ME\n")
+    out = drive([b"x", C_x + b"k", WAIT(b"Kill buffer"), RET,
+                 WAIT(b"modified; kill anyway?"), b"n", RET], path)
+    if asked not in out:
+        problems.append("C-x k on a modified buffer did not ask its "
+                        "question: %r" % out[-300:])
+    # `n' leaves it alive, so its name is still on the mode line ...
+    mode = [r for r in screen_of(out).split("\n") if "-- L" in r]
+    if not mode or "pty-check-kill.txt" not in mode[-1]:
+        problems.append("answering n killed the buffer anyway: %r"
+                        % (mode[-1][:60] if mode else None,))
+    # ... and the file was not written.
+    if open(path).read() != "KILL-ME\n":
+        problems.append("answering n wrote the buffer anyway: %r"
+                        % open(path).read())
+
+    # `y' kills it without saving, so the file is unchanged *and* the
+    # window is showing something else now.
+    open(path, "w").write("KILL-ME\n")
+    out = drive([b"x", C_x + b"k", WAIT(b"Kill buffer"), RET,
+                 WAIT(b"modified; kill anyway?"), b"y", RET], path)
+    mode = [r for r in screen_of(out).split("\n") if "-- L" in r]
+    if not mode or "pty-check-kill.txt" in mode[-1]:
+        problems.append("answering y did not kill the buffer: %r"
+                        % (mode[-1][:60] if mode else None,))
+    if open(path).read() != "KILL-ME\n":
+        problems.append("answering y saved before killing: %r"
+                        % open(path).read())
+
+    # `s' saves and then kills: the change reaches the file.
+    open(path, "w").write("KILL-ME\n")
+    drive([b"x", C_x + b"k", WAIT(b"Kill buffer"), RET,
+           WAIT(b"modified; kill anyway?"), b"s", RET], path)
+    if open(path).read() != "xKILL-ME\n":
+        problems.append("answering s did not save before killing: %r"
+                        % open(path).read())
     return problems
 
 

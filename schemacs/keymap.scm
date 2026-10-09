@@ -45,7 +45,6 @@
    keymap-index->events
    reverse-list->keymap-index
    =>keymap-layer-index!
-   keymap-index-to-char
 
    keymap-layer-type?
    keymap-layer
@@ -63,7 +62,7 @@
 
    make<keymap-index-predicate>
    keymap-index-predicate-type?
-   new-self-insert-keymap-layer
+   self-insert-keymap-layer
    apply-keymap-index-predicate
 
    keymap-type?
@@ -204,51 +203,6 @@
       (if (null? nodes)
           #f
           (apply keymap-index-append (reverse nodes))))
-
-    (define (keymap-index-to-char keyix allow-ctrl on-success on-fail)
-      ;; The *character* the key KEYIX names, if it names one:
-      ;; `ON-SUCCESS' is applied to it and `ON-FAIL' is applied when it
-      ;; does not.
-      ;;
-      ;; This is the test the catch-all `self-insert' layer is reached by,
-      ;; and it is the test Emacs's *keymap* makes by making the binding:
-      ;; the range `(cons 128 (max-char))' that
-      ;; `international/mule-conf.el:1671' puts on `global-map', and the
-      ;; 32..126 `subr.el:1763' fills in a loop. **A range entry in a char
-      ;; table is the one thing this tree's keymap cannot hold** - a layer
-      ;; here is an event-to-binding table - so the range is kept as the
-      ;; *predicate for* an event, which is what makes it a layer.
-      ;;
-      ;; A *named* key is not one, and without the test every unbound
-      ;; named key (`<f13>', `<prior>', `<insert>') reached
-      ;; `self-insert-command', which inserted the key's *name* as text -
-      ;; and in a read-only buffer said "Buffer is read-only" and
-      ;; otherwise did nothing, which is how PgUp and PgDn were lost in
-      ;; Dired.
-      ;;
-      ;; ALLOW-CTRL admits a control character too: whether a control code
-      ;; counts as a character is the whole of what its name says.
-      ;;
-      ;; KEYIX is a key, in any spelling `keymap-index' reads; what is
-      ;; walked here is the *events* of it. A key of more than one event
-      ;; is a prefix and is not a character.
-      ;;------------------------------------------------------------------
-      (let* ((events (or (keymap-index keyix) '()))
-             ;; The one event, when the key is exactly one - a key of more
-             ;; than one event is a prefix and is not a character.
-             (event (and (pair? events) (null? (cdr events)) (car events))))
-        (cond
-         ((not event) (on-fail))
-         ;; A named key is not self-inserting.
-         ((not (integer? event)) (on-fail))
-         ;; Every modifier but control means it is not a plain character.
-         ((not (zero? (logand event (logior char-alt char-super char-hyper
-                                            char-shift char-meta))))
-          (on-fail))
-         ((or (< event 32) (not (zero? (logand event char-ctl))))
-          (if allow-ctrl (on-success (integer->char event)) (on-fail)))
-         ((= event 127) (on-fail))      ; DEL is not self-inserting
-         (else (on-success (integer->char event))))))
 
     ;; -------------------------------------------------------------------------------------------------
 
@@ -590,18 +544,45 @@
       )
 
 
-    (define (new-self-insert-keymap-layer allow-ctrl on-success on-fail)
-      ;; The layer that makes a *character* key self-insert when nothing
+    (define (self-insert-keymap-layer command)
+      ;; The layer that runs COMMAND for a *character* key when nothing
       ;; above it matched - the tree's spelling of Emacs's two range
       ;; bindings, `subr.el:1763''s loop over 32..126 and
       ;; `international/mule-conf.el:1671''s `(cons 128 (max-char))' on
-      ;; `global-map'. `ON-SUCCESS' is applied to a character that
-      ;; qualifies, `ON-FAIL' to no arguments when one does not; ALLOW-CTRL
-      ;; admits a control code as well. See `keymap-index-to-char' above
-      ;; for why this is a predicate rather than a table.
+      ;; `global-map'.
+      ;;
+      ;; **A range entry in a char table is the one thing this tree's
+      ;; keymap cannot hold** - a layer here is an event-to-binding table
+      ;; - so the two ranges are kept as the *predicate for* an event,
+      ;; which is what makes them a layer.
+      ;;
+      ;; The event must be a plain character: no modifier at all, at
+      ;; least a space, and not DEL - that is 32..126 and 128 upward,
+      ;; which is exactly Emacs's two ranges. A *named* key is not one,
+      ;; and a key of more than one event is a prefix and is not either.
+      ;;
+      ;; Without the test every unbound named key (`<f13>', `<prior>',
+      ;; `<insert>') reached `self-insert-command', which inserted the
+      ;; key's *name* as text - and in a read-only buffer said "Buffer is
+      ;; read-only" and otherwise did nothing, which is how PgUp and PgDn
+      ;; were lost in Dired.
+      ;;
+      ;; KEYIX is a key, in any spelling `keymap-index' reads; what is
+      ;; walked here is the *events* of it.
       ;;--------------------------------------------------------------
       (make<keymap-index-predicate>
-       (lambda (keyix) (keymap-index-to-char keyix allow-ctrl on-success on-fail))))
+       (lambda (keyix)
+         (let* ((events (or (keymap-index keyix) '()))
+                (event (and (pair? events)
+                            (null? (cdr events))
+                            (car events))))
+           (and (integer? event)
+                (zero? (logand event (logior char-alt char-super char-hyper
+                                             char-shift char-meta)))
+                (not (< event 32))
+                (zero? (logand event char-ctl))
+                (not (= event 127))
+                command)))))
 
     ;; -------------------------------------------------------------------------------------------------
 

@@ -6122,6 +6122,22 @@ the check prints on failure** (`WAIT_TIMED_OUT`), so a check that waited
 for the wrong thing no longer fails three assertions later looking like an
 editor bug.
 
+**And that marker is a trap the moment you assert on the thing you waited
+for, which is the obvious thing to write.** `WAIT` puts the text it gave up
+on *into the screen it returns* -
+
+    [[harness: gave up waiting for b'modified; kill anyway?']]
+
+- so `if b"modified; kill anyway?" in out` is **true whether or not the
+prompt ever came up**, and the check passes while the editor is raising an
+error underneath it. Found the hard way: a new check for `C-x k` on a
+modified buffer asserted on its own `WAIT` text, passed, and was hollow.
+Assert on something only the real thing produces - the two versions differ
+in text that the marker does not contain (here the *choices*,
+`(yes/no/save and then kill)`) - and verify by stashing the fix and
+watching the check go red. A green check that has never been seen to fail
+is not evidence, and one built on a `WAIT` marker cannot fail.
+
 Seven checks were converted - `save-y-n`, `isearch-quit`,
 `quit-completions`, `default-directory`, `find-file-read-only`,
 `find-alternate-file` and `minibuffer` - which is every check this file has

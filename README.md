@@ -142,15 +142,6 @@ feature, we can port it in hours, not years. We don't need to be
 beholden to the old ways. Software isn't the scarce resource it once
 was.
 
-## How to build
-
-As of right now, this project only runs on Guile Scheme, although
-certain libraries (`lens.sld`, `pretty."Design is fine, but
-implementation is everything."sld`, `keymap.sld`) can build and run on
-other Schemes. The only GUI available right now is for
-[Guile-GI](https://github.com/spk121/guile-gi), but the Editor is
-designed specifically to be able to run on other Scheme platforms with
-other GUI toolkits. All platform specific calls are parameterized.
 
 ## Why guile? Why not...Chez or...
 
@@ -185,67 +176,70 @@ important. There may be other departures, but they are very
 small. Small enough that AI conversion of your packages should be
 smooth... *very* smooth.
 
+### Prerequisites
 
-### Running it
+## C Requirements
 
-There is one script in the top level:
+- `libglib`
+- `libgio`
+- `libgdk`
+- `libgtk3`
+- `ncurses`
 
-* se - the Scheme Editor, or if you like the Scheme Emacs. It reads a
-  command line of its own (`schemacs/main.scm`, through SRFI 37's
-  `args-fold`): the terminal editor is the default, `-w`/`--window` starts
-  the Gtk one, `--chdir=DIR` (or `--chdir DIR`) changes directory before
-  starting, and `-h` prints the usage.
-
-  `-q`/`--no-init-file` skips the init file. `--server[=PORT]` opens the
-  development back door (see AGENTS.md), and `--repl[=PORT]` connects to a
-  *running* editor's back door as a REPL and starts no editor of its own -
-  `emacsclient` the other way round. `-r`/`--remote[=PORT] FILE...` is
-  `emacsclient` itself: it hands the file names to a running editor's
-  `find-file`, so they open in that editor, and starts no editor here
-  (with no file it prints the usage line and stops). An optional argument
-  is attached: `--server=37146`, not `--server 37146`.
-
-  Starting with no file arguments shows the **startup screen**, the way
-  GNU Emacs does: the text of a `splash.txt` found on the load path - the
-  tree ships one at `schemacs/splash.txt`, and a `splash.txt` of your own
-  in any load-path directory wins over it. It is a read-only buffer and
-  `q` leaves it. With file arguments the frame is split and the splash is
-  the *lower* window, again as in Emacs. An init file turns it off with
-  Emacs's own variable - which is `startup.el`'s, and so lives in
-  `(schemacs editor startup)`:
-
-      (import (schemacs editor startup))
-      (set! inhibit-startup-screen #t)
-
-Right now I'm using Wayland, I presume the graphics will work on X11
-but haven't tried it.
-
-It looks for an init file in:
-* $XDG_CONFIG_HOME/schemacs/init.scm
-* $HOME/.config/schemacs/init.scm
-* $HOME/.schemacs
-
-### Scheme Requirements
+## Guile Requirements
 
 - [Guile 3](https://www.gnu.org/software/guile)
 
 - [Guile-GI](https://github.com/spk121/guile-gi) must be built and
   installed in a directory path that is listed in the `%load-path`.
 
-### C Requirements for Guile-GI
+- [Guile-Cairo](https://www.nongnu.org/guile-cairo/) must be built
+  and installed in a directory path that is listed in the `%load-path`
+  (Note, last I checked the Arch AUR guile-cairo is too old.)
+  
+- [Guile-Ncurses](https://www.gnu.org/software/guile-ncurses/) must be built and
+  installed in a directory path that is listed in the `%load-path`.
 
-- `libglib`
-- `libgio`
-- `libgdk`
-- `libgtk3`
 
-[Guile 3](https://www.gnu.org/software/guile) usually installs from
-source using `autotools` on any Linux or BSD operating system provided
-the above developer dependency packages are installed. Installing with
-`autotools` installs all Guile modules in the site-local package
-directory. If you install it this way, the modules are always
-available to your Guile runtime without needing to set the Guile
-`%load-path`.
+## How to install
+
+`make install-local` to install in your local directory.
+`make install` to install globally.
+
+### Running it
+
+  `bin/se` - the Scheme Editor, or if you like the Scheme Emacs. 
+
+  `-w`/`--window` starts the Gtk UI. Default is the terminal UI.
+  
+  `--chdir=DIR` changes directory before starting
+  
+  `-h` prints the usage.
+
+  `-q`/`--no-init-file` skips the init file. 
+  
+  `--server[=PORT]` runs server mode. Editor starts normally, but can now use --repl
+  
+  `--repl[=PORT]` connects to a *running* editor with a REPL and 
+  starts no editor of its own
+  
+  `-r`/`--remote[=PORT] FILE...` is `emacsclient` itself it hands the 
+  file names to a running editor's `find-file`, so they open in 
+  that editor, and starts no editor.
+
+  Starting with no file arguments shows the **startup screen**, a file
+  splash.txt on your load-path. q to quit it.
+  
+  Can be disabled in your init.scm
+```
+      (import (schemacs editor startup))
+      (set! inhibit-startup-screen #t)
+```
+
+It looks for an init file in:
+* $XDG_CONFIG_HOME/schemacs/init.scm
+* $HOME/.config/schemacs/init.scm
+* $HOME/.schemacs
 
 ### (Optional) use Guix
 
@@ -279,102 +273,4 @@ ways.
     directory, and the package dependencies installed into the profile
     directory will survive Guix garbage collections.
 
-### Launch the Guile REPL using `./guile.sh`
-
-The `guile.sh` script sets environment variables and command line
-parameters for the Guile runtime, it is usually easier to simply
-execute this script to start the REPL.
-
-Emacs users can set the directory-local variable `geiser-guile-binary`
-to `"./guile.sh"`. The `.dir-locals.el` file in this repository does
-this for you if you choose to use it.
-
-#### (optional) Launch `guile.sh` in a Guix Shell
-
-If you are using Guix Shell according to the steps in the section ["(Optional) Use Guix"](#optional-use-guix), you can run the `guile.sh` script like so:
-
-```sh
-guix shell -p ./.guix-profile -- sh ./guile.sh
-```
-
-## How to run
-
-Once you have a Guile Scheme REPL running and you can see the
-`scheme@(guile-user)>` prompt, and you are sure the Guile-GI
-dependencies available in the `%load-path`, simply load the main
-program into the REPL:
-
-```scheme
-(load "./main-gui.scm")
-```
-
-This will rebuild and launch the executable. If you are using the
-`./guile.sh` script to start the REPL, note that the
-`--fresh-auto-compile` flag is set, and so recompilation will occur
-every time `main-gui.scm` is loaded. If you are not hacking the
-Schemacs source code, feel free to delete this flag from the
-`guile.sh` script file so that `load` only builds the application
-once, and launches the application more quickly.
-
-### Double-check the Guile `%load-path`
-
-If you evaluate `,pp %load-path` in the `scheme@(guile-user)>` REPL,
-the load path should look something like this:
-
-```
-scheme@(guile-user)> ,pp %load-path
-$1 = ("/home/user/work-src/schemacs"
- "/usr/share/guile/3.0"
- "/usr/share/guile/site/3.0"
- "/usr/share/guile/site"
- "/usr/share/guile")
-```
-
-### Double-check the Guile `%load-path` in a Guix Shell
-
-If you evaluate `,pp %load-path` in the `scheme@(guile-user)>` REPL
-that was launched within a Guix Shell, the load path should look
-similar to this, although likely with different hash codes in the
-`/gnu/store`:
-
-```
-scheme@(guile-user)> ,pp %load-path
-$1 = ("/home/user/work-src/schemacs"
- "/gnu/store/ylbycmajc0sf1pndfnsfql76cr1097iq-profile/share/guile/site/3.0"
- "/gnu/store/jqrkacxgsaf7b19xqzc2x4d77v27dbc6-guile-3.0.8/share/guile/3.0"
- "/gnu/store/jqrkacxgsaf7b19xqzc2x4d77v27dbc6-guile-3.0.8/share/guile/site/3.0"
- "/gnu/store/jqrkacxgsaf7b19xqzc2x4d77v27dbc6-guile-3.0.8/share/guile/site"
- "/gnu/store/jqrkacxgsaf7b19xqzc2x4d77v27dbc6-guile-3.0.8/share/guile")
-```
-
-## How to hack
-
-Start a Scheme REPL as described above, but instead of running the
-main program or the `./elisp-tests.scm` program, instead run the test
-suite:
-
-```scheme
-(load "./run-tests.scm")
-```
-
-Unlike the `./elisp-tests.scm` program, the `./run-tests.scm` ensures
-the exported symbols in each library all behave as expected. Before
-you change anything, make sure you keep a log of which tests have
-passed and which have failed, if any.
-
-Whenever you make a change to the source code of a Scheme library, be
-sure to run the tests for that library. The tests in `./run-tests.scm`
-require your Scheme implementation to provide
-[SRFI-64](https://srfi.schemers.org/srfi-64/srfi-64.html), without
-this language extension (sorry, MIT Scheme users) you will have to run
-each test case by hand by copy-pasting each test form into your REPL.
-
-Keep in mind that this project is still experimental, it is possible
-some of the tests may not pass. As long as you create a pull request
-with equal or fewer passing tests, your request is more likely to be
-pulled into the main branch.
-
-That said, `./schemacs/lens.scm` and `./schemacs/keymap.scm` should always
-pass all tests, as these libraries are most essential to the rest of
-the application.
 
