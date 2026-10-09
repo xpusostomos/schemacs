@@ -24,7 +24,12 @@
  (only (oop goops) make)
  (prefix (only (schemacs ui gtk pgtk)
                <pgtk-display> initialize-pgtk-faces! pgtk-write-screenshot!
-               note-mouse-movement pgtk-mouse-moved)
+               note-mouse-movement pgtk-mouse-moved
+               ;; The local selection read - see its section below. It
+               ;; needs no window and no clipboard: the record is the
+               ;; display's own and the converters are `select.sld`'s.
+               pgtk-selections pgtk-get-local-selection
+               pgtk-get-selection-internal selection-data-to-lisp-data)
          pt:)
  (prefix (schemacs editor faces) f:)
  (prefix (schemacs editor xfaces) x:)
@@ -736,5 +741,153 @@
   (let ((d (new-display)))
     (parameterize ((fr:*current-frame* (fr:new-frame-on d (new-text-editor) 24 80)))
       (xd:remember-mouse-glyph (fr:*current-frame*) 7 9))))
+
+;;------------------------------------------------------------------
+;; Reading our own selection - `pgtk_get_local_selection'
+;;
+;; **None of this needs a window, a Gtk init or a clipboard.** Emacs
+;; answers a read of a selection *it owns* out of its own record
+;; (`LOCAL_SELECTION') and through `selection-converter-alist', never
+;; going to the server - which is why `(gui-get-selection 'CLIPBOARD
+;; 'TARGETS)' can answer with the target vector rather than with the
+;; text. The record is set here by hand, because `set-selection!' would
+;; have to call `gtk_clipboard_set_text' and this display has no Gtk.
+;;
+;; The C is `pgtk_get_local_selection' (`pgtkselect.c:236') and the
+;; DEFUN above it, `pgtk-get-selection-internal' (`:1606').
+;;------------------------------------------------------------------
+
+(define (owning-display selection value)
+  ;; A display that has asserted SELECTION holding VALUE, as
+  ;; `pgtk_own_selection' writes the record: `(SELECTION VALUE TIMESTAMP
+  ;; FRAME)' (`pgtkselect.c:151-160').
+  ;;--------------------------------------------------------------
+  (let* ((d (new-display))
+         (f (fr:new-frame-on d (new-text-editor) 24 80)))
+    (set! (pt:pgtk-selections d) (list (list selection value 7 f)))
+    d))
+
+(define (read-selection d selection target)
+  (pt:pgtk-get-selection-internal d selection target #f #f))
+
+;; A text target answers the value itself, and **no encoding is
+;; involved**: the C passes a nil TYPE to the converter for a local
+;; request, which is what `xselect--encode-string''s first line is for.
+(test-equal "a local read of a text target is the value as it stands"
+  "hello there" (read-selection (owning-display 'CLIPBOARD "hello there") 'CLIPBOARD 'STRING))
+
+(test-equal "and for each of the text targets" '("hello there" "hello there" "hello there")
+  (let ((d (owning-display 'CLIPBOARD "hello there")))
+    (list (read-selection d 'CLIPBOARD 'UTF8_STRING)
+          (read-selection d 'CLIPBOARD 'TEXT)
+          (read-selection d 'CLIPBOARD '#{text/plain;charset=utf-8}#))))
+
+;; `TIMESTAMP' never reaches a converter: it is the C's special case and
+;; answers element 2 of the record. It used to answer #f.
+(test-equal "TIMESTAMP answers the recorded timestamp" 7
+  (read-selection (owning-display 'CLIPBOARD "hello") 'CLIPBOARD 'TIMESTAMP))
+
+;; The target vector - `xselect-convert-to-targets', which is the whole
+;; point of the local path being local. TIMESTAMP and MULTIPLE lead it
+;; (`select.el:673'), and every target in the converter table follows.
+(test-equal "TARGETS is a vector beginning with TIMESTAMP and MULTIPLE"
+  #t
+  (let* ((v (read-selection (owning-display 'CLIPBOARD "hello") 'CLIPBOARD 'TARGETS))
+         (l (vector->list v)))
+    (and (vector? v)
+         (equal? (list-head l 2) '(TIMESTAMP MULTIPLE))
+         (and (memq 'STRING l) (memq 'UTF8_STRING l)
+              (memq 'TARGETS l) (memq 'SAVE_TARGETS l) #t))))
+
+;; bug#72254: a TARGETS answer is a vector even when it holds one item,
+;; "producing issues with programs that expect the TARGETS property
+;; always to return vectors".
+(test-equal "a TARGETS answer is always a vector"
+  #t
+  (let ((v (read-selection (owning-display 'CLIPBOARD "x") 'CLIPBOARD 'TARGETS)))
+    (vector? v)))
+
+;; A symbol value converts to its name for `STRING'? No - **it does not,
+;; and that is Emacs's behaviour**: `xselect-convert-to-string' takes a
+;; string, and a symbol goes to `xselect-convert-to-atom', which answers
+;; the symbol. This is what makes an `ATOM' target work and a `STRING'
+;; one answer nil for the same value.
+(test-equal "a symbol value answers the ATOM target and not STRING"
+  '(foo #f)
+  (let ((d (owning-display 'CLIPBOARD 'foo)))
+    (list (read-selection d 'CLIPBOARD 'ATOM)
+          (read-selection d 'CLIPBOARD 'STRING))))
+
+;; LENGTH is the string's length as the protocol's `(HIGH . LOW)' pair,
+;; and `clean_local_selection_data' turns that pair back into the number
+;; - which is the C's `(cons_to_signed obj 16)' pairing
+;; (`pgtkselect.c:1547').
+(test-equal "LENGTH comes back as a number, not as its two halves" 11
+  (read-selection (owning-display 'CLIPBOARD "hello there") 'CLIPBOARD 'LENGTH))
+
+;; An INTEGER value, the same round trip the other way.
+(test-equal "an integer value answers INTEGER as the number" 300
+  (read-selection (owning-display 'CLIPBOARD 300) 'CLIPBOARD 'INTEGER))
+
+;; `_EMACS_INTERNAL' is `xselect-convert-to-identity': the value as a
+;; one-element vector, which `clean_local_selection_data' unwraps again.
+(test-equal "the identity target round-trips" "hello"
+  (read-selection (owning-display 'CLIPBOARD "hello") 'CLIPBOARD '_EMACS_INTERNAL))
+
+;; A target with no converter is nil, which is "we do not know how to do
+;; this conversion" - the C's `(else value = Qnil)'.
+(test-equal "an unknown target answers #f" #f
+  (read-selection (owning-display 'CLIPBOARD "hello") 'CLIPBOARD 'NO_SUCH_TARGET))
+
+;; A selection we do not own has no local record at all, and the answer
+;; is nil before any converter is consulted - the C's
+;; `(if (NILP (local_value)) return Qnil)'.
+(test-equal "a selection we do not own has no local value" #f
+  (pt:pgtk-get-local-selection (new-display) 'CLIPBOARD 'STRING #t))
+
+;; `SAVE_TARGETS' answers the *symbol* `NULL' - not nil - and that is
+;; Emacs: `xselect-convert-to-save-targets' returns `'NULL', and NULL is
+;; "we did the conversion and have no value", which is a different answer
+;; from "we do not know how to do this conversion". It is what tells a
+;; freedesktop clipboard manager the selection can be saved. `DELETE' is
+;; the other NULL answer, and it *acts* on the way - see below.
+(test-equal "SAVE_TARGETS on CLIPBOARD answers the symbol NULL" 'NULL
+  (read-selection (owning-display 'CLIPBOARD "hello") 'CLIPBOARD 'SAVE_TARGETS))
+
+;; The same target on a selection that is not the CLIPBOARD answers nil:
+;; `(when (eq selection 'CLIPBOARD) 'NULL)'.
+(test-equal "SAVE_TARGETS on PRIMARY answers nothing at all" #f
+  (read-selection (owning-display 'PRIMARY "hello") 'PRIMARY 'SAVE_TARGETS))
+
+;; MULTIPLE is refused by the DEFUN, as in the C.
+(test-equal "MULTIPLE errors" #t
+  (let ((d (owning-display 'CLIPBOARD "hello")))
+    (guard (e (#t #t))
+      (read-selection d 'CLIPBOARD 'MULTIPLE)
+      #f)))
+
+;; The data decode, driven directly - `selection_data_to_lisp_data''s
+;; table. These are the C's own rows.
+(test-equal "format 8 decodes to a string" "abc"
+  (pt:selection-data-to-lisp-data #vu8(97 98 99) 3 "STRING" 8))
+(test-equal "a format-16 non-INTEGER decodes to a vector"
+  '#(1 2) (pt:selection-data-to-lisp-data #vu8(1 0 2 0) 4 "FOO" 16))
+(test-equal "a format-32 non-INTEGER decodes to a vector"
+  '#(1 2) (pt:selection-data-to-lisp-data
+           #vu8(1 0 0 0 2 0 0 0) 8 "FOO" 32))
+(test-equal "a single format-32 INTEGER decodes to a number"
+  5 (pt:selection-data-to-lisp-data #vu8(5 0 0 0) 4 "INTEGER" 32))
+(test-equal "a negative format-32 INTEGER stays negative"
+  -1 (pt:selection-data-to-lisp-data
+      #vu8(255 255 255 255) 4 "INTEGER" 32))
+(test-equal "a single format-16 INTEGER decodes to a number"
+  5 (pt:selection-data-to-lisp-data #vu8(5 0) 2 "INTEGER" 16))
+;; A UTF-8 clipboard is decoded by the coding system the data *type*
+;; names, which is select.el's rule (`select.el:391') done one function
+;; earlier - see `selection-bytes->string'.
+(test-equal "format 8 decodes UTF-8 bytes to their characters" "café"
+  (pt:selection-data-to-lisp-data #vu8(99 97 102 195 169) 5 "UTF8_STRING" 8))
+(test-equal "the NULL type answers nothing"
+  #f (pt:selection-data-to-lisp-data #vu8() 0 "NULL" 32))
 
 (test-end "schemacs_editor_pgtk")

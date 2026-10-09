@@ -106,6 +106,4 @@
   (parameterize ((*xterm--get-selection* #f))
     (xterm--tty-get-selection 'CLIPBOARD 'STRING)))
 
-(test-end "schemacs_editor_select")
-
 (test-end "schemacs_ui_ncurses_xterm")

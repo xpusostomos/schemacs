@@ -46,7 +46,17 @@
        *saved-region-selection*
        *gui--last-selected-text-clipboard*
        *gui--last-selected-text-primary*
-       *gui-last-cut-in-clipboard* *gui-last-cut-in-primary*)
+       *gui-last-cut-in-clipboard* *gui-last-cut-in-primary*
+       ;; The Lisp half of a read of a selection this process owns - the
+       ;; converter table `pgtk.sld''s `pgtk-get-local-selection' calls
+       ;; through, and the encoder those converters use. See the
+       ;; "Converting our own selection" section at the end of the file.
+       *selection-converter-alist* *selection-coding-system*
+       xselect--encode-string xselect--int-to-cons xselect-convert-to-string
+       xselect-convert-to-targets xselect-convert-to-length
+       xselect-convert-to-atom xselect-convert-to-integer
+       xselect-convert-to-identity xselect-convert-to-save-targets
+       xselect-convert-to-delete)
  (only (schemacs editor simple)
        *kill-ring* *kill-ring-yank-pointer*
        *kill-do-not-save-duplicates*
@@ -144,7 +154,7 @@
 (define (with-tty text thunk)
   (let* ((ed (new-text-editor))
          (frame (new-frame ed 24 80)))
-    (parameterize ((current-display (make <test-display>))
+    (parameterize ((current-display (make stub:<test-display>))
                    (*current-frame* frame)
                    (*kill-ring* '())
                    (*kill-ring-yank-pointer* '())
@@ -353,3 +363,120 @@
       (parameterize ((*kill-do-not-save-duplicates* #t))
         (kill-append "appended" #f))
       (latest-kill))))
+
+;;--------------------------------------------------------------------
+;; Converting our own selection - `selection-converter-alist'
+;;
+;; The table `pgtk.sld''s `pgtk-get-local-selection' looks a requested
+;; target up in, and the encoder its handlers use. **Everything here is
+;; Emacs 31.1's own answer**, measured in `emacs -Q --batch' - and the
+;; measurements are what corrected two expectations: a *unibyte* string
+;; literal in batch takes the C_STRING branch of the TEXT polymorphism
+;; and a multibyte one does not, so the numbers below are the multibyte
+;; ones (`string-to-multibyte'), which is what every string is here.
+;;------------------------------------------------------------------
+
+;; `xselect--int-to-cons' (`select.el:576'): a number as the two 16-bit
+;; halves the protocol carries it in.
+(test-equal '(0 . 11) (xselect--int-to-cons 11))
+(test-equal '(1 . 0) (xselect--int-to-cons 65536))
+
+;; **The local path is the first line of `xselect--encode-string'**: the
+;; C passes a nil TYPE for a request from this process, and then the
+;; string is answered as it stands with no coding system involved. Every
+;; call this tree makes arrives here.
+(test-equal "hello" (xselect--encode-string #f "hello" #t #f))
+
+;; `TEXT' is polymorphic, and the choice is made from the string's own
+;; characters - Emacs's `(when (eq type 'TEXT) ...)'. Anything that fits
+;; Latin-1 is STRING; a character past #x100 makes it UTF8_STRING.
+(test-equal '(STRING . #vu8(97 98 99))
+  (xselect--encode-string 'TEXT "abc" #t #f))
+(test-equal '(STRING . #vu8(99 97 102 233))
+  (xselect--encode-string 'TEXT "café" #t #f))
+(test-equal '(UTF8_STRING . #vu8(115 110 226 152 131 119))
+  (xselect--encode-string 'TEXT "sn☃w" #t #f))
+
+;; A named type encodes with *its* coding system: UTF8_STRING is utf-8,
+;; STRING is iso-latin-1 - which is what makes the two bytevectors above
+;; differ.
+(test-equal '(UTF8_STRING . #vu8(115 110 226 152 131 119))
+  (xselect--encode-string 'UTF8_STRING "sn☃w" #t #f))
+(test-equal '(STRING . #vu8(99 97 102 233))
+  (xselect--encode-string 'STRING "café" #t #f))
+
+;; "Most programs are unable to handle NUL bytes in strings", so a NUL is
+;; written out as the two characters backslash and `0'.
+(test-equal '(STRING . #vu8(97 92 48 98))
+  (xselect--encode-string 'STRING (string #\a #\nul #\b) #t #f))
+
+;; A type with no coding system here answers an error rather than
+;; something made up - COMPOUND_TEXT is `compound-text-with-extensions',
+;; which is the ISO-2022 family this tree does not carry.
+(test-assert "an unencodable type signals rather than guessing"
+  (guard (e (#t #t))
+    (xselect--encode-string 'COMPOUND_TEXT "hello" #t #f)
+    #f))
+
+;; The table itself: the target symbols the C looks up by `eq?', and one
+;; handler each. These are `select.el:903''s entries for the type-of-data
+;; targets; the legacy ICCCM ones (`OWNER_OS', `HOST_NAME', `USER',
+;; `FILE_NAME', `CHARACTER_POSITION', `LINE_NUMBER', `COLUMN_NUMBER') and
+;; the DnD ones are absent, with the reason on each in `select.sld'.
+(test-equal '(#t #t #t #t #t)
+  (let ((alist (*selection-converter-alist*)))
+    (list (and (procedure? (assq-ref alist 'STRING)) #t)
+          (and (procedure? (assq-ref alist 'UTF8_STRING)) #t)
+          (and (procedure? (assq-ref alist 'TARGETS)) #t)
+          (and (procedure? (assq-ref alist 'SAVE_TARGETS)) #t)
+          ;; **TIMESTAMP is not in the table at all**: it is the C's
+          ;; special case and never reaches a converter.
+          (not (assq 'TIMESTAMP alist)))))
+
+;; The converters themselves, driven directly - the C calls them with
+;; `(SELECTION TYPE VALUE)'.
+(test-equal '(0 . 5) (xselect-convert-to-length #f #f "hello"))
+(test-equal 'foo (xselect-convert-to-atom #f #f 'foo))
+(test-equal #f (xselect-convert-to-atom #f #f "foo"))
+(test-equal '(0 . 300) (xselect-convert-to-integer #f #f 300))
+(test-equal #f (xselect-convert-to-integer #f #f "x"))
+(test-equal '#("foo") (xselect-convert-to-identity #f #f "foo"))
+(test-equal 'NULL (xselect-convert-to-save-targets 'CLIPBOARD #f "x"))
+(test-equal #f (xselect-convert-to-save-targets 'PRIMARY #f "x"))
+
+;; `xselect-convert-to-string' wants a *string*: a symbol value answers
+;; the ATOM target and nil here, which is what makes the two targets
+;; differ for one value.
+(test-equal #f (xselect-convert-to-string #f #f 'foo))
+(test-equal "hello" (xselect-convert-to-string #f #f "hello"))
+
+;; TARGETS leads with TIMESTAMP and MULTIPLE, which are not converters but
+;; the C's own, and then names every handler in the table.
+(test-equal '(#t #t #t)
+  (let* ((v (xselect-convert-to-targets 'CLIPBOARD #f "x"))
+         (l (vector->list v)))
+    (list (vector? v)
+          (equal? (list-head l 2) '(TIMESTAMP MULTIPLE))
+          (and (memq 'STRING l) (memq 'TARGETS l) #t))))
+
+;; **`DELETE' acts and answers `NULL'**: "A return value of nil means that
+;; we do not know how to do this conversion, and replies with an error. A
+;; return value of NULL means that we have done the conversion (and any
+;; side-effects) but have no value to return." The side effect is giving
+;; the selection up, which on this stub display means disowning it.
+(test-equal '(NULL #f)
+  (with-editor "hello world"
+    (lambda (frame ed d)
+      (keys! frame C-SPC)
+      (text-editor-set-cursor ed 6)
+      (M-w! frame)
+      (let ((answer (xselect-convert-to-delete 'CLIPBOARD #f "x")))
+        (list answer (stub-clipboard d))))))
+
+;; **The `test-end` is not decoration.** `tools/run-suites.py' counts a
+;; suite as run only when it prints "*** Test suite finished", so a file
+;; that begins a group and never ends it is reported as DID NOT RUN with
+;; every test passing - which is exactly how this one read while its
+;; `test-end' was sitting at the end of `xterm-tests.scm', where the
+;; split had moved it.
+(test-end "schemacs_editor_select")

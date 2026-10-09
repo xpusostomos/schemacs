@@ -170,6 +170,17 @@
           read-char-from-minibuffer
           read-from-minibuffer
           yes-or-no-p)
+    ;; **`read-multiple-choice'** is `rmc.el''s, and it is what
+    ;; `kill-buffer--possibly-save' asks with - Emacs 31's modified-
+    ;; buffer question, in place of the `yes-or-no-p' this used. It is
+    ;; `(schemacs rmc)', beside `(schemacs map-ynp)' at the top of the
+    ;; tree, both mirroring a file under `lisp/emacs-lisp/'.
+    (only (schemacs rmc) read-multiple-choice)
+    ;; `use-short-answers' is `map-ynp.el''s, and it is one of the two
+    ;; variables `kill-buffer--possibly-save' reads to decide whether the
+    ;; answer to its question is a word or a key. `use-dialog-box-p' is
+    ;; defined below, and answers false.
+    (only (schemacs map-ynp) *use-short-answers*)
     ;; For deciding whether a file can be written, which is what makes a
     ;; visited file read-only (GNU Emacs's `file-writable-p', plus the
     ;; permission bits it also consults); and the directory reading and
@@ -599,46 +610,116 @@ save-buffer
             (quit!))))
 
 
-    (define-command (kill-buffer)
-      ;; C-x k runs this. GNU Emacs's `kill-buffer'. Killing a buffer
-      ;; that has unsaved changes asks first: Emacs offers to kill it
-      ;; anyway, not to save it (saving is offered on exit and by C-x
-      ;; C-s). Emacs then switches to some other buffer; this frontend
-      ;; has only one, so it falls back on an empty one, as if it had
-      ;; been left with *scratch*.
+    (define (use-dialog-box-p)
+      ;; GNU Emacs's `use-dialog-box-p' (`subr.el:4118'): whether the
+      ;; command being run should ask through a GUI dialog box. Emacs
+      ;; asks `x-popup-dialog' when `use-dialog-box' is set, the command
+      ;; came from the mouse, and the display can pop up menus. There are
+      ;; no popup menus in this tree, so the answer is always false -
+      ;; which is also what a keyboard command on a terminal gets in
+      ;; Emacs, and the answer `kill-buffer--possibly-save' needs.
+      ;;--------------------------------------------------------------
+      #f)
+
+    (define (kill-buffer--possibly-save buffer)
+      ;; GNU Emacs's `kill-buffer--possibly-save' (`simple.el:11568'):
+      ;; "Ask the user to confirm killing of a modified BUFFER. If the
+      ;; user confirms, optionally save BUFFER that is about to be
+      ;; killed."
       ;;
-      ;; GNU Emacs's `kill-buffer'. The asking is `kill-buffer-query-
-      ;; functions', which is what Emacs asks with too; the rest - taking
-      ;; the buffer out of the list, giving any window showing it another
-      ;; buffer, and answering with its name - is `(schemacs editor
-      ;; buffer)'. What used to be here was a hand-rolled version that
-      ;; made a fresh buffer and forgot the one it killed.
+      ;; **The question is `read-multiple-choice', and the answer is a
+      ;; word, not a key.** Emacs 31 asks it with the LONG-FORM argument
+      ;; set - `(and (not use-short-answers) (not (use-dialog-box-p)))',
+      ;; both nil for a keyboard command on a terminal - so it is a
+      ;; `completing-read' over "yes", "no" and "save and then kill":
+      ;;
+      ;;   Buffer rmc-test.txt modified; kill anyway? (yes/no/save and then kill)
+      ;;
+      ;; and a single `n' followed by RET is enough, the completion
+      ;; filling it out to "no" (measured against Emacs 31.1). **This
+      ;; replaced a `yes-or-no-p', which wanted the whole word** - so
+      ;; `n' was refused, the prompt asked again, and on a scripted
+      ;; display whose events had run out the ask looped forever.
+      ;;
+      ;; `save-buffer' takes no argument and acts on the current buffer
+      ;; (it is `files.el''s, and that is what its own docstring says),
+      ;; so the save is inside a `with-current-buffer' - which is what
+      ;; Emacs's is too.
+      ;;--------------------------------------------------------------
+      (let ((response
+             (cadr
+              (read-multiple-choice
+               (string-append "Buffer " (buffer-name buffer)
+                              " modified; kill anyway?")
+               ;; Emacs's own choices and their descriptions. The
+               ;; descriptions are the help text, and go unsaid here for
+               ;; the reason `(schemacs rmc)''s header gives.
+               (list (list #\y "yes" "kill buffer without saving")
+                     (list #\n "no" "exit without doing anything")
+                     (list #\s "save and then kill" "save the buffer and then kill it"))
+               #f                                   ; HELP-STRING
+               #f                                   ; SHOW-HELP
+               (and (not (*use-short-answers*))
+                    (not (use-dialog-box-p)))))))
+        (cond
+         ((equal? response "no") #f)
+         (else
+          (unless (equal? response "yes")
+            (with-current-buffer buffer (save-buffer)))
+          #t))))
+
+    (define-command (kill-buffer)
+      ;; C-x k runs this. GNU Emacs's `kill-buffer'.
+      ;;
+      ;; **The order is `Fkill_buffer''s** (`buffer.c:1938-1959'), and
+      ;; it is two questions, not one:
+      ;;
+      ;;   1. `kill-buffer-query-functions', which any of may refuse the
+      ;;      kill outright;
+      ;;   2. then, and **only when the call is interactive**, the
+      ;;      modified-buffer question - `kill-buffer--possibly-save'.
+      ;;
+      ;; The C guards the second with `INTERACTIVE', and that is why it
+      ;; is here in the command rather than in `%kill-buffer': the other
+      ;; callers of `%kill-buffer' - `find-alternate-file''s " **lose**"
+      ;; and `kill-some-buffers' - kill buffers the user has already
+      ;; decided about, and must not be asked again.
+      ;;
+      ;; Only a buffer that **visits a file** is asked about: the C's
+      ;; `modified' is `!NILP (b->filename) && MODIFF > SAVE_MODIFF', so
+      ;; `*Messages*' and a scratch buffer are killed without a word
+      ;; however modified they are. What was here instead asked about any
+      ;; modified buffer.
       ;;
       ;; Emacs offers to kill a modified buffer rather than to save it;
-      ;; saving is offered on exit and by C-x C-s.
+      ;; saving is offered on exit and by C-x C-s, and by the `s' of the
+      ;; `read-multiple-choice' question.
       "Kill the current buffer (bound to C-x k), asking first if it has
  unsaved changes."
       (interactive)
-      (let* ((frame (*current-frame*))
-             (buffer (current-buffer)))
-        (let ((killed
-               (parameterize
-                   ((*kill-buffer-query-functions*
-                     (list (lambda ()
-                             (or (not (text-editor-modified? buffer))
-                                 (yes-or-no-p
-                                  frame
-                                  (string-append
-                                   "Buffer "
-                                   (text-editor-buffer-name buffer)
-                                   " modified; kill anyway? ")))))))
-                 (%kill-buffer buffer))))
-          ;; Emacs says nothing when a query function refused the kill
-          ;; and "Killed buffer" when it did not; the window has already
-          ;; been given another buffer by `%kill-buffer' itself.
-          (set!frame-message
-           frame (if killed (string-append "Killed " killed) ""))
-          killed)))
+      (let ((frame (*current-frame*)))
+        (if (let loop ((rest (*kill-buffer-query-functions*)))
+              (cond ((null? rest) #f)
+                    ((not ((car rest))) #t)
+                    (else (loop (cdr rest)))))
+            #f
+            (let ((buffer (current-buffer)))
+              (if (and (text-editor-file-name buffer)
+                       (text-editor-modified? buffer)
+                       (not (kill-buffer--possibly-save buffer)))
+                  #f
+                  ;; the query functions have had their say; `%kill-buffer'
+                  ;; must not ask them a second time.
+                  (let ((killed
+                         (parameterize ((*kill-buffer-query-functions* '()))
+                           (%kill-buffer buffer))))
+                    ;; Emacs says nothing when a query function refused
+                    ;; the kill and "Killed buffer" when it did not; the
+                    ;; window has already been given another buffer by
+                    ;; `%kill-buffer' itself.
+                    (set!frame-message
+                     frame (if killed (string-append "Killed " killed) ""))
+                    killed))))))
     ;;----------------------------------------------------------------
     ;; The two commands that still need the minibuffer, and the last
     ;; of files.el that does
@@ -1391,14 +1472,38 @@ save-buffer
       ;; are kept. `HH:MM' is a legal Scheme identifier, `:' being a
       ;; special initial, so it stays as Emacs spells it.
       ;;
-      ;; The `\0' and `\177' of `[^\0-\177]' are NUL and DEL written in
-      ;; Guile's `\x..;' spelling. That range cannot survive this tree's
-      ;; regexp translation, and what that costs is measured in
-      ;; `(schemacs editor search)'s `%without-nul' - nothing, on the line
-      ;; shapes a listing has.
+      ;; The `\0' and `\177' of `[^\0-\177]' are NUL and DEL. That range
+      ;; cannot survive this tree's regexp translation, and what that
+      ;; costs is measured in `(schemacs editor search)'s `%without-nul'
+      ;; - nothing, on the line shapes a listing has.
+      ;;
+      ;; **They are built from the characters, not written as escapes,
+      ;; because Guile's two readers do not agree about `\x..;' and one
+      ;; of them is wrong silently.** Measured, same source text:
+      ;;
+      ;;              default reader        --r7rs
+      ;;   "\x00;\x7f;"   (0 59 127 59)        (0 127)
+      ;;   "\x0;\x7f;"    error, one digit     (0 127)
+      ;;   "\x00-\x7f"    (0 45 127)           error, `;' required
+      ;;
+      ;; The default reader takes `\x00' as exactly two hex digits and
+      ;; then treats the `;' as an ordinary character, so writing
+      ;; `\x00;' there does not *fail* - it produces a different
+      ;; character class, `[^' NUL `;' `-' DEL `;' `]', where `;' to DEL
+      ;; has become a range. A tree that reads this file with the wrong
+      ;; reader gets a subtly different `diary-date-forms' rather than an
+      ;; error. `(integer->char 0)' is a value, not an escape, so no
+      ;; reader has an opinion about it.
+      ;;
+      ;; This was the tree's second reason to need `--r7rs', after
+      ;; `select.sld''s symbol - see the note there, and
+      ;; `tools/syntax-check.scm', which re-execs itself with the flag
+      ;; because of the pair.
       ;;--------------------------------------------------------------
-      (let* ((l "\\([A-Za-z]\\|[^\x0;-\x7f;]\\)")
-             (l-or-quote "\\([A-Za-z']\\|[^\x0;-\x7f;]\\)")
+      (let* ((nul (string (integer->char 0)))
+             (del (string (integer->char 127)))
+             (l (string-append "\\([A-Za-z]\\|[^" nul "-" del "]\\)"))
+             (l-or-quote (string-append "\\([A-Za-z']\\|[^" nul "-" del "]\\)"))
              (month (string-append l-or-quote l-or-quote "+\\.?"))
              (s " ")
              (yyyy "[0-9][0-9][0-9][0-9]")

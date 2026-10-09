@@ -16,6 +16,10 @@
 
   (import
     (scheme base)
+    ;; `char-alphabetic?' / `char-numeric?', which the word-constituent
+    ;; predicate is built from - they arrived with the word motions from
+    ;; `simple.sld', which had them imported.
+    (scheme char)
     (only (schemacs editor engine)
           text-editor-get-cursor text-editor-get-char-index
           text-editor-point-min text-editor-point-max
@@ -26,9 +30,114 @@
   (export
    skip-chars-forward
    skip-chars-backward
+   word-char?
+   forward-word-position backward-word-position
+   word-run-end word-run-start
    )
 
   (begin
+
+    (define (word-char? c)
+      ;; The word-constituent predicate - the C's `WORD_CONSTITUENT'
+      ;; (`syntax.h': "True if the character has word syntax"), which
+      ;; `SYNTAX (c) == Sword' decides from the syntax table.
+      ;;
+      ;; **Its Emacs home is this file, and it was in `simple.sld`** -
+      ;; as mg's `inword'/ISWORD, which is where the tree's word motions
+      ;; came from. **The word motions moved with it**, and the import
+      ;; graph is what shows the placement was wrong: `search.sld` and
+      ;; `casefiddle.sld` both took word motion from `simple.sld`, and
+      ;; both of those files belong *below* `simple.el` - `forward-word`
+      ;; and `backward-word` are `syntax.c` DEFUNs (`scan_words`,
+      ;; `syntax.c:1222' is their shared walk). Two lone imports made
+      ;;
+      ;;     simple -> select -> coding -> search -> simple
+      ;;
+      ;; a cycle, which no port of `coding.c` reachable from `select.el`
+      ;; can live with. `simple.sld` imports this library already and
+      ;; re-exports the names, so every existing importer is unchanged.
+      ;;
+      ;; Here it is still mg's `inword`/ISWORD: alphanumeric plus the
+      ;; underscore. When the syntax tables come, this becomes
+      ;; `SYNTAX (c) == Sword'.
+      ;;--------------------------------------------------------------
+      (or (char-alphabetic? c) (char-numeric? c) (char=? c #\_)))
+
+    ;; The walk, mg's `forwword`/`backword` (`word.c`). The C's walk
+    ;; moves point and answers a count of *words*; these answer a
+    ;; position and leave the cursor alone, because that is the shape
+    ;; every caller in this tree was written against - `word-run-end`
+    ;; sets the cursor itself, walking the motion. The two `word-run-*`
+    ;; names are mg's `delfword`/`delbword` counting loops and have no C
+    ;; counterpart.
+    ;;------------------------------------------------------------------
+
+    (define (%char-at ed index)
+      (text-editor-get-char-index ed index))
+
+    (define (%inword-at ed index)
+      ;; like mg's `inword`, over absolute character indices
+      ;;--------------------------------------------------------------
+      (let ((c (%char-at ed index)))
+        (and c (word-char? c))))
+
+    (define (forward-word-position ed)
+      ;; Like mg's `forwword` (word.c:51): skip over non-word
+      ;; characters, then over word characters. Returns the *position*
+      ;; of the end of the next word - so `point-max' when there is no
+      ;; word left, and the end of the word otherwise.
+      ;;--------------------------------------------------------------
+      (let ((max (text-editor-point-max ed)))
+        (let loop ((i (text-editor-get-cursor ed)) (phase 'skip))
+          (cond
+           ((>= i max) max)
+           ((eq? phase 'skip)
+            (if (%inword-at ed i) (loop i 'word) (loop (+ i 1) 'skip)))
+           (else
+            (if (%inword-at ed i) (loop (+ i 1) 'word) i))))))
+
+    (define (backward-word-position ed)
+      ;; Like mg's `backword` (word.c:27): step back one character,
+      ;; skip back over non-word characters, then back over word
+      ;; characters, and step forward once, landing on the first
+      ;; character of the word.
+      ;;--------------------------------------------------------------
+      (let ((i0 (text-editor-get-cursor ed))
+            (min (text-editor-point-min ed)))
+        (if (<= i0 min) min
+            (let loop ((i (- i0 1)) (phase 'skip))
+              (cond
+               ((< i min) min)
+               ((eq? phase 'skip)
+                (if (%inword-at ed i) (loop i 'word) (loop (- i 1) 'skip)))
+               (else
+                (if (%inword-at ed i) (loop (- i 1) 'word) (+ i 1))))))))
+
+    (define (word-run-end ed count)
+      ;; The character index COUNT words forward of point, found the way
+      ;; mg's `delfword' (word.c:397) counts its `size' before deleting:
+      ;; walk the word motion, stopping when it stops advancing (the end
+      ;; of the buffer).
+      ;;--------------------------------------------------------------
+      (let loop ((i 0) (pos (text-editor-get-cursor ed)))
+        (if (>= i count)
+            pos
+            (begin
+              (text-editor-set-cursor ed pos)
+              (let ((next (forward-word-position ed)))
+                (if (= next pos) pos (loop (+ 1 i) next)))))))
+
+    (define (word-run-start ed count)
+      ;; The character index COUNT words back from point, the mirror of
+      ;; `word-run-end' and the way mg's `delbword' (word.c:453) counts.
+      ;;--------------------------------------------------------------
+      (let loop ((i 0) (pos (text-editor-get-cursor ed)))
+        (if (>= i count)
+            pos
+            (begin
+              (text-editor-set-cursor ed pos)
+              (let ((prev (backward-word-position ed)))
+                (if (= prev pos) prev (loop (+ 1 i) prev)))))))
 
     ;; `point', `point-min' and `point-max' are `editfns.c''s names for
     ;; what the engine answers as `text-editor-get-cursor' and the two

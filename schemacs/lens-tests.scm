@@ -13,7 +13,8 @@
         hash-table-for-each
         make-string-comparator
         )
-  (schemacs test)
+  (only (srfi 64) test-begin test-end test-skip test-error
+        test-assert test-equal test-eqv test-eq)
   )
 
 ;; -------------------------------------------------------------------------------------------------

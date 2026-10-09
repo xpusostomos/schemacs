@@ -65,7 +65,11 @@
     (only (schemacs editor keymap)
           *current-keymap*
           *default-keymap*
-          *special-event-map* define-key keymap-parent)
+          *special-event-map* define-key keymap-parent
+          ;; Emacs's `key-description', which the undefined-key message is
+          ;; built out of (`subr.el:1297') - and `single-key-description',
+          ;; which the prefix-argument echo uses.
+          key-description single-key-description)
     ;; The keys the current buffer has of its own - what gives a buffer
     ;; like `*Completions*' its own bindings - and which buffer is current.
     (only (schemacs editor buffer)
@@ -639,15 +643,29 @@
                         ;; prefix is discarded with it, the way GNU
                         ;; Emacs drops a prefix argument when the key
                         ;; sequence it precedes is not a command.
+                        ;;
+                        ;; **The message is Emacs's `undefined' command's**
+                        ;; (`subr.el:1297'):
+                        ;;
+                        ;;   (message "%s is undefined"
+                        ;;            (key-description (this-single-command-keys)))
+                        ;;
+                        ;; so it reads `C-c C-z is undefined' and not this
+                        ;; tree's `; undefined key: (ctrl #\z)', which was
+                        ;; the keymap's *private* spelling printed at the
+                        ;; user. `key-description' is Emacs's, over the
+                        ;; events the chord actually was. The `ding' that
+                        ;; command does first is not ported - there is no
+                        ;; bell here (the same gap `minibuffer.sld' notes
+                        ;; for the completion messages).
                         (clear-prefix!)
                         (set!frame-message
                          frame
                          (string-append
-                          "; undefined key: "
-                          (call-with-port (open-output-string)
-                            (lambda (port)
-                              (write (km:keymap-index->list full-path) port)
-                              (get-output-string port)))))))))
+                          (key-description
+                           (list->vector
+                            (km:keymap-index->events full-path)))
+                          " is undefined"))))))
                 (set!frame-keymap-state
                  frame (and result state))))))))
 

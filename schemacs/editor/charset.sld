@@ -27,7 +27,13 @@
   ;; checks the table it produces against Emacs's own answers cell by
   ;; cell.
 
-  (import (scheme base))
+  (import (scheme base)
+          ;; `ash' and `logior', which `charset-max-code' builds the code
+          ;; point out of - they were used without being imported, which
+          ;; the compiler reported as "possibly unbound variable" and
+          ;; which would have been an unbound variable the first time a
+          ;; charset was asked for its largest code.
+          (only (guile) ash logior))
 
   (export
    charset? define-charset

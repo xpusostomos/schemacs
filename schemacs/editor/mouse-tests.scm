@@ -36,10 +36,17 @@
  ;; `(schemacs editor test-display)'s stub, so this suite needs no front
  ;; end - it borrowed `<pgtk-display>' before, for a display object.
  (prefix (only (schemacs editor test-display) <test-display>) stub:)
+ ;; ...and its *script*, which is the stub's own and is read and written
+ ;; unprefixed here: the class below inherits it, and `scripted!' sets it.
+ ;; Leaving it out is the missing-import class - it is not a load error,
+ ;; it is an unbound variable the first time a test runs, which took this
+ ;; whole suite out of the battery with "Unbound variable:
+ ;; test-display-script" and no test line at all.
+ (only (schemacs editor test-display) test-display-script)
  ;; the display's generic, renamed: the test defines a method on it,
  ;; and `mouse-position' below is the frame-level function that calls it
  (rename (only (schemacs editor dispnew)
-               current-display mouse-position read-input-event)
+               current-display key-event->key mouse-position read-input-event)
          (mouse-position display-mouse-position)
          (read-input-event display-read-input-event))
  (only (schemacs editor frame)
@@ -78,6 +85,24 @@
 
 (define-method (display-mouse-position (d <test-display>))
   (test-display-pointer d))
+
+(define *resize-code* -1)
+;; ^ This display's own value for "the frame was resized", which is
+;; `pgtk.sld''s (`(define *resize-code* -1)', and `pgtk-item->event' maps
+;; `resize' to it). It is the *test's* here because a resize code is the
+;; front end's fact, not a generic one - `term.sld' answers `resize' for
+;; ncurses's `KEY_RESIZE' instead. The tests at the bottom of this file
+;; feed `-1' and expect it to be a resize and not a key, so the display
+;; has to say so; without this method the value went to `keymap-index' as
+;; a plain integer event, came out as `(integer->char 4194303)' and died
+;; with "Argument 1 out of range" - four tests, and the whole suite was
+;; out of the battery before that for the missing `test-display-script'.
+
+(define-method (key-event->key (d <test-display>) ev)
+  ;; The one keycode this display names. Everything else is the stub's
+  ;; own rule - a character is a byte is an event - via `next-method'.
+  ;;--------------------------------------------------------------
+  (if (eqv? ev *resize-code*) 'resize (next-method)))
 
 (define d (make <test-display>))
 (current-display d)

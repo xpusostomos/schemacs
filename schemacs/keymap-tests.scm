@@ -3,7 +3,12 @@
   (only (scheme lazy) force)
   (schemacs keymap)
   (only (schemacs lens) view update lens-set)
-  (schemacs test)
+  ;; `kbd' is the tree's spelling of a *key* - `(kbd "C-x")' is the event
+  ;; vector `#(24)' - and it is `character.sld''s, where the C's
+  ;; `make_lispy_event' arithmetic lives.
+  (only (schemacs editor character) kbd)
+  (only (srfi 64) test-begin test-end test-skip test-error
+        test-assert test-equal test-eqv test-eq)
   (schemacs hash-table)
   )
 
@@ -480,5 +485,50 @@
              (list (list 'ctrl #\x) (list 'ctrl #\f))))
 
 (test-end "schemacs_keymap_precedence")
+
+;; A bare *character* is an event, and it is the event its code point
+;; names: GNU Emacs has no character type, so `?a` there is 97 and `#\a`
+;; here is the same key. It used to fall off the end of `keymap-index`'s
+;; `cond` and come back as the unspecified value, which is true in
+;; Scheme - see that function's final `else`.
+(test-equal "a bare character is the event its code point names"
+  (list #\a)
+  (keymap-index->list (keymap-index #\a)))
+
+(test-equal "...and so is a character above the control range"
+  (list #\Z) (keymap-index->list (keymap-index #\Z)))
+
+;; **`(kbd ...)` is the spelling to compare against**, and never a
+;; hand-written `(list 'ctrl #\x)`: a key in this tree is `kbd`'s event
+;; vector - `(kbd "C-x")` is `#(24)`, which is exactly what the C's
+;; `buf.code = cbuf[i]` produces - and `keymap-index` walks the vector
+;; itself. Writing the index out by hand is how a test comes to assert on
+;; the keymap library's *private* representation instead of on the key,
+;; and a list printed as `(ctrl x)` is a character `#\x` in one place and
+;; the symbol `x` in another (`test-equal` is `equal?` and the two print
+;; identically) - which is a mistake that has already been made once in
+;; this file's new tests.
+;;
+;; So each of these says what a *key* is and that the index agrees, with
+;; no modifier list anywhere.
+(test-equal "the same key spelled with kbd and with the raw event"
+  (keymap-index->list (keymap-index (kbd "C-x")))
+  (keymap-index->list (keymap-index 24)))
+
+(test-equal "a character and its kbd spelling are one key"
+  (keymap-index->list (keymap-index (kbd "a")))
+  (keymap-index->list (keymap-index #\a)))
+
+(test-equal "and a chord is the two events of its kbd spelling"
+  (keymap-index->list (keymap-index (kbd "C-x C-c")))
+  (append (keymap-index->list (keymap-index (kbd "C-x")))
+          (keymap-index->list (keymap-index (kbd "C-c")))))
+
+;; **Anything else is an error, and not the unspecified value.** #t is
+;; not a key.
+(test-assert "a value that is not a key is an error"
+  (guard (e (#t #t))
+    (keymap-index #t)
+    #f))
 
 (test-end "schemacs_keymap")

@@ -40,10 +40,13 @@
     ;; and `dynamic-func' are core bindings, which an R7RS library
     ;; reaches through `(guile)' - as `frame.sld''s SIGTSTP does.
     (only (system foreign) pointer->procedure string->pointer pointer->string
-          null-pointer? int void double)
-    (only (guile) dynamic-link dynamic-func assq-ref filter)
-    ;; `alist-delete' removes one selection from the ownership record.
-    (only (srfi srfi-1) alist-delete)
+          pointer->bytevector null-pointer? int void double unsigned-int)
+    (only (guile) dynamic-link dynamic-func assq-ref filter
+          u32vector->list)
+    ;; `alist-delete' removes one selection from the ownership record;
+    ;; `iota' builds the element offsets the 16- and 32-bit selection
+    ;; data rows are read at.
+    (only (srfi srfi-1) alist-delete iota)
     (only (scheme write) display write)
     (only (guile) ash logand logior lognot inexact->exact round
           get-internal-real-time internal-time-units-per-second)
@@ -112,6 +115,17 @@
           selection-exists? selection-owner?
           set-selection! suspend-display! update-window-begin!
           update-window-end! write-glyphs!)
+    ;; The Lisp half of a *read* of a selection this process owns:
+    ;; `pgtk-get-local-selection' looks the requested target up in
+    ;; `selection-converter-alist' - the C's `Vselection_converter_alist'
+    ;; - and calls the handler it finds. See `select.sld'.
+    (only (schemacs editor select)
+          *selection-converter-alist* xselect--encode-string)
+    ;; `decode-coding-string' turns the bytes a foreign selection arrived
+    ;; as into the tree's code points; that is the half of
+    ;; `gui-get-selection' that decodes a `foreign-selection' string, done
+    ;; here because this is where the bytes are.
+    (only (schemacs editor coding) decode-coding-string)
     ;; Opening a display initializes faces against it, as `term.sld''s
     ;; `with-terminal' does.
     (only (schemacs editor faces)
@@ -143,7 +157,10 @@
           ;; arrived on, and selecting it is what makes typing in a second
           ;; window work - Emacs's `focus-in-event' ends in
           ;; `select-frame-set-input-focus' (`frame.el:1264').
-          *frame-list* select-frame)
+          *frame-list* select-frame
+          ;; The selection read's failure messages ("No selection: %s"),
+          ;; which go through the frame the display belongs to.
+          set!frame-message)
     ;; The development back door. `poll-repl!' is a no-op unless
     ;; `main-gtk.scm' was asked to open it; this loop is the only place a
     ;; windowed editor is ever idle, so it is where the REPL gets its turn.
@@ -194,6 +211,15 @@
    pgtk-window
    ;; Opening one window and titling it, for the frame backend.
    pgtk-open-window pgtk-title-frame!
+   ;; The selection read's own pieces, exported for tests - the same
+   ;; reason `pgtk-read-event' and `note-mouse-movement' are. **The local
+   ;; half needs no window and no Gtk**: it is the display's own record of
+   ;; what it asserted, the converter table in `select.sld', and the C's
+   ;; decode, so a test can set the record and read it back without a
+   ;; clipboard anywhere. Nothing in the editor calls these by name.
+   pgtk-selections
+   pgtk-get-local-selection pgtk-clean-local-selection-data
+   pgtk-get-selection-internal selection-data-to-lisp-data
    )
 
   (begin
@@ -570,10 +596,12 @@
       ;; and redraws forever.
       (last-allocation #:init-value #f #:accessor pgtk-last-allocation)
       ;; The selections this display has asserted, as
-      ;; `((SELECTION . VALUE) ...)'. This is `pgtkselect.c''s
-      ;; `LOCAL_SELECTION' - the process's own bookkeeping of what it
-      ;; owns, which is what `pgtk-selection-owner-p' answers from, Gtk
-      ;; recording no owner for a plain `set_text'.
+      ;; `((SELECTION VALUE TIMESTAMP FRAME) ...)' - the C's
+      ;; `selection_data' list. This is `pgtkselect.c''s
+      ;; `LOCAL_SELECTION' (`:116') - the process's own bookkeeping of
+      ;; what it owns, which is what `pgtk-selection-owner-p' answers
+      ;; from, Gtk recording no owner for a plain `set_text', and what
+      ;; `pgtk-get-local-selection' reads a value and a timestamp out of.
       (selections #:init-value '() #:accessor pgtk-selections)
       ;; The widget's allocation in PIXELS, as `size-allocate' last
       ;; reported it - GNU Emacs's `FRAME_PIXEL_WIDTH' and
@@ -1967,6 +1995,14 @@
 
     (define gdk-atom-intern
       (selection-foreign-fn gdk-selection-lib "gdk_atom_intern" '* (list '* int)))
+    ;; GDK's other direction: an atom's *name*, which is the only way to
+    ;; tell one from another across the FFI. `gdk_atom_intern' interns by
+    ;; name, so the atom `GDK_SELECTION_TYPE_ATOM' *is* the atom for the
+    ;; string "ATOM" - `gdk_atom_intern_static_string ("ATOM")' - which is
+    ;; why every comparison below is by name and none needs the C's
+    ;; constants. The answer is a `gchar *' that the caller frees.
+    (define gdk-atom-name
+      (selection-foreign-fn gdk-selection-lib "gdk_atom_name" '* (list '*)))
     (define gtk-clipboard-get
       (selection-foreign-fn gtk-selection-lib "gtk_clipboard_get" '* (list '*)))
     (define gtk-clipboard-set-text
@@ -1975,12 +2011,58 @@
     (define gtk-clipboard-clear
       (selection-foreign-fn gtk-selection-lib "gtk_clipboard_clear"
                             void (list '*)))
-    (define gtk-clipboard-wait-for-text
-      (selection-foreign-fn gtk-selection-lib "gtk_clipboard_wait_for_text"
-                            '* (list '*)))
     (define gtk-clipboard-wait-is-text-available?
       (selection-foreign-fn gtk-selection-lib "gtk_clipboard_wait_is_text_available"
                             int (list '*)))
+    ;; `gtk_clipboard_wait_for_text' is Gtk's convenience for the one
+    ;; target `UTF8_STRING' and **it is what `get-selection' used to call
+    ;; whatever it was asked for** - so a TARGETS request, an ATOM
+    ;; request, a LENGTH request all came back as the clipboard's text,
+    ;; and that is the departure the port below removes. It is gone
+    ;; rather than kept for the text targets, because the general read
+    ;; answers those too, and by the coding system the target names rather
+    ;; than by Gtk's guess.
+    ;;
+    ;; (Its one trap, recorded because it cost an afternoon: a NULL
+    ;; pointer comes back through the FFI as a *true* pointer object, so
+    ;; an empty clipboard has to be asked about with `null-pointer?' and
+    ;; not with `(if text ...)'.)
+    ;;
+    ;; **The read that takes a *target*.** `gtk_clipboard_wait_for_contents'
+    ;; converts the selection to the target atom asked
+    ;; for and answers a `GtkSelectionData *' (transfer full) holding the
+    ;; *bytes*, which is what `pgtk_get_window_property_as_lisp_data'
+    ;; reads in the C - there via `gdk_selection_property_get' after a
+    ;; `GDK_SELECTION_NOTIFY'. Gtk does the waiting inside the same nested
+    ;; main loop the read already runs in, so the C's
+    ;; `wait_reading_process_output' + atimer + timeout machinery is
+    ;; Gtk's and is not ported: what the C does with the property once it
+    ;; has it is what is below.
+    (define gtk-clipboard-wait-for-contents
+      (selection-foreign-fn gtk-selection-lib "gtk_clipboard_wait_for_contents"
+                            '* (list '* '*)))
+    ;; The four accessors of what came back. `GtkSelectionData' is the C's
+    ;; `(data, length, data_type, format, target)' quintuple - the same
+    ;; five things `pgtk_get_window_property' fills in - and its `data' is
+    ;; the `unsigned char *' the property held.
+    (define gtk-selection-data-get-data
+      (selection-foreign-fn gtk-selection-lib "gtk_selection_data_get_data"
+                            '* (list '*)))
+    (define gtk-selection-data-get-length
+      (selection-foreign-fn gtk-selection-lib "gtk_selection_data_get_length"
+                            int (list '*)))
+    (define gtk-selection-data-get-data-type
+      (selection-foreign-fn gtk-selection-lib "gtk_selection_data_get_data_type"
+                            '* (list '*)))
+    (define gtk-selection-data-get-format
+      (selection-foreign-fn gtk-selection-lib "gtk_selection_data_get_format"
+                            int (list '*)))
+    (define gtk-selection-data-free
+      (selection-foreign-fn gtk-selection-lib "gtk_selection_data_free"
+                            void (list '*)))
+    (define gtk-get-current-event-time
+      (selection-foreign-fn gtk-selection-lib "gtk_get_current_event_time"
+                            unsigned-int '()))
     (define g-free
       (selection-foreign-fn gobject-selection-lib "g_free" void (list '*)))
 
@@ -1990,8 +2072,39 @@
       ;; `pgtk-own-selection-internal''s docstring says: "(Those are
       ;; literal upper-case symbol names, since that's what GDK
       ;; expects.)"
+      ;;
+      ;; This is `symbol_to_gdk_atom' (`pgtkselect.c:119') as far as this
+      ;; tree needs it. The C's three special cases -
+      ;; `GDK_SELECTION_PRIMARY'/`_SECONDARY'/`_CLIPBOARD' - are the atoms
+      ;; for the strings "PRIMARY"/"SECONDARY"/"CLIPBOARD"
+      ;; (`gdk_atom_intern_static_string'), so interning the name is the
+      ;; same atom; and the C's nil case (GDK_NONE) is not reached,
+      ;; because `target-type' is checked to be a symbol before it gets
+      ;; here and a selection is always one of the three.
       ;;--------------------------------------------------------------
       (gdk-atom-intern (string->pointer (symbol->string selection) "UTF-8") 0))
+
+    (define (atom-name-string atom)
+      ;; `gdk_atom_to_symbol' (`pgtkselect.c:138')'s first half: the
+      ;; atom's name as a Scheme string, or #f for GDK_NONE and for an
+      ;; atom that has none. The returned `gchar *' is ours to free.
+      ;;--------------------------------------------------------------
+      (and atom
+           (not (null-pointer? atom))
+           (let ((p (gdk-atom-name atom)))
+             (and p
+                  (not (null-pointer? p))
+                  (let ((s (pointer->string p -1 "UTF-8")))
+                    (g-free p)
+                    s)))))
+
+    (define (gdk-atom-to-symbol atom)
+      ;; `gdk_atom_to_symbol' (`pgtkselect.c:138'): `(intern (gdk_atom_name
+      ;; atom))' - a *symbol*, which is what a 32-bit ATOM selection data
+      ;; row decodes to.
+      ;;--------------------------------------------------------------
+      (let ((name (atom-name-string atom)))
+        (and name (string->symbol name))))
 
     (define *selection-clipboards* (make-parameter '()))
     ;; ^ `((SELECTION . <clipboard-pointer>) ...)'. `gtk_clipboard_get'
@@ -2005,37 +2118,410 @@
              (cons (cons selection clip) (*selection-clipboards*)))
             clip)))
 
-    (define-method (get-selection (d <pgtk-display>) selection target-type)
-      ;; Read SELECTION off the display, or #f when it has no text to
-      ;; give. This is `pgtk-get-selection-internal': a read blocks
-      ;; until the owner answers, whether that owner is this process or
-      ;; another program.
+    ;;----------------------------------------------------------------
+    ;; Reading our own selection - `pgtk_get_local_selection'
+    ;;----------------------------------------------------------------
+
+    (define (local-selection d selection)
+      ;; `LOCAL_SELECTION' (`pgtkselect.c:116'): the process's own record
+      ;; of what it has asserted for SELECTION, as
       ;;
-      ;; TARGET-TYPE is a text target - `STRING', `UTF8_STRING',
-      ;; `COMPOUND_TEXT', `text/plain;charset=utf-8' - or `TIMESTAMP'.
-      ;; Gtk's clipboard keeps no timestamp, and select.el's timestamp
-      ;; comparisons only run for `window-system' `x', so that one
-      ;; answers #f; every text target is answered with the text.
+      ;;     (SELECTION VALUE TIMESTAMP FRAME)
+      ;;
+      ;; - the C's four-element `selection_data' list, `assq''d in the
+      ;; terminal's `Vselection_alist'. This is the display's `selections'
+      ;; slot, and it is **not** a question to GDK: Emacs answers a read
+      ;; of its own selection out of here rather than round-tripping
+      ;; through the server, which is what makes `(gui-get-selection
+      ;; 'CLIPBOARD 'TARGETS)' answer with the target vector instead of
+      ;; the text.
       ;;--------------------------------------------------------------
-      ;; A display opened with no window - a unit test's - has never
-      ;; initialised Gtk, and asking it would ask a dead library.
+      (assq selection (pgtk-selections d)))
+
+    (define (pgtk-get-local-selection d selection target-type local-request)
+      ;; GNU Emacs's `pgtk_get_local_selection' (`pgtkselect.c:236'):
+      ;; "Return the value of SELECTION for TARGET-TYPE, or nil if we do
+      ;; not own SELECTION."
+      ;;
+      ;; LOCAL-REQUEST is the C's flag: true when the request came from
+      ;; this process (`pgtk-get-selection-internal') and false when we
+      ;; are answering another program's. It is passed straight to the
+      ;; converter, where it decides whether TYPE is nil or the target -
+      ;; and a nil TYPE is what makes the conversion free
+      ;; (`xselect--encode-string' answers the string as it stands).
+      ;; Every call here is local: the foreign-request path is Gtk's,
+      ;; which answers with the text it was given rather than with the
+      ;; converters. That is a departure and it is named on
+      ;; `set-selection!'.
+      ;;
+      ;; Four things of the C's, in its order:
+      ;;
+      ;;   1. **TIMESTAMP is a special case** and never reaches the
+      ;;      converter table - its answer is the timestamp in the local
+      ;;      entry, the third element.
+      ;;   2. `CHECK_SYMBOL (target_type)' - a target is a symbol, and
+      ;;      that check is also what the table's `eq?' lookup needs.
+      ;;   3. **A string value's text properties are consulted first**:
+      ;;      `(get-text-property 0 target_type tem)', so a string can
+      ;;      carry an alternative value for one target. There are no
+      ;;      text properties on a selection string here - the value is
+      ;;      whatever `gui-set-selection' was handed - so this arm
+      ;;      answers nil and is written as the `#f' it is.
+      ;;   4. the handler is called, and then the value it answered is
+      ;;      **checked for transmissibility** - string, vector, symbol,
+      ;;      integer, nil, or a `cons_to_signed' pair - and an error
+      ;;      says so when it is none of those.
+      ;;--------------------------------------------------------------
+      (let ((local (local-selection d selection)))
+        (if (not local)
+            #f
+            (if (eq? target-type 'TIMESTAMP)
+                (list-ref local 2)
+                (let ((handler (assq-ref (*selection-converter-alist*)
+                                         target-type)))
+                  ;; CHECK_SYMBOL: `target-type''s symbolness is what the
+                  ;; `eq?' lookup above has already required.
+                  (unless (symbol? target-type)
+                    (error "Wrong type argument: symbolp"
+                           target-type))
+                  (let ((value (if handler
+                                   (handler selection
+                                            (if local-request #f target-type)
+                                            (list-ref local 1))
+                                   #f)))
+                    (pgtk-clean-local-selection-data
+                     (pgtk-check-local-selection-value handler value))))))))
+
+    (define (pgtk-check-local-selection-value handler value)
+      ;; The C's "Make sure this value is of a type that we could
+      ;; transmit to another client" (`pgtkselect.c:284'): a string, a
+      ;; vector, a symbol, an integer, nil, or the `(HIGH . LOW)' pair
+      ;; `CONS_TO_INTEGER' takes. Anything else is "Invalid data returned
+      ;; by selection-conversion function", naming the handler and the
+      ;; value.
+      ;;--------------------------------------------------------------
+      (let* ((check (if (and (pair? value) (symbol? (car value)))
+                        (cdr value)
+                        value))
+             (ok? (or (string? check)
+                      (vector? check)
+                      (symbol? check)
+                      (integer? check)
+                      (not value)
+                      ;; `cons_to_signed'/`cons_to_unsigned''s shape: a
+                      ;; cons whose car is an integer and whose cdr is one
+                      ;; or a one-element list of one.
+                      (and (pair? check)
+                           (integer? (car check))
+                           (or (integer? (cdr check))
+                               (and (pair? (cdr check))
+                                    (integer? (car (cdr check)))
+                                    (null? (cdr (cdr check)))))))))
+        (if ok?
+            value
+            (error (string-append "Invalid data returned by "
+                                  "selection-conversion function: "
+                                  (if handler "a handler" "no handler"))))))
+
+    (define (pgtk-clean-local-selection-data obj)
+      ;; GNU Emacs's `clean_local_selection_data' (`pgtkselect.c:1547'):
+      ;; the `(HIGH . LOW)' pair a number was carried as becomes the
+      ;; number again, and a one-element vector becomes its element - so
+      ;; `xselect-convert-to-identity''s `(vector value)' comes back as
+      ;; VALUE and a LENGTH conversion comes back as a number.
+      ;;
+      ;; The first clause of the C's is `(cons_to_signed obj 16)' - the
+      ;; pair written out as `(a b)' rather than `(a . b)'.
+      ;;--------------------------------------------------------------
+      (let ((obj (if (and (pair? obj)
+                          (integer? (car obj))
+                          (pair? (cdr obj))
+                          (integer? (car (cdr obj)))
+                          (null? (cdr (cdr obj))))
+                     (cons (car obj) (car (cdr obj)))
+                     obj)))
+        (cond
+         ((and (pair? obj) (integer? (car obj)) (integer? (cdr obj)))
+          (cond ((= 0 (car obj)) (cdr obj))
+                ((= -1 (car obj)) (- (cdr obj)))
+                (else obj)))
+         ((vector? obj)
+          (if (= 1 (vector-length obj))
+              (pgtk-clean-local-selection-data (vector-ref obj 0))
+              (list->vector
+               (map pgtk-clean-local-selection-data (vector->list obj)))))
+         (else obj))))
+
+    ;;----------------------------------------------------------------
+    ;; Reading a foreign selection's data
+    ;;----------------------------------------------------------------
+
+    (define (selection-data-size-for-format format)
+      ;; `pgtk_size_for_format' (`pgtkselect.c:1082').
+      ;;--------------------------------------------------------------
+      (cond ((= format 8) 1)
+            ((= format 16) 2)
+            ((= format 32) 4)
+            (else #f)))
+
+    (define (selection-data-to-lisp-data bytes size type-name format)
+      ;; GNU Emacs's `selection_data_to_lisp_data' (`pgtkselect.c:1266')
+      ;; - the table its own comment lays out:
+      ;;
+      ;;   Type   Format  Size   Lisp Type
+      ;;   ----   ------  ----   ---------
+      ;;   *      8       *      String
+      ;;   ATOM   32      1      Symbol
+      ;;   ATOM   32      > 1    Vector of Symbols
+      ;;   *      16      1      Integer
+      ;;   *      16      > 1    Vector of Integers
+      ;;   *      32      1      Integer
+      ;;   *      32      > 1    Vector of the above
+      ;;
+      ;; BYTES is the data as a bytevector and SIZE its length in bytes,
+      ;; TYPE-NAME the data type's atom name ("STRING", "ATOM", ...) and
+      ;; FORMAT 8, 16 or 32.
+      ;;
+      ;; **One departure, and it is the tree's data model rather than
+      ;; this function's**: the C's 8-bit answer is a *unibyte string*
+      ;; that select.el then decodes by data type
+      ;; (`gui-get-selection', with the `foreign-selection' property
+      ;; recording which). Guile has no unibyte string, so the bytes are
+      ;; decoded to the tree's code points here and rendered as a string -
+      ;; which is the same decode at the same point in the pipeline, one
+      ;; function earlier. A byte no charset can read becomes U+FFFD, the
+      ;; substitution the renderer already makes.
+      ;;
+      ;; The 16- and 32-bit cases read the elements out of BYTES with the
+      ;; endianness the protocol fixed (little on every display this
+      ;; tree runs on; the C reads a native `short'/`int', and so does
+      ;; this) and answer the integer, or the vector of them.
+      ;;
+      ;; The pair form - a single 32-bit value as `(HIGH . LOW)' - is the
+      ;; C's `format 32, size sizeof(int)' case, which answers a plain
+      ;; integer; the pair appears only on the way *out*
+      ;; (`clean_local_selection_data').
+      ;;--------------------------------------------------------------
+      (cond
+       ;; "NULL" is the C's `QNULL' - a conversion that happened and has
+       ;; no value, which is `xselect-convert-to-delete' and
+       ;; `-to-save-targets'.
+       ((and type-name (string=? type-name "NULL")) #f)
+       ((= format 8)
+        (selection-bytes->string bytes))
+       ((and (= format 32)
+             (or (and type-name (string=? type-name "ATOM"))
+                 (and type-name (string=? type-name "ATOM_PAIR"))))
+        (let ((atoms
+               (map (lambda (off)
+                      (gdk-atom-to-symbol (u32-at bytes off)))
+                    (iota (quotient size 4)))))
+          (if (= size 4)
+              (car atoms)
+              (list->vector atoms))))
+       ((and (= format 32) (= size 4))
+        (let ((n (u32-at bytes 0)))
+          (if (and type-name (string=? type-name "INTEGER"))
+              (if (>= n #x80000000) (- n #x100000000) n)
+              n)))
+       ((and (= format 16) (= size 2))
+        (let ((n (u16-at bytes 0)))
+          (if (and type-name (string=? type-name "INTEGER"))
+              (if (>= n #x8000) (- n #x10000) n)
+              n)))
+       ((= format 16)
+        (list->vector
+         (map (lambda (off)
+                (let ((n (u16-at bytes off)))
+                  (if (and type-name (string=? type-name "INTEGER"))
+                      (if (>= n #x8000) (- n #x10000) n)
+                      n)))
+              (map (lambda (i) (* i 2)) (iota (quotient size 2))))))
+       (else
+        (list->vector
+         (map (lambda (off)
+                (let ((n (u32-at bytes off)))
+                  (if (and type-name (string=? type-name "INTEGER"))
+                      (if (>= n #x80000000) (- n #x100000000) n)
+                      n)))
+              (map (lambda (i) (* i 4)) (iota (quotient size 4))))))))
+
+    (define (u16-at bytes off)
+      (let ((b (lambda (i) (bytevector-u8-ref bytes (+ off i)))))
+        (+ (b 0) (* 256 (b 1)))))
+
+    (define (u32-at bytes off)
+      (let ((b (lambda (i) (bytevector-u8-ref bytes (+ off i)))))
+        (+ (b 0) (* 256 (b 1)) (* 65536 (b 2)) (* 16777216 (b 3)))))
+
+    (define (selection-bytes->string bytes)
+      ;; The C's `(make_unibyte_string (char *) data, size)' and then
+      ;; select.el's decode by data type (`gui-get-selection',
+      ;; `select.el:391'). The coding system is chosen from the data
+      ;; type, which is the same list:
+      ;;
+      ;;   UTF8_STRING                 utf-8
+      ;;   text/plain;charset=utf-8    utf-8
+      ;;   COMPOUND_TEXT               compound-text-with-extensions
+      ;;   C_STRING                    nil - the bytes as they are
+      ;;   STRING                      iso-8859-1
+      ;;   anything else               `selection-coding-system' if set,
+      ;;                               else a guess, else nothing
+      ;;
+      ;; Only the two the tree carries are ever reached from a foreign
+      ;; selection here: the tree has no compound-text and no `text/`
+      ;; guessing. A byte no charset can read comes back as an
+      ;; eight-bit code point, which cannot be a Scheme character, so it
+      ;; is rendered U+FFFD - `coding.sld''s deviation #4.
+      ;;--------------------------------------------------------------
+      (let ((decoded (decode-coding-string bytes 'utf-8)))
+        (list->string
+         (map (lambda (cp)
+                (if (< cp #x110000) (integer->char cp) #\xfffd))
+              (u32vector->list decoded)))))
+
+    ;;----------------------------------------------------------------
+    ;; `pgtk-get-selection-internal', the DEFUN
+    ;;----------------------------------------------------------------
+
+    (define *pgtk-selection-alias-alist* (make-parameter '()))
+    ;; ^ `Vpgtk_selection_alias_alist': `((ALIAS . REAL) ...)', empty by
+    ;; default and settable from Lisp - Emacs's exits so that a program
+    ;; can say "when I ask for X, ask for Y instead". Ported because
+    ;; `pgtk_get_selection_internal' consults it first; nothing here sets
+    ;; it.
+
+    (define (pgtk-get-selection-internal d selection target-type
+                                         time-stamp terminal)
+      ;; GNU Emacs's `pgtk-get-selection-internal' (`pgtkselect.c:1606'):
+      ;;
+      ;;     (pgtk-get-selection-internal SELECTION-SYMBOL TARGET-TYPE
+      ;;                                  &optional TIME-STAMP TERMINAL)
+      ;;
+      ;; "Request the selection value from the owner. If we are the
+      ;; owner, simply return our selection value. If we are not the
+      ;; owner, this will block until all of the data has arrived."
+      ;;
+      ;; TIME-STAMP and TERMINAL are accepted and unused: the timestamp
+      ;; belongs to the `gdk_selection_convert' the C makes and Gtk does
+      ;; not take one, and this display *is* the terminal the parameter
+      ;; names.
+      ;;
+      ;; The order is the C's - the alias, then the local read, then the
+      ;; foreign one - and the TARGETS vector rule at the end is
+      ;; bug#72254's: "A window property holding just one item is
+      ;; indistinguishable from an array of one element", so a TARGETS
+      ;; answer is always a vector, even when Gtk reports one target.
+      ;;--------------------------------------------------------------
+      (unless (symbol? selection)
+        (error "Wrong type argument: symbolp" selection))
+      (unless (symbol? target-type)
+        (error "Wrong type argument: symbolp" target-type))
+      (if (eq? target-type 'MULTIPLE)
+          (error "Retrieving MULTIPLE selections is currently unimplemented")
+          (let* ((alias (assq selection (*pgtk-selection-alias-alist*)))
+                 (selection (if alias
+                                (begin
+                                  (unless (symbol? (cdr alias))
+                                    (error "Wrong type argument: symbolp"
+                                           (cdr alias)))
+                                  (cdr alias))
+                                selection))
+                 (val (pgtk-get-local-selection d selection target-type #t)))
+            (if val
+                (let ((val (if (and (pair? val) (symbol? (car val)))
+                               (let ((v (cdr val)))
+                                 (if (and (pair? v) (null? (cdr v)))
+                                     (car v)
+                                     v))
+                               val)))
+                  (pgtk-clean-local-selection-data val))
+                (let ((v (pgtk-get-foreign-selection d selection target-type
+                                                     time-stamp)))
+                  (if (and (eq? target-type 'TARGETS)
+                           (or (not v) (symbol? v)))
+                      (if v (vector v) (vector))
+                      v))))))
+
+    (define (pgtk-get-foreign-selection d selection target-type time-stamp)
+      ;; GNU Emacs's `pgtk_get_foreign_selection' (`pgtkselect.c:1012')
+      ;; and `pgtk_get_window_property_as_lisp_data' (`:1185'), which is
+      ;; what `gtk_clipboard_wait_for_contents' + the accessors + the
+      ;; decode below are: the C issues `gdk_selection_convert' with the
+      ;; TARGET atom, waits for `GDK_SELECTION_NOTIFY', reads the property
+      ;; off the requestor window and converts it. Gtk does the first
+      ;; three inside the clipboard call and the last is
+      ;; `selection-data-to-lisp-data'.
+      ;;
+      ;; The two messages on failure are the C's, when there is no data:
+      ;;
+      ;;   "Selection owner couldn't convert: %s"  - someone owns the
+      ;;       selection but would not convert to this target;
+      ;;   "No selection: %s"                      - nobody owns it.
+      ;;
+      ;; The C tells them apart with
+      ;; `gdk_selection_owner_get_for_display'; GtkClipboard's answer to
+      ;; the same question is whether the clipboard offers *any* target,
+      ;; which is what `gtk_clipboard_wait_for_targets' asks. Both answer
+      ;; nil and say which it was, which is the C's contract.
+      ;;
+      ;; The C also puts a one-second "Selection owner didn't respond"
+      ;; message on an atimer while it waits and times out after
+      ;; `pgtk-selection-timeout'. Gtk's wait runs the same main loop and
+      ;; hosts the timeout itself, so neither is ported - named, not
+      ;; forgotten.
       ;;--------------------------------------------------------------
       (and (pgtk-window d)
-           (not (eq? target-type 'TIMESTAMP))
-           (let* ((text (gtk-clipboard-wait-for-text
-                         (selection-clipboard selection)))
-                  ;; An empty clipboard comes back as the NULL pointer,
-                  ;; which the FFI wraps as a *true* pointer object, so
-                  ;; the question is not `text' but `null-pointer?'.
-                  (has-text? (and text (not (null-pointer? text))))
-                  ;; The `gchar *' is ours to free. `pointer->string' is
-                  ;; pinned to UTF-8: the clipboard's UTF8_STRING is
-                  ;; UTF-8 whatever the locale here is. Its second
-                  ;; argument is the LENGTH - -1 for "up to the NUL" -
-                  ;; and the encoding its third.
-                  (string (and has-text? (pointer->string text -1 "UTF-8"))))
-             (when has-text? (g-free text))
-             string)))
+           (let ((clip (selection-clipboard selection))
+                 (target (selection-atom target-type)))
+             (let ((sd (gtk-clipboard-wait-for-contents clip target)))
+               (if (or (not sd) (null-pointer? sd))
+                   (begin
+                     (selection-no-data-message d selection target-type)
+                     #f)
+                   (let* ((size (gtk-selection-data-get-length sd))
+                          (format (gtk-selection-data-get-format sd))
+                          (type-name (atom-name-string
+                                      (gtk-selection-data-get-data-type sd)))
+                          (bytes (if (> size 0)
+                                     (pointer->bytevector
+                                      (gtk-selection-data-get-data sd)
+                                      size 0 'vu8)
+                                     (bytevector))))
+                     (gtk-selection-data-free sd)
+                     (and (>= size 0)
+                          (selection-data-to-lisp-data bytes size type-name
+                                                       format))))))))
+
+    (define (selection-no-data-message d selection target-type)
+      ;; The C's `(if (for_multiple) ... (if (gdk_selection_owner_get_for_display
+      ;; ...) "Selection owner couldn't convert" "No selection"))'
+      ;; (`pgtkselect.c:1205-1224'). The message goes through the frame
+      ;; the display belongs to, as every message in this tree does.
+      ;;--------------------------------------------------------------
+      (let ((frame (pgtk-frame-for d)))
+        (and frame
+             (set!frame-message
+              frame
+              (if (selection-exists? d selection)
+                  (string-append "Selection owner couldn't convert: "
+                                 (symbol->string target-type))
+                  (string-append "No selection: "
+                                 (symbol->string selection)))))))
+
+    (define-method (get-selection (d <pgtk-display>) selection target-type)
+      ;; Read SELECTION off the display. This is `pgtk-get-selection-internal'
+      ;; - the C's DEFUN, called here with no TIMESTAMP and no TERMINAL,
+      ;; which is how `gui-get-selection' calls it.
+      ;;
+      ;; **`TIMESTAMP' is no longer answered #f.** It is the C's special
+      ;; case inside `pgtk_get_local_selection': when we own the
+      ;; selection its answer is the timestamp recorded with it, and when
+      ;; we do not own it there is no local value and the foreign read is
+      ;; asked - which is the C's behaviour too, and Gtk answers it from
+      ;; the selection's own time.
+      ;;--------------------------------------------------------------
+      (pgtk-get-selection-internal d selection target-type #f #f))
 
     (define-method (set-selection! (d <pgtk-display>) selection value)
       ;; Assert SELECTION holding VALUE, or - VALUE #f - disown it,
@@ -2051,16 +2537,36 @@
       ;; *request* time in the C (`selection-converter-alist', where a
       ;; symbol becomes its name for `STRING'); here the conversion
       ;; happens at assert time, which is the same text a reader gets.
+      ;;
+      ;; **The local record is the C's four-element list** -
+      ;; `(SELECTION VALUE TIMESTAMP FRAME)' (`pgtk_own_selection',
+      ;; `pgtkselect.c:151-160', writing `list4 (selection_name,
+      ;; selection_value, INT_TO_INTEGER (timestamp), frame)') - because
+      ;; that is what `pgtk_get_local_selection' reads back: element 1 is
+      ;; the value a converter is called with and element 2 is what a
+      ;; `TIMESTAMP' request answers. It used to be a `(SELECTION .
+      ;; VALUE)' pair, which had no timestamp to answer with.
+      ;;
+      ;; The timestamp is `gtk_get_current_event_time''s, with the C's
+      ;; fallback when there is no current event (that value is
+      ;; GDK_CURRENT_TIME, 0): `dpyinfo->last_user_time'. **That field is
+      ;; not ported** - it is refreshed from every input event, and its
+      ;; only reader is this timestamp, which nothing in this tree asks
+      ;; back (select.el reads a TIMESTAMP only when `window-system' is
+      ;; `x', and this front end's is `pgtk'). So the fallback is 0, and
+      ;; the full C expression is written out with the missing half
+      ;; named rather than left to look like an oversight.
       ;;--------------------------------------------------------------
       (if value
           (let ((text (cond ((string? value) value)
                             ((symbol? value) (symbol->string value))
                             ((integer? value) (number->string value))
-                            (else value))))
+                            (else value)))
+                (stamp (gtk-get-current-event-time)))
             (gtk-clipboard-set-text (selection-clipboard selection)
                                     (string->pointer text "UTF-8") -1)
             (set! (pgtk-selections d)
-                  (cons (cons selection value)
+                  (cons (list selection value stamp (*current-frame*))
                         (alist-delete selection (pgtk-selections d)))))
           ;; Don't disown the selection when we're not the owner - the
           ;; C's early return, which answers nil.

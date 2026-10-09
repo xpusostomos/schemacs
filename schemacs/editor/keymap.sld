@@ -24,6 +24,14 @@
 
   (import
     (scheme base)
+    (only (guile) string-join logand logior lognot)
+    ;; The event model: the modifier bits `push-key-description' tests,
+    ;; and `event-convert-list' for the Lucid form `single-key-description'
+    ;; converts first. `kbd' is the reader `key-description' takes a
+    ;; *string* key through, as `read-kbd-macro' does in Emacs.
+    (only (schemacs editor character)
+          char-alt char-ctl char-hyper char-meta char-shift char-super
+          event-convert-list kbd)
     (prefix (schemacs keymap) km:)
     ;; `keymap-parent' and `set-keymap-parent' are keymap.c's; this
     ;; library states them beside the keys, as it does `define-key'.
@@ -32,7 +40,7 @@
     )
 
   (export
-   single-key-description
+   single-key-description key-description
    *current-keymap*
    *default-keymap*
    *special-event-map*
@@ -109,27 +117,151 @@
 
 
     (define (single-key-description key . rest)
-      ;; GNU Emacs's `single-key-description' (`keymap.c:2307'), which
-      ;; for a character event is `push_key_description'
-      ;; (`keymap.c:2192'): "Control characters turn into C-whatever,
-      ;; etc." - 9 is `TAB', 13 `RET', 27 `ESC', 32 `SPC', 127 `DEL',
-      ;; the other controls `C-' with the letter the 0140 offset makes
-      ;; of them, and a printing character is itself. What
-      ;; `what-cursor-position' shows the character after point as.
+      ;; GNU Emacs's `single-key-description' (`keymap.c:2307'): "Return a
+      ;; pretty description of a character event KEY. Control characters
+      ;; turn into C-whatever, etc."
       ;;
-      ;; Only the character branch of the C is here: `text-char-
-      ;; description' - its octal-and-backslashes spelling - is not.
+      ;; **KEY is an *event*** - an integer carrying its modifier bits, a
+      ;; character (the same thing), or a symbol naming a key that is not
+      ;; one - and this is the function the whole tree prints a key with:
+      ;; the `; undefined key: ...' message and `key-description' below
+      ;; both end here. It used to take a bare character and stop, which
+      ;; is why the keymap had to print its keys itself, as the private
+      ;; `(ctrl #\\x)' list.
+      ;;
+      ;; Three of the C's four branches, in its order:
+      ;;
+      ;;   * a Lucid *event type list* - `(control ?x)' - is converted
+      ;;     first (`lucid_event_type_list_p' then `event-convert-list',
+      ;;     `:2319');
+      ;;   * an integer goes to `push_key_description' (`:2192'), whose
+      ;;     modifier-prefix order is **A- C- H- M- S- s-** and whose
+      ;;     character part is what this function already had;
+      ;;   * a symbol is its *name*, with `<...>' around the part after
+      ;;     the modifier prefixes (`:2343'-`:2356') unless NO-ANGLES.
+      ;;
+      ;; Not ported: the interval case - a cons of two integers, which is
+      ;; what a `map-char-table' produces and which nothing here builds.
       ;;--------------------------------------------------------------
-      (let ((c (char->integer key)))
+      (let* ((no-angles (and (pair? rest) (car rest)))
+             (key (if (and (pair? key) (pair? (cdr key)))
+                      (event-convert-list key)
+                      key)))
         (cond
-         ((= c 27) "ESC")
-         ((= c 9) "TAB")
-         ((= c 13) "RET")
-         ((= c 127) "DEL")
-         ((= c 32) "SPC")
-         ((< c 32)
-          (string "C-" (integer->char
-                        (if (and (> c 0) (<= c 26)) (+ c 96) (+ c 64)))))
-         ((< c 128) (string key))
-         (else (string key)))))
+         ((or (integer? key) (char? key))
+          (push-key-description (if (char? key) (char->integer key) key)))
+         ((symbol? key)
+          (let ((name (symbol->string key)))
+            (if no-angles
+                name
+                (let ((i (let loop ((i 0))
+                           (if (and (< i (- (string-length name) 3))
+                                    (char=? #\- (string-ref name (+ i 1)))
+                                    (memv (string-ref name i)
+                                          (list #\A #\C #\H #\M #\S #\s)))
+                               (loop (+ i 2))
+                               i))))
+                  (string-append (substring name 0 i) "<"
+                                 (substring name i (string-length name)) ">")))))
+         ((string? key) key)
+         (else (error "KEY must be an integer, cons, symbol, or string")))))
+
+    (define (push-key-description ch)
+      ;; GNU Emacs's `push_key_description' (`keymap.c:2192'): the
+      ;; description of one character *event*, as `single-key-description'
+      ;; answers it. The C's own shape is kept exactly - "Clear all the
+      ;; meaningless bits above the meta bit", C is *decremented* as each
+      ;; modifier prefix is emitted, and the character part is then read
+      ;; off what remains. Reading it off the original event instead was
+      ;; the first version here and it died in `integer->char' on a meta
+      ;; event, which is the C's own reason for subtracting.
+      ;;
+      ;; The prefix order is the C's: **A- C- H- M- S- s-**. `C-' is
+      ;; emitted when the control bit is set *or* when the character is
+      ;; one of the controls that has no separate RET/TAB/ESC name.
+      ;;--------------------------------------------------------------
+      (let* ((raw (logand ch (logior char-meta (lognot (- char-meta)))))
+             (c2 (logand raw (lognot (logior char-alt char-ctl char-hyper
+                                             char-meta char-shift char-super))))
+             (tab-as-ci (and (= c2 9) (not (zero? (logand raw char-meta)))))
+             (c raw)
+             (prefix ""))
+        (when (not (zero? (logand c char-alt)))
+          (set! prefix (string-append prefix "A-"))
+          (set! c (- c char-alt)))
+        (when (or (not (zero? (logand c char-ctl)))
+                  (and (< c2 32) (not (= c2 27)) (not (= c2 9)) (not (= c2 13)))
+                  tab-as-ci)
+          (set! prefix (string-append prefix "C-"))
+          (set! c (logand c (lognot char-ctl))))
+        (when (not (zero? (logand c char-hyper)))
+          (set! prefix (string-append prefix "H-"))
+          (set! c (- c char-hyper)))
+        (when (not (zero? (logand c char-meta)))
+          (set! prefix (string-append prefix "M-"))
+          (set! c (- c char-meta)))
+        (when (not (zero? (logand c char-shift)))
+          (set! prefix (string-append prefix "S-"))
+          (set! c (- c char-shift)))
+        (when (not (zero? (logand c char-super)))
+          (set! prefix (string-append prefix "s-"))
+          (set! c (- c char-super)))
+        (string-append
+         prefix
+         (cond
+          ((>= c #x110000) (string-append "[" (number->string c) "]"))
+          ((< c 32)
+           (cond
+            ((= c 27) "ESC")
+            (tab-as-ci "i")
+            ((= c 9) "TAB")
+            ((= c 13) "RET")
+            (else (string (integer->char (if (and (> c 0) (<= c 26))
+                                             (+ c 96) (+ c 64)))))))
+          ((= c 127) "DEL")
+          ((= c 32) "SPC")
+          (else (string (integer->char c)))))))
+
+    (define (key-description keys . rest)
+      ;; GNU Emacs's `key-description' (`keymap.c:2092'): "Return a pretty
+      ;; description of key-sequence KEYS. For example, `[?\\C-x ?l]' is
+      ;; converted into the string \"C-x l\"."
+      ;;
+      ;; KEYS is what a key *is* - a string or a vector of events - and
+      ;; the C's answer is `(mapconcat #'single-key-description keys "
+      ;; ")' with one extra rule: an ESC in the sequence is not an event
+      ;; but the *meta prefix* for the next one (`meta_prefix_char'), so
+      ;; `[27 108]' is "M-l" and not "ESC l". Two ESCs in a row are
+      ;; "ESC ESC", because the second cannot prefix anything.
+      ;;--------------------------------------------------------------
+      (let* ((prefix (if (pair? rest) (car rest) '()))
+             (events (append (if (vector? prefix)
+                                 (vector->list prefix)
+                                 (if (pair? prefix) prefix '()))
+                             (cond ((vector? keys) (vector->list keys))
+                                   ((string? keys) (vector->list (kbd keys)))
+                                   ((pair? keys) keys)
+                                   (else '())))))
+        (let loop ((rest events) (acc '()) (add-meta #f))
+          (if (null? rest)
+              (string-join
+               (map single-key-description
+                    (reverse (if add-meta (cons 27 acc) acc)))
+               " ")
+              (let ((key (car rest)))
+                (cond
+                 ;; The previous event was an ESC, so this one is the key
+                 ;; it prefixes. It can only take the prefix if it *is*
+                 ;; an event integer and has no meta bit already; an ESC
+                 ;; of its own is emitted as an ESC and the prefix is
+                 ;; spent on nothing.
+                 (add-meta
+                  (if (or (not (integer? key))
+                          (= key 27)
+                          (not (zero? (logand key char-meta))))
+                      (loop (cdr rest) (cons 27 acc) #f)
+                      (loop (cdr rest) (cons (logior key char-meta) acc) #f)))
+                 ((and (integer? key) (= key 27))
+                  (loop (cdr rest) acc #t))
+                 (else (loop (cdr rest) (cons key acc) #f))))))))
     ))

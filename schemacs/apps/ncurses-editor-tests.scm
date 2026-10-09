@@ -51,6 +51,8 @@
  (only (schemacs editor dispnew) current-display key-event->key)
  (only (schemacs editor test-display) <test-display>)
  (only (schemacs editor keymap) *current-keymap* *default-keymap*)
+ ;; `kbd' - the tree's spelling of a key, and the event a test presses.
+ (only (schemacs editor character) kbd)
  (only (schemacs editor dired)
        dired dired-directory dired-noselect dired-revert)
  (only (schemacs editor buffer) buffer-name major-mode)
@@ -2237,7 +2239,13 @@
          (km:keymap '*own-keys*
                     (km:alist->keymap-layer
                      `(((meta #\z) . ,read-only-mode))))))
-      (dispatch-key-event frame (list (list 'meta #\z)))
+      ;; **A key is an *event*** - an integer carrying its modifier bits,
+      ;; or a symbol - which is what `read-key-event' answers with and
+      ;; what Emacs's `define-key' takes. `(vector-ref (kbd "M-z") 0)' is
+      ;; that event, spelled the way every binding in the tree spells it;
+      ;; the keymap's own list form is used only for the *binding* above,
+      ;; where it is Emacs's Lucid event type list `((meta ?z))'.
+      (dispatch-key-event frame (vector-ref (kbd "M-z") 0))
       (list (text-editor-read-only? buffer)
             (frame-message frame))))))
 
@@ -2265,11 +2273,19 @@
              (frame (*current-frame*)))
         (set-window-buffer! (frame-selected-window frame) buffer)
         (*current-buffer* buffer)
-        (dispatch-key-event frame (list (list 'meta #\Z)))
+        ;; The *event* for `M-Z', which is the symbol - a key that is not
+        ;; a character. (Measured: `(event-convert-list '(meta ?Z))' is
+        ;; `M-Z' in Emacs, and `(kbd "M-Z")' is a different key.)
+        (dispatch-key-event frame 'M-Z)
         (list (text-editor-read-only? buffer)
               (frame-message frame))))))
 
-(test-equal '(#f "; undefined key: (meta #\\Z)")
+;; The message is GNU Emacs's `undefined' command's (`subr.el:1297'):
+;; `(message "%s is undefined" (key-description ...))'. Measured in
+;; Emacs 31.1, `(format "%s is undefined" (key-description (vector 'M-Z)))'
+;; is `<M-Z> is undefined' - the angle brackets are the C's own rule for
+;; a symbol whose name is too short to hold a modifier prefix.
+(test-equal '(#f "<M-Z> is undefined")
   (press-m-Z))
 
 (test-end "schemacs_ncurses_editor_buffer_keymap")

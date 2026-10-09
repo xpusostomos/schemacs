@@ -20,7 +20,7 @@
     (scheme case-lambda)
     ;; `format' fills in `what-cursor-position''s message - Guile's,
     ;; which `(scheme base)' does not have.
-    (only (guile) format)
+    (only (guile) format logand)
     ;; `eval-region' reads the region with the runtime's reader and runs
     ;; it with the runtime's evaluator, as `eval-expression' does.
     (only (scheme read) read)
@@ -94,7 +94,9 @@
           eolp following-char forward-line insert line-beginning-position
           current-message line-end-position goto-char message point point-max
           preceding-char region-beginning region-end save-excursion)
-    (only (schemacs editor syntax) skip-chars-forward skip-chars-backward)
+    (only (schemacs editor syntax) skip-chars-forward skip-chars-backward
+          word-char? forward-word-position backward-word-position
+          word-run-end word-run-start)
     ;; `cmds.c`'s: `internal-self-insert', which is where overwrite mode
     ;; lives, and the command cluster that used to be written out here -
     ;; `self-insert-command' and its neighbours are that file's, and the
@@ -682,52 +684,6 @@ non-nil."
       ;;--------------------------------------------------------------
       (make-parameter #f))
 
-    (define (word-char? c)
-      ;; The word-constituent predicate, like mg's `inword`/ISWORD:
-      ;; alphanumeric characters (plus the underscore).
-      ;;--------------------------------------------------------------
-      (or (char-alphabetic? c) (char-numeric? c) (char=? c #\_)))
-
-    (define (%char-at ed index)
-      (text-editor-get-char-index ed index))
-
-    (define (%inword-at ed index)
-      ;; like mg's `inword`, over absolute character indices
-      (let ((c (%char-at ed index)))
-        (and c (word-char? c))))
-
-    (define (forward-word-position ed)
-      ;; Like mg's `forwword` (word.c:51): skip over non-word
-      ;; characters, then over word characters. Returns the *position*
-      ;; of the end of the next word - so `point-max' when there is no
-      ;; word left, and the end of the word otherwise.
-      ;;--------------------------------------------------------------
-      (let ((max (text-editor-point-max ed)))
-        (let loop ((i (text-editor-get-cursor ed)) (phase 'skip))
-          (cond
-           ((>= i max) max)
-           ((eq? phase 'skip)
-            (if (%inword-at ed i) (loop i 'word) (loop (+ i 1) 'skip)))
-           (else
-            (if (%inword-at ed i) (loop (+ i 1) 'word) i))))))
-
-    (define (backward-word-position ed)
-      ;; Like mg's `backword` (word.c:27): step back one character,
-      ;; skip back over non-word characters, then back over word
-      ;; characters, and step forward once, landing on the first
-      ;; character of the word.
-      ;;--------------------------------------------------------------
-      (let ((i0 (text-editor-get-cursor ed))
-            (min (text-editor-point-min ed)))
-        (if (<= i0 min) min
-            (let loop ((i (- i0 1)) (phase 'skip))
-              (cond
-               ((< i min) min)
-               ((eq? phase 'skip)
-                (if (%inword-at ed i) (loop i 'word) (loop (- i 1) 'skip)))
-               (else
-                (if (%inword-at ed i) (loop (- i 1) 'word) (+ i 1))))))))
-
     (define (kill-range ed start end forward?)
       ;; Kill (cut) the text between the character indices START and END
       ;; and return it. This is the shared middle of the commands that
@@ -773,32 +729,6 @@ non-nil."
           (text-editor-set-cursor
            (current-buffer) (backward-word-position (current-buffer)))
           (loop (+ 1 i)))))
-
-    (define (word-run-end ed count)
-      ;; The character index COUNT words forward of point, found the way
-      ;; mg's `delfword' (word.c:397) counts its `size' before deleting:
-      ;; walk the word motion, stopping when it stops advancing (the end
-      ;; of the buffer).
-      ;;--------------------------------------------------------------
-      (let loop ((i 0) (pos (text-editor-get-cursor ed)))
-        (if (>= i count)
-            pos
-            (begin
-              (text-editor-set-cursor ed pos)
-              (let ((next (forward-word-position ed)))
-                (if (= next pos) pos (loop (+ 1 i) next)))))))
-
-    (define (word-run-start ed count)
-      ;; The character index COUNT words back from point, the mirror of
-      ;; `word-run-end' and the way mg's `delbword' (word.c:453) counts.
-      ;;--------------------------------------------------------------
-      (let loop ((i 0) (pos (text-editor-get-cursor ed)))
-        (if (>= i count)
-            pos
-            (begin
-              (text-editor-set-cursor ed pos)
-              (let ((prev (backward-word-position ed)))
-                (if (= prev pos) prev (loop (+ 1 i) prev)))))))
 
     (define-command (kill-word count)
       ;; Like mg's `delfword` (word.c:397): kill from point to the end
@@ -1478,11 +1408,18 @@ non-nil."
       ;;--------------------------------------------------------------
       (let* ((state (frame-keymap-state (*current-frame*)))
              (ix (and state (km:modal-lookup-state-key-index state)))
-             (path (and ix (km:keymap-index->list ix)))
-             (last (and (pair? path) (car (reverse path)))))
-        (and (char? last)
-             (char-numeric? last)
-             (- (char->integer last) (char->integer #\0)))))
+             ;; The *events* the chord was, which is what Emacs's
+             ;; `this-single-command-keys' answers with. The reader used
+             ;; to be `keymap-index->list', this keymap's private spelling
+             ;; of a key - `(ctrl #\x)' - and the last element of that was
+             ;; a *character*; an event is an integer, so the C's own mask
+             ;; is what takes the character out of it.
+             (events (and ix (km:keymap-index->events ix)))
+             (last (and (pair? events) (car (reverse events))))
+             (char (and (integer? last) (logand last #o177))))
+        (and char
+             (<= (char->integer #\0) char (char->integer #\9))
+             (- char (char->integer #\0)))))
 
     (define-command (digit-argument uarg)
       ;; GNU Emacs's `digit-argument': a digit typed with Meta adds
@@ -2484,9 +2421,21 @@ non-nil."
                           (format #f "point=~a of ~a (EOB) column=~a~a"
                                   pos total col hscroll))
             (set-message! frame
+                          ;; **`~o' and `~x' are not Guile's**, which is
+                          ;; why the two numbers are rendered before the
+                          ;; format call: the message Emacs builds with
+                          ;; `#o%o' and `#x%x' (`simple.el') is the same
+                          ;; text, and Guile's own `format' - which the
+                          ;; whole tree uses - has no directive for
+                          ;; either. (The compiler said so: "unsupported
+                          ;; format option ~o, use (ice-9 format)
+                          ;; instead" - and `(ice-9 format)' is not this
+                          ;; tree's format.)
                           (format #f
-                                  "Char: ~a (~a, #o~o, #x~x) point=~a of ~a (~a%) column=~a~a"
-                                  shown code code code
+                                  "Char: ~a (~a, #o~a, #x~a) point=~a of ~a (~a%) column=~a~a"
+                                  shown code
+                                  (number->string code 8)
+                                  (number->string code 16)
                                   pos total percent col hscroll)))))
 
     (define-key *default-keymap* (kbd "C-x =")

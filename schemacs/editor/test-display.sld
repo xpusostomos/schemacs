@@ -24,11 +24,31 @@
   ;;   * `read-input-event' answers the events a test has *scripted*, in
   ;;     order, and `#f' when they run out - which is what a timed-out
   ;;     read answers, so a script that ends is a read that timed out;
-  ;;   * `key-event->key' answers the event unchanged. That is the
-  ;;     honest stub: naming a keycode is the *terminal's* table
-  ;;     (`term.sld's `function-key-names''), so a test that feeds an
-  ;;     ncurses keycode and asserts its name is testing the terminal and
-  ;;     belongs with the terminal, not here.
+  ;;   * `key-event->key' names a *keycode* only as far as the terminal
+  ;;     does the same thing to it, and no further. Naming a keycode is
+  ;;     the *terminal's* table (`term.sld's `function-key-names''), so a
+  ;;     test that feeds an ncurses keycode and asserts its name is
+  ;;     testing the terminal and belongs with the terminal, not here.
+  ;;
+  ;;     **But a character is not a keycode, and it is normalised to its
+  ;;     integer here** - the same clause the terminal has, for the same
+  ;;     reason. `make_lispy_event' for a terminal is `keyboard.c:8301':
+  ;;     "buf.kind = ASCII_KEYSTROKE_EVENT; buf.code = cbuf[i];" - *the
+  ;;     byte is the event*, and `term.sld' says so with
+  ;;     `((char? ev) (char->integer ev))'. Emacs has no character type
+  ;;     at all (`?a' *is* 97), so a test written in the Emacs idiom
+  ;;     feeds `(integer->char 21)' for `C-u' and `#\a' for `a', which is
+  ;;     exactly what the terminal's display is given by `getch'.
+  ;;
+  ;;     Leaving them as characters is not a stub that draws nowhere, it
+  ;;     is a stub that answers a value no display produces - and
+  ;;     `(schemacs keymap)''s `keymap-index' takes an *event*, so a
+  ;;     character falls through it to `#<unspecified>', which is true,
+  ;;     so the lookup proceeds and dies three frames away in
+  ;;     `=>keymap-layer-index!' with "key not a list or a
+  ;;     <KEYMAP-INDEX-TYPE>". That is what 111 of
+  ;;     `ncurses-editor-tests'' tests did the day this display replaced
+  ;;     the terminal one there.
   ;;
   ;; The selection generics are not implemented here: `dispnew.sld' gives
   ;; `<display>' defaults that answer nil, which is what a display with no
@@ -137,10 +157,13 @@
                    (car script)))))
 
     (define-method (key-event->key (d <test-display>) ev)
-      ;; An event is already a key as far as this display is concerned;
-      ;; see the header for why the terminal's table is not here.
+      ;; A character is a byte is an event, which is the terminal's first
+      ;; clause (`term.sld') and the C's `buf.code = cbuf[i]'; anything
+      ;; else the test fed is already the event the tests mean. See the
+      ;; header: the terminal's keycode *table* is deliberately not here,
+      ;; but this one step is not the table.
       ;;--------------------------------------------------------------
-      ev)
+      (if (char? ev) (char->integer ev) ev))
 
     (define %face-tokens (make-hash-table))
     (define %next-face-token 0)

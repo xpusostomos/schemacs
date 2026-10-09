@@ -56,13 +56,28 @@ SUITES = [
     'schemacs/ui/gtk/pgtk-tests.scm',
     'schemacs/editor/timer-tests.scm',
     'schemacs/editor/select-tests.scm',
-    ;; The terminal's own OSC 52 selection, which came out of
-    ;; `select-tests.scm' when the platform libraries moved under
-    ;; `schemacs/ui/': an editor test that asserts the terminal's
-    ;; behaviour belongs beside `xterm.sld'.
+    # The terminal's own OSC 52 selection, which came out of
+    # `select-tests.scm' when the platform libraries moved under
+    # `schemacs/ui/': an editor test that asserts the terminal's
+    # behaviour belongs beside `xterm.sld'.
+    #
+    # **These lines were `;;' until 2026-10-09** - Scheme comments pasted
+    # into a Python list, which is a SyntaxError at line 59. So this
+    # runner was dead from the "finish reorg" commit onward and *no*
+    # suite ran, whatever the handoff notes said. It failed at parse time
+    # with exit 1, which reads like a failing suite; the one thing this
+    # file must never be is the reason nobody noticed.
     'schemacs/ui/ncurses/xterm-tests.scm',
     'schemacs/editor/startup-tests.scm',
     'schemacs/apps/ncurses-editor-tests.scm',
+    # The two suites of the top-level libraries. **They are here for the
+    # first time**: both imported `(schemacs test)`, the eighteen-line
+    # SRFI-64 re-export shim the reorg deleted, so both died at load and
+    # neither was in this list - 187 tests that had not run since. They
+    # take `(srfi 64)` directly now, as every other suite in the tree
+    # already did.
+    'schemacs/keymap-tests.scm',
+    'schemacs/lens-tests.scm',
 ]
 
 

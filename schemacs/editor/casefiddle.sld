@@ -7,7 +7,7 @@
   ;;
   ;; The C works per character with the syntax table deciding what a
   ;; word is, and the capitalization asks each character's case
-  ;; category; here a word-constituent is `simple.sld''s `word-char?'
+  ;; category; here a word-constituent is `syntax.sld`'s `word-char?'
   ;; - alphanumerics and the underscore, which is what the default
   ;; syntax table's `\sw' comes to - and the case conversions are
   ;; `(scheme base)''s `char-upcase' and `char-downcase'. The
@@ -40,13 +40,18 @@
     ;; which is the conversion `casify-region''s positions go through.
     (only (schemacs editor editfns) point save-excursion
           region-beginning region-end)
-    (only (schemacs editor simple) word-char?)
+    ;; `WORD_CONSTITUENT', from its Emacs home: it was in `simple.sld`,
+    ;; which put `casefiddle.c` above `simple.el` and closed a cycle
+    ;; through `search.sld` and the coding layer. See `syntax.sld`.
+    (only (schemacs editor syntax) word-char?)
     (only (schemacs editor command) current-prefix-arg define-command
           uarg->integer)
     (only (schemacs editor buffer) current-buffer)
-    ;; `scan_words' is `syntax.c''s in the C; here the word motions of
-    ;; simple.sld stand for it, under `save-excursion'.
-    (only (schemacs editor simple) word-run-end word-run-start)
+    ;; `scan_words` is `syntax.c`'s - the word motions were reached
+    ;; through `simple.sld`, which put `casefiddle.c` above `simple.el`
+    ;; and closed a cycle through `search.sld` and the coding layer.
+    ;; They are in their Emacs home now; see `syntax.sld`.
+    (only (schemacs editor syntax) word-run-end word-run-start)
     (only (schemacs editor keymap) define-key *default-keymap*)
     (only (guile) format)
     )

@@ -32,7 +32,8 @@
     ;; basic type this keymap indexes by. They are `character.sld''s, the
     ;; lowest editor library - see its export note.
     (only (schemacs editor character)
-          event-modifiers event-basic-type
+          event-modifiers event-basic-type event-convert-list
+          apply-modifiers kbd
           char-alt char-super char-hyper char-shift char-ctl char-meta)
     (only (srfi 1) fold concatenate find)
     (only (schemacs string) string-fold)
@@ -40,7 +41,7 @@
     ;; `lognot' is the C's, and srfi 60's `(schemacs bitwise)' does
     ;; not re-export it - `(guile)' is where the rest of the tree takes
     ;; it from too (`character.sld' imports it the same way).
-    (only (guile) lognot)
+    (only (guile) lognot logand logior)
     (only (schemacs comparator)
           make-eq-comparator  make-eqv-comparator
           make-equal-comparator
@@ -77,15 +78,14 @@
    keymap-index-type?
    keymap-index
    keymap-index-append
-   keymap-index->list
-   string->keymap-index
+   keymap-index->events
    reverse-list->keymap-index
    keymap-index->ascii
    =>kbd! =>keymap-layer-index!
    keymap-index-to-char
    mod-index char-index next-index
+   modifier-bit
    ctrl-bit meta-bit super-bit hyper-bit alt-bit
-   modifier->integer
 
    keymap-layer-type?
    keymap-layer
@@ -113,6 +113,10 @@
    =>keymap-label!
    =>keymap-top-layer!
    keymap keymap-lookup
+   ;; `keymap.c''s two choke points - the only functions that touch a
+   ;; keymap in Emacs. Both take ONE EVENT; the key sequence is walked
+   ;; one event at a time and a keymap value is a prefix.
+   store-in-keymap access-keymap
    keymap->layers-list
    keymap-lookup-binding-key
 
@@ -411,23 +415,37 @@
         ;; -------------------------------------------------------------------------------------------------
 
     (define-record-type <keymap-index-type>
-      ;; This defines a data structure fore defining keymap indicies, that
-      ;; is, the sequence of printable characters (keys on a keyboard,
-      ;; with or without modifiers) that lead to an action. You must
-      ;; construct a ~<KEYMAP-INDEX>~ in order to lookup or update a
-      ;; ~<KEYMAP-LAYER>~.
+      ;; One position in a key sequence: the modifiers held while a key
+      ;; was pressed, and the key itself. `NEXTIX` is the rest of the
+      ;; sequence, which is what a *prefix* is here - Emacs puts a submap
+      ;; in the binding and reads the next event from the input, and this
+      ;; is the same thing held in one value.
+      ;;
+      ;; **The bits in `MODIX` are GNU Emacs's own** -
+      ;; `character.sld`'s `char-ctl`/`char-meta`/`char-shift`/`char-super`/
+      ;; `char-hyper`/`char-alt` (`lisp.h`'s `CHAR_*`) - so an index and
+      ;; an *event* speak the same language and
+      ;; `event-convert-list'/'event-modifiers' read and write both. The
+      ;; five private bits that stood here (`ctrl-bit #x01' and its four
+      ;; neighbours) were a layout of this library's own, and they are
+      ;; what `modifier->integer' and its name table existed to parse:
+      ;; a `ctrl' this tree invented, accepted by no Emacs file, in place
+      ;; of the `control' every Emacs file writes.
       (make<keymap-index> modix charix nextix)
       keymap-index-type?
-      (modix  mod-index) ; the modifiers (if any) key pressed while the printable character was pressed
-      (charix char-index) ; the printable character
-      (nextix next-index) ; the next item in the sequence
+      (modix  mod-index) ; the modifier bits held while the key was pressed
+      (charix char-index) ; the key: a character, or a string naming one
+      (nextix next-index) ; the rest of the key sequence, or #f
       )
 
-    (define ctrl-bit  #x01)
-    (define meta-bit  #x02)
-    (define super-bit #x04)
-    (define hyper-bit #x08)
-    (define alt-bit   #x10)
+    (define ctrl-bit char-ctl)
+    (define meta-bit char-meta)
+    (define super-bit char-super)
+    (define hyper-bit char-hyper)
+    (define alt-bit char-alt)
+    ;; ^ GNU Emacs's own bits, under the names this library has always
+    ;; used for them - so `mod-index' answers an *event's* modifier field
+    ;; and needs no translation to become one again.
 
     (define (ascii-modifier? mod)
       ;; #t if none of the super, hyper or alt-sc bits are present. This
@@ -488,56 +506,39 @@
     ;; There are a few `COND-EXPAND` statments here to take care of this
     ;; diversity of opinion.
 
-    (define (sym-lookup-hash-func sym len)
-      ;; The values of the `SYM-LOOKUP-TABLE` table never change, so I
-      ;; hand-crafted a perfect hash function for a table of 14 bins.
-      (modulo
-       (string-fold          ; the hash performs a sum over the characters
-        (lambda (c sum)
-          (+ (* 6 sum)        ; the 6 was the optimal value for this table
-             (- (char->integer c) ; offset character to #\A before summing
-                (char->integer #\A))))
-        0
-        (let ((key (symbol->string sym)))
-          ;; Cut the key to 6 characters -- the smallest number that
-          ;; cannot possibly match any strings in the table -- we want
-          ;; keys that are too long to always be rejected.
-          (substring key 0 (min 6 (string-length key)))))
-       len)
-      )
+    (define (modifier-bit sym)
+      ;; The bit GNU Emacs's `event-modifiers' (`subr.el:1825') names with
+      ;; SYM, or #f. **The names are Emacs's own** - `control', `meta',
+      ;; `shift', `super', `hyper', `alt' - which is exactly the list that
+      ;; function's docstring gives; there is no `ctrl' among them, and
+      ;; this tree used to have one of its own here.
+      ;;
+      ;; **`shift' deliberately answers #f**, as the table this replaces
+      ;; did: a shifted *character* carries its shift in its own case, and
+      ;; `keymap-index` takes the character below as the event spells it,
+      ;; so `X' and `x' stay two keys. A shifted *function* key (`S-up')
+      ;; therefore still cannot be told from the unshifted one, which is
+      ;; a gap this keymap has always had and which closing would change
+      ;; what every bound capital does.
+      ;;--------------------------------------------------------------
+      (cond ((eq? sym 'control) char-ctl)
+            ((eq? sym 'meta) char-meta)
+            ((eq? sym 'super) char-super)
+            ((eq? sym 'hyper) char-hyper)
+            ((eq? sym 'alt) char-alt)
+            (else #f)))
 
-    (define sym-lookup-table-alist
-      `((C       . ,ctrl-bit)
-        (ctrl    . ,ctrl-bit)
-        (control . ,ctrl-bit)
-        (M       . ,meta-bit)
-        (meta    . ,meta-bit)
-        ;; `S-' is *shift* in Emacs and `s-' is super (`keyboard.c':7390);
-        ;; this table had them the other way round. A shifted *character*
-        ;; needs no bit - its case carries the shift, and `event-basic-type'
-        ;; folds it in - but a shifted *function* key (`S-up') has no bit
-        ;; here to be told by, which is the gap this keymap has always had.
-        (s       . ,super-bit)
-        (super   . ,super-bit)
-        (H       . ,hyper-bit)
-        (hyper   . ,hyper-bit)
-        (A       . ,alt-bit)
-        (alt     . ,alt-bit)
-        ))
-
-    (define sym-lookup-table
-      (alist->hash-table sym-lookup-table-alist (make-eq-comparator))
-      )
-
-    (define (modifier->integer sym)
-      ;; Lookup an integer value for a modifier symbol, return #f if the
-      ;; symbol is not valid. Valid symbols are 'C, 'ctrl, 'M, 'meta,
-      ;; 'alt, 'S, 'super."
-      ;;------------------------------------------------------------------
-      (hash-table-ref/default sym-lookup-table sym #f))
+    ;; `modifier->integer' and its `sym-lookup-table' stood here: a table
+    ;; of the twelve ways this library spelled a modifier - `C', `ctrl',
+    ;; `control', `M', `meta', `s', `super', `H', `hyper', `A', `alt' -
+    ;; hand-hashed into fourteen bins. `ctrl' and `s'-for-super were this
+    ;; tree's own spellings, written by no Emacs file; the C's
+    ;; `parse_solitary_modifier' (`keyboard.c:7920') accepts `ctrl' as an
+    ;; alias but every `define-key' in Emacs writes `control'. The names
+    ;; are Emacs's now, and `modifier-bit' above is the whole of it.
 
     (define (keymap-index syms)
-      ;; Construct a ~<KEYMAP-INDEX>~ from a symbolic representation. An
+      ;; Construct a ~<KEYMAP-INDEX>~ from a symbolic representation.
       ;; index is a sequence of keyboard key elements. Each element must
       ;; be symbolized by a typeable and printable UTF character (such as
       ;; a letter or number) or a string representing a keyboard key (such
@@ -558,7 +559,13 @@
        ((vector? syms)
         (keymap-index (vector->list syms)))
        ((string? syms)
-        (keymap-index (string->keymap-index syms)))
+        ;; A *string*, which is what `(kbd "C-x C-c")' is written as and
+        ;; what `read-kbd-macro' reads. `kbd' (`character.sld:644') is
+        ;; Emacs's parser for it and answers a vector of events, so this
+        ;; is the same walk as the vector branch above. It replaces
+        ;; `string->keymap-index', this library's own parser, which was
+        ;; the *other* place that built `ctrland the rest' by hand.
+        (keymap-index (kbd syms)))
        ;; An Emacs *event*: an integer whose low bits are the character and
        ;; whose high bits are the modifiers, or a symbol for a key that is
        ;; not a character (`up', `f1'). It is one key, not a sequence, so it
@@ -583,6 +590,19 @@
        ;; never asks `event-basic-type' anything, and `(kbd "X")' is
        ;; `[88]' there, a key of its own beside `[120]'. Folding `X' onto
        ;; `x' meant a capital could not be inserted at all.
+       ((char? syms)
+        ;; **A bare character is the event its code point names.** GNU
+        ;; Emacs has no character type - `?a' *is* 97 - so a character
+        ;; here is one event and nothing else, and the event branch below
+        ;; is where it is decomposed. The nested-list branch further down
+        ;; has always accepted `'(#\a)'; this is the same key spelled
+        ;; without its list, and until it was here `(keymap-index #\a)'
+        ;; fell off the end of this `cond' and answered the *unspecified*
+        ;; value - which is **true in Scheme**, so the caller went on with
+        ;; it as if it were a key. Three frames away that surfaced as an
+        ;; `Argument 1 out of range' from `integer->char' on a nonsense
+        ;; event.
+        (keymap-index (char->integer syms)))
        ((or (integer? syms) (symbol? syms))
         (let ((base (event-basic-type syms)))
           (make<keymap-index>
@@ -591,7 +611,7 @@
                  mod
                  (loop (cdr mods)
                        (bitwise-ior mod
-                                    (or (modifier->integer (car mods)) 0)))))
+                                    (or (modifier-bit (car mods)) 0)))))
            (if (symbol? base)
                (symbol->string base)
                ;; The event's character: the modifier bits masked off,
@@ -612,94 +632,88 @@
                      (char-downcase (integer->char (bitwise-ior code 64)))
                      (integer->char code))))
            #f)))
-       ((pair? syms)
+       ;; **Anything that is not one of the above is not a key at all**,
+       ;; and the clause that says so is written as this `cond`'s final
+       ;; `else` because that is where a `cond`'s default belongs. Without
+       ;; it the `cond` fell off its own end and answered the *unspecified*
+       ;; value, which is **true in Scheme** - so a caller that asked for
+       ;; an index it could not get went on with something that was not
+       ;; one. That is how a character event reached `keymap-lookup` as "a
+       ;; key", and the failure surfaced three frames away as `Argument 1
+       ;; out of range` from `integer->char` on a nonsense event.
+       ;; **A key sequence: a list of *events*.** Each element is one
+       ;; key - an integer carrying its own modifier bits, a symbol
+       ;; naming a key that is not a character (`up', `f1'), or a
+       ;; character, which is the same thing as its code point. An
+       ;; element that is itself a list is Emacs's *Lucid event type
+       ;; list* - `(control ?x)', `(meta f10)', `(control meta ?0)' - and
+       ;; goes through `event-convert-list' (`keyboard.c:7832'), which is
+       ;; where Emacs consumes a modifier *name* and which is therefore
+       ;; the only place one may appear. `define-key' makes exactly this
+       ;; conversion before it touches a map (`Fdefine_key',
+       ;; `keymap.c:1156', guarded by `lucid_event_type_list_p'), and
+       ;; `Flookup_key' does the same (`:1264').
+       ;;
+       ;; It used to be the *modifier symbols themselves* that were the
+       ;; currency here - `(ctrl #\x)', `(ctrl meta #\@)' - accumulated
+       ;; into the index by a name table of this library's own. Emacs
+       ;; writes no such thing: `(kbd "C-x")' is `#(24)' and a Lucid
+       ;; element is the only list that means a key.
+       (else
+        (unless (pair? syms)
+          (error "keymap index must be composed of events" syms))
         ;; NOTE: the field accessors of <keymap-index-type> are
         ;; shadowed by the loop variables below, so aliases are bound
         ;; here, outside of the named let.
         ;;--------------------------------------------------------------
         (let* ((%keymod mod-index)
-               (%keychar char-index))
+               (%keychar char-index)
+               (one-event
+                (lambda (sym)
+                  (cond
+                   ;; An event already: an integer, a character (the same
+                   ;; thing), or a named key as a string.
+                   ((or (integer? sym) (char? sym) (string? sym)) sym)
+                   ;; A Lucid event type list - the one list that is a key.
+                   ((pair? sym) (event-convert-list sym))
+                   ((symbol? sym) sym)
+                   (else
+                    (error "keymap index must be composed of events" sym))))))
         (let loop
             ((mod-index 0)
              (syms syms))
           (cond
            ((null? syms) #f)
            (else
-            (let ((sym (car syms))
-                  (next (cdr syms)))
-              (cond
-               ((or (char? sym) (string? sym))
-                (make<keymap-index> mod-index sym (loop 0 next)))
-               ((pair? sym)
-                ;; A nested list is one key of the chord, written as
-                ;; its own list of modifiers and a terminating
-                ;; character, e.g. `(((ctrl #\x) (ctrl #\c)) . action)`
-                ;; for the Emacs chord C-x C-c. This form matches the
-                ;; key indexes accumulated by
-                ;; `MODAL-LOOKUP-STATE-STEP!` from real key events,
-                ;; which carry the modifier state of each key.
-                (let ((sub (keymap-index sym)))
-                  (make<keymap-index>
-                   (%keymod sub) (%keychar sub)
-                   (loop 0 next))))
-               ;; an *event* of the sequence: an integer is a character
-               ;; with its modifiers folded into it, and a symbol that
-               ;; names no modifier is a named key - `up`, `f1`. Both are
-               ;; one key, so each becomes one index, as the nested-list
-               ;; form above does.
-               ((integer? sym)
-                (let ((sub (keymap-index sym)))
-                  (make<keymap-index>
-                   (%keymod sub) (%keychar sub)
-                   (loop 0 next))))
-               ((symbol? sym)
-                (let ((mod (modifier->integer sym)))
-                  (cond
-                   (mod (loop (bitwise-ior mod mod-index) next))
-                   (else
-                    (let ((sub (keymap-index sym)))
-                      (make<keymap-index>
-                       (%keymod sub) (%keychar sub)
-                       (loop 0 next)))))))
-               (else
-                (error "keymap index must be composed of symbols or characters" sym)))))))))))
-
-    (define (string->keymap-index str)
-      ;; Emacs uses the ASCII protocol to represent control characters and
-      ;; non-control characters. It negates characters modulo 2^27 and
-      ;; sets the upper bits on these integers to represent Meta, Super,
-      ;; Hyper, and Alt modifiers.
-      ;;------------------------------------------------------------------
-      (let ((len (string-length str)))
-        (let loop ((i 0) (stack '()))
-          (cond
-           ((>= i len) (reverse stack))
-           (else
-            (let*((ch (string-ref str i))
-                  (ci (char->integer ch))
-                  )
-              (cond
-               ((= ci 0)
-                (loop (+ 1 i) (cons #\@ (cons 'ctrl stack))))
-               ((< ci #x20)
-                (loop (+ 1 i) (cons (integer->char (+ 96 ci)) (cons 'ctrl stack))))
-               ;;TODO: there are a lot more things here that could be
-               ;; decoded. For starters, the `STR` argument could be an
-               ;; unboxed integer vector with the Meta, Super, Hyper, or Alt
-               ;; bits set, none of that has been encoded here yet.
-               (else
-                (loop (+ 1 i) (cons ch stack))
-                ))))))))
-
-
-    (define *mod-bit-alist*
-      `((ctrl    . ,ctrl-bit)
-        (meta    . ,meta-bit)
-        (super   . ,super-bit)
-        (hyper   . ,hyper-bit)
-        (alt     . ,alt-bit)))
+            (let* ((sym (car syms))
+                   (event (one-event sym))
+                   (next (cdr syms)))
+              (if (or (integer? event) (char? event))
+                  (let ((sub (keymap-index event)))
+                    (make<keymap-index>
+                     (%keymod sub) (%keychar sub)
+                     (loop 0 next)))
+                  ;; **A named key is an *event*, so it goes back to
+                  ;; the event branch - not to the string branch.** The
+                  ;; string branch parses a `kbd' description, and
+                  ;; `(kbd "up")' answers the very vector this loop is
+                  ;; walking, so turning the symbol into a string here
+                  ;; recursed for ever: the editor hung before it drew
+                  ;; anything, with no error to see, because every
+                  ;; `define-key' in the tree runs through this at load.
+                  (let ((sub (keymap-index event)))
+                    (make<keymap-index>
+                     (%keymod sub) (%keychar sub)
+                     (loop 0 next))))))))))))
 
     (define (keymap-index-append . items)
+      ;; Join key sequences: the same walk `reverse-list->keymap-index`
+      ;; does, from the other end. **It was deleted by accident** in the
+      ;; pass that took the modifier vocabulary out - it sat between
+      ;; `*mod-bit-alist*' and `keymap-index->list', and the surgery
+      ;; removed the range - which showed up as "Unbound variable:
+      ;; keymap-index-append" the moment the editor suite ran.
+      ;;--------------------------------------------------------------
       (cond
        ((null? items) #f)
        (else
@@ -716,22 +730,52 @@
            (else
             (error "all arguments must be of <keymap-index-type>" head)))))))
 
-    (define (keymap-index->list km)
-      ;; Convert a ~<KEYMAP-INDEX>~ to a list of sequences. This is the best
-      ;; way to see a human-readable representation of a ~<KEYMAP-INDEX>~ value.
-      (if (not km) '()
-          (let ((modix (mod-index km)))
-            (let loop ((mod-bit-alist *mod-bit-alist*))
-              (cond
-               ((null? mod-bit-alist)
-                (cons (char-index km) (keymap-index->list (next-index km))))
-               (else
-                (let ((assoc (car mod-bit-alist)))
-                  (cond
-                   ((eqv? 0 (bitwise-and modix (cdr assoc)))
-                    (loop (cdr mod-bit-alist)))
-                   (else
-                    (cons (car assoc) (loop (cdr mod-bit-alist))))))))))))
+    (define (modifier-names modix)
+      ;; The modifier *names* a bit field holds, in Emacs's spelling -
+      ;; `control', `meta', `super', `hyper', `alt' - which is what
+      ;; `event-modifiers' answers with and what `event-convert-list'
+      ;; takes. The inverse of `modifier-bit' above, and the only other
+      ;; place a modifier name appears.
+      ;;--------------------------------------------------------------
+      (append (if (not (zero? (logand modix char-ctl))) '(control) '())
+              (if (not (zero? (logand modix char-meta))) '(meta) '())
+              (if (not (zero? (logand modix char-super))) '(super) '())
+              (if (not (zero? (logand modix char-hyper))) '(hyper) '())
+              (if (not (zero? (logand modix char-alt))) '(alt) '())))
+
+    (define (keymap-index->events km)
+      ;; The *events* of the key sequence KM stands for: an integer with
+      ;; its modifier bits, or a symbol naming a key that is not a
+      ;; character. This is Emacs's reader of a key - `(aref KEY i)' for
+      ;; a vector key - and what `key-description' renders.
+      ;;
+      ;; **The conversion is `event-convert-list', run backwards.** An
+      ;; index holds its modifiers as bits and its key as the letter the
+      ;; control range was unfolded to, so rebuilding the event means
+      ;; asking `event-convert-list' for `(control #\\x)' - which is the
+      ;; C's "Turn (control a) into C-a", and which is what turns the
+      ;; stored `#\\x' back into the event 24. Doing the bit arithmetic by
+      ;; hand here gave `char-ctl | 120', an event Emacs never makes for
+      ;; that key.
+      ;;
+      ;; It replaces `keymap-index->list', which answered
+      ;; `(ctrl #\\x)' - this library's private spelling, in which the
+      ;; modifier names were the *data*. There is no such reader in
+      ;; Emacs because there is no such spelling.
+      ;;--------------------------------------------------------------
+      (if (not km)
+          '()
+          (let ((modix (mod-index km))
+                (charix (char-index km)))
+            (cons (if (char? charix)
+                      (event-convert-list
+                       (append (modifier-names modix) (list charix)))
+                      ;; A string names a key that is not a character
+                      ;; (`up', `f1'); `apply-modifiers' is the C's
+                      ;; `apply_modifiers_uncached', which spells the
+                      ;; modifier prefixes into the name - `M-up'.
+                      (apply-modifiers modix (string->symbol charix)))
+                  (keymap-index->events (next-index km))))))
 
     (define (reverse-list->keymap-index nodes)
       (let loop
@@ -791,7 +835,7 @@
                  (on-fail)))
        ))
 
-    (define keymap-index->expr keymap-index->list)
+    (define keymap-index->expr keymap-index->events)
 
     ;; -------------------------------------------------------------------------------------------------
 
@@ -1302,6 +1346,71 @@
        '=>keymap-top-layer!
        ))
 
+
+    ;;------------------------------------------------------------------
+    ;; The two choke points - `keymap.c''s `store_in_keymap' and
+    ;; `access_keymap'
+    ;;
+    ;; Emacs writes EVERY binding through `store_in_keymap'
+    ;; (`keymap.c:730') - from `Fdefine_key' (`:1187'), from the autoload
+    ;; seeding (`:131') and from `:1448' - and reads every one through
+    ;; `access_keymap' -> `access_keymap_1' (`:491', `:327'). Nothing else
+    ;; in Emacs touches a keymap.
+    ;;
+    ;; **Both are keyed by ONE EVENT** - an integer carrying its modifier
+    ;; bits, or a symbol - and that is the point of them. Emacs reaches
+    ;; that state by normalising the key sequence one level up, in
+    ;; `Fdefine_key'/`Flookup_key' (`keymap.c:1156', `:1264'), where an
+    ;; element that is a list goes through `Fevent_convert_list'
+    ;; (`keyboard.c:7832') and comes back an event. This tree has the
+    ;; same conversion already - `(schemacs editor character)''s
+    ;; `event-convert-list', with `parse-solitary-modifier' beside it -
+    ;; so the two functions below are the *only* thing that was missing.
+    ;;
+    ;; A value that is itself a keymap is a *prefix*: `access_keymap_1'
+    ;; recurses into it, and a sequence is walked one event at a time.
+    ;; The tree expresses a prefix as a layer or keymap *value* (its
+    ;; `<keymap-index>''s `nextix' chain does the same job inside a single
+    ;; index, and goes when the callers have moved here).
+    ;;------------------------------------------------------------------
+
+    (define (store-in-keymap keymap event def)
+      ;; GNU Emacs's `store_in_keymap' (`keymap.c:730'): "Scan the keymap
+      ;; for a binding of IDX" and set it. The tree's layers are what
+      ;; Emacs spells as several maps with a parent between them, so the
+      ;; binding goes into the top layer - the one a lookup tries first,
+      ;; which is what makes a later definition shadow an earlier one.
+      ;;
+      ;; The C's two errors are kept: `keymap' is reserved for an
+      ;; embedded parent map, and a non-keymap is refused outright.
+      ;;--------------------------------------------------------------
+      (when (eq? event 'keymap)
+        (error "`keymap' is reserved for embedded parent maps"))
+      (unless (or (integer? event) (symbol? event) (char? event))
+        (error "store-in-keymap: not an event" event))
+      (update (lambda (layer)
+                (values
+                 (keymap-layer-update!
+                  prefer-new-bindings layer
+                  (list (cons (keymap-index event) def)))
+                 #f))
+              keymap =>keymap-top-layer!)
+      def)
+
+    (define (access-keymap keymap event)
+      ;; GNU Emacs's `access_keymap' (`keymap.c:491'): the binding of one
+      ;; EVENT in KEYMAP, or #f. A *keymap* answer means the event is a
+      ;; prefix; the caller reads the next event and calls this again on
+      ;; it, which is `Flookup_key''s walk (`keymap.c:1264').
+      ;;
+      ;; The parent walk inside `keymap-lookup' is
+      ;; `access_keymap_1''s inheritance arm (`:399'-`:416'), so this is
+      ;; one event of that walk with the layers and the parents both
+      ;; still honoured.
+      ;;--------------------------------------------------------------
+      (unless (or (integer? event) (symbol? event) (char? event))
+        (error "access-keymap: not an event" event))
+      (keymap-lookup keymap (keymap-index event)))
 
     (define (keymap-layer-lookup km key)
       ;; Take a KEY-PATH that has been constructed by the KEYMAP-INDEX

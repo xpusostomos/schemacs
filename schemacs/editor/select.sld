@@ -31,7 +31,27 @@
    (only (schemacs editor faces) *window-system*)
    (only (schemacs editor dispnew)
          current-display get-selection set-selection!
-         selection-owner? selection-exists?))
+         selection-owner? selection-exists?)
+   ;; The selection *converters* at the bottom of this file walk a
+   ;; string's characters and encode it - `xselect--encode-string' is
+   ;; `encode-coding-string' when TYPE names a coding system. Emacs has
+   ;; `coding.c' compiled in below this file, so nothing about the
+   ;; order is visible there; here it is an import.
+   ;;
+   ;; The base-name test in `xselect--encode-string' stands where the
+   ;; C's `:coding-type' does: this tree's coding systems carry no
+   ;; `:coding-type' field (see `coding.sld''s record), so "is this
+   ;; already a utf-8 coding system" is asked of the base *name*.
+   (only (schemacs editor coding)
+         encode-coding-string coding-system-base find-coding-system)
+   ;; `(only (guile) ...)': `string-split'/`string-join' for the NUL
+   ;; escaping, `ash'/`logand' for `xselect--int-to-cons',
+   ;; `list->u32vector' for the code points `encode-coding-string' takes.
+   (only (guile) ash logand string-split string-join list->u32vector)
+   ;; `u8-list->bytevector': the NUL escaping has to walk the *bytes*
+   ;; `encode-coding-string' answered with, which are a bytevector here
+   ;; where Emacs's are a unibyte string.
+   (only (rnrs bytevectors) u8-list->bytevector))
 
   (export
    select-enable-clipboard select-enable-primary
@@ -46,6 +66,17 @@
    *saved-region-selection* *x-select-request-type*
    *gui-last-cut-in-clipboard* *gui-last-cut-in-primary*
    x-get-clipboard
+   ;; The Lisp half of a read of our *own* selection: the target table
+   ;; `pgtk.sld''s `pgtk-get-local-selection' looks a requested target up
+   ;; in, and the coding system selection text is encoded with.
+   *selection-converter-alist* *selection-coding-system*
+   *next-selection-coding-system*
+   xselect--encode-string xselect--int-to-cons
+   xselect-convert-to-string xselect-convert-to-length
+   xselect-convert-to-targets xselect-convert-to-delete
+   xselect-convert-to-atom xselect-convert-to-integer
+   xselect-convert-to-identity xselect-convert-to-save-targets
+   xselect-convert-to-class xselect-convert-to-name
    )
 
   (begin
@@ -104,9 +135,34 @@
     ;; them, or nil - nil meaning the list
     ;; (UTF8_STRING COMPOUND_TEXT STRING text/plain;charset=utf-8),
     ;; which `gui--selection-value-internal' walks until one answers.
-    ;; The last member's name holds a `;', which Scheme reads as a
-    ;; comment - select.el writes it `text/plain\;charset=utf-8' and
-    ;; it is pipe-quoted here for the same reason.
+    ;; The last member's name holds a `;', which a reader reads as the
+    ;; start of a comment unless it is told otherwise. **Every Lisp
+    ;; spells this the same way and every reader spells the escape
+    ;; differently**, so the spelling is worth naming:
+    ;;
+    ;;   select.el   `text/plain\;charset=utf-8'   a backslash escapes it
+    ;;   R7RS        `|text/plain;charset=utf-8|'  pipe quoting
+    ;;   Guile       `#{text/plain;charset=utf-8}#' the reader's own form
+    ;;
+    ;; **Guile's reader has no backslash escape inside a symbol** -
+    ;; `'a\;b' is "unexpected end of input while searching for: )" in
+    ;; both of its readers (measured) - so Emacs's own spelling cannot be
+    ;; transcribed. It is written in `#{...}#' instead, which is Guile's
+    ;; answer to the same problem: it is exactly how Guile's printer
+    ;; writes this symbol, and it is the one spelling that reads under
+    ;; the default reader *and* under `--r7rs'. That matters more than it
+    ;; sounds - it was the only thing in the tree that made `--r7rs'
+    ;; compulsory, so `tools/syntax-check.scm' had to re-exec itself with
+    ;; it (`select.sld:17' in the pre-2026-10-09 tree).
+    ;;
+    ;; The *value* stays a symbol, as Emacs's is, for the reason the
+    ;; backend gives: `pgtk_get_selection_internal' does `CHECK_SYMBOL'
+    ;; on it, `symbol_to_gdk_atom' interns its NAME as a GDK atom, and
+    ;; `pgtk_get_local_selection' looks it up with `Fassq' in
+    ;; `selection-converter-alist' - an `eq?' lookup keyed by these
+    ;; symbols. A string answers none of those. `display-*''s tty method
+    ;; already leans on the shape one layer down: it compares against the
+    ;; symbol `STRING' and errors on anything else.
 
     ;;----------------------------------------------------------------
     ;; The backend face of the low level
@@ -258,7 +314,7 @@
                                     '(UTF8_STRING
                                       COMPOUND_TEXT
                                       STRING
-                                      |text/plain;charset=utf-8|))
+                                      #{text/plain;charset=utf-8}#))
                                 'STRING)))
           (let loop ((types (if (pair? request-type)
                                 request-type
@@ -433,5 +489,383 @@
       (or (string? data)
           (symbol? data)
           (integer? data)))
+
+    ;;----------------------------------------------------------------
+    ;; Converting our own selection to another target
+    ;;
+    ;; This is the Lisp half of a read - `selection-converter-alist' and
+    ;; the handlers on it. The C half is `pgtk_get_local_selection'
+    ;; (`pgtkselect.c:236', and `pgtk.sld' here), which looks the
+    ;; requested target up in *this table* with `Fassq' - an `eq?' lookup
+    ;; keyed by the target *symbol* - and calls the handler with
+    ;;
+    ;;     (SELECTION TYPE VALUE)
+    ;;
+    ;; where TYPE is **nil**, because the request is local: the C passes
+    ;; `(local_request ? Qnil : target_type)'. That nil is what makes a
+    ;; local read cheap - `xselect--encode-string' answers the string as
+    ;; it stands and no coding system is involved at all.
+    ;;
+    ;; Emacs declares the variable in the C - `DEFVAR_LISP
+    ;; (\"selection-converter-alist\", ..., Qnil)' at `pgtkselect.c:1915'
+    ;; - and fills it here, with one `setq' at the end of this file
+    ;; (`select.el:903'). The same shape: the table is built at the
+    ;; bottom of this library, once the handlers are defined.
+    ;;
+    ;; **Which handlers are not here, and why** - each is a leaf whose
+    ;; *input* is what is missing, and all of one kind are missing for
+    ;; one reason:
+    ;;
+    ;;   * `xselect--selection-bounds' (`select.el:552') and the four
+    ;;     converters that exist to walk it - `-to-filename',
+    ;;     `-to-charpos', `-to-lineno', `-to-colno' - and the non-string
+    ;;     arm of `-to-string'. They convert a selection whose VALUE is a
+    ;;     buffer, a cons of two markers or an overlay, and
+    ;;     `gui--valid-simple-selection-p' above admits only a string, a
+    ;;     symbol and an integer - it has to, because the backend here
+    ;;     hands Gtk the *text* (`set-selection!') and Gtk answers
+    ;;     foreign requests with it, so a value that is not text has
+    ;;     nowhere to live. Widening that predicate is the one change
+    ;;     that lights all five up, and it needs a backend that can hold
+    ;;     a non-text selection.
+    ;;   * `-to-os', `-to-host', `-to-user', which answer
+    ;;     `(symbol-name system-type)', `(system-name)' and
+    ;;     `(user-full-name)'. None of those three variables exists in
+    ;;     this tree: their Emacs homes are `emacs.c' (no `emacs.sld'
+    ;;     here), `sysdep.c' (no `sysdep.sld') and `editfns.c'. Four
+    ;;     one-line primitives, and three legacy ICCCM targets that no
+    ;;     program this editor talks to asks for - left rather than
+    ;;     given a home in a pass about the read path.
+    ;;   * the eleven `XdndSelection' entries (`text/uri-list', `FILE',
+    ;;     `_DT_NETFILE', the two `XmTRANSFER_*', `text/x-xdnd-username')
+    ;;     and the four "available-p" predicates that guard them. Every
+    ;;     one of them opens `(eq selection 'XdndSelection)' and there is
+    ;;     no drag-and-drop here (`x-dnd.el' is not ported, and
+    ;;     `pgtk_register_dnd_targets' with it).
+    ;;   * `ATOM' and `INTEGER' *are* here - `-to-atom' and
+    ;;     `-to-integer'; `SAVE_TARGETS' and `_EMACS_INTERNAL' are here -
+    ;;     `-to-save-targets' and `-to-identity'.
+    ;;------------------------------------------------------------------
+
+    (define *selection-coding-system* (make-parameter #f))
+    ;; ^ `selection-coding-system' (`select.el:42'): "Coding system for
+    ;; communicating with other programs." The workspace's whole default
+    ;; is nil - Emacs's is too, on X - and its only effect here is on
+    ;; `xselect--encode-string''s choice for a *foreign* request, which
+    ;; this tree does not answer (Gtk does). Named, not used.
+    ;;
+    ;; Emacs's `:set' also runs `set-selection-coding-system', which
+    ;; resolves the value through `coding-system-base' and warns about a
+    ;; name that is not one; a parameter has no setter hook here, so the
+    ;; base is taken at use time instead (`xselect--encode-string').
+
+    (define *next-selection-coding-system* (make-parameter #f))
+    ;; ^ `next-selection-coding-system' (`select.el:82'): "Coding system
+    ;; for the next communication with other programs... After the
+    ;; communication, this variable is set to nil." Read first and
+    ;; cleared by `gui-get-selection', which is the write half of the
+    ;; read that is ported.
+
+    (define (xselect--int-to-cons n)
+      ;; GNU Emacs's `xselect--int-to-cons' (`select.el:576'): a number
+      ;; as the `(HIGH . LOW)' pair the X protocol carries a 32-bit value
+      ;; in - two 16-bit halves.
+      ;;--------------------------------------------------------------
+      (cons (ash n -16) (logand n 65535)))
+
+    (define (xselect--encode-string type str can-modify prefer-string-to-c-string)
+      ;; GNU Emacs's `xselect--encode-string' (`select.el:579'): the
+      ;; string a *foreign* request for target TYPE is answered with, as
+      ;; `(TYPE . BYTES)'.
+      ;;
+      ;; **The first thing it does is the whole of the local path**: a
+      ;; nil TYPE means the request came from this process - the C's
+      ;; `(local_request ? Qnil : target_type)' - and then STR is
+      ;; answered as it stands, with no encoding at all. Every call this
+      ;; tree can make today arrives here, because the backend hands Gtk
+      ;; the text and never asks a converter on another program's behalf.
+      ;;
+      ;; The rest is Emacs's: `TEXT' is *polymorphic* - the encoding is
+      ;; chosen from the string's own characters, UTF8_STRING for
+      ;; anything past Latin-1, C_STRING for an eight-bit byte - and each
+      ;; other type names its coding system. The final `\\0' escaping is
+      ;; Emacs's too ("Most programs are unable to handle NUL bytes in
+      ;; strings").
+      ;;
+      ;; Three substitutions this tree's data model forces, all of them
+      ;; the coding layer's known shape rather than this file's:
+      ;;
+      ;;   * `multibyte-string-p' is always true here (`mule.sld' says
+      ;;     why: every buffer is multibyte), so Emacs's
+      ;;     `(not (multibyte-string-p str))' branch - "a unibyte string
+      ;;     is C_STRING" - never fires.
+      ;;   * the answer is a *bytevector* where Emacs's is a unibyte
+      ;;     string; see `encode-coding-string' in `coding.sld'. The
+      ;;     `\\0' escaping therefore walks bytes, below.
+      ;;   * Emacs's compatibility tests ask `(coding-system-type
+      ;;     coding)'; this tree's coding systems carry no `:coding-type'
+      ;;     field, so the same question is asked of the base *name*.
+      ;;     `selection-coding-system' is nil and nothing sets it, so no
+      ;;     test fires today.
+      ;;
+      ;; The coding system names are Emacs's, and one of them -
+      ;; `compound-text-with-extensions' - is not carried here (there is
+      ;; no ISO-2022 in this tree), so a COMPOUND_TEXT conversion of our
+      ;; own selection signals "Unknown coding system", which is what
+      ;; Emacs does with a coding system it does not have.
+      ;;--------------------------------------------------------------
+      (if (not str)
+          #f
+          (if (not type)
+              str
+              (let* ((coding (or (*next-selection-coding-system*)
+                                 (*selection-coding-system*)))
+                     (coding (if coding (coding-system-base coding) #f)))
+                ;; "Suppress producing escape sequences for
+                ;; compositions" - there are no compositions here, so
+                ;; Emacs's `remove-text-properties' after that line is
+                ;; the same string; `can-modify' and the `substring' it
+                ;; guards are about *mutating* the caller's string, which
+                ;; a Scheme string makes unnecessary.
+                (when (eq? type 'TEXT)
+                  (set! type (xselect--text-target str #f)))
+                (let ((bytes
+                       (cond
+                        ((or (eq? type 'UTF8_STRING)
+                             (eq? type '#{text/plain;charset=utf-8}#))
+                         (unless (and coding (eq? coding 'utf-8))
+                           (set! coding 'utf-8))
+                         (encode-coding-string (xselect--code-points str) coding))
+                        ((eq? type 'STRING)
+                         (unless coding (set! coding 'iso-latin-1))
+                         (encode-coding-string (xselect--code-points str) coding))
+                        ((eq? type 'text/plain)
+                         (unless coding (set! coding 'us-ascii))
+                         (encode-coding-string (xselect--code-points str) coding))
+                        ((eq? type 'COMPOUND_TEXT)
+                         (unless coding
+                           (set! coding 'compound-text-with-extensions))
+                         (encode-coding-string (xselect--code-points str) coding))
+                        ((eq? type 'C_STRING)
+                         ;; "a zero-terminated sequence of raw bytes that
+                         ;; shouldn't be interpreted as text in any
+                         ;; encoding" - the eight-bit characters are
+                         ;; written out as their single bytes and
+                         ;; nothing else is touched.
+                         (encode-coding-string (xselect--code-points str)
+                                               'raw-text-unix))
+                        (else
+                         (error (string-append "Unknown selection type: "
+                                               (symbol->string type)))))))
+                  (*next-selection-coding-system* #f)
+                  (cons (if (and prefer-string-to-c-string (eq? type 'C_STRING))
+                            'STRING
+                            type)
+                        (xselect--escape-nuls bytes)))))))
+
+    (define (xselect--code-points str)
+      ;; A Scheme string as the tree's code points, which is what
+      ;; `encode-coding-string' takes: its `string' argument is "the
+      ;; buffer's characters" and in this tree those are a `u32vector'
+      ;; (`coding.sld''s note says why they cannot be a Scheme string).
+      ;; It is the string-to-code-points direction of
+      ;; `buffer-text-substring'.
+      ;;--------------------------------------------------------------
+      (list->u32vector (map char->integer (string->list str))))
+
+    (define (xselect--escape-nuls str)
+      ;; Emacs's `(string-replace \"\\0\" \"\\\\0\" str)' - "Most programs
+      ;; are unable to handle NUL bytes in strings" (`select.el:672').
+      ;;
+      ;; STR is a *string* when `xselect--encode-string' returned it as it
+      ;; stood (the local path) and the encoded *bytes* when it did not,
+      ;; so this walks either. `\\\\0' is the two characters backslash and
+      ;; `0', which is what the replacement is.
+      ;;--------------------------------------------------------------
+      (if (string? str)
+          (string-join (string-split str (integer->char 0)) "\\0")
+          (let ((n (bytevector-length str)))
+            (let loop ((i 0) (out '()))
+              (if (= i n)
+                  (u8-list->bytevector (reverse out))
+                  (if (= 0 (bytevector-u8-ref str i))
+                      ;; push the `0' before the backslash: OUT is built
+                      ;; backwards and reversed at the end
+                      (loop (+ i 1) (cons 48 (cons 92 out)))
+                      (loop (+ i 1) (cons (bytevector-u8-ref str i) out))))))))
+
+    (define (xselect--text-target str coding)
+      ;; The type `TEXT' stands for, chosen from STR's own characters -
+      ;; `xselect--encode-string''s `(when (eq type 'TEXT) ...)'.
+      ;;
+      ;; Emacs walks the characters with `mapc' and three flags: one
+      ;; character at or above #x100 that is *under* #x110000 makes it
+      ;; UTF8_STRING, one at or above #x110000 but under #x3FFF80 makes
+      ;; it COMPOUND_TEXT, and one at or above #x3FFF80 - an eight-bit
+      ;; byte, `character.sld''s representation - makes it C_STRING. A
+      ;; string with nothing above #x100 stays STRING, which is Latin-1.
+      ;; The flags are sticky: one of each anywhere in the string is
+      ;; enough, because the whole string is answered in one type.
+      ;;
+      ;; The `coding' argument is Emacs's one extra: with a coding
+      ;; system given *and* its `:mime-charset' equal to `x-ctext',
+      ;; COMPOUND_TEXT is preferred over UTF8_STRING. This tree has no
+      ;; `:mime-charset' and no x-ctext, so that arm cannot fire and is
+      ;; not written - named here rather than left to look like an
+      ;; oversight.
+      ;;--------------------------------------------------------------
+      (let loop ((rest (string->list str))
+                 (non-latin-1 #f) (non-unicode #f) (eight-bit #f))
+        (cond ((null? rest)
+               (cond ((or non-unicode (and non-latin-1 coding)) 'COMPOUND_TEXT)
+                     (non-latin-1 'UTF8_STRING)
+                     (eight-bit 'C_STRING)
+                     (else 'STRING)))
+              (else
+               (let ((code (char->integer (car rest))))
+                 (when (>= code #x100)
+                   (cond ((< code #x110000) (set! non-latin-1 #t))
+                         ((< code #x3FFF80) (set! non-unicode #t))
+                         (else (set! eight-bit #t)))))
+               (loop (cdr rest) non-latin-1 non-unicode eight-bit)))))
+
+    (define (xselect-convert-to-string selection type value)
+      ;; GNU Emacs's `xselect-convert-to-string' (`select.el:648'): the
+      ;; text targets - `TEXT', `STRING', `UTF8_STRING', `COMPOUND_TEXT',
+      ;; `text/plain' and `text/plain;charset=utf-8' all come here.
+      ;;
+      ;; Emacs's other arm takes a buffer, a cons of two markers or an
+      ;; overlay and takes the text between its bounds; see the note on
+      ;; this file's converter table for why that arm is not here.
+      ;;--------------------------------------------------------------
+      (let ((str (and (string? value) value)))
+        (and str (xselect--encode-string type str #t #f))))
+
+    (define (xselect-convert-to-length selection type value)
+      ;; GNU Emacs's `xselect-convert-to-length' (`select.el:657'): how
+      ;; long the selection is, as the `(HIGH . LOW)' pair the protocol
+      ;; carries a 32-bit number in.
+      ;;--------------------------------------------------------------
+      (let ((len (and (string? value) (string-length value))))
+        (and len (xselect--int-to-cons len))))
+
+    (define (xselect-convert-to-targets selection type value)
+      ;; GNU Emacs's `xselect-convert-to-targets' (`select.el:673'):
+      ;; "Return a vector of atoms, but remove duplicates first."
+      ;;
+      ;; Every entry of the converter table is asked whether it can
+      ;; answer for this selection and value, and the ones that say no
+      ;; become the marker `_EMACS_INTERNAL', which is removed - so the
+      ;; vector is exactly the targets worth asking for. TIMESTAMP and
+      ;; MULTIPLE are at the front because they are not converters:
+      ;; TIMESTAMP is the C's special case and MULTIPLE is the C's, and
+      ;; `pgtk_get_selection_internal' errors on MULTIPLE ("Retrieving
+      ;; MULTIPLE selections is currently unimplemented") - Emacs
+      ;; advertises it anyway.
+      ;;
+      ;; An entry's cdr is either a handler or the `(PREDICATE . HANDLER)'
+      ;; pair a DnD target needs; only the first kind is in the table
+      ;; here, so the predicate half is not walked - named in the note
+      ;; above. Emacs's test is `(consp (cdr conv))': "is the cdr a
+      ;; cons", because a handler there is a *symbol* or such a pair.
+      ;; Handlers here are procedures, so the same question is `pair?'.
+      ;;
+      ;; `delete-dups' keeps the *first* of a run of duplicates; SRFI-1's
+      ;; `delete-duplicates' keeps the last, so this is written out.
+      ;;--------------------------------------------------------------
+      (let ((names
+             (let loop ((rest (*selection-converter-alist*)) (acc '()))
+               (cond ((null? rest) (reverse acc))
+                     ((pair? (cdr (car rest))) (loop (cdr rest) acc))
+                     (else (loop (cdr rest) (cons (car (car rest)) acc)))))))
+        (let dedup ((rest (append '(TIMESTAMP MULTIPLE) names))
+                    (seen '())
+                    (acc '()))
+          (cond ((null? rest) (list->vector (reverse acc)))
+                ((memq (car rest) seen) (dedup (cdr rest) seen acc))
+                (else (dedup (cdr rest)
+                             (cons (car rest) seen)
+                             (cons (car rest) acc)))))))
+
+    (define (xselect-convert-to-delete selection type value)
+      ;; GNU Emacs's `xselect-convert-to-delete' (`select.el:721'): "A
+      ;; return value of nil means that we do not know how to do this
+      ;; conversion, and replies with an error. A return value of NULL
+      ;; means that we have done the conversion (and any side-effects)
+      ;; but have no value to return."
+      ;;
+      ;; So this one *acts*: it gives the selection up and answers NULL.
+      ;;--------------------------------------------------------------
+      (gui-backend-set-selection selection #f)
+      'NULL)
+
+    (define (xselect-convert-to-atom selection type value)
+      ;; `xselect-convert-to-atom' (`select.el:824'): a symbol answers
+      ;; itself, anything else cannot be converted.
+      ;;--------------------------------------------------------------
+      (and (symbol? value) value))
+
+    (define (xselect-convert-to-integer selection type value)
+      ;; `xselect-convert-to-integer' (`select.el:820').
+      ;;--------------------------------------------------------------
+      (and (integer? value) (xselect--int-to-cons value)))
+
+    (define (xselect-convert-to-identity selection type value)
+      ;; `xselect-convert-to-identity' (`select.el:826'), "used
+      ;; internally": the value as a one-element vector, which is how the
+      ;; C's own round trip through `clean_local_selection_data' - it
+      ;; answers a vector's single element - comes back unchanged.
+      ;;--------------------------------------------------------------
+      (vector value))
+
+    (define (xselect-convert-to-save-targets selection type value)
+      ;; `xselect-convert-to-save-targets' (`select.el:829'): "Null
+      ;; target that tells clipboard managers we support SAVE_TARGETS
+      ;; (see freedesktop.org Clipboard Manager spec)."
+      ;;--------------------------------------------------------------
+      (and (eq? selection 'CLIPBOARD) 'NULL))
+
+    (define (xselect-convert-to-class selection type value)
+      ;; `xselect-convert-to-class' (`select.el:802'): "This function
+      ;; returns the string \"Emacs\"." The name is this tree's own,
+      ;; which is the one departure - `xselect-convert-to-name' is
+      ;; Emacs's "emacs" and is *deliberately* not `(downcase ...)' of
+      ;; this, because "We do not try to determine the name Emacs was
+      ;; invoked with".
+      ;;--------------------------------------------------------------
+      "Schemacs")
+
+    (define (xselect-convert-to-name selection type value)
+      ;; `xselect-convert-to-name' (`select.el:813').
+      ;;--------------------------------------------------------------
+      "schemacs")
+
+    (define *selection-converter-alist* (make-parameter '()))
+    ;; ^ The table itself, built once the handlers above exist - Emacs's
+    ;; `setq' at the end of `select.el', in Scheme.
+    ;;
+    ;; The keys are target *symbols* and the values are the handlers,
+    ;; because that is the shape the C reads: `pgtk_get_local_selection'
+    ;; does `(CDR (ASSQ target_type Vselection_converter_alist))' and
+    ;; only unwraps a `(PREDICATE . HANDLER)' cons, which none of these
+    ;; is. `TIMESTAMP' is absent on purpose: it is the C's special case
+    ;; and never reaches a converter.
+
+    (*selection-converter-alist*
+     (list (cons 'TEXT xselect-convert-to-string)
+           (cons 'COMPOUND_TEXT xselect-convert-to-string)
+           (cons 'STRING xselect-convert-to-string)
+           (cons 'UTF8_STRING xselect-convert-to-string)
+           (cons 'text/plain xselect-convert-to-string)
+           (cons '#{text/plain;charset=utf-8}# xselect-convert-to-string)
+           (cons 'TARGETS xselect-convert-to-targets)
+           (cons 'LENGTH xselect-convert-to-length)
+           (cons 'DELETE xselect-convert-to-delete)
+           (cons 'ATOM xselect-convert-to-atom)
+           (cons 'INTEGER xselect-convert-to-integer)
+           (cons 'SAVE_TARGETS xselect-convert-to-save-targets)
+           (cons 'CLASS xselect-convert-to-class)
+           (cons 'NAME xselect-convert-to-name)
+           (cons '_EMACS_INTERNAL xselect-convert-to-identity)))
 
     ))

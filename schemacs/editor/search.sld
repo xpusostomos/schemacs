@@ -79,7 +79,7 @@
     (only (schemacs editor editfns)
           bobp buffer-substring delete-region eobp goto-char insert
           point point-min point-max save-excursion)
-    (only (schemacs editor simple) word-char?)
+    (only (schemacs editor syntax) word-char?)
     ;; The case transfer of `replace-match' casifies the replacement
     ;; with the string case functions.
     (only (schemacs editor casefiddle)
