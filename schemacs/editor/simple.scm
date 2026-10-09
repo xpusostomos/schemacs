@@ -1397,43 +1397,33 @@ non-nil."
           (when description
             (set!frame-message (*current-frame*) description)))))
 
-    (define (last-command-event-digit)
-      ;; The digit the key that reached this command spelled, or #f.
-      ;; GNU Emacs's `digit-argument' reads it from
-      ;; `last-command-event', masking the modifier bits off with
-      ;; `(logand char ?\177)'. The key is re-derived here from the
-      ;; frame's keymap lookup state, the way `self-insert-command'
-      ;; re-derives its character - and the modifier bits are the
-      ;; other elements of the chord, so nothing has to be masked.
-      ;;--------------------------------------------------------------
-      (let* ((state (frame-keymap-state (*current-frame*)))
-             ;; The *events* the chord was, which is what Emacs's
-             ;; `this-single-command-keys' answers with and what
-             ;; `modal-lookup-state-key-index' reads back. The reader
-             ;; used to be `keymap-index->list', this keymap's private
-             ;; spelling of a key, and the last element of that was a
-             ;; *character*; an event is an integer, so the C's own mask
-             ;; is what takes the character out of it.
-             (events (and state (km:modal-lookup-state-key-index state)))
-             (last (and (pair? events) (car (reverse events))))
-             (char (and (integer? last) (logand last #o177))))
-        (and char
-             (<= (char->integer #\0) char (char->integer #\9))
-             (- char (char->integer #\0)))))
-
     (define-command (digit-argument uarg)
-      ;; GNU Emacs's `digit-argument': a digit typed with Meta adds
-      ;; itself to the numeric argument for the next command.
-      ;; `M-3 M-5 C-n' moves down thirty-five lines.
+      ;; GNU Emacs's `digit-argument' (`simple.el:5596'): a digit typed
+      ;; with Meta adds itself to the numeric argument for the next
+      ;; command. `M-3 M-5 C-n' moves down thirty-five lines.
       ;;
       ;; It is a command and not part of `UPDATE-PREFIX!', because in
       ;; Emacs it is one: `esc-map' binds M-0 to M-9 to it, which is why
       ;; M-6 is not an undefined key there. What it receives is the raw
       ;; prefix argument, since `M-3 M-5' has to build on `M-3' rather
       ;; than start again.
-      "Add the digit of this key to the numeric argument for the next command."
+      ;;
+      ;; **The digit comes from `last-command-event'**, as Emacs's does -
+      ;; `(logand char ?\177)' is what takes it out of an event that also
+      ;; carries the meta bit (M-3 arrives as 3 | `char-meta'). The tree
+      ;; used to re-derive it from the frame's keymap lookup state, which
+      ;; is what `self-insert-command' did too; one variable fixes both.
+      ;;
+      ;; Not carried: Emacs's `(get last-command-event 'ascii-character)'
+      ;; fallback for an event that is a symbol rather than an integer -
+      ;; the M-digit keys are plain integers, and nothing here puts that
+      ;; property on an event symbol.
+      "Part of the numeric argument for the next command.
+\\[universal-argument] following digits or minus sign ends the argument."
       (interactive "P")
-         (let ((digit (or (last-command-event-digit) 0)))
+         (let* ((event (*last-command-event*))
+                ;; `(logand char ?\177)' - `?0' is 48.
+                (digit (- (logand (if (integer? event) event 0) #o177) 48)))
            ;; digits replace a C-u count rather than multiplying it, as
            ;; Emacs's `universal-argument' does with `M-6' after `C-u'
            (*prefix-cu* #f)
@@ -2451,11 +2441,28 @@ non-nil."
       what-cursor-position)
 
     (define self-insert-layer
-      ;; Catch all printable characters and bind them to
-      ;; `self-insert-command`: the global map's fallback layer, reached
-      ;; when no layer above it matched. It is here because the command it
-      ;; names is here - which is the reason the bindings live with their
-      ;; commands at all.
+      ;; Make every printing character self-insert: the global map's
+      ;; fallback layer, reached when no layer above it matched. It is here
+      ;; because the command it names is here - which is the reason the
+      ;; bindings live with their commands at all.
+      ;;
+      ;; **Emacs says this in two places, and neither is a layer**: the
+      ;; loop over 32..126 in `subr.el:1763' (which also binds it to C-i,
+      ;; shadowed later by `indent-for-tab-command'), and
+      ;; `international/mule-conf.el:1671''s
+      ;;
+      ;;   (set-char-table-range (nth 1 global-map)
+      ;;                         (cons 128 (max-char))
+      ;;                         'self-insert-command)
+      ;;
+      ;; - every character from 128 up. Measured in Emacs 31.1: 32..126
+      ;; and everything from 128 are `self-insert-command', 127 is
+      ;; `delete-backward-char', 9 is `indent-for-tab-command', and a
+      ;; *modified* event like `M-x' is unbound, because a char-table
+      ;; cannot even be indexed by one. A range entry is the one thing this
+      ;; tree's keymap cannot hold, so the two ranges are one predicate
+      ;; layer; `(schemacs keymap)''s `new-self-insert-keymap-layer' is
+      ;; that predicate.
       ;;--------------------------------------------------------------
       (km:new-self-insert-keymap-layer
        #f

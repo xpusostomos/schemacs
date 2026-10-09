@@ -93,7 +93,7 @@
           ;; event's *position* is - `read-key-event' answers only the key
           *last-read-event*)
     (only (schemacs editor command)
-          *this-event* current-prefix-arg define-command))
+          *last-command-event* current-prefix-arg define-command))
 
   (export posn-set-point mouse-set-point mouse-drag-region mouse-drag-track
           mouse-set-region mouse-start-end mouse--drag-set-mark-and-point
@@ -149,7 +149,7 @@ This should be bound to a mouse click event type.
 If PROMOTE-TO-REGION is non-nil and event is a multiple-click, select
 the corresponding element around point, with the resulting position of
 point determined by `mouse-select-region-move-to-beginning'."
-      (interactive (list (*this-event*) (current-prefix-arg)))
+      (interactive (list (*last-command-event*) (current-prefix-arg)))
       ;; Emacs's body is
       ;;
       ;;   (and promote-to-region (> (event-click-count event) 1))

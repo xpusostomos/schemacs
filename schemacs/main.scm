@@ -8,10 +8,11 @@
 ;;     se --repl[=PORT]              be a REPL for another editor's
 ;;     se --remote[=PORT] FILE...    open files in another editor
 ;;
-;; `se' is the launcher - it puts the tree, and the built guile-cairo,
-;; on the load path and loads this file. Like `main-gtk.scm' and
-;; `main-ncurses.scm' this is a *program* and not a library: it does its
-;; work as it is loaded rather than exporting a function.
+;; `se' (in `bin/') is the launcher - it puts the tree, or an installed
+;; copy's own site directory, on the load path and loads this file. Like
+;; `main-gtk.scm' and `main-ncurses.scm' this is a *program* and not a
+;; library: it does its work as it is loaded rather than exporting a
+;; function.
 ;;
 ;; The options are read with **SRFI 37**, `(srfi srfi-37)`: `args-fold`
 ;; folds over the command line, and each option's procedure answers the
@@ -29,21 +30,32 @@
 ;; resolved at the moment it is chosen, which is what keeps a terminal
 ;; editor from needing the Gtk stack and the windowed one from needing
 ;; ncurses - the reason this is one entry point rather than two.
-(import ;; `error' and `raise' come from `(guile)' here, and importing
-        ;; `(scheme base)' on top of them makes Guile warn that it
-        ;; "overrides core binding" - this file is loaded into
-        ;; `(guile-user)', where those are already bound.
-        (except (scheme base) error raise)
+(import ;; **Nothing is imported from `(scheme base)' or `(scheme write)'**,
+        ;; and that is the fix for a warning rather than a style choice.
+        ;; This file is loaded into `(guile-user)', whose parent module is
+        ;; `(guile)' and which therefore already has every one of them -
+        ;; `list', `apply', `string-append', `assq', `display', `newline'
+        ;; and the rest. Importing `(scheme base)' on top of them makes
+        ;; Guile warn
+        ;;
+        ;;   WARNING: (guile-user): imported module (scheme base) overrides
+        ;;   core binding `member'
+        ;;
+        ;; the first time each shadowed name is *looked up* - so `member'
+        ;; and `for-each' warned at startup, two lines of stderr before the
+        ;; first screen paint, from the launcher's own use of them.
+        ;; `error' and `raise' were excluded here for the same reason and
+        ;; the other 60-odd names were not, which is why the warning waited
+        ;; for two of them to be used. The names taken from `(guile)' are
+        ;; named below, so the dependency is still on the record - the
+        ;; `(only (guile) ...)' form at the end of this list.
         (ice-9 exceptions)
         (srfi srfi-37)
         (only (srfi srfi-13) string-contains)
         (only (schemacs repl) remove-repl-port-file! start-repl!)
-        ;; `(scheme process-context)' is deliberately *not* imported, even
-        ;; though `command-line' and `exit' are what it is wanted for: this
-        ;; file is loaded into `(guile-user)', where both are already core
-        ;; bindings, and importing the library on top of them makes Guile
-        ;; warn that it "overrides core binding `exit'". The bindings are
-        ;; named here so that the dependency is still on the record.
+        ;; `command-line' and `exit' are `(scheme process-context)''s in
+        ;; R7RS and core bindings in `(guile-user)'; they are named here for
+        ;; the same reason as everything else in this list.
         (only (guile) %load-path basename catch chdir command-line exit
               format getenv module-ref module-variable resolve-module
               scm-error setenv string->number))
@@ -303,63 +315,37 @@
            #t))
     (lambda args #f)))
 
-(define (cairo-directory)
-  ;; Where the launcher was told to look, for the message below: the load
-  ;; path entry under the tree, or #f when there is none - which is a
-  ;; different complaint and says so.
-  ;;--------------------------------------------------------------
-  (let loop ((path %load-path))
-    (cond ((null? path) #f)
-          ((string-contains (car path) ".guile-cairo") (car path))
-          (else (loop (cdr path))))))
-
 (define (check-cairo!)
-  ;; The launcher's own check, moved here so that it runs only when the
-  ;; Gtk editor is what was asked for: a terminal editor needs no cairo at
-  ;; all, and failing a terminal run over it would be wrong.
+  ;; Run only when the Gtk editor is what was asked for: a terminal editor
+  ;; needs no cairo at all, and failing a terminal run over it would be
+  ;; wrong.
   ;;
-  ;; Two separate messages rather than one `format' with a computed
-  ;; format string, which is what keeps this file free of the compiler's
-  ;; `non-literal format string' warning.
+  ;; **This used to name a `.guile-cairo' directory under the tree** and
+  ;; tell the reader to build one there - a *staged install* of a newer
+  ;; guile-cairo that the launcher put on the load path itself. That is
+  ;; gone (2026-10-10): the library belongs on Guile's own load path, in
+  ;; the prefix Guile was configured for, so the message names the install
+  ;; rather than a directory this tree keeps.
   ;;--------------------------------------------------------------
   (unless (cairo-bridge?)
-    (let ((dir (cairo-directory)))
-      (format (current-error-port)
-              "~a: cairo-pointer->context is not available.~%~%" *program-name*)
-      (if dir
-          (format (current-error-port)
-                  "  Looked first in: ~a~%~%" dir)
-          (format (current-error-port)
-                  "  No .guile-cairo directory is on the load path.~%~%"))
-      (format (current-error-port)
-              (string-append
-               "That directory is a *built copy* of a newer guile-cairo than the~%"
-               "packaged one; it is what wraps the cairo context GTK hands the~%"
-               "draw signal. Build it from the guile-cairo checkout (it is not~%"
-               "committed):~%~%"))
-      (let ((tree (tree-of-cairo dir)))
-        (format (current-error-port)
-                "  cd ~a/../guile-cairo && ./autogen.sh && ./configure~%"
-                tree)
-        (format (current-error-port)
-                "  make install --prefix=~a/.guile-cairo~%~%" tree))
-      (format (current-error-port)
-              "See GTK-PLAN.md, \"Rendering: guile-gi's cairo gap\".~%")
-      (exit 1))))
-
-(define (tree-of-cairo dir)
-  ;; DIR is the launcher's `.guile-cairo' load path entry; the tree is what
-  ;; it sits under. "<tree>" when there is no such entry, so that the
-  ;; instructions above still read as instructions.
-  ;;--------------------------------------------------------------
-  (let ((suffix "/.guile-cairo/share/guile/site/3.0"))
-    (if (and dir
-             (> (string-length dir) (string-length suffix))
-             (string=? suffix (substring dir
-                                         (- (string-length dir)
-                                            (string-length suffix)))))
-        (substring dir 0 (- (string-length dir) (string-length suffix)))
-        "<tree>")))
+    (format (current-error-port)
+            "~a: guile-cairo is too old for the Gtk front end.~%~%" *program-name*)
+    (format (current-error-port)
+            (string-append
+             "  `cairo-pointer->context' is missing, and that is what wraps the~%"
+             "  cairo context Gtk hands the `draw' signal - no Gtk frame can be~%"
+             "  drawn without it. It is in guile-cairo newer than 1.11.2, and it~%"
+             "  belongs where Guile looks for libraries, not in a directory this~%"
+             "  editor knows about:~%~%"))
+    (format (current-error-port)
+            (string-append
+             "      cd <the guile-cairo checkout>~%"
+             "      ./configure --prefix=$(guile-config info prefix)~%"
+             "      make && sudo make install~%~%"))
+    (format (current-error-port)
+            "  `~a' with no `-w' is a terminal editor and needs no cairo at all.~%"
+            *program-name*)
+    (exit 1)))
 
 (define (start-front-end module name args)
   ;; Load one front end and run it with the file names.

@@ -45,7 +45,12 @@
    ;; The eight-bit representation - GNU Emacs's `CHAR_BYTE8_P' and the
    ;; four beside it. See the note where they are defined.
    *max-5-byte-char*
-   char-byte8? byte8-to-char char-to-byte8 char-to-byte-safe unibyte-to-char)
+   *max-char*
+   char-byte8? byte8-to-char char-to-byte8 char-to-byte-safe unibyte-to-char
+   ;; `character.h''s `CHARACTERP' and `CHAR_VALID_P', in the same file
+   ;; and for the same reason: it is about character codes and nothing
+   ;; above this library has to ask it of anything else.
+   characterp)
 
   (begin
 
@@ -89,6 +94,13 @@
     ;;
     ;; The arguments are *code points*, as the C's are, and not
     ;; characters: these are arithmetic on the numbers.
+    (define *max-char* #x3FFFFF)
+    ;; ^ `MAX_CHAR' (`character.h:49'). The largest value `CHARACTERP'
+    ;; below accepts. It is *above* `*max-5-byte-char*' underneath it:
+    ;; the five-byte `utf-8-emacs' form reaches `0x3FFF7F', and the codes
+    ;; from there to here are the raw eight-bit bytes `byte8-to-char'
+    ;; makes.
+
     (define *max-5-byte-char* #x3FFF7F)
     ;; ^ `MAX_5_BYTE_CHAR' (`character.h:59'), the largest character the
     ;; five-byte `utf-8-emacs' form holds.
@@ -129,6 +141,20 @@
       (cond ((< c #x80) c)
             ((char-byte8? c) (- c #x3FFF00))
             (else -1)))
+
+    (define (characterp x)
+      ;; `CHARACTERP' (`character.h:166'), over `CHAR_VALID_P':
+      ;;
+      ;;     return FIXNUMP (x) && 0 <= XFIXNUM (x) && XFIXNUM (x) <= MAX_CHAR;
+      ;;
+      ;; So a *modified* event is a character by this test - `M-x' is
+      ;; 134217752 and `CHARACTERP' says yes - which surprises people who
+      ;; expect it to mean "a printing character". It does not, and the
+      ;; test that keeps `M-x' out of `self-insert-command' is the keymap's:
+      ;; `M-x' is not bound to it, because a char-table cannot even be
+      ;; indexed by an event that carries modifier bits.
+      ;;--------------------------------------------------------------
+      (and (integer? x) (<= 0 x *max-char*)))
 
     (define (sanitize-char-width width)
       ;; Emacs's `sanitize_char_width': a width outside 0..1000 is taken

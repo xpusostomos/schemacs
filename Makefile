@@ -56,9 +56,8 @@ MANPAGES := $(wildcard man/*.1)
 
 # --- what is a module and what is a script ----------------------------------
 # Every .scm with a define-module is a module: it is compiled and installed
-# under the site directory, its .go under the site ccache.  What is left over
-# is a SCRIPT FRAGMENT -- script/prelude.scm, which the launcher LOADS before
-# anything is imported.  bin/ holds launchers, installed as they stand.
+# under the site directory, its .go under the site ccache.  
+# bin/ holds launchers, installed as they stand.
 
 DIRS    := schemacs
 SCRIPTS := script/prelude.scm
@@ -71,16 +70,6 @@ GOS     := $(patsubst %.scm,build/%.go,$(MODULES))
 # -- where nothing ever removes it.  One file at a time, by name, with `find'
 # rather than a wildcard so the list holds files and not directories.
 SOURCES := $(shell find $(DIRS) -type f ! -name '*~')
-
-# The prelude is compiled like everything else, but it INSTALLS differently: not
-# into the site ccache, which is indexed by module name -- and a fragment has no
-# module name -- but beside its own source, which is where Guile looks for a
-# fragment's compiled file.  Either way `guile -l script/prelude.scm' finds it
-# and skips the source: it is a fragment of nothing but `use-modules', so
-# compiling it bakes in no definitions that the wrong module could capture.  (A
-# `define-module' wrapper would break it: the imports would land in that module
-# instead of (guile-user), the module the user's lines and scripts run in.)
-PRELUDE_GO := build/script/prelude.go
 
 all: $(GOS)
 
@@ -103,14 +92,13 @@ build/deps.mk: $(MODULES) $(SCRIPTS) tools/mkdeps.scm
 
 # The old copy is cleared first: a module that has been renamed or deleted
 # would otherwise linger beside the new one and still be found.
-install: all $(PRELUDE_GO)
+install: all
 	install -d $(DESTDIR)$(SITEDIR) $(DESTDIR)$(CCACHEDIR) $(DESTDIR)$(BINDIR) $(DESTDIR)$(MAN1DIR)
 	rm -rf $(DESTDIR)$(SITEDIR)/schemacs
 	rm -rf $(DESTDIR)$(CCACHEDIR)/schemacs
 	for f in $(SOURCES); do install -D -m 644 $$f $(DESTDIR)$(SITEDIR)/$$f; done
 	cp -r build/schemacs $(DESTDIR)$(CCACHEDIR)/
-	install -m 644 $(PRELUDE_GO) $(DESTDIR)$(SITEDIR)/script/prelude.go
-	install -m 755 bin/schemacs $(DESTDIR)$(BINDIR)/schemacs
+	install -m 755 bin/se $(DESTDIR)$(BINDIR)/se
 	for f in $(MANPAGES); do install -D -m 644 $$f $(DESTDIR)$(MAN1DIR)/$$(basename $$f); done
 
 # A local install carries no .go: Guile compiles into the user's own cache the
@@ -120,7 +108,7 @@ install-local:
 	install -d $(LOCALSITEDIR) $(LOCALBINDIR) $(LOCALMAN1DIR)
 	rm -rf $(LOCALSITEDIR)/schemacs
 	for f in $(SOURCES); do install -D -m 644 $$f $(LOCALSITEDIR)/$$f; done
-	install -m 755 bin/schemacs $(LOCALBINDIR)/schemacs
+	install -m 755 bin/se $(LOCALBINDIR)/se
 	for f in $(MANPAGES); do install -D -m 644 $$f $(LOCALMAN1DIR)/$$(basename $$f); done
 
 # uninstall removes what install put there: the site tree, its ccache, the
@@ -134,7 +122,7 @@ install-local:
 uninstall:
 	rm -rf $(DESTDIR)$(SITEDIR)/schemacs
 	rm -rf $(DESTDIR)$(CCACHEDIR)/schemacs
-	rm -f  $(DESTDIR)$(BINDIR)/schemacs
+	rm -f  $(DESTDIR)$(BINDIR)/se
 	for f in $(MANPAGES); do rm -f $(DESTDIR)$(MAN1DIR)/$$(basename $$f); done
 
 # A local install ships no .go: Guile compiles those sources into the user's
@@ -144,7 +132,7 @@ uninstall:
 # LOCALSITEDIR would otherwise make the pattern match every cached tree.)
 uninstall-local:
 	rm -rf $(LOCALSITEDIR)/schemacs
-	rm -f  $(LOCALBINDIR)/schemacs
+	rm -f  $(LOCALBINDIR)/se
 	for f in $(MANPAGES); do rm -f $(LOCALMAN1DIR)/$$(basename $$f); done
 	@if [ -n "$(LOCALSITEDIR)" ]; then \
 	   rm -rf $(CACHEHOME)/guile/ccache/*$(LOCALSITEDIR); \

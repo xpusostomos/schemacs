@@ -106,10 +106,15 @@
     (define (add-keymap-layer! keymap layer)
       ;; Put LAYER at the *end* of KEYMAP's layers, where a lookup reaches it
       ;; only when no layer above it matched. It is for a keymap's fallback:
-      ;; the global map's catch-all layer, which gives an unbound printing
-      ;; character `self-insert-command'. GNU Emacs's equivalent is the
-      ;; fallback in `keyboard.c' that runs `self-insert-command' for a
-      ;; self-inserting character with no binding of its own.
+      ;; the global map's self-insert layer, which gives an unbound printing
+      ;; character `self-insert-command'. **GNU Emacs has no such function**
+      ;; - it gets the same effect from data, the range bindings
+      ;; `subr.el:1763' makes in a loop (32..126) and
+      ;; `international/mule-conf.el:1671' makes in one call
+      ;; (`(cons 128 (max-char))' on `global-map') - and this tree has a
+      ;; predicate layer instead only because a layer here is an
+      ;; event-to-binding table and cannot hold a range. See
+      ;; `(schemacs keymap)''s `new-self-insert-keymap-layer'.
       ;;--------------------------------------------------------------
       (update (lambda (layers) (values (append layers (list layer)) #f))
               keymap km:=>keymap-layers*!)

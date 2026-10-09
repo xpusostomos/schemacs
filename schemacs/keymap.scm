@@ -211,14 +211,20 @@
       ;; does not.
       ;;
       ;; This is the test the catch-all `self-insert' layer is reached by,
-      ;; and it is the one Emacs makes in `keyboard.c': the fallback that
-      ;; runs `self-insert-command' is reached only for a *character*
-      ;; event with no modifier on it. A *named* key is not one, and
-      ;; without the test every unbound named key (`<f13>', `<prior>',
-      ;; `<insert>') reached `self-insert-command', which inserted the
-      ;; key's *name* as text - and in a read-only buffer said "Buffer is
-      ;; read-only" and otherwise did nothing, which is how PgUp and PgDn
-      ;; were lost in Dired.
+      ;; and it is the test Emacs's *keymap* makes by making the binding:
+      ;; the range `(cons 128 (max-char))' that
+      ;; `international/mule-conf.el:1671' puts on `global-map', and the
+      ;; 32..126 `subr.el:1763' fills in a loop. **A range entry in a char
+      ;; table is the one thing this tree's keymap cannot hold** - a layer
+      ;; here is an event-to-binding table - so the range is kept as the
+      ;; *predicate for* an event, which is what makes it a layer.
+      ;;
+      ;; A *named* key is not one, and without the test every unbound
+      ;; named key (`<f13>', `<prior>', `<insert>') reached
+      ;; `self-insert-command', which inserted the key's *name* as text -
+      ;; and in a read-only buffer said "Buffer is read-only" and
+      ;; otherwise did nothing, which is how PgUp and PgDn were lost in
+      ;; Dired.
       ;;
       ;; ALLOW-CTRL admits a control character too: whether a control code
       ;; counts as a character is the whole of what its name says.
@@ -585,13 +591,15 @@
 
 
     (define (new-self-insert-keymap-layer allow-ctrl on-success on-fail)
-      ;; Construct a `<KEYMAP-INDEX-PREDICATE-TYPE>` that checks a given
-      ;; key whether it is any unmodified key (or, only modified by a CTRL
-      ;; modifier if `ALLOW-CTRL` is #t), and also not followed by any
-      ;; other key, then the `ON-SUCCESS` procedure is applied to the
-      ;; character of that key. If lookup fails, the `ON-FAIL` procedure
-      ;; is applied no arguments.
-      ;;------------------------------------------------------------------
+      ;; The layer that makes a *character* key self-insert when nothing
+      ;; above it matched - the tree's spelling of Emacs's two range
+      ;; bindings, `subr.el:1763''s loop over 32..126 and
+      ;; `international/mule-conf.el:1671''s `(cons 128 (max-char))' on
+      ;; `global-map'. `ON-SUCCESS' is applied to a character that
+      ;; qualifies, `ON-FAIL' to no arguments when one does not; ALLOW-CTRL
+      ;; admits a control code as well. See `keymap-index-to-char' above
+      ;; for why this is a predicate rather than a table.
+      ;;--------------------------------------------------------------
       (make<keymap-index-predicate>
        (lambda (keyix) (keymap-index-to-char keyix allow-ctrl on-success on-fail))))
 

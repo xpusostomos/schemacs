@@ -99,4 +99,28 @@
 (test-equal 1 (d:char-display-cursor-width (integer->char 13) 0))
 (test-equal 1 (d:char-display-cursor-width (integer->char #x0301) 0))
 
+;;------------------------------------------------------------------
+;; `characterp' - `character.h:166'
+;;------------------------------------------------------------------
+;;
+;; `CHARACTERP (x)' is `FIXNUMP (x) && 0 <= x <= MAX_CHAR', and `MAX_CHAR'
+;; is `#x3FFFFF' (`character.h:49') - *above* the last real character,
+;; because the codes from `#x3FFF80' up are the raw eight-bit bytes
+;; `byte8-to-char' makes. So it answers t for things nobody would call a
+;; character, and that is the point of it: it is not the test that keeps
+;; `M-x' out of `self-insert-command' (being unbound is).
+;;
+;; Measured in Emacs 31.1:
+;;     (characterp 65) => t        (characterp 4194304) => nil
+;;     (characterp 4194303) => t   (characterp 1114111) => t
+;;     (characterp -1) => nil      (characterp 'a) => nil
+(test-equal '(#t #t #t #f #f #f #f)
+  (map c:characterp (list 65 #x3FFFFF 1114111 #x400000 -1 'a #f)))
+
+;; The boundary is `*max-char*', and a byte character sits inside it.
+(test-equal '(#t #t #f)
+  (list (c:characterp c:*max-char*)
+        (c:characterp (c:byte8-to-char #xFF))
+        (c:characterp (+ 1 c:*max-char*))))
+
 (test-end "schemacs_editor_character")

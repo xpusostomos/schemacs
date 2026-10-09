@@ -3433,6 +3433,14 @@ the load path, as `seg` does and for the same reason: `pgtk.sld` needs
 the moment it drew anything. A path that is not there is harmless, so
 there is no condition; a checkout without the build loses the GTK suite.
 
+*(Superseded 2026-10-10: that staged build - a `.guile-cairo/` directory
+under the tree, put on the load path by `se` and by this runner - is
+gone. A guile-cairo newer than 1.11.2 is **installed** now, into the
+prefix `guile-config info prefix` names, so Guile's own load path finds it
+and `se` knows nothing about cairo; `schemacs/main.scm`'s `check-cairo!`
+says what is missing and how to install it when the Gtk front end asks
+for a library that is not there.)*
+
 All 31 suites pass (pgtk-tests 47, one new) and `tools/pty-check.py` is
 61/61.
 

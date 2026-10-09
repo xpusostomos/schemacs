@@ -42,7 +42,7 @@
           text-editor-copy-string
           text-editor-deactivate-mark set!text-editor-deactivate-mark!)
     (only (schemacs editor command)
-          *this-event*
+          *last-command-event*
           command-interactive-spec command-name command-record-of
           command-type? define-command
           run-command)
@@ -579,7 +579,7 @@
                                  handler
                                  (command-record-of handler))))
                  (if record
-                     (parameterize ((*this-event* (list key (list frame))))
+                     (parameterize ((*last-command-event* (list key (list frame))))
                        (if (command-interactive-spec record)
                            (run-command record #f)
                            (run-command record)))
@@ -598,6 +598,31 @@
       ;; the keymap is keyed by - one event per step of the walk, as
       ;; `read_key_sequence' reads one key at a time.
       ;;--------------------------------------------------------------
+      ;; **`last-command-event', set where the C sets it.** GNU Emacs sets
+      ;; it in the command loop, once per command, to the last event of the
+      ;; sequence it just read (`keyboard.c:1449': `last_command_event =
+      ;; keybuf[i - 1]'), so it is the key you finished typing with: in
+      ;; `C-x C-f' the `f', and in `C-u 3 a' the `a'. Setting it as each
+      ;; event is dispatched lands on the same value, and doing it here
+      ;; covers the events a prefix swallows as well.
+      ;;
+      ;; A *mouse* key keeps its own value - the one with the window and
+      ;; the position in it - because that is the event Emacs's
+      ;; `last-command-event' holds for a click; a frame event's value is
+      ;; the frame, `(focus-in (FRAME))' as Emacs builds it.
+      ;;
+      ;; It is bound here and not in `dispatch-key' so that a caller
+      ;; holding a decoded key and no display event gets it too - the
+      ;; harness drives named keys with a direct call, `(dispatch-key-event
+      ;; frame #\z)', and the ESC-prefixed keys of `dispatch-key' come
+      ;; straight here as well.
+      (parameterize ((*last-command-event*
+                      (if (symbol? key)
+                          (let ((raw (*last-read-event*)))
+                            (if (and (pair? raw) (memq (car raw) *mouse-keys*))
+                                raw
+                                (list key (list frame))))
+                          key)))
       (if (dispatch-special-event frame key)
           #t
           (if (update-prefix! key)
@@ -613,10 +638,14 @@
             (let ((state
                    (or (frame-keymap-state frame)
                        (km:new-modal-lookup-state (lookup-keymaps)))))
-              ;; NOTE: the state must be stored on the frame BEFORE the
-              ;; lookup step, because commands dispatched by the step
-              ;; (such as `self-insert-command`) read the key index of
-              ;; the chord from the frame's state.
+              ;; NOTE: the state is stored on the frame BEFORE the lookup
+              ;; step, because the step's callbacks read it - `do-action'
+              ;; reads the completed chord off it for `*this-command-keys*'
+              ;; and the undefined-key message. (Until 2026-10-10
+              ;; `self-insert-command' and `digit-argument' read it too,
+              ;; re-deriving what Emacs gets from `last-command-event';
+              ;; they take that now, which is why this is a note about the
+              ;; chord and not about commands.)
               (set!frame-keymap-state frame state)
               (let ((result
                      (km:modal-lookup-state-step!
@@ -665,7 +694,7 @@
                             (km:keymap-index->events full-path)))
                           " is undefined"))))))
                 (set!frame-keymap-state
-                 frame (and result state))))))))
+                 frame (and result state)))))))))
 
     (define (dispatch-key frame key)
       ;; Dispatch one *key event* - the integer or symbol `read-key-event'
@@ -707,18 +736,7 @@
                    (event-convert-list (list 'meta key)))))
        (else
         (*esc-pending* #f)
-        (let ((event (if (symbol? key)
-                         (let ((raw (*last-read-event*)))
-                           ;; A mouse event keeps its own value - the one
-                           ;; that has the window and the position in it.
-                           (if (and (pair? raw) (memq (car raw) *mouse-keys*))
-                               raw
-                               ;; A frame event's value is the frame:
-                               ;; `(focus-in (FRAME))', as Emacs builds it.
-                               (list key (list frame))))
-                         key)))
-          (parameterize ((*this-event* event))
-            (dispatch-key-event frame key))))))
+        (dispatch-key-event frame key))))
 
     (define (dispatch-input-event frame ev)
       ;; Dispatch one event *as a display answered it*: normalise it into

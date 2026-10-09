@@ -17,13 +17,12 @@
   ;; Guile warns here that `load' is used "in declarative module
   ;; (schemacs editor startup)" and suggests "Add #:declarative? #f to
   ;; your define-module invocation". There is no `define-module' to add
-  ;; it to - this is a `define-library', which Guile's R7RS expansion
-  ;; does not pass the clause through (tried: it is a syntax error) - and
-  ;; the warning is *correct*: loading the user's init file at run time
-  ;; is exactly a non-declarative act, which is why Guile is right to ask
-  ;; for the hint rather than to be silenced. Turning this library into a
-  ;; `define-module' to carry one line of metadata would be a bigger
-  ;; change than the warning is worth; it stays, and says so.
+  ;; it to - this is a `define-library', whose expansion takes only R7RS
+  ;; declarations, and an extra clause is not even rejected: measured, it
+  ;; becomes a body expression, evaluates and is forgotten, so the
+  ;; warning comes back. **The declaration is made at the top of the body
+  ;; instead**, where its own comment explains why it has to be a macro
+  ;; and why leaving the module declarative is not an option.
 
   (import
     (scheme base)
@@ -35,8 +34,11 @@
     ;; `load' is Guile's own, and is what the init file is read with - the
     ;; same call the shell in `../guile-scsh/editor/init.scm' makes.
     ;; `%load-path' is where the splash screen's text is looked for.
-    (only (guile) %load-path catch current-module format getenv load
-          resolve-module set-current-module)
+    ;; `set-module-declarative?!' and `datum->syntax' are for the
+    ;; declaration at the top of the body, not for the init file.
+    (only (guile) %load-path catch current-module datum->syntax format
+          getenv load resolve-module set-current-module
+          set-module-declarative?!)
     ;; the editor's names are *not* given to the init file: it imports what
     ;; it needs, as an Emacs init file requires what it needs - see
     ;; `load-init'
@@ -79,6 +81,62 @@
    )
 
   (begin
+
+    ;;----------------------------------------------------------------
+    ;; This library is not declarative - Guile's `#:declarative? #f'
+    ;;----------------------------------------------------------------
+    ;; `load' is used below, so this module is not a declarative one, and
+    ;; Guile says so at every compile: "Use of `load' in declarative module
+    ;; (schemacs editor startup).  Add #:declarative? #f to your
+    ;; define-module invocation." There is no `define-module' here to add
+    ;; it to - `define-library' takes only R7RS declarations, and an extra
+    ;; clause is not even rejected: it becomes a *body expression*, is
+    ;; evaluated, and is forgotten, so the warning comes back (measured).
+    ;; So the fact is declared here instead, in two steps - and both are
+    ;; needed, for different reasons, which is what the two comments below
+    ;; are about.
+    ;;
+    ;; **Leaving the module declarative is not an option, and the warning
+    ;; is not merely untidy.** A declarative module lets Guile fold one of
+    ;; its own definitions into its own code, so an outside `(set!)' of it
+    ;; stops being seen: measured, a declarative library with
+    ;; `(define flag #f)' and `(define (read-flag) flag)' answers **#f**
+    ;; from `read-flag' after a caller has done `(set! flag #t)', once the
+    ;; library is *compiled* - and #t while it is interpreted, which is why
+    ;; no suite run with `--no-auto-compile' can see it. The definition at
+    ;; risk here is `inhibit-startup-screen', which exists for the user's
+    ;; init file to set, so the symptom would be an init file that works in
+    ;; every test and quietly stops working for a user running a `.go'.
+    (define-syntax %not-declarative!
+      ;; The flag has to be set while the body is being *expanded*, which
+      ;; is why this is a macro and not a call. The expander walks the
+      ;; whole library body before running any of it, so a plain call as
+      ;; the first form is already too late - measured, the warning still
+      ;; came and the flag was still set for the rest of that compilation.
+      ;; A macro's transformer runs when its use is expanded, which is the
+      ;; moment wanted, and it is the moment the compiler decides whether
+      ;; to treat this module's definitions as foldable.
+      ;;--------------------------------------------------------------
+      (lambda (x)
+        (set-module-declarative?! (current-module) #f)
+        (datum->syntax x '(if #f #f))))
+    (%not-declarative!)
+    (set-module-declarative?!
+     (resolve-module '(schemacs editor startup) #f)
+     #f)
+    ;; ^ **The macro alone silences the warning without fixing anything**,
+    ;; and finding that out took a measurement worth recording. `library'
+    ;; expands to `(define-module ...)` *followed by* the body, and that
+    ;; `define-module` is evaluated when the library is loaded - so it
+    ;; re-declares the module, with the default declarative flag, after the
+    ;; expansion-time flip has worn off. Measured with the macro alone: no
+    ;; warning, and `(module-declarative? (resolve-module '(schemacs editor
+    ;; startup)))` answering **#t**. That is the worst of both - a hidden
+    ;; diagnostic and a module that still is not what it claims - and it
+    ;; matters for anything that compiles *against* this library rather
+    ;; than inside it. So the flag is set a second time, here, where it
+    ;; runs after that `define-module` and before anything reads it. With
+    ;; both, the measured answer is `(folded #t declarative #f)`.
 
     ;;----------------------------------------------------------------
     ;; The init file

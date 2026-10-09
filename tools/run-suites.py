@@ -81,13 +81,13 @@ SUITES = [
 ]
 
 
-# The newer guile-cairo built into the tree, first on the path exactly as
-# `se' puts it there: `pgtk.sld' needs `cairo-context->pointer' and
-# `cairo-pointer->context', and the *system* guile-cairo has neither - so
-# the GTK suite fails with "Unbound variable" the moment it draws anything.
-# A path that is not there is harmless, so this needs no condition; the
-# build is not committed, and a checkout without it loses the GTK suite.
-CAIRODIR = os.path.join(REPO, '.guile-cairo', 'share', 'guile', 'site', '3.0')
+# **No cairo path here any more.** `pgtk.scm' needs
+# `cairo-context->pointer' and `cairo-pointer->context', which only a
+# guile-cairo newer than 1.11.2 has - and this put the tree's staged copy
+# of one on the path. That staging is gone (2026-10-10): guile-cairo is
+# installed where Guile looks for libraries, so the GTK suite finds it the
+# way everything else does. A machine without such an install loses that
+# one suite, which is what `make`'s own note about it says.
 
 # An empty config directory, so a suite never loads the developer's init
 # file. See the note in `run'.
@@ -96,8 +96,7 @@ TEST_CONFIG_HOME = tempfile.mkdtemp(prefix='schemacs-test-config-')
 
 def run(path):
     proc = subprocess.run(
-        ['guile', '--no-auto-compile',
-         '-L', CAIRODIR, '-L', REPO, '-s', path],
+        ['guile', '--no-auto-compile', '-L', REPO, '-s', path],
         capture_output=True, text=True, cwd=REPO, timeout=900,
         env=dict(os.environ, GUILE_WARN_DEPRECATED='no',
                  # No developer's init file: `startup.sld' loads

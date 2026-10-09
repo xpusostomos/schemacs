@@ -184,17 +184,22 @@ def drive(keys, path, settle=1.5, gap=0.3, term=None, background="0000/0000/0000
         os.environ["XDG_CONFIG_HOME"] = config or TEST_CONFIG_HOME
         os.environ["TERM"] = term or os.environ.get("SCHEMACS_TEST_TERM", "xterm")
         os.chdir(REPO)
-        # **`se', which is the editor's one entry point.** This used to run
-        # `main-ncurses.scm', a second launcher of its own that duplicated
-        # what `se' + `schemacs/main.scm' do (the back door, the command
-        # line, the port-file cleanup) - and did less: no `-w', no
+        # **`bin/se', which is the editor's one entry point.** This used to
+        # run `main-ncurses.scm', a second launcher of its own that
+        # duplicated what `se' + `schemacs/main.scm' do (the back door, the
+        # command line, the port-file cleanup) - and did less: no `-w', no
         # `--chdir', no `-q', no usage. That script is gone, so this runs
-        # the real thing. `se''s shebang carries the same
+        # the real thing. `bin/se''s shebang carries the same
         # `GUILE_WARN_DEPRECATED=no' and `--no-auto-compile' this passed to
-        # guile directly, and it resolves the tree from `(car
-        # (command-line))' - the absolute path below - so `-L' is no longer
+        # guile directly, and it resolves the tree from its own file name
+        # (`(current-filename)', one directory up) - so `-L' is no longer
         # needed either.
-        se = os.path.join(REPO, "se")
+        #
+        # It moved there on 2026-10-10 (`bin/' is where the Makefile
+        # installs launchers from); this was `REPO/se' until then, and its
+        # absence is what made the back-door check die with
+        # "ConnectionRefusedError" rather than a check failure.
+        se = os.path.join(REPO, "bin", "se")
         argv = [se] + ([path] if path is not None else [])
         os.execv(se, argv)
     out = b""
@@ -1530,10 +1535,10 @@ def check_back_door():
         return buf.decode("utf-8", "replace")
 
     def run_se(*args):
-        # `./se' and not `guile -s ...': the launcher is what parses
+        # `bin/se' and not `guile -s ...': the launcher is what parses
         # `--remote', and this is the one check that drives it. It has to
         # run from the tree, which is how it finds the tree.
-        return subprocess.run([os.path.join(REPO, "se")] + list(args),
+        return subprocess.run([os.path.join(REPO, "bin", "se")] + list(args),
                               capture_output=True, text=True, cwd=REPO,
                               timeout=120)
 

@@ -20,7 +20,7 @@
    command-name command-procedure command-doc-string
    command-interactive-spec
    *mark-even-if-inactive*
-   *this-event*
+   *last-command-event*
    current-prefix-arg
    *pending-coding-system*
    *called-interactively*
@@ -91,18 +91,33 @@
       ;;--------------------------------------------------------------
       (make-parameter #f))
 
-    (define *this-event*
-      ;; Emacs's `this_command_keys' and the event the command was
-      ;; invoked by: `callint.c:287' reads the key sequence the command
-      ;; loop recorded (`keys = this_command_keys') and the
-      ;; `(interactive "e")' spec hands the command `AREF (keys,
-      ;; next_event)' (`callint.c:608') - the invoking event itself, which
-      ;; for a window-system event is the list Emacs's `make_lispy_event'
-      ;; built: `(delete-frame (FRAME))' (`keyboard.c:6238') and
-      ;; `(focus-in (FRAME))' (`keyboard.c:6281').
+    (define *last-command-event*
+      ;; GNU Emacs's `last-command-event' (`keyboard.c:13763'): "Last
+      ;; input event of a key sequence that called a command." The
+      ;; command loop sets it once per command to the last event of the
+      ;; sequence it just read (`keyboard.c:1449': `last_command_event =
+      ;; keybuf[i - 1]'), which is why it is the *last* and not the first:
+      ;; `self-insert-command' wants the character that was typed, and in
+      ;; `C-x C-f' that is the `f'.
       ;;
-      ;; The command loop binds it around the dispatch, and
-      ;; `interactive-proc''s `"e"' case is what reads it.
+      ;; **This was called `*this-event*' here, named from `callint.c'
+      ;; instead of from `keyboard.c', and the value is the same one.**
+      ;; `callint.c:608' hands `(interactive "e")' `AREF (keys,
+      ;; next_event)' - an event of this command's sequence rather than
+      ;; necessarily its last - and for the case that reaches a command
+      ;; with parameters (a mouse click, a frame event) the sequence is
+      ;; one event long, so first and last are the same value: the list
+      ;; Emacs's `make_lispy_event' built, `(delete-frame (FRAME))'
+      ;; (`keyboard.c:6238') and `(focus-in (FRAME))' (`keyboard.c:6281').
+      ;; The command loop binds it around the dispatch, which is where the
+      ;; C sets its own; `interactive-proc''s `"e"' case reads it for a
+      ;; parameterised spec, and `self-insert-command' and
+      ;; `digit-argument' read it for the event.
+      ;;
+      ;; **It is here, and not in `keyboard.scm' where Emacs declares it**,
+      ;; because `cmds.scm' and `simple.scm' are the two readers and the
+      ;; command loop is *above* both of them - a variable a command reads
+      ;; cannot live in a library that imports the command.
       ;;--------------------------------------------------------------
       (make-parameter #f))
 
@@ -281,7 +296,7 @@
        ;; `args[i] = AREF (keys, next_event)' (`callint.c:608').
        ((string=? spec "e") (lambda (uarg)
                               (parameterize ((*called-interactively* #t))
-                                (command (*this-event*)))))
+                                (command (*last-command-event*)))))
        ((string=? spec "p") (lambda (uarg)
                               (parameterize ((*called-interactively* #t))
                                 (command (uarg->integer 1 uarg)))))

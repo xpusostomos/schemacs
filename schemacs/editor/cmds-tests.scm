@@ -10,7 +10,10 @@
        insert goto-char point buffer-string)
  (only (schemacs editor cmds)
        backward-char beginning-of-line end-of-line forward-char
-       internal-self-insert))
+       internal-self-insert self-insert-command)
+ ;; `last-command-event' is `keyboard.c''s and is bound by the command
+ ;; loop; a test calling the command itself binds it, as the loop does.
+ (only (schemacs editor command) *last-command-event*))
 
 ;; Unbuffered output, so a run that hangs shows where it got to.
 (setvbuf (current-output-port) 'none)
@@ -222,5 +225,81 @@
 (test-equal "a negative N scans further back and stops at the beginning"
   '((1 1) (1 1) (1 4))
   (list (bol-and-eol 1 -1) (bol-and-eol 5 -1) (bol-and-eol 9 -1)))
+
+;; ------------------------------------------------------------------
+;; self-insert-command - `cmds.c:263'
+;; ------------------------------------------------------------------
+;;
+;; The command is a few lines around `internal_self_insert', and what is
+;; worth pinning is where its arguments come from: the character is the
+;; *event that invoked it* (`last-command-event', which Emacs's own
+;; interactive spec passes), and the count is the numeric prefix.
+;;
+;; **It used to re-derive the character here**, from the chord in the
+;; frame's keymap lookup state, which meant the command loop had to keep
+;; that state alive for the command to read. It is an argument now, as in
+;; Emacs, and these are the cases that tell the two apart - a caller that
+;; ran the command itself, with no keymap lookup in progress, got nothing
+;; before.
+;;
+;; Every expectation is GNU Emacs 31.1's, from
+;;
+;;   emacs -Q --batch --eval '(with-temp-buffer (insert "abc")
+;;     (goto-char 1) (self-insert-command N C) (buffer-string))'
+
+(define (self-insert-cmd text n char)
+  ;; What TEXT holds after `self-insert-command' runs at position 1 with
+  ;; the event CHAR, or the error message it signalled.
+  ;;--------------------------------------------------------------
+  (let ((ed (get-buffer-create "*cmds-self-insert*")))
+    (set-buffer ed)
+    (erase-buffer)
+    (insert text)
+    (goto-char 1)
+    (let ((outcome (guard (e (#t (if (error-object? e)
+                                    (error-object-message e)
+                                    'ERR)))
+                     (parameterize ((*last-command-event* char))
+                       (self-insert-command n char))
+                     (buffer-string))))
+      outcome)))
+
+(test-equal "self-insert-command inserts the event it was invoked by"
+  '("xabc" "xxxabc")
+  (list (self-insert-cmd "abc" 1 (char->integer #\x))
+        (self-insert-cmd "abc" 3 (char->integer #\x))))
+
+(test-equal "a count of zero inserts nothing"
+  "abc"
+  (self-insert-cmd "abc" 0 (char->integer #\x)))
+
+;; "Barf if the key that invoked this was not a character" - `bitch_at_user'
+;; is a bell, and `ding' is not ported, so this is silent here.
+(test-equal "a key that is not a character inserts nothing"
+  "abc"
+  (self-insert-cmd "abc" 1 'f13))
+
+;; The one branch with a message in it. One formatted string, as Emacs's
+;; `error ("Negative repetition argument %d", n)' is.
+(test-equal "a negative count signals"
+  "Negative repetition argument -1"
+  (self-insert-cmd "abc" -1 (char->integer #\x)))
+
+;; A *modified* event is a `characterp' character (`M-x' is 134217752, below
+;; `MAX_CHAR') and reaches `internal_self_insert' in Emacs - which inserts
+;; nothing for it, measured. Nothing can reach this command with one from
+;; the keymap, so the case pins the guard rather than a live path.
+(test-equal "a modified event inserts nothing"
+  "abc"
+  (self-insert-cmd "abc" 1 (logior 134217728 (char->integer #\x))))
+
+;; **A departure, pinned.** Emacs inserts the raw byte - measured,
+;; `(self-insert-command 1 #x3FFF80)' puts the character `#x3FFF80' in the
+;; buffer - and this tree has no character for a code above `#x10FFFF'
+;; (Guile's last), so it does nothing. Same gap as `buffer-text.scm''s "a
+;; byte character has no character to be", reached from the other end.
+(test-equal "an eight-bit byte character inserts nothing (departure)"
+  "abc"
+  (self-insert-cmd "abc" 1 #x3FFF80))
 
 (test-end "schemacs_editor_cmds")

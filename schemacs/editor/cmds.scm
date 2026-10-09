@@ -2,40 +2,35 @@
   ;; This library mirrors GNU Emacs's `cmds.c': the simple editing
   ;; commands and the one subroutine they run through.
   ;;
-  ;; What is here so far is `internal-self-insert' (`cmds.c:312'), which
-  ;; is where overwrite mode lives - the whole of the ` Ovwrt' behaviour
-  ;; is this function's overwrite branch and nothing else.
+  ;; What is here so far is `self-insert-command' (`cmds.c:263') and
+  ;; `internal-self-insert' (`cmds.c:312') beneath it, which is where
+  ;; overwrite mode lives - the whole of the ` Ovwrt' behaviour is that
+  ;; function's overwrite branch and nothing else.
   ;;
-  ;; Not ported from `cmds.c': `self-insert-command' itself and its
-  ;; neighbours (`forward-char', `backward-char', `newline',
-  ;; `delete-char', `kill-line', ...) still live in `simple.sld', where
-  ;; the original author put them. They belong here; moving them is its
-  ;; own piece of work, and this library is the seat they will move to.
-  ;; Also not ported: the abbrev expansion at the top of
-  ;; `internal_self_insert' (`expand-abbrev' and the `no-self-insert'
-  ;; property), because `abbrev-mode' is not here, and the
-  ;; `auto-fill-function' call after the insert, because auto fill is
+  ;; Not ported from `cmds.c': its other commands (`forward-char',
+  ;; `backward-char', `newline', `delete-char', `kill-line', ...) still
+  ;; live in `simple.sld', where the original author put them. They belong
+  ;; here; moving them is its own piece of work, and this library is the
+  ;; seat they will move to. Also not ported: the abbrev expansion at the
+  ;; top of `internal_self_insert' (`expand-abbrev' and the
+  ;; `no-self-insert' property), because `abbrev-mode' is not here, and
+  ;; the `auto-fill-function' call after the insert, because auto fill is
   ;; not here either. Both are marked at the point they would go.
 
   (import
     (scheme base)
     (scheme char)
-    (only (guile) most-positive-fixnum)
-    (only (schemacs editor character) char-width)
+    (only (guile) format most-positive-fixnum)
+    (only (schemacs editor character) char-width characterp)
     (only (schemacs editor buffer)
           buffer-overwrite-mode current-buffer)
     (only (schemacs editor editfns)
           char-after char-before delete-region goto-char insert
           line-beginning-position line-end-position point point-max)
     (only (schemacs editor indentc) current-column move-to-column)
-    ;; the commands below are `define-command`s, and `self-insert-command`
-    ;; is still on the record form `new-command` builds.
     (only (schemacs editor command)
-          define-command new-command uarg->integer)
-    ;; `self-insert-command` re-derives the character from the keymap
-    ;; lookup state the frame is holding.
-    (only (schemacs editor frame) *current-frame* frame-keymap-state)
-    (prefix (schemacs keymap) km:)
+          define-command uarg->integer current-prefix-arg
+          *last-command-event*)
     (only (schemacs editor engine)
           text-editor-delete-from-cursor text-editor-get-cursor
           text-editor-get-end-of-line
@@ -166,33 +161,77 @@
     ;; The commands
     ;;------------------------------------------------------------------
 
-    ;; `self-insert-command' is the one command left on `new-command':
-    ;; the character it inserts is re-derived from the keymap lookup
-    ;; state at *interactive* time, which `(interactive ...)' cannot say
-    ;; yet - so it stays on the record form until it can.
-    (define self-insert-command
-      ;; The character is not an argument the dispatcher can supply: it
-      ;; is re-derived from the frame's keymap lookup state, which holds
-      ;; the key index of the chord that reached this command. The
-      ;; prefix argument is supplied normally, as the repeat count.
-      (new-command
-       "self-insert-command"
-       (lambda (uarg)
-         (let ((state (frame-keymap-state (*current-frame*))))
-           (when state
-             (km:keymap-index-to-char
-              (km:modal-lookup-state-key-index state) #f
-              ;; `internal_self_insert' takes the repeat count itself -
-              ;; `(self-insert-command N C)' - so the loop the C's
-              ;; `self-insert-command' wraps round it is not repeated
-              ;; here.
-              (lambda (c)
-                (internal-self-insert c (uarg->integer 1 uarg)))
-              (lambda () #f))
-              )))
-       (lambda (c) (internal-self-insert c 1))
-       "Insert the typed character at point."
-       'uarg))
+    (define-command (self-insert-command count char)
+      ;; GNU Emacs's `self-insert-command' (`cmds.c:263'). Its interactive
+      ;; spec is
+      ;;
+      ;;   "(list (prefix-numeric-value current-prefix-arg)
+      ;;          last-command-event)"
+      ;;
+      ;; - the character is **the event that invoked the command**, handed
+      ;; to it as an argument, and the body is `internal_self_insert''s
+      ;; one level up.
+      ;;
+      ;; **The character used to be re-derived here instead**, from the
+      ;; chord in the frame's keymap lookup state, through
+      ;; `keymap-index-to-char'. It worked, and it was a departure with
+      ;; two costs: the command loop had to store the lookup state *before*
+      ;; the lookup so that this command could still find it (a coupling
+      ;; Emacs does not have, and there was a NOTE saying so), and a caller
+      ;; that ran the command without a keymap lookup in progress got
+      ;; nothing at all. `digit-argument' re-derived its digit the same
+      ;; way, and the same one variable fixes both.
+      ;;
+      ;; Not carried: `translate_char (Vtranslation_table_for_input, c)',
+      ;; because there is no `keyboard-translate-table' here (nor a
+      ;; `translation-table-for-input' to consult); and
+      ;; `call0 (Qundo_auto_amalgamate)', the undo amalgamation for a
+      ;; repeated self-insert (`internal-self-insert' does the undo work
+      ;; it can). `bitch_at_user' is `ding', which is not ported - see
+      ;; `minibuffer.sld''s note about there being no bell - so the branch
+      ;; below is silent where Emacs rings.
+      "Insert the character you type.
+Whichever character C you type to run this command is inserted.
+The numeric prefix argument N says how many times to repeat the insertion.
+Before insertion, `expand-abbrev' is executed if the inserted character does
+not have word syntax and the previous character in the buffer does.
+After insertion, `internal-auto-fill' is called if
+`auto-fill-function' is non-nil and if the `auto-fill-chars' table has
+a non-nil value for the inserted character.  At the end, it runs
+`post-self-insert-hook'."
+      (interactive (list (uarg->integer 1 (current-prefix-arg))
+                         (*last-command-event*)))
+      ;; "if (XFIXNUM (n) < 0) error ("Negative repetition argument %d", n)"
+      ;; - one formatted string, so the count is in the message and not an
+      ;; irritant. Measured: "Negative repetition argument -1".
+      (when (< count 0)
+        (error (format #f "Negative repetition argument ~a" count)))
+      ;; "Barf if the key that invoked this was not a character."
+      ;;
+      ;; `characterp' is the C's `CHARACTERP', so this is false for a
+      ;; *named* key - but it is true for things the C's own
+      ;; `internal_self_insert' can still be handed and this tree cannot:
+      ;; a raw eight-bit byte character (`#x3FFF80' to `#x3FFFFF', which
+      ;; is what the top of `MAX_CHAR' is for) and a *modified* event like
+      ;; `M-x' (134217752, also below `MAX_CHAR'). `internal_self_insert
+      ;; (int c, ...)' takes the code and its first act is `CHAR_STRING
+      ;; (c, str)', which makes bytes out of any of them.
+      ;;
+      ;; This tree's `internal-self-insert' takes a *Scheme character*, and
+      ;; Guile has none above `#x10FFFF' (measured: `(integer->char
+      ;; #x10FFFF)' is the last one that works and `#x110000' raises), so
+      ;; those events do nothing here rather than erroring. Emacs inserts
+      ;; their bytes. It is the same gap `buffer-text.scm' names as "a byte
+      ;; character has no character to be" - and `M-x' cannot reach this
+      ;; command from the keymap, since a char-table cannot be indexed by
+      ;; an event with modifier bits.
+      ;;
+      ;; Measured: `(self-insert-command 1 (logior 134217728 ?x))' inserts
+      ;; nothing in Emacs 31.1 either, by a route that is `translate_char'
+      ;; and `CHAR_STRING''s rather than this one.
+      (if (or (not (characterp char)) (> char #x10FFFF))
+          #f
+          (internal-self-insert (integer->char char) count)))
 
     ;; Not an Emacs command: Emacs binds C-i to
     ;; `indent-for-tab-command', which indents. This inserts a tab,
