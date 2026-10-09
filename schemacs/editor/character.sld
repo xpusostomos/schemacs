@@ -270,40 +270,193 @@
                   (substring rest 2))
             (cons (reverse mods) rest))))
 
-    (define (parse-key word)
-      ;; One word of a `kbd' string as one key of the chord:
-      ;; `(modifiers... character-or-string)'.
+    (define (key-parse-bits mods)
+      ;; The modifier bits the symbols MODS stand for, added up - the C's
+      ;; `bits' in `key-parse' (`keymap.el:282'), where each `X-' prefix
+      ;; contributes its `?\X-\0'. They are distinct bits, so this is a
+      ;; `logior' written as the C writes it.
       ;;--------------------------------------------------------------
-      (if (and (> (string-length word) 2)
-               (char=? (string-ref word 0) #\<)
+      (let loop ((rest mods) (bits 0))
+        (if (null? rest)
+            bits
+            (loop (cdr rest)
+                  (+ bits (cond ((eq? (car rest) 'alt) char-alt)
+                                ((eq? (car rest) 'control) char-ctl)
+                                ((eq? (car rest) 'hyper) char-hyper)
+                                ((eq? (car rest) 'meta) char-meta)
+                                ((eq? (car rest) 'shift) char-shift)
+                                ((eq? (car rest) 'super) char-super)
+                                (else 0)))))))
+
+    (define (key-parse-char mods char word)
+      ;; One character key with its modifiers, as `key-parse' builds it
+      ;; (`keymap.el:304'-`:316'). Four cases, in the C's order:
+      ;;
+      ;;   * no modifiers: the character itself;
+      ;;   * meta and nothing else on an all-digit word: the digits, each
+      ;;     with the meta bit - `(kbd "M-6")' and its like;
+      ;;   * a word of more than one character, with modifiers: an error,
+      ;;     "X- must prefix a single character, not WORD";
+      ;;   * control with the character in its *control column*
+      ;;     (`@-_a-z', whose control code is the low five bits): the
+      ;;     other bits plus that code - so `C-M-M' is meta + 13;
+      ;;   * anything else: the bits added to the character's code.
+      ;;--------------------------------------------------------------
+      (let ((bits (key-parse-bits mods))
+            (code (char->integer char)))
+        (cond
+         ((zero? bits) code)
+         ((and (= bits char-meta) (char-numeric? char)) (+ code bits))
+         ((not (= (string-length word) 1))
+          (error "~a must prefix a single character, not ~a"
+                 (substring word 0 (- (string-length word)
+                                      (string-length (string char))))
+                 word))
+         ((and (not (zero? (logand bits char-ctl)))
+               (or (char<=? #\@ char #\_)
+                   (char<=? #\a char #\z)))
+          (+ (- bits char-ctl) (logand code 31)))
+         (else (+ bits code)))))
+
+    (define %named-key-names
+      ;; The seven words `key-parse' translates to a character
+      ;; (`keymap.el:293'), which is also the list its angle-bracket
+      ;; branch refuses to treat as a *name*: `(kbd "<DEL>")' is the
+      ;; character 127 and not a key called DEL.
+      '("NUL" "RET" "LFD" "TAB" "ESC" "SPC" "DEL"))
+
+    (define (named-key-suffix? text)
+      ;; Whether TEXT ends with one of `%named-key-names' at a word
+      ;; boundary - the C's
+      ;; "\\<\\(NUL\\|RET\\|...\\)$" (`keymap.el:275').
+      ;;--------------------------------------------------------------
+      (let loop ((names %named-key-names))
+        (if (null? names)
+            #f
+            (let* ((name (car names))
+                   (n (string-length name)))
+              (cond
+               ((and (>= (string-length text) n)
+                     (string=? name (substring text (- (string-length text) n)
+                                               (string-length text)))
+                     (or (= n (string-length text))
+                         (not (char-alphabetic?
+                               (string-ref text (- (string-length text) n 1))))))
+                #t)
+               (else (loop (cdr names))))))))
+
+    (define (meta-number? text)
+      ;; Whether TEXT is what the C's "^\\(-?[0-9]+\\)$" matches
+      ;; (`keymap.el:305'): an optional `-' and then ASCII digits, so that
+      ;; `(kbd "M-6")' is `digit-argument' and `(kbd "M-12")' is two of
+      ;; them. `char-numeric?' is not this test - it is Unicode's.
+      ;;--------------------------------------------------------------
+      (let ((start (if (and (> (string-length text) 0)
+                            (char=? (string-ref text 0) #\-))
+                       1 0)))
+        (and (< start (string-length text))
+             (let loop ((i start))
+               (cond ((>= i (string-length text)) #t)
+                     ((char<=? #\0 (string-ref text i) #\9) (loop (+ i 1)))
+                     (else #f))))))
+
+    (define (angle-key-name word)
+      ;; The name a `<...>' word denotes, modifiers and all, or #f: the
+      ;; C's "\\`\\(\\([ACHMsS]-\\)*\\)<\\(.+\\)>$" branch
+      ;; (`keymap.el:270'), which turns `S-<f10>' into the *symbol*
+      ;; `S-f10' and `C-<left>' into `C-left', and which steps aside for
+      ;; the seven named keys - so `(kbd "<DEL>")' is the character 127
+      ;; and not a symbol. The scan skips the modifier prefixes, which
+      ;; are single letters each followed by `-', and then wants a `<'
+      ;; and a closing `>'.
+      ;;--------------------------------------------------------------
+      (let loop ((i 0))
+        (cond
+         ((and (> (- (string-length word) i) 2)
+               (char=? (string-ref word i) #\<)
                (char=? (string-ref word (- (string-length word) 1)) #\>))
-          ;; `<up>' names a keyboard key: a *symbol* in the event
-          ;; vector, `up', which is what Emacs's `(kbd "<up>")' is.
-          (string->symbol (substring word 1 (- (string-length word) 1)))
+          (let ((text (string-append (substring word 0 i)
+                                     (substring word (+ i 1)
+                                                (- (string-length word) 1)))))
+            (and (not (named-key-suffix? text)) text)))
+         ((and (< (+ i 1) (string-length word))
+               (char=? (string-ref word (+ i 1)) #\-)
+               (memv (string-ref word i) (list #\A #\C #\H #\M #\s #\S)))
+          (loop (+ i 2)))
+         (else #f))))
+
+    (define (parse-key word)
+      ;; One word of a `kbd' string as the key (or keys) it names, as a
+      ;; *list* of events - Emacs's `key-parse''s `key', which `vconcat'
+      ;; splices into the sequence. It is a list because one word can be
+      ;; more than one event: `(kbd "M-12")' is two - the digits 1 and 2,
+      ;; each with the meta bit - and `(kbd "f10")', a word with no
+      ;; modifiers and no angle brackets, is the three characters f, 1
+      ;; and 0.
+      ;;
+      ;; **A character's event is `key-parse''s own arithmetic and not
+      ;; `event-convert-list'** (`keymap.el:304'-`:316'). The two
+      ;; disagree, and the difference is a whole class of key:
+      ;;
+      ;;   * `event-convert-list' *folds* - it turns `(shift ?x)' into
+      ;;     `X' and runs control through `make_ctrl_char' - so
+      ;;     `(kbd "S-x")' came out as `X', losing the key;
+      ;;   * `key-parse' adds the modifier *bits* to the character and
+      ;;     folds only the control *column* (`@-_a-z', whose control is
+      ;;     the low five bits), so `S-x' is `shift | ?x' = 33554552,
+      ;;     which is what Emacs answers.
+      ;;
+      ;; Measured against Emacs 31.1: `(kbd "C-x")' 24, `(kbd "S-x")'
+      ;; 33554552, `(kbd "C-M-M")' 134217741 - the `M' folds to 13,
+      ;; `\r', with no shift kept - `(kbd "M-<")' 134217788, `(kbd
+      ;; "M-12")' the two events 134217777 and 134217778, and `(kbd
+      ;; "C-f10")' the error "C- must prefix a single character, not
+      ;; f10".
+      ;;--------------------------------------------------------------
+      (let ((angle-name (angle-key-name word)))
+        (cond
+         (angle-name (list (string->symbol angle-name)))
+         (else
           (let* ((mods-and-key (key-parse-modifiers word))
                  (mods (car mods-and-key))
-                 (named (cdr mods-and-key))
-                 ;; the modifiers are off; now a `<...>` names a keyboard
-                 ;; key, which is why this is done after them
-                 (named (if (and (> (string-length named) 2)
-                                 (char=? (string-ref named 0) #\<)
-                                 (char=? (string-ref named
-                                                    (- (string-length named) 1))
-                                 #\>))
-                            (substring named 1 (- (string-length named) 1))
-                            named))
-                 (found (assoc named *key-parse-named*))
-                 (char (if found (cdr found) (and (= (string-length named) 1)
-                                                 (string-ref named 0)))))
+                 (raw (cdr mods-and-key))
+                 (bits (key-parse-bits mods))
+                 (found (assoc raw *key-parse-named*))
+                 ;; The word as Emacs has it *after* its named-key
+                 ;; substitution: `TAB' is `#\tab' by then, and the
+                 ;; "single character" test below is made on this.
+                 (keytext (if found (string (cdr found)) raw))
+                 (char (if found (cdr found)
+                           (and (= (string-length raw) 1)
+                                (string-ref raw 0)))))
             (cond
-             ;; The word as the *event* it names: the modifiers and the
-             ;; base, through `event-convert-list' - which is the C's way
-             ;; from a description to an event, and the reason `C-s' comes
-             ;; out as 19 and `M-<' as 134217788 rather than as a list.
-             (char (event-convert-list (append mods (list (char->integer char)))))
-             (named (event-convert-list
-                     (append mods (list (string->symbol named)))))
-             (else #f)))))
+             ;; No modifiers: the word is its own keys - `key-parse''s
+             ;; `key = word', which `vconcat' splices. That is where
+             ;; `(kbd "f10")' being the three characters f, 1, 0 comes
+             ;; from.
+             ((zero? bits) (map char->integer (string->list keytext)))
+             ;; Meta alone on a number: each digit takes the bit
+             ;; (`keymap.el:305'), which is how `M-6' is
+             ;; `digit-argument' and `M-12' is two of them.
+             ((and (= bits char-meta) (meta-number? keytext))
+              (map (lambda (c) (+ bits (char->integer c)))
+                   (string->list keytext)))
+             ;; A modifier prefix needs a *single* character under it -
+             ;; Emacs's own complaint (`keymap.el:311'). `C-f10' is an
+             ;; error and `C-<f10>' is the key, which is why the angle
+             ;; form is taken above.
+             ((not (= (string-length keytext) 1))
+              (error "~a must prefix a single character, not ~a"
+                     (substring word 0 (- (string-length word)
+                                          (string-length raw)))
+                     keytext))
+             ;; The control column: `@-_a-z' denote control characters
+             ;; by their low five bits, so `C-M-M' is meta + 13.
+             ((and (not (zero? (logand bits char-ctl)))
+                   (or (and (char>=? char #\@) (char<=? char #\_))
+                       (and (char>=? char #\a) (char<=? char #\z))))
+              (list (+ (- bits char-ctl) (logand (char->integer char) 31))))
+             (else (list (+ bits (char->integer char))))))))))
 
     ;;----------------------------------------------------------------
     ;; Key events
@@ -664,8 +817,12 @@
                    (word-beg (or pos (string-length rest)))
                    (word-end (key-parse-word rest word-beg))
                    (word (substring rest word-beg word-end))
-                   (key (parse-key word)))
+                   ;; A word can be more than one event - `M-12' is two
+                   ;; - so `parse-key' answers a *list* and it is spliced,
+                   ;; which is what `vconcat' does with `key-parse''s
+                   ;; `key' (`subr.el:1268').
+                   (evs (parse-key word)))
               (loop (substring rest (min word-end (string-length rest)))
-                    (cons key keys)))))))
+                    (append (reverse evs) keys)))))))
 
     ))

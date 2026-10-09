@@ -6,7 +6,7 @@
   ;; `kbd' is the tree's spelling of a *key* - `(kbd "C-x")' is the event
   ;; vector `#(24)' - and it is `character.sld''s, where the C's
   ;; `make_lispy_event' arithmetic lives.
-  (only (schemacs editor character) kbd)
+  (only (schemacs editor character) kbd char-meta char-ctl char-shift)
   (only (srfi 64) test-begin test-end test-skip test-error
         test-assert test-equal test-eqv test-eq)
   (schemacs hash-table)
@@ -252,7 +252,6 @@
 (define (iden id) id)
 (define (const-f) #f)
 
-(define ctrl-alt-bits (bitwise-ior meta-bit ctrl-bit))
 (define ctrl-char     (new-self-insert-keymap-layer #t iden const-f))
 (define app-kmp       apply-keymap-index-predicate)
 (define unctrl-char   (new-self-insert-keymap-layer #f iden const-f))
@@ -263,12 +262,19 @@
 ;; symbols and characters, which is the vocabulary this tree was purged of.
 (define (key s) (keymap-index (kbd s)))
 
-(test-equal (list ctrl-alt-bits #\@ #f)
+;; **The two fields are the event's own split.** `mod-index' is the
+;; `CHAR_*' bits the event carries - and only those, so `C-M-@' has meta
+;; and no control bit, because the *code* 0 is what says control for that
+;; key - and `char-index' is the code below the bits, as a character.
+;; What stood here was a *folded* reading: control was unfolded
+;; (`C-x' became the letter `x') and the letter downcased, which is
+;; exactly what made the index lossy.
+(test-equal (list char-meta #\nul #f)
   (let ((kix (key "C-M-@")))
     (list (mod-index kix) (char-index kix) (next-index kix))
     ))
 
-(test-equal (list ctrl-alt-bits #\m ctrl-bit #\c #f)
+(test-equal (list char-meta #\return 0 (integer->char 3) #f)
   (let*((kix (key "C-M-m C-c"))
         (kix2 (next-index kix))
         )

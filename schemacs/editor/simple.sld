@@ -1890,14 +1890,23 @@ non-nil."
     ;; C-M--. C-u is not bound because it never reaches the keymap -
     ;; `UPDATE-PREFIX!' consumes it first, as Emacs's
     ;; `universal-argument-map' does.
+    ;; **The digit is *interpolated*** - `(kbd "M-digit")' is the literal
+    ;; word `digit', so the loop bound the *one* key `M-digit' ten times
+    ;; over and no digit ever reached `digit-argument'. The loop was
+    ;; written with a `digit' binding that its body never used, which is
+    ;; why reading it did not show the mistake; it came out the day `kbd'
+    ;; started *refusing* a modifier prefix on a word longer than one
+    ;; character, as Emacs's `key-parse' does ("M- must prefix a single
+    ;; character, not digit").
     (let loop ((i 0))
       (when (<= i 9)
-        (let ((digit (integer->char (+ (char->integer #\0) i))))
-          (define-key *default-keymap* (kbd "M-digit") digit-argument)
+        (let ((digit (number->string i)))
           (define-key *default-keymap*
-            (kbd "C-digit") digit-argument)
+            (kbd (string-append "M-" digit)) digit-argument)
           (define-key *default-keymap*
-            (kbd "M-C-digit") digit-argument))
+            (kbd (string-append "C-" digit)) digit-argument)
+          (define-key *default-keymap*
+            (kbd (string-append "M-C-" digit)) digit-argument))
         (loop (+ 1 i))))
     (define-key *default-keymap* (kbd "M--") negative-argument)
     (define-key *default-keymap* (kbd "C--") negative-argument)

@@ -84,7 +84,7 @@
    keymap-index-to-char
    mod-index char-index next-index
    modifier-bit
-   ctrl-bit meta-bit super-bit hyper-bit alt-bit
+   event-modifier-bits event-base-part
 
    keymap-layer-type?
    keymap-layer
@@ -437,14 +437,13 @@
       (nextix next-index) ; the rest of the key sequence, or #f
       )
 
-    (define ctrl-bit char-ctl)
-    (define meta-bit char-meta)
-    (define super-bit char-super)
-    (define hyper-bit char-hyper)
-    (define alt-bit char-alt)
-    ;; ^ GNU Emacs's own bits, under the names this library has always
-    ;; used for them - so `mod-index' answers an *event's* modifier field
-    ;; and needs no translation to become one again.
+    ;; **The bits are named Emacs's way and only Emacs's way.**
+    ;; `ctrl-bit', `meta-bit', `super-bit', `hyper-bit' and `alt-bit'
+    ;; stood here as aliases for these, and they were this library's own
+    ;; invention: the C's names are `CHAR_CTL' and its neighbours
+    ;; (`lisp.h':3221), which `character.sld' already exports as
+    ;; `char-ctl' and so on. An alias for a bit is one more vocabulary to
+    ;; learn for nothing, and this tree has been there.
 
     ;; `ascii-modifier?' and `keymap-index->ascii' stood here. The latter
     ;; reconstructed an ASCII *string* from an index - an ESC prefixed for
@@ -471,19 +470,21 @@
       ;; function's docstring gives; there is no `ctrl' among them, and
       ;; this tree used to have one of its own here.
       ;;
-      ;; **`shift' deliberately answers #f**, as the table this replaces
-      ;; did: a shifted *character* carries its shift in its own case, and
-      ;; `keymap-index` takes the character below as the event spells it,
-      ;; so `X' and `x' stay two keys. A shifted *function* key (`S-up')
-      ;; therefore still cannot be told from the unshifted one, which is
-      ;; a gap this keymap has always had and which closing would change
-      ;; what every bound capital does.
+      ;; **`shift' answers its bit, as it does in Emacs.** It used to
+      ;; answer #f here, on the reading that a shifted *character* carries
+      ;; its shift in its own case - which is true of `X' and `x', and
+      ;; those are two events already (88 and 120), so nothing about them
+      ;; changes. What that #f cost was every event that carries the shift
+      ;; *bit*: `(kbd "S-x")' is `shift | ?x' in Emacs, `S-<f10>' is a key
+      ;; of its own beside `<f10>', and with no bit both were stored as
+      ;; their unshifted selves and neither could be bound at all.
       ;;--------------------------------------------------------------
       (cond ((eq? sym 'control) char-ctl)
             ((eq? sym 'meta) char-meta)
             ((eq? sym 'super) char-super)
             ((eq? sym 'hyper) char-hyper)
             ((eq? sym 'alt) char-alt)
+            ((eq? sym 'shift) char-shift)
             (else #f)))
 
     ;; `modifier->integer' and its `sym-lookup-table' stood here: a table
@@ -494,6 +495,38 @@
     ;; `parse_solitary_modifier' (`keyboard.c:7920') accepts `ctrl' as an
     ;; alias but every `define-key' in Emacs writes `control'. The names
     ;; are Emacs's now, and `modifier-bit' above is the whole of it.
+
+    (define (event-modifier-bits event)
+      ;; The C's modifier bits of EVENT - the `CHAR_*' mask taken straight
+      ;; off an integer, because that is what an event *is*: `C-x' is the
+      ;; integer 24 and its control is the *code*, not a bit. A symbol's
+      ;; bits are read off its name, which is where `M-up' keeps its `M-',
+      ;; and `event-modifiers' (`subr.el:1825') is the reading used. Note
+      ;; that it is a *reading*: it reports `control' for any code below
+      ;; 32, bit or no bit, which is exactly why the integer case does not
+      ;; go through it.
+      ;;--------------------------------------------------------------
+      (if (integer? event)
+          (logand event (logior char-alt char-super char-hyper
+                                char-shift char-ctl char-meta))
+          (let loop ((mods (event-modifiers event)) (bits 0))
+            (if (null? mods)
+                bits
+                (loop (cdr mods)
+                      (logior bits (or (modifier-bit (car mods)) 0)))))))
+
+    (define (event-base-part event)
+      ;; EVENT without its modifier bits: a *character* for an integer -
+      ;; "the low bits are the character", which is what the C's
+      ;; `buf.code' is - and the name without its modifier prefixes for a
+      ;; symbol, which is where `M-up''s `up' is.
+      ;;--------------------------------------------------------------
+      (if (integer? event)
+          (integer->char
+           (logand event (lognot (logior char-alt char-super char-hyper
+                                         char-shift char-ctl char-meta))))
+          (let ((base (event-basic-type event)))
+            (if (symbol? base) (symbol->string base) (string base)))))
 
     (define (keymap-index syms)
       ;; Construct a ~<KEYMAP-INDEX>~ from a symbolic representation.
@@ -563,34 +596,27 @@
         ;; event.
         (keymap-index (char->integer syms)))
        ((or (integer? syms) (symbol? syms))
-        (let ((base (event-basic-type syms)))
-          (make<keymap-index>
-           (let loop ((mods (event-modifiers syms)) (mod 0))
-             (if (null? mods)
-                 mod
-                 (loop (cdr mods)
-                       (bitwise-ior mod
-                                    (or (modifier-bit (car mods)) 0)))))
-           (if (symbol? base)
-               (symbol->string base)
-               ;; The event's character: the modifier bits masked off,
-               ;; and the control range unfolded - `event-basic-type'
-               ;; as far as `uncontrolled' (`subr.el:1875'). The
-               ;; folding of the control range *is* a case fold - `C-x'
-               ;; arrives as 24 and unfolds to `X' - so the unfolded
-               ;; character is downcased here, to the `x' every binding
-               ;; in the tree spells it with. A character *above* the
-               ;; control range keeps its case: it came from the key
-               ;; itself, and `X' and `x' are two keys.
-               (let ((code (bitwise-and
-                            syms
-                            (lognot (bitwise-ior char-alt char-super
-                                                 char-hyper char-shift
-                                                 char-ctl char-meta)))))
-                 (if (< code 32)
-                     (char-downcase (integer->char (bitwise-ior code 64)))
-                     (integer->char code))))
-           #f)))
+        ;; **The event is stored as it *is*** - its own modifier bits and
+        ;; its own base, which is the split `event-modifier-bits' and
+        ;; `event-base-part' make - so that `keymap-index->events' gives
+        ;; the very event back.
+        ;;
+        ;; What stood here folded the base first, through
+        ;; `event-basic-type': the control range was unfolded (`C-x'
+        ;; arrives as 24 and became the character `X') and the character
+        ;; downcased. That made the index a *lossy reading* of the event,
+        ;; and every round-trip bug in this library came out of it - a
+        ;; control-bit `x' and the code 24 became one index, `S-x' came
+        ;; back as `X', and `C-M-M' lost its shift. It is also why
+        ;; `shift' had no bit in `modifier-bit': an index that cannot tell
+        ;; two events apart has no use for the distinction.
+        ;;
+        ;; Rebuilding from this split is exact, and the split is the C's
+        ;; own - `CHAR_MODIFIER_MASK' and the code below it.
+        (make<keymap-index>
+         (event-modifier-bits syms)
+         (event-base-part syms)
+         #f))
        ;; **Anything that is not one of the above is not a key at all**,
        ;; and the clause that says so is written as this `cond`'s final
        ;; `else` because that is where a `cond`'s default belongs. Without
@@ -689,18 +715,11 @@
            (else
             (error "all arguments must be of <keymap-index-type>" head)))))))
 
-    (define (modifier-names modix)
-      ;; The modifier *names* a bit field holds, in Emacs's spelling -
-      ;; `control', `meta', `super', `hyper', `alt' - which is what
-      ;; `event-modifiers' answers with and what `event-convert-list'
-      ;; takes. The inverse of `modifier-bit' above, and the only other
-      ;; place a modifier name appears.
-      ;;--------------------------------------------------------------
-      (append (if (not (zero? (logand modix char-ctl))) '(control) '())
-              (if (not (zero? (logand modix char-meta))) '(meta) '())
-              (if (not (zero? (logand modix char-super))) '(super) '())
-              (if (not (zero? (logand modix char-hyper))) '(hyper) '())
-              (if (not (zero? (logand modix char-alt))) '(alt) '())))
+    ;; `modifier-names' stood here: the bit field read back as the
+    ;; modifier *names* `event-convert-list' takes. It existed only to
+    ;; rebuild an event out of an index, and the index no longer holds a
+    ;; folded reading of one - the event's own bits and base are put back
+    ;; together with `logior', and no name is involved.
 
     (define (keymap-index->events km)
       ;; The *events* of the key sequence KM stands for: an integer with
@@ -708,14 +727,15 @@
       ;; character. This is Emacs's reader of a key - `(aref KEY i)' for
       ;; a vector key - and what `key-description' renders.
       ;;
-      ;; **The conversion is `event-convert-list', run backwards.** An
-      ;; index holds its modifiers as bits and its key as the letter the
-      ;; control range was unfolded to, so rebuilding the event means
-      ;; asking `event-convert-list' for `(control #\\x)' - which is the
-      ;; C's "Turn (control a) into C-a", and which is what turns the
-      ;; stored `#\\x' back into the event 24. Doing the bit arithmetic by
-      ;; hand here gave `char-ctl | 120', an event Emacs never makes for
-      ;; that key.
+      ;; **The conversion is that same split, put back** - the bits and
+      ;; the base `logior'ed, which is all the event ever was.
+      ;;
+      ;; It used to go through `event-convert-list', which is Emacs's
+      ;; "turn `(control ?x)' into C-x": that function *folds* control
+      ;; through `make_ctrl_char' and upcases a shifted letter, so it is
+      ;; the inverse of `key-parse' and not of this index. It happened to
+      ;; give the right answer for `C-x' and the wrong one for anything
+      ;; carrying a shift bit.
       ;;
       ;; It replaces `keymap-index->list', which answered a list of
       ;; modifier *symbols* and a character - this library's private
@@ -727,8 +747,7 @@
           (let ((modix (mod-index km))
                 (charix (char-index km)))
             (cons (if (char? charix)
-                      (event-convert-list
-                       (append (modifier-names modix) (list charix)))
+                      (logior modix (char->integer charix))
                       ;; A string names a key that is not a character
                       ;; (`up', `f1'); `apply-modifiers' is the C's
                       ;; `apply_modifiers_uncached', which spells the
@@ -761,38 +780,40 @@
           (error "expecting list of <keymap-index-type> elements" nodes)))))
 
 
-    (define at-char (integer->char 64))
-    (define underscore (integer->char 95))
-
     (define (keymap-index-to-char keyix allow-ctrl on-success on-fail)
-      ;; Convert a keymap-index to a character, evaluate `ON-SUCCESS` with
-      ;; the character if conversion succeeded, evaluate `ON-FAIL` if
-      ;; conversion failed.
+      ;; The *character* KEYIX names, if it names one: `ON-SUCCESS` is
+      ;; applied to it and `ON-FAIL` is applied when it does not.
+      ;;
+      ;; This is the test the catch-all `self-insert' layer is reached by,
+      ;; and it is the one Emacs makes in `keyboard.c': the fallback that
+      ;; runs `self-insert-command' is reached only for a *character*
+      ;; event with no modifier on it. A *named* key is not one, and
+      ;; without the test every unbound named key (`<f13>', `<prior>',
+      ;; `<insert>') reached `self-insert-command', which inserted the
+      ;; key's *name* as text - and in a read-only buffer said "Buffer is
+      ;; read-only" and otherwise did nothing, which is how PgUp and PgDn
+      ;; were lost in Dired.
+      ;;
+      ;; ALLOW-CTRL admits a control character too. It used to be what
+      ;; folded `(ctrl #\@)' back to NUL; the event for that key *is* 0,
+      ;; so what it decides now is only whether a control code counts as
+      ;; a character, which is what its name says.
       ;;------------------------------------------------------------------
-      (cond
-       ((next-index keyix) (on-fail)) ;; if there is a next-index, return #f
-       ((and allow-ctrl (= ctrl-bit (mod-index keyix)))
-        (let ((char (char-upcase (char-index keyix))))
-          (cond
-           ((and (char>=? char at-char) (char<=? char underscore))
-            ;; this equation is defined by ASCII standard for how to
-            ;; convert letters to control characters.
-            (on-success (integer->char (bitwise-and #x1F (char->integer char)))))
-           (else (on-fail)))))
-       ((not (= 0 (mod-index keyix)))
-        (on-fail)) ;; ctrl chars not allows and mod-index is not zero
-       ;; A *character* key is self-inserting; a *named* one is not. Emacs
-       ;; makes the same test in `keyboard.c' - the catch-all that runs
-       ;; `self-insert-command' is reached only when the key is a
-       ;; character event - and without it every unbound named key
-       ;; (`<f13>', `<prior>', `<insert>') reached `self-insert-command',
-       ;; which inserted the key's *name* as text. In a read-only buffer
-       ;; the same keys said "Buffer is read-only" and otherwise did
-       ;; nothing, which is how PgUp and PgDn were lost in Dired.
-       (else (if (char? (char-index keyix))
-                 (on-success (char-index keyix))
-                 (on-fail)))
-       ))
+      (let ((event (if (char? (char-index keyix))
+                       (logior (mod-index keyix)
+                               (char->integer (char-index keyix)))
+                       #f)))
+        (cond
+         ((next-index keyix) (on-fail))   ; a prefix is not a character
+         ((not event) (on-fail))          ; a named key is not self-inserting
+         ;; Every modifier but control means it is not a plain character.
+         ((not (zero? (logand event (logior char-alt char-super char-hyper
+                                            char-shift char-meta))))
+          (on-fail))
+         ((or (< event 32) (not (zero? (logand event char-ctl))))
+          (if allow-ctrl (on-success (char-index keyix)) (on-fail)))
+         ((= event 127) (on-fail))        ; DEL is not self-inserting
+         (else (on-success (char-index keyix))))))
 
     (define keymap-index->expr keymap-index->events)
 
