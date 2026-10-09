@@ -1,4 +1,4 @@
-(define-library (schemacs editor xterm)
+(define-library (schemacs ui ncurses xterm)
   ;; This library mirrors GNU Emacs's `term/xterm.el': what Emacs does to
   ;; an xterm when it opens one. Two parts of that file are here, because
   ;; they are the two that decide how a face comes out on the screen:

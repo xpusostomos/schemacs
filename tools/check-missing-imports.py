@@ -50,9 +50,10 @@ EDITOR_LIBS = [
     '(schemacs keymap)', '(schemacs lens)',
     '(schemacs vector)', '(schemacs string)', '(schemacs bitwise)',
     '(schemacs comparator)', '(schemacs hash-table)', '(schemacs pretty)',
-    '(schemacs lexer)', '(schemacs bit-stack)', '(schemacs cursor)',
-    '(schemacs elisp-eval)', '(schemacs elisp-load)',
-    '(schemacs ui platform ncurses)', '(schemacs ui text-buffer-impl)',
+    '(schemacs cursor)',
+    '(schemacs ui gtk gtk-main)', '(schemacs ui gtk pgtk)',
+    '(schemacs ui ncurses ncurses-main)', '(schemacs ui ncurses term)',
+    '(schemacs ui ncurses xterm)',
 ]
 R7RS_MODULES = ['(scheme base)', '(scheme char)', '(scheme write)',
                 '(scheme file)', '(scheme cxr)', '(scheme case-lambda)',

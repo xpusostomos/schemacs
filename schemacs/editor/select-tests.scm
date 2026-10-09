@@ -32,7 +32,7 @@
       current-display get-selection set-selection!
       selection-owner? selection-exists?)
  (only (schemacs editor faces) *window-system*)
- (only (schemacs editor term) <tty-display>)
+ (only (schemacs ui ncurses term) <tty-display>)
  (only (schemacs editor engine)
        new-text-editor text-editor-insert text-editor-set-cursor
        text-editor-get-cursor text-editor-to-string)
@@ -50,7 +50,7 @@
        *select-active-regions* *interprogram-cut-function*
        *interprogram-paste-function* deactivate-mark
        kill-new kill-append current-kill)
- (only (schemacs editor xterm)
+ (only (schemacs ui ncurses xterm)
        *xterm--set-selection* *xterm--get-selection*
        xterm-max-cut-length xterm--selection-char
        xterm--base64-encode xterm--base64-decode

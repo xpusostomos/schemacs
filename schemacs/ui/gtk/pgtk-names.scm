@@ -15,7 +15,7 @@
 ;;; Importers must use `only' or `#:select': the surface is thousands of
 ;;; names, and pulling them in wholesale shadows core bindings.
 
-(define-module (schemacs editor pgtk-names)
+(define-module (schemacs ui gtk pgtk-names)
   ;; The plain `(gi)' module has to be *loaded* - it initializes the
   ;; girepository runtime, without which typelib->module segfaults - but
   ;; its re-exports of `connect', `equal?', `format', `write', `quit'
@@ -29,13 +29,13 @@
 
 ;; GdkPixbuf must be required explicitly: Gdk pulls in its *types*, so a
 ;; survey looks complete while its functions are missing.
-(typelib->module (resolve-module '(schemacs editor pgtk-names)) "Gtk" "3.0")
-(typelib->module (resolve-module '(schemacs editor pgtk-names)) "Gdk" "3.0")
-(typelib->module (resolve-module '(schemacs editor pgtk-names)) "GLib" "2.0")
-(typelib->module (resolve-module '(schemacs editor pgtk-names)) "GdkPixbuf" "2.0")
-(typelib->module (resolve-module '(schemacs editor pgtk-names)) "PangoCairo" "1.0")
-(typelib->module (resolve-module '(schemacs editor pgtk-names)) "Pango" "1.0")
-(typelib->module (resolve-module '(schemacs editor pgtk-names)) "cairo" "1.0")
+(typelib->module (resolve-module '(schemacs ui gtk pgtk-names)) "Gtk" "3.0")
+(typelib->module (resolve-module '(schemacs ui gtk pgtk-names)) "Gdk" "3.0")
+(typelib->module (resolve-module '(schemacs ui gtk pgtk-names)) "GLib" "2.0")
+(typelib->module (resolve-module '(schemacs ui gtk pgtk-names)) "GdkPixbuf" "2.0")
+(typelib->module (resolve-module '(schemacs ui gtk pgtk-names)) "PangoCairo" "1.0")
+(typelib->module (resolve-module '(schemacs ui gtk pgtk-names)) "Pango" "1.0")
+(typelib->module (resolve-module '(schemacs ui gtk pgtk-names)) "cairo" "1.0")
 
 ;; Without these, every typelib generic misresolves and fails with a
 ;; misleading "Too few \"in\" arguments" error. They are pushed here and

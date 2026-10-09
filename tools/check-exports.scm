@@ -34,7 +34,10 @@
       ;; exported that nothing defines - pre-existing, and its own
       ;; business. Name it explicitly to look at it:
       ;;     tools/check-exports.scm schemacs/apps/debugui.sld
-      (let loop ((dirs '("schemacs/editor" "schemacs/ui/platform"))
+      ;; The UI directories are walked too: the toolkit libraries moved
+      ;; there when they stopped being `(schemacs editor ...)'
+      ;; (`schemacs/ui/gtk' and `schemacs/ui/ncurses').
+      (let loop ((dirs '("schemacs/editor" "schemacs/ui/gtk" "schemacs/ui/ncurses"))
                  (acc '()))
         (if (null? dirs)
             (reverse acc)

@@ -1,4 +1,4 @@
-(define-library (schemacs ui platform ncurses)
+(define-library (schemacs ui ncurses ncurses-main)
   ;; The ncurses-terminal editor's entry point. Entering and leaving
   ;; curses mode, drawing and reading keys are `term.sld`'s - the mirror
   ;; of GNU Emacs's `term.c` - and what is left here is the other half
@@ -19,7 +19,7 @@
     ;; Opening the terminal - curses mode, the display object, the face
     ;; initialization - is `term.sld''s (the mirror of Emacs's term.c);
     ;; what is left here is the entry point that opens an editor on one.
-    (only (schemacs editor term) with-terminal)
+    (only (schemacs ui ncurses term) with-terminal)
     (only (schemacs editor engine)
           new-text-editor set!text-editor-buffer-name)
     (only (schemacs editor frame) *current-frame* new-frame)

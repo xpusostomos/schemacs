@@ -32,7 +32,7 @@
  (only (guile) setvbuf)
  (only (srfi 64) test-assert test-equal test-begin test-end)
  (only (oop goops) define-class define-method make)
- (only (schemacs editor pgtk) <pgtk-display> initialize-pgtk-faces!)
+ (only (schemacs ui gtk pgtk) <pgtk-display> initialize-pgtk-faces!)
  ;; the display's generic, renamed: the test defines a method on it,
  ;; and `mouse-position' below is the frame-level function that calls it
  (rename (only (schemacs editor dispnew)

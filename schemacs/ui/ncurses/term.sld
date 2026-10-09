@@ -1,4 +1,4 @@
-(define-library (schemacs editor term)
+(define-library (schemacs ui ncurses term)
   ;; This library mirrors GNU Emacs's `term.c': the text terminal.
   ;; Emacs has one redisplay that draws through a per-display interface
   ;; (`dispnew.sld''s generics here); this library is the implementation
@@ -31,7 +31,7 @@
     ;; import for that: the eight standard colors, the xterm driver for
     ;; a TERM of xterm*, and the face registry to recalc.
     (only (schemacs editor tty-colors) tty-register-default-colors)
-    (only (schemacs editor xterm)
+    (only (schemacs ui ncurses xterm)
           *input-decode-map* terminal-init-xterm
           *xterm--set-selection* *xterm--get-selection*
           xterm--tty-set-selection xterm--tty-get-selection)

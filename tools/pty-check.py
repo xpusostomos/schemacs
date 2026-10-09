@@ -22,7 +22,7 @@ script is that check, kept.
 Usage:  python3 tools/pty-check.py [name ...]
         (no arguments runs every check)
 
-Each check starts `main-ncurses.scm` on a real terminal, sends keys, and
+Each check starts `se` (the editor's entry point) on a real terminal, sends keys, and
 asserts on the screen and on the files left behind. Exit status is 0 when
 every check passes.
 """
@@ -184,11 +184,19 @@ def drive(keys, path, settle=1.5, gap=0.3, term=None, background="0000/0000/0000
         os.environ["XDG_CONFIG_HOME"] = config or TEST_CONFIG_HOME
         os.environ["TERM"] = term or os.environ.get("SCHEMACS_TEST_TERM", "xterm")
         os.chdir(REPO)
-        argv = ["guile", "--no-auto-compile", "--r7rs", "-L", REPO,
-                "-s", "main-ncurses.scm"]
-        if path is not None:
-            argv.append(path)
-        os.execvp("guile", argv)
+        # **`se', which is the editor's one entry point.** This used to run
+        # `main-ncurses.scm', a second launcher of its own that duplicated
+        # what `se' + `schemacs/main.scm' do (the back door, the command
+        # line, the port-file cleanup) - and did less: no `-w', no
+        # `--chdir', no `-q', no usage. That script is gone, so this runs
+        # the real thing. `se''s shebang carries the same
+        # `GUILE_WARN_DEPRECATED=no' and `--no-auto-compile' this passed to
+        # guile directly, and it resolves the tree from `(car
+        # (command-line))' - the absolute path below - so `-L' is no longer
+        # needed either.
+        se = os.path.join(REPO, "se")
+        argv = [se] + ([path] if path is not None else [])
+        os.execv(se, argv)
     out = b""
     answers = {
         # Secondary DA: an xterm of a version that reports its colours
@@ -460,7 +468,7 @@ def check_crlf():
     frame-wide answer for every buffer in it: visit a CRLF file and then
     an LF one, and saving the CRLF file rewrote it with LF.
 
-    This drives the path the unit tests cannot: `main-ncurses.scm' visits
+    This drives the path the unit tests cannot: `se' visits
     the file named on the command line, which is where the convention is
     recorded now.
     """
@@ -1633,7 +1641,7 @@ def check_splash():
     GNU Emacs's splash is Lisp that builds its own text; this one is a
     file of text, `splash.txt', looked for on the load path - and the tree
     ships one at `schemacs/splash.txt', beside its libraries, which is
-    what a run here finds (`main-ncurses.scm' is started with `-L REPO').
+    what a run here finds (`se` is started with the tree as its own directory).
 
     Four things, which are what Emacs's own splash does with
     `command-line-1''s `(display-startup-screen (> displayable-buffers-len
@@ -2930,7 +2938,10 @@ def check_not_modified():
     open(path, "w").write("hello\n")
     problems = []
     # edit, M-~, quit: no modified question, editor exits
-    screen, exited = drive([b"X", M_TILDE, C_x + C_c], path,
+    # `EXITED` because this check's condition *is* "the editor quit" -
+    # the same race `save-y-n` had: reading the silence after the last key
+    # is not the same as the editor having left.
+    screen, exited = drive([b"X", M_TILDE, C_x + C_c, EXITED], path,
                            report_exit=True, gap=0.4)
     if "Modification-flag cleared" not in screen:
         problems.append("M-~ did not say `Modification-flag cleared'")

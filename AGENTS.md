@@ -108,7 +108,7 @@ return something that they don't want to see.
 
 The layout plan (LAYOUT-PLAN.txt) is essentially executed: `apps/ncurses-editor.sld`
 (3,471 lines) has dissolved into `schemacs/editor/*.sld` plus
-`schemacs/ui/platform/ncurses.sld`. One library per mirrored Emacs file:
+`schemacs/ui/ncurses/ncurses.sld`. One library per mirrored Emacs file:
 
 - `engine.sld` — buffer.c + insdel.c + marker.c + search.c (pre-existing; ~57% ours
   by `git diff main`; Chris decided to leave it whole)
@@ -6215,3 +6215,126 @@ missing is completing the user's *name*.
   `realdir` put back: the message is the symptom, "TAB in a prompt holding
   '~/sc-.../' did not complete a name in it: ... `No such file or
   directory`".
+
+# The harness onto `se`, and the platform reorganisation (2026-10-09)
+
+Two jobs Chris asked for in one breath: *"fix the test harness, then do a
+reorganisation. The new hierarchy is `schemacs/ui/gtk` and
+`schemacs/ui/ncurses` … Then I want you to move every file / module under
+schemacs that is either gtk or ncurses specific under one of those
+directories. Then … only one thing importing either ui/gtk/gtk.scm or
+ui/ncurses/ncurses.scm, and that would be main."*
+
+## The harness now drives `se`, which found three real bugs
+
+`tools/pty-check.py` used to start `main-ncurses.scm` - a *second launcher*
+that duplicated `se` + `schemacs/main.scm` (env var, back door, port-file
+cleanup) and did less (no `-w`, `--chdir`, `-q`, usage). Chris deleted it,
+so `drive()` now spawns `[REPO/se] + args` with the same environment. That
+change alone turned the battery red, and every failure was a real bug that
+the second launcher had been hiding:
+
+1. **`schemacs/main.scm`'s `SCHEMACS_REPL` branch had `port` out of scope.**
+   It read `(let ((port (string->number env))) (when port (start-repl-in!
+   port))) port` - the answer *outside* the `let` that binds it. So the
+   env-var way to open the door answered **`Unbound variable: port`** and
+   the door never opened under `se`. `main-ncurses.scm` had its own copy of
+   that code, which worked, so nothing drove this path.
+2. **The launcher's error reporter was itself broken, and hid (1).** It
+   called `(format (current-error-port) …)` by *name*, and this file is
+   `load`ed into `(guile-user)` - where the user's init file imports
+   editor libraries, one of which exports `format` (`(schemacs editor
+   editfns)`, Emacs's, string-first). The reporter was then handed a port
+   as its format string, and all the terminal showed was `Wrong type
+   argument … #<output: file /dev/pts/8>`. Now captured once as
+   `%guile-format` at the top of the file. **An init file can shadow the
+   launcher's own bindings**; anything this file calls by name is at risk.
+3. **`not-modified` asserted an exit without waiting for one** - the eighth
+   check of that shape, converted to `EXITED` like the other seven.
+
+## The layout
+
+```
+schemacs/ui/gtk/gtk-main.sld          (schemacs ui gtk gtk-main)
+schemacs/ui/gtk/pgtk.sld              (schemacs ui gtk pgtk)
+schemacs/ui/gtk/pgtk-names.scm        (schemacs ui gtk pgtk-names)
+schemacs/ui/gtk/pgtk-tests.scm
+schemacs/ui/ncurses/ncurses-main.sld  (schemacs ui ncurses ncurses-main)
+schemacs/ui/ncurses/term.sld          (schemacs ui ncurses term)
+schemacs/ui/ncurses/xterm.sld         (schemacs ui ncurses xterm)
+```
+
+**A library name is its path, and the path cannot repeat the last
+component.** Chris asked for `ui/gtk/gtk.sld`; Guile resolves `(a b)` to
+`a/b.sld` and *does not* try `a/b/b.sld` - measured in a scratch tree,
+`no code for module (x y)` - so the entry is `gtk-main.sld`/`ncurses-main.sld`
+(Chris's own suggestion) under the directory it belongs to.
+
+`loadup.sld`'s excluded list is down to **itself**. The toolkit pair used to
+be named there so that a terminal session would not drag guile-gi in; now
+those libraries are *outside* `schemacs/editor/`, and `loadup-tests.scm`
+walks that directory - so the rule is structural instead of a note that can
+be forgotten. That also closed the leak found in the previous pass
+(`(schemacs editor xterm)` bound guile-ncurses and *was* in the
+session's list, so a GTK back door loaded ncurses).
+
+**Shared stays in `editor/`** - `dispnew.sld`, `select.sld`, `frame.sld`,
+`xfaces.sld`, `faces.sld`, and `tty-colors.sld`, which the shared face
+layer imports (`xfaces.sld`'s `tty-color-translate`, as Emacs's
+`xfaces.el` uses `tty-colors.el`). Moving `tty-colors` on its name's
+flavour would have had the editor core importing out of `ui/`, which is
+what the whole split is for.
+
+## Left to do: the tests still reach into `ui/`
+
+`tools/check-missing-imports.py`-style greps now show four files outside
+`ui/` importing it (plus `main.scm`, which is allowed):
+
+| file | what it imports | why |
+|---|---|---|
+| `apps/ncurses-editor-tests.scm` | `(schemacs ui ncurses term)` `<tty-display>` | needs *a* display; its own comment says "a terminal object with nothing behind it" |
+| `editor/faces-tests.scm` | same, `term:` prefix | subclasses it as `<test-display>` |
+| `editor/select-tests.scm` | `<tty-display>` **and** xterm's OSC 52 helpers | the first is a display object, the second is the terminal's behaviour |
+| `editor/mouse-tests.scm` | `(schemacs ui gtk pgtk)` `<pgtk-display>` | needs `line-height` in pixels |
+
+The first three are one mistake - a shared test borrowing a concrete front
+end to get a display object - and the fix is a **stub display** (the
+`dispnew` generics with no default: `write-glyphs!`, `realize-face`,
+`screen-size`, `column-width`, `line-height`, `display-color-cells`,
+`key-event->key`, …) with the geometry as its fields. The ncurses *key
+table* and xterm's OSC 52 selection cannot be stubbed (they are the
+terminal's facts), so those assertions belong in `ui/ncurses/`.
+
+## The purge, and the library that was deleted while still imported
+
+Chris purged the tree on the strength of the audit in the previous message,
+and one file it called dead was not: **`schemacs/pretty.sld`**, which
+`keymap.sld` and `vbal.sld` import for real. The editor stopped starting -
+`no code for module (schemacs pretty)` - and it was restored.
+
+What `pretty.sld` *does*, since he asked: it is a debug pretty-printer -
+`print`/`pretty` plus the layout helpers (`bracketed`, `newline-indent`,
+`indent-by`, `join-by`, `repeat`, `line-break`) and `qstr`. Its only
+customers are three structure printers, and **nothing calls any of them**:
+`keymap-print`, `keymap-layer-print`, `keymap-index-print`,
+`char-table-print` (each self-recursive and exported), `print-vbal` /
+`print-vbal-with`, and `bin-hash-table-print`. They are REPL debugging aids
+- `(keymap-print m)` at the back door - on no path the editor runs. So the
+complete deletion is `pretty.sld` **plus** those seven definitions and their
+imports in the three live libraries; not the library alone.
+
+**Two method lessons, both mine:**
+
+- **"Reachable from a test" is not "used by the editor"** and the first
+  audit conflated them, which is what made the whole `elisp-eval/` layer
+  look live: its only route in was `elisp-eval/print-tests.scm`, a file in
+  the suite list. Ask the two questions separately - the editor's roots
+  (`se`, `schemacs/main.scm`, the pty harness) versus the tests'.
+- **Before deleting, grep the tree for the library's name.** The audit's
+  importer list for `pretty.sld` named `elisp-load.sld` alone; the grep
+  found four importers including `keymap.sld` and `vbal.sld`. *Why* the
+  computed list was wrong is not established - re-running the same
+  stripping on the same file afterwards finds the import - so the lesson is
+  not "the graph is buggy" but **do not delete on one tool's say-so**:
+  `grep -rl "$(name)" --include='*.sld' --include='*.scm' .` over the whole
+  tree, for *every* file about to go, and read the hits.

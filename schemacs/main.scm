@@ -50,6 +50,21 @@
 
 (setenv "GUILE_WARN_DEPRECATED" "no")
 
+(define %guile-format format)
+;; ^ **Captured here, at the top of the file, and not called by name
+;; below.** This file is loaded into `(guile-user)', and so is the user's
+;; *init file* - which imports whatever it needs, and an editor library
+;; that exports a name this file uses then shadows it for every later call
+;; in this module. `format' is the one that bites: Guile's takes the
+;; DESTINATION first and `(schemacs editor editfns)'s `format' is Emacs's,
+;; which takes the format *string* first - so the error message this file
+;; prints on a bad command line became `%styled-format' being handed a
+;; port as its format string, and the real error was never seen. Measured
+;; by driving `se' with `SCHEMACS_REPL' set and a pty harness init file
+;; (`(import (schemacs editor startup))'): the door did not open and the
+;; only thing on the screen was "Wrong type argument ... #<output: file
+;; /dev/pts/8>".
+
 (define *program-name* (basename (car (command-line))))
 ;; ^ What this program calls itself in a message. Emacs uses argv[0]
 ;; (`emacs.c': `fprintf (stderr, "%s: Can't chdir to %s: %s\n", argv[0],
@@ -199,19 +214,19 @@
              '()))
 
 (define (usage port)
-  (format port "Usage: ~a [OPTION]... [FILE]...~%" *program-name*)
-  (format port "Edit FILE, or start on an empty buffer.~%")
-  (format port "~%")
-  (format port "  -w, --window        start the Gtk editor (the terminal is the default)~%")
-  (format port "      --chdir=DIR     change to directory DIR before starting~%")
-  (format port "  -q, --no-init-file  do not load an init file~%")
-  (format port "      --server[=PORT] open the REPL back door (on PORT when given)~%")
-  (format port "      --repl[=PORT]   connect to a running editor's back door as a~%")
-  (format port "                      REPL, and start no editor~%")
-  (format port "  -r, --remote[=PORT] open FILE... in a running editor's `find-file',~%")
-  (format port "                      and start no editor (`-r' takes no port;~%")
-  (format port "                      `--remote=PORT' names one)~%")
-  (format port "  -h, --help          print this and exit~%"))
+  (%guile-format port "Usage: ~a [OPTION]... [FILE]...~%" *program-name*)
+  (%guile-format port "Edit FILE, or start on an empty buffer.~%")
+  (%guile-format port "~%")
+  (%guile-format port "  -w, --window        start the Gtk editor (the terminal is the default)~%")
+  (%guile-format port "      --chdir=DIR     change to directory DIR before starting~%")
+  (%guile-format port "  -q, --no-init-file  do not load an init file~%")
+  (%guile-format port "      --server[=PORT] open the REPL back door (on PORT when given)~%")
+  (%guile-format port "      --repl[=PORT]   connect to a running editor's back door as a~%")
+  (%guile-format port "                      REPL, and start no editor~%")
+  (%guile-format port "  -r, --remote[=PORT] open FILE... in a running editor's `find-file',~%")
+  (%guile-format port "                      and start no editor (`-r' takes no port;~%")
+  (%guile-format port "                      `--remote=PORT' names one)~%")
+  (%guile-format port "  -h, --help          print this and exit~%"))
 
 (define (launcher-error message . irritants)
   ;; Signal a bad command line, with a message already formatted.
@@ -391,9 +406,18 @@
     (cond ((number? server) (start-repl-in! server) #t)
           ((eq? server #t) (start-repl-in!) #t)
           (env
+           ;; **`port' is bound by this `let' and returned by it.** It was
+           ;; written as `(let ((port ...)) (when port (start-repl-in!
+           ;; port))) port' - the answer outside the `let` that binds it -
+           ;; so `SCHEMACS_REPL` answered "Unbound variable: port" and the
+           ;; door never opened. It went unnoticed because nothing drove
+           ;; this path: `tools/pty-check.py' started `main-ncurses.scm',
+           ;; which opened its own door from the same variable, and
+           ;; `--server'/`--repl' take the branches above. Found the day
+           ;; the harness was pointed at `se'.
            (let ((port (string->number env)))
-             (when port (start-repl-in! port)))
-           port)
+             (when port (start-repl-in! port))
+             port))
           (else #f))))
 
 (define (start-repl-in! . port)
@@ -416,7 +440,7 @@
   ;; REPL client, and the `--repl'/`--server' checks.
   ;;--------------------------------------------------------------
   (guard (e ((quit-exception? e) (raise e))
-             (#t (format (current-error-port) "~a: ~a~%"
+             (#t (%guile-format (current-error-port) "~a: ~a~%"
                          *program-name* (condition-text e))
                  (exit 1)))
     (thunk)))
@@ -438,9 +462,9 @@
                  (if window
                      (begin
                        (check-cairo!)
-                       (start-front-end '(schemacs ui platform gtk)
+                       (start-front-end '(schemacs ui gtk gtk-main)
                                         'main-gtk files))
-                     (start-front-end '(schemacs ui platform ncurses)
+                     (start-front-end '(schemacs ui ncurses ncurses-main)
                                       'main-ncurses files)))))
     (if no-init-file
         (let ((param (init-file-user)))

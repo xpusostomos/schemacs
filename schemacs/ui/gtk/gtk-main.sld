@@ -1,6 +1,6 @@
-(define-library (schemacs ui platform gtk)
+(define-library (schemacs ui gtk gtk-main)
   ;; The GTK platform: open the editor on a GTK window. This mirrors
-  ;; `(schemacs ui platform ncurses)' exactly - the same buffers, the
+  ;; `(schemacs ui ncurses ncurses-main)' exactly - the same buffers, the
   ;; same frame, the same command loop - with the display opened by
   ;; `with-gtk-display' instead of `with-terminal'. Nothing here knows
   ;; what the editor does; nothing in the editor knows this exists.
@@ -10,7 +10,7 @@
   (import
     (scheme base)
     ;; The display, and the editor that runs on it.
-    (only (schemacs editor pgtk) with-gtk-display
+    (only (schemacs ui gtk pgtk) with-gtk-display
           pgtk-open-window pgtk-title-frame! initialize-pgtk-faces!
           pgtk-arm-timer! pgtk-main pgtk-main-quit)
     (only (schemacs editor engine) new-text-editor set!text-editor-buffer-name)

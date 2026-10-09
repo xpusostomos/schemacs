@@ -1,4 +1,4 @@
-;; Tests for `(schemacs editor pgtk)', the GTK display - the parts that
+;; Tests for `(schemacs ui gtk pgtk)', the GTK display - the parts that
 ;; need no window.
 ;;
 ;; A `<pgtk-display>' is made directly, never opened: `with-gtk-display' is
@@ -22,7 +22,7 @@
  (only (guile) setvbuf delete-file getpid)
  (only (srfi 64) test-assert test-equal test-begin test-end)
  (only (oop goops) make)
- (prefix (only (schemacs editor pgtk)
+ (prefix (only (schemacs ui gtk pgtk)
                <pgtk-display> initialize-pgtk-faces! pgtk-write-screenshot!
                note-mouse-movement pgtk-mouse-moved)
          pt:)

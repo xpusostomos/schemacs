@@ -7,7 +7,7 @@
  ;; for the run walk at the end: a buffer, a property on it, and the
  ;; computation that turns the two into runs
  (prefix (schemacs editor xdisp) xd:)
- (prefix (schemacs editor term) term:)
+ (prefix (schemacs ui ncurses term) term:)
  (prefix (schemacs editor dispnew) dn:)
  (only (oop goops) define-class make)
  (only (schemacs editor engine)

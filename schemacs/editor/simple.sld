@@ -306,7 +306,7 @@ a specialization of overwrite mode, entered by setting the
     ;; Both are here for the reason bindings.el gives for having both -
     ;; "`insertchar' is what term.c produces" - and this editor's
     ;; terminal layer is the counterpart of term.c, so it produces
-    ;; `insertchar' too (`(schemacs editor term)').
+    ;; `insertchar' too (`(schemacs ui ncurses term)').
     (define-key *default-keymap* (kbd "<insert>") overwrite-mode)
     (define-key *default-keymap* (kbd "<insertchar>") overwrite-mode)
 

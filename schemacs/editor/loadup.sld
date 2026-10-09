@@ -67,27 +67,26 @@
 
     (define %excluded-libraries
       ;; The editor's libraries that are deliberately *not* in the list.
-      ;; Three, and each for its own reason:
-      ;;
-      ;;   `(schemacs editor term)' and `(schemacs editor pgtk)' bind a
-      ;;   *toolkit* rather than state a part of the editor - the
-      ;;   guile-ncurses binding and the guile-gi one - and an editor has
-      ;;   one of them loaded and must never need the other.
-      ;;   `schemacs/main.scm' says the same thing about the front ends
-      ;;   ("a terminal editor has no business needing guile-gi, and a
-      ;;   windowed one no business needing ncurses"). Importing them
-      ;;   unconditionally would drag the other toolkit into whichever
-      ;;   editor opened the door, and for a terminal editor the Gtk one is
-      ;;   not merely wasteful but absent. Anything that wants them can
-      ;;   `(import (schemacs editor pgtk))' itself, which is a name the
-      ;;   module now has.
+      ;; One now, and the other two left for a *structural* reason rather
+      ;; than a note in here:
       ;;
       ;;   `(schemacs editor loadup)' is this list, which cannot sensibly
       ;;   be in itself: what it hands out is the editor, and it is the
       ;;   hand.
-      '((schemacs editor pgtk)
-        (schemacs editor term)
-        (schemacs editor loadup)))
+      ;;
+      ;;   **The toolkit libraries are not `(schemacs editor ...)' at all
+      ;;   any more** - `(schemacs ui gtk pgtk)' and `(schemacs ui ncurses
+      ;;   term)' are under `schemacs/ui/', beside the front ends that
+      ;;   bind them. This list used to name them so that a terminal
+      ;;   editor's session would not drag guile-gi in, and the Gtk one
+      ;;   would not drag guile-ncurses in; moving them out of
+      ;;   `schemacs/editor/' is the same decision made where it cannot be
+      ;;   forgotten - `loadup-tests.scm' walks *this* directory, so a
+      ;;   library that is not in it cannot be handed out by accident.
+      ;;   `schemacs/main.scm' says the same thing about the front ends
+      ;;   ("a terminal editor has no business needing guile-gi, and a
+      ;;   windowed one no business needing ncurses").
+      '((schemacs editor loadup)))
 
     (define %editor-libraries
       ;; Every `(schemacs editor ...)' there is, less the pair above:
@@ -149,8 +148,7 @@
         (schemacs editor tty-colors)
         (schemacs editor window)
         (schemacs editor xdisp)
-        (schemacs editor xfaces)
-        (schemacs editor xterm)))
+        (schemacs editor xfaces)))
 
     (define (editor-libraries)
       ;; What the back door's session is given, and - with

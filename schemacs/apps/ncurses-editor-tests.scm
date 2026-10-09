@@ -49,7 +49,7 @@
  ;; all the character events these tests feed ever need (only an extended
  ;; keycode would ask the terminal's terminfo, and none is used here).
  (only (schemacs editor dispnew) current-display key-event->key)
- (only (schemacs editor term) <tty-display>)
+ (only (schemacs ui ncurses term) <tty-display>)
  (only (schemacs editor keymap) *current-keymap* *default-keymap*)
  (only (schemacs editor dired)
        dired dired-directory dired-noselect dired-revert)

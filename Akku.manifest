@@ -4,13 +4,9 @@
 (akku-package ("schemacs" "0.0.0-alpha.0")
   (synopsis "A clone of Emacs and Emacs Lisp written in R7RS Scheme")
   (description
-   "The goal of this project is to construct a Scheme app platform similar to Emacs, not just in the UI/UX, but also to be backward compatible (to the greatest degree possible) with GNU Emacs by implementing an Emacs Lisp interpreter as well."
-   "  - written in portable R7RS Scheme, should run on any compliant Scheme implementation."
-   "  - able to run your init.el, run Emacs software pulled from ELPA."
-   "  - use Emacs Regression Tests (ERT) from GNU Emacs to ensure compatibility."
-   "  - encourage the use of the Scheme programming language to develop apps and text editing workflows.")
-  (authors "Ramin Honary")
-  (license "AGPL-3.0-or-later")
+   "A Scheme clone of Emacs")
+  (authors "Chris Bitmead")
+  (license "LGPL-2.1")
   (depends
    ("akku-r7rs" "^1.0.1")
    ((chibi match) "^0.9.1")

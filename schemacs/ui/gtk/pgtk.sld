@@ -1,4 +1,4 @@
-(define-library (schemacs editor pgtk)
+(define-library (schemacs ui gtk pgtk)
   ;; This library mirrors the role of GNU Emacs's `src/pgtkterm.c': the
   ;; GTK display. `term.sld' is the text terminal's implementation of
   ;; `(schemacs editor dispnew)''s interface; this is the windowed one -
@@ -65,7 +65,7 @@
     ;; for why it is not loaded here. `only' is required - the surface is
     ;; thousands of names and importing them wholesale shadows core
     ;; bindings.
-    (only (schemacs editor pgtk-names)
+    (only (schemacs ui gtk pgtk-names)
           init-check! <GtkWindow> <GtkDrawingArea> <GtkContainer> <GtkWidget>
           widget:show-all widget:hide widget:destroy widget:queue-draw
           ;; a *child* widget has to select the events it wants -
