@@ -91,14 +91,26 @@
 
 ;; -------------------------------------------------------------------------------------------------
 
-(define C-M-x '(ctrl meta #\x))
+;; **A key is written with `kbd', and never as a list of modifier
+;; symbols.** In GNU Emacs a key is a *string or a vector of events* -
+;; `(kbd "C-x C-c")' is `#(24 3)' - and an event is an integer carrying
+;; its own modifier bits, or a symbol naming a key that is not a
+;; character (`left', `f10'). A modifier *name* is allowed in exactly one
+;; place: the Lucid event type list `(control ?x)', which `keymap-index'
+;; routes through `event-convert-list' (`keyboard.c:7832') as
+;; `Fdefine_key' does (`keymap.c:1156'). A bare list of *modifier symbols*
+;; is not a key in Emacs at all, and is what this tree was purged of; the
+;; same sequence of *events* `(kbd ...)' answers with is what
+;; `keymap-index->events' reads back, so the two are compared directly.
+(define (kbd->events s) (vector->list (kbd s)))
+(define C-M-x (kbd->events "C-M-x"))
 (define kmix_C-M-x (keymap-index C-M-x))
-(define C-c_C-c '(ctrl #\c ctrl #\c))
+(define C-c_C-c (kbd->events "C-c C-c"))
 (define kmix_C-c_C-c (keymap-index C-c_C-c))
-(define C-g '(ctrl #\g))
+(define C-g (kbd->events "C-g"))
 (define kmix_C-g (keymap-index C-g))
-(define left-arrow-key '("left"))
-(define C-left-arrow-key '(ctrl "left"))
+(define left-arrow-key (kbd->events "<left>"))
+(define C-left-arrow-key (kbd->events "C-<left>"))
 (define kmix_C-left-arrow-key (keymap-index C-left-arrow-key))
 (define kmix_left-arrow-key   (keymap-index left-arrow-key))
 
@@ -110,12 +122,17 @@
 (define el:left-char "el:left-char")
 (define el:left-word "el:left-word")
 (define el:minibuffer-cancel "el:minibuffer-cancel")
-(define unassigned-key (keymap-index '(ctrl #\u #\return)))
+(define unassigned-key (keymap-index (kbd "C-u RET")))
 
 (define kml (lens-set "c" (keymap-layer) (=>keymap-layer-index! '(#\c))))
 (test-equal "c" (view kml (=>keymap-layer-index! '(#\c))))
 
-(test-equal C-c_C-c (string->keymap-index (list->string (map integer->char '(3 3)))))
+;; A key may be spelled as the *string* `(kbd ...)' reads - `read-kbd-macro'
+;; is what Emacs's `define-key' takes such a string through - and that is
+;; the string branch of `keymap-index'. The library's own string parser,
+;; which built a modifier-symbol list by hand, was deleted in the purge;
+;; `kbd' is the one parser and this is the one seam.
+(test-equal kmix_C-c_C-c (keymap-index "C-c C-c"))
 
 (set! kml (lens-set "x" #f (=>keymap-layer-index! '(#\x))))
 (test-equal "x" (view kml (=>keymap-layer-index! '(#\x))))
@@ -131,8 +148,8 @@
 (test-assert (keymap-layer-type? kml))
 (test-assert (keymap-index-type? kmix_C-M-x))
 (test-assert (keymap-index-type? kmix_C-c_C-c))
-(test-assert (equal? C-M-x (keymap-index->list kmix_C-M-x)))
-(test-assert (equal? C-c_C-c (keymap-index->list kmix_C-c_C-c)))
+(test-assert (equal? C-M-x (keymap-index->events kmix_C-M-x)))
+(test-assert (equal? C-c_C-c (keymap-index->events kmix_C-c_C-c)))
 (test-eq el:eval-defun (keymap-layer-lookup kml kmix_C-M-x))
 (test-eq el:compile (keymap-layer-lookup kml kmix_C-c_C-c))
 (test-assert
@@ -187,34 +204,27 @@
 (test-equal "<-" (keymap-layer-lookup kml-copy kmix_left-arrow-key))
 
 ;; -------------------------------------------------------------------------------------------------
-;; testing keymap-index->ascii
-
-(test-equal (list->string '(#\esc #\null))
-  (keymap-index->ascii (keymap-index '(ctrl meta #\@))))
-
-(test-equal (list->string '(#\null))
-  (keymap-index->ascii (keymap-index '(ctrl #\@))))
-
-(test-equal (list->string '(#\a #\b #\c #\newline))
-  (keymap-index->ascii (keymap-index '(#\a #\b #\c ctrl #\J))))
-
-(test-equal (list->string '(#\null))
-  (keymap-index->ascii (keymap-index '(ctrl #\@))))
+;; `keymap-index->ascii' stood here, and is gone: it reconstructed an
+;; ASCII *string* from an index - prefixing an ESC for a meta bit and
+;; subtracting #x40 for a control bit - which is a reader for the private
+;; spelling this tree used to keep its keys in. There is no such reader in
+;; Emacs and there is no such spelling left here; a key is an *event*, and
+;; `keymap-index->events' plus `key-description' render it.
 
 ;; -------------------------------------------------------------------------------------------------
 ;; testing modal-lookup-state-step!
 
-(test-equal (keymap-index '(ctrl #\c ctrl #\c ctrl meta #\x ctrl #\g))
+(test-equal (keymap-index (kbd "C-c C-c C-M-x C-g"))
   (keymap-index-append kmix_C-c_C-c kmix_C-M-x kmix_C-g))
 
 (test-equal kmix_C-c_C-c
   (reverse-list->keymap-index
-   (list (keymap-index '(ctrl #\c))
-         (keymap-index '(ctrl #\c)))))
+   (list (keymap-index (kbd "C-c"))
+         (keymap-index (kbd "C-c")))))
 
 (test-equal kmix_C-M-x
   (reverse-list->keymap-index
-   (list (keymap-index '(ctrl meta #\x)))))
+   (list (keymap-index (kbd "C-M-x")))))
 
 (test-assert (not (reverse-list->keymap-index '())))
 
@@ -247,15 +257,19 @@
 (define app-kmp       apply-keymap-index-predicate)
 (define unctrl-char   (new-self-insert-keymap-layer #f iden const-f))
 
-(define (key . args) (keymap-index args))
+;; `key' reads a key the way the tree spells one - a `kbd' string, which
+;; is `read-kbd-macro''s own input in Emacs - and answers the index
+;; `keymap-index' makes of it. It used to take varargs of modifier
+;; symbols and characters, which is the vocabulary this tree was purged of.
+(define (key s) (keymap-index (kbd s)))
 
 (test-equal (list ctrl-alt-bits #\@ #f)
-  (let ((kix (key 'ctrl 'meta #\@)))
+  (let ((kix (key "C-M-@")))
     (list (mod-index kix) (char-index kix) (next-index kix))
     ))
 
-(test-equal (list ctrl-alt-bits #\M ctrl-bit #\c #f)
-  (let*((kix (key 'ctrl 'meta #\M 'ctrl #\c))
+(test-equal (list ctrl-alt-bits #\m ctrl-bit #\c #f)
+  (let*((kix (key "C-M-m C-c"))
         (kix2 (next-index kix))
         )
     (list (mod-index kix) (char-index kix)
@@ -263,66 +277,65 @@
           (next-index kix2))
     ))
 
-(define (cheq? mk-char val . key-index-expr)
+(define (cheq? mk-char val kbd-string)
   (let*((expected-result (if (integer? val) (integer->char val) val))
         (predicate-result
-         (apply-keymap-index-predicate mk-char (keymap-index key-index-expr)))
+         (apply-keymap-index-predicate mk-char (key kbd-string)))
         )
     (char=? predicate-result expected-result)))
 
-(test-assert (cheq? ctrl-char    #\null    'ctrl  #\@))
-;;(test-assert (cheq? ctrl-char    #\space   'ctrl  #\_))
-(test-assert (cheq? ctrl-char    #\return  'ctrl  #\M))
-(test-assert (cheq? ctrl-char    #\tab     'ctrl  #\i))
+(test-assert (cheq? ctrl-char    #\null    "C-@"))
+(test-assert (cheq? ctrl-char    #\return  "C-m"))
+(test-assert (cheq? ctrl-char    #\tab     "C-i"))
 ;; --------------------------------------------------
-(test-assert (cheq? unctrl-char  #\@  #\@))
-(test-assert (cheq? unctrl-char  #\_  #\_))
-(test-assert (cheq? unctrl-char  #\M  #\M))
-(test-assert (cheq? unctrl-char  #\i  #\i))
+(test-assert (cheq? unctrl-char  #\@  "@"))
+(test-assert (cheq? unctrl-char  #\_  "_"))
+(test-assert (cheq? unctrl-char  #\M  "M"))
+(test-assert (cheq? unctrl-char  #\i  "i"))
 ;; --------------------------------------------------
-(test-assert (cheq? ctrl-char    #\null    'ctrl  #\@))
-(test-assert (cheq? ctrl-char    #\x1F     'ctrl  #\_))
-(test-assert (cheq? ctrl-char    #\return  'ctrl  #\M))
-(test-assert (cheq? ctrl-char    #\tab     'ctrl  #\i))
+(test-assert (cheq? ctrl-char    #\null    "C-@"))
+(test-assert (cheq? ctrl-char    #\x1F     "C-_"))
+(test-assert (cheq? ctrl-char    #\return  "C-m"))
+(test-assert (cheq? ctrl-char    #\tab     "C-i"))
 ;; --------------------------------------------------
-(test-assert (not (app-kmp unctrl-char (key 'ctrl #\@))))
-(test-assert (not (app-kmp unctrl-char (key 'ctrl #\_))))
-(test-assert (not (app-kmp unctrl-char (key 'ctrl #\M))))
-(test-assert (not (app-kmp unctrl-char (key 'ctrl #\t))))
+(test-assert (not (app-kmp unctrl-char (key "C-@"))))
+(test-assert (not (app-kmp unctrl-char (key "C-_"))))
+(test-assert (not (app-kmp unctrl-char (key "C-m"))))
+(test-assert (not (app-kmp unctrl-char (key "C-t"))))
 ;; --------------------------------------------------
-(test-assert (not (app-kmp ctrl-char   (key 'meta #\@))))
-(test-assert (not (app-kmp ctrl-char   (key 'meta #\_))))
-(test-assert (not (app-kmp ctrl-char   (key 'meta #\M))))
-(test-assert (not (app-kmp ctrl-char   (key 'meta #\t))))
+(test-assert (not (app-kmp ctrl-char   (key "M-@"))))
+(test-assert (not (app-kmp ctrl-char   (key "M-_"))))
+(test-assert (not (app-kmp ctrl-char   (key "M-m"))))
+(test-assert (not (app-kmp ctrl-char   (key "M-t"))))
 ;; --------------------------------------------------
-(test-assert (not (app-kmp unctrl-char (key 'meta #\@))))
-(test-assert (not (app-kmp unctrl-char (key 'meta #\_))))
-(test-assert (not (app-kmp unctrl-char (key 'meta #\M))))
-(test-assert (not (app-kmp unctrl-char (key 'meta #\t))))
+(test-assert (not (app-kmp unctrl-char (key "M-@"))))
+(test-assert (not (app-kmp unctrl-char (key "M-_"))))
+(test-assert (not (app-kmp unctrl-char (key "M-m"))))
+(test-assert (not (app-kmp unctrl-char (key "M-t"))))
 ;; --------------------------------------------------
-(test-assert (not (app-kmp ctrl-char   (key  'ctrl 'meta  #\@))))
-(test-assert (not (app-kmp ctrl-char   (key  'ctrl 'meta  #\_))))
-(test-assert (not (app-kmp ctrl-char   (key  'ctrl 'meta  #\M))))
-(test-assert (not (app-kmp ctrl-char   (key  'ctrl 'meta  #\t))))
+(test-assert (not (app-kmp ctrl-char   (key "C-M-@"))))
+(test-assert (not (app-kmp ctrl-char   (key "C-M-_"))))
+(test-assert (not (app-kmp ctrl-char   (key "C-M-m"))))
+(test-assert (not (app-kmp ctrl-char   (key "C-M-t"))))
 ;; --------------------------------------------------
-(test-assert (not (app-kmp unctrl-char (key  'ctrl 'meta  #\@))))
-(test-assert (not (app-kmp unctrl-char (key  'ctrl 'meta  #\_))))
-(test-assert (not (app-kmp unctrl-char (key  'ctrl 'meta  #\M))))
-(test-assert (not (app-kmp unctrl-char (key  'ctrl 'meta  #\t))))
+(test-assert (not (app-kmp unctrl-char (key "C-M-@"))))
+(test-assert (not (app-kmp unctrl-char (key "C-M-_"))))
+(test-assert (not (app-kmp unctrl-char (key "C-M-m"))))
+(test-assert (not (app-kmp unctrl-char (key "C-M-t"))))
 ;; --------------------------------------------------
-(test-assert (not (app-kmp unctrl-char (key 'ctrl 'meta #\M #\c))))
-(test-assert (not (app-kmp ctrl-char   (key 'ctrl 'meta #\M #\c))))
-(test-assert (not (app-kmp unctrl-char (key 'meta #\M #\c))))
-(test-assert (not (app-kmp ctrl-char   (key 'meta #\M #\c))))
-(test-assert (not (app-kmp unctrl-char (key 'ctrl #\M #\c))))
-(test-assert (not (app-kmp ctrl-char   (key 'ctrl #\M #\c))))
+(test-assert (not (app-kmp unctrl-char (key "C-M-m C-c"))))
+(test-assert (not (app-kmp ctrl-char   (key "C-M-m C-c"))))
+(test-assert (not (app-kmp unctrl-char (key "M-m C-c"))))
+(test-assert (not (app-kmp ctrl-char   (key "M-m C-c"))))
+(test-assert (not (app-kmp unctrl-char (key "C-m C-c"))))
+(test-assert (not (app-kmp ctrl-char   (key "C-m C-c"))))
 ;; --------------------------------------------------
-(test-assert (not (app-kmp unctrl-char (key 'ctrl 'meta #\M 'ctrl #\c))))
-(test-assert (not (app-kmp ctrl-char   (key 'ctrl 'meta #\M 'ctrl #\c))))
-(test-assert (not (app-kmp unctrl-char (key       'meta #\M 'ctrl #\c))))
-(test-assert (not (app-kmp ctrl-char   (key       'meta #\M 'ctrl #\c))))
-(test-assert (not (app-kmp unctrl-char (key 'ctrl       #\M 'ctrl #\c))))
-(test-assert (not (app-kmp ctrl-char   (key 'ctrl       #\M 'ctrl #\c))))
+(test-assert (not (app-kmp unctrl-char (key "C-M-m C-c"))))
+(test-assert (not (app-kmp ctrl-char   (key "C-M-m C-c"))))
+(test-assert (not (app-kmp unctrl-char (key "M-m C-c"))))
+(test-assert (not (app-kmp ctrl-char   (key "M-m C-c"))))
+(test-assert (not (app-kmp unctrl-char (key "C-m C-c"))))
+(test-assert (not (app-kmp ctrl-char   (key "C-m C-c"))))
 ;; --------------------------------------------------
 
 (define km (keymap '*test-keymap kml unctrl-char))
@@ -331,7 +344,7 @@
 (test-assert (eq? el:self-insert-command (keymap-lookup km (keymap-index '(#\b)))))
 (test-assert (eq? el:comint-interrupt-subjob (keymap-lookup km kmix_C-c_C-c)))
 (test-assert (char=? #\c (keymap-lookup km (keymap-index '(#\c)))))
-(test-assert (char=? #\null (keymap-lookup (keymap ctrl-char km) (keymap-index '(ctrl #\@)))))
+(test-assert (char=? #\null (keymap-lookup (keymap ctrl-char km) (keymap-index (kbd "C-@")))))
 (test-assert (not (keymap-lookup km unassigned-key)))
 
 (test-equal "hello"
@@ -367,16 +380,16 @@
             (set! result
               (list
                'action
-               (keymap-index->list (force key-index))
+               (keymap-index->events (force key-index))
                action)))
           (lambda (key-index next-kml) ;; do wait next
             (set! result
               (list
                'waiting
-               (keymap-index->list (force key-index)))))
+               (keymap-index->events (force key-index)))))
           (lambda (key-index) ;; do fail lookup
             (set! result
-              (list 'fail (keymap-index->list key-index)))))))
+              (list 'fail (keymap-index->events key-index)))))))
     (cons keep result)))
 
 (reset-modal! km)
@@ -385,45 +398,45 @@
 (test-eq el:comint-interrupt-subjob
   (keymap-lookup (modal-lookup-state-keymap modal) kmix_C-c_C-c))
 
-(test-assert (keymap-layer-type? (keymap-layer-ref kml (keymap-index '(ctrl #\c)))))
+(test-assert (keymap-layer-type? (keymap-layer-ref kml (keymap-index (kbd "C-c")))))
 
 (reset-modal! km)
 
-(test-equal '(#t waiting (ctrl #\c))
-  (lookup-modal! '(ctrl #\c)))
+(test-equal '(#t waiting (3))
+  (lookup-modal! (kbd "C-c")))
 
-(test-equal (list #f 'action '(ctrl #\c ctrl #\c) el:comint-interrupt-subjob)
-  (lookup-modal! '(ctrl #\c)))
-
-(reset-modal! km)
-
-(test-equal (list #f 'action '(ctrl #\g) el:keyboard-quit)
-  (lookup-modal! '(ctrl #\g)))
+(test-equal (list #f 'action '(3 3) el:comint-interrupt-subjob)
+  (lookup-modal! (kbd "C-c")))
 
 (reset-modal! km)
 
-(test-equal (list #f 'action '(#\a) el:self-insert-command)
+(test-equal (list #f 'action '(7) el:keyboard-quit)
+  (lookup-modal! (kbd "C-g")))
+
+(reset-modal! km)
+
+(test-equal (list #f 'action '(97) el:self-insert-command)
   (lookup-modal! '(#\a)))
 
 (reset-modal! km)
 
-(test-equal '(#f fail (ctrl #\q))
-  (lookup-modal! '(ctrl #\q)))
+(test-equal '(#f fail (17))
+  (lookup-modal! (kbd "C-q")))
 
 (reset-modal! km)
 
-(test-equal '(#t waiting (ctrl #\c))
-  (lookup-modal! '(ctrl #\c)))
+(test-equal '(#t waiting (3))
+  (lookup-modal! (kbd "C-c")))
 
-(test-equal '(#f fail (ctrl #\c ctrl #\space))
-  (lookup-modal! '(ctrl #\space)))
+(test-equal '(#f fail (3 0))
+  (lookup-modal! (kbd "C-@")))
 
 (reset-modal! km)
 
-(test-equal '(#f action (#\c) #\c)
+(test-equal (list #f 'action '(99) #\c)
   (lookup-modal! '(#\c)))
 
-(test-equal '(#f fail (#\c #\c))
+(test-equal '(#f fail (99 99))
   (lookup-modal! '(#\c)))
 
 
@@ -441,19 +454,19 @@
 (test-begin "schemacs_keymap_precedence")
 
 (define (one-key-map name key command)
-  (keymap name (keymap-layer (map-key (list key) command))))
+  (keymap name (keymap-layer (map-key key command))))
 
 (define precedence-local
-  (keymap '*prec-local* (keymap-layer (map-key (list (list 'ctrl #\a)) 'local-command))))
+  (keymap '*prec-local* (keymap-layer (map-key (kbd "C-a") 'local-command))))
 (define precedence-global
   (keymap '*prec-global*
-          (keymap-layer (map-key (list (list 'ctrl #\f)) 'global-command)
-                        (map-key (list (list 'ctrl #\x) (list 'ctrl #\f)) 'find-file))))
+          (keymap-layer (map-key (kbd "C-f") 'global-command)
+                        (map-key (kbd "C-x C-f") 'find-file))))
 
-(define (lookup-in keymaps keys)
+(define (lookup-in keymaps kbd-string)
   (let ((r (keymap-lookup
             (modal-lookup-state-keymap (new-modal-lookup-state keymaps))
-            (keymap-index keys))))
+            (keymap-index (kbd kbd-string)))))
     (if (keymap-type? r) 'keymap r)))
 
 ;; a list is accepted at all
@@ -462,16 +475,14 @@
 
 ;; the first keymap that binds the key wins
 (test-equal '(local-command global-command)
-  (list (lookup-in (list precedence-local precedence-global)
-                   (list (list 'ctrl #\a)))
-        (lookup-in (list precedence-local precedence-global)
-                   (list (list 'ctrl #\f)))))
+  (list (lookup-in (list precedence-local precedence-global) "C-a")
+        (lookup-in (list precedence-local precedence-global) "C-f")))
 
 ;; a key the first keymap does not bind is found in the next
 (test-equal 'global-command
-  (lookup-in (list (one-key-map '*empty* (list 'meta #\z) 'unused)
+  (lookup-in (list (one-key-map '*empty* (kbd "M-z") 'unused)
                    precedence-global)
-             (list (list 'ctrl #\f))))
+             "C-f"))
 
 ;; and a *prefix* in the first keymap does not stop the next keymap's
 ;; longer sequence being found: Emacs answers `find-file' for
@@ -479,10 +490,10 @@
 ;; and nothing under it
 (test-equal 'find-file
   (lookup-in (list (keymap '*prec-prefix*
-                           (keymap-layer (map-key (list (list 'ctrl #\x))
+                           (keymap-layer (map-key (kbd "C-x")
                                                   (keymap-layer))))
                    precedence-global)
-             (list (list 'ctrl #\x) (list 'ctrl #\f))))
+             "C-x C-f"))
 
 (test-end "schemacs_keymap_precedence")
 
@@ -492,37 +503,37 @@
 ;; `cond` and come back as the unspecified value, which is true in
 ;; Scheme - see that function's final `else`.
 (test-equal "a bare character is the event its code point names"
-  (list #\a)
-  (keymap-index->list (keymap-index #\a)))
+  (list 97)
+  (keymap-index->events (keymap-index #\a)))
 
 (test-equal "...and so is a character above the control range"
-  (list #\Z) (keymap-index->list (keymap-index #\Z)))
+  (list 90) (keymap-index->events (keymap-index #\Z)))
 
 ;; **`(kbd ...)` is the spelling to compare against**, and never a
-;; hand-written `(list 'ctrl #\x)`: a key in this tree is `kbd`'s event
-;; vector - `(kbd "C-x")` is `#(24)`, which is exactly what the C's
+;; hand-written list of modifier symbols: a key in this tree is `kbd`'s
+;; event vector - `(kbd "C-x")` is `#(24)`, which is exactly what the C's
 ;; `buf.code = cbuf[i]` produces - and `keymap-index` walks the vector
-;; itself. Writing the index out by hand is how a test comes to assert on
-;; the keymap library's *private* representation instead of on the key,
-;; and a list printed as `(ctrl x)` is a character `#\x` in one place and
-;; the symbol `x` in another (`test-equal` is `equal?` and the two print
-;; identically) - which is a mistake that has already been made once in
-;; this file's new tests.
+;; itself. Writing the key out by hand as a symbol list is how a test
+;; comes to assert on the keymap library's *private* representation
+;; instead of on the key, and the two spellings of one character - as a
+;; character and as a bare symbol - print identically under `test-equal`
+;; (which is `equal?`), which is a mistake that has already been made once
+;; in this file's tests.
 ;;
 ;; So each of these says what a *key* is and that the index agrees, with
-;; no modifier list anywhere.
+;; no modifier-symbol list anywhere.
 (test-equal "the same key spelled with kbd and with the raw event"
-  (keymap-index->list (keymap-index (kbd "C-x")))
-  (keymap-index->list (keymap-index 24)))
+  (keymap-index->events (keymap-index (kbd "C-x")))
+  (keymap-index->events (keymap-index 24)))
 
 (test-equal "a character and its kbd spelling are one key"
-  (keymap-index->list (keymap-index (kbd "a")))
-  (keymap-index->list (keymap-index #\a)))
+  (keymap-index->events (keymap-index (kbd "a")))
+  (keymap-index->events (keymap-index #\a)))
 
 (test-equal "and a chord is the two events of its kbd spelling"
-  (keymap-index->list (keymap-index (kbd "C-x C-c")))
-  (append (keymap-index->list (keymap-index (kbd "C-x")))
-          (keymap-index->list (keymap-index (kbd "C-c")))))
+  (keymap-index->events (keymap-index (kbd "C-x C-c")))
+  (append (keymap-index->events (keymap-index (kbd "C-x")))
+          (keymap-index->events (keymap-index (kbd "C-c")))))
 
 ;; **Anything else is an error, and not the unspecified value.** #t is
 ;; not a key.

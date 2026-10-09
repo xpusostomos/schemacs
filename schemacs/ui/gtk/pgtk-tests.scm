@@ -98,7 +98,7 @@
 
 ;; A control character keeps its own event: RET is 13, which is the
 ;; `(kbd "RET")' the minibuffer's map binds, and TAB is 9. The
-;; *terminal* folds these onto `(ctrl #\m)' and `(ctrl #\i)' because a
+;; *terminal* folds these onto control-M and control-I because a
 ;; terminal has one byte for the pair; a window system has the keysym,
 ;; and Emacs's event there is the character.
 ;; Return, TAB and Escape keep their *names* here: a window system
@@ -141,9 +141,11 @@
 ;; `dispatch-input-event', to the mark - the same path a keypress takes.
 ;;------------------------------------------------------------------
 
-(define (ctrl keysym) (+ keysym (* 4 (expt 2 32))))
-(define key-c-spc (ctrl #x20))   ; GDK_KEY_space with Control
-(define key-c-at  (ctrl #x40))   ; GDK_KEY_at with Control
+;; GDK's control modifier, `GDK_CONTROL_MASK = 1 << 2', folded into the
+;; state field of a key event the way the C's shift is.
+(define (with-control keysym) (+ keysym (* 4 (expt 2 32))))
+(define key-c-spc (with-control #x20))   ; GDK_KEY_space with Control
+(define key-c-at  (with-control #x40))   ; GDK_KEY_at with Control
 
 (define (mark-after key)
   ;; Dispatch KEY as the GTK display would, then two C-f, and answer the
@@ -157,8 +159,8 @@
       (dispatch-input-event frame key)
       ;; C-f is a *motion* command, which keeps the mark active - it is how
       ;; a region is made at all.
-      (dispatch-input-event frame (ctrl (char->integer #\f)))
-      (dispatch-input-event frame (ctrl (char->integer #\f)))
+      (dispatch-input-event frame (with-control (char->integer #\f)))
+      (dispatch-input-event frame (with-control (char->integer #\f)))
       (list (buffer-local-value ed 'mark-active #f)
             (text-editor-mark ed)
             (text-editor-get-cursor ed)))))

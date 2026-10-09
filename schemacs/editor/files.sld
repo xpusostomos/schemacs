@@ -135,6 +135,8 @@
                   *current-buffer*
                   buffer-modified-p
                   buffer-name
+                  bufferp
+                  get-buffer
                   *kill-buffer-query-functions*
                   buffer-default-directory
                   buffer-file-name
@@ -161,6 +163,7 @@
     ;; Every command here prompts.
     (only (schemacs editor minibuffer)
           *insert-default-directory*
+          read-buffer
           *minibuffer-completing-file-name*
           completing-read
           *confirm-nonexistent-file-or-buffer*
@@ -668,7 +671,7 @@ save-buffer
             (with-current-buffer buffer (save-buffer)))
           #t))))
 
-    (define-command (kill-buffer)
+    (define-command (kill-buffer buffer-or-name)
       ;; C-x k runs this. GNU Emacs's `kill-buffer'.
       ;;
       ;; **The order is `Fkill_buffer''s** (`buffer.c:1938-1959'), and
@@ -694,32 +697,44 @@ save-buffer
       ;; Emacs offers to kill a modified buffer rather than to save it;
       ;; saving is offered on exit and by C-x C-s, and by the `s' of the
       ;; `read-multiple-choice' question.
-      "Kill the current buffer (bound to C-x k), asking first if it has
- unsaved changes."
-      (interactive)
-      (let ((frame (*current-frame*)))
+      ;; **The interactive spec is Emacs's own** - `"bKill buffer: "'
+      ;; (`buffer.c:1890'), whose `b' is "name of existing buffer"
+      ;; (`callint.c:468'): the default is the current buffer and an
+      ;; answer matching nothing is refused. The argument was missing
+      ;; here, so the command could only ever kill the buffer it was
+      ;; called from, and a name typed at it was ignored.
+      "Kill the buffer specified by BUFFER-OR-NAME (bound to C-x k),
+ asking first if it has unsaved changes. The argument is the buffer
+ itself or its name (a string)."
+      (interactive (list (read-buffer "Kill buffer: " (current-buffer) #t)))
+      (let ((buffer (if (bufferp buffer-or-name)
+                        buffer-or-name
+                        (get-buffer buffer-or-name))))
+        ;; Emacs's `nsberror' (`buffer.c:2159'): `(kill-buffer "nothing")'
+        ;; signals "No buffer named nothing" rather than answering nil.
+        (unless (bufferp buffer)
+          (error "No buffer named ~a" buffer-or-name))
         (if (let loop ((rest (*kill-buffer-query-functions*)))
               (cond ((null? rest) #f)
                     ((not ((car rest))) #t)
                     (else (loop (cdr rest)))))
             #f
-            (let ((buffer (current-buffer)))
-              (if (and (text-editor-file-name buffer)
-                       (text-editor-modified? buffer)
-                       (not (kill-buffer--possibly-save buffer)))
-                  #f
-                  ;; the query functions have had their say; `%kill-buffer'
-                  ;; must not ask them a second time.
-                  (let ((killed
-                         (parameterize ((*kill-buffer-query-functions* '()))
-                           (%kill-buffer buffer))))
-                    ;; Emacs says nothing when a query function refused
-                    ;; the kill and "Killed buffer" when it did not; the
-                    ;; window has already been given another buffer by
-                    ;; `%kill-buffer' itself.
-                    (set!frame-message
-                     frame (if killed (string-append "Killed " killed) ""))
-                    killed))))))
+            (if (and (text-editor-file-name buffer)
+                     (text-editor-modified? buffer)
+                     (not (kill-buffer--possibly-save buffer)))
+                #f
+                ;; the query functions have had their say; `%kill-buffer'
+                ;; must not ask them a second time.
+                ;; **The answer is `t' or nil, as Emacs's is** (measured:
+                ;; `(kill-buffer "zz")' is `t'), and nothing is said in
+                ;; the echo area - also measured, `(current-message)' is
+                ;; nil after one. The `"Killed <name>"' message that stood
+                ;; here was this tree's own invention. The window has
+                ;; already been given another buffer by `%kill-buffer'
+                ;; itself.
+                (and (parameterize ((*kill-buffer-query-functions* '()))
+                       (%kill-buffer buffer))
+                     #t)))))
     ;;----------------------------------------------------------------
     ;; The two commands that still need the minibuffer, and the last
     ;; of files.el that does

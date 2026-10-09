@@ -628,9 +628,9 @@
         (bind! "~" Buffer-menu-not-modified)
         (bind! "%" Buffer-menu-toggle-read-only)
         (bind! "g" revert-buffer)
-        ;; RET is `(ctrl #\m)' and not the character `#\return': a
-        ;; terminal sends the byte 13, and the key event for it is
-        ;; control-M. Emacs's keymap has the same key - RET and C-m are one
+        ;; RET is the event `control-M' (13) and not the character
+        ;; `#\return': a terminal sends the byte 13, and the key event
+        ;; for it is control-M. Emacs's keymap has the same key - RET and C-m are one
         ;; key there too - which is why `(key-binding "\r")' finds it.
         (bind! "C-m" Buffer-menu-this-window)
         (bind! "f" Buffer-menu-this-window)

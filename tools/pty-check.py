@@ -1760,6 +1760,60 @@ def check_switch_buffer():
     return problems
 
 
+def check_kill_buffer():
+    """`C-x k' prompts for the buffer, and says nothing when it kills.
+
+    GNU Emacs's `kill-buffer' is `"bKill buffer: "' (`buffer.c:1890'), so
+    the key puts up a prompt whose default is the current buffer and RET
+    takes it; the command had no interactive argument here, so a name
+    typed at it was ignored and it could only ever kill the buffer it was
+    called from.
+
+    And Emacs prints *nothing* on the way out - measured,
+    `(current-message)' is nil after `(kill-buffer "zz")'. The
+    `"Killed <name>"' line this used to draw was this tree's own.
+
+    `b' is "name of existing buffer" (`callint.c:468'), so a name that
+    matches nothing is refused rather than making one, which is the other
+    half of what is checked here.
+    """
+    path = "/tmp/pty-check-kill.txt"
+    open(path, "w").write("KILL-ME\n")
+    problems = []
+
+    # the prompt, and it names the buffer being killed as its default
+    out = drive([C_x + b"k"], path)
+    if "Kill buffer (default " not in out:
+        problems.append("C-x k did not prompt: %r" % out[-200:])
+    if "pty-check-kill.txt" not in out:
+        problems.append("C-x k's default was not the current buffer: %r"
+                        % out[-200:])
+
+    # RET takes the default and kills it: the window is given another
+    # buffer, and nothing is said about the one that went
+    out = drive([C_x + b"k", RET], path)
+    mode = [r for r in screen_of(out).split("\n") if "-- L" in r]
+    if not mode or "pty-check-kill.txt" in mode[-1]:
+        problems.append("C-x k RET did not kill and replace the buffer: %r"
+                        % (mode[-1][:60] if mode else None,))
+    if "Killed" in out:
+        problems.append("C-x k said something in the echo area: %r"
+                        % out[-200:])
+
+    # a name that is not a buffer is refused *by the prompt*: `b' is
+    # "name of existing buffer" and `read-buffer' is called with
+    # REQUIRE-MATCH t (`minibuf.c'), so `minibuffer-complete-and-exit'
+    # says "[No match]" and the minibuffer does not leave. That is
+    # Emacs's own text for it (`minibuffer.el:2100'). The `No buffer
+    # named' error inside `kill-buffer' is the *programmatic* path -
+    # `nsberror' - and is not reachable from the key.
+    out = drive([C_x + b"k", b"no-such-buffer-here", RET], path)
+    if "[No match]" not in out:
+        problems.append("C-x k with a name that is not a buffer was not "
+                        "refused by the prompt: %r" % out[-300:])
+    return problems
+
+
 def check_abbreviate():
     """`~' for the home directory, in the file prompt and the buffer list.
 
@@ -3272,6 +3326,7 @@ CHECKS = {
     "splash": check_splash,
     "switch-buffer": check_switch_buffer,
     "abbreviate": check_abbreviate,
+    "kill-buffer": check_kill_buffer,
 }
 
 

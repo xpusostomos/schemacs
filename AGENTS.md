@@ -129,10 +129,15 @@ Wiring already done:
 2. `keyboard.sld`'s `lookup-keymaps` consults the buffer-local keymap before the global
 3. `ncurses.sld` imports the binding-carrying libraries
 
-**The RET binding** stays as it is: RET is the key path `(list 'ctrl #\m)`, not
-the character `#\return` — a terminal sends byte 13 and
-`ncurses-key->keymap-path` turns that into `(ctrl #\m)`, which is exactly Emacs's
-binding (in Emacs `(kbd "RET")` and `(kbd "C-m")` are the same key event).
+**The RET binding** stays as it is: RET is the *event* control-M (13), not
+the character `#\return` — a terminal sends byte 13, which is that event,
+and that is exactly Emacs's binding (in Emacs `(kbd "RET")` and
+`(kbd "C-m")` are the same key event).
+
+*(Superseded 2026-10-09: the key path this note was written about — a list
+of modifier symbols and a character — is gone. A key is an event or a
+vector of events now, as it is in Emacs; see "the keymap's key currency"
+in the plan of that name.)*
 
 ## The buffer list is done (2026-09-27, second pass)
 
@@ -3181,7 +3186,7 @@ the answer is wrong, print the operations, not the state.**
 Step 5 of the coding plan, and the last of it: the commands that *change*
 what a buffer's bytes are. `schemacs/editor/mule-cmds.sld` (new) mirrors
 `lisp/international/mule-cmds.el`, and `C-x RET` reaches it - RET and `C-m`
-being one key, measured: `(event-convert-list '(ctrl ?m))` is 13 and
+being one key, measured: `(event-convert-list '(control ?m))` is 13 and
 `(kbd "C-x RET f")` and `(kbd "C-x C-m f")` are the same key sequence.
 
 | key | command | what it does |

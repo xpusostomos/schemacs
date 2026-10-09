@@ -240,7 +240,7 @@ For a list of possible values of CODING-SYSTEM, use \\[list-coding-systems]."
 
     ;; "Keep `C-x C-m ...' for mule specific commands."
     ;; RET *is* `C-m' - one key in a terminal and one event here,
-    ;; measured: `(event-convert-list`\''s answer for `(ctrl ?m)` is 13, and
+    ;; measured: `(event-convert-list`\''s answer for `(control ?m)` is 13, and
     ;; `(kbd "C-x RET f")` and `(kbd "C-x C-m f")` are the same key
     ;; sequence.
     (define-key *default-keymap* (kbd "C-x RET f") set-buffer-file-coding-system)

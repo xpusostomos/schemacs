@@ -5,7 +5,7 @@
  (only (srfi 64) test-assert test-equal test-begin test-end)
  (only (schemacs editor subr) kbd event-modifiers event-basic-type
        event-convert-list event-symbol-elements)
- (only (schemacs keymap) keymap-index mod-index char-index)
+ (only (schemacs keymap) keymap-index keymap-index->events)
  ;; `function-key-map''s translation of a named key into the character it
  ;; means, which is `read_key_sequence''s step.
  (only (schemacs editor keyboard) function-key-translate))
@@ -120,23 +120,20 @@
 (test-equal "kbd C-<home>" (vector 'C-home) (kbd "C-<home>"))
 
 ;; ------------------------------------------------------------------
-;; an event indexes a keymap exactly as the path spelling it replaces,
-;; which is what let the two forms live side by side while the tree was
-;; converted.
-
-(define (same-index? a b)
-  (let ((x (keymap-index a)) (y (keymap-index b)))
-    (and (= (mod-index x) (mod-index y))
-         (equal? (char-index x) (char-index y)))))
-
-(test-assert "kbd C-x C-c indexes as the path spelling"
-  (same-index? (kbd "C-x C-c") '((ctrl #\x) (ctrl #\c))))
-(test-assert "kbd M-< indexes as the path spelling"
-  (same-index? (kbd "M-<") '((meta #\<))))
-(test-assert "kbd <up> indexes as the path spelling"
-  (same-index? (kbd "<up>") '(("up"))))
-(test-assert "kbd M-<up> indexes as the path spelling"
-  (same-index? (kbd "M-<up>") '((meta "up"))))
+;; a key sequence read by `kbd' indexes a keymap to exactly the events it
+;; names: an integer carrying its own modifier bits, or a symbol naming a
+;; key that is not a character. These four were written while the tree was
+;; being converted, against the modifier-symbol path spelling this tree
+;; used to keep its keys in; that spelling is gone, and what is left to
+;; assert is the *events* a key indexes to.
+(test-equal "kbd C-x C-c indexes to its two events"
+  '(24 3) (keymap-index->events (keymap-index (kbd "C-x C-c"))))
+(test-equal "kbd M-< indexes to the M-< event"
+  '(134217788) (keymap-index->events (keymap-index (kbd "M-<"))))
+(test-equal "kbd <up> indexes to the up event"
+  '(up) (keymap-index->events (keymap-index (kbd "<up>"))))
+(test-equal "kbd M-<up> indexes to the M-up event"
+  '(M-up) (keymap-index->events (keymap-index (kbd "M-<up>"))))
 
 ;; ------------------------------------------------------------------
 ;; `function-key-map' (`bindings.el':1554'), read off a real Emacs: the

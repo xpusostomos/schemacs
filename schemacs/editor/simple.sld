@@ -1411,8 +1411,8 @@ non-nil."
              ;; The *events* the chord was, which is what Emacs's
              ;; `this-single-command-keys' answers with. The reader used
              ;; to be `keymap-index->list', this keymap's private spelling
-             ;; of a key - `(ctrl #\x)' - and the last element of that was
-             ;; a *character*; an event is an integer, so the C's own mask
+             ;; of a key, and the last element of that was a *character*;
+             ;; an event is an integer, so the C's own mask
              ;; is what takes the character out of it.
              (events (and ix (km:keymap-index->events ix)))
              (last (and (pair? events) (car (reverse events))))

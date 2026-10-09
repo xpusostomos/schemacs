@@ -49,7 +49,7 @@
  ;; all the character events these tests feed ever need (only an extended
  ;; keycode would ask the terminal's terminfo, and none is used here).
  (only (schemacs editor dispnew) current-display key-event->key)
- (only (schemacs editor test-display) <test-display>)
+ (only (schemacs editor test-display) <test-display> test-display-script)
  (only (schemacs editor keymap) *current-keymap* *default-keymap*)
  ;; `kbd' - the tree's spelling of a key, and the event a test presses.
  (only (schemacs editor character) kbd)
@@ -68,7 +68,8 @@
  (only (schemacs editor buffer)
        *buffer-list* *current-buffer* *kill-buffer-query-functions*
        buffer-cursor-in-non-selected-windows buffer-cursor-type
-       buffer-list buffer-name get-buffer get-buffer-create set-buffer-local-value!
+       buffer-list buffer-name bufferp get-buffer get-buffer-create
+       set-buffer-local-value!
        current-buffer set-buffer
        buffer-local-keymap set!buffer-local-keymap set!buffer-default-directory
        set!buffer-cursor-in-non-selected-windows set!buffer-cursor-type
@@ -88,6 +89,7 @@
        file-name-completion-table files--buffers-needing-to-be-saved
        find-file-noselect note-file-read-only!
        save-buffer buffer-file-coding-system
+       kill-buffer
        save-answer-char->decision)
  ;; `try-completion' and `all-completions' are `minibuf.c''s.
  (only (schemacs editor coding) coding-system-name)
@@ -1076,16 +1078,16 @@
     (and record (string=? (command-name record) name))))
 
 (test-equal '(#t #t #t #t #t)
-  (list (command-named? (bound-in minibuffer-local-map (list 'ctrl #\m))
+  (list (command-named? (bound-in minibuffer-local-map (kbd "C-m"))
                         "exit-minibuffer")
-        (command-named? (bound-in minibuffer-local-map (list 'ctrl #\g))
+        (command-named? (bound-in minibuffer-local-map (kbd "C-g"))
                         "abort-recursive-edit")
-        (command-named? (bound-in minibuffer-local-map (list 'meta #\p))
+        (command-named? (bound-in minibuffer-local-map (kbd "M-p"))
                         "previous-history-element")
-        (command-named? (bound-in minibuffer-local-map (list 'meta #\n))
+        (command-named? (bound-in minibuffer-local-map (kbd "M-n"))
                         "next-history-element")
         (command-named? (bound-in minibuffer-local-completion-map
-                                  (list 'ctrl #\i))
+                                  (kbd "TAB"))
                         "minibuffer-complete")))
 
 ;; ... and the global bindings are *not* copied into it. The map holds
@@ -1112,8 +1114,8 @@
                    (*current-buffer* #f)
                    (*echo-area-buffer* mb-ed)
                    (*current-keymap* minibuffer-local-map))
-      (dispatch-key-event frame (list (list 'ctrl #\f)))
-      (list (bound-in minibuffer-local-map (list (list 'ctrl #\f)))
+      (dispatch-key-event frame (vector 6))
+      (list (bound-in minibuffer-local-map (vector 6))
             (text-editor-get-cursor mb-ed)
             (text-editor-get-cursor ed)))))
 
@@ -1124,13 +1126,13 @@
 ;; a REQUIRE-MATCH argument.
 (test-equal '(#t #t #t #t)
   (list (command-named? (bound-in minibuffer-local-completion-map
-                                  (list 'ctrl #\i))
+                                  (kbd "TAB"))
                         "minibuffer-complete")
         (command-named? (bound-in minibuffer-local-completion-map
                                   (list #\space))
                         "minibuffer-complete-word")
         (command-named? (bound-in minibuffer-local-must-match-map
-                                  (list 'ctrl #\m))
+                                  (kbd "C-m"))
                         "minibuffer-complete-and-exit")
         (command-named? (bound-in minibuffer-local-completion-map (list #\?))
                         "minibuffer-completion-help")))
@@ -2162,18 +2164,67 @@
 ;; left showing a buffer that is gone. The replacement is `other-buffer',
 ;; which makes `*scratch*' when there is nothing else to show.
 ;;
+;; **C-x k prompts first** - GNU Emacs's interactive spec is
+;; `"bKill buffer: "' (`buffer.c:1890'), so the key puts up
+;; `Kill buffer (default fe-kill.txt): ' and RET takes the default. The
+;; echo area is *empty* afterwards: measured in Emacs 31.1,
+;; `(current-message)' is nil after `(kill-buffer "zz")'.
+;;
 ;; `with-file-buffer' answers with the status line and the file's contents,
 ;; not with the frame - it runs its thunk on the frame - so what the test
 ;; wants afterwards is captured inside the thunk.
-(test-equal '("*scratch*" ("*scratch*") "Killed fe-kill.txt")
+(test-equal '("*scratch*" ("*scratch*") "")
   (let ((shown #f) (names #f) (message #f))
     (with-file-buffer "/tmp/fe-kill.txt" "text\n"
       (lambda (frame)
+        ;; `C-x k' prompts (`"bKill buffer: "'), and the RET the *nested*
+        ;; read takes is scripted on the display: `type' dispatches one
+        ;; event and waits for it to finish, so a key the prompt reads
+        ;; cannot be sent from here (this is what the test display's
+        ;; script is for).
+        (set! (test-display-script *test-display*) (list #\return))
         (type frame C-x #\k)
         (set! shown (buffer-name (frame-editor frame)))
         (set! names (map buffer-name (buffer-list)))
         (set! message (frame-message frame))))
     (list shown names message)))
+
+;; `kill-buffer' takes a buffer *or its name* - Emacs's `"bKill buffer: "'
+;; is `callint.c''s `b', "name of existing buffer" - and answers `t' when
+;; it killed one and nil when a query function refused (measured in Emacs
+;; 31.1: `(let ((kill-buffer-query-functions (list (lambda () nil))))
+;; (kill-buffer "qq"))' is nil, and `(kill-buffer "zz")' is t).
+(test-equal '(#t #t #f)
+  (let ((ed (new-text-editor)))
+    (parameterize ((*current-frame* (test-frame ed))
+                   (*echo-area-buffer* #f)
+                   (*buffer-list* '())
+                   (*current-buffer* ed)
+                   (*kill-buffer-query-functions* '()))
+      (get-buffer-create "fe-named.txt")
+      (list (kill-buffer "fe-named.txt")        ; by name
+            (not (bufferp (get-buffer "fe-named.txt")))
+            ;; a query function says no, and the answer is nil
+            (parameterize ((*kill-buffer-query-functions*
+                            (list (lambda () #f))))
+              (kill-buffer (get-buffer-create "fe-refused.txt")))))))
+
+;; ... and a name that is not a buffer at all signals, as Emacs's
+;; `nsberror' does: `(kill-buffer "nothing")' is "No buffer named nothing"
+;; rather than nil. The *key* cannot reach this, because `read-buffer' is
+;; asked with REQUIRE-MATCH, so the prompt refuses the name first.
+;; The message is checked in the shape `error' gives it - a format
+;; template and its irritants - because that is how every message in the
+;; tree is raised; `error-message-string' is Emacs's and does not exist
+;; here.
+(test-equal (list #t "No buffer named ~a" (list "no-such-buffer"))
+  (parameterize ((*buffer-list* '())
+                 (*current-buffer* #f))
+    (guard (e (#t (list #t
+                        (error-object-message e)
+                        (error-object-irritants e))))
+      (kill-buffer "no-such-buffer")
+      (list #f #f #f))))
 
 ;; A modified buffer is asked about first, and `n' leaves it alone: the
 ;; window still shows it and it is still in the list.
@@ -2182,7 +2233,13 @@
     (with-file-buffer "/tmp/fe-kill2.txt" "text\n"
       (lambda (frame)
         (text-editor-insert (frame-editor frame) "edited")
-        (type frame C-x #\k #\n #\return)
+        ;; `C-x k', RET for the buffer name, then `n' and RET to the
+        ;; modified-file question - which is asked *after* the name, as
+        ;; `Fkill_buffer' asks it. All three of those keys are read inside
+        ;; the command, so they are scripted.
+        (set! (test-display-script *test-display*)
+              (list #\return #\n #\return))
+        (type frame C-x #\k)
         (set! shown (buffer-name (frame-editor frame)))
         (set! still (and (get-buffer "fe-kill2.txt") #t))))
     (list shown still)))
@@ -2238,13 +2295,16 @@
          buffer
          (km:keymap '*own-keys*
                     (km:alist->keymap-layer
-                     `(((meta #\z) . ,read-only-mode))))))
+                     (list (cons (kbd "M-z") read-only-mode))))))
       ;; **A key is an *event*** - an integer carrying its modifier bits,
       ;; or a symbol - which is what `read-key-event' answers with and
-      ;; what Emacs's `define-key' takes. `(vector-ref (kbd "M-z") 0)' is
-      ;; that event, spelled the way every binding in the tree spells it;
-      ;; the keymap's own list form is used only for the *binding* above,
-      ;; where it is Emacs's Lucid event type list `((meta ?z))'.
+      ;; what Emacs's `define-key' takes. `(kbd "M-z")' is the *key
+      ;; sequence* and `(vector-ref (kbd "M-z") 0)' the one event, which
+      ;; is what the binding above is made from too. Writing the binding
+      ;; as a list of a modifier symbol and a character made it *two*
+      ;; keys - a prefix `meta` with a `z` under it - so the lookup found
+      ;; a prefix where it wanted a command and the dispatch waited for a
+      ;; second key for ever.
       (dispatch-key-event frame (vector-ref (kbd "M-z") 0))
       (list (text-editor-read-only? buffer)
             (frame-message frame))))))
@@ -2726,7 +2786,7 @@
                                (km:keymap-index '((#\space)))))
         ;; ...and the file-name map says nothing about TAB at all.
         (km:keymap-lookup minibuffer-local-filename-completion-map
-                          (km:keymap-index '((ctrl #\i))))))
+                          (km:keymap-index '(9)))))
 
 ;; Layering them is what `completing-read' does while a file name is
 ;; being read: SPC comes from the file-name map and everything else from
@@ -2746,7 +2806,7 @@
      (eq? minibuffer-complete
           (km:keymap-lookup
            (completion--map-for minibuffer-local-completion-map)
-           (km:keymap-index '((ctrl #\i))))))
+           (km:keymap-index '(9)))))
    ;; a buffer name is not a file name, and there SPC still completes a
    ;; word - the file-name map is not layered at all
    (eq? minibuffer-complete-word

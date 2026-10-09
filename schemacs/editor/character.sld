@@ -220,7 +220,7 @@
       ;; way round - so `(kbd "S-<up>")' named a super key where Emacs
       ;; names a shifted one.
       '((#\A . alt)
-        (#\C . ctrl)
+        (#\C . control)
         (#\H . hyper)
         (#\M . meta)
         (#\S . shift)

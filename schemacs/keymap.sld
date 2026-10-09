@@ -80,8 +80,7 @@
    keymap-index-append
    keymap-index->events
    reverse-list->keymap-index
-   keymap-index->ascii
-   =>kbd! =>keymap-layer-index!
+   =>keymap-layer-index!
    keymap-index-to-char
    mod-index char-index next-index
    modifier-bit
@@ -447,54 +446,13 @@
     ;; used for them - so `mod-index' answers an *event's* modifier field
     ;; and needs no translation to become one again.
 
-    (define (ascii-modifier? mod)
-      ;; #t if none of the super, hyper or alt-sc bits are present. This
-      ;; is useful for deciding if the keymap index value maps to an ASCII
-      ;; string using ordinary arithmetic. There are no mappings from
-      ;; super, hyper, or alt-sc bits to ASCII characters.
-      (= 0 (bitwise-and mod (bitwise-ior super-bit hyper-bit alt-bit))))
-
-    (define (keymap-index->ascii ix)
-      ;; This function takes a  <keymap-index-type> and tries to construct
-      ;; an ASCII character string from it, but may return #f. Control and
-      ;; meta-modified characters can produce ASCII characters, but super,
-      ;; hyper or Alt-SC modifiers cannot.
-      (let*((ok #t)
-            (fail (lambda () (set! ok #f) #f))
-            (char-list
-             (let loop ((ix ix))
-               (cond
-                ((keymap-index-type? ix)
-                 (let ((c (char-index ix)))
-                   (cond
-                    ((string? c)
-                     (cons #\null (loop (next-index ix))))
-                    ((char? c)
-                     (let*((i (char->integer c))
-                           (mod (mod-index ix))
-                           (has-ctrl-bit (= ctrl-bit (bitwise-and mod ctrl-bit)))
-                           (prefix-mod ; if meta modifier, prefix an #\escape char
-                            (lambda (next)
-                              (cond
-                               ((= meta-bit (bitwise-and mod meta-bit))
-                                (cons #\escape next))
-                               (else next))))
-                           (ctrl-offset ; if ctrl modifier, subtract #x40 from the char index
-                            (cond
-                             (has-ctrl-bit (integer->char (- i #x40)))
-                             (else c))))
-                       (cond
-                        ((and (ascii-modifier? mod) ; modifiers are any of meta, ctrl, or nothing
-                              (or (not has-ctrl-bit) ; control bit is not set, or else
-                                  (<= #x40 i #x7F))) ; control bit is set and i is in range
-                         (prefix-mod (cons ctrl-offset (loop (next-index ix)))))
-                        ((not ix) '())
-                        (else (fail)))))
-                    (else
-                     (error "char-index field is not a char or string" c ix)))))
-                ((not ix) '())
-                (else (fail))))))
-        (if ok (list->string char-list) #f)))
+    ;; `ascii-modifier?' and `keymap-index->ascii' stood here. The latter
+    ;; reconstructed an ASCII *string* from an index - an ESC prefixed for
+    ;; a meta bit and #x40 subtracted for a control bit - which is a reader
+    ;; for the private key spelling this tree used to keep. There is no
+    ;; such reader in Emacs, no such spelling is left here, and nothing
+    ;; called either function (checked). A key is an *event*, and
+    ;; `keymap-index->events' plus `key-description' render it.
 
     (define (keymap-index-head kmix)
       ;; Return just the head of a keymap index
@@ -585,9 +543,10 @@
        ;; does two things: it unfolds the control range - `(logior base
        ;; 64)', so `C-x' is the character `x' - and then it *downcases*
        ;; (`subr.el:1876'). The unfolding is wanted: the index for `C-x'
-       ;; is `(ctrl #\x)', which is what every binding in this tree
-       ;; already spells. The downcasing is not - Emacs's `define-key'
-       ;; never asks `event-basic-type' anything, and `(kbd "X")' is
+       ;; is the control-range character `x', which is what every binding
+       ;; in this tree spells. The downcasing is not - Emacs's
+       ;; `define-key' never asks `event-basic-type' anything, and
+       ;; `(kbd "X")' is
        ;; `[88]' there, a key of its own beside `[120]'. Folding `X' onto
        ;; `x' meant a capital could not be inserted at all.
        ((char? syms)
@@ -655,10 +614,10 @@
        ;; `Flookup_key' does the same (`:1264').
        ;;
        ;; It used to be the *modifier symbols themselves* that were the
-       ;; currency here - `(ctrl #\x)', `(ctrl meta #\@)' - accumulated
-       ;; into the index by a name table of this library's own. Emacs
-       ;; writes no such thing: `(kbd "C-x")' is `#(24)' and a Lucid
-       ;; element is the only list that means a key.
+       ;; currency here - a list of `control', `meta' and a character,
+       ;; accumulated into the index by a name table of this library's
+       ;; own. Emacs writes no such thing: `(kbd "C-x")' is `#(24)' and a
+       ;; Lucid element is the only list that means a key.
        (else
         (unless (pair? syms)
           (error "keymap index must be composed of events" syms))
@@ -758,10 +717,10 @@
       ;; hand here gave `char-ctl | 120', an event Emacs never makes for
       ;; that key.
       ;;
-      ;; It replaces `keymap-index->list', which answered
-      ;; `(ctrl #\\x)' - this library's private spelling, in which the
-      ;; modifier names were the *data*. There is no such reader in
-      ;; Emacs because there is no such spelling.
+      ;; It replaces `keymap-index->list', which answered a list of
+      ;; modifier *symbols* and a character - this library's private
+      ;; spelling, in which the modifier names were the *data*. There is
+      ;; no such reader in Emacs because there is no such spelling.
       ;;--------------------------------------------------------------
       (if (not km)
           '()
@@ -1035,28 +994,11 @@
        ))
 
 
-    (define (=>kbd! . syms)
-      ;; This function calls `=>keymap-layer-index!` lens with an arbitrary
-      ;; number of keyboard modifier and character symbols arguments, and
-      ;; encapsulates the resulting `<compound-lens-type>` into a new
-      ;; `<unit-lens-type>.` the `final` argument to `=>keymap-layer-index!`
-      ;; is `=>keymap-layer-alt-action`, so the lens constructed by this
-      ;; function will always operates on the leaf of the keymap-layer
-      ;; node. The lens constructed in `=>canonical`, so if the
-      ;; `<keymap-layer-type>` is updated and becomes empty, the `update`
-      ;; or `lens-set` function returns `#f` instead of an empty
-      ;; `<keymap-layer-type>.`
-      ;;------------------------------------------------------------------
-      (let ((label (cons '=>kbd syms))
-            (=>lens (lens (=>keymap-layer-index! syms)
-                          =>keymap-layer-alt-action
-                          )))
-        (unit-lens
-         (lambda (km) (view km =>lens))
-         (lambda (km val) (lens-set val km =>lens))
-         (lambda (up km) (update&view up km =>lens))
-         label
-         )))
+;; `=>kbd!' stood here: a lens over a binding named by a varargs list of
+    ;; modifier and character symbols - the private key spelling this tree
+    ;; used to keep, wrapped in a lens. Nothing called it (checked), and
+    ;; the spelling it was named after is gone; `=>keymap-layer-index!'
+    ;; takes a key sequence, `(kbd "C-x")' or an event vector.
 
     (define (prefer-new-bindings old new)
       ;; Use this as the first argument to the KEYMAP-LAYER-MERGE-ACTIONS

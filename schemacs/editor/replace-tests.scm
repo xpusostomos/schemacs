@@ -51,9 +51,9 @@
 (test-equal "the map's ? is help"
   'help (km:keymap-lookup *query-replace-map* (km:keymap-index (list #\?))))
 (test-equal "the map's C-g is quit"
-  'quit (km:keymap-lookup *query-replace-map* (km:keymap-index (list (list 'ctrl #\g)))))
+  'quit (km:keymap-lookup *query-replace-map* (km:keymap-index (kbd "C-g"))))
 (test-equal "the map's M-v is scroll-down"
-  'scroll-down (km:keymap-lookup *query-replace-map* (km:keymap-index (list (list 'meta #\v)))))
+  'scroll-down (km:keymap-lookup *query-replace-map* (km:keymap-index (kbd "M-v"))))
 
 ;; ------------------------------------------------------------------
 ;; the caret description

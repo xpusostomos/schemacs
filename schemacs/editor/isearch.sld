@@ -405,8 +405,8 @@
       ;;
       ;; A plain character key is itself, which the event spells as its
       ;; own code. TAB and `C-j` are control keys - the decoders fold
-      ;; them to `(ctrl #\i)` and `(ctrl #\j)`, which are the events 9
-      ;; and 10 - and GNU Emacs's `isearch-printing-char' takes both, so
+      ;; them to control-I and control-J, which are the events 9 and 10 -
+      ;; and GNU Emacs's `isearch-printing-char' takes both, so
       ;; a search can be given a tab or a line break to find: that is how
       ;; `C-s foo C-j bar` searches for a string with a line break in
       ;; it.

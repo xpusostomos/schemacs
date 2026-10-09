@@ -651,8 +651,8 @@
                         ;;            (key-description (this-single-command-keys)))
                         ;;
                         ;; so it reads `C-c C-z is undefined' and not this
-                        ;; tree's `; undefined key: (ctrl #\z)', which was
-                        ;; the keymap's *private* spelling printed at the
+                        ;; tree's old `; undefined key: ...', which printed
+                        ;; the keymap's *private* spelling at the
                         ;; user. `key-description' is Emacs's, over the
                         ;; events the chord actually was. The `ding' that
                         ;; command does first is not ported - there is no
@@ -687,7 +687,7 @@
        ;; ESC prefixes the next key with the meta modifier. Its event is
        ;; 27, `(kbd "ESC")', and it is the same event from either display:
        ;; a terminal sends byte 27, and Gtk sends the keysym 0xff1b, which
-       ;; `character-path' folds to `(ctrl #\[)' and so to the same event
+       ;; `character-path' folds to control-[ and so to the same event
        ;; - "the two displays must name it the same way or a keymap
        ;; binding one misses the other". A test against the *character*
        ;; was a terminal-shaped one, and on Gtk a lone ESC came out an

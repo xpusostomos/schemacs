@@ -126,8 +126,8 @@
       ;; one - and this is the function the whole tree prints a key with:
       ;; the `; undefined key: ...' message and `key-description' below
       ;; both end here. It used to take a bare character and stop, which
-      ;; is why the keymap had to print its keys itself, as the private
-      ;; `(ctrl #\\x)' list.
+      ;; is why the keymap had to print its keys itself, in a private
+      ;; modifier-symbol spelling.
       ;;
       ;; Three of the C's four branches, in its order:
       ;;

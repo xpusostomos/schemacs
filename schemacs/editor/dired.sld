@@ -1815,9 +1815,9 @@ for SWITCHES."
         (bind! "d" dired-flag-file-deletion)
         (bind! "<" dired-prev-dirline)
         (bind! "g" revert-buffer)
-        ;; RET is `(ctrl #\m)' and not `#\return': a terminal sends byte
-        ;; 13, and Emacs's keymap has the same key, where RET and C-m are
-        ;; one key.
+        ;; RET is the event `control-M' (13) and not `#\return': a
+        ;; terminal sends byte 13, and Emacs's keymap has the same key,
+        ;; where RET and C-m are one key.
         (bind! "C-m" dired-find-file)
         (bind! "f" dired-find-file)
         (bind! "e" dired-find-file)
