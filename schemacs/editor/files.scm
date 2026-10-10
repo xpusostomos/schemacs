@@ -55,8 +55,8 @@
           text-editor-set-read-only! text-editor-to-string
           text-editor-undo-disable! text-editor-undo-enable!)
     (only (schemacs editor frame)
-          *current-frame* current-editor
-          frame-editor frame-quit-cont
+          *current-frame* current-editor delete-frame
+          frame-editor frame-list frame-quit-cont
           set!frame-editor
           set!frame-message)
     ;; The commands here install their own keys, as files.el does.
@@ -78,7 +78,11 @@
     ;; `string-prefix-p' is `subr.el''s and now lives in
     ;; `(schemacs editor subr)', which is below this library.
     (only (schemacs editor subr) kbd run-hook-with-args-until-success
-          string-prefix-p)
+          string-prefix-p ctl-x-4-map
+          ;; The window-system event's own accessors, which
+          ;; `handle-delete-frame` reads the frame out of
+          ;; (`subr.el`'s, as Emacs's does).
+          event-start posn-window)
     (only (schemacs editor buffer)
           *case-fold-search*
           current-buffer default-directory erase-buffer)
@@ -282,7 +286,6 @@ save-buffer
    write-file
    save-buffers-kill-terminal
    handle-delete-frame
-   frames-except
    save-some-buffers
    y-or-n-p
    )
@@ -544,16 +547,6 @@ save-buffer
     ;; the `Windows' banner is in `(schemacs editor window)' now.
     ;;------------------------------------------------------------------
 
-    (define (frames-except frame)
-      ;; The frames other than FRAME. This editor has one frame
-      ;; (`*current-frame*'), so the scan Emacs's `handle-delete-frame'
-      ;; does before it decides the frame being closed is the last is a
-      ;; scan over that one frame - and it is the scan, not a hardcoded
-      ;; "this is the last frame", that a multi-frame editor extends.
-      ;;--------------------------------------------------------------
-      (let ((current (*current-frame*)))
-        (if (and current (not (eq? current frame))) (list current) '())))
-
     (define-command (handle-delete-frame event)
       ;; GNU Emacs's `handle-delete-frame' (`frame.el:265'): the window
       ;; manager has asked to close FRAME. "If there is another visible
@@ -564,18 +557,37 @@ save-buffer
       ;; library rather than `frame.sld' because the command it hands off
       ;; to is `save-buffers-kill-terminal', which is here.
       ;;
+      ;; **It deletes the frame.** It used to answer the list of other
+      ;; frames and stop there - Emacs's `(delete-frame frame t)` was
+      ;; missing - so a window manager's close request did nothing at all:
+      ;; the frame stayed in `frame-list`, its window stayed on the screen
+      ;; (the display's `delete_event` returns TRUE, so Gtk does not
+      ;; destroy it either), and only the *last* frame ever appeared to
+      ;; work, because that branch exits the editor.
+      ;;
       ;; Emacs's takes the EVENT as its argument - `(interactive "e")' -
-      ;; and reads the frame from it: `(nth 1 event)' is the frame list
-      ;; `keyboard.c:6238' built, whose car is the frame. This tree's
-      ;; event is the same shape, so the frame is read from it too - and
-      ;; `frames-except' is given *that* frame, which is the one being
-      ;; closed and need not be the selected one if there were several.
+      ;; and reads the frame out of it, `(posn-window (event-start
+      ;; event))'. The event is `(delete-frame (FRAME))' - the shape
+      ;; `make_lispy_event` builds (`keyboard.c:6235`) and
+      ;; `keyboard.sld`'s `dispatch-special-event` builds too - so
+      ;; `event-start` is the one-element position `(FRAME)` and
+      ;; `posn-window` of it is the frame.
+      ;;
+      ;; The scan for another frame is Emacs's `dolist` and `catch`,
+      ;; reduced by what this tree has: every frame is visible (there is
+      ;; no iconification - the departure `delete-frame` names), no frame
+      ;; is a child, and a frame has no parameters, so
+      ;; `frame-visible-p`, `frame-parent` and `frame-parameter` all drop
+      ;; out and what is left is "is there a frame that is not this one".
       ;;--------------------------------------------------------------
       "Handle the window manager's request to close the frame."
       (interactive "e")
-      (let ((others (frames-except (car (list-ref event 1)))))
-        (if (pair? others)
-            others
+      (let ((frame (posn-window (event-start event))))
+        (if (let any ((frames (frame-list)))
+              (and (pair? frames)
+                   (or (not (eq? (car frames) frame))
+                       (any (cdr frames)))))
+            (delete-frame frame #t)
             (save-buffers-kill-terminal))))
 
     (define-command (save-buffers-kill-terminal)
@@ -2355,9 +2367,13 @@ at point instead."
       insert-file)
     (define-key *default-keymap* (kbd "C-x C-r")
       find-file-read-only)
-    (define-key *default-keymap*
-      (kbd "C-x 4 f")
-      find-file-other-window)
+    ;; `C-x 4 f' is `files.el''s own binding, into the *submap* `subr.el'
+    ;; makes for the `C-x 4' prefix - `(define-key ctl-x-4-map "f"
+    ;; #'find-file-other-window)'. It was written flat as `(kbd "C-x 4 f")'
+    ;; on the global map because this tree's lookup could not descend into
+    ;; a keymap-valued binding; it can now, which is what makes the key
+    ;; `C-x 4' and this map the value.
+    (define-key ctl-x-4-map (kbd "f") find-file-other-window)
     (define-key *default-keymap* (kbd "C-x C-v")
       find-alternate-file)
     (define-key *default-keymap* (kbd "M-~") not-modified)

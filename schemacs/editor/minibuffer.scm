@@ -35,7 +35,7 @@
     ;; `read-from-minibuffer' takes an optional keymap, history and default,
     ;; which is a `case-lambda'.
     (scheme case-lambda)
-    (prefix (schemacs keymap) km:)
+    (prefix (schemacs editor keymap) km:)
     ;; `string-prefix?' is Guile's, not R7RS's: completion is written with
     ;; it, and leaving it out reports as an unbound variable the first time
     ;; a completion is tried.
@@ -57,7 +57,7 @@
     ;; `logior' is Guile's: the bitset is three bit flags.
     (only (guile) logior)
     ;; The `*Completions*' buffer is filled with the `face' text property
-    ;; and shown in a window. (`keymap' above is `(schemacs keymap)''s,
+    ;; and shown in a window. (`keymap' above is `(schemacs editor keymap)''s,
     ;; which the completion map is built with - this library's `km:' names
     ;; are the keymap library's, not this one's.)
     (only (schemacs editor textprop)
@@ -561,6 +561,25 @@ read-number-history
             (cons (kbd "M-p") previous-history-element)
             (cons (kbd "M-n") next-history-element)))
 
+    (define (minibuffer-map-from-bindings name bindings)
+      ;; `(make-sparse-keymap NAME)' with each `(KEY . BINDING)' of
+      ;; BINDINGS defined in it. GNU Emacs has no such function - a keymap
+      ;; is filled with `define-key' - and this is that in a loop, because
+      ;; the minibuffer's maps are each written as a table of bindings.
+      ;;--------------------------------------------------------------
+      (let ((map (km:keymap name)))
+        (for-each (lambda (kv) (km:define-key map (car kv) (cdr kv))) bindings)
+        map))
+
+    (define (minibuffer-filename-completion-bindings)
+      ;; `minibuffer-local-filename-completion-map''s own bindings. Named
+      ;; rather than written twice, because `completion--map-for' below
+      ;; needs a *fresh* map with the same bindings - it composes this map
+      ;; over a different base each time, as Emacs's `make-composed-keymap'
+      ;; does - and two copies of a binding table can drift apart.
+      ;;--------------------------------------------------------------
+      (list (cons (kbd "SPC") self-insert-command)))
+
     (define minibuffer-local-map
       ;; GNU Emacs's `minibuffer-local-map': the minibuffer's own bindings.
       ;; RET and C-j both leave the minibuffer, C-g abandons the command
@@ -574,9 +593,8 @@ read-number-history
       ;; when this library loaded, and it is what `LOOKUP-KEYMAP' in
       ;; `(schemacs editor keyboard)' now does per lookup instead.
       ;;--------------------------------------------------------------
-      (km:keymap
-       '*minibuffer-local-map*
-       (km:alist->keymap-layer (minibuffer-local-bindings))))
+      (minibuffer-map-from-bindings '*minibuffer-local-map*
+                                    (minibuffer-local-bindings)))
 
 
     ;;----------------------------------------------------------------
@@ -1707,22 +1725,24 @@ read-number-history
     ;; is t.
 
     (define (completion--map-for base)
-      ;; BASE with `minibuffer-local-filename-completion-map' layered
+      ;; BASE with `minibuffer-local-filename-completion-map' composed
       ;; over it when a file name is being read: GNU Emacs's
       ;; `(make-composed-keymap minibuffer-local-filename-completion-map
-      ;; base-keymap)' with the base as the parent, which is what lets
-      ;; the layered map's binding for a key override the base's.
+      ;; base-keymap)', which makes a map with the first's bindings and
+      ;; the base as its *parent*. A parent is what lets the composed
+      ;; map's binding for a key override the base's, and it is why a
+      ;; fresh map is made rather than the shared one's parent set.
       ;; Emacs tests `(memq minibuffer-completing-file-name '(nil
       ;; lambda))' - a file name is being read unless the variable is
       ;; nil.
       ;;--------------------------------------------------------------
       (if (not (*minibuffer-completing-file-name*))
           base
-          (apply km:keymap
-                 '*minibuffer-filename-completion-map*
-                 (append
-                  (km:keymap->layers-list minibuffer-local-filename-completion-map)
-                  (km:keymap->layers-list base)))))
+          (let ((map (minibuffer-map-from-bindings
+                      '*minibuffer-filename-completion-map*
+                      (minibuffer-filename-completion-bindings))))
+            (km:set-keymap-parent map base)
+            map)))
 
     ;;----------------------------------------------------------------
     ;; The *Completions* buffer
@@ -2506,10 +2526,8 @@ read-number-history
       ;; and it is the honest way to say it while a layer cannot hold
       ;; "bound to nothing".
       ;;--------------------------------------------------------------
-      (km:keymap
-       '*minibuffer-local-filename-completion-map*
-       (km:alist->keymap-layer
-        (list (cons (kbd "SPC") self-insert-command)))))
+      (minibuffer-map-from-bindings '*minibuffer-local-filename-completion-map*
+                                    (minibuffer-filename-completion-bindings)))
 
     (define minibuffer-local-completion-map
       ;; GNU Emacs's `minibuffer-local-completion-map', whose parent is
@@ -2528,18 +2546,19 @@ read-number-history
       ;; minibuffer.el too: a keymap is built when it is defined, so every
       ;; command it binds has to exist by then.
       ;;--------------------------------------------------------------
-      (apply km:keymap
-             '*minibuffer-local-completion-map*
-             (append
-              (list (km:alist->keymap-layer
-                     (list (cons (kbd "TAB") minibuffer-complete)
-                           (cons (kbd "SPC") minibuffer-complete-word)
-                           (cons (kbd "?") minibuffer-completion-help)
-                           (cons (kbd "RET") minibuffer-completion-exit)
-                           (cons (kbd "M-<up>") minibuffer-previous-completion)
-                           (cons (kbd "M-<down>") minibuffer-next-completion)
-                           (cons (kbd "M-RET") minibuffer-choose-completion))))
-              (km:keymap->layers-list minibuffer-local-map))))
+      (let ((map (minibuffer-map-from-bindings
+                  '*minibuffer-local-completion-map*
+                  (list (cons (kbd "TAB") minibuffer-complete)
+                        (cons (kbd "SPC") minibuffer-complete-word)
+                        (cons (kbd "?") minibuffer-completion-help)
+                        (cons (kbd "RET") minibuffer-completion-exit)
+                        (cons (kbd "M-<up>") minibuffer-previous-completion)
+                        (cons (kbd "M-<down>") minibuffer-next-completion)
+                        (cons (kbd "M-RET") minibuffer-choose-completion)))))
+        ;; The map it completes *from* is the parent, as Emacs's
+        ;; `(set-keymap-parent map minibuffer-local-map)' has it.
+        (km:set-keymap-parent map minibuffer-local-map)
+        map))
 
 
     (define minibuffer-local-must-match-map
@@ -2549,13 +2568,12 @@ read-number-history
       ;; still takes a chosen candidate first, since
       ;; `minibuffer-complete-and-exit' does that itself.
       ;;--------------------------------------------------------------
-      (apply km:keymap
-             '*minibuffer-local-must-match-map*
-             (append
-              (list (km:alist->keymap-layer
-                     (list (cons (kbd "RET") minibuffer-complete-and-exit)
-                           (cons (kbd "C-j") minibuffer-complete-and-exit))))
-              (km:keymap->layers-list minibuffer-local-completion-map))))
+      (let ((map (minibuffer-map-from-bindings
+                  '*minibuffer-local-must-match-map*
+                  (list (cons (kbd "RET") minibuffer-complete-and-exit)
+                        (cons (kbd "C-j") minibuffer-complete-and-exit)))))
+        (km:set-keymap-parent map minibuffer-local-completion-map)
+        map))
 
     ;;----------------------------------------------------------------
     ;; Reading a number
@@ -3113,11 +3131,10 @@ Just \\[universal-argument] as argument means to use the current column."
       ;; Its parent is `special-mode-map', as Emacs's is, so the buffer
       ;; gets `q' from here and whatever else the mode binds.
       ;;--------------------------------------------------------------
-      (let ((map (km:keymap
+      (let ((map (minibuffer-map-from-bindings
                   '*debugger-mode-map*
-                  (km:alist->keymap-layer
-                   (list (cons (kbd "q") debugger-quit))))))
-        (set-keymap-parent map special-mode-map)
+                  (list (cons (kbd "q") debugger-quit)))))
+        (km:set-keymap-parent map special-mode-map)
         map))
 
     (define-command (read--expression-try-read)
@@ -3162,11 +3179,10 @@ Exit the minibuffer if successful, else report the error to the user."
       ;; `read-from-minibuffer' *replaces* `minibuffer-local-map', so
       ;; whatever the expression prompt does not carry it loses.
       ;;--------------------------------------------------------------
-      (km:keymap
+      (minibuffer-map-from-bindings
        '*read--expression-map*
-       (km:alist->keymap-layer
-        (cons (cons (kbd "RET") read--expression-try-read)
-              (minibuffer-local-bindings)))))
+       (cons (cons (kbd "RET") read--expression-try-read)
+             (minibuffer-local-bindings))))
 
     (define (read--expression prompt)
       ;; GNU Emacs's `read--expression' (`simple.el:2063'): "Read an Emacs

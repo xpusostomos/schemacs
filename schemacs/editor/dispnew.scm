@@ -34,6 +34,7 @@
    key-event->key
    suspend-display!
    resume-display!
+   delete-frame-display!
    realize-face
    screen-size
    column-width
@@ -221,6 +222,28 @@
     (define-generic resume-display!)
     ;; Take the display back after `suspend-display!'.
     ;; `(resume-display! display)'.
+
+    (define-generic delete-frame-display!)
+    ;; A frame drawn on this display has been deleted: release what the
+    ;; display holds for it. GNU Emacs's `terminal->delete_frame_hook',
+    ;; which `delete_frame` calls once the frame is off `frame-list`
+    ;; (`frame.c:2937`) - and the frame is already dead by then, which is
+    ;; why this takes the display and not the frame.
+    ;;
+    ;; **What it means differs by display, and the difference is Emacs's.**
+    ;; A window system's display holds one window per frame and destroys
+    ;; it here - `pgtk_destroy_window` ends in `gtk_widget_destroy
+    ;; (FRAME_WIDGET (f))` (`pgtkterm.c:445`), `x_destroy_window` in
+    ;; `XDestroyWindow` (`xterm.c`). A text terminal's holds *all* its
+    ;; frames at once and destroys nothing: Emacs's `tty_free_frame_resources`
+    ;; (`term.c:4326`) frees the frame's face cache and its tty data and
+    ;; leaves the terminal alone, because the frames on a tty are screens
+    ;; on one terminal and the next redisplay draws the one that is still
+    ;; selected. The default method below is therefore the terminal's
+    ;; answer, and it is an answer rather than an omission - which is what
+    ;; keeps `frame.sld` free of both front ends.
+    ;; `(delete-frame-display! display)`.
+    (define-method (delete-frame-display! (d <display>)) #t)
 
     (define-generic realize-face)
     ;; The display's token for a face whose realized attributes are

@@ -1,17 +1,19 @@
 (import
   (scheme base)
   (only (scheme lazy) force)
-  (schemacs keymap)
-  (only (schemacs lens) view lens-set)
+  (schemacs editor keymap)
   ;; `kbd' is the tree's spelling of a *key* - `(kbd "C-x")' is the event
   ;; vector `#(24)' - and it is `character.sld''s, where the C's
   ;; `make_lispy_event' arithmetic lives. `event-convert-list' is
   ;; `keyboard.c''s consumer of a Lucid event type list.
   (only (schemacs editor character) kbd event-convert-list)
-  ;; `define-key' is `keymap.c''s, stated in `editor/keymap.sld' beside the
-  ;; global map it binds into - `(schemacs keymap)' below it has only the
-  ;; two choke points a store and a lookup go through.
-  (only (schemacs editor keymap) define-key)
+  ;; The modal lookup state is `read_key_sequence''s, so it lives in
+  ;; `keyboard.sld' beside the loop that calls it; what is tested here is
+  ;; that it walks a map and a *list* of maps the way Emacs does.
+  (only (schemacs editor keyboard)
+        new-modal-lookup-state modal-lookup-state-type?
+        modal-lookup-state-step! modal-lookup-state-key-index
+        modal-lookup-state-keymaps)
   (only (srfi 64) test-begin test-end
         test-assert test-equal test-eq)
   )
@@ -84,25 +86,6 @@
     (keymap-index #t)
     #f))
 
-;; `reverse-list->keymap-index' joins a *reversed* list of key sequences,
-;; which is the shape the modal lookup state keeps its stack in.
-(test-equal "joining key sequences"
-  (keymap-index (kbd "C-c C-c C-M-x C-g"))
-  (keymap-index-append C-c_C-c C-M-x C-g))
-
-(test-equal "a reversed list of one-event sequences"
-  C-c_C-c
-  (reverse-list->keymap-index
-   (list (keymap-index (kbd "C-c"))
-         (keymap-index (kbd "C-c")))))
-
-(test-equal "and of a longer one"
-  C-M-x
-  (reverse-list->keymap-index (list (keymap-index (kbd "C-M-x")))))
-
-(test-assert "no sequences at all is #f"
-  (not (reverse-list->keymap-index '())))
-
 ;; -------------------------------------------------------------------------------------------------
 
 (define (el:keyboard-quit) "el:keyboard-quit")
@@ -115,196 +98,34 @@
 (define el:local-command "el:local-command")
 (define el:global-command "el:global-command")
 (define el:find-file "el:find-file")
-(define unassigned-key (keymap-index (kbd "C-u RET")))
-
-;; The `=>keymap-layer-index!' lens, over a key spelled anyway `kbd' can
-;; write it.
-(define kml (lens-set "c" (keymap-layer) (=>keymap-layer-index! '(#\c))))
-(test-equal "c" (view kml (=>keymap-layer-index! '(#\c))))
-
-(set! kml (lens-set "x" #f (=>keymap-layer-index! '(#\x))))
-(test-equal "x" (view kml (=>keymap-layer-index! '(#\x))))
-
-(set! kml (lens-set #f kml (=>keymap-layer-index! '(#\x))))
-(test-assert (not kml))
-
-(set! kml
-  (keymap-layer
-   (cons C-M-x   el:eval-defun)
-   (cons C-c_C-c el:compile)))
-
-(test-assert (keymap-layer-type? kml))
-(test-eq el:eval-defun (keymap-layer-lookup kml C-M-x))
-(test-eq el:compile (keymap-layer-lookup kml C-c_C-c))
-;; ...and the same lookup by a kbd description string, because the lens
-;; normalises whatever it is handed.
-(test-eq el:compile (keymap-layer-lookup kml "C-c C-c"))
-
-(test-assert
-    (keymap-layer-type?
-     (keymap-layer-update!
-      (lambda (_old new) new)
-      kml (list (cons C-c_C-c el:comint-interrupt-subjob)))))
-
-(test-eq el:comint-interrupt-subjob (keymap-layer-lookup kml C-c_C-c))
-(test-assert (not (keymap-layer-lookup kml C-g)))
-(test-assert
-    (keymap-layer-type?
-     (keymap-layer-update!
-      prefer-new-bindings kml
-      (list (cons C-g el:keyboard-quit)))))
-
-(test-eq el:keyboard-quit (keymap-layer-lookup kml C-g))
-(test-assert
-    (keymap-layer-type?
-     (keymap-layer-update!
-      prefer-new-bindings kml
-      (list (map-key '(#\a) el:self-insert-command)))))
-(test-assert
-    (keymap-layer-type?
-     (keymap-layer-update!
-      prefer-new-bindings kml
-      (list (map-key '(#\b) el:self-insert-command)))))
-
-(test-eq el:self-insert-command (keymap-layer-lookup kml #\a))
-(test-eq el:self-insert-command (keymap-layer-lookup kml #\b))
-
-(keymap-layer-update! prefer-new-bindings kml
-                      (list (cons C-left-arrow-key el:left-word)))
-(keymap-layer-update! prefer-new-bindings kml
-                      (list (cons left-arrow-key el:left-char)))
-(test-eq el:left-word (keymap-layer-lookup kml C-left-arrow-key))
-(test-eq el:left-char (keymap-layer-lookup kml left-arrow-key))
-
-;; A layer's alist is one association per key, and a prefix is flattened
-;; into an association for each key under it. The order `hash-table->alist'
-;; answers in is not specified, so this asserts the set.
-(test-equal "a layer's alist has one entry per binding"
-  7 (length (keymap-layer->alist kml)))
-(test-assert "a prefix is flattened into the association for the whole key"
-  (and (assoc C-c_C-c (keymap-layer->alist kml))
-       (not (assoc (keymap-index (kbd "C-c")) (keymap-layer->alist kml)))))
-(test-equal "...and its binding is the one under it"
-  el:comint-interrupt-subjob
-  (cdr (assoc C-c_C-c (keymap-layer->alist kml))))
-
-;; `keymap-lookup-binding-key' is the reverse lookup `[rebind ...]` wants.
-(test-equal "a key found by its binding"
-  C-M-x (keymap-lookup-binding-key (keymap kml) el:eval-defun))
 
 ;; -------------------------------------------------------------------------------------------------
-;; Check if keymap-layer-copy really creates a deep copy
+;; A keymap is Emacs's: bindings, a *parent*, and the char-table slot.
+;;
+;; There is no list of "layers" any more. The original author's library kept
+;; one, with an `alt-action' field and merge policies; Emacs has no such
+;; thing, the two jobs it did are `parent' and the char-table range below,
+;; and the third it pretended to do - keep a shorter binding when a longer
+;; one is defined under it - is a case `Fdefine_key' *refuses*. See the
+;; note on `<keymap-type>' in `editor/keymap.sld'.
 
-(define kml-copy (keymap-layer-copy kml))
-(keymap-layer-update!
- prefer-new-bindings kml-copy
- (list
-  (cons left-arrow-key "<-")
-  (cons C-left-arrow-key "<==<")
-  ))
-(test-assert el:left-word (keymap-layer-lookup kml C-left-arrow-key))
-(test-assert el:left-char (keymap-layer-lookup kml left-arrow-key))
-(test-equal "<==<" (keymap-layer-lookup kml-copy C-left-arrow-key))
-(test-equal "<-" (keymap-layer-lookup kml-copy left-arrow-key))
+(test-assert "a new keymap is empty, and has no parent"
+  (let ((m (keymap '*empty*)))
+    (and (keymap-type? m)
+         (not (keymap-parent m))
+         (not (keymap-lookup m (kbd "C-x"))))))
 
-;; -------------------------------------------------------------------------------------------------
-;; `keymap-index->ascii' stood here, and is gone: it reconstructed an
-;; ASCII *string* from an index - prefixing an ESC for a meta bit and
-;; subtracting #x40 for a control bit - which is a reader for the private
-;; spelling this tree used to keep its keys in. There is no such reader in
-;; Emacs and there is no such spelling left here; a key is an *event*, and
-;; `keymap-index->events' plus `key-description' render it.
+;; `make-sparse-keymap' takes a prompt - a string or a symbol - or one
+;; keymap; anything else is refused rather than quietly making a map.
+(test-assert "an argument that is neither a prompt nor a keymap is refused"
+  (guard (e (#t #t)) (keymap 42) #f))
+(test-assert "so is a second argument"
+  (guard (e (#t #t)) (keymap '*two* (keymap '*one*)) #f))
 
-;; -------------------------------------------------------------------------------------------------
-;; testing modal-lookup-state-step!
+;; ------------------------------------------------------------------
+;; `store_in_keymap' and `access_keymap' - `keymap.c:730' and `:491', the
+;; two functions in Emacs that touch a keymap, both keyed by ONE *event*.
 
-(define app-kmp       apply-keymap-index-predicate)
-
-;; `key' reads a key the way the tree spells one - a `kbd' string, which
-;; is `read-kbd-macro''s own input in Emacs - and answers the events of
-;; it, which is what every reader here takes.
-(define (key s) (keymap-index (kbd s)))
-
-;; The catch-all self-insert layer. Emacs reaches `self-insert-command'
-;; for a plain character in 32..126 (`subr.el:1763''s loop) and for every
-;; character from 128 up (`international/mule-conf.el:1671''s `(cons 128
-;; (max-char))' on `global-map'), and for nothing else. The layer answers
-;; the *command* - it is the keymap's binding that is being asked for, not
-;; a character - so every expectation below is that command or `#f', and
-;; each is Emacs 31.1's own answer, measured.
-(define sil-layer (self-insert-keymap-layer el:self-insert-command))
-
-(define (self-inserting? kbd-string)
-  (eq? el:self-insert-command (app-kmp sil-layer (key kbd-string))))
-
-;; A plain printing character does ...
-;; (`(kbd " ")` is the empty key in Emacs too - a lone space is a
-;; separator in a `kbd' string, and `SPC' is how the space key is spelled.)
-(test-assert (self-inserting? "SPC"))
-(test-assert (self-inserting? "!"))
-(test-assert (self-inserting? "@"))
-(test-assert (self-inserting? "M"))
-(test-assert (self-inserting? "_"))
-(test-assert (self-inserting? "~"))
-;; ... and so does every character from 128 up.
-(test-assert (eq? el:self-insert-command
-                 (app-kmp sil-layer
-                          (keymap-index (list (integer->char 200))))))
-(test-assert (eq? el:self-insert-command
-                 (app-kmp sil-layer
-                          (keymap-index (list (integer->char 12354))))))
-;; --------------------------------------------------
-;; A control character is not a plain character.
-(test-assert (not (self-inserting? "C-@")))
-(test-assert (not (self-inserting? "C-i")))
-(test-assert (not (self-inserting? "C-m")))
-(test-assert (not (self-inserting? "C-t")))
-(test-assert (not (self-inserting? "C-_")))
-;; DEL is not self-inserting either - it is `delete-backward-char'.
-(test-assert (not (self-inserting? "DEL")))
-;; --------------------------------------------------
-;; A modified event is not a plain character, and a char table cannot even
-;; be indexed by one.
-(test-assert (not (self-inserting? "M-@")))
-(test-assert (not (self-inserting? "M-m")))
-(test-assert (not (self-inserting? "C-M-@")))
-(test-assert (not (self-inserting? "C-M-m")))
-;; --------------------------------------------------
-;; Neither is a key of more than one event: that is a prefix.
-(test-assert (not (self-inserting? "M-m C-c")))
-(test-assert (not (self-inserting? "C-m C-c")))
-;; --------------------------------------------------
-
-(define km (keymap '*test-keymap kml sil-layer))
-
-(test-assert (eq? el:self-insert-command (keymap-lookup km '(#\a))))
-(test-assert (eq? el:self-insert-command (keymap-lookup km '(#\b))))
-(test-assert (eq? el:comint-interrupt-subjob (keymap-lookup km C-c_C-c)))
-;; `c' is bound by no layer of `km' above the catch-all one, so the lookup
-;; falls through to it and answers the command.
-(test-assert (eq? el:self-insert-command (keymap-lookup km (keymap-index '(#\c)))))
-;; And `C-@' finds nothing at all: a control character is not a plain
-;; character, so the catch-all layer refuses it too.
-(test-assert (not (keymap-lookup km (kbd "C-@"))))
-(test-assert (not (keymap-lookup km unassigned-key)))
-
-(test-equal "hello"
-  (let ((km (keymap (keymap-layer))))
-    ;; Test the =>keymap-top-layer! lens on a keymap with 1 layer
-    (lens-set "hello" km =>keymap-top-layer! (=>keymap-layer-index! C-c_C-c))
-    (view km =>keymap-top-layer! (=>keymap-layer-index! C-c_C-c))
-    ))
-
-(test-equal "hello"
-  (let ((km (keymap)))
-    ;; Test the =>keymap-top-layer! lens on a keymap with no layers,
-    ;; should be canonical and add a new layer.
-    (lens-set "hello" km =>keymap-top-layer! (=>keymap-layer-index! C-c_C-c))
-    (view km =>keymap-top-layer! (=>keymap-layer-index! C-c_C-c))
-    ))
-
-;; The two choke points `keymap.c''s `store_in_keymap' and
-;; `access_keymap' are, and that they are keyed by ONE event.
 (define store-km (keymap '*store*))
 (store-in-keymap store-km 24 el:eval-defun)
 (test-eq el:eval-defun (access-keymap store-km 24))
@@ -313,8 +134,34 @@
   (guard (e (#t #t))
     (access-keymap store-km "C-x")
     #f))
+(test-assert "`keymap' is reserved for an embedded parent map"
+  (guard (e (#t #t))
+    (store-in-keymap store-km 'keymap el:eval-defun)
+    #f))
 
-;; -------------------------------------------------------------------------------------------------
+;; ------------------------------------------------------------------
+;; `define-key' and the walk a key sequence needs
+
+(define km (keymap '*test-keymap*))
+(define-key km C-c_C-c el:comint-interrupt-subjob)
+(define-key km C-M-x el:eval-defun)
+(define-key km C-g el:keyboard-quit)
+
+(test-eq el:comint-interrupt-subjob (keymap-lookup km C-c_C-c))
+(test-eq el:eval-defun (keymap-lookup km C-M-x))
+(test-eq el:keyboard-quit (keymap-lookup km C-g))
+(test-assert "an unbound sequence answers #f" (not (keymap-lookup km C-left-arrow-key)))
+
+;; A prefix is a *keymap* in the binding, which is Emacs's submap, and
+;; `access_keymap_1' recurses into it. `(kbd "C-c")' is a prefix of
+;; `C-c C-c' above and is therefore a keymap rather than a command.
+(test-assert "a prefix binding is a keymap"
+  (keymap-type? (keymap-lookup km (kbd "C-c"))))
+(test-eq "and it reaches what is under it"
+  el:comint-interrupt-subjob
+  (keymap-lookup km (kbd "C-c C-c")))
+
+;; ------------------------------------------------------------------
 ;; Every event but the last must already be a prefix
 ;;
 ;; `Fdefine_key''s loop (`keymap.c:1196') looks up each event but the last,
@@ -323,9 +170,9 @@
 ;;
 ;;   error ("Key sequence %s starts with non-prefix key %s%s", ...)
 ;;
-;; Without that test the walk went ahead anyway and the store *replaced*
-;; the command with a prefix layer, so a binding was silently destroyed.
-;; Every string below is Emacs 31.1's own, measured in `emacs -Q --batch'.
+;; Without that test the walk went ahead and the store *replaced* the
+;; command with a prefix, so a binding was silently destroyed. Every string
+;; below is Emacs 31.1's own, measured in `emacs -Q --batch'.
 
 (define (define-key-error keymap keys command)
   ;; The message `define-key' signals, or #f when it signals nothing.
@@ -350,8 +197,8 @@
 ;; A sequence whose events really are prefixes is not an error, and the
 ;; binding lands.
 (define prefix-km (keymap '*prefix*))
-(test-assert (not (define-key-error prefix-km (kbd "C-x C-f") 'find-file)))
-(test-eq 'find-file (keymap-lookup prefix-km (kbd "C-x C-f")))
+(test-assert (not (define-key-error prefix-km (kbd "C-x C-f") el:find-file)))
+(test-eq el:find-file (keymap-lookup prefix-km (kbd "C-x C-f")))
 
 ;; The name in the message is the whole prefix, not just the offending
 ;; event: here `C-x' is a prefix and `C-x C-f' is not.
@@ -370,46 +217,156 @@
 ;; The parent's own binding is untouched.
 (test-eq 'parent-command (keymap-lookup parent-km (kbd "C-x")))
 
+;; ------------------------------------------------------------------
+;; The parent chain: a child's binding shadows its parent's, and a key the
+;; child leaves unbound is found in the parent. This is the whole of what
+;; `define-derived-mode''s `(set-keymap-parent CHILD-map ...)' means.
+
+(define shadow-parent (keymap '*shadow-parent*))
+(define-key shadow-parent (kbd "C-a") 'parent-a)
+(define-key shadow-parent (kbd "C-b") 'parent-b)
+(define shadow-child (keymap '*shadow-child*))
+(set-keymap-parent shadow-child shadow-parent)
+(define-key shadow-child (kbd "C-a") 'child-a)
+
+(test-eq "an unbound key is found in the parent"
+  'parent-b (keymap-lookup shadow-child (kbd "C-b")))
+(test-eq "a bound key shadows the parent's"
+  'child-a (keymap-lookup shadow-child (kbd "C-a")))
+(test-eq "...and the parent's own answer is unchanged"
+  'parent-a (keymap-lookup shadow-parent (kbd "C-a")))
+
+(test-assert "a parent that is not a keymap is refused"
+  (guard (e (#t #t)) (set-keymap-parent shadow-child 'not-a-keymap) #f))
+
+;; `keymap_memberp' (`keymap.c:263'): a keymap may not become its own
+;; ancestor, or a lookup would never end.
+(test-assert "cyclic inheritance is refused"
+  (guard (e (#t #t))
+    (set-keymap-parent shadow-parent shadow-child)
+    #f))
+(test-assert "and a keymap may not be its own parent"
+  (guard (e (#t #t))
+    (set-keymap-parent shadow-parent shadow-parent)
+    #f))
+
+;; ------------------------------------------------------------------
+;; The char-table slot - Emacs's `nth 1', which is where the two *range*
+;; bindings live that make an unbound printing character self-insert
+;;
+;; A char table is the one thing this tree has not ported, so the slot
+;; holds a *procedure* whose test is the range. Every expectation below is
+;; Emacs 31.1's own answer, measured.
+
+(define sil-command 'self-insert)
+(define sil-map (keymap '*sil*))
+(set-keymap-char-table! sil-map (self-insert-char-table sil-command))
+
+(define (self-inserting? kbd-string)
+  (eq? sil-command (keymap-lookup sil-map (kbd kbd-string))))
+
+;; (`(kbd " ")` is the empty key in Emacs too - a lone space is a
+;; separator in a `kbd' string, and `SPC' is how the space key is spelled.)
+(test-assert (self-inserting? "SPC"))
+(test-assert (self-inserting? "!"))
+(test-assert (self-inserting? "@"))
+(test-assert (self-inserting? "M"))
+(test-assert (self-inserting? "_"))
+(test-assert (self-inserting? "~"))
+;; ... and so does every character from 128 up - `(cons 128 (max-char))'.
+(test-assert (eq? sil-command
+                 (keymap-lookup sil-map (keymap-index (list 200)))))
+(test-assert (eq? sil-command
+                 (keymap-lookup sil-map (keymap-index (list 12354)))))
+;; --------------------------------------------------
+;; A control character is not a plain character.
+(test-assert (not (self-inserting? "C-@")))
+(test-assert (not (self-inserting? "C-i")))
+(test-assert (not (self-inserting? "C-m")))
+(test-assert (not (self-inserting? "C-t")))
+(test-assert (not (self-inserting? "C-_")))
+;; DEL is not self-inserting either - it is `delete-backward-char'.
+(test-assert (not (self-inserting? "DEL")))
+;; --------------------------------------------------
+;; A modified event is not a plain character, and a char table cannot even
+;; be indexed by one.
+(test-assert (not (self-inserting? "M-@")))
+(test-assert (not (self-inserting? "M-m")))
+(test-assert (not (self-inserting? "C-M-@")))
+(test-assert (not (self-inserting? "C-M-m")))
+;; --------------------------------------------------
+;; Neither is a key of more than one event: that is a prefix.
+(test-assert (not (self-inserting? "M-m C-c")))
+(test-assert (not (self-inserting? "C-m C-c")))
+;; --------------------------------------------------
+;; **A char table is consulted before the parent**, which is where it sits
+;; in the map the C builds - so a *bound* key still wins over it, and a key
+;; the map does not bind falls to it rather than to the parent.
+(define sil-bound (keymap '*sil-bound*))
+(set-keymap-char-table! sil-bound (self-insert-char-table sil-command))
+(define-key sil-bound (kbd "q") 'quit-command)
+(test-eq "a bound key beats the char table"
+  'quit-command (keymap-lookup sil-bound (kbd "q")))
+(test-eq "an unbound printing character takes the char table"
+  sil-command (keymap-lookup sil-bound (kbd "z")))
+
+;; ------------------------------------------------------------------
+;; `key-description' and `single-key-description' - `keymap.c:2092' and
+;; `:2307', what the `is undefined' message and M-x's help are written
+;; with. Emacs 31.1's own answers, measured.
+
+(test-equal "the description of a chord" "C-x C-c" (key-description (kbd "C-x C-c")))
+(test-equal "a control character" "C-a" (key-description (kbd "C-a")))
+(test-equal "a named key is bracketed" "<left>" (key-description (kbd "<left>")))
+(test-equal "RET and TAB and SPC have names" "RET" (key-description (kbd "RET")))
+(test-equal "..." "TAB" (key-description (kbd "TAB")))
+(test-equal "..." "SPC" (key-description (kbd "SPC")))
+(test-equal "and DEL" "DEL" (key-description (kbd "DEL")))
+(test-equal "ESC in a sequence is the *meta* prefix for the next event"
+  "M-l" (key-description (vector 27 108)))
+
+;; ------------------------------------------------------------------
+;; The reverse lookup `M-x''s help asks for
+
+;; `test-equal' and not `test-eq': the answer is a *fresh* list built by
+;; the walk, as Emacs's `where-is-internal' builds a fresh sequence - only
+;; its contents are the key.
+(test-equal "the key a binding is reached by"
+  C-c_C-c (keymap-lookup-binding-key km el:comint-interrupt-subjob))
+(test-assert "and #f for one that is not there"
+  (not (keymap-lookup-binding-key km 'no-such-command)))
+
+;; -------------------------------------------------------------------------------------------------
+;; The modal lookup state - `read_key_sequence''s walk, one event at a time
+;;
+;; It lives in `keyboard.sld' because it is `keyboard.c''s. A step looks one
+;; event up in the state's keymaps, in precedence order; a *keymap* answer
+;; means the sequence is a prefix and the next event is looked up in it;
+;; anything else is the command and the chord ends.
+
 (define modal #f)
 
-(define (reset-modal! kml)
-  (set! modal (new-modal-lookup-state km)))
+(define (reset-modal! m)
+  (set! modal (new-modal-lookup-state m)))
 
-;; The step takes ONE *event* - what `read_key_sequence' reads at a time -
-;; and the chord is accumulated in the state. The stack is a list of
-;; events, and the key sequence is that reversed.
 (define (lookup-modal! key)
   (let*((event (car (keymap-index key)))
         (result #f)
         (keep
          (modal-lookup-state-step!
           modal event
-          (lambda (key-index action) ;; do action
-            (set! result
-              (list
-               'action
-               (keymap-index->events (force key-index))
-               action)))
-          (lambda (key-index next-kml) ;; do wait next
-            (set! result
-              (list
-               'waiting
-               (keymap-index->events (force key-index)))))
-          (lambda (key-index) ;; do fail lookup
-            (set! result
-              (list 'fail (keymap-index->events key-index)))))))
+          (lambda (key-index action)          ; do action
+            (set! result (list 'action (force key-index) action)))
+          (lambda (key-index next-km)         ; do wait next
+            (set! result (list 'waiting (force key-index))))
+          (lambda (key-index)                 ; do fail lookup
+            (set! result (list 'fail key-index))))))
     (cons keep result)))
 
 (reset-modal! km)
-
 (test-assert (modal-lookup-state-type? modal))
-(test-eq el:comint-interrupt-subjob
-  (keymap-lookup (modal-lookup-state-keymap modal) C-c_C-c))
-
-(test-assert (keymap-layer-type? (keymap-layer-ref kml (keymap-index (kbd "C-c")))))
 
 (reset-modal! km)
-
 (test-equal '(#t waiting (3))
   (lookup-modal! (kbd "C-c")))
 
@@ -417,92 +374,59 @@
   (lookup-modal! (kbd "C-c")))
 
 (reset-modal! km)
-
-(test-equal (list #f 'action '(7) el:keyboard-quit)
-  (lookup-modal! (kbd "C-g")))
-
-(reset-modal! km)
-
-(test-equal (list #f 'action '(97) el:self-insert-command)
-  (lookup-modal! '(#\a)))
+(test-equal (list #f 'action (list 134217752) el:eval-defun)
+  (lookup-modal! (kbd "C-M-x")))
 
 (reset-modal! km)
-
 (test-equal '(#f fail (17))
   (lookup-modal! (kbd "C-q")))
 
 (reset-modal! km)
-
+;; An undefined sequence ends the chord, and the pending prefix goes with
+;; it: `C-c' is a prefix, and `C-c z' names nothing.
 (test-equal '(#t waiting (3))
   (lookup-modal! (kbd "C-c")))
+(test-equal '(#f fail (3 122))
+  (lookup-modal! (kbd "z")))
 
-(test-equal '(#f fail (3 0))
-  (lookup-modal! (kbd "C-@")))
+(test-equal "the key sequence read so far is the stack, in order"
+  '(3 122)
+  (modal-lookup-state-key-index modal))
 
-(reset-modal! km)
-
-(test-equal (list #f 'action '(99) el:self-insert-command)
-  (lookup-modal! '(#\c)))
-
-(test-equal '(#f fail (99 99))
-  (lookup-modal! '(#\c)))
-
-
-;;--------------------------------------------------------------------
-;; A list of keymaps: what a key sequence is looked up in, in order.
+;; --------------------------------------------------
+;; A *list* of keymaps is a precedence order, which is what the command
+;; loop builds from the buffer's own map and then `global-map'.
 ;;
-;; GNU Emacs's `read_key_sequence' searches the buffer's local map and
-;; then `global-map'. This library's `new-modal-lookup-state' has always
-;; documented that it takes "a <keymap-type> argument or a list of
-;; <keymap-type> arguments", and until now it took only the one - the
-;; callers that passed a list got an error. These are the four things the
-;; list has to do, and the first and last of them were measured from a
-;; terminal Emacs with `(key-binding ...)' for the same maps.
+;; The first map that binds the key wins and one that does not falls
+;; through to the next.
 
-(test-begin "schemacs_keymap_precedence")
+(define precedence-local  (keymap '*prec-local*))
+(define precedence-global (keymap '*prec-global*))
+(define-key precedence-local (kbd "C-a") el:local-command)
+(define-key precedence-global (kbd "C-a") el:global-command)
+(define-key precedence-global (kbd "C-f") el:global-command)
 
-(define (one-key-map name key command)
-  (keymap name (keymap-layer (map-key key command))))
+(test-equal "the first map's binding wins"
+  el:local-command
+  (keymap-lookup (car (modal-lookup-state-keymaps
+                       (new-modal-lookup-state
+                        (list precedence-local precedence-global))))
+                 (kbd "C-a")))
 
-(define precedence-local
-  (keymap '*prec-local* (keymap-layer (map-key (kbd "C-a") 'local-command))))
-(define precedence-global
-  (keymap '*prec-global*
-          (keymap-layer (map-key (kbd "C-f") 'global-command)
-                        (map-key (kbd "C-x C-f") 'find-file))))
+(reset-modal! (list precedence-local precedence-global))
+(test-equal (list #f 'action '(1) el:local-command)
+  (lookup-modal! (kbd "C-a")))
 
-(define (lookup-in keymaps kbd-string)
-  (let ((r (keymap-lookup
-            (modal-lookup-state-keymap (new-modal-lookup-state keymaps))
-            (keymap-index (kbd kbd-string)))))
-    (if (keymap-type? r) 'keymap r)))
+(reset-modal! (list precedence-local precedence-global))
+(test-equal "a key the first map leaves unbound falls to the second"
+  (list #f 'action '(6) el:global-command)
+  (lookup-modal! (kbd "C-f")))
 
-;; a list is accepted at all
-(test-equal #t (modal-lookup-state-type?
-                (new-modal-lookup-state (list precedence-local precedence-global))))
+(test-assert "a list of keymaps makes a state"
+  (modal-lookup-state-type?
+   (new-modal-lookup-state (list precedence-local precedence-global))))
 
-;; the first keymap that binds the key wins
-(test-equal '(local-command global-command)
-  (list (lookup-in (list precedence-local precedence-global) "C-a")
-        (lookup-in (list precedence-local precedence-global) "C-f")))
-
-;; a key the first keymap does not bind is found in the next
-(test-equal 'global-command
-  (lookup-in (list (one-key-map '*empty* (kbd "M-z") 'unused)
-                   precedence-global)
-             "C-f"))
-
-;; and a *prefix* in the first keymap does not stop the next keymap's
-;; longer sequence being found: Emacs answers `find-file' for
-;; `(key-binding "\C-x\C-f")' when the local map binds C-x as a prefix
-;; and nothing under it
-(test-equal 'find-file
-  (lookup-in (list (keymap '*prec-prefix*
-                           (keymap-layer (map-key (kbd "C-x")
-                                                  (keymap-layer))))
-                   precedence-global)
-             "C-x C-f"))
-
-(test-end "schemacs_keymap_precedence")
+(test-assert "no keymap at all is refused"
+  (guard (e (#t #t)) (new-modal-lookup-state '()) #f))
 
 (test-end "schemacs_keymap")

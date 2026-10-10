@@ -108,6 +108,7 @@
     (only (schemacs editor dispnew)
           <display> *mouse-event-keys* clear-frame-area! column-width
           current-display
+          delete-frame-display!
           display-color-cells
           draw-window-cursor! flush-display! key-event->key
           get-selection line-height mouse-position read-input-event
@@ -1895,11 +1896,76 @@
                 (symbol->string (frame-name frame))))
         d))
 
+    (define *pgtk-destroyed-displays* '())
+    ;; ^ The displays whose windows `pgtk-close-window!' has destroyed,
+    ;; held so that the Guile proxies of the widgets inside them outlive
+    ;; the destruction. Their heavy resources - the cairo surface, the
+    ;; context and the Pango layout - are dropped before the display is
+    ;; parked here, so what is held is the display's own record and the two
+    ;; widget objects.
+    ;;
+    ;; **This is guile-gi's ownership rule, measured rather than assumed.**
+    ;; A widget's proxy holds a *toggle reference* to its GObject: the
+    ;; object lives exactly as long as the proxy does. When the proxy is
+    ;; collected, guile-gi drops that reference - and then its ordinary
+    ;; finalizer calls `g_object_unref' on the object it has just released,
+    ;; which is a double release. GLib reports it as
+    ;;
+    ;;     GLib-GObject-CRITICAL: g_object_unref: assertion
+    ;;     'G_IS_OBJECT (object)' failed
+    ;;
+    ;; twice per closed window (the window and the drawing area inside it).
+    ;; It is *guarded*, so it corrupts nothing - `g_object_unref' checks
+    ;; and returns - but it is two CRITICAL lines on stderr for a perfectly
+    ;; ordinary action, and it is a release of memory this process no longer
+    ;; owns.
+    ;;
+    ;; Measured on a live editor, forcing `gc' after each step. These four
+    ;; rows are why it is the whole *display* that is parked and not just
+    ;; the window:
+    ;;
+    ;;   close a window, hold nothing                      -> 2 CRITICALs
+    ;;   the same from `delete-frame', holding the
+    ;;     window's proxy but not the display              -> 2 CRITICALs
+    ;;   hold the display across the close                 -> 0
+    ;;   **drop the big slots, then park it - this code**  -> 0
+    ;;
+    ;; Both proxies have to stay alive; the drawing area's does not follow
+    ;; the window's. Parking the display costs its own record and the two
+    ;; widget objects per frame closed - the heavy resources, the pixel
+    ;; buffer above all (`columns x rows x 4' bytes), are dropped first and
+    ;; so are not parked, and a human closes frames one at a time.
+    ;;
+    ;; Nothing here is masking a crash, which is worth knowing before
+    ;; reading the hold that way: a destroyed widget is a *valid* object.
+    ;; `(widget:visible win)' answers #f afterwards, a second
+    ;; `(widget:destroy win)' passes `GTK_IS_WIDGET' without complaint, and
+    ;; neither warns. The GObject outlives the destruction; it is only its
+    ;; *release* that is wrong, and only in guile-gi's hands.
+    ;;
+    ;; **No Emacs code is being departed from here.** `pgtk_destroy_window`
+    ;; and `tty_free_frame_resources` do the same destruction; what has no
+    ;; counterpart is guile-gi's proxy, because Emacs has no proxy - the C
+    ;; holds and releases its own references. This is the same category as
+    ;; the AT-SPI and duplicate-`make' warnings AGENTS.md records, with the
+    ;; difference that a cheap hold removes it rather than documenting it.
+
     (define (pgtk-close-window! d)
       ;; Destroy a window `pgtk-open-window' made, and forget it. Emacs's
       ;; counterpart is the teardown `x_free_frame_resources' does.
+      ;;
+      ;; The display is parked *before* the destroy, so that the widgets'
+      ;; proxies are alive already when the objects change state - see
+      ;; `*pgtk-destroyed-displays*'. The big slots go first, so that
+      ;; parking the display does not park the frame's pixel buffer with
+      ;; it.
       ;;--------------------------------------------------------------
       (let ((win (pgtk-window d)))
+        (set! (pgtk-surface d) #f)
+        (set! (pgtk-cr d) #f)
+        (set! (pgtk-layout d) #f)
+        (set! (pgtk-last-allocation d) #f)
+        (set! *pgtk-destroyed-displays* (cons d *pgtk-destroyed-displays*))
         (when win (widget:destroy win)))
       (*pgtk-displays*
        (let loop ((l (*pgtk-displays*)) (acc '()))
@@ -1907,6 +1973,27 @@
                ((eq? (car l) d) (loop (cdr l) acc))
                (else (loop (cdr l) (cons (car l) acc))))))
       d)
+
+    (define-method (delete-frame-display! (d <pgtk-display>))
+      ;; The display's `terminal->delete_frame_hook`: a frame on this
+      ;; display has been deleted, so its window goes away.
+      ;;
+      ;; This is `pgtk_destroy_window` (`pgtkterm.c:600`), whose whole
+      ;; visible effect is the `gtk_widget_destroy (FRAME_WIDGET (f))` in
+      ;; `pgtk_free_frame_resources` (`:445`). One display here is one
+      ;; frame's window, so destroying the display is destroying the
+      ;; frame's surface - and `pgtk-close-window!` drops it from
+      ;; `*pgtk-displays*` as well, so a read stops looking at it.
+      ;;
+      ;; **The window is destroyed exactly once.** The window manager's
+      ;; close request reaches `delete_event` first, and that handler
+      ;; returns TRUE precisely so that Gtk does *not* destroy the widget
+      ;; (`pgtk-open-window`): the command loop is asked instead, and
+      ;; `handle-delete-frame` is what turns that request into a
+      ;; `delete-frame` call, which arrives here. So both routes end in
+      ;; this one destroy, and neither double-destroys.
+      ;;--------------------------------------------------------------
+      (pgtk-close-window! d))
 
     (define (with-gtk-display thunk)
       ;; Open the editor's GTK window, make it the editor's display, run

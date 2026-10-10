@@ -80,7 +80,7 @@
     (only (schemacs editor keymap) define-key *default-keymap*)
     ;; a sparse keymap to hand to `set-transient-map', which is Emacs's
     ;; `(make-sparse-keymap)' in that same place
-    (prefix (schemacs keymap) km:)
+    (prefix (schemacs editor keymap) km:)
     (only (schemacs editor character) kbd)
     ;; A command that reads its own keys waits the way the command loop
     ;; does, and `read-key-event' is the read every key comes through -
@@ -390,7 +390,20 @@ This should be bound to a mouse drag event."
       ;; (window-system) (sit-for 1))" cursor bounce, which is a text
       ;; terminal's.
       ;;--------------------------------------------------------------
-      (select-window (posn-window (event-start click)))
+      ;; **`posn-window' answers the *frame* when the press was outside
+      ;; every window** - `posn-at-x-y' does that deliberately, and its own
+      ;; comment says so - and `select-window' on a frame is a type error:
+      ;;
+      ;;   Wrong type argument: #<<frame> windows: (#<<window> ...)
+      ;;
+      ;; That is a click in a second frame, which is the report this fixes.
+      ;; The rule for what a frame position means is `posn-set-point''s,
+      ;; one function up, and it is the same rule here: the frame's own
+      ;; selected window. Two spellings of one rule is one too many, and
+      ;; they disagreed - `posn-set-point' had it and this did not.
+      (select-window
+       (let ((w (posn-window (event-start click))))
+         (if (window-type? w) w (frame-selected-window w))))
       (let* ((beg (posn-point (event-start click)))
              (end (if (eq? (posn-window (event-end click)) (selected-window))
                       (posn-point (event-end click))

@@ -155,7 +155,7 @@
     (only (schemacs regexp-opt) regexp-opt)
     (only (schemacs editor font-core) font-lock-mode)
     (only (schemacs editor indentc) *indent-tabs-mode*)
-    (prefix (schemacs keymap) km:)
+    (prefix (schemacs editor keymap) km:)
     (only (schemacs editor window)
           display-buffer display-buffer-below-selected pop-to-buffer-same-window
           quit-restore-window quit-window switch-to-buffer

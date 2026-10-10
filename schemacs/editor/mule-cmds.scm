@@ -54,8 +54,8 @@
     ;; hash table rather than a list.
     (only (guile) delq hash-map->list)
     (only (schemacs editor keymap) define-key *default-keymap*)
-    ;; The keymap constructor is `keymap` in `(schemacs keymap)`.
-    (only (schemacs keymap) keymap)
+    ;; The keymap constructor is `keymap` in `(schemacs editor keymap)`.
+    (only (schemacs editor keymap) keymap)
     ;; `kbd' is `subr.el''s: a key description to the vector of events
     ;; a `define-key' takes.
     (only (schemacs editor subr) kbd)
@@ -225,14 +225,19 @@ For a list of possible values of CODING-SYSTEM, use \\[list-coding-systems]."
     ;; ^ GNU Emacs's `mule-keymap' (`mule-cmds.el:41'), with the three
     ;; commands this tree has. See the file header for the rest.
     ;;
-    ;; **It is the object and not the thing that gets looked up.** Emacs
-    ;; binds `ctl-x-map'\'s `C-m' to it and a lookup descends into a
-    ;; keymap-valued binding; this tree's lookup walks a map's own layers
-    ;; and the maps beside it and does not descend, which is why
-    ;; `find-file-other-window` is bound as a flat `C-x 4 f` rather than
-    ;; as a submap of `C-x 4`. The commands are bound flat below and this
-    ;; stays as the description of the keyboard it is in Emacs - a value
-    ;; you can still `(define-key mule-keymap ...)` into.
+    ;; **It is the object and not the thing that gets looked up**, and
+    ;; that is now only a departure of *binding* rather than of lookup.
+    ;; Emacs binds `ctl-x-map'\'s `C-m' to it and a lookup descends into a
+    ;; keymap-valued binding; when this was written the lookup could not
+    ;; descend - it walked a map's own layers and the maps beside it -
+    ;; which is why the three commands are also bound flat on the global
+    ;; map below, and why `find-file-other-window` is a flat `C-x 4 f`
+    ;; rather than a submap of `C-x 4`.
+    ;;
+    ;; `access-keymap'/'keymap-lookup' descend into a keymap-valued binding
+    ;; now - that is `access_keymap_1''s recursion, and `define-as-prefix'
+    ;; is what builds the map to descend into - so the flat pair is retired
+    ;; and this map is bound the way Emacs binds it.
 
     (define-key mule-keymap (kbd "f") set-buffer-file-coding-system)
     (define-key mule-keymap (kbd "r") revert-buffer-with-coding-system)
@@ -243,8 +248,16 @@ For a list of possible values of CODING-SYSTEM, use \\[list-coding-systems]."
     ;; measured: `(event-convert-list`\''s answer for `(control ?m)` is 13, and
     ;; `(kbd "C-x RET f")` and `(kbd "C-x C-m f")` are the same key
     ;; sequence.
-    (define-key *default-keymap* (kbd "C-x RET f") set-buffer-file-coding-system)
-    (define-key *default-keymap* (kbd "C-x RET r") revert-buffer-with-coding-system)
-    (define-key *default-keymap* (kbd "C-x RET c") universal-coding-system-argument)
+    ;;
+    ;; **`mule-keymap' is bound as a *submap*, which is what Emacs does** -
+    ;; `mule-cmds.el' has `(define-key ctl-x-map "\\C-m" mule-keymap)': the
+    ;; key is `C-x RET' and its *value* is the map, so the event after it
+    ;; is looked up inside. Three flat
+    ;; `(define-key *default-keymap* (kbd "C-x RET <key>") ...)' lines stood
+    ;; here, and they were a departure forced by a lookup that could not
+    ;; descend. The same limitation had made `C-x 4 f' a flat sequence in
+    ;; `files.sld'; that one is retired too, into `ctl-x-4-map' - the
+    ;; submap `subr.el' makes for the `C-x 4' prefix.
+    (define-key *default-keymap* (kbd "C-x RET") mule-keymap)
 
     ))

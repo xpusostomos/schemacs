@@ -41,10 +41,9 @@ LIBS = [
     ('(schemacs editor xdisp)', '(schemacs editor xdisp)'),
     ('(schemacs editor isearch)', '(schemacs editor isearch)'),
     ('(schemacs editor window)', '(schemacs editor window)'),
-    ('(schemacs editor keymap)', '(schemacs editor keymap)'),
+    ('(schemacs editor keymap)', '(prefix (schemacs editor keymap) km:)'),
     ('(schemacs editor keyboard)', '(schemacs editor keyboard)'),
     ('(schemacs editor minibuffer)', '(schemacs editor minibuffer)'),
-    ('(schemacs keymap)', '(prefix (schemacs keymap) km:)'),
     # The toolkit libraries, one directory per front end
     ('(schemacs ui gtk gtk-main)', '(only (schemacs ui gtk gtk-main) main-gtk)'),
     ('(schemacs ui gtk pgtk)', '(only (schemacs ui gtk pgtk) with-gtk-display)'),

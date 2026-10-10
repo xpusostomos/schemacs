@@ -1,6 +1,6 @@
-# Project Schemacs
+# Schemacs
 
-#### A clone of Emacs and Emacs Lisp written in Scheme
+#### A clone of Emacs written in Scheme
 
 ### Project State
 

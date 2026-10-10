@@ -26,6 +26,10 @@
     (scheme base)
     (scheme char)
     (scheme case-lambda)
+    ;; `delay' and `force` are the modal lookup state's: a step hands its
+    ;; callbacks a *promise* of the key sequence rather than the sequence,
+    ;; because only one of the three outcomes uses it.
+    (only (scheme lazy) delay force)
     ;; The error the loop reports is formatted from the format string its
     ;; arguments arrive apart in.
     (only (scheme write) write)
@@ -36,7 +40,7 @@
     ;; signal one could see it, because the error path is not otherwise
     ;; reached.
     (only (guile) format inexact->exact logior string-index)
-    (prefix (schemacs keymap) km:)
+    (prefix (schemacs editor keymap) km:)
     (only (schemacs editor engine)
           new-text-editor
           text-editor-copy-string
@@ -157,6 +161,12 @@
    read-quoted-char
    *overriding-terminal-local-map*
    *this-command-keys*
+   ;; The modal lookup state - `read_key_sequence''s one-event-at-a-time
+   ;; walk. It was `(schemacs keymap)''s and is `keyboard.c''s; the
+   ;; accessors are published because the tests drive the walk by hand.
+   new-modal-lookup-state modal-lookup-state-type?
+   modal-lookup-state-step! modal-lookup-state-key-index
+   modal-lookup-state-keymaps
    internal-pop-keymap
    internal-push-keymap
    read-key-event
@@ -528,6 +538,94 @@
          (if mode-keys (%keymap-and-parents mode-keys) '())
          (%keymap-and-parents *default-keymap*))))
 
+    ;;----------------------------------------------------------------
+    ;; The modal lookup state - `read_key_sequence''s feel for a chord
+    ;;------------------------------------------------------------------
+    ;;
+    ;; In Emacs, key lookup is modal: `read_key_sequence' (`keyboard.c')
+    ;; reads ONE event at a time, and each step looks that event up in the
+    ;; keymap the last step reached. A *keymap* answer means the sequence
+    ;; so far is a prefix and the next event is looked up in it; anything
+    ;; else is the command and the chord ends there; nothing at all ends
+    ;; it as an undefined key. `lookup-keymaps' above is the list of maps
+    ;; the FIRST event is looked up in - `read_key_sequence' searches the
+    ;; buffer's own map and then `global-map' - and this state is what
+    ;; carries that from one event to the next.
+    ;;
+    ;; **This was `(schemacs editor keymap)''s, and it is `keyboard.c''s.** That
+    ;; library kept a keymap as a list of "layers" and this state folded
+    ;; the map *list* into it; the layers are gone, so the state holds the
+    ;; maps it was given and tries them in order - which is the same
+    ;; search, without a representation invented for it.
+    ;;------------------------------------------------------------------
+
+    (define-record-type <modal-lookup-state-type>
+      (make<modal-lookup-state-type> keymaps stack)
+      modal-lookup-state-type?
+      (keymaps modal-lookup-state-keymaps set!modal-lookup-state-keymaps)
+      (stack   modal-lookup-state-index-stack set!modal-lookup-state-index-stack))
+
+    (define (new-modal-lookup-state km)
+      ;; A new state over one keymap, or over a *list* of them.
+      ;;
+      ;; A list is a precedence order: the first keymap that binds the key
+      ;; wins, and one that does not falls through to the next. It is what
+      ;; `lookup-keymaps' builds, and what GNU Emacs's `read_key_sequence'
+      ;; does with the buffer's local map and then `global-map'.
+      ;;--------------------------------------------------------------
+      (cond
+       ((km:keymap-type? km)
+        (make<modal-lookup-state-type> (list km) '()))
+       ((and (list? km) (pair? km) (km:keymap-type? (car km)))
+        (make<modal-lookup-state-type> km '()))
+       ((null? km)
+        (error "no keymap to look a key sequence up in"))
+       (else
+        (error "argument must be a <keymap-type> or a list of them" km))))
+
+    (define (modal-lookup-state-key-index state)
+      ;; The key sequence read so far - a *list of events*, which is what
+      ;; GNU Emacs's `this-command-keys' answers with (a vector, there;
+      ;; the same events).
+      ;;--------------------------------------------------------------
+      (reverse (modal-lookup-state-index-stack state)))
+
+    (define (modal-lookup-state-lookup state event)
+      ;; Look ONE event up in the state's keymaps, in precedence order.
+      ;;--------------------------------------------------------------
+      (let loop ((maps (modal-lookup-state-keymaps state)))
+        (cond
+         ((null? maps) #f)
+         (else
+          (let ((got (km:keymap-lookup (car maps) (list event))))
+            (or got (loop (cdr maps))))))))
+
+    (define (modal-lookup-state-step! state event do-action do-wait-next do-fail-lookup)
+      ;; One event of `read_key_sequence''s walk.
+      ;;
+      ;; DO-ACTION is called with a promise of the key sequence and the
+      ;; action found - the chord is over. DO-WAIT-NEXT is called with the
+      ;; same promise and the keymap the sequence has become a prefix of -
+      ;; more events are wanted. DO-FAIL-LOOKUP is called with the key
+      ;; sequence itself when the event named nothing at all. The answer
+      ;; is #t while more events are wanted and #f when the chord ended.
+      ;;--------------------------------------------------------------
+      (let* ((stack (cons event (modal-lookup-state-index-stack state)))
+             (full-key (delay (reverse stack)))
+             (action-or-map (modal-lookup-state-lookup state event)))
+        (set!modal-lookup-state-index-stack state stack)
+        (cond
+         ((and action-or-map (not (km:keymap-type? action-or-map)))
+          (set!modal-lookup-state-keymaps state '())
+          (do-action full-key action-or-map)
+          #f)
+         ((km:keymap-type? action-or-map)
+          (set!modal-lookup-state-keymaps state (list action-or-map))
+          (do-wait-next full-key action-or-map) #t)
+         (else
+          (set!modal-lookup-state-keymaps state '())
+          (do-fail-lookup (force full-key)) #f))))
+
     (define (%keymap-and-parents keymap)
       ;; KEYMAP and its parents, nearest first.
       ;;
@@ -540,7 +638,7 @@
       ;; special-mode-map)'.
       ;;
       ;; What the lookup did instead was walk a map's own *layers* and stop
-      ;; (`keymap-lookup-binding-key' in `(schemacs keymap)'), and no map
+      ;; (`keymap-lookup-binding-key' in `(schemacs editor keymap)'), and no map
       ;; in this tree has one of its parents among its layers. So every
       ;; parent was decorative: a mode that inherited a key did not have
       ;; it, and the only reason nothing showed is that the modes which
@@ -637,7 +735,7 @@
           (begin
             (let ((state
                    (or (frame-keymap-state frame)
-                       (km:new-modal-lookup-state (lookup-keymaps)))))
+                       (new-modal-lookup-state (lookup-keymaps)))))
               ;; NOTE: the state is stored on the frame BEFORE the lookup
               ;; step, because the step's callbacks read it - `do-action'
               ;; reads the completed chord off it for `*this-command-keys*'
@@ -648,7 +746,7 @@
               ;; chord and not about commands.)
               (set!frame-keymap-state frame state)
               (let ((result
-                     (km:modal-lookup-state-step!
+                     (modal-lookup-state-step!
                       state key
                       (lambda (full-path action)
                         ;; **The chord that ran the command**, which
@@ -661,7 +759,7 @@
                         (parameterize
                             ((*this-command-keys*
                               (list->vector
-                               (km:modal-lookup-state-key-index state))))
+                               (modal-lookup-state-key-index state))))
                           (dispatch-action frame action))
                         #f)
                       (lambda (full-path action) #t)

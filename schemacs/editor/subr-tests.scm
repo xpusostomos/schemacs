@@ -5,7 +5,7 @@
  (only (srfi 64) test-assert test-equal test-begin test-end)
  (only (schemacs editor subr) kbd event-modifiers event-basic-type
        event-convert-list event-symbol-elements)
- (only (schemacs keymap) keymap-index keymap-index->events)
+ (only (schemacs editor keymap) keymap-index keymap-index->events)
  ;; `function-key-map''s translation of a named key into the character it
  ;; means, which is `read_key_sequence''s step.
  (only (schemacs editor keyboard) function-key-translate))

@@ -1881,6 +1881,51 @@ def check_kill_buffer():
     return problems
 
 
+def check_delete_frame():
+    """`C-x 5 0' - `delete-frame' - is a command, and the key reaches it.
+
+    `delete-frame' and `delete-other-frames' are registered with
+    `register-command!' rather than written as `define-command's, because
+    their Emacs shape has `&optional' arguments (`frame.c:3150',
+    `frame.el:3224'), and the spec that went in was
+
+        (register-command! delete-frame (list (*current-frame*) #f))
+
+    **SPEC is an *expression* - a form the dispatcher evaluates at the
+    keypress to produce the argument list - and `(list ...)' is a *call*.**
+    So what was registered was the list of *values*, `(#f #f)`: it was
+    built as the library loaded, when there was no frame yet. At the
+    keypress the dispatcher evaluated `(#f #f)' and so applied `#f', and
+
+        C-x 5 0  ->  Wrong type to apply: #f
+
+    was all the key could ever answer - `C-x 5 1' likewise. Emacs's specs
+    are `(interactive "")' and `(interactive "i\\nP")', both of which pass
+    the frame as *nothing*; `#f' is this dispatcher's spelling of that.
+
+    A terminal has one frame, so the key's answer here is Emacs's refusal
+    rather than a deletion - which is the assertion because it is only
+    reachable *through* the interactive spec. The unit tests all call
+    `delete-frame' directly and so never took this path; that is the gap
+    this check exists for.
+    """
+    problems = []
+    path = "/tmp/pty-check-frame.txt"
+    open(path, "w").write("frame\n")
+    out = drive([C_x + b"50"], path)
+    if "Wrong type to apply" in out:
+        problems.append("C-x 5 0 applied #f - the spec is a call, not an "
+                        "expression: %r" % out[-200:])
+    if "Attempt to delete the sole visible or iconified frame" not in out:
+        problems.append("C-x 5 0 did not give Emacs's sole-frame message: %r"
+                        % out[-200:])
+    # and the sibling, which had the same spec
+    out = drive([C_x + b"51"], path)
+    if "Wrong type to apply" in out:
+        problems.append("C-x 5 1 applied #f: %r" % out[-200:])
+    return problems
+
+
 def check_abbreviate():
     """`~' for the home directory, in the file prompt and the buffer list.
 
@@ -3394,6 +3439,7 @@ CHECKS = {
     "switch-buffer": check_switch_buffer,
     "abbreviate": check_abbreviate,
     "kill-buffer": check_kill_buffer,
+    "delete-frame": check_delete_frame,
 }
 
 

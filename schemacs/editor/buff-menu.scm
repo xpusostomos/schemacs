@@ -43,7 +43,7 @@
     (only (schemacs editor character) kbd)
     (scheme base)
     (scheme char)
-    (prefix (schemacs keymap) km:)
+    (prefix (schemacs editor keymap) km:)
     (only (schemacs editor command)
           define-command)
     (only (schemacs editor engine)

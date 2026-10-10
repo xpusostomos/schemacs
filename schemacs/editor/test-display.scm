@@ -21,6 +21,10 @@
   ;;   * `write-glyphs!' records what was drawn instead of drawing it,
   ;;     which is also useful in its own right: a test can ask what the
   ;;     redisplay wrote;
+  ;;   * `delete-frame-display!' counts the frames it has been told about
+  ;;     and destroys no surface, which is what a `terminal->delete_frame_hook'
+  ;;     for a display with no window system answers - and what lets
+  ;;     `delete-frame` be tested without one;
   ;;   * `read-input-event' answers the events a test has *scripted*, in
   ;;     order, and `#f' when they run out - which is what a timed-out
   ;;     read answers, so a script that ends is a read that timed out;
@@ -62,7 +66,8 @@
     (only (guile) hash-ref hash-set! make-hash-table)
     (only (schemacs editor dispnew)
           <display>
-          clear-frame-area! column-width display-color-cells
+          clear-frame-area! column-width delete-frame-display!
+          display-color-cells
           draw-window-cursor! flush-display! key-event->key line-height
           read-input-event realize-face resume-display! screen-size
           suspend-display! update-window-begin! update-window-end!
@@ -79,7 +84,8 @@
           test-display-color-cells set!test-display-color-cells
           test-display-script set!test-display-script
           test-display-glyphs set!test-display-glyphs
-          test-display-cursor set!test-display-cursor)
+          test-display-cursor set!test-display-cursor
+          test-display-frames-deleted set!test-display-frames-deleted)
 
   (begin
 
@@ -111,7 +117,16 @@
                    #:setter set!test-display-glyphs)
       ;; The last cursor position asked for, as `(ROW COLUMN TYPE)'.
       (cursor      #:init-value #f #:accessor test-display-cursor
-                   #:setter set!test-display-cursor))
+                   #:setter set!test-display-cursor)
+      ;; How many frames have been deleted off this display - what
+      ;; `delete-frame-display!' counts, which is a *terminal's* answer
+      ;; (a tty keeps its frames and its surface; a window system
+      ;; destroys the frame's window). Counting rather than drawing is
+      ;; all a stub can do, and it is enough to see that the deletion
+      ;; reached the display at all.
+      (frames-deleted #:init-value 0
+                      #:accessor test-display-frames-deleted
+                      #:setter set!test-display-frames-deleted))
 
     (define-method (screen-size (d <test-display>))
       ;; The tty's own answer shape: a cons of columns and rows
@@ -143,6 +158,18 @@
     (define-method (flush-display! (d <test-display>)) #t)
     (define-method (suspend-display! (d <test-display>)) #t)
     (define-method (resume-display! (d <test-display>)) #t)
+
+    (define-method (delete-frame-display! (d <test-display>))
+      ;; A terminal's answer to Emacs's `terminal->delete_frame_hook`: the
+      ;; frame goes and the display stays, because a tty's frames are
+      ;; screens on one terminal and `tty_free_frame_resources' destroys
+      ;; nothing. What a stub can do that a terminal cannot is *say* it was
+      ;; asked, which is what makes `delete-frame`'s half of the pair
+      ;; testable without a window system.
+      ;;--------------------------------------------------------------
+      (set!test-display-frames-deleted
+       d (+ 1 (test-display-frames-deleted d)))
+      #t)
 
     (define-method (read-input-event (d <test-display>) timeout)
       ;; The next scripted event, or #f when the script has run out -

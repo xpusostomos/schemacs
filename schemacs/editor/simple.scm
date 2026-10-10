@@ -34,7 +34,7 @@
     ;; `echo-keystrokes' out in `read_char' and this tree arms a one-shot
     ;; timer for it, which is the same facility a message's timeout uses.
     (only (schemacs editor timer) cancel-timer run-at-time)
-    (prefix (schemacs keymap) km:)
+    (prefix (schemacs editor keymap) km:)
     ;; `define-derived-mode' is `derived.el''s, and `special-mode' below
     ;; is defined with it.
     (only (schemacs editor derived) define-derived-mode)
@@ -120,7 +120,7 @@
     ;; bindings for the commands it defines - as simple.el does with
     ;; `(define-key global-map ...)'.
     (only (schemacs editor keymap)
-         add-keymap-layer!
+         set-keymap-char-table!
          define-key
          single-key-description
          *default-keymap*)
@@ -2442,11 +2442,11 @@ non-nil."
 
     (define self-insert-layer
       ;; Make every printing character self-insert: the global map's
-      ;; fallback layer, reached when no layer above it matched. It is here
+      ;; fallback, reached when nothing else in the map matched. It is here
       ;; because the command it names is here - which is the reason the
       ;; bindings live with their commands at all.
       ;;
-      ;; **Emacs says this in two places, and neither is a layer**: the
+      ;; **Emacs says this in two places, and both are *data in the map***: the
       ;; loop over 32..126 in `subr.el:1763' (which also binds it to C-i,
       ;; shadowed later by `indent-for-tab-command'), and
       ;; `international/mule-conf.el:1671''s
@@ -2460,13 +2460,16 @@ non-nil."
       ;; `delete-backward-char', 9 is `indent-for-tab-command', and a
       ;; *modified* event like `M-x' is unbound, because a char-table
       ;; cannot even be indexed by one. A range entry is the one thing this
-      ;; tree's keymap cannot hold, so the two ranges are one predicate
-      ;; layer; `(schemacs keymap)''s `self-insert-keymap-layer' is
-      ;; that predicate.
+      ;; tree's keymap cannot hold: there are no char tables here, so the
+      ;; slot Emacs keeps one in holds a *procedure* whose answer is the
+      ;; binding and whose test is the range.
+      ;; `(schemacs editor keymap)''s `self-insert-char-table' is that
+      ;; procedure, and it goes in the global map's char-table slot - which
+      ;; is `(nth 1 global-map)', the same slot the elisp above writes.
       ;;--------------------------------------------------------------
-      (km:self-insert-keymap-layer self-insert-command))
+      (km:self-insert-char-table self-insert-command))
 
-    (add-keymap-layer! *default-keymap* self-insert-layer)
+    (km:set-keymap-char-table! *default-keymap* self-insert-layer)
 
     ;;----------------------------------------------------------------
     ;; eval-region - `lread.c:2420'

@@ -233,7 +233,7 @@
     ;; which is what `define-key' takes there ("a string or a vector of
     ;; symbols and characters", `keymap.c':1084') and what every read in
     ;; this tree answers with. It is also what the keymap is keyed by now:
-    ;; `(schemacs keymap)''s `keymap-index' normalises any spelling - this
+    ;; `(schemacs editor keymap)''s `keymap-index' normalises any spelling - this
     ;; vector, that description string, a list of events, a single event -
     ;; to the list of events the key is made of.
     ;;----------------------------------------------------------------

@@ -2,8 +2,9 @@
   (scheme base)
   (scheme char)
   (only (srfi 64) test-assert test-equal test-begin test-end)
-  (only (schemacs keymap) keymap->layers-list keymap-layer-type?
-        keymap-layer->alist)
+  (only (schemacs editor keymap)
+        keymap-lookup keymap-type? *default-keymap*)
+  (only (schemacs editor character) kbd)
   (only (schemacs editor coding)
         coding-system-name coding-system-base)
   (only (schemacs editor mule) merge-coding-systems)
@@ -43,9 +44,29 @@
 ;; without a command loop; that they reach the commands is
 ;; `tools/pty-check.py`'s `set-coding-system`, which drives them.
 (test-assert "mule-keymap is a keymap with the three bindings in it"
-  (let ((layer (car (keymap->layers-list mule-keymap))))
-    (and (keymap-layer-type? layer)
-         (= 3 (length (keymap-layer->alist layer))))))
+  (and (keymap-type? mule-keymap)
+       (let loop ((keys (list (kbd "f") (kbd "r") (kbd "c"))))
+         (cond ((null? keys) #t)
+               ((keymap-lookup mule-keymap (car keys)) (loop (cdr keys)))
+               (else #f)))))
+
+;; ... and `C-x RET <key>' reaches them, which is what the user presses.
+;;
+;; **This is the *submap* path, not three flat bindings.** Emacs binds
+;; `ctl-x-map''s `C-m' to `mule-keymap' itself and its lookup descends into
+;; a keymap-valued binding; this tree spelled `C-x RET f' and its siblings
+;; out flat while its lookup could not descend. It descends now, so the
+;; key is `C-x RET' and the value is the map - which makes this assertion
+;; the one that proves the descent works, because `keymap-lookup' has to
+;; walk `C-x', then `RET' *into* `mule-keymap', and then `f'.
+(test-assert "and C-x RET reaches them through mule-keymap"
+  (let loop ((keys (list (kbd "C-x RET f") (kbd "C-x RET r") (kbd "C-x RET c"))))
+    (cond ((null? keys) #t)
+          ((keymap-lookup *default-keymap* (car keys)) (loop (cdr keys)))
+          (else #f))))
+
+(test-assert "C-x RET is bound to the keymap itself, as Emacs binds it"
+  (keymap-type? (keymap-lookup *default-keymap* (kbd "C-x RET"))))
 
 ;; Every coding system this tree carries is offered, as one-element lists -
 ;; `completing-read''s collection shape.

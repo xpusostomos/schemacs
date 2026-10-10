@@ -55,7 +55,7 @@
     (only (schemacs editor frame) *current-frame* set!frame-message)
     (only (schemacs editor buff-menu) list-buffers)
     (only (schemacs editor keymap) define-key)
-    (prefix (schemacs keymap) km:)
+    (prefix (schemacs editor keymap) km:)
     (only (schemacs editor simple) scroll-down-command scroll-up-command)
     (only (schemacs editor subr) kbd)
     (only (schemacs editor window)

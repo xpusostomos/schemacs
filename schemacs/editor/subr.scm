@@ -35,6 +35,11 @@
           parse-solitary-modifier make-ctrl-char
           parse-modifiers-uncached event-symbol-elements
           event-modifiers event-basic-type apply-modifiers event-convert-list)
+    ;; `ctl-x-4-map' below is `subr.el''s and it is a *keymap*, so this
+    ;; library needs the keymap layer to build one. `(schemacs editor
+    ;; keymap)' is a leaf - it imports `character' and nothing else of the
+    ;; editor - so this is not a cycle.
+    (only (schemacs editor keymap) keymap *default-keymap* define-key)
     )
 
   (export
@@ -46,6 +51,7 @@
    regexp-unmatchable
    string-prefix-p
    string-replace
+   ctl-x-4-map
    ;; The key event model. `char-alt' and the five beside it are the C's
    ;; `CHAR_*'; the rest are `subr.el''s two decomposition functions,
    ;; `keyboard.c''s way back, and the three C functions that way back
@@ -515,5 +521,23 @@
       ;; GNU Emacs's `posn-x-y': the pixel coordinates, as a pair.
       ;;--------------------------------------------------------------
       (nth 2 position))
+
+    (define ctl-x-4-map (keymap '*ctl-x-4-map*))
+    ;; ^ GNU Emacs's `ctl-x-4-map' (`subr.el:1808'): "Keymap for
+    ;; subcommands of C-x 4."
+    ;;
+    ;; **It is a *submap*, which is the point of it.** Emacs binds it with
+    ;; `(define-key ctl-x-map "4" 'ctl-x-4-map)' - the key is `C-x 4' and
+    ;; its value is the map, so the event after it is looked up inside.
+    ;; This tree has no `ctl-x-map' (every `C-x' binding goes straight into
+    ;; `*default-keymap*', as this tree's rule has it), so the same binding
+    ;; is made against the global map.
+    ;;
+    ;; What goes *in* it is added where each command is, like every other
+    ;; binding here: `find-file-other-window' is `files.sld''s and binds
+    ;; its own `f'. Emacs fills the map in this same file with `0'
+    ;; (`kill-buffer-and-window'), `C-o' (`display-buffer') and the rest,
+    ;; none of which this tree has.
+    (define-key *default-keymap* (kbd "C-x 4") ctl-x-4-map)
 
     ))

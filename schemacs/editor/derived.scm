@@ -24,7 +24,7 @@
   (import
     (scheme base)
     (scheme char)
-    (prefix (schemacs keymap) km:)
+    (prefix (schemacs editor keymap) km:)
     (only (schemacs editor buffer)
           current-local-map kill-all-local-variables set!major-mode
           set!mode-name use-local-map)

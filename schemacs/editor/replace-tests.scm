@@ -12,7 +12,7 @@
  (only (schemacs editor isearch) *search-upper-case*)
  ;; `kbd', so the two erase keys are spelled as the map binds them.
  (only (schemacs editor subr) kbd)
- (prefix (schemacs keymap) km:)
+ (prefix (schemacs editor keymap) km:)
  (only (srfi 64) test-assert test-equal test-begin test-end)
  )
 

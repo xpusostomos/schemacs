@@ -38,7 +38,8 @@
     ;; takes Emacs's.
     (rename
      (only (schemacs editor dispnew)
-           column-width current-display display-selections-supported?
+           column-width current-display delete-frame-display!
+           display-selections-supported?
            line-height mouse-position resume-display!
            screen-size suspend-display!)
      (mouse-position display-mouse-position))
@@ -1369,7 +1370,12 @@
       ;; 70 (`:2835') - there is no forcible path here, since the last
       ;; frame is refused above.
       "Delete FRAME (bound to C-x 5 0)."
-      (let ((frame (if (pair? args) (car args) (*current-frame*)))
+      ;; A nil FRAME means the selected frame, which is Emacs's
+      ;; `decode_any_frame`: "if (NILP (frame)) frame = selected_frame"
+      ;; (`frame.c:109'). It is the same call a programmatic `(delete-frame)'
+      ;; makes, since a missing optional is a nil one.
+      (let ((frame (let ((given (if (pair? args) (car args) #f)))
+                     (or given (*current-frame*))))
             (force (and (pair? args) (pair? (cdr args)) (cadr args))))
       (cond
        ;; Emacs's `CHECK_LIVE_FRAME' first: something that is not a frame
@@ -1390,7 +1396,26 @@
                    (else (loop (cdr l) (cons (car l) acc))))))
           (when was-selected
             (select-frame (car (*frame-list*))))
-          frame)))))
+          ;; **The display takes the frame's surface away.**
+          ;; `delete_frame` ends in `(*FRAME_TERMINAL (f)->delete_frame_hook)
+          ;; (f)` (`frame.c:2937`), and without it the frame left
+          ;; `frame-list` while its window stayed on the screen - a window
+          ;; the editor had no frame for. `pgtk-frame-for` walks
+          ;; `*frame-list*` and so answered #f for every event that arrived
+          ;; on it, and those events were then acted on by whatever frame
+          ;; *was* selected: deleting the frame you were in selected the
+          ;; other one and closed nothing, and `C-x 5 0` in the window you
+          ;; had just "deleted" complained about the sole frame with two
+          ;; windows visibly open. The display answers this per its kind -
+          ;; see `delete-frame-display!`.
+          (let ((output (frame-output frame)))
+            (when output (delete-frame-display! output)))
+          ;; **nil, not the frame.** `Fdelete_frame` ends `return Qnil`
+          ;; (`frame.c:3147') - every path of it does, including the one
+          ;; for a frame that is already dead - so a REPL user sees `$1 =
+          ;; #f` here where this used to print the frame it had just
+          ;; deleted and Emacs prints nil.
+          #f)))))
 
     (define (delete-other-frames . args)
       ;; GNU Emacs's `delete-other-frames' (`frame.el:3224'): "Delete all
@@ -1402,6 +1427,11 @@
       ;; spares - minibuffer frames, child frames, ancestors, and its
       ;; ICONIFY argument, which iconifies rather than deletes. None of
       ;; those exist here, so what is left is the plain rule.
+      ;;
+      ;; **It answers nil too**, which is `delete-frame`'s answer for its
+      ;; reason: Emacs's body ends in a `dolist`, so what a caller gets
+      ;; back is nothing at all. Measured the same way - a real Emacs in a
+      ;; pty with two extra frames answers `nil' and leaves one.
       ;;--------------------------------------------------------------
       "Delete all other frames (bound to C-x 5 1)."
       (let ((frame (if (pair? args) (car args) (*current-frame*))))
@@ -1410,7 +1440,8 @@
                               ((eq? (car l) frame) (loop (cdr l) acc))
                               (else (loop (cdr l) (cons (car l) acc)))))))
           (for-each (lambda (f) (delete-frame f #f)) others)
-          (when (frame-live-p frame) (select-frame frame)))))
+          (when (frame-live-p frame) (select-frame frame)))
+        #f))
 
     (define (display-graphic-p . args)
       ;; GNU Emacs's `display-graphic-p' (`frame.c'): "Return non-nil if
@@ -1476,10 +1507,26 @@
 
     ;; `delete-frame' and `delete-other-frames' are registered here rather
     ;; than by `define-command', because their Emacs shape has optional
-    ;; arguments - see the note on `delete-frame'. The spec is the
-    ;; interactive expression `define-command' would have generated.
-    (register-command! delete-frame (list (*current-frame*) #f))
-    (register-command! delete-other-frames (list (*current-frame*)))
+    ;; arguments - see the note on `delete-frame'.
+    ;;
+    ;; **The spec is `#f', which means "no arguments".** That is Emacs's own
+    ;; shape for both: `(interactive "")' (`frame.c:3150') and
+    ;; `(interactive "i\nP")' (`frame.el:3224') pass the frame as *nothing*,
+    ;; so each command reads `(*current-frame*)' itself. (The `P' half of
+    ;; the second is ICONIFY, which this tree does not carry - the departure
+    ;; the function names.)
+    ;;
+    ;; **`(list (*current-frame*) #f)' is the trap this argument lays**, and
+    ;; it is what stood here: SPEC is an *expression* - a form for the
+    ;; dispatcher to evaluate at the keypress to produce the argument list -
+    ;; and `(list ...)' is a *call*, so what was registered was the list of
+    ;; values, `(#f #f)`, built as the library loaded, when there was no
+    ;; frame yet. At the keypress the dispatcher evaluated `(#f #f)' and so
+    ;; applied `#f', and `C-x 5 0' answered **"Wrong type to apply: #f"** -
+    ;; no frame could be deleted, including by `C-x 5 1'. Pass `#f' or a
+    ;; *quoted* form; an unquoted one is evaluated here and now.
+    (register-command! delete-frame #f)
+    (register-command! delete-other-frames #f)
 
     (define-key *default-keymap* (kbd "C-x 5 2") make-frame-command)
     (define-key *default-keymap* (kbd "C-x 5 0") delete-frame)

@@ -256,7 +256,7 @@
       ;; `(kbd "C-x")' answers, the one-event vector `#(24)' - and 127 is
       ;; DEL and 8 is `C-h', two keys, because they are two bytes. Nothing
       ;; is folded here into a `ctrl' symbol and a letter: that spelling
-      ;; was `(schemacs keymap)''s own key representation, and it is gone -
+      ;; was `(schemacs editor keymap)''s own key representation, and it is gone -
       ;; `keymap-index' normalises a key to its *events* now, and an event
       ;; is exactly what this answer already is. Nor is there any "keymap
       ;; path" in GNU Emacs for one to be converted to - `define-key''s own

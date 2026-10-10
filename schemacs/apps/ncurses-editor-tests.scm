@@ -7,7 +7,7 @@
  ;; `make' is GOOPS's: the test display object is made with it.
  (only (oop goops) make)
  (only (ice-9 exceptions) exception-message)
- (prefix (schemacs keymap) km:)
+ (prefix (schemacs editor keymap) km:)
  (only (srfi 64) test-assert test-equal test-begin test-end)
  (only (schemacs editor engine)
        new-text-editor set!text-editor-buffer-name set!text-editor-mark
@@ -49,7 +49,8 @@
  ;; all the character events these tests feed ever need (only an extended
  ;; keycode would ask the terminal's terminfo, and none is used here).
  (only (schemacs editor dispnew) current-display key-event->key)
- (only (schemacs editor test-display) <test-display> test-display-script)
+ (only (schemacs editor test-display) <test-display> test-display-script
+       test-display-frames-deleted)
  (only (schemacs editor keymap) *current-keymap* *default-keymap*)
  ;; `kbd' - the tree's spelling of a key, and the event a test presses.
  (only (schemacs editor character) kbd)
@@ -90,6 +91,7 @@
        find-file-noselect note-file-read-only!
        save-buffer buffer-file-coding-system
        kill-buffer
+       handle-delete-frame
        save-answer-char->decision)
  ;; `try-completion' and `all-completions' are `minibuf.c''s.
  (only (schemacs editor coding) coding-system-name)
@@ -2293,11 +2295,9 @@
            (buffer (get-buffer-create "*own-keys*")))
       (set-window-buffer! (frame-selected-window frame) buffer)
       (when local?
-        (set!buffer-local-keymap
-         buffer
-         (km:keymap '*own-keys*
-                    (km:alist->keymap-layer
-                     (list (cons (kbd "M-z") read-only-mode))))))
+        (let ((map (km:keymap '*own-keys*)))
+          (km:define-key map (kbd "M-z") read-only-mode)
+          (set!buffer-local-keymap buffer map)))
       ;; **A key is an *event*** - an integer carrying its modifier bits,
       ;; or a symbol - which is what `read-key-event' answers with and
       ;; what Emacs's `define-key' takes. `(kbd "M-z")' is the *key
@@ -3641,14 +3641,18 @@
             (other-frame -1)
             (list one two (eq? (selected-frame) c))))))))
 
-(test-equal "delete-frame removes it from the list, and returns it"
+;; **It answers nil, not the frame.** `Fdelete_frame` ends `return Qnil`
+;; (`frame.c:3147'), so the frame it deleted is *not* what a caller gets
+;; back - which matters at the REPL, where the return value is what gets
+;; printed.
+(test-equal "delete-frame removes it from the list, and answers nil"
   '(#t #t #t #t)
   (with-frames 3
     (lambda (frames)
       (let ((a (car frames)) (b (cadr frames)) (c (caddr frames)))
         (select-frame a)
         (let ((gone (delete-frame b)))
-          (list (eq? gone b)
+          (list (eq? gone #f)
                 (equal? (*frame-list*) (list c a))
                 (frame-live-p a)
                 (not (frame-live-p b))))))))
@@ -3662,6 +3666,23 @@
         (delete-frame a)
         (list (not (frame-live-p a))
               (eq? (selected-frame) b))))))
+
+;; **A nil FRAME is the selected frame** - Emacs's `decode_any_frame`:
+;; "if (NILP (frame)) frame = selected_frame" (`frame.c:109') - and it is
+;; the same call `(delete-frame)` with no argument makes, a missing
+;; optional being a nil one. Anything that is not a frame at all is still
+;; the type error `CHECK_FRAME' raises.
+(test-equal "delete-frame takes a nil frame as the selected one"
+  '(#t #t "Wrong type argument: framep")
+  (with-frames 2
+    (lambda (frames)
+      (let ((a (car frames)) (b (cadr frames)))
+        (select-frame a)
+        (delete-frame #f)
+        (list (not (frame-live-p a))
+              (eq? (selected-frame) b)
+              (guard (e (#t (error-object-message e)))
+                (delete-frame 5)))))))
 
 ;; **The last frame is never silently deleted.** Emacs signals "Attempt to
 ;; delete the sole visible or iconified frame" without force
@@ -3678,15 +3699,89 @@
             (guard (e (#t (error-object-message e)))
               (delete-frame (selected-frame) #t))))))
 
-(test-equal "delete-other-frames leaves one, and selects it"
-  '(#t #t)
+(test-equal "delete-other-frames leaves one, selects it, and answers nil"
+  '(#t #t #t)
   (with-frames 3
     (lambda (frames)
       (let ((a (car frames)) (c (caddr frames)))
         (select-frame c)
-        (delete-other-frames a)
-        (list (equal? (*frame-list*) (list a))
-              (eq? (selected-frame) a))))))
+        (let ((answer (delete-other-frames a)))
+          (list (equal? (*frame-list*) (list a))
+                (eq? (selected-frame) a)
+                ;; Emacs answers nil - its body ends in a `dolist' - and a
+                ;; real Emacs with two extra frames answers `nil' too.
+                (eq? answer #f)))))))
+
+;; **The frame's surface goes with it.** `delete_frame` ends with
+;; `(*FRAME_TERMINAL (f)->delete_frame_hook) (f)` (`frame.c:2937`), and
+;; `delete-frame` here did not ask any display anything: the frame left
+;; `frame-list` while its window stayed on the screen. A window the editor
+;; has no frame for is a window that cannot be typed in (`pgtk-frame-for`
+;; walks `*frame-list*`) and whose `C-x 5 0` then complains about the sole
+;; frame while two windows are visibly open - which is the bug this pair
+;; of tests is the regression test for.
+;;
+;; The stub display counts what it was told to delete. A terminal's answer
+;; is to destroy nothing (a tty's frames are screens on one terminal), so
+;; the *count* is the whole observable, and it is enough: the call is what
+;; was missing, not the drawing.
+(test-equal "delete-frame takes the frame's surface off its display"
+  '(1 2 2 #t)
+  (let ((d (make <test-display>)))
+    (parameterize ((current-display d) (*frame-list* '()) (*current-frame* #f)
+                   (*buffer-list* '()) (*current-buffer* #f))
+      (let ((ed (get-buffer-create "*scratch*")))
+        (let* ((a (new-frame ed 24 80))
+               (b (new-frame ed 24 80))
+               (c (new-frame ed 24 80)))
+          (select-frame a)
+          (delete-frame b)
+          (let ((one (test-display-frames-deleted d)))
+            (delete-frame c)
+            (let ((two (test-display-frames-deleted d)))
+              ;; A *refused* deletion is not a deletion: the last frame's
+              ;; surface must still be there.
+              (guard (e (#t #f)) (delete-frame a))
+              (list one two (test-display-frames-deleted d)
+                    (equal? (*frame-list*) (list a))))))))))
+
+(test-equal "delete-other-frames takes each other frame's surface off"
+  '(2 #t)
+  (let ((d (make <test-display>)))
+    (parameterize ((current-display d) (*frame-list* '()) (*current-frame* #f)
+                   (*buffer-list* '()) (*current-buffer* #f))
+      (let ((ed (get-buffer-create "*scratch*")))
+        (let ((a (new-frame ed 24 80))
+              (b (new-frame ed 24 80))
+              (c (new-frame ed 24 80)))
+          (select-frame c)
+          (delete-other-frames c)
+          (list (test-display-frames-deleted d)
+                ;; `a' and `b' are both gone; the display heard about
+                ;; each, and the frame kept kept its.
+                (and (equal? (*frame-list*) (list c))
+                     (not (frame-live-p a))
+                     (not (frame-live-p b)))))))))
+
+;; `handle-delete-frame` (`frame.el:265') is the window manager's close
+;; request. It read the frame out of the event and then answered the list
+;; of *other* frames - Emacs's `(delete-frame frame t)` was not there - so
+;; the request never deleted anything.
+(test-equal "handle-delete-frame deletes the frame the event names"
+  '(#t #t 1)
+  (let ((d (make <test-display>)))
+    (parameterize ((current-display d) (*frame-list* '()) (*current-frame* #f)
+                   (*buffer-list* '()) (*current-buffer* #f))
+      (let ((ed (get-buffer-create "*scratch*")))
+        (let ((a (new-frame ed 24 80))
+              (b (new-frame ed 24 80)))
+          (select-frame a)
+          ;; The event is `(delete-frame (FRAME))' - the shape
+          ;; `make_lispy_event' builds (`keyboard.c:6235').
+          (handle-delete-frame (list 'delete-frame (list b)))
+          (list (not (frame-live-p b))
+                (equal? (*frame-list*) (list a))
+                (test-display-frames-deleted d)))))))
 
 (test-equal "make-frame runs the hooks and the creation function, and does not select"
   '((before created after) #f)

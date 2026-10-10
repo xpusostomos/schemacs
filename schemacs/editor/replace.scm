@@ -96,7 +96,7 @@
     (only (schemacs editor command)
           current-prefix-arg define-command uarg->integer)
     (only (schemacs editor keymap) define-key *default-keymap* *current-keymap*)
-    (prefix (schemacs keymap) km:)
+    (prefix (schemacs editor keymap) km:)
     (only (schemacs editor window) display-buffer)
     (only (schemacs editor subr) kbd add-to-history)
     (only (guile) cadr caddr cddr cdddr cadddr cddddr format string-contains)
