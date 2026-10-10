@@ -39,10 +39,6 @@
     (scheme case-lambda)
     (only (scheme char) char-downcase)  ; for case-folding searches
     (only (scheme write) display write) ;;DEBUG
-    (only (schemacs vector)
-          u32vector?  make-u32vector  u32vector-ref  u32vector-set!
-          u64vector?  make-u64vector
-          )
     ;;(only (schemacs lexer) make<source-file-location>)
     ;; The marker chain is held weakly - see the note above
     ;; `MAKE<MARKER>'. There is no Emacs name for the mechanism and no

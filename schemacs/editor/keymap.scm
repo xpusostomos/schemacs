@@ -33,7 +33,18 @@
   (import
     (scheme base)
     (scheme char)
-    (only (guile) string-join logand logior lognot)
+    (only (guile)
+          string-join logand logior lognot
+          ;; The bindings themselves. Guile's `hashv' family compares its
+          ;; keys with `eqv?' - which is the right comparison for both
+          ;; kinds of key an event can be: an integer (`eqv?' on numbers is
+          ;; `=') and a symbol. This was `(schemacs comparator)' and
+          ;; `(schemacs hash-table)', two ports of what Guile already has;
+          ;; `hashv-set!' and `hashv-ref' are the whole of what the `eqv?'
+          ;; comparator was for, and `hash-map->list' is the alist walk
+          ;; (`hash-table->alist' is not a binding in any module here -
+          ;; `(ice-9 hash-table)' exports only the alist *converters*).
+          make-hash-table hashv-ref hashv-set! hash-map->list)
     ;; The event model: the modifier bits `push-key-description' tests,
     ;; and `event-convert-list' for the Lucid form `single-key-description'
     ;; converts first. `kbd' is `read-kbd-macro''s own input, and the reader
@@ -41,14 +52,6 @@
     (only (schemacs editor character)
           char-alt char-ctl char-hyper char-meta char-shift char-super
           event-convert-list kbd)
-    ;; The bindings themselves. An `eqv?' comparator is the right one for
-    ;; both kinds of key an event can be: an integer (`eqv?' on numbers is
-    ;; `=') and a symbol.
-    (only (schemacs comparator) make-eqv-comparator)
-    (only (schemacs hash-table)
-          make-hash-table hash-table?
-          hash-table-ref/default hash-table-set! hash-table->alist
-          )
     )
 
   (export
@@ -227,13 +230,13 @@
       ;; the tree uses.
       ;;--------------------------------------------------------------
       (cond
-       ((null? rest) (make<keymap> (make-hash-table (make-eqv-comparator)) #f #f #f))
+       ((null? rest) (make<keymap> (make-hash-table) #f #f #f))
        ;; a prompt, and nothing else: `make-sparse-keymap' takes the
        ;; prompt and stops, so a second argument is an error rather than
        ;; something quietly ignored.
        ((and (or (string? (car rest)) (symbol? (car rest)))
              (null? (cdr rest)))
-        (make<keymap> (make-hash-table (make-eqv-comparator)) #f #f (car rest)))
+        (make<keymap> (make-hash-table) #f #f (car rest)))
        ((and (keymap-type? (car rest)) (null? (cdr rest)))
         ;; `(keymap MAP)' is MAP - what `(keymap kml)' meant before, when
         ;; a keymap argument stood for its layers.
@@ -255,7 +258,7 @@
       ;; sequence is the two events joined, which is what the caller needs
       ;; to be able to press.
       ;;--------------------------------------------------------------
-      (let loop ((alist (hash-table->alist (keymap-bindings keymap))))
+      (let loop ((alist (hash-map->list cons (keymap-bindings keymap))))
         (cond
          ((null? alist) #f)
          (else
@@ -368,7 +371,7 @@
       (let ((event (if (char? event) (char->integer event) event)))
         (unless (or (integer? event) (symbol? event))
           (error "store-in-keymap: not an event" event))
-        (hash-table-set! (keymap-bindings keymap) event def)
+        (hashv-set! (keymap-bindings keymap) event def)
         def))
 
     (define (access-keymap keymap event)
@@ -387,7 +390,7 @@
       (let ((event (if (char? event) (char->integer event) event)))
         (unless (or (integer? event) (symbol? event))
           (error "access-keymap: not an event" event))
-        (let ((own (hash-table-ref/default (keymap-bindings keymap) event #f)))
+        (let ((own (hashv-ref (keymap-bindings keymap) event #f)))
           (cond
            (own own)
            (else

@@ -77,7 +77,6 @@ SUITES = [
     # take `(srfi 64)` directly now, as every other suite in the tree
     # already did.
     'schemacs/keymap-tests.scm',
-    'schemacs/lens-tests.scm',
 ]
 
 

@@ -38,10 +38,6 @@
   (import
     (scheme base)
     (scheme case-lambda)
-    (only (schemacs vector)
-          make-u32vector u32vector? u32vector-ref u32vector-set!
-          u32vector-length
-          )
     ;; The ranged copy. `u32vector-copy!' does not exist, `vector-copy!'
     ;; refuses a `u32vector', and `array-copy!' is whole-array only - so
     ;; the one shift this class does is `%array-copy-range!'.
@@ -51,6 +47,15 @@
     ;; `char-byte8?' is the eight-bit test, from `character.h' - the one
     ;; predicate that says "this code point is a byte, not a character".
     (only (schemacs editor character) char-byte8?)
+    ;; The store's own type. `(scheme base)' has no generic array and R7RS
+    ;; has no `u32vector' constructor at all, so the array is made with
+    ;; Guile's `make-typed-array' - `(make-typed-array 'u32 0 N)' is a
+    ;; zeroed `u32vector' of N elements, and `array-type' answers `u32'
+    ;; back. This is what `engine.scm' does with the same type, and it
+    ;; replaced `(schemacs vector)', a port of what Guile already has.
+    (only (guile)
+          make-typed-array
+          u32vector? u32vector-ref u32vector-set! u32vector-length)
     )
 
   (export
@@ -184,7 +189,7 @@
         ;; `modiff' and `chars_modiff' both start at 1, not 0: that is
         ;; what Emacs reports for a buffer that has just been made
         ;; (`(buffer-modified-tick)' on a fresh buffer is 1).
-        (make<buffer-text> base (make-u32vector size 0) base base size 0
+        (make<buffer-text> base (make-typed-array 'u32 0 size) base base size 0
                            1 1)
         )))
 
@@ -220,7 +225,7 @@
             (z-i     (- (buffer-text-z bt) base))
             (after   (- z-i gpt-i))
             (gap     (buffer-text-gap-size bt))
-            (new     (make-u32vector new-allocation 0))
+            (new     (make-typed-array 'u32 0 new-allocation))
             )
         (when (< 0 gpt-i)
           (%array-copy-range! new 0 old 0 gpt-i)

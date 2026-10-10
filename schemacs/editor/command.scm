@@ -9,7 +9,6 @@
     (scheme eval)
     (scheme write)
     (scheme case-lambda)
-    (only (schemacs lens) record-unit-lens)
     ;; A `define-command' name keeps its name and docstring in Guile's own
     ;; copy, which `,describe' shows: `procedure-name' and
     ;; `procedure-documentation' read them back for the obarray record.
@@ -29,13 +28,6 @@
    run-command apply-command show-command
    define-command *command-table* command? command-record-of command-value-of
    register-command!
-   =>command-name*!
-   =>command-procedure*!
-   =>command-doc-string*!
-   =>command-interactive-spec*!
-   =>command-source-type*!
-   =>command-source-location*!
-   =>command-source-code*!
    )
 
   (begin
@@ -415,40 +407,6 @@
          (begin
            (define (name . args) body ...)
            (register-command! name #f)))))
-
-    (define =>command-name*!
-      (record-unit-lens command-name set!command-name '=>command-name)
-      )
-
-    (define =>command-procedure*!
-      (record-unit-lens command-procedure set!command-procedure '=>command-procedure)
-      )
-
-    (define =>command-api*!
-      (record-unit-lens command-api set!command-api '=>command-api)
-      )
-
-    (define =>command-doc-string*!
-      (record-unit-lens command-doc-string set!command-doc-string '=>command-doc-string)
-      )
-
-    (define =>command-interactive-spec*!
-      (record-unit-lens command-interactive-spec
-                        set!command-interactive-spec
-                        '=>command-interactive-spec)
-      )
-
-    (define =>command-source-type*!
-      (record-unit-lens command-source-type set!command-source-type '=>command-source-type)
-      )
-
-    (define =>command-source-location*!
-      (record-unit-lens command-source-location set!command-source-location '=>command-source-location)
-      )
-
-    (define =>command-source-code*!
-      (record-unit-lens command-source-code set!command-source-code '=>command-source-code)
-      )
 
     (define (run-command cmd . args)
       ;; Run the `COMMAND-PROCEDURE` procedure, passing it ARGS. A
