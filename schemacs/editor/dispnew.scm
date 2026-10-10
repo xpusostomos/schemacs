@@ -25,6 +25,7 @@
    <display>
    current-display
    write-glyphs!
+   glyphs->text
    clear-frame-area!
    update-window-begin!
    update-window-end!
@@ -88,9 +89,18 @@
     ;;------------------------------------------------------------------
 
     (define-generic write-glyphs!)
-    ;; Draw a run of TEXT at pixel Y, X with ATTRIBUTE: the cells xdisp
+    ;; Draw a run of GLYPHS at pixel Y, X with ATTRIBUTE: the cells xdisp
     ;; has decided are one face. Emacs's `write_glyphs'.
-    ;; `(write-glyphs! display text y x attribute)'.
+    ;;
+    ;; **GLYPHS is a list, one entry per buffer column of the run**, each
+    ;; entry being what that cell shows - a character, or the string the
+    ;; display table draws in its place. Emacs hands `write_glyphs' a
+    ;; `struct glyph *' array for the same reason: what crosses the
+    ;; boundary is the cells, and only the *display* turns them into what
+    ;; the device wants. A run used to be one string built by the
+    ;; redisplay, so a row -- and behind it a line -- became a string on
+    ;; every repaint; nothing above the boundary materialises one now.
+    ;; `(write-glyphs! display glyphs y x attribute)'.
 
     (define-generic clear-frame-area!)
     ;; Clear the whole display surface, ready for the frame drawn next.
@@ -223,6 +233,15 @@
     ;; Take the display back after `suspend-display!'.
     ;; `(resume-display! display)'.
 
+    (define (glyphs->text glyphs)
+      ;; The run's cells as one string: the boundary's join, and the
+      ;; counterpart of what a device takes. A terminal writes the cells;
+      ;; Pango is handed a string built from the run, which is what GNU
+      ;; Emacs's own pgtk back end does with a `struct glyph_string'.
+      ;; It is here because all three displays want the same one.
+      ;;--------------------------------------------------------------
+      (if (string? glyphs) glyphs (apply string-append glyphs)))
+
     (define-generic delete-frame-display!)
     ;; A frame drawn on this display has been deleted: release what the
     ;; display holds for it. GNU Emacs's `terminal->delete_frame_hook',
@@ -232,13 +251,16 @@
     ;;
     ;; **What it means differs by display, and the difference is Emacs's.**
     ;; A window system's display holds one window per frame and destroys
-    ;; it here - `pgtk_destroy_window` ends in `gtk_widget_destroy
-    ;; (FRAME_WIDGET (f))` (`pgtkterm.c:445`), `x_destroy_window` in
-    ;; `XDestroyWindow` (`xterm.c`). A text terminal's holds *all* its
-    ;; frames at once and destroys nothing: Emacs's `tty_free_frame_resources`
-    ;; (`term.c:4326`) frees the frame's face cache and its tty data and
-    ;; leaves the terminal alone, because the frames on a tty are screens
-    ;; on one terminal and the next redisplay draws the one that is still
+    ;; it here - `pgtk_destroy_window` (`pgtkterm.c:600`) reaches
+    ;; `pgtk_free_frame_resources` (`:445`), whose visible effect is
+    ;; `gtk_widget_destroy (FRAME_WIDGET (f))` (`:579`); `x_destroy_window`
+    ;; is the same thing over `XDestroyWindow` (`xterm.c`).
+    ;;
+    ;; A text terminal's display holds *all* its frames at once and
+    ;; destroys nothing: Emacs's `tty_free_frame_resources` (`term.c:4326`)
+    ;; frees the frame's face cache and its tty data and leaves the
+    ;; terminal alone, because the frames on a tty are screens on one
+    ;; terminal and the next redisplay draws the one that is still
     ;; selected. The default method below is therefore the terminal's
     ;; answer, and it is an answer rather than an omission - which is what
     ;; keeps `frame.sld` free of both front ends.

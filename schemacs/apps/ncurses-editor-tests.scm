@@ -11,13 +11,13 @@
  (only (srfi 64) test-assert test-equal test-begin test-end)
  (only (schemacs editor engine)
        new-text-editor set!text-editor-buffer-name set!text-editor-mark
-       text-editor-char-count text-editor-cursor-column text-editor-get-cursor text-editor-insert
+       text-editor-cursor-column buffer-pt text-editor-insert
        text-editor-text-props
        text-editor-mark text-editor-move-cursor text-editor-set-cursor
        text-editor-set-modified! text-editor-set-read-only!
        text-editor-to-string text-editor-undo-list
-       text-editor-point-min text-editor-point-max count-lines
-       line-break-newline line-break-crlf line-break-return string-search-forward)
+       buffer-beg buffer-z count-lines
+       string-search-forward)
  (only (schemacs editor frame)
        *current-frame* *echo-area-buffer* *echo-area-prompt* *minibuffer*
        frame-height frame-editor frame-message
@@ -121,7 +121,10 @@
        minibuffer-set-contents! minibufferp)
  (only (schemacs editor buffer) mark-active)
  (only (schemacs editor command) *mark-even-if-inactive*)
- (only (schemacs editor editfns) region-beginning region-end)
+ (only (schemacs editor editfns) goto-char point region-beginning region-end)
+ ;; `paragraphs.el': imported for the *bindings* its load installs (M-h,
+ ;; M-k, M-C-k), which is why the M-h test below presses a key at all.
+ (only (schemacs editor paragraphs) mark-paragraph)
  (only (schemacs editor simple)
        *kill-do-not-save-duplicates* *kill-ring* *kill-ring-max*
        *kill-ring-yank-pointer*
@@ -143,7 +146,7 @@
        switch-to-buffer)
  (only (schemacs editor xdisp)
        *mode-line-format* cursor-screen-position format-mode-line
-       line-continuation-display? line-display-width
+       line-display-width
        line-face-runs mode-line-string status-string)
  (only (schemacs editor command)
        command-name command-type?)
@@ -228,7 +231,7 @@
       (text-editor-set-cursor ed 1 0)
       (for-each (lambda (ev) (dispatch-input-event frame ev)) evs)
       (list (text-editor-to-string ed)
-            (text-editor-get-cursor ed)
+            (buffer-pt ed)
             ;; the latest kill, which is the front of the ring - and
             ;; #f when nothing has been killed yet, Elisp's `(car nil)'
             (if (pair? (*kill-ring*)) (car (*kill-ring*)) #f)
@@ -401,7 +404,7 @@
 
 ;; C-k kills into the kill buffer, so C-y brings the text back. This
 ;; covers single-line buffers too, whose first character used to be
-;; dropped by `text-editor-copy-string'.
+;; dropped by `make-buffer-string'.
 (test-equal '("hello\nworld" . 6) (run-keys "hello\nworld" (list C-k C-y)))
 (test-equal '("one two" . 8) (run-keys "one two" (list C-k C-y)))
 (test-equal '("X" . 2) (run-keys "X" (list C-k C-y)))
@@ -1120,8 +1123,8 @@
       ;; `read-key-event' answers with; `(vector 6)' is a key sequence.
       (dispatch-key-event frame 6)
       (list (bound-in minibuffer-local-map (vector 6))
-            (text-editor-get-cursor mb-ed)
-            (text-editor-get-cursor ed)))))
+            (buffer-pt mb-ed)
+            (buffer-pt ed)))))
 
 ;; The completion keymaps: TAB completes, SPC completes one word, `?'
 ;; lists the candidates, and RET in the `require-match' map completes and
@@ -1489,7 +1492,7 @@
 (define (points frame)
   ;; Each window's point, and the buffer's own.
   (append (map window-point (window-list frame))
-          (list (text-editor-get-cursor (frame-editor frame)))))
+          (list (buffer-pt (frame-editor frame)))))
 
 ;; A frame starts with exactly one window, filling the text area, and it
 ;; is the selected one.
@@ -1567,7 +1570,7 @@
            (selected (selected-window-of frame))
            (lower (cadr windows)))
       (list (eq? selected lower)
-            (text-editor-get-cursor ed)
+            (buffer-pt ed)
             (window-point lower)
             (window-point (car windows))))))
 
@@ -1579,7 +1582,7 @@
     (text-editor-move-cursor ed 3)
     (run-window-keys frame C-x #\o C-x #\o)
     (list (eq? (car (window-list frame)) (selected-window-of frame))
-          (text-editor-get-cursor ed))))
+          (buffer-pt ed))))
 
 ;; C-x 1 makes the selected window the only one, filling the frame.
 (test-equal '(#t 1 0 23)
@@ -1819,11 +1822,11 @@
       (set-window-point! (selected-window-of frame) 5)
       (let ((lower-point-before (window-point (selected-window-of frame))))
         (run-window-keys frame C-x #\o)        ; back to the upper window
-        (let ((upper-point (text-editor-get-cursor ed)))
+        (let ((upper-point (buffer-pt ed)))
           (run-window-keys frame C-a #\X #\Y)  ; edit above the other window's point
           (run-window-keys frame C-x #\o)       ; and back down to it
           (list lower-point-before upper-point
-                (text-editor-get-cursor ed)
+                (buffer-pt ed)
                 (window-point (selected-window-of frame))))))))
 
 ;; The same for the mark: Emacs moves a mark with the text too, so a
@@ -2002,7 +2005,7 @@
                             (string-append acc "line " (number->string i) "\n")))))))
     (let ((ed (frame-editor frame))
           (w (frame-selected-window frame)))
-      (text-editor-set-cursor ed (text-editor-point-max ed))
+      (text-editor-set-cursor ed (buffer-z ed))
       ;; scroll the window onto point so that the cache is based on a line
       ;; that is *not* the first - otherwise no edit can go above it and
       ;; the test proves nothing
@@ -2010,9 +2013,9 @@
       (let ((before (format-in frame "%l")))
         ;; a line inserted at the very top moves every line below it down
         ;; one, the cached base line included
-        (text-editor-set-cursor ed (text-editor-point-min ed))
+        (text-editor-set-cursor ed (buffer-beg ed))
         (text-editor-insert ed "INSERTED\n")
-        (text-editor-set-cursor ed (text-editor-point-max ed))
+        (text-editor-set-cursor ed (buffer-z ed))
         (list before
               (format-in frame "%l")
               ;; and again, now that a fresh cache has been made
@@ -2020,8 +2023,8 @@
               ;; the answer counted from scratch, which is what the
               ;; cache must never disagree with
               (number->string
-               (+ 1 (count-lines ed (text-editor-point-min ed)
-                                 (text-editor-get-cursor ed)))))))))
+               (+ 1 (count-lines ed (buffer-beg ed)
+                                 (buffer-pt ed)))))))))
 
 (test-end "schemacs_ncurses_editor_mode_line_format")
 
@@ -2626,7 +2629,7 @@
     (text-editor-insert ed "abc")
     (text-editor-set-cursor ed 1 0)
     (when initial (text-editor-insert mb-ed initial))
-    (text-editor-set-cursor mb-ed (text-editor-char-count mb-ed))
+    (text-editor-set-cursor mb-ed (- (buffer-z mb-ed) (buffer-beg mb-ed)))
     (parameterize ((*current-frame* frame)
                    (*minibuffer* mb)
                    (*echo-area-buffer* mb-ed)
@@ -2954,11 +2957,11 @@
         (let ((fresh (get-buffer-create "*Completions*")))
           (set!buffer-intervals fresh #f)
           (text-editor-set-cursor fresh 0)
-          (text-editor-delete-from-cursor fresh (text-editor-char-count fresh)))
+          (text-editor-delete-from-cursor fresh (- (buffer-z fresh) (buffer-beg fresh))))
         (display-completion-list candidates common-substring)
         (let* ((buffer (get-buffer "*Completions*"))
                (root (iv:buffer-intervals buffer))
-               (chars (text-editor-char-count buffer)))
+               (chars (- (buffer-z buffer) (buffer-beg buffer))))
           ;; No interval is longer than its subtree, and a subtree's total
           ;; is its own length plus its children's. Positions are a *cache*
           ;; and are only trustworthy along the path the last lookup walked,
@@ -3094,7 +3097,7 @@
   (with-mark-frame "hello"
     (lambda (frame ed)
       (keys! frame C-x #\h)
-      (list (text-editor-get-cursor ed) (mark #t) (region-active-p)))))
+      (list (buffer-pt ed) (mark #t) (region-active-p)))))
 
 ;; The mark ring: `push-mark' puts the old mark on it, and
 ;; `pop-to-mark-command' - `C-u C-SPC' - jumps back to the ring's mark and
@@ -3113,7 +3116,7 @@
         ;; `pop-mark' makes the ring's mark - 2 - the mark, which is what
         ;; "pop a new position for mark off the ring" means.
         (keys! frame C-u C-SPC)
-        (list pushed (text-editor-get-cursor ed) (mark #t))))))
+        (list pushed (buffer-pt ed) (mark #t))))))
 
 (test-end "schemacs_ncurses_editor_mark")
 
@@ -3510,14 +3513,14 @@
         (for-each (lambda (ev) (dispatch-input-event frame ev))
                   (list C-v C-v C-v))
         (scroll-to-cursor! w)
-        (let ((before (count-lines ed (text-editor-point-min ed)
+        (let ((before (count-lines ed (buffer-beg ed)
                                    (window-start w))))
           ;; now move up one line, which puts point above the window
           (dispatch-input-event frame C-p)
           (scroll-to-cursor! w)
-          (let* ((here (count-lines ed (text-editor-point-min ed)
-                                    (text-editor-get-cursor ed)))
-                 (start (count-lines ed (text-editor-point-min ed)
+          (let* ((here (count-lines ed (buffer-beg ed)
+                                    (buffer-pt ed)))
+                 (start (count-lines ed (buffer-beg ed)
                                      (window-start w))))
             ;; the start went back half a window, not to point's own line
             (list (= start (- here half))
@@ -3554,9 +3557,9 @@
             (dispatch-input-event frame C-n)
             (scroll-to-cursor! w)
             (loop (+ n 1))))
-        (let* ((here (count-lines ed (text-editor-point-min ed)
-                                  (text-editor-get-cursor ed)))
-               (start (count-lines ed (text-editor-point-min ed)
+        (let* ((here (count-lines ed (buffer-beg ed)
+                                  (buffer-pt ed)))
+               (start (count-lines ed (buffer-beg ed)
                                    (window-start w))))
           (list (= start (- here half))
                 (> start start-before)))))))
@@ -3853,13 +3856,13 @@
      (select-frame f1)
      (text-editor-set-cursor ed 111)
      (select-frame f2)
-     (let ((f2-point (text-editor-get-cursor ed)))
+     (let ((f2-point (buffer-pt ed)))
        (text-editor-set-cursor ed 205)
        (select-frame f1)
-       (let ((f1-point (text-editor-get-cursor ed)))
+       (let ((f1-point (buffer-pt ed)))
          (select-frame f2)
          (list 111 f2-point 205 f1-point
-               (text-editor-get-cursor ed)))))))
+               (buffer-pt ed)))))))
 
 ;; A window that is not selected answers its own point, not the
 ;; buffer's - which is what `window-point' is (`window.c:1778': the
@@ -3873,7 +3876,7 @@
      (select-frame f2)
      (text-editor-set-cursor ed 205)
      (select-frame f1)
-     (list (text-editor-get-cursor ed)
+     (list (buffer-pt ed)
            (window-point (frame-selected-window f2))))))
 
 ;; A frame made while point is in the middle of a buffer opens there:
@@ -3977,5 +3980,48 @@
                 ;; and the answer is the window's frame and not the
                 ;; *selected* one, which is f1 throughout
                 (not (eq? (window-frame (frame-selected-window f2)) f1))))))))
+
+;;--------------------------------------------------------------------
+;; `mark-paragraph' (M-h) - the extend branch, and where point ends up
+
+;; **A second M-h moves the *mark*, not point.** Emacs's body is
+;;
+;;   (set-mark (save-excursion
+;;               (goto-char (mark))
+;;               (forward-paragraph arg)
+;;               (point)))
+;;
+;; and the `save-excursion' is load-bearing: the walk happens at the
+;; mark, so without it point ends up wherever the walk stopped instead of
+;; staying where the user left it.
+;;
+;; Measured in Emacs 31.1, on "aaa\n\nbbb\n\nccc\n" with point at 2:
+;;
+;;   after the first M-h:  point 1, mark 5
+;;   after the second:     point 1, mark 10
+;;
+;; Ours had two departures in three lines - no excursion, and a `+ 1'
+;; left over from when the mark was a zero-based index - so the second
+;; press threw point to the end of the paragraphs it had just marked.
+(test-equal '(1 5 1 10)
+  (parameterize ((*buffer-list* '()) (*current-buffer* #f)
+                 (*this-command* #f) (*last-command* #f)
+                 (*kill-buffer-query-functions* #f))
+    (let* ((ed (new-text-editor))
+           (frame (test-frame ed)))
+      (parameterize ((*current-frame* frame) (*echo-area-buffer* #f))
+        (set-window-buffer! (frame-selected-window frame) ed)
+        (*current-buffer* ed)
+        (text-editor-insert ed "aaa\n\nbbb\n\nccc\n")
+        (goto-char 2)
+        ;; The second call takes the *extend* branch, which is the one
+        ;; whose body Emacs wraps in `save-excursion'. `last-command' is
+        ;; what that branch tests, and the command loop sets it - a
+        ;; direct call has to say so itself.
+        (mark-paragraph 1 #t)
+        (let ((p1 (point)) (m1 (text-editor-mark ed)))
+          (*last-command* mark-paragraph)
+          (mark-paragraph 1 #t)
+          (list p1 m1 (point) (text-editor-mark ed)))))))
 
 (test-end "schemacs_ncurses_editor_frame_points")

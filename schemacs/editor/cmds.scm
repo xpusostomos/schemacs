@@ -32,10 +32,10 @@
           define-command uarg->integer current-prefix-arg
           *last-command-event*)
     (only (schemacs editor engine)
-          text-editor-delete-from-cursor text-editor-get-cursor
+          text-editor-delete-from-cursor buffer-pt
           text-editor-get-end-of-line
           text-editor-get-start-of-line text-editor-insert
-          text-editor-move-cursor text-editor-point-min text-editor-point-max
+          text-editor-move-cursor buffer-beg buffer-z
           text-editor-set-cursor)
     )
 
@@ -268,10 +268,10 @@ a non-nil value for the inserted character.  At the end, it runs
       ;;--------------------------------------------------------------
       (let ((n (if (or (not n) (eq? n #f)) 1 n)))
         (let* ((ed (current-buffer))
-               (pt (text-editor-get-cursor ed))
+               (pt (buffer-pt ed))
                (new (if forward (+ pt n) (- pt n)))
-               (low (text-editor-point-min ed))
-               (high (text-editor-point-max ed)))
+               (low (buffer-beg ed))
+               (high (buffer-z ed)))
           (cond
            ((< new low)
             (text-editor-set-cursor ed low)

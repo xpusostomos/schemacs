@@ -90,7 +90,6 @@
    ;; accessors take a name and do it themselves.
    find-coding-system
    coding-system-base-name coding-system-change-eol-conversion
-   eol-type->line-break line-break->eol-type
    *coding-system-table*
    ;; The end-of-line half
    *max-eol-check-count* detect-eol bytes-have-null? adjust-coding-eol-type
@@ -820,27 +819,16 @@
     ;;------------------------------------------------------------------
     ;;
     ;; Emacs keeps the line-end convention *inside* the coding system -
-    ;; that is what the `-unix' in `utf-8-unix' is - and so does this.
-    ;; `(schemacs editor engine)''s `line-break-*' values are what the
-    ;; three EOL types mean, and the two tables below are the whole of the
-    ;; correspondence.
-
-    (define (eol-type->line-break eol-type)
-      ;; The `line-break-*' value an EOL type stands for, or the value
-      ;; itself when it is given one already.
-      ;;--------------------------------------------------------------
-      (case eol-type
-        ((unix) 'line-break-newline)
-        ((dos) 'line-break-crlf)
-        ((mac) 'line-break-return)
-        (else eol-type)))
-
-    (define (line-break->eol-type line-break)
-      (case line-break
-        ((line-break-newline) 'unix)
-        ((line-break-crlf) 'dos)
-        ((line-break-return) 'mac)
-        (else #f)))
+    ;; that is what the `-unix' in `utf-8-unix' is - and so does this:
+    ;; `coding-system-eol-type' answers `unix', `dos' or `mac', and
+    ;; `decode-eol' and `encode-eol' below are the whole of applying it.
+    ;;
+    ;; **The two functions that used to sit here are gone** -
+    ;; `eol-type->line-break' and `line-break->eol-type', which mapped an
+    ;; EOL type to `(schemacs editor engine)`'s old `line-break-*' values
+    ;; and back. Nothing called them (not this library, not the tests),
+    ;; and the values they named went with the engine's line-break state
+    ;; machine the engine no longer has.
 
     (define coding-system-base-name coding-system-base)
     ;; ^ The same function under the name it had before `coding-system-base'

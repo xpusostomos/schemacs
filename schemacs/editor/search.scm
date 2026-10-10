@@ -62,9 +62,9 @@
     (only (schemacs editor engine)
           copy-marker marker-buffer marker-position marker-type?
           set-marker! text-editor-type?
-          text-editor-char-count text-editor-copy-string
-          text-editor-delete-from-cursor text-editor-get-cursor
-          text-editor-insert text-editor-point-min text-editor-point-max
+          make-buffer-string
+          text-editor-delete-from-cursor buffer-pt
+          text-editor-insert buffer-beg buffer-z
           text-editor-search-backward
           text-editor-search-forward text-editor-set-cursor)
     ;; `*case-fold-search*' is the case folding every search here
@@ -784,9 +784,9 @@
                ;; what `(%bol-flags ...)' and the match data's
                ;; translation below both assume. Point is a position;
                ;; the regexp engine is handed an offset.
-               (text (text-editor-copy-string ed (text-editor-point-min ed)
-                                                 (text-editor-point-max ed)))
-               (from (- (text-editor-get-cursor ed) 1)))
+               (text (make-buffer-string ed (buffer-beg ed)
+                                                 (buffer-z ed)))
+               (from (- (buffer-pt ed) 1)))
           (let ((m (regexp-exec (%compile-emacs-regexp regexp (*case-fold-search*))
                                 text from (%bol-flags text from))))
             (cond
@@ -861,8 +861,8 @@
                             (pair? (cddr args)) (pair? (cdddr args)))
                        (cadddr args)
                        (*case-fold-search*)))
-             (limit (or bound (text-editor-point-max ed))))
-        (let loop ((left (max 1 count)) (from (text-editor-get-cursor ed)))
+             (limit (or bound (buffer-z ed))))
+        (let loop ((left (max 1 count)) (from (buffer-pt ed)))
           (let ((found (text-editor-search-forward
                         ed string (min from limit) fold)))
             (cond
@@ -899,8 +899,8 @@
                             (pair? (cddr args)) (pair? (cdddr args)))
                        (cadddr args)
                        (*case-fold-search*)))
-             (limit (or bound (text-editor-point-min ed))))
-        (let loop ((left (max 1 count)) (from (text-editor-get-cursor ed)))
+             (limit (or bound (buffer-beg ed))))
+        (let loop ((left (max 1 count)) (from (buffer-pt ed)))
           (let ((found (text-editor-search-backward
                         ed string (max from limit) fold)))
             (cond
@@ -949,7 +949,7 @@
       ;; down from AT to LIMIT and takes only a match that *ends* by AT,
       ;; so it reaches [LIMIT, AT).
       ;;--------------------------------------------------------------
-      (let* ((lo (text-editor-point-min ed))
+      (let* ((lo (buffer-beg ed))
              ;; The window starts one character *before* the search
              ;; start, so that `^' is judged against the real character
              ;; in front of it - which is what the C's `re_search_2'
@@ -960,7 +960,7 @@
         ;; WSTART is a position and is answered as the base the match
         ;; offsets are added to: the character at offset O of the window
         ;; is at position `(+ wstart O)'.
-        (cons (text-editor-copy-string ed wstart wend) wstart)))
+        (cons (make-buffer-string ed wstart wend) wstart)))
 
     (define (%re-search regexp bound noerror count backward)
       ;; `search_command' (search.c) and `search_buffer' for the regexp
@@ -975,9 +975,9 @@
       ;;--------------------------------------------------------------
       (let* ((ed (current-buffer))
              (limit (or bound
-                        (if backward (text-editor-point-min ed)
-                                     (text-editor-point-max ed))))
-             (from (text-editor-get-cursor ed)))
+                        (if backward (buffer-beg ed)
+                                     (buffer-z ed))))
+             (from (buffer-pt ed)))
         (let loop ((left (max 1 count)) (at from))
           (let* ((window (%search-window-text ed at limit backward))
                  (whole (car window))
@@ -1322,11 +1322,11 @@
              (pair (list-ref regs sub))
              (sub-start (car pair))
              (sub-end (cdr pair))
-             (zv (text-editor-point-max ed))
+             (zv (buffer-z ed))
              ;; `opoint = PT <= sub_start ? PT : max (PT, sub_end) - ZV'
              ;; - the recorded point, negative being an offset from the
              ;; buffer's end
-             (pt (text-editor-get-cursor ed))
+             (pt (buffer-pt ed))
              (opoint (if (<= pt sub-start)
                          pt
                          (- (max pt sub-end) zv)))
@@ -1359,7 +1359,7 @@
         ;; put point back where it was, then move it "officially" to
         ;; the replacement's end
         (text-editor-set-cursor
-         ed (max (text-editor-point-min ed)
+         ed (max (buffer-beg ed)
                  (min zv (if (< opoint 0)
                              (+ zv opoint)
                              opoint))))

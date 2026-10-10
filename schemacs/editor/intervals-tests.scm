@@ -3,8 +3,8 @@
  (scheme char)
  (only (srfi 64) test-assert test-equal test-begin test-end)
  (only (schemacs editor engine)
-       new-text-editor text-editor-insert text-editor-char-count
-       text-editor-set-cursor
+       new-text-editor text-editor-insert
+       text-editor-set-cursor buffer-beg buffer-z
        text-editor-text-props text-editor-to-string)
  (prefix (schemacs editor intervals) iv:))
 
@@ -277,7 +277,7 @@
     (text-editor-insert ed "HELLO")
     (list (valid-tree? ed)
           (iv:interval-total-length (tree-of ed))
-          (text-editor-char-count ed)
+          (- (buffer-z ed) (buffer-beg ed))
           (intervals-of ed)
           (text-editor-to-string ed))))
 

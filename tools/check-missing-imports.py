@@ -50,7 +50,6 @@ EDITOR_LIBS = [
     '(schemacs lens)',
     '(schemacs vector)', '(schemacs string)', '(schemacs bitwise)',
     '(schemacs comparator)', '(schemacs hash-table)',
-    '(schemacs cursor)',
     '(schemacs ui gtk gtk-main)', '(schemacs ui gtk pgtk)',
     '(schemacs ui ncurses ncurses-main)', '(schemacs ui ncurses term)',
     '(schemacs ui ncurses xterm)',

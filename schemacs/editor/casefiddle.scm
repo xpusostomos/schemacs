@@ -31,9 +31,9 @@
     (scheme base)
     (scheme char)
     (only (schemacs editor engine)
-          text-editor-char-count text-editor-copy-string
-          text-editor-point-min text-editor-point-max
-          text-editor-delete-from-cursor text-editor-get-cursor
+    make-buffer-string
+          buffer-beg buffer-z
+          text-editor-delete-from-cursor buffer-pt
           text-editor-insert text-editor-set-cursor
           text-editor-undo-boundary!)
     ;; `point' is one-based here and the engine's cursor zero-based,
@@ -189,7 +189,7 @@
       (let ((ed (current-buffer)))
         (if (= beg end)
             end
-            (let ((text (text-editor-copy-string ed beg end)))
+            (let ((text (make-buffer-string ed beg end)))
               (text-editor-undo-boundary! ed)
               (let ((newtext
                      (let loop ((rest (string->list text))
@@ -226,11 +226,11 @@
       ;; do not move"). The scan failing is BEGV or ZV by the sign.
       ;;--------------------------------------------------------------
       (let* ((ed (current-buffer))
-             (pt (text-editor-get-cursor ed))
+             (pt (buffer-pt ed))
              (farend (or (scan-words arg)
                          (if (<= arg 0)
-                             (text-editor-point-min ed)
-                             (text-editor-point-max ed)))))
+                             (buffer-beg ed)
+                             (buffer-z ed)))))
         (text-editor-set-cursor
          ed (casify-region flag (min pt farend) (max pt farend)))
         #f))

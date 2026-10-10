@@ -21,7 +21,7 @@
     ;; what is left here is the entry point that opens an editor on one.
     (only (schemacs ui ncurses term) with-terminal)
     (only (schemacs editor engine)
-          new-text-editor set!text-editor-buffer-name)
+          set!text-editor-buffer-name)
     (only (schemacs editor frame) *current-frame* new-frame)
     ;; Everything this needs of the editor: the buffers named on the
     ;; command line - which is `startup.el''s job, not this one's - and

@@ -55,10 +55,10 @@
          define-key
          *default-keymap*)
     (only (schemacs editor engine)
-         set!text-editor-mark string-search-forward text-editor-char-count
-         text-editor-copy-string
-         text-editor-get-char-index text-editor-get-cursor
-         text-editor-point-min text-editor-point-max
+    set!text-editor-mark string-search-forward
+         make-buffer-string
+         fetch-char buffer-pt
+         buffer-beg buffer-z
          text-editor-search-backward text-editor-search-forward
          text-editor-set-cursor
          ;; what `minibuffer-lazy-highlight-setup' hangs its hook on
@@ -167,15 +167,15 @@
       ;; character before each repeat).
       ;;--------------------------------------------------------------
       (let* ((forward? (eq? direction 'forward))
-             (bound (text-editor-point-max ed))
-             (point (text-editor-get-cursor ed))
+             (bound (buffer-z ed))
+             (point (buffer-pt ed))
              (len (string-length pattern))
              (start (if step?
                         (if forward? (+ point 1) (- point 1))
                         point)))
-        (and (<= (text-editor-point-min ed) start bound)
+        (and (<= (buffer-beg ed) start bound)
              (let ((from (if forward?
-                             (max (text-editor-point-min ed) (- start len))
+                             (max (buffer-beg ed) (- start len))
                              (min bound (+ start len)))))
                (if forward?
                    (text-editor-search-forward
@@ -339,7 +339,7 @@
       ;; Searching the buffer a match at a time would be quadratic and was:
       ;; the engine's `text-editor-search-forward' copies from its start
       ;; argument to the end of the *buffer* on every call, and
-      ;; `text-editor-copy-string' reads character by character through the
+      ;; `make-buffer-string' reads character by character through the
       ;; engine, so a per-match copy of a two-kilobyte window cost about a
       ;; millisecond for each of a screenful of matches - 165ms per
       ;; keystroke on an 800KB file, which is what "isearch has become
@@ -349,10 +349,10 @@
       (when (and (*isearch-lazy-highlight*)
                  (< 0 (string-length pattern))
                  (eq? (window-buffer window) ed))
-        (let* ((limit (min (window-end window) (text-editor-point-max ed)))
+        (let* ((limit (min (window-end window) (buffer-z ed)))
                (start (min (window-start window) limit))
                (len (string-length pattern))
-               (text (text-editor-copy-string ed start limit))
+               (text (make-buffer-string ed start limit))
                (end (string-length text)))
           (let loop ((at 0))
             (let ((found (isearch-lazy-highlight-search text pattern at case-fold?)))
@@ -371,7 +371,7 @@
       ;; "If found, move point to the end of the occurrence") - so the
       ;; other end is the pattern's length away.
       ;;--------------------------------------------------------------
-      (let ((point (text-editor-get-cursor ed))
+      (let ((point (buffer-pt ed))
             (len (string-length pattern)))
         (if (eq? direction 'forward)
             (cons (- point len) point)
@@ -437,7 +437,7 @@
              ;; the window whose matches are highlighted lazily, which is
              ;; the one the search is being watched in
              (window (frame-selected-window frame))
-             (opoint (text-editor-get-cursor ed)))
+             (opoint (buffer-pt ed)))
         (let loop ((pattern "")
                    (direction (if forward? 'forward 'backward))
                    (states '())
@@ -468,7 +468,7 @@
           (set!frame-message
            frame
            (isearch-message pattern direction success? wrapped? case-fold?
-                            (text-editor-get-cursor ed) opoint))
+                            (buffer-pt ed) opoint))
           ;; Draw only when there is something new to draw. The read is
           ;; *timed* whenever the development REPL is open - `read-wait-ms',
           ;; for the reason its note gives - so most iterations of this loop
@@ -503,7 +503,7 @@
               (isearch-dehighlight)
               (lazy-highlight-cleanup #t)
               (set!frame-message frame "")
-              (when (not (= (text-editor-get-cursor ed) opoint))
+              (when (not (= (buffer-pt ed) opoint))
                 (set!text-editor-mark ed opoint)
                 (set!frame-message
                  frame "Mark saved where search started")))
@@ -551,7 +551,7 @@
               ;; point joins the search string
               (let ((new (string-append pattern (isearch-word-at-point ed))))
                 (loop new direction
-                      (cons (list pattern (text-editor-get-cursor ed) success?)
+                      (cons (list pattern (buffer-pt ed) success?)
                             states)
                       (isearch-search! ed new direction case-fold?)
                       #f case-fold? #t)))
@@ -561,7 +561,7 @@
               ;; which also moves the ring's yank pointer.
               (let ((new (string-append pattern (current-kill 0))))
                 (loop new direction
-                      (cons (list pattern (text-editor-get-cursor ed) success?)
+                      (cons (list pattern (buffer-pt ed) success?)
                             states)
                       (isearch-search! ed new direction case-fold?)
                       #f case-fold? #t)))
@@ -577,7 +577,7 @@
                      (fold? (and case-fold?
                                  (not (char-upper-case? printable)))))
                 (loop new direction
-                      (cons (list pattern (text-editor-get-cursor ed) success?)
+                      (cons (list pattern (buffer-pt ed) success?)
                             states)
                       (isearch-search! ed new direction fold?)
                       #f fold? #t)))
@@ -662,7 +662,7 @@
       ;;--------------------------------------------------------------
       (let* ((turning? (not (eq? direction new-direction)))
              (forward? (eq? new-direction 'forward))
-             (here (text-editor-get-cursor ed))
+             (here (buffer-pt ed))
              (found (cond
                      (turning?
                       (isearch-find ed pattern new-direction case-fold? #f))
@@ -672,8 +672,8 @@
                       ;; the search was failing, so this repeat wraps
                       (text-editor-set-cursor
                        ed (if forward?
-                              (text-editor-point-min ed)
-                              (text-editor-point-max ed)))
+                              (buffer-beg ed)
+                              (buffer-z ed)))
                       (isearch-find ed pattern new-direction
                                     case-fold? #f)))))
         (if found
@@ -691,14 +691,14 @@
       ;; The word at point, or the character at point when it is not part
       ;; of one - GNU Emacs's `isearch-yank-word-or-char'.
       ;;--------------------------------------------------------------
-      (let* ((point (text-editor-get-cursor ed))
-             (max (text-editor-point-max ed))
-             (c (and (< point max) (text-editor-get-char-index ed point))))
+      (let* ((point (buffer-pt ed))
+             (max (buffer-z ed))
+             (c (and (< point max) (fetch-char ed point))))
         (cond
          ((not c) "")
          ((word-char? c)
           (let loop ((i point) (acc '()))
-            (let ((ch (and (< i max) (text-editor-get-char-index ed i))))
+            (let ((ch (and (< i max) (fetch-char ed i))))
               (if (and ch (word-char? ch))
                   (loop (+ 1 i) (cons ch acc))
                   (list->string (reverse acc))))))

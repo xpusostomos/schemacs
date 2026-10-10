@@ -38,7 +38,7 @@
  ;; `xterm-tests.scm' beside `xterm.sld'.)
  (only (schemacs editor engine)
        new-text-editor text-editor-insert text-editor-set-cursor
-       text-editor-get-cursor text-editor-to-string)
+       buffer-pt text-editor-to-string)
  (only (schemacs editor frame) *current-frame* new-frame)
  (only (schemacs editor keyboard) dispatch-input-event)
  (only (schemacs editor select)

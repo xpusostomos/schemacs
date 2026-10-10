@@ -49,7 +49,7 @@
  ;; not a test-only dependency.
  (only (schemacs editor dired))
  (only (schemacs editor keyboard) dispatch-input-event)
- (only (schemacs editor engine) text-editor-mark text-editor-get-cursor)
+ (only (schemacs editor engine) text-editor-mark buffer-pt)
  (only (cairo) cairo-image-surface-create-from-png cairo-image-surface-get-data
        cairo-image-surface-get-stride))
 
@@ -163,7 +163,7 @@
       (dispatch-input-event frame (with-control (char->integer #\f)))
       (list (buffer-local-value ed 'mark-active #f)
             (text-editor-mark ed)
-            (text-editor-get-cursor ed)))))
+            (buffer-pt ed)))))
 
 (define c-spc-mark (mark-after key-c-spc))
 (test-equal #t (car c-spc-mark))

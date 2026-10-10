@@ -4,7 +4,7 @@
  (only (srfi 64) test-assert test-equal test-begin test-end)
  (only (guile) setvbuf)
  (only (schemacs editor engine)
-       new-text-editor text-editor-char-count text-editor-delete-from-cursor
+       new-text-editor text-editor-delete-from-cursor
        text-editor-insert text-editor-set-cursor text-editor-text-props)
  (only (schemacs editor intervals)
        find-interval next-interval interval-position interval-last-pos

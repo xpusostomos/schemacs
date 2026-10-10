@@ -64,7 +64,7 @@
  (only (schemacs editor editfns) point)
  (only (schemacs editor engine)
        new-text-editor text-editor-insert text-editor-set-cursor
-       text-editor-get-cursor text-editor-point-max text-editor-mark))
+       buffer-pt buffer-z text-editor-mark))
 
 ;; Unbuffered output, so a run that hangs shows where it got to.
 (setvbuf (current-output-port) 'none)
@@ -191,24 +191,24 @@
        (w (frame-selected-window f)))
   (test-equal "vertical-motion moves down the screen lines asked for"
     (list 5 26)
-    (list (vertical-motion 5 w) (text-editor-get-cursor (window-buffer w))))
+    (list (vertical-motion 5 w) (buffer-pt (window-buffer w))))
   (test-equal "and up a negative number of them"
     (list -1 21)
-    (list (vertical-motion -1 w) (text-editor-get-cursor (window-buffer w))))
+    (list (vertical-motion -1 w) (buffer-pt (window-buffer w))))
   (test-equal "a move of zero goes nowhere"
     (list 0 21)
-    (list (vertical-motion 0 w) (text-editor-get-cursor (window-buffer w))))
+    (list (vertical-motion 0 w) (buffer-pt (window-buffer w))))
   ;; The end of the buffer: "the function returns number of screen lines
   ;; moved over; ... may be closer to zero if beginning or end of buffer
   ;; was reached". From the last line there is nowhere to go, and point
   ;; stops at the end of the buffer - which is what makes
   ;; `mouse-scroll-subr''s loop terminate instead of spinning.
   (text-editor-set-cursor (window-buffer w)
-                          (text-editor-point-max (window-buffer w)))
+                          (buffer-z (window-buffer w)))
   (test-equal "at the end of the buffer, nothing moves"
-    (list 0 (text-editor-point-max (window-buffer w)))
+    (list 0 (buffer-z (window-buffer w)))
     (list (vertical-motion 5 w)
-          (text-editor-get-cursor (window-buffer w)))))
+          (buffer-pt (window-buffer w)))))
 
 ;;-------------------------------------------------------------------
 ;; `mouse-position' is the display's answer, dotted as Emacs gives it
@@ -425,7 +425,7 @@
     (pointer-at! 30)
     (event! 'mouse-movement f #f 30)
     (test-equal "held past the bottom, it scrolls to the end of the buffer"
-      (text-editor-point-max ed)
+      (buffer-z ed)
       (window-start w))
     (test-assert "and the map survives it"
       (pair? *overriding-terminal-local-map*))

@@ -8,8 +8,8 @@
   ;;
   ;; What is here so far is the region, because that is what is needed
   ;; now. The rest are the engine's under its own names for the moment
-  ;; (`text-editor-get-cursor' is `point', `text-editor-insert' is
-  ;; `insert', `text-editor-copy-string' is `buffer-substring'), because
+  ;; (`buffer-pt' is `point', `text-editor-insert' is
+  ;; `insert', `make-buffer-string' is `buffer-substring'), because
   ;; the engine is `buffer.c' and `insdel.c' and the position arithmetic
   ;; had to live somewhere; they come here, under Emacs's names, when
   ;; something needs them by those names.
@@ -40,13 +40,13 @@
     (only (schemacs editor engine)
           copy-marker marker-position marker-type? set-marker!
           text-editor-get-start-of-line text-editor-get-end-of-line
-          text-editor-get-char-index text-editor-copy-string
+          fetch-char make-buffer-string
           text-editor-search-forward text-editor-search-backward
           text-editor-read-only?
-          text-editor-char-count text-editor-insert
+          text-editor-insert
           text-editor-cursor-line text-editor-delete-from-cursor
-          text-editor-point-min text-editor-point-max
-          text-editor-get-cursor count-lines
+          buffer-beg buffer-z
+          buffer-pt count-lines
           text-editor-mark text-editor-set-cursor
           bol
           eol
@@ -135,10 +135,10 @@ point-marker
       ;;--------------------------------------------------------------
       (let* ((start (if (pair? rest) (car rest) #f))
              (end (if (and (pair? rest) (pair? (cdr rest))) (cadr rest) #f))
-             (text (text-editor-copy-string
+             (text (make-buffer-string
                     buffer
-                    (or start (text-editor-point-min buffer))
-                    (or end (text-editor-point-max buffer)))))
+                    (or start (buffer-beg buffer))
+                    (or end (buffer-z buffer)))))
         (insert text)))
 
     (define (region-limit beginning?)
@@ -162,7 +162,7 @@ point-marker
         (error "The mark is not active now"))
       (let ((m (text-editor-mark (current-buffer))))
         (unless m (error "The mark is not set now, so there is no region"))
-        (let ((point (text-editor-get-cursor (current-buffer))))
+        (let ((point (buffer-pt (current-buffer))))
           (if (eq? (< point m) beginning?) point m))))
 
     (define (delete-region start end)
@@ -209,15 +209,15 @@ point-marker
         ;; The C's second argument, ABSOLUTE, is about counting past a
         ;; narrowing, and nothing is narrowed here.
         (+ 1 (count-lines ed
-                          (text-editor-point-min ed)
+                          (buffer-beg ed)
                           (if (pair? args)
                               (car args)
-                              (text-editor-get-cursor ed))))))
+                              (buffer-pt ed))))))
 
     ;;----------------------------------------------------------------
     ;; Point, its questions, and its preservation - the `editfns.c'
     ;; primitives under their own names. The engine has had them under
-    ;; its own (`text-editor-get-cursor' is `point') since before this
+    ;; its own (`buffer-pt' is `point') since before this
     ;; library existed; these are the Emacs spellings the ports of the
     ;; .el files read as, so that a port can read like its source.
     ;;----------------------------------------------------------------
@@ -227,7 +227,7 @@ point-marker
       ;; cursor. It is the engine's cursor as it stands: both count
       ;; from one, so nothing stands between them.
       ;;--------------------------------------------------------------
-      (text-editor-get-cursor (current-buffer)))
+      (buffer-pt (current-buffer)))
 
     (define (point-min)
       ;; GNU Emacs's `point-min' (editfns.c): "the minimum permissible
@@ -240,7 +240,7 @@ point-marker
       ;; GNU Emacs's `point-max' (editfns.c): one past the last
       ;; character of the buffer.
       ;;--------------------------------------------------------------
-      (text-editor-point-max (current-buffer)))
+      (buffer-z (current-buffer)))
 
     (define (goto-char position)
       ;; GNU Emacs's `goto-char' (editfns.c): "Set point to POSITION,
@@ -281,7 +281,7 @@ point-marker
              ;; the text goes in, and then the properties it *carries*
              ;; are grafted in after it (`graft_intervals_into_buffer'
              ;; with the string's own tree, and `inherit' false).
-             (let ((at (text-editor-get-cursor ed)))
+             (let ((at (buffer-pt ed)))
                (text-editor-insert ed arg)
                (graft-intervals-into-buffer (string-intervals arg) at
                                             (string-length arg) ed #f)))
@@ -309,7 +309,7 @@ point-marker
       ;;--------------------------------------------------------------
       (let ((ed (current-buffer)))
         (or (= (point) (point-min))
-            (eqv? (text-editor-get-char-index ed (- (point) 1))
+            (eqv? (fetch-char ed (- (point) 1))
                   #\newline))))
 
     (define (eolp)
@@ -320,12 +320,6 @@ point-marker
       (let ((ed (current-buffer)))
         (= (point) (text-editor-get-end-of-line ed))))
 
-    (define (%char-at-position ed pos)
-      ;; The character at POSITION, or #f - the reader the C's
-      ;; `FETCH_CHAR' is here.
-      ;;--------------------------------------------------------------
-      (text-editor-get-char-index ed pos))
-
     (define (char-after position)
       ;; GNU Emacs's `char-after' (editfns.c): "Return character in
       ;; current buffer at position POSITION" - nil, this tree's #f,
@@ -335,7 +329,7 @@ point-marker
       (let* ((ed (current-buffer))
              (pos (if position position (point))))
         (and (<= (point-min) pos) (< pos (point-max))
-             (%char-at-position ed pos))))
+             (fetch-char ed pos))))
 
     (define (char-before . rest)
       ;; GNU Emacs's `char-before' (editfns.c:1070): "Return character in
@@ -361,7 +355,7 @@ point-marker
              (pos (if position position (point))))
         (and (<= (+ (point-min) 1) pos)
              (<= pos (point-max))
-             (%char-at-position ed (- pos 1)))))
+             (fetch-char ed (- pos 1)))))
 
     (define (following-char)
       ;; GNU Emacs's `following-char' (editfns.c): "Return the
@@ -425,7 +419,7 @@ point-marker
       ;; The positions are this layer's and the engine's alike - both
       ;; count from one - so nothing is converted.
       ;;--------------------------------------------------------------
-      (let ((result (text-editor-copy-string (current-buffer) beg end)))
+      (let ((result (make-buffer-string (current-buffer) beg end)))
         ;; The C's `copy_intervals_to_string (result, current_buffer,
         ;; start, end - start)': the fourth argument is a *length*, not
         ;; an end position, and passing the end position walks the tree
@@ -439,7 +433,7 @@ point-marker
       ;; characters of part of the current buffer, without text
       ;; properties."
       ;;--------------------------------------------------------------
-      (text-editor-copy-string (current-buffer) beg end))
+      (make-buffer-string (current-buffer) beg end))
 
     (define (propertize string . properties)
       ;; GNU Emacs's `propertize' (editfns.c:3296): "Return a copy of
@@ -482,7 +476,7 @@ point-marker
       ;; characters in the current buffer" - no narrowing here, so
       ;; nothing is subtracted.
       ;;--------------------------------------------------------------
-      (text-editor-char-count (current-buffer)))
+      (- (buffer-z (current-buffer)) (buffer-beg (current-buffer))))
 
     (define (buffer-string)
       ;; GNU Emacs's `buffer-string' (editfns.c): "Return the contents
@@ -565,7 +559,7 @@ point-marker
       ;; `save_excursion_save' does.
       ;;--------------------------------------------------------------
       (copy-marker (current-buffer)
-                   (text-editor-get-cursor (current-buffer))))
+                   (buffer-pt (current-buffer))))
 
 (define-syntax save-excursion
       ;; GNU Emacs's `save-excursion' (editfns.c:818): "Save point, and
@@ -594,7 +588,7 @@ point-marker
       (syntax-rules ()
         ((save-excursion body ...)
          (let ((marker (copy-marker (current-buffer)
-                                    (text-editor-get-cursor
+                                    (buffer-pt
                                      (current-buffer))))
                (saved-buffer (current-buffer)))
            (dynamic-wind

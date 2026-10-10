@@ -33,7 +33,7 @@
           copy-marker new-text-editor set-marker! marker-position
           set!text-editor-buffer-name
           set!text-editor-file-name text-editor-buffer-name
-          text-editor-get-cursor text-editor-modified? text-editor-set-cursor
+          buffer-pt text-editor-modified? text-editor-set-cursor
           text-editor-type?)
     ;; `define-key' and the global map: the window keys are stated here,
     ;; beside the commands they run.
@@ -281,7 +281,7 @@
                           (window-frame window)
                           (window-buffer window)
                           (copy-marker (window-buffer window)
-                                       (text-editor-get-cursor (window-buffer window)))
+                                       (buffer-pt (window-buffer window)))
                           ;; the start and whether it is a line beginning
                           ;; are copied together, as the C copies them
                           ;; (`save_window_save', `window.c:8374')
@@ -322,7 +322,7 @@
                           (window-frame window)
                           (window-buffer window)
                           (copy-marker (window-buffer window)
-                                       (text-editor-get-cursor (window-buffer window)))
+                                       (buffer-pt (window-buffer window)))
                           (copy-marker (window-buffer window)
                                        (marker-position (%window-start window)))
                           (%window-start-at-line-beg window)
@@ -361,7 +361,7 @@
         (let ((new (make<window>
                     (window-frame main)
                     buffer
-                    (copy-marker buffer (text-editor-get-cursor buffer))
+                    (copy-marker buffer (buffer-pt buffer))
                     (copy-marker buffer 1) #t
                     0 0 #f 0 0
                     (+ top (- total size))

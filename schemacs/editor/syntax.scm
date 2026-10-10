@@ -21,8 +21,8 @@
     ;; `simple.sld', which had them imported.
     (scheme char)
     (only (schemacs editor engine)
-          text-editor-get-cursor text-editor-get-char-index
-          text-editor-point-min text-editor-point-max
+          buffer-pt fetch-char
+          buffer-beg buffer-z
           text-editor-set-cursor)
     (only (schemacs editor buffer) current-buffer)
     )
@@ -72,13 +72,10 @@
     ;; counterpart.
     ;;------------------------------------------------------------------
 
-    (define (%char-at ed index)
-      (text-editor-get-char-index ed index))
-
     (define (%inword-at ed index)
       ;; like mg's `inword`, over absolute character indices
       ;;--------------------------------------------------------------
-      (let ((c (%char-at ed index)))
+      (let ((c (fetch-char ed index)))
         (and c (word-char? c))))
 
     (define (forward-word-position ed)
@@ -87,8 +84,8 @@
       ;; of the end of the next word - so `point-max' when there is no
       ;; word left, and the end of the word otherwise.
       ;;--------------------------------------------------------------
-      (let ((max (text-editor-point-max ed)))
-        (let loop ((i (text-editor-get-cursor ed)) (phase 'skip))
+      (let ((max (buffer-z ed)))
+        (let loop ((i (buffer-pt ed)) (phase 'skip))
           (cond
            ((>= i max) max)
            ((eq? phase 'skip)
@@ -102,8 +99,8 @@
       ;; characters, and step forward once, landing on the first
       ;; character of the word.
       ;;--------------------------------------------------------------
-      (let ((i0 (text-editor-get-cursor ed))
-            (min (text-editor-point-min ed)))
+      (let ((i0 (buffer-pt ed))
+            (min (buffer-beg ed)))
         (if (<= i0 min) min
             (let loop ((i (- i0 1)) (phase 'skip))
               (cond
@@ -119,7 +116,7 @@
       ;; walk the word motion, stopping when it stops advancing (the end
       ;; of the buffer).
       ;;--------------------------------------------------------------
-      (let loop ((i 0) (pos (text-editor-get-cursor ed)))
+      (let loop ((i 0) (pos (buffer-pt ed)))
         (if (>= i count)
             pos
             (begin
@@ -131,7 +128,7 @@
       ;; The character index COUNT words back from point, the mirror of
       ;; `word-run-end' and the way mg's `delbword' (word.c:453) counts.
       ;;--------------------------------------------------------------
-      (let loop ((i 0) (pos (text-editor-get-cursor ed)))
+      (let loop ((i 0) (pos (buffer-pt ed)))
         (if (>= i count)
             pos
             (begin
@@ -140,14 +137,14 @@
                 (if (= prev pos) prev (loop (+ 1 i) prev)))))))
 
     ;; `point', `point-min' and `point-max' are `editfns.c''s names for
-    ;; what the engine answers as `text-editor-get-cursor' and the two
+    ;; what the engine answers as `buffer-pt' and the two
     ;; bounds. They are the same values under private names here, so the
     ;; walks below read like the C they are ported from:
     ;; `(schemacs editor editfns)' imports this library, so this one
     ;; cannot import that back.
-    (define (%point ed) (text-editor-get-cursor ed))
-    (define (%point-min ed) (text-editor-point-min ed))
-    (define (%point-max ed) (text-editor-point-max ed))
+    (define (%point ed) (buffer-pt ed))
+    (define (%point-min ed) (buffer-beg ed))
+    (define (%point-max ed) (buffer-z ed))
 
     (define (skip-chars-forward set . rest)
       ;; GNU Emacs's `skip-chars-forward' (syntax.c:1618): "Move point
@@ -166,7 +163,7 @@
         (let loop ((pos (%point ed)) (moved 0))
           (if (>= pos lim)
               moved
-              (let ((c (text-editor-get-char-index ed pos)))
+              (let ((c (fetch-char ed pos)))
                 (if (and c (memv c members))
                     (begin
                       (text-editor-set-cursor ed (+ pos 1))
@@ -186,7 +183,7 @@
         (let loop ((pos (%point ed)) (moved 0))
           (if (<= pos lim)
               moved
-              (let ((c (text-editor-get-char-index ed (- pos 1))))
+              (let ((c (fetch-char ed (- pos 1))))
                 (if (and c (memv c members))
                     (begin
                       (text-editor-set-cursor ed (- pos 1))

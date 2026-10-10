@@ -162,11 +162,14 @@
       ;; `display' text property substituted for a character is made of -
       ;; and the string's own tabs expand from the column it starts at.
       ;;
-      ;; GNU Emacs keeps the one function for both - `string-width'
-      ;; (`character.c') - and xdisp.sld has its own copy of it under
-      ;; `line-display-width'. That copy is for a string drawn from
-      ;; column zero, which is not this; the sum is written here over the
-      ;; primitive both are built from.
+      ;; **It is not `string-width'** (`character.c:466'): that one sums
+      ;; `char-width' and knows nothing about the column, so a tab in it
+      ;; is `tab-width' cells wherever it starts. This is the renderer's
+      ;; measure and takes the column for that reason. The one caller
+      ;; that wanted a plain string - `check_display_width'
+      ;; (`indent.c:567'), which measures a `display' property from
+      ;; column zero - uses `(schemacs editor character)''s
+      ;; `string-width' instead, which is what the C does there too.
       ;;--------------------------------------------------------------
       (let loop ((i 0) (end col))
         (if (>= i (string-length text))

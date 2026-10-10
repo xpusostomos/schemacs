@@ -46,7 +46,7 @@
     (scheme char)
     (only (guile) caddr)
     (only (schemacs editor engine)
-          text-editor-char-count text-editor-text-props text-editor-type?
+    text-editor-text-props text-editor-type?
           text-editor-note-property-change!)
     (only (schemacs editor buffer)
           *current-buffer* current-buffer overlay-get overlays-at)

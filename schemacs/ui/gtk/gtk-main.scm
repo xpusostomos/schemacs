@@ -13,7 +13,7 @@
     (only (schemacs ui gtk pgtk) with-gtk-display
           pgtk-open-window pgtk-title-frame! initialize-pgtk-faces!
           pgtk-arm-timer! pgtk-main pgtk-main-quit)
-    (only (schemacs editor engine) new-text-editor set!text-editor-buffer-name)
+    (only (schemacs editor engine) set!text-editor-buffer-name)
     (only (schemacs editor frame) *current-frame* new-frame new-frame-on
           *frame-creation-function* frame-editor)
     (only (schemacs editor buffer) *scratch-buffer-name* get-buffer-create)

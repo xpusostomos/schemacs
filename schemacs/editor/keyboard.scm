@@ -43,7 +43,7 @@
     (prefix (schemacs editor keymap) km:)
     (only (schemacs editor engine)
           new-text-editor
-          text-editor-copy-string
+          make-buffer-string
           text-editor-deactivate-mark set!text-editor-deactivate-mark!)
     (only (schemacs editor command)
           *last-command-event*
@@ -444,7 +444,7 @@
                 ;; question - a command may have moved the current
                 ;; buffer, and the answer at this point is not
                 ;; necessarily the one the positions were computed in.
-                (let ((txt (text-editor-copy-string
+                (let ((txt (make-buffer-string
                             buffer
                             (region-beginning)
                             (region-end))))

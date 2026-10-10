@@ -115,7 +115,7 @@
           realize-face resume-display! screen-size
           selection-exists? selection-owner?
           set-selection! suspend-display! update-window-begin!
-          update-window-end! write-glyphs!)
+          glyphs->text update-window-end! write-glyphs!)
     ;; The Lisp half of a *read* of a selection this process owns:
     ;; `pgtk-get-local-selection' looks the requested target up in
     ;; `selection-converter-alist' - the C's `Vselection_converter_alist'
@@ -1446,7 +1446,7 @@
             (loop (+ i 1)
                   (+ col (char-display-width (string-ref text i) col))))))
 
-    (define-method (write-glyphs! (d <pgtk-display>) text y x token)
+    (define-method (write-glyphs! (d <pgtk-display>) glyphs y x token)
       ;; Draw TEXT at cell (X, Y), a *cluster* at a time.
       ;;
       ;; The surface is ours, so the cell grid is exact and there is no
@@ -1471,7 +1471,11 @@
       ;; text. So the run's cells are filled first, with the face's own
       ;; background or with the display's when the face names none.
       ;;--------------------------------------------------------------
+      ;; Pango takes a string, as GNU Emacs's pgtk back end hands it one
+      ;; built from a `struct glyph_string' - so the join is here, at the
+      ;; boundary, and a run is one face.
       (let ((cr (pgtk-cr d))
+            (text (glyphs->text glyphs))
             (foreground (face-token-foreground token))
             (background (face-token-background token)))
         (when cr

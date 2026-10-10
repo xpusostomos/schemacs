@@ -40,6 +40,7 @@
    kbd
    *tab-width*
    char-width
+   string-width
    char-width-default
    sanitize-char-width
    ;; The eight-bit representation - GNU Emacs's `CHAR_BYTE8_P' and the
@@ -162,6 +163,42 @@
       ;; nonsense.
       ;;--------------------------------------------------------------
       (if (and (<= 0 width) (<= width 1000)) width 1000))
+
+    (define string-width
+      ;; GNU Emacs's `string-width' (`character.c:466'), over
+      ;; `lisp_string_width' (`:424'): "Return width of STRING in columns
+      ;; when displayed in the current buffer. ... Optional arguments
+      ;; FROM and TO specify the substring of STRING to consider. ...
+      ;; Tabs in STRING are always assumed to occupy `tab-width'
+      ;; columns, although they might take fewer columns depending on the
+      ;; column where they begin on display."
+      ;;
+      ;; That last sentence is the whole difference from this tree's
+      ;; *display* width (`char-display-width', and `scan_for_column'
+      ;; above it): those measure from a column, where a tab runs to the
+      ;; next tab stop. This one sums `char-width' and knows nothing
+      ;; about where the text is.
+      ;;
+      ;; Measured on Emacs 31.1, and what these answer:
+      ;;
+      ;;   (char-width ?\t)          =>  8   (= `tab-width')
+      ;;   (string-width "a\tb")      => 10
+      ;;   (string-width "\u4e00x")   =>  3   (a CJK ideograph is two)
+      ;;   (string-width "abcde" 1 3) =>  2   (FROM and TO)
+      ;;
+      ;; Not carried: character compositions and the PRECISION bound,
+      ;; which `lisp_string_width' carries and `Fstring_width' passes as
+      ;; -1. Nothing here composes.
+      ;;--------------------------------------------------------------
+      (lambda (string . rest)
+        (let* ((from (if (pair? rest) (car rest) 0))
+               (to (if (and (pair? rest) (pair? (cdr rest)))
+                       (cadr rest)
+                       (string-length string))))
+          (let loop ((i from) (width 0))
+            (if (>= i to)
+                width
+                (loop (+ i 1) (+ width (char-width (string-ref string i)))))))))
 
     (define (char-width-table-ref c)
       ;; The table's answer for C: the width of the range it falls in, or

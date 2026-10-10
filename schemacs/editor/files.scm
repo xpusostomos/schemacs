@@ -46,9 +46,9 @@
     (only (schemacs editor mule) set-auto-coding)
     (only (schemacs editor engine)
           set!text-editor-buffer-name set!text-editor-file-name
-          text-editor-buffer-name text-editor-char-count
-          text-editor-file-name text-editor-get-char-index text-editor-get-cursor
-          text-editor-point-min text-editor-point-max
+          text-editor-buffer-name
+          text-editor-file-name fetch-char buffer-pt
+          buffer-beg buffer-z
           text-editor-insert text-editor-to-code-points
           text-editor-modified? text-editor-read-only?
           text-editor-set-cursor text-editor-set-modified!
@@ -716,8 +716,8 @@ save-buffer
       ;; here, so the command could only ever kill the buffer it was
       ;; called from, and a name typed at it was ignored.
       "Kill the buffer specified by BUFFER-OR-NAME (bound to C-x k),
- asking first if it has unsaved changes. The argument is the buffer
- itself or its name (a string)."
+      asking first if it has unsaved changes. The argument is the buffer
+      itself or its name (a string)."
       (interactive (list (read-buffer "Kill buffer: " (current-buffer) #t)))
       (let ((buffer (if (bufferp buffer-or-name)
                         buffer-or-name
@@ -811,8 +811,7 @@ save-buffer
                                                buffer 'buffer-offer-save #f)))
                                    (or (eq? offer 'always)
                                        (and pred offer
-                                            (< 0 (text-editor-char-count
-                                                  buffer))))))
+                                            (< 0 (- (buffer-z buffer) (buffer-beg buffer)))))))
                              (or (not (procedure? pred))
                                  (with-current-buffer buffer (pred))))
                         (cons buffer kept)
@@ -1593,9 +1592,9 @@ save-buffer
       ;; Whether the last character of the buffer is a line break. False
       ;; for an empty buffer, which Emacs treats as needing nothing.
       ;;--------------------------------------------------------------
-      (let ((max (text-editor-point-max ed)))
-        (and (< (text-editor-point-min ed) max)
-             (char=? (text-editor-get-char-index ed (- max 1)) #\newline))))
+      (let ((max (buffer-z ed)))
+        (and (< (buffer-beg ed) max)
+             (char=? (fetch-char ed (- max 1)) #\newline))))
 
     (define (add-line-break-at-end! ed)
       ;; Append a line break to the buffer, leaving the cursor where it
@@ -1604,12 +1603,12 @@ save-buffer
       ;; follow it, exactly as they would for a line break typed at the
       ;; end.
       ;;--------------------------------------------------------------
-      (let ((at (text-editor-get-cursor ed)))
+      (let ((at (buffer-pt ed)))
         ;; `point-max', not the character count: positions are one-based
         ;; and `point-max' is one past the last character, which is where
         ;; a break appended to the buffer goes. The count is one short of
         ;; it, which put the break before the last character.
-        (text-editor-set-cursor ed (text-editor-point-max ed))
+        (text-editor-set-cursor ed (buffer-z ed))
         (text-editor-insert ed #\newline)
         (text-editor-set-cursor ed at)))
 
@@ -1633,7 +1632,7 @@ save-buffer
       ;; the line break into the buffer itself.
       ;;--------------------------------------------------------------
       (when (and (not (text-editor-read-only? ed))
-                 (< 0 (text-editor-char-count ed))
+                 (< 0 (- (buffer-z ed) (buffer-beg ed)))
                  (not (buffer-ends-with-newline? ed)))
         (let ((value (*require-final-newline*)))
           (when (cond

@@ -49,17 +49,17 @@
           column-width line-height)
     (only (schemacs editor engine)
          string-search-forward text-editor-buffer-name text-editor-text-props
-         text-editor-char-count text-editor-file-name marker-position
+         text-editor-file-name marker-position
          text-editor-cursor-column text-editor-cursor-line
-         text-editor-get-cursor text-editor-set-cursor text-editor-mark
+         buffer-pt text-editor-set-cursor text-editor-mark
          text-editor-get-end-of-line
-         text-editor-get-start-of-line text-editor-copy-string
-         text-editor-line-count count-lines
-         text-editor-point-min
-         text-editor-beg-unchanged text-editor-note-unchanged!
-         text-editor-line-outer-size text-editor-modified?
-         text-editor-read-only? text-editor-line-string
-         text-editor-point-max text-editor-to-string)
+         text-editor-get-start-of-line make-buffer-string fetch-char
+         count-lines
+         buffer-beg
+         buffer-beg-unchanged set!buffer-beg-unchanged!
+         text-editor-modified?
+         text-editor-read-only?
+         buffer-z text-editor-to-string)
     (only (schemacs editor frame)
          *current-frame* *echo-area-buffer* *echo-area-prompt*
          *frame-cursor-type* *frame-focus* frame-height frame-width
@@ -168,7 +168,6 @@
    format-mode-line
    *line-number-display-limit* *line-number-display-limit-width*
    *truncate-partial-width-windows*
-   line-continuation-display?
    line-display-rows
    line-display-width
    mode-line-string
@@ -201,24 +200,6 @@
     ;; searching exists, which is the whole point: it cannot disagree with
     ;; the search about what matched.
 
-    (define (buffer-line-string ed i)
-      ;; The displayable contents of line I - a line *number*, counting
-      ;; from 1 - as a string, without the line break that ends it, or
-      ;; #f when there is no such line.
-      ;;
-      ;; This is a departure, and there is no Emacs function to mirror
-      ;; it with: xdisp.c never materialises a line as a string - it
-      ;; walks the buffer with the display iterator (`struct it'),
-      ;; fetching characters as it produces glyphs. Rendering from a
-      ;; line string is this redisplay's shortcut.
-      ;;
-      ;; The engine used to keep the current line in a line editor of
-      ;; its own, so this had to read that one from the editor and every
-      ;; other from a gap buffer of lines. There is one store now, and
-      ;; one answer for every line.
-      ;;--------------------------------------------------------------
-      (text-editor-line-string ed i))
-
     ;;----------------------------------------------------------------
     ;; The `display' text property
     ;;
@@ -246,22 +227,31 @@
     ;; screen column zero - see `line-display-rows'.
     ;;------------------------------------------------------------------
 
-    (define (line-display-texts ed line-start line-string)
-      ;; LINE-STRING - the line beginning at buffer position LINE-START -
-      ;; as the vector of texts described above, one entry per buffer
-      ;; column. LINE-START is an engine position, which is what
-      ;; `get-text-property' takes; the overlay layer is not consulted,
-      ;; because the C's `handle_display_prop' reads the text property.
+    (define (line-display-texts ed line-start)
+      ;; The line beginning at buffer position LINE-START as the vector of
+      ;; texts described above, one entry per buffer column. LINE-START is
+      ;; an engine position, which is what `get-text-property' takes; the
+      ;; overlay layer is not consulted, because the C's
+      ;; `handle_display_prop' reads the text property.
+      ;;
+      ;; **The characters are read at their positions** - `fetch-char' at
+      ;; `(+ line-start i)' - where this was handed the whole line as a
+      ;; string and indexed it. `init_iterator' (`xdisp.c') finds the
+      ;; row's end with `find_newline' and produces a glyph per position;
+      ;; building a string of the line first is the shortcut this file is
+      ;; shedding, one reader at a time.
       ;;--------------------------------------------------------------
-      (let ((len (string-length line-string)))
+      (let ((line-end (text-editor-get-end-of-line ed line-start)))
         (let loop ((i 0) (acc '()))
-          (if (>= i len)
+          (if (>= (+ line-start i) line-end)
               (list->vector (reverse acc))
               (let ((prop (and ed
                                (get-text-property (+ line-start i)
                                                   'display ed))))
                 (loop (+ i 1)
-                      (cons (if (string? prop) prop (string-ref line-string i))
+                      (cons (if (string? prop)
+                                prop
+                                (fetch-char ed (+ line-start i)))
                             acc)))))))
 
     (define (buffer-line-texts-at window line-start)
@@ -271,8 +261,7 @@
       ;; already, and asking for the line by *number* instead means
       ;; scanning from the beginning of the buffer for every row.
       ;;--------------------------------------------------------------
-      (line-display-texts (window-buffer window) line-start
-                          (line-string-at (window-buffer window) line-start)))
+      (line-display-texts (window-buffer window) line-start))
 
     (define (buffer-line-texts window line-index)
       ;; The texts of LINE-INDEX's line in WINDOW, or #f when the buffer
@@ -282,7 +271,7 @@
       ;;--------------------------------------------------------------
       (let* ((ed (window-buffer window))
              (start (and (<= 1 line-index)
-                         (<= line-index (text-editor-line-count ed))
+                         (<= line-index (+ 1 (count-lines ed (buffer-beg ed) (buffer-z ed))))
                          (window-line-start ed line-index))))
         (and start (buffer-line-texts-at window start))))
 
@@ -292,12 +281,12 @@
       ;; everything above the line, so it is for callers that have no
       ;; position, not for walks.
       ;;--------------------------------------------------------------
-      (let loop ((line (- line-index 1)) (pos (text-editor-point-min ed)))
+      (let loop ((line (- line-index 1)) (pos (buffer-beg ed)))
         (cond ((<= line 0) pos)
-              ((>= pos (text-editor-point-max ed)) #f)
+              ((>= pos (buffer-z ed)) #f)
               (else
                (let ((end (text-editor-get-end-of-line ed pos)))
-                 (if (< end (text-editor-point-max ed))
+                 (if (< end (buffer-z ed))
                      (loop (- line 1) (+ end 1))
                      #f))))))
 
@@ -361,20 +350,27 @@
                     (+ col (display-text-width glyph col))
                     (cons glyph acc))))))
 
-    (define (line-texts-display texts from to width)
-      ;; The slice [FROM, TO) of TEXTS as one string, cut at WIDTH screen
-      ;; cells - `expand-line-display''s walk, and its same rule that the
-      ;; glyph starting before WIDTH is written whole and the renderer
-      ;; clips it by column.
+    (define (line-texts-slice-width texts from to width)
+      ;; How many screen cells the slice [FROM, TO) of TEXTS takes drawn
+      ;; cut at WIDTH - `line-texts-width''s walk over a slice, answering
+      ;; the column it reached. It is the width of the glyphs a row
+      ;; *draws*, so the glyph starting before WIDTH is counted whole and
+      ;; this can exceed WIDTH by a wide character's second cell, which is
+      ;; what the row itself does.
+      ;;
+      ;; It is this walk rather than a width taken over the glyphs joined
+      ;; into a string, because there is no string: the row is drawn glyph
+      ;; by glyph from TEXTS, as GNU Emacs's `display_line' appends to a
+      ;; glyph row and reads the width off the iterator - `it->current_x'
+      ;; (`xdisp.c'). Joining the glyphs and measuring the result again
+      ;; can only disagree with the walk that drew them, it makes the
+      ;; widths here disagree with `line-texts-offsets' (which is this
+      ;; walk), and it conses a string per row to do it.
       ;;--------------------------------------------------------------
-      (call-with-port (open-output-string)
-        (lambda (port)
-          (let loop ((i from) (col 0))
-            (when (and (< i to) (< col width))
-              (let ((glyph (texts-glyph texts i col)))
-                (display glyph port)
-                (loop (+ i 1) (+ col (display-text-width glyph col))))))
-          (get-output-string port))))
+      (let loop ((i from) (col 0))
+        (if (or (>= i to) (>= col width))
+            col
+            (loop (+ i 1) (+ col (texts-width texts i col))))))
 
     (define (truncate-line str width)
       (let ((len (string-length str)))
@@ -712,7 +708,7 @@
       ;;--------------------------------------------------------------
       (let* ((window (or window (selected-window)))
              (ed (window-buffer window))
-             (pt (text-editor-get-cursor ed))
+             (pt (buffer-pt ed))
              (line-start (text-editor-get-start-of-line ed pt))
              (slices (window-line-slices-at window line-start))
              (k (%row-of-position window line-start (- pt line-start)))
@@ -733,12 +729,12 @@
                                   0 (- left 1) (+ moved 1))
                             ;; the end of the buffer: the C's walk stops
                             ;; at ZV and says how far it got
-                            (list (text-editor-point-max ed) moved)))))
+                            (list (buffer-z ed) moved)))))
                  ((> k 0)
                   (loop line row-slices (- k 1) (- left 1) (+ moved 1)))
-                 ((= line (text-editor-point-min ed))
+                 ((= line (buffer-beg ed))
                   ;; the beginning of the buffer, the other edge
-                  (list (text-editor-point-min ed) moved))
+                  (list (buffer-beg ed) moved))
                  (else
                   (let* ((prev (text-editor-get-start-of-line ed (- line 1)))
                          (prev-slices (window-line-slices-at window prev)))
@@ -791,7 +787,7 @@
       ;; the middle of the window is in the first line of the window."
       ;;--------------------------------------------------------------
       (let loop ((back (quotient vheight 2)) (rows 0) (pos cursor-start))
-        (if (or (<= back 0) (= pos (text-editor-point-min ed)))
+        (if (or (<= back 0) (= pos (buffer-beg ed)))
             (set-window-start!
              window (if (>= rows vheight) cursor-start pos))
             (let* ((above (text-editor-get-start-of-line ed (- pos 1)))
@@ -1210,41 +1206,41 @@
              (base-pos (%window-base-line-pos window))
              (limit (*line-number-display-limit*))
              (toobig (and limit
-                          (> (- (text-editor-point-max ed)
-                                (text-editor-point-min ed))
+                          (> (- (buffer-z ed)
+                                (buffer-beg ed))
                              limit))))
         (if (or (= base-pos -1) toobig)
             #f
             (let* ((cached (%window-base-line-number window))
                    (use-cache (and (> cached 0) (> base-pos 0)
                                    (<= base-pos startpos)
-                                   (>= (text-editor-beg-unchanged ed)
+                                   (>= (buffer-beg-unchanged ed)
                                        base-pos)))
                    (line (if use-cache cached 1))
-                   (linepos (if use-cache base-pos (text-editor-point-min ed)))
+                   (linepos (if use-cache base-pos (buffer-beg ed)))
                    (nlines (count-lines ed linepos startpos))
                    (topline (+ nlines line)))
               (let ((nlines-from-start
                      (lambda () (count-lines ed startpos (window-point window)))))
                 (cond
-                 ((= startpos (text-editor-point-min ed))
+                 ((= startpos (buffer-beg ed))
                   (set!%window-base-line-number window topline)
-                  (set!%window-base-line-pos window (text-editor-point-min ed))
-                  (text-editor-note-unchanged! ed)
+                  (set!%window-base-line-pos window (buffer-beg ed))
+                  (set!buffer-beg-unchanged! ed)
                   (+ topline (nlines-from-start)))
                  ;; "too close" to the window, too far from it, or never
                  ;; set: re-base it
                  ((or (< nlines (+ height 25))
                       (> nlines (+ (* height 3) 50))
-                      (= linepos (text-editor-point-min ed)))
+                      (= linepos (buffer-beg ed)))
                   (let* ((wanted (+ (* height 2) 30))
                          (span (* (*line-number-display-limit-width*) wanted))
-                         (limit-at (max (text-editor-point-min ed)
+                         (limit-at (max (buffer-beg ed)
                                         (- startpos span)))
                          (gave-up (<= startpos limit-at))
                          (got (let loop ((n 0) (pos startpos))
                                 (if (or (>= n wanted)
-                                        (<= pos (text-editor-point-min ed)))
+                                        (<= pos (buffer-beg ed)))
                                     (cons n pos)
                                     (loop (+ n 1)
                                           (text-editor-get-start-of-line
@@ -1260,7 +1256,7 @@
                           (set!%window-base-line-number
                            window (- topline (car got)))
                           (set!%window-base-line-pos window (cdr got))
-                          (text-editor-note-unchanged! ed)
+                          (set!buffer-beg-unchanged! ed)
                           (+ topline (nlines-from-start))))))
                  (else (+ topline (nlines-from-start)))))))))
 
@@ -1366,14 +1362,12 @@
           ;; 2 after a CJK character, as Emacs's is.
           ((#\c) (number->string
                   (line-texts-column
-                   (line-display-texts ed line-start
-                                       (line-string-at ed line-start))
+                   (line-display-texts ed line-start)
                    column)))
           ;; `%C' is `%c' counting from one rather than zero
           ((#\C) (number->string
                   (+ 1 (line-texts-column
-                        (line-display-texts ed line-start
-                                            (line-string-at ed line-start))
+                        (line-display-texts ed line-start)
                         column))))
           ;; `%*' is `%' read-only, `*' modified, `-' neither; `%+' is `*'
           ;; modified, `%' read-only, `-' neither; `%&' is `*' modified
@@ -1384,8 +1378,8 @@
                      "*"
                      (if (text-editor-read-only? ed) "%" "-")))
           ((#\&) (if (text-editor-modified? ed) "*" "-"))
-          ((#\i) (number->string (text-editor-char-count ed)))
-          ((#\I) (let ((n (text-editor-char-count ed)))
+          ((#\i) (number->string (- (buffer-z ed) (buffer-beg ed))))
+          ((#\I) (let ((n (- (buffer-z ed) (buffer-beg ed))))
                    (cond ((< n 10000) (number->string n))
                          ((< n 10000000)
                           (string-append (number->string (quotient n 1000)) "k"))
@@ -1571,12 +1565,6 @@
       ;;--------------------------------------------------------------
       (mode-line-string (frame-selected-window frame)))
 
-    (define (line-outer-size ed line-index)
-      ;; How many characters line LINE-INDEX advances the buffer's
-      ;; character index by - its contents plus its line break.
-      ;;--------------------------------------------------------------
-      (text-editor-line-outer-size ed line-index))
-
     ;;----------------------------------------------------------------
     ;; A line addressed by its *position* rather than its number
     ;;
@@ -1607,7 +1595,7 @@
       ;; without the line break that ends it. One forward scan to the line
       ;; break and no further.
       ;;--------------------------------------------------------------
-      (text-editor-copy-string ed line-start
+      (make-buffer-string ed line-start
                                (text-editor-get-end-of-line ed line-start)))
 
     (define (line-outer-size-at ed line-start)
@@ -1617,7 +1605,7 @@
       ;;--------------------------------------------------------------
       (let ((end (text-editor-get-end-of-line ed line-start)))
         (+ (- end line-start)
-           (if (< end (text-editor-point-max ed)) 1 0))))
+           (if (< end (buffer-z ed)) 1 0))))
 
     (define (line-next-start ed line-start)
       ;; Where the line after the one at LINE-START begins, or #f when it
@@ -1626,7 +1614,7 @@
       ;; `point-max' and begins here like any other.
       ;;--------------------------------------------------------------
       (let ((end (text-editor-get-end-of-line ed line-start)))
-        (if (< end (text-editor-point-max ed)) (+ end 1) #f)))
+        (if (< end (buffer-z ed)) (+ end 1) #f)))
 
     ;; `display-column-of' used to sit here - the screen column at which
     ;; buffer column COL of a line is drawn, as the display width of the
@@ -1649,7 +1637,7 @@
                     (merge-face-vectors (face-realized-attributes face-name)
                                         (face-realized-attributes 'default))))
 
-    (define (line-face-runs ed line-start line-string)
+    (define (line-face-runs ed line-start len)
       ;; LINE-STRING as maximal runs of characters that share one face:
       ;; `(FROM TO ATTRIBUTE)' in buffer columns, ATTRIBUTE being the
       ;; display's token for the face `face-at-buffer-position' finds.
@@ -1669,8 +1657,7 @@
       ;; which is what made isearch look like it had hung on Gtk; a
       ;; terminal's realize is a cheap intern, so nothing showed there.
       ;;--------------------------------------------------------------
-      (let ((len (string-length line-string)))
-        (if (= len 0)
+      (if (= len 0)
             '()
             (let loop ((i 1)
                        (start 0)
@@ -1686,7 +1673,7 @@
                         (loop (+ 1 i) i a
                               (cons (list start i
                                           (realize-face (current-display) attrs))
-                                    acc)))))))))
+                                    acc))))))))
 
     (define (line-glyph-run glyphs offsets from to width)
       ;; The text to write for the buffer columns [FROM, TO) of a line
@@ -1705,7 +1692,7 @@
         (and (< start width)
              (let loop ((i from) (acc '()))
                (if (or (>= i to) (>= (vector-ref offsets i) width))
-                   (cons (apply string-append (reverse acc)) start)
+                   (cons (reverse acc) start)
                    (loop (+ i 1) (cons (vector-ref glyphs i) acc)))))))
 
     (define (draw-overlay-strings! entries screen-row x)
@@ -1720,7 +1707,7 @@
             (let* ((entry (car rest))
                    (text (cdr entry))
                    (face (overlay-get (car entry) 'face)))
-              (write-glyphs! (current-display) text screen-row x
+              (write-glyphs! (current-display) (list text) screen-row x
                              (and face (face->attribute face)))
               (loop (cdr rest) (+ x (line-display-width text)))))))
 
@@ -1776,7 +1763,7 @@
                            (w (texts-width texts i col)))
                       (when (< col width)
                         (write-glyphs!
-                         (current-display) glyph screen-row
+                         (current-display) (list glyph) screen-row
                          (+ x0 col)
                          (face-at-buffer-position ed (+ slice-start c))))
                       ;; and the `after-string's come after the character,
@@ -1786,12 +1773,11 @@
                             (draw-overlay-strings! tails screen-row
                                                    (+ x0 col w))))))))))
 
-    (define (draw-line! ed slice-start line-string texts slice
+    (define (draw-line! ed slice-start texts slice
                         screen-row x0 width more? truncated?)
       ;; Draw one *screen row* of a line at SCREEN-ROW, X0. SLICE is the
       ;; row's own buffer columns in TEXTS - the caller cut them out of
-      ;; the line, whose texts TEXTS are and whose string LINE-STRING is,
-      ;; the latter for the region's line-end rule.
+      ;; the line, whose texts TEXTS are.
       ;;
       ;; A row of a long line is one of three things, and the last cell
       ;; says which: it *continues* on the next row (MORE?), it was *cut
@@ -1810,14 +1796,10 @@
       (let* ((from (car slice))
              (to (cdr slice))
              (len (- to from))
-             ;; The row's own width: `display` holds no tabs or control
-             ;; characters - they were expanded into it - so this is a sum
-             ;; of character widths, and for a wide character that is 2
-             ;; where a `string-length' would say 1.
-             (display (line-texts-display texts from to width))
-             ;; the row's own characters, which the two face walks below
-             ;; ask the length of
-             (slice-string (substring line-string from to))
+             ;; The row's own width in screen cells, off the same glyph
+             ;; walk that draws it: a wide character is 2 cells where a
+             ;; `string-length' says 1, and a tab is already expanded.
+             (row-width (line-texts-slice-width texts from to width))
              (strings (row-overlay-strings ed slice-start len))
              (drawn-width
               (if (row-string-elements? strings)
@@ -1839,7 +1821,9 @@
                     (if (and (not (text-editor-text-props ed))
                              (not (region-face-active? ed))
                              (null? (overlays-in slice-start (+ slice-start len))))
-                        (write-glyphs! (current-display) display screen-row x0 #f)
+                        (write-glyphs! (current-display)
+                                       (line-texts-glyphs texts from to)
+                                       screen-row x0 #f)
                         (let ((offsets (list->vector
                                         (line-texts-offsets texts from to)))
                               (glyphs (list->vector
@@ -1852,8 +1836,8 @@
                                  (write-glyphs! (current-display) (car drawn)
                                                 screen-row
                                                 (+ x0 (cdr drawn)) (caddr run)))))
-                           (line-face-runs ed slice-start slice-string))))
-                    (line-display-width display)))))
+                           (line-face-runs ed slice-start len))))
+                    row-width))))
         ;; The last cell, and what the row's own width was.
         (cond
          (more? (draw-special-glyph! screen-row x0 width "\\"))
@@ -1861,11 +1845,11 @@
          (else
           ;; the line's own end: a region may extend its face into the
           ;; empty cells after the text
-          (let ((fill (line-end-fill-attribute ed slice-start slice-string
-                                               display width)))
+          (let ((fill (line-end-fill-attribute ed (+ slice-start len)
+                                               row-width width)))
             (when fill
               (write-glyphs! (current-display)
-                             (make-string (- width drawn-width) #\space)
+                             (list (make-string (- width drawn-width) #\space))
                              screen-row (+ x0 drawn-width) fill)))))))
 
     (define (line-display-width line-string)
@@ -1885,41 +1869,35 @@
             (let ((ch (string-ref line-string i)))
               (loop (+ i 1) (+ column (char-display-width ch column)))))))
 
-    (define (line-continuation-display? line-string width)
-      ;; Whether the logical line's full display width exceeds this row:
-      ;; GNU Emacs puts a special continuation glyph in the final cell.
-      ;; Tabs and control characters may occupy more than one display cell.
-      ;;--------------------------------------------------------------
-      (and (> width 0)
-           (> (line-display-width line-string) width)))
-
     (define (draw-special-glyph! row x0 width glyph)
       ;; The continuation glyph (`\') or the truncation glyph (`$') in a
       ;; row's last cell. It is a special display character, not buffer
       ;; text, and Emacs draws it with the default face even inside a
       ;; region - `produce_special_glyphs' uses `DEFAULT_FACE_ID'.
       ;;--------------------------------------------------------------
-      (write-glyphs! (current-display) glyph row (+ x0 width -1)
+      (write-glyphs! (current-display) (list glyph) row (+ x0 width -1)
                      (face->attribute 'default)))
 
-    (define (line-end-fill-attribute ed line-start line-string display width)
+    (define (line-end-fill-attribute ed row-end row-width width)
       ;; Face used for cells after a line's text when the line-end
-      ;; position is inside the active region. LINE-STRING is the *row's*
-      ;; text, so its length is the row's. A line that ends at point-max
-      ;; has no newline position and gets no extension face in Emacs.
+      ;; position is inside the active region. ROW-END is the buffer
+      ;; position just past the row's last character - the position of the
+      ;; line break that ends it, or of the first character of the row
+      ;; below - and ROW-WIDTH how many screen cells the row took. A line
+      ;; that ends at point-max has no line break and gets no extension
+      ;; face in Emacs.
       ;;--------------------------------------------------------------
-      (let* ((row-end (+ line-start (string-length line-string)))
-             (mark (text-editor-mark ed))
-             (point (text-editor-get-cursor ed))
+      (let* ((mark (text-editor-mark ed))
+             (point (buffer-pt ed))
              (region-start (and mark (min point mark)))
              (region-end (and mark (max point mark))))
-        (and (< (line-display-width display) width)
+        (and (< row-width width)
              (region-face-active? ed)
              region-start
              region-end
              (<= region-start row-end)
              (< row-end region-end)
-             (< row-end (text-editor-point-max ed))
+             (< row-end (buffer-z ed))
              (region-face-at-position? ed row-end)
              ;; The region face's :extend fills newline space even in the
              ;; monochrome spec, where :extend itself is unspecified and
@@ -1956,7 +1934,7 @@
            (buffer-local-value ed 'mark-active #f)
            (let ((mark (text-editor-mark ed)))
              (and mark
-                  (let* ((point (text-editor-get-cursor ed))
+                  (let* ((point (buffer-pt ed))
                          (beginning (min mark point))
                          (end (max mark point)))
                     (and (>= position beginning)
@@ -2240,14 +2218,21 @@
       ;; double-width character it is two cells wide. Past the end of the
       ;; line there is no character to sit on, and Emacs draws a one-cell
       ;; cursor in the space beyond it - which is what this answers there.
+      ;;
+      ;; **It reads the character at the position, not a line string.**
+      ;; This used to build the whole line with `line-string-at' and
+      ;; index it - a string of the line, per call, to look at one
+      ;; character. Emacs asks the glyph at point (`xdisp.c'), and what
+      ;; is at a buffer position here is `fetch-char' - the same
+      ;; `FETCH_CHAR' every other reader in the tree uses. `#f' from it
+      ;; *is* "past the end of the line".
       ;;--------------------------------------------------------------
       (let* ((line-start (text-editor-get-start-of-line ed position))
-             (line-string (line-string-at ed line-start))
+             (ch (fetch-char ed position))
              (column (- position line-start)))
-        (if (< column (string-length line-string))
-            (char-display-cursor-width
-             (string-ref line-string column)
-             (current-line-display-column ed column))
+        (if ch
+            (char-display-cursor-width ch
+                                       (current-line-display-column ed column))
             1)))
 
     (define (cursor-screen-position window)
@@ -2275,7 +2260,7 @@
              (line-start (text-editor-get-start-of-line ed pt))
              (column (- pt line-start))
              (line-string (line-string-at ed line-start))
-             (texts (line-display-texts ed line-start line-string))
+             (texts (line-display-texts ed line-start))
              (rows (window-line-slices-at window line-start))
              (width (window-body-width window))
              (vheight (window-body-height window))
@@ -2355,7 +2340,7 @@
       (let ((ed (window-buffer window))
             (vheight (window-body-height window)))
         (if (%window-end-valid? window)
-            (- (text-editor-point-max ed) (%window-end-pos window))
+            (- (buffer-z ed) (%window-end-pos window))
             (let loop ((pos (window-start window)) (row 0))
               (if (>= row vheight)
                   pos
@@ -2395,17 +2380,18 @@
       (let loop ((row 0)
                  (line-start (window-start window)))
         (when (< row vheight)
-          (let* ((line-string (line-string-at ed line-start))
-                 ;; The line's `display' texts, from the buffer position
+          (let* (;; The line's `display' texts, from the buffer position
                  ;; the walk already has - so the two do not disagree.
-                 (texts (line-display-texts ed line-start line-string))
+                 ;; The row drawing needs nothing else: it is drawn from
+                 ;; these, and there is no line *string* anywhere in it.
+                 (texts (line-display-texts ed line-start))
                  (slices (%window-line-slices window texts)))
             ;; No slices means there is no such line - the walk has run
             ;; past the end of the buffer, and there is nothing below to
             ;; draw.
             (when (pair? slices)
               (render-line-rows! window ed width x0 vheight
-                                 row line-start line-string texts slices)
+                                 row line-start texts slices)
               ;; Record where the window's text ends: the position of the
               ;; last glyph drawn, as a distance from the end of the
               ;; buffer, and the screen row it was drawn on. These are
@@ -2442,7 +2428,7 @@
                            ;; its end is the end of its text.
                            (else (text-editor-get-end-of-line ed line-start)))))
                 (set!%window-end-pos window
-                                     (- (text-editor-point-max ed) end))
+                                     (- (buffer-z ed) end))
                 (set!%window-end-vpos window (+ row (- drawn 1)))
                 (set!%window-end-valid? window #t))
               ;; The next line begins one character past this one's line
@@ -2453,7 +2439,7 @@
                   (loop (+ row (length slices)) next))))))))
 
     (define (render-line-rows! window ed width x0 vheight
-                               row line-start line-string texts slices)
+                               row line-start texts slices)
       ;; One buffer line's screen rows, from ROW down.
       ;;--------------------------------------------------------------
       (let* ((hscrolled? (and (not (window-wraps? window))
@@ -2474,7 +2460,6 @@
             (let* ((slice (car rest))
                    (more? (pair? (cdr rest)))
                    (slice-start (+ line-start (car slice)))
-                   (slice-string (substring line-string (car slice) (cdr slice)))
                    (screen-row (+ row k (window-top window))))
               (if hscrolled?
                   ;; the row is `$' in its first cell - the left
@@ -2493,10 +2478,10 @@
                     (write-glyphs! (current-display)
                                    "$" screen-row x0
                                    (face->attribute 'default))
-                    (draw-line! ed slice-start line-string texts slice
+                    (draw-line! ed slice-start texts slice
                                 screen-row (+ x0 1) row-width
                                 #f hscroll-truncated?))
-                  (draw-line! ed slice-start line-string texts slice
+                  (draw-line! ed slice-start texts slice
                               screen-row x0 width more?
                               (and truncated? (not more?))))
               (rows-loop (cdr rest) (+ k 1)))))))
@@ -2700,7 +2685,7 @@
                      ;; are placed by `window-point' above. Emacs keeps the
                      ;; echo area's point in the minibuffer buffer, which
                      ;; is the same thing here.
-                     (at (text-editor-get-cursor reading))
+                     (at (buffer-pt reading))
                      (glyph (cursor-glyph reading at)))
                 (draw-window-cursor! (current-display)
                                      (- height 1)
@@ -2776,21 +2761,27 @@
     ;; command that installed it has returned.
     ;;--------------------------------------------------------------
 
-    (define (%posn-char-at line-string from to column)
-      ;; The offset within LINE-STRING of the character drawn at display
-      ;; COLUMN, walking `from' to `to' and adding each character's own
-      ;; width - a wide character takes two columns, so counting
-      ;; characters would land a cell to the left of what was clicked.
+    (define (%posn-char-at texts from to column)
+      ;; The offset within TEXTS of the character drawn at display COLUMN,
+      ;; walking `from' to `to' and adding each text's own width - a wide
+      ;; character takes two columns and a `display' property's string takes
+      ;; its own - so counting characters would land a cell to the left of
+      ;; what was clicked.
       ;;
-      ;; The accumulation is `text-cells'' and `scan_for_column''s, and
-      ;; it stops at `to': a click past the end of a slice is the end of
+      ;; The accumulation is `texts-width''s and `scan_for_column''s, which
+      ;; is the walk the row was *drawn* with, so this cannot disagree with
+      ;; what is on the screen. It walked the line's characters instead,
+      ;; which is right only for a line no `display' property stands in -
+      ;; and the one line in this tree that has one is Dired's disk-space
+      ;; header, which is exactly where a click would land a cell out.
+      ;;
+      ;; It stops at `to': a click past the end of a slice is the end of
       ;; the slice.
       ;;--------------------------------------------------------------
       (let loop ((i from) (c 0))
         (if (or (>= i to) (>= c column))
             (min i to)
-            (loop (+ i 1)
-                  (+ c (char-display-width (string-ref line-string i) c))))))
+            (loop (+ i 1) (+ c (texts-width texts i c))))))
 
     (define (remember-mouse-glyph frame x y)
       ;; GNU Emacs's `remember_mouse_glyph' (`xdisp.c:2778'): "Return the
@@ -2835,11 +2826,11 @@
       ;; counted from the window's own top-left corner. This tree counts
       ;; *cells* where the C counts pixels and glyphs.
       ;;
-      ;; The walk is the renderer's own - the same `line-string-at',
-      ;; `line-display-texts' and `%window-line-slices' that
-      ;; `render-window-rows!' uses, advanced by the same
-      ;; `line-next-start' - which is what makes the answer agree with
-      ;; what is on the screen. A second walk written by hand would be
+      ;; The walk is the renderer's own - the same `line-display-texts'
+      ;; and `%window-line-slices' that `render-window-rows!' uses,
+      ;; advanced by the same `line-next-start', and landing within a row
+      ;; by `%posn-char-at', which is the row's own measure - which is what
+      ;; makes the answer agree with what is on the screen. A second walk written by hand would be
       ;; free to disagree, and this file has a section on how that goes.
       ;;
       ;; #f when the coordinates are past the end of the text: there is
@@ -2859,15 +2850,14 @@
            ((>= r vheight) last-end)
            ((not line-start) last-end)
            (else
-            (let* ((line-string (line-string-at ed line-start))
-                   (texts (line-display-texts ed line-start line-string))
+            (let* ((texts (line-display-texts ed line-start))
                    (slices (%window-line-slices window texts)))
               (cond
                ((null? slices) last-end)
                ((< row (+ r (length slices)))
                 (let ((slice (list-ref slices (- row r))))
                   (+ line-start
-                     (%posn-char-at line-string (car slice) (cdr slice)
+                     (%posn-char-at texts (car slice) (cdr slice)
                                     column))))
                ((not (line-next-start ed line-start))
                 (text-editor-get-end-of-line ed line-start))

@@ -47,10 +47,10 @@
     (only (schemacs editor command)
           define-command)
     (only (schemacs editor engine)
-          text-editor-get-cursor text-editor-set-cursor text-editor-modified?
+          buffer-pt text-editor-set-cursor text-editor-modified?
           text-editor-set-modified! text-editor-read-only?
-          text-editor-point-min text-editor-point-max
-          text-editor-set-read-only! text-editor-char-count
+          buffer-beg buffer-z
+          text-editor-set-read-only!
           text-editor-file-name text-editor-buffer-name text-editor-insert
           text-editor-delete-from-cursor text-editor-undo-disable!
           text-editor-undo-enable! text-editor-get-start-of-line
@@ -251,7 +251,7 @@
                     ((text-editor-modified? buffer) "*")
                     (else " "))
               (Buffer-menu--pretty-name (buffer-name buffer))
-              (number->string (text-editor-char-count buffer))
+              (number->string (- (buffer-z buffer) (buffer-beg buffer)))
               "Fundamental"
               (Buffer-menu--pretty-file-name (text-editor-file-name buffer)
                                                 buffer))))
@@ -362,11 +362,11 @@
       ;; this project has.
       ;;--------------------------------------------------------------
       (let ((ed (current-buffer)))
-        (text-editor-set-cursor ed (text-editor-point-min ed))
+        (text-editor-set-cursor ed (buffer-beg ed))
         ;; the newline ending the titles' line is the last character on it,
         ;; so one past it is the first character of the first buffer's line
         (text-editor-set-cursor
-         ed (min (text-editor-point-max ed)
+         ed (min (buffer-z ed)
                  (+ 1 (text-editor-get-end-of-line ed))))))
 
     (define (Buffer-menu-buffer)
@@ -381,7 +381,7 @@
     (define (Buffer-menu--move-down!)
       (let ((ed (current-buffer)))
         (text-editor-set-cursor
-         ed (min (text-editor-point-max ed)
+         ed (min (buffer-z ed)
                  (+ 1 (text-editor-get-end-of-line ed))))))
 
     (define-command (Buffer-menu-mark)
@@ -597,7 +597,7 @@
            (when (> n 0)
              (let ((ed (current-buffer)))
                (text-editor-set-cursor
-                ed (max (text-editor-point-min ed)
+                ed (max (buffer-beg ed)
                         (- (text-editor-get-start-of-line ed) 2))))
              (loop (- n 1)))))
     (define buffer-menu-mode-map

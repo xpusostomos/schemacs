@@ -20,9 +20,9 @@
     (only (schemacs editor character) kbd)
     (scheme base)
     (only (schemacs editor engine)
-          text-editor-char-count text-editor-get-char-index
-          text-editor-point-min text-editor-point-max
-          text-editor-get-cursor text-editor-get-start-of-line
+    fetch-char
+          buffer-beg buffer-z
+          buffer-pt text-editor-get-start-of-line
           text-editor-get-end-of-line text-editor-set-cursor)
     (only (schemacs editor editfns) goto-char save-excursion forward-line)
     ;; the line ends and the blank-line question are simple.sld's -
@@ -54,18 +54,12 @@
 
   (begin
 
-    (define (%char-at ed index)
-      ;; The character at INDEX, or #f: simple.sld's, for the walking
-      ;; below.
-      ;;--------------------------------------------------------------
-      (text-editor-get-char-index ed index))
-
     (define (%paragraph-start-line? ed)
       ;; A line whose first character is a formfeed - the "\f\\|"
       ;; branch of the default `paragraph-start' - beside the blank
       ;; line the rest of it says. The cursor must be ON the line.
       ;;--------------------------------------------------------------
-      (or (memv (%char-at ed (text-editor-get-start-of-line ed))
+      (or (memv (fetch-char ed (text-editor-get-start-of-line ed))
                 (list (integer->char 12)))
           (%blank-line? ed)))
 
@@ -75,7 +69,7 @@
       ;; called with the walk's editor. The answer of interest to the
       ;; walks is whether the line moved at all.
       ;;--------------------------------------------------------------
-      (let ((before (text-editor-get-cursor ed))
+      (let ((before (buffer-pt ed))
             (after (forward-line 1)))
         0))
 
@@ -83,7 +77,7 @@
       ;; The backward mirror, the same way.
       ;;--------------------------------------------------------------
       (let ((start (text-editor-get-start-of-line ed)))
-        (if (> start (text-editor-point-min ed))
+        (if (> start (buffer-beg ed))
             (begin
               (text-editor-set-cursor ed (- start 1))
               (text-editor-set-cursor
@@ -107,8 +101,8 @@
             (backward-paragraph (- n))
             (let loop ((left n))
               (if (and (> left 0)
-                       (< (text-editor-get-cursor ed)
-                          (text-editor-point-max ed)))
+                       (< (buffer-pt ed)
+                          (buffer-z ed)))
                   (begin
                     ;; over the separator lines
                     (let skip ()
@@ -121,8 +115,8 @@
                     ;; paragraph-start line, or the end
                     (let find ()
                       (cond
-                       ((>= (text-editor-get-cursor ed)
-                            (text-editor-point-max ed)) #f)
+                       ((>= (buffer-pt ed)
+                            (buffer-z ed)) #f)
                        ((%paragraph-start-line? ed) #f)
                        (else (%forward-line ed) (find))))
                     (loop (- left 1)))
@@ -142,7 +136,7 @@
             (forward-paragraph (- n))
             (let loop ((left n))
               (if (and (> left 0)
-                       (> (text-editor-get-cursor ed) 0))
+                       (> (buffer-pt ed) 0))
                   (begin
                     ;; back over separator lines, which includes the
                     ;; blank line this walk may start on
@@ -153,7 +147,7 @@
                     ;; up while the line above this one is not blank
                     (let find ()
                       (if (<= (text-editor-get-start-of-line ed)
-                              (text-editor-point-min ed))
+                              (buffer-beg ed))
                           #f
                           (let ((above (begin
                                          (text-editor-set-cursor
@@ -161,7 +155,7 @@
                                                 1))
                                          (text-editor-set-cursor
                                           ed (text-editor-get-start-of-line ed))
-                                         (text-editor-get-cursor ed))))
+                                         (buffer-pt ed))))
                             (text-editor-set-cursor ed above)
                             (unless (%blank-line? ed)
                               (find)))))
@@ -176,7 +170,7 @@
       "Kill forward to end of paragraph."
       (interactive (list (uarg->integer 1 (current-prefix-arg))))
       (let* ((ed (current-buffer))
-             (here (text-editor-get-cursor ed)))
+             (here (buffer-pt ed)))
         ;; Emacs's `(progn (forward-paragraph arg) (point))': the motion
         ;; moves point, and it is point AFTER it that the kill runs to -
         ;; the motion's own answer is the count left undone, which is
@@ -184,7 +178,7 @@
         (if (< arg 0)
             (backward-paragraph (- arg))
             (forward-paragraph arg))
-        (let ((there (text-editor-get-cursor ed)))
+        (let ((there (buffer-pt ed)))
           (kill-region (+ 1 (min here there))
                        (+ 1 (max here there))))))
 
@@ -220,14 +214,41 @@ it marks the next ARG paragraphs after the ones already marked."
       (interactive (list (uarg->integer 1 (current-prefix-arg)) #t))
       (if (= arg 0)
           (error "Cannot mark zero paragraphs"))
+      ;; Emacs's condition is
+      ;;
+      ;;   (and allow-extend
+      ;;        (or (and (eq last-command this-command) (mark t))
+      ;;            (and transient-mark-mode mark-active)))
+      ;;
+      ;; - the `(mark t)' conjunct is load-bearing: the extend branch
+      ;; starts by going to the mark, so it may only be taken when there
+      ;; *is* one. Without it a repeat with no mark went to `(goto-char
+      ;; #f)' and died with "text editor index must be set with an
+      ;; integer".
       (if (and allow-extend
-               (or (eq? (*last-command*) mark-paragraph)
+               (or (and (eq? (*last-command*) mark-paragraph) (mark #t))
                    (and (transient-mark-mode) (mark-active))))
-          ;; extend: the mark is where the last one ended
-          (let ((here (mark #t)))
-            (goto-char (+ 1 here))
-            (forward-paragraph arg)
-            (set-mark (text-editor-get-cursor (current-buffer))))
+          ;; extend: the mark is where the last one ended. Emacs's body is
+          ;;
+          ;;   (set-mark (save-excursion
+          ;;               (goto-char (mark))
+          ;;               (forward-paragraph arg)
+          ;;               (point)))
+          ;;
+          ;; - the walk happens *at the mark*, and `save-excursion' is what
+          ;; leaves point where it was: the mark moves, point does not.
+          ;;
+          ;; This was `(goto-char (+ 1 here))' with no excursion, two
+          ;; departures in three lines: the `+ 1' was left from when the
+          ;; mark was a zero-based index (it is a marker position now, and
+          ;; one-based like every other), and without the excursion the
+          ;; point stayed where the walk left it - so a second `M-h' threw
+          ;; point to the end of the paragraphs it had just marked.
+          (set-mark
+           (save-excursion
+             (goto-char (mark #t))
+             (forward-paragraph arg)
+             (buffer-pt (current-buffer))))
           (begin
             (forward-paragraph arg)
             (push-mark #f #t #t)

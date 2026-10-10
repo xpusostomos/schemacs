@@ -27,8 +27,8 @@
     (scheme base)
     (only (schemacs editor character) char-width)
     (only (schemacs editor engine)
-          text-editor-get-cursor text-editor-get-start-of-line
-          text-editor-point-max text-editor-ref)
+          buffer-pt text-editor-get-start-of-line
+          buffer-z fetch-char)
     (only (schemacs editor buffer) buffer-tab-width current-buffer)
     (only (schemacs editor editfns)
           delete-region forward-line goto-char insert-char point
@@ -36,7 +36,7 @@
     (only (schemacs editor textprop)
           get-text-property next-single-property-change)
     (only (schemacs editor syntax) skip-chars-forward)
-    (only (schemacs editor disp-table) display-text-width)
+    (only (schemacs editor character) string-width)
     )
 
   (export
@@ -102,7 +102,10 @@
       ;; produced anywhere in this tree, so they are not carried.
       ;;--------------------------------------------------------------
       (let ((prop (get-text-property pos 'display ed)))
-        (and (string? prop) (display-text-width prop 0))))
+        ;; `check_display_width' (`indent.c:567') measures the
+        ;; property's string with `Fstring_width (val, Qnil, Qnil)' -
+        ;; `string-width' with no FROM or TO.
+        (and (string? prop) (string-width prop))))
 
     (define (scan-for-column ed endpos goalcol)
       ;; GNU Emacs's `scan_for_column' (`indent.c:607'): "Scanning from
@@ -144,7 +147,7 @@
       ;;--------------------------------------------------------------
       (let* ((tab-width (buffer-tab-width ed))
              (goal (or goalcol +inf.0))
-             (end (or endpos (text-editor-get-cursor ed)))
+             (end (or endpos (buffer-pt ed)))
              ;; "Start the scan at the beginning of this line with column
              ;; number 0" - the C's backward `find_newline (..., -1, ...)'
              ;; is the line's start.
@@ -165,13 +168,13 @@
                           (loop endp (+ col width) scan col)
                           ;; the C's "avoid infinite loops with 0-width
                           ;; overlays": the character is still counted
-                          (let ((c (text-editor-ref ed scan)))
+                          (let ((c (fetch-char ed scan)))
                             (if (not c)
                                 (values scan col prev-pos prev-col)
                                 (loop (+ scan 1)
                                       (%column-width c col tab-width)
                                       scan col)))))
-                    (let ((c (text-editor-ref ed scan)))
+                    (let ((c (fetch-char ed scan)))
                       (if (or (not c) (char=? c #\newline))
                           ;; a newline ends the line: `goto endloop'
                           (values scan col prev-pos prev-col)
@@ -249,13 +252,13 @@
       (let ((force (if (pair? rest) (car rest) #f))
             (ed (current-buffer)))
         (call-with-values
-            (lambda () (scan-for-column ed (text-editor-point-max ed) column))
+            (lambda () (scan-for-column ed (buffer-z ed) column))
           (lambda (pos col prev-pos prev-col)
             (goto-char pos)
             ;; "If a tab char made us overshoot, change it to spaces and
             ;; scan through it again."
             (when (and force (> col column))
-              (let ((c (text-editor-ref ed prev-pos)))
+              (let ((c (fetch-char ed prev-pos)))
                 (when (and (char? c)
                            (char=? c #\tab)
                            (< prev-col column)

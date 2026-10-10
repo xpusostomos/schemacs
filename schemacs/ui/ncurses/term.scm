@@ -299,14 +299,17 @@
     ;; but answers the same generics.
     ;;------------------------------------------------------------------
 
-    (define-method (write-glyphs! (d <tty-display>) text y x attribute)
+    (define-method (write-glyphs! (d <tty-display>) glyphs y x attribute)
       ;; Draw TEXT at row Y, column X with ATTRIBUTE - or the terminal's
       ;; own appearance when ATTRIBUTE is #f, which is what not starting
       ;; a face means. This is the one operation everything a window
       ;; shows comes down to.
       ;;--------------------------------------------------------------
       (when attribute (attr-on! (stdscr) attribute))
-      (addstr (stdscr) text #:y y #:x x)
+      ;; The cells joined: ncurses writes a string, and a run is one face,
+      ;; so this is one `addstr'. (A loop of `addch' is the other spelling,
+      ;; and the cells are never a *line* either way.)
+      (addstr (stdscr) (glyphs->text glyphs) #:y y #:x x)
       (when attribute (attr-off! (stdscr) attribute)))
 
     (define-method (clear-frame-area! (d <tty-display>))

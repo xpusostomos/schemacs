@@ -23,13 +23,13 @@
     (only (srfi 1) filter)
     (only (guile) lognot logand logior)
     (only (schemacs comparator) make-eqv-comparator)
-    (only (schemacs hash-table)
-          hash-table-empty?
-          alist->hash-table hash-table->alist
-          hash-table? hash-table-size make-hash-table
-          hash-table-fold hash-table-ref/default
-          hash-table-copy hash-table-set!
-          ))
+    ;; (only (schemacs hash-table)
+    ;;       hash-table-empty?
+    ;;       alist->hash-table hash-table->alist
+    ;;       hash-table? hash-table-size make-hash-table
+    ;;       hash-table-fold hash-table-ref/default
+    ;;       hash-table-copy hash-table-set!
+    ;;       ))
 
   (cond-expand
     (guile-3

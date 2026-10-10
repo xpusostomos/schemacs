@@ -62,7 +62,7 @@
     (only (ice-9 weak-vector) list->weak-vector weak-vector-ref weak-vector?)
     (only (schemacs editor engine)
           *text-property-offset-function*
-          text-editor-char-count text-editor-point-max
+          buffer-beg buffer-z
           text-editor-text-props set!text-editor-text-props))
 
   (export
@@ -262,7 +262,7 @@
       ;;--------------------------------------------------------------
       (if (string? object)
           (string-length object)
-          (text-editor-char-count object)))
+          (- (buffer-z object) (buffer-beg object))))
 
     (define (object-beg-position object)
       ;; The first position of OBJECT: a buffer's `BEGV', which is 1, and
@@ -277,7 +277,7 @@
       ;;--------------------------------------------------------------
       (if (string? object)
           (string-length object)
-          (text-editor-point-max object)))
+          (buffer-z object)))
 
     (define (object-last-position object)
       ;; The position of OBJECT's last character, or its first position
@@ -1549,7 +1549,7 @@
               (if tree
                   (set!buffer-intervals buffer (balance-an-interval tree)))
               #f)
-            (if (= (text-editor-char-count buffer) length)
+            (if (= (- (buffer-z buffer) (buffer-beg buffer)) length)
                 ;; "The inserted text constitutes the whole buffer, so
                 ;; simply copy over the interval structure." The C then
                 ;; re-states the root's position - `buffer_intervals

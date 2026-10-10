@@ -65,9 +65,9 @@
           text-editor-modified? text-editor-set-modified!
           text-editor-cache-long-scans set!text-editor-cache-long-scans
           text-editor-read-only? text-editor-set-read-only!
-          text-editor-get-cursor text-editor-set-cursor
-          text-editor-delete-from-cursor text-editor-char-count
-          text-editor-point-min text-editor-point-max
+          buffer-pt text-editor-set-cursor
+          text-editor-delete-from-cursor
+          buffer-beg buffer-z
           ;; an overlay's two ends are markers: `marker.c''s, which is
           ;; also the engine's, and they are what makes an overlay follow
           ;; the text as it is edited
@@ -1117,7 +1117,7 @@
       (let ((buffer (current-buffer)))
         (let loop ((l (buffer-overlays buffer)) (best #f))
           (cond ((null? l)
-                 (or best (text-editor-point-max buffer)))
+                 (or best (buffer-z buffer)))
                 (else
                  (let ((s (overlay-start (car l)))
                        (e (overlay-end (car l))))
@@ -1394,8 +1394,8 @@
                  (not (*inhibit-read-only*)))
         (error "Buffer is read-only"))
       (let ((ed (current-buffer)))
-        (text-editor-set-cursor ed (text-editor-point-min ed))
-        (text-editor-delete-from-cursor ed (text-editor-char-count ed)))
+        (text-editor-set-cursor ed (buffer-beg ed))
+        (text-editor-delete-from-cursor ed (- (buffer-z ed) (buffer-beg ed))))
       #f)
 
 

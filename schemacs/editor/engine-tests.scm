@@ -53,7 +53,7 @@
   ;; A string index counts from 0 and a buffer position from 1, so the
   ;; buffer is read one ahead of the string.
   (let*((strlen (string-length str))
-	(buflen (text-editor-char-count buf))
+	(buflen (- (buffer-z buf) (buffer-beg buf)))
 	(len (min strlen buflen))
 	)
     ;;(display "strlen=") (write strlen) (display ", buflen=") (write buflen) (newline);;DEBUG
@@ -62,7 +62,7 @@
       (cond
        ((< i len)
 	(let ((str-ch (string-ref str i))
-	      (buf-ch (text-editor-get-char-index buf (+ i 1)))
+	      (buf-ch (fetch-char buf (+ i 1)))
 	      )
 	  ;;(display "s=") (write str-ch) (display ", b=") (write buf-ch) (newline);;DEBUG
 	  (cond
@@ -71,7 +71,7 @@
 	   )))
        ((< i buflen)
 	;;(display " end of string\n");;DEBUG
-	(values i #f (text-editor-get-char-index buf (+ i 1)))
+	(values i #f (fetch-char buf (+ i 1)))
 	)
        ((< i strlen)
 	;;(display " end of buffer\n");;DEBUG
@@ -163,8 +163,7 @@
 ;; 3. regression tests: cursor motion, navigation, and line breaks
 ;;
 ;; These exercise the procedures which navigate and edit the text
-;; editor buffer, including round-trips through `text-load-port` and
-;; `text-dump-port`, and CRLF-protocol files.
+;; editor buffer, including text that carries CR characters.
 
 (test-begin "schemacs_editor_engine_motion")
 
@@ -213,18 +212,19 @@
     (text-editor-insert ed "!")
     (text-editor-to-string ed)))
 
-;; A CRLF-protocol file must round-trip, including after edits.
+;; CR characters are ordinary characters in the buffer - a line break is
+;; not a property of the buffer any more, it is whatever characters are
+;; in it - so text carrying CRLF round-trips like any other text.
 (test-equal "one\r\ntwo\r\nthrXee\r\n"
-  (let ((ed (new-text-editor line-break-crlf)))
+  (let ((ed (new-text-editor)))
     (text-editor-insert ed "one\r\ntwo\r\nthree\r\n")
     (text-editor-move-cursor ed -4)
     (text-editor-insert ed "X")
     (text-editor-to-string ed)))
 
-;; A mid-line break in a CRLF-protocol file splits into two CRLF
-;; lines.
+;; A mid-line CRLF splits into two CRLF lines.
 (test-equal "HELLO\r\nWORLD\r\n"
-  (let ((ed (new-text-editor line-break-crlf)))
+  (let ((ed (new-text-editor)))
     (text-editor-insert ed "HELLOWORLD\r\n")
     (text-editor-move-cursor ed -7)
     (text-editor-insert ed "\r\n")
@@ -238,9 +238,9 @@
    (text-editor-insert ed "alpha\nbeta\ngamma\n")
    ;; move to start
    (text-editor-move-cursor ed -100)
-   (let ((start (text-editor-get-cursor ed)))
+   (let ((start (buffer-pt ed)))
      (text-editor-set-cursor ed 2 2)
-     (let ((mid (text-editor-get-cursor ed)))
+     (let ((mid (buffer-pt ed)))
        (and (= 1 start) (= 9 mid))))))
 
 ;; Deleting characters within a line.
@@ -298,14 +298,14 @@
   (let ((ed (new-text-editor)))
     (text-editor-insert ed "X")
     (text-editor-set-cursor ed 1 0)
-    (text-editor-get-char-index ed 1)))
+    (fetch-char ed 1)))
 
 ;; Copying a whole single-line buffer keeps its first character.
 (test-equal "one two"
   (let ((ed (new-text-editor)))
     (text-editor-insert ed "one two")
     (text-editor-set-cursor ed 1 0)
-    (text-editor-copy-string ed 1 8)))
+    (make-buffer-string ed 1 8)))
 
 ;; The first character of every line: position 5 begins the second line
 ;; and position 10 the third.
@@ -313,14 +313,14 @@
   (let ((ed (new-text-editor)))
     (text-editor-insert ed "abc\ndefg\nhi")
     (text-editor-set-cursor ed 1 0)
-    (map (lambda (i) (text-editor-get-char-index ed i)) '(1 5 10))))
+    (map (lambda (i) (fetch-char ed i)) '(1 5 10))))
 
 ;; An index past the end of the buffer is still unresolvable.
 (test-equal #f
   (let ((ed (new-text-editor)))
     (text-editor-insert ed "abc")
     (text-editor-set-cursor ed 0 0)
-    (text-editor-get-char-index ed 4)))
+    (fetch-char ed 4)))
 
 (test-end "schemacs_editor_engine_char_index")
 
@@ -376,7 +376,7 @@
     (text-editor-insert ed "abc")
     (text-editor-set-cursor ed 1 0)
     (undo! ed 1)
-    (list (text-editor-to-string ed) (text-editor-get-cursor ed))))
+    (list (text-editor-to-string ed) (buffer-pt ed))))
 
 ;; A deletion is recorded with the deleted text, so undo can put it
 ;; back without having to recover it from the buffer - which is what
@@ -404,7 +404,7 @@
     (text-editor-set-cursor ed 6)
     (text-editor-delete-from-cursor ed 1)
     (undo! ed 1)
-    (list (text-editor-to-string ed) (text-editor-get-cursor ed))))
+    (list (text-editor-to-string ed) (buffer-pt ed))))
 
 ;; Undo, redo, undo: the records an undo creates are ordinary entries at
 ;; the front of the list, so redoing is undoing them. Round-tripping
@@ -518,7 +518,7 @@
     (text-editor-set-cursor ed 3)
     (text-editor-delete-from-cursor ed -2)
     (undo! ed 1)
-    (list (text-editor-to-string ed) (text-editor-get-cursor ed))))
+    (list (text-editor-to-string ed) (buffer-pt ed))))
 
 (test-equal '("abcd" 1)
   (let ((ed (new-text-editor)))
@@ -527,19 +527,18 @@
     (text-editor-set-cursor ed 1)
     (text-editor-delete-from-cursor ed 2)
     (undo! ed 1)
-    (list (text-editor-to-string ed) (text-editor-get-cursor ed))))
+    (list (text-editor-to-string ed) (buffer-pt ed))))
 
-;; Reading a file records the insertion like any other, which is what
-;; GNU Emacs's `insert-file-contents' does - its `buffer-undo-list'
-;; after a 12-character read is `((1 . 13) (t . 0))', and so is this.
-;; It is the *visit* that leaves nothing to undo, and that is
-;; `find-file-noselect''s doing (`empty_undo_list_p', fileio.c:4125).
+;; Inserting a file's characters records the insertion like any other,
+;; which is what GNU Emacs's `insert-file-contents' does - its
+;; `buffer-undo-list' after a 12-character read is `((1 . 13) (t . 0))',
+;; and so is this. It is the *visit* that leaves nothing to undo, and
+;; that is `find-file-noselect''s doing (`empty_undo_list_p',
+;; fileio.c:4125). Reading the file is `(schemacs editor files)`'s now -
+;; this is the insertion it performs.
 (test-equal '(((1 . 13) (t . 0)) "loaded\ntext\n")
   (let ((ed (new-text-editor)))
-    (call-with-output-file "/tmp/schemacs-undo-test.txt"
-      (lambda (port) (display "loaded\ntext\n" port)))
-    (call-with-input-file "/tmp/schemacs-undo-test.txt"
-      (lambda (port) (text-load-port ed port)))
+    (text-editor-insert ed "loaded\ntext\n")
     (list (text-editor-undo-list ed) (text-editor-to-string ed))))
 
 ;; Disabling undo drops the list and stops recording; enabling it again
@@ -550,7 +549,7 @@
     (text-editor-insert ed "abc")
     (text-editor-undo-disable! ed)
     (let ((disabled (list (text-editor-undo-recording? ed)
-                          (text-editor-char-count ed))))
+                          (- (buffer-z ed) (buffer-beg ed)))))
       (text-editor-undo-enable! ed)
       (let ((enabled (text-editor-undo-list ed)))
         (text-editor-insert ed "wxyz")
@@ -755,7 +754,7 @@
   (let ((ed (new-text-editor)))
     (text-editor-insert ed "abc")
     (text-editor-set-read-only! ed #t)
-    (list (text-editor-to-string ed) (text-editor-char-count ed))))
+    (list (text-editor-to-string ed) (- (buffer-z ed) (buffer-beg ed)))))
 
 ;; Read-only and modified are independent: saving a buffer does not
 ;; change whether it refuses edits, and a read-only buffer can be
@@ -790,9 +789,8 @@
 ;; `text-editor-search-forward' and `text-editor-search-backward' are
 ;; GNU Emacs's `search-forward' and `search-backward' (mg's
 ;; forwsrch/backsrch): they report where point would be left - past the
-;; match forwards, at its start backwards. A line break counts as one
-;; #\newline whichever line-break protocol the buffer uses, which is what
-;; makes a match that spans lines findable.
+;; match forwards, at its start backwards. A line break in the buffer is
+;; one #\newline, which is what makes a match that spans lines findable.
 
 (test-begin "schemacs_editor_engine_search")
 
@@ -853,7 +851,7 @@
 ;; beyond that one, and GNU Emacs puts `point-max' at the end of it.
 ;; `text-editor-index-line-offset` reported such a position on an empty
 ;; line past the end instead - a line the buffer does not have, and one
-;; `text-editor-line-count` does not count - which made `C-e' leave
+;; its own line count left out - which made `C-e' leave
 ;; point where `beginning-of-line' could not reach: the start of the
 ;; empty line was the position point was already at, so `C-e' then
 ;; `C-a' moved point nowhere, and the mode line read `L2 C1' for a file
@@ -869,7 +867,7 @@
   (let ((ed (new-text-editor)))
     (text-editor-insert ed "abc")
     (text-editor-move-cursor ed 100)
-    (list (text-editor-line-count ed)
+    (list (+ 1 (count-lines ed (buffer-beg ed) (buffer-z ed)))
           (text-editor-cursor-line ed)
           (text-editor-cursor-column ed)
           (text-editor-get-start-of-line ed)
@@ -893,8 +891,8 @@
   (let* ((ed (new-text-editor))
          (pos (begin (text-editor-insert ed "ab\ncd")
                      (text-editor-set-cursor ed 5)
-                     (text-editor-get-cursor ed))))
-    (list (+ 1 (count-lines ed (text-editor-point-min ed) pos))
+                     (buffer-pt ed))))
+    (list (+ 1 (count-lines ed (buffer-beg ed) pos))
           (- pos (text-editor-get-start-of-line ed pos)))))
 
 ;; Point at that end still reaches the beginning of the line, which is
@@ -905,7 +903,7 @@
     (text-editor-move-cursor ed 100)
     (text-editor-set-cursor ed (text-editor-get-end-of-line ed))
     (text-editor-set-cursor ed (text-editor-get-start-of-line ed))
-    (text-editor-get-cursor ed)))
+    (buffer-pt ed)))
 
 ;; A line break at the end of the buffer does start a line: the buffer
 ;; has two lines and the empty one gets `point-max'.
@@ -913,7 +911,7 @@
   (let ((ed (new-text-editor)))
     (text-editor-insert ed "abc\n")
     (text-editor-move-cursor ed 100)
-    (list (text-editor-line-count ed)
+    (list (+ 1 (count-lines ed (buffer-beg ed) (buffer-z ed)))
           (text-editor-cursor-line ed)
           (text-editor-cursor-column ed)
           (text-editor-get-start-of-line ed)
@@ -929,8 +927,8 @@
     (text-editor-insert ed "abc")
     (text-editor-set-cursor ed 2 0)
     (list (text-editor-cursor-line ed)
-          (text-editor-get-cursor ed)
-          (text-editor-char-count ed))))
+          (buffer-pt ed)
+          (- (buffer-z ed) (buffer-beg ed)))))
 
 ;; With a line break at the end there is: the empty line the break
 ;; started is addressable, at the position the break ends at.
@@ -939,8 +937,8 @@
     (text-editor-insert ed "abc\n")
     (text-editor-set-cursor ed 2 0)
     (list (text-editor-cursor-line ed)
-          (text-editor-get-cursor ed)
-          (text-editor-line-count ed))))
+          (buffer-pt ed)
+          (+ 1 (count-lines ed (buffer-beg ed) (buffer-z ed))))))
 
 ;; Typing a line break at the end of a buffer with no trailing break
 ;; starts a line, and point is on it.
@@ -949,7 +947,7 @@
     (text-editor-insert ed "abc")
     (text-editor-move-cursor ed 100)
     (text-editor-insert ed "\n")
-    (list (text-editor-line-count ed)
+    (list (+ 1 (count-lines ed (buffer-beg ed) (buffer-z ed)))
           (text-editor-cursor-line ed)
           (text-editor-cursor-column ed))))
 
@@ -959,7 +957,7 @@
   (let ((ed (new-text-editor)))
     (text-editor-insert ed "one\ntwo\n")
     (text-editor-move-cursor ed 100)
-    (list (text-editor-line-count ed)
+    (list (+ 1 (count-lines ed (buffer-beg ed) (buffer-z ed)))
           (text-editor-cursor-line ed)
           (text-editor-cursor-column ed))))
 
@@ -981,9 +979,9 @@
   (let ((ed (new-text-editor)))
     (text-editor-insert ed "abcd")
     (text-editor-set-cursor ed 5)
-    (list (text-editor-line-count ed)
+    (list (+ 1 (count-lines ed (buffer-beg ed) (buffer-z ed)))
           (text-editor-cursor-column ed)
-          (text-editor-get-cursor ed))))
+          (buffer-pt ed))))
 
 ;; Deleting backwards at the end takes the two characters before it:
 ;; Emacs: "abcd" with point at the end and `(delete-char -2)' is "ab"
@@ -994,7 +992,7 @@
     (text-editor-set-cursor ed 5)
     (let ((deleted (text-editor-delete-from-cursor ed -2)))
       (list (text-editor-to-string ed)
-            (text-editor-get-cursor ed)
+            (buffer-pt ed)
             deleted))))
 
 ;; ... and the deletion is recorded as what was really deleted, so
@@ -1015,7 +1013,7 @@
 (test-equal '(2 2 0)
   (let ((ed (new-text-editor)))
     (text-editor-insert ed "abcd\n")
-    (list (text-editor-line-count ed)
+    (list (+ 1 (count-lines ed (buffer-beg ed) (buffer-z ed)))
           (text-editor-cursor-line ed)
           (text-editor-cursor-column ed))))
 
@@ -1027,7 +1025,7 @@
     (text-editor-insert ed "abcd\n")
     (text-editor-set-cursor ed 6)
     (text-editor-delete-from-cursor ed -2)
-    (list (text-editor-to-string ed) (text-editor-get-cursor ed))))
+    (list (text-editor-to-string ed) (buffer-pt ed))))
 
 ;; Writing a line back while the cursor is in the middle of it leaves the
 ;; cursor there: Emacs: point after inserting "X" at position 3 of
@@ -1037,9 +1035,9 @@
     (text-editor-insert ed "abcdef")
     (text-editor-set-cursor ed 3)          ; writes the line back
     (text-editor-insert ed "X")            ; the line is changed again
-    (let ((before (text-editor-get-cursor ed)))
-      (text-editor-copy-string ed 1 8)     ; a read, which writes back
-      (list (text-editor-to-string ed) before (text-editor-get-cursor ed)))))
+    (let ((before (buffer-pt ed)))
+      (make-buffer-string ed 1 8)     ; a read, which writes back
+      (list (text-editor-to-string ed) before (buffer-pt ed)))))
 
 ;; Deleting backwards in the middle of a line was always right, and stays
 ;; right: Emacs: point 3 of "abcdef" with `(delete-char -1)' is "acdef"
@@ -1049,7 +1047,7 @@
     (text-editor-insert ed "abcdef")
     (text-editor-set-cursor ed 3)
     (text-editor-delete-from-cursor ed -1)
-    (list (text-editor-to-string ed) (text-editor-get-cursor ed))))
+    (list (text-editor-to-string ed) (buffer-pt ed))))
 
 (test-end "schemacs_editor_engine_end_of_buffer")
 
@@ -1084,7 +1082,7 @@
     (text-editor-insert ed "alpha")
     (list (text-editor-to-string ed)
           (text-editor-buffer-name ed)
-          (text-editor-char-count ed))))
+          (- (buffer-z ed) (buffer-beg ed)))))
 
 ;; A buffer with no file can be named after something that is not a
 ;; file at all - "*Completions*" - which is what a window showing one
@@ -1315,7 +1313,7 @@
     (text-editor-insert ed "abc\ndef\n")
     (text-editor-set-cursor ed 1 3)
     (text-editor-delete-from-cursor ed 1)
-    (list (text-editor-char-count ed)
+    (list (- (buffer-z ed) (buffer-beg ed))
           (string-length (text-editor-to-string ed))
           (text-editor-to-string ed))))
 
@@ -1326,7 +1324,7 @@
     (text-editor-insert ed "abc\ndef\n")
     (text-editor-set-cursor ed 2 0)
     (text-editor-delete-from-cursor ed -1)
-    (list (text-editor-char-count ed)
+    (list (- (buffer-z ed) (buffer-beg ed))
           (string-length (text-editor-to-string ed))
           (text-editor-to-string ed))))
 
@@ -1337,7 +1335,7 @@
     (text-editor-insert ed "schemacs/\nscratch.md\nscratch-ro.md\n")
     (text-editor-set-cursor ed 0 0)
     (text-editor-delete-from-cursor ed 35)
-    (list (text-editor-char-count ed)
+    (list (- (buffer-z ed) (buffer-beg ed))
           (string-length (text-editor-to-string ed))
           (text-editor-to-string ed))))
 
@@ -1347,12 +1345,12 @@
 (test-equal '(35 0 35)
   (let ((ed (new-text-editor)))
     (text-editor-insert ed "schemacs/\nscratch.md\nscratch-ro.md\n")
-    (let ((full (text-editor-char-count ed)))
+    (let ((full (- (buffer-z ed) (buffer-beg ed))))
       (text-editor-set-cursor ed 0)
-      (text-editor-delete-from-cursor ed (text-editor-char-count ed))
-      (let ((emptied (text-editor-char-count ed)))
+      (text-editor-delete-from-cursor ed (- (buffer-z ed) (buffer-beg ed)))
+      (let ((emptied (- (buffer-z ed) (buffer-beg ed))))
         (text-editor-insert ed "schemacs/\nscratch.md\nscratch-ro.md\n")
-        (list full emptied (text-editor-char-count ed))))))
+        (list full emptied (- (buffer-z ed) (buffer-beg ed)))))))
 
 (test-end "schemacs_editor_engine_char_count")
 
@@ -1377,8 +1375,8 @@
 (test-begin "schemacs_editor_engine_modiff")
 
 (define (tick-triple ed)
-  (list (text-editor-modiff ed)
-        (text-editor-chars-modiff ed)
+  (list (buffer-modiff ed)
+        (buffer-chars-modiff ed)
         (text-editor-modified? ed)))
 
 (test-equal '((1 1 #f) (2 2 #t) (3 3 #t) (3 3 #f)
@@ -1411,6 +1409,6 @@
     (text-editor-set-cursor ed 1)
     (text-editor-set-modified! ed #f)
     (text-editor-delete-from-cursor ed 10)
-    (text-editor-modiff ed)))
+    (buffer-modiff ed)))
 
 (test-end "schemacs_editor_engine_modiff")

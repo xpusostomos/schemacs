@@ -47,11 +47,11 @@
           current-prefix-arg define-command run-command uarg->integer
           *command-table* command-value-of command-interactive-spec)
     (only (schemacs editor engine)
-          new-text-editor text-editor-char-count text-editor-point-min text-editor-copy-string
-          text-editor-point-min text-editor-point-max
+    new-text-editor buffer-beg make-buffer-string count-lines
+          buffer-beg buffer-z
           text-editor-cursor-column text-editor-cursor-line
-          text-editor-delete-from-cursor text-editor-get-cursor
-          text-editor-insert text-editor-line-count text-editor-set-cursor
+          text-editor-delete-from-cursor buffer-pt
+          text-editor-insert text-editor-set-cursor
           text-editor-set-read-only! text-editor-to-string
           text-editor-undo-disable!)
     ;; `logior' is Guile's: the bitset is three bit flags.
@@ -372,8 +372,8 @@ read-number-history
         ;; that was there stayed in front of the new text. Stepping
         ;; through the history, and choosing a completion, both put the
         ;; answer one keystroke in front of the previous one.
-        (text-editor-set-cursor ed (text-editor-point-min ed))
-        (text-editor-delete-from-cursor ed (text-editor-char-count ed))
+        (text-editor-set-cursor ed (buffer-beg ed))
+        (text-editor-delete-from-cursor ed (- (buffer-z ed) (buffer-beg ed)))
         (text-editor-insert ed text)))
 
     (define (minibuffer-insert! text)
@@ -425,8 +425,8 @@ read-number-history
         (when text (text-editor-insert ed text))
         (text-editor-set-cursor ed
                                 (if at
-                                    (min at (text-editor-point-max ed))
-                                    (text-editor-point-max ed)))
+                                    (min at (buffer-z ed))
+                                    (buffer-z ed)))
         (let ((mb (make<minibuffer>
                    ed prompt (or keymap minibuffer-local-map) default
                    (or history minibuffer-history) 0 #f)))
@@ -1109,8 +1109,8 @@ read-number-history
       (let ((mb (*minibuffer*)))
         (when mb
           (let ((ed (minibuffer-editor mb)))
-            (text-editor-set-cursor ed (text-editor-point-min ed))
-            (text-editor-delete-from-cursor ed (text-editor-char-count ed))
+            (text-editor-set-cursor ed (buffer-beg ed))
+            (text-editor-delete-from-cursor ed (- (buffer-z ed) (buffer-beg ed)))
             (text-editor-insert ed completion)))))
 
     (define (completion--do-completion string table predicate point expect-exact)
@@ -1769,7 +1769,7 @@ read-number-history
       ;; faces at all.
       ;;--------------------------------------------------------------
       (remove-text-properties start end '(face) buffer)
-      (let* ((candidate (text-editor-copy-string buffer start end))
+      (let* ((candidate (make-buffer-string buffer start end))
              (matched (min (string-length (*completions-common-substring*))
                            (string-length candidate))))
         (when highlight?
@@ -1820,7 +1820,7 @@ read-number-history
       ;; why Emacs's line does not offer to click.
       ;;--------------------------------------------------------------
       (when (*completion-show-help*)
-        (text-editor-set-cursor buffer (text-editor-point-min buffer))
+        (text-editor-set-cursor buffer (buffer-beg buffer))
         (text-editor-insert buffer "Type M-RET on a completion to select it.\n")
         (text-editor-insert buffer
                             (string-append
@@ -1865,9 +1865,9 @@ read-number-history
         ;; The property range is in *positions*, so it starts where the
         ;; text will go - `point-max' before the insert - and ends where
         ;; it went: `point-max' after it.
-        (let ((start (text-editor-point-max buffer)))
+        (let ((start (buffer-z buffer)))
           (text-editor-insert buffer (completions-header-string count))
-          (put-text-property start (text-editor-point-max buffer)
+          (put-text-property start (buffer-z buffer)
                              'face 'shadow buffer))))
 
     (define (insert-completion-cell! buffer candidate)
@@ -1877,9 +1877,9 @@ read-number-history
       ;; two faces to the candidate *strings*; a string here cannot
       ;; carry a property, so the faces go straight on the buffer text.)
       ;;--------------------------------------------------------------
-      (let ((start (text-editor-point-max buffer)))
+      (let ((start (buffer-z buffer)))
         (text-editor-insert buffer candidate)
-        (put-text-property start (text-editor-point-max buffer)
+        (put-text-property start (buffer-z buffer)
                            'completion--string candidate buffer)
         (set-completion-line-faces!
          buffer start (+ start (string-length candidate)) #f)))
@@ -1895,9 +1895,9 @@ read-number-history
       ;; no property", which only works while the separator between two
       ;; cells stays clean.
       ;;--------------------------------------------------------------
-      (let ((start (text-editor-point-max buffer)))
+      (let ((start (buffer-z buffer)))
         (text-editor-insert buffer str)
-        (remove-text-properties start (text-editor-point-max buffer)
+        (remove-text-properties start (buffer-z buffer)
                                 '(completion--string) buffer)))
 
     (define *completions-format*
@@ -1993,7 +1993,7 @@ read-number-history
         (if (null? rest)
             (begin
               (text-editor-set-cursor
-               buffer (- (text-editor-point-max buffer) 1))
+               buffer (- (buffer-z buffer) 1))
               (text-editor-delete-from-cursor buffer 1))
             (begin
               (insert-completion-cell! buffer (car rest))
@@ -2033,8 +2033,8 @@ read-number-history
         (with-current-buffer buffer
           (set!buffer-local-keymap buffer completion-list-mode-map)
           (text-editor-set-read-only! buffer #f)
-          (text-editor-set-cursor buffer (text-editor-point-min buffer))
-          (text-editor-delete-from-cursor buffer (text-editor-char-count buffer))
+          (text-editor-set-cursor buffer (buffer-beg buffer))
+          (text-editor-delete-from-cursor buffer (- (buffer-z buffer) (buffer-beg buffer)))
           (*completions-common-substring* common-substring)
           (insert-completions-header! buffer (length completions))
           (completion--insert-strings buffer completions)
@@ -2065,7 +2065,10 @@ read-number-history
       ;; that being nil - the frame's text area less a minimum for the
       ;; window above.
       ;;--------------------------------------------------------------
-      (let* ((needed (+ 1 (text-editor-line-count buffer)))
+      ;; The buffer's text lines plus its mode line: Emacs writes this as
+      ;; `line-number-at-pos' of the end of the buffer, which is
+      ;; `(count_lines BEGV ZV) + 1' - and the outer `+ 1' is the mode line.
+      (let* ((needed (+ 1 (+ 1 (count-lines buffer (buffer-beg buffer) (buffer-z buffer)))))
              (max-height (or (*completions-max-height*)
                              (max 1
                                   (- (- (frame-height (*current-frame*)) 1)
@@ -2152,7 +2155,7 @@ read-number-history
       "Select the completion on this line."
       (interactive)
       (let* ((ed (current-buffer))
-             (candidate (get-text-property (text-editor-get-cursor ed)
+             (candidate (get-text-property (buffer-pt ed)
                                            'completion--string ed))
              (mb (*minibuffer*)))
         (when (and mb (> (string-length candidate) 0))
@@ -2353,7 +2356,7 @@ read-number-history
       ;; editor's display reads `face'.
       ;;--------------------------------------------------------------
       (clear-completions-selection!)
-      (let* ((start (text-editor-get-cursor buffer))
+      (let* ((start (buffer-pt buffer))
              (end (completion--cell-end buffer start)))
         (when (< start end)
           (set-completion-line-faces! buffer start end #t)
@@ -2377,7 +2380,7 @@ read-number-history
       ;; each candidate was written with, and so does this - an index
       ;; kept where it is through the help insertion and the layout.
       ;;--------------------------------------------------------------
-      (let ((last (text-editor-point-max buffer)))
+      (let ((last (buffer-z buffer)))
         (let loop ((i (+ from 1)))
           (cond ((>= i last) #f)
                 ((completion-start-at? buffer i) i)
@@ -2387,7 +2390,7 @@ read-number-history
       ;; The last completion cell start before FROM, or #f.
       ;;--------------------------------------------------------------
       (let loop ((i (- from 1)))
-        (cond ((< i (text-editor-point-min buffer)) #f)
+        (cond ((< i (buffer-beg buffer)) #f)
               ((completion-start-at? buffer i) i)
               (else (loop (- i 1))))))
 
@@ -2396,7 +2399,7 @@ read-number-history
       ;; Emacs's `completion--move-to-candidate-end', which is where a
       ;; selection face stops on its cell.
       ;;--------------------------------------------------------------
-      (let ((last (text-editor-point-max buffer))
+      (let ((last (buffer-z buffer))
             (value (get-text-property start 'completion--string buffer)))
         (let loop ((i (+ start 1)))
           (cond ((>= i last) i)
@@ -2426,9 +2429,9 @@ read-number-history
                 #f
                 (let ((next (if (< step 0)
                                 (completion-previous-cell-start
-                                 buffer (text-editor-get-cursor buffer))
+                                 buffer (buffer-pt buffer))
                                 (completion-next-cell-start
-                                 buffer (text-editor-get-cursor buffer)))))
+                                 buffer (buffer-pt buffer)))))
                   (if next
                       (begin (text-editor-set-cursor buffer next)
                              (loop (- left 1) step))
@@ -2436,7 +2439,7 @@ read-number-history
           ;; the window is a view of the buffer, so its point follows
           (let ((window (completions-window)))
             (when window
-              (set-window-point! window (text-editor-get-cursor buffer))))
+              (set-window-point! window (buffer-pt buffer))))
           (show-completions-selection! buffer)))))
 
     (define (completion--selected-candidate)
@@ -2450,7 +2453,7 @@ read-number-history
       ;;--------------------------------------------------------------
       (let ((buffer (and (completions-window) (get-buffer "*Completions*"))))
         (and buffer
-             (get-text-property (text-editor-get-cursor buffer)
+             (get-text-property (buffer-pt buffer)
                                 'completion--string buffer))))
 
     (define (minibuffer-choose-completion . args)
@@ -2798,10 +2801,10 @@ read-number-history
       ;; `let' ED is unbound there and the command dies with "Unbound
       ;; variable: ed" in the echo area - which is what `M-g g' did.
       (let* ((ed (current-buffer))
-             (target (max (text-editor-point-min ed) line)))
+             (target (max (buffer-beg ed) line)))
         (text-editor-set-cursor ed target 0)
         (when (< (text-editor-cursor-line ed) target)
-          (text-editor-set-cursor ed (text-editor-point-max ed)))))
+          (text-editor-set-cursor ed (buffer-z ed)))))
 
     ;; The keys GNU Emacs binds it to (M-g g, and M-g M-g, which is the
     ;; same command), beside the command as the other libraries state
@@ -3064,7 +3067,7 @@ Just \\[universal-argument] as argument means to use the current column."
           ;; *why* it is there rather than its last frame - the backtrace
           ;; is longer than the window, and point left at the end of the
           ;; insertion would have shown the bottom of it.
-          (goto-char (text-editor-point-min buffer))
+          (goto-char (buffer-beg buffer))
           (search-forward ":" (line-end-position) #t)
           ;; `(char-after)' defaults to point in Emacs; this tree's takes
           ;; the position it is asked about, so point is passed.

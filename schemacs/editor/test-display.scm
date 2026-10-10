@@ -66,7 +66,7 @@
     (only (guile) hash-ref hash-set! make-hash-table)
     (only (schemacs editor dispnew)
           <display>
-          clear-frame-area! column-width delete-frame-display!
+          clear-frame-area! column-width delete-frame-display! glyphs->text
           display-color-cells
           draw-window-cursor! flush-display! key-event->key line-height
           read-input-event realize-face resume-display! screen-size
@@ -138,12 +138,14 @@
     (define-method (line-height (d <test-display>)) (test-display-line-height d))
     (define-method (display-color-cells (d <test-display>)) (test-display-color-cells d))
 
-    (define-method (write-glyphs! (d <test-display>) text y x attribute)
-      ;; Nothing is drawn anywhere; the text and where it would have gone
-      ;; are kept, newest first.
+    (define-method (write-glyphs! (d <test-display>) glyphs y x attribute)
+      ;; Nothing is drawn anywhere; the cells and where they would have
+      ;; gone are kept, newest first - joined, so that what a test reads
+      ;; back is the run's text as a device would write it.
       ;;--------------------------------------------------------------
       (set!test-display-glyphs
-       d (cons (list text y x attribute) (test-display-glyphs d))))
+       d (cons (list (glyphs->text glyphs) y x attribute)
+               (test-display-glyphs d))))
 
     (define-method (clear-frame-area! (d <test-display>))
       (set!test-display-glyphs d '()))

@@ -10,10 +10,6 @@
           =>canonical
           =>vector-index!
           declare-rule/index->lens)
-    (only (schemacs cursor)
-          make<cursor-interface>
-          declare-interface/cursor
-          )
     )
   (export
    make<mutable-vector>

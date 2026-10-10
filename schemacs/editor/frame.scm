@@ -45,9 +45,9 @@
      (mouse-position display-mouse-position))
     (only (schemacs editor engine)
           copy-marker  marker-position  set-marker!
-          text-editor-cursor-line  text-editor-ref  text-editor-point-min
+          text-editor-cursor-line  fetch-char  buffer-beg
           text-editor-get-start-of-line
-          text-editor-get-cursor  text-editor-set-cursor)
+          buffer-pt  text-editor-set-cursor)
     ;; `suspend-frame' is a command and states its own key as the other
     ;; command libraries do.
     (only (schemacs editor command) current-prefix-arg define-command
@@ -378,7 +378,7 @@
       (let ((frame (*current-frame*)))
         (if (and frame
                  (eq? window (frame-selected-window frame)))
-            (text-editor-get-cursor (window-buffer window))
+            (buffer-pt (window-buffer window))
             (marker-position (%window-point window)))))
 
     (define (set-window-point! window index)
@@ -493,13 +493,13 @@
       ;;--------------------------------------------------------------
       (let ((buffer (window-buffer window)))
         (set-marker! (%window-start window) position buffer)
-        ;; `text-editor-ref' is `char-after', so the comparison is `char=?'
+        ;; `fetch-char' is `char-after', so the comparison is `char=?'
         ;; and `#\newline' - and a position with no character before it is
         ;; the beginning of the buffer by definition.
         (set!%window-start-at-line-beg
          window
-         (or (= position (text-editor-point-min buffer))
-             (let ((before (text-editor-ref buffer (- position 1))))
+         (or (= position (buffer-beg buffer))
+             (let ((before (fetch-char buffer (- position 1))))
                (and (char? before) (char=? #\newline before)))))
         position))
 
@@ -545,7 +545,7 @@
         (set!%window-hscroll window 0)
         (set!%window-min-hscroll window 0)
         (set!%window-suspend-auto-hscroll? window #f)
-        (set-marker! (%window-point window) (text-editor-get-cursor buffer)
+        (set-marker! (%window-point window) (buffer-pt buffer)
                      buffer)
         (set-window-start! window 1)
         window))
@@ -590,7 +590,7 @@
       ;; showing that place. Written as 1, `C-x 5 2' put the new window
       ;; at the top of the file wherever the old one was - measured on
       ;; Emacs 31.1: point at 21, the new frame's `window-point' is 21.
-      (make<window> frame buffer (copy-marker buffer (text-editor-get-cursor buffer))
+      (make<window> frame buffer (copy-marker buffer (buffer-pt buffer))
                             (copy-marker buffer 1) #t
                             0 0 #f 0 0
                             top height left width #f '()
@@ -975,13 +975,17 @@
       ;;
       ;; Emacs's takes the EVENT as its argument - `(interactive "e")' -
       ;; and reads the frame from it: `(nth 1 event)' is the frame list
-      ;; `make_lispy_focus_in' built. This tree's event is the same shape
-      ;; (`keyboard.sld' builds it), so the frame is read from it too.
+      ;; `make_lispy_focus_in' built, and it records the focus on *that*
+      ;; frame's `last-focus-update' parameter, guarded by
+      ;; `(frame-live-p frame)' (`frame.el:357').
       ;;
-      ;; Emacs's takes the EVENT as its argument - `(interactive "e")' -
-      ;; and reads the frame from it. This tree has one frame, so the
-      ;; command reads `*current-frame*', which is what `interactive'
-      ;; would have to hand it: the event-argument spec is not ported.
+      ;; **This tree's focus is one flag, not one per frame** - the
+      ;; departure AGENTS.md names, because Emacs's `highlight_frame' is a
+      ;; field of the *display* and this tree has no such field. So the
+      ;; event's frame is not consulted and the flag is set outright; the
+      ;; `frame-live-p' guard has nothing to guard, since the flag names no
+      ;; frame. Written when there was one frame, and left as it is rather
+      ;; than half-ported: the honest fix is the per-display field.
       ;;--------------------------------------------------------------
       "Handle a focus-in event."
       (interactive "e")
@@ -1265,7 +1269,7 @@
           (let ((old-window (and old (frame-selected-window old))))
             (when old-window
               (set-marker! (%window-point old-window)
-                           (text-editor-get-cursor (window-buffer old-window))
+                           (buffer-pt (window-buffer old-window))
                            (window-buffer old-window)))))
         (*current-frame* frame)
         (current-display (frame-output frame))
@@ -1732,7 +1736,7 @@
         (when (and old (not (eq? old window)))
           ;; the window being left keeps the point it had ...
           (set-marker! (%window-point old)
-                       (text-editor-get-cursor (window-buffer old))
+                       (buffer-pt (window-buffer old))
                        (window-buffer old))
           (set!frame-selected-window frame window)
           ;; ... and the one being selected gives the buffer its point
@@ -1805,7 +1809,7 @@
         (set-window-start!
          window
          (let loop ((n iarg) (pos (text-editor-get-start-of-line ed)))
-           (if (or (<= n 0) (= pos (text-editor-point-min ed)))
+           (if (or (<= n 0) (= pos (buffer-beg ed)))
                pos
                (loop (- n 1)
                      (text-editor-get-start-of-line ed (- pos 1))))))))

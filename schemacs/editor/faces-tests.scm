@@ -12,7 +12,7 @@
  (only (oop goops) define-class make)
  (only (schemacs editor engine)
         new-text-editor text-editor-insert text-editor-set-cursor
-        text-editor-line-outer-size set!text-editor-mark)
+        set!text-editor-mark)
  (only (schemacs editor buffer) set-buffer-local-value!)
  (only (schemacs editor textprop) put-text-property))
 
@@ -312,14 +312,16 @@
   (with-display
    (lambda ()
      (let* ((ed (region-buffer "ab\ncdef" 3 0 #t))
-            (attribute (xd:line-end-fill-attribute ed 0 "ab" "ab" 10)))
+            ;; the row's end position and its width in cells: `ab' from
+            ;; position 0, two characters and two cells
+            (attribute (xd:line-end-fill-attribute ed 2 2 10)))
        (and attribute (not (= attribute 0)))))
    1 'mono #f))
 (test-equal #f
   (with-display
    (lambda ()
      (xd:line-end-fill-attribute (region-buffer "abcdef" 3 0 #t)
-                                 0 "abcdef" "abcdef" 10))
+                                 6 6 10))
    1 'mono #f))
 
 (test-end "schemacs_editor_faces_runs")
