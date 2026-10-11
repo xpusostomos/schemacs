@@ -4,6 +4,17 @@
  (schemacs editor engine)
  (only (schemacs editor buffer) with-current-buffer set-buffer-modified-p)
  (only (schemacs editor simple) primitive-undo)
+ ;; The visited file's modification time is `fileio.c`'s, and the time
+ ;; values it is written in are `timefns.c`'s. The engine reaches the
+ ;; first through the seam `*buffer-visited-file-modtime-function*`,
+ ;; which the tests below bind to check what a mark holds.
+ (only (schemacs editor fileio) set-visited-file-modtime)
+ (only (schemacs editor timefns) make-lisp-time)
+ ;; The markers are `marker.scm`'s - marker.c's own library - and not the
+ ;; engine's any more.
+ (only (schemacs editor marker)
+       make-marker build-marker markerp marker-buffer marker-position
+       set-marker set-marker-insertion-type copy-marker)
  (only (srfi 64) test-assert test-equal test-begin test-end)
  )
 
@@ -630,11 +641,26 @@
     (with-current-buffer ed (set-buffer-modified-p #f))
     (list (buffer-modified-p ed) (text-editor-undo-list ed))))
 
-;; Saving a buffer that is already unmodified changes nothing.
-(test-equal '(#f 0)
+;; The mark of the last save holds the *visited file's* modification
+;; time, and the engine asks for it through a seam because `fileio.c` is
+;; above it - a buffer's text and its visit to a file are different
+;; things. A buffer that visits nothing records 0, which is what
+;; `buffer_visited_file_modtime' answers for an unknown `modtime' and
+;; what Emacs records there too.
+(test-equal '((1 . 4) (t . 0))
   (let ((ed (allocate-buffer)))
-    (with-current-buffer ed (set-buffer-modified-p #f))
-    (list (buffer-modified-p ed) (text-editor-save-token ed))))
+    (text-editor-insert ed "abc")
+    (text-editor-undo-list ed)))
+
+;; ... and a buffer visiting a file records the file's time, which is
+;; what lets an undo tell whether the file has moved since the mark was
+;; made.
+(test-equal '((1 . 4) (t 0 2317 0 0))
+  (let ((ed (allocate-buffer)))
+    (parameterize ((*buffer-visited-file-modtime-function*
+                    (lambda (buffer) (make-lisp-time 2317 0))))
+      (text-editor-insert ed "abc")
+      (text-editor-undo-list ed))))
 
 ;; Undoing back to the saved state makes the buffer unmodified again,
 ;; and redoing makes it modified again.
@@ -657,12 +683,23 @@
 
 ;; Undoing PAST the saved state leaves the buffer modified: the file
 ;; being saved at one point does not make the buffer match it at an
-;; earlier point. This is what the token in the mark is for - Emacs
-;; compares the visited file's modification time for the same reason.
+;; earlier point. This is what the recorded time in the mark is for -
+;; `primitive-undo' marks the buffer unmodified only while the file still
+;; holds the time it held when the mark was made.
+;;
+;; The save is two steps here because it is two steps in Emacs: writing
+;; the file records its new modification time (`write-region'), and
+;; clearing the modified flag does not touch it at all. A fileless buffer
+;; would keep 0 throughout and the second undo would mark it unmodified -
+;; which is Emacs's answer there too, and why this test has to move the
+;; time to be about anything.
 (test-equal '(#f #t)
   (let ((ed (allocate-buffer)))
     (text-editor-insert ed "abc")
-    (with-current-buffer ed (set-buffer-modified-p #f))        ; saved here: the file has "abc"
+    (with-current-buffer ed
+      ;; saved here: the file has "abc" and its time is now 1000
+      (set-buffer-modified-p #f)
+      (set-visited-file-modtime '(1000 . 1)))
     (text-editor-undo-boundary! ed)
     (text-editor-set-cursor ed 3)
     (text-editor-insert ed "x")              ; now "abcx"
@@ -1099,160 +1136,9 @@
 (test-end "schemacs_editor_engine_buffer_identity")
 
 ;;--------------------------------------------------------------------
-;; 11. markers: positions that follow the text
-;;
-;; GNU Emacs keeps a buffer's markers in a chain that the insert and
-;; delete code adjusts, so a marker goes on pointing at the same
-;; character as the text around it moves. The expectations below are
-;; what a real Emacs reports for the same operations (`emacs --batch`,
-;; checked one by one), which is the only way to be sure the boundary
-;; rules are the same ones.
+;; 11. the mark, which is a marker
 
 (test-begin "schemacs_editor_engine_markers")
-
-;; A marker made with no buffer points nowhere, and reports nowhere.
-(test-equal '(#f #f #t)
-  (let ((m (new-marker)))
-    (list (marker-position m) (marker-buffer m) (marker-type? m))))
-
-;; A marker at index 3 of "abcdef" reports that, and its buffer.
-(test-equal '(3 #t)
-  (let* ((ed (allocate-buffer))
-         (m (begin (text-editor-insert ed "abcdef") (copy-marker ed 3))))
-    (list (marker-position m) (eq? ed (marker-buffer m)))))
-
-;; Text inserted BEFORE a marker carries it along: Emacs: a marker at 3
-;; with "XY" inserted at 1 is at 5.
-(test-equal 5
-  (let* ((ed (allocate-buffer)))
-    (text-editor-insert ed "abcdef")
-    (let ((m (copy-marker ed 3)))
-      (text-editor-set-cursor ed 1)
-      (text-editor-insert ed "XY")
-      (marker-position m))))
-
-;; Text inserted AFTER a marker leaves it alone.
-(test-equal 3
-  (let* ((ed (allocate-buffer)))
-    (text-editor-insert ed "abcdef")
-    (let ((m (copy-marker ed 3)))
-      (text-editor-move-cursor ed 100)
-      (text-editor-insert ed "XY")
-      (marker-position m))))
-
-;; Text inserted EXACTLY at a marker is the boundary case: the default
-;; marker (insertion type false) stays put and the text lands after it -
-;; Emacs: a marker at 3, "XY" inserted at 3, is still at 3 in "abXYcd".
-(test-equal '(3 "abXYcd")
-  (let* ((ed (allocate-buffer)))
-    (text-editor-insert ed "abcd")
-    (let ((m (copy-marker ed 3)))
-      (text-editor-set-cursor ed 3)
-      (text-editor-insert ed "XY")
-      (list (marker-position m) (text-editor-to-string ed)))))
-
-;; ... and one whose insertion type is true advances past it: Emacs: the
-;; same case gives 5.
-(test-equal 5
-  (let* ((ed (allocate-buffer)))
-    (text-editor-insert ed "abcd")
-    (let ((m (copy-marker ed 3 #t)))
-      (text-editor-set-cursor ed 3)
-      (text-editor-insert ed "XY")
-      (marker-position m))))
-
-;; Deletion does not shift markers, it collapses the ones inside the
-;; deleted text to its start: Emacs: delete the three characters from
-;; position 2 of "abcdef" with a marker at 4 leaves "aef" and the marker
-;; collapsed to 2.
-(test-equal '(2 "aef")
-  (let* ((ed (allocate-buffer)))
-    (text-editor-insert ed "abcdef")
-    (let ((m (copy-marker ed 4)))
-      (text-editor-set-cursor ed 2)
-      (text-editor-delete-from-cursor ed 3)
-      (list (marker-position m) (text-editor-to-string ed)))))
-
-;; A marker after the deleted text moves back by its length; one at the
-;; far end of it does too.
-(test-equal '(2 3)
-  (let* ((ed (allocate-buffer)))
-    (text-editor-insert ed "abcdef")
-    (let ((at-end (copy-marker ed 5)) (after (copy-marker ed 6)))
-      (text-editor-set-cursor ed 2)
-      (text-editor-delete-from-cursor ed 3)
-      (list (marker-position at-end) (marker-position after)))))
-
-;; Deleting backwards takes the text before the cursor: Emacs: "abcdef"
-;; with point at 5 and `(delete-char -2)' is "abef" with the marker that
-;; was at 4 collapsed to 3.
-(test-equal '(3 "abef")
-  (let* ((ed (allocate-buffer)))
-    (text-editor-insert ed "abcdef")
-    (let ((m (copy-marker ed 4)))
-      (text-editor-set-cursor ed 5)
-      (text-editor-delete-from-cursor ed -2)
-      (list (marker-position m) (text-editor-to-string ed)))))
-
-;; A backwards deletion at the very end of a buffer, which is a position
-;; the engine used to get wrong (see the note in
-;; `SCHEMACS_EDITOR_ENGINE_END_OF_BUFFER'): the markers inside the
-;; deleted text collapse to where it began, and the buffer loses exactly
-;; the two characters asked for.
-(test-equal '(5 "abcd")
-  (let* ((ed (allocate-buffer)))
-    (text-editor-insert ed "abcdef")
-    (let ((m (copy-marker ed 5)))
-      (text-editor-set-cursor ed 7)
-      (text-editor-delete-from-cursor ed -2)
-      (list (marker-position m) (text-editor-to-string ed)))))
-
-;; A marker that points nowhere is in no chain and follows nothing.
-(test-equal #f
-  (let* ((ed (allocate-buffer)))
-    (text-editor-insert ed "abcdef")
-    (let ((m (copy-marker ed 3)))
-      (set-marker! m #f)
-      (text-editor-set-cursor ed 1)
-      (text-editor-insert ed "XY")
-      (marker-position m))))
-
-;; Markers belong to a buffer: editing one leaves another's alone.
-(test-equal '(3 5)
-  (let* ((one (allocate-buffer))
-         (two (allocate-buffer)))
-    (text-editor-insert one "abcdef")
-    (text-editor-insert two "abcdef")
-    (let ((m1 (copy-marker one 3)) (m2 (copy-marker two 3)))
-      (text-editor-set-cursor two 1)
-      (text-editor-insert two "XY")
-      (list (marker-position m1) (marker-position m2)))))
-
-;; A line break is text too: a marker after it moves with it.
-(test-equal '(6 "ab\ncd")
-  (let* ((ed (allocate-buffer)))
-    (text-editor-insert ed "abcd")
-    (let ((m (copy-marker ed 5)))
-      (text-editor-set-cursor ed 3)
-      (text-editor-insert ed #\newline)
-      (list (marker-position m) (text-editor-to-string ed)))))
-
-;; Undo replays through the same insert and delete procedures, so it
-;; adjusts markers too: an insertion undone puts the marker back where
-;; it was.
-(test-equal '(3 5 3)
-  (let* ((ed (allocate-buffer)))
-    (text-editor-insert ed "abcdef")
-    ;; A boundary, as the command loop places one between commands, so
-    ;; that undoing takes back the insertion below and not this one too.
-    (text-editor-undo-boundary! ed)
-    (let ((m (copy-marker ed 3)))
-      (let ((before (marker-position m)))
-        (text-editor-set-cursor ed 1)
-        (text-editor-insert ed "XY")
-        (let ((after (marker-position m)))
-          (with-current-buffer ed (primitive-undo 1 (text-editor-undo-list ed)))
-          (list before after (marker-position m)))))))
 
 ;; The mark is a marker, so it follows the text: Emacs: a mark at 5 with
 ;; "XY" inserted before it is at 7.
@@ -1268,7 +1154,13 @@
 
 ;; ... and it is the same marker object throughout, so code that holds
 ;; it - `MARK-MARKER' - sees the moves rather than a replacement.
-(test-equal '(9 9 #t)
+;;
+;; **The mark at 9 in a six-character buffer is at 7**, because a marker
+;; is a marker: `set-marker' clips the position to the buffer
+;; (`clip_to_bounds`, `marker.c:558') and `point-max' is 7. Measured on
+;; Emacs 31.1 for the same four steps, `(7 7 t)'. This expected `(9 9 #t)'
+;; while our `set-marker` was storing the position unclipped.
+(test-equal '(7 7 #t)
   (let* ((ed (allocate-buffer)))
     (text-editor-insert ed "abcdef")
     (set!text-editor-mark ed 3)

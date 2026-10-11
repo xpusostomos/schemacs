@@ -101,7 +101,12 @@
           ;; expanding - see the note there.
           substitute-in-file-name
           ;; `cd' resolves its argument through this
-          locate-file-internal)
+          locate-file-internal
+          ;; The visited file's modification time. A visit records it
+          ;; (`insert-file-contents') and a save records it again
+          ;; (`save-buffer'), and between those two moments it is what
+          ;; says whether the file has moved under the buffer.
+          set-visited-file-modtime)
     ;; `parse-colon-path' runs the whole search path through it before
     ;; splitting it - `files.el:946'
     (only (schemacs editor env) substitute-env-vars)
@@ -1831,6 +1836,22 @@ save-buffer
         ;; (a visiting buffer keeps the name it already had, which is what
         ;; Emacs does when it finds the file already in a buffer).
         (set!text-editor-file-name ed path)
+        ;; and the file's modification time is recorded against the
+        ;; buffer, which is what makes "has the file moved since?" a
+        ;; question with an answer, and what the `(t . TIME)' undo mark
+        ;; holds. It is recorded *after* the file name because that is
+        ;; what it reads the time from.
+        ;;
+        ;; **Emacs records it inside `insert_file_contents'**
+        ;; (`fileio.c:5155'), which its `find-file-noselect' reaches
+        ;; through `insert-file-contents-literally'. This function reads
+        ;; the file itself instead, which is a departure that predates
+        ;; this line, so the recording is made here. A file that is not
+        ;; there records `NONEXISTENT_MODTIME_NSECS' - the C's
+        ;; `time_error_value' (`fileio.c:3972') - which is why
+        ;; `(visited-file-modtime)' answers -1 for a buffer visiting a
+        ;; file that has not been written yet.
+        (with-current-buffer ed (set-visited-file-modtime (if new? -1 #f)))
         ;; and the coding system it was read with, which is the buffer's
         ;; rather than the frame's - so that this buffer saves the way it
         ;; was loaded however many other files have been visited since
@@ -1907,7 +1928,20 @@ save-buffer
         (text-editor-insert ed decoded)
         ;; the visit: the buffer is what the file is now, so there is
         ;; nothing in it the file does not have
-        (when visit (with-current-buffer ed (set-buffer-modified-p #f)))
+        (when visit
+          (with-current-buffer ed
+            ;; The C's visit branch does two more things here
+            ;; (`fileio.c:5152-5160'): it makes the buffer visit the file
+            ;; it has just read - `bset_filename (current_buffer,
+            ;; orig_filename)' - and it records the file's modification
+            ;; time beside it. Both matter for what reaches this, which
+            ;; is a revert: a revert that left the old time recorded
+            ;; would believe the file had moved again the moment the
+            ;; buffer was next changed, and every `(t . TIME)' mark older
+            ;; than it would be treated as stale.
+            (set!buffer-file-name ed filename)
+            (set-visited-file-modtime)
+            (set-buffer-modified-p #f)))
         (list filename (length decoded))))
 
     (define (insert-file-1 filename insert-func)
@@ -2223,6 +2257,16 @@ at point instead."
               (write-file-code-points path (text-editor-to-code-points buffer)
                                       coding)
               (*last-coding-system-used* coding))
+            ;; The file has just been written, so its modification time
+            ;; is new - and recording it is what makes every `(t . TIME)'
+            ;; undo mark older than this save go stale, so that undoing
+            ;; back to one of them no longer claims the buffer matches a
+            ;; file that has moved on since. **Emacs does this inside
+            ;; `write-region'** (`fileio.c:5828', from the `stat' it
+            ;; makes after writing), not in `save-buffer'; there is no
+            ;; `write-region' here yet, so the same recording is made at
+            ;; the write's own door.
+            (set-visited-file-modtime)
             (set-buffer-modified-p #f)
             (set!frame-message (*current-frame*)
                                        (string-append "Wrote " path))
@@ -2241,17 +2285,18 @@ at point instead."
       ;; visiting nothing. NO-QUERY - `write-file''s way of passing
       ;; `(not CONFIRM)' - leaves out the warning when another buffer
       ;; already visits the file. ALONG-WITH-FILE is Emacs's third
-      ;; argument, for a file that has been renamed under the buffer;
-      ;; nothing here tracks a file's modtime, so there is nothing for
-      ;; it to keep in step with.
+      ;; argument, for a file that has been renamed under the buffer -
+      ;; and that argument is what decides whether the recorded
+      ;; modification time is kept or cleared.
       ;;
-      ;; Not ported: the file's truename and `buffer-file-number', the
-      ;; visit-modtime bookkeeping, `buffer-backed-up' (there are no
-      ;; backups yet), and the flushing of `write-file-functions' -
-      ;; there are no hooks here either. `find-file-visit-truename' is
-      ;; not a variable here.
+      ;; Not ported: the file's truename and `buffer-file-number',
+      ;; `buffer-backed-up' (there are no backups yet), and the flushing
+      ;; of `write-file-functions' - there are no hooks here either.
+      ;; `find-file-visit-truename' is not a variable here.
       ;;--------------------------------------------------------------
-      (let ((no-query (if (pair? args) (car args) #f)))
+      (let ((no-query (if (pair? args) (car args) #f))
+            (along-with-file (and (pair? args) (pair? (cdr args))
+                                  (cadr args))))
         (let ((filename (and filename
                              (not (string=? filename ""))
                              (expand-file-name filename))))
@@ -2276,7 +2321,27 @@ at point instead."
               ;; <2> and it's considered as a feature in rename-buffer.
               (unless (string=? new-name (buffer-name (current-buffer)))
                 (rename-buffer (current-buffer) new-name #t))))
+          ;; `(or along-with-file (clear-visited-file-modtime))' - the
+          ;; buffer is visiting some *other* file now, so what it recorded
+          ;; about the old one says nothing about this one and is thrown
+          ;; away. `write-file' passes no ALONG-WITH-FILE and so clears
+          ;; it; the save that follows records the new file's time.
+          (or along-with-file (clear-visited-file-modtime))
           filename)))
+
+    (define (clear-visited-file-modtime)
+      ;; GNU Emacs's `clear-visited-file-modtime' (files.el:6610):
+      ;; "Clear out records of last mod time of visited file. Next attempt
+      ;; to save will not complain of a discrepancy."
+      ;;
+      ;; The whole of it is `(set-visited-file-modtime 0)', and 0 is the
+      ;; C's `UNKNOWN_MODTIME_NSECS' through
+      ;; `buffer_visited_file_modtime' - "nothing is known", which is not
+      ;; the same as -1, "the file is not there". A buffer that does not
+      ;; know is believed rather than doubted: `verify-visited-file-modtime'
+      ;; answers t for it.
+      ;;--------------------------------------------------------------
+      (set-visited-file-modtime 0))
 
     (define-command (write-file filename confirm)
       ;; GNU Emacs's `write-file' (files.el:5267): "Write current buffer

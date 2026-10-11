@@ -3,6 +3,10 @@
  (scheme char)
  (only (guile) getenv)
  (schemacs editor fileio)
+ ;; The visited-file time is recorded on a *buffer*, so the tests below
+ ;; need one to record it on.
+ (only (schemacs editor buffer)
+       allocate-buffer with-current-buffer set!buffer-file-name)
  (only (srfi 64) test-assert test-equal test-begin test-end)
  )
 
@@ -182,5 +186,68 @@
 ;; `substitute-env-in-file-name''s WHEN-UNDEFINED does on Unix
 (test-equal "substitute-in-file-name leaves an undefined variable" "/a/$nope/b"
   (substitute-in-file-name "/a/$nope/b"))
+
+;; ------------------------------------------------------------------
+;; the visited file's modification time
+;;
+;; Every answer here is Emacs 31.1's, read off `emacs -Q --batch' on
+;; files made for the purpose. The point of the whole family is what
+;; `record_first_change' (`undo.c:210') writes into the `(t . TIME)' undo
+;; mark: undoing back to the mark of the last save makes a buffer
+;; unmodified again only while the file still holds the time it held when
+;; the mark was made.
+
+(define vf-root "/tmp/schemacs-modtime-test.txt")
+
+(define (vf-write! contents)
+  (guard (e (#t #f)) (delete-file vf-root))
+  (call-with-output-file vf-root (lambda (p) (display contents p)))
+  vf-root)
+
+;; A buffer that visits nothing has recorded no time, and the answer is
+;; the *integer* 0 rather than a time. Emacs documents the three answers
+;; exactly: "a Lisp timestamp ... if the current buffer has a recorded
+;; file modification time, 0 if it doesn't, and -1 if the visited file
+;; doesn't exist."
+(test-equal "visited-file-modtime with no file" 0
+  (with-current-buffer (allocate-buffer) (visited-file-modtime)))
+
+;; A buffer that knows nothing is *believed* rather than doubted - Emacs
+;; has not been told anything, so it does not claim the file has moved.
+(test-equal "verify-visited-file-modtime with no file" #t
+  (with-current-buffer (allocate-buffer) (verify-visited-file-modtime)))
+
+;; The two integer flags, which are the two sentinels a `struct timespec'
+;; cannot hold - "no time is known" and "the file is not there" - turned
+;; into the two integers the interface documents.
+(test-equal "the two sentinels are 0 and -1" '(0 -1 0)
+  (with-current-buffer (allocate-buffer)
+    (set-visited-file-modtime 0)
+    (let ((unknown (visited-file-modtime)))
+      (set-visited-file-modtime -1)
+      (list unknown (visited-file-modtime)
+            (begin (set-visited-file-modtime 0) (visited-file-modtime))))))
+
+;; Any other integer is neither a flag nor a time, and the C range-checks
+;; it: `check_integer_range (time_flag, -1, 0)'.
+(test-equal "a fixnum outside -1..0 is refused" #t
+  (guard (e (#t #t)) (set-visited-file-modtime 5) #f))
+
+;; A recorded time is a real Lisp time, and it is what makes "has the file
+;; moved since?" a question with an answer: rewrite the file under the
+;; buffer and `verify-visited-file-modtime' says so.
+(test-equal "a recorded time notices a file that has changed" '(#t #t #f)
+  (let* ((path (vf-write! "abc"))
+         (b (allocate-buffer)))
+    (set!buffer-file-name b path)
+    (with-current-buffer b
+      (set-visited-file-modtime)
+      (let ((recorded (visited-file-modtime))
+            (verified (verify-visited-file-modtime)))
+        ;; the file changes underneath, not through the buffer
+        (vf-write! "abcdef")
+        (list verified (list? recorded) (verify-visited-file-modtime))))))
+
+(guard (e (#t #f)) (delete-file vf-root))
 
 (test-end "fileio")

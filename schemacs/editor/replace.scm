@@ -24,8 +24,8 @@
   (import
     (scheme base)
     (scheme char)
+    (only (schemacs editor marker) copy-marker markerp marker-position)
     (only (schemacs editor engine)
-          copy-marker marker-position marker-type?
           buffer-z
           text-editor-undo-boundary!)
     ;; `*case-fold-search*' is the case folding `perform-replace'
@@ -877,13 +877,11 @@ re-executed as a normal key sequence.")
             ;; region came from.
             (if backward
                 (when end
-                  (set! limit (copy-marker (current-buffer)
-                                           (- (min start end) 1)))
+                  (set! limit (copy-marker (min start end)))
                   (goto-char (max start end))
                   (deactivate-mark))
                 (when start
-                  (set! limit (copy-marker (current-buffer)
-                                           (- (max start end) 1)))
+                  (set! limit (copy-marker (max start end)))
                   (goto-char (min start end))
                   (deactivate-mark)))
             (push-mark)
@@ -930,7 +928,7 @@ re-executed as a normal key sequence.")
                                 (and (replace-search
                                       search-string
                                       (and limit
-                                           (+ 1 (marker-position limit)))
+                                           (marker-position limit))
                                       regexp-flag delimited-flag
                                       case-fold backward)
                                      (match-data)))
@@ -953,7 +951,7 @@ re-executed as a normal key sequence.")
                                   (or (and (replace-search
                                             search-string
                                             (and limit
-                                                 (+ 1 (marker-position limit)))
+                                                 (marker-position limit))
                                             regexp-flag delimited-flag
                                             case-fold backward)
                                            (match-data))
@@ -991,10 +989,10 @@ re-executed as a normal key sequence.")
                                                    ;; the positions are
                                                    ;; read out of them
                                                    ;; first.
-                                                   (and (not (= (if (marker-type? (car match))
+                                                   (and (not (= (if (markerp (car match))
                                                                    (marker-position (car match))
                                                                    (car match))
-                                                                (if (marker-type? (cadr match))
+                                                                (if (markerp (cadr match))
                                                                     (marker-position (cadr match))
                                                                     (cadr match))))
                                                         match))))))

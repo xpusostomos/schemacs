@@ -38,8 +38,10 @@
     ;; `define-derived-mode' is `derived.el''s, and `special-mode' below
     ;; is defined with it.
     (only (schemacs editor derived) define-derived-mode)
+    ;; the markers, from marker.c's own library
+    (only (schemacs editor marker) copy-marker marker-position set-marker)
     (only (schemacs editor engine)
-         copy-marker marker-position set-marker!
+         mark-marker
          set!text-editor-deactivate-mark!
          undo-insertion-entry? undo-deletion-entry? undo-modified-entry?
          set!text-editor-mark make-buffer-string
@@ -51,8 +53,12 @@
          buffer-beg buffer-z
          buffer-read-only? text-editor-set-cursor
          set!buffer-read-only
-         text-editor-undo-boundary! text-editor-undo-list
-         text-editor-save-token)
+         text-editor-undo-boundary! text-editor-undo-list)
+    ;; `visited-file-modtime' is `fileio.c`'s, and the `(t . TIME)' undo
+    ;; branch below is what reads it - the same questions asked of the
+    ;; same buffer, and `simple.el' is above both.
+    (only (schemacs editor fileio) visited-file-modtime)
+    (only (schemacs editor timefns) time-equal-p)
     (only (schemacs editor frame)
          *current-frame* *echo-area-buffer* display-selections-p
          set-message!
@@ -1209,8 +1215,27 @@ non-nil."
                   ;; `(set-buffer-modified-p nil)' - one argument, the
                   ;; current buffer. This loop takes its buffer as an
                   ;; argument, so the current buffer is made one first.
-                  (when (= (cdr entry) (text-editor-save-token ed))
-                    (with-current-buffer ed (set-buffer-modified-p #f)))
+                  ;;
+                  ;; TIME is the visited file's modification time *as it
+                  ;; was when the mark was made* - `record_first_change'
+                  ;; wrote it - and `visited-file-modtime' is what the
+                  ;; buffer records now. The two are equal for exactly as
+                  ;; long as the file has not been written since, and
+                  ;; that is when undoing back here really does put the
+                  ;; buffer back in step with its file. Emacs's own
+                  ;; comment says it: "If this records an obsolete save
+                  ;; (not matching the actual disk file) then don't mark
+                  ;; unmodified" (`simple.el:3678').
+                  ;;
+                  ;; Two pieces of the C's branch are not carried, and
+                  ;; both are absences rather than choices: the indirect
+                  ;; buffer fallback - a buffer that has no file of its
+                  ;; own asks its base - because there are no indirect
+                  ;; buffers here, and `unlock-buffer' (`filelock.c'),
+                  ;; because there is no file locking.
+                  (with-current-buffer ed
+                    (when (time-equal-p (cdr entry) (visited-file-modtime))
+                      (set-buffer-modified-p #f)))
                   (loop rest n #f))
                  (else
                   ;; The entries the undo is about to create, by running
@@ -1754,8 +1779,7 @@ non-nil."
         (when (mark #t)
           (set!mark-ring
            (add-to-history (mark-ring)
-                           (copy-marker (current-buffer)
-                                        (text-editor-mark (current-buffer)))
+                           (copy-marker (mark-marker (current-buffer)))
                            (*mark-ring-max*) #t)))
         (set!text-editor-mark (current-buffer)
                               (or location (buffer-pt
@@ -1774,11 +1798,10 @@ non-nil."
         (when (pair? ring)
           (set!mark-ring
            (append (cdr ring)
-                   (list (copy-marker (current-buffer)
-                                      (text-editor-mark (current-buffer))))))
+                   (list (copy-marker (mark-marker (current-buffer))))))
           (set!text-editor-mark (current-buffer)
                                 (marker-position (car ring)))
-          (set-marker! (car ring) #f (current-buffer))))
+          (set-marker (car ring) #f (current-buffer))))
       (deactivate-mark))
 
     (define (push-mark-command arg nomsg)

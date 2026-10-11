@@ -64,6 +64,8 @@
           float-time
           format-time-string
           make-lisp-time
+          lisp-time-arguments
+          time-equal-p
           time-less-p
           time-subtract
           )
@@ -102,10 +104,17 @@
         (if (list? time)
             (cons (+ (* (car time) 65536) (cadr time))
                   (+ (* (caddr time) 1000000) (cadddr time)))
-            (let ((ticks (* (car time) 1000000000000))
-                  (hz (cdr time)))
-              (cons (floor-quotient ticks hz)
-                    (floor-remainder ticks hz)))))
+            ;; `(TICKS . HZ)' is `TICKS / HZ' *seconds*, so the value in
+            ;; picoseconds is `TICKS * 10^12 / HZ', and the two fields of
+            ;; the answer are that total split - not that total taken as
+            ;; the seconds, which is what this did and which is wrong by
+            ;; 10^12. Measured against Emacs: `(1 . 1000000000000)' is
+            ;; one picosecond there, `(float-time ...)' answering 1e-12,
+            ;; and `(100 . 1)' is 100 seconds.
+            (let ((ps (floor-quotient (* (car time) 1000000000000)
+                                      (cdr time))))
+              (cons (floor-quotient ps 1000000000000)
+                    (floor-remainder ps 1000000000000)))))
        (else (error "Invalid time" time))))
 
     (define (%now-arguments)
@@ -179,6 +188,23 @@
         (if (= (car ta) (car tb))
             (< (cdr ta) (cdr tb))
             (< (car ta) (car tb)))))
+
+    (define (time-equal-p a b)
+      ;; GNU Emacs's `time-equal-p' (timefns.c:1296): "Return non-nil if
+      ;; A and B are equal time values."
+      ;;
+      ;; The C is `NILP (a) == NILP (b) && time_cmp (a, b) == 0', and the
+      ;; nil test is first for a reason worth keeping: nil means "the
+      ;; current time" to every other reader here, so leaving this to the
+      ;; comparison alone would make `(time-equal-p nil NOW)' true, where
+      ;; the C answers nil for a nil against anything but a nil.
+      ;;--------------------------------------------------------------
+      (cond ((and (not a) (not b)) #t)
+            ((or (not a) (not b)) #f)
+            (else
+             (let ((ta (lisp-time-arguments a))
+                   (tb (lisp-time-arguments b)))
+               (and (= (car ta) (car tb)) (= (cdr ta) (cdr tb)))))))
 
     (define (time-subtract a . rest)
       ;; GNU Emacs's `time-subtract': "Subtract two time values, A minus

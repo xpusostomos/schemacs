@@ -52,6 +52,35 @@ rest into USEC and PSEC" '(1 0 500000 0)
   (list (time-less-p '(0 0 0 0) '(0 0 0 1))
         (time-less-p '(0 0 0 1) '(0 0 0 0))))
 
+;; A `(TICKS . HZ)' pair is TICKS/HZ *seconds*. It used to be read as
+;; though the picosecond total were the seconds, which is 10^12 out: it
+;; answered 1.0 for a picosecond and 1e14 for a hundred seconds. Every
+;; number here is `emacs -Q --batch''s.
+(test-equal '(1e-12 100.0 0.5 1.0)
+  (list (float-time '(1 . 1000000000000))
+        (float-time '(100 . 1))
+        (float-time '(1 . 2))
+        (float-time '(1 . 1))))
+
+;; ------------------------------------------------------------------
+;; time-equal-p
+
+;; The nil rule comes first in the C, and it is not the comparison's
+;; business: nil means "the current time" to everything else here, so
+;; `(time-equal-p nil NOW)' would be true if it were left to the times.
+(test-equal '(#t #f #f #t)
+  (list (time-equal-p #f #f)
+        (time-equal-p #f 0)
+        (time-equal-p 0 #f)
+        (time-equal-p 0 0)))
+
+;; The same instant in two spellings is equal, and a different one is not.
+(test-equal '(#t #t #t #f)
+  (list (time-equal-p '(1 . 1) '(1 . 1))
+        (time-equal-p '(0 1000 0 0) '(1000 . 1))
+        (time-equal-p 1.0 1)
+        (time-equal-p '(0 1000 0 0) '(0 1000 0 1))))
+
 ;; ------------------------------------------------------------------
 ;; time-subtract
 

@@ -23,7 +23,7 @@
     (only (schemacs editor editfns)
           bolp delete-region eolp forward-line goto-char point point-marker
           save-excursion)
-    (only (schemacs editor engine) marker-position set-marker!)
+    (only (schemacs editor marker) marker-position set-marker)
     (only (schemacs editor indentc) current-indentation indent-to)
     (only (schemacs editor syntax) skip-chars-forward)
     )
@@ -76,6 +76,6 @@ large negative ARG."
                                  (point))))
               (forward-line 1)
               (loop)))
-          (set-marker! end-marker #f))))
+          (set-marker end-marker #f))))
 
     ))

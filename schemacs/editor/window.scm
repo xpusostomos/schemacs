@@ -29,8 +29,8 @@
     (scheme case-lambda)
     (only (schemacs editor command)
           current-prefix-arg define-command uarg->integer)
+    (only (schemacs editor marker) build-marker marker-position set-marker)
     (only (schemacs editor engine)
-          copy-marker marker-position
           buffer-pt
           bufferp)
     ;; `define-key' and the global map: the window keys are stated here,
@@ -271,13 +271,25 @@
                           ;; (`:5583')
                           (window-frame window)
                           (window-buffer window)
-                          (copy-marker (window-buffer window)
-                                       (buffer-pt (window-buffer window)))
+                          ;; **`build-marker` and not `copy-marker`**: it
+                          ;; is the C's way to make a marker when it has
+                          ;; the buffer in hand (`alloc.c:3801`), which is
+                          ;; this position - the window carries its buffer
+                          ;; from construction. GNU Emacs makes the two
+                          ;; markers *empty* in `make_window`
+                          ;; (`window.c:4612`, `Fmake_marker`) and
+                          ;; attaches them in `set_window_buffer`
+                          ;; (`set_marker_both`, `:4375`); this tree's
+                          ;; window takes its buffer as a constructor
+                          ;; argument, which is a window.c shape left for
+                          ;; when that file is next opened.
+                          (build-marker (window-buffer window)
+                                        (buffer-pt (window-buffer window)))
                           ;; the start and whether it is a line beginning
                           ;; are copied together, as the C copies them
-                          ;; (`save_window_save', `window.c:8374')
-                          (copy-marker (window-buffer window)
-                                       (marker-position (%window-start window)))
+                          ;; (`save_window_save', `window.c:8374`)
+                          (build-marker (window-buffer window)
+                                        (marker-position (%window-start window)))
                           (%window-start-at-line-beg window)
                           0 0 #f 0 0
                           top
@@ -312,9 +324,9 @@
                           ;; (`:5583')
                           (window-frame window)
                           (window-buffer window)
-                          (copy-marker (window-buffer window)
+                          (build-marker (window-buffer window)
                                        (buffer-pt (window-buffer window)))
-                          (copy-marker (window-buffer window)
+                          (build-marker (window-buffer window)
                                        (marker-position (%window-start window)))
                           (%window-start-at-line-beg window)
                           0 0 #f 0 0
@@ -352,8 +364,8 @@
         (let ((new (make<window>
                     (window-frame main)
                     buffer
-                    (copy-marker buffer (buffer-pt buffer))
-                    (copy-marker buffer 1) #t
+                    (build-marker buffer (buffer-pt buffer))
+                    (build-marker buffer 1) #t
                     0 0 #f 0 0
                     (+ top (- total size))
                     size

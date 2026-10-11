@@ -47,9 +47,11 @@
           ;; event's coordinates into the cells the windows are
           ;; measured in - see `posn-at-x-y'.
           column-width line-height)
+    ;; the markers, from marker.c's own library
+    (only (schemacs editor marker) marker-position)
     (only (schemacs editor engine)
          text-editor-buffer-name text-editor-text-props
-         text-editor-file-name marker-position
+         text-editor-file-name
          text-editor-cursor-column
          buffer-pt text-editor-set-cursor text-editor-mark
          text-editor-get-end-of-line

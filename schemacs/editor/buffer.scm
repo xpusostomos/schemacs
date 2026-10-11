@@ -93,12 +93,14 @@
    ;; marker ones, each as it loads.
    *current-editor-function*
    *replace-buffer-in-windows-function*
-   *copy-marker-function*
+   *build-marker-function*
    *marker-position-function*
    *set-marker-function*
+   *set-marker-insertion-type-function*
    *run-hooks-function*
    *make-marker-function*
    *del-range-function*
+   *buffer-visited-file-modtime-function*
    ;; The buffer record - `buffer.h`'s struct, which `buffer.c` owns. Its
    ;; accessors are that header's macros: `BUF_PT`, `BUF_BEG`, `BUF_Z`,
    ;; `BUF_MARKERS`, `BVAR (b, ...)`. Everything that reads a buffer goes
@@ -110,8 +112,10 @@
    text-editor-text-props  set!text-editor-text-props
    text-editor-undo-list  set!text-editor-undo-list
    text-editor-save-modiff  set!text-editor-save-modiff
+   %buffer-modtime  set!%buffer-modtime
+   %buffer-modtime-size  set!%buffer-modtime-size
+   %unknown-modtime-nsecs  %nonexistent-modtime-nsecs
    text-editor-cache-long-scans  set!text-editor-cache-long-scans
-   text-editor-save-token  set!text-editor-save-token
    text-editor-deactivate-mark  set!text-editor-deactivate-mark!
    %mark-marker  set!%mark-marker
    buffer-markers  set!buffer-markers
@@ -332,21 +336,25 @@
       ;; `frame.sld' installs.
       ;;--------------------------------------------------------------
       (make-parameter (lambda (buffer) #f)))
-    ;; `marker.c`'s three operations an overlay needs: an overlay's ends
-    ;; are markers, so `make-overlay' has to make them and `move-overlay'
-    ;; to point them. `marker.sld' is built on *this* library - a marker
-    ;; is added to a buffer's chain, and that chain is a field of the
-    ;; record below - so it cannot be imported here, and these three
-    ;; arrive the way the two above do.
-    (define *copy-marker-function*    (make-parameter (lambda args #f)))
-    (define *marker-position-function* (make-parameter (lambda (marker) #f)))
-    (define *set-marker-function*     (make-parameter (lambda args #f)))
-    (define *make-marker-function*
-      ;; `marker.c`'s constructor, which `allocate_buffer` calls to make
-      ;; the buffer's mark (`buffer.c:672`) - and marker.c is built on
-      ;; *this* library, so the constructor arrives through a seam like
-      ;; the three above.
-      ;;--------------------------------------------------------------
+    ;; `marker.scm`'s operations an overlay and the buffer's own mark
+    ;; need. An overlay's ends are markers, so `make-overlay` has to make
+    ;; them, point them, and set their insertion types; and
+    ;; `allocate_buffer` makes the buffer's mark with the constructor
+    ;; (`buffer.c:672`). `marker.scm` is built on *this* library - a
+    ;; marker is added to a buffer's chain, and that chain is a field of
+    ;; the record below - so it cannot be imported here, and these arrive
+    ;; the way the two above do.
+    ;;
+    ;; The shapes are Emacs's own: `build-marker` takes the buffer and a
+    ;; position because that is what the C passes when it has a buffer in
+    ;; hand (`alloc.c:3801`), and `set-marker` takes one because its
+    ;; BUFFER argument is what says which buffer a marker is being put
+    ;; into (`marker.c:607`).
+    (define *make-marker-function*      (make-parameter (lambda args #f)))
+    (define *build-marker-function*     (make-parameter (lambda args #f)))
+    (define *marker-position-function*  (make-parameter (lambda (marker) #f)))
+    (define *set-marker-function*       (make-parameter (lambda args #f)))
+    (define *set-marker-insertion-type-function*
       (make-parameter (lambda args #f)))
     (define *del-range-function*
       ;; GNU Emacs's `del_range' (`insdel.c`), which is what
@@ -379,6 +387,27 @@
       ;; three marker seams above, and for the same reason.
       ;;--------------------------------------------------------------
       (make-parameter (lambda (hooks) #f)))
+    (define *buffer-visited-file-modtime-function*
+      ;; GNU Emacs's `buffer_visited_file_modtime' (`fileio.c:6157'),
+      ;; which `record_first_change' (`undo.c:210') calls to write the
+      ;; visited file's modification time into the `(t . TIME)' mark of
+      ;; the last save.
+      ;;
+      ;; **Why it is a seam and not an import.** It is declared here, on
+      ;; the record it reads `modtime' and `modtime_size' from, because
+      ;; both libraries that need it are above this one and `fileio.scm'
+      ;; cannot import the engine: fileio.c is up where files are, and
+      ;; the engine is insdel.c and does not know what a file is. The
+      ;; engine reads this; `fileio.scm' installs it as it loads.
+      ;;
+      ;; The default answers 0, "no time is known", and that is not a
+      ;; placeholder: it is what `buffer_visited_file_modtime' answers
+      ;; for a buffer whose `modtime' is `UNKNOWN_MODTIME_NSECS', which
+      ;; is every buffer that visits no file - so a unit test that loads
+      ;; the engine alone records `(t . 0)', which is Emacs's own answer
+      ;; there.
+      ;;--------------------------------------------------------------
+      (make-parameter (lambda (buffer) 0)))
     (define (current-buffer)
       ;; The buffer a command acts on: GNU Emacs's `(current-buffer)'.
       ;;
@@ -935,7 +964,7 @@
     ;; file, and the tree is an optimisation this tree's shape does not
     ;; need yet.
     ;;
-    ;; Positions are the *engine's*, zero-based - what `copy-marker' takes
+    ;; Positions are the *engine's*, one-based - what `build-marker' takes
     ;; and what `(schemacs editor textprop)' reads. `get-char-property' is
     ;; the seam the two meet at, and says so in its own comment.
     ;;
@@ -988,6 +1017,24 @@
       (start  overlay-start-marker)
       (end    overlay-end-marker)
       (plist  overlay-properties set!overlay-properties!))
+    (define (%make-overlay-boundary buffer position advance)
+      ;; One end of an overlay: a marker at POSITION in BUFFER whose
+      ;; insertion type is ADVANCE - so that text inserted exactly at the
+      ;; end is inside the overlay for a rear advance and outside it for a
+      ;; front one, which is what Front-Advance and Rear-Advance mean.
+      ;;
+      ;; **Two calls, where GNU Emacs 31 makes one.** Its `build_overlay`
+      ;; (`buffer.c:697`) puts the two flags on the overlay's interval-tree
+      ;; node and does not make markers at all - the tree holds the
+      ;; positions. This tree's overlays are still the older model, a pair
+      ;; of markers, so the flags are the markers' insertion types and
+      ;; setting them is a second call (`set-marker-insertion-type`,
+      ;; `marker.c:784`). `build-marker` is part of it either way: it
+      ;; takes the buffer, which `copy-marker` cannot.
+      ;;--------------------------------------------------------------
+      (let ((marker ((*build-marker-function*) buffer position)))
+        ((*set-marker-insertion-type-function*) marker advance)
+        marker))
     (define (overlay-start overlay)
       ;; GNU Emacs's `overlay-start': "Return the start position of
       ;; OVERLAY." A deleted overlay's markers point nowhere, and its
@@ -1059,8 +1106,8 @@
              (b (min beg end))
              (e (max beg end))
              (overlay (make<overlay> buffer
-                                    ((*copy-marker-function*) buffer b front-advance)
-                                    ((*copy-marker-function*) buffer e rear-advance)
+                                    (%make-overlay-boundary buffer b front-advance)
+                                    (%make-overlay-boundary buffer e rear-advance)
                                     '())))
         (add-buffer-overlay! buffer overlay)
         overlay))
@@ -1441,19 +1488,23 @@
       ;; both leave `buffer-undo-list' exactly as it was. The C calls
       ;; `record_first_change' from the *change* paths - `insdel.c:2090',
       ;; `textprop.c:89', `undo.c:65' - and from nothing here. The
-      ;; `(t . TOKEN)' mark is made by `%text-editor-note-change!', before
+      ;; `(t . TIME)' mark is made by `%text-editor-note-change!', before
       ;; a change to an unmodified buffer.
+      ;;
+      ;; **It does not touch the visited file's modtime either**, which
+      ;; is the other half of the same point: `SAVE_MODIFF' is the
+      ;; buffer's own record of what it last agreed with, and only
+      ;; `visited-file-modtime' records what the *file* was. Saving a
+      ;; buffer sets both, but through different doors - the write
+      ;; updates `modtime' and this sets `SAVE_MODIFF' - and something
+      ;; that marks a buffer unmodified without writing the file (a
+      ;; revert, a programmatic clear) leaves `modtime' alone, as Emacs
+      ;; does.
       ;;--------------------------------------------------------------
       (let* ((ed (current-buffer))
              (modiff (buffer-modified-tick ed)))
         (if (not flag)
-            (begin
-              ;; our stand-in for the file modification time Emacs records
-              ;; beside the mark of the last save
-              (when (buffer-modified-p ed)
-                (set!text-editor-save-token
-                 ed (+ 1 (text-editor-save-token ed))))
-              (set!text-editor-save-modiff ed modiff))
+            (set!text-editor-save-modiff ed modiff)
             (when (>= (text-editor-save-modiff ed) modiff)
               (set!text-editor-save-modiff ed modiff)
               (%text-editor-incr-modiff! ed 0)))
@@ -1487,11 +1538,22 @@
     ;; `*make-marker-function*` is a seam, installed by the library
     ;; that has the constructor.
     ;;--------------------------------------------------------------
+    ;; GNU Emacs's two sentinel modification times (`buffer.h:314').
+    ;; They are not times at all but the two answers a buffer's recorded
+    ;; visited-file time can give that no `struct timespec' can hold:
+    ;; "no time is known" for a buffer that visits nothing, and "the
+    ;; file is not there" for one whose file has been removed.
+    ;; `buffer-visited-file-modtime' (`fileio.c:6157') turns them into
+    ;; the 0 and -1 the Lisp interface documents.
+    ;;--------------------------------------------------------------
+    (define %unknown-modtime-nsecs -2)
+    (define %nonexistent-modtime-nsecs -1)
+
     (define-record-type <buffer>
       (make<buffer>
        text  newline-cache  point
        textprops  undo
-       save-modiff  save-token  cache-long-scans  read-only  mark  markers
+       save-modiff  modtime  modtime-size  cache-long-scans  read-only  mark  markers
        deactivate-mark
        name  file-name
        )
@@ -1535,6 +1597,32 @@
       ;; recording is enabled but there is nothing to undo. See the
       ;; "Undo" section below for the entry formats.
       (save-modiff text-editor-save-modiff  set!text-editor-save-modiff)
+      (modtime    %buffer-modtime         set!%buffer-modtime)
+      ;; ^ GNU Emacs's `b->modtime' (`buffer.h:649'), the modification
+      ;; time of the file the buffer visits, as the C's `struct
+      ;; timespec' - here a pair of `(SECONDS . NANOSECONDS)'.
+      ;;
+      ;; **The nanoseconds carry two sentinels, as the C's do**
+      ;; (`buffer.h:314'): `UNKNOWN_MODTIME_NSECS' (-2) is "no time is
+      ;; known", which is what a buffer that visits nothing holds, and
+      ;; `NONEXISTENT_MODTIME_NSECS' (-1) is "the file is not there".
+      ;; `buffer-visited-file-modtime' (`fileio.c:6157') is what reads
+      ;; them, and it is why the field is not simply a Lisp time: those
+      ;; two answers have no time to be.
+      ;;
+      ;; It is recorded when a file is visited and again when it is
+      ;; written, and what it is *for* is the `(t . TIME)' undo entry:
+      ;; undoing back to the mark of the last save makes the buffer
+      ;; unmodified again only while the time it recorded still matches
+      ;; this one. Save in between and this changes, the entry goes
+      ;; stale, and the undo does not claim the buffer matches a file it
+      ;; no longer matches.
+      (modtime-size %buffer-modtime-size    set!%buffer-modtime-size)
+      ;; ^ GNU Emacs's `b->modtime_size' (`buffer.h:661'), the visited
+      ;; file's size as of that same stat, or -1 for "not from a stat".
+      ;; `verify-visited-file-modtime' compares it beside the time,
+      ;; because a file can be rewritten within the resolution of the
+      ;; clock and keep the same timestamp.
       (cache-long-scans text-editor-cache-long-scans
                         set!text-editor-cache-long-scans)
       ;; ^ GNU Emacs's `cache-long-scans' (`buffer.c:5786'), a
@@ -1555,16 +1643,6 @@
       ;; answers and what `set-buffer-modified-p' maintains.
       ;; It is cleared by saving and by undoing back past every change
       ;; made since the last save.
-      (save-token text-editor-save-token    set!text-editor-save-token)
-      ;; ^ Identifies the state the buffer was last in sync with its
-      ;; file. It is an integer that counts up every time the buffer is
-      ;; marked unmodified, and it is what the `(t . TOKEN)' undo entry
-      ;; records: undoing back to that entry makes the buffer
-      ;; unmodified again, but only while the token still matches,
-      ;; which is false once the buffer has been saved in the meantime.
-      ;; Emacs records the visited file's modification time there
-      ;; instead and compares it with `visited-file-modtime'; the
-      ;; engine has no file or clock, so it numbers its saves.
       (deactivate-mark text-editor-deactivate-mark
                        set!text-editor-deactivate-mark!)
       ;; ^ Whether the mark should be deactivated once this command is
@@ -1645,12 +1723,15 @@
          ;; `SAVE_MODIFF' starts at 1 and so does the text's `modiff',
          ;; which is what makes a fresh buffer unmodified: `1 < 1' is
          ;; false. Emacs sets the one to 1 at `buffer.c:631' and a fresh
-         ;; buffer reports a tick of 1. `SAVE_MODIFF' is 1, the
-         ;; `save-token' 0, long scans cached, and the buffer writable.
-         1 0 #t #f
+         ;; buffer reports a tick of 1. Beside it a fresh buffer's
+         ;; visited-file time is unknown and its size unrecorded, which
+         ;; is `reset_buffer''s pair (`buffer.c:1094') exactly -
+         ;; `(make_timespec (0, UNKNOWN_MODTIME_NSECS))' and -1. Long
+         ;; scans are cached and the buffer is writable.
+         1 (cons 0 -2) -1 #t #f
          ;; The mark, pointing nowhere until it is set, and an empty
          ;; marker chain.
-         ((*make-marker-function*) #f 0 #f)
+         ((*make-marker-function*))
          (make-weak-key-hash-table)
          ;; Nothing is waiting to deactivate the mark.
          #f

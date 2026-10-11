@@ -43,8 +43,8 @@
            line-height mouse-position resume-display!
            screen-size suspend-display!)
      (mouse-position display-mouse-position))
+    (only (schemacs editor marker) build-marker marker-position set-marker make-marker)
     (only (schemacs editor engine)
-          copy-marker marker-position set-marker!
            fetch-char buffer-beg
           text-editor-get-start-of-line
           buffer-pt text-editor-set-cursor)
@@ -396,7 +396,7 @@
       ;; `set-window-point', which moves point itself when the window is
       ;; the selected one.
       ;;--------------------------------------------------------------
-      (set-marker! (%window-point window) index (window-buffer window))
+      (set-marker (%window-point window) index (window-buffer window))
       (when (eq? window (selected-window))
         (text-editor-set-cursor (window-buffer window) index))
       index)
@@ -502,7 +502,7 @@
       ;; start begins a line.
       ;;--------------------------------------------------------------
       (let ((buffer (window-buffer window)))
-        (set-marker! (%window-start window) position buffer)
+        (set-marker (%window-start window) position buffer)
         ;; `fetch-char' is `char-after', so the comparison is `char=?'
         ;; and `#\newline' - and a position with no character before it is
         ;; the beginning of the buffer by definition.
@@ -555,7 +555,7 @@
         (set!%window-hscroll window 0)
         (set!%window-min-hscroll window 0)
         (set!%window-suspend-auto-hscroll? window #f)
-        (set-marker! (%window-point window) (buffer-pt buffer)
+        (set-marker (%window-point window) (buffer-pt buffer)
                      buffer)
         (set-window-start! window 1)
         window))
@@ -600,8 +600,8 @@
       ;; showing that place. Written as 1, `C-x 5 2' put the new window
       ;; at the top of the file wherever the old one was - measured on
       ;; Emacs 31.1: point at 21, the new frame's `window-point' is 21.
-      (make<window> frame buffer (copy-marker buffer (buffer-pt buffer))
-                            (copy-marker buffer 1) #t
+      (make<window> frame buffer (build-marker buffer (buffer-pt buffer))
+                            (build-marker buffer 1) #t
                             0 0 #f 0 0
                             top height left width #f '()
                             0 0 #f 0))
@@ -1264,7 +1264,7 @@
           ;; the frame being left keeps the point its window had ...
           (let ((old-window (and old (frame-selected-window old))))
             (when old-window
-              (set-marker! (%window-point old-window)
+              (set-marker (%window-point old-window)
                            (buffer-pt (window-buffer old-window))
                            (window-buffer old-window)))))
         (*current-frame* frame)
@@ -1731,7 +1731,7 @@
             (old (selected-window)))
         (when (and old (not (eq? old window)))
           ;; the window being left keeps the point it had ...
-          (set-marker! (%window-point old)
+          (set-marker (%window-point old)
                        (buffer-pt (window-buffer old))
                        (window-buffer old))
           (set!frame-selected-window frame window)

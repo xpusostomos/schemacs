@@ -80,8 +80,9 @@
           major-mode set-buffer-local-value!)
     ;; the hook `font-lock-mode' hangs its incremental fontification on:
     ;; `after-change-functions' is `buffer.c''s, and the engine holds it
-    (only (schemacs editor engine)
-          *after-change-functions* marker-position set-marker!)
+    (only (schemacs editor engine) *after-change-functions*)
+    ;; the markers, from marker.c's own library
+    (only (schemacs editor marker) marker-position set-marker)
     ;; the faces above are `defface''d here, as font-lock.el deffaces them
     (only (schemacs editor faces) defface))
 
@@ -703,7 +704,7 @@
         ;; keyword may add/delete text (this happens e.g. in grep.el)." A
         ;; plain position is not enough and this port used one.
         (let ((pos (point-marker)))
-          (set-marker! pos #f)          ; `(make-marker)': nowhere yet
+          (set-marker pos #f)          ; `(make-marker)': nowhere yet
           (for-each
          (lambda (keyword)
            (let ((matcher (car keyword)))
@@ -759,7 +760,7 @@
                     (if (number? (car highlight))
                         (font-lock-apply-highlight highlight)
                         (begin
-                          (set-marker! pos (point) (current-buffer))
+                          (set-marker pos (point) (current-buffer))
                           (font-lock-fontify-anchored-keywords highlight end)
                           (when (< (point) (marker-position pos))
                             (goto-char (marker-position pos))))))
@@ -767,7 +768,7 @@
                  (loop)))))
          (if (pair? (cddr keywords)) (cddr keywords) '()))
           ;; `(set-marker pos nil)'
-          (set-marker! pos #f)
+          (set-marker pos #f)
           #f)))
 
     (define (car-safe x) (if (pair? x) (car x) #f))

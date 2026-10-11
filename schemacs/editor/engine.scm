@@ -1,51 +1,41 @@
 (define-library (schemacs editor engine)
   ;; This library mirrors GNU Emacs's `buffer.c' + `insdel.c' +
-  ;; `marker.c' + `search.c': the buffer and its text (one `buffer-text`,
-  ;; which is `struct buffer_text`), inserting into it and deleting from
-  ;; it, the markers that follow edits, and searching over it.
+  ;; `search.c': the buffer and its text (one `buffer-text`, which is
+  ;; `struct buffer_text`), inserting into it and deleting from it, the
+  ;; undo list those record, and searching over it.
   ;;
-  ;; It is four Emacs files in one library, which the rule in
+  ;; It is three Emacs files in one library, which the rule in
   ;; LAYOUT-PLAN.txt does not ask for - the rule is one library per
   ;; mirrored file. It was written before the rule, and this note used to
   ;; promise a split "when markers are next worked on".
   ;;
-  ;; **That split is not available, and the reason is Emacs's own data
-  ;; layout.** The buffer *record* is the hub:
+  ;; **Two of the four have left.** `marker.c` is `marker.scm' - the
+  ;; smallest piece, and the one with nothing pointing back into this
+  ;; file, because `marker.c` never calls `insdel.c`. Grep the C and the
+  ;; only edge runs the other way: `insdel.c` walks the chain with
+  ;; `adjust_markers_for_insert`. The record left before it - it is
+  ;; `buffer.h`'s `struct buffer`, and it is `buffer.scm`'s now, which is
+  ;; where `buffer.c` keeps it. This library is built ON that one, so it
+  ;; may call the buffer's own functions rather than the reverse.
   ;;
-  ;;   * `set_marker` and `copy_marker` write the buffer's `markers`
-  ;;     field (`buffer.h`), and `buffer.c`'s overlays are markers - so
-  ;;     marker.c and buffer.c call each other;
-  ;;   * `adjust_markers_for_insert` (`insdel.c`) walks that same field,
-  ;;     so the primitives call marker.c and marker.c's callers call the
-  ;;     primitives;
+  ;; **What holds the remaining three together is a cycle in Emacs's own
+  ;; data layout**, and an R7RS library's imports are a directed acyclic
+  ;; graph:
+  ;;
   ;;   * the line scans (`find_newline`, `bol`, `eol`) are read by the
   ;;     line and column arithmetic in this same file - `%line-start`,
   ;;     `%line-end`, `text-editor-cursor-line` - so search.c's scans sit
-  ;;     *below* `search.sld`, the file that already mirrors search.c's
+  ;;     *below* `search.scm`, the file that already mirrors search.c's
   ;;     other half and imports this one;
-  ;;   * the undo list is written by the primitives and applied by a
-  ;;     command that goes back *through* those primitives.
+  ;;   * the undo list is written by the insert and delete primitives and
+  ;;     applied by a command that goes back *through* those primitives;
+  ;;   * and the insert and delete primitives *are* this library, so
+  ;;     `insdel.c` cannot be taken out of what is left of `buffer.c`.
   ;;
-  ;; C may have those files include each other; an R7RS library may not -
-  ;; its imports are a directed acyclic graph. So the primitives, the
-  ;; markers, the scans and the undo list stay in one library, and this
-  ;; header stands for the four files. The same entanglement is why
-  ;; `frame.sld` is `frame.c` + `window.c`.
-  ;;
-  ;; **The record has left, though.** It is `buffer.h`'s `struct buffer`
-  ;; and it is `buffer.sld`'s now, which is where `buffer.c` keeps it -
-  ;; and this library is built ON that one, so the engine may call the
-  ;; buffer's own functions rather than the other way round. It used to
-  ;; be the engine's, and the reason it could not move was a cycle: the
-  ;; buffer library ran `change-major-mode-hook' through `subr.el`'s
-  ;; `run-hooks`, `subr.sld` reaches the engine through `fns.sld` and
-  ;; `intervals.sld`, and the engine could not be above a library that
-  ;; reached it. That one call is a seam now
-  ;; (`*run-hooks-function*`), and the record, its accessors,
-  ;; `make_buffer`, `buffer-beg`/`buffer-z` and `inhibit-read-only` moved
-  ;; with it. Whatever comes back the other way - `del_range`, the undo
-  ;; entry a save records up to, marker.c's constructor - is a seam this
-  ;; library installs at the end of its load.
+  ;; What comes the other way - `del_range`, the undo entry a save
+  ;; records up to, the visited file's modification time - is a seam this
+  ;; library installs at the end of its load, or one declared in
+  ;; `buffer.scm` and filled in by the library that owns the function.
   ;;
   ;; See LAYOUT-PLAN.txt for the rule this library predates.
   ;;------------------------------------------------------------------
@@ -53,15 +43,13 @@
     (scheme base)
     (scheme case-lambda)
     (only (scheme char) char-downcase)  ; for case-folding searches
-    (only (scheme write) display) ;;DEBUG
     ;;(only (schemacs lexer) make<source-file-location>)
-    ;; The marker chain is held weakly - see the note above
-    ;; `MAKE<MARKER>'. There is no Emacs name for the mechanism and no
-    ;; wrapper for it any more: this is Guile's own weak table, a key
-    ;; held weakly with a constant for its value, which `(schemacs
-    ;; weak)' used to spell `new-weak-set'.
+    ;; **The marker chain's weak table is not imported here any more** -
+    ;; the chain moved to `marker.scm' with `marker.c`, and with it the
+    ;; four `hashq` functions that used to be imported for it. The
+    ;; `(only (scheme write) display)` that stood here was a `;;DEBUG`
+    ;; leftover: nothing called it.
     (only (guile)
-          make-weak-key-hash-table  hashq-set!  hashq-remove!  hash-for-each
           ;; `make-typed-array' is how a `u32vector' of a given length is
           ;; made - `(scheme base)' has no generic array, and R7RS has no
           ;; `u32vector' constructor at all. `u32vector-set!' takes the value before
@@ -105,7 +93,6 @@
           text-editor-text-props  set!text-editor-text-props
           text-editor-undo-list  set!text-editor-undo-list
           text-editor-cache-long-scans  set!text-editor-cache-long-scans
-          text-editor-save-token
           text-editor-deactivate-mark  set!text-editor-deactivate-mark!
           %mark-marker
           buffer-markers
@@ -118,9 +105,21 @@
           %text-editor-incr-modiff!
           ;; the seams this library installs as it loads, at the end of
           ;; the file
-          *make-marker-function*  *copy-marker-function*
-          *marker-position-function*  *set-marker-function*
+          *buffer-visited-file-modtime-function*
           *del-range-function*)
+    ;; The markers that follow the text. `marker.scm` is built on the
+    ;; buffer library - a marker is added to a buffer's chain, and that
+    ;; chain is a field of the record - and this library is built on the
+    ;; same one, so the two are siblings and this is where the engine gets
+    ;; them from.
+    ;;
+    ;; **`adjust_markers_for_insert` and `adjust_markers_for_delete` are
+    ;; `insdel.c`'s, not `marker.c`'s**, which is why the two adjusters
+    ;; below are still here: they walk the chain and write `m->charpos`,
+    ;; and that is what the C does from the other file.
+    (only (schemacs editor marker)
+          %for-each-marker %marker-charpos set!%marker-charpos
+          marker-position marker-insertion-type set-marker)
     )
   (export
    ;; The buffer data type - `buffer.h`'s struct, which `buffer.sld`
@@ -156,7 +155,7 @@
 
    ;; Whether the buffer has changed since it was last saved
    buffer-modified-p  set-buffer-modified-p
-   text-editor-save-token
+   *buffer-visited-file-modtime-function*
 
    ;; Whether the buffer refuses to be changed
    buffer-read-only?  set!buffer-read-only
@@ -170,12 +169,11 @@
    text-editor-buffer-name  set!text-editor-buffer-name
    text-editor-file-name    set!text-editor-file-name
 
-   ;; Markers: positions that follow the text
-   new-marker  copy-marker  marker-type?
-   marker-position  marker-buffer  marker-insertion-type
-   set-marker!  set-marker-insertion-type!
+   ;; The buffer's mark. The markers themselves are `marker.scm`'s now -
+   ;; `MARKERP`, `marker-position`, `set-marker` and the rest come from
+   ;; there, where marker.c's functions live - and `mark-marker` is
+   ;; `buffer.c`'s, which is why it is still here.
    mark-marker
-   buffer-markers
 
    ;; Getting and setting the cursor index. Every *position* the engine
    ;; answers is one-based, as Emacs's are: `point-min' is 1 and
@@ -223,21 +221,19 @@
 
   (begin
 
-    ;; Cumulative Distribution Function (CDF): since most text editors
-    ;; require moving the cursor to a precise index, as though the
-    ;; text buffer were an array of characters, and since this editor
-    ;; engine buffers variable-length lines and not characters, we
-    ;; provide a way to efficiently map arbitrary character indicies
-    ;; to line indicies. This is accomplished with a CDF which
-    ;; precisely describes how characters are distributed throughout
-    ;; the text buffer, that way character lookup by index can be
-    ;; performed with a simple binary search in O(log n) time. The CDF
-    ;; implementation defined here provides APIs for changing the
-    ;; characters and lazily re-computing the distribution whenever
-    ;; characters are inserted or removed from somewhere in the middle
-    ;; of the text buffer.
-
+    ;;----------------------------------------------------------------
     ;; Inserting text
+    ;;------------------------------------------------------------------
+    ;;
+    ;; **A Cumulative Distribution Function used to be described here** -
+    ;; "since this editor engine buffers variable-length lines and not
+    ;; characters, we provide a way to efficiently map arbitrary
+    ;; character indices to line indices ... with a CDF". It described
+    ;; machinery that no longer exists: the line buffer, the gap buffer
+    ;; of `<text-line>' records and the CDF over them were all replaced
+    ;; by one `buffer-text`, a sequence of *characters* with a gap, as
+    ;; `struct buffer_text' is. A position is an offset into it, so there
+    ;; is no character-to-line mapping to compute.
 
 
     (define (make-buffer-string ed start end)
@@ -354,126 +350,30 @@
       ;;--------------------------------------------------------------
       (and (pair? entry) (eq? (car entry) 't)))
 
-    ;;----------------------------------------------------------------
-    ;; Markers
+    ;;------------------------------------------------------------------
+    ;; Adjusting markers
+    ;;------------------------------------------------------------------
     ;;
-    ;; A marker is a position in a buffer that follows the text: insert
-    ;; or delete anywhere and the marker goes on pointing at the same
-    ;; character, because its index is adjusted by the change. It is
-    ;; GNU Emacs's marker (marker.c), and it is what a position that
-    ;; must not go stale has to be - the mark, a window's point, and
-    ;; (later) the bounds of an overlay.
-    ;;
-    ;; Positions that must NOT move are plain integers, and that is not
-    ;; an accident: Emacs's `region-beginning' returns an integer, so
-    ;; code that binds it gets a fixed anchor, while the mark and
-    ;; window points are markers and do follow the text. The engine
-    ;; supplies both kinds; a buffer's own cursor is the integer kind,
-    ;; because it is the current position and the insert and delete
-    ;; procedures move it themselves.
-    ;;
-    ;; Each buffer holds its markers in a chain (`buffer-markers')
-    ;; that the insert and delete procedures walk. GNU Emacs's chain
-    ;; does not keep its markers alive - its collector prunes the chain
-    ;; while sweeping, so an unreachable marker is collected and its
-    ;; place in the chain goes with it. A Scheme implementation cannot
-    ;; hook its collector's sweep, so the chain holds its markers
-    ;; weakly instead - `MAKE-WEAK-KEY-HASH-TABLE', whose key is held
-    ;; weakly and whose value is the constant `#t' - which comes to the
-    ;; same thing: a marker that nothing else refers to is collected,
-    ;; and it stops being adjusted.
-
-    (define-record-type <marker-type>
-      (make<marker> buffer index insertion-type)
-      marker-type?
-      (buffer     marker-buffer           set!marker-buffer)
-      ;; ^ The <buffer> this marker points into, or false
-      ;; when it points nowhere - GNU Emacs's "marker points nowhere",
-      ;; which is what a marker made by `MAKE-MARKER' is, and what one
-      ;; is left as when its buffer is killed or its position is set to
-      ;; false.
-      (index      %marker-index           set!%marker-index)
-      ;; ^ The character index within that buffer. Only meaningful
-      ;; while the marker has one.
-      (insertion-type marker-insertion-type set!marker-insertion-type)
-      ;; ^ GNU Emacs's marker insertion type: whether the marker
-      ;; advances past text inserted exactly at it. False - the default,
-      ;; and what Emacs gives a marker made by `MAKE-MARKER' - leaves
-      ;; the marker where it is and lets the inserted text follow it;
-      ;; true moves the marker past the insertion. Text inserted on
-      ;; either side of the marker moves it whichever way the text went,
-      ;; whatever the type.
-      )
-
-    (define (marker-position marker)
-      ;; Where MARKER points, as a character index, or false when it
-      ;; points nowhere. GNU Emacs's `marker-position'.
-      ;;--------------------------------------------------------------
-      (and (marker-buffer marker) (%marker-index marker)))
-
-    (define (new-marker)
-      ;; A marker that points nowhere, GNU Emacs's `make-marker'.
-      ;;--------------------------------------------------------------
-      (make<marker> #f 0 #f))
-
-    (define (copy-marker ed index . insertion-type)
-      ;; A new marker at character index INDEX of ED, GNU Emacs's
-      ;; `copy-marker'. It is added to ED's chain, so it follows the
-      ;; text from here on.
-      ;;--------------------------------------------------------------
-      (let ((marker (make<marker> ed index
-                                (and (pair? insertion-type) (car insertion-type)))))
-        (hashq-set! (buffer-markers ed) marker #t)
-        marker))
-
-    (define (set-marker! marker position . buffer)
-      ;; Point MARKER at POSITION, or nowhere when POSITION is false:
-      ;; GNU Emacs's `set-marker'. A marker that points nowhere is in no
-      ;; buffer's chain and follows nothing, and one that is set
-      ;; nowhere loses its buffer; a marker being given a position it
-      ;; has no buffer for needs one, as in Emacs.
-      ;;--------------------------------------------------------------
-      (let ((ed (cond ((pair? buffer) (car buffer))
-                      (else (marker-buffer marker)))))
-        (cond
-         (position
-          (unless ed
-            (error "set-marker! needs a buffer for a marker that points nowhere"))
-          (set!marker-buffer marker ed)
-          (set!%marker-index marker position)
-          (hashq-set! (buffer-markers ed) marker #t))
-         (else
-          (when ed
-            (hashq-remove! (buffer-markers ed) marker))
-          (set!marker-buffer marker #f)
-          (set!%marker-index marker 0)))
-        marker))
-
-    (define (set-marker-insertion-type! marker type)
-      (set!marker-insertion-type marker (and type #t))
-      type)
-
-    (define (for-each-marker ed proc)
-      ;; Apply PROC to every marker in ED's chain. A marker that has
-      ;; been collected is simply no longer in it.
-      ;;--------------------------------------------------------------
-      (hash-for-each (lambda (marker _) (proc marker))
-                     (buffer-markers ed)))
+    ;; **These are `insdel.c`'s, not `marker.c`'s.** marker.c sets and
+    ;; reads markers; it is the insert and delete procedures that move
+    ;; them, because a marker follows the text only if whoever changed
+    ;; the text told it to. They walk the buffer's chain - `marker.scm`'s
+    ;; `%for-each-marker`, which stands for the C's `BUF_MARKERS` loop -
+    ;; and write `m->charpos` directly, which is what the C does.
 
     (define (adjust-markers-for-insertion! ed position delta)
       ;; Move the markers of ED for DELTA characters inserted at
       ;; POSITION: GNU Emacs's `adjust_markers_for_insert'. A marker
       ;; after the insertion moves with the text that follows it; one
-      ;; exactly at POSITION moves only if its insertion type says so
-      ;; (see the type's note above).
+      ;; exactly at POSITION moves only if its insertion type says so.
       ;;--------------------------------------------------------------
-      (for-each-marker
+      (%for-each-marker
        ed
        (lambda (marker)
-         (let ((index (%marker-index marker)))
+         (let ((index (%marker-charpos marker)))
            (when (or (> index position)
                      (and (= index position) (marker-insertion-type marker)))
-             (set!%marker-index marker (+ index delta)))))))
+             (set!%marker-charpos marker (+ index delta)))))))
 
     (define (adjust-markers-for-deletion! ed start end)
       ;; Move the markers of ED for the characters in [START, END)
@@ -482,13 +382,13 @@
       ;; ones inside it - whose character is gone - are left at its
       ;; start, which is where Emacs leaves them.
       ;;--------------------------------------------------------------
-      (for-each-marker
+      (%for-each-marker
        ed
        (lambda (marker)
-         (let ((index (%marker-index marker)))
+         (let ((index (%marker-charpos marker)))
            (cond
-            ((>= index end) (set!%marker-index marker (- index (- end start))))
-            ((> index start) (set!%marker-index marker start)))))))
+            ((>= index end) (set!%marker-charpos marker (- index (- end start))))
+            ((> index start) (set!%marker-charpos marker start)))))))
 
     (define (mark-marker ed)
       ;; The buffer's mark as the marker it is, GNU Emacs's
@@ -509,7 +409,7 @@
       ;; Put the buffer's mark at POSITION, or leave it unset when
       ;; POSITION is false.
       ;;--------------------------------------------------------------
-      (set-marker! (%mark-marker ed) (and position position) ed))
+      (set-marker (%mark-marker ed) (and position position) ed))
 
     (define (text-editor-note-property-change! ed start end)
       ;; A change to the buffer's *text properties* rather than to its
@@ -529,19 +429,26 @@
       ;; below the change's own entry in the list and is reached after
       ;; the change has been undone.
       ;;
+      ;; The mark is the C's `record_first_change' (`undo.c:210'), which
+      ;; `record_insert' calls before the modification counter rises - so
+      ;; the test "have we changed since the save?" is still answered by
+      ;; the *old* counter. It is not a call to `set-buffer-modified-p':
+      ;; with the counter moved, `buffer-modified-p' is true on its own.
+      ;;
+      ;; **What it records is the visited file's modification time**, and
+      ;; that is the whole point of the entry: undoing back to this mark
+      ;; makes the buffer unmodified again only while the file still
+      ;; holds the time it held when the mark was made. Emacs asks the
+      ;; *base* buffer, an indirect buffer having no file of its own;
+      ;; there are no indirect buffers here, so ED is its own base.
+      ;;
       ;; A modification also asks for the mark to be deactivated, which
       ;; is what GNU Emacs's `prepare_to_modify_buffer' does with
       ;; `(setq deactivate-mark t)' - `insdel.c''s, where this is.
       ;;--------------------------------------------------------------
-      ;;
-      ;; The mark is recorded here because this is the C's
-      ;; `record_first_change' (`undo.c:210'), which `record_insert' calls
-      ;; before the modification counter rises - so the test "have we
-      ;; changed since the save?" is still answered by the *old* counter.
-      ;; It is not a call to `set-buffer-modified-p': with the counter
-      ;; moved, `buffer-modified-p' is true on its own.
       (when (not (buffer-modified-p ed))
-        (%undo-record! ed (cons 't (text-editor-save-token ed))))
+        (%undo-record!
+         ed (cons 't ((*buffer-visited-file-modtime-function*) ed))))
       (set!text-editor-deactivate-mark! ed #t))
 
     (define *after-change-functions* (make-parameter '()))
@@ -1533,13 +1440,10 @@
     ;; defines.** The record is the buffer library's now, the engine is
     ;; built on it, and so these are installed where the functions are.
     ;;
-    ;; `marker.c`'s four (`copy-marker`'s family, and the constructor
-    ;; `allocate_buffer` calls), and `insdel.c`'s `del_range` - which is
-    ;; what `Ferase_buffer` calls to empty a buffer.
-    (*make-marker-function* make<marker>)
-    (*copy-marker-function* copy-marker)
-    (*marker-position-function* marker-position)
-    (*set-marker-function* set-marker!)
+    ;; **`marker.scm`'s five seams are not here** - they are installed
+    ;; where marker.c's functions are, which is the point of that library.
+    ;; What is left is `insdel.c`'s `del_range`, which is what
+    ;; `Ferase_buffer` calls to empty a buffer.
     (*del-range-function* %del-range)
 
     )

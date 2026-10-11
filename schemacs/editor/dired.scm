@@ -143,9 +143,9 @@
           *default-keymap*)
     (only (schemacs editor command) current-prefix-arg define-command
           uarg->integer)
-    (only (schemacs editor engine)
-          marker-position set-marker! set!buffer-read-only
-          bufferp)
+    (only (schemacs editor engine) set!buffer-read-only bufferp)
+    ;; the markers, from marker.c's own library
+    (only (schemacs editor marker) marker-position set-marker)
     ;; the three mark faces are dired.el's own `defface's
     (only (schemacs editor faces) defface)
     ;; the mark keywords are run by font-lock, which `dired-mode' turns on
@@ -664,7 +664,7 @@
                     (set! looping #f))))
             (save-excursion
               (forward-line 1)
-              (set-marker! pos (point)))
+              (set-marker pos (point)))
             (save-excursion (function))
             ;; "Advance to the next line - actually, to the line that
             ;; *was* next. (If FUNCTION inserted some new lines in
@@ -683,7 +683,7 @@
             (beginning-of-line)
             (save-excursion (function))
             (loop arg)))
-        (set-marker! pos #f)
+        (set-marker pos #f)
         (dired-move-to-filename)))
 
     (define (dired-insert-directory dir switches . rest)
@@ -1163,7 +1163,7 @@ With a prefix arg, mark files on the next ARG lines."
       ;;--------------------------------------------------------------
       (let loop ()
         (when (pair? (dired-subdir-alist))
-          (set-marker! (cdr (car (dired-subdir-alist))) #f)
+          (set-marker (cdr (car (dired-subdir-alist))) #f)
           (set!dired-subdir-alist! (cdr (dired-subdir-alist)))
           (loop))))
 
@@ -2326,7 +2326,7 @@ for SWITCHES."
                     (collect!)
                     (goto-char (marker-position next-position))
                     (forward-line 1)
-                    (set-marker! next-position #f)
+                    (set-marker next-position #f)
                     (set! next-position
                           (let ((found-at (re-search-forward regexp #f #t)))
                             (and found-at (point-marker))))
@@ -2727,7 +2727,7 @@ for SWITCHES."
                              m))
                      #f))
                    #f #t)
-                  (for-each (lambda (m) (set-marker! m #f)) markers))
+                  (for-each (lambda (m) (set-marker m #f)) markers))
                 (if (not nomessage)
                     (message "(No deletions requested)")
                     #f))))))

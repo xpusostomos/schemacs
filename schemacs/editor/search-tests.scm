@@ -7,6 +7,7 @@
  (schemacs editor editfns)
  (schemacs editor search)
  (schemacs editor casefiddle)
+ (only (schemacs editor marker) markerp marker-position)
  (only (srfi 64) test-assert test-equal test-begin test-end test-error)
  )
 
@@ -122,12 +123,14 @@
    (let ((md (match-data)))
      ;; buffer search: markers by default
      (test-assert "match-data's entries are markers"
-       (marker-type? (car md)))
-     ;; a marker's position is the engine's index, one behind the
-     ;; one-based position
+       (markerp (car md)))
+     ;; a marker's position and the integer beside it are the same
+     ;; position - which they were not: the markers came back one behind,
+     ;; so this answered `(4 9)' where `(match-data t)' answered `(5 10)'.
+     ;; Emacs 31.1 answers `(5 10)' both ways.
      (test-equal "match-data's pairs are the match"
-       (list 4 9) (list (marker-position (car md))
-                        (marker-position (cadr md))))
+       (list 5 10) (list (marker-position (car md))
+                         (marker-position (cadr md))))
      (set-match-data md)
      (test-equal "set-match-data restores the positions"
        (list 5 10) (list (match-beginning 0) (match-end 0))))))

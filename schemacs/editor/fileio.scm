@@ -64,17 +64,30 @@
     (only (guile)
           R_OK W_OK X_OK
           access? chmod delete-file getenv getpwnam lstat mkdir readlink rmdir
-          stat stat:mode stat:type)
+          stat stat:mode stat:type stat:mtime stat:mtimensec stat:size)
     ;; `substitute-env-vars' is `env.el''s, and is what
     ;; `substitute-in-file-name' below substitutes the variables with.
     (only (schemacs editor env) substitute-env-vars)
     ;; `find-file-name-handler' matches a handler's regexp against the
     ;; name, which is the same regexp engine `string-match' reads.
     (only (schemacs editor search) string-match)
+    ;; The time a visited file's modification time is written in, which
+    ;; is `timefns.c`'s - `make_lisp_time' (`timefns.c:1068') is what the
+    ;; C's `buffer_visited_file_modtime' answers with.
+    (only (schemacs editor timefns) make-lisp-time lisp-time-arguments)
     ;; `default-directory' is what a name with no directory of its own is
     ;; expanded against - a buffer-local variable in Emacs, and so
-    ;; `buffer.c''s, which is where it now lives.
-    (only (schemacs editor buffer) default-directory)
+    ;; `buffer.c''s, which is where it now lives. The rest is the buffer
+    ;; the visited-file time is recorded on: `modtime' and `modtime_size'
+    ;; are `buffer.h`'s fields, and this library is the one that reads
+    ;; and writes them because `fileio.c' is where Emacs's functions for
+    ;; them are.
+    (only (schemacs editor buffer)
+          default-directory current-buffer buffer-file-name
+          %buffer-modtime set!%buffer-modtime
+          %buffer-modtime-size set!%buffer-modtime-size
+          %unknown-modtime-nsecs %nonexistent-modtime-nsecs
+          *buffer-visited-file-modtime-function*)
     )
 
   (export
@@ -112,6 +125,14 @@
    make-directory-internal
    rename-file
    set-file-modes
+   ;; The visited file's modification time, which `fileio.c` owns - it is
+   ;; what tells a buffer whether its file has moved, and what the
+   ;; `(t . TIME)' undo entry records.
+   buffer-visited-file-modtime
+   visited-file-modtime
+   set-visited-file-modtime
+   verify-visited-file-modtime
+   *buffer-visited-file-modtime-function*
    substitute-in-file-name
    )
 
@@ -614,6 +635,142 @@
         (guard (e (#t #f))
           (logand (stat:mode ((if nofollow lstat stat) name)) #o7777))))
 
+    ;;----------------------------------------------------------------
+    ;; The visited file's modification time
+    ;;------------------------------------------------------------------
+    ;;
+    ;; This is what tells a buffer whether the file it visits has been
+    ;; changed behind it, and what the `(t . TIME)' undo entry records -
+    ;; see `record_first_change' (`undo.c:210') and the `(t . ,time)'
+    ;; branch of `primitive-undo' (`simple.el:3677'). The time is
+    ;; *recorded* on the buffer rather than asked of the file, which is
+    ;; the point: it says what the file held when the buffer was last in
+    ;; step with it, and comparing it against the file now says whether
+    ;; anything has happened since.
+
+    (define (%stat-mtime name)
+      ;; The modification time and size of NAME, as the pair
+      ;; `(SECONDS . NANOSECONDS)' and a size, or the two sentinels when
+      ;; there is no file to ask. GNU Emacs's `get_stat_mtime' beside
+      ;; `time_error_value' (`fileio.c:3972'), which answers
+      ;; `NONEXISTENT_MODTIME_NSECS' for a name that is not there and
+      ;; `UNKNOWN_MODTIME_NSECS' for any other failure.
+      ;;--------------------------------------------------------------
+      (let ((st (guard (e (#t #f)) (stat name))))
+        (if st
+            (cons (cons (stat:mtime st) (stat:mtimensec st)) (stat:size st))
+            ;; `stat' does not say which errno it was, so a name that is
+            ;; not there and one that cannot be reached are told apart by
+            ;; asking the cheaper question. Emacs has the errno and does
+            ;; not need this.
+            (cons (cons 0 (if (file-exists-p name)
+                              %unknown-modtime-nsecs
+                              %nonexistent-modtime-nsecs))
+                  -1))))
+
+    (define (buffer-visited-file-modtime buffer)
+      ;; GNU Emacs's `buffer_visited_file_modtime' (`fileio.c:6157'):
+      ;; "Return BUF's recorded visited file modification time" as a
+      ;; Lisp time. The C is
+      ;;
+      ;;     int ns = buf->modtime.tv_nsec;
+      ;;     if (ns < 0)
+      ;;       return make_fixnum (UNKNOWN_MODTIME_NSECS - ns);
+      ;;     return make_lisp_time (buf->modtime);
+      ;;
+      ;; so the two sentinel nanoseconds answer the two integers the
+      ;; interface documents - 0 for "no time is known" and -1 for "the
+      ;; file is not there" - and everything else is a real time.
+      ;;--------------------------------------------------------------
+      (let* ((mt (%buffer-modtime buffer))
+             (ns (cdr mt)))
+        (if (< ns 0)
+            (- %unknown-modtime-nsecs ns)
+            (make-lisp-time (car mt) ns))))
+
+    (define (visited-file-modtime)
+      ;; GNU Emacs's `visited-file-modtime' (`fileio.c:6165'): "Return
+      ;; the current buffer's recorded visited file modification time.
+      ;; Return a Lisp timestamp (as in `current-time') if the current
+      ;; buffer has a recorded file modification time, 0 if it doesn't,
+      ;; and -1 if the visited file doesn't exist."
+      ;;--------------------------------------------------------------
+      (buffer-visited-file-modtime (current-buffer)))
+
+    (define (set-visited-file-modtime . rest)
+      ;; GNU Emacs's `set-visited-file-modtime' (`fileio.c:6177'):
+      ;; "Update buffer's recorded modification time from the visited
+      ;; file's time. ... An argument specifies the modification time
+      ;; value to use (instead of that of the visited file), in the form
+      ;; of a time value as in `current-time' or an integer flag as
+      ;; returned by `visited-file-modtime'."
+      ;;
+      ;; This is what a save reaches - GNU Emacs's `write-region' sets
+      ;; the buffer's `modtime' from the `stat' it makes after writing
+      ;; (`fileio.c:5828'), so that the next change to the buffer records
+      ;; the *new* time as the mark of the last save and every older mark
+      ;; goes stale. It is also what the visit reaches, from
+      ;; `insert-file-contents'.
+      ;;
+      ;; The C signals if the file cannot be stat'ed - `file_attribute_errno'
+      ;; - which is the point of calling it with no argument: it is a
+      ;; claim that the file is there.
+      ;;--------------------------------------------------------------
+      (let ((time-flag (if (pair? rest) (car rest) #f))
+            (buffer (current-buffer)))
+        (if time-flag
+            (if (integer? time-flag)
+                (begin
+                  ;; the C's `check_integer_range (time_flag, -1, 0)':
+                  ;; only the two sentinels are integers here, and any
+                  ;; other one is not a time but a mistake
+                  (unless (<= -1 time-flag 0)
+                    (error "Invalid time specification" time-flag))
+                  (set!%buffer-modtime buffer
+                                       (cons 0 (- %unknown-modtime-nsecs
+                                                  time-flag)))
+                  (set!%buffer-modtime-size buffer -1))
+                (let ((t (lisp-time-arguments time-flag)))
+                  (set!%buffer-modtime buffer
+                                       (cons (car t)
+                                             (quotient (cdr t) 1000)))
+                  (set!%buffer-modtime-size buffer -1)))
+            (let ((name (expand-file-name (buffer-file-name buffer))))
+              (unless (file-exists-p name)
+                (error "Setting file modtime: No such file or directory"
+                       name))
+              (let ((mtime (%stat-mtime name)))
+                (set!%buffer-modtime buffer (car mtime))
+                (set!%buffer-modtime-size buffer (cdr mtime)))))
+        #f))
+
+    (define (verify-visited-file-modtime . rest)
+      ;; GNU Emacs's `verify-visited-file-modtime' (`fileio.c:6121'):
+      ;; "Return t if last mod time of BUF's visited file matches what
+      ;; BUF records. This means that the file has not been changed since
+      ;; it was visited or saved."
+      ;;
+      ;; The two early answers are the interesting ones: a buffer that
+      ;; visits nothing is trivially in step with its nothing, and a
+      ;; buffer whose time is *unknown* is believed rather than doubted -
+      ;; Emacs has not been told anything, so it does not claim the file
+      ;; has moved. Only a recorded time can go stale.
+      ;;--------------------------------------------------------------
+      (let* ((buffer (if (and (pair? rest) (car rest))
+                         (car rest)
+                         (current-buffer)))
+             (name (buffer-file-name buffer)))
+        (cond
+         ((not name) #t)
+         ((= (cdr (%buffer-modtime buffer)) %unknown-modtime-nsecs) #t)
+         (else
+          (let* ((mtime (%stat-mtime (expand-file-name name)))
+                 (mt (car mtime)))
+            (and (equal? mt (%buffer-modtime buffer))
+                 (let ((size (%buffer-modtime-size buffer)))
+                   (or (< size 0) (= size (cdr mtime))))))))))
+
+
     (define (set-file-modes filename mode . rest)
       ;; GNU Emacs's `set-file-modes' (fileio.c:3666): "Set mode bits of
       ;; file named FILENAME to MODE (an integer). Only the 12 low bits
@@ -949,5 +1106,17 @@
               (if (%pathname-passes? name predicate)
                   name
                   (loop (cdr rest)))))))
+
+    ;;----------------------------------------------------------------
+    ;; The seam, installed as this library loads
+    ;;------------------------------------------------------------------
+    ;;
+    ;; `(schemacs editor engine)' reads this to write the visited file's
+    ;; modification time into the `(t . TIME)' undo mark, and cannot
+    ;; import it from here: fileio.c is above insdel.c, so the parameter
+    ;; is declared in `(schemacs editor buffer)' - beside the record
+    ;; whose `modtime' field it reads - and filled in here. A seam
+    ;; belongs to whoever fills it.
+    (*buffer-visited-file-modtime-function* buffer-visited-file-modtime)
 
     ))

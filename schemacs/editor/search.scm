@@ -59,9 +59,10 @@
           make-regexp regexp-exec
           regexp/icase regexp/newline regexp/notbol
           string-index)
+    (only (schemacs editor marker)
+          make-marker marker-buffer marker-position markerp set-marker)
     (only (schemacs editor engine)
-          copy-marker marker-buffer marker-position marker-type?
-          set-marker! bufferp
+          bufferp
           make-buffer-string
           text-editor-delete-from-cursor buffer-pt
           text-editor-insert buffer-beg buffer-z
@@ -158,7 +159,7 @@
                ;; which is what `query-replace-regexp' was failing with
                ;; once it moved point to a match.
                (let ((v ((if beginningp car cdr) pair)))
-                 (if (marker-type? v) (marker-position v) v)))))))
+                 (if (markerp v) (marker-position v) v)))))))
 
     (define (match-beginning subexp)
       ;; GNU Emacs's `match-beginning' (search.c:2793): "position of
@@ -200,12 +201,29 @@
                            acc
                            (cons (if as-integers
                                      (cdr pair)
-                                     (copy-marker buffer (- (cdr pair) 1)))
+                                     (%match-marker buffer (cdr pair)))
                                  (cons (if as-integers
                                            (car pair)
-                                           (copy-marker buffer
-                                                        (- (car pair) 1)))
+                                           (%match-marker buffer (car pair)))
                                        acc)))))))))
+
+    (define (%match-marker buffer position)
+      ;; One register's marker, as the C makes it: two statements,
+      ;; `data[2 * i] = Fmake_marker (); Fset_marker (data[2 * i],
+      ;; make_fixnum (start), last_thing_searched);' (`search.c:2892'),
+      ;; with no function named between them. The `%` is this tree's mark
+      ;; for a helper the C does not name.
+      ;;
+      ;; **POSITION is a buffer position as it stands**, one-based, which
+      ;; is what `search_regs.start' holds. This used to subtract one,
+      ;; from when the registers here were zero-based - and the integers
+      ;; beside it in `%regs->match-data' never did, so the same match
+      ;; came back as markers at `(4 9)' and integers at `(5 10)'. Emacs
+      ;; answers `(5 10)' either way.
+      ;;--------------------------------------------------------------
+      (let ((marker (make-marker)))
+        (set-marker marker position buffer)
+        marker))
 
     (define (match-data . args)
       ;; GNU Emacs's `match-data' (search.c:2816): "Return a list of
@@ -224,7 +242,7 @@
           (let loop ((l reuse))
             (when (pair? l)
               (when (marker-buffer (car l))
-                (set-marker! (car l) #f))
+                (set-marker (car l) #f))
               (set-car! l #f)
               (loop (cdr l)))))
         (cond
@@ -286,10 +304,17 @@
                   (list-set! pairs i
                              (cond
                               ((not beg) #f)
-                              ((marker-type? beg)
-                               (cons (+ 1 (marker-position beg))
-                                     (and (marker-type? end)
-                                          (+ 1 (marker-position end)))))
+                              ((markerp beg)
+                               ;; the C's `XSETFASTINT (marker_position
+                               ;; (beg), ...)' - a marker's own position,
+                               ;; one-based, as the integers here are.
+                               ;; This used to add one, the other half of
+                               ;; the subtraction `match-data' used to
+                               ;; make; the two cancelled, and both were
+                               ;; one away from Emacs.
+                               (cons (marker-position beg)
+                                     (and (markerp end)
+                                          (marker-position end))))
                               (else
                                (cons
                                 (cond ((integer? beg) beg)

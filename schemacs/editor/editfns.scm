@@ -37,8 +37,9 @@
           exact->inexact string-index)
     (only (schemacs editor buffer) current-buffer set-buffer
           *inhibit-read-only*)
+    (only (schemacs editor marker)
+          build-marker markerp marker-position set-marker)
     (only (schemacs editor engine)
-          copy-marker marker-position marker-type? set-marker!
           text-editor-get-start-of-line text-editor-get-end-of-line
           fetch-char make-buffer-string
           buffer-read-only?
@@ -255,7 +256,7 @@ point-marker
       ;; `text-editor-set-cursor' answers something else entirely.
       ;;--------------------------------------------------------------
       (let ((at (cond
-                 ((marker-type? position) (marker-position position))
+                 ((markerp position) (marker-position position))
                  (else position))))
         (text-editor-set-cursor (current-buffer) at)
         at))
@@ -556,7 +557,7 @@ point-marker
       ;; as a marker object" - the bookkeeping `save-excursion''s
       ;; `save_excursion_save' does.
       ;;--------------------------------------------------------------
-      (copy-marker (current-buffer)
+      (build-marker (current-buffer)
                    (buffer-pt (current-buffer))))
 
 (define-syntax save-excursion
@@ -585,9 +586,7 @@ point-marker
       ;;--------------------------------------------------------------
       (syntax-rules ()
         ((save-excursion body ...)
-         (let ((marker (copy-marker (current-buffer)
-                                    (buffer-pt
-                                     (current-buffer))))
+         (let ((marker (point-marker))
                (saved-buffer (current-buffer)))
            (dynamic-wind
              (lambda () #f)
@@ -598,7 +597,7 @@ point-marker
                ;; after BODY's edits, unchained once read
                (text-editor-set-cursor
                 saved-buffer (marker-position marker))
-               (set-marker! marker #f)))))))
+               (set-marker marker #f)))))))
 
     ;;----------------------------------------------------------------
     ;; `format', `format-message' and `message'
