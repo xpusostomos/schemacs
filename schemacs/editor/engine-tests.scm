@@ -2,6 +2,8 @@
  (scheme base)
  (scheme file)
  (schemacs editor engine)
+ (only (schemacs editor buffer) with-current-buffer set-buffer-modified-p)
+ (only (schemacs editor simple) primitive-undo)
  (only (srfi 64) test-assert test-equal test-begin test-end)
  )
 
@@ -109,7 +111,7 @@
 ;; cursor to the beginning, dumps the buffer back to a stirng, compares
 ;; the string 
 
-(define ed (new-text-editor))
+(define ed (allocate-buffer))
 
 (define (gb-insert-list ed elems)
   (let loop ((elems elems))
@@ -169,13 +171,13 @@
 
 ;; Round-trip a buffer whose last line has no terminating line break.
 (test-equal "AAA\nBBB\nno-newline"
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed "AAA\nBBB\nno-newline")
     (text-editor-to-string ed)))
 
 ;; Round-trip a buffer with empty lines.
 (test-equal "AAA\n\nBBB\n\n"
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed "AAA\n\nBBB\n\n")
     (text-editor-to-string ed)))
 
@@ -183,7 +185,7 @@
 ;; middle line, insert, move to the end, insert. Verify nothing is
 ;; lost or misplaced.
 (test-equal "SAAA\nB1BB\nCCC\nDDD\nE"
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed "AAA\nBBB\nCCC\nDDD\n")
     (text-editor-move-cursor ed -100)
     (text-editor-insert ed "S")
@@ -196,7 +198,7 @@
 ;; A line break in the middle of a line splits the line, keeping the
 ;; characters after the cursor on the new current line.
 (test-equal "HELLOW\nORLD\n"
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed "HELLOWORLD\n")
     (text-editor-move-cursor ed -5)
     (text-editor-insert ed "\n")
@@ -205,7 +207,7 @@
 ;; Editing the last line of a buffer which does not end in a line
 ;; break must not introduce a line break.
 (test-equal "aaa\nbbb\nc!cc"
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed "aaa\nbbb\n")
     (text-editor-insert ed "ccc")
     (text-editor-move-cursor ed -2)
@@ -216,7 +218,7 @@
 ;; not a property of the buffer any more, it is whatever characters are
 ;; in it - so text carrying CRLF round-trips like any other text.
 (test-equal "one\r\ntwo\r\nthrXee\r\n"
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed "one\r\ntwo\r\nthree\r\n")
     (text-editor-move-cursor ed -4)
     (text-editor-insert ed "X")
@@ -224,7 +226,7 @@
 
 ;; A mid-line CRLF splits into two CRLF lines.
 (test-equal "HELLO\r\nWORLD\r\n"
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed "HELLOWORLD\r\n")
     (text-editor-move-cursor ed -7)
     (text-editor-insert ed "\r\n")
@@ -234,7 +236,7 @@
 ;; START is `point-min', 1 - Emacs's coordinate, not an index - and the
 ;; second line's third character is position 9.
 (test-assert
- (let ((ed (new-text-editor)))
+ (let ((ed (allocate-buffer)))
    (text-editor-insert ed "alpha\nbeta\ngamma\n")
    ;; move to start
    (text-editor-move-cursor ed -100)
@@ -245,7 +247,7 @@
 
 ;; Deleting characters within a line.
 (test-equal "hello\n"
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed "hello world\n")
     (text-editor-move-cursor ed -100)
     (text-editor-move-cursor ed 5)
@@ -255,7 +257,7 @@
 ;; Backward delete at the start of a line merges with the line before,
 ;; and leaves the cursor where the line break was.
 (test-equal "alphabeta\ngamma\n"
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed "alpha\nbeta\ngamma\n")
     (text-editor-set-cursor ed 2 0)
     (text-editor-delete-from-cursor ed -1)
@@ -264,7 +266,7 @@
 ;; Forward delete past the end of a line merges with the next line,
 ;; counting the line break as one deleted character.
 (test-equal "alphata\ngamma\n"
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed "alpha\nbeta\ngamma\n")
     (text-editor-set-cursor ed 0 5)
     (text-editor-delete-from-cursor ed 3)
@@ -272,7 +274,7 @@
 
 ;; A deletion spanning multiple lines merges and deletes.
 (test-equal "alphagamma\n"
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed "alpha\nbeta\ngamma\n")
     (text-editor-set-cursor ed 1 5)
     (text-editor-delete-from-cursor ed 6)
@@ -295,14 +297,14 @@
 ;; The first character of a single-line buffer - position 1, which is
 ;; `point-min'.
 (test-equal #\X
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed "X")
     (text-editor-set-cursor ed 1 0)
     (fetch-char ed 1)))
 
 ;; Copying a whole single-line buffer keeps its first character.
 (test-equal "one two"
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed "one two")
     (text-editor-set-cursor ed 1 0)
     (make-buffer-string ed 1 8)))
@@ -310,14 +312,14 @@
 ;; The first character of every line: position 5 begins the second line
 ;; and position 10 the third.
 (test-equal '(#\a #\d #\h)
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed "abc\ndefg\nhi")
     (text-editor-set-cursor ed 1 0)
     (map (lambda (i) (fetch-char ed i)) '(1 5 10))))
 
 ;; An index past the end of the buffer is still unresolvable.
 (test-equal #f
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed "abc")
     (text-editor-set-cursor ed 0 0)
     (fetch-char ed 4)))
@@ -351,13 +353,14 @@
   (let* ((pending (if (eq? (*last-command*) 'undo)
                       (*pending*)
                       (strip-boundaries (text-editor-undo-list ed))))
-         (rest (text-editor-undo ed pending n)))
+         (rest (with-current-buffer ed (primitive-undo n pending))))
     (*pending* (if (null? rest) #f rest))
     (*last-command* 'undo)))
 
 (define (redo-command! ed n)
   ;; Redoing is undoing the redo records at the front of the list.
-  (text-editor-undo ed (strip-boundaries (text-editor-undo-list ed)) n))
+  (with-current-buffer ed
+    (primitive-undo n (strip-boundaries (text-editor-undo-list ed)))))
 
 (define (undo! ed n)
   ;; A single, isolated undo command (no chain).
@@ -367,12 +370,12 @@
 ;; An insertion is recorded as the range of characters it occupies, and
 ;; undoing it deletes that range.
 (test-equal '((1 . 4) (t . 0))
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed "abc")
     (text-editor-undo-list ed)))
 
 (test-equal '("" 1)
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed "abc")
     (text-editor-set-cursor ed 1 0)
     (undo! ed 1)
@@ -382,7 +385,7 @@
 ;; back without having to recover it from the buffer - which is what
 ;; makes undoing the deletion of a line break work.
 (test-equal 6
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed "hello\nworld")
     (text-editor-undo-boundary! ed)
     (text-editor-set-cursor ed 6)
@@ -390,7 +393,7 @@
     (cdr (car (text-editor-undo-list ed)))))
 
 (test-equal (list (cons (string #\newline) 6))
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed "hello\nworld")
     (text-editor-undo-boundary! ed)
     (text-editor-set-cursor ed 6)
@@ -398,7 +401,7 @@
     (list (car (text-editor-undo-list ed)))))
 
 (test-equal '("hello\nworld" 6)
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed "hello\nworld")
     (text-editor-undo-boundary! ed)
     (text-editor-set-cursor ed 6)
@@ -411,7 +414,7 @@
 ;; must be stable: delete, undo, redo, undo must visit the same two
 ;; states in alternation.
 (test-equal '("helloworld" "hello\nworld" "hello\nworld")
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed "hello\nworld")
     (text-editor-undo-boundary! ed)
     (text-editor-set-cursor ed 6)
@@ -428,7 +431,7 @@
 ;; second one walking the saved tail rather than the front of the list.
 (test-equal '("abc" "")
   (parameterize ((*pending* #f) (*last-command* #f))
-    (let ((ed (new-text-editor)))
+    (let ((ed (allocate-buffer)))
       (text-editor-insert ed "abc")
       (text-editor-undo-boundary! ed)
       (text-editor-set-cursor ed 3)
@@ -440,7 +443,7 @@
 ;; there is no tail left to walk.
 (test-equal '(#f "")
   (parameterize ((*pending* #f) (*last-command* #f))
-    (let ((ed (new-text-editor)))
+    (let ((ed (allocate-buffer)))
       (text-editor-insert ed "abc")
       (undo-command! ed 1)
       (list (*pending*) (text-editor-to-string ed)))))
@@ -448,7 +451,7 @@
 ;; A boundary is never recorded twice in a row, nor at the front of an
 ;; empty list (mg's rule), so the grouping cannot be split by accident.
 (test-equal '(() (1 . 4) (t . 0))
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed "abc")
     (text-editor-undo-boundary! ed)
     (text-editor-undo-boundary! ed)
@@ -457,7 +460,7 @@
 ;; Adjacent insertions grow one entry rather than adding one each, the
 ;; way Emacs's `record_insert' and mg's `undo_add_insert' do.
 (test-equal '((1 . 7) (t . 0))
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed "abc")
     (text-editor-insert ed "def")
     (text-editor-undo-list ed)))
@@ -465,7 +468,7 @@
 ;; An insertion that does not abut the previous one starts a new entry,
 ;; rather than being folded into it.
 (test-equal '((2 . 3) (1 . 4) (t . 0))
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed "abc")
     (text-editor-set-cursor ed 2)
     (text-editor-insert ed "X")
@@ -475,7 +478,7 @@
 ;; deleting 100 characters of a 3-character buffer records 3, and undo
 ;; restores 3.
 (test-equal '("abc" . 1)
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed "abc")
     (text-editor-undo-boundary! ed)
     (text-editor-set-cursor ed 1 0)
@@ -483,7 +486,7 @@
     (car (text-editor-undo-list ed))))
 
 (test-equal "abc"
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed "abc")
     (text-editor-undo-boundary! ed)
     (text-editor-set-cursor ed 0 0)
@@ -496,7 +499,7 @@
 ;; records a negative POS (point was at the end) and undo leaves point
 ;; at the end of the restored text.
 (test-equal 1
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed "abcd")
     (text-editor-undo-boundary! ed)
     (text-editor-set-cursor ed 1)
@@ -504,7 +507,7 @@
     (cdr (car (text-editor-undo-list ed)))))
 
 (test-equal -1
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed "abcd")
     (text-editor-undo-boundary! ed)
     (text-editor-set-cursor ed 3)
@@ -512,7 +515,7 @@
     (cdr (car (text-editor-undo-list ed)))))
 
 (test-equal '("abcd" 3)
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed "abcd")
     (text-editor-undo-boundary! ed)
     (text-editor-set-cursor ed 3)
@@ -521,7 +524,7 @@
     (list (text-editor-to-string ed) (buffer-pt ed))))
 
 (test-equal '("abcd" 1)
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed "abcd")
     (text-editor-undo-boundary! ed)
     (text-editor-set-cursor ed 1)
@@ -537,7 +540,7 @@
 ;; fileio.c:4125). Reading the file is `(schemacs editor files)`'s now -
 ;; this is the insertion it performs.
 (test-equal '(((1 . 13) (t . 0)) "loaded\ntext\n")
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed "loaded\ntext\n")
     (list (text-editor-undo-list ed) (text-editor-to-string ed))))
 
@@ -545,7 +548,7 @@
 ;; starts a fresh, empty list (Emacs's `buffer-disable-undo' sets
 ;; `buffer-undo-list' to t, and `buffer-enable-undo' sets it to nil).
 (test-equal '(#f 3 () ((4 . 8)))
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed "abc")
     (text-editor-undo-disable! ed)
     (let ((disabled (list (text-editor-undo-recording? ed)
@@ -563,7 +566,7 @@
 ;; rather than Emacs' exact thresholds.)
 (test-equal '((4 . 5) () (3 . 4) () (2 . 3))
   (parameterize ((*undo-limit* 6))
-    (let ((ed (new-text-editor)))
+    (let ((ed (allocate-buffer)))
       (text-editor-insert ed "A")
       (let loop ((i 0))
         (when (< i 3)
@@ -577,7 +580,7 @@
 ;; recording being switched off.
 (test-equal #t
   (parameterize ((*undo-limit* 1))
-    (let ((ed (new-text-editor)))
+    (let ((ed (allocate-buffer)))
       (text-editor-insert ed "abc")
       (text-editor-undo-boundary! ed)
       (text-editor-insert ed "def")
@@ -596,60 +599,60 @@
 (test-begin "schemacs_editor_engine_modified")
 
 ;; A fresh buffer has nothing to differ from its file.
-(test-equal #f (text-editor-modified? (new-text-editor)))
+(test-equal #f (buffer-modified-p (allocate-buffer)))
 
 ;; Changing it marks it modified, and records where it was last in sync
 ;; so that undoing back there can unmark it.
 (test-equal '(#t ((1 . 4) (t . 0)))
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed "abc")
-    (list (text-editor-modified? ed) (text-editor-undo-list ed))))
+    (list (buffer-modified-p ed) (text-editor-undo-list ed))))
 
 ;; Inserting nothing is not a change.
 (test-equal #f
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed "")
-    (text-editor-modified? ed)))
+    (buffer-modified-p ed)))
 
 ;; Deleting nothing is not a change either (there is nothing after the
 ;; cursor to delete).
 (test-equal #f
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-delete-from-cursor ed 5)
-    (text-editor-modified? ed)))
+    (buffer-modified-p ed)))
 
 ;; Saving clears the flag and leaves the undo list alone, as in GNU
 ;; Emacs: the record of where the buffer was last in sync is what makes
 ;; undo able to clear the flag again later.
 (test-equal '(#f ((1 . 6) (t . 0)))
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed "hello")
-    (text-editor-set-modified! ed #f)
-    (list (text-editor-modified? ed) (text-editor-undo-list ed))))
+    (with-current-buffer ed (set-buffer-modified-p #f))
+    (list (buffer-modified-p ed) (text-editor-undo-list ed))))
 
 ;; Saving a buffer that is already unmodified changes nothing.
 (test-equal '(#f 0)
-  (let ((ed (new-text-editor)))
-    (text-editor-set-modified! ed #f)
-    (list (text-editor-modified? ed) (text-editor-save-token ed))))
+  (let ((ed (allocate-buffer)))
+    (with-current-buffer ed (set-buffer-modified-p #f))
+    (list (buffer-modified-p ed) (text-editor-save-token ed))))
 
 ;; Undoing back to the saved state makes the buffer unmodified again,
 ;; and redoing makes it modified again.
 (test-equal '(#t #f "hello" #t "ahello")
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed "hello")        ; visit
-    (text-editor-set-modified! ed #f)
+    (with-current-buffer ed (set-buffer-modified-p #f))
     (text-editor-undo-boundary! ed)
     (text-editor-set-cursor ed 0 0)
     (text-editor-insert ed "a")            ; the change to be undone
-    (let ((before (text-editor-modified? ed)))
+    (let ((before (buffer-modified-p ed)))
       (undo! ed 1)
-      (let ((after (list (text-editor-modified? ed)
+      (let ((after (list (buffer-modified-p ed)
                          (text-editor-to-string ed))))
-        (text-editor-undo ed (strip-boundaries
-                              (text-editor-undo-list ed)) 1)  ; redo
+        (with-current-buffer ed
+          (primitive-undo 1 (strip-boundaries (text-editor-undo-list ed)))) ; redo
         (append (list before) after
-                (list (text-editor-modified? ed)
+                (list (buffer-modified-p ed)
                       (text-editor-to-string ed)))))))
 
 ;; Undoing PAST the saved state leaves the buffer modified: the file
@@ -657,26 +660,26 @@
 ;; earlier point. This is what the token in the mark is for - Emacs
 ;; compares the visited file's modification time for the same reason.
 (test-equal '(#f #t)
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed "abc")
-    (text-editor-set-modified! ed #f)        ; saved here: the file has "abc"
+    (with-current-buffer ed (set-buffer-modified-p #f))        ; saved here: the file has "abc"
     (text-editor-undo-boundary! ed)
     (text-editor-set-cursor ed 3)
     (text-editor-insert ed "x")              ; now "abcx"
     (undo! ed 1)                             ; back to "abc" == the file
-    (let ((at-save-point (text-editor-modified? ed)))
+    (let ((at-save-point (buffer-modified-p ed)))
       (undo! ed 1)                           ; back past the save, to ""
-      (list at-save-point (text-editor-modified? ed)))))
+      (list at-save-point (buffer-modified-p ed)))))
 
 ;; The flag works even when undo recording is switched off: it is a
 ;; property of the buffer, not of the undo list.
 (test-equal '(#t #f)
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-undo-disable! ed)
     (text-editor-insert ed "abc")
-    (let ((modified (text-editor-modified? ed)))
-      (text-editor-set-modified! ed #f)
-      (list modified (text-editor-modified? ed)))))
+    (let ((modified (buffer-modified-p ed)))
+      (with-current-buffer ed (set-buffer-modified-p #f))
+      (list modified (buffer-modified-p ed)))))
 
 (test-end "schemacs_editor_engine_modified")
 
@@ -694,29 +697,29 @@
   ;; refuses an edit.
   (guard (ex (else #t)) (thunk) #f))
 
-(test-equal #f (text-editor-read-only? (new-text-editor)))
+(test-equal #f (buffer-read-only? (allocate-buffer)))
 
 (test-equal '(#t #f)
-  (let ((ed (new-text-editor)))
-    (text-editor-set-read-only! ed #t)
-    (let ((set (text-editor-read-only? ed)))
-      (text-editor-set-read-only! ed #f)
-      (list set (text-editor-read-only? ed)))))
+  (let ((ed (allocate-buffer)))
+    (set!buffer-read-only ed #t)
+    (let ((set (buffer-read-only? ed)))
+      (set!buffer-read-only ed #f)
+      (list set (buffer-read-only? ed)))))
 
 ;; Insertion is refused, and changes nothing.
 (test-equal '(#t "abc")
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed "abc")
-    (text-editor-set-read-only! ed #t)
+    (set!buffer-read-only ed #t)
     (text-editor-set-cursor ed 0 0)
     (let ((refused (refused? (lambda () (text-editor-insert ed "X")))))
       (list refused (text-editor-to-string ed)))))
 
 ;; Deletion is refused, and changes nothing.
 (test-equal '(#t "abc")
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed "abc")
-    (text-editor-set-read-only! ed #t)
+    (set!buffer-read-only ed #t)
     (text-editor-set-cursor ed 0 0)
     (let ((refused (refused? (lambda () (text-editor-delete-from-cursor ed 2)))))
       (list refused (text-editor-to-string ed)))))
@@ -724,9 +727,9 @@
 ;; Deleting nothing is not an edit, so it is not refused - there is
 ;; nothing to refuse.
 (test-equal '(#f "abc")
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed "abc")
-    (text-editor-set-read-only! ed #t)
+    (set!buffer-read-only ed #t)
     (text-editor-set-cursor ed 0 0)
     (let ((refused (refused? (lambda () (text-editor-delete-from-cursor ed 0)))))
       (list refused (text-editor-to-string ed)))))
@@ -735,51 +738,52 @@
 ;; change would be worse than none. (GNU Emacs's `undo' has the `*' in
 ;; its interactive spec that refuses a read-only buffer.)
 (test-equal '(#t "Xabc")
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed "abc")
     (text-editor-undo-boundary! ed)
     (text-editor-set-cursor ed 0 0)
     (text-editor-insert ed "X")
-    (text-editor-set-read-only! ed #t)
-    (let ((refused
-           (refused? (lambda ()
-                       (text-editor-undo ed
-                                         (strip-boundaries
-                                          (text-editor-undo-list ed))
-                                         1)))))
+    (set!buffer-read-only ed #t)
+    (let* ((refused
+            (refused?
+             (lambda ()
+               (with-current-buffer ed
+                 (primitive-undo
+                  1 (strip-boundaries
+                     (text-editor-undo-list ed))))))))
       (list refused (text-editor-to-string ed)))))
 
 ;; Reading is unaffected: a read-only buffer can still be read.
 (test-equal '("abc" 3)
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed "abc")
-    (text-editor-set-read-only! ed #t)
+    (set!buffer-read-only ed #t)
     (list (text-editor-to-string ed) (- (buffer-z ed) (buffer-beg ed)))))
 
 ;; Read-only and modified are independent: saving a buffer does not
 ;; change whether it refuses edits, and a read-only buffer can be
 ;; modified (by marking it so) without becoming editable.
 (test-equal '(#f #t #t #t)
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed "abc")
-    (text-editor-set-read-only! ed #t)
-    (text-editor-set-modified! ed #f)
-    (let ((read-only (text-editor-read-only? ed))
-          (unmodified (text-editor-modified? ed)))
-      (text-editor-set-modified! ed #t)
+    (set!buffer-read-only ed #t)
+    (with-current-buffer ed (set-buffer-modified-p #f))
+    (let ((read-only (buffer-read-only? ed))
+          (unmodified (buffer-modified-p ed)))
+      (with-current-buffer ed (set-buffer-modified-p #t))
       (list unmodified read-only
-            (text-editor-modified? ed)
-            (text-editor-read-only? ed)))))
+            (buffer-modified-p ed)
+            (buffer-read-only? ed)))))
 
 ;; Turning it off again lets the buffer be edited.
 (test-equal '("Xabc" #f)
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed "abc")
-    (text-editor-set-read-only! ed #t)
+    (set!buffer-read-only ed #t)
     (text-editor-set-cursor ed 0 0)
-    (text-editor-set-read-only! ed #f)
+    (set!buffer-read-only ed #f)
     (text-editor-insert ed "X")
-    (list (text-editor-to-string ed) (text-editor-read-only? ed))))
+    (list (text-editor-to-string ed) (buffer-read-only? ed))))
 
 (test-end "schemacs_editor_engine_read_only")
 
@@ -797,7 +801,7 @@
 (define (searchable)
   ;; "alpha beta gamma\nbeta delta\n": the two "beta"s are at 7..10 and
   ;; 18..21, and "gamma\nbeta" spans a line break.
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed "alpha beta gamma\nbeta delta\n")
     ed))
 
@@ -864,7 +868,7 @@
 ;; The end of a buffer with no trailing line break is the end of its
 ;; last line, not a line of its own.
 (test-equal '(1 1 3 1 4)
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed "abc")
     (text-editor-move-cursor ed 100)
     (list (+ 1 (count-lines ed (buffer-beg ed) (buffer-z ed)))
@@ -877,7 +881,7 @@
 ;; counting from 1 as `line-number-at-pos' does, the column from 0 as
 ;; `current-column' does.
 (test-equal '(1 3)
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed "abc")
     (text-editor-move-cursor ed 100)
     (list (text-editor-cursor-line ed)
@@ -888,7 +892,7 @@
 ;; the line comes from the `count-lines' scan and the column from the
 ;; start of that line.
 (test-equal '(2 1)
-  (let* ((ed (new-text-editor))
+  (let* ((ed (allocate-buffer))
          (pos (begin (text-editor-insert ed "ab\ncd")
                      (text-editor-set-cursor ed 5)
                      (buffer-pt ed))))
@@ -898,7 +902,7 @@
 ;; Point at that end still reaches the beginning of the line, which is
 ;; what `C-e' then `C-a' does.
 (test-equal 1
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed "abc")
     (text-editor-move-cursor ed 100)
     (text-editor-set-cursor ed (text-editor-get-end-of-line ed))
@@ -908,7 +912,7 @@
 ;; A line break at the end of the buffer does start a line: the buffer
 ;; has two lines and the empty one gets `point-max'.
 (test-equal '(2 2 0 5 5)
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed "abc\n")
     (text-editor-move-cursor ed 100)
     (list (+ 1 (count-lines ed (buffer-beg ed) (buffer-z ed)))
@@ -923,7 +927,7 @@
 ;; `(goto-line 2)' in a buffer holding "abc" puts point at 4, line 1,
 ;; column 3, which is exactly this.
 (test-equal '(1 4 3)
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed "abc")
     (text-editor-set-cursor ed 2 0)
     (list (text-editor-cursor-line ed)
@@ -933,7 +937,7 @@
 ;; With a line break at the end there is: the empty line the break
 ;; started is addressable, at the position the break ends at.
 (test-equal '(2 5 2)
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed "abc\n")
     (text-editor-set-cursor ed 2 0)
     (list (text-editor-cursor-line ed)
@@ -943,7 +947,7 @@
 ;; Typing a line break at the end of a buffer with no trailing break
 ;; starts a line, and point is on it.
 (test-equal '(2 2 0)
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed "abc")
     (text-editor-move-cursor ed 100)
     (text-editor-insert ed "\n")
@@ -954,7 +958,7 @@
 ;; So does accepting a file whose text ends in a line break, and its
 ;; end is the empty line the break started.
 (test-equal '(3 3 0)
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed "one\ntwo\n")
     (text-editor-move-cursor ed 100)
     (list (+ 1 (count-lines ed (buffer-beg ed) (buffer-z ed)))
@@ -976,7 +980,7 @@
 ;; One line, and the cursor at the end of it - position 5, which is
 ;; `point-max', column 4 as Emacs counts it.
 (test-equal '(1 4 5)
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed "abcd")
     (text-editor-set-cursor ed 5)
     (list (+ 1 (count-lines ed (buffer-beg ed) (buffer-z ed)))
@@ -987,7 +991,7 @@
 ;; Emacs: "abcd" with point at the end and `(delete-char -2)' is "ab"
 ;; with point 3.
 (test-equal '("ab" 3 2)
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed "abcd")
     (text-editor-set-cursor ed 5)
     (let ((deleted (text-editor-delete-from-cursor ed -2)))
@@ -999,19 +1003,19 @@
 ;; undoing it gives the buffer back: before this was fixed the entry said
 ;; two characters where one had gone, and undo corrupted the buffer.
 (test-equal "abcd"
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed "abcd")
     (text-editor-set-cursor ed 4)
     (text-editor-undo-boundary! ed)
     (text-editor-delete-from-cursor ed -2)
-    (text-editor-undo ed (text-editor-undo-list ed) 1)
+    (with-current-buffer ed (primitive-undo 1 (text-editor-undo-list ed)))
     (text-editor-to-string ed)))
 
 ;; A buffer whose last line does end in a line break does have an empty
 ;; line after it, and the cursor can be on it: Emacs: "abcd\n" has two
 ;; lines and `(point-max)' is on the second.
 (test-equal '(2 2 0)
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed "abcd\n")
     (list (+ 1 (count-lines ed (buffer-beg ed) (buffer-z ed)))
           (text-editor-cursor-line ed)
@@ -1021,7 +1025,7 @@
 ;; before it: Emacs: "abcd\n" with point at the end and
 ;; `(delete-char -2)' is "abc".
 (test-equal '("abc" 4)
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed "abcd\n")
     (text-editor-set-cursor ed 6)
     (text-editor-delete-from-cursor ed -2)
@@ -1031,7 +1035,7 @@
 ;; cursor there: Emacs: point after inserting "X" at position 3 of
 ;; "abcdef" is 4, and stays 4 while the buffer is read.
 (test-equal '("abXcdef" 4 4)
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed "abcdef")
     (text-editor-set-cursor ed 3)          ; writes the line back
     (text-editor-insert ed "X")            ; the line is changed again
@@ -1043,7 +1047,7 @@
 ;; right: Emacs: point 3 of "abcdef" with `(delete-char -1)' is "acdef"
 ;; with point 2.
 (test-equal '("acdef" 2)
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed "abcdef")
     (text-editor-set-cursor ed 3)
     (text-editor-delete-from-cursor ed -1)
@@ -1065,12 +1069,12 @@
 ;; A new buffer is named as `generate-new-buffer' names one, and visits
 ;; no file.
 (test-equal '("Untitled" #f)
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (list (text-editor-buffer-name ed) (text-editor-file-name ed))))
 
 ;; Both are the buffer's own to set.
 (test-equal '("scratch.md" "/tmp/x/scratch.md")
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (set!text-editor-buffer-name ed "scratch.md")
     (set!text-editor-file-name ed "/tmp/x/scratch.md")
     (list (text-editor-buffer-name ed) (text-editor-file-name ed))))
@@ -1078,7 +1082,7 @@
 ;; The identity is independent of the text: loading a file into a
 ;; buffer does not name it, and naming it does not touch the text.
 (test-equal '("alpha" "Untitled" 5)
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed "alpha")
     (list (text-editor-to-string ed)
           (text-editor-buffer-name ed)
@@ -1088,7 +1092,7 @@
 ;; file at all - "*Completions*" - which is what a window showing one
 ;; puts in its mode line.
 (test-equal "*Completions*"
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (set!text-editor-buffer-name ed "*Completions*")
     (text-editor-buffer-name ed)))
 
@@ -1113,14 +1117,14 @@
 
 ;; A marker at index 3 of "abcdef" reports that, and its buffer.
 (test-equal '(3 #t)
-  (let* ((ed (new-text-editor))
+  (let* ((ed (allocate-buffer))
          (m (begin (text-editor-insert ed "abcdef") (copy-marker ed 3))))
     (list (marker-position m) (eq? ed (marker-buffer m)))))
 
 ;; Text inserted BEFORE a marker carries it along: Emacs: a marker at 3
 ;; with "XY" inserted at 1 is at 5.
 (test-equal 5
-  (let* ((ed (new-text-editor)))
+  (let* ((ed (allocate-buffer)))
     (text-editor-insert ed "abcdef")
     (let ((m (copy-marker ed 3)))
       (text-editor-set-cursor ed 1)
@@ -1129,7 +1133,7 @@
 
 ;; Text inserted AFTER a marker leaves it alone.
 (test-equal 3
-  (let* ((ed (new-text-editor)))
+  (let* ((ed (allocate-buffer)))
     (text-editor-insert ed "abcdef")
     (let ((m (copy-marker ed 3)))
       (text-editor-move-cursor ed 100)
@@ -1140,7 +1144,7 @@
 ;; marker (insertion type false) stays put and the text lands after it -
 ;; Emacs: a marker at 3, "XY" inserted at 3, is still at 3 in "abXYcd".
 (test-equal '(3 "abXYcd")
-  (let* ((ed (new-text-editor)))
+  (let* ((ed (allocate-buffer)))
     (text-editor-insert ed "abcd")
     (let ((m (copy-marker ed 3)))
       (text-editor-set-cursor ed 3)
@@ -1150,7 +1154,7 @@
 ;; ... and one whose insertion type is true advances past it: Emacs: the
 ;; same case gives 5.
 (test-equal 5
-  (let* ((ed (new-text-editor)))
+  (let* ((ed (allocate-buffer)))
     (text-editor-insert ed "abcd")
     (let ((m (copy-marker ed 3 #t)))
       (text-editor-set-cursor ed 3)
@@ -1162,7 +1166,7 @@
 ;; position 2 of "abcdef" with a marker at 4 leaves "aef" and the marker
 ;; collapsed to 2.
 (test-equal '(2 "aef")
-  (let* ((ed (new-text-editor)))
+  (let* ((ed (allocate-buffer)))
     (text-editor-insert ed "abcdef")
     (let ((m (copy-marker ed 4)))
       (text-editor-set-cursor ed 2)
@@ -1172,7 +1176,7 @@
 ;; A marker after the deleted text moves back by its length; one at the
 ;; far end of it does too.
 (test-equal '(2 3)
-  (let* ((ed (new-text-editor)))
+  (let* ((ed (allocate-buffer)))
     (text-editor-insert ed "abcdef")
     (let ((at-end (copy-marker ed 5)) (after (copy-marker ed 6)))
       (text-editor-set-cursor ed 2)
@@ -1183,7 +1187,7 @@
 ;; with point at 5 and `(delete-char -2)' is "abef" with the marker that
 ;; was at 4 collapsed to 3.
 (test-equal '(3 "abef")
-  (let* ((ed (new-text-editor)))
+  (let* ((ed (allocate-buffer)))
     (text-editor-insert ed "abcdef")
     (let ((m (copy-marker ed 4)))
       (text-editor-set-cursor ed 5)
@@ -1196,7 +1200,7 @@
 ;; deleted text collapse to where it began, and the buffer loses exactly
 ;; the two characters asked for.
 (test-equal '(5 "abcd")
-  (let* ((ed (new-text-editor)))
+  (let* ((ed (allocate-buffer)))
     (text-editor-insert ed "abcdef")
     (let ((m (copy-marker ed 5)))
       (text-editor-set-cursor ed 7)
@@ -1205,7 +1209,7 @@
 
 ;; A marker that points nowhere is in no chain and follows nothing.
 (test-equal #f
-  (let* ((ed (new-text-editor)))
+  (let* ((ed (allocate-buffer)))
     (text-editor-insert ed "abcdef")
     (let ((m (copy-marker ed 3)))
       (set-marker! m #f)
@@ -1215,8 +1219,8 @@
 
 ;; Markers belong to a buffer: editing one leaves another's alone.
 (test-equal '(3 5)
-  (let* ((one (new-text-editor))
-         (two (new-text-editor)))
+  (let* ((one (allocate-buffer))
+         (two (allocate-buffer)))
     (text-editor-insert one "abcdef")
     (text-editor-insert two "abcdef")
     (let ((m1 (copy-marker one 3)) (m2 (copy-marker two 3)))
@@ -1226,7 +1230,7 @@
 
 ;; A line break is text too: a marker after it moves with it.
 (test-equal '(6 "ab\ncd")
-  (let* ((ed (new-text-editor)))
+  (let* ((ed (allocate-buffer)))
     (text-editor-insert ed "abcd")
     (let ((m (copy-marker ed 5)))
       (text-editor-set-cursor ed 3)
@@ -1237,7 +1241,7 @@
 ;; adjusts markers too: an insertion undone puts the marker back where
 ;; it was.
 (test-equal '(3 5 3)
-  (let* ((ed (new-text-editor)))
+  (let* ((ed (allocate-buffer)))
     (text-editor-insert ed "abcdef")
     ;; A boundary, as the command loop places one between commands, so
     ;; that undoing takes back the insertion below and not this one too.
@@ -1247,13 +1251,13 @@
         (text-editor-set-cursor ed 1)
         (text-editor-insert ed "XY")
         (let ((after (marker-position m)))
-          (text-editor-undo ed (text-editor-undo-list ed) 1)
+          (with-current-buffer ed (primitive-undo 1 (text-editor-undo-list ed)))
           (list before after (marker-position m)))))))
 
 ;; The mark is a marker, so it follows the text: Emacs: a mark at 5 with
 ;; "XY" inserted before it is at 7.
 (test-equal '(#f 5 7)
-  (let* ((ed (new-text-editor)))
+  (let* ((ed (allocate-buffer)))
     (text-editor-insert ed "one two three")
     (let ((unset (text-editor-mark ed)))
       (set!text-editor-mark ed 5)
@@ -1265,7 +1269,7 @@
 ;; ... and it is the same marker object throughout, so code that holds
 ;; it - `MARK-MARKER' - sees the moves rather than a replacement.
 (test-equal '(9 9 #t)
-  (let* ((ed (new-text-editor)))
+  (let* ((ed (allocate-buffer)))
     (text-editor-insert ed "abcdef")
     (set!text-editor-mark ed 3)
     (let ((before (mark-marker ed)))
@@ -1276,7 +1280,7 @@
 
 ;; Setting the mark to false leaves it unset again, pointing nowhere.
 (test-equal #f
-  (let* ((ed (new-text-editor)))
+  (let* ((ed (allocate-buffer)))
     (text-editor-insert ed "abcdef")
     (set!text-editor-mark ed 3)
     (set!text-editor-mark ed #f)
@@ -1309,7 +1313,7 @@
 ;; loses exactly that one character - not the length of the line that
 ;; moved up into the line editor.
 (test-equal '(7 7 "abcdef\n")
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed "abc\ndef\n")
     (text-editor-set-cursor ed 1 3)
     (text-editor-delete-from-cursor ed 1)
@@ -1320,7 +1324,7 @@
 ;; ...and the same backwards, which is the path a DEL at the start of a
 ;; line takes.
 (test-equal '(7 7 "abcdef\n")
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed "abc\ndef\n")
     (text-editor-set-cursor ed 2 0)
     (text-editor-delete-from-cursor ed -1)
@@ -1331,7 +1335,7 @@
 ;; A deletion crossing several lines merges once per line break, and
 ;; the count has to lose one character per merge and nothing else.
 (test-equal '(0 0 "")
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed "schemacs/\nscratch.md\nscratch-ro.md\n")
     (text-editor-set-cursor ed 0 0)
     (text-editor-delete-from-cursor ed 35)
@@ -1343,7 +1347,7 @@
 ;; emptying the buffer and typing the text back in has to bring it back
 ;; to where it started.
 (test-equal '(35 0 35)
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed "schemacs/\nscratch.md\nscratch-ro.md\n")
     (let ((full (- (buffer-z ed) (buffer-beg ed))))
       (text-editor-set-cursor ed 0)
@@ -1375,24 +1379,24 @@
 (test-begin "schemacs_editor_engine_modiff")
 
 (define (tick-triple ed)
-  (list (buffer-modiff ed)
-        (buffer-chars-modiff ed)
-        (text-editor-modified? ed)))
+  (list (buffer-modified-tick ed)
+        (buffer-chars-modified-tick ed)
+        (buffer-modified-p ed)))
 
 (test-equal '((1 1 #f) (2 2 #t) (3 3 #t) (3 3 #f)
               (4 3 #t) (5 3 #t) (9 9 #t))
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (let ((steps (list (tick-triple ed))))
       (text-editor-insert ed "a")
       (set! steps (cons (tick-triple ed) steps))
       (text-editor-insert ed "b")
       (set! steps (cons (tick-triple ed) steps))
       ;; saving: the buffer is in sync with its file again
-      (text-editor-set-modified! ed #f)
+      (with-current-buffer ed (set-buffer-modified-p #f))
       (set! steps (cons (tick-triple ed) steps))
       ;; marking it modified without changing the text raises the tick,
       ;; so that the comparison comes out true again
-      (text-editor-set-modified! ed #t)
+      (with-current-buffer ed (set-buffer-modified-p #t))
       (set! steps (cons (tick-triple ed) steps))
       ;; a property change raises the tick and NOT the character tick
       (text-editor-note-property-change! ed 1 2)
@@ -1404,11 +1408,11 @@
 ;; A deletion is one change however many characters go, like an
 ;; insertion: ten characters raise the tick by four.
 (test-equal 9
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed "abcdefghij")
     (text-editor-set-cursor ed 1)
-    (text-editor-set-modified! ed #f)
+    (with-current-buffer ed (set-buffer-modified-p #f))
     (text-editor-delete-from-cursor ed 10)
-    (buffer-modiff ed)))
+    (buffer-modified-tick ed)))
 
 (test-end "schemacs_editor_engine_modiff")

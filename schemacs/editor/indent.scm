@@ -19,7 +19,6 @@
 
   (import
     (scheme base)
-    (only (schemacs editor buffer) current-buffer)
     (only (schemacs editor command) current-prefix-arg define-command)
     (only (schemacs editor editfns)
           bolp delete-region eolp forward-line goto-char point point-marker

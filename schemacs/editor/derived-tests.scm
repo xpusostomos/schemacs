@@ -98,7 +98,7 @@
 ;; "These modes usually use read-only buffers" - the one thing its body
 ;; does is `(setq buffer-read-only t)'.
 (test-assert "and makes the buffer read-only"
-  (in-buffer (lambda () (special-mode) (text-editor-read-only? (current-buffer)))))
+  (in-buffer (lambda () (special-mode) (buffer-read-only? (current-buffer)))))
 (test-assert "and installs its keymap"
   (in-buffer (lambda () (special-mode)
                (eq? special-mode-map (current-local-map)))))

@@ -62,7 +62,7 @@
             (rename-file %rename-file)
             (copy-file %copy-file))
     (only (guile)
-          F_OK R_OK W_OK X_OK
+          R_OK W_OK X_OK
           access? chmod delete-file getenv getpwnam lstat mkdir readlink rmdir
           stat stat:mode stat:type)
     ;; `substitute-env-vars' is `env.el''s, and is what

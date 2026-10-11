@@ -2,7 +2,7 @@
  (scheme base)
  (scheme char)
  (only (srfi 64) test-assert test-equal test-begin test-end)
- (only (schemacs editor engine) new-text-editor)
+ (only (schemacs editor engine) allocate-buffer)
  (only (schemacs editor buffer)
        *current-buffer* current-buffer erase-buffer get-buffer-create
        set-buffer)
@@ -37,7 +37,7 @@
 (test-begin "schemacs_editor_editfns")
 
 (define (with-text text thunk)
-  (parameterize ((*current-frame* (new-frame (new-text-editor) 24 80))
+  (parameterize ((*current-frame* (new-frame (allocate-buffer) 24 80))
                  (*current-buffer* #f))
     (let ((b (get-buffer-create "*editfns-tests*")))
       (set-buffer b)

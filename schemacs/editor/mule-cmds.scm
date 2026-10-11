@@ -31,9 +31,9 @@
     ;; The coding systems, and the two variables that let one command's
     ;; I/O use a coding system the buffer's own does not name.
     (only (schemacs editor coding)
-          coding-system-p coding-system-name
+          coding-system-p
           *coding-system-table*
-          *coding-system-for-read* *coding-system-for-write*)
+          *coding-system-for-read*)
     ;; `merge-coding-systems' is `mule.el''s, which is `mule.sld'.
     (only (schemacs editor mule) merge-coding-systems)
     ;; `buffer-file-coding-system' and what a revert re-reads with.
@@ -46,13 +46,13 @@
     ;; The prompt. `completing-read' is `minibuf.c''s and `make<history>'
     ;; is the history a coding-system prompt keeps.
     (only (schemacs editor minibuffer)
-          completing-read make<history> history-entries set!history-entries)
+          completing-read make<history>)
     (only (schemacs editor command) define-command current-prefix-arg
           *pending-coding-system*)
     ;; `delq' is Guile's list `delete' - R7RS has no destructive one -
     ;; and `hash-map->list' is how the registry is walked now that it is a
     ;; hash table rather than a list.
-    (only (guile) delq hash-map->list)
+    (only (guile) hash-map->list)
     (only (schemacs editor keymap) define-key *default-keymap*)
     ;; The keymap constructor is `keymap` in `(schemacs editor keymap)`.
     (only (schemacs editor keymap) keymap)

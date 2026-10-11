@@ -2,7 +2,7 @@
  (scheme base)
  (scheme char)
  (only (guile) delete-file mkdir rmdir setvbuf string-contains)
- (only (schemacs editor engine) new-text-editor text-editor-to-string)
+ (only (schemacs editor engine) allocate-buffer text-editor-to-string)
  (only (schemacs editor frame) *current-frame* new-frame)
  (only (srfi 64) test-assert test-equal test-begin test-end)
  (schemacs editor buffer)
@@ -49,7 +49,7 @@
 ;; expression binds it for the rest of the file, which is what these tests
 ;; need: without a frame every command that reads the current buffer dies,
 ;; and the failure is a `struct-vtable' error on #f three frames away.
-(*current-frame* (new-frame (new-text-editor) 24 80))
+(*current-frame* (new-frame (allocate-buffer) 24 80))
 
 (define (fixture!)
   (for-each (lambda (name)

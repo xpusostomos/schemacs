@@ -39,7 +39,7 @@
     ;; `string-prefix?' is Guile's, not R7RS's: completion is written with
     ;; it, and leaving it out reports as an unbound variable the first time
     ;; a completion is tried.
-    (only (guile) string-contains string-prefix?)
+    (only (guile) string-contains)
     ;; `format' fills in a message's arguments, as GNU Emacs's
     ;; `format-message' does for `minibuffer-message'.
     (only (guile) format)
@@ -47,12 +47,12 @@
           current-prefix-arg define-command run-command uarg->integer
           *command-table* command-value-of command-interactive-spec)
     (only (schemacs editor engine)
-    new-text-editor buffer-beg make-buffer-string count-lines
+    allocate-buffer buffer-beg make-buffer-string count-lines
           buffer-beg buffer-z
           text-editor-cursor-column text-editor-cursor-line
           text-editor-delete-from-cursor buffer-pt
           text-editor-insert text-editor-set-cursor
-          text-editor-set-read-only! text-editor-to-string
+          set!buffer-read-only text-editor-to-string
           text-editor-undo-disable!)
     ;; `logior' is Guile's: the bitset is three bit flags.
     (only (guile) logior)
@@ -68,7 +68,7 @@
           buffer-default-directory bury-buffer current-buffer get-buffer
           get-buffer-create record-buffer!
           buffer-fill-column set!buffer-fill-column
-          buffer-local-keymap set!buffer-local-keymap set!buffer-default-directory
+          set!buffer-local-keymap set!buffer-default-directory
           ;; `completion-base-position' is a variable local to `*Completions*'
           buffer-local-value erase-buffer set!mode-name
           set-buffer-local-value! use-local-map with-current-buffer
@@ -85,12 +85,11 @@
     ;; `(scheme write)''s `display' is in, one library over.
     (only (scheme read) read)
     (only (scheme write) display write)
-    (only (schemacs editor keymap) set-keymap-parent)
     (only (schemacs editor window)
           ;; how `switch-to-buffer` reads its buffer name - see
           ;; `read-buffer-to-switch` below
           *read-buffer-to-switch*
-          delete-window display-buffer get-buffer-window pop-to-buffer
+          delete-window get-buffer-window pop-to-buffer
           quit-window
           split-main-window-below switch-to-buffer-other-window
           window-min-height)
@@ -324,7 +323,7 @@ read-number-history
        editor prompt keymap default history position content)
       minibuffer-type?
       (editor   minibuffer-editor   set!minibuffer-editor)
-      ;; ^ The <text-editor-type> holding what has been typed.
+      ;; ^ The <buffer> holding what has been typed.
       (prompt   minibuffer-prompt-string set!minibuffer-prompt-string)
       (keymap   minibuffer-keymap   set!minibuffer-keymap)
       (default  minibuffer-default  set!minibuffer-default)
@@ -411,7 +410,7 @@ read-number-history
       ;; here (minibuffer.el:5214), because the two functions disagree.
       ;;--------------------------------------------------------------
       (let* ((frame (*current-frame*))
-             (ed (new-text-editor))
+             (ed (allocate-buffer))
              (text (if (pair? initial) (car initial) initial))
              ;; point, counting from zero into TEXT, or #f for its end
              (at (if (not (pair? initial))
@@ -719,7 +718,7 @@ read-number-history
       ;; meaning for (an arrow key, a frame resize) asks it again.
       ;;--------------------------------------------------------------
       (let ((frame (*current-frame*)))
-        (parameterize ((*echo-area-buffer* (new-text-editor))
+        (parameterize ((*echo-area-buffer* (allocate-buffer))
                        (*echo-area-prompt* prompt))
           (render! frame)
           (let loop ()
@@ -2032,7 +2031,7 @@ read-number-history
         (clear-completions-selection!)
         (with-current-buffer buffer
           (set!buffer-local-keymap buffer completion-list-mode-map)
-          (text-editor-set-read-only! buffer #f)
+          (set!buffer-read-only buffer #f)
           (text-editor-set-cursor buffer (buffer-beg buffer))
           (text-editor-delete-from-cursor buffer (- (buffer-z buffer) (buffer-beg buffer)))
           (*completions-common-substring* common-substring)
@@ -2049,7 +2048,7 @@ read-number-history
           ;; the note on `adjust-intervals-for-insertion' in
           ;; `(schemacs editor intervals)'.
           (run-completion-setup-hook! buffer)
-          (text-editor-set-read-only! buffer #t))
+          (set!buffer-read-only buffer #t))
         buffer))
 
     (define *completions-max-height* (make-parameter #f))

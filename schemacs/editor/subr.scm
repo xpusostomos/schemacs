@@ -18,7 +18,7 @@
     ;; `logior' and `lognot' are the event model's bit arithmetic, beside
     ;; the `logand' `key-parse' already folds control characters with, and
     ;; `filter' orders a symbol event's modifiers.
-    (only (guile) delete filter logand logior lognot string-contains)
+    (only (guile) delete string-contains)
     ;; `char-downcase' is `event-basic-type''s.
     (scheme char)
     ;; `string-prefix-p' compares with `compare-strings', which is
@@ -40,6 +40,13 @@
     ;; keymap)' is a leaf - it imports `character' and nothing else of the
     ;; editor - so this is not a cycle.
     (only (schemacs editor keymap) keymap *default-keymap* define-key)
+    ;; `kill-all-local-variables' (`buffer.c') runs `change-major-mode-hook'
+    ;; through `run-hooks', and the buffer library cannot import this one -
+    ;; this library reaches the engine through `fns.sld' and
+    ;; `intervals.sld', and the engine is built on the buffer library. So
+    ;; the hook runner arrives there through a seam, and this is where it
+    ;; is installed.
+    (only (schemacs editor buffer) *run-hooks-function*)
     )
 
   (export
@@ -539,5 +546,10 @@
     ;; (`kill-buffer-and-window'), `C-o' (`display-buffer') and the rest,
     ;; none of which this tree has.
     (define-key *default-keymap* (kbd "C-x 4") ctl-x-4-map)
+
+    ;;----------------------------------------------------------------
+    ;; The hook runner, into the library that needs it
+    ;;------------------------------------------------------------------
+    (*run-hooks-function* run-hooks)
 
     ))

@@ -63,7 +63,7 @@
  (only (schemacs editor simple) region-active-p)
  (only (schemacs editor editfns) point)
  (only (schemacs editor engine)
-       new-text-editor text-editor-insert text-editor-set-cursor
+       allocate-buffer text-editor-insert text-editor-set-cursor
        buffer-pt buffer-z text-editor-mark))
 
 ;; Unbuffered output, so a run that hangs shows where it got to.
@@ -118,7 +118,7 @@
   ;; `window-end', and Emacs's own code depends on it being the *old*
   ;; end until the next redisplay, which is what this makes true.
   ;;--------------------------------------------------------------
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (let loop ((i 1))
       (when (<= i lines)
         (text-editor-insert ed (string-append (number->string (+ 1000 i)) "\n"))

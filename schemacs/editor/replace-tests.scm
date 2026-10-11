@@ -28,7 +28,7 @@
 ;; a buffer to work in, without a query to draw
 
 (define (in-buffer thunk)
-  (parameterize ((*current-frame* (new-frame (new-text-editor) 24 80))
+  (parameterize ((*current-frame* (new-frame (allocate-buffer) 24 80))
                  (*current-buffer* #f)
                  (*case-fold-search* #f)
                  (*kill-ring* '())

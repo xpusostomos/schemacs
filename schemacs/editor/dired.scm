@@ -68,8 +68,7 @@
     ;; string - see `dired-get-filename'. `delq' is `dired-buffers-for-dir'
     ;; and `dired-unadvertise' dropping a killed buffer from the registry,
     ;; as the C's `delq' does.
-    (only (guile) caddr cadddr cdddr cddddr delq open-input-string read
-          string-prefix? string-suffix?)
+    (only (guile) caddr cadddr cdddr cddddr delq open-input-string read)
     ;; The file primitives this is built on, and their library.
     (only (schemacs editor diredc) directory-files file-attributes
           *completion-ignored-extensions*)
@@ -107,11 +106,11 @@
     ;; library's own `dired-directory' exists, and
     ;; `revert-buffer-function', which `dired-mode' sets to `dired-revert'.
     (only (schemacs editor buffer)
-          *case-fold-search* buffer-local-keymap buffer-local-value buffer-modified-p
+          *case-fold-search* buffer-local-value buffer-modified-p
           buffer-name current-buffer default-directory erase-buffer
-          get-buffer get-buffer-create kill-all-local-variables kill-buffer major-mode
+          get-buffer get-buffer-create kill-all-local-variables major-mode
           restore-buffer-modified-p set!buffer-default-directory
-          set!buffer-local-keymap set!major-mode set-buffer
+          set!major-mode set-buffer
           *inhibit-read-only*
           set!mode-name set-buffer-local-value! set-buffer-modified-p
           use-local-map with-current-buffer)
@@ -132,7 +131,7 @@
           remove-text-properties set-text-properties)
     (only (schemacs editor simple)
           beginning-of-line delete-char end-of-line forward-char keyboard-quit
-          special-mode special-mode-map)
+          special-mode-map)
     ;; the page walk `dired-log''s page header needs
     (only (schemacs editor pages) backward-page)
     ;; the date that header is headed with
@@ -145,8 +144,8 @@
     (only (schemacs editor command) current-prefix-arg define-command
           uarg->integer)
     (only (schemacs editor engine)
-          marker-position set-marker! text-editor-set-read-only!
-          text-editor-type?)
+          marker-position set-marker! set!buffer-read-only
+          bufferp)
     ;; the three mark faces are dired.el's own `defface's
     (only (schemacs editor faces) defface)
     ;; the mark keywords are run by font-lock, which `dired-mode' turns on
@@ -158,9 +157,9 @@
     (prefix (schemacs editor keymap) km:)
     (only (schemacs editor window)
           display-buffer display-buffer-below-selected pop-to-buffer-same-window
-          quit-restore-window quit-window switch-to-buffer
+          quit-restore-window quit-window
           switch-to-buffer-other-window
-          temp-buffer-window-setup temp-buffer-window-show window-live-p
+          window-live-p
           with-current-buffer-window with-selected-window)
     ;; the switches prompt, which the C reads with `read-string'; the
     ;; deletion confirmation is `yes-or-no-p', and the marked-file window
@@ -1876,7 +1875,7 @@ for SWITCHES."
         (dired-advertise)
         (set!major-mode 'dired-mode)
         (set!mode-name "Dired")
-        (text-editor-set-read-only! (current-buffer) #t)
+        (set!buffer-read-only (current-buffer) #t)
         ;; "Dired sets `revert-buffer-function' to this function" - which
         ;; is what makes `g' and any `revert-buffer' call read the
         ;; directory again rather than the file's text.
@@ -2492,7 +2491,7 @@ for SWITCHES."
             (cond
              ((string? log)
               (insert (if (pair? args) (apply format log args) log)))
-             ((text-editor-type? log)
+             ((bufferp log)
               (insert-buffer-substring log))
              ((eq? log #t)
               ;; "insert the current time and buffer at the start of the

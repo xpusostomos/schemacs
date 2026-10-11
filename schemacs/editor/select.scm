@@ -43,7 +43,7 @@
    ;; `:coding-type' field (see `coding.sld''s record), so "is this
    ;; already a utf-8 coding system" is asked of the base *name*.
    (only (schemacs editor coding)
-         encode-coding-string coding-system-base find-coding-system)
+         encode-coding-string coding-system-base)
    ;; `(only (guile) ...)': `string-split'/`string-join' for the NUL
    ;; escaping, `ash'/`logand' for `xselect--int-to-cons',
    ;; `list->u32vector' for the code points `encode-coding-string' takes.

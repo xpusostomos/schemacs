@@ -40,17 +40,19 @@
     (only (schemacs editor derived) define-derived-mode)
     (only (schemacs editor engine)
          copy-marker marker-position set-marker!
-         set!text-editor-deactivate-mark! text-editor-deactivate-mark
+         set!text-editor-deactivate-mark!
+         undo-insertion-entry? undo-deletion-entry? undo-modified-entry?
          set!text-editor-mark make-buffer-string
-         text-editor-cursor-column text-editor-cursor-line 
-         text-editor-delete-from-cursor fetch-char 
-         buffer-pt text-editor-get-end-of-line 
-         text-editor-get-start-of-line text-editor-insert 
-         text-editor-mark text-editor-move-cursor 
+         text-editor-cursor-column
+         text-editor-delete-from-cursor fetch-char
+         buffer-pt text-editor-get-end-of-line
+         text-editor-get-start-of-line text-editor-insert
+         text-editor-mark text-editor-move-cursor
          buffer-beg buffer-z
-         text-editor-read-only? text-editor-set-cursor 
-         text-editor-set-read-only! text-editor-undo 
-         text-editor-undo-boundary! text-editor-undo-list)
+         buffer-read-only? text-editor-set-cursor
+         set!buffer-read-only
+         text-editor-undo-boundary! text-editor-undo-list
+         text-editor-save-token)
     (only (schemacs editor frame)
          *current-frame* *echo-area-buffer* display-selections-p
          set-message!
@@ -72,7 +74,7 @@
     ;; `quit-window' is what `special-mode-map''s `q' is.
     (only (schemacs editor window) quit-window set-window-hscroll!)
     (only (schemacs editor command)
-         called-interactively? current-prefix-arg new-command uarg->integer
+         current-prefix-arg uarg->integer
          define-command *last-command-event*)
     ;; The buffer-local store, for `mark-ring' - which is the buffer's
     ;; own - and the variables that come from the libraries Emacs
@@ -81,6 +83,7 @@
     ;; `region-beginning' and `region-end' are `editfns.c''s, and
     ;; `add-to-history' is `subr.el''s.
     (only (schemacs editor buffer) buffer-overwrite-mode set!buffer-overwrite-mode
+          with-current-buffer set-buffer-modified-p
           *show-trailing-whitespace*
           buffer-local-value buffer-truncate-lines current-buffer mark-active
           set!buffer-truncate-lines set!mark-active
@@ -92,7 +95,7 @@
     (only (schemacs editor editfns)
           bolp buffer-size buffer-substring delete-and-extract-region delete-region eobp
           eolp following-char forward-line insert line-beginning-position
-          current-message line-end-position goto-char message point point-max
+          line-end-position goto-char message point point-max
           preceding-char region-beginning region-end save-excursion)
     (only (schemacs editor syntax) skip-chars-forward skip-chars-backward
           word-char? forward-word-position backward-word-position
@@ -105,7 +108,7 @@
     ;; library keeps finding them.
     (only (schemacs editor cmds)
           backward-char beginning-of-line delete-char end-of-line
-          forward-char internal-self-insert self-insert-command
+          forward-char self-insert-command
           self-insert-tab)
     ;; `define-minor-mode' is `easy-mmode.el`'s, and it is what builds
     ;; `overwrite-mode' and `binary-overwrite-mode' below.
@@ -120,7 +123,6 @@
     ;; bindings for the commands it defines - as simple.el does with
     ;; `(define-key global-map ...)'.
     (only (schemacs editor keymap)
-         set-keymap-char-table!
          define-key
          single-key-description
          *default-keymap*)
@@ -173,7 +175,7 @@ just-one-space delete-horizontal-space delete-blank-lines
    delete-all-space delete-leading-space delete-trailing-space
    transpose-chars transpose-words fixup-whitespace
    prefix-echo-pending? request-prefix-echo! show-prefix-echo!
-   strip-undo-boundaries undo undo-redo update-prefix!
+   primitive-undo strip-undo-boundaries undo undo-redo update-prefix!
    word-char? word-run-end word-run-start yank
    )
 
@@ -205,7 +207,7 @@ just-one-space delete-horizontal-space delete-blank-lines
 
 A special major mode is intended to view specially formatted data
 rather than files.  These modes usually use read-only buffers."
-      (text-editor-set-read-only! (current-buffer) #t))
+      (set!buffer-read-only (current-buffer) #t))
 
     ;;----------------------------------------------------------------
     ;; Commands
@@ -435,8 +437,8 @@ a specialization of overwrite mode, entered by setting the
              (ed (current-buffer))
              (on? (if uarg
                       (< 0 (uarg->integer 1 uarg))
-                      (not (text-editor-read-only? ed)))))
-        (text-editor-set-read-only! ed on?)
+                      (not (buffer-read-only? ed)))))
+        (set!buffer-read-only ed on?)
         (set!frame-message
          frame
          (if on?
@@ -985,7 +987,7 @@ non-nil."
       ;; needed, and it silently killed one character too far to the
       ;; left once the engine went to Emacs's own coordinates.
       (let* ((string (make-buffer-string (current-buffer) beg end))
-             (read-only? (text-editor-read-only? (current-buffer))))
+             (read-only? (buffer-read-only? (current-buffer))))
         ;; The ring takes the text first, as in Emacs, so that a
         ;; read-only buffer still gives up its text.
         (if (and (not read-only?)
@@ -1151,6 +1153,100 @@ non-nil."
       (let loop ((list list))
         (if (and (pair? list) (null? (car list))) (loop (cdr list)) list)))
 
+    (define (primitive-undo n list)
+      ;; GNU Emacs's `primitive-undo' (`simple.el:3650'): "Undo N
+      ;; records from the front of the list LIST. Return what remains of
+      ;; the list."
+      ;;
+      ;; **It is `simple.el`'s, not `undo.c`'s.** The C file *records*
+      ;; the undo entries - `record_insert', `record_delete',
+      ;; `record_first_change' (`undo.c:210') - and this is what applies
+      ;; them, which in Emacs 31 is Lisp, in the same file as `undo'
+      ;; itself. It was in the engine, which broke the rule twice over:
+      ;; wrong file, and a shape that took the buffer as an argument
+      ;; where Emacs's works on the current buffer.
+      ;;
+      ;; The returned tail is what the caller keeps as
+      ;; `pending-undo-list', so that a run of undo commands walks
+      ;; further and further back.
+      ;;
+      ;; A group ends at a boundary, which is consumed but does not
+      ;; itself undo anything - so a list whose front is a boundary
+      ;; gives back the same list with that boundary removed, which is
+      ;; what Emacs means by "get rid of initial undo boundary".
+      ;;
+      ;; Because the inverse operations run the ordinary insert and
+      ;; delete primitives, they record their own inverses on the front
+      ;; of the buffer's undo list, and that is how redo works.
+      ;;
+      ;; A read-only buffer cannot be undone: undoing is an edit like
+      ;; any other, and GNU Emacs's `undo' has the `*' in its
+      ;; interactive spec that refuses before it does anything. Refusing
+      ;; here rather than part way through matters, since a half-undone
+      ;; change would be worse than none.
+      ;;--------------------------------------------------------------
+      (let ((ed (current-buffer)))
+        (when (buffer-read-only? ed)
+          (error "Buffer is read-only"))
+        (let loop ((list list) (n n) (opening? #t))
+          (if (or (<= n 0) (not (pair? list)))
+              list
+              (let ((entry (car list))
+                    (rest (cdr list)))
+                (cond
+                 ;; a boundary ends the group
+                 ((null? entry) (loop rest (- n 1) #t))
+                 ;; Undoing back past the mark of the last save makes the
+                 ;; buffer unmodified again, which is what tells the user
+                 ;; there is nothing left to save. The mark only counts
+                 ;; while it still describes the current save: a buffer
+                 ;; saved since then is not the buffer this mark was made
+                 ;; for. It does not end the group (GNU Emacs).
+                 ((undo-modified-entry? entry)
+                  ;; **Where this belongs is `simple.el`, not `undo.c`**:
+                  ;; the walk over the entries is that file's `undo' loop
+                  ;; (`simple.el:3663'), whose `(t . ,time)' branch ends
+                  ;; `(set-buffer-modified-p nil)' - one argument, the
+                  ;; current buffer. This loop takes its buffer as an
+                  ;; argument, so the current buffer is made one first.
+                  (when (= (cdr entry) (text-editor-save-token ed))
+                    (with-current-buffer ed (set-buffer-modified-p #f)))
+                  (loop rest n #f))
+                 (else
+                  ;; The entries the undo is about to create, by running
+                  ;; the ordinary insert and delete primitives, must form
+                  ;; a change group of their own - otherwise undoing them
+                  ;; again would swallow the very entries being undone
+                  ;; here. One boundary before the group's first entry
+                  ;; separates them from everything older, and the
+                  ;; boundary below already separates them from the
+                  ;; group being undone. mg's undo brackets its inverse
+                  ;; operations the same way.
+                  (when opening? (text-editor-undo-boundary! ed))
+                  (cond
+                   ((undo-insertion-entry? entry)
+                    (let ((beg (car entry))
+                          (end (cdr entry)))
+                      ;; Move point first, so that undoing this undo does
+                      ;; not send point back to where it is now (Emacs's
+                      ;; comment in `primitive-undo').
+                      (text-editor-set-cursor ed beg)
+                      (text-editor-delete-from-cursor ed (- end beg))))
+                   ((undo-deletion-entry? entry)
+                    (let* ((text (car entry))
+                           (pos (cdr entry))
+                           (at (abs pos)))
+                      (text-editor-set-cursor ed at)
+                      (text-editor-insert ed text)
+                      ;; POS was positive when point was at the beginning
+                      ;; of the deleted text and negative when it was at
+                      ;; the end; undo puts point back on the side it was
+                      ;; on (Emacs's rule for the sign of POS).
+                      (text-editor-set-cursor
+                       ed (if (< pos 0) (+ at (string-length text)) at)))))
+                  (loop rest n #f)))))))
+      )
+
     (define-command (undo count)
       ;; GNU Emacs's `undo'. Repeating it undoes further back, and when
       ;; it reaches the end of the undo list the next one reports that
@@ -1167,7 +1263,7 @@ non-nil."
                   (strip-undo-boundaries (text-editor-undo-list ed)))))
         (if (not (list? pending))
             (set!frame-message frame "No further undo information")
-            (let ((rest (text-editor-undo ed pending count)))
+            (let ((rest (primitive-undo count pending)))
               ;; Emacs sets `pending-undo-list' to t once the run has
               ;; reached the end; false is that state here, and it is
               ;; what makes the next undo report that it is finished.
@@ -1192,7 +1288,7 @@ non-nil."
                   (set!frame-message
                    frame "No undone changes to redo")
                   (begin
-                    (text-editor-undo ed list count)
+                    (primitive-undo count list)
                     (*last-change-was-undo* #t)
                     (set!frame-message frame "Redo")))))))
 

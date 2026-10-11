@@ -46,7 +46,7 @@
     (scheme char)
     (only (guile) caddr)
     (only (schemacs editor engine)
-    text-editor-text-props text-editor-type?
+    bufferp
           text-editor-note-property-change!)
     (only (schemacs editor buffer)
           *current-buffer* current-buffer overlay-get overlays-at)
@@ -199,7 +199,7 @@
         ;; "Both overlay properties and text properties are checked" - but
         ;; only a *buffer* has overlays, which is the C's
         ;; `if (BUFFERP (object))'.
-        (if (not (text-editor-type? object))
+        (if (not (bufferp object))
             (get-text-property position prop object)
             (parameterize ((*current-buffer* object))
               (let loop ((ovs (overlays-at position #t)))
@@ -370,7 +370,7 @@
                     ;; `CHARS_MODIFF', because the characters have not
                     ;; changed - which is why a cache of something
                     ;; computed from them is not thrown away by it.
-                    (if (text-editor-type? object)
+                    (if (bufferp object)
                         (text-editor-note-property-change! object start end))
                   (let ((len (- end start)))
                     (let ((i (if (= start (iv:interval-position i))
@@ -452,7 +452,7 @@
       ;; whole job is done.
       ;;--------------------------------------------------------------
       ;; the same raise as `add-text-properties-1''s, for a replacement
-      (if (text-editor-type? object)
+      (if (bufferp object)
           (text-editor-note-property-change! object start end))
       (let ((len (- end start)))
         (if (<= len 0)
@@ -640,7 +640,7 @@
       (let ((object (object-or-current args)))
         ;; `Fremove_text_properties' raises the counter for a buffer, as
         ;; the adding side does (`textprop.c:1775')
-        (if (text-editor-type? object)
+        (if (bufferp object)
             (text-editor-note-property-change! object start end))
         (%remove-properties-range object start end properties '())))
 
@@ -652,7 +652,7 @@
       ;; the properties it manages are a list of names.
       ;;--------------------------------------------------------------
       (let ((object (object-or-current args)))
-        (if (text-editor-type? object)
+        (if (bufferp object)
             (text-editor-note-property-change! object start end))
         (%remove-properties-range object start end '() properties)))
 

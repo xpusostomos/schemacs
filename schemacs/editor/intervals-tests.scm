@@ -3,7 +3,7 @@
  (scheme char)
  (only (srfi 64) test-assert test-equal test-begin test-end)
  (only (schemacs editor engine)
-       new-text-editor text-editor-insert
+       allocate-buffer text-editor-insert
        text-editor-set-cursor buffer-beg buffer-z
        text-editor-text-props text-editor-to-string)
  (prefix (schemacs editor intervals) iv:))
@@ -31,7 +31,7 @@
   ;; A buffer holding TEXT, with a root interval covering it, and the
   ;; tree stored on the buffer as Emacs stores it.
   ;;--------------------------------------------------------------
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed text)
     (iv:create-root-interval ed)
     ed))

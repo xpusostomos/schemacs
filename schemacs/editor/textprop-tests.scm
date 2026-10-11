@@ -4,7 +4,7 @@
  (only (srfi 64) test-assert test-equal test-begin test-end)
  (only (guile) setvbuf)
  (only (schemacs editor engine)
-       new-text-editor text-editor-delete-from-cursor
+       allocate-buffer text-editor-delete-from-cursor
        text-editor-insert text-editor-set-cursor text-editor-text-props)
  (only (schemacs editor intervals)
        find-interval next-interval interval-position interval-last-pos
@@ -32,7 +32,7 @@
 (test-begin "schemacs_editor_textprop")
 
 (define (buffer-of text)
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed text)
     ed))
 
@@ -366,7 +366,7 @@
 ;; and the face sits on the file name in the middle of it.
 (test-equal "remove-text-properties: the range may begin before the property"
   (list #f #f)
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (set-buffer ed)
     (insert "abcdefghij")
     (tp:put-text-property 7 9 'face 'zz ed)
@@ -376,7 +376,7 @@
 
 (test-equal "remove-text-properties: a range that ends inside the property"
   (list #f 'zz)
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (set-buffer ed)
     (insert "abcdefghij")
     (tp:put-text-property 7 9 'face 'zz ed)

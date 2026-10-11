@@ -32,7 +32,7 @@
   ;;  - The C reaches the buffer through `struct buffer *' and the `BEG'
   ;;    / `Z' macros. Here the caller passes the two endpoints, since
   ;;    this library sits under the engine and cannot see a
-  ;;    `<text-editor-type>'. They are the arguments `buf' stands for.
+  ;;    `<buffer>'. They are the arguments `buf' stands for.
   ;;
   ;;  - A boundary is a pair rather than a two-field C struct, and the
   ;;    array is a Scheme vector. The gap arithmetic is the C's.

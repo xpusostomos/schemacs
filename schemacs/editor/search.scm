@@ -52,16 +52,16 @@
     ;; C's `string-match', which shadows no import because this one is
     ;; not taken.
     (only (ice-9 regex)
-          match:substring match:start match:end match:count)
+          match:start match:end match:count)
     ;; the cxr accessors are Guile's, as `(schemacs editor editfns)'s
     ;; import of them is
     (only (guile) cadr caddr cddr cdddr cadddr logior
           make-regexp regexp-exec
-          regexp/icase regexp/newline regexp/notbol regexp/noteol
+          regexp/icase regexp/newline regexp/notbol
           string-index)
     (only (schemacs editor engine)
           copy-marker marker-buffer marker-position marker-type?
-          set-marker! text-editor-type?
+          set-marker! bufferp
           make-buffer-string
           text-editor-delete-from-cursor buffer-pt
           text-editor-insert buffer-beg buffer-z
@@ -72,18 +72,17 @@
     ;; what `looking-at' and the like read the buffer through.
     (only (schemacs editor buffer)
           *case-fold-search* current-buffer with-current-buffer)
-    (only (schemacs editor frame) current-editor)
     ;; The position answers are one-based and the engine's are
     ;; zero-based; the conversion is at the edges only, as everywhere
     ;; else in the Emacs-named layer.
     (only (schemacs editor editfns)
-          bobp buffer-substring delete-region eobp goto-char insert
-          point point-min point-max save-excursion)
+          buffer-substring
+          point point-min point-max)
     (only (schemacs editor syntax) word-char?)
     ;; The case transfer of `replace-match' casifies the replacement
     ;; with the string case functions.
     (only (schemacs editor casefiddle)
-          casify-region capitalize downcase upcase upcase-initials)
+          casify-region upcase upcase-initials)
     (only (guile) string-index)
     )
 
@@ -276,7 +275,7 @@
               (*last-thing-searched*
                (if buffer buffer 'string))
               #f)
-             ((text-editor-type? (car l))
+             ((bufferp (car l))
               (loop (cdr l) i (car l)))
              (else
               (let* ((beg (car l))

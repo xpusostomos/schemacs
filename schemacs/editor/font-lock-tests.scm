@@ -2,7 +2,7 @@
  (scheme base)
  (scheme char)
  (only (srfi 64) test-assert test-equal test-begin test-end)
- (only (schemacs editor engine) new-text-editor *after-change-functions*)
+ (only (schemacs editor engine) allocate-buffer *after-change-functions*)
  (only (schemacs editor frame) *current-frame* new-frame)
  (only (schemacs editor buffer) current-buffer erase-buffer)
  (only (schemacs editor editfns)
@@ -29,7 +29,7 @@
 ;; One frame for the whole file, as the other editor suites have: without
 ;; it every command that reads the current buffer dies, and the failure is
 ;; a `struct-vtable' error on #f three frames away.
-(*current-frame* (new-frame (new-text-editor) 24 80))
+(*current-frame* (new-frame (allocate-buffer) 24 80))
 
 (test-begin "schemacs_editor_font_lock")
 

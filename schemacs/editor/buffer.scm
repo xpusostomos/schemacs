@@ -4,14 +4,25 @@
   ;; current, making one and killing one - and the slots that belong to a
   ;; buffer without being part of its text.
   ;;
+  ;; **The record is here**, and that is the one thing this library has
+  ;; that it did not: `buffer.h`'s `struct buffer`, with `BUF_PT`,
+  ;; `BUF_BEG`, `BUF_Z`, `BUF_MARKERS` and the rest of that header's
+  ;; macros over it. It was `(schemacs editor engine)`'s, because the
+  ;; engine was BELOW this library and the record is what everything
+  ;; touches; the engine is built on this library now, so `buffer.c`'s own
+  ;; functions work on the record rather than through a second set of
+  ;; accessors. What comes back the other way arrives through the seams
+  ;; beside them - see the notes on those.
+  ;;
   ;; What it does not mirror, because another library already does:
   ;;
   ;;  * the text, the gap and the edits - `buffer.c`'s own text is in
-  ;;    `insdel.c`, which is `(schemacs editor engine)'. A buffer here *is*
-  ;;    a `<text-editor>': there is no wrapper record, exactly as there is
-  ;;    no second struct in Emacs. `BUFFERP' is `TEXT-EDITOR-TYPE?'.
+  ;;    `insdel.c`, which is `(schemacs editor engine)`. A buffer here *is*
+  ;;    a `<buffer>': there is no wrapper record, exactly as there is
+  ;;    no second struct in Emacs. `BUFFERP' (`buffer.h:757') is `bufferp'.
   ;;  * the markers and the undo list - `marker.c' and the undo half of
-  ;;    `buffer.c', also the engine's.
+  ;;    `buffer.c', also the engine's. The record holds the marker chain
+  ;;    and the undo list; the operations on them are the engine's.
   ;;  * `current-buffer' *maintained* by the window code: in Emacs it is
   ;;    `window.c''s `set_buffer_internal' that sets `current_buffer' when
   ;;    a window is selected or a buffer displayed. Ours is
@@ -29,7 +40,8 @@
   ;;    one, so the slots live in a weak table keyed by the buffer -
   ;;    `MAKE-WEAK-KEY-HASH-TABLE' - weak because a table that held its
   ;;    keys strongly would keep every killed buffer alive
-  ;;    forever. They move into the record when the engine is next opened.
+  ;;    forever. They move into the record when the local-variable
+  ;;    machinery is next opened; the record itself is here now.
   ;;  * **Names.** Where Emacs has a *function*, this library uses its
   ;;    name - `GET-BUFFER', `KILL-BUFFER', `SET-BUFFER', `OTHER-BUFFER'
   ;;    and the rest - so that Elisp reads the same here. Where Emacs has
@@ -51,43 +63,70 @@
     ;; The buffer's side tables - its slots and its overlays - are held
     ;; weakly, keyed by the buffer: see the note in the header. Guile's own
     ;; weak table, a key held weakly and a value held strongly.
-    (only (guile) caddr getcwd sort
+    (only (guile)
+          caddr getcwd sort
           make-weak-key-hash-table hashq-ref hashq-set! hashq-remove!)
-    ;; `run-hooks' is `subr.el''s, and `kill-all-local-variables' runs
-    ;; `change-major-mode-hook' through it.
-    (only (schemacs editor subr) run-hooks)
-    (only (schemacs editor engine)
-          *inhibit-read-only*
-          new-text-editor
-          text-editor-type?
-          text-editor-buffer-name set!text-editor-buffer-name
-          text-editor-file-name set!text-editor-file-name
-          text-editor-modified? text-editor-set-modified!
-          text-editor-cache-long-scans set!text-editor-cache-long-scans
-          text-editor-read-only? text-editor-set-read-only!
-          buffer-pt text-editor-set-cursor
-          text-editor-delete-from-cursor
-          buffer-beg buffer-z
-          ;; an overlay's two ends are markers: `marker.c''s, which is
-          ;; also the engine's, and they are what makes an overlay follow
-          ;; the text as it is edited
-          copy-marker marker-buffer marker-position marker-type?
-          set-marker!)
-    (only (schemacs editor frame)
-          *current-frame*
-          ;; `SET-BUFFER' writes it and `CURRENT-BUFFER' reads it; the
-          ;; window code writes it too, which is why it is defined down
-          ;; there - see the note on it in `frame.sld'.
-          *current-buffer*
-          current-editor
-          selected-window
-          set-window-buffer!
-          window-buffer))
-
+    (only (scheme write) display)
+    ;; The buffer's text - GNU Emacs's `struct buffer_text', the `text'
+    ;; field of the record below. `NEW-BUFFER-TEXT' is what
+    ;; `allocate_buffer' allocates, and the other three are the `BEG' and
+    ;; `Z' macros `buffer-beg' and `buffer-z' are.
+    (only (schemacs editor buffer-text)
+          *gap-bytes-min*
+          new-buffer-text  buffer-text-base  buffer-text-z
+          buffer-text-modiff  buffer-text-chars-modiff
+          set!buffer-text-modiff  set!buffer-text-chars-modiff)
+    (scheme case-lambda))
+  (cond-expand
+   ;; The record's pretty-printer below is Guile's.
+   (guile-3
+    (import (only (srfi srfi-9 gnu) set-record-type-printer!))
+    )
+   (else)
+   )
   (export
    *buffer-list*
    *buffer-list-update-hook*
    *current-buffer*
+   ;; The seams - see the notes on them below. `frame.sld' installs the
+   ;; two window ones and the marker library will install the three
+   ;; marker ones, each as it loads.
+   *current-editor-function*
+   *replace-buffer-in-windows-function*
+   *copy-marker-function*
+   *marker-position-function*
+   *set-marker-function*
+   *run-hooks-function*
+   *make-marker-function*
+   *del-range-function*
+   ;; The buffer record - `buffer.h`'s struct, which `buffer.c` owns. Its
+   ;; accessors are that header's macros: `BUF_PT`, `BUF_BEG`, `BUF_Z`,
+   ;; `BUF_MARKERS`, `BVAR (b, ...)`. Everything that reads a buffer goes
+   ;; through one of these, and they are exported for that reason.
+   allocate-buffer  bufferp  show-text-editor
+   text-editor-text  set!text-editor-text
+   buffer-pt  set!buffer-pt
+   %text-editor-newline-cache  set!%text-editor-newline-cache
+   text-editor-text-props  set!text-editor-text-props
+   text-editor-undo-list  set!text-editor-undo-list
+   text-editor-save-modiff  set!text-editor-save-modiff
+   text-editor-cache-long-scans  set!text-editor-cache-long-scans
+   text-editor-save-token  set!text-editor-save-token
+   text-editor-deactivate-mark  set!text-editor-deactivate-mark!
+   %mark-marker  set!%mark-marker
+   buffer-markers  set!buffer-markers
+   text-editor-read-only-flag  set!text-editor-read-only-flag
+   text-editor-buffer-name  set!text-editor-buffer-name
+   text-editor-file-name  set!text-editor-file-name
+   buffer-beg  buffer-z
+   ;; `buffer-modified-p' and `buffer-read-only' answer with these: GNU
+   ;; Emacs's `buffer-modified-tick', `buffer-modified-p' - which is the
+   ;; comparison `SAVE_MODIFF < MODIFF' and not a flag - and the
+   ;; `buffer-read-only' variable.
+   buffer-modified-tick  buffer-chars-modified-tick
+   buffer-modified-p  set-buffer-modified-p
+   buffer-read-only?  set!buffer-read-only
+   %text-editor-incr-modiff!
    *kill-buffer-query-functions*
    *scratch-buffer-name*
    buffer-default-directory
@@ -181,12 +220,9 @@
    set!buffer-read-only
    with-current-buffer
    )
-
   (begin
-
     ;;----------------------------------------------------------------
     ;; The buffers that exist, and the one that is current
-
     (define *buffer-list*
       ;; GNU Emacs's `Vbuffer-alist': the live buffers, as an association
       ;; list of (NAME . BUFFER) ordered most-recently-used first.
@@ -202,14 +238,12 @@
       ;; that a test would otherwise leak into the next one.
       ;;--------------------------------------------------------------
       (make-parameter '()))
-
     (define *buffer-list-update-hook*
       ;; GNU Emacs's `buffer-list-update-hook': thunks run whenever the
       ;; list changes - a buffer made, killed, or moved in the order.
       ;; Emacs runs it from `Fset_buffer_list'; so does this.
       ;;--------------------------------------------------------------
       (make-parameter '()))
-
     (define *case-fold-search*
       ;; GNU Emacs's `case-fold-search' (buffer.c:6009): "Non-nil if
       ;; a case-insensitive search should be done." A nil value makes
@@ -220,7 +254,6 @@
       ;; defvars here are too.
       ;;--------------------------------------------------------------
       (make-parameter #t))
-
     (define *kill-buffer-query-functions*
       ;; GNU Emacs's `kill-buffer-query-functions': procedures of no
       ;; arguments asked before a buffer is killed, in order. A false
@@ -228,22 +261,18 @@
       ;; modified; kill anyway?" belongs.
       ;;--------------------------------------------------------------
       (make-parameter '()))
-
     (define *scratch-buffer-name* "*scratch*")
     ;; ^ The name of the buffer Emacs makes when there would otherwise be
     ;; no buffer at all, and the name it starts with.
-
     (define (run-buffer-list-update-hook!)
       ;; Tell whoever is listening that the list of buffers changed.
       ;;--------------------------------------------------------------
       (for-each (lambda (thunk) (thunk)) (*buffer-list-update-hook*)))
-
     (define (buffer-list-alist)
       ;; The list itself, names and buffers: GNU Emacs's `Vbuffer-alist'
       ;; as a value. `BUFFER-LIST' is the same list without the names.
       ;;--------------------------------------------------------------
       (*buffer-list*))
-
     (define (buffer-list)
       ;; Every live buffer, most-recently-used first: GNU Emacs's
       ;; `(buffer-list)'. What "most recently used" means to Emacs is the
@@ -254,13 +283,6 @@
       ;; below).
       ;;--------------------------------------------------------------
       (map cdr (*buffer-list*)))
-
-    (define (bufferp thing)
-      ;; Whether THING is a buffer: GNU Emacs's `bufferp'. A buffer here
-      ;; is the engine's text editor, so this is its type predicate.
-      ;;--------------------------------------------------------------
-      (text-editor-type? thing))
-
     (define (buffer-live-p thing)
       ;; Whether THING is a buffer that still exists: GNU Emacs's
       ;; `buffer-live-p'. A buffer is live while it is in the list.
@@ -270,7 +292,93 @@
              (cond ((null? rest) #f)
                    ((eq? (cdar rest) thing) #t)
                    (else (loop (cdr rest)))))))
-
+    ;;----------------------------------------------------------------
+    ;; The current buffer, and the two seams to the window code
+    ;;------------------------------------------------------------------
+    (define *current-buffer* (make-parameter #f))
+    ;; ^ The buffer commands act on: GNU Emacs's `current_buffer', the C
+    ;; global that `set-buffer' writes and that the *window code* writes
+    ;; too. False means "no choice has been made", and `CURRENT-BUFFER'
+    ;; answers the window's for it.
+    ;;
+    ;; **It is defined here, and it used to be defined in `frame.sld'.**
+    ;; Emacs declares it in `buffer.c' and `Fselect_window' writes it -
+    ;;
+    ;;   Fset_buffer (w->contents);   /* `window.c:534' */
+    ;;
+    ;; - so both libraries have to reach it, and a Scheme import cannot be
+    ;; circular. It sat with the frame state because the frame is the
+    ;; lower library *today*; it is here now because this library defines
+    ;; the buffer record, so the frame's window code is the one built on
+    ;; it. `frame.sld' imports it and re-exports it, so every library that
+    ;; asks the frame for it still finds it, and `select-window' still
+    ;; writes it.
+    (define *current-editor-function*
+      ;; How the window's buffer is found when no choice has been made:
+      ;; the half of `current_buffer' that the *window code* maintains.
+      ;; `frame.sld' installs its `current-editor' here as it loads.
+      ;;
+      ;; A seam and not a call, for the reason above: this library cannot
+      ;; import `frame.sld', which is built on it. It is the arrangement
+      ;; `*read-buffer-to-switch*' (`window.sld') and
+      ;; `*text-property-offset-function*' already use.
+      ;;--------------------------------------------------------------
+      (make-parameter (lambda () #f)))
+    (define *replace-buffer-in-windows-function*
+      ;; GNU Emacs's `replace_buffer_in_windows' (`window.c:3722'), which
+      ;; `Fkill_buffer' calls (`buffer.c:2032') to put another buffer into
+      ;; every window that was showing the one being killed. It is the
+      ;; window code's function, so it arrives through this seam, which
+      ;; `frame.sld' installs.
+      ;;--------------------------------------------------------------
+      (make-parameter (lambda (buffer) #f)))
+    ;; `marker.c`'s three operations an overlay needs: an overlay's ends
+    ;; are markers, so `make-overlay' has to make them and `move-overlay'
+    ;; to point them. `marker.sld' is built on *this* library - a marker
+    ;; is added to a buffer's chain, and that chain is a field of the
+    ;; record below - so it cannot be imported here, and these three
+    ;; arrive the way the two above do.
+    (define *copy-marker-function*    (make-parameter (lambda args #f)))
+    (define *marker-position-function* (make-parameter (lambda (marker) #f)))
+    (define *set-marker-function*     (make-parameter (lambda args #f)))
+    (define *make-marker-function*
+      ;; `marker.c`'s constructor, which `allocate_buffer` calls to make
+      ;; the buffer's mark (`buffer.c:672`) - and marker.c is built on
+      ;; *this* library, so the constructor arrives through a seam like
+      ;; the three above.
+      ;;--------------------------------------------------------------
+      (make-parameter (lambda args #f)))
+    (define *del-range-function*
+      ;; GNU Emacs's `del_range' (`insdel.c`), which is what
+      ;; `Ferase_buffer' calls to empty a buffer (`buffer.c:2472'). It is
+      ;; `insdel.c`'s and insdel.c sits ABOVE this library - the whole
+      ;; point of the split - so the one call this library makes back into
+      ;; it arrives through a seam.
+      ;;
+      ;; It takes two positions, one-based, and deletes between them.
+      ;;--------------------------------------------------------------
+      (make-parameter (lambda (from to) #f)))
+    (define *run-hooks-function*
+      ;; How a hook is run from this library. `run-hooks' is `subr.el''s,
+      ;; and only `kill-all-local-variables' below wants it - the one line
+      ;; of this library that runs `change-major-mode-hook'.
+      ;;
+      ;; **Why it is a seam and not an import.** `(schemacs editor subr)'
+      ;; reaches the engine the long way round - `subr.sld' imports
+      ;; `fns.sld', which imports `intervals.sld', which imports the
+      ;; engine - so importing `subr' here makes this library depend on
+      ;; the engine, and the engine has to be built on *this* library,
+      ;; because the buffer record is here. That is the cycle this seam
+      ;; cuts, and it is the reason the record could not move here
+      ;; before. `subr.sld' installs its `run-hooks' as it loads, which
+      ;; is after this library once the record is here.
+      ;;
+      ;; **Transient.** Until the record does move, the engine is still
+      ;; below this library, so `subr.sld' still loads *before* it and
+      ;; cannot install this - `frame.sld' stands in, as it does for the
+      ;; three marker seams above, and for the same reason.
+      ;;--------------------------------------------------------------
+      (make-parameter (lambda (hooks) #f)))
     (define (current-buffer)
       ;; The buffer a command acts on: GNU Emacs's `(current-buffer)'.
       ;;
@@ -281,8 +389,7 @@
       ;; different places: `current_buffer' is written by `set-buffer' and
       ;; by the window code.
       ;;--------------------------------------------------------------
-      (or (*current-buffer*) (current-editor)))
-
+      (or (*current-buffer*) ((*current-editor-function*))))
     (define (set-buffer buffer)
       ;; Make BUFFER the current buffer: GNU Emacs's `set-buffer'. It does
       ;; *not* put the buffer in a window - "if you want to change which
@@ -298,7 +405,6 @@
           (error "No such buffer" buffer))
         (*current-buffer* buffer)
         buffer))
-
     (define (save-current-buffer thunk)
       ;; Call THUNK with the current buffer as it is, and put the current
       ;; buffer back afterwards whatever THUNK does: GNU Emacs's
@@ -311,7 +417,6 @@
           (lambda () #f)
           thunk
           (lambda () (*current-buffer* saved)))))
-
     (define-syntax with-current-buffer
       ;; Run the body with BUFFER current, and restore the current buffer
       ;; afterwards: GNU Emacs's `with-current-buffer', which is
@@ -331,7 +436,6 @@
           (lambda ()
             (set-buffer buffer)
             body ...)))))
-
     (define (record-buffer! buffer)
       ;; Move BUFFER to the front of the list, it having just been shown or
       ;; selected: GNU Emacs's `record_buffer' in `window.c'.
@@ -351,10 +455,8 @@
                        (else (cons (car rest) (loop (cdr rest))))))))
         (run-buffer-list-update-hook!)
         buffer))
-
     ;;----------------------------------------------------------------
     ;; Names
-
     (define *show-trailing-whitespace*
       ;; GNU Emacs's `show-trailing-whitespace' (xdisp.c:38640, a
       ;; DEFVAR buffer-local): "Non-nil means highlight trailing
@@ -367,7 +469,6 @@
       ;; here is a parameter until the store is per-buffer.
       ;;--------------------------------------------------------------
       (make-parameter #f))
-
     (define *transient-mark-mode*
       ;; GNU Emacs's `transient-mark-mode', which is `buffer.c''s: whether
       ;; the mark is *transient* - active until a command that is not a
@@ -386,7 +487,6 @@
       ;; from, so it is on.
       ;;--------------------------------------------------------------
       (make-parameter #t))
-
     (define (transient-mark-mode)
       ;; The mode as the *buffer* sees it: its own value if it has one,
       ;; else the global one. GNU Emacs turns the mode on for a single
@@ -396,7 +496,6 @@
       ;;--------------------------------------------------------------
       (buffer-local-value (current-buffer) 'transient-mark-mode
                           (*transient-mark-mode*)))
-
     (define (buffer-cursor-type buffer)
       ;; The cursor BUFFER wants: GNU Emacs's `cursor-type', which
       ;; `buffer.c' declares as a per-buffer variable (so a buffer can
@@ -419,10 +518,8 @@
       ;; (`get-specified-cursor-type'), as in Emacs.
       ;;--------------------------------------------------------------
       (buffer-local-value buffer 'cursor-type #t))
-
     (define (set!buffer-cursor-type buffer value)
       (set-buffer-local-value! buffer 'cursor-type value))
-
     (define (cache-long-scans . args)
       ;; GNU Emacs's `cache-long-scans' (`buffer.c:5786'): "Non-nil means
       ;; that Emacs should use caches in attempt to speedup buffer
@@ -434,13 +531,11 @@
       ;;--------------------------------------------------------------
       (let ((buffer (if (pair? args) (car args) (current-buffer))))
         (text-editor-cache-long-scans buffer)))
-
     (define (set!cache-long-scans buffer value)
       ;; Emacs's `setq-local' of it; the engine's setter is the same one
       ;; the buffer's own field uses.
       ;;--------------------------------------------------------------
       (set!text-editor-cache-long-scans buffer value))
-
     (define (buffer-truncate-lines buffer)
       ;; Whether BUFFER's long lines are cut off at the window edge
       ;; instead of continuing onto the next screen row: GNU Emacs's
@@ -459,10 +554,8 @@
       ;; too (it sets `word-wrap' instead).
       ;;--------------------------------------------------------------
       (buffer-local-value buffer 'truncate-lines #f))
-
     (define (set!buffer-truncate-lines buffer value)
       (set-buffer-local-value! buffer 'truncate-lines value))
-
     (define (buffer-word-wrap buffer)
       ;; Whether BUFFER's continuation lines break at a space near the
       ;; window's right edge rather than at the edge itself: GNU Emacs's
@@ -477,10 +570,8 @@
       ;; `visual-line-mode' is what usually turns it on.
       ;;--------------------------------------------------------------
       (buffer-local-value buffer 'word-wrap #f))
-
     (define (set!buffer-word-wrap buffer value)
       (set-buffer-local-value! buffer 'word-wrap value))
-
     (define (buffer-auto-hscroll-mode buffer)
       ;; Whether a window whose point leaves the window's horizontal view
       ;; scrolls itself just enough to bring it back: GNU Emacs's
@@ -492,21 +583,17 @@
       ;; window whatever the value, and only nil turns the machinery off.
       ;;--------------------------------------------------------------
       (buffer-local-value buffer 'auto-hscroll-mode #t))
-
     (define (set!buffer-auto-hscroll-mode buffer value)
       (set-buffer-local-value! buffer 'auto-hscroll-mode value))
-
-(define (buffer-tab-width buffer)
+          (define (buffer-tab-width buffer)
       ;; How wide a tab is in columns: GNU Emacs's `tab-width', a
       ;; buffer-local DEFVAR_PER_BUFFER whose default is 8
       ;; (`buffer.c:4880'), which `indent-to' and the display both read.
       ;;--------------------------------------------------------------
       (buffer-local-value buffer 'tab-width 8))
-
-(define (set!buffer-tab-width buffer value)
+          (define (set!buffer-tab-width buffer value)
       (set-buffer-local-value! buffer 'tab-width value))
-
-(define (buffer-overwrite-mode buffer)
+          (define (buffer-overwrite-mode buffer)
       ;; Which overwrite mode this buffer is in: GNU Emacs's
       ;; `overwrite-mode', a buffer-local DEFVAR_PER_BUFFER of `cmds.c'
       ;; whose default is nil (`buffer.c:5480' - `DEFVAR_PER_BUFFER
@@ -523,17 +610,14 @@
       ;; the mode line reads it for the ` Ovwrt' lighter.
       ;;--------------------------------------------------------------
       (buffer-local-value buffer 'overwrite-mode #f))
-
     (define (set!buffer-overwrite-mode buffer value)
       (set-buffer-local-value! buffer 'overwrite-mode value))
-
     (define (buffer-fill-column buffer)
       ;; The column `fill-paragraph' and auto fill fill to: GNU Emacs's
       ;; `fill-column', a buffer-local DEFVAR_PER_BUFFER whose default
       ;; is 70 (`buffer.c:4898').
       ;;--------------------------------------------------------------
       (buffer-local-value buffer 'fill-column 70))
-
     (define (set!buffer-fill-column buffer value)
       (set-buffer-local-value! buffer 'fill-column value))
     (define (buffer-hscroll-margin buffer)
@@ -542,10 +626,8 @@
       ;; a buffer-local DEFVAR_INT of `xdisp.c' whose default is 5.
       ;;--------------------------------------------------------------
       (buffer-local-value buffer 'hscroll-margin 5))
-
     (define (set!buffer-hscroll-margin buffer value)
       (set-buffer-local-value! buffer 'hscroll-margin value))
-
     (define (buffer-hscroll-step buffer)
       ;; How far auto hscrolling moves the view when it scrolls: GNU
       ;; Emacs's `hscroll-step', a buffer-local DEFVAR_* of `xdisp.c'
@@ -559,10 +641,8 @@
       ;; acts as 0 does here.
       ;;--------------------------------------------------------------
       (buffer-local-value buffer 'hscroll-step 0))
-
     (define (set!buffer-hscroll-step buffer value)
       (set-buffer-local-value! buffer 'hscroll-step value))
-
     (define (buffer-cursor-in-non-selected-windows buffer)
       ;; What to draw in a window that is not selected, when this buffer
       ;; is in it: GNU Emacs's `cursor-in-non-selected-windows', another
@@ -571,20 +651,16 @@
       ;; no cursor at all; any other value is a cursor type of its own.
       ;;--------------------------------------------------------------
       (buffer-local-value buffer 'cursor-in-non-selected-windows #t))
-
     (define (set!buffer-cursor-in-non-selected-windows buffer value)
       (set-buffer-local-value! buffer 'cursor-in-non-selected-windows value))
-
     (define (mark-active)
       ;; Whether the mark is active: GNU Emacs's `mark-active', which
       ;; `buffer.c' declares as a per-buffer variable - each buffer has
       ;; its own, so switching buffers does not carry the region with it.
       ;;--------------------------------------------------------------
       (buffer-local-value (current-buffer) 'mark-active #f))
-
     (define (set!mark-active flag)
       (set-buffer-local-value! (current-buffer) 'mark-active (and flag #t)))
-
     (define (buffer-name . rest)
       ;; The name of BUFFER: GNU Emacs's `buffer-name' (buffer.c:1302):
       ;; "Return the name of BUFFER, as a string. BUFFER defaults to the
@@ -602,20 +678,17 @@
       ;;--------------------------------------------------------------
       (text-editor-buffer-name (or (and (pair? rest) (car rest))
                                    (current-buffer))))
-
     (define (set!buffer-name buffer name)
       ;; Name BUFFER: what Emacs's `rename-buffer' ends with. Use
       ;; `RENAME-BUFFER' to keep the list consistent, which is why that is
       ;; the function Emacs has and this one is its last step.
       ;;--------------------------------------------------------------
       (set!text-editor-buffer-name buffer name))
-
     (define (get-buffer name)
       ;; The buffer called NAME, or false: GNU Emacs's `get-buffer'.
       ;;--------------------------------------------------------------
       (let ((entry (assoc name (*buffer-list*))))
         (and entry (cdr entry))))
-
     (define (generate-new-buffer-name name . args)
       ;; A name no buffer has, based on NAME: GNU Emacs's
       ;; `generate-new-buffer-name'. If NAME is free it is returned;
@@ -636,7 +709,6 @@
               (if (get-buffer candidate)
                   (loop (+ 1 n))
                   candidate)))))))
-
     (define (rename-buffer buffer newname . args)
       ;; Give BUFFER the name NEWNAME: GNU Emacs's `rename-buffer'. With a
       ;; second argument the name is made unique rather than raising an
@@ -658,10 +730,8 @@
                 (*buffer-list*)))
           (run-buffer-list-update-hook!)
           name)))
-
     ;;----------------------------------------------------------------
     ;; Making a buffer
-
     (define (register-buffer! buffer name)
       ;; Put a new buffer at the front of the list: what Emacs's
       ;; `Fget_buffer_create' does with `Vbuffer_alist', and why a buffer
@@ -671,29 +741,26 @@
       (*buffer-list* (cons (cons name buffer) (*buffer-list*)))
       (run-buffer-list-update-hook!)
       buffer)
-
     (define (generate-new-buffer name)
       ;; A new buffer with a name based on NAME but unique: GNU Emacs's
       ;; `generate-new-buffer'. Emacs's optional second argument is about
       ;; *hooks* rather than the name - "inhibit-buffer-hooks" - and there
       ;; are no buffer hooks here yet, so this takes the name alone.
       ;;--------------------------------------------------------------
-      (let ((buffer (new-text-editor)))
+      (let ((buffer (allocate-buffer)))
         (register-buffer! buffer (generate-new-buffer-name name))
         (init-buffer! buffer)
         buffer))
-
     (define (get-buffer-create name)
       ;; The buffer called NAME, made if there is none: GNU Emacs's
       ;; `get-buffer-create'. This is the way to reach a buffer by name -
       ;; `*Completions*', `*Messages*' - and get the same one every time.
       ;;--------------------------------------------------------------
       (or (get-buffer name)
-          (let ((buffer (new-text-editor)))
+          (let ((buffer (allocate-buffer)))
             (register-buffer! buffer name)
             (init-buffer! buffer)
             buffer)))
-
     (define (find-buffer-visiting filename)
       ;; The buffer whose file FILENAME is, or #f: GNU Emacs's
       ;; `find-buffer-visiting' (`buffer.c''s `Ffind_buffer_visiting'
@@ -707,7 +774,6 @@
                     (string=? (buffer-file-name (car buffers)) filename))
                (car buffers))
               (else (scan (cdr buffers))))))
-
     (define (init-buffer! buffer)
       ;; Give a buffer just made the slots and flags Emacs gives a new
       ;; buffer: read-write, unmodified, with no file and an empty local
@@ -715,12 +781,15 @@
       ;; buffer a major mode, a syntax table, buffer-local defaults and a
       ;; marker for point; those wait for the features that need them.)
       ;;--------------------------------------------------------------
-      (text-editor-set-modified! buffer #f)
-      (text-editor-set-read-only! buffer #f)
+      ;; Not `set-buffer-modified-p': the modified state of a buffer just
+      ;; made is not set at all - `allocate_buffer' writes the counters
+      ;; themselves, `BUF_MODIFF (b) = 1' and `BUF_SAVE_MODIFF (b) = 1'
+      ;; (`buffer.c:630-631'), and `1 < 1' is false. `NEW-TEXT-EDITOR'
+      ;; writes the same two, which is where those lines live here.
+      (set!buffer-read-only buffer #f)
       (set!text-editor-file-name buffer #f)
       (set!buffer-local-keymap buffer #f)
       buffer)
-
     (define (other-buffer . args)
       ;; A buffer other than the one named: GNU Emacs's `other-buffer',
       ;; which returns the most recently used buffer that is not the
@@ -743,7 +812,6 @@
             (get-buffer-create *scratch-buffer-name*))
            ((eq? (cdar rest) avoid) (loop (cdr rest)))
            (else (cdar rest))))))
-
     (define (bury-buffer . args)
       ;; Move a buffer to the end of the list, so that `OTHER-BUFFER' will
       ;; not choose it until there is nothing else: GNU Emacs's
@@ -765,7 +833,6 @@
                      (list (cons name buffer))))
             (run-buffer-list-update-hook!)))
         buffer))
-
     (define (kill-buffer . args)
       ;; Kill a buffer: GNU Emacs's `kill-buffer'. The optional argument
       ;; is the buffer, or its name; with none, the current buffer.
@@ -826,22 +893,13 @@
                    (cond ((null? rest) '())
                          ((eq? (cdar rest) buffer) (loop (cdr rest)))
                          (else (cons (car rest) (loop (cdr rest)))))))
-                ;; a window may not be left showing a buffer that is gone
-                (let ((replacement #f))
-                  (let loop ((windows (frame-windows-with buffer)))
-                    (unless (null? windows)
-                      ;; avoid the buffer being killed: while it is
-                      ;; still in the list, `other-buffer' could hand it
-                      ;; back, and a window would be left showing a buffer
-                      ;; that is gone
-                      (unless replacement
-                        (set! replacement (other-buffer buffer)))
-                      ;; `replace_buffer_in_windows' (`buffer.c') puts
-                      ;; the replacement in through `set_window_buffer',
-                      ;; so everything the window recorded about the
-                      ;; buffer being killed goes with it
-                      (set-window-buffer! (car windows) replacement)
-                      (loop (cdr windows)))))
+                ;; A window may not be left showing a buffer that is
+                ;; gone: `replace_buffer_in_windows' (`window.c:3722'),
+                ;; which the C calls here for the same reason - before the
+                ;; buffer leaves the list, so `other_buffer' cannot hand
+                ;; the dying buffer back. It is the window code's
+                ;; function, so it arrives through the seam above.
+                ((*replace-buffer-in-windows-function*) buffer)
                 (hashq-remove! buffer-slots-table buffer)
                 ;; Emacs sets the killed buffer's `name' to nil and keeps
                 ;; the old one in `last_name'. That nil *is* why
@@ -852,18 +910,6 @@
                 (set!buffer-name buffer #f)
                 (run-buffer-list-update-hook!)
                 name)))))))
-
-    (define (frame-windows-with buffer)
-      ;; The current frame's windows showing BUFFER: `window.c''s
-      ;; `replace-buffer-in-windows' walks the same thing. This project has
-      ;; one window per frame for now, so it is a list of none or one.
-      ;;--------------------------------------------------------------
-      (let ((window (and (*current-frame*)
-                         (selected-window))))
-        (if (and window (eq? (window-buffer window) buffer))
-            (list window)
-            '())))
-
     ;;----------------------------------------------------------------
     ;; The slots a buffer has besides its text
     ;;
@@ -873,7 +919,6 @@
     ;; killed buffer alive - and the table is per buffer rather than one
     ;; slot per fact so that a buffer-local variable can be any name a
     ;; ported Elisp sets, which is what `setq-local' needs.
-
     ;;----------------------------------------------------------------
     ;; Overlays
     ;;
@@ -900,10 +945,8 @@
     ;; modification hooks; and the `window' property, which limits an
     ;; overlay to one window.
     ;;------------------------------------------------------------------
-
     (define buffer-overlays-table (make-weak-key-hash-table))
     ;; ^ each buffer's overlays, as a list in order by start
-
     ;; `*inhibit-read-only*' is GNU Emacs's `inhibit-read-only'
     ;; (`buffer.c':5885), which is where Emacs defines it - but it is
     ;; *read* by `insdel.c', on every insertion and deletion, and that is
@@ -919,7 +962,6 @@
     ;; into a read-only buffer. It is a parameter here, as this tree keeps
     ;; the flags that Elisp let-binds, so a command writes
     ;; `(parameterize ((*inhibit-read-only* #t)) ...)'.
-
     (define (overlay-current-buffer)
       ;; The buffer the overlay functions act on - Emacs's
       ;; `current_buffer'. `(current-buffer)' *raises* when there is no
@@ -928,7 +970,6 @@
       ;; nothing current is exactly that case.
       ;;--------------------------------------------------------------
       (guard (e (#t #f)) (current-buffer)))
-
     (define (buffer-overlays buffer)
       ;; A buffer with no overlays has none, and *no buffer at all* has
       ;; none either - the redisplay asks this for a position in a buffer
@@ -938,10 +979,8 @@
       (if buffer
           (hashq-ref buffer-overlays-table buffer '())
           '()))
-
     (define (set!buffer-overlays! buffer overlays)
       (hashq-set! buffer-overlays-table buffer overlays))
-
     (define-record-type <overlay-type>
       (make<overlay> buffer start end plist)
       overlayp
@@ -949,28 +988,24 @@
       (start  overlay-start-marker)
       (end    overlay-end-marker)
       (plist  overlay-properties set!overlay-properties!))
-
     (define (overlay-start overlay)
       ;; GNU Emacs's `overlay-start': "Return the start position of
       ;; OVERLAY." A deleted overlay's markers point nowhere, and its
       ;; start is nil, as the C's is.
       ;;--------------------------------------------------------------
       (and (overlayp overlay)
-           (marker-position (overlay-start-marker overlay))))
-
+           ((*marker-position-function*) (overlay-start-marker overlay))))
     (define (overlay-end overlay)
       ;; GNU Emacs's `overlay-end': "Return the end position of OVERLAY."
       ;;--------------------------------------------------------------
       (and (overlayp overlay)
-           (marker-position (overlay-end-marker overlay))))
-
+           ((*marker-position-function*) (overlay-end-marker overlay))))
     (define (overlay-get overlay prop)
       ;; GNU Emacs's `overlay-get': "Get the property of overlay OVERLAY
       ;; with property name PROP."
       ;;--------------------------------------------------------------
       (let ((cell (assq prop (overlay-properties overlay))))
         (and cell (cdr cell))))
-
     (define (overlay-put overlay prop value)
       ;; GNU Emacs's `overlay-put': "Set the property of overlay OVERLAY
       ;; with property name PROP to the value VALUE. ... Return VALUE."
@@ -983,7 +1018,6 @@
                      ((eq? (caar l) prop) (loop (cdr l)))
                      (else (cons (car l) (loop (cdr l))))))))
       value)
-
     (define (overlay-priority overlay)
       ;; The C's `make_sortvec_item' (buffer.c:3304): the `priority'
       ;; property if there is one - an integer, or a cons of the
@@ -994,7 +1028,6 @@
               ((integer? p) p)
               ((pair? p) (if (integer? (car p)) (car p) 0))
               (else 0))))
-
     (define (add-buffer-overlay! buffer overlay)
       ;; Put OVERLAY into BUFFER's list, in order by start.
       ;;--------------------------------------------------------------
@@ -1005,7 +1038,6 @@
                (set!buffer-overlays!
                 buffer (append (reverse acc) (cons overlay l))))
               (else (loop (cdr l) (cons (car l) acc))))))
-
     (define (make-overlay beg end . rest)
       ;; GNU Emacs's `make-overlay' (buffer.c:3635): "Create a new overlay
       ;; with range BEG to END in BUFFER and return it. If omitted, BUFFER
@@ -1027,12 +1059,11 @@
              (b (min beg end))
              (e (max beg end))
              (overlay (make<overlay> buffer
-                                    (copy-marker buffer b front-advance)
-                                    (copy-marker buffer e rear-advance)
+                                    ((*copy-marker-function*) buffer b front-advance)
+                                    ((*copy-marker-function*) buffer e rear-advance)
                                     '())))
         (add-buffer-overlay! buffer overlay)
         overlay))
-
     (define (delete-overlay overlay)
       ;; GNU Emacs's `delete-overlay' (buffer.c:3806): "Delete the overlay
       ;; OVERLAY from its buffer." Its markers are detached, so it follows
@@ -1046,11 +1077,10 @@
              (cond ((null? l) '())
                    ((eq? (car l) overlay) (cdr l))
                    (else (cons (car l) (loop (cdr l)))))))
-          (set-marker! (overlay-start-marker overlay) #f)
-          (set-marker! (overlay-end-marker overlay) #f)
+          ((*set-marker-function*) (overlay-start-marker overlay) #f)
+          ((*set-marker-function*) (overlay-end-marker overlay) #f)
           (%set-overlay-buffer! overlay #f)))
       #f)
-
     (define (move-overlay overlay beg end . rest)
       ;; GNU Emacs's `move-overlay': "Move OVERLAY to span the region from
       ;; BEG to END." An overlay moved to another buffer is taken out of
@@ -1063,8 +1093,8 @@
         (unless (eq? buffer (overlay-buffer overlay))
           (delete-overlay overlay)
           (%set-overlay-buffer! overlay buffer))
-        (set-marker! (overlay-start-marker overlay) (min beg end) buffer)
-        (set-marker! (overlay-end-marker overlay) (max beg end) buffer)
+        ((*set-marker-function*) (overlay-start-marker overlay) (min beg end) buffer)
+        ((*set-marker-function*) (overlay-end-marker overlay) (max beg end) buffer)
         ;; the list is kept in order by start, and this may have moved it
         (when (overlay-buffer overlay)
           (let ((ovs (let loop ((l (buffer-overlays buffer)))
@@ -1074,7 +1104,6 @@
             (set!buffer-overlays! buffer ovs)
             (add-buffer-overlay! buffer overlay))))
       overlay)
-
     (define (overlays-at pos . rest)
       ;; GNU Emacs's `overlays-at' (buffer.c:3898): "Return a list of the
       ;; overlays that contain the character at POS. If SORTED is
@@ -1094,7 +1123,6 @@
                                    (< (overlay-priority a)
                                       (overlay-priority b)))))
             found)))
-
     (define (overlays-in beg end)
       ;; GNU Emacs's `overlays-in' (buffer.c:3944): "Return a list of the
       ;; overlays that overlap the region BEG ... END. Overlap means that
@@ -1107,7 +1135,6 @@
                     (< beg (overlay-end (car l))))
                (loop (cdr l) (cons (car l) acc)))
               (else (loop (cdr l) acc)))))
-
     (define (next-overlay-change pos)
       ;; GNU Emacs's `next-overlay-change' (buffer.c:3987): "Return the
       ;; next position after POS where an overlay starts or ends. If there
@@ -1125,7 +1152,6 @@
                          (fold-best best
                                     (if (> s pos) s #f)
                                     (if (> e pos) e #f)))))))))
-
     (define (fold-best best . candidates)
       ;; the smallest of BEST and the CANDIDATES that are numbers, #f for
       ;; none - the "next" of `next-overlay-change'
@@ -1135,7 +1161,6 @@
               ((not (car rest)) (loop (cdr rest) best))
               ((or (not best) (< (car rest) best)) (loop (cdr rest) (car rest)))
               (else (loop (cdr rest) best)))))
-
     (define (previous-overlay-change pos)
       ;; GNU Emacs's `previous-overlay-change': "Return the previous
       ;; position before POS where an overlay starts or ends. If there are
@@ -1153,14 +1178,12 @@
                          (cond ((not s) (or e best))
                                ((not e) (or best s))
                                (else (max s e (or best 0)))))))))))
-
     (define buffer-slots-table
       ;; The table of side slots. One table rather than a slot per fact,
       ;; so that a buffer-local variable can be any name a ported Elisp
       ;; sets, which is what `setq-local' needs.
       ;;--------------------------------------------------------------
       (make-weak-key-hash-table))
-
     (define (buffer-local-value buffer key . args)
       ;; The buffer-local value of KEY in BUFFER, or the optional default:
       ;; GNU Emacs's `buffer-local-value', which reads a named
@@ -1173,7 +1196,6 @@
         (cond (entry (cdr entry))
               ((pair? args) (car args))
               (else #f))))
-
     (define (set-buffer-local-value! buffer key value)
       ;; Make KEY locally VALUE in BUFFER: GNU Emacs's `setq-local' and the
       ;; `make-local-variable' beneath it.
@@ -1187,7 +1209,6 @@
                                        (else (cons (car rest)
                                                    (loop (cdr rest))))))))
         value))
-
     (define (use-local-map keymap)
       ;; GNU Emacs's `use-local-map' (keymap.c:1900): "Select KEYMAP as
       ;; the current local keymap. If KEYMAP is nil, that means no local
@@ -1199,14 +1220,12 @@
       ;; the buffer's own keymap slot live with the slot.
       ;;--------------------------------------------------------------
       (set!buffer-local-keymap (current-buffer) keymap))
-
     (define (current-local-map)
       ;; GNU Emacs's `current-local-map' (keymap.c): "Return current
       ;; buffer's local map, or nil if there is none." keymap.c's, and
       ;; here for the reason `use-local-map' is.
       ;;--------------------------------------------------------------
       (buffer-local-keymap (current-buffer)))
-
     (define (buffer-local-keymap buffer)
       ;; The buffer's own keymap, or false: GNU Emacs's `current-local-map'
       ;; for a buffer that is not current, and its `BVAR (buf, keymap)'
@@ -1214,12 +1233,10 @@
       ;; in this map first and the global map after it.
       ;;--------------------------------------------------------------
       (buffer-local-value buffer 'buffer-local-keymap #f))
-
     (define (set!buffer-local-keymap buffer keymap)
       ;; Give BUFFER its own keymap: GNU Emacs's `use-local-map'.
       ;;--------------------------------------------------------------
       (set-buffer-local-value! buffer 'buffer-local-keymap keymap))
-
     (define (default-directory)
       ;; The directory a bare file name is relative to: GNU Emacs's
       ;; `default-directory', which is a buffer-local variable - each
@@ -1243,16 +1260,14 @@
       ;; than an error on the way to reading the file.
       ;;--------------------------------------------------------------
       (let ((buffer (or (*current-buffer*)
-                        (and (*current-frame*) (current-editor)))))
+                        ((*current-editor-function*)))))
         (or (and buffer (buffer-default-directory buffer))
             (string-append (getcwd) "/"))))
-
     (define *change-major-mode-hook* (make-parameter '()))
     ;; ^ GNU Emacs's `change-major-mode-hook' (`buffer.c'): "Normal hook
     ;; run before changing the major mode, when otherwise a new major
     ;; mode would be installed. ... `kill-all-local-variables' runs it."
     ;; It is what a mode puts its clean-up in.
-
     (define (major-mode . args)
       ;; GNU Emacs's `major-mode' (`buffer.c':5230): "Symbol for current
       ;; buffer's major mode. The default value (normally
@@ -1266,13 +1281,11 @@
       ;;--------------------------------------------------------------
       (let ((buffer (if (pair? args) (car args) (current-buffer))))
         (buffer-local-value buffer 'major-mode 'fundamental-mode)))
-
     (define (set!major-mode value . args)
       ;; What `(setq major-mode MODE)' does in a buffer.
       ;;--------------------------------------------------------------
       (set-buffer-local-value! (if (pair? args) (car args) (current-buffer))
                                'major-mode value))
-
     (define (mode-name . args)
       ;; GNU Emacs's `mode-name' (`buffer.c':5243): "Pretty name of
       ;; current buffer's major mode. Usually a string, but can use any
@@ -1284,13 +1297,11 @@
       ;;--------------------------------------------------------------
       (let ((buffer (if (pair? args) (car args) (current-buffer))))
         (buffer-local-value buffer 'mode-name "Fundamental")))
-
     (define (set!mode-name value . args)
       ;; What `(setq mode-name NAME)' does in a buffer.
       ;;--------------------------------------------------------------
       (set-buffer-local-value! (if (pair? args) (car args) (current-buffer))
                                'mode-name value))
-
     (define *permanent-local-variables*
       ;; The variables `kill-all-local-variables' does not reset, because
       ;; they have no default value to reset *to*: the C's
@@ -1304,7 +1315,6 @@
       ;;--------------------------------------------------------------
       '(default-directory buffer-file-name mark-active truncate-lines
         buffer-file-coding-system))
-
     (define (kill-all-local-variables . args)
       ;; GNU Emacs's `kill-all-local-variables' (`buffer.c':3019):
       ;; "Switch to Fundamental mode by killing current buffer's local
@@ -1322,7 +1332,7 @@
       ;; is keyed by a plain value - so there is no exception to make,
       ;; and the C's KILL-PERMANENT argument has nothing to say.
       ;;--------------------------------------------------------------
-      (run-hooks (*change-major-mode-hook*))
+      ((*run-hooks-function*) (*change-major-mode-hook*))
       (let ((buffer (if (pair? args) (car args) (current-buffer))))
         ;; "Actually eliminate all local bindings of this buffer" - except
         ;; the ones the C never had in its locals list to begin with. Those
@@ -1351,7 +1361,6 @@
       ;; to ask here: this editor redraws after every command, so the
       ;; mode line is drawn again before anything can be seen.
       #t)
-
     (define (buffer-default-directory buffer . args)
       ;; The directory BUFFER's relative file names are relative to: GNU
       ;; Emacs's `default-directory', which is a buffer-local variable, so
@@ -1365,12 +1374,10 @@
       ;;--------------------------------------------------------------
       (let ((buffer (if (pair? args) (car args) (current-buffer))))
         (buffer-local-value buffer 'default-directory #f)))
-
     (define (set!buffer-default-directory buffer directory)
       ;; What `(setq default-directory DIRECTORY)' does in a buffer.
       ;;--------------------------------------------------------------
       (set-buffer-local-value! buffer 'default-directory directory))
-
     ;;----------------------------------------------------------------
     ;; The flags and the file name, which are the engine's
     ;;
@@ -1378,7 +1385,6 @@
     ;; the fields are the engine's here, so these are the names Emacs's
     ;; Elisp calls - `buffer-modified-p' - over the engine's accessors,
     ;; which are spelled the way the rest of this tree spells them.
-
     (define (erase-buffer)
       ;; GNU Emacs's `erase-buffer' (buffer.c:2472): "Delete the entire
       ;; contents of the current buffer. Any narrowing restriction in
@@ -1390,69 +1396,72 @@
       ;; is no narrowing, so the widen is a no-op, and the
       ;; `save_length' is nothing - no auto saving machinery.
       ;;--------------------------------------------------------------
-      (when (and (text-editor-read-only? (current-buffer))
+      (when (and (buffer-read-only? (current-buffer))
                  (not (*inhibit-read-only*)))
         (error "Buffer is read-only"))
       (let ((ed (current-buffer)))
-        (text-editor-set-cursor ed (buffer-beg ed))
-        (text-editor-delete-from-cursor ed (- (buffer-z ed) (buffer-beg ed))))
+        ;; The C is three lines: `Fwiden ()', `del_range (BEG, Z)', and
+        ;; the housekeeping that follows. Nothing is narrowed here, so
+        ;; the widen is a no-op, and the rest is `del_range`'s.
+        ((*del-range-function*) (buffer-beg ed) (buffer-z ed)))
       #f)
-
-
-    (define (buffer-modified-p . rest)
-      ;; GNU Emacs's `buffer-modified-p' (buffer.c:1506): "Return non-nil
-      ;; if BUFFER was modified since its file was last read or saved. No
-      ;; argument or nil as argument means use current buffer as BUFFER."
-      ;;
-      ;; The C's DEFUN is `0, 1, 0', so BUFFER is optional; taking it as
-      ;; a required argument, which this did, is a departure that all
-      ;; callers had to work around - and it makes `(buffer-modified-p)'
-      ;; - how every .el caller spells it - an error.
-      ;;--------------------------------------------------------------
-      (text-editor-modified? (or (and (pair? rest) (car rest))
-                                 (current-buffer))))
-
     (define (set-buffer-modified-p flag)
       ;; GNU Emacs's `set-buffer-modified-p' (buffer.c:1549): "Mark
       ;; current buffer as modified or unmodified according to FLAG."
       ;;
       ;; FLAG is the *only* argument - the C's DEFUN is `1, 1, 0' and it
-      ;; acts on the current buffer.
+      ;; acts on the current buffer. The C is two calls, and this is the
+      ;; first of them:
+      ;;
+      ;;     Frestore_buffer_modified_p (flag);
+      ;;     return Fforce_mode_line_update (Qnil);
+      ;;
+      ;; The mode line half is this tree's redisplay's business, so what
+      ;; is left is `restore-buffer-modified-p'.
       ;;--------------------------------------------------------------
-      (text-editor-set-modified! (current-buffer) flag))
-
+      (restore-buffer-modified-p flag))
     (define (restore-buffer-modified-p flag)
       ;; GNU Emacs's `restore-buffer-modified-p' (buffer.c:1576): "Like
       ;; `set-buffer-modified-p', but doesn't redisplay buffer's mode
       ;; line. A nil FLAG means to mark the buffer as unmodified."
       ;;
-      ;; The C also locks or unlocks the visited file, which needs file
-      ;; locking - not ported - and its other difference is that the mode
-      ;; line is not redrawn. This tree redraws when it redraws, so the
-      ;; two are the same function here, which is the whole of what the
-      ;; difference buys.
+      ;; The arithmetic is all in terms of the two counters rather than a
+      ;; flag. Marking a buffer modified *raises* `MODIFF' when
+      ;; `SAVE_MODIFF' has caught up with it, so that the comparison comes
+      ;; out true again - which is how "modified" is said of a buffer
+      ;; whose text never changed. `modiff_incr' answers the *old* count,
+      ;; so `SAVE_MODIFF' is left one below, not equal.
+      ;;
+      ;; The C also locks or unlocks the file the buffer visits, which
+      ;; needs file locking - not ported. It returns FLAG.
+      ;;
+      ;; **No undo entry is recorded**, which is Emacs's behaviour and is
+      ;; worth stating because it is not obvious: measured,
+      ;; `(set-buffer-modified-p nil)' and `(set-buffer-modified-p t)'
+      ;; both leave `buffer-undo-list' exactly as it was. The C calls
+      ;; `record_first_change' from the *change* paths - `insdel.c:2090',
+      ;; `textprop.c:89', `undo.c:65' - and from nothing here. The
+      ;; `(t . TOKEN)' mark is made by `%text-editor-note-change!', before
+      ;; a change to an unmodified buffer.
       ;;--------------------------------------------------------------
-      (set-buffer-modified-p flag))
-
-    (define (buffer-read-only? buffer)
-      ;; Whether the buffer refuses changes: GNU Emacs's `buffer-read-only'
-      ;; *variable*, which is a field rather than a function there; the `?'
-      ;; is this tree's spelling for a predicate.
-      ;;--------------------------------------------------------------
-      (text-editor-read-only? buffer))
-
-    (define (set!buffer-read-only buffer flag)
-      ;; What `(setq buffer-read-only FLAG)' does in a buffer. Emacs's
-      ;; `read-only-mode' is the command over it, and turns the flag on and
-      ;; off; this is the flag itself.
-      ;;--------------------------------------------------------------
-      (text-editor-set-read-only! buffer flag))
-
+      (let* ((ed (current-buffer))
+             (modiff (buffer-modified-tick ed)))
+        (if (not flag)
+            (begin
+              ;; our stand-in for the file modification time Emacs records
+              ;; beside the mark of the last save
+              (when (buffer-modified-p ed)
+                (set!text-editor-save-token
+                 ed (+ 1 (text-editor-save-token ed))))
+              (set!text-editor-save-modiff ed modiff))
+            (when (>= (text-editor-save-modiff ed) modiff)
+              (set!text-editor-save-modiff ed modiff)
+              (%text-editor-incr-modiff! ed 0)))
+        flag))
     (define (buffer-file-name buffer)
       ;; The file BUFFER visits, or false: GNU Emacs's `buffer-file-name'.
       ;;--------------------------------------------------------------
       (text-editor-file-name buffer))
-
     (define (set!buffer-file-name buffer path)
       ;; Make BUFFER visit PATH: GNU Emacs's `set-visited-file-name' ends
       ;; here. Emacs also renames the buffer after the file and marks it
@@ -1460,7 +1469,353 @@
       ;; `set-visited-file-name''s job, above this.
       ;;--------------------------------------------------------------
       (set!text-editor-file-name buffer path))
+    ;;----------------------------------------------------------------
+    ;; The buffer record - GNU Emacs's `struct buffer'
+    ;;------------------------------------------------------------------
+    ;;
+    ;; **This is `buffer.h`'s struct, and it is here because it is
+    ;; `buffer.c`'s.** It used to be in `(schemacs editor engine)`,
+    ;; which is not a file Emacs has - and the engine is built on
+    ;; this library now, not the other way round, which is what lets
+    ;; `buffer.c`'s own functions work on it.
+    ;;
+    ;; The one thing it cannot reach is `marker.c`'s constructor:
+    ;; `allocate_buffer` makes the mark with `Fmake_marker`
+    ;; (`buffer.c:672`), and marker.c is built on this library for
+    ;; the same reason it is built on Emacs's buffer.c - a marker is
+    ;; added to a buffer's chain, and that chain is a field here. So
+    ;; `*make-marker-function*` is a seam, installed by the library
+    ;; that has the constructor.
+    ;;--------------------------------------------------------------
+    (define-record-type <buffer>
+      (make<buffer>
+       text  newline-cache  point
+       textprops  undo
+       save-modiff  save-token  cache-long-scans  read-only  mark  markers
+       deactivate-mark
+       name  file-name
+       )
+      bufferp
+      (newline-cache %text-editor-newline-cache
+                     set!%text-editor-newline-cache)
+      ;; ^ GNU Emacs's `buf->newline_cache' (`buffer.h:696'), the
+      ;; `region-cache' that remembers which stretches of the buffer have
+      ;; been searched and found to hold no line break. False until
+      ;; `find-newline' first wants it, which is when the C makes one
+      ;; too (`search.c:640') - a buffer whose lines are never searched
+      ;; never pays for it.
+      (text       text-editor-text          set!text-editor-text)
+      ;; ^ The buffer's text - a `(schemacs editor buffer-text)', which
+      ;; is GNU Emacs's `struct buffer_text': the characters, the gap
+      ;; and where the gap is. There is ONE of these where there used to
+      ;; be four - a gap buffer of `<text-line>' records, a separate
+      ;; line editor, a CDF indexing the lines, and a hand-maintained
+      ;; character count. None of the four has a counterpart in Emacs;
+      ;; the text is one sequence of characters there and it is one
+      ;; here.
+      (point      buffer-pt         set!buffer-pt)
+      ;; ^ The cursor - GNU Emacs's `BUF_PT (buf)`, which is the field
+      ;; `PT` on the buffer (`buffer.h:1078`). It is a `buffer-text`
+      ;; *position*: one-based, the convention the class speaks, and
+      ;; Emacs's own. Emacs keeps `PT' on the buffer for the same reason
+      ;; it is here - it is not derivable from the gap, which can sit
+      ;; anywhere - and `point' (`editfns.c') is `BUF_PT' of the current
+      ;; buffer and nothing more.
+      (textprops  text-editor-text-props     set!text-editor-text-props)
+      ;; The root of the buffer's text-property tree. This is GNU Emacs's
+      ;; `BUFFER_INTERVALS' - the root of the interval tree - which
+      ;; `(schemacs editor intervals)' mirrors and this library only
+      ;; holds; it is what syntax colouring and the `display' property
+      ;; are kept in.
+      (undo       text-editor-undo-list     set!text-editor-undo-list)
+      ;; ^ The buffer's undo list, GNU Emacs's `buffer-undo-list'. A
+      ;; list, newest entry first, of the edits that can be undone; or
+      ;; false, which is Emacs's `t', meaning that the recording of
+      ;; undo information is disabled. The empty list is Emacs's `nil':
+      ;; recording is enabled but there is nothing to undo. See the
+      ;; "Undo" section below for the entry formats.
+      (save-modiff text-editor-save-modiff  set!text-editor-save-modiff)
+      (cache-long-scans text-editor-cache-long-scans
+                        set!text-editor-cache-long-scans)
+      ;; ^ GNU Emacs's `cache-long-scans' (`buffer.c:5786'), a
+      ;; `DEFVAR_PER_BUFFER' whose default is **true**: "Non-nil means
+      ;; that Emacs should use caches in attempt to speedup buffer
+      ;; scans... There is no reason to set this to nil except for
+      ;; debugging purposes." It is the switch both region caches hang
+      ;; on - `find_newline' consults it before making one
+      ;; (`search.c:618'), and `width_run_cache_on_off' checks it too.
+      ;; It lives on the buffer because that is where Emacs declares
+      ;; it, and `find-newline' is below the library that would
+      ;; otherwise hold it.
+      ;; ^ GNU Emacs's `SAVE_MODIFF' (`buffer.h'), a field of
+      ;; `struct buffer': the value of the text's `modiff' when the
+      ;; buffer was last in sync with its file. There is no flag
+      ;; beside it - `buffer-modified-p' *is* the comparison
+      ;; `SAVE_MODIFF < MODIFF', which is what `buffer-modified-p'
+      ;; answers and what `set-buffer-modified-p' maintains.
+      ;; It is cleared by saving and by undoing back past every change
+      ;; made since the last save.
+      (save-token text-editor-save-token    set!text-editor-save-token)
+      ;; ^ Identifies the state the buffer was last in sync with its
+      ;; file. It is an integer that counts up every time the buffer is
+      ;; marked unmodified, and it is what the `(t . TOKEN)' undo entry
+      ;; records: undoing back to that entry makes the buffer
+      ;; unmodified again, but only while the token still matches,
+      ;; which is false once the buffer has been saved in the meantime.
+      ;; Emacs records the visited file's modification time there
+      ;; instead and compares it with `visited-file-modtime'; the
+      ;; engine has no file or clock, so it numbers its saves.
+      (deactivate-mark text-editor-deactivate-mark
+                       set!text-editor-deactivate-mark!)
+      ;; ^ Whether the mark should be deactivated once this command is
+      ;; over: GNU Emacs's `deactivate-mark' variable, which the command
+      ;; loop sets to nil before each command and tests when the command
+      ;; returns. **Any buffer modification stores t in it**
+      ;; (`insdel.c''s `prepare_to_modify_buffer'), which is what makes
+      ;; the region go away when you type or yank.
+      (mark       %mark-marker           set!%mark-marker)
+      ;; ^ The buffer's mark, GNU Emacs's `mark': a <marker-type>, which
+      ;; is what makes it survive the text around it changing. It points
+      ;; nowhere until the mark is set. `TEXT-EDITOR-MARK' is the
+      ;; accessor Lisp would see - the position, as Emacs's `(mark)' -
+      ;; so this slot is private.
+      (markers    buffer-markers    set!buffer-markers)
+      ;; ^ The buffer's markers: GNU Emacs's marker chain, which the
+      ;; insert and delete procedures adjust so that a marker goes on
+      ;; pointing at the same character as the text around it moves.
+      ;; It holds them weakly, so a marker that nothing else refers to
+      ;; is collected and drops out of the chain by itself - see the
+      ;; "Markers" section below for why.
+      (read-only  text-editor-read-only-flag set!text-editor-read-only-flag)
+      ;; ^ Whether the buffer refuses to be changed, GNU Emacs's
+      ;; `buffer-read-only'. The insert and delete procedures signal an
+      ;; error while it is set, so nothing can change the text by
+      ;; accident - including undo, which is why the undo procedure
+      ;; refuses too. It is independent of the modified flag: a buffer
+      ;; can be read-only and modified at once.
+      (name       text-editor-buffer-name set!text-editor-buffer-name)
+      ;; ^ The buffer's name, GNU Emacs's `buffer-name': what the mode
+      ;; line shows, and what distinguishes one buffer from another in
+      ;; the messages that name them. A buffer visiting a file is named
+      ;; after the file, without its directory (Emacs's
+      ;; `create-file-buffer' uses `file-name-nondirectory'), and a
+      ;; buffer with no file has a name of its own - "*scratch*",
+      ;; "*Completions*". The default is Emacs's for a buffer made by
+      ;; `generate-new-buffer'.
+      (file-name  text-editor-file-name    set!text-editor-file-name)
+      ;; ^ The file the buffer visits, GNU Emacs's `buffer-file-name',
+      ;; or false when it visits none. It is the path the buffer was
+      ;; read from and the one `save-buffer' writes back to - which is
+      ;; why it is the buffer's and not the window's: two windows can
+      ;; show the same buffer, and a window can show a buffer that
+      ;; visits no file at all.
+      )
+
+    (define (allocate-buffer)
+      ;; A new buffer: one `buffer-text`, no text, an empty undo list, and
+      ;; the buffer-level state GNU Emacs's `struct buffer` carries -
+      ;; `buffer.c`'s `make_buffer` and `Fget_buffer_create`.
+      ;;
+      ;; **It takes no arguments on purpose.** It used to take a
+      ;; line-break protocol and a properties list, both of them the
+      ;; previous author's: the protocol existed to drive a line editor
+      ;; that no longer exists (the engine keeps one sequence of
+      ;; characters, so a line break is a character like any other), and
+      ;; the properties list was an association list of text properties
+      ;; where this tree now keeps `BUFFER_INTERVALS` - the interval
+      ;; tree, in `(schemacs editor intervals)`. Neither had a caller.
+      ;;--------------------------------------------------------------
+      (let ()
+        (make<buffer>
+         ;; Emacs's `BEG' is 1, and every position the class answers is in
+         ;; that coordinate system. The gap is `GAP_BYTES_MIN' because
+         ;; that is what a fresh buffer's is: `buffer.c:607' sets
+         ;; `BUF_GAP_SIZE (b) = 20' and allocates exactly that (plus the
+         ;; NUL anchor) before anything is inserted. It used to be 4096,
+         ;; which was the previous author's *line* count for a store that
+         ;; held lines rather than characters.
+         (new-buffer-text 1 *gap-bytes-min*)
+         ;; the newline cache, made on first use
+         #f
+         1
+         #f
+         ;; A newly created buffer records undo information from the
+         ;; start, as in GNU Emacs.
+         '()
+         ;; `SAVE_MODIFF' starts at 1 and so does the text's `modiff',
+         ;; which is what makes a fresh buffer unmodified: `1 < 1' is
+         ;; false. Emacs sets the one to 1 at `buffer.c:631' and a fresh
+         ;; buffer reports a tick of 1. `SAVE_MODIFF' is 1, the
+         ;; `save-token' 0, long scans cached, and the buffer writable.
+         1 0 #t #f
+         ;; The mark, pointing nowhere until it is set, and an empty
+         ;; marker chain.
+         ((*make-marker-function*) #f 0 #f)
+         (make-weak-key-hash-table)
+         ;; Nothing is waiting to deactivate the mark.
+         #f
+         ;; Named as `generate-new-buffer' names a buffer it makes, and
+         ;; visiting no file.
+         "Untitled" #f
+         )))
+
+    (define show-text-editor
+      ;; Write a buffer to a port the way GNU Emacs writes one, which is
+      ;; `print_object`'s `PVEC_BUFFER` case (`print.c:1895`):
+      ;;
+      ;;     if (!BUFFER_LIVE_P (XBUFFER (obj)))
+      ;;       print_c_string ("#<killed buffer>", printcharfun);
+      ;;     else if (escapeflag)
+      ;;       { print_c_string ("#<buffer ", ...
+      ;;         print_string (BVAR (XBUFFER (obj), name), ...
+      ;;     else
+      ;;       print_string (BVAR (XBUFFER (obj), name), ...
+      ;;
+      ;; so `prin1` is `#<buffer NAME>`, `princ` is the bare name, and a
+      ;; buffer that is not live is `#<killed buffer>` - and `BUFFER_LIVE_P`
+      ;; is `!NILP (BVAR (b, name))` (`buffer.h:1143`), which makes
+      ;; liveness the name being there, which is the nearest thing this
+      ;; tree has to it. This is the `escapeflag` answer, because a Guile
+      ;; record printer is handed the record and a port and nothing that
+      ;; says which of the two it is - and `write`, which is what a REPL
+      ;; echoes with, is `prin1`.
+      ;;
+      ;; **It used to write the whole buffer out**, line by line and
+      ;; quoted, and that is what the first person to type
+      ;; `(find-file "README.md")` at the back door saw: a screenful of
+      ;; the file where the answer was one word. Emacs's `find-file`
+      ;; answers the *buffer*, and a buffer prints as its name and nothing
+      ;; else. It was also the expensive way round - a printed buffer
+      ;; looked like a list of strings because `text-editor-line-string`
+      ;; builds a fresh string for every line, so echoing a buffer
+      ;; allocated one string per line of it. The storage was never a list
+      ;; of strings: it is one `buffer-text`, a `u32vector` with a gap.
+      ;;
+      ;; **Cheap on purpose**, as well: a record printer is what runs when
+      ;; Guile prints a *backtrace*, and one that walks the buffer there
+      ;; has crashed before now.
+      ;;--------------------------------------------------------------
+      (case-lambda
+       ((ed) (show-text-editor ed (current-output-port)))
+       ((ed port)
+        (let ((name (text-editor-buffer-name ed)))
+          (if name
+              (begin (display "#<buffer " port)
+                     (display name port)
+                     (display ">" port))
+              (display "#<killed buffer>" port))))))
 
 
+    (cond-expand
+     (guile
+      (set-record-type-printer! <buffer> show-text-editor)
+      )
+     (else)
+     )
+
+
+
+    (define *inhibit-read-only* (make-parameter #f))
+    ;; ^ GNU Emacs's `inhibit-read-only' (`buffer.c':5885): "Non-nil means
+    ;; disregard read-only status of buffers or characters. A non-nil
+    ;; value that is a list means disregard `buffer-read-only' status, and
+    ;; disregard a `read-only' text property if the property value is a
+    ;; member of the list. Any other non-nil value means disregard
+    ;; `buffer-read-only' and all `read-only' text properties."
+    ;;
+    ;; Emacs defines it in buffer.c and *reads* it from insdel.c, which is
+    ;; this library - and here the read is the other way round, because
+    ;; the engine cannot import the library that imports it. So it is held
+    ;; here and `buffer.sld' re-exports it, the same arrangement as
+    ;; `*text-property-offset-function*' below. A command writes into a
+    ;; read-only buffer with
+    ;; `(parameterize ((*inhibit-read-only* #t)) ...)'.
+    ;;
+    ;; Not ported: the *list* value's meaning for `read-only' text
+    ;; properties. The engine's insert and delete do not know about text
+    ;; properties at all - see `barf-if-buffer-read-only' - so any non-nil
+    ;; value is the "disregard all of it" case.
+
+    (define (buffer-beg ed)
+      ;; GNU Emacs's `point-min' (`editfns.c'): "the minimum permissible
+      ;; value of point in the current buffer. This is 1, unless
+      ;; narrowing ... is in effect." Nothing is narrowed here, and the
+      ;; buffer-text's base is that same 1.
+      ;;--------------------------------------------------------------
+      (buffer-text-base (text-editor-text ed)))
+
+    (define (buffer-z ed)
+      ;; GNU Emacs's `point-max' (`editfns.c'): one past the last
+      ;; character of the buffer. It is the buffer-text's own `z' field,
+      ;; which is Emacs's `Z'.
+      ;;--------------------------------------------------------------
+      (buffer-text-z (text-editor-text ed)))
+
+    (define (buffer-modified-tick . rest)
+      ;; GNU Emacs's `buffer-modified-tick' (`buffer.c:1631'): "Return
+      ;; BUFFER's modification tick." It answers `MODIFF', which every
+      ;; change to the text raises, so two readings that differ mean the
+      ;; buffer changed in between - which is the question the line-break
+      ;; cache and redisplay freshness both ask. The DEFUN is `0, 1, 0',
+      ;; so BUFFER is optional.
+      ;;--------------------------------------------------------------
+      (buffer-text-modiff (text-editor-text (or (and (pair? rest) (car rest))
+                                                (current-buffer)))))
+
+    (define (buffer-chars-modified-tick . rest)
+      ;; The same, for changes to the *characters* alone: GNU Emacs's
+      ;; `buffer-chars-modified-tick' (`buffer.c:1631'). A change to a
+      ;; text property raises `modiff' and not this one, so a cache of
+      ;; something computed from the characters is not invalidated by a
+      ;; fontification change. BUFFER is optional, as above.
+      ;;--------------------------------------------------------------
+      (buffer-text-chars-modiff (text-editor-text (or (and (pair? rest) (car rest))
+                                                      (current-buffer)))))
+
+    (define (buffer-modified-p . rest)
+      ;; GNU Emacs's `buffer-modified-p' (buffer.c:1506): "Return non-nil
+      ;; if BUFFER was modified since its file was last read or saved. No
+      ;; argument or nil as argument means use current buffer as BUFFER."
+      ;;
+      ;; Not a flag: it is the comparison
+      ;;
+      ;;     BUF_SAVE_MODIFF (buf) < BUF_MODIFF (buf)
+      ;;
+      ;; and the DEFUN is `0, 1, 0', so BUFFER is optional.
+      ;;--------------------------------------------------------------
+      (let ((ed (or (and (pair? rest) (car rest)) (current-buffer))))
+        (< (text-editor-save-modiff ed) (buffer-modified-tick ed))))
+
+    (define (%text-editor-incr-modiff! ed len)
+      ;; Raise the modification counter by `modiff_incr''s rule
+      ;; (`lisp.h:4142'): one for a change that is not to the characters,
+      ;; and `elogb (len) + 1' - the base-2 logarithm of the size, plus
+      ;; one - for one that is. Raising it more for a bigger change but
+      ;; only logarithmically is what stops a large edit racing the
+      ;; counter away; and `chars_modiff' follows `modiff' only for a
+      ;; change to the characters (`insdel.c:929').
+      ;;--------------------------------------------------------------
+      (let ((text (text-editor-text ed)))
+        (set!buffer-text-modiff
+         text (+ (buffer-text-modiff text)
+                 (if (or (not len) (= len 0))
+                     1
+                     (+ 1 (let loop ((n len) (w 0))
+                            (if (<= n 1) w (loop (quotient n 2) (+ w 1))))))))
+        (when (and len (> len 0))
+          (set!buffer-text-chars-modiff text (buffer-text-modiff text)))))
+
+    (define (buffer-read-only? ed)
+      ;; Whether ED refuses to be changed. GNU Emacs's
+      ;; `buffer-read-only'.
+      ;;--------------------------------------------------------------
+      (text-editor-read-only-flag ed))
+
+    (define (set!buffer-read-only ed flag)
+      ;; Set whether ED refuses to be changed: the variable GNU Emacs
+      ;; keeps as `buffer-read-only', and that its `read-only-mode'
+      ;; toggles.
+      ;;--------------------------------------------------------------
+      (set!text-editor-read-only-flag ed (and flag #t)))
 
     ))

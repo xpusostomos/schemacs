@@ -25,23 +25,22 @@
     (scheme base)
     (scheme char)
     (only (schemacs editor engine)
-          copy-marker marker-position marker-type? set-marker!
-          buffer-pt
+          copy-marker marker-position marker-type?
           buffer-z
           text-editor-undo-boundary!)
     ;; `*case-fold-search*' is the case folding `perform-replace'
     ;; parameterizes around its loop (the C's
     ;; `(let* ((case-fold-search ...)))').
     (only (schemacs editor buffer)
-          *case-fold-search* buffer-modified-p current-buffer
-          erase-buffer get-buffer-create transient-mark-mode
+          *case-fold-search* current-buffer
+          erase-buffer get-buffer-create
           with-current-buffer)
     (only (schemacs editor frame)
           *current-frame* frame-selected-window recenter set!frame-message
           set-message!)
     (only (schemacs editor editfns)
-          barf-if-buffer-read-only bobp buffer-substring char-after
-          delete-region eobp goto-char insert point point-min point-max
+          barf-if-buffer-read-only bobp char-after
+          eobp goto-char insert point point-min point-max
           save-excursion)
     ;; `transient-mark-mode' is `buffer.c''s variable here, beside
     ;; `mark-active'.
@@ -52,10 +51,10 @@
     ;; and the match data and `replace-match' that make the edits.
     (only (schemacs editor search)
           looking-at looking-back match-beginning match-data
-          match-data--translate match-end match-string
+          match-end
           match-substitute-replacement re-search-backward
-          re-search-forward regexp-quote replace-match save-match-data
-          search-backward search-forward set-match-data string-match)
+          re-search-forward regexp-quote replace-match
+          search-backward search-forward set-match-data)
     ;; The key reads: the loop reads one key at a time, exactly the
     ;; command loop's own read, and pushes a key it does not know back
     ;; onto `*unread-command-events*'. `read-key-event' answers the key
@@ -94,7 +93,7 @@
           current-buffer delete-overlay make-overlay move-overlay overlay-put)
     (only (schemacs editor faces) defface)
     (only (schemacs editor command)
-          current-prefix-arg define-command uarg->integer)
+          current-prefix-arg define-command)
     (only (schemacs editor keymap) define-key *default-keymap* *current-keymap*)
     (prefix (schemacs editor keymap) km:)
     (only (schemacs editor window) display-buffer)

@@ -18,7 +18,7 @@
  (scheme base)
  (only (guile) getenv)
  (only (srfi 64) test-assert test-equal test-begin test-end)
- (only (schemacs editor engine) new-text-editor)
+ (only (schemacs editor engine) allocate-buffer)
  (only (schemacs editor buffer) buffer-local-value default-directory current-buffer)
  (only (schemacs editor frame) *current-frame* new-frame)
  (only (schemacs editor fileio)
@@ -43,7 +43,7 @@
     (thunk)
     #f))
 
-(define ed (new-text-editor))
+(define ed (allocate-buffer))
 (define frame (new-frame ed 24 80))
 
 (test-begin "schemacs_editor_files")

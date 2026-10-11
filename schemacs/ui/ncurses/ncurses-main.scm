@@ -20,8 +20,6 @@
     ;; initialization - is `term.sld''s (the mirror of Emacs's term.c);
     ;; what is left here is the entry point that opens an editor on one.
     (only (schemacs ui ncurses term) with-terminal)
-    (only (schemacs editor engine)
-          set!text-editor-buffer-name)
     (only (schemacs editor frame) *current-frame* new-frame)
     ;; Everything this needs of the editor: the buffers named on the
     ;; command line - which is `startup.el''s job, not this one's - and
@@ -40,10 +38,10 @@
     ;; meets it the same way - `loadup.el' loads simple.el, files.el,
     ;; window.el and the rest before the first command runs. Anything that
     ;; adds bindings has to be named here too.
-    (only (schemacs editor simple) self-insert-layer)
-    (only (schemacs editor isearch) isearch-forward)
-    (only (schemacs editor window) split-window-below)
-    (only (schemacs editor buff-menu) list-buffers)
+    (only (schemacs editor simple))
+    (only (schemacs editor isearch))
+    (only (schemacs editor window))
+    (only (schemacs editor buff-menu))
     ;; `casefiddle.c' and `paragraphs.el': M-u/M-l/M-c, C-x C-u/C-l and
     ;; M-k/M-C-k - imported for their `define-key' forms, the same
     ;; reason as the four above.

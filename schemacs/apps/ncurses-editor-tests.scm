@@ -10,11 +10,11 @@
  (prefix (schemacs editor keymap) km:)
  (only (srfi 64) test-assert test-equal test-begin test-end)
  (only (schemacs editor engine)
-       new-text-editor set!text-editor-buffer-name set!text-editor-mark
+       allocate-buffer set!text-editor-buffer-name set!text-editor-mark
        text-editor-cursor-column buffer-pt text-editor-insert
        text-editor-text-props
        text-editor-mark text-editor-move-cursor text-editor-set-cursor
-       text-editor-set-modified! text-editor-set-read-only!
+       set-buffer-modified-p set!buffer-read-only
        text-editor-to-string text-editor-undo-list
        buffer-beg buffer-z count-lines
        string-search-forward)
@@ -56,7 +56,8 @@
  (only (schemacs editor character) kbd)
  (only (schemacs editor dired)
        dired dired-directory dired-noselect dired-revert)
- (only (schemacs editor buffer) buffer-name major-mode)
+ (only (schemacs editor buffer) buffer-name major-mode
+       with-current-buffer)
  (only (schemacs editor buff-menu)
        *Buffer-menu-del-char* *Buffer-menu-marks* Buffer-menu-buffer
        Buffer-menu-execute Buffer-menu--set-mark! Buffer-menu-redraw!
@@ -76,9 +77,9 @@
        set!buffer-cursor-in-non-selected-windows set!buffer-cursor-type
        set!buffer-truncate-lines set!buffer-word-wrap)
  (only (schemacs editor engine) text-editor-delete-from-cursor text-editor-insert
-       text-editor-read-only? text-editor-set-cursor
-       new-text-editor set!text-editor-buffer-name
-       set!text-editor-file-name text-editor-set-modified!)
+       buffer-read-only? text-editor-set-cursor
+       allocate-buffer set!text-editor-buffer-name
+       set!text-editor-file-name set-buffer-modified-p)
  (only (schemacs editor intervals) set!buffer-intervals)
  (prefix (schemacs editor intervals) iv:)
  ;; The file primitives moved to the library that mirrors the C they
@@ -196,7 +197,7 @@
                  (*this-command* #f)
                  (*last-command* #f)
                  (*kill-buffer-query-functions* #f))
-    (let* ((ed (new-text-editor))
+    (let* ((ed (allocate-buffer))
            (frame (test-frame ed)))
       (parameterize ((*current-frame* frame) (*echo-area-buffer* #f))
         (set-window-buffer! (frame-selected-window frame) ed)
@@ -213,7 +214,7 @@
   ;; into the next. The third element is the front of the ring - what
   ;; `*kill-buffer*' used to be, before the ring replaced it.
   ;;--------------------------------------------------------------
-  (let* ((ed (new-text-editor))
+  (let* ((ed (allocate-buffer))
          (frame (test-frame ed)))
     (parameterize ((*current-frame* frame)
                    (*search-pattern* #f)
@@ -370,7 +371,7 @@
 ;; Emacs's own value for it - `universal-argument' sets `prefix-arg' to
 ;; `(list 4)'. That is what lets a command tell `C-u' from `C-u 4'.
 (test-equal '(4)
-  (let* ((ed (new-text-editor))
+  (let* ((ed (allocate-buffer))
         (frame (test-frame ed)))
     (parameterize ((*current-frame* frame))
       (dispatch-key-event frame (key-event->key (current-display) C-u))
@@ -378,7 +379,7 @@
       (pending-uarg))))
 
 (test-equal #f
-  (let* ((ed (new-text-editor))
+  (let* ((ed (allocate-buffer))
         (frame (test-frame ed)))
     (parameterize ((*current-frame* frame))
       (dispatch-key-event frame (key-event->key (current-display) C-u))
@@ -387,7 +388,7 @@
 
 ;; An undefined key ends the chord and discards the prefix with it.
 (test-equal #f
-  (let* ((ed (new-text-editor))
+  (let* ((ed (allocate-buffer))
         (frame (test-frame ed)))
     (parameterize ((*current-frame* frame))
       (dispatch-key-event frame (key-event->key (current-display) C-u))
@@ -683,7 +684,7 @@
              (let* ((ed (find-file-noselect path))
                     (frame (test-frame ed)))
                (parameterize ((*current-frame* frame))
-                 (text-editor-set-modified! ed #t)
+                 (with-current-buffer ed (set-buffer-modified-p #t))
                  (save-buffer)))
              (call-with-port (open-input-file path #:encoding #f)
                get-bytevector-all))))
@@ -724,7 +725,7 @@
             (let* ((ed (find-file-noselect path))
                    (frame (test-frame ed)))
               (parameterize ((*current-frame* frame))
-                (text-editor-set-modified! ed #t)
+                (with-current-buffer ed (set-buffer-modified-p #t))
                 (save-buffer)))
             (call-with-port (open-input-file path #:encoding #f)
               get-bytevector-all))
@@ -771,25 +772,25 @@
 (test-equal '("fe-modified.txt")
   (parameterize ((*buffer-list*
                   (list (cons "fe-modified.txt"
-                              (let ((ed (new-text-editor)))
+                              (let ((ed (allocate-buffer)))
                                 (set!text-editor-buffer-name ed
                                         "fe-modified.txt")
                                 (set!text-editor-file-name ed
                                         "/tmp/fe-modified.txt")
-                                (text-editor-set-modified! ed #t)
+                                (with-current-buffer ed (set-buffer-modified-p #t))
                                 ed))
                         (cons "*Completions*"
-                              (let ((ed (new-text-editor)))
+                              (let ((ed (allocate-buffer)))
                                 (set!text-editor-buffer-name ed "*Completions*")
-                                (text-editor-set-modified! ed #t)
+                                (with-current-buffer ed (set-buffer-modified-p #t))
                                 ed))
                         (cons "prompt"
-                              (let ((ed (new-text-editor)))
+                              (let ((ed (allocate-buffer)))
                                 (set!text-editor-buffer-name ed "prompt")
                                 (text-editor-insert ed "sc")
                                 ed))
                         (cons "fe-clean.txt"
-                              (let ((ed (new-text-editor)))
+                              (let ((ed (allocate-buffer)))
                                 (set!text-editor-buffer-name ed "fe-clean.txt")
                                 (set!text-editor-file-name ed
                                         "/tmp/fe-clean.txt")
@@ -892,10 +893,10 @@
 
 ;; ...and a buffer with no file says nothing at all, whatever its flag.
 (test-equal ""
-  (let* ((ed (new-text-editor))
+  (let* ((ed (allocate-buffer))
          (frame (test-frame ed)))
     (parameterize ((*current-frame* frame))
-      (text-editor-set-read-only! ed #t)
+      (set!buffer-read-only ed #t)
       (note-file-read-only! frame)
       (frame-message frame))))
 
@@ -936,7 +937,7 @@
 ;; The search step, against "alpha beta gamma\nbeta delta\n" (the two
 ;; "beta"s are at 6..10 and 17..21).
 (define (isearch-buffer)
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed "alpha beta gamma\nbeta delta\n")
     ed))
 
@@ -1030,7 +1031,7 @@
 ;; the directory in the minibuffer, so its answer is absolute already,
 ;; while this editor's prompt carries the directory beside the buffer.
 (test-equal "/tmp/somewhere/notes.txt"
-  (let ((buffer (new-text-editor)))
+  (let ((buffer (allocate-buffer)))
     (set!text-editor-buffer-name buffer "notes.txt")
     (set!buffer-default-directory buffer "/tmp/somewhere/")
     (parameterize ((*current-buffer* buffer))
@@ -1103,9 +1104,9 @@
 ;; moves point forward - in the *minibuffer's* buffer, because that is the
 ;; current buffer while it is read.
 (test-equal '(#f 2 1)
-  (let* ((ed (new-text-editor))
+  (let* ((ed (allocate-buffer))
          (frame (test-frame ed))
-         (mb-ed (new-text-editor))
+         (mb-ed (allocate-buffer))
          (mb (make<minibuffer> mb-ed "" minibuffer-local-map
                               #f minibuffer-history 0 #f)))
     (text-editor-insert mb-ed "abc")
@@ -1157,9 +1158,9 @@
 ;; and the bitset says there were completions but is not exact - so RET
 ;; would refuse to leave.
 (test-equal '("ap" 2)
-  (let* ((ed (new-text-editor))
+  (let* ((ed (allocate-buffer))
          (frame (test-frame ed))
-         (mb-ed (new-text-editor))
+         (mb-ed (allocate-buffer))
          (mb (make<minibuffer> mb-ed "Fruit: " minibuffer-local-completion-map
                               #f minibuffer-history 0 #f)))
     (text-editor-insert mb-ed "ap")
@@ -1174,9 +1175,9 @@
 ;; ...and when what is typed is already the only candidate, `try-completion'
 ;; answers #t, the bitset is 1, and RET leaves - the "sole completion" case.
 (test-equal '("apple" 1)
-  (let* ((ed (new-text-editor))
+  (let* ((ed (allocate-buffer))
          (frame (test-frame ed))
-         (mb-ed (new-text-editor))
+         (mb-ed (allocate-buffer))
          (mb (make<minibuffer> mb-ed "Fruit: " minibuffer-local-completion-map
                               #f minibuffer-history 0 #f)))
     (text-editor-insert mb-ed "apple")
@@ -1269,7 +1270,7 @@
   ;; "Confirm" case). A frame is needed because the "Confirm" is said in
   ;; the echo area.
   ;;--------------------------------------------------------------
-  (let ((frame (test-frame (new-text-editor))))
+  (let ((frame (test-frame (allocate-buffer))))
     (parameterize ((*current-frame* frame)
                    (*minibuffer-completion-table* (table-of '("apple")))
                    (*minibuffer-completion-predicate* #f)
@@ -1345,7 +1346,7 @@
 ;; The frame's one window fills the frame's text area: the rows above
 ;; the echo area, all of the columns.
 (test-equal '(23 80)
-  (let* ((frame (test-frame (new-text-editor)))
+  (let* ((frame (test-frame (allocate-buffer)))
          (window (window-of frame)))
     (list (window-height window) (window-width window))))
 
@@ -1356,7 +1357,7 @@
 ;; `window-point''s and only the selected window's point is the buffer's
 ;; - the same binding `render!' is called under.
 (test-equal '(0 . 3)
-  (let* ((frame (test-frame (new-text-editor)))
+  (let* ((frame (test-frame (allocate-buffer)))
          (ed (frame-editor frame)))
     (text-editor-insert ed "abc")
     (text-editor-set-cursor ed 1 0)
@@ -1367,7 +1368,7 @@
 ;; ... and it is a column on the last line, so moving point backward and
 ;; forward again returns to it.
 (test-equal '((0 . 3) (0 . 2) (0 . 3))
-  (let* ((frame (test-frame (new-text-editor)))
+  (let* ((frame (test-frame (allocate-buffer)))
          (ed (frame-editor frame))
          (window (window-of frame)))
     (text-editor-insert ed "abc")
@@ -1383,7 +1384,7 @@
 ;; A line break at the end of the buffer does start a line, and point at
 ;; the very end is drawn on that empty line, one row down.
 (test-equal '(1 . 0)
-  (let* ((frame (test-frame (new-text-editor)))
+  (let* ((frame (test-frame (allocate-buffer)))
          (ed (frame-editor frame)))
     (text-editor-insert ed "abc\n")
     (text-editor-set-cursor ed 1 0)
@@ -1394,7 +1395,7 @@
 ;; A vertical run keeps its original goal after a short line clamps point;
 ;; an intervening command starts a new run from its resulting column.
 (test-equal '(4 0)
-  (let* ((ed (new-text-editor))
+  (let* ((ed (allocate-buffer))
          (frame (test-frame ed))
          (run (lambda (keys)
                 (parameterize ((*current-frame* frame)
@@ -1413,7 +1414,7 @@
 ;; The minibuffer draws the cursor at the prompt, then what has been
 ;; typed up to point - and at the end of it, after the last character.
 (test-equal '(11 14 13 11)
-  (let* ((ed (new-text-editor))
+  (let* ((ed (allocate-buffer))
          (mb (make<minibuffer> ed "Find file: " minibuffer-local-map
                               #f minibuffer-history 0 #f)))
     (text-editor-insert ed "abc")
@@ -1464,7 +1465,7 @@
      (else (loop (cdr rest) (+ row (window-height (car rest))))))))
 
 (define (frame-with text)
-  (let* ((ed (new-text-editor))
+  (let* ((ed (allocate-buffer))
          (frame (test-frame ed)))
     (text-editor-insert ed text)
     (text-editor-set-cursor ed 1 0)
@@ -1702,7 +1703,7 @@
 (test-equal '(((0 0 40 23) (40 0 80 23)) ((0 0 41 23) (41 0 81 23)))
   (list (let ((frame (run-window-keys (frame-with "alpha\nbeta\n") C-x #\3)))
           (map window-edges (window-list frame)))
-        (let* ((frame (new-frame (new-text-editor) 24 81)))
+        (let* ((frame (new-frame (allocate-buffer) 24 81)))
           (run-window-keys frame C-x #\3)
           (map window-edges (window-list frame)))))
 
@@ -1892,7 +1893,7 @@
   (let ((frame (frame-with "hello\nworld\n")))
     (let ((ed (frame-editor frame)))
       (set!text-editor-buffer-name ed "probe")
-      (text-editor-set-read-only! ed #t)
+      (set!buffer-read-only ed #t)
       (list (format-in frame "%b")
             (format-in frame "%l")
             (format-in frame "%c")
@@ -1910,13 +1911,13 @@
          (indicator (lambda () (format-in frame (list "%1*" "%1+")))))
     ;; visiting the text left the buffer modified, so it is cleared first
     ;; to get the third state - what an untouched buffer shows
-    (text-editor-set-modified! ed #f)
+    (with-current-buffer ed (set-buffer-modified-p #f))
     (let ((clean (indicator)))
       (text-editor-insert ed "X")
       (let ((modified (indicator)))
-        (text-editor-set-read-only! ed #t)
+        (set!buffer-read-only ed #t)
         (let ((both (indicator)))
-          (text-editor-set-modified! ed #f)
+          (with-current-buffer ed (set-buffer-modified-p #f))
           (list clean modified both (indicator)))))))
 
 ;; A field pads a number on the left and anything else on the right, so
@@ -1959,10 +1960,10 @@
 ;; A DOS-coded buffer shows Emacs's mode-line EOL mnemonic, independently
 ;; of a Unix-coded buffer displayed in the same frame.
 (test-equal '(#t #t #t)
-  (let* ((frame (new-frame (new-text-editor) 24 80))
+  (let* ((frame (new-frame (allocate-buffer) 24 80))
          (window (selected-window-of frame))
-         (dos (new-text-editor))
-         (unix (new-text-editor)))
+         (dos (allocate-buffer))
+         (unix (allocate-buffer)))
     (text-editor-insert dos "dos\n")
     (text-editor-insert unix "unix\n")
     ;; The buffer's variable holds a *coding system* now, as in Emacs -
@@ -2032,7 +2033,7 @@
 ;; than reserving an arbitrary one-third for the new buffer.
 (test-equal '((0 12) (12 11))
   (let ((frame (frame-with "alpha\nbeta\n"))
-        (popup (new-text-editor)))
+        (popup (allocate-buffer)))
     (parameterize ((*current-frame* frame))
       (display-buffer popup)
       (window-rects frame))))
@@ -2048,7 +2049,7 @@
 ;; above - which is what broke the completion UI's M-<down> test.
 (test-equal '(1 "beta")
   (let ((frame (frame-with "alpha\nbeta\n"))
-        (other (new-text-editor)))
+        (other (allocate-buffer)))
     (parameterize ((*current-frame* frame))
       (text-editor-insert other "beta")
       (pop-to-buffer-same-window other)
@@ -2060,7 +2061,7 @@
 ;; own test
 (test-equal 2
   (let ((frame (frame-with "alpha\nbeta\n"))
-        (other (new-text-editor)))
+        (other (allocate-buffer)))
     (parameterize ((*current-frame* frame))
       (text-editor-insert other "beta")
       (display-buffer other (list #f (cons 'inhibit-same-window #t)))
@@ -2202,7 +2203,7 @@
 ;; 31.1: `(let ((kill-buffer-query-functions (list (lambda () nil))))
 ;; (kill-buffer "qq"))' is nil, and `(kill-buffer "zz")' is t).
 (test-equal '(#t #t #f)
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (parameterize ((*current-frame* (test-frame ed))
                    (*echo-area-buffer* #f)
                    (*buffer-list* '())
@@ -2277,7 +2278,7 @@
   ;; `get-buffer-create' in the `let*' above it would run with the real
   ;; buffer list, find the buffer the previous call made, and inherit the
   ;; keymap it left on it.
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (parameterize ((*current-frame* (test-frame ed))
                    (*echo-area-buffer* #f)
                    (*buffer-list* '())
@@ -2311,7 +2312,7 @@
       ;; a prefix where it wanted a command and the dispatch waited for a
       ;; second key for ever.
       (dispatch-key-event frame (vector-ref (kbd "M-z") 0))
-      (list (text-editor-read-only? buffer)
+      (list (buffer-read-only? buffer)
             (frame-message frame))))))
 
 (test-equal '(#t "Read-Only mode enabled in current buffer")
@@ -2321,7 +2322,7 @@
 ;; question is asked of a key nothing binds: M-Z.
 (define (press-m-Z)
   ;; press-m-z's harness, with the local rebinding left out.
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (parameterize ((*current-frame* (test-frame ed))
                    (*echo-area-buffer* #f)
                    (*buffer-list* '())
@@ -2342,7 +2343,7 @@
         ;; a character. (Measured: `(event-convert-list '(meta ?Z))' is
         ;; `M-Z' in Emacs, and `(kbd "M-Z")' is a different key.)
         (dispatch-key-event frame 'M-Z)
-        (list (text-editor-read-only? buffer)
+        (list (buffer-read-only? buffer)
               (frame-message frame))))))
 
 ;; The message is GNU Emacs's `undefined' command's (`subr.el:1297'):
@@ -2376,7 +2377,7 @@
         (set-window-buffer! (frame-selected-window frame) ed)
         (for-each (lambda (spec)
                     (let ((buffer (get-buffer-create (car spec))))
-                      (when (cadr spec) (text-editor-set-read-only! buffer #t))
+                      (when (cadr spec) (set!buffer-read-only buffer #t))
                       (when (caddr spec) (text-editor-insert buffer "x"))))
                   extra)
         (thunk (text-editor-to-string (list-buffers-noselect)))))))
@@ -2454,7 +2455,7 @@
         (set-window-buffer! (frame-selected-window frame) ed)
         (for-each (lambda (spec)
                     (let ((buffer (get-buffer-create (car spec))))
-                      (when (cadr spec) (text-editor-set-read-only! buffer #t))
+                      (when (cadr spec) (set!buffer-read-only buffer #t))
                       (when (caddr spec) (text-editor-insert buffer "x"))))
                   extra)
         (let ((list (list-buffers-noselect)))
@@ -2501,7 +2502,7 @@
   (with-buffer-menu-keys (list (list "a.txt" #f #f) (list "b.txt" #f #f))
     (lambda (menu-buffer press!)
       (press! #\%)
-      (list (text-editor-read-only? (get-buffer "b.txt"))
+      (list (buffer-read-only? (get-buffer "b.txt"))
             (mentions? (text-editor-to-string menu-buffer) "% b.txt")))))
 
 ;; `s' marks a buffer for saving and `x' saves it, which is what GNU
@@ -2621,9 +2622,9 @@
   ;; Run EVS with a minibuffer active over a buffer holding "abc", and
   ;; return (minibuffer-contents buffer-contents echo-message).
   ;;--------------------------------------------------------------
-  (let* ((ed (new-text-editor))
+  (let* ((ed (allocate-buffer))
          (frame (test-frame ed))
-         (mb-ed (new-text-editor))
+         (mb-ed (allocate-buffer))
          (mb (make<minibuffer> mb-ed prompt minibuffer-local-map
                               #f minibuffer-history 0 #f)))
     (text-editor-insert ed "abc")
@@ -2690,7 +2691,7 @@
 (test-begin "schemacs_ncurses_editor_completion_ui")
 
 (define (message-frame)
-  (test-frame (new-text-editor)))
+  (test-frame (allocate-buffer)))
 
 ;; A message shown while the minibuffer is being read is enclosed in
 ;; `[...]' with a space in front, which is how Emacs marks it as the
@@ -2765,8 +2766,8 @@
 ;; "scratch.mdsc" and stepping through the history was wrong the same
 ;; way.
 (test-equal '("apple" "orange")
-  (let* ((frame (test-frame (new-text-editor)))
-         (mb-ed (new-text-editor))
+  (let* ((frame (test-frame (allocate-buffer)))
+         (mb-ed (allocate-buffer))
          (mb (make<minibuffer> mb-ed "Fruit: " minibuffer-local-map
                               #f minibuffer-history 0 #f)))
     (text-editor-insert mb-ed "ap")
@@ -2921,7 +2922,7 @@
                                   acc)))))
          (row-names
           (lambda (cols)
-            (let* ((frame (new-frame (new-text-editor) 24 cols))
+            (let* ((frame (new-frame (allocate-buffer) 24 cols))
                    (buffer (get-buffer-create "*Completions*")))
               (parameterize ((*current-frame* frame))
                 (display-buffer buffer)
@@ -2996,7 +2997,7 @@
   ;; A frame over TEXT, so that the commands - which act on the selected
   ;; window's buffer through `(current-buffer)' - have somewhere to act.
   ;;--------------------------------------------------------------
-  (let* ((ed (new-text-editor))
+  (let* ((ed (allocate-buffer))
          (frame (test-frame ed)))
     (text-editor-insert ed text)
     (text-editor-set-cursor ed 0)
@@ -3290,7 +3291,7 @@
 (define (cursor-type-runs-text value)
   ;; The cursor type a `cursor-type' VALUE resolves to, as
   ;; `(TYPE WIDTH ACTIVE?)'.
-  (let* ((ed (new-text-editor))
+  (let* ((ed (allocate-buffer))
          (frame (new-frame ed 24 80)))
     (parameterize ((*current-frame* frame))
       (set!buffer-cursor-type ed value)
@@ -3303,7 +3304,7 @@
   (let ((r (cursor-type-runs-text value))) (list (car r) (cadr r))))
 
 ;; the default is t, which means the frame's own cursor - a filled box
-(test-equal #t (buffer-cursor-type (new-text-editor)))
+(test-equal #t (buffer-cursor-type (allocate-buffer)))
 (test-equal 'filled-box-cursor (cursor-type-of #t))
 (test-equal 1 (cursor-width-of #t))
 
@@ -3334,7 +3335,7 @@
 ;; A window that is not selected shows the cursor *modified*: a filled
 ;; box becomes hollow, which is `cursor-in-non-selected-windows' being t
 (test-equal 'hollow-box-cursor
-  (let* ((ed (new-text-editor))
+  (let* ((ed (allocate-buffer))
          (frame (new-frame ed 24 80))
          (other (car (window-list frame))))
     (parameterize ((*current-frame* frame))
@@ -3343,7 +3344,7 @@
 
 ;; and a buffer can say what its non-selected windows show instead
 (test-equal 'no-cursor
-  (let* ((ed (new-text-editor))
+  (let* ((ed (allocate-buffer))
          (frame (new-frame ed 24 80))
          (other (car (window-list frame))))
     (parameterize ((*current-frame* frame))
@@ -3424,7 +3425,7 @@
 ;;------------------------------------------------------------------
 
 (define (truncating-with setup)
-  (let* ((ed (new-text-editor))
+  (let* ((ed (allocate-buffer))
          (frame (new-frame ed 24 80))
          (window (frame-selected-window frame)))
     (parameterize ((*current-frame* frame))
@@ -3442,7 +3443,7 @@
 ;; truncates every partial-width window, and an integer truncates one
 ;; narrower than that many columns.
 (test-equal #t
-  (let* ((ed (new-text-editor))
+  (let* ((ed (allocate-buffer))
          (frame (new-frame ed 24 80))
          (window (frame-selected-window frame)))
     (parameterize ((*current-frame* frame)
@@ -3450,7 +3451,7 @@
       (set!window-width window 40)
       (window-truncates-lines? window))))
 (test-equal #f
-  (let* ((ed (new-text-editor))
+  (let* ((ed (allocate-buffer))
          (frame (new-frame ed 24 80))
          (window (frame-selected-window frame)))
     (parameterize ((*current-frame* frame)
@@ -3459,7 +3460,7 @@
       (window-truncates-lines? window))))
 ;; the integer is a *width*: a window wider than it still wraps
 (test-equal #f
-  (let* ((ed (new-text-editor))
+  (let* ((ed (allocate-buffer))
          (frame (new-frame ed 24 80))
          (window (frame-selected-window frame)))
     (parameterize ((*current-frame* frame)
@@ -3497,7 +3498,7 @@
 (test-begin "schemacs_ncurses_editor_recenter")
 
 (test-equal '(#t #t)
-  (let* ((ed (new-text-editor))
+  (let* ((ed (allocate-buffer))
          (frame (test-frame ed)))
     (parameterize ((*current-frame* frame) (*current-buffer* #f)
                    (*this-command* #f) (*last-command* #f))
@@ -3538,7 +3539,7 @@
 ;; asserts is the same one the test above asserts: the start lands
 ;; `half' lines above point.
 (test-equal '(#t #t)
-  (let* ((ed (new-text-editor))
+  (let* ((ed (allocate-buffer))
          (frame (test-frame ed)))
     (parameterize ((*current-frame* frame) (*current-buffer* #f)
                    (*this-command* #f) (*last-command* #f))
@@ -3842,7 +3843,7 @@
   ;;--------------------------------------------------------------
   (parameterize ((*frame-list* '()) (*current-frame* #f)
                  (*buffer-list* '()) (*current-buffer* #f))
-    (let ((ed (new-text-editor)))
+    (let ((ed (allocate-buffer)))
       (text-editor-insert ed text)
       (text-editor-set-cursor ed 1)
       (thunk ed (test-frame ed) (test-frame ed)))))
@@ -3927,8 +3928,8 @@
 (test-equal '(#t #t)
   (parameterize ((*frame-list* '()) (*current-frame* #f)
                  (*buffer-list* '()) (*current-buffer* #f))
-    (let ((a (new-text-editor))
-          (b (new-text-editor)))
+    (let ((a (allocate-buffer))
+          (b (allocate-buffer)))
       (let ((fa (test-frame a))
             (fb (test-frame b)))
         (select-frame fa)
@@ -3944,8 +3945,8 @@
 (test-equal '(#t #t)
   (parameterize ((*frame-list* '()) (*current-frame* #f)
                  (*buffer-list* '()) (*current-buffer* #f))
-    (let* ((a (new-text-editor))
-           (b (new-text-editor))
+    (let* ((a (allocate-buffer))
+           (b (allocate-buffer))
            (f (test-frame a)))
       (parameterize ((*current-frame* f))
         (run-window-keys f C-x #\2)
@@ -3968,7 +3969,7 @@
 (test-equal '((#t #t) #t #t)
   (parameterize ((*frame-list* '()) (*current-frame* #f)
                  (*buffer-list* '()) (*current-buffer* #f))
-    (let ((ed (new-text-editor)))
+    (let ((ed (allocate-buffer)))
       (let ((f1 (test-frame ed))
             (f2 (test-frame ed)))
         (parameterize ((*current-frame* f1))
@@ -4007,7 +4008,7 @@
   (parameterize ((*buffer-list* '()) (*current-buffer* #f)
                  (*this-command* #f) (*last-command* #f)
                  (*kill-buffer-query-functions* #f))
-    (let* ((ed (new-text-editor))
+    (let* ((ed (allocate-buffer))
            (frame (test-frame ed)))
       (parameterize ((*current-frame* frame) (*echo-area-buffer* #f))
         (set-window-buffer! (frame-selected-window frame) ed)

@@ -33,7 +33,7 @@
     (only (schemacs editor tty-colors) tty-register-default-colors)
     (only (schemacs ui ncurses xterm)
           *input-decode-map* terminal-init-xterm
-          *xterm--set-selection* *xterm--get-selection*
+          *xterm--set-selection*
           xterm--tty-set-selection xterm--tty-get-selection)
     ;; `tty-select-active-regions' gates the tty branch of
     ;; `display-selections-p', which the selection methods answer for.

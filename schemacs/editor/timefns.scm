@@ -53,7 +53,7 @@
     (scheme base)
     (scheme char)
     ;; the clock, and the local-time breakdown SRFI-19's date needs
-    (only (guile) ash cadddr caddr gettimeofday logand localtime strftime
+    (only (guile) ash cadddr caddr gettimeofday logand localtime
           string-index tm:hour tm:mday tm:min tm:mon tm:sec tm:wday tm:year)
     ;; the substituted implementation - see the comment above
     (only (srfi srfi-19) date->string make-date)

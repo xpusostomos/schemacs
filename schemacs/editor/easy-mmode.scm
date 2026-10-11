@@ -51,7 +51,7 @@
     (only (guile) datum->syntax identifier? quasisyntax syntax syntax->datum
           syntax-case unsyntax unsyntax-splicing)
     (only (schemacs editor subr)
-          *minor-mode-alist* add-minor-mode run-hooks string-replace)
+          add-minor-mode run-hooks string-replace)
     (only (schemacs editor buffer)
           buffer-local-value current-buffer set-buffer-local-value!)
     (only (schemacs editor editfns) current-message message)

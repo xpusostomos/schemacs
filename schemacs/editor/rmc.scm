@@ -1,4 +1,4 @@
-(define-library (schemacs rmc)
+(define-library (schemacs editor rmc)
   ;; This library mirrors GNU Emacs's `lisp/emacs-lisp/rmc.el': the
   ;; question whose answer is one of a list of *named* choices -
   ;; `read-multiple-choice'. Its sibling `read-answer' is

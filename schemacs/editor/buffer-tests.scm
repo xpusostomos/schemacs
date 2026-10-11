@@ -3,7 +3,7 @@
  (scheme char)
  (only (srfi 64) test-assert test-equal test-begin test-end)
  (only (schemacs editor engine)
-       new-text-editor text-editor-insert text-editor-to-string
+       allocate-buffer text-editor-insert text-editor-to-string
        text-editor-set-cursor)
  (only (schemacs editor textprop) get-char-property put-text-property)
  (only (schemacs editor frame)
@@ -29,7 +29,7 @@
   ;; every test: it is module state, so one test's buffers would otherwise
   ;; be the next test's.
   ;;--------------------------------------------------------------
-  (new-frame (new-text-editor) 24 80))
+  (new-frame (allocate-buffer) 24 80))
 
 (define (with-buffers thunk)
   (let ((frame (fresh-frame)))

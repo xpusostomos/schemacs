@@ -33,9 +33,8 @@
           *last-command-event*)
     (only (schemacs editor engine)
           text-editor-delete-from-cursor buffer-pt
-          text-editor-get-end-of-line
-          text-editor-get-start-of-line text-editor-insert
-          text-editor-move-cursor buffer-beg buffer-z
+          text-editor-insert
+          buffer-beg buffer-z
           text-editor-set-cursor)
     )
 

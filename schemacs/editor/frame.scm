@@ -44,13 +44,22 @@
            screen-size suspend-display!)
      (mouse-position display-mouse-position))
     (only (schemacs editor engine)
-          copy-marker  marker-position  set-marker!
-          text-editor-cursor-line  fetch-char  buffer-beg
+          copy-marker marker-position set-marker!
+           fetch-char buffer-beg
           text-editor-get-start-of-line
-          buffer-pt  text-editor-set-cursor)
+          buffer-pt text-editor-set-cursor)
+    ;; `*current-buffer*' is the C global `current_buffer', which this
+    ;; library writes (`select-window') and re-exports; its definition is
+    ;; in the lower library, which defines the buffer record. The two
+    ;; seams are this library's half of the arrangement - see the notes
+    ;; where they are installed, at the end of this file.
+    (only (schemacs editor buffer)
+          *current-buffer* other-buffer
+          *current-editor-function* *replace-buffer-in-windows-function*)
     ;; `suspend-frame' is a command and states its own key as the other
     ;; command libraries do.
-    (only (schemacs editor command) current-prefix-arg define-command
+    (only (schemacs editor command)
+          current-prefix-arg define-command
           register-command! uarg->integer)
     ;; `special-event-map' is where the window system's events are
     ;; bound, as Emacs's is (`keyboard.c:14550').
@@ -60,7 +69,8 @@
     ;; raises an exception, not a signal.
     ;; `window-cursor-table' is held weakly - see the note above
     ;; `WINDOW-CURSOR-TABLE'. Guile's own weak table, a key held weakly.
-    (only (guile) kill getpid SIGTSTP
+    (only (guile)
+          kill getpid SIGTSTP
           make-weak-key-hash-table hashq-ref hashq-set!)
     ;; `w->cursor_off_p' and the blink's timers are kept beside the
     ;; window and the frame rather than in the window, for the reason
@@ -246,7 +256,7 @@
       ;; (`xdisp.c:34813') all read it; asking the selected frame instead
       ;; is what made two frames on one buffer draw as one view.
       (buffer    window-buffer      set!window-buffer)
-      ;; ^ The <text-editor-type> this window shows. Emacs's
+      ;; ^ The <buffer> this window shows. Emacs's
       ;; `window-buffer'.
       (point     %window-point      set!%window-point)
       ;; ^ The <marker-type> this window is holding, which is point for
@@ -717,28 +727,14 @@
     ;; frame through this parameter.
     (define *current-frame* (make-parameter #f))
 
-    (define *current-buffer* (make-parameter #f))
-    ;; ^ The buffer commands act on: GNU Emacs's `current_buffer', the C
-    ;; global that `set-buffer' writes and that the *window code* writes
-    ;; too. False means "no choice has been made", and `(schemacs editor
-    ;; buffer)''s `current-buffer' answers `(current-editor)' for it.
-    ;;
-    ;; **It lives here, below the buffers, because `select-window'
-    ;; writes it.** Emacs's `Fselect_window' begins with
-    ;;
-    ;;   Fset_buffer (w->contents);   /* `window.c:534' */
-    ;;
-    ;; - "Make the selected window's buffer current" - and
-    ;; `do_switch_frame' reaches that same line for every frame switch,
-    ;; since it ends in `Fselect_window (f->selected_window, norecord)'.
-    ;; That is the whole of Emacs's rule that the current buffer follows
-    ;; the selected window, and it is what keeps two frames on one
-    ;; buffer - or a `C-x 5 o' between them - acting on the buffer you
-    ;; are looking at instead of the one you were looking at when you
-    ;; last called `set-buffer'. This library cannot import `set-buffer',
-    ;; because `(schemacs editor buffer)' is built on it; the parameter
-    ;; is the part both libraries can see, so it is here with the frame
-    ;; state, beside `*echo-area-buffer*' and for the same reason.
+    ;; `*current-buffer*' is imported from `(schemacs editor buffer)' and
+    ;; re-exported, so every library that asks this one for it still finds
+    ;; it. GNU Emacs's `current_buffer' is declared in `buffer.c' and this
+    ;; is the file that *writes* it, so both need it and a Scheme import
+    ;; cannot be circular; the definition is in the lower library now,
+    ;; which is the one that defines the buffer record. `select-window'
+    ;; below still writes it, unchanged - writing a parameter needs no
+    ;; import of the library that made it.
 
     (define *frame-cursor-type* (make-parameter (cons 'filled-box-cursor 1)))
     ;; ^ The cursor the *frame* wants, as `(TYPE . WIDTH)', which is what
@@ -1833,5 +1829,47 @@
       ;; end position and its line-number cache all described the buffer
       ;; that was there.
       (set-window-buffer! (frame-selected-window frame) editor))
+
+    ;;----------------------------------------------------------------
+    ;; The seams to `(schemacs editor buffer)'
+    ;;
+    ;; That library defines the buffer record, so this one is built on it
+    ;; and it cannot import this one back. Emacs makes the same two calls
+    ;; across the same seam - `buffer.c' reads the buffer the selected
+    ;; window shows, and calls `replace_buffer_in_windows' to put another
+    ;; one into a window - and gets away with it because C files may
+    ;; include each other where Scheme libraries may not.
+    ;;------------------------------------------------------------------
+    (define (replace-buffer-in-windows buffer)
+      ;; GNU Emacs's `replace_buffer_in_windows' (`window.c:3722'): show
+      ;; some other buffer in every window that is showing BUFFER, so a
+      ;; buffer can be killed without a window being left pointing at it.
+      ;; `Fkill_buffer' calls it (`buffer.c:2032') *before* the buffer
+      ;; leaves the buffer list, which is why the replacement is chosen
+      ;; here rather than by the caller: while the dying buffer is still
+      ;; listed, `other-buffer' cannot hand it straight back.
+      ;;
+      ;; One window per frame for now, so the walk is the selected
+      ;; frame's window.
+      ;;--------------------------------------------------------------
+      (let ((window (and (*current-frame*) (selected-window))))
+        (when (and window (eq? (window-buffer window) buffer))
+          (set-window-buffer! window (other-buffer buffer)))
+        #t))
+    ;; The two seams, installed here because this is the library that has
+    ;; the window code. `(schemacs editor buffer)' calls them where the C
+    ;; would call into `window.c' directly.
+    ;;
+    ;; **The first one is guarded, and the guard is the point.** The
+    ;; buffer library asks it for "the buffer the window code made
+    ;; current" and there may be no frame at all - a script or a test
+    ;; that calls `find-file' with nothing on screen - where `(current-
+    ;; editor)' would walk into `(window-buffer #f)'. The caller used to
+    ;; spell this guard itself, as `(and (*current-frame*)
+    ;; (current-editor))'; it belongs on this side of the seam, because
+    ;; `*current-frame*' is this library's.
+    (*current-editor-function*
+     (lambda () (and (*current-frame*) (current-editor))))
+    (*replace-buffer-in-windows-function* replace-buffer-in-windows)
 
     ))

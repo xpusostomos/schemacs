@@ -23,14 +23,13 @@
     fetch-char
           buffer-beg buffer-z
           buffer-pt text-editor-get-start-of-line
-          text-editor-get-end-of-line text-editor-set-cursor)
+          text-editor-set-cursor)
     (only (schemacs editor editfns) goto-char save-excursion forward-line)
     ;; the line ends and the blank-line question are simple.sld's -
     ;; `paragraph-separate''s default is a blank line.
     (only (schemacs editor simple)
-          %blank-line? beginning-of-line end-of-line kill-region
+          %blank-line? kill-region
           mark set-mark push-mark)
-    (only (schemacs editor frame) current-editor)
     ;; the mark-active and transient-mark-mode of the extend branch are
     ;; `buffer.c''s variables, beside `*last-command*' which is
     ;; simple.sld's (the command loop binds it there)
@@ -40,8 +39,6 @@
     (only (schemacs editor command) current-prefix-arg define-command
           uarg->integer)
     (only (schemacs editor keymap) define-key *default-keymap*)
-    (only (scheme write) display)
-    (only (guile) newline)
     )
 
   (export

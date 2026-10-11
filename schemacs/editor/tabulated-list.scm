@@ -27,7 +27,7 @@
     (scheme base)
     (scheme char)
     (only (schemacs editor engine)
-    buffer-pt text-editor-insert
+    text-editor-insert
           buffer-beg buffer-z
           text-editor-delete-from-cursor text-editor-set-cursor
           text-editor-cursor-line

@@ -54,7 +54,6 @@
     (scheme char)
     ;; `cdddr' is `(scheme cxr)''s, not `(scheme base)''s - the
     ;; distinction that has bitten this tree before
-    (only (scheme cxr) cdddr)
     ;; `delq' is Guile's list `delete' - R7RS has no destructive one -
     ;; and `/=', which `(scheme base)' has not got. `last' is SRFI 1's,
     ;; which `font-lock-choose-keywords' takes the last element of a
@@ -69,7 +68,7 @@
           text-property-not-all)
     ;; the region: its ends, and the search that walks it
     (only (schemacs editor editfns)
-          buffer-substring forward-line goto-char line-beginning-position
+          forward-line goto-char line-beginning-position
           line-end-position point point-marker point-max point-min
           save-excursion)
     (only (schemacs editor search)
@@ -77,14 +76,12 @@
     ;; `font-lock-mode''s buffer, and the `defvar-local' variables it
     ;; keeps on it
     (only (schemacs editor buffer)
-          *current-buffer* buffer-local-value buffer-name current-buffer
-          major-mode set-buffer-local-value! set-buffer-modified-p)
+          buffer-local-value current-buffer
+          major-mode set-buffer-local-value!)
     ;; the hook `font-lock-mode' hangs its incremental fontification on:
     ;; `after-change-functions' is `buffer.c''s, and the engine holds it
     (only (schemacs editor engine)
           *after-change-functions* marker-position set-marker!)
-    (only (schemacs editor command) current-prefix-arg define-command)
-    (only (schemacs editor frame) *current-frame* set!frame-message)
     ;; the faces above are `defface''d here, as font-lock.el deffaces them
     (only (schemacs editor faces) defface))
 

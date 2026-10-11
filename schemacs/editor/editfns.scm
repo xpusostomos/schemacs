@@ -33,24 +33,22 @@
     (only (scheme write) display write)
     ;; `current-buffer' and `set-buffer', which `save-excursion' saves
     ;; and restores beside point.
-    (only (guile) cadr caddr cddr cdddr cadddr call-with-output-string
+    (only (guile) cadr call-with-output-string
           exact->inexact string-index)
     (only (schemacs editor buffer) current-buffer set-buffer
-          *case-fold-search* *inhibit-read-only*)
+          *inhibit-read-only*)
     (only (schemacs editor engine)
           copy-marker marker-position marker-type? set-marker!
           text-editor-get-start-of-line text-editor-get-end-of-line
           fetch-char make-buffer-string
-          text-editor-search-forward text-editor-search-backward
-          text-editor-read-only?
+          buffer-read-only?
           text-editor-insert
-          text-editor-cursor-line text-editor-delete-from-cursor
+          text-editor-delete-from-cursor
           buffer-beg buffer-z
           buffer-pt count-lines
           text-editor-mark text-editor-set-cursor
           bol
-          eol
-          text-editor-undo-boundary!)
+          eol)
     ;; `mark-active' and `transient-mark-mode' are `buffer.c''s
     ;; variables, and `mark-even-if-inactive' is `callint.c''s, which is
     ;; where `region_limit' reads them from - the same three the C's
@@ -513,7 +511,7 @@ point-marker
       ;; yet, and the engine's insert and delete do not know about text
       ;; properties at all.
       ;;--------------------------------------------------------------
-      (when (and (text-editor-read-only? (current-buffer))
+      (when (and (buffer-read-only? (current-buffer))
                  (not (*inhibit-read-only*))
                  (not (get-text-property
                        (if (pair? rest) (car rest) (point))

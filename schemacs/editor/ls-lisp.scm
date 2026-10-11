@@ -64,7 +64,7 @@
     ;; the window's width, which `ls-lisp-column-format' lays out to
     (only (schemacs editor frame) selected-window window-body-width)
     (only (schemacs editor diredc)
-          directory-files directory-files-and-attributes file-attributes
+          directory-files-and-attributes file-attributes
           file-attribute-group-id file-attribute-inode-number
           file-attribute-link-number file-attribute-modes
           file-attribute-size file-attribute-type

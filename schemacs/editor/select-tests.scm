@@ -37,7 +37,7 @@
  ;; window system's. (The terminal's own OSC 52 selection moved out, to
  ;; `xterm-tests.scm' beside `xterm.sld'.)
  (only (schemacs editor engine)
-       new-text-editor text-editor-insert text-editor-set-cursor
+       allocate-buffer text-editor-insert text-editor-set-cursor
        buffer-pt text-editor-to-string)
  (only (schemacs editor frame) *current-frame* new-frame)
  (only (schemacs editor keyboard) dispatch-input-event)
@@ -125,7 +125,7 @@
   ;; selection state bound fresh, so one test's cuts do not leak into
   ;; the next.
   ;;--------------------------------------------------------------
-  (let* ((ed (new-text-editor))
+  (let* ((ed (allocate-buffer))
          (frame (new-frame ed 24 80))
          (d (make <clipboard-tty>)))
     (parameterize ((current-display d)
@@ -152,7 +152,7 @@
 
 ;; The plain terminal: no selections behind it, which is `emacs -nw'.
 (define (with-tty text thunk)
-  (let* ((ed (new-text-editor))
+  (let* ((ed (allocate-buffer))
          (frame (new-frame ed 24 80)))
     (parameterize ((current-display (make stub:<test-display>))
                    (*current-frame* frame)

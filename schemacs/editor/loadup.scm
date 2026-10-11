@@ -141,6 +141,7 @@
         (schemacs editor paragraphs)
         (schemacs editor region-cache)
         (schemacs editor replace)
+        (schemacs editor rmc)
         (schemacs editor search)
         (schemacs editor select)
         (schemacs editor simple)

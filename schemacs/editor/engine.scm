@@ -27,10 +27,25 @@
   ;;     command that goes back *through* those primitives.
   ;;
   ;; C may have those files include each other; an R7RS library may not -
-  ;; its imports are a directed acyclic graph. So the record, its
-  ;; accessors, the primitives, the markers, the scans and the undo list
-  ;; stay in one library, and this header stands for the four files. The
-  ;; same entanglement is why `frame.sld` is `frame.c` + `window.c`.
+  ;; its imports are a directed acyclic graph. So the primitives, the
+  ;; markers, the scans and the undo list stay in one library, and this
+  ;; header stands for the four files. The same entanglement is why
+  ;; `frame.sld` is `frame.c` + `window.c`.
+  ;;
+  ;; **The record has left, though.** It is `buffer.h`'s `struct buffer`
+  ;; and it is `buffer.sld`'s now, which is where `buffer.c` keeps it -
+  ;; and this library is built ON that one, so the engine may call the
+  ;; buffer's own functions rather than the other way round. It used to
+  ;; be the engine's, and the reason it could not move was a cycle: the
+  ;; buffer library ran `change-major-mode-hook' through `subr.el`'s
+  ;; `run-hooks`, `subr.sld` reaches the engine through `fns.sld` and
+  ;; `intervals.sld`, and the engine could not be above a library that
+  ;; reached it. That one call is a seam now
+  ;; (`*run-hooks-function*`), and the record, its accessors,
+  ;; `make_buffer`, `buffer-beg`/`buffer-z` and `inhibit-read-only` moved
+  ;; with it. Whatever comes back the other way - `del_range`, the undo
+  ;; entry a save records up to, marker.c's constructor - is a seam this
+  ;; library installs at the end of its load.
   ;;
   ;; See LAYOUT-PLAN.txt for the rule this library predates.
   ;;------------------------------------------------------------------
@@ -38,7 +53,7 @@
     (scheme base)
     (scheme case-lambda)
     (only (scheme char) char-downcase)  ; for case-folding searches
-    (only (scheme write) display write) ;;DEBUG
+    (only (scheme write) display) ;;DEBUG
     ;;(only (schemacs lexer) make<source-file-location>)
     ;; The marker chain is held weakly - see the note above
     ;; `MAKE<MARKER>'. There is no Emacs name for the mechanism and no
@@ -59,19 +74,12 @@
     ;; hand-maintained character count) are one sequence of characters,
     ;; as they are in Emacs.
     (only (schemacs editor buffer-text)
-          *gap-bytes-min*
-          new-buffer-text  buffer-text-type?
-          buffer-text-base  buffer-text-z  buffer-text-length
-          buffer-text-gap-size  buffer-text-allocation
-          buffer-text-ref  buffer-text-set!
-          buffer-text-insert!  buffer-text-insert-code-points!
+          buffer-text-base buffer-text-z
+          buffer-text-ref
+          buffer-text-insert! buffer-text-insert-code-points!
           buffer-text-delete!
-          buffer-text-substring  buffer-text-for-each
-          buffer-text-clear!
-          buffer-text-beg-unchanged  set!buffer-text-beg-unchanged
-          buffer-text-modiff  buffer-text-chars-modiff
-          set!buffer-text-modiff  set!buffer-text-chars-modiff
-          )
+          buffer-text-substring
+          buffer-text-beg-unchanged set!buffer-text-beg-unchanged)
     ;; The line-break cache `find-newline' keeps - GNU Emacs's
     ;; `region-cache.c', which is `buf->newline_cache' there. It is what
     ;; makes searching a buffer with very long lines affordable: a
@@ -80,17 +88,45 @@
     (only (schemacs editor region-cache)
           new-region-cache  know-region-cache  invalidate-region-cache
           region-cache-forward  region-cache-backward)
+    ;; **The buffer record is the buffer library's now** - `buffer.h`'s
+    ;; struct, which `buffer.c` owns - so the record, its accessors,
+    ;; `make_buffer` (`NEW-TEXT-EDITOR`), `buffer-beg' and `buffer-z'
+    ;; (the `BEG'/`Z' macros) and `inhibit-read-only' (`buffer.c:5885')
+    ;; all come from there. The engine is built ON that library, which is
+    ;; what lets `buffer.c`'s own functions work on the record; the
+    ;; alternative - the engine below it - is what kept the record out of
+    ;; its home until now.
+    (only (schemacs editor buffer)
+          *inhibit-read-only*  current-buffer  with-current-buffer
+          allocate-buffer  bufferp  show-text-editor
+          text-editor-text
+          buffer-pt  set!buffer-pt
+          %text-editor-newline-cache  set!%text-editor-newline-cache
+          text-editor-text-props  set!text-editor-text-props
+          text-editor-undo-list  set!text-editor-undo-list
+          text-editor-cache-long-scans  set!text-editor-cache-long-scans
+          text-editor-save-token
+          text-editor-deactivate-mark  set!text-editor-deactivate-mark!
+          %mark-marker
+          buffer-markers
+          text-editor-buffer-name  set!text-editor-buffer-name
+          text-editor-file-name  set!text-editor-file-name
+          buffer-beg  buffer-z
+          buffer-modified-tick  buffer-chars-modified-tick
+          buffer-modified-p  set-buffer-modified-p
+          buffer-read-only?  set!buffer-read-only
+          %text-editor-incr-modiff!
+          ;; the seams this library installs as it loads, at the end of
+          ;; the file
+          *make-marker-function*  *copy-marker-function*
+          *marker-position-function*  *set-marker-function*
+          *del-range-function*)
     )
-  (cond-expand
-   ;; To define pretty-printers for Guile
-   (guile-3
-    (import (only (srfi srfi-9 gnu) set-record-type-printer!))
-    )
-   (else)
-   )
   (export
-   ;; The text editor data type
-   new-text-editor  text-editor-type?  buffer-pt
+   ;; The buffer data type - `buffer.h`'s struct, which `buffer.sld`
+   ;; owns now; these are re-exported for the libraries that still ask
+   ;; the engine for them.
+   allocate-buffer  bufferp  buffer-pt
 
    text-editor-to-string
    text-editor-to-code-points
@@ -102,7 +138,7 @@
 
    ;; Undo
    text-editor-undo-list  set!text-editor-undo-list
-   text-editor-undo  text-editor-undo-boundary!
+   text-editor-undo-boundary!
    text-editor-undo-disable!  text-editor-undo-enable!
    text-editor-undo-recording?
    *undo-limit*
@@ -119,11 +155,11 @@
    *text-property-offset-function*
 
    ;; Whether the buffer has changed since it was last saved
-   text-editor-modified?  text-editor-set-modified!
+   buffer-modified-p  set-buffer-modified-p
    text-editor-save-token
 
    ;; Whether the buffer refuses to be changed
-   text-editor-read-only?  text-editor-set-read-only!
+   buffer-read-only?  set!buffer-read-only
 
    ;; Searching, and the mark
    text-editor-search-forward  text-editor-search-backward
@@ -168,14 +204,15 @@
    ;; this file call it themselves; it is exported because anything that
    ;; changes the text by another route has to, and the C's `erase-buffer'
    ;; is the example - `(invalidate_buffer_caches (current_buffer, BEGV,
-   ;; ZV))' (buffer.c:2773). `erase-buffer' here goes through
+   ;; ZV))' (buffer.c:2773). `erase-buffer' is the buffer library's now and
+   ;; calls back in here through `*del-range-function*', which ends in
    ;; `text-editor-delete-from-cursor', so it is already covered.
    text-editor-invalidate-caches!
    ;; `BEG_UNCHANGED' (`buffer.h:156') and the caches' own "everything is
    ;; current as of now".
    buffer-beg-unchanged  set!buffer-beg-unchanged!
    ;; `buffer-modified-tick' and `buffer-chars-modified-tick' (buffer.c)
-   buffer-modiff  buffer-chars-modiff
+   buffer-modified-tick  buffer-chars-modified-tick
    ;; `cache-long-scans' (`buffer.c:5786'), the buffer-local both region
    ;; caches hang on
    text-editor-cache-long-scans  set!text-editor-cache-long-scans
@@ -200,235 +237,6 @@
     ;; characters are inserted or removed from somewhere in the middle
     ;; of the text buffer.
 
-    ;;----------------------------------------------------------------
-
-    (define-record-type <text-editor-type>
-      (make<text-editor>
-       text  newline-cache  point
-       textprops  undo
-       save-modiff  save-token  cache-long-scans  read-only  mark  markers
-       deactivate-mark
-       name  file-name
-       )
-      text-editor-type?
-      (newline-cache %text-editor-newline-cache
-                     set!%text-editor-newline-cache)
-      ;; ^ GNU Emacs's `buf->newline_cache' (`buffer.h:696'), the
-      ;; `region-cache' that remembers which stretches of the buffer have
-      ;; been searched and found to hold no line break. False until
-      ;; `find-newline' first wants it, which is when the C makes one
-      ;; too (`search.c:640') - a buffer whose lines are never searched
-      ;; never pays for it.
-      (text       text-editor-text          set!text-editor-text)
-      ;; ^ The buffer's text - a `(schemacs editor buffer-text)', which
-      ;; is GNU Emacs's `struct buffer_text': the characters, the gap
-      ;; and where the gap is. There is ONE of these where there used to
-      ;; be four - a gap buffer of `<text-line>' records, a separate
-      ;; line editor, a CDF indexing the lines, and a hand-maintained
-      ;; character count. None of the four has a counterpart in Emacs;
-      ;; the text is one sequence of characters there and it is one
-      ;; here.
-      (point      buffer-pt         set!buffer-pt)
-      ;; ^ The cursor - GNU Emacs's `BUF_PT (buf)`, which is the field
-      ;; `PT` on the buffer (`buffer.h:1078`). It is a `buffer-text`
-      ;; *position*: one-based, the convention the class speaks, and
-      ;; Emacs's own. Emacs keeps `PT' on the buffer for the same reason
-      ;; it is here - it is not derivable from the gap, which can sit
-      ;; anywhere - and `point' (`editfns.c') is `BUF_PT' of the current
-      ;; buffer and nothing more.
-      (textprops  text-editor-text-props     set!text-editor-text-props)
-      ;; The root of the buffer's text-property tree. This is GNU Emacs's
-      ;; `BUFFER_INTERVALS' - the root of the interval tree - which
-      ;; `(schemacs editor intervals)' mirrors and this library only
-      ;; holds; it is what syntax colouring and the `display' property
-      ;; are kept in.
-      (undo       text-editor-undo-list     set!text-editor-undo-list)
-      ;; ^ The buffer's undo list, GNU Emacs's `buffer-undo-list'. A
-      ;; list, newest entry first, of the edits that can be undone; or
-      ;; false, which is Emacs's `t', meaning that the recording of
-      ;; undo information is disabled. The empty list is Emacs's `nil':
-      ;; recording is enabled but there is nothing to undo. See the
-      ;; "Undo" section below for the entry formats.
-      (save-modiff text-editor-save-modiff  set!text-editor-save-modiff)
-      (cache-long-scans text-editor-cache-long-scans
-                        set!text-editor-cache-long-scans)
-      ;; ^ GNU Emacs's `cache-long-scans' (`buffer.c:5786'), a
-      ;; `DEFVAR_PER_BUFFER' whose default is **true**: "Non-nil means
-      ;; that Emacs should use caches in attempt to speedup buffer
-      ;; scans... There is no reason to set this to nil except for
-      ;; debugging purposes." It is the switch both region caches hang
-      ;; on - `find_newline' consults it before making one
-      ;; (`search.c:618'), and `width_run_cache_on_off' checks it too.
-      ;; It lives on the buffer because that is where Emacs declares
-      ;; it, and `find-newline' is below the library that would
-      ;; otherwise hold it.
-      ;; ^ GNU Emacs's `SAVE_MODIFF' (`buffer.h'), a field of
-      ;; `struct buffer': the value of the text's `modiff' when the
-      ;; buffer was last in sync with its file. There is no flag
-      ;; beside it - `buffer-modified-p' *is* the comparison
-      ;; `SAVE_MODIFF < MODIFF', which is what `text-editor-modified?'
-      ;; answers and what `text-editor-set-modified!' maintains.
-      ;; It is cleared by saving and by undoing back past every change
-      ;; made since the last save.
-      (save-token text-editor-save-token    set!text-editor-save-token)
-      ;; ^ Identifies the state the buffer was last in sync with its
-      ;; file. It is an integer that counts up every time the buffer is
-      ;; marked unmodified, and it is what the `(t . TOKEN)' undo entry
-      ;; records: undoing back to that entry makes the buffer
-      ;; unmodified again, but only while the token still matches,
-      ;; which is false once the buffer has been saved in the meantime.
-      ;; Emacs records the visited file's modification time there
-      ;; instead and compares it with `visited-file-modtime'; the
-      ;; engine has no file or clock, so it numbers its saves.
-      (deactivate-mark text-editor-deactivate-mark
-                       set!text-editor-deactivate-mark!)
-      ;; ^ Whether the mark should be deactivated once this command is
-      ;; over: GNU Emacs's `deactivate-mark' variable, which the command
-      ;; loop sets to nil before each command and tests when the command
-      ;; returns. **Any buffer modification stores t in it**
-      ;; (`insdel.c''s `prepare_to_modify_buffer'), which is what makes
-      ;; the region go away when you type or yank.
-      (mark       %mark-marker           set!%mark-marker)
-      ;; ^ The buffer's mark, GNU Emacs's `mark': a <marker-type>, which
-      ;; is what makes it survive the text around it changing. It points
-      ;; nowhere until the mark is set. `TEXT-EDITOR-MARK' is the
-      ;; accessor Lisp would see - the position, as Emacs's `(mark)' -
-      ;; so this slot is private.
-      (markers    buffer-markers    set!buffer-markers)
-      ;; ^ The buffer's markers: GNU Emacs's marker chain, which the
-      ;; insert and delete procedures adjust so that a marker goes on
-      ;; pointing at the same character as the text around it moves.
-      ;; It holds them weakly, so a marker that nothing else refers to
-      ;; is collected and drops out of the chain by itself - see the
-      ;; "Markers" section below for why.
-      (read-only  text-editor-read-only-flag set!text-editor-read-only-flag)
-      ;; ^ Whether the buffer refuses to be changed, GNU Emacs's
-      ;; `buffer-read-only'. The insert and delete procedures signal an
-      ;; error while it is set, so nothing can change the text by
-      ;; accident - including undo, which is why the undo procedure
-      ;; refuses too. It is independent of the modified flag: a buffer
-      ;; can be read-only and modified at once.
-      (name       text-editor-buffer-name set!text-editor-buffer-name)
-      ;; ^ The buffer's name, GNU Emacs's `buffer-name': what the mode
-      ;; line shows, and what distinguishes one buffer from another in
-      ;; the messages that name them. A buffer visiting a file is named
-      ;; after the file, without its directory (Emacs's
-      ;; `create-file-buffer' uses `file-name-nondirectory'), and a
-      ;; buffer with no file has a name of its own - "*scratch*",
-      ;; "*Completions*". The default is Emacs's for a buffer made by
-      ;; `generate-new-buffer'.
-      (file-name  text-editor-file-name    set!text-editor-file-name)
-      ;; ^ The file the buffer visits, GNU Emacs's `buffer-file-name',
-      ;; or false when it visits none. It is the path the buffer was
-      ;; read from and the one `save-buffer' writes back to - which is
-      ;; why it is the buffer's and not the window's: two windows can
-      ;; show the same buffer, and a window can show a buffer that
-      ;; visits no file at all.
-      )
-
-    (define (new-text-editor)
-      ;; A new buffer: one `buffer-text`, no text, an empty undo list, and
-      ;; the buffer-level state GNU Emacs's `struct buffer` carries -
-      ;; `buffer.c`'s `make_buffer` and `Fget_buffer_create`.
-      ;;
-      ;; **It takes no arguments on purpose.** It used to take a
-      ;; line-break protocol and a properties list, both of them the
-      ;; previous author's: the protocol existed to drive a line editor
-      ;; that no longer exists (the engine keeps one sequence of
-      ;; characters, so a line break is a character like any other), and
-      ;; the properties list was an association list of text properties
-      ;; where this tree now keeps `BUFFER_INTERVALS` - the interval
-      ;; tree, in `(schemacs editor intervals)`. Neither had a caller.
-      ;;--------------------------------------------------------------
-      (let ()
-        (make<text-editor>
-         ;; Emacs's `BEG' is 1, and every position the class answers is in
-         ;; that coordinate system. The gap is `GAP_BYTES_MIN' because
-         ;; that is what a fresh buffer's is: `buffer.c:607' sets
-         ;; `BUF_GAP_SIZE (b) = 20' and allocates exactly that (plus the
-         ;; NUL anchor) before anything is inserted. It used to be 4096,
-         ;; which was the previous author's *line* count for a store that
-         ;; held lines rather than characters.
-         (new-buffer-text 1 *gap-bytes-min*)
-         ;; the newline cache, made on first use
-         #f
-         1
-         #f
-         ;; A newly created buffer records undo information from the
-         ;; start, as in GNU Emacs.
-         '()
-         ;; `SAVE_MODIFF' starts at 1 and so does the text's `modiff',
-         ;; which is what makes a fresh buffer unmodified: `1 < 1' is
-         ;; false. Emacs sets the one to 1 at `buffer.c:631' and a fresh
-         ;; buffer reports a tick of 1. `SAVE_MODIFF' is 1, the
-         ;; `save-token' 0, long scans cached, and the buffer writable.
-         1 0 #t #f
-         ;; The mark, pointing nowhere until it is set, and an empty
-         ;; marker chain.
-         (make<marker> #f 0 #f)
-         (make-weak-key-hash-table)
-         ;; Nothing is waiting to deactivate the mark.
-         #f
-         ;; Named as `generate-new-buffer' names a buffer it makes, and
-         ;; visiting no file.
-         "Untitled" #f
-         )))
-
-    (define show-text-editor
-      ;; Write a buffer to a port the way GNU Emacs writes one, which is
-      ;; `print_object`'s `PVEC_BUFFER` case (`print.c:1895`):
-      ;;
-      ;;     if (!BUFFER_LIVE_P (XBUFFER (obj)))
-      ;;       print_c_string ("#<killed buffer>", printcharfun);
-      ;;     else if (escapeflag)
-      ;;       { print_c_string ("#<buffer ", ...
-      ;;         print_string (BVAR (XBUFFER (obj), name), ...
-      ;;     else
-      ;;       print_string (BVAR (XBUFFER (obj), name), ...
-      ;;
-      ;; so `prin1` is `#<buffer NAME>`, `princ` is the bare name, and a
-      ;; buffer that is not live is `#<killed buffer>` - and `BUFFER_LIVE_P`
-      ;; is `!NILP (BVAR (b, name))` (`buffer.h:1143`), which makes
-      ;; liveness the name being there, which is the nearest thing this
-      ;; tree has to it. This is the `escapeflag` answer, because a Guile
-      ;; record printer is handed the record and a port and nothing that
-      ;; says which of the two it is - and `write`, which is what a REPL
-      ;; echoes with, is `prin1`.
-      ;;
-      ;; **It used to write the whole buffer out**, line by line and
-      ;; quoted, and that is what the first person to type
-      ;; `(find-file "README.md")` at the back door saw: a screenful of
-      ;; the file where the answer was one word. Emacs's `find-file`
-      ;; answers the *buffer*, and a buffer prints as its name and nothing
-      ;; else. It was also the expensive way round - a printed buffer
-      ;; looked like a list of strings because `text-editor-line-string`
-      ;; builds a fresh string for every line, so echoing a buffer
-      ;; allocated one string per line of it. The storage was never a list
-      ;; of strings: it is one `buffer-text`, a `u32vector` with a gap.
-      ;;
-      ;; **Cheap on purpose**, as well: a record printer is what runs when
-      ;; Guile prints a *backtrace*, and one that walks the buffer there
-      ;; has crashed before now.
-      ;;--------------------------------------------------------------
-      (case-lambda
-       ((ed) (show-text-editor ed (current-output-port)))
-       ((ed port)
-        (let ((name (text-editor-buffer-name ed)))
-          (if name
-              (begin (display "#<buffer " port)
-                     (display name port)
-                     (display ">" port))
-              (display "#<killed buffer>" port))))))
-
-    (cond-expand
-     (guile
-      (set-record-type-printer! <text-editor-type> show-text-editor)
-      )
-     (else)
-     )
-
-
-    ;;----------------------------------------------------------------
     ;; Inserting text
 
 
@@ -475,6 +283,14 @@
     ;; in its comment: "Only when we undo a deletion, the insertion
     ;; will be recorded just as if it was typed on the keyboard.
     ;; Resulting in the inverse operation being saved in the list."
+    ;;
+    ;; **What this library does NOT have is `primitive-undo'** - the
+    ;; procedure that applies these entries, walking the list and running
+    ;; the inverse of each one. That is `simple.el`'s (`simple.el:3650'),
+    ;; in the same file as the `undo' command itself, and it is there:
+    ;; `undo.c` records the entries and Lisp applies them. It was here,
+    ;; which put a `simple.el` function in the engine and gave it a buffer
+    ;; argument Emacs's does not have.
     ;;
     ;; Entries are recorded by the two public mutators below, and only
     ;; by them. The internal procedures that shuffle lines when a line
@@ -571,7 +387,7 @@
       (make<marker> buffer index insertion-type)
       marker-type?
       (buffer     marker-buffer           set!marker-buffer)
-      ;; ^ The <text-editor-type> this marker points into, or false
+      ;; ^ The <buffer> this marker points into, or false
       ;; when it points nowhere - GNU Emacs's "marker points nowhere",
       ;; which is what a marker made by `MAKE-MARKER' is, and what one
       ;; is left as when its buffer is killed or its position is set to
@@ -695,51 +511,6 @@
       ;;--------------------------------------------------------------
       (set-marker! (%mark-marker ed) (and position position) ed))
 
-    (define (buffer-modiff ed)
-      ;; The buffer's modification tick: GNU Emacs's `buffer-modified-tick'
-      ;; (`buffer.c:1631'), which answers `MODIFF'. Every change to the
-      ;; text raises it, so two readings that differ mean the buffer
-      ;; changed in between - which is the question the line-break cache
-      ;; and redisplay freshness both ask.
-      ;;--------------------------------------------------------------
-      (buffer-text-modiff (text-editor-text ed)))
-
-    (define (buffer-chars-modiff ed)
-      ;; The same, for changes to the *characters* alone: GNU Emacs's
-      ;; `buffer-chars-modified-tick'. A change to a text property raises
-      ;; `modiff' and not this one, so a cache of something computed from
-      ;; the characters is not invalidated by a fontification change.
-      ;;--------------------------------------------------------------
-      (buffer-text-chars-modiff (text-editor-text ed)))
-
-    (define (text-editor-modified? ed)
-      ;; Whether the buffer has been changed since it was last saved or
-      ;; visited: GNU Emacs's `buffer-modified-p' (`buffer.c'), which is
-      ;; not a flag but the comparison
-      ;;
-      ;;     BUF_SAVE_MODIFF (buf) < BUF_MODIFF (buf)
-      ;;--------------------------------------------------------------
-      (< (text-editor-save-modiff ed) (buffer-modiff ed)))
-
-    (define (%text-editor-incr-modiff! ed len)
-      ;; Raise the modification counter by `modiff_incr''s rule
-      ;; (`lisp.h:4142'): one for a change that is not to the characters,
-      ;; and `elogb (len) + 1' - the base-2 logarithm of the size, plus
-      ;; one - for one that is. Raising it more for a bigger change but
-      ;; only logarithmically is what stops a large edit racing the
-      ;; counter away; and `chars_modiff' follows `modiff' only for a
-      ;; change to the characters (`insdel.c:929').
-      ;;--------------------------------------------------------------
-      (let ((text (text-editor-text ed)))
-        (set!buffer-text-modiff
-         text (+ (buffer-text-modiff text)
-                 (if (or (not len) (= len 0))
-                     1
-                     (+ 1 (let loop ((n len) (w 0))
-                            (if (<= n 1) w (loop (quotient n 2) (+ w 1))))))))
-        (when (and len (> len 0))
-          (set!buffer-text-chars-modiff text (buffer-text-modiff text)))))
-
     (define (text-editor-note-property-change! ed start end)
       ;; A change to the buffer's *text properties* rather than to its
       ;; characters - GNU Emacs's `modify_text_properties'
@@ -751,36 +522,6 @@
       ;;--------------------------------------------------------------
       (text-editor-invalidate-caches! ed start end)
       (%text-editor-incr-modiff! ed 0))
-
-    (define (text-editor-set-modified! ed flag)
-      ;; Set whether ED is modified - GNU Emacs's
-      ;; `set-buffer-modified-p' (`buffer.c:1573'), whose arithmetic is
-      ;; all in terms of the two counters rather than a flag.
-      ;;
-      ;; Marking it modified *raises MODIFF* when `SAVE_MODIFF' has
-      ;; caught up with it, so that the comparison comes out true again:
-      ;; that is how "modified" is said of a buffer whose text never
-      ;; changed. Note that `modiff_incr' answers the *old* count, so
-      ;; `SAVE_MODIFF' is set to the value `MODIFF' had before the
-      ;; raise, and the two end up one apart.
-      ;;
-      ;; Marking it unmodified records where it was last in sync with its
-      ;; file, so undoing back past every change made since then can mark
-      ;; it unmodified again; the `(t . TOKEN)' undo entry is that mark,
-      ;; and an older one no longer counts - the buffer saved in the
-      ;; meantime is not the buffer that mark describes.
-      ;;--------------------------------------------------------------
-      (cond
-       (flag
-        (unless (text-editor-modified? ed)
-          (%undo-record! ed (cons 't (text-editor-save-token ed)))
-          (when (>= (text-editor-save-modiff ed) (buffer-modiff ed))
-            (set!text-editor-save-modiff ed (buffer-modiff ed))
-            (%text-editor-incr-modiff! ed 0))))
-       (else
-        (when (text-editor-modified? ed)
-          (set!text-editor-save-modiff ed (buffer-modiff ed))
-          (set!text-editor-save-token ed (+ 1 (text-editor-save-token ed)))))))
 
     (define (%text-editor-note-change! ed)
       ;; Note that ED is about to be changed. This goes BEFORE the
@@ -798,8 +539,8 @@
       ;; before the modification counter rises - so the test "have we
       ;; changed since the save?" is still answered by the *old* counter.
       ;; It is not a call to `set-buffer-modified-p': with the counter
-      ;; moved, `text-editor-modified?' is true on its own.
-      (when (not (text-editor-modified? ed))
+      ;; moved, `buffer-modified-p' is true on its own.
+      (when (not (buffer-modified-p ed))
         (%undo-record! ed (cons 't (text-editor-save-token ed))))
       (set!text-editor-deactivate-mark! ed #t))
 
@@ -913,96 +654,6 @@
               (if (null? (car node))
                   (loop (+ i 1) (cdr node) i)   ; remember this boundary
                   (loop (+ i 1) (cdr node) last-boundary))))))
-
-    (define (text-editor-undo ed list arg)
-      ;; Undo ARG change groups from the front of LIST, applying the
-      ;; inverse of each entry, and return what remains of LIST. This
-      ;; is GNU Emacs's `primitive-undo', and it returns what Emacs's
-      ;; does, so that the caller can keep the returned tail as
-      ;; `pending-undo-list' and thereby walk further and further back
-      ;; over a run of undo commands.
-      ;;
-      ;; A group ends at a boundary, which is consumed but does not
-      ;; itself undo anything - so a list whose front is a boundary
-      ;; gives back the same list with that boundary removed, which is
-      ;; what Emacs means by "get rid of initial undo boundary".
-      ;;
-      ;; Because the inverse operations run the ordinary insert and
-      ;; delete primitives, they record their own inverses on the front
-      ;; of ED's undo list, and that is how redo works.
-      ;;
-      ;; A read-only buffer cannot be undone: undoing is an edit like
-      ;; any other, and GNU Emacs's `undo' has the `*' in its
-      ;; interactive spec that refuses before it does anything. Refusing
-      ;; here rather than part way through matters, since a half-undone
-      ;; change would be worse than none.
-      ;;--------------------------------------------------------------
-      (when (text-editor-read-only? ed)
-        (error "Buffer is read-only"))
-      (let loop ((list list) (arg arg) (opening? #t))
-        (if (or (<= arg 0) (not (pair? list)))
-            list
-            (let ((entry (car list))
-                  (rest (cdr list)))
-              (cond
-               ;; a boundary ends the group
-               ((null? entry) (loop rest (- arg 1) #t))
-               ;; Undoing back past the mark of the last save makes the
-               ;; buffer unmodified again, which is what tells the user
-               ;; there is nothing left to save. The mark only counts
-               ;; while it still describes the current save: a buffer
-               ;; saved since then is not the buffer this mark was made
-               ;; for. It does not end the group (GNU Emacs).
-               ((undo-modified-entry? entry)
-                (when (= (cdr entry) (text-editor-save-token ed))
-                  (text-editor-set-modified! ed #f))
-                (loop rest arg #f))
-               (else
-                ;; The entries the undo is about to create, by running
-                ;; the ordinary insert and delete primitives, must form
-                ;; a change group of their own - otherwise undoing them
-                ;; again would swallow the very entries being undone
-                ;; here. One boundary before the group's first entry
-                ;; separates them from everything older, and the
-                ;; boundary below already separates them from the
-                ;; group being undone. mg's undo brackets its inverse
-                ;; operations the same way.
-                (when opening? (text-editor-undo-boundary! ed))
-                (cond
-                 ((undo-insertion-entry? entry)
-                  (let ((beg (car entry))
-                        (end (cdr entry)))
-                    ;; Move point first, so that undoing this undo does
-                    ;; not send point back to where it is now (Emacs's
-                    ;; comment in `primitive-undo').
-                    (text-editor-set-cursor ed beg)
-                    (text-editor-delete-from-cursor ed (- end beg))))
-                 ((undo-deletion-entry? entry)
-                  (let* ((text (car entry))
-                         (pos (cdr entry))
-                         (at (abs pos)))
-                    (text-editor-set-cursor ed at)
-                    (text-editor-insert ed text)
-                    ;; POS was positive when point was at the beginning
-                    ;; of the deleted text and negative when it was at
-                    ;; the end; undo puts point back on the side it was
-                    ;; on (Emacs's rule for the sign of POS).
-                    (text-editor-set-cursor
-                     ed (if (< pos 0) (+ at (string-length text)) at)))))
-                (loop rest arg #f)))))))
-
-    (define (text-editor-read-only? ed)
-      ;; Whether ED refuses to be changed. GNU Emacs's
-      ;; `buffer-read-only'.
-      ;;--------------------------------------------------------------
-      (text-editor-read-only-flag ed))
-
-    (define (text-editor-set-read-only! ed flag)
-      ;; Set whether ED refuses to be changed: the variable GNU Emacs
-      ;; keeps as `buffer-read-only', and that its `read-only-mode'
-      ;; toggles.
-      ;;--------------------------------------------------------------
-      (set!text-editor-read-only-flag ed (and flag #t)))
 
     ;;----------------------------------------------------------------
     ;; Searching
@@ -1119,26 +770,6 @@
       ;;--------------------------------------------------------------
       (make-parameter #f))
 
-    (define *inhibit-read-only* (make-parameter #f))
-    ;; ^ GNU Emacs's `inhibit-read-only' (`buffer.c':5885): "Non-nil means
-    ;; disregard read-only status of buffers or characters. A non-nil
-    ;; value that is a list means disregard `buffer-read-only' status, and
-    ;; disregard a `read-only' text property if the property value is a
-    ;; member of the list. Any other non-nil value means disregard
-    ;; `buffer-read-only' and all `read-only' text properties."
-    ;;
-    ;; Emacs defines it in buffer.c and *reads* it from insdel.c, which is
-    ;; this library - and here the read is the other way round, because
-    ;; the engine cannot import the library that imports it. So it is held
-    ;; here and `buffer.sld' re-exports it, the same arrangement as
-    ;; `*text-property-offset-function*' below. A command writes into a
-    ;; read-only buffer with
-    ;; `(parameterize ((*inhibit-read-only* #t)) ...)'.
-    ;;
-    ;; Not ported: the *list* value's meaning for `read-only' text
-    ;; properties. The engine's insert and delete do not know about text
-    ;; properties at all - see `barf-if-buffer-read-only' - so any non-nil
-    ;; value is the "disregard all of it" case.
 
     (define (text-editor-insert ed thing)
       ;; Insert THING at the cursor. The insertion is recorded in the
@@ -1148,7 +779,7 @@
       ;; unless `inhibit-read-only' says otherwise, which is the same
       ;; test the C's `prepare_to_modify_buffer_1' makes.
       ;;--------------------------------------------------------------
-      (when (and (text-editor-read-only? ed)
+      (when (and (buffer-read-only? ed)
                  (not (*inhibit-read-only*)))
         (error "Buffer is read-only"))
       (let ((beg (buffer-pt ed)))
@@ -1372,6 +1003,25 @@
         (set!buffer-pt ed (- point n))
         n))
 
+    (define (%del-range from to)
+      ;; GNU Emacs's `del_range' (`insdel.c'): "Delete the characters
+      ;; between FROM and TO, moving all markers that point into the
+      ;; deleted range." This is the buffer library calling back into the
+      ;; engine, through `*del-range-function*'.
+      ;;
+      ;; **Our delete primitive is cursor-relative and this one is not**,
+      ;; which is the one difference: `text-editor-delete-from-cursor'
+      ;; deletes N characters from point, so the range is made by putting
+      ;; point at FROM first. `del_range' leaves point where it was; this
+      ;; moves it to FROM. For the one caller - `erase-buffer', which
+      ;; deletes the whole buffer, so that point must end at `BEG` either
+      ;; way - the two agree. They would not for a range in the middle,
+      ;; which is why the difference is written down.
+      ;;--------------------------------------------------------------
+      (let ((ed (current-buffer)))
+        (text-editor-set-cursor ed from)
+        (text-editor-delete-from-cursor ed (- to from))))
+
     (define (text-editor-delete-from-cursor ed n)
       ;; Delete N characters at the text editor cursor. Positive N
       ;; deletes characters after the cursor (forward), negative N
@@ -1394,7 +1044,7 @@
       ;; `inhibit-read-only' says otherwise.
       ;;--------------------------------------------------------------
       (when (and (not (= n 0))
-                 (text-editor-read-only? ed)
+                 (buffer-read-only? ed)
                  (not (*inhibit-read-only*)))
         (error "Buffer is read-only"))
       (cond
@@ -1489,20 +1139,6 @@
     ;;----------------------------------------------------------------
     ;; Positions
 
-    (define (buffer-beg ed)
-      ;; GNU Emacs's `point-min' (`editfns.c'): "the minimum permissible
-      ;; value of point in the current buffer. This is 1, unless
-      ;; narrowing ... is in effect." Nothing is narrowed here, and the
-      ;; buffer-text's base is that same 1.
-      ;;--------------------------------------------------------------
-      (buffer-text-base (text-editor-text ed)))
-
-    (define (buffer-z ed)
-      ;; GNU Emacs's `point-max' (`editfns.c'): one past the last
-      ;; character of the buffer. It is the buffer-text's own `z' field,
-      ;; which is Emacs's `Z'.
-      ;;--------------------------------------------------------------
-      (buffer-text-z (text-editor-text ed)))
 
     (define (fetch-char ed pos)
       ;; The character at position POS, or false when there is none
@@ -1886,7 +1522,25 @@
                       (or (%text-editor-position
                            ed (max 1 line-num) (max 0 column-num))
                           (buffer-z ed)))))))
+
       )
+
+    ;;----------------------------------------------------------------
+    ;; The seams into this library, installed as it loads
+    ;;------------------------------------------------------------------
+    ;; **These used to be installed by `frame.sld', because the engine
+    ;; was BELOW the buffer library and could not reach the parameters it
+    ;; defines.** The record is the buffer library's now, the engine is
+    ;; built on it, and so these are installed where the functions are.
+    ;;
+    ;; `marker.c`'s four (`copy-marker`'s family, and the constructor
+    ;; `allocate_buffer` calls), and `insdel.c`'s `del_range` - which is
+    ;; what `Ferase_buffer` calls to empty a buffer.
+    (*make-marker-function* make<marker>)
+    (*copy-marker-function* copy-marker)
+    (*marker-position-function* marker-position)
+    (*set-marker-function* set-marker!)
+    (*del-range-function* %del-range)
 
     )
   )

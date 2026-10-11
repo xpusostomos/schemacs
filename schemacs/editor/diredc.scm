@@ -49,9 +49,9 @@
     ;; `sort', `string<?' and the `c...r' accessors the argument handling
     ;; reads; `cadr' and friends are `(guile)''s, as elsewhere in the tree.
     (only (guile)
-          ash cadddr caddr cadr cdddr cddddr closedir getgrgid getpwuid logand
+          cadddr caddr cadr cdddr cddddr closedir getgrgid getpwuid logand
           lstat opendir readdir sort string<?
-          stat:atime stat:atimensec stat:ctime stat:ctimensec stat:dev
+          stat:atime stat:atimensec stat:ctime stat:dev
           stat:gid stat:ino stat:mode stat:mtime stat:mtimensec stat:nlink
           stat:size stat:type stat:uid)
     (only (schemacs editor fileio)

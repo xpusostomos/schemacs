@@ -32,7 +32,6 @@
     (only (scheme lazy) delay force)
     ;; The error the loop reports is formatted from the format string its
     ;; arguments arrive apart in.
-    (only (scheme write) write)
     ;; `format' and `string-index' are Guile's and not R7RS's, and both are
     ;; on the error path: `report-command-error!' asks whether the message
     ;; has a `~' in it and fills it in if it has. Neither was imported, so
@@ -42,7 +41,7 @@
     (only (guile) format inexact->exact logior string-index)
     (prefix (schemacs editor keymap) km:)
     (only (schemacs editor engine)
-          new-text-editor
+          allocate-buffer
           make-buffer-string
           text-editor-deactivate-mark set!text-editor-deactivate-mark!)
     (only (schemacs editor command)
@@ -73,12 +72,12 @@
           ;; Emacs's `key-description', which the undefined-key message is
           ;; built out of (`subr.el:1297') - and `single-key-description',
           ;; which the prefix-argument echo uses.
-          key-description single-key-description)
+          key-description)
     ;; The keys the current buffer has of its own - what gives a buffer
     ;; like `*Completions*' its own bindings - and which buffer is current.
     (only (schemacs editor buffer)
-          buffer-local-keymap buffer-local-value buffer-overwrite-mode
-          current-buffer mark-active set!mark-active transient-mark-mode)
+          buffer-local-keymap buffer-overwrite-mode
+          current-buffer mark-active transient-mark-mode)
     (only (schemacs editor simple)
           *last-change-was-undo* *last-command* *this-command*
           *select-active-regions*
@@ -112,7 +111,7 @@
     ;; is how a cursor blink happens while the editor sits still.
     (only (schemacs editor timer)
           *timer-idle-list* *timer-list* cancel-timer current-idle-time
-          set!timer-due-at timer-armed? timer-args timer-due-at
+          set!timer-due-at timer-args timer-due-at
           timer-function timer-idle? timer-idle-start! timer-idle-stop!
           timer-mark-run! timer-repeat timer-ripe?
           ;; The delay to the next timer and the front end's wake are the
@@ -124,7 +123,6 @@
     ;; fractional number of seconds and the read wants whole milliseconds.
     (only (guile) ceiling delq inexact->exact)
     ;; the clock the next timer's delay is measured against
-    (only (scheme time) current-second)
     ;; the millisecond clock a timed read's deadline is measured against -
     ;; the same two calls the front ends' own `now-ms' are made of
     (only (guile) get-internal-real-time internal-time-units-per-second)
@@ -1502,7 +1500,7 @@
              (done #f)
              (first #t)
              (code 0))
-        (parameterize ((*echo-area-buffer* (new-text-editor))
+        (parameterize ((*echo-area-buffer* (allocate-buffer))
                        (*echo-area-prompt*
                         (if prompt (string-append prompt "-") "")))
           (render! frame)

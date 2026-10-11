@@ -30,14 +30,11 @@
     ;; with "Wrong number of arguments to #<procedure delete-file (_)>"
     ;; the first time Dired deleted anything.
     (except (scheme file) delete-file)
-    (only (scheme write) display)
     (only (rnrs io ports) get-bytevector-all put-bytevector)
     ;; The coding system layer, which is where reading and writing
     ;; a file stopped going through the default port encoding.
     (only (schemacs editor coding)
           coding-setup-port! coding-read-char coding-write-char
-          coding-system-p coding-system-name coding-system-eol-type
-          coding-system-change-eol-conversion
           detect-eol bytes-have-null? adjust-coding-eol-type
           detect-coding-bytes find-operation-coding-system
           coding-system-bom
@@ -45,27 +42,26 @@
           *coding-system-for-read* *coding-system-for-write*)
     (only (schemacs editor mule) set-auto-coding)
     (only (schemacs editor engine)
-          set!text-editor-buffer-name set!text-editor-file-name
+          set!text-editor-file-name
           text-editor-buffer-name
           text-editor-file-name fetch-char buffer-pt
           buffer-beg buffer-z
           text-editor-insert text-editor-to-code-points
-          text-editor-modified? text-editor-read-only?
-          text-editor-set-cursor text-editor-set-modified!
-          text-editor-set-read-only! text-editor-to-string
+          buffer-modified-p buffer-read-only?
+          text-editor-set-cursor set-buffer-modified-p
+          set!buffer-read-only
           text-editor-undo-disable! text-editor-undo-enable!)
     (only (schemacs editor frame)
-          *current-frame* current-editor delete-frame
+          *current-frame* delete-frame
           frame-editor frame-list frame-quit-cont
-          set!frame-editor
           set!frame-message)
     ;; The commands here install their own keys, as files.el does.
-    (only (schemacs editor command)
-          current-prefix-arg define-command run-command)
+    (only (schemacs editor command) current-prefix-arg define-command)
     ;; `switch-to-buffer' is `window.el''s, and not this file's: it shows a
     ;; buffer in the selected window, which is a window operation.
     ;; `find-file-other-window' shows one in the OTHER window.
-    (only (schemacs editor window) pop-to-buffer-same-window
+    (only (schemacs editor window)
+          pop-to-buffer-same-window
           switch-to-buffer switch-to-buffer-other-window)
     ;; The file-name table is a *function* table, so it answers
     ;; `try-completion' and `all-completions' itself - `minibuf.c''s.
@@ -77,7 +73,8 @@
     (only (schemacs editor simple) push-mark)
     ;; `string-prefix-p' is `subr.el''s and now lives in
     ;; `(schemacs editor subr)', which is below this library.
-    (only (schemacs editor subr) kbd run-hook-with-args-until-success
+    (only (schemacs editor subr)
+          kbd run-hook-with-args-until-success
           string-prefix-p ctl-x-4-map
           ;; The window-system event's own accessors, which
           ;; `handle-delete-frame` reads the frame out of
@@ -170,19 +167,17 @@
           read-buffer
           *minibuffer-completing-file-name*
           completing-read
-          *confirm-nonexistent-file-or-buffer*
           confirm-nonexistent-file-or-buffer
           file-name-history
           list-ref-or
           read-char-from-minibuffer
-          read-from-minibuffer
           yes-or-no-p)
     ;; **`read-multiple-choice'** is `rmc.el''s, and it is what
     ;; `kill-buffer--possibly-save' asks with - Emacs 31's modified-
     ;; buffer question, in place of the `yes-or-no-p' this used. It is
     ;; `(schemacs rmc)', beside `(schemacs map-ynp)' at the top of the
     ;; tree, both mirroring a file under `lisp/emacs-lisp/'.
-    (only (schemacs rmc) read-multiple-choice)
+    (only (schemacs editor rmc) read-multiple-choice)
     ;; `use-short-answers' is `map-ynp.el''s, and it is one of the two
     ;; variables `kill-buffer--possibly-save' reads to decide whether the
     ;; answer to its question is a word or a key. `use-dialog-box-p' is
@@ -192,11 +187,12 @@
     ;; visited file read-only (GNU Emacs's `file-writable-p', plus the
     ;; permission bits it also consults); and the directory reading and
     ;; name splitting `read-file-name' completes with.
-    (only (guile) access? format stat stat:mode W_OK X_OK logand logior
-          closedir getcwd opendir readdir stat:type
+    (only (guile)
+          access? format stat stat:mode W_OK X_OK logand logior
+          closedir opendir readdir stat:type
           string-index string-prefix? string-rindex)
     ;; `file-size-human-readable''s arithmetic
-    (only (guile) caddr exact->inexact floor quotient remainder)
+    (only (guile) caddr exact->inexact floor)
     ;; `format' here is Guile's (destination first); the C's `format' is
     ;; editfns.c's, so it is imported under a prefix of its own.
     (prefix (only (schemacs editor editfns) format) ef:)
@@ -617,7 +613,7 @@ save-buffer
               (and (pair? buffers)
                    (let ((buffer (car buffers)))
                      (or (and (buffer-file-name buffer)
-                              (text-editor-modified? buffer))
+                              (buffer-modified-p buffer))
                          (scan (cdr buffers))))))
             (when (yes-or-no-p frame
                                "Modified buffers exist; exit anyway? ")
@@ -732,7 +728,7 @@ save-buffer
                     (else (loop (cdr rest)))))
             #f
             (if (and (text-editor-file-name buffer)
-                     (text-editor-modified? buffer)
+                     (buffer-modified-p buffer)
                      (not (kill-buffer--possibly-save buffer)))
                 #f
                 ;; the query functions have had their say; `%kill-buffer'
@@ -805,7 +801,7 @@ save-buffer
             (reverse kept)
             (let ((buffer (car buffers)))
               (loop (cdr buffers)
-                    (if (and (text-editor-modified? buffer)
+                    (if (and (buffer-modified-p buffer)
                              (or (buffer-file-name buffer)
                                  (let ((offer (buffer-local-value
                                                buffer 'buffer-offer-save #f)))
@@ -1631,7 +1627,7 @@ save-buffer
       ;; left holding what the file will hold, as in Emacs, which inserts
       ;; the line break into the buffer itself.
       ;;--------------------------------------------------------------
-      (when (and (not (text-editor-read-only? ed))
+      (when (and (not (buffer-read-only? ed))
                  (< 0 (- (buffer-z ed) (buffer-beg ed)))
                  (not (buffer-ends-with-newline? ed)))
         (let ((value (*require-final-newline*)))
@@ -1821,11 +1817,11 @@ save-buffer
         (when new? (set!frame-message (*current-frame*) "(New file)"))
         ;; ... and what is in the buffer is what is in the file, so
         ;; there is nothing to save yet.
-        (text-editor-set-modified! ed #f)
+        (with-current-buffer ed (set-buffer-modified-p #f))
         ;; A file that cannot be written is visited read-only, so that
         ;; the edits which could not be saved are refused in the first
         ;; place rather than at the end.
-        (text-editor-set-read-only! ed (file-write-protected? path))
+        (set!buffer-read-only ed (file-write-protected? path))
         ;; and the echo area says so, which the C does from
         ;; `after-find-file' - in `find-file-noselect', not in the command.
         ;; A frame is needed to say it in, and a script has none.
@@ -1911,7 +1907,7 @@ save-buffer
         (text-editor-insert ed decoded)
         ;; the visit: the buffer is what the file is now, so there is
         ;; nothing in it the file does not have
-        (when visit (text-editor-set-modified! ed #f))
+        (when visit (with-current-buffer ed (set-buffer-modified-p #f)))
         (list filename (length decoded))))
 
     (define (insert-file-1 filename insert-func)
@@ -1969,7 +1965,7 @@ Set mark after the inserted text."
         (error "~a does not exist" filename))
       (mode filename)
       (with-current-buffer (current-buffer)
-        (text-editor-set-read-only! (current-buffer) #t)))
+        (set!buffer-read-only (current-buffer) #t)))
 
     (define-command (find-file-read-only filename)
       ;; GNU Emacs's `find-file-read-only' (files.el:2095): "Edit file
@@ -1982,7 +1978,7 @@ Use \\[read-only-mode] to permit editing."
       (find-file--read-only
        (lambda (name)
          (find-file name)
-         (text-editor-set-read-only! (current-buffer) #t))
+         (set!buffer-read-only (current-buffer) #t))
        filename #f))
 
     (define-command (find-file-other-window filename)
@@ -2098,12 +2094,12 @@ If the current buffer now contains an empty file that you just visited
           (let* ((ed (current-buffer))
                  (old-point (point)))
             (with-current-buffer ed
-              (text-editor-set-read-only! ed #f)
+              (set!buffer-read-only ed #f)
               (insert-file-contents file-name #t #t)
               (goto-char (min old-point (point-max)))
               ;; the visit-time messages and the read-only note, as
               ;; `after-find-file' does
-              (text-editor-set-read-only! ed (file-write-protected? file-name))
+              (set!buffer-read-only ed (file-write-protected? file-name))
               (note-file-read-only! (*current-frame*)))
             #t)
           #t))))
@@ -2227,7 +2223,7 @@ at point instead."
               (write-file-code-points path (text-editor-to-code-points buffer)
                                       coding)
               (*last-coding-system-used* coding))
-            (text-editor-set-modified! buffer #f)
+            (set-buffer-modified-p #f)
             (set!frame-message (*current-frame*)
                                        (string-append "Wrote " path))
             ;; the C's `(when save-silently (message nil))', which
@@ -2332,7 +2328,7 @@ at point instead."
         ;; new one is not to be.
         (when (and (buffer-file-name (current-buffer))
                    (file-writable-p (buffer-file-name (current-buffer))))
-          (text-editor-set-read-only! (current-buffer) #f))
+          (set!buffer-read-only (current-buffer) #f))
         (save-buffer)))
 
     ;;----------------------------------------------------------------

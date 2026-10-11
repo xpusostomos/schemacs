@@ -47,7 +47,6 @@
     ;; `iota' builds the element offsets the 16- and 32-bit selection
     ;; data rows are read at.
     (only (srfi srfi-1) alist-delete iota)
-    (only (scheme write) display write)
     (only (guile) ash logand logior lognot inexact->exact round
           get-internal-real-time internal-time-units-per-second)
     (oop goops)
@@ -69,7 +68,7 @@
     ;; thousands of names and importing them wholesale shadows core
     ;; bindings.
     (only (schemacs ui gtk pgtk-names)
-          init-check! <GtkWindow> <GtkDrawingArea> <GtkContainer> <GtkWidget>
+          init-check! <GtkWindow> <GtkDrawingArea>
           widget:show-all widget:hide widget:destroy widget:queue-draw
           ;; a *child* widget has to select the events it wants -
           ;; see the button handlers below
@@ -121,7 +120,7 @@
     ;; `selection-converter-alist' - the C's `Vselection_converter_alist'
     ;; - and calls the handler it finds. See `select.sld'.
     (only (schemacs editor select)
-          *selection-converter-alist* xselect--encode-string)
+          *selection-converter-alist*)
     ;; `decode-coding-string' turns the bytes a foreign selection arrived
     ;; as into the tree's code points; that is the half of
     ;; `gui-get-selection' that decodes a `foreign-selection' string, done
@@ -149,7 +148,7 @@
     ;; The frame's focus, which the window tells us about: it decides
     ;; whether the cursor blinks and whether it is drawn hollow.
     (only (schemacs editor frame)
-          *current-frame* *frame-focus* blink-cursor--rescan-frames
+          *current-frame*
           ;; `pgtk-title-frame!' gives a window its frame's name as a
           ;; title, as Emacs's `x_window' does from `f->name'
           ;; (`gtkutil.c:1656-1663').

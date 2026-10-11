@@ -13,7 +13,6 @@
     (only (schemacs ui gtk pgtk) with-gtk-display
           pgtk-open-window pgtk-title-frame! initialize-pgtk-faces!
           pgtk-arm-timer! pgtk-main pgtk-main-quit)
-    (only (schemacs editor engine) set!text-editor-buffer-name)
     (only (schemacs editor frame) *current-frame* new-frame new-frame-on
           *frame-creation-function* frame-editor)
     (only (schemacs editor buffer) *scratch-buffer-name* get-buffer-create)
@@ -30,10 +29,10 @@
     ;; made by the library that owns the command, so the library has to
     ;; be loaded even though nothing here calls it. `ncurses.sld' does
     ;; the same, for the same reason.
-    (only (schemacs editor simple) self-insert-layer)
-    (only (schemacs editor isearch) isearch-forward)
-    (only (schemacs editor window) split-window-below)
-    (only (schemacs editor buff-menu) list-buffers)
+    (only (schemacs editor simple))
+    (only (schemacs editor isearch))
+    (only (schemacs editor window))
+    (only (schemacs editor buff-menu))
     ;; `casefiddle.c' and `paragraphs.el' - the ncurses.sld note says
     ;; why.
     (only (schemacs editor casefiddle))

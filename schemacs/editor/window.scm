@@ -30,55 +30,46 @@
     (only (schemacs editor command)
           current-prefix-arg define-command uarg->integer)
     (only (schemacs editor engine)
-          copy-marker new-text-editor set-marker! marker-position
-          set!text-editor-buffer-name
-          set!text-editor-file-name text-editor-buffer-name
-          buffer-pt text-editor-modified? text-editor-set-cursor
-          text-editor-type?)
+          copy-marker marker-position
+          buffer-pt
+          bufferp)
     ;; `define-key' and the global map: the window keys are stated here,
     ;; beside the commands they run.
     (only (schemacs editor keymap)
          define-key
          *default-keymap*)
     (only (schemacs editor frame)
-          %window-point
           ;; the window's own hscroll state, which `set-window-hscroll!'
           ;; and the scroll commands maintain
-          %window-hscroll %window-min-hscroll %window-suspend-auto-hscroll?
+          %window-hscroll
           set!%window-hscroll set!%window-min-hscroll
           set!%window-suspend-auto-hscroll?
-          *current-frame* current-editor frame-height frame-width
+          *current-frame* frame-height frame-width
           window-type?
-          make<window> frame-quit-cont
+          make<window>
           frame-selected-window frame-windows select-window
-          selected-window set!frame-editor set!frame-message
+          selected-window
           set!frame-windows set!window-children set!window-height
           set!window-left set!window-parent set!window-top
-          set-window-buffer! set!window-width set-window-point!
+          set-window-buffer! set!window-width
           window-buffer window-children
           window-edges window-frame window-height window-left window-list
           window-parent
           window-body-width window-top window-width
-          %window-start set!%window-start
-          %window-start-at-line-beg set!%window-start-at-line-beg
-          %window-end-pos set!%window-end-pos
-          %window-end-vpos set!%window-end-vpos
-          %window-end-valid? set!%window-end-valid?
-          %window-base-line-number set!%window-base-line-number
-          %window-base-line-pos set!%window-base-line-pos
-          set-window-start! window-start-at-line-beg)
+          %window-start
+          %window-start-at-line-beg)
     ;; `display-buffer' puts what it shows in the buffer list's
     ;; most-recently-used order, which is Emacs's `record_buffer';
     ;; `pop-to-buffer' makes a buffer current by name when a string is
     ;; what it was given, and `switch-to-buffer' does the same.
     (only (schemacs editor buffer)
-          bury-buffer buffer-local-value default-directory erase-buffer
+          bury-buffer default-directory erase-buffer
           get-buffer-create
           kill-all-local-variables kill-buffer other-buffer record-buffer!
           *scratch-buffer-name*
           set-buffer
           set!buffer-default-directory set!buffer-file-name set!buffer-read-only
-          set-buffer-modified-p set-buffer-local-value!
+          set-buffer-modified-p
           with-current-buffer *inhibit-read-only*)
     ;; `run-hooks' is `subr.el''s, and the two temp-buffer hooks below
     ;; are run through it.
@@ -564,7 +555,7 @@
             ;; X))', and its `get-buffer' answers a *buffer* argument too.
             ;; This tree's does not - `buffer.sld''s takes a name - so the
             ;; buffer case is spelled out.
-            ((text-editor-type? buffer-or-name) buffer-or-name)
+            ((bufferp buffer-or-name) buffer-or-name)
             ((string? buffer-or-name) (get-buffer-create buffer-or-name))
             (else (error "not a buffer or a buffer name" buffer-or-name))))
 

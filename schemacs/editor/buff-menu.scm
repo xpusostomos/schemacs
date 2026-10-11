@@ -45,19 +45,18 @@
     (scheme char)
     (prefix (schemacs editor keymap) km:)
     (only (schemacs editor command)
-          define-command)
+          current-prefix-arg define-command)
     (only (schemacs editor engine)
-          buffer-pt text-editor-set-cursor text-editor-modified?
-          text-editor-set-modified! text-editor-read-only?
+          text-editor-set-cursor buffer-modified-p
+          set-buffer-modified-p buffer-read-only?
           buffer-beg buffer-z
-          text-editor-set-read-only!
-          text-editor-file-name text-editor-buffer-name text-editor-insert
-          text-editor-delete-from-cursor text-editor-undo-disable!
-          text-editor-undo-enable! text-editor-get-start-of-line
+          set!buffer-read-only
+          text-editor-file-name
+          text-editor-get-start-of-line
           text-editor-get-end-of-line)
     (only (schemacs editor frame)
           *current-frame* set!frame-message
-          frame-selected-window frame-width window-buffer window-list)
+          frame-width)
     (only (schemacs editor keymap) define-key *default-keymap*)
     ;; The list's own keys are the buffer's, which is what the lookup
     ;; searches first. `CURRENT-BUFFER' is what the commands act on, and
@@ -68,16 +67,15 @@
     ;; current buffer there, and `Buffer-menu-beginning' has to put
     ;; *its* point on the first line.
     (only (schemacs editor buffer)
-          buffer-list buffer-live-p buffer-local-keymap buffer-local-value
-          buffer-modified-p
+          buffer-list buffer-live-p buffer-local-value
           buffer-name bury-buffer current-buffer get-buffer-create
-          kill-buffer set!buffer-local-keymap set!buffer-name
+          kill-buffer set!buffer-local-keymap
           set-buffer-local-value!
           with-current-buffer)
     ;; `quit-window' is `window.el''s and lives in `(schemacs editor
     ;; window)'; this library binds it and does not define it.
     (only (schemacs editor window)
-          delete-window display-buffer get-buffer-window quit-window
+          display-buffer quit-window
           switch-to-buffer switch-to-buffer-other-window)
     ;; `Buffer-menu-execute' saves the buffers marked `s' with
     ;; `save-buffer', as Emacs's does - in the buffer, so it writes that
@@ -91,8 +89,7 @@
     (only (schemacs editor tabulated-list)
           *tabulated-list-entries* *tabulated-list-format*
           tabulated-list-get-id tabulated-list-print)
-    (only (schemacs editor xdisp) format-mode-line)
-    (only (guile) string-index))
+    )
 
   (export
    Buffer-menu-beginning
@@ -246,9 +243,9 @@
         (list (cond ((eq? buffer old-buffer) ".")
                     (mark (string mark))
                     (else " "))
-              (if (text-editor-read-only? buffer) "%" " ")
+              (if (buffer-read-only? buffer) "%" " ")
               (cond ((eq? mark *Buffer-menu-save-char*) "S")
-                    ((text-editor-modified? buffer) "*")
+                    ((buffer-modified-p buffer) "*")
                     (else " "))
               (Buffer-menu--pretty-name (buffer-name buffer))
               (number->string (- (buffer-z buffer) (buffer-beg buffer)))
@@ -330,9 +327,9 @@
       ;; what makes the entries again. The titles come from the format, as
       ;; they do in Emacs - `tabulated-list-print' draws them.
       ;;--------------------------------------------------------------
-      (text-editor-set-read-only! buffer #f)
+      (set!buffer-read-only buffer #f)
       (tabulated-list-print buffer)
-      (text-editor-set-read-only! buffer #t)
+      (set!buffer-read-only buffer #t)
       (Buffer-menu-beginning))
 
     (define-command (list-buffers)
@@ -439,17 +436,27 @@
              (Buffer-menu--set-mark! buffer *Buffer-menu-save-char*)
              (Buffer-menu-redraw! (current-buffer)))
            (Buffer-menu--move-down!)))
-    (define-command (Buffer-menu-not-modified)
-      ;; GNU Emacs's `Buffer-menu-not-modified' (~): say the buffer on this
-      ;; line has not been changed, so that saving it is not offered.
+    (define-command (Buffer-menu-not-modified arg)
+      ;; GNU Emacs's `Buffer-menu-not-modified' (`buff-menu.el:585'):
+      ;;
+      ;;     (interactive "P" Buffer-menu-mode)
+      ;;     (with-current-buffer (Buffer-menu-buffer t)
+      ;;       (set-buffer-modified-p arg))
+      ;;
+      ;; ARG is the raw prefix, and a non-nil one marks the buffer
+      ;; *modified* rather than unmodified - `set-buffer-modified-p'
+      ;; treats any non-nil as "modified". Emacs then updates column 2
+      ;; with `tabulated-list-set-col'; this redraws the list.
       ;;--------------------------------------------------------------
-      
-      "Clear the buffer's modified flag (~)."
-      (interactive)
-
-         (let ((buffer (Buffer-menu-buffer)))
-           (when buffer (text-editor-set-modified! buffer #f))
-           (Buffer-menu-redraw! (current-buffer))))
+      "Mark the buffer on this line as unmodified (no changes to save).
+If ARG is non-nil (interactively, with a prefix argument), mark
+it as modified."
+      (interactive (list (current-prefix-arg)))
+      (let ((buffer (Buffer-menu-buffer)))
+        (when buffer
+          (with-current-buffer buffer
+            (set-buffer-modified-p arg))))
+      (Buffer-menu-redraw! (current-buffer)))
     (define-command (Buffer-menu-bury)
       ;; GNU Emacs's `Buffer-menu-bury' (b): move the buffer on this line
       ;; to the end of the buffer list, so that `other-buffer' does not
@@ -472,8 +479,8 @@
 
          (let ((buffer (Buffer-menu-buffer)))
            (when buffer
-             (text-editor-set-read-only! buffer
-                                         (not (text-editor-read-only? buffer)))))
+             (set!buffer-read-only buffer
+                                         (not (buffer-read-only? buffer)))))
          (Buffer-menu-redraw! (current-buffer)))
     (define-command (Buffer-menu-this-window)
       ;; GNU Emacs's `Buffer-menu-this-window' (RET, f): show the buffer on

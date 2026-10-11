@@ -11,7 +11,7 @@
  (prefix (schemacs editor dispnew) dn:)
  (only (oop goops) define-class make)
  (only (schemacs editor engine)
-        new-text-editor text-editor-insert text-editor-set-cursor
+        allocate-buffer text-editor-insert text-editor-set-cursor
         set!text-editor-mark)
  (only (schemacs editor buffer) set-buffer-local-value!)
  (only (schemacs editor textprop) put-text-property))
@@ -204,7 +204,7 @@
 (dn:current-display (make <test-display>))
 
 (define (buffer-with-face text from to face)
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed text)
     (put-text-property from to 'face face ed)
     ed))
@@ -219,7 +219,7 @@
 ;; been failing, unnoticed, because `tools/run-suites.py' could not see
 ;; failures in a suite that aborts.
 (test-equal '(1 ((0 6 0)))
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed "abcdef")
     (let ((runs (xd:line-face-runs ed 1 "abcdef")))
       (list (length runs) runs))))
@@ -270,7 +270,7 @@
 ;; as the commands do, then exercise the same per-character run walk that
 ;; redisplay uses.
 (define (region-buffer text point mark active?)
-  (let ((ed (new-text-editor)))
+  (let ((ed (allocate-buffer)))
     (text-editor-insert ed text)
     (text-editor-set-cursor ed point)
     (set!text-editor-mark ed mark)

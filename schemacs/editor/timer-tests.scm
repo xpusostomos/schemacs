@@ -17,7 +17,7 @@
  (prefix (schemacs editor keyboard) kb:)
  (prefix (schemacs editor frame) fr:)
  (prefix (schemacs editor faces) f:)
- (only (schemacs editor engine) new-text-editor)
+ (only (schemacs editor engine) allocate-buffer)
  (only (oop goops) make))
 
 (setvbuf (current-output-port) 'none)
@@ -111,7 +111,7 @@
 ;; The cursor's visibility - what the blink turns off and on
 ;;------------------------------------------------------------------
 
-(let* ((ed (new-text-editor))
+(let* ((ed (allocate-buffer))
        (frame (fr:new-frame ed 24 80)))
   (parameterize ((fr:*current-frame* frame))
     ;; shown to begin with

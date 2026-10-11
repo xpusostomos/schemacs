@@ -38,7 +38,7 @@
           text-editor-undo-boundary!)
     ;; `point' is one-based here and the engine's cursor zero-based,
     ;; which is the conversion `casify-region''s positions go through.
-    (only (schemacs editor editfns) point save-excursion
+    (only (schemacs editor editfns) save-excursion
           region-beginning region-end)
     ;; `WORD_CONSTITUENT', from its Emacs home: it was in `simple.sld`,
     ;; which put `casefiddle.c` above `simple.el` and closed a cycle
@@ -53,7 +53,6 @@
     ;; They are in their Emacs home now; see `syntax.sld`.
     (only (schemacs editor syntax) word-run-end word-run-start)
     (only (schemacs editor keymap) define-key *default-keymap*)
-    (only (guile) format)
     )
 
   (export

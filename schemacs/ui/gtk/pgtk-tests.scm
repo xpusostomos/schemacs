@@ -37,7 +37,7 @@
  (prefix (schemacs editor dispnew) dn:)
  (prefix (schemacs editor frame) fr:)
  (only (schemacs editor engine)
-        new-text-editor text-editor-insert text-editor-set-cursor
+        allocate-buffer text-editor-insert text-editor-set-cursor
         set!text-editor-mark)
  (only (schemacs editor buffer) buffer-local-value set-buffer-local-value!)
  (only (schemacs editor textprop) put-text-property)
@@ -151,7 +151,7 @@
   ;; Dispatch KEY as the GTK display would, then two C-f, and answer the
   ;; mark as the region code sees it.
   (let* ((display (new-display))
-         (ed (new-text-editor))
+         (ed (allocate-buffer))
          (frame (fr:new-frame ed 24 80)))
     (parameterize ((fr:*current-frame* frame))
       (text-editor-insert ed "hello world")
@@ -218,7 +218,7 @@
   ;; A frame on a display, with the region [MARK, POINT) active, rendered
   ;; by the real `render!'.
   (let* ((d (new-display))
-         (ed (new-text-editor)))
+         (ed (allocate-buffer)))
     (text-editor-insert ed text)
     (text-editor-set-cursor ed point)
     (set!text-editor-mark ed mark)
@@ -318,7 +318,7 @@
 
 (define (render-one-character ch)
   (let* ((d (new-display))
-         (ed (new-text-editor)))
+         (ed (allocate-buffer)))
     (text-editor-insert ed (string ch))
     (let ((frame (fr:new-frame ed 24 80)))
       (parameterize ((fr:*current-frame* frame))
@@ -365,7 +365,7 @@
   ;; puts a `lazy-highlight' overlay on each match in the window. #f for
   ;; no search at all.
   (let* ((d (new-display))
-         (ed (new-text-editor)))
+         (ed (allocate-buffer)))
     (text-editor-insert ed text)
     (text-editor-set-cursor ed 0)
     (put-text-property face-start face-end 'face 'font-lock-keyword-face ed)
@@ -446,7 +446,7 @@
 (define (render-plain-search text pattern)
   ;; TEXT with no text properties at all, and PATTERN highlighted.
   (let* ((d (new-display))
-         (ed (new-text-editor)))
+         (ed (allocate-buffer)))
     (text-editor-insert ed text)
     (text-editor-set-cursor ed 0)
     (let ((frame (fr:new-frame ed 24 80)))
@@ -468,7 +468,7 @@
 ;; overlay carrying the face, so the display merges it like any other
 ;; overlay - `isearch-highlight' makes it, `isearch-dehighlight' removes
 ;; it, and the lazy highlighter makes one per other match.
-(let* ((ed (new-text-editor)))
+(let* ((ed (allocate-buffer)))
   (text-editor-insert ed "alpha beta alpha")
   (text-editor-set-cursor ed 0)
   (parameterize ((fr:*current-frame* (fr:new-frame ed 24 80)))
@@ -529,7 +529,7 @@
   ;; A frame on a display showing TEXT, with the last character's
   ;; `display' property set to a long string when PROP?.
   (let* ((d (new-display))
-         (ed (new-text-editor)))
+         (ed (allocate-buffer)))
     (text-editor-insert ed text)
     (text-editor-set-cursor ed 0)
     (when prop?
@@ -639,7 +639,7 @@
       (dn:current-display d1)
       (pt:initialize-pgtk-faces! d1)
       (pt:initialize-pgtk-faces! d2)
-      (let ((ed (new-text-editor)))
+      (let ((ed (allocate-buffer)))
         (text-editor-insert
          ed (apply string-append
                    (map (lambda (i) "aaaaaaaaaa\n")
@@ -690,7 +690,7 @@
       (dn:current-display d1)
       (pt:initialize-pgtk-faces! d1)
       (pt:initialize-pgtk-faces! d2)
-      (let* ((ed (new-text-editor))
+      (let* ((ed (allocate-buffer))
              (f1 (fr:new-frame-on d1 ed 24 80))
              (f2 (fr:new-frame-on d2 ed 24 80)))
         (parameterize ((fr:*current-frame* f1))
@@ -724,7 +724,7 @@
   (pt:note-mouse-movement d column row))
 
 (let* ((d (new-display))
-       (f (fr:new-frame-on d (new-text-editor) 24 80)))
+       (f (fr:new-frame-on d (allocate-buffer) 24 80)))
   (parameterize ((fr:*current-frame* f))
     (test-equal #f (pt:pgtk-mouse-moved d))
     (test-equal "the first report is a movement, there being no glyph yet"
@@ -741,7 +741,7 @@
 (test-equal "the glyph a report is compared against is its cell"
   (list 7 9 1 1)
   (let ((d (new-display)))
-    (parameterize ((fr:*current-frame* (fr:new-frame-on d (new-text-editor) 24 80)))
+    (parameterize ((fr:*current-frame* (fr:new-frame-on d (allocate-buffer) 24 80)))
       (xd:remember-mouse-glyph (fr:*current-frame*) 7 9))))
 
 ;;------------------------------------------------------------------
@@ -765,7 +765,7 @@
   ;; FRAME)' (`pgtkselect.c:151-160').
   ;;--------------------------------------------------------------
   (let* ((d (new-display))
-         (f (fr:new-frame-on d (new-text-editor) 24 80)))
+         (f (fr:new-frame-on d (allocate-buffer) 24 80)))
     (set! (pt:pgtk-selections d) (list (list selection value 7 f)))
     d))
 

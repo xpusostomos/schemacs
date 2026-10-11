@@ -48,17 +48,17 @@
           ;; measured in - see `posn-at-x-y'.
           column-width line-height)
     (only (schemacs editor engine)
-         string-search-forward text-editor-buffer-name text-editor-text-props
+         text-editor-buffer-name text-editor-text-props
          text-editor-file-name marker-position
-         text-editor-cursor-column text-editor-cursor-line
+         text-editor-cursor-column
          buffer-pt text-editor-set-cursor text-editor-mark
          text-editor-get-end-of-line
          text-editor-get-start-of-line make-buffer-string fetch-char
          count-lines
          buffer-beg
          buffer-beg-unchanged set!buffer-beg-unchanged!
-         text-editor-modified?
-         text-editor-read-only?
+         buffer-modified-p
+         buffer-read-only?
          buffer-z text-editor-to-string)
     (only (schemacs editor frame)
          *current-frame* *echo-area-buffer* *echo-area-prompt*
@@ -87,7 +87,7 @@
          ;; display begins, where its last glyph was, and the line-number
          ;; cache `%l' counts from
          %window-start set-window-start!
-         %window-end-pos %window-end-vpos %window-end-valid?
+         %window-end-pos %window-end-valid?
          set!%window-end-pos set!%window-end-vpos set!%window-end-valid?
          %window-base-line-number %window-base-line-pos
          set!%window-base-line-number set!%window-base-line-pos
@@ -95,12 +95,11 @@
          ;; auto hscrolling read and write
          %window-hscroll %window-min-hscroll
          %window-old-point %window-suspend-auto-hscroll?
-         set!%window-hscroll set!%window-min-hscroll
+         set!%window-hscroll
          set!%window-old-point set!%window-suspend-auto-hscroll?)
     (only (schemacs editor disp-table)
          char-display-cursor-width char-display-width
-         char-display-glyph display-text-width
-         expand-line-display expand-line-glyphs line-display-offsets)
+         char-display-glyph display-text-width)
     ;; `current-line-display-column' is `indent.c''s walk - it moved out of
     ;; `disp-table.sld' on 2026-10-06, when it stopped being a second copy
     ;; of `scan_for_column' and became that function asked one question.
@@ -129,7 +128,6 @@
           ;; the mode line's mode name is the buffer's `mode-name'
           mode-name
           ;; and the overlays at a position are merged into its face
-          buffer-overlays
           overlay-end overlay-get overlay-priority overlay-start
           overlays-at overlays-in)
 
@@ -1371,13 +1369,13 @@
                         column))))
           ;; `%*' is `%' read-only, `*' modified, `-' neither; `%+' is `*'
           ;; modified, `%' read-only, `-' neither; `%&' is `*' modified
-          ((#\*) (if (text-editor-read-only? ed)
+          ((#\*) (if (buffer-read-only? ed)
                      "%"
-                     (if (text-editor-modified? ed) "*" "-")))
-          ((#\+) (if (text-editor-modified? ed)
+                     (if (buffer-modified-p ed) "*" "-")))
+          ((#\+) (if (buffer-modified-p ed)
                      "*"
-                     (if (text-editor-read-only? ed) "%" "-")))
-          ((#\&) (if (text-editor-modified? ed) "*" "-"))
+                     (if (buffer-read-only? ed) "%" "-")))
+          ((#\&) (if (buffer-modified-p ed) "*" "-"))
           ((#\i) (number->string (- (buffer-z ed) (buffer-beg ed))))
           ((#\I) (let ((n (- (buffer-z ed) (buffer-beg ed))))
                    (cond ((< n 10000) (number->string n))

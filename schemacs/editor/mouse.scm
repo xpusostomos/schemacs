@@ -47,7 +47,6 @@
     (only (schemacs editor subr) event-start event-end posn-point posn-window
           ;; where the pointer is, which a drag that has left its window
           ;; asks for
-          posn-x-y
           ;; where a release lands if the tracking loop did not eat it
           ignore)
     (only (schemacs editor frame)
@@ -61,8 +60,7 @@
     ;; call in `mouse-drag-track': the mark that was there goes on the
     ;; ring rather than being lost.
     (only (schemacs editor simple)
-          push-mark pop-mark set-mark activate-mark deactivate-mark
-          region-active-p use-region-p)
+          push-mark pop-mark set-mark deactivate-mark)
     (only (schemacs editor engine)
           set!text-editor-deactivate-mark! text-editor-mark)
     (only (schemacs editor buffer)
@@ -71,12 +69,11 @@
     ;; a drag repaints as it moves, which is what Emacs's tracking does
     ;; with `redisplay'.
     (only (schemacs editor xdisp)
-          redisplay-frames! *mode-line-format* track-mouse vertical-motion
+          *mode-line-format* track-mouse vertical-motion
           window-end window-start)
     ;; `mouse-position' - the pointer's own frame row, which is what
     ;; decides whether a drag has left the window - is the display's
     ;; answer, so the display is what is asked.
-    (only (schemacs editor dispnew) current-display line-height)
     (only (schemacs editor keymap) define-key *default-keymap*)
     ;; a sparse keymap to hand to `set-transient-map', which is Emacs's
     ;; `(make-sparse-keymap)' in that same place
