@@ -56,12 +56,15 @@
          buffer-pt text-editor-set-cursor text-editor-mark
          text-editor-get-end-of-line
          text-editor-get-start-of-line make-buffer-string fetch-char
-         count-lines
-         buffer-beg
-         buffer-beg-unchanged set!buffer-beg-unchanged!
          buffer-modified-p
          buffer-read-only?
-         buffer-z text-editor-to-string)
+         text-editor-to-string)
+    ;; `count-lines' is `xdisp.c''s own (`:29892') and reads straight from
+    ;; this file's library - it is placed in `fns.scm' beside the
+    ;; `line-number-at-pos' that wants it, because this library is the top
+    ;; of the graph and a definition up here could not be reached from
+    ;; below. See the note on it there.
+    (only (schemacs editor fns) count-lines)
     (only (schemacs editor frame)
          *current-frame* *echo-area-buffer* *echo-area-prompt*
          *frame-cursor-type* *frame-focus* frame-height frame-width
@@ -127,11 +130,21 @@
           buffer-cursor-type buffer-hscroll-margin buffer-hscroll-step
           buffer-local-value buffer-overwrite-mode buffer-truncate-lines
           buffer-word-wrap
+          ;; the buffer's own bounds and text, which the `%l' cache's
+          ;; `BEG_UNCHANGED' accessors below read - `BEG' and `Z' are
+          ;; `buffer.h:992''s macros and come from their own library, not
+          ;; through the engine facade
+          buffer-beg buffer-z text-editor-text
           ;; the mode line's mode name is the buffer's `mode-name'
           mode-name
           ;; and the overlays at a position are merged into its face
           overlay-end overlay-get overlay-priority overlay-start
           overlays-at overlays-in)
+    ;; `BEG_UNCHANGED' (`buffer.h:156') is a field of the buffer's *text* -
+    ;; `buffer-text' is this tree's `struct buffer_text' - and the two
+    ;; accessors below are the only readers and writers of it here.
+    (only (schemacs editor buffer-text)
+          buffer-text-beg-unchanged set!buffer-text-beg-unchanged)
 
     ;; `overwrite-mode''s two mode-line lighters are `simple.el''s and
     ;; live beside the commands that set the variable; `minor-mode-alist'
@@ -1166,6 +1179,40 @@
       ;; then the line number may be omitted from the mode line." 200.
       ;;--------------------------------------------------------------
       (make-parameter 200))
+
+    (define (buffer-beg-unchanged ed)
+      ;; GNU Emacs's `BEG_UNCHANGED' (`buffer.h:156'): how many characters
+      ;; at the beginning of the buffer are known not to have changed
+      ;; since `set!buffer-beg-unchanged!' was last called. The `%l' cache
+      ;; is only good while this still reaches past the line it remembers:
+      ;;
+      ;;     #define BASE_LINE_NUMBER_VALID_P(w)                      \
+      ;;        (!current_buffer->clip_changed                     \
+      ;;         && BEG_UNCHANGED >= (w)->base_line_pos)          \
+      ;;
+      ;; (`xdisp.c:19393').
+      ;;
+      ;; **Both accessors live here because both of the C's ends of this
+      ;; field are `xdisp.c`'s.** The read is that validity rule, and the
+      ;; write is `xdisp.c:18327`'s `BUF_BEG_UNCHANGED (b) = BUF_GPT (b)
+      ;; - BUF_BEG (b)` - "everything is current as of now". `insdel.c`
+      ;; shrinks the field as it modifies (`:1607', `:1749', `:2060') and
+      ;; does that through `buffer-text` directly, which is where the
+      ;; field really is.
+      ;;--------------------------------------------------------------
+      (buffer-text-beg-unchanged (text-editor-text ed)))
+
+    (define (set!buffer-beg-unchanged! ed)
+      ;; Say that everything the buffer holds is current as of now, so
+      ;; that `buffer-beg-unchanged' counts from here. The C does this
+      ;; from `mark_window_display_accurate_1', once per redisplay
+      ;; (`xdisp.c:18327'); here the only reader is the `%l' cache, so it
+      ;; is done when that cache is written - the same statement, made at
+      ;; the one moment it is needed.
+      ;;--------------------------------------------------------------
+      (set!buffer-text-beg-unchanged
+       (text-editor-text ed)
+       (- (buffer-z ed) (buffer-beg ed))))
 
     (define (mode-line-line-number window)
       ;; What `%l' prints: the line point is on, counting from 1 - GNU

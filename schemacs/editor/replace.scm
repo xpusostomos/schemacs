@@ -39,9 +39,12 @@
           *current-frame* frame-selected-window recenter set!frame-message
           set-message!)
     (only (schemacs editor editfns)
-          barf-if-buffer-read-only bobp char-after
+          bobp char-after
           eobp goto-char insert point point-min point-max
           save-excursion)
+    ;; `barf-if-buffer-read-only' is `buffer.c`'s and lives in
+    ;; `buffer.scm' now - see the note in `keyboard.scm'.
+    (only (schemacs editor buffer) barf-if-buffer-read-only)
     ;; `transient-mark-mode' is `buffer.c''s variable here, beside
     ;; `mark-active'.
     (only (schemacs editor simple)

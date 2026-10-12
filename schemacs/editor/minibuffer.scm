@@ -47,7 +47,7 @@
           current-prefix-arg define-command run-command uarg->integer
           *command-table* command-value-of command-interactive-spec)
     (only (schemacs editor engine)
-    allocate-buffer buffer-beg make-buffer-string count-lines
+    allocate-buffer buffer-beg make-buffer-string
           buffer-beg buffer-z
           text-editor-cursor-column text-editor-cursor-line
           text-editor-delete-from-cursor buffer-pt
@@ -93,13 +93,17 @@
           quit-window
           split-main-window-below switch-to-buffer-other-window
           window-min-height)
-    ;; `line-number-at-pos' is `editfns.c''s: the default `goto-line'
-    ;; offers is the line point is on. The search primitives are
-    ;; `search.c''s, which have their own library now (`zap-to-char'
-    ;; walks with them).
+    ;; `line-number-at-pos' is `fns.c''s (`fns.c:6688'), re-exported by
+    ;; `editfns' so that its readers here do not move: the default
+    ;; `goto-line' offers is the line point is on. It is read straight
+    ;; from `fns' - with the `count_lines' it counts with, which is
+    ;; `xdisp.c''s and sits beside it there - because `editfns' only
+    ;; re-exports the one name. The search primitives are `search.c''s,
+    ;; which have their own library now (`zap-to-char' walks with them).
     (only (schemacs editor editfns)
-          char-after goto-char insert line-end-position
-          line-number-at-pos message point)
+          char-after delete-region goto-char insert line-end-position
+          line-number-at-pos message point point-max point-min)
+    (only (schemacs editor fns) count-lines)
     ;; `forward-char' is `cmds.c''s and lives in `(schemacs editor cmds)'.
     (only (schemacs editor cmds) forward-char)
     (only (schemacs editor search) search-backward search-forward)
@@ -362,18 +366,21 @@ read-number-history
     (define (minibuffer-set-contents! mb text)
       ;; Replace what has been typed, leaving point at the end, the way
       ;; stepping through the history does.
+      ;;
+      ;; GNU Emacs's shape is `goto-history-element`'s body
+      ;; (`simple.el:3100'): point to the end, `delete-minibuffer-contents`
+      ;; (minibuf.c - the prompt sits *beside* this buffer here rather than
+      ;; in it, so the whole of it goes), then `insert`. The old body
+      ;; parked point at the beginning before deleting, because the
+      ;; engine's delete runs *forward* from the cursor - a wart of that
+      ;; primitive, not of this function - and with `delete-region`, which
+      ;; takes both ends, it is gone.
       ;;--------------------------------------------------------------
       (let ((ed (minibuffer-editor mb)))
         (text-editor-undo-disable! ed)
-        ;; the cursor goes to the beginning *before* the deletion: the
-        ;; engine deletes forward from the cursor, so deleting first, at
-        ;; the end where the cursor is, deletes nothing - and the text
-        ;; that was there stayed in front of the new text. Stepping
-        ;; through the history, and choosing a completion, both put the
-        ;; answer one keystroke in front of the previous one.
-        (text-editor-set-cursor ed (buffer-beg ed))
-        (text-editor-delete-from-cursor ed (- (buffer-z ed) (buffer-beg ed)))
-        (text-editor-insert ed text)))
+        (with-current-buffer ed
+          (delete-region (point-min) (point-max))
+          (insert text))))
 
     (define (minibuffer-insert! text)
       ;; Add TEXT to what has been typed, for the completion commands.
@@ -667,18 +674,31 @@ read-number-history
                            (if (not (pair? rest))
                                (reverse acc)
                                (loop (cdr rest) (cons (car rest) acc)))))
-                    ;; the window comes *first*, so that the fill below
-                    ;; reads the window's real width (the layout's column
-                    ;; count is a function of it) - Emacs displays the
-                    ;; buffer and then fills it, and so does this
-                    (window (completion-display-window
-                             (get-buffer-create "*Completions*")))
-                    (buffer (display-completion-list
-                             all (substring typed base-size (string-length typed))))
-                    (window2 (completion-fit-window buffer)))
-               (set-buffer-local-value! buffer 'completion-base-position
-                                        (list base-size (string-length typed)))
-               (record-buffer! buffer))))))
+                    (buffer (get-buffer-create "*Completions*")))
+               ;; Emptying the list is the *caller's* work, which is
+               ;; GNU Emacs's `temp-buffer-window-setup` (`window.el:91')
+               ;; run by this command through `with-current-buffer-window`.
+               ;; `display-completion-list` only appends - it goes to
+               ;; `point-max` and inserts - so without this the list before
+               ;; would still stand in front of the new one. The recorded
+               ;; selection goes with it: the range it names would point
+               ;; into the list being thrown away.
+               (clear-completions-selection!)
+               (with-current-buffer buffer
+                 (set!buffer-local-keymap buffer completion-list-mode-map)
+                 (set!buffer-read-only buffer #f)
+                 (erase-buffer))
+               (let* (;; the window comes *first*, so that the fill below
+                      ;; reads the window's real width (the layout's column
+                      ;; count is a function of it) - Emacs displays the
+                      ;; buffer and then fills it, and so does this
+                      (window (completion-display-window buffer))
+                      (filled (display-completion-list
+                               all (substring typed base-size (string-length typed))))
+                      (window2 (completion-fit-window filled)))
+                 (set-buffer-local-value! filled 'completion-base-position
+                                          (list base-size (string-length typed)))
+                 (record-buffer! filled)))))))
 
     (define-command (minibuffer-complete)
       ;; GNU Emacs's `minibuffer-complete': complete as far as the text
@@ -2024,16 +2044,17 @@ read-number-history
       ;; hilit-commonality' does them to the candidate *strings* in Emacs,
       ;; and a string here cannot carry a property, so they are put on
       ;; the buffer text here instead - see `insert-completion-cell!'.
+      ;;
+      ;; **It appends and does not erase**, which is Emacs's contract: the
+      ;; C goes to `point-max' and inserts there, and what empties the list
+      ;; is the *caller* - `temp-buffer-window-setup` (`window.el:91'), run
+      ;; by `minibuffer-completion-help` through `with-current-buffer-window`.
+      ;; The erase used to be here, which meant this function could not be
+      ;; used the way Emacs's is, to add to a list already on screen.
       ;;--------------------------------------------------------------
       (let ((buffer (get-buffer-create "*Completions*")))
-        ;; the list is about to be thrown away, so the selection in it
-        ;; is too: the recorded range would point into the new list.
-        (clear-completions-selection!)
         (with-current-buffer buffer
-          (set!buffer-local-keymap buffer completion-list-mode-map)
-          (set!buffer-read-only buffer #f)
-          (text-editor-set-cursor buffer (buffer-beg buffer))
-          (text-editor-delete-from-cursor buffer (- (buffer-z buffer) (buffer-beg buffer)))
+          (goto-char (point-max))
           (*completions-common-substring* common-substring)
           (insert-completions-header! buffer (length completions))
           (completion--insert-strings buffer completions)

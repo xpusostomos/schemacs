@@ -2861,6 +2861,21 @@
 ;; the middle of a buffer whose text carries properties, which is where the
 ;; interval code used to come apart. The help has to end up above the
 ;; heading and the candidates, and the tree has to survive it.
+;;
+;; These tests call `display-completion-list` directly, so they stand in
+;; for its *caller* and do the caller's half: `display-completion-list`
+;; only appends now (GNU Emacs's contract - it goes to `point-max` and
+;; inserts), and what empties the list is `temp-buffer-window-setup`
+;; (`window.el:91`), which `minibuffer-completion-help` runs. Without the
+;; wipe the previous list would still be in front of the new one, and
+;; without clearing `buffer-read-only` the append would refuse.
+(define (fill-completions! completions common-substring)
+  (let ((buffer (get-buffer-create "*Completions*")))
+    (set!buffer-read-only buffer #f)
+    (text-editor-set-cursor buffer (buffer-beg buffer))
+    (text-editor-delete-from-cursor buffer (- (buffer-z buffer) (buffer-beg buffer))))
+  (display-completion-list completions common-substring))
+
 (test-equal (string-append
              "Type M-RET on a completion to select it.\n"
              "Type M-<down> or M-<up> to move point between completions.\n"
@@ -2870,7 +2885,7 @@
              "apple.txt")
   (let ((frame (message-frame)))
     (parameterize ((*current-frame* frame))
-      (display-completion-list '("apricot.txt" "apple.txt") "ap")
+      (fill-completions! '("apricot.txt" "apple.txt") "ap")
       (text-editor-to-string (get-buffer "*Completions*")))))
 
 ;; With more candidates than a single column of them, the layout Emacs's
@@ -2886,7 +2901,7 @@
              "af")
   (let ((frame (message-frame)))
     (parameterize ((*current-frame* frame))
-      (display-completion-list '("aa" "ab" "ac" "ad" "ae" "af") "")
+      (fill-completions! '("aa" "ab" "ac" "ad" "ae" "af") "")
       (let* ((text (text-editor-to-string (get-buffer "*Completions*")))
              (after (string-append "possible completions:\n"))
              (at (string-contains text after)))
@@ -2900,7 +2915,7 @@
   (let ((frame (message-frame)))
     (parameterize ((*current-frame* frame)
                    (*completions-format* 'one-column))
-      (display-completion-list '("aa" "ab" "ac") "")
+      (fill-completions! '("aa" "ab" "ac") "")
       (let* ((text (text-editor-to-string (get-buffer "*Completions*")))
              (after (string-append "possible completions:\n"))
              (at (string-contains text after)))
@@ -2926,7 +2941,7 @@
                    (buffer (get-buffer-create "*Completions*")))
               (parameterize ((*current-frame* frame))
                 (display-buffer buffer)
-                (display-completion-list names "")
+                (fill-completions! names "")
                 (let* ((text (text-editor-to-string buffer))
                        (at (string-contains text "possible completions:\n"))
                        (tail (substring text (+ at (string-length
@@ -2957,6 +2972,7 @@
         ;; does the same thing (`set_buffer_intervals (b, NULL)').
         (let ((fresh (get-buffer-create "*Completions*")))
           (set!buffer-intervals fresh #f)
+          (set!buffer-read-only fresh #f)
           (text-editor-set-cursor fresh 0)
           (text-editor-delete-from-cursor fresh (- (buffer-z fresh) (buffer-beg fresh))))
         (display-completion-list candidates common-substring)

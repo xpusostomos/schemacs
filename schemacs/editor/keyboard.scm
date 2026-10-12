@@ -43,7 +43,12 @@
     (only (schemacs editor engine)
           allocate-buffer
           make-buffer-string
-          text-editor-deactivate-mark set!text-editor-deactivate-mark!)
+          buffer-pt
+          ;; the two the command loop must set before every command -
+          ;; `keyboard.c`'s `point_before_last_command_or_undo`
+          ;; (`:232`), which undo.c reads
+          *point-before-last-command-or-undo*
+          *buffer-before-last-command-or-undo*)
     (only (schemacs editor command)
           *last-command-event*
           command-interactive-spec command-name command-record-of
@@ -77,15 +82,23 @@
     ;; like `*Completions*' its own bindings - and which buffer is current.
     (only (schemacs editor buffer)
           buffer-local-keymap buffer-overwrite-mode
-          current-buffer mark-active transient-mark-mode)
+          current-buffer mark-active transient-mark-mode
+          ;; `deactivate-mark' is a buffer-local *variable*
+          ;; (`keyboard.c:14030'), not a slot of the buffer record: the
+          ;; command loop clears it before every command and applies it
+          ;; after, reading and writing it by name.
+          buffer-local-value set-buffer-local-value!)
     (only (schemacs editor simple)
           *last-change-was-undo* *last-command* *this-command*
           *select-active-regions*
           deactivate-mark clear-prefix! delete-char pending-uarg
           place-undo-boundary!
           undo undo-redo update-prefix!)
-    (only (schemacs editor editfns)
-          barf-if-buffer-read-only insert)
+    (only (schemacs editor editfns) insert)
+    ;; `barf-if-buffer-read-only' is `buffer.c`'s (`:2453'), and it lives
+    ;; in `buffer.scm' now - `insdel.c`'s `prepare_to_modify_buffer_1' is
+    ;; its main caller and `insdel.scm' is below `editfns.scm'.
+    (only (schemacs editor buffer) barf-if-buffer-read-only)
     ;; `uarg->integer' is `callint.c''s, in the command library the
     ;; commands' interactive specs come from.
     (only (schemacs editor command) uarg->integer current-prefix-arg
@@ -358,7 +371,7 @@
              (buffer (current-buffer)))
         ;; Emacs clears its buffer-local deferred flag before every command;
         ;; edits and region commands may set it again while they run.
-        (set!text-editor-deactivate-mark! buffer #f)
+        (set-buffer-local-value! buffer 'deactivate-mark #f)
         ;; `this_command' is what is running - and a command may *change*
         ;; it (`kill-region' renames itself to itself, `yank-pop' says
         ;; `yank'), which is why the promotion to `last-command' reads it
@@ -387,6 +400,15 @@
         ;; *named* - a `let' would leave the prompt outside it.
         (parameterize ((*coding-system-for-read* coding)
                        (*coding-system-for-write* coding))
+        ;; "Record point and buffer, so we can put point into the undo
+        ;; information if necessary" - `keyboard.c:1534`, which the
+        ;; command loop does before running the command. `record_point`
+        ;; (`undo.c:50`) reads them to push the integer entry that puts
+        ;; point back where the command began; without it, undoing a
+        ;; `kill-line` - which moves point to the far end of what it
+        ;; kills, as Emacs's own does - left point one character along.
+        (*point-before-last-command-or-undo* (buffer-pt (current-buffer)))
+        (*buffer-before-last-command-or-undo* (current-buffer))
         (guard (ex (else (report-command-error! frame ex)))
           (cond
            ((command-type? action)
@@ -424,9 +446,9 @@
         ;; which `deactivate-mark' makes too, and an empty selection is
         ;; not set. `post-select-region-hook' is not run - no user of it.
         (when (mark-active)
-          (if (text-editor-deactivate-mark buffer)
+          (if (buffer-local-value buffer 'deactivate-mark #f)
               (begin
-                (set!text-editor-deactivate-mark! buffer #f)
+                (set-buffer-local-value! buffer 'deactivate-mark #f)
                 (deactivate-mark))
               (when (and (display-selections-p)
                          (*select-active-regions*)

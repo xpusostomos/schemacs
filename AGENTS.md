@@ -78,7 +78,7 @@ yours will work too. Where you get bugs is mostly where you try to wander off
 your own way. Many times you found that you were chasing rabbit holes of bugs
 but when you read the emacs source you landed it first time.
 
-You will most likely find full emacs sources at @../emacs/
+You will most likely find full emacs sources at @../../GITE/emacs/
 
 A piece of work isn't done till you fix most of the warnings. There are a
 few warnings that we can't avoid, those are fine, but all the ones we

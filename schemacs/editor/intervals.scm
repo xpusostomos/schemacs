@@ -60,10 +60,24 @@
     ;; The weak reference a *string* owner is held by - see
     ;; `set-interval-object!'.
     (only (ice-9 weak-vector) list->weak-vector weak-vector-ref weak-vector?)
-    (only (schemacs editor engine)
-          *text-property-offset-function*
+    ;; The buffer's own field accessors - `BEG', `Z' (`buffer.h:992') and
+    ;; the text-properties slot - are `buffer.c''s and are read straight
+    ;; from that library, not through `(schemacs editor engine)', which
+    ;; only re-exported them. That import was the last edge from this
+    ;; library *up* into the engine facade, and it is what stood between
+    ;; `(schemacs editor fns)' and the engine: `fns' imports this library,
+    ;; so a facade import here would have made `engine -> fns' a cycle the
+    ;; day `count-lines' moved down to `fns' (it is `xdisp.c''s, and
+    ;; `fns.c''s `line-number-at-pos' is its only real user).
+    (only (schemacs editor buffer)
           buffer-beg buffer-z
-          text-editor-text-props set!text-editor-text-props))
+          text-editor-text-props set!text-editor-text-props)
+    ;; ... and the two seams are read straight from their own libraries,
+    ;; which is where they are declared - `intervals.c` is below `insdel.c`
+    ;; in Emacs's build order, so this is the direction the calls really
+    ;; go, and there is no reason to route them through the engine.
+    (only (schemacs editor insdel)
+          *graft-intervals-function* *text-property-offset-function*))
 
   (export
    ;; the node
@@ -1546,8 +1560,25 @@
                   (%clear-interval-properties position (+ position length) '()
                                               buffer (find-interval tree position)))
               ;; "Shouldn't be necessary. --Stef"
-              (if tree
-                  (set!buffer-intervals buffer (balance-an-interval tree)))
+              ;;
+              ;; **It is `buffer_balance_intervals`, which re-reads the
+              ;; buffer's root** - the C's three lines are
+              ;; `i = buffer_intervals (b); if (i) set_buffer_intervals (b,
+              ;; balance_an_interval (i))'. Balancing the TREE this
+              ;; function read at its top is not the same thing: the clear
+              ;; above splits the root (`set_text_properties_1` splits at
+              ;; START), so that node can be an interior interval by the
+              ;; time this runs - and making the *buffer's* root an
+              ;; interior node silently discards every interval outside
+              ;; its subtree. Measured on `*Completions*`: a fill that
+              ;; ends with an insertion at `point-min` left a 146-character
+              ;; buffer with an interval tree totalling 41, and the next
+              ;; whole-buffer delete of it never terminated
+              ;; (`adjust_intervals_for_deletion` cannot make progress
+              ;; against a tree that does not cover the text).
+              (let ((root (buffer-intervals buffer)))
+                (if root
+                    (set!buffer-intervals buffer (balance-an-interval root))))
               #f)
             (if (= (- (buffer-z buffer) (buffer-beg buffer)) length)
                 ;; "The inserted text constitutes the whole buffer, so
@@ -1622,5 +1653,23 @@
     ;; `offset-intervals'. See `*text-property-offset-function*'.
     (*text-property-offset-function*
      (lambda (buffer start length) (offset-intervals buffer start length)))
+
+    ;; The other half of the same edge: `replace_range` grafts the *new*
+    ;; text's own tree into the buffer once, where an insert and a delete
+    ;; would each bring their own - and `insert_from_string_1` grafts the
+    ;; inserted string's, which is the C's `string_intervals (string)`.
+    ;; The argument is the text and not its tree, so that
+    ;; `string-intervals` - intervals.c's own reader, and this library's -
+    ;; is what finds it.
+    ;;
+    ;; **A code-point list is the C's null tree**, which is the branch
+    ;; that clears the new text's properties when INHERIT is false. That
+    ;; is this tree's own case and Emacs has none: a Scheme string cannot
+    ;; hold a byte character, so a file whose bytes no charset can read
+    ;; arrives as a list (see `insert-from-string-1`).
+    (*graft-intervals-function*
+     (lambda (text position length buffer inherit)
+       (graft-intervals-into-buffer (if (string? text) (string-intervals text) #f)
+                                    position length buffer inherit)))
 
     ))

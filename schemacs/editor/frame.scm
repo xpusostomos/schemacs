@@ -54,8 +54,12 @@
     ;; seams are this library's half of the arrangement - see the notes
     ;; where they are installed, at the end of this file.
     (only (schemacs editor buffer)
-          *current-buffer* other-buffer
+          *current-buffer* other-buffer current-buffer
           *current-editor-function* *replace-buffer-in-windows-function*)
+    ;; The seam `insdel.scm` declares for `adjust_suspend_auto_hscroll` -
+    ;; it reads the selected window, which is this library's, so it is
+    ;; installed here.
+    (only (schemacs editor insdel) *adjust-suspend-auto-hscroll-function*)
     ;; `suspend-frame' is a command and states its own key as the other
     ;; command libraries do.
     (only (schemacs editor command)
@@ -1871,5 +1875,24 @@
     (*current-editor-function*
      (lambda () (and (*current-frame*) (current-editor))))
     (*replace-buffer-in-windows-function* replace-buffer-in-windows)
+
+    ;; `insdel.c`'s `adjust_suspend_auto_hscroll` (`insdel.c:226`): "If
+    ;; the selected window's old pointm is adjacent or covered by the
+    ;; region from FROM to TO, unsuspend auto hscroll in that window."
+    ;; The function is `insdel.c`'s - `adjust_markers_for_replace` calls
+    ;; it one line before its loop - but what it *reads* is the selected
+    ;; window, which is this library's, so `insdel.scm` declares the seam
+    ;; and this installs it, exactly as `*current-editor-function*` above
+    ;; is declared there and installed here.
+    (*adjust-suspend-auto-hscroll-function*
+     (lambda (from to)
+       (let ((window (and (*current-frame*)
+                          (frame-selected-window (*current-frame*)))))
+         (when (and window
+                    (window-buffer window)
+                    (eq? (window-buffer window) (current-buffer))
+                    (>= (%window-old-point window) from)
+                    (<= (%window-old-point window) to))
+           (set!%window-suspend-auto-hscroll? window #f)))))
 
     ))

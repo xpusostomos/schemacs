@@ -45,11 +45,25 @@
     (scheme base)
     (scheme char)
     (only (guile) caddr)
-    (only (schemacs editor engine)
-    bufferp
-          text-editor-note-property-change!)
     (only (schemacs editor buffer)
-          *current-buffer* current-buffer overlay-get overlays-at)
+          *current-buffer* bufferp current-buffer overlay-get overlays-at
+          with-current-buffer
+          *get-text-property-function*)
+    ;; `modify_text_properties`'s body is `insdel.c`'s
+    ;; `prepare_to_modify_buffer_1` - the half that does not touch the
+    ;; caches, because a property write does not change the characters -
+    ;; and `buffer.c`'s modification counter, which it raises *without*
+    ;; touching `chars_modiff`. `record_first_change` is `undo.c`'s and is
+    ;; what leaves the "the file was saved here" mark behind.
+    ;;
+    ;; **This is the whole of the engine import this file used to have**:
+    ;; it held `bufferp' - `buffer.c`'s, and read from there now - and
+    ;; `text-editor-note-property-change!', which was this file's own
+    ;; `modify_text_properties' under an invented name. That name is gone
+    ;; and the function is defined below, in the file that owns it.
+    (only (schemacs editor insdel) prepare-to-modify-buffer-1)
+    (only (schemacs editor undo) record-first-change)
+    (only (schemacs editor buffer) %text-editor-incr-modiff!)
     ;; `install-intervals-set-text-properties!' is the seam back *up*
     ;; into this library - see the end of the file.
     (only (schemacs editor fns) install-fns-textprop!)
@@ -59,6 +73,7 @@
   (export
    add-text-properties
    add-text-properties-from-list
+   modify-text-properties
    text-property-list
    get-char-property
    remove-text-properties
@@ -344,6 +359,53 @@
                                         (list old val)))))
                   (loop (cddr tail) #t))))))))))
 
+    (define (modify-text-properties object start end)
+      ;; GNU Emacs's `modify_text_properties` (`textprop.c:76'): "Prepare to
+      ;; modify the text properties of BUFFER from START to END." Every
+      ;; property write to a *buffer* goes through it, and it is a near
+      ;; twin of `insdel.c`'s `modify_text` - a change that no
+      ;; insert/delete primitive makes - with three differences, all of
+      ;; them the C's:
+      ;;
+      ;;   * it calls `prepare_to_modify_buffer_1`, the half that does
+      ;;     **not** invalidate the region caches: the characters have not
+      ;;     changed, so the line-break cache is still good. (This tree
+      ;;     used to call `invalidate-buffer-caches` here, which the C
+      ;;     does not - harmless, and wrong.)
+      ;;   * `modiff_incr (&MODIFF, 1)` - a constant one, where
+      ;;     `modify_text` passes the region's length.
+      ;;   * it does **not** set `CHARS_MODIFF`, which is the whole reason
+      ;;     the two counters exist apart.
+      ;;
+      ;; **What `prepare_to_modify_buffer_1` brings with it is the point
+      ;; of the port**, and this tree did not have it: the read-only gate
+      ;; (measured, `put-text-property` on a read-only buffer signals
+      ;; `(buffer-read-only #<buffer>)` in Emacs 31.1 and is allowed when
+      ;; `inhibit-read-only` is set), `before-change-functions` (measured:
+      ;; called once by one property write), and the `deactivate-mark`
+      ;; flag - `Fset (Qdeactivate_mark, Qt)`, its last line, and measured:
+      ;; a property write turns it from nil to t.
+      ;;
+      ;; **And `record_first_change` is the other half of what was
+      ;; missing.** The C tests `MODIFF <= SAVE_MODIFF` before raising the
+      ;; counter, so the *first* change after a save - of any kind, a face
+      ;; included - leaves the `(t . TOKEN)` entry that says where the file
+      ;; was. Without it, undoing back past a property change went too far.
+      ;;
+      ;; **Not carried**, each named where Emacs has it:
+      ;; `BUF_COMPUTE_UNCHANGED` (this tree keeps `beg_unchanged` but not
+      ;; its sibling `end_unchanged`, whose only readers are a redisplay
+      ;; that recomputes), `bset_point_before_scroll` (the redisplay's own
+      ;; bookkeeping), and the `first_time` half of the call's guard
+      ;; (`:1231`) - the C runs this once per outermost property write and
+      ;; this runs it on every recursive one, which raises the counter more
+      ;; than Emacs does and changes nothing else.
+      ;;--------------------------------------------------------------
+      (with-current-buffer object
+        (prepare-to-modify-buffer-1 start end)
+        (record-first-change)
+        (%text-editor-incr-modiff! (current-buffer) 0)))
+
     (define (add-text-properties-1 start end properties object set-type)
       ;; GNU Emacs's `add_text_properties_1': add PROPERTIES to the text
       ;; START..END of OBJECT.
@@ -362,16 +424,17 @@
               (if (not i)
                   #f
                   (begin
-                    ;; A property write raises the buffer's modification
-                    ;; counter - GNU Emacs's `modify_text_properties'
-                    ;; (`textprop.c:78'), which this is, called at the
-                    ;; same point (`if (BUFFERP (object) && first_time)',
-                    ;; `:1231'). It raises `MODIFF' and *not*
-                    ;; `CHARS_MODIFF', because the characters have not
+                    ;; A property write goes through the buffer's
+                    ;; modification machinery - GNU Emacs's
+                    ;; `modify_text_properties' (`textprop.c:76'), called
+                    ;; at the same point (`if (BUFFERP (object) &&
+                    ;; first_time)', `:1231'). It runs the change hooks,
+                    ;; marks the buffer modified, and does **not** touch
+                    ;; `chars_modiff', because the characters have not
                     ;; changed - which is why a cache of something
                     ;; computed from them is not thrown away by it.
                     (if (bufferp object)
-                        (text-editor-note-property-change! object start end))
+                        (modify-text-properties object start end))
                   (let ((len (- end start)))
                     (let ((i (if (= start (iv:interval-position i))
                                  i
@@ -453,7 +516,7 @@
       ;;--------------------------------------------------------------
       ;; the same raise as `add-text-properties-1''s, for a replacement
       (if (bufferp object)
-          (text-editor-note-property-change! object start end))
+          (modify-text-properties object start end))
       (let ((len (- end start)))
         (if (<= len 0)
             #f
@@ -641,7 +704,7 @@
         ;; `Fremove_text_properties' raises the counter for a buffer, as
         ;; the adding side does (`textprop.c:1775')
         (if (bufferp object)
-            (text-editor-note-property-change! object start end))
+            (modify-text-properties object start end))
         (%remove-properties-range object start end properties '())))
 
     (define (remove-list-of-text-properties start end properties . args)
@@ -653,7 +716,7 @@
       ;;--------------------------------------------------------------
       (let ((object (object-or-current args)))
         (if (bufferp object)
-            (text-editor-note-property-change! object start end))
+            (modify-text-properties object start end))
         (%remove-properties-range object start end '() properties)))
 
     ;;----------------------------------------------------------------
@@ -828,6 +891,15 @@
     ;; way files.el's two functions are handed to `ls-lisp'.
     (install-intervals-set-text-properties! set-text-properties-1)
     (install-fns-textprop! text-property-list add-text-properties-from-list)
+
+    ;; The seam `barf-if-buffer-read-only' (`buffer.scm') reads to ask
+    ;; whether the `inhibit-read-only` *text property* is set where a
+    ;; change is being made - the C's third test (`buffer.c:2465'). It is
+    ;; a seam because the tree's lookups are this library's and this
+    ;; library is above the buffer's; it is cold, because the C's `&&`
+    ;; only asks when the buffer is read-only and `inhibit-read-only' is
+    ;; nil.
+    (*get-text-property-function* get-text-property)
 
 
     ))

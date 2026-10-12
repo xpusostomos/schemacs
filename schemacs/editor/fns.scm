@@ -44,13 +44,25 @@
     (only (schemacs editor intervals)
           copy-intervals set-interval-object! set!string-intervals
           string-intervals)
+    ;; `line-number-at-pos' is a DEFUN of this file and reads the buffer
+    ;; through `point' (`PT') and the bounds, and its POSITION argument
+    ;; may be a marker - the C's `MARKERP (position)' branch - so the
+    ;; marker predicates come with it.
+    (only (schemacs editor buffer)
+          buffer-beg buffer-pt buffer-z current-buffer text-editor-text)
+    ;; the characters themselves - `count_lines' is a walk over them, as
+    ;; the C's `display_count_lines' is a walk over the buffer's bytes.
+    (only (schemacs editor buffer-text) buffer-text-ref)
+    (only (schemacs editor marker) marker-position markerp)
     (only (guile) LC_COLLATE LC_CTYPE)
     )
 
   (export compare-strings
           concat
           copy-sequence
+          count-lines
           install-fns-textprop!
+          line-number-at-pos
           string-collate-lessp
           string-lessp
           )
@@ -108,6 +120,94 @@
     (define (install-fns-textprop! text-property-list add-text-properties-from-list)
       (set! %text-property-list text-property-list)
       (set! %add-text-properties-from-list add-text-properties-from-list))
+
+    ;;----------------------------------------------------------------
+    ;; Lines, counted and numbered
+    ;;----------------------------------------------------------------
+
+    (define (count-lines ed from to)
+      ;; The number of line boundaries between the positions FROM and TO -
+      ;; GNU Emacs's `count_lines' (`xdisp.c:29892'), which is one call to
+      ;; `display_count_lines (FROM, TO, ZV, &ignored)', the `count > 0'
+      ;; branch of that walk.
+      ;;
+      ;; **Emacs also has a *Lisp* `count-lines' - `simple.el:1800' - and
+      ;; it is a different function that answers differently.** It narrows
+      ;; to START..END, counts the newlines in there, and adds one when
+      ;; `START /= END' and the greater end is not at the beginning of a
+      ;; line: measured, `(count-lines 1 6)' over `"a\nb\nc"' is **3**,
+      ;; where this walk from 1 to 6 finds the two newlines and answers
+      ;; **2**. That one is `simple.el''s, so it belongs in `simple.scm',
+      ;; and it is not ported - it is written over `narrow-to-region' and
+      ;; `re-search-forward', and nothing here is narrowed. So this name
+      ;; is the *C helper's*, spelled as the C spells it, and it must not
+      ;; be read as the Lisp function of the same spelling.
+      ;;
+      ;; **Its Emacs file is `xdisp.c', and it lives here.** The C needs
+      ;; it low, because `fns.c''s `line-number-at-pos' - this file's own
+      ;; - is its only caller that is not `lread.c:645'; but
+      ;; `(schemacs editor xdisp)' is the top of this tree's graph, so a
+      ;; `count-lines' in its own file could only be reached from above,
+      ;; and `line-number-at-pos' could not reach it at all. It is placed
+      ;; beside the one function that wants it, and `xdisp.scm' imports
+      ;; it from here. A placement departure, and this is the note.
+      ;;
+      ;; **The walk is a character-at-a-time one where the C's is a
+      ;; byte-pointer one.** `display_count_lines' walks raw bytes up to
+      ;; `BUFFER_CEILING_OF' and only then recomputes an address - a step
+      ;; that exists because Emacs's buffer holds bytes with a gap at an
+      ;; arbitrary point in them. `buffer-text' holds one element per
+      ;; character and `buffer-text-ref' steps over the gap itself, so
+      ;; the ceiling would buy one branch per element and nothing else.
+      ;; The answers are identical. `selective-display', the C's other
+      ;; branch (where a `\r' also ends a line), is not ported.
+      ;;--------------------------------------------------------------
+      (let ((text (text-editor-text ed)))
+        (let loop ((pos from) (n 0))
+          (cond
+           ((>= pos to) n)
+           ((= (buffer-text-ref text pos) #x0a) (loop (+ pos 1) (+ n 1)))
+           (else (loop (+ pos 1) n))))))
+
+    (define (line-number-at-pos . args)
+      ;; GNU Emacs's `line-number-at-pos' (`fns.c:6688'), a DEFUN of this
+      ;; file: "Return the line number at POSITION in the current buffer.
+      ;; If POSITION is nil or omitted, it defaults to point's position
+      ;; in the current buffer."
+      ;;
+      ;; The C's body, in its own order: a nil POSITION is `PT'; a
+      ;; *marker* is its position (`marker_byte_position' of it when the
+      ;; marker is in this buffer, `CHAR_TO_BYTE' of its position when it
+      ;; is not - the same character position either way, this tree
+      ;; having no bytes); anything else must be a fixnum inside
+      ;; `[BEG, Z]', and the C raises `args-out-of-range' when it is not;
+      ;; and then the answer is `count_lines (BEGV, POS) + 1'.
+      ;;
+      ;; **ABSOLUTE cannot change the answer here, and is still taken.**
+      ;; The C chooses between `BEG_BYTE' and `BEGV_BYTE' for the start
+      ;; of the count, and it is the *narrowing* that makes those differ:
+      ;; "If the buffer is narrowed, the return value by default counts
+      ;; the lines from the beginning of the accessible portion ... But
+      ;; if the second optional argument ABSOLUTE is non-nil, the value
+      ;; counts the lines from the absolute start of the buffer."
+      ;; Nothing is narrowed in this tree, so the two starts are the same
+      ;; start. The argument is accepted rather than dropped so that the
+      ;; DEFUN's shape is Emacs's - both arguments are optional there,
+      ;; `0, 2, 0' - and the day narrowing arrives this becomes the C's
+      ;; two-branch start.
+      ;;--------------------------------------------------------------
+      (let* ((position (if (pair? args) (car args) #f))
+             (ed (current-buffer))
+             (pos (cond ((not position) (buffer-pt ed))
+                        ((markerp position) (marker-position position))
+                        ((integer? position)
+                         (if (and (<= (buffer-beg ed) position)
+                                  (<= position (buffer-z ed)))
+                             position
+                             (error "Args out of range" position
+                                    (buffer-beg ed) (buffer-z ed))))
+                        (else (error "Wrong type argument" position)))))
+        (+ 1 (count-lines ed (buffer-beg ed) pos))))
 
     (define (concat . args)
       ;; GNU Emacs's `concat' (fns.c): "Concatenate all the arguments and

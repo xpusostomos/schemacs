@@ -3,6 +3,10 @@
  (scheme file)
  (schemacs editor engine)
  (only (schemacs editor buffer) with-current-buffer set-buffer-modified-p)
+ ;; the property-change raise is `textprop.c`'s `modify_text_properties`,
+ ;; in the library that owns it - it was `text-editor-note-property-change!`
+ ;; in the engine until 2026-10-12.
+ (only (schemacs editor textprop) modify-text-properties)
  (only (schemacs editor simple) primitive-undo)
  ;; The visited file's modification time is `fileio.c`'s, and the time
  ;; values it is written in are `timefns.c`'s. The engine reaches the
@@ -411,7 +415,15 @@
     (text-editor-delete-from-cursor ed 1)
     (list (car (text-editor-undo-list ed)))))
 
-(test-equal '("hello\nworld" 6)
+;; **Point after the undo is where the boundary left it, not where the
+;; deletion began** - `record_point` (`undo.c:50`) pushes the position
+;; the command started at as an integer entry, `primitive-undo`'s
+;; integer case is `(goto-char next)`, and it is applied after the
+;; change's own entry. These expected the deleted text's start, which is
+;; what a tree without that entry gives. Measured on Emacs 31.1 for the
+;; same steps: the `undo-boundary` leaves point at the end of what was
+;; inserted, and undoing restores point *there*.
+(test-equal '("hello\nworld" 12)
   (let ((ed (allocate-buffer)))
     (text-editor-insert ed "hello\nworld")
     (text-editor-undo-boundary! ed)
@@ -525,7 +537,15 @@
     (text-editor-delete-from-cursor ed -2)
     (cdr (car (text-editor-undo-list ed)))))
 
-(test-equal '("abcd" 3)
+;; **Point after the undo is where the boundary left it, not where the
+;; deletion began** - `record_point` (`undo.c:50`) pushes the position
+;; the command started at as an integer entry, `primitive-undo`'s
+;; integer case is `(goto-char next)`, and it is applied after the
+;; change's own entry. These expected the deleted text's start, which is
+;; what a tree without that entry gives. Measured on Emacs 31.1 for the
+;; same steps: the `undo-boundary` leaves point at the end of what was
+;; inserted, and undoing restores point *there*.
+(test-equal '("abcd" 5)
   (let ((ed (allocate-buffer)))
     (text-editor-insert ed "abcd")
     (text-editor-undo-boundary! ed)
@@ -534,7 +554,15 @@
     (undo! ed 1)
     (list (text-editor-to-string ed) (buffer-pt ed))))
 
-(test-equal '("abcd" 1)
+;; **Point after the undo is where the boundary left it, not where the
+;; deletion began** - `record_point` (`undo.c:50`) pushes the position
+;; the command started at as an integer entry, `primitive-undo`'s
+;; integer case is `(goto-char next)`, and it is applied after the
+;; change's own entry. These expected the deleted text's start, which is
+;; what a tree without that entry gives. Measured on Emacs 31.1 for the
+;; same steps: the `undo-boundary` leaves point at the end of what was
+;; inserted, and undoing restores point *there*.
+(test-equal '("abcd" 5)
   (let ((ed (allocate-buffer)))
     (text-editor-insert ed "abcd")
     (text-editor-undo-boundary! ed)
@@ -1291,7 +1319,7 @@
       (with-current-buffer ed (set-buffer-modified-p #t))
       (set! steps (cons (tick-triple ed) steps))
       ;; a property change raises the tick and NOT the character tick
-      (text-editor-note-property-change! ed 1 2)
+      (modify-text-properties ed 1 2)
       (set! steps (cons (tick-triple ed) steps))
       (text-editor-insert ed "cccccccccc")
       (set! steps (cons (tick-triple ed) steps))

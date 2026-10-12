@@ -64,8 +64,7 @@
     (only (schemacs editor engine)
           bufferp
           make-buffer-string
-          text-editor-delete-from-cursor buffer-pt
-          text-editor-insert buffer-beg buffer-z
+          buffer-beg buffer-z buffer-pt
           text-editor-search-backward
           text-editor-search-forward text-editor-set-cursor)
     ;; `*case-fold-search*' is the case folding every search here
@@ -85,6 +84,10 @@
     (only (schemacs editor casefiddle)
           casify-region upcase upcase-initials)
     (only (guile) string-index)
+    ;; The seam `insdel.scm` declares for `update_search_regs`: it is
+    ;; `search.c`'s function (this file's) and `replace_range`, below, is
+    ;; what calls it.
+    (only (schemacs editor insdel) *update-search-regs-function* replace-range)
     )
 
   (export
@@ -1365,13 +1368,22 @@
                   newtext
                   (%substitute-replacement newtext regs sub)))
              (newpoint (+ sub-start (string-length newtext))))
-        ;; replace the region, as `replace_range' does
-        (text-editor-set-cursor ed sub-start)
-        (text-editor-delete-from-cursor ed (- sub-end sub-start))
-        (text-editor-insert ed newtext)
-        ;; the match data follows the change, as the C's
-        ;; `replace_range' asks `update_search_regs' for
-        (%update-search-regs sub-start sub-end newpoint)
+        ;; "Replace the old text with the new in the cleanest possible
+        ;; way." The C is one call, and **it does not move point to
+        ;; SUB-START first** - `replace_range` relocates point as if it
+        ;; were a marker, which is a different thing: a point before the
+        ;; replaced text keeps its place, one inside it lands at
+        ;; SUB-START, and one at SUB-END follows the new text. The tree
+        ;; used to park point at SUB-START and then delete and insert,
+        ;; which is three changes where the C makes one - and the match
+        ;; data follows the change through `replace_range`'s own
+        ;; `adjust_match_data` argument, which is why the explicit
+        ;; `%update-search-regs` call that stood here is gone.
+        ;;
+        ;; The C's arguments are `(sub_start, sub_end, newtext, true,
+        ;; false, true)`: run the change hooks and signal once, do not
+        ;; inherit properties, and adjust the match data.
+        (replace-range sub-start sub-end newtext #t #f #t)
         ;; casify the inserted text, as the C calls Fupcase_region /
         ;; Fupcase_initials_region over it
         (cond
@@ -1380,15 +1392,31 @@
          ((eq? case-action 'cap-initials)
           (casify-region 'capitalize-up sub-start newpoint))
          (else #f))
-        ;; put point back where it was, then move it "officially" to
-        ;; the replacement's end
+        ;; "Put point back where it was in the text, if possible." The
+        ;; C's `opoint <= 0` is not `< 0` - a zero names a place counted
+        ;; from the end of the buffer, which is how `replace-match-string'
+        ;; (the C's string path) spells "at the end".
         (text-editor-set-cursor
          ed (max (buffer-beg ed)
-                 (min zv (if (< opoint 0)
+                 (min zv (if (<= opoint 0)
                              (+ zv opoint)
                              opoint))))
+        ;; "Now move point `officially' to the end of the inserted
+        ;; replacement." The C's `move_if_not_intangible` is not ported -
+        ;; there is no intangible text here - so this is the `goto-char`
+        ;; it amounts to.
         (text-editor-set-cursor ed newpoint)
         #f))
+
+    ;; Install the seam `replace_range` reads. In the C `search.c` is
+    ;; *above* `insdel.c` and `replace_range` calls `update_search_regs`
+    ;; up the build - which is why a library below cannot call it and the
+    ;; parameter exists. `replace-match` is the caller that asks for it
+    ;; (`replace_range (..., adjust_match_data = true)`), so that a match
+    ;; still names the same text after the replacement.
+    (*update-search-regs-function*
+     (lambda (oldstart oldend newend)
+       (%update-search-regs oldstart oldend newend)))
 
     (define (match-string num . args)
       ;; GNU Emacs's `match-string' (subr.el:5848): "Return the string

@@ -4,11 +4,18 @@
  (only (guile) setvbuf)
  (only (srfi 64) test-assert test-equal test-begin test-end)
  (only (schemacs editor subr) kbd event-modifiers event-basic-type
-       event-convert-list event-symbol-elements)
+       event-convert-list event-symbol-elements with-silent-modifications)
  (only (schemacs editor keymap) keymap-index keymap-index->events)
  ;; `function-key-map''s translation of a named key into the character it
  ;; means, which is `read_key_sequence''s step.
- (only (schemacs editor keyboard) function-key-translate))
+ (only (schemacs editor keyboard) function-key-translate)
+ ;; `with-silent-modifications''s tests need a buffer to be silent about,
+ ;; and the property write it exists for.
+ (only (schemacs editor buffer)
+       allocate-buffer buffer-modified-p set-buffer set-buffer-modified-p
+       set!buffer-read-only)
+ (only (schemacs editor editfns) insert)
+ (only (schemacs editor textprop) get-text-property put-text-property))
 
 ;; The key event model: GNU Emacs's `subr.el' and `keyboard.c' functions
 ;; that say what a key *is*, and `kbd', which builds one.
@@ -159,5 +166,52 @@
 (test-equal 'menu (function-key-translate 'menu))
 ;; and a character is not the map's business at all
 (test-equal 97 (function-key-translate 97))
+
+;; ------------------------------------------------------------------
+;; `with-silent-modifications'
+;;
+;; GNU Emacs's `subr.el:5473'. The body's use here is the one the
+;; docstring names - "typically used around modifications of text
+;; properties that do not really affect the buffer's content" - and on a
+;; *read-only* buffer, which is the case that made it necessary:
+;; font-lock fontifies dired's and `*Completions*'.
+;;
+;; Measured on Emacs 31.1 for the same calls: the property write inside
+;; succeeds although the buffer is read-only, the property is there
+;; afterwards, and the buffer is left unmodified.
+
+(define (temp-buffer-of text)
+  (let ((ed (allocate-buffer)))
+    (set-buffer ed)
+    (insert text)
+    ed))
+
+(test-equal "with-silent-modifications: the body's value is the macro's"
+  42
+  ;; In a buffer, because the macro reads the current one on the way in -
+  ;; as the C's `(buffer-modified-p)' does - and this tree's
+  ;; `current-buffer' is false when nothing is current, where Emacs always
+  ;; has one.
+  (let ((ed (temp-buffer-of "abcdefghij")))
+    (with-silent-modifications 42)))
+
+(test-equal "with-silent-modifications: a property write on a read-only buffer"
+  (list 'bold #f)
+  (let ((ed (temp-buffer-of "abcdefghij")))
+    (set!buffer-read-only ed #t)
+    (set-buffer-modified-p #f)
+    (with-silent-modifications
+      (put-text-property 1 3 'face 'bold ed))
+    (list (get-text-property 1 'face ed)
+          (buffer-modified-p ed))))
+
+;; The C restores the modified flag only "when modified is nil or
+;; `autosaved'", so a buffer that was already modified is left modified.
+(test-equal "with-silent-modifications: a modified buffer stays modified"
+  #t
+  (let ((ed (temp-buffer-of "abcdefghij")))
+    (with-silent-modifications
+      (put-text-property 1 3 'face 'bold ed))
+    (buffer-modified-p ed)))
 
 (test-end "schemacs_editor_subr")

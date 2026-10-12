@@ -31,11 +31,22 @@
     (scheme base)
     (scheme char)
     (only (schemacs editor engine)
-    make-buffer-string
-          buffer-beg buffer-z
-          text-editor-delete-from-cursor buffer-pt
-          text-editor-insert text-editor-set-cursor
-          text-editor-undo-boundary!)
+          make-buffer-string
+          buffer-beg buffer-z buffer-pt
+          text-editor-set-cursor
+          ;; `record_insert` and `record_delete` are undo.c's, and
+          ;; `casify_region` calls them **directly** - `casefiddle.c`
+          ;; records the whole region once around its per-character loop.
+          ;; They are `undo.scm`'s now and re-exported by the engine.
+          record-insert record-delete signal-after-change)
+    ;; `replace_range_2` and `modify_text` are `insdel.c`'s, and
+    ;; `casify_region` is the only caller of the first in all of Emacs.
+    (only (schemacs editor insdel) modify-text replace-range-2)
+    ;; The raw character store: the C's `FETCH_BYTE (pos) = ...` and
+    ;; `memcpy (BYTE_POS_ADDR (pos_byte), ...)`, which `casefiddle.c` uses
+    ;; the way any file above `insdel.c` may - they are `buffer.h`'s
+    ;; macros and `buffer-text.scm` is `buffer.h`'s struct.
+    (only (schemacs editor buffer-text) buffer-text-ref buffer-text-set!)
     ;; `point' is one-based here and the engine's cursor zero-based,
     ;; which is the conversion `casify-region''s positions go through.
     (only (schemacs editor editfns) save-excursion
@@ -46,7 +57,8 @@
     (only (schemacs editor syntax) word-char?)
     (only (schemacs editor command) current-prefix-arg define-command
           uarg->integer)
-    (only (schemacs editor buffer) current-buffer)
+    (only (schemacs editor buffer) current-buffer validate-region
+          text-editor-text set!buffer-pt)
     ;; `scan_words` is `syntax.c`'s - the word motions were reached
     ;; through `simple.sld`, which put `casefiddle.c` above `simple.el`
     ;; and closed a cycle through `search.sld` and the coding layer.
@@ -71,6 +83,85 @@
 
   (begin
 
+    ;;----------------------------------------------------------------
+    ;; Casing one character - the C's three steps
+    ;;------------------------------------------------------------------
+    ;;
+    ;; `case_character_impl` is the whole of the decision, and the other
+    ;; two are entry points into it: `case_single_character` for a caller
+    ;; that wants a character, `case_character` for the two walks that
+    ;; case a run. Both walks below call the third, as `casefiddle.c`'s
+    ;; do.
+
+    (define (case-character-impl flag ch was-inword)
+      ;; GNU Emacs's `case_character_impl` (`casefiddle.c:113`): case CH
+      ;; under FLAG, given WAS-INWORD. Three answers - the cased text as a
+      ;; *string*, which is the C's `struct casing_str_buf` and is one
+      ;; character long for a one-to-one conversion and several for a
+      ;; special casing; the `inword` state this character leaves behind,
+      ;; which the next character's call needs; and the single cased
+      ;; character, which is what the C answers when it was asked for a
+      ;; change to one character.
+      ;;
+      ;; **`syntax_prefix_flag_p` is not carried**: it is a property of
+      ;; the `'` syntax class, which this tree's `word-char?` does not
+      ;; model, so the C's "a word constituent that is not a word prefix"
+      ;; comes out as plain `word-char?`.
+      ;;
+      ;; **The titlecase and specialcase char tables are not ported** -
+      ;; the Unicode one-to-many casings, see the file header - so every
+      ;; conversion here is one-to-one and the text is never longer than
+      ;; one character. The multi-character branch is the C's all the
+      ;; same, and it is what `do-casify-multibyte-region`'s
+      ;; `replace_range_2` call exists for.
+      ;;--------------------------------------------------------------
+      (let* ((inword (word-char? ch))
+             ;; "Normalize flag so it's one of CASE_UP, CASE_DOWN or
+             ;; CASE_CAPITALIZE."
+             (action (cond ((eq? flag 'capitalize)
+                            (if was-inword 'downcase 'upcase))
+                           ((eq? flag 'capitalize-up)
+                            (if was-inword 'none 'upcase))
+                           (else flag)))
+             (cased (cond ((eq? action 'upcase) (char-upcase ch))
+                          ((eq? action 'downcase) (char-downcase ch))
+                          ((eq? action 'none) ch)
+                          (else (char-upcase ch)))))
+        (values (string cased) inword cased)))
+
+    (define (case-single-character flag ch was-inword)
+      ;; GNU Emacs's `case_single_character` (`casefiddle.c:213`):
+      ;; `case_character_impl` for a caller that wants the character and
+      ;; not a buffer - "Special casing rules (such as upcase(ﬁ) = FI) are
+      ;; not handled. For characters whose casing results in multiple code
+      ;; points, the character is returned unchanged." The new `inword`
+      ;; comes back too, since a Scheme call cannot leave it in the
+      ;; caller's context the way the C's struct does.
+      ;;--------------------------------------------------------------
+      (let-values (((text inword cased) (case-character-impl flag ch was-inword)))
+        (values cased inword)))
+
+    (define (case-character flag ch was-inword next)
+      ;; GNU Emacs's `case_character` (`casefiddle.c:226`): what the two
+      ;; walks use. It is `case_character_impl` and the Greek final sigma
+      ;; rule - "If we have just down-cased a capital sigma and the next
+      ;; character no longer has a word syntax (i.e. current character is
+      ;; end of word), use final sigma." NEXT is the character after CH,
+      ;; or #f when CH is the last, which is the C's null pointer.
+      ;;
+      ;; Whether the character changed is `case_character_impl`'s own
+      ;; answer - the sigma rule re-spells what came out, it does not
+      ;; change that it changed.
+      ;;--------------------------------------------------------------
+      (let-values (((text inword cased) (case-character-impl flag ch was-inword)))
+        (let ((text (if (and was-inword
+                             (char=? ch #\x3a3)   ; GREEK CAPITAL LETTER SIGMA
+                             (not (char=? cased ch))
+                             (or (not next) (not (word-char? next))))
+                        (string #\x3c2)       ; GREEK SMALL LETTER FINAL SIGMA
+                        text)))
+          (values text inword (not (char=? cased ch))))))
+
     (define (casify-object flag obj)
       ;; GNU Emacs's `casify_object' (casefiddle.c:354): FLAG the
       ;; character or string OBJ - `upcase', `downcase', `capitalize'
@@ -88,47 +179,38 @@
       ;; inword when the following non-constituent is cased, which is
       ;; why the separator after it is not capitalized.
       ;;--------------------------------------------------------------
-      ;; The titlecase and specialcase char tables (`Unicode' one-to-many
-      ;; casing) are not ported, as the file header says.
       (cond
        ((char? obj)
-        (let* ((inword (word-char? obj))
-               ;; `case_character_impl''s normalization: CASE_CAPITALIZE
-               ;; becomes CASE_DOWN after a word-constituent and stays
-               ;; CASE_CAPITALIZE - which upcases - otherwise;
-               ;; CASE_CAPITALIZE_UP becomes CASE_CAPITALIZE (upcase)
-               ;; unless we are within a word, where the character
-               ;; stands unchanged.
-               (flag (cond
-                      ((eq? flag 'capitalize)
-                       (if inword 'downcase 'upcase))
-                      ((eq? flag 'capitalize-up)
-                       (if inword 'none 'upcase))
-                      (else flag))))
-          (cond
-           ((eq? flag 'upcase) (char-upcase obj))
-           ((eq? flag 'downcase) (char-downcase obj))
-           ((eq? flag 'none) obj)
-           (else (char-upcase obj)))))
+        ;; The C's `do_casify_natnum` (`casefiddle.c:220`), over
+        ;; `case_single_character`. The context is fresh, so `inword` is
+        ;; false going in - the C's `prepare_casing_context` sets it so -
+        ;; and a lone character is therefore never "within a word".
+        ;;
+        ;; **Not carried**: the C's modifier-bit juggling, the `CHAR_ALT`
+        ;; and friends it packs into a character's integer and strips
+        ;; before casing. A Scheme character has nowhere to put them.
+        (let-values (((cased inword) (case-single-character flag obj #f)))
+          cased))
        ((string? obj)
-        (let loop ((i 0) (inword #f) (acc '()))
-          (if (>= i (string-length obj))
-              (list->string (reverse acc))
-              (let* ((c (string-ref obj i))
-                     (word? (word-char? c))
-                     (flag (cond
-                            ((eq? flag 'capitalize)
-                             (if inword 'downcase 'upcase))
-                            ((eq? flag 'capitalize-up)
-                             (if inword 'none 'upcase))
-                            (else flag)))
-                     (cased
-                      (cond
-                       ((eq? flag 'upcase) (char-upcase c))
-                       ((eq? flag 'downcase) (char-downcase c))
-                       ((eq? flag 'none) c)
-                       (else (char-upcase c)))))
-                (loop (+ i 1) word? (cons cased acc))))))
+        ;; The C's `do_casify_multibyte_string` (`casefiddle.c:281`): walk
+        ;; the characters with `case_character`, keeping the `inword`
+        ;; state, and build the answer - which may be *longer* than the
+        ;; argument, since a special casing can expand one character into
+        ;; several.
+        ;;
+        ;; **The unibyte walk is not ported** (`do_casify_unibyte_string`
+        ;; and the `ascii_casify_character` it falls back to): every string
+        ;; here is multibyte, `enable-multibyte-characters` being always
+        ;; true. See `mule.scm`.
+        (let ((n (string-length obj)))
+          (let loop ((i 0) (inword #f) (acc '()))
+            (if (>= i n)
+                (apply string-append (reverse acc))
+                (let-values (((text new-inword changed?)
+                              (case-character flag (string-ref obj i) inword
+                                              (and (< (+ i 1) n)
+                                                   (string-ref obj (+ i 1))))))
+                  (loop (+ i 1) new-inword (cons text acc)))))))
        (else (error "Wrong type argument" obj))))
 
     (define (upcase obj)
@@ -170,52 +252,126 @@
               (word-run-end ed count)
               (word-run-start ed (- count))))))
 
+    (define (do-casify-multibyte-region flag start end)
+      ;; GNU Emacs's `do_casify_multibyte_region` (`casefiddle.c:432`):
+      ;; "Based on CTX, case region in a multibyte buffer from *STARTP to
+      ;; *ENDP. Return number of added characters (may be negative if more
+      ;; characters were deleted then inserted), save first and last
+      ;; positions that has changed in *STARTP and *ENDP respectively. If
+      ;; no characters were changed, return 0, save -1 to *STARTP and
+      ;; leave *ENDP unspecified."
+      ;;
+      ;; The C writes the two positions back through its `*startp` and
+      ;; `*endp`; here they come back with ADDED, which is the answer the C
+      ;; returns.
+      ;;
+      ;; **A one-character-in, one-character-out conversion is written in
+      ;; place** - the C's `memcpy`, "keeping text properties the same" -
+      ;; and never goes through `replace_range_2`. That is the only path
+      ;; this tree's casing can reach today, its conversions all being
+      ;; one-to-one; the count-changing path (ß → SS) is the C's and is
+      ;; what `replace_range_2` is here for.
+      ;;
+      ;; **Point is saved and put back**, because `replace_range_2`
+      ;; relocates point as a marker and the C does not want that here: it
+      ;; tracks the position itself, moved by the characters added before
+      ;; it, and restores that at the end.
+      ;;--------------------------------------------------------------
+      (let* ((buffer (current-buffer))
+             (text (text-editor-text buffer))
+             (opoint (buffer-pt buffer)))
+        (let loop ((pos start)
+                   (size (- end start))
+                   (inword #f)
+                   (first -1)
+                   (last -1)
+                   (added 0))
+          (if (<= size 0)
+              (begin
+                (unless (= (buffer-pt buffer) opoint)
+                  (set!buffer-pt buffer opoint))
+                (values added first last))
+              (let* ((cp (buffer-text-ref text pos))
+                     (ch (and (<= cp #x10ffff) (integer->char cp))))
+                (if (not ch)
+                    ;; A byte character - one this tree holds as a code
+                    ;; point above `#x10ffff`, which no Scheme character
+                    ;; can be (see `character.scm`). The C's case tables
+                    ;; have no entry for one, so it is neither a word
+                    ;; constituent nor changed, and the scan steps over it
+                    ;; exactly as it does over an unchanged character.
+                    (loop (+ pos 1) (- size 1) inword first last added)
+                    (let ((next (and (> size 1)
+                                     (let ((ncp (buffer-text-ref text (+ pos 1))))
+                                       (and (<= ncp #x10ffff)
+                                            (integer->char ncp))))))
+                      (let-values (((text-out new-inword changed?)
+                                    (case-character flag ch inword next)))
+                        (if (not changed?)
+                            (loop (+ pos 1) (- size 1) new-inword
+                                  first last added)
+                            (let* ((newlen (string-length text-out))
+                                   (new-first (if (< first 0) pos first))
+                                   (new-last (+ pos newlen)))
+                              (if (= newlen 1)
+                                  (buffer-text-set!
+                                   text pos
+                                   (char->integer (string-ref text-out 0)))
+                                  (begin
+                                    (replace-range-2 pos (+ pos 1) text-out
+                                                     newlen #f)
+                                    (when (> opoint pos)
+                                      (set! opoint (+ opoint (- newlen 1))))))
+                              (loop (+ pos newlen) (- size 1) new-inword
+                                    new-first new-last
+                                    (+ added (- newlen 1)))))))))))))
+
     (define (casify-region flag beg end)
-      ;; GNU Emacs's `casify_region' (casefiddle.c): FLAG the region
-      ;; BEG..END - `upcase', `downcase' or `capitalize' - and answer
-      ;; the end. Capitalize makes each word's first character upper
-      ;; and the rest lower, a word's start being a word-constituent
-      ;; that follows one that is not; the C's `do_casify_*_region'
-      ;; walk the characters in one pass, and so does this. The
-      ;; positions are one-based and so are the engine's, so nothing is
-      ;; converted at the edges.
+      ;; GNU Emacs's `casify_region` (`casefiddle.c:534`): FLAG the region
+      ;; BEG..END - `upcase', `downcase' or `capitalize' - and answer the
+      ;; end *after* the change, which is BEG's for a same-length change
+      ;; and moves only when a special casing made the text longer.
+      ;;
+      ;; **The hooks are around the whole region, once** - `modify_text`
+      ;; before it and `signal_after_change` after it - and
+      ;; `do_casify_multibyte_region` writes the characters in between
+      ;; without any of them. That is the division the C's comment on
+      ;; `replace_range_2` states, and it is why the undo record is one
+      ;; deletion of the whole region followed by one insertion of it:
+      ;; `record_delete` and `record_insert` bracket the loop here, where
+      ;; the loop itself is the loop's business.
+      ;;
+      ;; **Not carried**: `casify_pnc_region` and the noncontiguous region
+      ;; it walks, `region-extract-function` not being ported - so the
+      ;; commands take two arguments where Emacs's take three - and the
+      ;; tree-sitter bookkeeping, `update_compositions` (syntax.c) and the
+      ;; `SETUP_BUFFER_SYNTAX_TABLE` of `prepare_casing_context`, whose
+      ;; only reader is `syntax_prefix_flag_p`.
       ;;--------------------------------------------------------------
-      ;; The edit is delete-then-insert, with one undo boundary, which
-      ;; is what `modify_text' makes of it for a case change: the text
-      ;; is the same length, so the markers either side are unchanged
-      ;; and the answer is END.
-      ;;--------------------------------------------------------------
-      (let ((ed (current-buffer)))
+      (let-values (((beg end) (validate-region beg end)))
         (if (= beg end)
+            ;; "Not modifying because nothing marked."
             end
-            (let ((text (make-buffer-string ed beg end)))
-              (text-editor-undo-boundary! ed)
-              (let ((newtext
-                     (let loop ((rest (string->list text))
-                                (prev-word? #f)
-                                (acc '()))
-                       (cond
-                        ((null? rest)
-                         (list->string (reverse acc)))
-                        (else
-                         (let* ((c (car rest))
-                                (word? (word-char? c))
-                                (new
-                                 (cond
-                                  ((eq? flag 'upcase) (char-upcase c))
-                                  ((eq? flag 'downcase) (char-downcase c))
-                                  ;; capitalize: a word-constituent
-                                  ;; changes case only at a word's
-                                  ;; start, the rest going lower
-                                  ((not word?) c)
-                                  ((not prev-word?) (char-upcase c))
-                                  (else (char-downcase c)))))
-                           (loop (cdr rest) word? (cons new acc))))))))
-                (text-editor-set-cursor ed beg)
-                (text-editor-delete-from-cursor ed (- end beg))
-                (text-editor-insert ed newtext)
-                (text-editor-set-cursor ed beg)
-                end)))))
+            (begin
+              (modify-text beg end)
+              (let ((orig-end end)
+                    (buffer (current-buffer)))
+                ;; The whole region goes, before the loop - so undo puts it
+                ;; back in one step whatever the loop then does to it.
+                (record-delete beg (make-buffer-string buffer beg end))
+                (let-values (((added first last)
+                              (do-casify-multibyte-region flag beg end)))
+                  ;; "Record the insertion", the whole region again, and
+                  ;; with the characters a special casing added.
+                  (record-insert beg (+ (- end beg) added))
+                  (when (>= first 0)
+                    ;; The first and last positions that *changed*, not the
+                    ;; region: `added` converts the changed span's new
+                    ;; length into what it was before.
+                    (signal-after-change first
+                                         (- (- last first) added)
+                                         (- last first)))
+                  (+ orig-end added)))))))
 
     (define (casify-word flag arg)
       ;; GNU Emacs's `casify_word' (casefiddle.c): FLAG the words from
@@ -235,17 +391,36 @@
         #f))
 
     (define-command (upcase-region beg end)
-      ;; GNU Emacs's `upcase-region' (casefiddle.c:609): "Convert the
-      ;; region to upper case."
-      "Convert the region to upper case."
+      ;; GNU Emacs's `upcase-region' (`casefiddle.c:603'): "Convert the
+      ;; region to upper case. In programs, wants two arguments..."
+      ;;
+      ;; **It answers nil, not the region's end.** `casify_region` answers
+      ;; where the change ended, and that is what `casify_word` sets point
+      ;; from - but the DEFUN goes through `casify_pnc_region`, which
+      ;; throws that answer away and returns `Qnil`. Measured:
+      ;; `(upcase-region 1 4)` answers nil in Emacs 31.1.
+      ;;--------------------------------------------------------------
+      "Convert the region to upper case.
+In programs, wants two arguments.  These arguments
+specify the starting and ending character numbers of the region to
+operate on.  When used as a command, the text between point and the
+mark is operated on.
+See also `capitalize-region'."
       (interactive (list (region-beginning) (region-end)))
-      (casify-region 'upcase beg end))
+      (casify-region 'upcase beg end)
+      #f)
 
     (define-command (downcase-region beg end)
-      ;; GNU Emacs's `downcase-region' (casefiddle.c:621).
-      "Convert the region to lower case."
+      ;; GNU Emacs's `downcase-region' (`casefiddle.c:621'): the same,
+      ;; downcasing, and nil the same way.
+      "Convert the region to lower case.
+In programs, wants two arguments.  These arguments
+specify the starting and ending character numbers of the region to
+operate on.  When used as a command, the text between point and the
+mark is operated on."
       (interactive (list (region-beginning) (region-end)))
-      (casify-region 'downcase beg end))
+      (casify-region 'downcase beg end)
+      #f)
 
     (define-command (upcase-word arg)
       ;; GNU Emacs's `upcase-word' (casefiddle.c:671): "Convert to

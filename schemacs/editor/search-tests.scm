@@ -8,6 +8,9 @@
  (schemacs editor search)
  (schemacs editor casefiddle)
  (only (schemacs editor marker) markerp marker-position)
+ ;; `primitive-undo` is `undo.c`'s and reaches this tree through the
+ ;; library that holds undo.c until `undo.scm` exists.
+ (only (schemacs editor simple) primitive-undo)
  (only (srfi 64) test-assert test-equal test-begin test-end test-error)
  )
 
@@ -199,6 +202,37 @@
      "one FRUIT, two apples" (buffer-substring (point-min) (point-max)))
    (test-equal "replace-match leaves point at the replacement's end"
      10 (point))))
+
+;; `replace_range` records the change as **one** deletion of the old text
+;; and **one** insertion of the new, and the insertion's record is
+;; `(BEG . BEG+LENGTH)` - the range the insertion occupies, which is what
+;; undoing it deletes (`record_insert`'s second argument is a *length*,
+;; `undo.c:86`). Written with a position there instead, the record is
+;; `(10 . 5)` and undoing it deletes nothing, so the replacement stays.
+;;
+;; This is the one test that would have caught that, and it is here
+;; because it did not exist: the departure was invisible to every other
+;; test in the suite, and to `casify-region`'s own.
+(test-equal "replace-match's undo record is a deletion and an insertion"
+  '(("apple" . -5) (10 . 15))
+  (with-buffer
+   (lambda ()
+     (fill "one apple, two apples")
+     (set!text-editor-undo-list (current-buffer) '())
+     (search-forward "apple")
+     (replace-match "FRUIT" #f #f)
+     (text-editor-undo-list (current-buffer)))))
+
+(test-equal "one undo puts the matched text back"
+  '("one apple, two apples" 10)
+  (with-buffer
+   (lambda ()
+     (fill "one apple, two apples")
+     (set!text-editor-undo-list (current-buffer) '())
+     (search-forward "apple")
+     (replace-match "FRUIT" #f #f)
+     (primitive-undo 1 (text-editor-undo-list (current-buffer)))
+     (list (buffer-substring (point-min) (point-max)) (point)))))
 
 ;; the error strings are the C's
 

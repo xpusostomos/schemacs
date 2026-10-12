@@ -42,12 +42,18 @@
   ;; the customize group, `font-lock-mode-hook' - is named on it rather
   ;; than faked.
   ;;
-  ;; And `with-silent-modifications', which wraps Emacs's fontification
-  ;; to keep it out of the undo list and off the modified flag, is *not*
-  ;; needed here and so is not written: a text-property change in this
-  ;; tree does neither (`insert' and `delete' are what touch the undo
-  ;; list and the modified flag, and the engine's, not the property
-  ;; layer's). Named, not faked.
+  ;; And `with-silent-modifications', which wraps Emacs's fontification,
+  ;; **is needed after all, and is ported** - `font-lock.el:1044' and
+  ;; `:1196', which are `font-lock-unfontify-region' and
+  ;; `font-lock-default-fontify-region'. This header used to say it was
+  ;; not needed, on the reasoning that "a text-property change in this
+  ;; tree does neither" the undo list nor the modified flag. That stopped
+  ;; being true on 2026-10-12, when `textprop.scm`'s
+  ;; `modify_text_properties' was made faithful: a property write now runs
+  ;; `prepare_to_modify_buffer_1', which means it consults the read-only
+  ;; flag and it records undo and raises the counter. `inhibit-read-only'
+  ;; is the binding that matters most - font-lock fontifies *read-only*
+  ;; buffers, dired's among them - and Emacs has always bound it here.
 
   (import
     (scheme base)
@@ -78,6 +84,10 @@
     (only (schemacs editor buffer)
           buffer-local-value current-buffer
           major-mode set-buffer-local-value!)
+    ;; `with-silent-modifications` is `subr.el`'s, and font-lock wraps its
+    ;; two fontifying entry points in it as `font-lock.el` does - see the
+    ;; note in this library's header for why it is not optional.
+    (only (schemacs editor subr) with-silent-modifications)
     ;; the hook `font-lock-mode' hangs its incremental fontification on:
     ;; `after-change-functions' is `buffer.c''s, and the engine holds it
     (only (schemacs editor engine) *after-change-functions*)
@@ -848,9 +858,13 @@
        (current-buffer)))
 
     (define (font-lock-unfontify-region beg end)
-      ;; GNU Emacs's `font-lock-unfontify-region' (font-lock.el:1041).
+      ;; GNU Emacs's `font-lock-unfontify-region' (font-lock.el:1041),
+      ;; which wraps its call in `with-silent-modifications' (`:1044') -
+      ;; the unfontifying *is* a property change, and the buffer may be
+      ;; read-only.
       ;;--------------------------------------------------------------
-      ((*font-lock-unfontify-region-function*) beg end))
+      (with-silent-modifications
+       ((*font-lock-unfontify-region-function*) beg end)))
 
     (define (font-lock-extend-region-multiline)
       ;; GNU Emacs's `font-lock-extend-region-multiline'
@@ -905,26 +919,30 @@
       ;;
       ;; The `with-syntax-table' the C wraps everything in is not here -
       ;; there is no syntax table - and the syntactic pass with it; what
-      ;; is left is the extend-region walk and the keyword pass.
+      ;; is left is the extend-region walk and the keyword pass. The
+      ;; `with-silent-modifications' it wraps the same body in (`:1196')
+      ;; *is* here, and has to be: fontification is a property write, and
+      ;; font-lock fontifies read-only buffers.
       ;;
       ;; The C's answer is `(jit-lock-bounds BEG . END)', which is
       ;; jit-lock's bookkeeping and belongs with jit-lock.
       ;;--------------------------------------------------------------
       (let ((end (if (> end (point-max)) (point-max) end)))
-        (parameterize ((*font-lock-beg* beg)
-                       (*font-lock-end* end))
-          ;; "If there's been a change, we should go through the list
-          ;; again since this new position may warrant a different answer
-          ;; from one of the fun we've already seen."
-          (let loop ((funs (*font-lock-extend-region-functions*)))
-            (when (pair? funs)
-              (if ((car funs))
-                  (loop (*font-lock-extend-region-functions*))
-                  (loop (cdr funs)))))
-          (let ((beg (*font-lock-beg*))
-                (end (*font-lock-end*)))
-            (font-lock-unfontify-region beg end)
-            (font-lock-fontify-keywords-region beg end)))
+        (with-silent-modifications
+         (parameterize ((*font-lock-beg* beg)
+                        (*font-lock-end* end))
+           ;; "If there's been a change, we should go through the list
+           ;; again since this new position may warrant a different answer
+           ;; from one of the fun we've already seen."
+           (let loop ((funs (*font-lock-extend-region-functions*)))
+             (when (pair? funs)
+               (if ((car funs))
+                   (loop (*font-lock-extend-region-functions*))
+                   (loop (cdr funs)))))
+           (let ((beg (*font-lock-beg*))
+                 (end (*font-lock-end*)))
+             (font-lock-unfontify-region beg end)
+             (font-lock-fontify-keywords-region beg end))))
         #f))
 
     (define (font-lock-fontify-region beg end . args)

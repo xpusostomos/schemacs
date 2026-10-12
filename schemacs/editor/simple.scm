@@ -42,7 +42,6 @@
     (only (schemacs editor marker) copy-marker marker-position set-marker)
     (only (schemacs editor engine)
          mark-marker
-         set!text-editor-deactivate-mark!
          undo-insertion-entry? undo-deletion-entry? undo-modified-entry?
          set!text-editor-mark make-buffer-string
          text-editor-cursor-column
@@ -53,6 +52,7 @@
          buffer-beg buffer-z
          buffer-read-only? text-editor-set-cursor
          set!buffer-read-only
+         set!text-editor-undo-list
          text-editor-undo-boundary! text-editor-undo-list)
     ;; `visited-file-modtime' is `fileio.c`'s, and the `(t . TIME)' undo
     ;; branch below is what reads it - the same questions asked of the
@@ -100,7 +100,8 @@
     (only (schemacs editor command) *mark-even-if-inactive*)
     (only (schemacs editor editfns)
           bolp buffer-size buffer-substring delete-and-extract-region delete-region eobp
-          eolp following-char forward-line insert line-beginning-position
+          eolp following-char forward-line insert insert-and-inherit
+          line-beginning-position
           line-end-position goto-char message point point-max
           preceding-char region-beginning region-end save-excursion)
     (only (schemacs editor syntax) skip-chars-forward skip-chars-backward
@@ -378,9 +379,24 @@ a specialization of overwrite mode, entered by setting the
                 (loop (+ 1 i) prev))))))))
 
     (define-command (backward-delete-char count)
+      ;; GNU Emacs's `delete-backward-char` (`simple.el:1478`), which
+      ;; `backward-delete-char` is an alias of (`subr.el:2269`). Its body
+      ;; is three branches, and this is the last of them, the one every
+      ;; ordinary DEL takes:
+      ;;
+      ;;     (t (delete-char (- n) killflag))
+      ;;
+      ;; **Not carried**, the two branches above it: the active-region
+      ;; branch (`use-region-p` + `delete-active-region`, which deletes or
+      ;; kills the region when N is 1) and the overwrite-mode untabify
+      ;; branch (which backs over *columns*, replacing a tab with spaces).
+      ;; Both need primitives this command does not reach yet. What the
+      ;; previous body did instead was call the engine facade's clamp,
+      ;; which quietly did nothing at the beginning of the buffer where
+      ;; this now signals `beginning-of-buffer`, as Emacs does.
       "Delete N characters before point."
       (interactive "p")
-      (text-editor-delete-from-cursor (current-buffer) (- count)))
+      (delete-char (- count)))
 
     (define-command (kill-line uarg)
       "Kill N lines at point. With no argument, kill to the end of the
@@ -414,12 +430,45 @@ a specialization of overwrite mode, entered by setting the
                      (point))))
 
     (define-command (insert-newline count)
+      ;; GNU Emacs's `newline' (`simple.el:616'), as far as it goes here.
+      ;;
+      ;; **The C is not a loop over `insert'**: `newline' sets
+      ;; `last-command-event' to the line break and calls
+      ;; `self-insert-command', so a newline goes through
+      ;; `internal_self_insert` like any other typed character - which is
+      ;; what gives it property inheritance, the `post-self-insert-hook',
+      ;; and (in the C) auto-fill, electric-indent and the left margin.
+      ;;
+      ;; **What is carried** is the insert that half ends in:
+      ;; `insert_and_inherit`, so a line break takes the properties of the
+      ;; text around it, as Emacs's does. **What is not**, each named:
+      ;; `use-hard-newlines` and `set-hard-newline-properties`; the
+      ;; `prefix-numeric-value` check and the negative-argument error;
+      ;; `inhibit-auto-fill` and `auto-fill-mode`, neither being ported;
+      ;; the left-margin deletion from a newly blank line and
+      ;; `move-to-left-margin`; and `post-self-insert-hook`, which
+      ;; `self-insert-command` does not run here.
+      ;;
+      ;; It is `insert-newline` and not `newline` because `(scheme base)`
+      ;; exports `newline`; see the export note on the command.
+      ;;--------------------------------------------------------------
+      ;; **The line break goes through `self-insert-command`**, which is
+      ;; where Emacs sends it - `newline` sets `last-command-event` to the
+      ;; break and calls `self-insert-command`, so the insertion that
+      ;; finally happens is `internal_self_insert`'s `insert_and_inherit`.
+      ;; (Emacs needs the `last-command-event` line because its
+      ;; `self-insert-command` is a one-argument DEFUN that reads the
+      ;; character out of that variable; this tree's takes it as an
+      ;; argument, so there is nothing to set.)
+      ;;
+      ;; **The character is the integer 10**, Emacs's `?\n` - a character
+      ;; in that model *is* an integer, and `self-insert-command` tests
+      ;; its argument with `characterp`, which asks for an integer. A
+      ;; Scheme `#\newline` there is not a character to that test and the
+      ;; command silently does nothing.
       "Insert N line breaks at point."
       (interactive "p")
-      (let loop ((i 0))
-        (when (< i count)
-          (text-editor-insert (current-buffer) #\newline)
-          (loop (+ 1 i)))))
+      (self-insert-command count (char->integer #\newline)))
 
     ;; `keyboard-quit', `read-only-mode' and
     ;; `exchange-point-and-mark' are simple.el's; they were
@@ -975,6 +1024,39 @@ non-nil."
         (and mark
              (list mark (buffer-pt (current-buffer))))))
 
+    (define (buffer-substring--filter beg end delete)
+      ;; GNU Emacs's `buffer-substring--filter` (`simple.el:5647`): "Default
+      ;; function to use for `filter-buffer-substring-function'. Also
+      ;; respects the obsolete wrapper hook `filter-buffer-substring-functions'."
+      ;;
+      ;; **The `save-excursion` and the `goto-char beg` are the whole
+      ;; point of it.** With DELETE the region goes through
+      ;; `delete-and-extract-region` *from BEG*, so the deletion records a
+      ;; **positive** position and undoing it leaves point at the start of
+      ;; what was killed - however far the command had moved point first.
+      ;; `kill-line` moves point to the far end of what it kills and says
+      ;; why (`simple.el:6800`: "It is better to move point to the other
+      ;; end of the kill before killing"), and this is what makes that
+      ;; harmless. Deleting with a plain `delete-region` instead records
+      ;; the sign of wherever point happened to be, and undo then lands in
+      ;; the wrong place.
+      ;;--------------------------------------------------------------
+      (if delete
+          (save-excursion
+            (goto-char beg)
+            (delete-and-extract-region beg end))
+          (buffer-substring beg end)))
+
+    (define (filter-buffer-substring beg end delete)
+      ;; GNU Emacs's `filter-buffer-substring` (`simple.el:5627`): "Copy
+      ;; text of the buffer between START and END, then delete it if
+      ;; DELETE is non-nil." **Not carried**: the
+      ;; `filter-buffer-substring-functions` wrapper hook and the
+      ;; `filter-buffer-substring-function` variable; the default is all
+      ;; that runs here.
+      ;;--------------------------------------------------------------
+      (buffer-substring--filter beg end delete))
+
     (define-command (kill-region beg end)
       ;; GNU Emacs's `kill-region' (simple.el:5999): "Kill the text
       ;; between BEG and END and put it in the kill ring" - which is
@@ -1001,11 +1083,12 @@ non-nil."
             (kill-append string (< end beg))
             (kill-new string))
         (*this-command* kill-region)
-        (set!text-editor-deactivate-mark! (current-buffer) #t)
+        (set-buffer-local-value! (current-buffer) 'deactivate-mark #t)
         (if read-only?
             (unless (*kill-read-only-ok*)
               (error "Buffer is read-only"))
-            (delete-region beg end))))
+            ;; the C's `(filter-buffer-substring beg end 'delete)'
+            (filter-buffer-substring beg end #t))))
 
     (define (copy-region-as-kill beg end)
       ;; GNU Emacs's `copy-region-as-kill': put the text in the kill ring
@@ -1019,7 +1102,7 @@ non-nil."
         ;; M-w does *not* rename itself: Emacs's `copy-region-as-kill' has
         ;; no `(setq this-command ...)', so copying twice makes two
         ;; entries where killing twice makes one.
-        (set!text-editor-deactivate-mark! (current-buffer) #t)))
+        (set-buffer-local-value! (current-buffer) 'deactivate-mark #t)))
 
     (define-command (kill-ring-save)
       ;; GNU Emacs's `kill-ring-save' (M-w), which is `copy-region-as-kill'
@@ -1061,7 +1144,7 @@ non-nil."
                      (else (- arg 1))))
             (ed (current-buffer)))
         (push-mark)
-        (text-editor-insert ed (current-kill n))
+        (insert (current-kill n))
         ;; `C-u C-y' leaves point *before* what it inserted and the
         ;; mark after it, which is like `exchange-point-and-mark' but
         ;; does not activate the mark. Emacs asks `(consp arg)' - a
@@ -1096,7 +1179,7 @@ non-nil."
                  (end (if before (mark #t) (buffer-pt ed))))
             (delete-region beg end)
             (set!text-editor-mark ed (buffer-pt ed))
-            (text-editor-insert ed (current-kill count))
+            (insert (current-kill count))
             ;; ... and it says `yank' as well, so the *next* M-y still
             ;; looks like one and the ring may be gone round and round.
             (*this-command* yank))))
@@ -1159,6 +1242,55 @@ non-nil."
       (let loop ((list list))
         (if (and (pair? list) (null? (car list))) (loop (cdr list)) list)))
 
+    (define (undo-drop-recorded-positions! ed)
+      ;; GNU Emacs's last loop in `undo` (`simple.el:3559`), which has no
+      ;; name there:
+      ;;
+      ;;   ;; Don't specify a position in the undo record for the undo
+      ;;   ;; command.  Instead, undoing this should move point to where
+      ;;   ;; the change is.
+      ;;
+      ;; An *integer* entry is where point was when the command began -
+      ;; `record_point`'s second half - and it is what makes undoing a
+      ;; kill land where the command started rather than wherever the
+      ;; deletion's sign put point. The undo command has just made
+      ;; entries of its own, and an integer among them would do that job
+      ;; a second time: the next undo would be *told* where to put point
+      ;; instead of working it out from the change it is undoing, and a
+      ;; redo - which is exactly that, an undo of the undo - would land a
+      ;; character or two out. So it comes back out here.
+      ;;
+      ;; The walk is Emacs's, shape and all: the outer loop removes the
+      ;; first integer it meets, the inner one steps over what follows
+      ;; removing entries that name the same position, and the outer loop
+      ;; is then finished - so one run of them goes, not every integer in
+      ;; the list. An integer *elsewhere* belongs to an older command and
+      ;; is still wanted. Copied rather than tidied.
+      ;;
+      ;; It edits the list in place with `set-cdr!`, as the Lisp does
+      ;; with `setcdr`, which is safe here because the buffer's undo list
+      ;; is the object `(text-editor-undo-list ed)` answers.
+      ;;--------------------------------------------------------------
+      (let loop ((tail (text-editor-undo-list ed)) (prev #f))
+        (when (and (pair? tail) (not (null? (car tail))))
+          (if (integer? (car tail))
+              (let ((pos (car tail)))
+                (if prev
+                    (set-cdr! prev (cdr tail))
+                    (set!text-editor-undo-list ed (cdr tail)))
+                ;; the inner walk: `prev` advances only over the entries
+                ;; that stay
+                (let inner ((rest (cdr tail)) (p prev))
+                  (when (and (pair? rest) (not (null? (car rest))))
+                    (if (eqv? pos (car rest))
+                        (begin
+                          (if p
+                              (set-cdr! p (cdr rest))
+                              (set!text-editor-undo-list ed (cdr rest)))
+                          (inner (cdr rest) p))
+                        (inner (cdr rest) rest)))))
+              (loop (cdr tail) tail)))))
+
     (define (primitive-undo n list)
       ;; GNU Emacs's `primitive-undo' (`simple.el:3650'): "Undo N
       ;; records from the front of the list LIST. Return what remains of
@@ -1202,6 +1334,20 @@ non-nil."
                 (cond
                  ;; a boundary ends the group
                  ((null? entry) (loop rest (- n 1) #t))
+                 ;; An *integer* entry is where point was when the
+                 ;; command began - `record_point`'s second half
+                 ;; (`undo.c:50`), pushed below the change's own entry so
+                 ;; that it is applied after it. The C's `pcase` case is
+                 ;; one line: `((pred integerp) (goto-char next))`.
+                 ;;
+                 ;; **It was missing here**, and nothing noticed while
+                 ;; nothing pushed one: an integer fell through to the
+                 ;; `else` below, which treated it as a change, opened an
+                 ;; undo group and left `n` alone, so the walk ran on
+                 ;; past the boundary and undid the next group too.
+                 ((integer? entry)
+                  (text-editor-set-cursor ed entry)
+                  (loop rest n #f))
                  ;; Undoing back past the mark of the last save makes the
                  ;; buffer unmodified again, which is what tells the user
                  ;; there is nothing left to save. The mark only counts
@@ -1294,6 +1440,9 @@ non-nil."
               ;; what makes the next undo report that it is finished.
               (*pending-undo-list* (if (null? rest) #f rest))
               (*last-change-was-undo* #t)
+              ;; ... and the records the undo just made do not carry a
+              ;; position of their own. See the function.
+              (undo-drop-recorded-positions! ed)
               (set!frame-message frame "Undo")))))
 
     (define-command (undo-redo count)
@@ -2078,10 +2227,12 @@ non-nil."
       (let* ((ed (current-buffer))
              (loc (buffer-pt ed)))
         (text-editor-undo-boundary! ed)
-        (let loop ((i 0))
-          (when (< i n)
-            (text-editor-insert ed #\newline)
-            (loop (+ i 1))))
+        ;; The `(newline n)' the note above names: `newline`'s own command
+        ;; here is `insert-newline`, which sends the break through
+        ;; `self-insert-command` as `newline` does. The hand-rolled loop
+        ;; this replaces inserted raw `#\newline`s through the engine
+        ;; facade - no `self-insert`, and so no property inheritance.
+        (insert-newline n)
         (text-editor-set-cursor ed loc)))
 
     (define-command (open-line-command n)
@@ -2110,7 +2261,7 @@ non-nil."
              (and (use-region-p) (region-beginning))
              (and (use-region-p) (region-end))))
       ;; Consistently deactivate mark even when no text is changed.
-      (set!text-editor-deactivate-mark! (current-buffer) #t)
+      (set-buffer-local-value! (current-buffer) 'deactivate-mark #t)
       (if (and beg (not arg))
           ;; Region is active. Go to END, but only if region spans
           ;; multiple lines.
@@ -2234,7 +2385,7 @@ non-nil."
                       (skip-chars-forward skip-characters)
                       (buffer-pt ed))))
           (delete-region mid end)
-          (text-editor-insert ed (make-string num #\space)))))
+          (insert (make-string num #\space)))))
 
     (define (%blank-line-up ed pos)
       ;; The position `re-search-backward "[^ \t\n]"' and `(forward-
@@ -2387,7 +2538,7 @@ non-nil."
               ;; the edits move it: +LEN2 for the first insert
               ;; (BEG2 is at or after it), -LEN1 for the delete.
               (text-editor-set-cursor ed (cdr pos1))
-              (text-editor-insert ed word)
+              (insert word)
               (text-editor-set-cursor ed (car pos1))
               (let ((first (delete-and-extract-region
                             (+ 1 (car pos1))

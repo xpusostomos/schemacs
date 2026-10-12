@@ -61,11 +61,13 @@
     ;; ring rather than being lost.
     (only (schemacs editor simple)
           push-mark pop-mark set-mark deactivate-mark)
-    (only (schemacs editor engine)
-          set!text-editor-deactivate-mark! text-editor-mark)
+    (only (schemacs editor engine) text-editor-mark)
     (only (schemacs editor buffer)
           buffer-auto-hscroll-mode current-buffer set!buffer-auto-hscroll-mode
           set-buffer-local-value! transient-mark-mode)
+    ;; ^ `set-buffer-local-value!' is also what clears the buffer's
+    ;; deferred `deactivate-mark' flag below - it is a buffer-local
+    ;; *variable* (`keyboard.c:14030') and not a slot of the buffer.
     ;; a drag repaints as it moves, which is what Emacs's tracking does
     ;; with `redisplay'.
     (only (schemacs editor xdisp)
@@ -474,8 +476,8 @@ This should be bound to a mouse drag event."
              ;; and window" - Emacs clears the buffer's deferred
              ;; `deactivate-mark' flag here, because this drag is about to
              ;; set its own region.
-             (_ (set!text-editor-deactivate-mark!
-                 (window-buffer start-window) #f))
+             (_ (set-buffer-local-value!
+                 (window-buffer start-window) 'deactivate-mark #f))
              ;; "now let's jump to the place of the event, where things
              ;; are happening" - the call that selects the window and
              ;; moves point, and that everything below depends on.

@@ -7,10 +7,15 @@
        get-buffer-create set-buffer erase-buffer buffer-overwrite-mode
        set!buffer-overwrite-mode)
  (only (schemacs editor editfns)
-       insert goto-char point buffer-string)
+       insert goto-char point buffer-string propertize)
+ (only (schemacs editor textprop) get-text-property)
  (only (schemacs editor cmds)
-       backward-char beginning-of-line end-of-line forward-char
+       backward-char beginning-of-line delete-char end-of-line forward-char
        internal-self-insert self-insert-command)
+ ;; `backward-delete-char` is `simple.el`'s `delete-backward-char`
+ ;; (`simple.el:1478`), and it is the last branch of it that DEL takes -
+ ;; it delegates to `delete-char` with a negated argument.
+ (only (schemacs editor simple) backward-delete-char)
  ;; `last-command-event' is `keyboard.c''s and is bound by the command
  ;; loop; a test calling the command itself binds it, as the loop does.
  (only (schemacs editor command) *last-command-event*))
@@ -177,6 +182,62 @@
   (move-result "ab" 2 (lambda () (forward-char -1))))
 
 ;; ------------------------------------------------------------------
+;; delete-char, which is `cmds.c:221` and whose **clamp is a signal**
+;;
+;; It used to delegate to the engine's `text-editor-delete-from-cursor`,
+;; which *clamped* at the buffer's end and answered the number of
+;; characters deleted. The C stops and signals, as `move_point` above
+;; does - and, unlike `move_point`, it does **not** move point to the
+;; boundary before signalling. Every row is Emacs 31.1's, from
+;; `emacs -Q --batch' over the same calls.
+
+(define (delete-result text position thunk)
+  ;; (error message or `no-error', the text afterwards, point afterwards).
+  ;;--------------------------------------------------------------
+  (let ((ed (get-buffer-create "*cmds-delete*")))
+    (set-buffer ed)
+    (erase-buffer)
+    (insert text)
+    (goto-char position)
+    (let ((outcome (guard (e (#t (if (error-object? e)
+                                    (error-object-message e)
+                                    'ERR)))
+                     (thunk)
+                     'no-error)))
+      (list outcome (buffer-string) (point)))))
+
+(test-equal "delete-char forward deletes N and leaves point"
+  '(no-error "acdef" 2)
+  (delete-result "abcdef" 2 (lambda () (delete-char 1))))
+
+(test-equal "delete-char backward deletes N and pulls point back to the start"
+  '(no-error "cdef" 1)
+  (delete-result "abcdef" 3 (lambda () (delete-char -2))))
+
+(test-equal "delete-char forward past the end signals, leaving point"
+  '("End of buffer" "ab" 3)
+  (delete-result "ab" 3 (lambda () (delete-char 1))))
+
+(test-equal "...and N past the end signals too, deleting nothing"
+  '("End of buffer" "ab" 2)
+  (delete-result "ab" 2 (lambda () (delete-char 5))))
+
+(test-equal "delete-char backward past the beginning signals, leaving point"
+  '("Beginning of buffer" "ab" 1)
+  (delete-result "ab" 1 (lambda () (delete-char -1))))
+
+;; ...and `backward-delete-char` is that with a negated argument, which is
+;; the branch of `delete-backward-char` that DEL takes - so DEL at the
+;; beginning of the buffer signals now where it used to do nothing.
+(test-equal "backward-delete-char at the beginning of the buffer signals"
+  '("Beginning of buffer" "ab" 1)
+  (delete-result "ab" 1 (lambda () (backward-delete-char 1))))
+
+(test-equal "backward-delete-char in the middle deletes and pulls point back"
+  '(no-error "acdef" 2)
+  (delete-result "abcdef" 3 (lambda () (backward-delete-char 1))))
+
+;; ------------------------------------------------------------------
 ;; beginning-of-line and end-of-line, which take an optional N too
 ;;
 ;; Both are `(0, 1, "^p")' in `cmds.c' and both are one call over the
@@ -301,5 +362,32 @@
 (test-equal "an eight-bit byte character inserts nothing (departure)"
   "abc"
   (self-insert-cmd "abc" 1 #x3FFF80))
+
+;; A typed character takes the properties of the text it lands next to:
+;; `internal_self_insert` inserts with `insert_and_inherit` (`cmds.c:471`,
+;; `:475`), not `insert`. Typing after a propertized run therefore extends
+;; the run, which is what Emacs does - measured, and it is not what this
+;; did until the `insert`/`insert-and-inherit` pair existed.
+(test-equal "self-insert inherits the properties of the text before it"
+  '("abcd" bold)
+  (let ((ed (get-buffer-create "*cmds-tests-inherit*")))
+    (set-buffer ed)
+    (erase-buffer)
+    (insert (propertize "abc" 'face 'bold))
+    (goto-char 4)
+    (self-insert-command 1 (char->integer #\d))
+    (list (buffer-string) (get-text-property 4 'face ed))))
+
+;; ...and a run of them all do, since each is its own insertion and the
+;; one before it has already taken the properties along.
+(test-equal "a repeated self-insert extends the run too"
+  '("abcddd" bold)
+  (let ((ed (get-buffer-create "*cmds-tests-inherit2*")))
+    (set-buffer ed)
+    (erase-buffer)
+    (insert (propertize "abc" 'face 'bold))
+    (goto-char 4)
+    (self-insert-command 3 (char->integer #\d))
+    (list (buffer-string) (get-text-property 6 'face ed))))
 
 (test-end "schemacs_editor_cmds")

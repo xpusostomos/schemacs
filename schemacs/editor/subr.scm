@@ -46,7 +46,18 @@
     ;; `intervals.sld', and the engine is built on the buffer library. So
     ;; the hook runner arrives there through a seam, and this is where it
     ;; is installed.
-    (only (schemacs editor buffer) *run-hooks-function*)
+    (only (schemacs editor buffer)
+          *run-hooks-function*
+          ;; `with-silent-modifications` binds four of `buffer.c`'s
+          ;; things, so the macro's template has to resolve them here -
+          ;; and it does resolve them here: a `syntax-rules` template's
+          ;; free identifiers are hygienic, meaning they name what they
+          ;; name *in this library*, whatever the caller has imported.
+          ;; The one of the four this tree has not got is
+          ;; `inhibit-modification-hooks`.
+          *inhibit-read-only* buffer-modified-p current-buffer
+          restore-buffer-modified-p set!text-editor-undo-list
+          text-editor-undo-list)
     )
 
   (export
@@ -80,6 +91,7 @@
    run-mode-hooks
    apply-partially
    kbd
+   with-silent-modifications
    nthcdr
    ;; `nth' and the `posn-' cluster - see the note on them below.
    nth event-start event-end
@@ -351,6 +363,69 @@
             (let ((after (reverse (*delayed-after-hook-functions*))))
               (*delayed-after-hook-functions* '())
               (for-each (lambda (f) (f)) after)))))
+
+    (define-syntax with-silent-modifications
+      ;; GNU Emacs's `with-silent-modifications' (`subr.el:5473'):
+      ;; "Execute BODY, pretending it does not modify the buffer. This
+      ;; macro is typically used around modifications of text properties
+      ;; that do not really affect the buffer's content. ... This macro
+      ;; will run BODY normally, but doesn't count its buffer
+      ;; modifications as being buffer modifications. This affects things
+      ;; like `buffer-modified-p', checking whether the file is locked by
+      ;; someone else, running buffer modification hooks, and other things
+      ;; of that nature."
+      ;;
+      ;; The C's body is a `let*' of four bindings around an
+      ;; `unwind-protect':
+      ;;
+      ;;     (let* ((modified (buffer-modified-p))
+      ;;            (buffer-undo-list t)
+      ;;            (inhibit-read-only t)
+      ;;            (inhibit-modification-hooks t))
+      ;;       (unwind-protect (progn ,@body)
+      ;;         (when (memq modified '(nil autosaved))
+      ;;           (restore-buffer-modified-p modified))))
+      ;;
+      ;; **`inhibit-read-only' is the binding that earns this macro its
+      ;; keep**, and it is the one that is easy to miss. Font-lock
+      ;; fontifies a *read-only* buffer - dired's, `*Completions*', any
+      ;; `special-mode' buffer - and `put-text-property' on a read-only
+      ;; buffer signals `buffer-read-only', as it does in Emacs
+      ;; (measured). Emacs's answer is this binding, and `font-lock.el'
+      ;; has it at `:1044' and `:1196'; before the property section
+      ;; below was made faithful, a property write here did not consult
+      ;; the read-only flag at all, and this tree's `font-lock' said in
+      ;; its header that this macro was not needed. It was needed all
+      ;; along, and the note is corrected there.
+      ;;
+      ;; `buffer-undo-list' bound to `t' is Emacs's "do not record"
+      ;; value; this tree's spelling of the same state is false - that is
+      ;; what `text-editor-undo-disable!' writes - so the binding is `#f'
+      ;; and the saved value is put back on the way out, which the C's
+      ;; `let' does too.
+      ;;
+      ;; **`inhibit-modification-hooks' is not carried**, there being no
+      ;; such switch here; it is what stops the change hooks running, and
+      ;; nothing in this tree reads it. With it, `signal-before-change'
+      ;; and `signal-after-change' still run inside BODY here where Emacs
+      ;; suppresses them. Named, not faked.
+      ;;
+      ;; `autosaved' - the third value Emacs 31's `buffer-modified-p' can
+      ;; answer - has no counterpart: this tree's is true or false.
+      ;;--------------------------------------------------------------
+      (syntax-rules ()
+        ((with-silent-modifications body ...)
+         (let ((buffer (current-buffer)))
+           (let ((modified (buffer-modified-p buffer))
+                 (undo-list (text-editor-undo-list buffer)))
+             (parameterize ((*inhibit-read-only* #t))
+               (dynamic-wind
+                 (lambda () (set!text-editor-undo-list buffer #f))
+                 (lambda () body ...)
+                 (lambda ()
+                   (set!text-editor-undo-list buffer undo-list)
+                   (unless modified
+                     (restore-buffer-modified-p #f))))))))))
 
     (define (apply-partially function . args)
       ;; GNU Emacs's `apply-partially' (`subr.el:129'): "Return a function

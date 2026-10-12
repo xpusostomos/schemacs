@@ -4,16 +4,24 @@
  (only (srfi 64) test-assert test-equal test-begin test-end)
  (only (guile) setvbuf)
  (only (schemacs editor engine)
-       allocate-buffer text-editor-delete-from-cursor
+       allocate-buffer buffer-beg buffer-z text-editor-delete-from-cursor
        text-editor-insert text-editor-set-cursor text-editor-text-props)
  (only (schemacs editor intervals)
        find-interval next-interval interval-position interval-last-pos
+       interval-total-length
        interval-plist string-intervals)
- (only (schemacs editor buffer) erase-buffer get-buffer-create set-buffer)
+ (only (schemacs editor buffer)
+       *inhibit-read-only* erase-buffer get-buffer-create set-buffer
+       set!buffer-read-only set-buffer-modified-p text-editor-undo-list)
+ ;; the `(t . TOKEN)' entry `record_first_change' pushes is read back with
+ ;; `undo.c`'s own predicate for it.
+ (only (schemacs editor undo) undo-modified-entry?)
  (only (schemacs editor editfns)
-       buffer-substring buffer-substring-no-properties insert propertize)
+       buffer-substring buffer-substring-no-properties insert insert-and-inherit
+       propertize)
  (only (schemacs editor fns) concat copy-sequence)
- (prefix (schemacs editor textprop) tp:))
+ (prefix (schemacs editor textprop) tp:)
+ (only (ice-9 exceptions) exception-message))
 
 ;; Unbuffered output, so a run that hangs shows where it got to.
 (setvbuf (current-output-port) 'none)
@@ -197,15 +205,83 @@
     (let ((i (find-interval (text-editor-text-props ed) 2)))
       (list (interval-position i) (interval-last-pos i) (interval-plist i)))))
 
-;; Text inserted *inside* a run takes the run's properties - the sticky
-;; rule, which is what makes a `read-only' or `field' property survive an
-;; edit instead of stopping at the old characters.
+;; Text inserted *inside* a run with plain `insert` **does not** take the
+;; run's properties. It does not stop at the old characters either - the
+;; run is still one interval on each side of the insertion - but the new
+;; text itself comes out bare, because `insert` is
+;; `general_insert_function` with `inherit` false, which reaches
+;; `graft_intervals_into_buffer`'s `!source` branch and *clears* the new
+;; range (`set_text_properties_1` with Qnil).
+;;
+;; Measured, `emacs -Q --batch`, on exactly this text and this insertion:
+;;   (with-temp-buffer (insert "abcdefghij")
+;;     (put-text-property 3 6 'face 'bold)
+;;     (goto-char 4) (insert "XYZ") ...)
+;;   => (1 3 nil) (3 4 bold) (4 7 nil) (7 9 bold) (9 14 nil)
+;;
+;; This test used to expect the sticky answer below, which was *this
+;; tree's* behaviour and not Emacs's - a passing test pinning the
+;; departure. It became visible when `insert` was put onto
+;; `insert_from_string` with the inherit flag carried through.
+(test-equal '((1 3 ()) (3 4 (face bold)) (4 7 ()) (7 9 (face bold)) (9 14 ()))
+  (let ((ed (buffer-of "abcdefghij")))
+    (tp:put-text-property 3 6 'face 'bold ed)
+    (set-buffer ed)
+    (text-editor-set-cursor ed 4)
+    (insert "XYZ")
+    (runs ed)))
+
+;; ...and `insert-and-inherit`, the same call with the flag on, is the
+;; sticky rule: the run grows across the new text and one interval covers
+;; all of it. Emacs's answer for the same three lines with
+;; `insert-and-inherit` is `(1 3 nil) (3 9 bold) (9 14 nil)`.
 (test-equal '((1 3 ()) (3 9 (face bold)) (9 14 ()))
   (let ((ed (buffer-of "abcdefghij")))
     (tp:put-text-property 3 6 'face 'bold ed)
+    (set-buffer ed)
     (text-editor-set-cursor ed 4)
-    (text-editor-insert ed "XYZ")
+    (insert-and-inherit "XYZ")
     (runs ed)))
+
+;; The tree still covers the buffer after an insertion whose new text is
+;; *cleared*.
+;;
+;; `graft_intervals_into_buffer`'s no-source branch does two things when
+;; `inherit` is false: it clears the new range - `set_text_properties_1`,
+;; which **splits the root** when the range begins inside it - and then
+;; balances the tree. It balanced the tree the function had read at its
+;; top rather than the buffer's current root, so the buffer was left
+;; pointing at an *interior* interval and every interval outside that
+;; subtree was silently discarded.
+;;
+;; Measured before the fix: a 146-character buffer whose root interval was
+;; 41 characters, and the next whole-buffer delete of it never terminated
+;; (`adjust_intervals_for_deletion` cannot make progress against a tree
+;; that does not cover the text). That is a hang, not a wrong answer, so
+;; what this test pins is the invariant that was violated: the root's
+;; total is the buffer's length, and the runs tile it end to end.
+;; (buffer-length root-total first-run-start last-run-end): the last is
+;; `point-max', so the runs tile the buffer exactly, and the second equals
+;; the first when the tree covers it.
+(test-equal '(13 13 1 14)
+  (let ((ed (buffer-of "abcdefghij")))
+    (tp:put-text-property 3 6 'face 'bold ed)
+    (tp:put-text-property 7 9 'face 'italic ed)
+    (set-buffer ed)
+    ;; position 2 and not 1: the clear then begins *inside* the root, which
+    ;; is what makes `set_text_properties_1` split it - the case that was
+    ;; broken. An insert at `point-min` alone does not split the root.
+    (text-editor-set-cursor ed 2)
+    (insert "XYZ")
+    (let* ((len (- (buffer-z ed) (buffer-beg ed)))
+           (root (text-editor-text-props ed))
+           (rs (runs ed)))
+      (list len
+            (interval-total-length root)
+            ;; the runs tile 1..len+1 with no gap and no overlap: the first
+            ;; starts at 1 and the last ends at `point-max'
+            (car (car rs))
+            (cadr (car (reverse rs)))))))
 
 ;; ------------------------------------------------------------------
 ;; properties on a *string*
@@ -383,5 +459,79 @@
     (tp:remove-text-properties 1 8 '(face) ed)
     (list (tp:get-text-property 7 'face ed)
           (tp:get-text-property 8 'face ed))))
+
+;; ------------------------------------------------------------------
+;; `modify_text_properties' - the read-only gate
+;;
+;; A property write goes through `prepare_to_modify_buffer_1` and so
+;; consults the buffer's read-only flag, exactly as Emacs's does.
+;; Measured on Emacs 31.1: `put-text-property` on a read-only buffer
+;; signals `(buffer-read-only #<buffer>)`, and is allowed when
+;; `inhibit-read-only` is bound to t. Both halves are here because the
+;; first alone would be indistinguishable from "property writes are
+;; broken".
+;;
+;; **This gate is load-bearing for font-lock**, which fontifies read-only
+;; buffers - dired's among them - through `with-silent-modifications`
+;; (`subr.el:5473`), whose `inhibit-read-only` binding is what lets them.
+;; Before 2026-10-12 the property layer consulted nothing, so none of this
+;; could fail; `font-lock-tests.scm` and `dired-mode-tests.scm` are what
+;; caught it when it could.
+
+(test-equal "put-text-property on a read-only buffer signals"
+  "Buffer is read-only"
+  (let ((ed (allocate-buffer)))
+    (set-buffer ed)
+    (insert "abcdefghij")
+    (set!buffer-read-only ed #t)
+    (guard (e (#t (exception-message e)))
+      (tp:put-text-property 1 3 'face 'bold ed)
+      "no error")))
+
+(test-equal "and is allowed with `inhibit-read-only'"
+  (list 'bold 'bold)
+  (let ((ed (allocate-buffer)))
+    (set-buffer ed)
+    (insert "abcdefghij")
+    (set!buffer-read-only ed #t)
+    (parameterize ((*inhibit-read-only* #t))
+      (tp:put-text-property 1 3 'face 'bold ed))
+    (list (tp:get-text-property 1 'face ed)
+          (tp:get-text-property 2 'face ed))))
+
+;; ------------------------------------------------------------------
+;; `modify_text_properties' - `record_first_change'
+;;
+;; The C raises the counter behind a guard:
+;;
+;;     if (MODIFF <= SAVE_MODIFF)
+;;       record_first_change ();
+;;     modiff_incr (&MODIFF, 1);
+;;
+;; so the *first* change after a save leaves the `(t . TOKEN)' entry that
+;; says where the file was last saved - and a property change is a change,
+;; so it leaves one too. This tree's version had no `record_first_change`
+;; at all, which meant undoing back past a face change could not make the
+;; buffer unmodified again.
+;;
+;; **It is pinned at the entry rather than end to end, and that is
+;; deliberate.** Doing it through `undo' would also need `undo.c''s
+;; `record_property_change' (`:191'), which records the property's old
+;; value as an undo entry of its own; that is named as not carried on
+;; `record-insert', and without it the two trees' undo lists differ for
+;; reasons that have nothing to do with this test. Measured on Emacs 31.1:
+;; after a save and `put-text-property', `buffer-undo-list' holds both a
+;; property entry and a `(t . TIME)' entry.
+(test-equal "the property-change raise records the first change since the save"
+  #t
+  (let ((ed (allocate-buffer)))
+    (set-buffer ed)
+    (insert "abcdefghij")
+    (set-buffer-modified-p #f)
+    (tp:put-text-property 1 3 'face 'bold ed)
+    (let loop ((l (text-editor-undo-list ed)))
+      (cond ((null? l) #f)
+            ((undo-modified-entry? (car l)) #t)
+            (else (loop (cdr l)))))))
 
 (test-end "schemacs_editor_textprop")

@@ -9,8 +9,10 @@
  (only (schemacs editor frame) *current-frame* new-frame)
  (only (schemacs editor editfns)
        *text-quoting-style* buffer-string char-before format format-message
-       forward-line goto-char insert insert-buffer-substring line-beginning-position
-       line-end-position line-number-at-pos point)
+       forward-line goto-char insert insert-and-inherit insert-buffer-substring
+       line-beginning-position line-end-position line-number-at-pos point
+       propertize)
+ (only (schemacs editor textprop) get-text-property)
  (only (ice-9 exceptions) exception-message))
 
 ;; editfns.c's position primitives, and `forward-line' with them.
@@ -24,15 +26,15 @@
 ;;
 ;; Every expectation below is `emacs -Q --batch' on this machine.
 ;;
-;; Named and *not* covered, because it is a departure with its own cause:
-;; `forward-line' does not clamp point to the end of the buffer when the
-;; walk runs out - `(forward-line 1)' on a last line with no trailing
-;; newline leaves point where it was, where the C moves it to ZV and
-;; counts that line as moved (`cmds.c:108-142', through `find_newline',
-;; search.c:675). That is why `indent-rigidly' loops forever on a region
-;; whose last line has no newline, and why `(line-beginning-position 3)'
-;; near the end of a buffer answers one line short. Three primitives are
-;; missing for it and this file does not pretend otherwise.
+;; **FIXED 2026-10-12**: `forward-line' used to leave point where it was
+;; when the walk ran out and to answer 0 always (its counter was passed to
+;; itself unchanged), so `kill-line`'s end-of-buffer test and
+;; `paragraphs.scm`'s walks were told every move had succeeded. It is now
+;; the C's body - `scan_newline_from_point`, the shortage answer, and the
+;; "non-empty last line counts as moved" exception (`cmds.c:97' is its
+;; home; it lives in `editfns.scm` only because `indent.scm` and
+;; `indentc.scm`, which use it, sit below `cmds.scm`). The cases that run
+;; out of buffer are tested below now, not just named.
 
 (test-begin "schemacs_editor_editfns")
 
@@ -54,15 +56,16 @@
 ;; "With argument N not nil or 1, move forward N - 1 lines first" - so an
 ;; absent N is 1 and moves nothing.
 
-;; Position ZV itself is deliberately absent from this list: with no
-;; trailing newline Emacs answers ZV there (16 for this text) where this
-;; answers the last line's beginning (13). Same root as the `forward-line'
-;; note in the header - the line walk, not the primitive.
-(test-equal '(1 5 9 13)
+;; Position ZV itself *is* included: on a buffer with no trailing newline
+;; it answers the last line's beginning, which is what Emacs answers too
+;; (measured: `(goto-char 16) (line-beginning-position)' is 13 in both).
+;; The header used to name it as one line short; that was a `forward-line'
+;; symptom and went with it.
+(test-equal '(1 5 9 13 13)
   (with-text lines
     (lambda ()
       (map (lambda (at) (goto-char at) (line-beginning-position))
-           (list 1 5 9 13)))))
+           (list 1 5 9 13 16)))))
 
 ;; with the argument given, with it given as nil (which must behave as
 ;; absent - Elisp spells it `(and arg 2)'), and with it 2
@@ -142,6 +145,41 @@
   (with-text "aaa\nbbb\nccc\n"
     (lambda ()
       (map (lambda (at) (goto-char at) (forward-line 1)) (list 1 5 9)))))
+
+;; ...and the cases that DO run out of buffer, which this port got wrong
+;; until 2026-10-12: the answer was always 0 (the walk passed its counter
+;; to itself unchanged), and point was not moved to the end. The C's answer
+;; is the *shortage* and it moves point as far as it can; the docstring's
+;; exception - "a non-empty line at the end of the buffer counts as one
+;; line successfully moved" - is the `FETCH_BYTE (PT_BYTE - 1) != '\n'`
+;; clause. Every row is `emacs -Q --batch' on the same text.
+(test-equal '((0 . 5) (1 . 9) (3 . 9))
+  (with-text "abc\ndef\n"
+    (lambda ()
+      (list (begin (goto-char 1) (cons (forward-line 1) (point)))
+            (begin (goto-char 9) (cons (forward-line 1) (point)))
+            (begin (goto-char 5) (cons (forward-line 4) (point)))))))
+
+;; No trailing newline: the last line counts as moved, so `(forward-line 1)`
+;; from its start answers 0 and lands on `point-max' - and only from there
+;; does it answer 1.
+(test-equal '((0 . 4) (1 . 4))
+  (with-text "abc"
+    (lambda ()
+      (list (begin (goto-char 1) (cons (forward-line 1) (point)))
+            (begin (goto-char 4) (cons (forward-line 1) (point)))))))
+
+;; Backward: the count is negative when it runs out of the front
+(test-equal '((-1 . 1) (0 . 1))
+  (with-text "abc\ndef\n"
+    (lambda ()
+      (list (begin (goto-char 1) (cons (forward-line -1) (point)))
+            (begin (goto-char 5) (cons (forward-line -1) (point)))))))
+
+;; `(forward-line 0)' is the beginning of the current line, and answers 0
+(test-equal '(0 . 5)
+  (with-text "abc\ndef\n"
+    (lambda () (goto-char 7) (cons (forward-line 0) (point)))))
 
 ;; ------------------------------------------------------------------
 ;; `line-number-at-pos'
@@ -229,5 +267,75 @@
         (erase-buffer)
         (insert-buffer-substring src 2 3)
         (list whole (buffer-string))))))
+
+;; ------------------------------------------------------------------
+;; `insert' and `insert-and-inherit': the one difference between them
+;;
+;; Both go through `general_insert_function', and the flag it carries
+;; reaches `graft_intervals_into_buffer', where it decides what happens to
+;; text that brings **no properties of its own**: `insert' has them
+;; *cleared off* it, `insert-and-inherit` leaves it part of whatever
+;; interval it landed in. Text that brings properties of its own - a
+;; `propertize'd string - keeps them either way.
+;;
+;; Every expectation is `emacs -Q --batch' on the same text.
+
+(define (prop-after-insert inserter)
+  ;; The `face' at position 4 after ABC propertized bold, a D put after it,
+  ;; and the face at 3 alongside - the pair the Emacs probe printed.
+  ;;--------------------------------------------------------------
+  (let ((ed (get-buffer-create "*editfns-tests-prop*")))
+    (set-buffer ed)
+    (erase-buffer)
+    (insert (propertize "abc" 'face 'bold))
+    (goto-char 4)
+    (inserter)
+    (list (buffer-string)
+          (get-text-property 4 'face ed)
+          (get-text-property 3 'face ed))))
+
+(test-equal "insert gives the new text no properties of the run it lands in"
+  '("abcd" #f bold)
+  (prop-after-insert (lambda () (insert "d"))))
+
+(test-equal "insert-and-inherit gives it the run's"
+  '("abcd" bold bold)
+  (prop-after-insert (lambda () (insert-and-inherit "d"))))
+
+;; A character argument is the same question - `general_insert_function'
+;; encodes it and hands it to the same insert.
+(test-equal "insert of a character does not inherit either"
+  '("abcd" #f bold)
+  (prop-after-insert (lambda () (insert #\d))))
+
+(test-equal "insert-and-inherit of a character inherits"
+  '("abcd" bold bold)
+  (prop-after-insert (lambda () (insert-and-inherit #\d))))
+
+;; Two arguments are two insertions, each asking the question afresh - so
+;; neither inherits.
+(test-equal "each argument of insert is inserted the same way"
+  '("abcde" #f #f)
+  (let ((ed (get-buffer-create "*editfns-tests-prop2*")))
+    (set-buffer ed)
+    (erase-buffer)
+    (insert (propertize "abc" 'face 'bold))
+    (goto-char 4)
+    (insert "d" "e")
+    (list (buffer-string)
+          (get-text-property 4 'face ed)
+          (get-text-property 5 'face ed))))
+
+;; ...and a string that *does* carry properties keeps them through plain
+;; `insert`: the graft is the string's own tree.
+(test-equal "a propertized string keeps its properties through insert"
+  '("abcd" italic)
+  (let ((ed (get-buffer-create "*editfns-tests-prop3*")))
+    (set-buffer ed)
+    (erase-buffer)
+    (insert "abc")
+    (goto-char 4)
+    (insert (propertize "d" 'face 'italic))
+    (list (buffer-string) (get-text-property 4 'face ed))))
 
 (test-end "schemacs_editor_editfns")

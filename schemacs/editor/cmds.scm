@@ -26,16 +26,19 @@
           buffer-overwrite-mode current-buffer)
     (only (schemacs editor editfns)
           char-after char-before delete-region goto-char insert
+          insert-and-inherit
           line-beginning-position line-end-position point point-max)
+    ;; `replace_range`, which the overwrite branch is: the C replaces the
+    ;; characters being covered in **one** change, where a delete and an
+    ;; insert would be two. `del-range` is what `delete-char` below is
+    ;; built on - the C's `del_range` - so it comes from the same library.
+    (only (schemacs editor insdel) replace-range del-range)
     (only (schemacs editor indentc) current-column move-to-column)
     (only (schemacs editor command)
           define-command uarg->integer current-prefix-arg
           *last-command-event*)
     (only (schemacs editor engine)
-          text-editor-delete-from-cursor buffer-pt
-          text-editor-insert
-          buffer-beg buffer-z
-          text-editor-set-cursor)
+          buffer-pt buffer-beg buffer-z text-editor-set-cursor)
     )
 
   (export
@@ -133,23 +136,29 @@
           ;; `expand-abbrev' and its `no-self-insert' property go here in
           ;; the C; `abbrev-mode' is not ported.
           (if (> chars-to-delete 0)
-              ;; `replace_range (PT, to, string, ...)' followed by
-              ;; `Fforward_char (n)': the region is replaced by the
-              ;; character repeated N times and the padding spaces, and
-              ;; point ends *after the N characters* and before the
-              ;; spaces - which is what leaves the cursor where the typed
-              ;; character is.
+              ;; The C's `replace_range (PT, to, string, true, true,
+              ;; false)' followed by `Fforward_char (n)': the region is
+              ;; replaced in **one** change by the character repeated N
+              ;; times and the padding spaces, and point ends *after the
+              ;; N characters* and before the spaces - which is what
+              ;; leaves the cursor where the typed character is.
+              ;;
+              ;; The two `true's are `run_mod_hooks' and **`inherit'** -
+              ;; the overwrite path inherits too.
               (let* ((start (point))
                      (string (string-append (make-string n c)
                                             (if (> spaces-to-insert 0)
                                                 (make-string spaces-to-insert #\space)
                                                 ""))))
-                (delete-region start (+ start chars-to-delete))
-                (goto-char start)
-                (insert string)
-                (goto-char (+ start n)))
+                (replace-range start (+ start chars-to-delete) string
+                               #t #t #f)
+                (forward-char n))
+              ;; `insert_and_inherit` (`cmds.c:471', `:475'), not
+              ;; `insert`: a typed character takes the properties of the
+              ;; text it lands next to, which is why typing at the end of
+              ;; a propertized run extends the run.
               (when (> n 0)
-                (insert (make-string n c))))
+                (insert-and-inherit (make-string n c))))
           ;; `internal-auto-fill' goes here in the C; auto fill is not
           ;; ported. Neither is `post-self-insert-hook', which is the
           ;; last thing the C runs.
@@ -241,7 +250,7 @@ a non-nil value for the inserted character.  At the end, it runs
       (interactive "p")
       (let loop ((i 0))
         (when (< i count)
-          (text-editor-insert (current-buffer) #\tab)
+          (insert #\tab)
           (loop (+ 1 i)))))
 
     (define (%move-point n forward)
@@ -341,8 +350,48 @@ If point reaches the beginning or end of buffer, it stops there."
       (goto-char (line-end-position (if (pair? rest) (car rest) #f))))
 
     (define-command (delete-char count)
-      "Delete N characters after point."
+      ;; GNU Emacs's `delete-char` (`cmds.c:221`), whose DEFUN is
+      ;; `(1, 2, "p\nP")`:
+      ;;
+      ;;     if (eabs (n) < 2) call0 (Qundo_auto_amalgamate);
+      ;;     pos = PT + XFIXNUM (n);
+      ;;     if (NILP (killflag))
+      ;;       { if (n < 0) { if (pos < BEGV) xsignal0 (Qbeginning_of_buffer);
+      ;;                      else del_range (pos, PT); }
+      ;;         else       { if (pos > ZV)   xsignal0 (Qend_of_buffer);
+      ;;                      else del_range (PT, pos); } }
+      ;;     return Qnil;
+      ;;
+      ;; **The clamp is a signal now.** It delegated to
+      ;; `text-editor-delete-from-cursor`, which *clamped* at the buffer's
+      ;; end and answered the number of characters deleted; the C stops and
+      ;; signals - `beginning-of-buffer` for a backward delete that would
+      ;; run off the front, `end-of-buffer` for a forward one off the back.
+      ;; Measured on Emacs 31.1: `(delete-char -1)` at `point-min` signals
+      ;; `(beginning-of-buffer)`; `(delete-char 1)` at `point-max` signals
+      ;; `(end-of-buffer)`. The messages are the ones `%move-point` above
+      ;; already signals with.
+      ;;
+      ;; **Not carried**, each named: KILLFLAG, the optional second argument
+      ;; (`"p\nP"`), and with it `kill_forward_chars` - it calls
+      ;; `kill-region`, which is `simple.el`'s and lives in a library
+      ;; *above* this one, so the kill path needs a seam nothing else here
+      ;; wants yet; the effect is that `C-u 3 C-d` deletes where Emacs
+      ;; kills. And `undo_auto_amalgamate`, which is not ported either - the
+      ;; single-character amalgamation is done by this tree's own
+      ;; `place-undo-boundary!` in `simple.scm`.
+      "Delete N characters after point (previous if N is negative)."
       (interactive "p")
-      (text-editor-delete-from-cursor (current-buffer) count))
+      (let* ((ed (current-buffer))
+             (pt (buffer-pt ed))
+             (pos (+ pt count)))
+        (if (< count 0)
+            (if (< pos (buffer-beg ed))
+                (error "Beginning of buffer")
+                (del-range pos pt))
+            (if (> pos (buffer-z ed))
+                (error "End of buffer")
+                (del-range pt pos))))
+      #f)
 
     ))

@@ -26,10 +26,13 @@
   (import
     (scheme base)
     (scheme char)
+    ;; `erase-buffer` is `buffer.c`'s and `with-current-buffer` is its
+    ;; neighbour; the insertion is `editfns.c`'s `insert`.
+    (only (schemacs editor buffer) erase-buffer with-current-buffer)
+    (only (schemacs editor editfns) insert)
     (only (schemacs editor engine)
-    text-editor-insert
           buffer-beg buffer-z
-          text-editor-delete-from-cursor text-editor-set-cursor
+          text-editor-set-cursor
           text-editor-cursor-line
           text-editor-undo-disable! text-editor-undo-enable!))
 
@@ -190,15 +193,14 @@
         ;; point. Deleting forward from point instead would leave whatever
         ;; came before it and draw the new list onto the end of the old -
         ;; which is what a redraw with point down the list used to do.
-        (text-editor-set-cursor ed (buffer-beg ed))
-        (text-editor-delete-from-cursor ed (- (buffer-z ed) (buffer-beg ed)))
-        (text-editor-insert ed (tabulated-list--header))
-        (text-editor-insert ed "\n")
-        (for-each (lambda (entry)
-                    (text-editor-insert
-                     ed (tabulated-list--line (cdr entry) widths))
-                    (text-editor-insert ed "\n"))
-                  entries)
+        (with-current-buffer ed
+          (erase-buffer)
+          (insert (tabulated-list--header))
+          (insert "\n")
+          (for-each (lambda (entry)
+                      (insert (tabulated-list--line (cdr entry) widths))
+                      (insert "\n"))
+                    entries))
         (text-editor-undo-enable! ed)
         (text-editor-set-cursor ed (buffer-beg ed))
         entries))

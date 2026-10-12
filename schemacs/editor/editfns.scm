@@ -43,12 +43,11 @@
           text-editor-get-start-of-line text-editor-get-end-of-line
           fetch-char make-buffer-string
           buffer-read-only?
-          text-editor-insert
-          text-editor-delete-from-cursor
           buffer-beg buffer-z
-          buffer-pt count-lines
+          buffer-pt
           text-editor-mark text-editor-set-cursor
           bol
+          scan-newline-from-point
           eol)
     ;; `mark-active' and `transient-mark-mode' are `buffer.c''s
     ;; variables, and `mark-even-if-inactive' is `callint.c''s, which is
@@ -56,18 +55,22 @@
     ;; `region_limit' reads.
     (only (schemacs editor buffer)
           mark-active transient-mark-mode)
-    ;; `barf-if-buffer-read-only' asks whether the text at a position
-    ;; carries the `inhibit-read-only' property.
-    (only (schemacs editor textprop)
-          add-text-properties get-text-property)
-    ;; `propertize' and the two string paths are intervals.c's and
-    ;; fns.c's: `propertize' copies through `copy-sequence', and `insert'
-    ;; and `buffer-substring' are the two ways text properties cross
-    ;; between a string and a buffer.
-    (only (schemacs editor fns) copy-sequence)
-    (only (schemacs editor intervals)
-          copy-intervals-to-string graft-intervals-into-buffer
-          string-intervals)
+    (only (schemacs editor textprop) add-text-properties)
+    ;; The insertion and the deletion themselves are `insdel.c`'s, in its
+    ;; own library - `insert_1_both` and `del_range` are that file's, the
+    ;; same way `Finsert` and `Fdelete_region` below are this one's.
+    (only (schemacs editor insdel) del-range del-range-1 insert-from-string)
+    ;; `propertize' and the string paths: `propertize' copies through
+    ;; `copy-sequence', and `buffer-substring' is the way text properties
+    ;; cross from a buffer to a string. The other direction - a string
+    ;; into a buffer - is `insert_from_string_1`'s graft and is no longer
+    ;; called from here: it belongs where the C has it, inside the
+    ;; insertion, before the after-change hooks run.
+    ;; `line-number-at-pos' is `fns.c''s DEFUN (`fns.c:6688') and lives in
+    ;; that library now, with the `count_lines' it calls; it is imported
+    ;; and re-exported below so that this library's readers do not move.
+    (only (schemacs editor fns) copy-sequence line-number-at-pos)
+    (only (schemacs editor intervals) copy-intervals-to-string)
     (only (schemacs editor command)
           *mark-even-if-inactive*)
     ;; `message' puts its text in the echo area, which is the frame's -
@@ -96,12 +99,12 @@ point-marker
    buffer-substring-no-properties
    propertize
    delete-and-extract-region
-   barf-if-buffer-read-only
    forward-line
    delete-region
    eobp
    goto-char
    insert
+   insert-and-inherit
    line-number-at-pos
    point-max
    point-min
@@ -165,21 +168,27 @@ point-marker
           (if (eq? (< point m) beginning?) point m))))
 
     (define (delete-region start end)
-      ;; GNU Emacs's `delete-region' (`editfns.c'): "delete the text
-      ;; between START and END ... without modifying the kill ring". It
-      ;; is the command `yank-pop' uses to take back what `yank'
-      ;; inserted, and the one `kill-region' uses once the text is safely
-      ;; in the ring.
+      ;; GNU Emacs's `delete-region' (`editfns.c:2681'): "Delete the text
+      ;; between START and END. This command deletes buffer text without
+      ;; modifying the kill ring." It is the command `yank-pop' uses to
+      ;; take back what `yank' inserted, and the one `kill-region' uses
+      ;; once the text is safely in the ring.
       ;;
-      ;; Emacs's `validate_region' puts the two in order and checks them
-      ;; against the buffer; the engine's cursor-and-delete does the same
-      ;; clamping.
+      ;; The whole of the C is three lines - `validate_region`, one
+      ;; `del_range`, and `return Qnil` - and that is the whole of this
+      ;; now. **It used to put the cursor at START and delete from
+      ;; there**, because the only deleter was cursor-relative; `del_range`
+      ;; leaves point where it was, moving it only when it was inside the
+      ;; deleted text, which is not the same thing at all.
+      ;;
+      ;; `validate_region' (`editfns.c`) puts the two in order and checks
+      ;; them against the buffer; `del_range_1` clips them to it, which
+      ;; covers the second half - the raising is not ported.
       ;;--------------------------------------------------------------
-      (let ((ed (current-buffer)))
-        (when (> start end)
-          (let ((swap start)) (set! start end) (set! end swap)))
-        (text-editor-set-cursor ed start)
-        (text-editor-delete-from-cursor ed (- end start))))
+      (when (> start end)
+        (let ((swap start)) (set! start end) (set! end swap)))
+      (del-range start end)
+      #f)
 
     (define (region-beginning)
       ;; GNU Emacs's `region-beginning' (editfns.c): "the integer value
@@ -196,22 +205,12 @@ point-marker
       (region-limit #f))
 
 
-    (define (line-number-at-pos . args)
-      ;; GNU Emacs's `line-number-at-pos' (`editfns.c'): "Return current
-      ;; line number in the current buffer", counting from 1 at
-      ;; `point-min'. With a POSITION, the line that position is on.
-      ;; Emacs's also narrows-independent `what-line' does its own count
-      ;; with the narrowing kept; nothing is narrowed here.
-      ;;--------------------------------------------------------------
-      (let ((ed (current-buffer)))
-        ;; `(count_lines BEGV POS) + 1', with POS defaulting to point.
-        ;; The C's second argument, ABSOLUTE, is about counting past a
-        ;; narrowing, and nothing is narrowed here.
-        (+ 1 (count-lines ed
-                          (buffer-beg ed)
-                          (if (pair? args)
-                              (car args)
-                              (buffer-pt ed))))))
+    ;; **`line-number-at-pos' has left, for `(schemacs editor fns)'.**
+    ;; It is `fns.c''s DEFUN and this library had it under a comment
+    ;; citing `editfns.c', which is where it is not. It is imported above
+    ;; and still exported below, so this library's readers - and its
+    ;; tests - do not move with it. What moved with it is the `count_lines'
+    ;; it counts with, which is `xdisp.c''s and now sits beside it.
 
     ;;----------------------------------------------------------------
     ;; Point, its questions, and its preservation - the `editfns.c'
@@ -261,34 +260,65 @@ point-marker
         (text-editor-set-cursor (current-buffer) at)
         at))
 
+    (define (general-insert-function inherit args)
+      ;; GNU Emacs's `general_insert_function` (`editfns.c:1298`), the
+      ;; body `insert' and `insert-and-inherit' share. The C takes the two
+      ;; insert functions as arguments because it has two pairs of them;
+      ;; there is one string-insert here - see `insert-from-string-1` on
+      ;; why - so the INHERIT flag is the whole of the parameter, and it
+      ;; reaches that one call the way the C's reaches its two.
+      ;;
+      ;; A character is encoded into a one-character string and inserted,
+      ;; which is what the C's `CHAR_STRING` does before calling
+      ;; `insert_func`. The flag decides whether text that brings no
+      ;; properties of its own *keeps* the neighbouring ones or has them
+      ;; cleared off it, and it is read inside the graft.
+      ;;--------------------------------------------------------------
+      (for-each
+       (lambda (arg)
+         (cond
+          ((string? arg) (insert-from-string arg inherit))
+          ((char? arg) (insert-from-string (string arg) inherit))
+          ((integer? arg)
+           (insert-from-string (string (integer->char arg)) inherit))
+          (else (error "Wrong type argument" arg))))
+       args)
+      #f)
+
     (define (insert . args)
-      ;; GNU Emacs's `insert' (editfns.c:1354): "Insert the arguments,
+      ;; GNU Emacs's `insert' (`editfns.c:1354`): "Insert the arguments,
       ;; either strings or characters, at point. Point and
       ;; after-insertion markers move forward to end up after the
-      ;; inserted text." The engine's `text-editor-insert' takes one
-      ;; character or one string, so each argument is inserted in
-      ;; turn; `general_insert_function', which the C's is, does the
-      ;; same loop.
+      ;; inserted text.
+      ;;
+      ;; If the current buffer is multibyte, unibyte strings are converted
+      ;; to multibyte for insertion (see `unibyte-char-to-multibyte').
+      ;; If the current buffer is unibyte, multibyte strings are converted
+      ;; to unibyte for insertion."
+      ;;
+      ;; The C's call is `general_insert_function (insert,
+      ;; insert_from_string, **0**, ...)' - that false is the whole of
+      ;; what makes this `insert' and not `insert-and-inherit'.
       ;;--------------------------------------------------------------
-      (let ((ed (current-buffer)))
-        (for-each
-         (lambda (arg)
-           (cond
-            ((string? arg)
-             ;; `general_insert_function' hands a string to
-             ;; `insert_from_string', which is `insert_from_string_1':
-             ;; the text goes in, and then the properties it *carries*
-             ;; are grafted in after it (`graft_intervals_into_buffer'
-             ;; with the string's own tree, and `inherit' false).
-             (let ((at (buffer-pt ed)))
-               (text-editor-insert ed arg)
-               (graft-intervals-into-buffer (string-intervals arg) at
-                                            (string-length arg) ed #f)))
-            ((char? arg) (text-editor-insert ed arg))
-            ((integer? arg) (text-editor-insert ed (integer->char arg)))
-            (else (error "Wrong type argument" arg))))
-         args)
-        #f))
+      ;; The graft used to be done here, after `insert-from-string'
+      ;; returned and therefore after the after-change hooks had run.
+      ;; `insert_from_string_1` does it now, which is where the C has it.
+      (general-insert-function #f args))
+
+    (define (insert-and-inherit . args)
+      ;; GNU Emacs's `insert-and-inherit' (`editfns.c:1377`): "Insert the
+      ;; arguments at point, inheriting properties from adjoining text."
+      ;; The C's call is `general_insert_function (insert_and_inherit,
+      ;; insert_from_string, **1**, ...)'.
+      ;;
+      ;; What it is for is the case `insert' handles by taking the
+      ;; properties *off*: text inserted next to a propertized run keeps
+      ;; the run's properties instead of coming in bare.
+      ;; `internal_self_insert` is Emacs's caller - a typed character
+      ;; inherits, which is why typing at the end of a propertized run
+      ;; extends it - and so is `newline'.
+      ;;--------------------------------------------------------------
+      (general-insert-function #t args))
 
     (define (bobp)
       ;; GNU Emacs's `bobp' (editfns.c): "Return t if point is at the
@@ -488,69 +518,80 @@ point-marker
       ;; the text between START and END and return it" - `transpose-
       ;; subr-1' is what uses it.
       ;;--------------------------------------------------------------
-      (let ((text (buffer-substring beg end)))
-        (delete-region beg end)
-        text))
-
-    (define (barf-if-buffer-read-only . rest)
-      ;; GNU Emacs's `barf-if-buffer-read-only' (buffer.c:2453): "Signal a
-      ;; `buffer-read-only' error if the current buffer is read-only. If
-      ;; the text under POSITION (which defaults to point) has the
-      ;; `inhibit-read-only' text property set, the error will not be
-      ;; raised."
-      ;;
-      ;; The C's test is three parts: the buffer is read-only, *and*
-      ;; `inhibit-read-only' is nil - the global a command let-binds to
-      ;; write into a read-only buffer - *and* the text property is nil
-      ;; where the change is.
-      ;;
-      ;; The message is the error's text here, there being no condition
-      ;; symbols yet.
-      ;;
-      ;; Not ported: the `read-only' *text* property, which makes a piece
-      ;; of an otherwise writable buffer read-only. Nothing consults it
-      ;; yet, and the engine's insert and delete do not know about text
-      ;; properties at all.
+      ;; The C is `del_range_1 (start, end, 1, 1)` - prepare the change,
+      ;; and answer the text. The `1, 1` is why this is not
+      ;; `delete-region`: that one discards what it deleted, and the
+      ;; capture is what `del_range_2` does with its RET_STRING.
       ;;--------------------------------------------------------------
-      (when (and (buffer-read-only? (current-buffer))
-                 (not (*inhibit-read-only*))
-                 (not (get-text-property
-                       (if (pair? rest) (car rest) (point))
-                       'inhibit-read-only)))
-        (error "Buffer is read-only")))
+      (when (> beg end)
+        (let ((swap beg)) (set! beg end) (set! end swap)))
+      (del-range-1 beg end #t #t))
 
-    (define (forward-line . rest)
-      ;; GNU Emacs's `forward-line' (simple.el via the C's
-      ;; `FORWARD_LINE'): "Move N lines forward (backwards if N is
-      ;; negative)." To the START of each line, not keeping the column
-      ;; - which is what distinguishes it from `next-line' - and it
-      ;; answers the count of lines it could NOT move, negative for a
-      ;; backward request that was cut short. `paragraphs.sld''s walks
-      ;; were spelling this privately.
-      ;;--------------------------------------------------------------
+        (define (forward-line . rest)
+      ;; GNU Emacs's `forward-line`, whose DEFUN is `(0, 1, "^p")`. Its C
+      ;; is in `cmds.c:97`, and this is a **placement departure**: it lives
+      ;; here, not there, because `indent.scm` and `indentc.scm` use it and
+      ;; sit *below* `cmds.scm`, so moving it up would be an import cycle.
+      ;; The body below is the C's, though:
+      ;;
+      ;;     counted = scan_newline_from_point (count, &pos, &pos_byte);
+      ;;     SET_PT_BOTH (pos, pos_byte);
+      ;;     shortage = count - (count <= 0) - counted;
+      ;;     if (shortage != 0)
+      ;;       shortage -= (count <= 0 ? -1
+      ;;                    : (BEGV < ZV && PT != opoint
+      ;;                       && FETCH_BYTE (PT_BYTE - 1) != '\n'));
+      ;;     return shortage;
+      ;;
+      ;; **Two things were wrong with the version this replaced, and this
+      ;; rewrite is both.** It scanned line by line with
+      ;; `text-editor-get-end-of-line` where the C scans with
+      ;; `scan_newline_from_point` - the one the `region_cache` backs, so a
+      ;; long line is not walked a character at a time. And **its answer
+      ;; was always zero**: the loop passed `moved` to itself unchanged
+      ;; instead of counting, so a caller that tests the answer for "did I
+      ;; run out of buffer" - `kill-line`'s `(unless (= 0 fail) (error
+      ;; "End of buffer"))`, `paragraphs.scm`'s walks - was told every move
+      ;; had succeeded. The C's answer is the **shortage**, "the count of
+      ;; lines left to move": a move that ran out of buffer answers
+      ;; non-zero.
+      ;;
+      ;; The `FETCH_BYTE (PT_BYTE - 1) != '\n'` clause is the docstring's
+      ;; exception - "a non-empty line at the end of the buffer counts as
+      ;; one line successfully moved" - which is why `(forward-line 1)` on
+      ;; the last line of a buffer with no final newline still answers 0
+      ;; while the same call at `point-max` answers 1.
+      ;;
+      ;; **Not carried**: the `excessive` branch, for a bignum N
+      ;; (`BUF_BYTES_MAX` and the `Fnatnump` test); N here is a fixnum or
+      ;; false, as it is everywhere else in this tree.
+      "Move N lines forward (backward if N is negative).
+Precisely, if point is on line I, move to the start of line I + N
+(\"start of line\" in the logical order).
+If there isn't room, go as far as possible (no error).
+
+Returns the count of lines left to move.  If moving forward,
+that is N minus number of lines moved; if backward, N plus number
+moved."
       (let* ((ed (current-buffer))
-             (n (if (pair? rest) (car rest) 1))
-             (moved
-              (let loop ((left (abs n)) (moved 0))
-                (cond
-                 ((= left 0) moved)
-                 ((> n 0)
-                  (let ((eol (text-editor-get-end-of-line ed)))
-                    (if (< eol (point-max))
-                        (begin
-                          (text-editor-set-cursor ed (+ eol 1))
-                          (loop (- left 1) moved))
-                        moved)))
-                 (else
-                  (let ((start (text-editor-get-start-of-line ed)))
-                    (if (> start (point-min))
-                        (begin
-                          (text-editor-set-cursor ed (- start 1))
-                          (text-editor-set-cursor
-                           ed (text-editor-get-start-of-line ed))
-                          (loop (- left 1) moved))
-                        moved)))))))
-        (if (< n 0) (- moved) moved)))
+             (n (if (and (pair? rest) (car rest)) (car rest) 1))
+             (opoint (buffer-pt ed)))
+        (call-with-values
+            (lambda () (scan-newline-from-point ed n))
+          (lambda (pos counted)
+            (text-editor-set-cursor ed pos)
+            (let ((shortage (- n (if (<= n 0) 1 0) counted)))
+              (if (= shortage 0)
+                  shortage
+                  (- shortage
+                     (if (<= n 0)
+                         -1
+                         (let ((c (char-before)))
+                           (if (and (< (buffer-beg ed) (buffer-z ed))
+                                    (not (= (buffer-pt ed) opoint))
+                                    (not (and c (char=? c #\newline))))
+                               1
+                               0))))))))))
 
 (define (point-marker)
       ;; GNU Emacs's `point-marker' (editfns.c): "Return value of point

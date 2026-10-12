@@ -97,6 +97,7 @@
    *marker-position-function*
    *set-marker-function*
    *set-marker-insertion-type-function*
+   *get-text-property-function*
    *run-hooks-function*
    *make-marker-function*
    *del-range-function*
@@ -116,7 +117,10 @@
    %buffer-modtime-size  set!%buffer-modtime-size
    %unknown-modtime-nsecs  %nonexistent-modtime-nsecs
    text-editor-cache-long-scans  set!text-editor-cache-long-scans
-   text-editor-deactivate-mark  set!text-editor-deactivate-mark!
+   ;; `text-editor-deactivate-mark' and its setter are gone: `deactivate-mark'
+   ;; is a buffer-local *variable* (`keyboard.c:14030'), keyed by the symbol,
+   ;; and read and written through `buffer-local-value' /
+   ;; `set-buffer-local-value!' - see the note where the field used to be.
    %mark-marker  set!%mark-marker
    buffer-markers  set!buffer-markers
    text-editor-read-only-flag  set!text-editor-read-only-flag
@@ -129,7 +133,8 @@
    ;; `buffer-read-only' variable.
    buffer-modified-tick  buffer-chars-modified-tick
    buffer-modified-p  set-buffer-modified-p
-   buffer-read-only?  set!buffer-read-only
+   buffer-read-only?  set!buffer-read-only  barf-if-buffer-read-only
+   validate-region
    %text-editor-incr-modiff!
    *kill-buffer-query-functions*
    *scratch-buffer-name*
@@ -356,6 +361,15 @@
     (define *set-marker-function*       (make-parameter (lambda args #f)))
     (define *set-marker-insertion-type-function*
       (make-parameter (lambda args #f)))
+    (define *get-text-property-function*
+      ;; GNU Emacs's `get-text-property', which `barf-if-buffer-read-only`
+      ;; below asks about the `inhibit-read-only` property. The interval
+      ;; tree's lookups are `intervals.scm`'s and that library is above
+      ;; this one, so the call arrives through a seam - and a cold one:
+      ;; the read-only test only reaches it when the buffer is read-only
+      ;; *and* `inhibit-read-only' is nil. `textprop.scm` installs it.
+      ;;--------------------------------------------------------------
+      (make-parameter #f))
     (define *del-range-function*
       ;; GNU Emacs's `del_range' (`insdel.c`), which is what
       ;; `Ferase_buffer' calls to empty a buffer (`buffer.c:2472'). It is
@@ -424,6 +438,31 @@
       ;; *not* put the buffer in a window - "if you want to change which
       ;; buffer is displayed in the selected window, use
       ;; `switch-to-buffer'" - and it does not reorder the list.
+      ;;
+      ;; **Setting it to the buffer that is *already* current does
+      ;; nothing**, which is `set_buffer_internal_1`'s first two lines
+      ;; (`buffer.c:2327`):
+      ;;
+      ;;     if (current_buffer == b)
+      ;;       return;
+      ;;
+      ;; That early return is load-bearing here in a way it is not in the
+      ;; C, because this tree's current buffer has *two* levels and Emacs
+      ;; has one: `*current-buffer*` is #f when no choice has been made
+      ;; and the frame's window answers instead, and a buffer is put there
+      ;; only when `set-buffer` really means to change it. Writing the
+      ;; buffer that is current anyway would turn "ask the frame" into
+      ;; "this buffer, pinned", and it would stay pinned for the rest of
+      ;; the session - every later command acting on it while the screen
+      ;; showed another, `C-x b` and `C-x o` looking like they did
+      ;; nothing.
+      ;;
+      ;; It showed up three functions away, in `save-excursion`: the C's
+      ;; `save_excursion_restore` is `Fset_buffer` and this port's is
+      ;; `set-buffer`, so *any* `save-excursion` used to pin - which is
+      ;; every function in `simple.el` that wraps a body in one. The C
+      ;; has the same line and gets away with it because a no-op there is
+      ;; a no-op; the pinning was this tree's alone.
       ;;--------------------------------------------------------------
       (define (buffer-or-name thing)
         (cond ((bufferp thing) thing)
@@ -432,7 +471,8 @@
       (let ((buffer (buffer-or-name buffer)))
         (unless buffer
           (error "No such buffer" buffer))
-        (*current-buffer* buffer)
+        (unless (eq? buffer (current-buffer))
+          (*current-buffer* buffer))
         buffer))
     (define (save-current-buffer thunk)
       ;; Call THUNK with the current buffer as it is, and put the current
@@ -1436,16 +1476,13 @@
       ;; GNU Emacs's `erase-buffer' (buffer.c:2472): "Delete the entire
       ;; contents of the current buffer. Any narrowing restriction in
       ;; effect is removed, so the buffer is truly empty after this."
-      ;; The read-only check is the `*' of its interactive spec - the
-      ;; check `barf-if-buffer-read-only' makes (editfns.sld's, which
-      ;; this library cannot import: it imports THIS one - so the check
-      ;; is made with the engine's flag directly, the same test). There
-      ;; is no narrowing, so the widen is a no-op, and the
-      ;; `save_length' is nothing - no auto saving machinery.
+      ;; The read-only check is the `*' of its interactive spec, which
+      ;; `barf-if-buffer-read-only' makes - the same function
+      ;; `prepare_to_modify_buffer_1` calls before any change. There is
+      ;; no narrowing, so the widen is a no-op, and the `save_length' is
+      ;; nothing - no auto saving machinery.
       ;;--------------------------------------------------------------
-      (when (and (buffer-read-only? (current-buffer))
-                 (not (*inhibit-read-only*)))
-        (error "Buffer is read-only"))
+      (barf-if-buffer-read-only)
       (let ((ed (current-buffer)))
         ;; The C is three lines: `Fwiden ()', `del_range (BEG, Z)', and
         ;; the housekeeping that follows. Nothing is narrowed here, so
@@ -1488,7 +1525,8 @@
       ;; both leave `buffer-undo-list' exactly as it was. The C calls
       ;; `record_first_change' from the *change* paths - `insdel.c:2090',
       ;; `textprop.c:89', `undo.c:65' - and from nothing here. The
-      ;; `(t . TIME)' mark is made by `%text-editor-note-change!', before
+      ;; `(t . TIME)' mark is made by `%record-point' (`record_insert`
+      ;; and `record_delete` call it), before
       ;; a change to an unmodified buffer.
       ;;
       ;; **It does not touch the visited file's modtime either**, which
@@ -1554,7 +1592,6 @@
        text  newline-cache  point
        textprops  undo
        save-modiff  modtime  modtime-size  cache-long-scans  read-only  mark  markers
-       deactivate-mark
        name  file-name
        )
       bufferp
@@ -1643,14 +1680,39 @@
       ;; answers and what `set-buffer-modified-p' maintains.
       ;; It is cleared by saving and by undoing back past every change
       ;; made since the last save.
-      (deactivate-mark text-editor-deactivate-mark
-                       set!text-editor-deactivate-mark!)
-      ;; ^ Whether the mark should be deactivated once this command is
-      ;; over: GNU Emacs's `deactivate-mark' variable, which the command
-      ;; loop sets to nil before each command and tests when the command
-      ;; returns. **Any buffer modification stores t in it**
-      ;; (`insdel.c''s `prepare_to_modify_buffer'), which is what makes
-      ;; the region go away when you type or yank.
+      ;; **`deactivate-mark' is NOT a field of `struct buffer' and is not a
+      ;; field here either.** GNU Emacs declares it in `keyboard.c:14030'
+      ;; - `DEFVAR_LISP ("deactivate-mark", Vdeactivate_mark)' followed by
+      ;; `Fmake_variable_buffer_local' - so it is a *Lisp variable* that is
+      ;; automatically buffer-local: a global whose value the current
+      ;; buffer may shadow. It was a slot of this record until 2026-10-12,
+      ;; which is the same shape read from the wrong direction: a slot
+      ;; cannot be `let'-bound, cannot be `setq'-ed by ported Lisp, and
+      ;; has no name for a user to set.
+      ;;
+      ;; It is a buffer-local *variable* now, keyed by the symbol
+      ;; `deactivate-mark' in the table `buffer-local-value' and
+      ;; `set-buffer-local-value!' read - the same arrangement
+      ;; `transient-mark-mode', `mark-ring' and `list-buffers-directory'
+      ;; already use. Nothing declares it: a key needs no definition, and
+      ;; the global it falls back to is `#f', which is
+      ;; `Vdeactivate_mark = Qnil'. So the reads and writes are
+      ;;
+      ;;     (buffer-local-value (current-buffer) 'deactivate-mark #f)
+      ;;     (set-buffer-local-value! (current-buffer) 'deactivate-mark #t)
+      ;;
+      ;; and there are eight of them: `insdel.scm`'s
+      ;; `prepare-to-modify-buffer-1` sets it ("Buffer modifications store
+      ;; t in this variable"), `keyboard.scm`'s command loop clears it
+      ;; before each command and applies it after, `mouse.scm` clears it
+      ;; when a drag sets its own region, and `simple.scm` sets it from
+      ;; the commands that change the buffer.
+      ;;
+      ;; The alternative - a named accessor pair declared here - was
+      ;; rejected because it invents two names Emacs has not got, and
+      ;; because the variable's *name* is what Lisp sets. The hazard of
+      ;; it is a misspelt key, which the compiler cannot catch; the eight
+      ;; sites are listed above so a sweep can find them.
       (mark       %mark-marker           set!%mark-marker)
       ;; ^ The buffer's mark, GNU Emacs's `mark': a <marker-type>, which
       ;; is what makes it survive the text around it changing. It points
@@ -1733,8 +1795,6 @@
          ;; marker chain.
          ((*make-marker-function*))
          (make-weak-key-hash-table)
-         ;; Nothing is waiting to deactivate the mark.
-         #f
          ;; Named as `generate-new-buffer' names a buffer it makes, and
          ;; visiting no file.
          "Untitled" #f
@@ -1898,5 +1958,63 @@
       ;; toggles.
       ;;--------------------------------------------------------------
       (set!text-editor-read-only-flag ed (and flag #t)))
+
+    (define (barf-if-buffer-read-only . rest)
+      ;; GNU Emacs's `barf-if-buffer-read-only' (`buffer.c:2453'):
+      ;; "Signal a `buffer-read-only' error if the current buffer is
+      ;; read-only. If the text under POSITION (which defaults to point)
+      ;; has the `inhibit-read-only' text property set, the error will
+      ;; not be raised."
+      ;;
+      ;; **This is `buffer.c`'s and it is here, not in `editfns.scm`
+      ;; where it used to be.** `insdel.c`'s `prepare_to_modify_buffer_1`
+      ;; is its main caller and `insdel.scm` sits above this library and
+      ;; below `editfns.scm`, so a copy in editfns was unreachable from
+      ;; the one place that needs it most - and the two would have been
+      ;; free to disagree.
+      ;;
+      ;; The C's test is three parts, in this order: the buffer is
+      ;; read-only, `inhibit-read-only' is nil - the global a command
+      ;; let-binds to write into a read-only buffer - and the *text
+      ;; property* is nil where the change is. The property is read
+      ;; through a seam because the interval tree's lookups are
+      ;; `intervals.scm`'s and that library is above this one; the seam
+      ;; is cold, since the C's `&&` asks it only when the first two
+      ;; tests have already passed.
+      ;;
+      ;; Not ported: the `read-only` text property, which makes a piece
+      ;; of an otherwise writable buffer read-only. Nothing consults it.
+      ;;--------------------------------------------------------------
+      (when (and (buffer-read-only? (current-buffer))
+                 (not (*inhibit-read-only*))
+                 (let ((lookup (*get-text-property-function*)))
+                   (or (not lookup)
+                       (not (lookup (if (pair? rest) (car rest)
+                                        (buffer-pt (current-buffer)))
+                                    'inhibit-read-only)))))
+        (error "Buffer is read-only")))
+
+    (define (validate-region b e)
+      ;; GNU Emacs's `validate_region` (`buffer.c:2492`): put the two ends
+      ;; of a region in order, check them against the buffer's bounds, and
+      ;; answer the pair the caller should use. It is the first line of
+      ;; every region-taking DEFUN - `casify_region` is one - and it
+      ;; exists because the two ends arrive in whatever order the caller
+      ;; had them, so each one has to be sorted before it can be used.
+      ;;
+      ;; **Not carried**: the C's `fix_position` coerces a marker to its
+      ;; position before anything is compared, and it is `buffer.c`'s. The
+      ;; callers here are the region commands, whose `region-beginning`
+      ;; and `region-end` answer integers, so there is no marker to coerce
+      ;; - and `marker.scm` is *above* this library, so the coercion could
+      ;; not be written here anyway. It belongs with whichever caller
+      ;; starts accepting an arbitrary object.
+      ;;--------------------------------------------------------------
+      (let* ((beg (if (< e b) e b))
+             (end (if (< e b) b e))
+             (ed (current-buffer)))
+        (if (not (and (<= (buffer-beg ed) beg) (<= end (buffer-z ed))))
+            (error "Args out of range" ed b e))
+        (values beg end)))
 
     ))

@@ -66,10 +66,14 @@
     ;; The file-name table is a *function* table, so it answers
     ;; `try-completion' and `all-completions' itself - `minibuf.c''s.
     (only (schemacs editor minibuf) all-completions try-completion)
-    ;; `insert-file', `revert-buffer' and the rest edit the buffer:
-    ;; the position primitives and the read-only check are editfns.c's.
+    ;; `insert-file', `revert-buffer' and the rest edit the buffer: the
+    ;; position primitives are editfns.c's, and the read-only check is
+    ;; `buffer.c`'s - it lives in `buffer.scm', because `insdel.c`'s
+    ;; `prepare_to_modify_buffer_1` is its main caller and `insdel.scm`
+    ;; is below `editfns.scm`.
     (only (schemacs editor editfns)
-          barf-if-buffer-read-only goto-char insert message point point-max)
+          goto-char insert message point point-max save-excursion)
+    (only (schemacs editor buffer) barf-if-buffer-read-only)
     (only (schemacs editor simple) push-mark)
     ;; `string-prefix-p' is `subr.el''s and now lives in
     ;; `(schemacs editor subr)', which is below this library.
@@ -1604,14 +1608,14 @@ save-buffer
       ;; follow it, exactly as they would for a line break typed at the
       ;; end.
       ;;--------------------------------------------------------------
-      (let ((at (buffer-pt ed)))
-        ;; `point-max', not the character count: positions are one-based
-        ;; and `point-max' is one past the last character, which is where
-        ;; a break appended to the buffer goes. The count is one short of
-        ;; it, which put the break before the last character.
-        (text-editor-set-cursor ed (buffer-z ed))
-        (text-editor-insert ed #\newline)
-        (text-editor-set-cursor ed at)))
+      (with-current-buffer ed
+        (save-excursion
+          ;; `point-max', not the character count: positions are one-based
+          ;; and `point-max' is one past the last character, which is where
+          ;; a break appended to the buffer goes. The count is one short of
+          ;; it, which put the break before the last character.
+          (goto-char (point-max))
+          (insert #\newline))))
 
     (define (y-or-n-p prompt)
       ;; GNU Emacs's `y-or-n-p': a question one key answers, unlike
