@@ -8,12 +8,17 @@
  (only (schemacs editor editfns)
        insert goto-char point buffer-string)
  (only (schemacs editor casefiddle)
-       casify-region upcase-region downcase-region
+       casify-region
        upcase-word downcase-word capitalize-word)
  (only (schemacs editor engine)
        text-editor-undo-list set!text-editor-undo-list
        text-editor-undo-boundary!)
- (only (schemacs editor simple) primitive-undo))
+ ;; `upcase-region` and `downcase-region` are `casefiddle.c`'s, but they
+ ;; read the region and so are defined in `simple.scm` now - the named
+ ;; placement departure noted there. Their tests stay here, beside
+ ;; `casify-region`'s, which is what they exercise.
+ (only (schemacs editor simple)
+       upcase-region downcase-region primitive-undo))
 
 ;; Unbuffered output, so a run that hangs shows where it got to.
 (setvbuf (current-output-port) 'none)

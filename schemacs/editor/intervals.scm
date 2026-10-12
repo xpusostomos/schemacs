@@ -70,8 +70,12 @@
     ;; day `count-lines' moved down to `fns' (it is `xdisp.c''s, and
     ;; `fns.c''s `line-number-at-pos' is its only real user).
     (only (schemacs editor buffer)
-          buffer-beg buffer-z
+          buffer-beg buffer-z text-editor-text
           text-editor-text-props set!text-editor-text-props)
+    ;; `make-buffer-string` below slices the text out of the store with
+    ;; `buffer-text-substring` - `buffer-text` is a leaf, so this is a
+    ;; downward edge like the two above.
+    (only (schemacs editor buffer-text) buffer-text-substring)
     ;; ... and the two seams are read straight from their own libraries,
     ;; which is where they are declared - `intervals.c` is below `insdel.c`
     ;; in Emacs's build order, so this is the direction the calls really
@@ -136,6 +140,7 @@
    reproduce-tree
    reproduce-tree-object
    copy-intervals
+   make-buffer-string
    copy-intervals-to-string
    graft-intervals-into-buffer
    install-intervals-set-text-properties!
@@ -1519,6 +1524,49 @@
                                (prevlen (interval-length i)))
                           (copy-properties i t)
                           (loop i t (+ got prevlen) prevlen)))))))))
+
+    (define (make-buffer-string ed start end . rest)
+      ;; The buffer's text between the positions START and END, as a
+      ;; string - GNU Emacs's `make_buffer_string`, **`editfns.c:1561`**
+      ;; and *not* `buffer-substring`: the fourth argument is the C's
+      ;; PROPS, and the C has it because its callers differ about it.
+      ;; `buffer-substring` (`editfns.c:507') passes true - "the
+      ;; properties are copied too" - and `buffer-substring-no-properties`
+      ;; (`:518') passes false.
+      ;;
+      ;; **It is in this library and not in `editfns.scm`, and that is a
+      ;; placement departure of the kind `forward-line` already carries
+      ;; in `editfns.scm`.** `search.scm` calls it twelve times and may
+      ;; not import `editfns.scm` - that cut is what broke the
+      ;; `editfns -> search -> casefiddle -> editfns` cycle in Emacs's
+      ;; own file graph, which a DAG cannot have. So a function that is
+      ;; editfns.c's but is called from search.c has to live *below*
+      ;; `search.scm`, and this is the lowest library that can hold it:
+      ;; `editfns.c` is where the C puts it, `intervals.c` is where the
+      ;; half of it that is not a plain slice comes from
+      ;; (`copy_intervals_to_string`, below), and this library is below
+      ;; every caller.
+      ;;
+      ;; It was `engine.scm`'s until 2026-10-13, and its docstring there
+      ;; named `insdel.c:1918' - the wrong file, found by the
+      ;; grep-the-source sweep the corrected endgame table demands.
+      ;;
+      ;; The positions are one-based and the same half-open range the C
+      ;; uses (START in, END out). Arguments may be given in either
+      ;; order; the empty range returns "".
+      ;;--------------------------------------------------------------
+      (let ((start (min start end))
+            (end (max start end))
+            (props (and (pair? rest) (car rest))))
+        (let ((result (buffer-text-substring (text-editor-text ed)
+                                             start end)))
+          (when props
+            ;; The C's `copy_intervals_to_string (result, current_buffer,
+            ;; start, end - start)': the fourth argument is a *length*,
+            ;; not an end position, and passing the end position walks
+            ;; the tree off its last interval.
+            (copy-intervals-to-string result ed start (- end start)))
+          result)))
 
     (define (copy-intervals-to-string string buffer position length)
       ;; GNU Emacs's `copy_intervals_to_string' (intervals.c:2267):

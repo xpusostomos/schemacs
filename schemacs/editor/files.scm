@@ -46,7 +46,7 @@
           text-editor-buffer-name
           text-editor-file-name fetch-char buffer-pt
           buffer-beg buffer-z
-          text-editor-insert text-editor-to-code-points
+          text-editor-insert
           buffer-modified-p buffer-read-only?
           text-editor-set-cursor set-buffer-modified-p
           set!buffer-read-only
@@ -86,7 +86,15 @@
           event-start posn-window)
     (only (schemacs editor buffer)
           *case-fold-search*
-          current-buffer default-directory erase-buffer)
+          current-buffer default-directory erase-buffer
+          ;; the buffer's text, which the save path reads code points out
+          ;; of - `buffer-text-to-code-points' below is the walk
+          text-editor-text)
+    ;; A buffer here can hold a *byte character*, which a Scheme string
+    ;; cannot, so the save path takes the code points rather than a
+    ;; string. That walk is the storage class's; it was
+    ;; `text-editor-to-code-points' in the engine until 2026-10-13.
+    (only (schemacs editor buffer-text) buffer-text-to-code-points)
     ;; The file primitives that were here and have moved to the library
     ;; that mirrors the C file they are really from, `fileio.c':
     ;; `expand-file-name' with the two name helpers and its path
@@ -1870,8 +1878,11 @@ save-buffer
         ;; which `find-file-noselect' sets to the file's directory
         (set!buffer-default-directory ed (file-name-directory-part path))
         ;; and point starts at the beginning of what was read, which is
-        ;; where GNU Emacs's `find-file-noselect' puts it - `point-min'
-        (text-editor-set-cursor ed 1 0)
+        ;; where GNU Emacs's `find-file-noselect' puts it - `point-min'.
+        ;; It was `(text-editor-set-cursor ed 1 0)`, the engine's
+        ;; invented line-and-column form; line 1 column 0 *is*
+        ;; `point-min', so the plain position says it without the detour.
+        (text-editor-set-cursor ed (buffer-beg ed))
         ed)))))
 
     (define *save-silently* (make-parameter #f))
@@ -2258,7 +2269,9 @@ at point instead."
             ;; it is what C-x RET c sets for the following command.
             (let ((coding (or (*coding-system-for-write*)
                               (buffer-file-coding-system buffer))))
-              (write-file-code-points path (text-editor-to-code-points buffer)
+              (write-file-code-points path
+                                      (buffer-text-to-code-points
+                                       (text-editor-text buffer))
                                       coding)
               (*last-coding-system-used* coding))
             ;; The file has just been written, so its modification time

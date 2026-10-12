@@ -5,7 +5,10 @@
  (only (schemacs editor engine)
        allocate-buffer text-editor-insert
        text-editor-set-cursor buffer-beg buffer-z
-       text-editor-text-props text-editor-to-string)
+       text-editor-text-props)
+ (only (schemacs editor buffer) with-current-buffer)
+ (only (schemacs editor editfns)
+       buffer-substring-no-properties point-max point-min)
  (prefix (schemacs editor intervals) iv:))
 
 ;; Regression tests for `(schemacs editor intervals)', which mirrors GNU
@@ -279,6 +282,7 @@
           (iv:interval-total-length (tree-of ed))
           (- (buffer-z ed) (buffer-beg ed))
           (intervals-of ed)
-          (text-editor-to-string ed))))
+          (with-current-buffer ed
+            (buffer-substring-no-properties (point-min) (point-max))))))
 
 (test-end "schemacs_editor_intervals_insert_at_beginning")

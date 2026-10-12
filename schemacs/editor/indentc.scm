@@ -27,12 +27,13 @@
     (scheme base)
     (only (schemacs editor character) char-width)
     (only (schemacs editor engine)
-          buffer-pt text-editor-get-start-of-line
+          buffer-pt
           buffer-z fetch-char)
     (only (schemacs editor buffer) buffer-tab-width current-buffer)
     (only (schemacs editor editfns)
           delete-region forward-line goto-char insert-char point
-          save-excursion)
+          save-excursion
+          text-editor-get-start-of-line)
     (only (schemacs editor textprop)
           get-text-property next-single-property-change)
     (only (schemacs editor syntax) skip-chars-forward)

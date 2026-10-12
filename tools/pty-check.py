@@ -69,6 +69,7 @@ C_k = b"\x0b"
 C_s = b"\x13"
 C_u = b"\x15"
 C_g = b"\x07"
+C_e = b"\x05"   # C-e, end-of-line
 C_q = b"\x11"   # C-q, quoted-insert
 C_r = b"\x12"   # C-r, recursive-edit / find-file-read-only's chord
 C_v = b"\x16"   # C-v, scroll-up / find-alternate-file's chord
@@ -3372,6 +3373,66 @@ def check_cd():
     return problems
 
 
+def check_isearch_mark():
+    """Leaving a search pushes the mark - and stays quiet when it should.
+
+    `isearch-done` ends with (`isearch.el:1534`):
+
+      (if (/= (point) isearch-opoint)
+          (or (and transient-mark-mode mark-active)
+              (progn (push-mark isearch-opoint t)
+                     (or executing-kbd-macro (> (minibuffer-depth) 0) edit
+                         (message "Mark saved where search started")))))
+
+    Three things in this tree departed from it, all inside those five
+    lines: the mark was *set* rather than **pushed**, so the mark that
+    was already there never reached the mark ring; the
+    `transient-mark-mode` + `mark-active` arm was missing, so a search
+    that ended with the region already active moved the mark and
+    announced it where Emacs leaves both alone; and the message did not
+    ask whether a prompt was up.
+
+    The second is the one a screen shows, and it is what this check is
+    built on: with the region already active the message must not
+    appear, and with it inactive it must. **Verified failing both ways**
+    - taking the `mark-active` arm out makes the first half fail, and
+    dropping the message makes the second.
+
+    The ring half is not asserted here. It needs the back door and a
+    mark-day-*already-set* state to show anything (Emacs's `push-mark`
+    only reaches the ring `(when (mark t))`), and the setup that gets
+    there from a keyboard is fiddly enough that the assertion was
+    hollow when it was first written - it passed with the push removed.
+    It is measured by hand instead; see the plan's note of 2026-10-13.
+    """
+    problems = []
+    path = "/tmp/pty-check-isearch-mark.txt"
+    open(path, "w").write("alpha beta gamma\n")
+
+    # The region is not active, so `isearch-done` pushes the search's
+    # start onto the mark ring and says so.
+    screen = drive([C_s, b"beta", RET], path)
+    if "Mark saved where search started" not in screen:
+        problems.append("`C-s beta RET` did not say `Mark saved where "
+                        "search started`")
+
+    # `C-@` is `set-mark-command` - "Mark set" - and `C-f` moves point,
+    # which leaves the region *active*. Emacs's `(or (and
+    # transient-mark-mode mark-active) ...)` short-circuits on that arm
+    # and says nothing at all. **`C-f` and not `C-e`**: from the end of
+    # the line the forward search finds nothing (`Failing I-search`), and
+    # a failed search leaves point where it started - so `(point)` *is*
+    # `isearch-opoint` and the block is skipped for a reason that has
+    # nothing to do with the mark. Measured: that version of this check
+    # passed with the arm removed, which is how it was found.
+    screen2 = drive([b"\x00", C_f, C_s, b"beta", RET], path)
+    if "Mark saved where search started" in screen2:
+        problems.append("the mark was moved and announced with the region "
+                        "already active - Emacs's `(and transient-mark-mode "
+                        "mark-active)` arm is taken and it says nothing")
+    return problems
+
+
 CHECKS = {
     "buffer-menu": check_buffer_menu,
     "query-replace": check_query_replace,
@@ -3440,6 +3501,7 @@ CHECKS = {
     "abbreviate": check_abbreviate,
     "kill-buffer": check_kill_buffer,
     "delete-frame": check_delete_frame,
+    "isearch-mark": check_isearch_mark,
 }
 
 

@@ -39,22 +39,35 @@
           *inhibit-read-only*)
     (only (schemacs editor marker)
           build-marker markerp marker-position set-marker)
+    ;; `make-buffer-string` is `editfns.c:1561`'s and is
+    ;; `intervals.scm`'s - it must live below `search.scm`, which
+    ;; calls it and cannot import `editfns.scm` (2026-10-13).
+    (only (schemacs editor intervals) make-buffer-string)
     (only (schemacs editor engine)
-          text-editor-get-start-of-line text-editor-get-end-of-line
-          fetch-char make-buffer-string
+          fetch-char
           buffer-read-only?
           buffer-beg buffer-z
           buffer-pt
-          text-editor-mark text-editor-set-cursor
-          bol
+          text-editor-set-cursor)
+    ;; The scans `bol', `eol' and the line arithmetic below are built on -
+    ;; `find_newline`, `scan_newline_from_point` and
+    ;; `find_before_next_newline`. **They are `search.c`'s and this file
+    ;; imports them from `search.scm`** (2026-10-12), which is the C's own
+    ;; direction: `editfns.c` calls into `search.c`, so the scans sit
+    ;; below this library. That is why `search.scm` must not import this
+    ;; one, and why `editfns.scm` gave up its `search`-blocking imports.
+    (only (schemacs editor search)
           scan-newline-from-point
-          eol)
+          find-newline find-before-next-newline)
     ;; `mark-active' and `transient-mark-mode' are `buffer.c''s
     ;; variables, and `mark-even-if-inactive' is `callint.c''s, which is
     ;; where `region_limit' reads them from - the same three the C's
     ;; `region_limit' reads.
     (only (schemacs editor buffer)
-          mark-active transient-mark-mode)
+          mark-active transient-mark-mode
+          ;; `structure buffer''s own `mark' slot, which `mark-marker'
+          ;; below hands out as the marker it is (`editfns.c:265').
+          %mark-marker)
     (only (schemacs editor textprop) add-text-properties)
     ;; The insertion and the deletion themselves are `insdel.c`'s, in its
     ;; own library - `insert_1_both` and `del_range` are that file's, the
@@ -69,16 +82,29 @@
     ;; `line-number-at-pos' is `fns.c''s DEFUN (`fns.c:6688') and lives in
     ;; that library now, with the `count_lines' it calls; it is imported
     ;; and re-exported below so that this library's readers do not move.
-    (only (schemacs editor fns) copy-sequence line-number-at-pos)
-    (only (schemacs editor intervals) copy-intervals-to-string)
+    (only (schemacs editor fns) copy-sequence line-number-at-pos count-lines)
+    ;; `(only (schemacs editor intervals) copy-intervals-to-string)` stood
+    ;; here for `buffer-substring`'s hand-copied properties; the copy is
+    ;; `make_buffer_string_both`'s body and moved into `engine.scm` with
+    ;; the PROPS argument (2026-10-12).
     (only (schemacs editor command)
           *mark-even-if-inactive*)
+    ;; **This library no longer imports `frame.scm'.**
+    ;;
     ;; `message' puts its text in the echo area, which is the frame's -
-    ;; Emacs's `message3' reaches the display the same way, so this is
-    ;; the C's own dependency and not a detour. (Frame's own closure does
-    ;; not contain this library, so the import is not circular.)
-    (only (schemacs editor frame)
-          *current-frame* frame-message set-message!)
+    ;; Emacs's `message3' reaches the display the same way. That import
+    ;; was here, and it pinned the frame *below* this library: every
+    ;; library that must read a line position from above (`frame.scm`
+    ;; itself, whose `window.c` code walks lines) then could not reach
+    ;; one, because the arithmetic it needs is `editfns.c`'s and this is
+    ;; where it belongs.
+    ;;
+    ;; The house seam instead, the arrangement `*current-editor-function*'
+    ;; (`buffer.scm'), `*replace-buffer-in-windows-function*' and
+    ;; `*adjust-suspend-auto-hscroll-function*' already use: the echo
+    ;; area is reached through a parameter declared here and installed by
+    ;; `frame.scm' as it loads, so the dependency runs frame -> editfns
+    ;; and not both ways.
     )
 
   (export
@@ -91,8 +117,18 @@ bobp
    preceding-char
    line-beginning-position
    line-end-position
+   ;; The internal pair the two above are built on (`editfns.c:665', `:723'),
+   ;; exported as the C's are non-static, and the facade spellings of the
+   ;; line arithmetic - all moved here from the engine 2026-10-12.
+   bol
+   eol
+   text-editor-get-start-of-line
+   text-editor-get-end-of-line
+   text-editor-cursor-line
+   text-editor-cursor-column
    buffer-substring
 point-marker
+   mark-marker
    buffer-size
    insert-char
    buffer-string
@@ -116,6 +152,8 @@ point-marker
    insert-buffer-substring
    *inhibit-message*
    *message-log-max*
+   *message-function*
+   *current-message-function*
    *standard-display-table*
    *text-quoting-style*
    default-to-grave-quoting-style
@@ -162,7 +200,7 @@ point-marker
                  (not (*mark-even-if-inactive*))
                  (not (mark-active)))
         (error "The mark is not active now"))
-      (let ((m (text-editor-mark (current-buffer))))
+      (let ((m (marker-position (mark-marker))))
         (unless m (error "The mark is not set now, so there is no region"))
         (let ((point (buffer-pt (current-buffer))))
           (if (eq? (< point m) beginning?) point m))))
@@ -399,6 +437,94 @@ point-marker
       ;;--------------------------------------------------------------
       (char-before (point)))
 
+    ;;----------------------------------------------------------------
+    ;; Lines, by scanning: `bol', `eol', and the arithmetic on them
+    ;;------------------------------------------------------------------
+    ;; **This block moved here from the engine on 2026-10-12.** Every
+    ;; name in it is `editfns.c`'s - `bol` (`:665'), `eol` (`:723'),
+    ;; `line-beginning-position` (`:700'), `line-end-position` (`:755') -
+    ;; or the facade spelling of one, and the engine had them only because
+    ;; the scans they read were there too. The scans stay in the engine
+    ;; (they are `search.c`'s, and `editfns.c` calls *into* `search.c`,
+    ;; so they sit below this file); the arithmetic moved up to the file
+    ;; that owns it.
+    ;;
+    ;; The direction is the point. Moving the scans up instead would have
+    ;; put them above their only readers, and this tree's imports are a
+    ;; directed acyclic graph.
+
+    (define (bol ed n)
+      ;; The position of the first character of the line N - 1 lines
+      ;; forward - the internal `bol' (`editfns.c:665') that
+      ;; `line-beginning-position', `beginning-of-line' and
+      ;; `forward-line' are all built on. N false means the current
+      ;; line. It does not move point.
+      ;;--------------------------------------------------------------
+      (call-with-values
+          (lambda () (scan-newline-from-point ed (if n (- n 1) 0)))
+        (lambda (pos _found) pos)))
+
+    (define (eol ed n)
+      ;; The position of the last character of the line N - 1 lines
+      ;; forward - the internal `eol' (`editfns.c:723') that
+      ;; `line-end-position', `end-of-line' and `forward-line' are built
+      ;; on. N false means the current line. It does not move point.
+      ;;--------------------------------------------------------------
+      (let ((count (if n n 1)))
+        (find-before-next-newline ed (buffer-pt ed)
+                                  (- count (if (<= count 0) 1 0)))))
+
+    (define (%bol-at ed pos)
+      ;; The position of the first character of the line POSITION is on.
+      ;; Emacs reaches this with `save-excursion' around
+      ;; `line-beginning-position'; here the scan simply starts where it
+      ;; is told to.
+      ;;--------------------------------------------------------------
+      (call-with-values
+          (lambda ()
+            (find-newline ed pos -1 (buffer-beg ed)))
+        (lambda (found-pos _found) found-pos)))
+
+    (define (text-editor-get-start-of-line ed . rest)
+      ;; The position of the first character of the line point is on - or,
+      ;; with POS, of the line POS is on. GNU Emacs's
+      ;; `line-beginning-position' (`editfns.c:700'), which is
+      ;; `(bol nil)'; with a POSITION the C reaches the same place with
+      ;; `save-excursion' around `goto-char', the scan here simply starts
+      ;; where it is told to. It does not move point.
+      ;;--------------------------------------------------------------
+      (if (pair? rest) (%bol-at ed (car rest)) (bol ed #f)))
+
+    (define (text-editor-get-end-of-line ed . rest)
+      ;; The position of the last character of the line point is on - or,
+      ;; with POS, of the line POS is on. GNU Emacs's
+      ;; `line-end-position' (`editfns.c:736'), which is `(eol nil)'; the
+      ;; POSITION form is the same scan started where it is told to
+      ;; rather than at point. At the end of the buffer it is `point-max',
+      ;; as the C's is. It does not move point.
+      ;;--------------------------------------------------------------
+      (if (pair? rest)
+          (find-before-next-newline ed (car rest) 1)
+          (eol ed #f)))
+
+    (define (text-editor-cursor-line ed)
+      ;; The line number point is on, counting from 1 - GNU Emacs's
+      ;; `line-number-at-pos' (`fns.c:6688'), which is
+      ;; `(count_lines BEGV PT) + 1'.
+      ;;--------------------------------------------------------------
+      (+ 1 (count-lines ed (buffer-beg ed) (buffer-pt ed))))
+
+    (define (text-editor-cursor-column ed)
+      ;; How many characters point is from the start of its line,
+      ;; counting from 0 - what the C's `current-column' (`indent.c:298')
+      ;; answers for a line with no tab and no multi-column character in
+      ;; it. The *display* column, which is what `current-column' really
+      ;; answers, is `(schemacs editor indentc)''s
+      ;; `current-line-display-column', and every caller that wants one
+      ;; goes through it.
+      ;;--------------------------------------------------------------
+      (- (buffer-pt ed) (text-editor-get-start-of-line ed)))
+
     (define (line-beginning-position . rest)
       ;; GNU Emacs's `line-beginning-position' (`editfns.c:700'), whose
       ;; whole body is
@@ -440,22 +566,19 @@ point-marker
       (eol (current-buffer) (if (pair? rest) (car rest) #f)))
 
     (define (buffer-substring beg end)
-      ;; GNU Emacs's `buffer-substring' (editfns.c): "Return the contents
-      ;; of part of the current buffer, as a string" - the engine's copy,
-      ;; and then the properties of that range, which is the C's
-      ;; `copy_intervals_to_string'.
+      ;; GNU Emacs's `buffer-substring' (editfns.c:507), whose whole body
+      ;; is `make_buffer_string (beg, end, 1)': "Return the contents of
+      ;; part of the current buffer, as a string", properties included.
+      ;;
+      ;; The properties used to be copied here by hand, because
+      ;; `make-buffer-string` had no PROPS argument - the C's fourth one,
+      ;; which `buffer-substring-no-properties` below passes false. It has
+      ;; it now (`engine.scm`), so this is the C's line.
       ;;
       ;; The positions are this layer's and the engine's alike - both
       ;; count from one - so nothing is converted.
       ;;--------------------------------------------------------------
-      (let ((result (make-buffer-string (current-buffer) beg end)))
-        ;; The C's `copy_intervals_to_string (result, current_buffer,
-        ;; start, end - start)': the fourth argument is a *length*, not
-        ;; an end position, and passing the end position walks the tree
-        ;; off its last interval.
-        (copy-intervals-to-string result (current-buffer)
-                                  beg (- end beg))
-        result))
+      (make-buffer-string (current-buffer) beg end #t))
 
     (define (buffer-substring-no-properties beg end)
       ;; GNU Emacs's `buffer-substring-no-properties': "Return the
@@ -593,6 +716,25 @@ moved."
                                1
                                0))))))))))
 
+(define (mark-marker)
+      ;; GNU Emacs's `mark-marker' (`editfns.c:265'): "Return this
+      ;; buffer's mark, as a marker object. Watch out! Moving this
+      ;; marker changes the mark position. If you set the marker not to
+      ;; point anywhere, the buffer will have no mark."
+      ;;
+      ;; **It takes no buffer, as the C's takes none** - the C is
+      ;; `BVAR (current_buffer, mark)' and nothing else. It lived in
+      ;; `engine.scm' until 2026-10-12, spelled with an ED argument; the
+      ;; argument was an invention, and every caller passed the current
+      ;; buffer.
+      ;;
+      ;; It is here rather than in `buffer.scm' because `editfns.c' is
+      ;; where Emacs puts it, and `buffer.scm' is where the *slot* is
+      ;; (`%mark-marker'). This file is above that one, which is the
+      ;; direction the C's own data layout runs too.
+      ;;--------------------------------------------------------------
+      (%mark-marker (current-buffer)))
+
 (define (point-marker)
       ;; GNU Emacs's `point-marker' (editfns.c): "Return value of point
       ;; as a marker object" - the bookkeeping `save-excursion''s
@@ -671,6 +813,24 @@ moved."
     (define *message-log-max* (make-parameter 1000))
     ;; ^ GNU Emacs's `message-log-max': "Maximum number of lines to keep
     ;; in the `*Messages*' buffer."
+
+    (define *message-function* (make-parameter (lambda (text) #f)))
+    ;; ^ How a message reaches the echo area: `FRAME_MESSAGE_BUF' and the
+    ;; `set-message!' that writes it are the frame's, and that is the
+    ;; library built *on* this one, so the seam runs this way round.
+    ;; `frame.scm' installs `(lambda (text) (set-message! (*current-frame*)
+    ;; text))' as it loads, and the echo area is the frame's own - the
+    ;; same place Emacs's `message3' puts it (`xdisp.c:11016').
+    ;;
+    ;; The default does nothing, which is the honest answer when there is
+    ;; no frame: a script or a test may `message' with nothing on screen,
+    ;; and the text is still returned to the caller.
+
+    (define *current-message-function* (make-parameter (lambda () #f)))
+    ;; ^ GNU Emacs's `current-message' (`xdisp.c'): the string the echo
+    ;; area is showing, or nil when none. Read off the frame through this
+    ;; seam for the reason above; with no frame installed the answer is
+    ;; nil, as the C answers when the echo area is empty.
 
     (define (default-to-grave-quoting-style)
       ;; GNU Emacs's `default_to_grave_quoting_style' (doc.c:640):
@@ -1100,22 +1260,21 @@ moved."
           (begin (message-clear) format-string)
           (let ((text (%requote (%styled-format format-string args #t))))
             (unless (*inhibit-message*)
-              (set-message! (*current-frame*) text))
+              ((*message-function*) text))
             text)))
 
     (define (message-clear)
       ;; The `message1 (0)' arm of `Fmessage' (editfns.c:3229): take any
       ;; message down, letting the minibuffer's own contents show.
       ;;--------------------------------------------------------------
-      (set-message! (*current-frame*) ""))
+      ((*message-function*) ""))
 
     (define (current-message)
       ;; GNU Emacs's `current-message' (xdisp.c): "Return the string
       ;; currently displayed in the echo area, or nil if none." The
       ;; echo area is the frame's message when it has not expired.
       ;;--------------------------------------------------------------
-      (let ((frame (*current-frame*)))
-        (and frame (frame-message frame))))
+      ((*current-message-function*)))
 
 
     ))

@@ -46,13 +46,16 @@
     (only (schemacs editor command)
           current-prefix-arg define-command run-command uarg->integer
           *command-table* command-value-of command-interactive-spec)
+    ;; `make-buffer-string` is `editfns.c:1561`'s and is
+    ;; `intervals.scm`'s - it must live below `search.scm`, which
+    ;; calls it and cannot import `editfns.scm` (2026-10-13).
+    (only (schemacs editor intervals) make-buffer-string)
     (only (schemacs editor engine)
-    allocate-buffer buffer-beg make-buffer-string
+    allocate-buffer buffer-beg
           buffer-beg buffer-z
-          text-editor-cursor-column text-editor-cursor-line
           text-editor-delete-from-cursor buffer-pt
           text-editor-insert text-editor-set-cursor
-          set!buffer-read-only text-editor-to-string
+          set!buffer-read-only
           text-editor-undo-disable!)
     ;; `logior' is Guile's: the bitset is three bit flags.
     (only (guile) logior)
@@ -101,8 +104,11 @@
     ;; re-exports the one name. The search primitives are `search.c''s,
     ;; which have their own library now (`zap-to-char' walks with them).
     (only (schemacs editor editfns)
-          char-after delete-region goto-char insert line-end-position
-          line-number-at-pos message point point-max point-min)
+          buffer-substring buffer-substring-no-properties
+          char-after delete-region forward-line goto-char insert
+          line-end-position
+          line-number-at-pos message point point-max point-min
+          text-editor-cursor-column text-editor-cursor-line)
     (only (schemacs editor fns) count-lines)
     ;; `forward-char' is `cmds.c''s and lives in `(schemacs editor cmds)'.
     (only (schemacs editor cmds) forward-char)
@@ -242,7 +248,7 @@ read-number-history
    make<minibuffer>
    minibuffer-complete
    minibuffer-completion-help
-   minibuffer-contents
+   minibuffer-contents minibuffer-contents-no-properties
    minibuffer-cursor-column
    minibuffer-history
    minibuffer-insert!
@@ -355,12 +361,39 @@ read-number-history
 
     (define (minibuffer-contents . args)
       ;; What has been typed in the minibuffer: GNU Emacs's
-      ;; `minibuffer-contents'. The optional argument is a minibuffer;
+      ;; `minibuffer-contents' (`minibuf.c:527'), whose whole body is
+      ;; `make_buffer_string (prompt_end, ZV, 1)' - PROPS true, so the
+      ;; text properties come with it. The optional argument is this
+      ;; tree's (Emacs's takes none and works on the current buffer);
       ;; without one the active minibuffer is read.
+      ;;
+      ;; **It was `minibuffer-contents-no-properties' wearing this
+      ;; name.** Its body was `text-editor-to-string', which passes no
+      ;; PROPS, so every caller got plain text where Emacs's returns the
+      ;; propertized one; that function is gone (2026-10-13) and this is
+      ;; the C's line. The prompt is in neither answer here, as it is in
+      ;; neither in Emacs - `prompt_end' to `ZV' is the user's input,
+      ;; and this tree draws the prompt in the echo area.
       ;;--------------------------------------------------------------
       (let ((mb (if (pair? args) (car args) (*minibuffer*))))
         (if mb
-            (text-editor-to-string (minibuffer-editor mb))
+            (with-current-buffer (minibuffer-editor mb)
+              (buffer-substring (point-min) (point-max)))
+            #f)))
+
+    (define (minibuffer-contents-no-properties . args)
+      ;; GNU Emacs's `minibuffer-contents-no-properties'
+      ;; (`minibuf.c:537'): "Return the user input in a minibuffer as a
+      ;; string, without text-properties" - the same read with PROPS
+      ;; false, `make_buffer_string (prompt_end, ZV, 0)'.
+      ;;
+      ;; It had no counterpart here until 2026-10-13, because the one
+      ;; function above was doing its job under the other name.
+      ;;--------------------------------------------------------------
+      (let ((mb (if (pair? args) (car args) (*minibuffer*))))
+        (if mb
+            (with-current-buffer (minibuffer-editor mb)
+              (buffer-substring-no-properties (point-min) (point-max)))
             #f)))
 
     (define (minibuffer-set-contents! mb text)
@@ -2815,16 +2848,29 @@ read-number-history
                 (switch-to-buffer-other-window buffer))))
         ;; Leave mark at previous position
         (or (region-active-p) (push-mark)))
-      ;; Move to the specified line number in that buffer.
-      ;; `let*', not `let': TARGET's initializer reads ED, and Elisp's
-      ;; `let' binds its names one at a time the way `let*' does. Under
-      ;; `let' ED is unbound there and the command dies with "Unbound
-      ;; variable: ed" in the echo area - which is what `M-g g' did.
-      (let* ((ed (current-buffer))
-             (target (max (buffer-beg ed) line)))
-        (text-editor-set-cursor ed target 0)
-        (when (< (text-editor-cursor-line ed) target)
-          (text-editor-set-cursor ed (buffer-z ed)))))
+      ;; Move to the specified line number in that buffer - the C's own
+      ;; move, which this function's docstring already named:
+      ;;
+      ;;     (goto-char (point-min))
+      ;;     (forward-line (1- line))
+      ;;
+      ;; **It used to be the engine's line-addressed cursor**
+      ;; (`(text-editor-set-cursor ed line 0)`, an invented two-argument
+      ;; form with no Emacs counterpart), plus a hand-written guard that
+      ;; put point at `point-max' when the line ran off the end and a
+      ;; clamp that held the line at or above 1. `forward-line` answers
+      ;; both by itself: a count past the end stops at `point-max`, and a
+      ;; negative one at `point-min` cannot go back past the beginning.
+      ;; So the guard and the clamp both go, and what is left is exactly
+      ;; what Emacs runs.
+      ;;
+      ;; The `widen`/`save-restriction` half is not ported: nothing here
+      ;; is narrowed, which is the note the docstring above already
+      ;; carries.
+      (let ((ed (current-buffer)))
+        (with-current-buffer ed
+          (goto-char (point-min))
+          (forward-line (- line 1)))))
 
     ;; The keys GNU Emacs binds it to (M-g g, and M-g M-g, which is the
     ;; same command), beside the command as the other libraries state

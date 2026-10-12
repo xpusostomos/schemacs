@@ -64,7 +64,11 @@
  (only (schemacs editor editfns) point)
  (only (schemacs editor engine)
        allocate-buffer text-editor-insert text-editor-set-cursor
-       buffer-pt buffer-z text-editor-mark))
+       buffer-pt buffer-z)
+ ;; `%mark-marker` is the buffer's mark slot - `BVAR (b, mark)` - and
+ ;; `text-editor-mark`, the read that used to be here, is gone.
+ (only (schemacs editor buffer) %mark-marker)
+ (only (schemacs editor marker) marker-position))
 
 ;; Unbuffered output, so a run that hangs shows where it got to.
 (setvbuf (current-output-port) 'none)
@@ -237,7 +241,7 @@
       (pair? *overriding-terminal-local-map*))
     (test-equal "with the mark and point of the press in it"
       (list 1 1 #t)
-      (list (text-editor-mark ed) (point) (region-active-p)))
+      (list (marker-position (%mark-marker ed)) (point) (region-active-p)))
     ;; A motion event the map binds: the command loop dispatches it to
     ;; the map's `[mouse-movement]' lambda, and *that lambda is the map's
     ;; own command*, which is what keeps the map alive.
@@ -283,7 +287,7 @@
     ;; button came up.
     (test-equal "and `mouse-set-region' leaves the region active"
       (list 1 12 #t)
-      (list (text-editor-mark ed) (point) (region-active-p)))))
+      (list (marker-position (%mark-marker ed)) (point) (region-active-p)))))
 
 ;;-------------------------------------------------------------------
 ;; A click is `mouse-1' and does not leave a region

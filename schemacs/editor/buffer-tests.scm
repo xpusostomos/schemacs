@@ -3,7 +3,7 @@
  (scheme char)
  (only (srfi 64) test-assert test-equal test-begin test-end)
  (only (schemacs editor engine)
-       allocate-buffer text-editor-insert text-editor-to-string
+       allocate-buffer text-editor-insert
        text-editor-set-cursor)
  (only (schemacs editor textprop) get-char-property put-text-property)
  (only (schemacs editor frame)

@@ -54,16 +54,23 @@
     (only (schemacs editor keymap)
          define-key
          *default-keymap*)
+    ;; `make-buffer-string` is `editfns.c:1561`'s and is
+    ;; `intervals.scm`'s - it must live below `search.scm`, which
+    ;; calls it and cannot import `editfns.scm` (2026-10-13).
+    (only (schemacs editor intervals) make-buffer-string)
     (only (schemacs editor engine)
-    set!text-editor-mark string-search-forward
-         make-buffer-string
          fetch-char buffer-pt
          buffer-beg buffer-z
-         text-editor-search-backward text-editor-search-forward
          text-editor-set-cursor
          ;; what `minibuffer-lazy-highlight-setup' hangs its hook on
          *after-change-functions*
           )
+    ;; The literal search is `search.c`'s and is `search.scm`'s now -
+    ;; moved out of the engine on 2026-10-12, so both of its consumers
+    ;; read it from the library that mirrors the file it belongs to.
+    (only (schemacs editor search)
+          string-search-forward
+          text-editor-search-backward text-editor-search-forward)
     ;; `minibuffer-lazy-highlight-setup' is isearch.el's and needs the
     ;; minibuffer it watches; no library imports isearch, so it can be
     ;; imported here.
@@ -75,10 +82,19 @@
     (only (schemacs editor frame)
          *current-frame* current-editor frame-selected-window
          set!frame-message window-buffer
+         ;; `isearch-done` says "Mark saved where search started" only
+         ;; when no prompt is up - Emacs's `(> (minibuffer-depth) 0)`,
+         ;; which this tree has no depth for; the echo area being in use
+         ;; is the same condition, spelled the way `push-mark` spells it.
+         *echo-area-buffer*
           )
     (only (schemacs editor command) define-command)
     (only (schemacs editor simple)
          current-kill word-char?
+         ;; `isearch-done` ends by PUSHING the mark, not setting it -
+         ;; `(push-mark isearch-opoint t)` (`isearch.el:1539`) - and by
+         ;; asking whether the region is already active.
+         push-mark
           )
     ;; `render!' redraws after each key; `window-start' and `window-end'
     ;; are the range the lazy highlighter covers - the window, which is
@@ -90,7 +106,9 @@
     ;; and the reason a font-locked word keeps its colour inside a match:
     ;; the display merges an overlay's face over the text property's.
     (only (schemacs editor buffer)
-          current-buffer delete-overlay make-overlay move-overlay overlay-put)
+          current-buffer delete-overlay make-overlay move-overlay overlay-put
+          ;; the two `isearch-done` reads for its mark block
+          transient-mark-mode mark-active)
     )
 
   (export
@@ -503,10 +521,46 @@
               (isearch-dehighlight)
               (lazy-highlight-cleanup #t)
               (set!frame-message frame "")
-              (when (not (= (buffer-pt ed) opoint))
-                (set!text-editor-mark ed opoint)
-                (set!frame-message
-                 frame "Mark saved where search started")))
+              ;; GNU Emacs's `isearch-done` (`isearch.el:1534`), which
+              ;; is the tail of the function every normal exit runs:
+              ;;
+              ;;   ;; If there was movement, mark the starting position.
+              ;;   ;; Maybe should test difference between and set mark
+              ;;   ;; only if > threshold.
+              ;;   (if (/= (point) isearch-opoint)
+              ;;       (or (and transient-mark-mode mark-active)
+              ;;           (progn
+              ;;             (push-mark isearch-opoint t)
+              ;;             (or executing-kbd-macro
+              ;;                 (> (minibuffer-depth) 0) edit
+              ;;                 (message "Mark saved where search
+              ;;                           started")))))
+              ;;
+              ;; **Three departures stood here and are gone.** The mark
+              ;; was *set* rather than pushed, so the mark that was
+              ;; already there went nowhere instead of onto the ring; the
+              ;; `transient-mark-mode` + `mark-active` arm was missing, so
+              ;; an already-active region was moved and announced where
+              ;; Emacs leaves it alone and says nothing; and the message
+              ;; did not ask whether a prompt is up - which is what
+              ;; `(> (minibuffer-depth) 0)` is, and this tree's stand-in
+              ;; for it is the echo area being in use.
+              ;;
+              ;; Not carried: `executing-kbd-macro` (no keyboard macros
+              ;; here) and `edit`, which is `isearch-edit-string` - this
+              ;; branch is `isearch-exit`, whose `(isearch-done)` passes
+              ;; no EDIT.
+              ;; **`(not (= ...))` and `begin`, not `(/= ...)` and
+              ;; `progn`.** Neither of those is `(scheme base)`'s - they
+              ;; are Guile core bindings, and a library here imports only
+              ;; what it names, so both would be unbound at run time.
+              (if (not (= (buffer-pt ed) opoint))
+                  (or (and (transient-mark-mode) (mark-active))
+                      (begin
+                        (push-mark opoint #t)
+                        (or (*echo-area-buffer*)
+                            (set!frame-message
+                             frame "Mark saved where search started"))))))
              ;; isearch-abort: give up the search if it found something,
              ;; otherwise take back what was typed until it finds again
              ((eqv? code 7)

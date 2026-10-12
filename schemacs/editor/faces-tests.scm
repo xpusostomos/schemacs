@@ -11,9 +11,11 @@
  (prefix (schemacs editor dispnew) dn:)
  (only (oop goops) define-class make)
  (only (schemacs editor engine)
-        allocate-buffer text-editor-insert text-editor-set-cursor
-        set!text-editor-mark)
- (only (schemacs editor buffer) set-buffer-local-value!)
+        allocate-buffer text-editor-insert text-editor-set-cursor)
+ (only (schemacs editor buffer) set-buffer-local-value! %mark-marker)
+ ;; the mark is a marker, so it is marker.c's `set-marker` that puts it
+ ;; on the buffer's slot - `text-editor-mark`'s write before it, gone.
+ (only (schemacs editor marker) set-marker)
  (only (schemacs editor textprop) put-text-property))
 
 ;; Unbuffered output, so a run that hangs shows where it got to.
@@ -273,7 +275,7 @@
   (let ((ed (allocate-buffer)))
     (text-editor-insert ed text)
     (text-editor-set-cursor ed point)
-    (set!text-editor-mark ed mark)
+    (set-marker (%mark-marker ed) mark ed)
     (when active?
       (set-buffer-local-value! ed 'mark-active #t))
     ed))

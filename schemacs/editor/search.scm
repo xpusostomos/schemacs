@@ -61,23 +61,47 @@
           string-index)
     (only (schemacs editor marker)
           make-marker marker-buffer marker-position markerp set-marker)
+    ;; `make-buffer-string` is `editfns.c:1561`'s and is
+    ;; `intervals.scm`'s - it must live below `search.scm`, which
+    ;; calls it and cannot import `editfns.scm` (2026-10-13).
+    (only (schemacs editor intervals) make-buffer-string)
     (only (schemacs editor engine)
           bufferp
-          make-buffer-string
           buffer-beg buffer-z buffer-pt
-          text-editor-search-backward
-          text-editor-search-forward text-editor-set-cursor)
+          text-editor-set-cursor)
     ;; `*case-fold-search*' is the case folding every search here
     ;; consults (`case-fold-search', buffer.c:6009), `with-current-buffer'
-    ;; what `looking-at' and the like read the buffer through.
+    ;; what `looking-at' and the like read the buffer through. The
+    ;; line-break cache accessors and `cache-long-scans' are the buffer's
+    ;; own slots (`buffer.c`), which `find-newline` below reads.
     (only (schemacs editor buffer)
-          *case-fold-search* current-buffer with-current-buffer)
-    ;; The position answers are one-based and the engine's are
-    ;; zero-based; the conversion is at the edges only, as everywhere
-    ;; else in the Emacs-named layer.
-    (only (schemacs editor editfns)
-          buffer-substring
-          point point-min point-max)
+          *case-fold-search* current-buffer with-current-buffer
+          text-editor-text
+          %text-editor-newline-cache set!%text-editor-newline-cache
+          text-editor-cache-long-scans)
+    ;; The raw character store: `buffer.h`'s macros, which the scans below
+    ;; read character by character as `find_newline` does with
+    ;; `FETCH_CHAR`.
+    (only (schemacs editor buffer-text) buffer-text-ref)
+    ;; The line-break cache: `region-cache.c`, which is the buffer's
+    ;; `newline_cache` there. It is what makes searching a buffer with
+    ;; very long lines affordable - a stretch already searched and found
+    ;; free of line breaks is skipped whole rather than scanned again.
+    ;; **It came here with the scans** (2026-10-12); the engine held this
+    ;; import before, for the same reason.
+    (only (schemacs editor region-cache)
+          new-region-cache  know-region-cache
+          region-cache-forward  region-cache-backward)
+    ;; **This library does not import `editfns.scm`**, and that is what
+    ;; lets `editfns.scm` be built on *it*. The four names it took from
+    ;; there - `buffer-substring`, `point`, `point-min`, `point-max` -
+    ;; were a departure from `search.c` anyway: search.c reads the buffer
+    ;; through the macros (`PT`, `BEGV`, `ZV`, `BYTE_POS_ADDR`) and
+    ;; `make_buffer_string` (`insdel.c`), never through `editfns.c`.
+    ;; Verified by grep: `search.c` calls no editfns function at all.
+    ;; The positions come from `buffer.scm`'s accessors, which the
+    ;; engine re-exports, and the strings from `make-buffer-string`,
+    ;; which is the C's own.
     (only (schemacs editor syntax) word-char?)
     ;; The case transfer of `replace-match' casifies the replacement
     ;; with the string case functions.
@@ -112,6 +136,19 @@
    search-forward
    set-match-data
    string-match
+   ;; `search.c`'s innermost literal walk and the two buffer searches it
+   ;; carries, moved here from `engine.scm` on 2026-10-12.
+   string-search-forward
+   text-editor-search-forward
+   text-editor-search-backward
+   ;; The line scans: `find_newline` (`search.c:675`),
+   ;; `scan_newline_from_point` (`:986') and `find_before_next_newline`
+   ;; (`:997'). **They moved here from `engine.scm` on 2026-10-12**,
+   ;; which held them only because the line arithmetic read them; that
+   ;; arithmetic is `editfns.scm`'s now and imports them from here.
+   find-newline
+   scan-newline-from-point
+   find-before-next-newline
    )
 
   (begin
@@ -839,13 +876,17 @@
       ;; is the lowest start worth trying; GREEDY is not ported
       ;; (`save-restriction' and the extension walk are not here).
       ;;--------------------------------------------------------------
-      (let* ((limit (if (pair? args) (car args) (point-min)))
-             (pt (point))
-             (start (max limit (point-min))))
+      (let* ((ed (current-buffer))
+             (limit (if (pair? args) (car args) (buffer-beg ed)))
+             (pt (buffer-pt ed))
+             (start (max limit (buffer-beg ed))))
         (let loop ((s (- pt 1)))
           (cond
            ((< s start) #f)
-           ((string-match regexp (buffer-substring s (point-max)) 0)
+           ;; `search.c` reads the buffer directly (`PT`, `BEGV`, `ZV`)
+           ;; and so does this; the text is wanted for a regexp, so its
+           ;; properties are not.
+           ((string-match regexp (make-buffer-string ed s (buffer-z ed)) 0)
             ;; the match must reach point: the text from S to PT is
             ;; what matches
             (and (= (match-end 0) (- pt s)) s))
@@ -864,6 +905,330 @@
         (*search-regs* regs)
         (*last-thing-searched* (current-buffer))
         #f))
+
+    ;;----------------------------------------------------------------
+    ;; The literal search
+    ;;------------------------------------------------------------------
+    ;; GNU Emacs's `search-forward' and `search-backward' reach the text
+    ;; through `search_command` -> `search_buffer` -> `simple_search`
+    ;; (search.c), and this is that innermost walk. It is a literal
+    ;; search over the buffer's characters, in which a line break counts
+    ;; as a single #\newline, and it answers a position rather than
+    ;; moving point: the two DEFUNs below do the moving and the match
+    ;; data, as `search_command` does.
+    ;;
+    ;; Case folding is the caller's decision, passed in: the rule that an
+    ;; upper-case letter in the search string turns folding off
+    ;; (`search-upper-case') belongs to isearch, not to `search-forward',
+    ;; which only obeys `case-fold-search'.
+    ;;
+    ;; **Moved here from `engine.scm` on 2026-10-12**, which had it only
+    ;; because `search.scm` and `isearch.scm` both import that library.
+
+    ;;----------------------------------------------------------------
+    ;; Searching
+    ;;
+    ;; GNU Emacs's `search-forward' and `search-backward' (mg's
+    ;; forwsrch/backsrch): a literal search over the buffer's
+    ;; characters, in which a line break counts as a single #\newline.
+    ;; Both leave point at the far end of the match - past it when
+    ;; searching forward, at its start when searching backward - and
+    ;; these procedures return that position, so a caller can put its
+    ;; cursor where Emacs would have left point.
+    ;;
+    ;; Case folding is the caller's decision, passed in: in Emacs the
+    ;; rule that an upper-case letter in the search string turns folding
+    ;; off (`search-upper-case') belongs to isearch, not to
+    ;; `search-forward', which only obeys `case-fold-search'.
+    ;;------------------------------------------------------------------
+
+    (define (string-search-forward haystack needle from case-fold?)
+      ;; The index of the first occurrence of NEEDLE in the string
+      ;; HAYSTACK at or after FROM, or #f. With CASE-FOLD? the comparison
+      ;; ignores case, the way mg's `eq' macro does with its `xcase'
+      ;; argument. This is the rule the buffer searches below use, and it
+      ;; is exported so that a caller which already holds the text - the
+      ;; renderer drawing search matches, say - can apply the same rule
+      ;; without asking the buffer for it again.
+      ;; The index of the first occurrence of NEEDLE in HAYSTACK at or
+      ;; after FROM, or #f. With CASE-FOLD? the comparison ignores case,
+      ;; the way mg's `eq' macro does with its `xcase' argument.
+      ;;--------------------------------------------------------------
+      (let ((n (string-length haystack))
+            (m (string-length needle)))
+        (let loop ((i from))
+          (cond
+           ((> (+ i m) n) #f)
+           ((%string-match-at? haystack needle i case-fold?)
+            i)
+           (else (loop (+ 1 i)))))))
+
+    (define (%string-search-backward haystack needle from case-fold?)
+      ;; The index of the last occurrence of NEEDLE in HAYSTACK that
+      ;; begins at or before FROM, or #f.
+      ;;--------------------------------------------------------------
+      (let ((m (string-length needle)))
+        (let loop ((i (min from (- (string-length haystack) m))))
+          (cond
+           ((< i 0) #f)
+           ((%string-match-at? haystack needle i case-fold?) i)
+           (else (loop (- i 1)))))))
+
+    (define (%string-match-at? haystack needle at case-fold?)
+      ;; Whether NEEDLE occurs in HAYSTACK at index AT.
+      ;;--------------------------------------------------------------
+      (let ((m (string-length needle)))
+        (let loop ((j 0))
+          (cond
+           ((>= j m) #t)
+           ((char=? (%fold (string-ref haystack (+ at j)) case-fold?)
+                    (%fold (string-ref needle j) case-fold?))
+            (loop (+ 1 j)))
+           (else #f)))))
+
+    (define (%fold c case-fold?)
+      (if case-fold? (char-downcase c) c))
+
+    (define (text-editor-search-forward ed string start case-fold?)
+      ;; Search forward from the position START for STRING. Returns the
+      ;; position just past the match, which is where GNU Emacs's
+      ;; `search-forward' leaves point, or #f when STRING does not
+      ;; occur there. An empty STRING finds nothing, as it does for
+      ;; mg's `is_find', rather than matching everywhere as Emacs's
+      ;; `search-forward' does - an empty search string means "no search
+      ;; yet" to the incremental search that wants this.
+      ;;--------------------------------------------------------------
+      (and (< 0 (string-length string))
+           (let ((found (string-search-forward
+                         (make-buffer-string
+                          ed start (buffer-z ed))
+                         string 0 case-fold?)))
+             (and found (+ start found (string-length string))))))
+
+    (define (text-editor-search-backward ed string start case-fold?)
+      ;; Search backward from the position START for STRING. Returns the
+      ;; position of the start of the match, which is where GNU Emacs's
+      ;; `search-backward' leaves point, or #f when STRING does not
+      ;; occur before START. An empty STRING finds nothing.
+      ;;--------------------------------------------------------------
+      (and (< 0 (string-length string))
+           (let* ((text (make-buffer-string ed (buffer-beg ed)
+                                                    start))
+                  (found (%string-search-backward
+                          text string (- (string-length text)
+                                         (string-length string))
+                          case-fold?)))
+             ;; FOUND is an offset into TEXT, whose first character is
+             ;; at `point-min'
+             (and found (+ found (buffer-beg ed))))))
+
+    ;;----------------------------------------------------------------
+    ;; Newlines
+
+    (define (find-newline ed start count end)
+      ;; GNU Emacs's `find_newline' (`search.c:675'): scan COUNT line
+      ;; boundaries from START, forward for a positive COUNT and
+      ;; backward for a negative one, and stop at END if COUNT of them
+      ;; are not there.
+      ;;
+      ;; Two values come back: where the scan stopped, and how many
+      ;; boundaries it found, counted the way COUNT is - positive going
+      ;; forward, negative going backward. Where it found them all, the
+      ;; position is just past the COUNTth one; where it ran out of
+      ;; text, it is END. Both conventions are the C's, whose caller
+      ;; reads the pair out of `*counted' and `*bytepos'.
+      ;;
+      ;; Scanning backward looks at the character *before* the position
+      ;; it is at, so a COUNT of -1 from the middle of a line lands on
+      ;; the line's first character when there is a newline just behind
+      ;; it - which is what `bol' is.
+      ;;
+      ;; END false means what the C's zero means: "the end of the buffer
+      ;; in the direction of travel" - `ZV' going forward, `BEGV' going
+      ;; backward (`search.c:681').
+      ;;
+      ;; The line-break cache (`buf->newline_cache', which is
+      ;; `(schemacs editor region-cache)') is consulted on the way, as
+      ;; the C consults it: a stretch already searched and found to hold
+      ;; no line break is skipped whole, and a stretch this scan crosses
+      ;; without finding one is recorded as known. That is what makes a
+      ;; buffer with very long lines affordable - see `region-cache.sld'
+      ;; for why the C has it at all.
+      ;;--------------------------------------------------------------
+      (let* ((end  (or end (if (< 0 count)
+                               (buffer-z ed)
+                               (buffer-beg ed))))
+             ;; The cache is made here on first use, as the C makes it
+             ;; (`if (!cache_buffer->newline_cache) cache_buffer->
+             ;; newline_cache = new_region_cache ()', `search.c:640') - a
+             ;; buffer whose lines are never searched never pays for one.
+             (cache (and (text-editor-cache-long-scans ed)
+                         (or (%text-editor-newline-cache ed)
+                             (let ((c (new-region-cache
+                                       (buffer-beg ed))))
+                               (set!%text-editor-newline-cache ed c)
+                               c)))))
+        (if (< 0 count)
+            (find-newline-forward ed start count end cache)
+            (find-newline-backward ed start count end cache))))
+
+    (define (%newline-in ed pos lim)
+      ;; The first line break in [POS, LIM), or false when there is none -
+      ;; the C's "dumb loop", the innermost scan that knows nothing about
+      ;; the cache or the buffer's ends. It carries one variable, because
+      ;; it runs once per character.
+      ;;--------------------------------------------------------------
+      (let ((text (text-editor-text ed)))
+        (let loop ((p pos))
+          (cond ((>= p lim) #f)
+                ((= (buffer-text-ref text p) #x0a) p)
+                (else (loop (+ p 1)))))))
+
+    (define (%newline-before ed pos lim)
+      ;; The first line break strictly before POS and at or after LIM,
+      ;; answering the position just *after* it, or false when there is
+      ;; none. Scanning backward looks at the character before the
+      ;; position it is at, which is why the answer is a position past the
+      ;; break rather than on it.
+      ;;--------------------------------------------------------------
+      (let ((text (text-editor-text ed)))
+        (let loop ((p pos))
+          (cond ((<= p lim) #f)
+                ((= (buffer-text-ref text (- p 1)) #x0a) p)
+                (else (loop (- p 1)))))))
+
+    (define (find-newline-forward ed start count end cache)
+      ;; The forward half of `find-newline'. Each round asks the cache
+      ;; where the knowledge runs out, scans that far for a line break,
+      ;; and records what it crossed - which is the C's structure: consult,
+      ;; dumb-loop, `know_region_cache', repeat.
+      ;;
+      ;; A stretch the cache calls known holds no line break, so it is
+      ;; stepped over rather than looked at. That is the whole saving.
+      ;;--------------------------------------------------------------
+      (let ((beg (buffer-beg ed))
+            (z (buffer-z ed)))
+        (let outer ((pos start) (left count) (found 0))
+          (if (>= pos end)
+              (values end found)
+              (call-with-values
+                  (lambda ()
+                    (if cache
+                        (region-cache-forward cache beg z pos)
+                        (values 0 pos)))
+                (lambda (known next-change)
+                  (cond
+                   ((= known 1)
+                    ;; known: no break in here at all - step over it
+                    (let ((skip (min next-change end)))
+                      (if (<= skip pos)
+                          (values end found)
+                          (outer skip left found))))
+                   (else
+                    ;; unknown as far as NEXT-CHANGE, or as far as the
+                    ;; caller asked
+                    (let ((lim (min (if (> next-change pos) next-change end)
+                                    end)))
+                      (let ((nl (%newline-in ed pos lim)))
+                        (cond
+                         ((not nl)
+                          (when (and cache (> lim pos))
+                            (know-region-cache cache beg z pos lim))
+                          (outer lim left found))
+                         (else
+                          (when (and cache (> nl pos))
+                            (know-region-cache cache beg z pos nl))
+                          (if (= left 1)
+                              (values (+ nl 1) (+ found 1))
+                              (outer (+ nl 1) (- left 1) (+ found 1)))))))))))))))
+
+    (define (find-newline-backward ed start count end cache)
+      ;; The backward half of `find-newline', the mirror of the forward
+      ;; one: consult, scan down to where the knowledge runs out, record
+      ;; what was crossed, repeat.
+      ;;--------------------------------------------------------------
+      (let ((beg (buffer-beg ed))
+            (z (buffer-z ed)))
+        (let outer ((pos start) (left count) (found 0))
+          (if (<= pos end)
+              (values end found)
+              (call-with-values
+                  (lambda ()
+                    (if cache
+                        (region-cache-backward cache beg z pos)
+                        (values 0 pos)))
+                (lambda (known next-change)
+                  (cond
+                   ((= known 1)
+                    (let ((skip (max next-change end)))
+                      (if (>= skip pos)
+                          (values end found)
+                          (outer skip left found))))
+                   (else
+                    (let ((lim (max (if (< next-change pos) next-change end)
+                                    end)))
+                      (let ((nl (%newline-before ed pos lim)))
+                        (cond
+                         ((not nl)
+                          (when (and cache (< lim pos))
+                            (know-region-cache cache beg z lim pos))
+                          (outer lim left found))
+                         (else
+                          (when (and cache (< nl pos))
+                            (know-region-cache cache beg z nl pos))
+                          ;; The count of boundaries found is
+                          ;; `found - 1' here, and it was a hardcoded
+                          ;; `-1' until 2026-10-06 - so every backward
+                          ;; scan answered "one found" however many it
+                          ;; had crossed. That is what the C's
+                          ;; `counted' is, and `find_before_next_newline'
+                          ;; reads it to decide whether to step back
+                          ;; onto the newline. A COUNT of -2 found two
+                          ;; breaks and said one, and nothing saw it
+                          ;; until `line-end-position' was given the
+                          ;; optional N that reaches a count below -1.
+                          (if (= left -1)
+                              (values nl (- found 1))
+                              (outer (- nl 1) (+ left 1) (- found 1)))))))))))))))
+
+    (define (scan-newline-from-point ed count)
+      ;; GNU Emacs's `scan_newline_from_point' (`search.c':986'): scan
+      ;; COUNT line boundaries from point. It does not move point.
+      ;;
+      ;; Two values come back - where the scan stopped, and how many
+      ;; boundaries it found - which is the C's two out-parameters
+      ;; (`*charpos' and the returned `counted'). A COUNT at or below
+      ;; zero scans backward, one boundary further back than COUNT asks
+      ;; for; that difference is what makes `bol' land on the *start* of
+      ;; a line where `forward-line' would land on the one before it.
+      ;;--------------------------------------------------------------
+      (if (<= count 0)
+          (find-newline ed (buffer-pt ed) (- count 1)
+                        (buffer-beg ed))
+          (find-newline ed (buffer-pt ed) count
+                        (buffer-z ed))))
+
+    ;; **`bol' and `eol' have left, for `(schemacs editor editfns)'.**
+    ;; They are `editfns.c:665' and `:723' - the internal pair
+    ;; `line-beginning-position', `line-end-position', `beginning-of-line'
+    ;; and `forward-line' are all built on - and they moved *up* rather
+    ;; than the scans below moving down. That direction is the one the
+    ;; C's own layering takes: `editfns.c' calls `search.c''s scans, so
+    ;; the scans sit below the arithmetic that reads them, and this
+    ;; library is where the scans are. They reach `scan-newline-from-point'
+    ;; and `find-before-next-newline' here through this library's exports.
+
+    (define (find-before-next-newline ed from cnt)
+      ;; GNU Emacs's `find_before_next_newline' (`search.c':997'): where
+      ;; the line boundary CNT boundaries away from FROM begins. With a
+      ;; positive CNT the scan lands just *after* the newline, so it
+      ;; steps back one, to the newline's own position - which is what
+      ;; an end-of-line wants.
+      ;;--------------------------------------------------------------
+      (call-with-values
+          (lambda () (find-newline ed from cnt #f))
+        (lambda (pos found)
+          (if (= found cnt) (- pos 1) pos))))
 
     (define (search-forward string . args)
       ;; GNU Emacs's `search-forward' (search.c:2218): "Search forward
@@ -1191,7 +1556,8 @@
                 (cond
                  ((char=? c #\&)
                    (loop (+ i 2)
-                         (cons (buffer-substring
+                         (cons (make-buffer-string
+                                (current-buffer)
                                 (+ 1 (car (list-ref regs sub)))
                                 (+ 1 (cdr (list-ref regs sub))))
                                acc)))
@@ -1201,7 +1567,8 @@
                     (cond
                      ((and pair (>= (car pair) 1))
                       (loop (+ i 2)
-                            (cons (buffer-substring
+                            (cons (make-buffer-string
+                                   (current-buffer)
                                    (+ 1 (car pair)) (+ 1 (cdr pair)))
                                   acc)))
                      ;; that subexp did not match: nothing
@@ -1360,8 +1727,8 @@
              ;; the case pattern of the matched text
              (case-action
               (if fixedcase 'nochange
-                  (%case-action-of (buffer-substring
-                                    sub-start sub-end))))
+                  (%case-action-of (make-buffer-string
+                                    ed sub-start sub-end))))
              ;; the substitution, if the replacement is not literal
              (newtext
               (if literal
@@ -1436,7 +1803,9 @@
                    (string (if (pair? args) (car args) #f)))
                (if string
                    (substring string beg end)
-                   (buffer-substring beg end))))))
+                   ;; Emacs's `match-string' is `buffer-substring' for a
+                   ;; buffer, which copies the properties with the text.
+                   (make-buffer-string (current-buffer) beg end #t))))))
 
     (define (match-substitute-replacement replacement . args)
       ;; GNU Emacs's `match-substitute-replacement' (subr.el:5890):
@@ -1449,8 +1818,9 @@
       (let* ((fixedcase (and (pair? args) (car args)))
              (literal (and (pair? args) (pair? (cdr args)) (cadr args))))
         (save-match-data
-          (let ((string (buffer-substring
-                         (match-beginning 0) (match-end 0))))
+          (let ((string (make-buffer-string
+                         (current-buffer) (match-beginning 0) (match-end 0)
+                         #t)))
             (match-data--translate (- (match-beginning 0)))
             (replace-match replacement fixedcase literal string))))
     )))

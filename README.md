@@ -256,15 +256,17 @@ much easier.
 ## Departures from real emacs
 
 For the most part, schemacs is extremely similar to real emacs in its
-implementation. One of the few things different is that Schemacs internally
-represents a UTF-32 array which is much easier to deal with and saves
-tens of thousands of lines of cruft compared to emacs, which attempts
-to have fully variable sized code sizes. The interface is fully hidden
-in the text-buffer interface, and later I will optimise it to chunk so
-that it uses the minimal memory as possible. If you have just one
-emoji in a large file, only one chunk will be utf-32. For now it just
+implementation. One of the few things different is that Schemacs
+internally represents a UTF-32 array which is much easier to deal with
+and saves tens of thousands of lines of cruft compared to emacs, which
+attempts to have fully variable sized code sizes, having to convert
+bytepos <-> charpos. This takes a lot of code, and the worst case
+could be O(N) performance. The interface of our text-buffer is fully
+hidden in the text-buffer interface, and later I will optimise it to
+chunk so that it uses the minimal memory as possible. If you have just
+one emoji in a large file, only one chunk will be utf-32. It just
 plain makes the whole thing a lot easier to deal with as a fixed sized
-array. This is 2026 where memory is important but not *that*
-important. There may be other departures, but they are very
-small. Small enough that AI conversion of elisp packages should be
-*very* smooth.
+array, with very little downside. This is 2026 where memory is
+important but not *that* important. There may be other departures, but
+they are very small. Small enough that AI conversion of elisp packages
+should be *very* smooth.

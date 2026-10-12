@@ -30,8 +30,11 @@
     (only (schemacs editor character) kbd)
     (scheme base)
     (scheme char)
+    ;; `make-buffer-string` is `editfns.c:1561`'s and is
+    ;; `intervals.scm`'s - it must live below `search.scm`, which
+    ;; calls it and cannot import `editfns.scm` (2026-10-13).
+    (only (schemacs editor intervals) make-buffer-string)
     (only (schemacs editor engine)
-          make-buffer-string
           buffer-beg buffer-z buffer-pt
           text-editor-set-cursor
           ;; `record_insert` and `record_delete` are undo.c's, and
@@ -47,10 +50,26 @@
     ;; the way any file above `insdel.c` may - they are `buffer.h`'s
     ;; macros and `buffer-text.scm` is `buffer.h`'s struct.
     (only (schemacs editor buffer-text) buffer-text-ref buffer-text-set!)
-    ;; `point' is one-based here and the engine's cursor zero-based,
-    ;; which is the conversion `casify-region''s positions go through.
-    (only (schemacs editor editfns) save-excursion
-          region-beginning region-end)
+    ;; **This library does not import `editfns.scm`.** It did, for three
+    ;; things, and all three are gone as of 2026-10-12:
+    ;;
+    ;;   - `region-beginning`/`region-end`, which only the interactive
+    ;;     specs of `upcase-region` and `downcase-region` wanted. Those
+    ;;     two commands are `simple.scm`'s now, with their C-x C-u and
+    ;;     C-x C-l bindings - which is also where `simple.el` binds them,
+    ;;     so the placement is Emacs's own for the keys even though the
+    ;;     commands are `casefiddle.c`'s.
+    ;;   - `save-excursion` in `scan-words`, which the C does not use:
+    ;;     `scan_words` (`syntax.c`) takes a FROM position and never moves
+    ;;     point. Ours moves it and puts it back by hand now, which is the
+    ;;     same contract by a shorter road.
+    ;;
+    ;; It has to stay out of `editfns.scm` because `editfns.scm` is built
+    ;; *on* this library's neighbour `search.scm` now, and a library that
+    ;; both imports and is imported closes a cycle the import graph
+    ;; cannot hold - the one `casefiddle.c` -> `editfns.c` -> `search.c`
+    ;; -> `casefiddle.c` forms in Emacs itself, where one binary makes it
+    ;; harmless.
     ;; `WORD_CONSTITUENT', from its Emacs home: it was in `simple.sld`,
     ;; which put `casefiddle.c` above `simple.el` and closed a cycle
     ;; through `search.sld` and the coding layer. See `syntax.sld`.
@@ -245,12 +264,23 @@
       ;; forward for positive COUNT and backward for negative; #f when
       ;; the words run out, which is the 0 the C answers and the
       ;; caller turns into BEGV or ZV.
+      ;;
+      ;; **Point is put back by hand, and `save-excursion` is not used.**
+      ;; The C does not need either: `scan_words` takes a FROM position
+      ;; and never touches point (`SET_PT` appears nowhere in its body).
+      ;; The walks this calls - `word-run-end`/`word-run-start`, which
+      ;; are `syntax.scm`'s - do move point, so the position is taken and
+      ;; restored here, which is the same contract by a shorter road.
+      ;; `save-excursion` is `editfns.c`'s (its `save_excursion_save` is
+      ;; at `editfns.c:779`) and this library cannot import that file.
       ;;--------------------------------------------------------------
-      (save-excursion
-        (let ((ed (current-buffer)))
-          (if (> count 0)
-              (word-run-end ed count)
-              (word-run-start ed (- count))))))
+      (let* ((ed (current-buffer))
+             (opoint (buffer-pt ed))
+             (result (if (> count 0)
+                         (word-run-end ed count)
+                         (word-run-start ed (- count)))))
+        (text-editor-set-cursor ed opoint)
+        result))
 
     (define (do-casify-multibyte-region flag start end)
       ;; GNU Emacs's `do_casify_multibyte_region` (`casefiddle.c:432`):
@@ -390,37 +420,14 @@
          ed (casify-region flag (min pt farend) (max pt farend)))
         #f))
 
-    (define-command (upcase-region beg end)
-      ;; GNU Emacs's `upcase-region' (`casefiddle.c:603'): "Convert the
-      ;; region to upper case. In programs, wants two arguments..."
-      ;;
-      ;; **It answers nil, not the region's end.** `casify_region` answers
-      ;; where the change ended, and that is what `casify_word` sets point
-      ;; from - but the DEFUN goes through `casify_pnc_region`, which
-      ;; throws that answer away and returns `Qnil`. Measured:
-      ;; `(upcase-region 1 4)` answers nil in Emacs 31.1.
-      ;;--------------------------------------------------------------
-      "Convert the region to upper case.
-In programs, wants two arguments.  These arguments
-specify the starting and ending character numbers of the region to
-operate on.  When used as a command, the text between point and the
-mark is operated on.
-See also `capitalize-region'."
-      (interactive (list (region-beginning) (region-end)))
-      (casify-region 'upcase beg end)
-      #f)
-
-    (define-command (downcase-region beg end)
-      ;; GNU Emacs's `downcase-region' (`casefiddle.c:621'): the same,
-      ;; downcasing, and nil the same way.
-      "Convert the region to lower case.
-In programs, wants two arguments.  These arguments
-specify the starting and ending character numbers of the region to
-operate on.  When used as a command, the text between point and the
-mark is operated on."
-      (interactive (list (region-beginning) (region-end)))
-      (casify-region 'downcase beg end)
-      #f)
+    ;; **`upcase-region' and `downcase-region' have left, for
+    ;; `simple.scm`.** They are `casefiddle.c`'s DEFUNs (`:603`, `:621`),
+    ;; and their bodies - `casify_region` and then nil - are still here,
+    ;; but their interactive specs read the region, which is
+    ;; `editfns.c`'s, and that is the import this library had to give up
+    ;; (see the note at the imports). Emacs binds both keys in
+    ;; `simple.el`, so the move is faithful for the bindings and a named
+    ;; departure for the two commands.
 
     (define-command (upcase-word arg)
       ;; GNU Emacs's `upcase-word' (casefiddle.c:671): "Convert to
@@ -443,11 +450,8 @@ mark is operated on."
       (casify-word 'capitalize arg))
 
     ;; The keys GNU Emacs binds them to, beside the commands as the
-    ;; other libraries state theirs.
-    (define-key *default-keymap* (kbd "C-x C-u")
-      upcase-region)
-    (define-key *default-keymap* (kbd "C-x C-l")
-      downcase-region)
+    ;; other libraries state theirs. `upcase-region`/`downcase-region`
+    ;; took C-x C-u and C-x C-l with them to `simple.scm`.
     (define-key *default-keymap* (kbd "M-u") upcase-word)
     (define-key *default-keymap* (kbd "M-l") downcase-word)
     (define-key *default-keymap* (kbd "M-c") capitalize-word)

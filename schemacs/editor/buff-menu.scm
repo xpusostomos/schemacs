@@ -51,7 +51,9 @@
           set-buffer-modified-p buffer-read-only?
           buffer-beg buffer-z
           set!buffer-read-only
-          text-editor-file-name
+          text-editor-file-name)
+    ;; The line arithmetic is `editfns.c`'s and lives there now.
+    (only (schemacs editor editfns)
           text-editor-get-start-of-line
           text-editor-get-end-of-line)
     (only (schemacs editor frame)

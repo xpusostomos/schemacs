@@ -40,9 +40,12 @@
     ;; reached.
     (only (guile) format inexact->exact logior string-index)
     (prefix (schemacs editor keymap) km:)
+    ;; `make-buffer-string` is `editfns.c:1561`'s and is
+    ;; `intervals.scm`'s - it must live below `search.scm`, which
+    ;; calls it and cannot import `editfns.scm` (2026-10-13).
+    (only (schemacs editor intervals) make-buffer-string)
     (only (schemacs editor engine)
           allocate-buffer
-          make-buffer-string
           buffer-pt
           ;; the two the command loop must set before every command -
           ;; `keyboard.c`'s `point_before_last_command_or_undo`

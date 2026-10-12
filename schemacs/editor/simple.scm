@@ -40,15 +40,16 @@
     (only (schemacs editor derived) define-derived-mode)
     ;; the markers, from marker.c's own library
     (only (schemacs editor marker) copy-marker marker-position set-marker)
+    ;; `make-buffer-string` is `editfns.c:1561`'s and is
+    ;; `intervals.scm`'s - it must live below `search.scm`, which
+    ;; calls it and cannot import `editfns.scm` (2026-10-13).
+    (only (schemacs editor intervals) make-buffer-string)
     (only (schemacs editor engine)
-         mark-marker
          undo-insertion-entry? undo-deletion-entry? undo-modified-entry?
-         set!text-editor-mark make-buffer-string
-         text-editor-cursor-column
          text-editor-delete-from-cursor fetch-char
-         buffer-pt text-editor-get-end-of-line
-         text-editor-get-start-of-line text-editor-insert
-         text-editor-mark text-editor-move-cursor
+         buffer-pt
+         text-editor-insert
+         text-editor-move-cursor
          buffer-beg buffer-z
          buffer-read-only? text-editor-set-cursor
          set!buffer-read-only
@@ -102,11 +103,17 @@
           bolp buffer-size buffer-substring delete-and-extract-region delete-region eobp
           eolp following-char forward-line insert insert-and-inherit
           line-beginning-position
-          line-end-position goto-char message point point-max
-          preceding-char region-beginning region-end save-excursion)
+          line-end-position goto-char mark-marker message point point-max
+          preceding-char region-beginning region-end save-excursion
+          text-editor-cursor-column text-editor-get-end-of-line
+          text-editor-get-start-of-line)
     (only (schemacs editor syntax) skip-chars-forward skip-chars-backward
           word-char? forward-word-position backward-word-position
           word-run-end word-run-start)
+    ;; `casify-region` is `casefiddle.c`'s, and `upcase-region` and
+    ;; `downcase-region` - which read the region and so cannot live in
+    ;; `casefiddle.scm` - are defined in this file and call it.
+    (only (schemacs editor casefiddle) casify-region)
     ;; `cmds.c`'s: `internal-self-insert', which is where overwrite mode
     ;; lives, and the command cluster that used to be written out here -
     ;; `self-insert-command' and its neighbours are that file's, and the
@@ -125,7 +132,10 @@
     ;; `kbd' is how the bindings below name their keys, as
     ;; `(define-key global-map (kbd "C-/") ...)' would in Emacs.
     (only (schemacs editor subr)
-          add-to-history event-convert-list kbd nthcdr)
+          add-to-history event-convert-list kbd nth nthcdr)
+    ;; `history-delete-duplicates` is `minibuf.c`'s variable, and
+    ;; `push-mark` binds it - Emacs's own line, for the mark ring only.
+    (only (schemacs editor minibuf) *history-delete-duplicates*)
     ;; `define-key' and the global map, which this library fills with the
     ;; bindings for the commands it defines - as simple.el does with
     ;; `(define-key global-map ...)'.
@@ -137,6 +147,9 @@
 
   (export
    special-mode special-mode-hook special-mode-map
+   ;; `casefiddle.c`'s two region commands, defined here because they
+   ;; read the region - see the note at their definitions.
+   upcase-region downcase-region
    %blank-line? *amalgamating-count% *amalgamating-undo-limit*
    *last-change-was-undo* *last-command* *this-command* *temporary-goal-column*
    *kill-do-not-save-duplicates* *kill-read-only-ok*
@@ -1151,7 +1164,7 @@ non-nil."
         ;; bare `C-u' - and that is what the list is for.
         (when (pair? arg)
           (let ((was (mark #t)))
-            (set!text-editor-mark ed (buffer-pt ed))
+            (set-marker (mark-marker) (buffer-pt ed) (current-buffer))
             (text-editor-set-cursor ed was))))
       ;; "If we do get all the way thru, make this-command indicate
       ;; that" - which is what `yank-pop' asks about, and what makes a
@@ -1178,7 +1191,7 @@ non-nil."
                  (beg (if before (buffer-pt ed) (mark #t)))
                  (end (if before (mark #t) (buffer-pt ed))))
             (delete-region beg end)
-            (set!text-editor-mark ed (buffer-pt ed))
+            (set-marker (mark-marker) (buffer-pt ed) (current-buffer))
             (insert (current-kill count))
             ;; ... and it says `yank' as well, so the *next* M-y still
             ;; looks like one and the ring may be gone round and round.
@@ -1758,7 +1771,7 @@ non-nil."
       (let ((force (if (pair? args) (car args) #f)))
         (if (or force (not (transient-mark-mode))
                 (mark-active) (*mark-even-if-inactive*))
-            (text-editor-mark (current-buffer))
+            (marker-position (mark-marker))
             (error "The mark is not active now"))))
 
     (define (set-mark position)
@@ -1770,7 +1783,7 @@ non-nil."
       ;;--------------------------------------------------------------
       (if position
           (begin
-            (set!text-editor-mark (current-buffer) position)
+            (set-marker (mark-marker) position (current-buffer))
             (activate-mark 'no-tmm))
           (begin
             ;; "Normally we never clear mark-active except in Transient
@@ -1778,7 +1791,7 @@ non-nil."
             ;; too, we must clear mark-active in any mode."
             (deactivate-mark #t)
             (set!mark-active #f)
-            (set!text-editor-mark (current-buffer) #f))))
+            (set-marker (mark-marker) #f))))
 
     (define (region-active-p)
       ;; GNU Emacs's `region-active-p': Transient Mark mode is on and the
@@ -1926,13 +1939,35 @@ non-nil."
                           (caddr args)
                           #f)))
         (when (mark #t)
-          (set!mark-ring
-           (add-to-history (mark-ring)
-                           (copy-marker (mark-marker (current-buffer)))
-                           (*mark-ring-max*) #t)))
-        (set!text-editor-mark (current-buffer)
-                              (or location (buffer-pt
-                                            (current-buffer))))
+          ;; **Emacs's `let` and its binding, both of which were
+          ;; missing.** `push-mark` wraps this whole step in
+          ;;
+          ;;   (let ((old (nth mark-ring-max mark-ring))
+          ;;         (history-delete-duplicates nil))
+          ;;     (add-to-history 'mark-ring (copy-marker (mark-marker))
+          ;;                     mark-ring-max t)
+          ;;     (when old (set-marker old nil)))
+          ;;
+          ;; The binding is not decoration: `add-to-history` removes
+          ;; duplicates when the *variable* says so, so Emacs overrides a
+          ;; user's `(setq history-delete-duplicates t)` for the mark
+          ;; ring only. Without it, a repeated mark would be dropped from
+          ;; the ring where Emacs keeps it.
+          ;;
+          ;; The teardown is the other half: the entry the truncation
+          ;; pushes off is otherwise left pointing into the buffer, and a
+          ;; marker that points somewhere keeps its buffer's marker list
+          ;; alive. Emacs unsets it here and nothing else does.
+          (let ((old (nth (*mark-ring-max*) (mark-ring))))
+            (parameterize ((*history-delete-duplicates* #f))
+              (set!mark-ring
+               (add-to-history (mark-ring)
+                               (copy-marker (mark-marker))
+                               (*mark-ring-max*) #t)))
+            (when old (set-marker old #f (current-buffer)))))
+        (set-marker (mark-marker) (or location (buffer-pt
+                                                 (current-buffer)))
+                    (current-buffer))
         (unless (or nomsg (*echo-area-buffer*))
           (set!frame-message (*current-frame*) "Mark set"))
         (when (or activate (not (transient-mark-mode)))
@@ -1947,9 +1982,9 @@ non-nil."
         (when (pair? ring)
           (set!mark-ring
            (append (cdr ring)
-                   (list (copy-marker (mark-marker (current-buffer))))))
-          (set!text-editor-mark (current-buffer)
-                                (marker-position (car ring)))
+                   (list (copy-marker (mark-marker)))))
+          (set-marker (mark-marker) (marker-position (car ring))
+                      (current-buffer))
           (set-marker (car ring) #f (current-buffer))))
       (deactivate-mark))
 
@@ -2801,6 +2836,57 @@ This function does not move point."
                           (write value printflag))))
                   (loop))))))))
 
+
+    ;;------------------------------------------------------------------
+    ;; The two region-casing commands
+    ;;------------------------------------------------------------------
+    ;; **A named placement departure.** `upcase-region` and
+    ;; `downcase-region` are `casefiddle.c`'s DEFUNs (`:603`, `:621`) and
+    ;; live in `casefiddle.scm` in Emacs - but their interactive specs
+    ;; read the region, which is `editfns.c`'s, and `casefiddle.scm` had
+    ;; to give up its `editfns` import for `search.scm` to sit below
+    ;; `editfns.scm` (see the note at `casefiddle.scm`'s imports).
+    ;; `simple.el` is where Emacs binds both keys, so the *bindings*
+    ;; below are more faithful here than they were there.
+    ;;
+    ;; Their bodies are unchanged from `casefiddle.c`: `casify_region`
+    ;; and then nil.
+
+    (define-command (upcase-region beg end)
+      ;; GNU Emacs's `upcase-region' (`casefiddle.c:603'): "Convert the
+      ;; region to upper case. In programs, wants two arguments..."
+      ;;
+      ;; **It answers nil, not the region's end.** `casify_region` answers
+      ;; where the change ended, and that is what `casify_word` sets point
+      ;; from - but the DEFUN goes through `casify_pnc_region`, which
+      ;; throws that answer away and returns `Qnil`. Measured:
+      ;; `(upcase-region 1 4)` answers nil in Emacs 31.1.
+      ;;--------------------------------------------------------------
+      "Convert the region to upper case.
+In programs, wants two arguments.  These arguments
+specify the starting and ending character numbers of the region to
+operate on.  When used as a command, the text between point and the
+mark is operated on.
+See also `capitalize-region'."
+      (interactive (list (region-beginning) (region-end)))
+      (casify-region 'upcase beg end)
+      #f)
+
+    (define-command (downcase-region beg end)
+      ;; GNU Emacs's `downcase-region' (`casefiddle.c:621'): the same,
+      ;; downcasing, and nil the same way.
+      "Convert the region to lower case.
+In programs, wants two arguments.  These arguments
+specify the starting and ending character numbers of the region to
+operate on.  When used as a command, the text between point and the
+mark is operated on."
+      (interactive (list (region-beginning) (region-end)))
+      (casify-region 'downcase beg end)
+      #f)
+
+    ;; The keys, which `simple.el` binds to these two.
+    (define-key *default-keymap* (kbd "C-x C-u") upcase-region)
+    (define-key *default-keymap* (kbd "C-x C-l") downcase-region)
 
     ;;------------------------------------------------------------------
     ;; special-mode-map

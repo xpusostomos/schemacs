@@ -95,6 +95,10 @@ user is connecting via the repl and running commands, they
 don't want to see some weird output because you decided to
 return something that they don't want to see.
 
+if emacs has an interesting macro or syntax-rules we should implement it,
+so as to keep the same shape as emacs code. make a schemacs/syntax.scm 
+for syntax.
+
 
 - `tools/syntax-check.scm` — after ANY scripted edit to a machinery
   `.scm` file, run `guile -s tools/syntax-check.scm <files>`: it runs

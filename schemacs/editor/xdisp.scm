@@ -49,16 +49,23 @@
           column-width line-height)
     ;; the markers, from marker.c's own library
     (only (schemacs editor marker) marker-position)
+    ;; `make-buffer-string` is `editfns.c:1561`'s and is
+    ;; `intervals.scm`'s - it must live below `search.scm`, which
+    ;; calls it and cannot import `editfns.scm` (2026-10-13).
+    (only (schemacs editor intervals) make-buffer-string)
     (only (schemacs editor engine)
          text-editor-buffer-name text-editor-text-props
          text-editor-file-name
-         text-editor-cursor-column
-         buffer-pt text-editor-set-cursor text-editor-mark
-         text-editor-get-end-of-line
-         text-editor-get-start-of-line make-buffer-string fetch-char
+         buffer-pt text-editor-set-cursor
+         fetch-char
          buffer-modified-p
-         buffer-read-only?
-         text-editor-to-string)
+         buffer-read-only?)
+    ;; The line arithmetic is `editfns.c`'s, and it lives there now.
+    (only (schemacs editor editfns)
+         buffer-substring-no-properties point-max point-min
+         text-editor-cursor-column
+         text-editor-get-end-of-line
+         text-editor-get-start-of-line)
     ;; `count-lines' is `xdisp.c''s own (`:29892') and reads straight from
     ;; this file's library - it is placed in `fns.scm' beside the
     ;; `line-number-at-pos' that wants it, because this library is the top
@@ -126,6 +133,7 @@
     (only (schemacs editor textprop) get-text-property)
     (only (schemacs editor buffer)
           *transient-mark-mode*
+          with-current-buffer
           buffer-auto-hscroll-mode buffer-cursor-in-non-selected-windows
           buffer-cursor-type buffer-hscroll-margin buffer-hscroll-step
           buffer-local-value buffer-overwrite-mode buffer-truncate-lines
@@ -135,6 +143,9 @@
           ;; `buffer.h:992''s macros and come from their own library, not
           ;; through the engine facade
           buffer-beg buffer-z text-editor-text
+          ;; `BVAR (b, mark)` - the slot itself, which redisplay reads
+          ;; for the buffer it is drawing rather than the current one.
+          %mark-marker
           ;; the mode line's mode name is the buffer's `mode-name'
           mode-name
           ;; and the overlays at a position are merged into its face
@@ -1934,7 +1945,7 @@
       ;; that ends at point-max has no line break and gets no extension
       ;; face in Emacs.
       ;;--------------------------------------------------------------
-      (let* ((mark (text-editor-mark ed))
+      (let* ((mark (marker-position (%mark-marker ed)))
              (point (buffer-pt ed))
              (region-start (and mark (min point mark)))
              (region-end (and mark (max point mark))))
@@ -1967,7 +1978,7 @@
       (and (buffer-local-value ed 'transient-mark-mode
                                (*transient-mark-mode*))
            (buffer-local-value ed 'mark-active #f)
-           (text-editor-mark ed)))
+           (marker-position (%mark-marker ed))))
 
     (define (region-face-at-position? ed position)
       ;; Whether POSITION is covered by ED's active region. GNU Emacs
@@ -1979,7 +1990,7 @@
       (and (buffer-local-value ed 'transient-mark-mode
                                (*transient-mark-mode*))
            (buffer-local-value ed 'mark-active #f)
-           (let ((mark (text-editor-mark ed)))
+           (let ((mark (marker-position (%mark-marker ed))))
              (and mark
                   (let* ((point (buffer-pt ed))
                          (beginning (min mark point))
@@ -2702,8 +2713,19 @@
                                  (face->attribute 'minibuffer-prompt)))
                 (write-glyphs! (current-display)
                                (truncate-line
-                                (string-append (text-editor-to-string reading)
-                                               (frame-message frame))
+                                (string-append
+                                 ;; The echo buffer's characters, which
+                                 ;; is `buffer-substring-no-properties'
+                                 ;; over the whole of it - Emacs's
+                                 ;; `echo_area_display' reads the same
+                                 ;; text, through the glyph matrices.
+                                 ;; It was `text-editor-to-string',
+                                 ;; which was that composition under an
+                                 ;; invented name (deleted 2026-10-13).
+                                 (with-current-buffer reading
+                                   (buffer-substring-no-properties
+                                    (point-min) (point-max)))
+                                 (frame-message frame))
                                 (- width pwidth))
                                (- height 1) pwidth #f)))
              (else

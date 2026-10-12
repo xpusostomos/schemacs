@@ -221,4 +221,28 @@
 (test-equal '(#\xfffd 97)
   (list (code-point->char 4194281) (char->integer (code-point->char 97))))
 
+;; **`buffer-text-to-code-points` is the door the byte character comes
+;; back out of**, and this is the pair of assertions that says why it
+;; exists: the string form substitutes U+FFFD for it, and the code-point
+;; form does not. That is what makes a file of undecodable bytes survive
+;; a visit-and-save round trip (`files.scm`'s `save-buffer` reads the
+;; buffer through this and never through a string).
+(test-equal (list "a\ufffdb" '(97 4194281 98))
+  (let* ((bt (new-buffer-text 1 16))
+         (v (make-typed-array 'u32 0 3)))
+    (array-set! v 97 0)
+    (array-set! v 4194281 1)
+    (array-set! v 98 2)
+    (buffer-text-insert-code-points! bt 1 v)
+    (list (buffer-text-substring bt 1 4)     ; the string form
+          (buffer-text-to-code-points bt))))  ; vs. this one
+
+;; ... and it is every character in order, at every base, empty included.
+(test-equal '(#x61 #x62 #x63)
+  (let ((bt (new-buffer-text 1 16)))
+    (buffer-text-insert! bt 1 "abc")
+    (buffer-text-to-code-points bt)))
+(test-equal '()
+  (buffer-text-to-code-points (new-buffer-text 1 16)))
+
 (test-end "schemacs_editor_buffer_text")

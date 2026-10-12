@@ -41,8 +41,12 @@
   ;;------------------------------------------------------------------
   (import
     (scheme base)
-    (scheme case-lambda)
-    (only (scheme char) char-downcase)  ; for case-folding searches
+    ;; `(scheme case-lambda)` stood here for `text-editor-set-cursor`'s
+    ;; two-argument form, which is gone (2026-10-12) - nothing in this
+    ;; library is a `case-lambda` any more.
+    ;; `(only (scheme char) char-downcase)` stood here for the
+    ;; case-folding of the literal search, which left with it for
+    ;; `search.scm` on 2026-10-12.
     ;;(only (schemacs lexer) make<source-file-location>)
     ;; **The marker chain's weak table is not imported here any more** -
     ;; the chain moved to `marker.scm' with `marker.c`, and with it the
@@ -62,21 +66,25 @@
     ;; records, a separate line editor, a CDF indexing the lines, and a
     ;; hand-maintained character count) are one sequence of characters,
     ;; as they are in Emacs.
+    ;; `make-buffer-string` was imported here for
+    ;; `text-editor-to-string`, which is deleted; nothing in this library
+    ;; calls it now. (`intervals.scm` still owns it - see the note on its
+    ;; definition there.)
     (only (schemacs editor buffer-text)
-          buffer-text-base buffer-text-z
+          ;; `buffer-text-base` and `buffer-text-z` were imported for
+          ;; `text-editor-to-code-points`, which is `buffer-text.scm`'s
+          ;; now - the walk is there and it uses its own accessors.
           buffer-text-ref
           buffer-text-insert! buffer-text-insert-code-points!
           buffer-text-delete!
           buffer-text-substring
           buffer-text-beg-unchanged set!buffer-text-beg-unchanged)
-    ;; The line-break cache `find-newline' keeps - GNU Emacs's
-    ;; `region-cache.c', which is `buf->newline_cache' there. It is what
-    ;; makes searching a buffer with very long lines affordable: a
-    ;; stretch already searched and found free of line breaks is skipped
-    ;; whole rather than scanned again.
-    (only (schemacs editor region-cache)
-          new-region-cache  know-region-cache  invalidate-region-cache
-          region-cache-forward  region-cache-backward)
+    ;; **`(only (schemacs editor region-cache) ...)` stood here** for the
+    ;; line-break cache `find_newline` keeps - a stretch already searched
+    ;; and found free of line breaks is skipped whole rather than scanned
+    ;; again, which is what makes a buffer with very long lines
+    ;; affordable. The scans are `search.scm`'s now and took the import
+    ;; with them.
     ;; **The buffer record is the buffer library's now** - `buffer.h`'s
     ;; struct, which `buffer.c` owns - so the record, its accessors,
     ;; `make_buffer` (`NEW-TEXT-EDITOR`), `buffer-beg' and `buffer-z'
@@ -101,7 +109,6 @@
           text-editor-text-props  set!text-editor-text-props
           text-editor-undo-list  set!text-editor-undo-list
           text-editor-cache-long-scans  set!text-editor-cache-long-scans
-          %mark-marker
           buffer-markers
           text-editor-buffer-name  set!text-editor-buffer-name
           text-editor-file-name  set!text-editor-file-name
@@ -157,11 +164,21 @@
    ;; the engine for them.
    allocate-buffer  bufferp  buffer-pt
 
-   text-editor-to-string
-   text-editor-to-code-points
+   ;; **`text-editor-to-string` is deleted** (2026-10-13). It had no
+   ;; Emacs function to be - see the note where it stood - and its 85
+   ;; callers write the composition out now.
+   ;; **`text-editor-to-code-points` has left for `buffer-text.scm`**
+   ;; (2026-10-13), as `buffer-text-to-code-points`, taking the
+   ;; buffer-text rather than the buffer. The walk was over the class's
+   ;; own store and there was nothing else in the function; the one
+   ;; caller - `files.scm`'s save path - names the text it means.
    text-editor-insert
    text-editor-delete-from-cursor
-   make-buffer-string
+   ;; **`make-buffer-string` has left for `intervals.scm`** (2026-10-13).
+   ;; It is `editfns.c:1561`'s - the docstring here said `insdel.c`, the
+   ;; wrong file - and the DAG forces it below `search.scm`: search.scm
+   ;; calls it twelve times and cannot import `editfns.scm`. See the
+   ;; note on its definition there.
    *after-change-functions*
    signal-after-change
 
@@ -201,10 +218,20 @@
    ;; Whether the buffer refuses to be changed
    buffer-read-only?  set!buffer-read-only
 
-   ;; Searching, and the mark
-   text-editor-search-forward  text-editor-search-backward
-   string-search-forward
-   text-editor-mark  set!text-editor-mark
+   ;; **`text-editor-mark` and `set!text-editor-mark` have left too**
+   ;; (2026-10-12), and neither had an Emacs function to move to: they
+   ;; are the C's own spelling of a `BVAR` read and write, and that is
+   ;; what their callers say now - `(marker-position (mark-marker))` for
+   ;; the current buffer (`mark-marker` being `editfns.c:265`'s, in that
+   ;; library), and `(marker-position (%mark-marker BUF))` for a buffer
+   ;; named outright, which is redisplay's `BVAR (b, mark)`. The write
+   ;; is `(set-marker (mark-marker) POS (current-buffer))`, which is
+   ;; `set_mark`.
+   ;;
+   ;; The literal search that stood here is `search.scm`'s now:
+   ;; `text-editor-search-forward`, `text-editor-search-backward` and
+   ;; `string-search-forward` are `search.c`'s, and both consumers -
+   ;; `search.scm` and `isearch.scm` - import that library.
 
    ;; The buffer's identity: its name and the file it visits
    text-editor-buffer-name  set!text-editor-buffer-name
@@ -212,9 +239,13 @@
 
    ;; The buffer's mark. The markers themselves are `marker.scm`'s now -
    ;; `MARKERP`, `marker-position`, `set-marker` and the rest come from
-   ;; there, where marker.c's functions live - and `mark-marker` is
-   ;; `buffer.c`'s, which is why it is still here.
-   mark-marker
+   ;; there, where marker.c's functions live.
+   ;;
+   ;; **`mark-marker` has left for `editfns.scm`** (2026-10-12). It is
+   ;; `editfns.c:265`'s - not `buffer.c`'s, as the note that stood here
+   ;; said - and the C's takes no buffer at all: it is `BVAR
+   ;; (current_buffer, mark)`. The ED argument the version here had was
+   ;; an invention, and every caller passed the current buffer.
 
    ;; Getting and setting the cursor index. Every *position* the engine
    ;; answers is one-based, as Emacs's are: `point-min' is 1 and
@@ -224,20 +255,22 @@
    buffer-beg
    buffer-z
    fetch-char
-   text-editor-cursor-line
-   text-editor-cursor-column
-   text-editor-get-start-of-line
-   text-editor-get-end-of-line
    text-editor-set-cursor
    text-editor-move-cursor
    buffer-pt
    ;; The scans the line arithmetic is built on - GNU Emacs's
    ;; `find_newline' (`search.c:675'), `scan_newline_from_point'
-   ;; (:986), `bol' (`editfns.c:665'), `eol' (:723),
-   ;; `find_before_next_newline' (`search.c':997) and `count_lines'
-   ;; (`xdisp.c:29892').
-   find-newline  scan-newline-from-point
-   bol  eol  find-before-next-newline  count-lines
+   ;; (:986) and `find_before_next_newline' (`search.c':997). The two
+   ;; ends that are `editfns.c`'s, `bol' (`:665') and `eol' (`:723'), and
+   ;; the arithmetic they carry - `line-beginning-position',
+   ;; `line-end-position', `line-number-at-pos', `current-column' - have
+   ;; moved up to `editfns.scm'; `count_lines' (`xdisp.c:29892') is
+   ;; re-exported from `fns.scm', where it lives.
+   ;;
+   ;; **`find-newline`, `scan-newline-from-point` and
+   ;; `find-before-next-newline` have left for `search.scm`** (their own
+   ;; file, `search.c`) now that nothing here or below reads a line scan.
+   count-lines
    show-text-editor
    ;; `invalidate_buffer_caches' (`insdel.c:2206'), which is `insdel.scm`'s
    ;; now and re-exported here so its readers do not have to know. The
@@ -277,43 +310,12 @@
     ;; is no character-to-line mapping to compute.
 
 
-    (define (make-buffer-string ed start end)
-      ;; The buffer's text between the positions START and END, as a
-      ;; string - GNU Emacs's `buffer-substring' over the whole buffer,
-      ;; and the same half-open range (START in, END out). Arguments may
-      ;; be given in either order; the empty range returns "".
-      ;;--------------------------------------------------------------
-      (let ((start (min start end))
-            (end (max start end)))
-        (buffer-text-substring (text-editor-text ed) start end)))
-
     ;; **The marker adjusters are `insdel.scm`'s now.** They are
     ;; `insdel.c`'s - `adjust_markers_for_insert` and
     ;; `adjust_markers_for_delete` - and that library exists, so there is
     ;; one copy of each rather than two. They act on the current buffer,
     ;; as the C's do, which is why the call sites below say what buffer
     ;; they mean by making it current.
-
-    (define (mark-marker ed)
-      ;; The buffer's mark as the marker it is, GNU Emacs's
-      ;; `mark-marker': the same marker object every time, so that
-      ;; setting the mark moves it rather than replacing it.
-      ;;--------------------------------------------------------------
-      (%mark-marker ed))
-
-    (define (text-editor-mark ed)
-      ;; Where the buffer's mark is, as a character index, or false when
-      ;; it has not been set: GNU Emacs's `(mark)'. The mark is a marker
-      ;; (see `MARK-MARKER'), so it follows the text: set it, edit
-      ;; before it, and it is still on the character it was put on.
-      ;;--------------------------------------------------------------
-      (marker-position (%mark-marker ed)))
-
-    (define (set!text-editor-mark ed position)
-      ;; Put the buffer's mark at POSITION, or leave it unset when
-      ;; POSITION is false.
-      ;;--------------------------------------------------------------
-      (set-marker (%mark-marker ed) (and position position) ed))
 
     ;; **`text-editor-note-property-change!' has left, and it never had
     ;; the right name.** It was this tree's spelling of `textprop.c`'s
@@ -325,101 +327,16 @@
     ;; own body.
 
     ;;----------------------------------------------------------------
-    ;; Searching
+    ;; Searching: **moved to `(schemacs editor search)` on 2026-10-12.**
     ;;
-    ;; GNU Emacs's `search-forward' and `search-backward' (mg's
-    ;; forwsrch/backsrch): a literal search over the buffer's
-    ;; characters, in which a line break counts as a single #\newline.
-    ;; Both leave point at the far end of the match - past it when
-    ;; searching forward, at its start when searching backward - and
-    ;; these procedures return that position, so a caller can put its
-    ;; cursor where Emacs would have left point.
-    ;;
-    ;; Case folding is the caller's decision, passed in: in Emacs the
-    ;; rule that an upper-case letter in the search string turns folding
-    ;; off (`search-upper-case') belongs to isearch, not to
-    ;; `search-forward', which only obeys `case-fold-search'.
+    ;; The literal search - `string-search-forward` and its case-folding
+    ;; helpers, and the two buffer walks built on it - is `search.c`'s
+    ;; (`simple_search`, which `search_buffer` calls for every kind of
+    ;; search it makes). It lived here while this library was the only
+    ;; place both `search.scm` and `isearch.scm` could reach, and both
+    ;; now import `(schemacs editor search)` instead.
     ;;------------------------------------------------------------------
 
-    (define (string-search-forward haystack needle from case-fold?)
-      ;; The index of the first occurrence of NEEDLE in the string
-      ;; HAYSTACK at or after FROM, or #f. With CASE-FOLD? the comparison
-      ;; ignores case, the way mg's `eq' macro does with its `xcase'
-      ;; argument. This is the rule the buffer searches below use, and it
-      ;; is exported so that a caller which already holds the text - the
-      ;; renderer drawing search matches, say - can apply the same rule
-      ;; without asking the buffer for it again.
-      ;; The index of the first occurrence of NEEDLE in HAYSTACK at or
-      ;; after FROM, or #f. With CASE-FOLD? the comparison ignores case,
-      ;; the way mg's `eq' macro does with its `xcase' argument.
-      ;;--------------------------------------------------------------
-      (let ((n (string-length haystack))
-            (m (string-length needle)))
-        (let loop ((i from))
-          (cond
-           ((> (+ i m) n) #f)
-           ((%string-match-at? haystack needle i case-fold?)
-            i)
-           (else (loop (+ 1 i)))))))
-
-    (define (%string-search-backward haystack needle from case-fold?)
-      ;; The index of the last occurrence of NEEDLE in HAYSTACK that
-      ;; begins at or before FROM, or #f.
-      ;;--------------------------------------------------------------
-      (let ((m (string-length needle)))
-        (let loop ((i (min from (- (string-length haystack) m))))
-          (cond
-           ((< i 0) #f)
-           ((%string-match-at? haystack needle i case-fold?) i)
-           (else (loop (- i 1)))))))
-
-    (define (%string-match-at? haystack needle at case-fold?)
-      ;; Whether NEEDLE occurs in HAYSTACK at index AT.
-      ;;--------------------------------------------------------------
-      (let ((m (string-length needle)))
-        (let loop ((j 0))
-          (cond
-           ((>= j m) #t)
-           ((char=? (%fold (string-ref haystack (+ at j)) case-fold?)
-                    (%fold (string-ref needle j) case-fold?))
-            (loop (+ 1 j)))
-           (else #f)))))
-
-    (define (%fold c case-fold?)
-      (if case-fold? (char-downcase c) c))
-
-    (define (text-editor-search-forward ed string start case-fold?)
-      ;; Search forward from the position START for STRING. Returns the
-      ;; position just past the match, which is where GNU Emacs's
-      ;; `search-forward' leaves point, or #f when STRING does not
-      ;; occur there. An empty STRING finds nothing, as it does for
-      ;; mg's `is_find', rather than matching everywhere as Emacs's
-      ;; `search-forward' does - an empty search string means "no search
-      ;; yet" to the incremental search that wants this.
-      ;;--------------------------------------------------------------
-      (and (< 0 (string-length string))
-           (let ((found (string-search-forward
-                         (make-buffer-string
-                          ed start (buffer-z ed))
-                         string 0 case-fold?)))
-             (and found (+ start found (string-length string))))))
-
-    (define (text-editor-search-backward ed string start case-fold?)
-      ;; Search backward from the position START for STRING. Returns the
-      ;; position of the start of the match, which is where GNU Emacs's
-      ;; `search-backward' leaves point, or #f when STRING does not
-      ;; occur before START. An empty STRING finds nothing.
-      ;;--------------------------------------------------------------
-      (and (< 0 (string-length string))
-           (let* ((text (make-buffer-string ed (buffer-beg ed)
-                                                    start))
-                  (found (%string-search-backward
-                          text string (- (string-length text)
-                                         (string-length string))
-                          case-fold?)))
-             ;; FOUND is an offset into TEXT, whose first character is
-             ;; at `point-min'
-             (and found (+ found (buffer-beg ed))))))
 
     ;; **`*text-property-offset-function*` has moved down to
     ;; `insdel.scm`**, because that is where the interval shifting now
@@ -468,18 +385,6 @@
       ;; do that themselves.
       ;;--------------------------------------------------------------
       (with-current-buffer ed (insert-from-string (%insert-argument thing))))
-
-    (define (text-editor-to-code-points ed)
-      ;; The buffer's characters, as a list of code points - the answer
-      ;; `text-editor-to-string' gives, without the one conversion that
-      ;; can fail. A buffer holding a byte character has no string form,
-      ;; which is why writing a file cannot go through a string either.
-      ;;--------------------------------------------------------------
-      (let ((text (text-editor-text ed)))
-        (let loop ((pos (buffer-text-base text)) (acc '()))
-          (if (>= pos (buffer-text-z text))
-              (reverse acc)
-              (loop (+ pos 1) (cons (buffer-text-ref text pos) acc))))))
 
     ;; Deleting text
     ;;
@@ -554,23 +459,25 @@
     ;; only user of both, so they are its own accessors now, reading the
     ;; field through `buffer-text'.
 
-    (define (text-editor-to-string ed)
-      ;; The buffer's characters as a string - GNU Emacs's
-      ;; `buffer-string' (`editfns.c'): "Return the contents of the
-      ;; current buffer as a string."
-      ;;
-      ;; It is the *raw* text, with `\n' for every line break and no
-      ;; coding-system translation, because that is what a buffer holds
-      ;; in Emacs. The buffer's line-break convention is applied once,
-      ;; by whoever writes the buffer out - `(schemacs editor files)'s
-      ;; `encode-line-breaks', which mirrors `coding.c' - and not here:
-      ;; this used to route through `text-dump-port', which applies the
-      ;; line break, and `save-buffer' then applied it a second time, so
-      ;; a CRLF file was written as `\r\r\n'.
-      ;;--------------------------------------------------------------
-      (make-buffer-string ed
-                               (buffer-beg ed)
-                               (buffer-z ed)))
+    ;; **`text-editor-to-string` stood here and is deleted**
+    ;; (2026-10-13). It had no Emacs function to be: `buffer-string` is
+    ;; `make_buffer_string_both (BEGV, ..., ZV, ..., 1)`
+    ;; (`editfns.c:1707') and copies the interval tree, and this passed
+    ;; no PROPS - so it was `buffer-substring-no-properties` over the
+    ;; whole buffer, which is a *composition* and not a DEFUN, which is
+    ;; why there was nowhere for it to move to. Its 85 callers write that
+    ;; composition out now, as Emacs's callers do.
+    ;;
+    ;; The other half of its docstring is worth keeping, because it is
+    ;; about the text and not about the function: it was the *raw* text,
+    ;; with `\n' for every line break and no coding-system translation,
+    ;; because that is what a buffer holds in Emacs. The buffer's
+    ;; line-break convention is applied once, by whoever writes the
+    ;; buffer out - `(schemacs editor files)'s `encode-line-breaks',
+    ;; which mirrors `coding.c'. It used to route through
+    ;; `text-dump-port', which applies the line break, and `save-buffer'
+    ;; then applied it a second time, so a CRLF file was written as
+    ;; `\r\r\n'.
 
     ;;----------------------------------------------------------------
     ;; The cursor, lines and columns
@@ -618,223 +525,18 @@
            ))
 
     ;;----------------------------------------------------------------
-    ;; Newlines
+    ;; Newlines: **the scans moved to `(schemacs editor search)` on
+    ;; 2026-10-12.**
+    ;;
+    ;; `find_newline`, `scan_newline_from_point` and
+    ;; `find_before_next_newline` are `search.c`'s, and this library held
+    ;; them only because the line arithmetic above used to read them.
+    ;; That arithmetic is `editfns.scm`'s now and so are its readers, so
+    ;; nothing here or below needs a line scan any more - which is what
+    ;; finally lets them go to their own file. `editfns.scm` imports them
+    ;; from there.
+    ;;------------------------------------------------------------------
 
-    (define (find-newline ed start count end)
-      ;; GNU Emacs's `find_newline' (`search.c:675'): scan COUNT line
-      ;; boundaries from START, forward for a positive COUNT and
-      ;; backward for a negative one, and stop at END if COUNT of them
-      ;; are not there.
-      ;;
-      ;; Two values come back: where the scan stopped, and how many
-      ;; boundaries it found, counted the way COUNT is - positive going
-      ;; forward, negative going backward. Where it found them all, the
-      ;; position is just past the COUNTth one; where it ran out of
-      ;; text, it is END. Both conventions are the C's, whose caller
-      ;; reads the pair out of `*counted' and `*bytepos'.
-      ;;
-      ;; Scanning backward looks at the character *before* the position
-      ;; it is at, so a COUNT of -1 from the middle of a line lands on
-      ;; the line's first character when there is a newline just behind
-      ;; it - which is what `bol' is.
-      ;;
-      ;; END false means what the C's zero means: "the end of the buffer
-      ;; in the direction of travel" - `ZV' going forward, `BEGV' going
-      ;; backward (`search.c:681').
-      ;;
-      ;; The line-break cache (`buf->newline_cache', which is
-      ;; `(schemacs editor region-cache)') is consulted on the way, as
-      ;; the C consults it: a stretch already searched and found to hold
-      ;; no line break is skipped whole, and a stretch this scan crosses
-      ;; without finding one is recorded as known. That is what makes a
-      ;; buffer with very long lines affordable - see `region-cache.sld'
-      ;; for why the C has it at all.
-      ;;--------------------------------------------------------------
-      (let* ((end  (or end (if (< 0 count)
-                               (buffer-z ed)
-                               (buffer-beg ed))))
-             ;; The cache is made here on first use, as the C makes it
-             ;; (`if (!cache_buffer->newline_cache) cache_buffer->
-             ;; newline_cache = new_region_cache ()', `search.c:640') - a
-             ;; buffer whose lines are never searched never pays for one.
-             (cache (and (text-editor-cache-long-scans ed)
-                         (or (%text-editor-newline-cache ed)
-                             (let ((c (new-region-cache
-                                       (buffer-beg ed))))
-                               (set!%text-editor-newline-cache ed c)
-                               c)))))
-        (if (< 0 count)
-            (find-newline-forward ed start count end cache)
-            (find-newline-backward ed start count end cache))))
-
-    (define (%newline-in ed pos lim)
-      ;; The first line break in [POS, LIM), or false when there is none -
-      ;; the C's "dumb loop", the innermost scan that knows nothing about
-      ;; the cache or the buffer's ends. It carries one variable, because
-      ;; it runs once per character.
-      ;;--------------------------------------------------------------
-      (let ((text (text-editor-text ed)))
-        (let loop ((p pos))
-          (cond ((>= p lim) #f)
-                ((= (buffer-text-ref text p) #x0a) p)
-                (else (loop (+ p 1)))))))
-
-    (define (%newline-before ed pos lim)
-      ;; The first line break strictly before POS and at or after LIM,
-      ;; answering the position just *after* it, or false when there is
-      ;; none. Scanning backward looks at the character before the
-      ;; position it is at, which is why the answer is a position past the
-      ;; break rather than on it.
-      ;;--------------------------------------------------------------
-      (let ((text (text-editor-text ed)))
-        (let loop ((p pos))
-          (cond ((<= p lim) #f)
-                ((= (buffer-text-ref text (- p 1)) #x0a) p)
-                (else (loop (- p 1)))))))
-
-    (define (find-newline-forward ed start count end cache)
-      ;; The forward half of `find-newline'. Each round asks the cache
-      ;; where the knowledge runs out, scans that far for a line break,
-      ;; and records what it crossed - which is the C's structure: consult,
-      ;; dumb-loop, `know_region_cache', repeat.
-      ;;
-      ;; A stretch the cache calls known holds no line break, so it is
-      ;; stepped over rather than looked at. That is the whole saving.
-      ;;--------------------------------------------------------------
-      (let ((beg (buffer-beg ed))
-            (z (buffer-z ed)))
-        (let outer ((pos start) (left count) (found 0))
-          (if (>= pos end)
-              (values end found)
-              (call-with-values
-                  (lambda ()
-                    (if cache
-                        (region-cache-forward cache beg z pos)
-                        (values 0 pos)))
-                (lambda (known next-change)
-                  (cond
-                   ((= known 1)
-                    ;; known: no break in here at all - step over it
-                    (let ((skip (min next-change end)))
-                      (if (<= skip pos)
-                          (values end found)
-                          (outer skip left found))))
-                   (else
-                    ;; unknown as far as NEXT-CHANGE, or as far as the
-                    ;; caller asked
-                    (let ((lim (min (if (> next-change pos) next-change end)
-                                    end)))
-                      (let ((nl (%newline-in ed pos lim)))
-                        (cond
-                         ((not nl)
-                          (when (and cache (> lim pos))
-                            (know-region-cache cache beg z pos lim))
-                          (outer lim left found))
-                         (else
-                          (when (and cache (> nl pos))
-                            (know-region-cache cache beg z pos nl))
-                          (if (= left 1)
-                              (values (+ nl 1) (+ found 1))
-                              (outer (+ nl 1) (- left 1) (+ found 1)))))))))))))))
-
-    (define (find-newline-backward ed start count end cache)
-      ;; The backward half of `find-newline', the mirror of the forward
-      ;; one: consult, scan down to where the knowledge runs out, record
-      ;; what was crossed, repeat.
-      ;;--------------------------------------------------------------
-      (let ((beg (buffer-beg ed))
-            (z (buffer-z ed)))
-        (let outer ((pos start) (left count) (found 0))
-          (if (<= pos end)
-              (values end found)
-              (call-with-values
-                  (lambda ()
-                    (if cache
-                        (region-cache-backward cache beg z pos)
-                        (values 0 pos)))
-                (lambda (known next-change)
-                  (cond
-                   ((= known 1)
-                    (let ((skip (max next-change end)))
-                      (if (>= skip pos)
-                          (values end found)
-                          (outer skip left found))))
-                   (else
-                    (let ((lim (max (if (< next-change pos) next-change end)
-                                    end)))
-                      (let ((nl (%newline-before ed pos lim)))
-                        (cond
-                         ((not nl)
-                          (when (and cache (< lim pos))
-                            (know-region-cache cache beg z lim pos))
-                          (outer lim left found))
-                         (else
-                          (when (and cache (< nl pos))
-                            (know-region-cache cache beg z nl pos))
-                          ;; The count of boundaries found is
-                          ;; `found - 1' here, and it was a hardcoded
-                          ;; `-1' until 2026-10-06 - so every backward
-                          ;; scan answered "one found" however many it
-                          ;; had crossed. That is what the C's
-                          ;; `counted' is, and `find_before_next_newline'
-                          ;; reads it to decide whether to step back
-                          ;; onto the newline. A COUNT of -2 found two
-                          ;; breaks and said one, and nothing saw it
-                          ;; until `line-end-position' was given the
-                          ;; optional N that reaches a count below -1.
-                          (if (= left -1)
-                              (values nl (- found 1))
-                              (outer (- nl 1) (+ left 1) (- found 1)))))))))))))))
-
-    (define (scan-newline-from-point ed count)
-      ;; GNU Emacs's `scan_newline_from_point' (`search.c':986'): scan
-      ;; COUNT line boundaries from point. It does not move point.
-      ;;
-      ;; Two values come back - where the scan stopped, and how many
-      ;; boundaries it found - which is the C's two out-parameters
-      ;; (`*charpos' and the returned `counted'). A COUNT at or below
-      ;; zero scans backward, one boundary further back than COUNT asks
-      ;; for; that difference is what makes `bol' land on the *start* of
-      ;; a line where `forward-line' would land on the one before it.
-      ;;--------------------------------------------------------------
-      (if (<= count 0)
-          (find-newline ed (buffer-pt ed) (- count 1)
-                        (buffer-beg ed))
-          (find-newline ed (buffer-pt ed) count
-                        (buffer-z ed))))
-
-    (define (bol ed n)
-      ;; The position of the first character of the line N - 1 lines
-      ;; forward - the internal `bol' (`editfns.c:665') that
-      ;; `line-beginning-position', `beginning-of-line' and
-      ;; `forward-line' are all built on. N false means the current
-      ;; line. It does not move point.
-      ;;--------------------------------------------------------------
-      (call-with-values
-          (lambda () (scan-newline-from-point ed (if n (- n 1) 0)))
-        (lambda (pos _found) pos)))
-
-    (define (eol ed n)
-      ;; The position of the last character of the line N - 1 lines
-      ;; forward - the internal `eol' (`editfns.c:723') that
-      ;; `line-end-position', `end-of-line' and `forward-line' are built
-      ;; on. N false means the current line. It does not move point.
-      ;;--------------------------------------------------------------
-      (let ((count (if n n 1)))
-        (find-before-next-newline ed (buffer-pt ed)
-                                  (- count (if (<= count 0) 1 0)))))
-
-    (define (find-before-next-newline ed from cnt)
-      ;; GNU Emacs's `find_before_next_newline' (`search.c':997'): where
-      ;; the line boundary CNT boundaries away from FROM begins. With a
-      ;; positive CNT the scan lands just *after* the newline, so it
-      ;; steps back one, to the newline's own position - which is what
-      ;; an end-of-line wants.
-      ;;--------------------------------------------------------------
-      (call-with-values
-          (lambda () (find-newline ed from cnt #f))
-        (lambda (pos found)
-          (if (= found cnt) (- pos 1) pos))))
 
     ;; **`count-lines' has left, for `(schemacs editor fns)'.** It is
     ;; `xdisp.c:29892' and it wants to be low, because `fns.c''s
@@ -846,96 +548,29 @@
 
     ;;----------------------------------------------------------------
     ;; Lines, by scanning
+    ;;
+    ;; **`%line-start`, `%line-end` and `%text-editor-position` are
+    ;; gone**, with the two-argument `text-editor-set-cursor` below that
+    ;; was their only caller. That form - "line N, column C" - had no
+    ;; Emacs counterpart; it was an invented cursor, and the two places
+    ;; that used it (`find-file-noselect` going to `point-min`, and
+    ;; `goto-line`) are now written as what Emacs actually runs. See the
+    ;; two call sites for the reasoning at each.
+    ;;
+    ;; With them went this library's last reader of `find-newline`, which
+    ;; is what leaves the scans free to move to `(schemacs editor
+    ;; search)` - their own file.
 
-    (define (%line-start ed line)
-      ;; The position of the first character of line LINE, counting from
-      ;; 1; false when the buffer has no such line. This is the `bol'
-      ;; scan started from the buffer's beginning rather than from
-      ;; point: `find_newline' from `point-min' for LINE - 1 boundaries.
-      ;;--------------------------------------------------------------
-      (and (integer? line)
-           (<= (buffer-beg ed) line)
-           (call-with-values
-               (lambda ()
-                 (find-newline ed (buffer-beg ed) (- line 1) #f))
-             (lambda (pos found) (and (= found (- line 1)) pos)))))
-
-    (define (%bol-at ed pos)
-      ;; The position of the first character of the line POSITION is on.
-      ;; Emacs reaches this with `save-excursion' around
-      ;; `line-beginning-position'; here the scan simply starts where it
-      ;; is told to.
-      ;;--------------------------------------------------------------
-      (call-with-values
-          (lambda ()
-            (find-newline ed pos -1 (buffer-beg ed)))
-        (lambda (found-pos _found) found-pos)))
-
-    (define (%line-end ed from)
-      ;; The position of the newline that ends the line containing FROM, or
-      ;; `point-max' when there is none. It is the forward half of `eol'
-      ;; with the scan started where it is told to rather than at point.
-      ;;
-      ;; It goes through `find-before-next-newline', and so through
-      ;; `find-newline' and the line-break cache, as the C's does. It used
-      ;; to be a private character-at-a-time loop, which not only
-      ;; duplicated a scan Emacs already has but missed the cache
-      ;; entirely - a long line was re-walked by every caller, which is
-      ;; what `region-cache.c' exists to prevent.
-      ;;--------------------------------------------------------------
-      (find-before-next-newline ed from 1))
-
-    (define (%text-editor-position ed line col)
-      ;; The position of column COL - counting from 0 - on line LINE -
-      ;; counting from 1 - clamped to the line. False when the buffer
-      ;; has no such line. This is what `goto-line' and `move-to-column'
-      ;; between them do, `line-beginning-position' then an offset.
-      ;;--------------------------------------------------------------
-      (let ((start (%line-start ed line)))
-        (and start
-             (min (%line-end ed start) (+ start (max 0 col))))))
-
-    (define text-editor-get-start-of-line
-      ;; The position of the first character of the line point is on - or,
-      ;; with POS, of the line POS is on. GNU Emacs's
-      ;; `line-beginning-position' (`editfns.c:700'), which is
-      ;; `(bol nil)'; with a POSITION the C reaches the same place with
-      ;; `save-excursion' around `goto-char', the scan here simply starts
-      ;; where it is told to. It does not move point.
-      ;;--------------------------------------------------------------
-      (case-lambda
-       ((ed) (bol ed #f))
-       ((ed pos) (%bol-at ed pos))))
-
-    (define text-editor-get-end-of-line
-      ;; The position of the last character of the line point is on - or,
-      ;; with POS, of the line POS is on. GNU Emacs's
-      ;; `line-end-position' (`editfns.c:736'), which is `(eol nil)'; the
-      ;; POSITION form is the same scan started where it is told to
-      ;; rather than at point. At the end of the buffer it is `point-max',
-      ;; as the C's is. It does not move point.
-      ;;--------------------------------------------------------------
-      (case-lambda
-       ((ed) (eol ed #f))
-       ((ed pos) (%line-end ed pos))))
-
-    (define (text-editor-cursor-line ed)
-      ;; The line number point is on, counting from 1 - GNU Emacs's
-      ;; `line-number-at-pos' (`fns.c:6688'), which is
-      ;; `(count_lines BEGV PT) + 1'.
-      ;;--------------------------------------------------------------
-      (+ 1 (count-lines ed (buffer-beg ed) (buffer-pt ed))))
-
-    (define (text-editor-cursor-column ed)
-      ;; How many characters point is from the start of its line,
-      ;; counting from 0 - what the C's `current-column' (`indent.c:298')
-      ;; answers for a line with no tab and no multi-column character in
-      ;; it. The *display* column, which is what `current-column' really
-      ;; answers, is `(schemacs editor indentc)''s
-      ;; `current-line-display-column', and every caller that wants one
-      ;; goes through it.
-      ;;--------------------------------------------------------------
-      (- (buffer-pt ed) (text-editor-get-start-of-line ed)))
+    ;; **`text-editor-get-start-of-line', `text-editor-get-end-of-line',
+    ;; `text-editor-cursor-line' and `text-editor-cursor-column' have all
+    ;; left, for `(schemacs editor editfns)'.**
+    ;;
+    ;; They are the facade spellings of `editfns.c`'s
+    ;; `line-beginning-position' (`:700'), `line-end-position' (`:736'),
+    ;; `fns.c`'s `line-number-at-pos' (`:6688') and `indent.c`'s
+    ;; `current-column' (`:298') - all arithmetic, all above the scans -
+    ;; and they moved with `bol' and `eol' for the reason given there.
+    ;; What is left here is the scan side they were built on.
 
     ;;----------------------------------------------------------------
     ;; Moving the cursor
@@ -950,36 +585,26 @@
                (min (buffer-z ed)
                     (+ (buffer-pt ed) move-by)))))
 
-    (define text-editor-set-cursor
-      (case-lambda
-       ((ed index)
-        (if (integer? index)
-            ;; A position, one-based as every position here is.
-            (set!buffer-pt ed
-               (max (buffer-beg ed)
-                    (min (buffer-z ed) index)))
-            (error "text editor index must be set with an integer" index)))
-       ((ed line-num column-num)
-        ;; Move the cursor to the given line - counting from 1, as
-        ;; `line-number-at-pos' does - and column, counting from 0 as
-        ;; `current-column' does, clamped to the line. This is
-        ;; `goto-line' followed by `move-to-column', both built on the
-        ;; scans.
-        ;;
-        ;; The new empty line past the end of the buffer is only
-        ;; addressable when the buffer's last line ends in a line break
-        ;; - that break is what starts it. Without one, the last line
-        ;; the buffer holds is the last line there is, and the end of
-        ;; the buffer is the end of that line, which is where GNU Emacs
-        ;; puts `point-max'.
-        (set!buffer-pt
-         ed (max (buffer-beg ed)
-                 (min (buffer-z ed)
-                      (or (%text-editor-position
-                           ed (max 1 line-num) (max 0 column-num))
-                          (buffer-z ed)))))))
-
-      )
+    (define (text-editor-set-cursor ed index)
+      ;; Put the cursor at INDEX, a position - one-based as every position
+      ;; here is - clamped to the buffer. Answers nothing.
+      ;;
+      ;; **This was a `case-lambda` with a second form - `(ed line col)` -
+      ;; and that form is gone.** It had no Emacs counterpart: Emacs
+      ;; addresses text by *character position*, and a line-and-column
+      ;; cursor is `goto-line` followed by `move-to-column`, two
+      ;; functions each with its own definition. The two places that used
+      ;; it are now written as what Emacs runs - `find-file-noselect`
+      ;; going to `point-min` (`files.scm`) and `goto-line`'s
+      ;; `(goto-char (point-min)) (forward-line (1- n))`
+      ;; (`minibuffer.scm`) - which is what removed this library's last
+      ;; dependency on the line scans.
+      ;;--------------------------------------------------------------
+      (if (integer? index)
+          (set!buffer-pt ed
+             (max (buffer-beg ed)
+                  (min (buffer-z ed) index)))
+          (error "text editor index must be set with an integer" index)))
 
     ;;----------------------------------------------------------------
     ;; The seams into this library, installed as it loads

@@ -29,11 +29,10 @@
     ;; `erase-buffer` is `buffer.c`'s and `with-current-buffer` is its
     ;; neighbour; the insertion is `editfns.c`'s `insert`.
     (only (schemacs editor buffer) erase-buffer with-current-buffer)
-    (only (schemacs editor editfns) insert)
+    (only (schemacs editor editfns) insert text-editor-cursor-line)
     (only (schemacs editor engine)
           buffer-beg buffer-z
           text-editor-set-cursor
-          text-editor-cursor-line
           text-editor-undo-disable! text-editor-undo-enable!))
 
   (export

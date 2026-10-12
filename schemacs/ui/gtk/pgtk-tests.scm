@@ -37,9 +37,12 @@
  (prefix (schemacs editor dispnew) dn:)
  (prefix (schemacs editor frame) fr:)
  (only (schemacs editor engine)
-        allocate-buffer text-editor-insert text-editor-set-cursor
-        set!text-editor-mark)
- (only (schemacs editor buffer) buffer-local-value set-buffer-local-value!)
+        allocate-buffer text-editor-insert text-editor-set-cursor)
+ (only (schemacs editor buffer) buffer-local-value set-buffer-local-value!
+       %mark-marker)
+ ;; the mark's read and write are marker.c's now, on the buffer's own
+ ;; slot; `text-editor-mark`/`set!text-editor-mark` are gone.
+ (only (schemacs editor marker) marker-position set-marker)
  (only (schemacs editor textprop) put-text-property)
  (prefix (schemacs editor isearch) is:)
  (only (schemacs editor buffer) overlays-at overlay-get overlay-start)
@@ -49,7 +52,7 @@
  ;; not a test-only dependency.
  (only (schemacs editor dired))
  (only (schemacs editor keyboard) dispatch-input-event)
- (only (schemacs editor engine) text-editor-mark buffer-pt)
+ (only (schemacs editor engine) buffer-pt)
  (only (cairo) cairo-image-surface-create-from-png cairo-image-surface-get-data
        cairo-image-surface-get-stride))
 
@@ -162,7 +165,7 @@
       (dispatch-input-event frame (with-control (char->integer #\f)))
       (dispatch-input-event frame (with-control (char->integer #\f)))
       (list (buffer-local-value ed 'mark-active #f)
-            (text-editor-mark ed)
+            (marker-position (%mark-marker ed))
             (buffer-pt ed)))))
 
 (define c-spc-mark (mark-after key-c-spc))
@@ -221,7 +224,7 @@
          (ed (allocate-buffer)))
     (text-editor-insert ed text)
     (text-editor-set-cursor ed point)
-    (set!text-editor-mark ed mark)
+    (set-marker (%mark-marker ed) mark ed)
     (set-buffer-local-value! ed 'mark-active #t)
     (let ((frame (fr:new-frame ed 24 80)))
       (parameterize ((fr:*current-frame* frame))

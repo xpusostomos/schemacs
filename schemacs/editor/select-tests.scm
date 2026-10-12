@@ -38,7 +38,10 @@
  ;; `xterm-tests.scm' beside `xterm.sld'.)
  (only (schemacs editor engine)
        allocate-buffer text-editor-insert text-editor-set-cursor
-       buffer-pt text-editor-to-string)
+       buffer-pt)
+ (only (schemacs editor buffer) with-current-buffer)
+ (only (schemacs editor editfns)
+       buffer-substring-no-properties point-max point-min)
  (only (schemacs editor frame) *current-frame* new-frame)
  (only (schemacs editor keyboard) dispatch-input-event)
  (only (schemacs editor select)
@@ -202,7 +205,7 @@
   (with-editor "hello world"
     (lambda (frame ed d)
       (keys! frame C-SPC C-e C-w)
-      (list (text-editor-to-string ed) (stub-clipboard d)))))
+      (list (with-current-buffer ed (buffer-substring-no-properties (point-min) (point-max))) (stub-clipboard d)))))
 
 ;; `select-enable-primary' is off, so M-w does not touch PRIMARY -
 ;; which is Emacs's default, not a bug.
@@ -220,7 +223,7 @@
   (with-tty "hello world"
     (lambda (frame ed)
       (keys! frame C-SPC C-e C-w)
-      (list (text-editor-to-string ed) (latest-kill)))))
+      (list (with-current-buffer ed (buffer-substring-no-properties (point-min) (point-max))) (latest-kill)))))
 
 ;;--------------------------------------------------------------------
 ;; Yanking
@@ -234,7 +237,7 @@
     (lambda (frame ed d)
       (keys! frame C-SPC C-e C-w)
       (keys! frame C-y)
-      (list (text-editor-to-string ed) (latest-kill)))))
+      (list (with-current-buffer ed (buffer-substring-no-properties (point-min) (point-max))) (latest-kill)))))
 
 ;; Text another program cut is new, and C-y takes it - and it becomes
 ;; the latest kill, as `current-kill' adds it to the ring.
@@ -244,7 +247,7 @@
       (keys! frame C-SPC C-e C-w)
       (stub-cut! d "from elsewhere")
       (keys! frame C-y)
-      (list (text-editor-to-string ed) (latest-kill)))))
+      (list (with-current-buffer ed (buffer-substring-no-properties (point-min) (point-max))) (latest-kill)))))
 
 ;; and the pulled text is in the ring *proper*, so `M-y' can walk to the
 ;; older kill behind it.
@@ -267,7 +270,7 @@
       (stub-cut! d "from elsewhere")
       (keys! frame C-y)
       (keys! frame C-y)
-      (list (text-editor-to-string ed) (length (*kill-ring*))))))
+      (list (with-current-buffer ed (buffer-substring-no-properties (point-min) (point-max))) (length (*kill-ring*))))))
 
 ;; A *changed* clipboard is taken again: cutting in the other program
 ;; between two C-y's means the second C-y takes the new text - and C-y
@@ -281,7 +284,7 @@
       (keys! frame C-y)
       (stub-cut! d "second")
       (keys! frame C-y)
-      (list (text-editor-to-string ed) (latest-kill)))))
+      (list (with-current-buffer ed (buffer-substring-no-properties (point-min) (point-max))) (latest-kill)))))
 
 ;;--------------------------------------------------------------------
 ;; The primary selection

@@ -17,8 +17,10 @@
  (scheme base)
  (schemacs editor marker)
  (only (schemacs editor buffer) allocate-buffer with-current-buffer current-buffer)
+ (only (schemacs editor editfns)
+       buffer-substring-no-properties point-max point-min)
  (only (schemacs editor engine)
-       text-editor-insert text-editor-to-string text-editor-set-cursor
+       text-editor-insert text-editor-set-cursor
        text-editor-move-cursor text-editor-delete-from-cursor
        text-editor-undo-boundary! text-editor-undo-list)
  (only (schemacs editor simple) primitive-undo)
@@ -66,7 +68,7 @@
     (let ((m (build-marker ed 3)))
       (text-editor-set-cursor ed 3)
       (text-editor-insert ed "XY")
-      (list (marker-position m) (text-editor-to-string ed)))))
+      (list (marker-position m) (with-current-buffer ed (buffer-substring-no-properties (point-min) (point-max)))))))
 
 ;; ... and one whose insertion type is true advances past it: Emacs: the
 ;; same case gives 5.
@@ -90,7 +92,7 @@
     (let ((m (build-marker ed 4)))
       (text-editor-set-cursor ed 2)
       (text-editor-delete-from-cursor ed 3)
-      (list (marker-position m) (text-editor-to-string ed)))))
+      (list (marker-position m) (with-current-buffer ed (buffer-substring-no-properties (point-min) (point-max)))))))
 
 ;; A marker after the deleted text moves back by its length; one at the
 ;; far end of it does too.
@@ -111,7 +113,7 @@
     (let ((m (build-marker ed 4)))
       (text-editor-set-cursor ed 5)
       (text-editor-delete-from-cursor ed -2)
-      (list (marker-position m) (text-editor-to-string ed)))))
+      (list (marker-position m) (with-current-buffer ed (buffer-substring-no-properties (point-min) (point-max)))))))
 
 ;; A backwards deletion at the very end of a buffer, which is a position
 ;; the engine used to get wrong (see the note in
@@ -124,7 +126,7 @@
     (let ((m (build-marker ed 5)))
       (text-editor-set-cursor ed 7)
       (text-editor-delete-from-cursor ed -2)
-      (list (marker-position m) (text-editor-to-string ed)))))
+      (list (marker-position m) (with-current-buffer ed (buffer-substring-no-properties (point-min) (point-max)))))))
 
 ;; A marker that points nowhere is in no chain and follows nothing.
 (test-equal #f
@@ -154,7 +156,7 @@
     (let ((m (build-marker ed 5)))
       (text-editor-set-cursor ed 3)
       (text-editor-insert ed #\newline)
-      (list (marker-position m) (text-editor-to-string ed)))))
+      (list (marker-position m) (with-current-buffer ed (buffer-substring-no-properties (point-min) (point-max)))))))
 
 ;; Undo replays through the same insert and delete procedures, so it
 ;; adjusts markers too: an insertion undone puts the marker back where

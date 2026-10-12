@@ -67,6 +67,7 @@
    code-point->char
    buffer-text-delete!  buffer-text-substring
    buffer-text-for-each
+   buffer-text-to-code-points
    buffer-text-clear!
    buffer-text-beg-unchanged  set!buffer-text-beg-unchanged
    buffer-text-modiff  buffer-text-chars-modiff
@@ -363,6 +364,27 @@
             ))
           )
         ))
+
+    (define (buffer-text-to-code-points bt)
+      ;; Every code point in BT, in order, as a list.
+      ;;
+      ;; **This one is this tree's and has no Emacs counterpart.** Emacs
+      ;; needs none: its strings hold its characters, byte characters and
+      ;; all, so a buffer comes out through `buffer-string'. A Scheme
+      ;; string stops at `#x10FFFF' and a byte character is above it on
+      ;; purpose (`character.sld''s `byte8-to-char'), so a file whose
+      ;; bytes did *not* decode can only come back out as code points.
+      ;; That is the save path's door, and it is why a file of undecodable
+      ;; bytes survives a round trip.
+      ;;
+      ;; It was `text-editor-to-code-points' in `engine.scm' until
+      ;; 2026-10-13, taking a buffer; it is the class's now, because the
+      ;; walk is over the class's own store and there was nothing else in
+      ;; it. The caller above names the buffer-text it means.
+      ;;--------------------------------------------------------------
+      (let ((acc '()))
+        (buffer-text-for-each bt (lambda (pos cp) (set! acc (cons cp acc))))
+        (reverse acc)))
 
     ;;----------------------------------------------------------------
     ;; Inserting and deleting

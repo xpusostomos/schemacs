@@ -46,7 +46,6 @@
     (only (schemacs editor marker) build-marker marker-position set-marker make-marker)
     (only (schemacs editor engine)
            fetch-char buffer-beg
-          text-editor-get-start-of-line
           buffer-pt text-editor-set-cursor)
     ;; `*current-buffer*' is the C global `current_buffer', which this
     ;; library writes (`select-window') and re-exports; its definition is
@@ -60,6 +59,19 @@
     ;; it reads the selected window, which is this library's, so it is
     ;; installed here.
     (only (schemacs editor insdel) *adjust-suspend-auto-hscroll-function*)
+    ;; The echo area is this library's - the message, the expiry timer and
+    ;; the row it is drawn on are all fields of the frame - and
+    ;; `editfns.c`'s `message' is not. So `editfns.scm' declares the two
+    ;; seam procedures and this installs them, which is also what lets
+    ;; this library sit *above* it: the line arithmetic this file's
+    ;; `window.c' code needs is `editfns.c`'s, and it could not reach one
+    ;; while `editfns.scm' imported back into here.
+    (only (schemacs editor editfns)
+          *message-function* *current-message-function*
+          ;; `window.c`'s line walks want a line start, and that is
+          ;; `editfns.c`'s arithmetic - which is why this library sits
+          ;; above `editfns.scm` and not below it.
+          text-editor-get-start-of-line)
     ;; `suspend-frame' is a command and states its own key as the other
     ;; command libraries do.
     (only (schemacs editor command)
@@ -1875,6 +1887,18 @@
     (*current-editor-function*
      (lambda () (and (*current-frame*) (current-editor))))
     (*replace-buffer-in-windows-function* replace-buffer-in-windows)
+
+    ;; `editfns.c`'s `message' and `current-message' reach the echo area
+    ;; through these two, declared in `editfns.scm' and installed here
+    ;; because the message buffer and the frame that owns it are this
+    ;; library's. They are the C's own two ends: `message3' writes
+    ;; `FRAME_MESSAGE_BUF (f)' and `current-message' reads it back.
+    (*message-function*
+     (lambda (text) (set-message! (*current-frame*) text)))
+    (*current-message-function*
+     (lambda ()
+       (let ((frame (*current-frame*)))
+         (and frame (frame-message frame)))))
 
     ;; `insdel.c`'s `adjust_suspend_auto_hscroll` (`insdel.c:226`): "If
     ;; the selected window's old pointm is adjacent or covered by the

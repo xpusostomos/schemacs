@@ -22,9 +22,11 @@
     (only (schemacs editor engine)
     fetch-char
           buffer-beg buffer-z
-          buffer-pt text-editor-get-start-of-line
+          buffer-pt
           text-editor-set-cursor)
-    (only (schemacs editor editfns) goto-char save-excursion forward-line)
+    (only (schemacs editor editfns)
+          goto-char save-excursion forward-line
+          text-editor-get-start-of-line)
     ;; the line ends and the blank-line question are simple.sld's -
     ;; `paragraph-separate''s default is a blank line.
     (only (schemacs editor simple)

@@ -10,14 +10,15 @@
  (prefix (schemacs editor keymap) km:)
  (only (srfi 64) test-assert test-equal test-begin test-end)
  (only (schemacs editor engine)
-       allocate-buffer set!text-editor-buffer-name set!text-editor-mark
-       text-editor-cursor-column buffer-pt text-editor-insert
+       allocate-buffer set!text-editor-buffer-name
+       buffer-pt text-editor-insert
        text-editor-text-props
-       text-editor-mark text-editor-move-cursor text-editor-set-cursor
+       text-editor-move-cursor text-editor-set-cursor
        set-buffer-modified-p set!buffer-read-only
-       text-editor-to-string text-editor-undo-list
-       buffer-beg buffer-z count-lines
-       string-search-forward)
+       text-editor-undo-list
+       buffer-beg buffer-z count-lines)
+ ;; The literal search is `search.c`'s and lives in `search.scm`.
+ (only (schemacs editor search) string-search-forward)
  (only (schemacs editor frame)
        *current-frame* *echo-area-buffer* *echo-area-prompt* *minibuffer*
        frame-height frame-editor frame-message
@@ -56,8 +57,12 @@
  (only (schemacs editor character) kbd)
  (only (schemacs editor dired)
        dired dired-directory dired-noselect dired-revert)
+ (only (schemacs editor marker) marker-position set-marker)
  (only (schemacs editor buffer) buffer-name major-mode
-       with-current-buffer)
+       with-current-buffer
+       ;; `BVAR (b, mark)` - the slot itself, which is what the mark is
+       ;; now that `text-editor-mark`/`set!text-editor-mark` are gone.
+       %mark-marker)
  (only (schemacs editor buff-menu)
        *Buffer-menu-del-char* *Buffer-menu-marks* Buffer-menu-buffer
        Buffer-menu-execute Buffer-menu--set-mark! Buffer-menu-redraw!
@@ -122,7 +127,10 @@
        minibuffer-set-contents! minibufferp)
  (only (schemacs editor buffer) mark-active)
  (only (schemacs editor command) *mark-even-if-inactive*)
- (only (schemacs editor editfns) goto-char point region-beginning region-end)
+ (only (schemacs editor editfns)
+       buffer-substring-no-properties goto-char point point-max point-min
+       region-beginning region-end
+       text-editor-cursor-column)
  ;; `paragraphs.el': imported for the *bindings* its load installs (M-h,
  ;; M-k, M-C-k), which is why the M-h test below presses a key at all.
  (only (schemacs editor paragraphs) mark-paragraph)
@@ -204,7 +212,7 @@
         (*current-buffer* ed)
         (text-editor-insert ed "abc")
         (dispatch-key-event frame name)
-        (text-editor-to-string ed)))))
+        (with-current-buffer ed (buffer-substring-no-properties (point-min) (point-max)))))))
 
 (define (run-keys* text evs)
   ;; Load TEXT into a fresh buffer, run EVS over it, and return
@@ -229,9 +237,9 @@
                    (*current-buffer* #f)
                    (*kill-buffer-query-functions* '()))
       (text-editor-insert ed text)
-      (text-editor-set-cursor ed 1 0)
+      (text-editor-set-cursor ed (buffer-beg ed))
       (for-each (lambda (ev) (dispatch-input-event frame ev)) evs)
-      (list (text-editor-to-string ed)
+      (list (with-current-buffer ed (buffer-substring-no-properties (point-min) (point-max)))
             (buffer-pt ed)
             ;; the latest kill, which is the front of the ring - and
             ;; #f when nothing has been killed yet, Elisp's `(car nil)'
@@ -508,7 +516,7 @@
     (call-with-output-file "/tmp/schemacs-fe-undo.txt"
       (lambda (port) (display "loaded\ntext\n" port)))
     (let ((ed (find-file-noselect "/tmp/schemacs-fe-undo.txt")))
-      (list (text-editor-undo-list ed) (text-editor-to-string ed)))))
+      (list (text-editor-undo-list ed) (with-current-buffer ed (buffer-substring-no-properties (point-min) (point-max)))))))
 
 ;; Amalgamation is bounded: a boundary goes in every
 ;; `amalgamating-undo-limit' (20) commands, so a run of 21 self-inserts
@@ -818,8 +826,9 @@
                            (for-each (lambda (ev) (dispatch-input-event frame ev))
                                      keys)
                            (set! message (frame-message frame))
-                           (set! buffer (text-editor-to-string
-                                         (frame-editor frame))))
+                           (set! buffer (with-current-buffer (frame-editor frame)
+                                          (buffer-substring-no-properties
+                                           (point-min) (point-max)))))
                          opts)))
       (list (mode-line-modification-indicator (car result))
             message (cdr result) buffer))))
@@ -1110,7 +1119,7 @@
          (mb (make<minibuffer> mb-ed "" minibuffer-local-map
                               #f minibuffer-history 0 #f)))
     (text-editor-insert mb-ed "abc")
-    (text-editor-set-cursor mb-ed 0 0)
+    (text-editor-set-cursor mb-ed (buffer-beg mb-ed))
     (parameterize ((*current-frame* frame)
                    (*minibuffer* mb)
                    ;; what `read_minibuf' does with the current buffer:
@@ -1360,7 +1369,7 @@
   (let* ((frame (test-frame (allocate-buffer)))
          (ed (frame-editor frame)))
     (text-editor-insert ed "abc")
-    (text-editor-set-cursor ed 1 0)
+    (text-editor-set-cursor ed (buffer-beg ed))
     (text-editor-move-cursor ed 100)
     (parameterize ((*current-frame* frame))
       (cursor-screen-position (window-of frame)))))
@@ -1372,7 +1381,7 @@
          (ed (frame-editor frame))
          (window (window-of frame)))
     (text-editor-insert ed "abc")
-    (text-editor-set-cursor ed 1 0)
+    (text-editor-set-cursor ed (buffer-beg ed))
     (text-editor-move-cursor ed 100)
     (parameterize ((*current-frame* frame))
       (let ((at-end (cursor-screen-position window)))
@@ -1387,7 +1396,7 @@
   (let* ((frame (test-frame (allocate-buffer)))
          (ed (frame-editor frame)))
     (text-editor-insert ed "abc\n")
-    (text-editor-set-cursor ed 1 0)
+    (text-editor-set-cursor ed (buffer-beg ed))
     (text-editor-move-cursor ed 100)
     (parameterize ((*current-frame* frame))
       (cursor-screen-position (window-of frame)))))
@@ -1404,10 +1413,10 @@
                   (for-each (lambda (key) (dispatch-input-event frame key))
                             keys)))))
     (text-editor-insert ed "abcdef\nxy\nabcdef")
-    (text-editor-set-cursor ed 0 4)
+    (text-editor-set-cursor ed (+ (buffer-beg ed) 4))
     (run (list C-n C-n))
     (let ((returned (text-editor-cursor-column ed)))
-      (text-editor-set-cursor ed 0 4)
+      (text-editor-set-cursor ed (+ (buffer-beg ed) 4))
       (run (list C-n C-a C-n))
       (list returned (text-editor-cursor-column ed)))))
 
@@ -1418,7 +1427,7 @@
          (mb (make<minibuffer> ed "Find file: " minibuffer-local-map
                               #f minibuffer-history 0 #f)))
     (text-editor-insert ed "abc")
-    (text-editor-set-cursor ed 1 0)
+    (text-editor-set-cursor ed (buffer-beg ed))
     (parameterize ((*minibuffer* mb))
       (let ((at-start (minibuffer-cursor-column)))
         (text-editor-move-cursor ed 100)
@@ -1468,7 +1477,7 @@
   (let* ((ed (allocate-buffer))
          (frame (test-frame ed)))
     (text-editor-insert ed text)
-    (text-editor-set-cursor ed 1 0)
+    (text-editor-set-cursor ed (buffer-beg ed))
     frame))
 
 (define (run-window-keys frame . evs)
@@ -1836,10 +1845,10 @@
 (test-equal '(5 7)
   (let* ((frame (frame-with "one two three"))
          (ed (frame-editor frame)))
-    (set!text-editor-mark ed 5)
-    (let ((mark-before (text-editor-mark ed)))
+    (set-marker (%mark-marker ed) 5 ed)
+    (let ((mark-before (marker-position (%mark-marker ed))))
       (run-window-keys frame C-a #\X #\Y)     ; edit in front of the mark
-      (list mark-before (text-editor-mark ed)))))
+      (list mark-before (marker-position (%mark-marker ed))))))
 
 ;; Deleting the *middle* of three windows gives its rows to the one it
 ;; was split from - its sibling in the tree - and nothing else moves.
@@ -2054,8 +2063,8 @@
       (text-editor-insert other "beta")
       (pop-to-buffer-same-window other)
       (list (length (window-list frame))
-            (text-editor-to-string
-             (window-buffer (frame-selected-window frame)))))))
+            (with-current-buffer (window-buffer (frame-selected-window frame))
+              (buffer-substring-no-properties (point-min) (point-max)))))))
 
 ;; ...and `inhibit-same-window' still refuses it, which is the action's
 ;; own test
@@ -2380,7 +2389,7 @@
                       (when (cadr spec) (set!buffer-read-only buffer #t))
                       (when (caddr spec) (text-editor-insert buffer "x"))))
                   extra)
-        (thunk (text-editor-to-string (list-buffers-noselect)))))))
+        (thunk (with-current-buffer (list-buffers-noselect) (buffer-substring-no-properties (point-min) (point-max))))))))
 
 (define (mentions? text what)
   (and (string-contains text what) #t))
@@ -2424,7 +2433,7 @@
       (*current-buffer* (get-buffer "*Buffer List*"))
       (Buffer-menu--set-mark! (get-buffer "doomed.txt") *Buffer-menu-del-char*)
       (Buffer-menu-redraw! (get-buffer "*Buffer List*"))
-      (let ((marked (text-editor-to-string (get-buffer "*Buffer List*"))))
+      (let ((marked (with-current-buffer (get-buffer "*Buffer List*") (buffer-substring-no-properties (point-min) (point-max)))))
         (Buffer-menu-execute)
         (list (mentions? marked "D  doomed.txt")
               (get-buffer "doomed.txt"))))))
@@ -2494,7 +2503,7 @@
     (lambda (menu-buffer press!)
       (press! #\m)
       (press! #\m)
-      (text-editor-to-string menu-buffer))))
+      (with-current-buffer menu-buffer (buffer-substring-no-properties (point-min) (point-max))))))
 
 ;; `%' toggles the read-only flag of the buffer on the line, and the R
 ;; column says which way it went.
@@ -2503,7 +2512,7 @@
     (lambda (menu-buffer press!)
       (press! #\%)
       (list (buffer-read-only? (get-buffer "b.txt"))
-            (mentions? (text-editor-to-string menu-buffer) "% b.txt")))))
+            (mentions? (with-current-buffer menu-buffer (buffer-substring-no-properties (point-min) (point-max))) "% b.txt")))))
 
 ;; `s' marks a buffer for saving and `x' saves it, which is what GNU
 ;; Emacs's `Buffer-menu-execute' does with `(with-current-buffer buffer
@@ -2544,7 +2553,7 @@
                       (if (eof-object? c)
                           (list->string (reverse acc))
                           (loop (cons c acc)))))))
-              (text-editor-to-string (get-buffer "*Buffer List*")))))))
+              (with-current-buffer (get-buffer "*Buffer List*") (buffer-substring-no-properties (point-min) (point-max))))))))
 
 ;; RET shows the buffer on the line in the selected window, replacing the
 ;; list. The key arrives as the byte 13 a terminal sends, which is why it
@@ -2587,7 +2596,7 @@
         (set-buffer-local-value! (get-buffer-create "dir")
                                  'list-buffers-directory
                                  (expand-file-name "~/GITE/schemacs"))
-        (let ((text (text-editor-to-string (list-buffers-noselect))))
+        (let ((text (with-current-buffer (list-buffers-noselect) (buffer-substring-no-properties (point-min) (point-max)))))
           (list (mentions? text "~/x.txt")
                 (mentions? text "/tmp/y.txt")
                 (mentions? text "~/GITE/schemacs")
@@ -2628,7 +2637,7 @@
          (mb (make<minibuffer> mb-ed prompt minibuffer-local-map
                               #f minibuffer-history 0 #f)))
     (text-editor-insert ed "abc")
-    (text-editor-set-cursor ed 1 0)
+    (text-editor-set-cursor ed (buffer-beg ed))
     (when initial (text-editor-insert mb-ed initial))
     (text-editor-set-cursor mb-ed (- (buffer-z mb-ed) (buffer-beg mb-ed)))
     (parameterize ((*current-frame* frame)
@@ -2655,8 +2664,8 @@
                    (*pending-undo-list* #f)
                    (*last-change-was-undo* #f))
       (for-each (lambda (ev) (dispatch-input-event frame ev)) evs)
-      (list (text-editor-to-string mb-ed)
-            (text-editor-to-string ed)
+      (list (with-current-buffer mb-ed (buffer-substring-no-properties (point-min) (point-max)))
+            (with-current-buffer ed (buffer-substring-no-properties (point-min) (point-max)))
             (frame-message frame)))))
 
 ;; Typing goes into the prompt, the buffer behind it is untouched, and
@@ -2886,7 +2895,7 @@
   (let ((frame (message-frame)))
     (parameterize ((*current-frame* frame))
       (fill-completions! '("apricot.txt" "apple.txt") "ap")
-      (text-editor-to-string (get-buffer "*Completions*")))))
+      (with-current-buffer (get-buffer "*Completions*") (buffer-substring-no-properties (point-min) (point-max))))))
 
 ;; With more candidates than a single column of them, the layout Emacs's
 ;; `completion--insert-strings' works out puts them on shared rows: as
@@ -2902,7 +2911,7 @@
   (let ((frame (message-frame)))
     (parameterize ((*current-frame* frame))
       (fill-completions! '("aa" "ab" "ac" "ad" "ae" "af") "")
-      (let* ((text (text-editor-to-string (get-buffer "*Completions*")))
+      (let* ((text (with-current-buffer (get-buffer "*Completions*") (buffer-substring-no-properties (point-min) (point-max))))
              (after (string-append "possible completions:\n"))
              (at (string-contains text after)))
         (substring text (+ at (string-length after))
@@ -2916,7 +2925,7 @@
     (parameterize ((*current-frame* frame)
                    (*completions-format* 'one-column))
       (fill-completions! '("aa" "ab" "ac") "")
-      (let* ((text (text-editor-to-string (get-buffer "*Completions*")))
+      (let* ((text (with-current-buffer (get-buffer "*Completions*") (buffer-substring-no-properties (point-min) (point-max))))
              (after (string-append "possible completions:\n"))
              (at (string-contains text after)))
         (substring text (+ at (string-length after))
@@ -2942,7 +2951,7 @@
               (parameterize ((*current-frame* frame))
                 (display-buffer buffer)
                 (fill-completions! names "")
-                (let* ((text (text-editor-to-string buffer))
+                (let* ((text (with-current-buffer buffer (buffer-substring-no-properties (point-min) (point-max))))
                        (at (string-contains text "possible completions:\n"))
                        (tail (substring text (+ at (string-length
                                                    "possible completions:\n"))
@@ -3285,7 +3294,7 @@
               ;; sequence is applied in
               (apply keys! frame (if (= n 0) (list C-y) M-y))
               (loop (+ n 1)
-                    (cons (text-editor-to-string ed) states)))))))))
+                    (cons (with-current-buffer ed (buffer-substring-no-properties (point-min) (point-max))) states)))))))))
 (test-end "schemacs_ncurses_editor_kill_ring")
 
 
@@ -4036,9 +4045,9 @@
         ;; what that branch tests, and the command loop sets it - a
         ;; direct call has to say so itself.
         (mark-paragraph 1 #t)
-        (let ((p1 (point)) (m1 (text-editor-mark ed)))
+        (let ((p1 (point)) (m1 (marker-position (%mark-marker ed))))
           (*last-command* mark-paragraph)
           (mark-paragraph 1 #t)
-          (list p1 m1 (point) (text-editor-mark ed)))))))
+          (list p1 m1 (point) (marker-position (%mark-marker ed))))))))
 
 (test-end "schemacs_ncurses_editor_frame_points")

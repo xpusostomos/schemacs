@@ -60,8 +60,14 @@
     ;; call in `mouse-drag-track': the mark that was there goes on the
     ;; ring rather than being lost.
     (only (schemacs editor simple)
-          push-mark pop-mark set-mark deactivate-mark)
-    (only (schemacs editor engine) text-editor-mark)
+          push-mark pop-mark set-mark deactivate-mark
+          ;; `mark` is `simple.el:7062`'s, where Emacs has it, and
+          ;; `mouse--drag-set-mark-and-point` calls it three times over.
+          ;; **This file used to keep a second, private `(mark)`** that
+          ;; answered `(text-editor-mark (current-buffer))` and never
+          ;; signalled - a duplicate that could not show you it
+          ;; disagreed. It is gone; the transient-mark test is Emacs's.
+          mark)
     (only (schemacs editor buffer)
           buffer-auto-hscroll-mode current-buffer set!buffer-auto-hscroll-mode
           set-buffer-local-value! transient-mark-mode)
@@ -180,13 +186,6 @@ point determined by `mouse-select-region-move-to-beginning'."
       ;; is not one.
       ;;--------------------------------------------------------------
       (and (pair? object) (car object)))
-
-    (define (mark)
-      ;; The mark as a *position*, which is what GNU Emacs's `(mark)'
-      ;; answers and what the comparisons below are made of. This tree
-      ;; keeps it as a marker, so the position is read out of it.
-      ;;--------------------------------------------------------------
-      (text-editor-mark (current-buffer)))
 
     (define (mouse-start-end start end mode)
       ;; GNU Emacs's `mouse-start-end' (`mouse.el:1832'): the bounds of
