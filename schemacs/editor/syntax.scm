@@ -21,10 +21,14 @@
     ;; `simple.sld', which had them imported.
     (scheme char)
     (only (schemacs editor engine)
-          buffer-pt fetch-char
+          buffer-pt
           buffer-beg buffer-z
           text-editor-set-cursor)
-    (only (schemacs editor buffer) current-buffer)
+    (only (schemacs editor buffer) current-buffer
+          ;; `FETCH_CHAR` (`buffer.h`) - the raw read of a named
+          ;; buffer. It has no Lisp name, and it was the engine's
+          ;; until 2026-10-13.
+          fetch-char)
     )
 
   (export

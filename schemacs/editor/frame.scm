@@ -45,7 +45,7 @@
      (mouse-position display-mouse-position))
     (only (schemacs editor marker) build-marker marker-position set-marker make-marker)
     (only (schemacs editor engine)
-           fetch-char buffer-beg
+            buffer-beg
           buffer-pt text-editor-set-cursor)
     ;; `*current-buffer*' is the C global `current_buffer', which this
     ;; library writes (`select-window') and re-exports; its definition is
@@ -54,7 +54,11 @@
     ;; where they are installed, at the end of this file.
     (only (schemacs editor buffer)
           *current-buffer* other-buffer current-buffer
-          *current-editor-function* *replace-buffer-in-windows-function*)
+          *current-editor-function* *replace-buffer-in-windows-function*
+          ;; `FETCH_CHAR` (`buffer.h`) - the raw read of a named
+          ;; buffer. It has no Lisp name, and it was the engine's
+          ;; until 2026-10-13.
+          fetch-char)
     ;; The seam `insdel.scm` declares for `adjust_suspend_auto_hscroll` -
     ;; it reads the selected window, which is this library's, so it is
     ;; installed here.

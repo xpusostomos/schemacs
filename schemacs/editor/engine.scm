@@ -70,11 +70,10 @@
     ;; `text-editor-to-string`, which is deleted; nothing in this library
     ;; calls it now. (`intervals.scm` still owns it - see the note on its
     ;; definition there.)
+    ;; `buffer-text-ref` was imported for `fetch-char` and
+    ;; `text-editor-to-code-points`; both have left this library and
+    ;; nothing here reads the store directly any more.
     (only (schemacs editor buffer-text)
-          ;; `buffer-text-base` and `buffer-text-z` were imported for
-          ;; `text-editor-to-code-points`, which is `buffer-text.scm`'s
-          ;; now - the walk is there and it uses its own accessors.
-          buffer-text-ref
           buffer-text-insert! buffer-text-insert-code-points!
           buffer-text-delete!
           buffer-text-substring
@@ -142,7 +141,6 @@
           *text-property-offset-function*
           invalidate-buffer-caches
           adjust-markers-for-insert
-          insert-from-string
           del-range prepare-to-modify-buffer)
     ;; `undo.c`'s recording half, which is its own library now and sits
     ;; *below* `insdel.scm` - so the three `*record-*-function*` seams the
@@ -172,7 +170,10 @@
    ;; buffer-text rather than the buffer. The walk was over the class's
    ;; own store and there was nothing else in the function; the one
    ;; caller - `files.scm`'s save path - names the text it means.
-   text-editor-insert
+   ;; **`text-editor-insert` and `%insert-argument` have left** for
+   ;; `editfns.scm`/`insdel.scm` - see the note where they stood. Nothing
+   ;; in this library inserts text any more, so `insert-from-string` is
+   ;; not imported either.
    text-editor-delete-from-cursor
    ;; **`make-buffer-string` has left for `intervals.scm`** (2026-10-13).
    ;; It is `editfns.c:1561`'s - the docstring here said `insdel.c`, the
@@ -254,7 +255,9 @@
 
    buffer-beg
    buffer-z
-   fetch-char
+   ;; **`fetch-char` has left for `buffer.scm`** (2026-10-13) - it is
+   ;; `FETCH_CHAR` from `buffer.h` and has no Lisp name. See the note
+   ;; where it stood.
    text-editor-set-cursor
    text-editor-move-cursor
    buffer-pt
@@ -346,45 +349,26 @@
 
 
 
-    (define (%insert-argument thing)
-      ;; **The C's `Finsert` (`editfns.c`) takes any number of arguments,
-      ;; each a string or a character**, and hands each to
-      ;; `insert_from_string`; this is the one-argument reading of that,
-      ;; and `editfns.scm`'s `insert` is the variadic one that loops with
-      ;; it. A list (or a `u32vector`) of code points is this tree's
-      ;; addition and is not `Finsert`'s: it is the door a decoded file
-      ;; comes through, because a byte character has no string form.
-      ;;--------------------------------------------------------------
-      (cond ((string? thing) thing)
-            ((char? thing) (string thing))
-            ((integer? thing) (string (integer->char thing)))
-            ((or (list? thing) (u32vector? thing)) thing)
-            (else (error "editor cannot insert text from" thing))))
-
-    (define (text-editor-insert ed thing)
-      ;; Insert THING at the cursor of ED.
-      ;;
-      ;; **The insertion is `insdel.scm`'s now**, and with it the whole
-      ;; composition: the read-only gate and the caches
-      ;; (`prepare_to_modify_buffer`), the undo entry and the mark of the
-      ;; last save (`record_insert`), the modification counter, the
-      ;; markers, the intervals, the after-change hooks - and point,
-      ;; which moves **once**, at the end, with `adjust_point`.
-      ;;
-      ;; This function used to do all of that itself, in its own order,
-      ;; over a store writer that advanced point one character at a time.
-      ;; The C moves point once because its insert writes the whole
-      ;; string into the gap in one go and then calls
-      ;; `adjust_point (nchars)`; ours now does the same, which is what
-      ;; `insert-from-string-1` is.
-      ;;
-      ;; What is left here is the shape this tree's callers want: ED is
-      ;; passed explicitly, where the C's primitives act on
-      ;; `current_buffer` - so it is made current around the call, and
-      ;; the day the callers are rewritten to Emacs's `insert` they will
-      ;; do that themselves.
-      ;;--------------------------------------------------------------
-      (with-current-buffer ed (insert-from-string (%insert-argument thing))))
+    ;; **`%insert-argument` and `text-editor-insert` have left**
+    ;; (2026-10-13), and neither was an Emacs function.
+    ;;
+    ;; `%insert-argument` was `Finsert`'s per-argument half, and
+    ;; `editfns.scm` already has it: `general_insert_function`
+    ;; (`editfns.c:1298`) is the string/char/integer normalising, and it
+    ;; is what `insert` loops with. The one case it did *not* have - a
+    ;; list or `u32vector` of code points - is not `Finsert`'s either. It
+    ;; is this tree's, and `insert-from-string-1` (`insdel.scm`) is where
+    ;; it belongs and where it already was: its own note says so, and
+    ;; `buffer_text` has the matching `buffer-text-insert-code-points!`.
+    ;; So `files.scm` - the one caller with code points - calls
+    ;; `insert-from-string` directly, and `insert` stays faithful and
+    ;; type-errors on anything else, as the C's does.
+    ;;
+    ;; `text-editor-insert` was the ED-taking wrapper around it. Its
+    ;; callers write `(with-current-buffer ED (insert TEXT))` now, which
+    ;; is what Emacs's callers do - and the whole content of that wrapper
+    ;; was saying which buffer the C's primitives act on, since they act
+    ;; on `current_buffer`.
 
     ;; Deleting text
     ;;
@@ -514,15 +498,17 @@
     ;; Positions
 
 
-    (define (fetch-char ed pos)
-      ;; The character at position POS, or false when there is none
-      ;; there - GNU Emacs's `char-after' (`editfns.c'), which answers
-      ;; nil at or past the end of the buffer.
-      ;;--------------------------------------------------------------
-      (and (<= (buffer-beg ed) pos)
-           (< pos (buffer-z ed))
-           (integer->char (buffer-text-ref (text-editor-text ed) pos))
-           ))
+    ;; **`fetch-char` has left for `buffer.scm`** (2026-10-13), and its
+    ;; note here was wrong about what it was: it said `char-after`
+    ;; (`editfns.c:1038'), and `char-after` is the *Lisp* door onto a raw
+    ;; read - it takes the current buffer, defaults POSITION to point and
+    ;; bounds-checks. This is the read underneath it, `FETCH_CHAR (pos)`
+    ;; from `buffer.h', with no Lisp name and an explicit buffer, which is
+    ;; why every one of its callers passed the buffer it meant. It lives
+    ;; with the record and the `BEG'/'Z' macros it reaches through now.
+    ;;
+    ;; `char-after` itself is `editfns.scm`'s and always was; it calls
+    ;; `fetch-char` over there.
 
     ;;----------------------------------------------------------------
     ;; Newlines: **the scans moved to `(schemacs editor search)` on

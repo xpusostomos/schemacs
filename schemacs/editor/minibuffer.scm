@@ -54,7 +54,7 @@
     allocate-buffer buffer-beg
           buffer-beg buffer-z
           text-editor-delete-from-cursor buffer-pt
-          text-editor-insert text-editor-set-cursor
+text-editor-set-cursor
           set!buffer-read-only
           text-editor-undo-disable!)
     ;; `logior' is Guile's: the bitset is three bit flags.
@@ -420,7 +420,7 @@ read-number-history
       ;;--------------------------------------------------------------
       (let ((mb (*minibuffer*)))
         (when mb
-          (text-editor-insert (minibuffer-editor mb) text))))
+          (with-current-buffer (minibuffer-editor mb) (insert text)))))
 
     (define (minibuffer-prompt)
       ;; The prompt of the active minibuffer, as the echo area draws it.
@@ -461,7 +461,7 @@ read-number-history
                              (else n))))))
         ;; Emacs disables undo in the minibuffer.
         (text-editor-undo-disable! ed)
-        (when text (text-editor-insert ed text))
+        (when text (with-current-buffer ed (insert text)))
         (text-editor-set-cursor ed
                                 (if at
                                     (min at (buffer-z ed))
@@ -1163,7 +1163,7 @@ read-number-history
           (let ((ed (minibuffer-editor mb)))
             (text-editor-set-cursor ed (buffer-beg ed))
             (text-editor-delete-from-cursor ed (- (buffer-z ed) (buffer-beg ed)))
-            (text-editor-insert ed completion)))))
+            (with-current-buffer ed (insert completion))))))
 
     (define (completion--do-completion string table predicate point expect-exact)
       ;; GNU Emacs's `completion--do-completion': complete STRING, put the
@@ -1873,11 +1873,10 @@ read-number-history
       ;;--------------------------------------------------------------
       (when (*completion-show-help*)
         (text-editor-set-cursor buffer (buffer-beg buffer))
-        (text-editor-insert buffer "Type M-RET on a completion to select it.\n")
-        (text-editor-insert buffer
-                            (string-append
+        (with-current-buffer buffer (insert "Type M-RET on a completion to select it.\n"))
+        (with-current-buffer buffer (insert (string-append
                              "Type M-<down> or M-<up> to move point between "
-                             "completions.\n\n"))))
+                             "completions.\n\n")))))
 
     (define *completion-setup-hook*
       ;; GNU Emacs's `completion-setup-hook': run at the end of
@@ -1918,7 +1917,7 @@ read-number-history
         ;; text will go - `point-max' before the insert - and ends where
         ;; it went: `point-max' after it.
         (let ((start (buffer-z buffer)))
-          (text-editor-insert buffer (completions-header-string count))
+          (with-current-buffer buffer (insert (completions-header-string count)))
           (put-text-property start (buffer-z buffer)
                              'face 'shadow buffer))))
 
@@ -1930,7 +1929,7 @@ read-number-history
       ;; carry a property, so the faces go straight on the buffer text.)
       ;;--------------------------------------------------------------
       (let ((start (buffer-z buffer)))
-        (text-editor-insert buffer candidate)
+        (with-current-buffer buffer (insert candidate))
         (put-text-property start (buffer-z buffer)
                            'completion--string candidate buffer)
         (set-completion-line-faces!
@@ -1948,7 +1947,7 @@ read-number-history
       ;; cells stays clean.
       ;;--------------------------------------------------------------
       (let ((start (buffer-z buffer)))
-        (text-editor-insert buffer str)
+        (with-current-buffer buffer (insert str))
         (remove-text-properties start (buffer-z buffer)
                                 '(completion--string) buffer)))
 

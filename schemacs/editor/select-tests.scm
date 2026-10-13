@@ -37,11 +37,12 @@
  ;; window system's. (The terminal's own OSC 52 selection moved out, to
  ;; `xterm-tests.scm' beside `xterm.sld'.)
  (only (schemacs editor engine)
-       allocate-buffer text-editor-insert text-editor-set-cursor
+       allocate-buffer text-editor-set-cursor
        buffer-pt)
  (only (schemacs editor buffer) with-current-buffer)
  (only (schemacs editor editfns)
-       buffer-substring-no-properties point-max point-min)
+       buffer-substring-no-properties point-max point-min insert
+)
  (only (schemacs editor frame) *current-frame* new-frame)
  (only (schemacs editor keyboard) dispatch-input-event)
  (only (schemacs editor select)
@@ -149,7 +150,7 @@
                    (*gui--last-selected-text-primary* #f)
                    (*gui-last-cut-in-clipboard* #f)
                    (*gui-last-cut-in-primary* #f))
-      (text-editor-insert ed text)
+      (with-current-buffer ed (insert text))
       (text-editor-set-cursor ed 0)
       (thunk frame ed d))))
 
@@ -164,7 +165,7 @@
                    (*saved-region-selection* #f)
                    (*gui--last-selected-text-clipboard* #f)
                    (*gui-last-cut-in-clipboard* #f))
-      (text-editor-insert ed text)
+      (with-current-buffer ed (insert text))
       (text-editor-set-cursor ed 0)
       (thunk frame ed))))
 

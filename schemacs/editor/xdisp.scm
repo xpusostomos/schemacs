@@ -57,7 +57,6 @@
          text-editor-buffer-name text-editor-text-props
          text-editor-file-name
          buffer-pt text-editor-set-cursor
-         fetch-char
          buffer-modified-p
          buffer-read-only?)
     ;; The line arithmetic is `editfns.c`'s, and it lives there now.
@@ -150,7 +149,11 @@
           mode-name
           ;; and the overlays at a position are merged into its face
           overlay-end overlay-get overlay-priority overlay-start
-          overlays-at overlays-in)
+          overlays-at overlays-in
+          ;; `FETCH_CHAR` (`buffer.h`) - the raw read of a named
+          ;; buffer. It has no Lisp name, and it was the engine's
+          ;; until 2026-10-13.
+          fetch-char)
     ;; `BEG_UNCHANGED' (`buffer.h:156') is a field of the buffer's *text* -
     ;; `buffer-text' is this tree's `struct buffer_text' - and the two
     ;; accessors below are the only readers and writers of it here.

@@ -5,14 +5,15 @@
  (only (guile) setvbuf)
  (only (schemacs editor engine)
        allocate-buffer buffer-beg buffer-z text-editor-delete-from-cursor
-       text-editor-insert text-editor-set-cursor text-editor-text-props)
+text-editor-set-cursor text-editor-text-props)
  (only (schemacs editor intervals)
        find-interval next-interval interval-position interval-last-pos
        interval-total-length
        interval-plist string-intervals)
  (only (schemacs editor buffer)
        *inhibit-read-only* erase-buffer get-buffer-create set-buffer
-       set!buffer-read-only set-buffer-modified-p text-editor-undo-list)
+       set!buffer-read-only set-buffer-modified-p text-editor-undo-list with-current-buffer
+)
  ;; the `(t . TOKEN)' entry `record_first_change' pushes is read back with
  ;; `undo.c`'s own predicate for it.
  (only (schemacs editor undo) undo-modified-entry?)
@@ -41,7 +42,7 @@
 
 (define (buffer-of text)
   (let ((ed (allocate-buffer)))
-    (text-editor-insert ed text)
+    (with-current-buffer ed (insert text))
     ed))
 
 (define (runs ed)
@@ -191,7 +192,7 @@
   (let ((ed (buffer-of "abcdefghij")))
     (tp:put-text-property 3 6 'face 'bold ed)
     (text-editor-set-cursor ed 1)
-    (text-editor-insert ed "XY")
+    (with-current-buffer ed (insert "XY"))
     (let ((i (find-interval (text-editor-text-props ed) 5)))
       (list (interval-position i) (interval-last-pos i) (interval-plist i)))))
 

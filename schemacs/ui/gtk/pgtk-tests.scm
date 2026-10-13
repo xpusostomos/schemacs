@@ -17,6 +17,7 @@
 ;; chosen from it was wrong. Reading the rendered pixels is what sees it.
 ;;-------------------------------------------------------------
 (import
+ (only (schemacs editor editfns) insert)
  (scheme base)
  (scheme char)
  (only (guile) setvbuf delete-file getpid)
@@ -37,9 +38,10 @@
  (prefix (schemacs editor dispnew) dn:)
  (prefix (schemacs editor frame) fr:)
  (only (schemacs editor engine)
-        allocate-buffer text-editor-insert text-editor-set-cursor)
+        allocate-buffer text-editor-set-cursor)
  (only (schemacs editor buffer) buffer-local-value set-buffer-local-value!
-       %mark-marker)
+       %mark-marker with-current-buffer
+)
  ;; the mark's read and write are marker.c's now, on the buffer's own
  ;; slot; `text-editor-mark`/`set!text-editor-mark` are gone.
  (only (schemacs editor marker) marker-position set-marker)
@@ -157,7 +159,7 @@
          (ed (allocate-buffer))
          (frame (fr:new-frame ed 24 80)))
     (parameterize ((fr:*current-frame* frame))
-      (text-editor-insert ed "hello world")
+      (with-current-buffer ed (insert "hello world"))
       (text-editor-set-cursor ed 1)
       (dispatch-input-event frame key)
       ;; C-f is a *motion* command, which keeps the mark active - it is how
@@ -222,7 +224,7 @@
   ;; by the real `render!'.
   (let* ((d (new-display))
          (ed (allocate-buffer)))
-    (text-editor-insert ed text)
+    (with-current-buffer ed (insert text))
     (text-editor-set-cursor ed point)
     (set-marker (%mark-marker ed) mark ed)
     (set-buffer-local-value! ed 'mark-active #t)
@@ -322,7 +324,7 @@
 (define (render-one-character ch)
   (let* ((d (new-display))
          (ed (allocate-buffer)))
-    (text-editor-insert ed (string ch))
+    (with-current-buffer ed (insert (string ch)))
     (let ((frame (fr:new-frame ed 24 80)))
       (parameterize ((fr:*current-frame* frame))
         (xd:render! frame)))
@@ -369,7 +371,7 @@
   ;; no search at all.
   (let* ((d (new-display))
          (ed (allocate-buffer)))
-    (text-editor-insert ed text)
+    (with-current-buffer ed (insert text))
     (text-editor-set-cursor ed 0)
     (put-text-property face-start face-end 'face 'font-lock-keyword-face ed)
     (let ((frame (fr:new-frame ed 24 80)))
@@ -450,7 +452,7 @@
   ;; TEXT with no text properties at all, and PATTERN highlighted.
   (let* ((d (new-display))
          (ed (allocate-buffer)))
-    (text-editor-insert ed text)
+    (with-current-buffer ed (insert text))
     (text-editor-set-cursor ed 0)
     (let ((frame (fr:new-frame ed 24 80)))
       (parameterize ((fr:*current-frame* frame))
@@ -472,7 +474,7 @@
 ;; overlay - `isearch-highlight' makes it, `isearch-dehighlight' removes
 ;; it, and the lazy highlighter makes one per other match.
 (let* ((ed (allocate-buffer)))
-  (text-editor-insert ed "alpha beta alpha")
+  (with-current-buffer ed (insert "alpha beta alpha"))
   (text-editor-set-cursor ed 0)
   (parameterize ((fr:*current-frame* (fr:new-frame ed 24 80)))
     (is:isearch-highlight 0 5)
@@ -533,7 +535,7 @@
   ;; `display' property set to a long string when PROP?.
   (let* ((d (new-display))
          (ed (allocate-buffer)))
-    (text-editor-insert ed text)
+    (with-current-buffer ed (insert text))
     (text-editor-set-cursor ed 0)
     (when prop?
       (put-text-property (- (string-length text) 1) (string-length text)
@@ -643,12 +645,11 @@
       (pt:initialize-pgtk-faces! d1)
       (pt:initialize-pgtk-faces! d2)
       (let ((ed (allocate-buffer)))
-        (text-editor-insert
-         ed (apply string-append
+        (with-current-buffer ed (insert (apply string-append
                    (map (lambda (i) "aaaaaaaaaa\n")
                         (let loop ((i 1) (acc '()))
                           (if (> i 60) (reverse acc)
-                              (loop (+ i 1) (cons i acc)))))))
+                              (loop (+ i 1) (cons i acc))))))))
         (text-editor-set-cursor ed 1)
         (let ((f1 (fr:new-frame-on d1 ed 24 80))
               (f2 (fr:new-frame-on d2 ed 24 80)))

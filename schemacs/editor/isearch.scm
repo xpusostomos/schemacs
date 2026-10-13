@@ -59,7 +59,7 @@
     ;; calls it and cannot import `editfns.scm` (2026-10-13).
     (only (schemacs editor intervals) make-buffer-string)
     (only (schemacs editor engine)
-         fetch-char buffer-pt
+          buffer-pt
          buffer-beg buffer-z
          text-editor-set-cursor
          ;; what `minibuffer-lazy-highlight-setup' hangs its hook on
@@ -108,7 +108,11 @@
     (only (schemacs editor buffer)
           current-buffer delete-overlay make-overlay move-overlay overlay-put
           ;; the two `isearch-done` reads for its mark block
-          transient-mark-mode mark-active)
+          transient-mark-mode mark-active
+          ;; `FETCH_CHAR` (`buffer.h`) - the raw read of a named
+          ;; buffer. It has no Lisp name, and it was the engine's
+          ;; until 2026-10-13.
+          fetch-char)
     )
 
   (export

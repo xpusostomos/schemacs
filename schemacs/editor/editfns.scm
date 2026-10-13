@@ -36,7 +36,11 @@
     (only (guile) cadr call-with-output-string
           exact->inexact string-index)
     (only (schemacs editor buffer) current-buffer set-buffer
-          *inhibit-read-only*)
+          *inhibit-read-only*
+          ;; `FETCH_CHAR` (`buffer.h`) - the raw read of a named
+          ;; buffer. It has no Lisp name, and it was the engine's
+          ;; until 2026-10-13.
+          fetch-char)
     (only (schemacs editor marker)
           build-marker markerp marker-position set-marker)
     ;; `make-buffer-string` is `editfns.c:1561`'s and is
@@ -44,7 +48,6 @@
     ;; calls it and cannot import `editfns.scm` (2026-10-13).
     (only (schemacs editor intervals) make-buffer-string)
     (only (schemacs editor engine)
-          fetch-char
           buffer-read-only?
           buffer-beg buffer-z
           buffer-pt

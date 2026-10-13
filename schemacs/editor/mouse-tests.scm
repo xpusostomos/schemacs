@@ -61,13 +61,15 @@
        *unread-command-events* dispatch-key sit-for)
  (only (schemacs editor mouse) *mouse-scroll-delay* *mouse-scroll-min-lines*)
  (only (schemacs editor simple) region-active-p)
- (only (schemacs editor editfns) point)
+ (only (schemacs editor editfns) point insert
+)
  (only (schemacs editor engine)
-       allocate-buffer text-editor-insert text-editor-set-cursor
+       allocate-buffer text-editor-set-cursor
        buffer-pt buffer-z)
  ;; `%mark-marker` is the buffer's mark slot - `BVAR (b, mark)` - and
  ;; `text-editor-mark`, the read that used to be here, is gone.
- (only (schemacs editor buffer) %mark-marker)
+ (only (schemacs editor buffer) %mark-marker with-current-buffer
+)
  (only (schemacs editor marker) marker-position))
 
 ;; Unbuffered output, so a run that hangs shows where it got to.
@@ -125,7 +127,7 @@
   (let ((ed (allocate-buffer)))
     (let loop ((i 1))
       (when (<= i lines)
-        (text-editor-insert ed (string-append (number->string (+ 1000 i)) "\n"))
+        (with-current-buffer ed (insert (string-append (number->string (+ 1000 i)) "\n")))
         (loop (+ i 1))))
     (text-editor-set-cursor ed 1)
     (let ((f (new-frame ed rows cols)))

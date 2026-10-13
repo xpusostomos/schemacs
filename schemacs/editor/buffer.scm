@@ -74,6 +74,7 @@
     (only (schemacs editor buffer-text)
           *gap-bytes-min*
           new-buffer-text  buffer-text-base  buffer-text-z
+          buffer-text-ref
           buffer-text-modiff  buffer-text-chars-modiff
           set!buffer-text-modiff  set!buffer-text-chars-modiff)
     (scheme case-lambda))
@@ -127,6 +128,9 @@
    text-editor-buffer-name  set!text-editor-buffer-name
    text-editor-file-name  set!text-editor-file-name
    buffer-beg  buffer-z
+   ;; `FETCH_CHAR` (`buffer.h`), which has no Lisp name - see the note
+   ;; where it is defined. It came here from `engine.scm` 2026-10-13.
+   fetch-char
    ;; `buffer-modified-p' and `buffer-read-only' answer with these: GNU
    ;; Emacs's `buffer-modified-tick', `buffer-modified-p' - which is the
    ;; comparison `SAVE_MODIFF < MODIFF' and not a flag - and the
@@ -1891,6 +1895,29 @@
       ;; which is Emacs's `Z'.
       ;;--------------------------------------------------------------
       (buffer-text-z (text-editor-text ed)))
+
+    (define (fetch-char ed pos)
+      ;; GNU Emacs's `FETCH_CHAR (pos)' (`buffer.h'): the character at
+      ;; POS in ED, or #f when POS is outside it. It answers a
+      ;; *character* and not a code point, where `buffer-text-ref' - the
+      ;; store's own read - answers the integer elisp and `FETCH_CHAR'
+      ;; deal in.
+      ;;
+      ;; **`FETCH_CHAR' is a macro over `BUF_BEG_ADDR', and this library
+      ;; is that macro's home here** - it owns the record, `BEG' and `Z'
+      ;; (`buffer.h:992') and the text, which is the same set of things
+      ;; the macro reaches through. It has no Lisp name in Emacs, so the
+      ;; tree's own spelling stands; it was `engine.scm`'s until
+      ;; 2026-10-13, where it sat with the writers it has nothing to do
+      ;; with.
+      ;;
+      ;; `char-after' (`editfns.c:1038') is the Lisp door onto this, for
+      ;; the current buffer and with point as the default; this is the
+      ;; read below it, and every caller of it names the buffer.
+      ;;--------------------------------------------------------------
+      (and (<= (buffer-beg ed) pos)
+           (< pos (buffer-z ed))
+           (integer->char (buffer-text-ref (text-editor-text ed) pos))))
 
     (define (buffer-modified-tick . rest)
       ;; GNU Emacs's `buffer-modified-tick' (`buffer.c:1631'): "Return

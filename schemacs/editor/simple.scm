@@ -46,9 +46,8 @@
     (only (schemacs editor intervals) make-buffer-string)
     (only (schemacs editor engine)
          undo-insertion-entry? undo-deletion-entry? undo-modified-entry?
-         text-editor-delete-from-cursor fetch-char
+         text-editor-delete-from-cursor
          buffer-pt
-         text-editor-insert
          text-editor-move-cursor
          buffer-beg buffer-z
          buffer-read-only? text-editor-set-cursor
@@ -97,7 +96,11 @@
           set-buffer-local-value! transient-mark-mode
           ;; the *global* value, which is what `kill-local-variable'
           ;; falls back to
-          *transient-mark-mode*)
+          *transient-mark-mode*
+          ;; `FETCH_CHAR` (`buffer.h`) - the raw read of a named
+          ;; buffer. It has no Lisp name, and it was the engine's
+          ;; until 2026-10-13.
+          fetch-char)
     (only (schemacs editor command) *mark-even-if-inactive*)
     (only (schemacs editor editfns)
           bolp buffer-size buffer-substring delete-and-extract-region delete-region eobp
@@ -1421,7 +1424,7 @@ non-nil."
                            (pos (cdr entry))
                            (at (abs pos)))
                       (text-editor-set-cursor ed at)
-                      (text-editor-insert ed text)
+                      (with-current-buffer ed (insert text))
                       ;; POS was positive when point was at the beginning
                       ;; of the deleted text and negative when it was at
                       ;; the end; undo puts point back on the side it was

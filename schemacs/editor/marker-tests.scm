@@ -18,9 +18,10 @@
  (schemacs editor marker)
  (only (schemacs editor buffer) allocate-buffer with-current-buffer current-buffer)
  (only (schemacs editor editfns)
-       buffer-substring-no-properties point-max point-min)
+       buffer-substring-no-properties point-max point-min insert
+)
  (only (schemacs editor engine)
-       text-editor-insert text-editor-set-cursor
+text-editor-set-cursor
        text-editor-move-cursor text-editor-delete-from-cursor
        text-editor-undo-boundary! text-editor-undo-list)
  (only (schemacs editor simple) primitive-undo)
@@ -37,26 +38,26 @@
 ;; A marker at index 3 of "abcdef" reports that, and its buffer.
 (test-equal '(3 #t)
   (let* ((ed (allocate-buffer))
-         (m (begin (text-editor-insert ed "abcdef") (build-marker ed 3))))
+         (m (begin (with-current-buffer ed (insert "abcdef")) (build-marker ed 3))))
     (list (marker-position m) (eq? ed (marker-buffer m)))))
 
 ;; Text inserted BEFORE a marker carries it along: Emacs: a marker at 3
 ;; with "XY" inserted at 1 is at 5.
 (test-equal 5
   (let* ((ed (allocate-buffer)))
-    (text-editor-insert ed "abcdef")
+    (with-current-buffer ed (insert "abcdef"))
     (let ((m (build-marker ed 3)))
       (text-editor-set-cursor ed 1)
-      (text-editor-insert ed "XY")
+      (with-current-buffer ed (insert "XY"))
       (marker-position m))))
 
 ;; Text inserted AFTER a marker leaves it alone.
 (test-equal 3
   (let* ((ed (allocate-buffer)))
-    (text-editor-insert ed "abcdef")
+    (with-current-buffer ed (insert "abcdef"))
     (let ((m (build-marker ed 3)))
       (text-editor-move-cursor ed 100)
-      (text-editor-insert ed "XY")
+      (with-current-buffer ed (insert "XY"))
       (marker-position m))))
 
 ;; Text inserted EXACTLY at a marker is the boundary case: the default
@@ -64,22 +65,22 @@
 ;; Emacs: a marker at 3, "XY" inserted at 3, is still at 3 in "abXYcd".
 (test-equal '(3 "abXYcd")
   (let* ((ed (allocate-buffer)))
-    (text-editor-insert ed "abcd")
+    (with-current-buffer ed (insert "abcd"))
     (let ((m (build-marker ed 3)))
       (text-editor-set-cursor ed 3)
-      (text-editor-insert ed "XY")
+      (with-current-buffer ed (insert "XY"))
       (list (marker-position m) (with-current-buffer ed (buffer-substring-no-properties (point-min) (point-max)))))))
 
 ;; ... and one whose insertion type is true advances past it: Emacs: the
 ;; same case gives 5.
 (test-equal 5
   (let* ((ed (allocate-buffer)))
-    (text-editor-insert ed "abcd")
+    (with-current-buffer ed (insert "abcd"))
     (let ((m (build-marker ed 3)))
       ;; the insertion type is a second call, as it is in the C
       (set-marker-insertion-type m #t)
       (text-editor-set-cursor ed 3)
-      (text-editor-insert ed "XY")
+      (with-current-buffer ed (insert "XY"))
       (marker-position m))))
 
 ;; Deletion does not shift markers, it collapses the ones inside the
@@ -88,7 +89,7 @@
 ;; collapsed to 2.
 (test-equal '(2 "aef")
   (let* ((ed (allocate-buffer)))
-    (text-editor-insert ed "abcdef")
+    (with-current-buffer ed (insert "abcdef"))
     (let ((m (build-marker ed 4)))
       (text-editor-set-cursor ed 2)
       (text-editor-delete-from-cursor ed 3)
@@ -98,7 +99,7 @@
 ;; far end of it does too.
 (test-equal '(2 3)
   (let* ((ed (allocate-buffer)))
-    (text-editor-insert ed "abcdef")
+    (with-current-buffer ed (insert "abcdef"))
     (let ((at-end (build-marker ed 5)) (after (build-marker ed 6)))
       (text-editor-set-cursor ed 2)
       (text-editor-delete-from-cursor ed 3)
@@ -109,7 +110,7 @@
 ;; was at 4 collapsed to 3.
 (test-equal '(3 "abef")
   (let* ((ed (allocate-buffer)))
-    (text-editor-insert ed "abcdef")
+    (with-current-buffer ed (insert "abcdef"))
     (let ((m (build-marker ed 4)))
       (text-editor-set-cursor ed 5)
       (text-editor-delete-from-cursor ed -2)
@@ -122,7 +123,7 @@
 ;; the two characters asked for.
 (test-equal '(5 "abcd")
   (let* ((ed (allocate-buffer)))
-    (text-editor-insert ed "abcdef")
+    (with-current-buffer ed (insert "abcdef"))
     (let ((m (build-marker ed 5)))
       (text-editor-set-cursor ed 7)
       (text-editor-delete-from-cursor ed -2)
@@ -131,31 +132,31 @@
 ;; A marker that points nowhere is in no chain and follows nothing.
 (test-equal #f
   (let* ((ed (allocate-buffer)))
-    (text-editor-insert ed "abcdef")
+    (with-current-buffer ed (insert "abcdef"))
     (let ((m (build-marker ed 3)))
       (set-marker m #f)
       (text-editor-set-cursor ed 1)
-      (text-editor-insert ed "XY")
+      (with-current-buffer ed (insert "XY"))
       (marker-position m))))
 
 ;; Markers belong to a buffer: editing one leaves another's alone.
 (test-equal '(3 5)
   (let* ((one (allocate-buffer))
          (two (allocate-buffer)))
-    (text-editor-insert one "abcdef")
-    (text-editor-insert two "abcdef")
+    (with-current-buffer one (insert "abcdef"))
+    (with-current-buffer two (insert "abcdef"))
     (let ((m1 (build-marker one 3)) (m2 (build-marker two 3)))
       (text-editor-set-cursor two 1)
-      (text-editor-insert two "XY")
+      (with-current-buffer two (insert "XY"))
       (list (marker-position m1) (marker-position m2)))))
 
 ;; A line break is text too: a marker after it moves with it.
 (test-equal '(6 "ab\ncd")
   (let* ((ed (allocate-buffer)))
-    (text-editor-insert ed "abcd")
+    (with-current-buffer ed (insert "abcd"))
     (let ((m (build-marker ed 5)))
       (text-editor-set-cursor ed 3)
-      (text-editor-insert ed #\newline)
+      (with-current-buffer ed (insert #\newline))
       (list (marker-position m) (with-current-buffer ed (buffer-substring-no-properties (point-min) (point-max)))))))
 
 ;; Undo replays through the same insert and delete procedures, so it
@@ -163,14 +164,14 @@
 ;; it was.
 (test-equal '(3 5 3)
   (let* ((ed (allocate-buffer)))
-    (text-editor-insert ed "abcdef")
+    (with-current-buffer ed (insert "abcdef"))
     ;; A boundary, as the command loop places one between commands, so
     ;; that undoing takes back the insertion below and not this one too.
     (text-editor-undo-boundary! ed)
     (let ((m (build-marker ed 3)))
       (let ((before (marker-position m)))
         (text-editor-set-cursor ed 1)
-        (text-editor-insert ed "XY")
+        (with-current-buffer ed (insert "XY"))
         (let ((after (marker-position m)))
           (with-current-buffer ed (primitive-undo 1 (text-editor-undo-list ed)))
           (list before after (marker-position m)))))))
@@ -187,14 +188,14 @@
 ;; above pass a buffer to `build-marker' instead.
 (test-equal '(4 #t)
   (with-current-buffer (allocate-buffer)
-    (text-editor-insert (current-buffer) "abcdef")
+    (with-current-buffer (current-buffer) (insert "abcdef"))
     (let ((m (copy-marker 4)))
       (list (marker-position m) (eq? (current-buffer) (marker-buffer m))))))
 
 ;; Given a *marker*, it points where that one does, in that one's buffer.
 (test-equal '(2 #t #f)
   (let* ((ed (allocate-buffer)))
-    (text-editor-insert ed "abcdef")
+    (with-current-buffer ed (insert "abcdef"))
     (let* ((from (build-marker ed 2))
            (copy (copy-marker from)))
       (list (marker-position copy)
@@ -206,7 +207,7 @@
 ;; marker's - the source's is left alone.
 (test-equal '(#t #f #f)
   (let* ((ed (allocate-buffer)))
-    (text-editor-insert ed "abcdef")
+    (with-current-buffer ed (insert "abcdef"))
     (let* ((from (build-marker ed 2))
            (copy (copy-marker from #t)))
       (list (marker-insertion-type copy)
@@ -222,7 +223,7 @@
 (test-equal 4
   (let ((m (make-marker))
         (ed (allocate-buffer)))
-    (text-editor-insert ed "abcdef")
+    (with-current-buffer ed (insert "abcdef"))
     (set-marker m 4 ed)
     (marker-position m)))
 
@@ -232,7 +233,7 @@
 (test-equal '(7 1)
   (let ((m (make-marker))
         (ed (allocate-buffer)))
-    (text-editor-insert ed "abcdef")
+    (with-current-buffer ed (insert "abcdef"))
     (set-marker m 99 ed)
     (let ((high (marker-position m)))
       (set-marker m 0 ed)
@@ -242,7 +243,7 @@
 ;; argument the *current* buffer is the one meant, as Emacs says.
 (test-equal 3
   (let* ((ed (allocate-buffer)))
-    (text-editor-insert ed "abcdef")
+    (with-current-buffer ed (insert "abcdef"))
     (let ((from (build-marker ed 3))
           (to (make-marker)))
       (with-current-buffer ed (set-marker to from))
@@ -252,7 +253,7 @@
 ;; last position is still answerable.
 (test-equal '(#f 3 #f)
   (let* ((ed (allocate-buffer)))
-    (text-editor-insert ed "abcdef")
+    (with-current-buffer ed (insert "abcdef"))
     (let ((m (build-marker ed 3)))
       (list (begin (set-marker m #f) (marker-position m))
             (marker-last-position m)
@@ -261,7 +262,7 @@
 ;; `detach-marker' is `set-marker' with nowhere and no buffer.
 (test-equal #f
   (let* ((ed (allocate-buffer)))
-    (text-editor-insert ed "abcdef")
+    (with-current-buffer ed (insert "abcdef"))
     (let ((m (build-marker ed 3)))
       (detach-marker m)
       (marker-position m))))
@@ -279,7 +280,7 @@
 ;; including markers at both ends.
 (test-equal 2
   (with-current-buffer (allocate-buffer)
-    (text-editor-insert (current-buffer) "abcdef")
+    (with-current-buffer (current-buffer) (insert "abcdef"))
     ;; the markers are held, or the chain - which holds them weakly, as
     ;; Emacs's does - would be free to collect them before the question
     (let ((two (build-marker (current-buffer) 2))

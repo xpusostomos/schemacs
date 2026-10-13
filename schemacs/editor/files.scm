@@ -44,9 +44,8 @@
     (only (schemacs editor engine)
           set!text-editor-file-name
           text-editor-buffer-name
-          text-editor-file-name fetch-char buffer-pt
+          text-editor-file-name  buffer-pt
           buffer-beg buffer-z
-          text-editor-insert
           buffer-modified-p buffer-read-only?
           text-editor-set-cursor set-buffer-modified-p
           set!buffer-read-only
@@ -73,7 +72,12 @@
     ;; is below `editfns.scm`.
     (only (schemacs editor editfns)
           goto-char insert message point point-max save-excursion)
-    (only (schemacs editor buffer) barf-if-buffer-read-only)
+    (only (schemacs editor buffer) barf-if-buffer-read-only
+          ;; `FETCH_CHAR` (`buffer.h`) - the raw read of a named
+          ;; buffer. It has no Lisp name, and it was the engine's
+          ;; until 2026-10-13.
+          fetch-char with-current-buffer
+)
     (only (schemacs editor simple) push-mark)
     ;; `string-prefix-p' is `subr.el''s and now lives in
     ;; `(schemacs editor subr)', which is below this library.
@@ -84,6 +88,11 @@
           ;; `handle-delete-frame` reads the frame out of
           ;; (`subr.el`'s, as Emacs's does).
           event-start posn-window)
+    ;; The code-point door: a decoded file is a list or `u32vector` of
+    ;; code points, which no Scheme string can hold, and
+    ;; `insert-from-string` (`insdel.c:981`) is what takes one - the
+    ;; same function `insert` reaches from the string side.
+    (only (schemacs editor insdel) insert-from-string)
     (only (schemacs editor buffer)
           *case-fold-search*
           current-buffer default-directory erase-buffer
@@ -1825,9 +1834,11 @@ save-buffer
         ;; undo discards what the load recorded.
         (text-editor-undo-disable! ed)
         (unless new?
-          (text-editor-insert ed (ensure-final-newline-on-visit
-                                  (decode-file-bytes bytes coding)
-                                  (file-write-protected? path))))
+          (with-current-buffer ed
+            (insert-from-string
+             (ensure-final-newline-on-visit
+              (decode-file-bytes bytes coding)
+              (file-write-protected? path)))))
         (text-editor-undo-enable! ed)
         ;; The echo area says what Emacs's `after-find-file' says about a
         ;; file that was not there.
@@ -1940,7 +1951,7 @@ save-buffer
           ;; file's again, as `revert-buffer-insert-file-contents'
           ;; makes of it
           (set!buffer-file-coding-system ed coding))
-        (text-editor-insert ed decoded)
+        (with-current-buffer ed (insert-from-string decoded))
         ;; the visit: the buffer is what the file is now, so there is
         ;; nothing in it the file does not have
         (when visit

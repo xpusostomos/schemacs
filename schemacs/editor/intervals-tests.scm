@@ -3,12 +3,12 @@
  (scheme char)
  (only (srfi 64) test-assert test-equal test-begin test-end)
  (only (schemacs editor engine)
-       allocate-buffer text-editor-insert
-       text-editor-set-cursor buffer-beg buffer-z
+       allocate-buffer       text-editor-set-cursor buffer-beg buffer-z
        text-editor-text-props)
  (only (schemacs editor buffer) with-current-buffer)
  (only (schemacs editor editfns)
-       buffer-substring-no-properties point-max point-min)
+       buffer-substring-no-properties point-max point-min insert
+)
  (prefix (schemacs editor intervals) iv:))
 
 ;; Regression tests for `(schemacs editor intervals)', which mirrors GNU
@@ -35,7 +35,7 @@
   ;; tree stored on the buffer as Emacs stores it.
   ;;--------------------------------------------------------------
   (let ((ed (allocate-buffer)))
-    (text-editor-insert ed text)
+    (with-current-buffer ed (insert text))
     (iv:create-root-interval ed)
     ed))
 
@@ -277,7 +277,7 @@
               "HELLOabcdefghij0123456789")
   (let ((ed (two-run-editor)))
     (text-editor-set-cursor ed 0)
-    (text-editor-insert ed "HELLO")
+    (with-current-buffer ed (insert "HELLO"))
     (list (valid-tree? ed)
           (iv:interval-total-length (tree-of ed))
           (- (buffer-z ed) (buffer-beg ed))

@@ -1,4 +1,5 @@
 (import
+ (only (schemacs editor editfns) insert)
  (scheme base)
  (scheme char)
  (only (srfi 64) test-assert test-equal test-begin test-end)
@@ -11,8 +12,9 @@
  (prefix (schemacs editor dispnew) dn:)
  (only (oop goops) define-class make)
  (only (schemacs editor engine)
-        allocate-buffer text-editor-insert text-editor-set-cursor)
- (only (schemacs editor buffer) set-buffer-local-value! %mark-marker)
+        allocate-buffer text-editor-set-cursor)
+ (only (schemacs editor buffer) set-buffer-local-value! %mark-marker with-current-buffer
+)
  ;; the mark is a marker, so it is marker.c's `set-marker` that puts it
  ;; on the buffer's slot - `text-editor-mark`'s write before it, gone.
  (only (schemacs editor marker) set-marker)
@@ -207,7 +209,7 @@
 
 (define (buffer-with-face text from to face)
   (let ((ed (allocate-buffer)))
-    (text-editor-insert ed text)
+    (with-current-buffer ed (insert text))
     (put-text-property from to 'face face ed)
     ed))
 
@@ -222,7 +224,7 @@
 ;; failures in a suite that aborts.
 (test-equal '(1 ((0 6 0)))
   (let ((ed (allocate-buffer)))
-    (text-editor-insert ed "abcdef")
+    (with-current-buffer ed (insert "abcdef"))
     (let ((runs (xd:line-face-runs ed 1 "abcdef")))
       (list (length runs) runs))))
 
@@ -273,7 +275,7 @@
 ;; redisplay uses.
 (define (region-buffer text point mark active?)
   (let ((ed (allocate-buffer)))
-    (text-editor-insert ed text)
+    (with-current-buffer ed (insert text))
     (text-editor-set-cursor ed point)
     (set-marker (%mark-marker ed) mark ed)
     (when active?

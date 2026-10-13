@@ -1,10 +1,10 @@
 (import
+ (only (schemacs editor editfns) insert)
  (scheme base)
  (scheme char)
  (only (srfi 64) test-assert test-equal test-begin test-end)
  (only (schemacs editor engine)
-       allocate-buffer text-editor-insert
-       text-editor-set-cursor)
+       allocate-buffer       text-editor-set-cursor)
  (only (schemacs editor textprop) get-char-property put-text-property)
  (only (schemacs editor frame)
        *current-frame* *echo-area-buffer* new-frame selected-window
@@ -255,7 +255,7 @@
    (lambda ()
      (let ((b (get-buffer-create "ov.txt")))
        (parameterize ((*current-buffer* b))
-         (text-editor-insert b "hello world")
+         (with-current-buffer b (insert "hello world"))
          (let ((o (make-overlay 1 6)))
            (list (overlay-start o) (overlay-end o))))))))
 
@@ -267,10 +267,10 @@
    (lambda ()
      (let ((b (get-buffer-create "ov.txt")))
        (parameterize ((*current-buffer* b))
-         (text-editor-insert b "hello world")
+         (with-current-buffer b (insert "hello world"))
          (let ((o (make-overlay 1 6)))
            (text-editor-set-cursor b 1)
-           (text-editor-insert b "abc")
+           (with-current-buffer b (insert "abc"))
            (list (overlay-start o) (overlay-end o))))))))
 
 ;; and `front-advance' says the opposite: the text inserted at the start
@@ -281,10 +281,10 @@
    (lambda ()
      (let ((b (get-buffer-create "ov.txt")))
        (parameterize ((*current-buffer* b))
-         (text-editor-insert b "hello world")
+         (with-current-buffer b (insert "hello world"))
          (let ((o (make-overlay 1 6 #f #t)))   ; front-advance
            (text-editor-set-cursor b 1)
-           (text-editor-insert b "abc")
+           (with-current-buffer b (insert "abc"))
            (list (overlay-start o) (overlay-end o))))))))
 
 ;; and inserting at its end, with the default `rear-advance' nil, does
@@ -295,10 +295,10 @@
    (lambda ()
      (let ((b (get-buffer-create "ov.txt")))
        (parameterize ((*current-buffer* b))
-         (text-editor-insert b "hello world")
+         (with-current-buffer b (insert "hello world"))
          (let ((o (make-overlay 0 5)))
            (text-editor-set-cursor b 5)
-           (text-editor-insert b "XYZ")
+           (with-current-buffer b (insert "XYZ"))
            (list (overlay-start o) (overlay-end o))))))))
 
 (test-equal "overlay-put and overlay-get"
@@ -307,7 +307,7 @@
    (lambda ()
      (let ((b (get-buffer-create "ov.txt")))
        (parameterize ((*current-buffer* b))
-         (text-editor-insert b "hello")
+         (with-current-buffer b (insert "hello"))
          (let ((o (make-overlay 0 3)))
            (overlay-put o 'face 'bold)
            (list (overlay-get o 'face) (overlay-properties o))))))))
@@ -320,7 +320,7 @@
    (lambda ()
      (let ((b (get-buffer-create "ov.txt")))
        (parameterize ((*current-buffer* b))
-         (text-editor-insert b "hello world")
+         (with-current-buffer b (insert "hello world"))
          (make-overlay 0 5)
          (make-overlay 8 8)
          (list (length (overlays-at 0))     ; the ranged overlay
@@ -333,7 +333,7 @@
    (lambda ()
      (let ((b (get-buffer-create "ov.txt")))
        (parameterize ((*current-buffer* b))
-         (text-editor-insert b "hello world")
+         (with-current-buffer b (insert "hello world"))
          (make-overlay 0 5)
          (list (length (overlays-in 3 8))
                (length (overlays-in 6 9))))))))
@@ -344,7 +344,7 @@
    (lambda ()
      (let ((b (get-buffer-create "ov.txt")))
        (parameterize ((*current-buffer* b))
-         (text-editor-insert b "hello world")
+         (with-current-buffer b (insert "hello world"))
          (make-overlay 0 5)
          (list (next-overlay-change 2) (previous-overlay-change 3)))))))
 
@@ -355,7 +355,7 @@
    (lambda ()
      (let ((b (get-buffer-create "ov.txt")))
        (parameterize ((*current-buffer* b))
-         (text-editor-insert b "hello world")
+         (with-current-buffer b (insert "hello world"))
          (let ((o (make-overlay 0 5)))
            (delete-overlay o)
            (list (overlay-start o) (length (overlays-at 0)))))))))
@@ -368,7 +368,7 @@
    (lambda ()
      (let ((b (get-buffer-create "ov.txt")))
        (parameterize ((*current-buffer* b))
-         (text-editor-insert b "hello world")
+         (with-current-buffer b (insert "hello world"))
          (overlay-put (make-overlay 0 5) 'priority 1)
          (overlay-put (make-overlay 1 5) 'priority 3)
          (overlay-put (make-overlay 2 5) 'priority 2)
@@ -384,7 +384,7 @@
    (lambda ()
      (let ((b (get-buffer-create "ov.txt")))
        (parameterize ((*current-buffer* b))
-         (text-editor-insert b "hello world")
+         (with-current-buffer b (insert "hello world"))
          (overlay-put (make-overlay 1 6) 'face 'ov-face)
          (get-char-property 2 'face))))))
 
@@ -394,7 +394,7 @@
    (lambda ()
      (let ((b (get-buffer-create "ov.txt")))
        (parameterize ((*current-buffer* b))
-         (text-editor-insert b "hello world")
+         (with-current-buffer b (insert "hello world"))
          (put-text-property 1 6 'face 'text-face)
          (overlay-put (make-overlay 1 6) 'priority 1)
          (get-char-property 2 'face))))))

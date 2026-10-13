@@ -20,7 +20,6 @@
     (only (schemacs editor character) kbd)
     (scheme base)
     (only (schemacs editor engine)
-    fetch-char
           buffer-beg buffer-z
           buffer-pt
           text-editor-set-cursor)
@@ -36,7 +35,11 @@
     ;; `buffer.c''s variables, beside `*last-command*' which is
     ;; simple.sld's (the command loop binds it there)
     (only (schemacs editor buffer)
-          current-buffer mark-active transient-mark-mode)
+          current-buffer mark-active transient-mark-mode
+          ;; `FETCH_CHAR` (`buffer.h`) - the raw read of a named
+          ;; buffer. It has no Lisp name, and it was the engine's
+          ;; until 2026-10-13.
+          fetch-char)
     (only (schemacs editor simple) *last-command*)
     (only (schemacs editor command) current-prefix-arg define-command
           uarg->integer)
