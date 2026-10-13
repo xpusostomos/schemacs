@@ -185,7 +185,13 @@
     ;; `record_delete` are called directly, as `insdel.c` calls them, and
     ;; the three `*record-*-function*` seams are gone.
     (only (schemacs editor undo)
-          record-insert  record-delete  record-first-change)
+          record-insert  record-delete  record-first-change
+          ;; `replace_range` asks whether undo is recording before it
+          ;; captures the text it is about to delete - the C's
+          ;; `!EQ (BUF_UNDO_LIST (current_buffer), Qt)`. It was a truth
+          ;; test of the list until 2026-10-14, when the sentinel became
+          ;; Emacs's `t'.
+          text-editor-undo-recording?)
     )
 
   (export
@@ -707,7 +713,12 @@
         (let ((nchars-del (- to from)))
           (if (and (<= nchars-del 0) (= inschars 0))
               #f
-              (let ((deletion (if (text-editor-undo-list buffer)
+              ;; The C's `!EQ (BUF_UNDO_LIST (current_buffer), Qt)' - the
+              ;; text is captured only when undo is recording. **Written
+              ;; as a truth test of the list until 2026-10-14**, which
+              ;; worked while the disabled sentinel was `#f' and reads
+              ;; backwards now that it is Emacs's `t' (`#t' is true).
+              (let ((deletion (if (text-editor-undo-recording? buffer)
                                   (buffer-text-substring text from to)
                                   #f)))
                 (buffer-text-delete! text from to)

@@ -70,6 +70,17 @@ Don't try and paper over it by getting around it. It's your job to find that
 primitive, port that primitve and make sure our entire code base uses that
 primitive the same way emacs does.
 
+I don't even want to see an emacs function refactored without a good reason.
+I want to see every function with the exact same shape as emacs, same
+args, same structure, same loops, same variables, same recursion, same
+number of functions, same everything. Of course this is scheme rather than
+lisp, so there will be some deference to it being a different language, 
+but there should be very minimal departures from emacs algorithms.
+
+You need to be aware of the range of differences between elisp and scheme.
+t in elisp is #t in scheme. nil in elisp might be '() or #f depending
+on the circumstances.
+
 Of course, we don't want to fully port code that exists in guile itself or
 a guile library we can download. In that case the answer is to integrate core
 guile functions and/or find the right library. When I say port every primitive

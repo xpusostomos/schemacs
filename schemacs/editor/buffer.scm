@@ -1639,10 +1639,18 @@
       (undo       text-editor-undo-list     set!text-editor-undo-list)
       ;; ^ The buffer's undo list, GNU Emacs's `buffer-undo-list'. A
       ;; list, newest entry first, of the edits that can be undone; or
-      ;; false, which is Emacs's `t', meaning that the recording of
-      ;; undo information is disabled. The empty list is Emacs's `nil':
-      ;; recording is enabled but there is nothing to undo. See the
-      ;; "Undo" section below for the entry formats.
+      ;; `#t`, which is Emacs's `t', meaning that the recording of undo
+      ;; information is disabled. The empty list is Emacs's `nil':
+      ;; recording is enabled but there is nothing to undo.
+      ;;
+      ;; **The sentinel is `#t', as Emacs's is `t'.** It was `#f' until
+      ;; 2026-10-14: behaviourally identical, and *inverted* in
+      ;; representation, which is the dangerous kind of departure -
+      ;; Emacs's `t' is true and this tree's `#f' was false, so a reader
+      ;; that tested the list for truth rather than for the sentinel read
+      ;; it backwards. `undo.scm`'s `text-editor-undo-recording?` is the
+      ;; C's own test, `undo.c`'s `!EQ (BUF_UNDO_LIST (buf), Qt)`. See
+      ;; the "Undo" section below for the entry formats.
       (save-modiff text-editor-save-modiff  set!text-editor-save-modiff)
       (modtime    %buffer-modtime         set!%buffer-modtime)
       ;; ^ GNU Emacs's `b->modtime' (`buffer.h:649'), the modification

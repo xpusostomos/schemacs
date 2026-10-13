@@ -56,7 +56,9 @@
     
     ;; The line arithmetic is `editfns.c`'s, and it lives there now.
     (only (schemacs editor editfns)
-         buffer-substring-no-properties point-max point-min
+         *message-log-function*
+         buffer-substring-no-properties delete-region goto-char insert
+         point-max point-min
          text-editor-cursor-column
          text-editor-get-end-of-line
          text-editor-get-start-of-line)
@@ -127,7 +129,9 @@
     (only (schemacs editor textprop) get-text-property)
     (only (schemacs editor buffer)
           *transient-mark-mode*
-          with-current-buffer
+          current-buffer get-buffer get-buffer-create with-current-buffer
+          text-editor-undo-list set!text-editor-undo-list
+          text-editor-cache-long-scans set!text-editor-cache-long-scans
           buffer-auto-hscroll-mode buffer-cursor-in-non-selected-windows
           buffer-cursor-type buffer-hscroll-margin buffer-hscroll-step
           buffer-local-value buffer-overwrite-mode buffer-truncate-lines
@@ -136,7 +140,8 @@
           ;; `BEG_UNCHANGED' accessors below read - `BEG' and `Z' are
           ;; `buffer.h:992''s macros and come from their own library, not
           ;; through the engine facade
-          buffer-beg buffer-z text-editor-text
+          *inhibit-read-only*
+          fetch-char buffer-beg buffer-z text-editor-text
           ;; `BVAR (b, mark)` - the slot itself, which redisplay reads
           ;; for the buffer it is drawing rather than the current one.
           %mark-marker
@@ -159,7 +164,14 @@
     ;; live beside the commands that set the variable; `minor-mode-alist'
     ;; below is what names them.
     (only (schemacs editor simple)
-          *overwrite-mode-textual* *overwrite-mode-binary*)
+          *overwrite-mode-textual* *overwrite-mode-binary*
+          ;; the `*Messages*' buffer's own mode, which `message-dolog'
+          ;; switches a newly made buffer into
+          messages-buffer-mode)
+    ;; `find_newline' (`search.c:675'), which is what the C's
+    ;; `scan_newline' is - the line arithmetic `message-dolog' walks the
+    ;; log with.
+    (only (schemacs editor search) find-newline)
     (only (schemacs editor faces) *undefined-face-attribute*
           ;; `%z' asks whether this frame has a window system behind it.
           *window-system*)
@@ -169,6 +181,7 @@
     )
 
   (export
+   *messages-buffer-name* *message-log-max*
    ;; `render!' and the mode line are what the rest calls. The search
    ;; highlight used to be here as a parameter; it is isearch's overlays
    ;; now, and the display only reads faces.
@@ -2981,5 +2994,177 @@
                                w (- row top) (- column left))
                             (cons x y) 0))
                   (loop (cdr rest))))))))
+
 )
+    ;;----------------------------------------------------------------
+    ;; The `*Messages*' buffer - `message_dolog' and what feeds it
+    ;;------------------------------------------------------------------
+
+    (define *messages-buffer-name* (make-parameter "*Messages*"))
+    ;; ^ GNU Emacs's `messages-buffer-name' (`xdisp.c:38597'): "Name of
+    ;; the buffer in which `message' logs its messages."
+
+    (define *message-log-max* (make-parameter 1000))
+    ;; ^ GNU Emacs's `message-log-max' (`xdisp.c:38859'): "Maximum number
+    ;; of lines to keep in the `*Messages*' buffer. If nil, disable
+    ;; message logging." It was declared in `editfns.scm' until
+    ;; 2026-10-14 - "the variable waiting for the buffer" - and both it
+    ;; and the name above are `xdisp.c`'s: `Fmessage' reads neither, and
+    ;; `message-dolog' below reads both.
+
+    (define (message--back-lines from count)
+      ;; `scan_newline (FROM, BEG, COUNT)' (`search.c:986'), which is
+      ;; `find_newline' with the byte arguments -1: "Move COUNT line
+      ;; boundaries back from FROM", stopping at the buffer's beginning.
+      ;;
+      ;; The C moves point; here the position comes back and the callers
+      ;; say where point goes, which is the tree's convention for a scan.
+      ;;--------------------------------------------------------------
+      (call-with-values
+          (lambda () (find-newline (current-buffer) from count (point-min)))
+        (lambda (pos found) pos)))
+
+    (define (message--times tail)
+      ;; The N of the C's `sprintf (dupstr, " [%"PRIdMAX" times]", dups)'
+      ;; read back - `strtoimax' and the `" times]\n"' after it
+      ;; (`xdisp.c:12465'), which is how a folded line says how many times
+      ;; it happened. #f when TAIL is not that.
+      ;;--------------------------------------------------------------
+      (and (>= (string-length tail) 10)
+           (string=? (substring tail 0 2) " [")
+           (let loop ((i 2))
+             (cond ((>= i (string-length tail)) #f)
+                   ((char-numeric? (string-ref tail i)) (loop (+ i 1)))
+                   ;; `" times]"' is **seven** characters - space, t, i, m,
+                   ;; e, s, ] - and the C wants the newline after it, so a
+                   ;; match spans i .. i+8.
+                   ((and (> i 2)
+                         (<= (+ i 8) (string-length tail))
+                         (string=? (substring tail i (+ i 7)) " times]")
+                         (char=? (string-ref tail (+ i 7)) #\newline))
+                    (string->number (substring tail 2 i)))
+                   (else #f)))))
+
+    (define (message-log-check-duplicate prev-bol this-bol)
+      ;; GNU Emacs's `message_log_check_duplicate' (`xdisp.c:12535'):
+      ;; "See if this line duplicates the previous one. If so, combine
+      ;; duplicates." 0 means no; anything else is the number of times the
+      ;; line has now been seen.
+      ;;
+      ;; **The `...' rule is the C's own**: a line that *differs* still
+      ;; counts as a duplicate when the previous one had `...' just before
+      ;; the difference - a continued line is folded onto what it
+      ;; continues. `seen_dots' is the C's bool, and it answers 1, not 2.
+      ;;--------------------------------------------------------------
+      (let* ((ed (current-buffer))
+             (len (- (buffer-z ed) 1 this-bol))
+             (p1 prev-bol)
+             (p2 this-bol))
+        (let loop ((i 0) (seen-dots #f))
+          (cond
+           ((>= i len)
+            ;; The whole of the new line matched, so the previous line is
+            ;; at least as long: what follows it decides.
+            (let ((tail (buffer-substring-no-properties
+                         (+ p1 len) (min (buffer-z ed) (+ p1 len 32)))))
+              (cond ((and (> (string-length tail) 0)
+                          (char=? (string-ref tail 0) #\newline))
+                     2)
+                    (else (or (message--times tail) 0)))))
+           ((and (>= i 3)
+                 (char=? (fetch-char ed (+ p1 (- i 3))) #\.)
+                 (char=? (fetch-char ed (+ p1 (- i 2))) #\.)
+                 (char=? (fetch-char ed (+ p1 (- i 1))) #\.))
+            (loop (+ i 1) #t))
+           ((not (char=? (fetch-char ed (+ p1 i)) (fetch-char ed (+ p2 i))))
+            (if seen-dots 1 0))
+           (else (loop (+ i 1) seen-dots))))))
+
+    (define (message-dolog text nlflag)
+      ;; GNU Emacs's `message_dolog' (`xdisp.c:12340'): append TEXT to the
+      ;; `*Messages*' buffer - the half of `message' that is not the echo
+      ;; area: "The message also goes into the `*Messages*' buffer, if
+      ;; `message-log-max' is non-nil."
+      ;;
+      ;; NLFLAG says the text is a whole line. Only a whole line is folded
+      ;; against its predecessor, and only a whole line counts towards
+      ;; `message-log-max'.
+      ;;
+      ;; The C switches to the buffer, does the work and switches back,
+      ;; saving point and the restrictions with markers; `with-current-buffer'
+      ;; is the same thing said once.
+      ;;--------------------------------------------------------------
+      (when (*message-log-max*)
+        (let* ((name (if (string? (*messages-buffer-name*))
+                         (*messages-buffer-name*)
+                         "*Messages*"))
+               (new? (not (get-buffer name))))
+          ;; **The buffer is read-only and the log writes to it anyway.**
+          ;; `messages-buffer-mode' is a `special-mode', which makes the
+          ;; buffer read-only, and the C's `insert_1_both (..., prepare =
+          ;; false, ...)' is what skips the check - `prepare_to_modify_buffer'
+          ;; is the thing that consults `inhibit-read-only', so that is
+          ;; what stands in for it here.
+          (parameterize ((*inhibit-read-only* #t))
+          (with-current-buffer (get-buffer-create name)
+            ;; "If we created it, set the major-mode."
+            (when new? (messages-buffer-mode))
+            ;; "This is safe because we don't have undo in this buffer" -
+            ;; and it does not cache long scans, the C's second line.
+            ;;
+            ;; `#t' is Emacs's `Qt' here: this tree's `buffer-undo-list'
+            ;; keeps Emacs's sentinel, and `text-editor-undo-recording?'
+            ;; is the C's `!EQ (..., Qt)'.
+            (set!text-editor-undo-list (current-buffer) #t)
+            (set!text-editor-cache-long-scans (current-buffer) #f)
+            (goto-char (point-max))
+            (insert text)
+            (when nlflag
+              (insert "\n")
+              (let ((this-bol (message--back-lines (point-max) -2)))
+                ;; "See if this line duplicates the previous one."
+                (when (> this-bol (point-min))
+                  (let ((prev-bol (message--back-lines this-bol -2)))
+                    (let ((dups (message-log-check-duplicate prev-bol this-bol)))
+                      ;; **`(not (zero? dups))', and not `dups'.** The C's
+                      ;; `if (dups)' is false for 0, and 0 is *true* in
+                      ;; Scheme - so written as a bare test this deletes the
+                      ;; previous line for a line that is *not* a duplicate
+                      ;; as well, which is how the first line of the log
+                      ;; disappeared.
+                      (when (and dups (not (zero? dups)))
+                        (delete-region prev-bol this-bol)
+                        (when (> dups 1)
+                          (goto-char (- (point-max) 1))
+                          (insert " [" (number->string dups) " times]")))))))
+              ;; "If we have more than the desired maximum number of lines
+              ;; in the `*Messages*' buffer now, delete the oldest ones."
+              (when (and (exact-integer? (*message-log-max*)) (>= (*message-log-max*) 0))
+                (delete-region
+                 (point-min)
+                 (message--back-lines (point-max)
+                                      (- 0 (*message-log-max*) 1))))
+              (goto-char (point-max))))))))
+
+    (define (log-message text)
+      ;; GNU Emacs's `log_message' (`xdisp.c:12569'), the half of
+      ;; `message3' that runs before the display: log TEXT if it is a
+      ;; string, and do nothing at all if it is not - which is how
+      ;; `message3_nolog''s empty case leaves the log alone.
+      ;;
+      ;; The C also clears the echo area and cancels the echoing here.
+      ;; That side is the frame's in this tree and `editfns.scm` does it
+      ;; at the display, one statement later.
+      ;;
+      ;; Not ported: `message_log_maybe_newline', which flushes a partial
+      ;; line written by `print' - there is no `print' to the echo area
+      ;; here.
+      ;;--------------------------------------------------------------
+      (when (string? text)
+        (message-dolog text #t)))
+
+    ;; The seam the log arrives through: `editfns.scm`'s `message` calls
+    ;; this before it displays, as `message3' calls `log_message'.
+    (*message-log-function* log-message)
+
     ))

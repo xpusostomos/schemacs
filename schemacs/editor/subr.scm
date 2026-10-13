@@ -420,7 +420,10 @@
                  (undo-list (text-editor-undo-list buffer)))
              (parameterize ((*inhibit-read-only* #t))
                (dynamic-wind
-                 (lambda () (set!text-editor-undo-list buffer #f))
+                 ;; `(let ((buffer-undo-list t)) ...)' - Emacs's `t', which
+                 ;; is `#t' here and not `#f' (see `buffer.scm`'s note on
+                 ;; the slot).
+                 (lambda () (set!text-editor-undo-list buffer #t))
                  (lambda () body ...)
                  (lambda ()
                    (set!text-editor-undo-list buffer undo-list)

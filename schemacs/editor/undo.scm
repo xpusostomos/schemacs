@@ -109,17 +109,27 @@
       (make-parameter 5000))
 
     (define (text-editor-undo-recording? ed)
-      ;; Whether edits to ED are being recorded for undo. Emacs calls
-      ;; this state `buffer-undo-list' being other than `t'.
+      ;; Whether edits to ED are being recorded for undo: GNU Emacs's
+      ;; `buffer-undo-list' being other than `t' - the C's own test,
+      ;; `undo.c`'s `if (EQ (BUF_UNDO_LIST (buf), Qt)) return;'.
+      ;;
+      ;; **The sentinel is `t' and not `#f'.** This read `(list? ...)'
+      ;; with `#f' for Emacs's `t' until 2026-10-14, which is equivalent
+      ;; in effect and *inverted* in representation - and the inversion is
+      ;; the trap: Emacs's `t' is *true* while `#f' is false, so any code
+      ;; that tested the list for truth, rather than for `Qt', got the
+      ;; opposite answer. Emacs's `buffer-undo-list' is `t' (recording
+      ;; off), `nil' (on, nothing to undo) or a cons (on), and so is this.
       ;;--------------------------------------------------------------
-      (list? (text-editor-undo-list ed)))
+      (not (eq? (text-editor-undo-list ed) #t)))
 
     (define (text-editor-undo-disable! ed)
-      ;; Stop recording undo information for ED (Emacs's
-      ;; `buffer-disable-undo', which sets `buffer-undo-list' to `t').
-      ;; The list is dropped: there is nothing left to undo.
+      ;; Stop recording undo information for ED - GNU Emacs's
+      ;; `buffer-disable-undo', whose whole body is
+      ;; `bset_undo_list (buf, Qt)'. The list is dropped: there is nothing
+      ;; left to undo.
       ;;--------------------------------------------------------------
-      (set!text-editor-undo-list ed #f))
+      (set!text-editor-undo-list ed #t))
 
     (define (text-editor-undo-enable! ed)
       ;; Start recording undo information for ED again, discarding any

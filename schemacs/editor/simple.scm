@@ -81,6 +81,7 @@
     ;; `region-beginning' and `region-end' are `editfns.c''s, and
     ;; `add-to-history' is `subr.el''s.
     (only (schemacs editor buffer) buffer-overwrite-mode set!buffer-overwrite-mode
+          get-buffer get-buffer-create
           with-current-buffer set-buffer-modified-p
           *show-trailing-whitespace*
           buffer-local-value buffer-truncate-lines current-buffer mark-active
@@ -145,6 +146,7 @@
     )
 
   (export
+   messages-buffer messages-buffer-mode
    special-mode special-mode-hook special-mode-map
    ;; `casefiddle.c`'s two region commands, defined here because they
    ;; read the region - see the note at their definitions.
@@ -227,6 +229,43 @@ just-one-space delete-horizontal-space delete-blank-lines
 A special major mode is intended to view specially formatted data
 rather than files.  These modes usually use read-only buffers."
       (set!buffer-read-only (current-buffer) #t))
+
+    ;;----------------------------------------------------------------
+    ;; `messages-buffer-mode' and the `*Messages*' buffer
+    ;;------------------------------------------------------------------
+
+    (define messages-buffer-mode-map
+      ;; GNU Emacs's `messages-buffer-mode-map', which `define-derived-mode'
+      ;; invents for the mode below; its parent is `special-mode-map',
+      ;; which is what gives the buffer `q', SPC, DEL, `<', `>' and `g'.
+      ;;--------------------------------------------------------------
+      (km:keymap '*messages-buffer-mode-map*))
+
+    (define messages-buffer-mode-hook '())
+    ;; ^ `messages-buffer-mode-hook', invented by `define-derived-mode'
+    ;; there and handed in here, as `special-mode-hook' is.
+
+    (define-derived-mode (messages-buffer-mode special-mode "Messages"
+                                               messages-buffer-mode-map
+                                               messages-buffer-mode-hook)
+      "Major mode used in the \"*Messages*\" buffer."
+      ;; Make it easy to do like "tail -f".
+      (set-buffer-local-value! (current-buffer) 'window-point-insertion-type #t))
+
+    (define (messages-buffer)
+      ;; GNU Emacs's `messages-buffer' (`simple.el:11318'): "Return the
+      ;; \"*Messages*\" buffer. If it does not exist, create it and switch
+      ;; it to `messages-buffer-mode'."
+      ;;
+      ;; **The name is spelled out**, as Emacs spells it here: the
+      ;; variable `messages-buffer-name' is `xdisp.c`'s and it is
+      ;; `message-dolog' that consults it, which is why this function and
+      ;; the C's own `message_dolog' agree on this one either way.
+      ;;--------------------------------------------------------------
+      (or (get-buffer "*Messages*")
+          (with-current-buffer (get-buffer-create "*Messages*")
+            (messages-buffer-mode)
+            (current-buffer))))
 
     ;;----------------------------------------------------------------
     ;; Commands

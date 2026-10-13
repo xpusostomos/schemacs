@@ -154,7 +154,7 @@ point-marker
    region-limit
    insert-buffer-substring
    *inhibit-message*
-   *message-log-max*
+   *message-log-function*
    *message-function*
    *current-message-function*
    *standard-display-table*
@@ -812,9 +812,16 @@ moved."
     ;; ^ GNU Emacs's `inhibit-message': "Non-nil means `message' should
     ;; not display a message, only log it in the `*Messages*' buffer."
 
-    (define *message-log-max* (make-parameter 1000))
-    ;; ^ GNU Emacs's `message-log-max': "Maximum number of lines to keep
-    ;; in the `*Messages*' buffer."
+    (define *message-log-function* (make-parameter (lambda (text) #f)))
+    ;; ^ The seam to `message_dolog' (`xdisp.c:12340'), which is
+    ;; `xdisp.scm`'s - the same device as `*message-function*' below and
+    ;; for the same reason: `message' is `editfns.c`'s (`Fmessage`,
+    ;; `:3197') and the log is `xdisp.c`'s, a library built on this one.
+    ;;
+    ;; **`message-log-max' and `messages-buffer-name' went with it.** They
+    ;; were `*message-log-max*' here until 2026-10-14, "the variable
+    ;; waiting for the buffer"; both are `xdisp.c`'s DEFVARs (`:38859',
+    ;; `:38597') and `Fmessage' reads neither - `message_dolog' does.
 
     (define *message-function* (make-parameter (lambda (text) #f)))
     ;; ^ How a message reaches the echo area: `FRAME_MESSAGE_BUF' and the
@@ -1261,6 +1268,11 @@ moved."
               (and (string? format-string) (= 0 (string-length format-string))))
           (begin (message-clear) format-string)
           (let ((text (%requote (%styled-format format-string args #t))))
+            ;; `message3' (`xdisp.c:12592') is `log_message' and *then* the
+            ;; display, in that order - so a message the echo area will not
+            ;; show still reaches `*Messages*', and one that is shown gets
+            ;; its line into the log first.
+            ((*message-log-function*) text)
             (unless (*inhibit-message*)
               ((*message-function*) text))
             text)))

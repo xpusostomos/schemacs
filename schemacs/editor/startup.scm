@@ -44,11 +44,13 @@
     ;; `load-init'
     (only (schemacs editor buffer)
           *inhibit-read-only* erase-buffer get-buffer-create
+          buffer-default-directory current-buffer set!buffer-default-directory
           set!buffer-read-only set-buffer-modified-p use-local-map
           with-current-buffer)
     (only (schemacs editor command) define-command)
     (only (schemacs editor editfns) goto-char)
-    (only (schemacs editor fileio) file-exists-p locate-file-internal)
+    (only (schemacs editor fileio)
+          expand-file-name file-exists-p locate-file-internal)
     (only (schemacs editor files) find-file-noselect insert-file-contents)
     ;; an init file that failed is *said* in the echo area as well as on
     ;; stdout - see `load-init'
@@ -56,7 +58,8 @@
     (only (schemacs editor buff-menu) list-buffers)
     (only (schemacs editor keymap) define-key)
     (prefix (schemacs editor keymap) km:)
-    (only (schemacs editor simple) scroll-down-command scroll-up-command)
+    (only (schemacs editor simple)
+          messages-buffer-mode scroll-down-command scroll-up-command)
     (only (schemacs editor subr) kbd)
     (only (schemacs editor window)
           display-buffer other-window quit-window switch-to-buffer
@@ -488,6 +491,22 @@
       ;; Emacs loads the init file before it visits the files named on
       ;; the command line (`normal-top-level' runs `command-line' after it),
       ;; and so does this.
+      ;;
+      ;; **The `*Messages*' buffer is made first, so that it is there from
+      ;; the start.** Emacs does it in `normal-top-level' (`startup.el:738'),
+      ;; immediately before it runs `command-line', and it gives the buffer
+      ;; the same `default-directory' as `*scratch*' - "just to keep things
+      ;; predictable". Without it an Emacs has no `*Messages*' until
+      ;; something first logs a message, and the difference shows in
+      ;; `C-x C-b' and in a user's init file.
+      ;;
+      ;; The *placement* is a departure, and named: this tree has no
+      ;; `normal-top-level', so the boot it would have run is here.
+      (let ((dir (buffer-default-directory (current-buffer))))
+        (with-current-buffer (get-buffer-create "*Messages*")
+          (messages-buffer-mode)
+          (set!buffer-default-directory (current-buffer)
+                                       (or dir (expand-file-name "~/")))))
       (load-init)
       (let ((displayable-buffers '()))
         (for-each
