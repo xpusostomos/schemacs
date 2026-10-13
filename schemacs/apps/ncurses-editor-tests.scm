@@ -58,9 +58,15 @@
        ;; now that `text-editor-mark`/`set!text-editor-mark` are gone.
        %mark-marker set-point allocate-buffer set!text-editor-buffer-name buffer-pt text-editor-text-props set-buffer-modified-p set!buffer-read-only text-editor-undo-list buffer-beg buffer-z buffer-read-only? set!text-editor-file-name)
  (only (schemacs editor buff-menu)
-       *Buffer-menu-del-char* *Buffer-menu-marks* Buffer-menu-buffer
-       Buffer-menu-execute Buffer-menu--set-mark! Buffer-menu-redraw!
-       list-buffers-noselect)
+       *Buffer-menu-del-char* Buffer-menu-buffer Buffer-menu-beginning
+       Buffer-menu-execute Buffer-menu-redraw! list-buffers-noselect)
+ ;; the test's own mark helper walks the lines, so it needs the two line
+ ;; primitives
+ (only (schemacs editor editfns) eobp forward-line)
+ ;; the marks are text now, so the tests read and write them the way a
+ ;; command does
+ (only (schemacs editor tabulated-list)
+       tabulated-list-get-id tabulated-list-set-col)
  (only (guile) string-contains string-prefix? string-split)
  (only (schemacs editor command) run-command apply-command
        define-command command? command-record-of)
@@ -2392,10 +2398,17 @@
   ;; (NAME READ-ONLY MODIFIED) - and the buffer list made from that
   ;; frame. THUNK is given the list buffer's text.
   ;;--------------------------------------------------------------
+  ;; **The marks are in the list buffer's text**, so a test that wants a
+  ;; clean slate has to start from a fresh list buffer: the old
+  ;; `(*Buffer-menu-marks* '())' binding cleared an alist that no longer
+  ;; exists, and a reused `*Buffer List*' would carry the `>' tags of the
+  ;; test before it - which is Emacs's own behaviour, the refresh
+  ;; rebuilding the C column from the text it finds.
   (parameterize ((*buffer-list* '())
                  (*current-buffer* #f)
-                 (*Buffer-menu-marks* '())
                  (*kill-buffer-query-functions* '()))
+    (when (get-buffer "*Buffer List*")
+      (kill-buffer (get-buffer "*Buffer List*")))
     (let* ((ed (get-buffer-create "shown.txt"))
            (frame (test-frame ed)))
       (parameterize ((*current-frame* frame) (*echo-area-buffer* #f))
@@ -2407,6 +2420,22 @@
                   extra)
         (thunk (with-current-buffer (list-buffers-noselect) (buffer-substring-no-properties (point-min) (point-max))))))))
 
+(define (buffer-menu--mark! buffer char)
+  ;; Put CHAR in the C column of BUFFER's line. The marks are *text* now,
+  ;; so this is what a command does - find the line, set the column - and
+  ;; there is no redraw: a redraw rebuilds the column from the `>' tags in
+  ;; the text and would take this one off again, which is exactly what
+  ;; Emacs does.
+  ;;--------------------------------------------------------------
+  (with-current-buffer (get-buffer "*Buffer List*")
+    (Buffer-menu-beginning)
+    (let loop ()
+      (unless (eobp)
+        (when (eq? (tabulated-list-get-id (current-buffer)) buffer)
+          (tabulated-list-set-col (current-buffer) 0 (string char) #t))
+        (forward-line 1)
+        (loop)))))
+
 (define (mentions? text what)
   (and (string-contains text what) #t))
 
@@ -2416,9 +2445,9 @@
 (test-equal '(#t #t #t)
   (with-buffer-menu '()
     (lambda (text)
-      (list (mentions? text "C R M Buffer")
+      (list (mentions? text "CRM Buffer")
             (mentions? text "shown.txt")
-            (mentions? text ".  shown.txt")))))
+            (mentions? text ".   shown.txt")))))
 
 ;; A buffer whose name starts with a space is not listed - those are the
 ;; internal ones - and neither is the list buffer itself.
@@ -2436,8 +2465,8 @@
       ;; the three columns are one character each, so the R column is a
       ;; single space after the C column and the name follows the M column
       ;; directly
-      (list (mentions? text "% ro.txt")
-            (mentions? text "*mod.txt")))))
+      (list (mentions? text "%  ro.txt")
+            (mentions? text "* mod.txt")))))
 
 ;; Marking a buffer for deletion and then executing the marks kills it,
 ;; and the row shows the `D' mark while it is marked.
@@ -2447,11 +2476,10 @@
       ;; the commands act on the current buffer, which is the list while
       ;; the user is in it - the same buffer point is in
       (*current-buffer* (get-buffer "*Buffer List*"))
-      (Buffer-menu--set-mark! (get-buffer "doomed.txt") *Buffer-menu-del-char*)
-      (Buffer-menu-redraw! (get-buffer "*Buffer List*"))
+      (buffer-menu--mark! (get-buffer "doomed.txt") *Buffer-menu-del-char*)
       (let ((marked (with-current-buffer (get-buffer "*Buffer List*") (buffer-substring-no-properties (point-min) (point-max)))))
         (Buffer-menu-execute)
-        (list (mentions? marked "D  doomed.txt")
+        (list (mentions? marked "D   doomed.txt")
               (get-buffer "doomed.txt"))))))
 
 ;; The keys of the list, sent the way a terminal sends them. Every test
@@ -2470,10 +2498,17 @@
   ;; the reverse of that order: after "shown.txt", the last of EXTRA is
   ;; the first line.
   ;;--------------------------------------------------------------
+  ;; **The marks are in the list buffer's text**, so a test that wants a
+  ;; clean slate has to start from a fresh list buffer: the old
+  ;; `(*Buffer-menu-marks* '())' binding cleared an alist that no longer
+  ;; exists, and a reused `*Buffer List*' would carry the `>' tags of the
+  ;; test before it - which is Emacs's own behaviour, the refresh
+  ;; rebuilding the C column from the text it finds.
   (parameterize ((*buffer-list* '())
                  (*current-buffer* #f)
-                 (*Buffer-menu-marks* '())
                  (*kill-buffer-query-functions* '()))
+    (when (get-buffer "*Buffer List*")
+      (kill-buffer (get-buffer "*Buffer List*")))
     (let* ((ed (get-buffer-create "shown.txt"))
            (frame (test-frame ed)))
       (parameterize ((*current-frame* frame) (*echo-area-buffer* #f))
@@ -2511,10 +2546,10 @@
 ;; marks the first two lines.
 (test-equal
   (string-append
-   "C R M Buffer             Size   Mode            File\n"
-   ">  b.txt              0      Fundamental     \n"
-   ">  a.txt              0      Fundamental     \n"
-   ".  shown.txt          0      Fundamental     \n")
+   "CRM Buffer                 Size Mode             File\n"
+   ">   b.txt                     0 Fundamental      \n"
+   ">   a.txt                     0 Fundamental      \n"
+   ".   shown.txt                 0 Fundamental      \n")
   (with-buffer-menu-keys (list (list "a.txt" #f #f) (list "b.txt" #f #f))
     (lambda (menu-buffer press!)
       (press! #\m)
@@ -2528,7 +2563,7 @@
     (lambda (menu-buffer press!)
       (press! #\%)
       (list (buffer-read-only? (get-buffer "b.txt"))
-            (mentions? (with-current-buffer menu-buffer (buffer-substring-no-properties (point-min) (point-max))) "% b.txt")))))
+            (mentions? (with-current-buffer menu-buffer (buffer-substring-no-properties (point-min) (point-max))) "%  b.txt")))))
 
 ;; `s' marks a buffer for saving and `x' saves it, which is what GNU
 ;; Emacs's `Buffer-menu-execute' does with `(with-current-buffer buffer
@@ -2539,12 +2574,19 @@
 (test-equal
   (list "saved\noriginal\n"
         (string-append
-         "C R M Buffer             Size   Mode            File\n"
-         ".  bm-save.txt        15     Fundamental     /tmp/bm-save.txt\n"))
+         "CRM Buffer                 Size Mode             File\n"
+         ".   bm-save.txt              15 Fundamental      /tmp/bm-save.txt\n"))
+  ;; **The marks are in the list buffer's text**, so a test that wants a
+  ;; clean slate has to start from a fresh list buffer: the old
+  ;; `(*Buffer-menu-marks* '())' binding cleared an alist that no longer
+  ;; exists, and a reused `*Buffer List*' would carry the `>' tags of the
+  ;; test before it - which is Emacs's own behaviour, the refresh
+  ;; rebuilding the C column from the text it finds.
   (parameterize ((*buffer-list* '())
                  (*current-buffer* #f)
-                 (*Buffer-menu-marks* '())
                  (*kill-buffer-query-functions* '()))
+    (when (get-buffer "*Buffer List*")
+      (kill-buffer (get-buffer "*Buffer List*")))
     (call-with-output-file "/tmp/bm-save.txt"
       (lambda (port) (display "original\n" port)))
     (let* ((ed (find-file-noselect "/tmp/bm-save.txt"))
@@ -2594,10 +2636,17 @@
 ;; below for the same three buffers.
 
 (test-equal '(#t #t #t #f)
+  ;; **The marks are in the list buffer's text**, so a test that wants a
+  ;; clean slate has to start from a fresh list buffer: the old
+  ;; `(*Buffer-menu-marks* '())' binding cleared an alist that no longer
+  ;; exists, and a reused `*Buffer List*' would carry the `>' tags of the
+  ;; test before it - which is Emacs's own behaviour, the refresh
+  ;; rebuilding the C column from the text it finds.
   (parameterize ((*buffer-list* '())
                  (*current-buffer* #f)
-                 (*Buffer-menu-marks* '())
                  (*kill-buffer-query-functions* '()))
+    (when (get-buffer "*Buffer List*")
+      (kill-buffer (get-buffer "*Buffer List*")))
     (let* ((ed (get-buffer-create "shown.txt"))
            (frame (test-frame ed)))
       (parameterize ((*current-frame* frame) (*echo-area-buffer* #f))

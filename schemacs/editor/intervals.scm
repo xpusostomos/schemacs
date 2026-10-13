@@ -449,6 +449,25 @@
               ((eq? (car tail) prop) tail)
               (else (loop (cddr tail))))))
 
+    (define (%plist-pair sym plist)
+      ;; SYM's `(SYM VAL)' pair in PLIST, or #f - the walk GNU Emacs's
+      ;; `merge_properties_sticky' makes over it:
+      ;;
+      ;;     for (tail = pleft; CONSP (tail); tail = Fcdr (XCDR (tail)))
+      ;;       if (EQ (sym, XCAR (tail))) ...
+      ;;
+      ;; **`assq' is the wrong function for this and the port used it**:
+      ;; a property list is `(SYM VAL SYM VAL ...)`, not an association
+      ;; list, so `assq' walks its *symbols* as if they were pairs and
+      ;; raises "expecting association list" the first time a property is
+      ;; merged beside an existing one. Every caller here wants presence
+      ;; and value, so the pair is built.
+      ;;--------------------------------------------------------------
+      (let loop ((tail plist))
+        (cond ((or (null? tail) (null? (cdr tail))) #f)
+              ((eq? (car tail) sym) (list (car tail) (cadr tail)))
+              (else (loop (cddr tail))))))
+
     (define (interval-plist-get plist prop)
       ;; `plist_get': the value of PROP in PLIST, or #f.
       ;;--------------------------------------------------------------
@@ -1172,7 +1191,7 @@
                        ((or (eq? sym 'rear-nonsticky) (eq? sym 'front-sticky))
                         (left-loop (cddr tail) props front rear))
                        ;; Already considered in the PRIGHT walk.
-                       ((assq sym pright)
+                       ((%plist-pair sym pright)
                         (left-loop (cddr tail) props front rear))
                        (else
                         (let* ((lval (cadr tail))
@@ -1205,7 +1224,7 @@
                   (right-loop (cddr tail) props front rear))
                  (else
                   (let* ((rval (cadr tail))
-                         (lpair (assq sym pleft))
+                         (lpair (%plist-pair sym pleft))
                          ;; Defined on the right for certain, since we are
                          ;; walking PRIGHT.
                          (lpresent (and lpair #t))

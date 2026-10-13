@@ -2671,9 +2671,9 @@ def check_buffer_menu():
     problems = []
 
     screen = screen_of(drive([C_x + b"\x02"], path))     # C-x C-b
-    if "C R M Buffer" not in screen:
+    if "CRM Buffer" not in screen:
         problems.append("the list's column titles are not on the screen")
-    if ".  pty-check-menu.txt" not in screen:
+    if ".   pty-check-menu.txt" not in screen:
         # the `.` is the C column: the buffer the list was made from
         problems.append("no row for the visited file, marked `.` in the C "
                         "column")

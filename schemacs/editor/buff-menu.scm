@@ -49,8 +49,15 @@
     
     ;; The line arithmetic is `editfns.c`'s and lives there now.
     (only (schemacs editor editfns)
+          char-after eobp forward-line line-beginning-position
+          line-end-position point
           text-editor-get-start-of-line
           text-editor-get-end-of-line)
+    ;; The list's rows are `tabulated-list.el`'s now, and with them the
+    ;; two functions that *edit* a row - which is what a mark is.
+    (only (schemacs editor tabulated-list)
+          tabulated-list-delete-entry tabulated-list-get-entry
+          tabulated-list-set-col)
     (only (schemacs editor frame)
           *current-frame* set!frame-message
           frame-width)
@@ -94,7 +101,6 @@
    Buffer-menu-bury
    Buffer-menu-delete
    Buffer-menu-execute
-   Buffer-menu--set-mark!
    Buffer-menu-redraw!
    Buffer-menu-mark
    Buffer-menu-not-modified
@@ -106,7 +112,6 @@
    Buffer-menu-unmark
    *Buffer-menu-del-char*
    *Buffer-menu-marker-char*
-   *Buffer-menu-marks*
    *Buffer-menu-mode-width*
    *Buffer-menu-name-width*
    *Buffer-menu-size-width*
@@ -129,38 +134,55 @@
     ;; buffer), `Buffer-menu-del-char' (the `d' mark: kill it) and the `S'
     ;; that `Buffer-menu-save' puts in the M column.
 
-    (define *Buffer-menu-marks*
-      ;; The mark on each buffer, as (BUFFER . CHARACTER), or none.
+    (define (Buffer-menu-marked-buffers ed)
+      ;; GNU Emacs's `Buffer-menu-marked-buffers' (`buff-menu.el:645'):
+      ;; the buffers whose line carries a `>' tag.
       ;;
-      ;; Emacs keeps the marks in the buffer's *text* - a tag character in
-      ;; the first column - and reads them back out of it when it redraws.
-      ;; There are no text properties here, so they are kept here instead.
-      ;; It is a parameter so that a test can bind it.
+      ;; **The tags are read back out of the text**, line by line, because
+      ;; that is where they live - there is no table of marks. This is what
+      ;; makes `>' survive a redraw and the `d' and `s' tags not:
+      ;; `list-buffers--refresh' rebuilds the C column from this list and
+      ;; from nothing else, so a redraw restores `>' and loses the rest.
+      ;; That is Emacs's own behaviour, measured - `d` then `g` leaves the
+      ;; line blank - and it was **not** this tree's until 2026-10-14,
+      ;; because the marks were kept in an alist that nothing ever
+      ;; cleared.
+      ;;
+      ;; The C searches with `(re-search-forward "^>" nil t)'; the tag is
+      ;; the line's first character, so the walk tests the character.
       ;;--------------------------------------------------------------
-      (make-parameter '()))
+      (with-current-buffer ed
+        (Buffer-menu-beginning)
+        (let loop ((buffers '()))
+          (cond
+           ((eobp) (reverse buffers))
+           (else
+            (let ((buffer (tabulated-list-get-id ed))
+                  (c (char-after (line-beginning-position))))
+              (forward-line 1)
+              (loop (if (and buffer c (char=? c *Buffer-menu-marker-char*))
+                        (cons buffer buffers)
+                        buffers))))))))
 
-    (define (Buffer-menu--mark-of buffer)
-      (let ((entry (assq buffer (*Buffer-menu-marks*))))
-        (and entry (cdr entry))))
-
-    (define (Buffer-menu--set-mark! buffer char)
-      ;; Put CHAR on BUFFER's line, or take the mark off with #f.
+    (define (Buffer-menu--unmark ed mark)
+      ;; GNU Emacs's `Buffer-menu--unmark' (`buff-menu.el:509'): "Remove
+      ;; MARK in current entry. If MARK is RET remove all marks." A mark
+      ;; can be in column 0 (the C tag) or column 2 (the M tag), so both
+      ;; are cleared - and the `*' of a modified buffer is put back in
+      ;; column 2, which is the C's "Reset modified mark".
       ;;--------------------------------------------------------------
-      (*Buffer-menu-marks*
-       (let loop ((rest (*Buffer-menu-marks*)))
-         (cond ((null? rest) (if char (list (cons buffer char)) '()))
-               ((eq? (caar rest) buffer)
-                (if char
-                    (cons (cons buffer char) (cdr rest))
-                    (cdr rest)))
-               (else (cons (car rest) (loop (cdr rest))))))))
-
-    (define (Buffer-menu-marked-buffers)
-      ;; The buffers with any mark on them: GNU Emacs's
-      ;; `Buffer-menu-marked-buffers', which reads the tags back out of
-      ;; the text.
-      ;;--------------------------------------------------------------
-      (map car (*Buffer-menu-marks*)))
+      (let ((entry (tabulated-list-get-entry ed)))
+        (when entry
+          (for-each
+           (lambda (col)
+             (when (or (char=? mark #\return)
+                       (char=? mark (string-ref (list-ref entry col) 0)))
+               (tabulated-list-set-col ed col " " #t)))
+           (list 0 2))
+          (let ((buffer (Buffer-menu-buffer)))
+            (when (and buffer (buffer-modified-p buffer)
+                       (string=? (list-ref entry 2) " "))
+              (tabulated-list-set-col ed 2 "*" #t))))))
 
     (define *Buffer-menu-size-width* 7)
     (define *Buffer-menu-mode-width* 16)
@@ -220,7 +242,7 @@
              => abbreviate-file-name)
             (else "")))
 
-    (define (Buffer-menu--row-for buffer old-buffer)
+    (define (Buffer-menu--row-for buffer old-buffer marked)
       ;; One row of the list: the seven fields of GNU Emacs's
       ;; `list-buffers--refresh', as strings.
       ;;
@@ -236,19 +258,20 @@
       ;; `mode-name'. It is a row of its own here so that when modes exist
       ;; this is the one place that changes.
       ;;--------------------------------------------------------------
-      (let ((mark (Buffer-menu--mark-of buffer)))
-        (list (cond ((eq? buffer old-buffer) ".")
-                    (mark (string mark))
-                    (else " "))
-              (if (buffer-read-only? buffer) "%" " ")
-              (cond ((eq? mark *Buffer-menu-save-char*) "S")
-                    ((buffer-modified-p buffer) "*")
-                    (else " "))
-              (Buffer-menu--pretty-name (buffer-name buffer))
-              (number->string (- (buffer-z buffer) (buffer-beg buffer)))
-              "Fundamental"
-              (Buffer-menu--pretty-file-name (text-editor-file-name buffer)
-                                                buffer))))
+      (list (cond ((eq? buffer old-buffer) ".")
+                  ((memq buffer marked) ">")
+                  (else " "))
+            (if (buffer-read-only? buffer) "%" " ")
+            ;; **`S' is not among these**, and its absence is the point:
+            ;; Emacs's `list-buffers--refresh' builds the M column from
+            ;; `(buffer-modified-p)' alone, so the `s' tag is *lost* by a
+            ;; redraw. Measured, and copied.
+            (if (buffer-modified-p buffer) "*" " ")
+            (Buffer-menu--pretty-name (buffer-name buffer))
+            (number->string (- (buffer-z buffer) (buffer-beg buffer)))
+            "Fundamental"
+            (Buffer-menu--pretty-file-name (text-editor-file-name buffer)
+                                           buffer)))
 
     (define (Buffer-menu--listed? buffer)
       ;; Whether the list shows this buffer: GNU Emacs's filter, which is
@@ -267,13 +290,23 @@
       ;; marks with `.` - Emacs passes `(current-buffer)' from
       ;; `list-buffers-noselect'.
       ;;--------------------------------------------------------------
-      (let ((old-buffer (if (pair? args) (car args) (current-buffer))))
+      (let* ((old-buffer (if (pair? args) (car args) (current-buffer)))
+             (menu (if (and (pair? args) (pair? (cdr args)))
+                       (cadr args)
+                       (current-buffer)))
+             ;; **The `>' tags are read out of the text *before* the rows
+             ;; are made**: the redraw that follows rewrites every line, and
+             ;; the tags are only in the text - GNU Emacs's
+             ;; `(marked-buffers (Buffer-menu-marked-buffers))', the first
+             ;; binding of its `list-buffers--refresh'.
+             (marked (Buffer-menu-marked-buffers menu)))
         (let loop ((rest (buffer-list)) (entries '()))
           (cond ((null? rest) (reverse entries))
                 ((Buffer-menu--listed? (car rest))
                  (loop (cdr rest)
                        (cons (cons (car rest)
-                                   (Buffer-menu--row-for (car rest) old-buffer))
+                                   (Buffer-menu--row-for (car rest) old-buffer
+                                                         marked))
                              entries)))
                 (else (loop (cdr rest) entries))))))
 
@@ -299,7 +332,7 @@
            buffer 'revert-buffer-function
            (lambda (ignore-auto noconfirm)
              (*tabulated-list-entries*
-              (lambda () (list-buffers--refresh old-buffer)))
+              (lambda () (list-buffers--refresh old-buffer buffer)))
              (Buffer-menu-redraw! buffer)
              #t))
           ;; The buffer has to be writable while it is being drawn, as
@@ -308,13 +341,22 @@
           ;; `special-mode' - the parent of Emacs's `tabulated-list-mode' -
           ;; makes it.
           (*tabulated-list-format*
-           (list (list "C" 1 #f) (list "R" 1 #f) (list "M" 1 #f)
+           ;; **GNU Emacs's own format** (`buff-menu.el:860'), its
+           ;; `:pad-right' and `:right-align' included: the C and R columns
+           ;; are packed hard against each other so the header reads
+           ;; "CRM", the M column keeps its space (which is the gap before
+           ;; the name), the size is right-aligned in its column so the
+           ;; digits line up, and the File column is last so it is never
+           ;; padded or truncated.
+           (list (list "C" 1 #f ':pad-right 0)
+                 (list "R" 1 #f ':pad-right 0)
+                 (list "M" 1 #f)
                  (list "Buffer" (Buffer-menu-name-width (buffer-list)) #f)
-                 (list "Size" *Buffer-menu-size-width* #f)
+                 (list "Size" *Buffer-menu-size-width* #f ':right-align #t)
                  (list "Mode" *Buffer-menu-mode-width* #f)
-                 (list "File" 0 #f)))
+                 (list "File" 1 #f)))
           (*tabulated-list-entries*
-           (lambda () (list-buffers--refresh old-buffer)))
+           (lambda () (list-buffers--refresh old-buffer buffer)))
           (Buffer-menu-redraw! buffer)
           buffer)))
 
@@ -386,11 +428,10 @@
       "Mark the buffer on this line for display (m)."
       (interactive)
 
-         (let ((buffer (Buffer-menu-buffer)))
-           (when buffer
-             (Buffer-menu--set-mark! buffer *Buffer-menu-marker-char*)
-             (Buffer-menu-redraw! (current-buffer)))
-           (Buffer-menu--move-down!)))
+         (when (Buffer-menu-buffer)
+           (tabulated-list-set-col (current-buffer) 0
+                                   (string *Buffer-menu-marker-char*) #t))
+         (Buffer-menu--move-down!))
     (define-command (Buffer-menu-delete count)
       ;; GNU Emacs's `Buffer-menu-delete' (d, k): mark the buffer on this
       ;; line for deletion, and go on to the next one. Nothing is killed
@@ -400,11 +441,10 @@
       "Mark the buffer on this line for deletion (d)."
       (interactive "p")
 
-         (let ((buffer (Buffer-menu-buffer)))
-           (when buffer
-             (Buffer-menu--set-mark! buffer *Buffer-menu-del-char*)
-             (Buffer-menu-redraw! (current-buffer)))
-           (Buffer-menu--move-down!)))
+         (when (Buffer-menu-buffer)
+           (tabulated-list-set-col (current-buffer) 0
+                                   (string *Buffer-menu-del-char*) #t))
+         (Buffer-menu--move-down!))
     (define-command (Buffer-menu-unmark)
       ;; GNU Emacs's `Buffer-menu-unmark' (u): take every mark off this
       ;; line, and go on to the next one.
@@ -413,11 +453,9 @@
       "Remove all marks from this line (u)."
       (interactive)
 
-         (let ((buffer (Buffer-menu-buffer)))
-           (when buffer
-             (Buffer-menu--set-mark! buffer #f)
-             (Buffer-menu-redraw! (current-buffer)))
-           (Buffer-menu--move-down!)))
+         (when (Buffer-menu-buffer)
+           (Buffer-menu--unmark (current-buffer) #\return))
+         (Buffer-menu--move-down!))
     (define-command (Buffer-menu-save)
       ;; GNU Emacs's `Buffer-menu-save' (s): mark the buffer on this line
       ;; to be saved, and go on to the next one. (Marking it says so in
@@ -428,11 +466,9 @@
       "Mark the buffer on this line to be saved (s)."
       (interactive)
 
-         (let ((buffer (Buffer-menu-buffer)))
-           (when buffer
-             (Buffer-menu--set-mark! buffer *Buffer-menu-save-char*)
-             (Buffer-menu-redraw! (current-buffer)))
-           (Buffer-menu--move-down!)))
+         (when (Buffer-menu-buffer)
+           (tabulated-list-set-col (current-buffer) 2 "S" #t))
+         (Buffer-menu--move-down!))
     (define-command (Buffer-menu-not-modified arg)
       ;; GNU Emacs's `Buffer-menu-not-modified' (`buff-menu.el:585'):
       ;;
@@ -548,27 +584,47 @@ it as modified."
       (interactive)
 
          (let ((frame (*current-frame*))
+               (ed (current-buffer))
                (killed 0)
                (saved 0)
                (failed '()))
-           (for-each
-            (lambda (buffer)
-              (let ((mark (Buffer-menu--mark-of buffer)))
-                (cond
-                 ((eq? mark *Buffer-menu-save-char*)
-                  (guard (ex (else (set! failed (cons (buffer-name buffer)
+           ;; **The list is walked a line at a time**, which is how Emacs's
+           ;; `Buffer-menu-execute' walks it: the marks are characters in
+           ;; the text, so the text is what says what to do. The character
+           ;; at point is the C column - the tag - and column 2 of the
+           ;; line's entry is the M column.
+           ;;
+           ;; (Emacs wraps the walk in `save-excursion'; here the walk ends
+           ;; with a redraw, which puts point back at the first line
+           ;; itself.)
+           (with-current-buffer ed
+             (Buffer-menu-beginning)
+             (let loop ()
+               (unless (eobp)
+                 (let ((buffer (tabulated-list-get-id ed))
+                       (entry (tabulated-list-get-entry ed)))
+                   (cond
+                    ((not entry) (forward-line 1))
+                    ((not (buffer-live-p buffer))
+                     ;; the buffer is gone: its line goes with it
+                     (tabulated-list-delete-entry ed))
+                    (else
+                     (let ((delete? (char=? (char-after (point))
+                                            *Buffer-menu-del-char*)))
+                       (when (string=? (list-ref entry 2) "S")
+                         (guard (ex (else (set! failed
+                                                (cons (buffer-name buffer)
                                                       failed))))
-                    (with-current-buffer buffer (save-buffer))
-                    (Buffer-menu--set-mark! buffer #f)
-                    (set! saved (+ 1 saved))))
-                 ((eq? mark *Buffer-menu-del-char*)
-                  (when (and (buffer-live-p buffer)
-                             (not (eq? buffer (current-buffer)))
-                             (kill-buffer buffer))
-                    (Buffer-menu--set-mark! buffer #f)
-                    (set! killed (+ 1 killed)))))))
-            (Buffer-menu-marked-buffers))
-           (Buffer-menu-redraw! (current-buffer))
+                           (with-current-buffer buffer (save-buffer))
+                           (tabulated-list-set-col ed 2 " " #t)
+                           (set! saved (+ 1 saved))))
+                       (if (and delete?
+                                (not (eq? buffer ed))
+                                (kill-buffer buffer))
+                           (tabulated-list-delete-entry ed)
+                           (forward-line 1))))))
+                 (loop))))
+           (Buffer-menu-redraw! ed)
            (set!frame-message
             frame
             (cond ((pair? failed)

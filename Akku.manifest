@@ -1,8 +1,8 @@
 #!r6rs ; -*- mode: scheme; coding: utf-8 -*-
 (import (akku format manifest))
 
-(akku-package ("schemacs" "0.0.0-alpha.0")
-  (synopsis "A clone of Emacs and Emacs Lisp written in R7RS Scheme")
+(akku-package ("schemacs" "0.0.1")
+  (synopsis "A clone of Emacs written in Scheme")
   (description
    "A Scheme clone of Emacs")
   (license "LGPL-2.1")
