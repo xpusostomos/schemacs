@@ -66,14 +66,16 @@ project there.
 
 - [Guile-GI](https://github.com/spk121/guile-gi) must be built and
   installed in a directory path that is listed in the `%load-path`.
+  The arch AUR version is rather old but works fine.
 
 - [Guile-Cairo](https://www.nongnu.org/guile-cairo/) must be built
   and installed in a directory path that is listed in the `%load-path`
-  (Note, last I checked the Arch AUR guile-cairo is too old.)
+  (Note, last I checked the Arch AUR guile-cairo is too old and won't work.
+  Suggesting downloading and sudo make install)
   
 - [Guile-Ncurses](https://www.gnu.org/software/guile-ncurses/) must be built and
   installed in a directory path that is listed in the `%load-path`.
-
+  The arch AUR version works.
 
 ## How to install
 
@@ -193,12 +195,14 @@ emacs functionality exactly.
 
 In my opinion, Ramin's project has fundamentally gone on the wrong
 track. On the one hand it is putting a lot of effort into elisp
-compatibility. However the elisp strategy is a strategy for 100%
-code compatibility. However the editor bits that Ramin has implemented
-have functions that don't have emacs names, and don't have emacs
-shapes. So he is on the way to having an editor with functioning
-elisp but can't run emacs packages, because all the functions
-and api names are completely different. He also says on his
+compatibility. However the elisp strategy is a strategy for 100% code
+compatibility. However the editor bits that Ramin has implemented have
+functions that don't have emacs names, and don't have emacs shapes. So
+he is on the way to having an editor with functioning elisp but can't
+run emacs packages, because all the functions and api names are
+completely different. That doesn't mean the design is bad, it just
+means it's not a road to compatibility, and at best is a far longer
+road to working, at worst it just won't work.  He also says on his
 README that he is not in a hurry...
 
 ## Future directions

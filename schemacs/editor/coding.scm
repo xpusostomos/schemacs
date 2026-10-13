@@ -1177,75 +1177,125 @@
            (= (bytevector-u8-ref bytes 1) #xBB)
            (= (bytevector-u8-ref bytes 2) #xBF)))
 
-    (define (%utf-8-sequence-length c)
-      ;; How many bytes the sequence C leads, or 0 when C cannot lead one.
-      ;;
-      ;; The C's five-octet case (`UTF_8_5_OCTET_LEADING_P (c) && c <
+    (define (%utf-8-lead-length c)
+      ;; The C's `UTF_8_2/3/4_OCTET_LEADING_P': how many bytes the lead C
+      ;; opens, or 0 for a byte that leads nothing. The C's five-octet
+      ;; case (`UTF_8_5_OCTET_LEADING_P (c) && c <
       ;; MAX_MULTIBYTE_LEADING_CODE') can never be taken - a five-octet
-      ;; lead has bit 3 of the top nibble set, and `MAX_MULTIBYTE_LEADING_CODE'
-      ;; is `0xF8' (`character.h:65') - so a five-byte form is refused,
-      ;; exactly as the C refuses it.
+      ;; lead has bit 3 of the top nibble set, and
+      ;; `MAX_MULTIBYTE_LEADING_CODE' is `0xF8' (`character.h:65') - so a
+      ;; five-byte form is refused, exactly as the C refuses it.
       ;;--------------------------------------------------------------
       (cond ((= (logand c #xE0) #xC0) 2)
             ((= (logand c #xF0) #xE0) 3)
             ((= (logand c #xF8) #xF0) 4)
             (else 0)))
 
-    (define (detect-coding-utf-8 bytes head-ascii info)
-      ;; GNU Emacs's `detect_coding_utf_8' (`coding.c:5811'): whether BYTES
+    (define (%utf-8-extra-octet? c)
+      ;; The C's `UTF_8_EXTRA_OCTET_P': a continuation byte, `10xxxxxx'.
+      ;;--------------------------------------------------------------
+      (= (logand c #xC0) #x80))
+
+    (define (detect-coding-utf-8 bytes head-ascii info last-block?)
+      ;; GNU Emacs's `detect_coding_utf_8' (`coding.c:1130'): whether BYTES
       ;; could be UTF-8. It sets the masks on INFO and answers whether the
       ;; source ran out before anything invalid was found.
       ;;
-      ;; A *valid* sequence is not the question - whether one can be read
-      ;; from the start to the end is, which is why a truncated sequence at
-      ;; the end rejects (`if (src_base < src && LAST_BLOCK)').
+      ;; **The scan is the C's, octet by octet**, not a classification of
+      ;; the lead byte: the C reads the next octet and only *then* asks
+      ;; which length the lead opened -
+      ;;
+      ;;     ONE_MORE_BYTE (c1);
+      ;;     if (c1 < 0 || ! UTF_8_EXTRA_OCTET_P (c1)) break;
+      ;;     if (UTF_8_2_OCTET_LEADING_P (c)) { nchars++; continue; }
+      ;;     ONE_MORE_BYTE (c2); ...
+      ;;
+      ;; - so a byte that leads nothing is still *consumed* as a lead, and
+      ;; the scan gives up only when the next octet is missing or wrong.
+      ;; That is what separates this from a scan that classifies the lead
+      ;; first: `a1 a1' is taken as a lead and one octet, and the input
+      ;; then ends.
+      ;;
+      ;; **`last-block?' is `CODING_MODE_LAST_BLOCK'**, and it decides what
+      ;; running out means. In the last block a sequence cut off by the end
+      ;; of the input is a rejection; anywhere else it is inconclusive, and
+      ;; the scan ends the way a clean end of input does. The read path is
+      ;; the anywhere else: `insert-file-contents' decodes through
+      ;; `decode_coding_gap', which never sets the flag, so a file Emacs
+      ;; reads as UTF-8 need not be valid UTF-8 at all.
+      ;; `detect-coding-region' goes through `detect_coding_system', which
+      ;; sets it, which is why the two disagree on short input.
       ;;--------------------------------------------------------------
       (set!detection-info-checked info
         (logior (detection-info-checked info) *category-mask-utf-8*))
       (let* ((n (bytevector-length bytes))
              (bom? (and (= head-ascii 0) (< (+ 3 0) n) (%utf-8-bom? bytes)))
-             (start (if bom? 3 head-ascii)))
+             (start (if bom? 3 head-ascii))
+             (byte-at (lambda (i)
+                        (if (< i n) (bytevector-u8-ref bytes i) -1))))
+        (define (bad)
+          ;; The C's `break', which falls out of the loop onto an
+          ;; unconditional rejection.
+          (%reject! info *category-mask-utf-8*)
+          #f)
+        (define (no-more-source src-base i nchars)
+          ;; The C's `no_more_source', which `ONE_MORE_BYTE' jumps to. The
+          ;; `src_base < src' test is the C's: running out *between*
+          ;; characters is not a bad sequence, only running out inside one
+          ;; can be - and only in the last block.
+          (if (and (< src-base i) last-block?)
+              (bad)
+              (begin
+                (cond
+                 (bom?
+                  ;; "The first character 0xFFFE doesn't necessarily mean
+                  ;; a BOM." - with one, all three categories are possible.
+                  (%found! info *category-mask-utf-8*))
+                 (else
+                  (%reject! info (%mask 'utf-8-sig))
+                  (when (< nchars n)
+                    ;; Fewer characters than source bytes: a valid
+                    ;; non-ASCII character was read.
+                    (%found! info (+ (%mask 'utf-8-auto)
+                                     (%mask 'utf-8-nosig))))))
+                #t)))
         (let loop ((i start) (nchars (if bom? (+ head-ascii 1) head-ascii)))
-          (cond
-           ((>= i n)
-            (cond
-             (bom?
-              ;; "The first character 0xFFFE doesn't necessarily mean a
-              ;; BOM." - with one, all three categories are possible.
-              (%found! info *category-mask-utf-8*))
-             (else
-              (%reject! info (%mask 'utf-8-sig))
-              (when (< nchars n)
-                ;; The characters found are fewer than the source bytes,
-                ;; which means a valid non-ASCII character was read.
-                (%found! info (+ (%mask 'utf-8-auto) (%mask 'utf-8-nosig))))))
-            #t)
-           (else
-            (let ((c (bytevector-u8-ref bytes i)))
-              (if (< c #x80)
-                  ;; ASCII. A CR-LF pair is two bytes and one character,
-                  ;; which is the C's own bookkeeping.
-                  (loop (if (and (= c 13) (< (+ i 1) n)
-                                 (= (bytevector-u8-ref bytes (+ i 1)) 10))
-                            (+ i 2)
-                            (+ i 1))
-                        (+ nchars 1))
-                  (let ((len (%utf-8-sequence-length c)))
-                    (cond
-                     ((or (= len 0) (> (+ i len) n))
-                      ;; Not a lead byte, or the source ran out inside the
-                      ;; sequence.
-                      (%reject! info *category-mask-utf-8*)
-                      #f)
-                     ((let bad ((j (+ i 1)))
-                        ;; Every other byte is `10xxxxxx'.
-                        (cond ((= j (+ i len)) #f)
-                              ((= (logand (bytevector-u8-ref bytes j) #xC0) #x80)
-                               (bad (+ j 1)))
-                              (else #t)))
-                      (%reject! info *category-mask-utf-8*)
-                      #f)
-                     (else (loop (+ i len) (+ nchars 1))))))))))))
+          (let ((src-base i))
+            (let ((c (byte-at i)))
+              (if (= c -1)
+                  (no-more-source src-base i nchars)
+                  (let ((i (+ i 1)))
+                    (if (< c #x80)
+                        ;; `UTF_8_1_OCTET_P'. A CR-LF pair is two bytes and
+                        ;; one character, the C's own bookkeeping.
+                        (loop (if (and (= c 13) (< i n)
+                                       (= (bytevector-u8-ref bytes i) 10))
+                                  (+ i 1)
+                                  i)
+                              (+ nchars 1))
+                        ;; The C's chain of reads and class tests.
+                        (let octet ((k 1) (i i))
+                          (let ((ck (byte-at i)))
+                            (cond
+                             ((= ck -1)
+                              (no-more-source src-base i nchars))
+                             ((not (%utf-8-extra-octet? ck)) (bad))
+                             (else
+                              (let ((i (+ i 1)))
+                                (cond
+                                 ((= k 1)
+                                  (if (= 2 (%utf-8-lead-length c))
+                                      (loop i (+ nchars 1))
+                                      (octet 2 i)))
+                                 ((= k 2)
+                                  (if (= 3 (%utf-8-lead-length c))
+                                      (loop i (+ nchars 1))
+                                      (octet 3 i)))
+                                 ((= k 3)
+                                  (if (= 4 (%utf-8-lead-length c))
+                                      (loop i (+ nchars 1))
+                                      (octet 4 i)))
+                                 (else (bad))))))))))))))))
 
     (define (%latin-extra-code? byte)
       ;; GNU Emacs's `latin-extra-code-table' (`charset.c'), which is nil
@@ -1269,7 +1319,11 @@
       ;;--------------------------------------------------------------
       #t)
 
-    (define (detect-coding-charset bytes head-ascii info)
+    (define (detect-coding-charset bytes head-ascii info last-block?)
+      ;; LAST-BLOCK? is taken and not used: `detect_coding_charset' is not
+      ;; one of the four detectors that consult `CODING_MODE_LAST_BLOCK'
+      ;; (utf-8, emacs-mule, sjis, big5 - `coding.c:1215', `:1908',
+      ;; `:4618', `:4665'), and every detector is called alike.
       ;; GNU Emacs's `detect_coding_charset' (`coding.c:5900'): whether
       ;; BYTES could be text in the charset the `charset' category's
       ;; coding system uses.
@@ -1327,7 +1381,7 @@
       ;;--------------------------------------------------------------
       #xEF)
 
-    (define (detect-coding-sjis bytes head-ascii info)
+    (define (detect-coding-sjis bytes head-ascii info last-block?)
       ;; GNU Emacs's `detect_coding_sjis' (`coding.c:5885'): whether BYTES
       ;; could be Shift-JIS. The same shape as the UTF-8 detector - set
       ;; the masks on INFO, and answer whether the source ran out before
@@ -1352,8 +1406,13 @@
                ((or (and (>= c #x81) (<= c #x9F))
                     (and (>= c #xE0) (<= c *sjis-max-first-byte*)))
                 (if (>= (+ i 1) n)
-                    ;; the source ran out inside a two-byte character
-                    (begin (%reject! info (%mask 'sjis)) #f)
+                    ;; `ONE_MORE_BYTE' ran out inside a two-byte character:
+                    ;; the C's `no_more_source', which rejects only in the
+                    ;; last block (`CODING_MODE_LAST_BLOCK') and otherwise
+                    ;; ends the scan having found what it found.
+                    (if last-block?
+                        (begin (%reject! info (%mask 'sjis)) #f)
+                        (begin (%found! info found) #t))
                     (let ((c1 (bytevector-u8-ref bytes (+ i 1))))
                       (if (or (< c1 #x40) (= c1 #x7F) (> c1 #xFC))
                           (begin (%reject! info (%mask 'sjis)) #f)
@@ -1361,7 +1420,7 @@
                ((and (>= c #xA0) (< c #xE0)) (loop (+ i 1) (%mask 'sjis)))
                (else (%reject! info (%mask 'sjis)) #f))))))))
 
-    (define (detect-coding-big5 bytes head-ascii info)
+    (define (detect-coding-big5 bytes head-ascii info last-block?)
       ;; GNU Emacs's `detect_coding_big5' (`coding.c:5900'): whether BYTES
       ;; could be Big5. A byte at or above 0xA1 leads a two-byte
       ;; character whose second byte is 0x40-0x7E or 0xA1-0xFE; anything
@@ -1388,15 +1447,19 @@
                ((< c #x80) (loop (+ i 1) found))
                ((>= c #xA1)
                 (if (>= (+ i 1) n)
-                    ;; the source ran out inside a two-byte character
-                    (begin (%reject! info (%mask 'big5)) #f)
+                    ;; `ONE_MORE_BYTE' ran out inside a two-byte character:
+                    ;; the C's `no_more_source', rejecting only in the last
+                    ;; block and otherwise ending the scan as it found it.
+                    (if last-block?
+                        (begin (%reject! info (%mask 'big5)) #f)
+                        (begin (%found! info found) #t))
                     (let ((c1 (bytevector-u8-ref bytes (+ i 1))))
                       (cond ((< c1 #x40) #f)          ; the C's bare `return 0'
                             ((and (>= c1 #x7F) (<= c1 #xA0)) #f)
                             (else (loop (+ i 2) (%mask 'big5)))))))
                (else (%reject! info (%mask 'big5)) #f))))))))
 
-    (define (detect-coding-utf-16 bytes head-ascii info)
+    (define (detect-coding-utf-16 bytes head-ascii info last-block?)
       ;; GNU Emacs's `detect_coding_utf_16' (`coding.c:6100'): whether
       ;; BYTES could be UTF-16, and which byte order.
       ;;
@@ -1417,9 +1480,12 @@
         (logior (detection-info-checked info) *category-mask-utf-16*))
       (let ((n (bytevector-length bytes)))
         (cond
-         ;; `CODING_MODE_LAST_BLOCK && (src_chars & 1)': the whole block
-         ;; is always here, and an odd number of bytes cannot be UTF-16.
-         ((odd? n) (%reject! info *category-mask-utf-16*) #f)
+         ;; `CODING_MODE_LAST_BLOCK && (src_chars & 1)': an odd byte
+         ;; count is a rejection only in the last block. The read path is
+         ;; never the last block, so an odd-length file still gets the
+         ;; measurement below.
+         ((and last-block? (odd? n))
+          (%reject! info *category-mask-utf-16*) #f)
          ;; `TWO_MORE_BYTES' ran out - the C's `goto no_more_source',
          ;; which answers 1 having set nothing.
          ((< n 2) #t)
@@ -1552,7 +1618,7 @@
         ((utf-16-auto) detect-coding-utf-16)
         (else #f)))
 
-    (define (detect-coding-system bytes highest)
+    (define (%detect-coding-system bytes highest last-block?)
       ;; GNU Emacs's `detect_coding_system': "Detect a coding system for
       ;; the text SRC of length SRC_BYTES ... If HIGHEST is nonzero, it
       ;; returns the coding system of the highest priority."
@@ -1639,8 +1705,10 @@
                             (walk (cdr ps))))
                        (else
                         (let ((detector (%detector-for category)))
-                          (let ((accepted (and detector
-                                               (detector bytes head-ascii info))))
+                          (let ((accepted
+                                 (and detector
+                                      (detector bytes head-ascii info
+                                                last-block?))))
                             (if (and accepted highest
                                      (not (= 0 (logand (detection-info-found info) bit))))
                                 ;; The C's one special case: a coding
@@ -1659,16 +1727,34 @@
                                  info null-byte-found)
                                 (walk (cdr ps)))))))))))))))))
 
-    (define (detect-coding-bytes bytes highest)
-      ;; `detect-coding-system' under the name the file layer calls it by.
-      ;; `detect-coding-region' is the C's name for the public function and
-      ;; it takes a *buffer region*; nothing here has one, so the bytes are
-      ;; the argument and the algorithm is the same one. The answer is
-      ;; settled against the line ends, as `detect_coding_system''s own
-      ;; closing loop does, so what comes back is `iso-latin-1-unix' and
-      ;; not `iso-latin-1'.
+    (define (detect-coding-system bytes highest)
+      ;; The public door: GNU Emacs's `detect_coding_system', which
+      ;; `detect-coding-region' and `detect-coding-string' call. It is the
+      ;; *last block* - the whole region is here at once - which is what
+      ;; `detect_coding_system' sets `CODING_MODE_LAST_BLOCK' to say.
       ;;--------------------------------------------------------------
-      (let* ((found (detect-coding-system bytes highest))
+      (%detect-coding-system bytes highest #t))
+
+    (define (detect-coding-bytes bytes highest)
+      ;; The read path's detector: GNU Emacs's `detect_coding', which
+      ;; `decode_coding_gap' calls (`coding.c:7926') and so
+      ;; `insert-file-contents' uses (`fileio.c:5114'), under the name the
+      ;; file layer calls it by. The algorithm is the one above.
+      ;;
+      ;; **It is not `detect-coding-system'**, and the difference is
+      ;; `CODING_MODE_LAST_BLOCK': `decode_coding_gap' never sets it, so
+      ;; for the read path a sequence cut off by the end of the file is
+      ;; *inconclusive* rather than invalid. That is why a short file Emacs
+      ;; reads as UTF-8 need not be valid UTF-8 at all - `a1 a1' is
+      ;; `utf-8-unix' to `find-file' and `iso-latin-1' to
+      ;; `detect-coding-region'. See `detect-coding-utf-8' for the scan
+      ;; that turns on it.
+      ;;
+      ;; The answer is settled against the line ends, as `detect_coding''s
+      ;; own closing does, so what comes back is `iso-latin-1-unix' and not
+      ;; `iso-latin-1'.
+      ;;--------------------------------------------------------------
+      (let* ((found (%detect-coding-system bytes highest #f))
              (eol (if (bytes-have-null? bytes) 'unix (detect-eol bytes))))
         (and found
              (map (lambda (name) (or (adjust-coding-eol-type name eol) name))

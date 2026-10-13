@@ -442,17 +442,27 @@
   (list (detected 45 78 135 101 45 78)
         (detected 78 45 101 135 78 45)))
 
-(test-equal "an odd byte count cannot be UTF-16, and raw-text is the fallback"
-  ;; The detector's first test - `(coding->src_chars & 1)' with the whole
-  ;; block present - rejects the five UTF-16 categories outright. What
-  ;; comes back is `raw-text' and not `no-conversion', and that is the
-  ;; *other* thing this case pins: the walk is bounded by a priority
-  ;; *position* compared against raw_text's *index* - the C's
-  ;; `for (i = 0; i < coding_category_raw_text; i++)' - so the last two
-  ;; entries are never tested at all, and raw_text, never rejected, is
-  ;; what the last-resort branch finds. Emacs's `detect-coding-region' on
-  ;; these bytes answers `(raw-text)', measured.
-  '(raw-text-unix raw-text)
+(test-equal "the last block decides what an odd byte count means"
+  ;; Two doors, and the difference between them is `CODING_MODE_LAST_BLOCK'.
+  ;;
+  ;; `detect-coding-region' is the *whole block*, so an odd byte count
+  ;; rejects the five UTF-16 categories outright (`(coding->src_chars & 1)'
+  ;; under the flag) - and what comes back is `raw-text' and not
+  ;; `no-conversion', which is the *other* thing this case pins: the walk
+  ;; is bounded by a priority *position* compared against raw_text's
+  ;; *index* - the C's `for (i = 0; i < coding_category_raw_text; i++)' -
+  ;; so the last two entries are never tested at all, and raw_text, never
+  ;; rejected, is what the last-resort branch finds. Measured: Emacs's
+  ;; `detect-coding-region' on these bytes answers `(raw-text)'.
+  ;;
+  ;; The *file* read is not the last block - `decode_coding_gap' never sets
+  ;; the flag - so the same bytes take the other side of the same rule: the
+  ;; scan runs out *inside* `87', which is inconclusive rather than
+  ;; invalid, and `utf-8' is then the first priority left unrejected.
+  ;; Measured: `find-file' on these bytes is `utf-8-unix'. **This test
+  ;; expected `raw-text-unix' until 2026-10-13 and was pinning the
+  ;; departure.**
+  '(utf-8-unix raw-text)
   (list (detected 45 78 135)
         (car (detect-coding-system (list->u8vector (list 45 78 135)) #f))))
 

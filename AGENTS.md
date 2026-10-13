@@ -60,6 +60,11 @@ look at the emacs code to find out definitively the rule.
 If Emacs implements an algorithm in several functions, you should too. Don't
 try and mash it into one.
 
+If you're told to implement an emacs feature, but you think you can see
+a better way of doing it... don't... at least not without asking.
+We are trying an exact replica of emcacs right down to the algorithms.
+Follow emacs way anyway.
+
 If you find an emacs function that uses a primitive that we don't have.
 Don't try and paper over it by getting around it. It's your job to find that
 primitive, port that primitve and make sure our entire code base uses that
