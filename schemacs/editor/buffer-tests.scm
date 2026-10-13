@@ -1,10 +1,10 @@
 (import
+ (only (schemacs editor buffer) allocate-buffer)
  (only (schemacs editor editfns) insert)
  (scheme base)
  (scheme char)
  (only (srfi 64) test-assert test-equal test-begin test-end)
- (only (schemacs editor engine)
-       allocate-buffer       text-editor-set-cursor)
+ 
  (only (schemacs editor textprop) get-char-property put-text-property)
  (only (schemacs editor frame)
        *current-frame* *echo-area-buffer* new-frame selected-window
@@ -269,7 +269,7 @@
        (parameterize ((*current-buffer* b))
          (with-current-buffer b (insert "hello world"))
          (let ((o (make-overlay 1 6)))
-           (text-editor-set-cursor b 1)
+           (set-point b 1)
            (with-current-buffer b (insert "abc"))
            (list (overlay-start o) (overlay-end o))))))))
 
@@ -283,7 +283,7 @@
        (parameterize ((*current-buffer* b))
          (with-current-buffer b (insert "hello world"))
          (let ((o (make-overlay 1 6 #f #t)))   ; front-advance
-           (text-editor-set-cursor b 1)
+           (set-point b 1)
            (with-current-buffer b (insert "abc"))
            (list (overlay-start o) (overlay-end o))))))))
 
@@ -297,7 +297,7 @@
        (parameterize ((*current-buffer* b))
          (with-current-buffer b (insert "hello world"))
          (let ((o (make-overlay 0 5)))
-           (text-editor-set-cursor b 5)
+           (set-point b 5)
            (with-current-buffer b (insert "XYZ"))
            (list (overlay-start o) (overlay-end o))))))))
 

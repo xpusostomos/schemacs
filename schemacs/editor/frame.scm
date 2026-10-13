@@ -44,9 +44,7 @@
            screen-size suspend-display!)
      (mouse-position display-mouse-position))
     (only (schemacs editor marker) build-marker marker-position set-marker make-marker)
-    (only (schemacs editor engine)
-            buffer-beg
-          buffer-pt text-editor-set-cursor)
+    
     ;; `*current-buffer*' is the C global `current_buffer', which this
     ;; library writes (`select-window') and re-exports; its definition is
     ;; in the lower library, which defines the buffer record. The two
@@ -58,7 +56,7 @@
           ;; `FETCH_CHAR` (`buffer.h`) - the raw read of a named
           ;; buffer. It has no Lisp name, and it was the engine's
           ;; until 2026-10-13.
-          fetch-char)
+          fetch-char set-point buffer-beg buffer-pt)
     ;; The seam `insdel.scm` declares for `adjust_suspend_auto_hscroll` -
     ;; it reads the selected window, which is this library's, so it is
     ;; installed here.
@@ -418,7 +416,7 @@
       ;;--------------------------------------------------------------
       (set-marker (%window-point window) index (window-buffer window))
       (when (eq? window (selected-window))
-        (text-editor-set-cursor (window-buffer window) index))
+        (set-point (window-buffer window) index))
       index)
 
     (define (mouse-position)
@@ -1297,7 +1295,7 @@
         (when changing?
           (let ((new-window (frame-selected-window frame)))
             (when new-window
-              (text-editor-set-cursor
+              (set-point
                (window-buffer new-window)
                (marker-position (%window-point new-window))))))
         ;; **... and it makes that window's buffer current**, which is the
@@ -1756,7 +1754,7 @@
                        (window-buffer old))
           (set!frame-selected-window frame window)
           ;; ... and the one being selected gives the buffer its point
-          (text-editor-set-cursor (window-buffer window)
+          (set-point (window-buffer window)
                                   (marker-position (%window-point window))))
         ;; **`Fset_buffer (w->contents)' - the first line of
         ;; `Fselect_window' (`window.c:534'), which runs before the C

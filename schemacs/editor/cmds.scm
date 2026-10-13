@@ -23,7 +23,7 @@
     (only (guile) format most-positive-fixnum)
     (only (schemacs editor character) char-width characterp)
     (only (schemacs editor buffer)
-          buffer-overwrite-mode current-buffer)
+          buffer-overwrite-mode current-buffer set-point buffer-pt buffer-beg buffer-z)
     (only (schemacs editor editfns)
           char-after char-before delete-region goto-char insert
           insert-and-inherit
@@ -37,8 +37,7 @@
     (only (schemacs editor command)
           define-command uarg->integer current-prefix-arg
           *last-command-event*)
-    (only (schemacs editor engine)
-          buffer-pt buffer-beg buffer-z text-editor-set-cursor)
+    
     )
 
   (export
@@ -268,7 +267,8 @@ a non-nil value for the inserted character.  At the end, it runs
       ;; boundary; and it then **signals** - "On reaching end or beginning
       ;; of buffer, stop and signal error" - so a command that runs off
       ;; the end fails with `end-of-buffer' rather than quietly clamping.
-      ;; The tree's `text-editor-move-cursor' clamps and says nothing.
+      ;; The tree's `text-editor-move-cursor' clamped and said nothing;
+      ;; it is gone (2026-10-13), and this is the only move there is.
       ;;
       ;; Emacs signals `beginning-of-buffer' and `end-of-buffer'; the
       ;; messages their error symbols carry, measured, are "Beginning of
@@ -282,13 +282,13 @@ a non-nil value for the inserted character.  At the end, it runs
                (high (buffer-z ed)))
           (cond
            ((< new low)
-            (text-editor-set-cursor ed low)
+            (set-point ed low)
             (error "Beginning of buffer"))
            ((> new high)
-            (text-editor-set-cursor ed high)
+            (set-point ed high)
             (error "End of buffer"))
            (else
-            (text-editor-set-cursor ed new)
+            (set-point ed new)
             #f)))))
 
     (define-command (forward-char . rest)

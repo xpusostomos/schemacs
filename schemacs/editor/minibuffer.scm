@@ -28,6 +28,7 @@
   ;; See LAYOUT-PLAN.txt for the rule this library is a step of.
 
   (import
+ (only (schemacs editor undo) text-editor-undo-disable!)
     ;; `kbd' - see `character.sld''s export note for why it is there
     (only (schemacs editor character) kbd)
     (scheme base)
@@ -50,13 +51,7 @@
     ;; `intervals.scm`'s - it must live below `search.scm`, which
     ;; calls it and cannot import `editfns.scm` (2026-10-13).
     (only (schemacs editor intervals) make-buffer-string)
-    (only (schemacs editor engine)
-    allocate-buffer buffer-beg
-          buffer-beg buffer-z
-          text-editor-delete-from-cursor buffer-pt
-text-editor-set-cursor
-          set!buffer-read-only
-          text-editor-undo-disable!)
+    
     ;; `logior' is Guile's: the bitset is three bit flags.
     (only (guile) logior)
     ;; The `*Completions*' buffer is filled with the `face' text property
@@ -77,7 +72,7 @@ text-editor-set-cursor
           set-buffer-local-value! use-local-map with-current-buffer
           ;; `read-buffer''s completion is over the buffer registry, which
           ;; is an alist of `(NAME . BUFFER)' - see `internal-complete-buffer'
-          *buffer-list* buffer-name bufferp other-buffer)
+          *buffer-list* buffer-name bufferp other-buffer set-point allocate-buffer buffer-beg buffer-z buffer-pt set!buffer-read-only)
     ;; `getcwd' is Guile's, for a buffer that has no `default-directory'.
     (only (guile) getcwd)
     ;; `(scheme eval)''s `eval' is the evaluator `eval-expression' runs,
@@ -462,7 +457,7 @@ read-number-history
         ;; Emacs disables undo in the minibuffer.
         (text-editor-undo-disable! ed)
         (when text (with-current-buffer ed (insert text)))
-        (text-editor-set-cursor ed
+        (set-point ed
                                 (if at
                                     (min at (buffer-z ed))
                                     (buffer-z ed)))
@@ -1161,9 +1156,9 @@ read-number-history
       (let ((mb (*minibuffer*)))
         (when mb
           (let ((ed (minibuffer-editor mb)))
-            (text-editor-set-cursor ed (buffer-beg ed))
-            (text-editor-delete-from-cursor ed (- (buffer-z ed) (buffer-beg ed)))
-            (with-current-buffer ed (insert completion))))))
+            (with-current-buffer ed
+              (delete-region (buffer-beg ed) (buffer-z ed))
+              (insert completion))))))
 
     (define (completion--do-completion string table predicate point expect-exact)
       ;; GNU Emacs's `completion--do-completion': complete STRING, put the
@@ -1872,7 +1867,7 @@ read-number-history
       ;; why Emacs's line does not offer to click.
       ;;--------------------------------------------------------------
       (when (*completion-show-help*)
-        (text-editor-set-cursor buffer (buffer-beg buffer))
+        (set-point buffer (buffer-beg buffer))
         (with-current-buffer buffer (insert "Type M-RET on a completion to select it.\n"))
         (with-current-buffer buffer (insert (string-append
                              "Type M-<down> or M-<up> to move point between "
@@ -2043,9 +2038,11 @@ read-number-history
       (let loop ((rest completions))
         (if (null? rest)
             (begin
-              (text-editor-set-cursor
-               buffer (- (buffer-z buffer) 1))
-              (text-editor-delete-from-cursor buffer 1))
+              ;; The separator after the last candidate comes off, and
+              ;; point steps back across it - Emacs's `(delete-char -1)'
+              ;; with point at the end.
+              (with-current-buffer buffer
+                (delete-region (- (buffer-z buffer) 1) (buffer-z buffer))))
             (begin
               (insert-completion-cell! buffer (car rest))
               (insert-completion-separator! buffer "\n")
@@ -2485,7 +2482,7 @@ read-number-history
                                 (completion-next-cell-start
                                  buffer (buffer-pt buffer)))))
                   (if next
-                      (begin (text-editor-set-cursor buffer next)
+                      (begin (set-point buffer next)
                              (loop (- left 1) step))
                       (loop 0 step))))
           ;; the window is a view of the buffer, so its point follows

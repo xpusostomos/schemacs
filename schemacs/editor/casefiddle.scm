@@ -26,6 +26,7 @@
   ;; See LAYOUT-PLAN.txt for the rule this library is a step of.
 
   (import
+ (only (schemacs editor undo) record-insert record-delete)
     ;; `kbd' - see `character.sld''s export note for why it is there
     (only (schemacs editor character) kbd)
     (scheme base)
@@ -34,17 +35,10 @@
     ;; `intervals.scm`'s - it must live below `search.scm`, which
     ;; calls it and cannot import `editfns.scm` (2026-10-13).
     (only (schemacs editor intervals) make-buffer-string)
-    (only (schemacs editor engine)
-          buffer-beg buffer-z buffer-pt
-          text-editor-set-cursor
-          ;; `record_insert` and `record_delete` are undo.c's, and
-          ;; `casify_region` calls them **directly** - `casefiddle.c`
-          ;; records the whole region once around its per-character loop.
-          ;; They are `undo.scm`'s now and re-exported by the engine.
-          record-insert record-delete signal-after-change)
+    
     ;; `replace_range_2` and `modify_text` are `insdel.c`'s, and
     ;; `casify_region` is the only caller of the first in all of Emacs.
-    (only (schemacs editor insdel) modify-text replace-range-2)
+    (only (schemacs editor insdel) modify-text replace-range-2 signal-after-change)
     ;; The raw character store: the C's `FETCH_BYTE (pos) = ...` and
     ;; `memcpy (BYTE_POS_ADDR (pos_byte), ...)`, which `casefiddle.c` uses
     ;; the way any file above `insdel.c` may - they are `buffer.h`'s
@@ -77,7 +71,7 @@
     (only (schemacs editor command) current-prefix-arg define-command
           uarg->integer)
     (only (schemacs editor buffer) current-buffer validate-region
-          text-editor-text set!buffer-pt)
+          text-editor-text set!buffer-pt set-point buffer-beg buffer-z buffer-pt)
     ;; `scan_words` is `syntax.c`'s - the word motions were reached
     ;; through `simple.sld`, which put `casefiddle.c` above `simple.el`
     ;; and closed a cycle through `search.sld` and the coding layer.
@@ -279,7 +273,7 @@
              (result (if (> count 0)
                          (word-run-end ed count)
                          (word-run-start ed (- count)))))
-        (text-editor-set-cursor ed opoint)
+        (set-point ed opoint)
         result))
 
     (define (do-casify-multibyte-region flag start end)
@@ -416,7 +410,7 @@
                          (if (<= arg 0)
                              (buffer-beg ed)
                              (buffer-z ed)))))
-        (text-editor-set-cursor
+        (set-point
          ed (casify-region flag (min pt farend) (max pt farend)))
         #f))
 

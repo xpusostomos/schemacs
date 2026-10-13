@@ -63,13 +63,11 @@
  (only (schemacs editor simple) region-active-p)
  (only (schemacs editor editfns) point insert
 )
- (only (schemacs editor engine)
-       allocate-buffer text-editor-set-cursor
-       buffer-pt buffer-z)
+ 
  ;; `%mark-marker` is the buffer's mark slot - `BVAR (b, mark)` - and
  ;; `text-editor-mark`, the read that used to be here, is gone.
  (only (schemacs editor buffer) %mark-marker with-current-buffer
-)
+ set-point allocate-buffer buffer-pt buffer-z)
  (only (schemacs editor marker) marker-position))
 
 ;; Unbuffered output, so a run that hangs shows where it got to.
@@ -129,7 +127,7 @@
       (when (<= i lines)
         (with-current-buffer ed (insert (string-append (number->string (+ 1000 i)) "\n")))
         (loop (+ i 1))))
-    (text-editor-set-cursor ed 1)
+    (set-point ed 1)
     (let ((f (new-frame ed rows cols)))
       (parameterize ((*current-frame* f))
         (render! f))
@@ -209,7 +207,7 @@
   ;; was reached". From the last line there is nowhere to go, and point
   ;; stops at the end of the buffer - which is what makes
   ;; `mouse-scroll-subr''s loop terminate instead of spinning.
-  (text-editor-set-cursor (window-buffer w)
+  (set-point (window-buffer w)
                           (buffer-z (window-buffer w)))
   (test-equal "at the end of the buffer, nothing moves"
     (list 0 (buffer-z (window-buffer w)))

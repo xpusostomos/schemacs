@@ -53,12 +53,7 @@
     ;; `intervals.scm`'s - it must live below `search.scm`, which
     ;; calls it and cannot import `editfns.scm` (2026-10-13).
     (only (schemacs editor intervals) make-buffer-string)
-    (only (schemacs editor engine)
-         text-editor-buffer-name text-editor-text-props
-         text-editor-file-name
-         buffer-pt text-editor-set-cursor
-         buffer-modified-p
-         buffer-read-only?)
+    
     ;; The line arithmetic is `editfns.c`'s, and it lives there now.
     (only (schemacs editor editfns)
          buffer-substring-no-properties point-max point-min
@@ -153,7 +148,7 @@
           ;; `FETCH_CHAR` (`buffer.h`) - the raw read of a named
           ;; buffer. It has no Lisp name, and it was the engine's
           ;; until 2026-10-13.
-          fetch-char)
+          fetch-char set-point text-editor-buffer-name text-editor-text-props text-editor-file-name buffer-pt buffer-modified-p buffer-read-only?)
     ;; `BEG_UNCHANGED' (`buffer.h:156') is a field of the buffer's *text* -
     ;; `buffer-text' is this tree's `struct buffer_text' - and the two
     ;; accessors below are the only readers and writers of it here.
@@ -768,7 +763,7 @@
                     (loop prev prev-slices
                           (max 0 (- (length prev-slices) 1))
                           (- left 1) (+ moved 1))))))))
-        (text-editor-set-cursor ed (car answer))
+        (set-point ed (car answer))
         (if down? (cadr answer) (- (cadr answer)))))
 
     (define (recenter-window-on-cursor! window ed cursor-start vheight)

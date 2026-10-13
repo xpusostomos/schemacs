@@ -14,16 +14,15 @@
 ;; and `with-current-buffer' is what the Lisp one needs.
 ;;-------------------------------------------------------------
 (import
+ (only (schemacs editor undo) text-editor-undo-boundary!)
  (scheme base)
  (schemacs editor marker)
- (only (schemacs editor buffer) allocate-buffer with-current-buffer current-buffer)
+ (only (schemacs editor buffer) allocate-buffer with-current-buffer current-buffer
+       set-point buffer-z text-editor-undo-list)
  (only (schemacs editor editfns)
-       buffer-substring-no-properties point-max point-min insert
+       buffer-substring-no-properties delete-region insert point point-max point-min
 )
- (only (schemacs editor engine)
-text-editor-set-cursor
-       text-editor-move-cursor text-editor-delete-from-cursor
-       text-editor-undo-boundary! text-editor-undo-list)
+ 
  (only (schemacs editor simple) primitive-undo)
  (only (srfi 64) test-assert test-equal test-begin test-end)
  )
@@ -47,7 +46,7 @@ text-editor-set-cursor
   (let* ((ed (allocate-buffer)))
     (with-current-buffer ed (insert "abcdef"))
     (let ((m (build-marker ed 3)))
-      (text-editor-set-cursor ed 1)
+      (set-point ed 1)
       (with-current-buffer ed (insert "XY"))
       (marker-position m))))
 
@@ -56,7 +55,7 @@ text-editor-set-cursor
   (let* ((ed (allocate-buffer)))
     (with-current-buffer ed (insert "abcdef"))
     (let ((m (build-marker ed 3)))
-      (text-editor-move-cursor ed 100)
+      (set-point ed (buffer-z ed))
       (with-current-buffer ed (insert "XY"))
       (marker-position m))))
 
@@ -67,7 +66,7 @@ text-editor-set-cursor
   (let* ((ed (allocate-buffer)))
     (with-current-buffer ed (insert "abcd"))
     (let ((m (build-marker ed 3)))
-      (text-editor-set-cursor ed 3)
+      (set-point ed 3)
       (with-current-buffer ed (insert "XY"))
       (list (marker-position m) (with-current-buffer ed (buffer-substring-no-properties (point-min) (point-max)))))))
 
@@ -79,7 +78,7 @@ text-editor-set-cursor
     (let ((m (build-marker ed 3)))
       ;; the insertion type is a second call, as it is in the C
       (set-marker-insertion-type m #t)
-      (text-editor-set-cursor ed 3)
+      (set-point ed 3)
       (with-current-buffer ed (insert "XY"))
       (marker-position m))))
 
@@ -91,8 +90,8 @@ text-editor-set-cursor
   (let* ((ed (allocate-buffer)))
     (with-current-buffer ed (insert "abcdef"))
     (let ((m (build-marker ed 4)))
-      (text-editor-set-cursor ed 2)
-      (text-editor-delete-from-cursor ed 3)
+      (set-point ed 2)
+      (with-current-buffer ed (delete-region (point) (+ (point) 3)))
       (list (marker-position m) (with-current-buffer ed (buffer-substring-no-properties (point-min) (point-max)))))))
 
 ;; A marker after the deleted text moves back by its length; one at the
@@ -101,8 +100,8 @@ text-editor-set-cursor
   (let* ((ed (allocate-buffer)))
     (with-current-buffer ed (insert "abcdef"))
     (let ((at-end (build-marker ed 5)) (after (build-marker ed 6)))
-      (text-editor-set-cursor ed 2)
-      (text-editor-delete-from-cursor ed 3)
+      (set-point ed 2)
+      (with-current-buffer ed (delete-region (point) (+ (point) 3)))
       (list (marker-position at-end) (marker-position after)))))
 
 ;; Deleting backwards takes the text before the cursor: Emacs: "abcdef"
@@ -112,8 +111,8 @@ text-editor-set-cursor
   (let* ((ed (allocate-buffer)))
     (with-current-buffer ed (insert "abcdef"))
     (let ((m (build-marker ed 4)))
-      (text-editor-set-cursor ed 5)
-      (text-editor-delete-from-cursor ed -2)
+      (set-point ed 5)
+      (with-current-buffer ed (delete-region (- (point) 2) (point)))
       (list (marker-position m) (with-current-buffer ed (buffer-substring-no-properties (point-min) (point-max)))))))
 
 ;; A backwards deletion at the very end of a buffer, which is a position
@@ -125,8 +124,8 @@ text-editor-set-cursor
   (let* ((ed (allocate-buffer)))
     (with-current-buffer ed (insert "abcdef"))
     (let ((m (build-marker ed 5)))
-      (text-editor-set-cursor ed 7)
-      (text-editor-delete-from-cursor ed -2)
+      (set-point ed 7)
+      (with-current-buffer ed (delete-region (- (point) 2) (point)))
       (list (marker-position m) (with-current-buffer ed (buffer-substring-no-properties (point-min) (point-max)))))))
 
 ;; A marker that points nowhere is in no chain and follows nothing.
@@ -135,7 +134,7 @@ text-editor-set-cursor
     (with-current-buffer ed (insert "abcdef"))
     (let ((m (build-marker ed 3)))
       (set-marker m #f)
-      (text-editor-set-cursor ed 1)
+      (set-point ed 1)
       (with-current-buffer ed (insert "XY"))
       (marker-position m))))
 
@@ -146,7 +145,7 @@ text-editor-set-cursor
     (with-current-buffer one (insert "abcdef"))
     (with-current-buffer two (insert "abcdef"))
     (let ((m1 (build-marker one 3)) (m2 (build-marker two 3)))
-      (text-editor-set-cursor two 1)
+      (set-point two 1)
       (with-current-buffer two (insert "XY"))
       (list (marker-position m1) (marker-position m2)))))
 
@@ -155,7 +154,7 @@ text-editor-set-cursor
   (let* ((ed (allocate-buffer)))
     (with-current-buffer ed (insert "abcd"))
     (let ((m (build-marker ed 5)))
-      (text-editor-set-cursor ed 3)
+      (set-point ed 3)
       (with-current-buffer ed (insert #\newline))
       (list (marker-position m) (with-current-buffer ed (buffer-substring-no-properties (point-min) (point-max)))))))
 
@@ -170,7 +169,7 @@ text-editor-set-cursor
     (text-editor-undo-boundary! ed)
     (let ((m (build-marker ed 3)))
       (let ((before (marker-position m)))
-        (text-editor-set-cursor ed 1)
+        (set-point ed 1)
         (with-current-buffer ed (insert "XY"))
         (let ((after (marker-position m)))
           (with-current-buffer ed (primitive-undo 1 (text-editor-undo-list ed)))

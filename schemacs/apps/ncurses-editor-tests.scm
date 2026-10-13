@@ -1,4 +1,5 @@
 (import
+ (only (schemacs editor fns) count-lines)
  (scheme base)
  (scheme char)
  (scheme file)
@@ -9,13 +10,7 @@
  (only (ice-9 exceptions) exception-message)
  (prefix (schemacs editor keymap) km:)
  (only (srfi 64) test-assert test-equal test-begin test-end)
- (only (schemacs editor engine)
-       allocate-buffer set!text-editor-buffer-name
-       buffer-pt       text-editor-text-props
-       text-editor-move-cursor text-editor-set-cursor
-       set-buffer-modified-p set!buffer-read-only
-       text-editor-undo-list
-       buffer-beg buffer-z count-lines)
+ 
  ;; The literal search is `search.c`'s and lives in `search.scm`.
  (only (schemacs editor search) string-search-forward)
  (only (schemacs editor frame)
@@ -61,7 +56,7 @@
        with-current-buffer
        ;; `BVAR (b, mark)` - the slot itself, which is what the mark is
        ;; now that `text-editor-mark`/`set!text-editor-mark` are gone.
-       %mark-marker)
+       %mark-marker set-point allocate-buffer set!text-editor-buffer-name buffer-pt text-editor-text-props set-buffer-modified-p set!buffer-read-only text-editor-undo-list buffer-beg buffer-z buffer-read-only? set!text-editor-file-name)
  (only (schemacs editor buff-menu)
        *Buffer-menu-del-char* *Buffer-menu-marks* Buffer-menu-buffer
        Buffer-menu-execute Buffer-menu--set-mark! Buffer-menu-redraw!
@@ -80,9 +75,7 @@
        buffer-local-keymap set!buffer-local-keymap set!buffer-default-directory
        set!buffer-cursor-in-non-selected-windows set!buffer-cursor-type
        set!buffer-truncate-lines set!buffer-word-wrap)
- (only (schemacs editor engine) text-editor-delete-from-cursor       buffer-read-only? text-editor-set-cursor
-       allocate-buffer set!text-editor-buffer-name
-       set!text-editor-file-name set-buffer-modified-p)
+ 
  (only (schemacs editor intervals) set!buffer-intervals)
  (prefix (schemacs editor intervals) iv:)
  ;; The file primitives moved to the library that mirrors the C they
@@ -126,7 +119,7 @@
  (only (schemacs editor buffer) mark-active)
  (only (schemacs editor command) *mark-even-if-inactive*)
  (only (schemacs editor editfns)
-       buffer-substring-no-properties goto-char point point-max point-min
+       buffer-substring-no-properties delete-region goto-char point point-max point-min
        region-beginning region-end
        text-editor-cursor-column insert
 )
@@ -238,7 +231,7 @@
                    (*current-buffer* #f)
                    (*kill-buffer-query-functions* '()))
       (with-current-buffer ed (insert text))
-      (text-editor-set-cursor ed (buffer-beg ed))
+      (set-point ed (buffer-beg ed))
       (for-each (lambda (ev) (dispatch-input-event frame ev)) evs)
       (list (with-current-buffer ed (buffer-substring-no-properties (point-min) (point-max)))
             (buffer-pt ed)
@@ -955,11 +948,11 @@
 ;; the match's start.
 (test-equal '(11 22 7)
   (let ((ed (isearch-buffer)))
-    (text-editor-set-cursor ed 1)
+    (set-point ed 1)
     (let ((first (isearch-find ed "beta" 'forward #f #f)))
-      (text-editor-set-cursor ed first)
+      (set-point ed first)
       (let ((second (isearch-find ed "beta" 'forward #f #t)))
-        (text-editor-set-cursor ed 17)
+        (set-point ed 17)
         (list first second (isearch-find ed "beta" 'backward #f #f))))))
 
 ;; A failing search reports nothing and leaves the caller's point alone.
@@ -973,7 +966,7 @@
 ;; incremental search turns it off when an upper-case letter is typed in.
 (test-equal '(11 #f)
   (let ((ed (isearch-buffer)))
-    (text-editor-set-cursor ed 1)
+    (set-point ed 1)
     (list (isearch-find ed "BETA" 'forward #t #f)
           (isearch-find ed "BETA" 'forward #f #f))))
 
@@ -1142,7 +1135,7 @@
          (mb (make<minibuffer> mb-ed "" minibuffer-local-map
                               #f minibuffer-history 0 #f)))
     (with-current-buffer mb-ed (insert "abc"))
-    (text-editor-set-cursor mb-ed (buffer-beg mb-ed))
+    (set-point mb-ed (buffer-beg mb-ed))
     (parameterize ((*current-frame* frame)
                    (*minibuffer* mb)
                    ;; what `read_minibuf' does with the current buffer:
@@ -1392,8 +1385,8 @@
   (let* ((frame (test-frame (allocate-buffer)))
          (ed (frame-editor frame)))
     (with-current-buffer ed (insert "abc"))
-    (text-editor-set-cursor ed (buffer-beg ed))
-    (text-editor-move-cursor ed 100)
+    (set-point ed (buffer-beg ed))
+    (set-point ed (buffer-z ed))
     (parameterize ((*current-frame* frame))
       (cursor-screen-position (window-of frame)))))
 
@@ -1404,13 +1397,13 @@
          (ed (frame-editor frame))
          (window (window-of frame)))
     (with-current-buffer ed (insert "abc"))
-    (text-editor-set-cursor ed (buffer-beg ed))
-    (text-editor-move-cursor ed 100)
+    (set-point ed (buffer-beg ed))
+    (set-point ed (buffer-z ed))
     (parameterize ((*current-frame* frame))
       (let ((at-end (cursor-screen-position window)))
-        (text-editor-move-cursor ed -1)
+        (set-point ed (- (buffer-pt ed) 1))
         (let ((back (cursor-screen-position window)))
-          (text-editor-move-cursor ed 1)
+          (set-point ed (+ (buffer-pt ed) 1))
           (list at-end back (cursor-screen-position window)))))))
 
 ;; A line break at the end of the buffer does start a line, and point at
@@ -1419,8 +1412,8 @@
   (let* ((frame (test-frame (allocate-buffer)))
          (ed (frame-editor frame)))
     (with-current-buffer ed (insert "abc\n"))
-    (text-editor-set-cursor ed (buffer-beg ed))
-    (text-editor-move-cursor ed 100)
+    (set-point ed (buffer-beg ed))
+    (set-point ed (buffer-z ed))
     (parameterize ((*current-frame* frame))
       (cursor-screen-position (window-of frame)))))
 
@@ -1436,10 +1429,10 @@
                   (for-each (lambda (key) (dispatch-input-event frame key))
                             keys)))))
     (with-current-buffer ed (insert "abcdef\nxy\nabcdef"))
-    (text-editor-set-cursor ed (+ (buffer-beg ed) 4))
+    (set-point ed (+ (buffer-beg ed) 4))
     (run (list C-n C-n))
     (let ((returned (text-editor-cursor-column ed)))
-      (text-editor-set-cursor ed (+ (buffer-beg ed) 4))
+      (set-point ed (+ (buffer-beg ed) 4))
       (run (list C-n C-a C-n))
       (list returned (text-editor-cursor-column ed)))))
 
@@ -1450,14 +1443,14 @@
          (mb (make<minibuffer> ed "Find file: " minibuffer-local-map
                               #f minibuffer-history 0 #f)))
     (with-current-buffer ed (insert "abc"))
-    (text-editor-set-cursor ed (buffer-beg ed))
+    (set-point ed (buffer-beg ed))
     (parameterize ((*minibuffer* mb))
       (let ((at-start (minibuffer-cursor-column)))
-        (text-editor-move-cursor ed 100)
+        (set-point ed (buffer-z ed))
         (let ((at-end (minibuffer-cursor-column)))
-          (text-editor-move-cursor ed -1)
+          (set-point ed (- (buffer-pt ed) 1))
           (let ((back (minibuffer-cursor-column)))
-            (text-editor-move-cursor ed -100)
+            (set-point ed (buffer-beg ed))
             (list at-start at-end back (minibuffer-cursor-column))))))))
 
 (test-end "schemacs_ncurses_editor_cursor_position")
@@ -1500,7 +1493,7 @@
   (let* ((ed (allocate-buffer))
          (frame (test-frame ed)))
     (with-current-buffer ed (insert text))
-    (text-editor-set-cursor ed (buffer-beg ed))
+    (set-point ed (buffer-beg ed))
     frame))
 
 (define (run-window-keys frame . evs)
@@ -1597,7 +1590,7 @@
          (ed (frame-editor frame)))
     ;; move point forward in the upper window, then change windows: the
     ;; upper keeps the point it had, the lower gets it as its own
-    (text-editor-move-cursor ed 3)
+    (set-point ed (+ (buffer-pt ed) 3))
     (run-window-keys frame C-x #\o)
     (let* ((windows (window-list frame))
            (selected (selected-window-of frame))
@@ -1612,7 +1605,7 @@
 (test-equal '(#t 4)
   (let* ((frame (run-window-keys (frame-with "alpha\nbeta\n") C-x #\2))
          (ed (frame-editor frame)))
-    (text-editor-move-cursor ed 3)
+    (set-point ed (+ (buffer-pt ed) 3))
     (run-window-keys frame C-x #\o C-x #\o)
     (list (eq? (car (window-list frame)) (selected-window-of frame))
           (buffer-pt ed))))
@@ -1676,7 +1669,7 @@
          (ed (frame-editor frame)))
     (set!text-editor-buffer-name ed "alpha.txt")
     (run-window-keys frame C-x #\2)
-    (text-editor-move-cursor ed 3)
+    (set-point ed (+ (buffer-pt ed) 3))
     ;; read inside the frame's context: `window-point' asks which window is
     ;; selected, and that is a fact about the current frame - outside it
     ;; every window answers with its own marker, which is where this test
@@ -1851,7 +1844,7 @@
     (parameterize ((*current-frame* frame))
       ;; upper window: point at the start; lower window: point on "t" of "two"
       (run-window-keys frame C-x #\2 C-x #\o)
-      (text-editor-set-cursor ed 5)
+      (set-point ed 5)
       (set-window-point! (selected-window-of frame) 5)
       (let ((lower-point-before (window-point (selected-window-of frame))))
         (run-window-keys frame C-x #\o)        ; back to the upper window
@@ -2038,7 +2031,7 @@
                             (string-append acc "line " (number->string i) "\n")))))))
     (let ((ed (frame-editor frame))
           (w (frame-selected-window frame)))
-      (text-editor-set-cursor ed (buffer-z ed))
+      (set-point ed (buffer-z ed))
       ;; scroll the window onto point so that the cache is based on a line
       ;; that is *not* the first - otherwise no edit can go above it and
       ;; the test proves nothing
@@ -2046,9 +2039,9 @@
       (let ((before (format-in frame "%l")))
         ;; a line inserted at the very top moves every line below it down
         ;; one, the cached base line included
-        (text-editor-set-cursor ed (buffer-beg ed))
+        (set-point ed (buffer-beg ed))
         (with-current-buffer ed (insert "INSERTED\n"))
-        (text-editor-set-cursor ed (buffer-z ed))
+        (set-point ed (buffer-z ed))
         (list before
               (format-in frame "%l")
               ;; and again, now that a fresh cache has been made
@@ -2660,9 +2653,9 @@
          (mb (make<minibuffer> mb-ed prompt minibuffer-local-map
                               #f minibuffer-history 0 #f)))
     (with-current-buffer ed (insert "abc"))
-    (text-editor-set-cursor ed (buffer-beg ed))
+    (set-point ed (buffer-beg ed))
     (when initial (with-current-buffer mb-ed (insert initial)))
-    (text-editor-set-cursor mb-ed (- (buffer-z mb-ed) (buffer-beg mb-ed)))
+    (set-point mb-ed (- (buffer-z mb-ed) (buffer-beg mb-ed)))
     (parameterize ((*current-frame* frame)
                    (*minibuffer* mb)
                    (*echo-area-buffer* mb-ed)
@@ -2904,8 +2897,8 @@
 (define (fill-completions! completions common-substring)
   (let ((buffer (get-buffer-create "*Completions*")))
     (set!buffer-read-only buffer #f)
-    (text-editor-set-cursor buffer (buffer-beg buffer))
-    (text-editor-delete-from-cursor buffer (- (buffer-z buffer) (buffer-beg buffer))))
+    (set-point buffer (buffer-beg buffer))
+    (with-current-buffer buffer (delete-region (point-min) (point-max))))
   (display-completion-list completions common-substring))
 
 (test-equal (string-append
@@ -3005,8 +2998,8 @@
         (let ((fresh (get-buffer-create "*Completions*")))
           (set!buffer-intervals fresh #f)
           (set!buffer-read-only fresh #f)
-          (text-editor-set-cursor fresh 0)
-          (text-editor-delete-from-cursor fresh (- (buffer-z fresh) (buffer-beg fresh))))
+          (set-point fresh 0)
+          (with-current-buffer fresh (delete-region (point-min) (point-max))))
         (display-completion-list candidates common-substring)
         (let* ((buffer (get-buffer "*Completions*"))
                (root (iv:buffer-intervals buffer))
@@ -3048,7 +3041,7 @@
   (let* ((ed (allocate-buffer))
          (frame (test-frame ed)))
     (with-current-buffer ed (insert text))
-    (text-editor-set-cursor ed 0)
+    (set-point ed 0)
     (list frame ed)))
 
 ;; Run keys the way the editor does, and answer the buffer and the mark as
@@ -3090,10 +3083,10 @@
 (test-equal '(5 5 3 5)
   (with-mark-frame "hello"
     (lambda (frame ed)
-      (text-editor-set-cursor ed 5)
+      (set-point ed 5)
       (keys! frame C-SPC)                       ; mark at 5, active
       (let ((at-point (list (region-beginning) (region-end))))
-        (text-editor-set-cursor ed 3)
+        (set-point ed 3)
         (append at-point (list (region-beginning) (region-end)))))))
 
 ;; `use-region-p' is false for an *empty* active region unless
@@ -3155,12 +3148,12 @@
 (test-equal '(1 4 2)
   (with-mark-frame "hello"
     (lambda (frame ed)
-      (text-editor-set-cursor ed 2)
+      (set-point ed 2)
       (keys! frame C-SPC)                       ; mark at 2
-      (text-editor-set-cursor ed 4)
+      (set-point ed 4)
       (push-mark)                               ; mark at 4, 2 pushed on the ring
       (let ((pushed (length (mark-ring))))
-        (text-editor-set-cursor ed 0)
+        (set-point ed 0)
         ;; `pop-to-mark-command' jumps to the mark - 4 - and then
         ;; `pop-mark' makes the ring's mark - 2 - the mark, which is what
         ;; "pop a new position for mark off the ring" means.
@@ -3555,7 +3548,7 @@
           (with-current-buffer ed (insert (string-append "line " (number->string i) "\n")))
           (loop (+ i 1))))
       (set-window-buffer! (frame-selected-window frame) ed)
-      (text-editor-set-cursor ed 1)
+      (set-point ed 1)
       (let* ((w (frame-selected-window frame))
              (half (quotient (window-body-height w) 2)))
         ;; scroll so point is at the top of the window
@@ -3596,7 +3589,7 @@
           (with-current-buffer ed (insert (string-append "line " (number->string i) "\n")))
           (loop (+ i 1))))
       (set-window-buffer! (frame-selected-window frame) ed)
-      (text-editor-set-cursor ed 1)
+      (set-point ed 1)
       (let* ((w (frame-selected-window frame))
              (half (quotient (window-body-height w) 2))
              (start-before (window-start w)))
@@ -3893,7 +3886,7 @@
                  (*buffer-list* '()) (*current-buffer* #f))
     (let ((ed (allocate-buffer)))
       (with-current-buffer ed (insert text))
-      (text-editor-set-cursor ed 1)
+      (set-point ed 1)
       (thunk ed (test-frame ed) (test-frame ed)))))
 
 ;; Each frame keeps its own point, and selecting a frame hands its
@@ -3903,10 +3896,10 @@
    (lines-text 20)
    (lambda (ed f1 f2)
      (select-frame f1)
-     (text-editor-set-cursor ed 111)
+     (set-point ed 111)
      (select-frame f2)
      (let ((f2-point (buffer-pt ed)))
-       (text-editor-set-cursor ed 205)
+       (set-point ed 205)
        (select-frame f1)
        (let ((f1-point (buffer-pt ed)))
          (select-frame f2)
@@ -3921,9 +3914,9 @@
    (lines-text 20)
    (lambda (ed f1 f2)
      (select-frame f1)
-     (text-editor-set-cursor ed 111)
+     (set-point ed 111)
      (select-frame f2)
-     (text-editor-set-cursor ed 205)
+     (set-point ed 205)
      (select-frame f1)
      (list (buffer-pt ed)
            (window-point (frame-selected-window f2))))))
@@ -3936,7 +3929,7 @@
    (lines-text 20)
    (lambda (ed f1 f2)
      (select-frame f1)
-     (text-editor-set-cursor ed 111)
+     (set-point ed 111)
      (let ((new (test-frame ed)))
        (window-point (frame-selected-window new))))))
 
@@ -3951,7 +3944,7 @@
      (let ((w1 (frame-selected-window f1))
            (w2 (frame-selected-window f2)))
        (select-frame f1)
-       (text-editor-set-cursor ed 300)
+       (set-point ed 300)
        (parameterize ((*current-frame* f1))
          (scroll-to-cursor! w1)
          (scroll-to-cursor! w2)
@@ -4074,3 +4067,37 @@
           (list p1 m1 (point) (marker-position (%mark-marker ed))))))))
 
 (test-end "schemacs_ncurses_editor_frame_points")
+
+;;--------------------------------------------------------------------
+;; Transposition - `C-t' (`transpose-chars') and `M-t'
+;; (`transpose-words'), simple.el's.
+;;
+;; **Both were no-ops until 2026-10-13.** `%transpose-subr-1' cut the
+;; first object with `(delete-and-extract-region (+ 1 (car pos1)) ...)' -
+;; one character to the right of where Emacs's own `transpose-subr-1'
+;; cuts (`(car pos1)`) - so the three edits cancelled and the buffer came
+;; back unchanged. Every expectation below is `emacs -Q --batch''s own
+;; answer for the same keys.
+
+(test-begin "schemacs_ncurses_editor_transpose")
+
+(define C-t (integer->char 20))
+(define M-t (list ESC #\t))
+(define (keys-to col)
+  ;; C-a then COL `C-f's, then whatever the caller appends.
+  (append (list C-a)
+          (let loop ((i 0)) (if (< i col) (cons C-f (loop (+ i 1))) '()))))
+
+;; Point before `d': the `c' and the `d' swap, and point moves one on.
+(test-equal '("abdcef" . 5)
+  (run-keys "abcdef" (append (keys-to 3) (list C-t))))
+
+;; At end of line the previous two characters are exchanged, point stays.
+(test-equal '("acb" . 4)
+  (run-keys "abc" (append (keys-to 3) (list C-t))))
+
+;; `M-t' drags the word before point past the following one.
+(test-equal '("foo baz bar" . 12)
+  (run-keys "foo bar baz" (append (keys-to 7) M-t)))
+
+(test-end "schemacs_ncurses_editor_transpose")

@@ -8,6 +8,7 @@
 ;; due, because that is not something a loaded machine can promise.
 ;;-------------------------------------------------------------
 (import
+ (only (schemacs editor buffer) allocate-buffer)
  (scheme base)
  (scheme char)
  (only (guile) setvbuf usleep)
@@ -17,7 +18,7 @@
  (prefix (schemacs editor keyboard) kb:)
  (prefix (schemacs editor frame) fr:)
  (prefix (schemacs editor faces) f:)
- (only (schemacs editor engine) allocate-buffer)
+ 
  (only (oop goops) make))
 
 (setvbuf (current-output-port) 'none)

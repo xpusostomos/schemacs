@@ -2,10 +2,8 @@
  (scheme base)
  (scheme char)
  (only (srfi 64) test-assert test-equal test-begin test-end)
- (only (schemacs editor engine)
-       allocate-buffer       text-editor-set-cursor buffer-beg buffer-z
-       text-editor-text-props)
- (only (schemacs editor buffer) with-current-buffer)
+ 
+ (only (schemacs editor buffer) with-current-buffer set-point allocate-buffer buffer-beg buffer-z text-editor-text-props)
  (only (schemacs editor editfns)
        buffer-substring-no-properties point-max point-min insert
 )
@@ -276,7 +274,7 @@
 (test-equal '(#t 25 25 ((0 5 ()) (5 15 (face shadow)) (15 25 ()))
               "HELLOabcdefghij0123456789")
   (let ((ed (two-run-editor)))
-    (text-editor-set-cursor ed 0)
+    (set-point ed 0)
     (with-current-buffer ed (insert "HELLO"))
     (list (valid-tree? ed)
           (iv:interval-total-length (tree-of ed))

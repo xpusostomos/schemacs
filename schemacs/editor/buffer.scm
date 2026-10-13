@@ -131,6 +131,12 @@
    ;; `FETCH_CHAR` (`buffer.h`), which has no Lisp name - see the note
    ;; where it is defined. It came here from `engine.scm` 2026-10-13.
    fetch-char
+   ;; `SET_PT` (`buffer.h:170`), the write to the point slot, clipped as
+   ;; `Fgoto_char` (`editfns.c:233`) clips - see the note where it is
+   ;; defined. `goto-char` is the Lisp door onto it; this is the write
+   ;; below, and every caller names its buffer. It came here from
+   ;; `engine.scm` 2026-10-13, where it was `text-editor-set-cursor`.
+   set-point
    ;; `buffer-modified-p' and `buffer-read-only' answer with these: GNU
    ;; Emacs's `buffer-modified-tick', `buffer-modified-p' - which is the
    ;; comparison `SAVE_MODIFF < MODIFF' and not a flag - and the
@@ -1918,6 +1924,41 @@
       (and (<= (buffer-beg ed) pos)
            (< pos (buffer-z ed))
            (integer->char (buffer-text-ref (text-editor-text ed) pos))))
+
+    (define (set-point ed position)
+      ;; GNU Emacs's `SET_PT' (`buffer.h:170'), as `Fgoto_char'
+      ;; (`editfns.c:233') uses it: put ED's point at POSITION, clipped
+      ;; into the buffer. Answers nothing.
+      ;;
+      ;; **`SET_PT' is a macro over the point slot, and this library is
+      ;; its home here** - it owns the record and the `BEG'/'Z' the clip
+      ;; runs against, the same reason `fetch-char' is above. It was
+      ;; `engine.scm`'s under the invented name `text-editor-set-cursor'
+      ;; until 2026-10-13, where it stood among the writers it has
+      ;; nothing to do with.
+      ;;
+      ;; The C's `set_point' (`intervals.c:1776') does **not** clip: it
+      ;; asserts the position is in range, and `Fgoto_char' is what
+      ;; clips first - `SET_PT (clip_to_bounds (BEGV, XFIXNUM
+      ;; (position), ZV))'. Measured on Emacs 31.1, `(goto-char 999)' on
+      ;; a 7-character buffer leaves point at 7 and `(goto-char 0)' at
+      ;; 1, silently. This is that clipping SET_PT, so a caller may hand
+      ;; it a position it has not bounds-checked.
+      ;;
+      ;; `goto-char' (`editfns.scm') is the Lisp door onto this - the
+      ;; current buffer, a marker or a number, answering the POSITION it
+      ;; was given; this is the write below it, and every caller names
+      ;; its buffer.
+      ;;
+      ;; The integer test is the Scheme stand-in for the C's `ptrdiff_t'
+      ;; parameter, which cannot be handed anything else; a non-number is
+      ;; `wrong-type-argument` in Emacs's `goto-char`.
+      ;;--------------------------------------------------------------
+      (if (integer? position)
+          (set!buffer-pt ed
+             (max (buffer-beg ed)
+                  (min (buffer-z ed) position)))
+          (error "text editor index must be set with an integer" position)))
 
     (define (buffer-modified-tick . rest)
       ;; GNU Emacs's `buffer-modified-tick' (`buffer.c:1631'): "Return

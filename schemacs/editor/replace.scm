@@ -22,19 +22,18 @@
   ;; See LAYOUT-PLAN.txt for the rule this library is a step of.
 
   (import
+ (only (schemacs editor undo) text-editor-undo-boundary!)
     (scheme base)
     (scheme char)
     (only (schemacs editor marker) copy-marker markerp marker-position)
-    (only (schemacs editor engine)
-          buffer-z
-          text-editor-undo-boundary!)
+    
     ;; `*case-fold-search*' is the case folding `perform-replace'
     ;; parameterizes around its loop (the C's
     ;; `(let* ((case-fold-search ...)))').
     (only (schemacs editor buffer)
           *case-fold-search* current-buffer
           erase-buffer get-buffer-create
-          with-current-buffer)
+          with-current-buffer buffer-z)
     (only (schemacs editor frame)
           *current-frame* frame-selected-window recenter set!frame-message
           set-message!)

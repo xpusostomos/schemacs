@@ -26,14 +26,12 @@
   (import
     (scheme base)
     (only (schemacs editor character) char-width)
-    (only (schemacs editor engine)
-          buffer-pt
-          buffer-z )
+    
     (only (schemacs editor buffer) buffer-tab-width current-buffer
           ;; `FETCH_CHAR` (`buffer.h`) - the raw read of a named
           ;; buffer. It has no Lisp name, and it was the engine's
           ;; until 2026-10-13.
-          fetch-char)
+          fetch-char buffer-pt buffer-z)
     (only (schemacs editor editfns)
           delete-region forward-line goto-char insert-char point
           save-excursion

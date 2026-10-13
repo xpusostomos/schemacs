@@ -56,6 +56,7 @@
   ;; buffers, dired's among them - and Emacs has always bound it here.
 
   (import
+ (only (schemacs editor insdel) *after-change-functions*)
     (scheme base)
     (scheme char)
     ;; `cdddr' is `(scheme cxr)''s, not `(scheme base)''s - the
@@ -90,7 +91,7 @@
     (only (schemacs editor subr) with-silent-modifications)
     ;; the hook `font-lock-mode' hangs its incremental fontification on:
     ;; `after-change-functions' is `buffer.c''s, and the engine holds it
-    (only (schemacs editor engine) *after-change-functions*)
+    
     ;; the markers, from marker.c's own library
     (only (schemacs editor marker) marker-position set-marker)
     ;; the faces above are `defface''d here, as font-lock.el deffaces them

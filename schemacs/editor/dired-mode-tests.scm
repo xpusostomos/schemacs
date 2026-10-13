@@ -2,8 +2,8 @@
  (scheme base)
  (scheme char)
  (only (guile) delete-file mkdir rmdir setvbuf string-contains)
- (only (schemacs editor engine) allocate-buffer)
- (only (schemacs editor buffer) with-current-buffer)
+ 
+ (only (schemacs editor buffer) with-current-buffer allocate-buffer)
  (only (schemacs editor editfns)
        buffer-substring-no-properties point-max point-min)
  (only (schemacs editor frame) *current-frame* new-frame)

@@ -164,6 +164,13 @@
           current-buffer buffer-beg buffer-z buffer-pt set!buffer-pt
           barf-if-buffer-read-only text-editor-text text-editor-undo-list
           %text-editor-newline-cache
+          ;; `Ferase_buffer` (`buffer.c`) empties a buffer by calling
+          ;; `del_range`, which is this library's - so the seam it reaches
+          ;; it through is declared down there and installed at the foot
+          ;; of this file. (It was the engine that installed it, because
+          ;; the engine was the only thing that had both; the engine is
+          ;; gone and the seam belongs with `del_range`.)
+          *del-range-function*
           ;; `deactivate-mark' is a buffer-local variable and `buffer.c`
           ;; owns the table, so `prepare-to-modify-buffer-1` writes it
           ;; through the slot accessor; there is no seam to install and no
@@ -879,5 +886,14 @@
       ;; engine used to declare, moved down here because this is where the
       ;; shifting now happens.
       (make-parameter #f))
+
+    ;; `Ferase_buffer` (`buffer.c:2472`) empties the current buffer by
+    ;; calling `del_range (BEGV, ZV)` - which is `del-range` here - so the
+    ;; seam `buffer.scm` declares is installed where the function is, the
+    ;; house idiom. **`engine.scm` used to install it**, being the one
+    ;; library that held both ends; with the engine's last importers
+    ;; repointed at their real homes (2026-10-13) nothing loaded it any
+    ;; more, and `erase-buffer` silently emptied nothing.
+    (*del-range-function* del-range)
 
     ))

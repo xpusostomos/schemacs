@@ -1,18 +1,17 @@
 (import
+ (only (schemacs editor undo) text-editor-undo-boundary!)
  (scheme base)
  (scheme char)
  (only (srfi 64) test-assert test-equal test-begin test-end)
  (only (guile) setvbuf)
  (only (schemacs editor buffer)
-       get-buffer-create set-buffer erase-buffer)
+       get-buffer-create set-buffer erase-buffer text-editor-undo-list set!text-editor-undo-list)
  (only (schemacs editor editfns)
        insert goto-char point buffer-string)
  (only (schemacs editor casefiddle)
        casify-region
        upcase-word downcase-word capitalize-word)
- (only (schemacs editor engine)
-       text-editor-undo-list set!text-editor-undo-list
-       text-editor-undo-boundary!)
+ 
  ;; `upcase-region` and `downcase-region` are `casefiddle.c`'s, but they
  ;; read the region and so are defined in `simple.scm` now - the named
  ;; placement departure noted there. Their tests stay here, beside

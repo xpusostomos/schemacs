@@ -30,9 +30,7 @@
     (only (schemacs editor command)
           current-prefix-arg define-command uarg->integer)
     (only (schemacs editor marker) build-marker marker-position set-marker)
-    (only (schemacs editor engine)
-          buffer-pt
-          bufferp)
+    
     ;; `define-key' and the global map: the window keys are stated here,
     ;; beside the commands they run.
     (only (schemacs editor keymap)
@@ -70,7 +68,7 @@
           set-buffer
           set!buffer-default-directory set!buffer-file-name set!buffer-read-only
           set-buffer-modified-p
-          with-current-buffer *inhibit-read-only*)
+          with-current-buffer *inhibit-read-only* buffer-pt bufferp)
     ;; `run-hooks' is `subr.el''s, and the two temp-buffer hooks below
     ;; are run through it.
     (only (schemacs editor subr) kbd run-hooks)

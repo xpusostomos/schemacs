@@ -46,12 +46,7 @@
     (prefix (schemacs editor keymap) km:)
     (only (schemacs editor command)
           current-prefix-arg define-command)
-    (only (schemacs editor engine)
-          text-editor-set-cursor buffer-modified-p
-          set-buffer-modified-p buffer-read-only?
-          buffer-beg buffer-z
-          set!buffer-read-only
-          text-editor-file-name)
+    
     ;; The line arithmetic is `editfns.c`'s and lives there now.
     (only (schemacs editor editfns)
           text-editor-get-start-of-line
@@ -73,7 +68,7 @@
           buffer-name bury-buffer current-buffer get-buffer-create
           kill-buffer set!buffer-local-keymap
           set-buffer-local-value!
-          with-current-buffer)
+          with-current-buffer set-point buffer-modified-p set-buffer-modified-p buffer-read-only? buffer-beg buffer-z set!buffer-read-only text-editor-file-name)
     ;; `quit-window' is `window.el''s and lives in `(schemacs editor
     ;; window)'; this library binds it and does not define it.
     (only (schemacs editor window)
@@ -361,10 +356,10 @@
       ;; this project has.
       ;;--------------------------------------------------------------
       (let ((ed (current-buffer)))
-        (text-editor-set-cursor ed (buffer-beg ed))
+        (set-point ed (buffer-beg ed))
         ;; the newline ending the titles' line is the last character on it,
         ;; so one past it is the first character of the first buffer's line
-        (text-editor-set-cursor
+        (set-point
          ed (min (buffer-z ed)
                  (+ 1 (text-editor-get-end-of-line ed))))))
 
@@ -379,7 +374,7 @@
 
     (define (Buffer-menu--move-down!)
       (let ((ed (current-buffer)))
-        (text-editor-set-cursor
+        (set-point
          ed (min (buffer-z ed)
                  (+ 1 (text-editor-get-end-of-line ed))))))
 
@@ -605,7 +600,7 @@ it as modified."
          (let loop ((n count))
            (when (> n 0)
              (let ((ed (current-buffer)))
-               (text-editor-set-cursor
+               (set-point
                 ed (max (buffer-beg ed)
                         (- (text-editor-get-start-of-line ed) 2))))
              (loop (- n 1)))))

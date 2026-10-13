@@ -28,6 +28,7 @@
   ;; See LAYOUT-PLAN.txt for the rule this library is a step of.
 
   (import
+ (only (schemacs editor insdel) *after-change-functions*)
     ;; `kbd' - see `character.sld''s export note for why it is there
     (only (schemacs editor character) kbd)
     (scheme base)
@@ -58,13 +59,7 @@
     ;; `intervals.scm`'s - it must live below `search.scm`, which
     ;; calls it and cannot import `editfns.scm` (2026-10-13).
     (only (schemacs editor intervals) make-buffer-string)
-    (only (schemacs editor engine)
-          buffer-pt
-         buffer-beg buffer-z
-         text-editor-set-cursor
-         ;; what `minibuffer-lazy-highlight-setup' hangs its hook on
-         *after-change-functions*
-          )
+    
     ;; The literal search is `search.c`'s and is `search.scm`'s now -
     ;; moved out of the engine on 2026-10-12, so both of its consumers
     ;; read it from the library that mirrors the file it belongs to.
@@ -112,7 +107,7 @@
           ;; `FETCH_CHAR` (`buffer.h`) - the raw read of a named
           ;; buffer. It has no Lisp name, and it was the engine's
           ;; until 2026-10-13.
-          fetch-char)
+          fetch-char set-point buffer-pt buffer-beg buffer-z)
     )
 
   (export
@@ -212,7 +207,7 @@
       ;; was not, point is left where it was.
       ;;--------------------------------------------------------------
       (let ((found (isearch-find ed pattern direction case-fold? #f)))
-        (when found (text-editor-set-cursor ed found))
+        (when found (set-point ed found))
         (and found #t)))
 
     (define *search-case-fold?*
@@ -570,7 +565,7 @@
              ((eqv? code 7)
               (if success?
                   (begin
-                    (text-editor-set-cursor ed opoint)
+                    (set-point ed opoint)
                     (*search-pattern* #f)
                     (isearch-dehighlight)
                     (lazy-highlight-cleanup #t)
@@ -693,7 +688,7 @@
       (if (null? states)
           (cons "" '())
           (let ((state (car states)))
-            (text-editor-set-cursor ed (cadr state))
+            (set-point ed (cadr state))
             (cons (car state) (cdr states)))))
 
     (define (isearch-pop-to-success ed states)
@@ -728,7 +723,7 @@
                       (isearch-find ed pattern new-direction case-fold? #t))
                      (else
                       ;; the search was failing, so this repeat wraps
-                      (text-editor-set-cursor
+                      (set-point
                        ed (if forward?
                               (buffer-beg ed)
                               (buffer-z ed)))
@@ -736,7 +731,7 @@
                                     case-fold? #f)))))
         (if found
             (begin
-              (text-editor-set-cursor ed found)
+              (set-point ed found)
               (list pattern
                     (cons (list pattern here success?) states)
                     #t

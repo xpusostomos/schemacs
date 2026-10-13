@@ -1,7 +1,10 @@
 (import
+ (only (schemacs editor undo) record-insert record-delete text-editor-undo-boundary! text-editor-undo-disable! text-editor-undo-enable! text-editor-undo-recording? *undo-limit* undo-insertion-entry? undo-deletion-entry? undo-modified-entry? *point-before-last-command-or-undo* *buffer-before-last-command-or-undo*)
+ (only (schemacs editor insdel) *after-change-functions* signal-after-change *text-property-offset-function* invalidate-buffer-caches)
+ (only (schemacs editor fns) count-lines)
  (scheme base)
  (scheme file)
- (schemacs editor engine)
+ 
  ;; `%mark-marker` is `BVAR (b, mark)` - the slot itself, which is what
  ;; the mark tests below are about now that `text-editor-mark` and
  ;; `set!text-editor-mark` are gone (they were that read and that write,
@@ -11,7 +14,7 @@
           ;; `FETCH_CHAR` (`buffer.h`) - the raw read of a named
           ;; buffer. It has no Lisp name, and it was the engine's
           ;; until 2026-10-13.
-          fetch-char)
+          fetch-char set-point allocate-buffer bufferp buffer-pt buffer-beg buffer-z text-editor-buffer-name set!text-editor-buffer-name text-editor-file-name set!text-editor-file-name buffer-modified-p set-buffer-modified-p buffer-read-only? set!buffer-read-only text-editor-text-props set!text-editor-text-props *inhibit-read-only* *buffer-visited-file-modtime-function* buffer-modified-tick buffer-chars-modified-tick text-editor-cache-long-scans set!text-editor-cache-long-scans show-text-editor text-editor-undo-list set!text-editor-undo-list)
  ;; the property-change raise is `textprop.c`'s `modify_text_properties`,
  ;; in the library that owns it - it was `text-editor-note-property-change!`
  ;; in the engine until 2026-10-12.
@@ -25,7 +28,7 @@
  ;; end-of-buffer tests below, which read them beside the engine's own
  ;; state, ask that library for them.
  (only (schemacs editor editfns)
-       buffer-substring buffer-substring-no-properties point-max point-min
+       buffer-substring buffer-substring-no-properties delete-region point point-max point-min
        text-editor-cursor-line text-editor-cursor-column
        text-editor-get-start-of-line text-editor-get-end-of-line
        ;; `mark-marker` is `editfns.c:265`'s and left the engine for that
@@ -231,7 +234,7 @@
 (test-equal "SAAA\nB1BB\nCCC\nDDD\nE"
   (let ((ed (allocate-buffer)))
     (with-current-buffer ed (insert "AAA\nBBB\nCCC\nDDD\n"))
-    (text-editor-move-cursor ed -100)
+    (set-point ed (buffer-beg ed))
     (with-current-buffer ed (insert "S"))
     ;; **The engine's two-argument `text-editor-set-cursor` - "line N,
     ;; column C" - is gone** (2026-10-12): it had no Emacs counterpart,
@@ -239,9 +242,9 @@
     ;; the engine addresses text by, so the setups below name one. Here:
     ;; line 2 of `"SAAA\nBBB\nCCC\nDDD\n"` begins at 6, so its column 1 is
     ;; position 7.
-    (text-editor-set-cursor ed (+ (buffer-beg ed) 6))
+    (set-point ed (+ (buffer-beg ed) 6))
     (with-current-buffer ed (insert "1"))
-    (text-editor-move-cursor ed 100)
+    (set-point ed (buffer-z ed))
     (with-current-buffer ed (insert "E"))
     (with-current-buffer ed (buffer-substring-no-properties (point-min) (point-max)))))
 
@@ -250,7 +253,7 @@
 (test-equal "HELLOW\nORLD\n"
   (let ((ed (allocate-buffer)))
     (with-current-buffer ed (insert "HELLOWORLD\n"))
-    (text-editor-move-cursor ed -5)
+    (set-point ed (- (buffer-pt ed) 5))
     (with-current-buffer ed (insert "\n"))
     (with-current-buffer ed (buffer-substring-no-properties (point-min) (point-max)))))
 
@@ -260,7 +263,7 @@
   (let ((ed (allocate-buffer)))
     (with-current-buffer ed (insert "aaa\nbbb\n"))
     (with-current-buffer ed (insert "ccc"))
-    (text-editor-move-cursor ed -2)
+    (set-point ed (- (buffer-pt ed) 2))
     (with-current-buffer ed (insert "!"))
     (with-current-buffer ed (buffer-substring-no-properties (point-min) (point-max)))))
 
@@ -270,7 +273,7 @@
 (test-equal "one\r\ntwo\r\nthrXee\r\n"
   (let ((ed (allocate-buffer)))
     (with-current-buffer ed (insert "one\r\ntwo\r\nthree\r\n"))
-    (text-editor-move-cursor ed -4)
+    (set-point ed (- (buffer-pt ed) 4))
     (with-current-buffer ed (insert "X"))
     (with-current-buffer ed (buffer-substring-no-properties (point-min) (point-max)))))
 
@@ -278,7 +281,7 @@
 (test-equal "HELLO\r\nWORLD\r\n"
   (let ((ed (allocate-buffer)))
     (with-current-buffer ed (insert "HELLOWORLD\r\n"))
-    (text-editor-move-cursor ed -7)
+    (set-point ed (- (buffer-pt ed) 7))
     (with-current-buffer ed (insert "\r\n"))
     (with-current-buffer ed (buffer-substring-no-properties (point-min) (point-max)))))
 
@@ -289,14 +292,14 @@
  (let ((ed (allocate-buffer)))
    (with-current-buffer ed (insert "alpha\nbeta\ngamma\n"))
    ;; move to start
-   (text-editor-move-cursor ed -100)
+   (set-point ed (buffer-beg ed))
    (let ((start (buffer-pt ed)))
      ;; `line-beginning-position' for the line position 9 is on - the
      ;; second line of `"alpha\nbeta\ngamma\n"', which begins at 7. The
      ;; line-and-column cursor this used to address with is gone; what is
      ;; asserted is the arithmetic `goto-line' and `move-to-column' are
      ;; made of.
-     (text-editor-set-cursor ed (text-editor-get-start-of-line ed 9))
+     (set-point ed (text-editor-get-start-of-line ed 9))
      (let ((mid (buffer-pt ed)))
        (and (= 1 start) (= 7 mid))))))
 
@@ -304,9 +307,9 @@
 (test-equal "hello\n"
   (let ((ed (allocate-buffer)))
     (with-current-buffer ed (insert "hello world\n"))
-    (text-editor-move-cursor ed -100)
-    (text-editor-move-cursor ed 5)
-    (text-editor-delete-from-cursor ed 6)
+    (set-point ed (buffer-beg ed))
+    (set-point ed (+ (buffer-pt ed) 5))
+    (with-current-buffer ed (delete-region (point) (+ (point) 6)))
     (with-current-buffer ed (buffer-substring-no-properties (point-min) (point-max)))))
 
 ;; Backward delete at the start of a line merges with the line before,
@@ -315,8 +318,8 @@
   (let ((ed (allocate-buffer)))
     (with-current-buffer ed (insert "alpha\nbeta\ngamma\n"))
     ;; line 2 begins at 7, which is where column 0 of it is
-    (text-editor-set-cursor ed (+ (buffer-beg ed) 6))
-    (text-editor-delete-from-cursor ed -1)
+    (set-point ed (+ (buffer-beg ed) 6))
+    (with-current-buffer ed (delete-region (- (point) 1) (point)))
     (with-current-buffer ed (buffer-substring-no-properties (point-min) (point-max)))))
 
 ;; Forward delete past the end of a line merges with the next line,
@@ -324,16 +327,16 @@
 (test-equal "alphata\ngamma\n"
   (let ((ed (allocate-buffer)))
     (with-current-buffer ed (insert "alpha\nbeta\ngamma\n"))
-    (text-editor-set-cursor ed (+ (buffer-beg ed) 5))
-    (text-editor-delete-from-cursor ed 3)
+    (set-point ed (+ (buffer-beg ed) 5))
+    (with-current-buffer ed (delete-region (point) (+ (point) 3)))
     (with-current-buffer ed (buffer-substring-no-properties (point-min) (point-max)))))
 
 ;; A deletion spanning multiple lines merges and deletes.
 (test-equal "alphagamma\n"
   (let ((ed (allocate-buffer)))
     (with-current-buffer ed (insert "alpha\nbeta\ngamma\n"))
-    (text-editor-set-cursor ed (+ (buffer-beg ed) 5))
-    (text-editor-delete-from-cursor ed 6)
+    (set-point ed (+ (buffer-beg ed) 5))
+    (with-current-buffer ed (delete-region (point) (+ (point) 6)))
     (with-current-buffer ed (buffer-substring-no-properties (point-min) (point-max)))))
 
 (test-end "schemacs_editor_engine_motion")
@@ -355,14 +358,14 @@
 (test-equal #\X
   (let ((ed (allocate-buffer)))
     (with-current-buffer ed (insert "X"))
-    (text-editor-set-cursor ed (buffer-beg ed))
+    (set-point ed (buffer-beg ed))
     (fetch-char ed 1)))
 
 ;; Copying a whole single-line buffer keeps its first character.
 (test-equal "one two"
   (let ((ed (allocate-buffer)))
     (with-current-buffer ed (insert "one two"))
-    (text-editor-set-cursor ed (buffer-beg ed))
+    (set-point ed (buffer-beg ed))
     (make-buffer-string ed 1 8)))
 
 ;; **`buffer-substring-no-properties` is not `buffer-string`**, and this
@@ -402,14 +405,14 @@
 (test-equal '(#\a #\d #\h)
   (let ((ed (allocate-buffer)))
     (with-current-buffer ed (insert "abc\ndefg\nhi"))
-    (text-editor-set-cursor ed (buffer-beg ed))
+    (set-point ed (buffer-beg ed))
     (map (lambda (i) (fetch-char ed i)) '(1 5 10))))
 
 ;; An index past the end of the buffer is still unresolvable.
 (test-equal #f
   (let ((ed (allocate-buffer)))
     (with-current-buffer ed (insert "abc"))
-    (text-editor-set-cursor ed (buffer-beg ed))
+    (set-point ed (buffer-beg ed))
     (fetch-char ed 4)))
 
 (test-end "schemacs_editor_engine_char_index")
@@ -465,7 +468,7 @@
 (test-equal '("" 1)
   (let ((ed (allocate-buffer)))
     (with-current-buffer ed (insert "abc"))
-    (text-editor-set-cursor ed (buffer-beg ed))
+    (set-point ed (buffer-beg ed))
     (undo! ed 1)
     (list (with-current-buffer ed (buffer-substring-no-properties (point-min) (point-max))) (buffer-pt ed))))
 
@@ -476,16 +479,16 @@
   (let ((ed (allocate-buffer)))
     (with-current-buffer ed (insert "hello\nworld"))
     (text-editor-undo-boundary! ed)
-    (text-editor-set-cursor ed 6)
-    (text-editor-delete-from-cursor ed 1)
+    (set-point ed 6)
+    (with-current-buffer ed (delete-region (point) (+ (point) 1)))
     (cdr (car (text-editor-undo-list ed)))))
 
 (test-equal (list (cons (string #\newline) 6))
   (let ((ed (allocate-buffer)))
     (with-current-buffer ed (insert "hello\nworld"))
     (text-editor-undo-boundary! ed)
-    (text-editor-set-cursor ed 6)
-    (text-editor-delete-from-cursor ed 1)
+    (set-point ed 6)
+    (with-current-buffer ed (delete-region (point) (+ (point) 1)))
     (list (car (text-editor-undo-list ed)))))
 
 ;; **Point after the undo is where the boundary left it, not where the
@@ -500,8 +503,8 @@
   (let ((ed (allocate-buffer)))
     (with-current-buffer ed (insert "hello\nworld"))
     (text-editor-undo-boundary! ed)
-    (text-editor-set-cursor ed 6)
-    (text-editor-delete-from-cursor ed 1)
+    (set-point ed 6)
+    (with-current-buffer ed (delete-region (point) (+ (point) 1)))
     (undo! ed 1)
     (list (with-current-buffer ed (buffer-substring-no-properties (point-min) (point-max))) (buffer-pt ed))))
 
@@ -513,8 +516,8 @@
   (let ((ed (allocate-buffer)))
     (with-current-buffer ed (insert "hello\nworld"))
     (text-editor-undo-boundary! ed)
-    (text-editor-set-cursor ed 6)
-    (text-editor-delete-from-cursor ed 1)
+    (set-point ed 6)
+    (with-current-buffer ed (delete-region (point) (+ (point) 1)))
     (undo! ed 1)                       ; undo the deletion
     (let ((after-undo (with-current-buffer ed (buffer-substring-no-properties (point-min) (point-max)))))
       (redo-command! ed 1)             ; put the deletion back
@@ -530,7 +533,7 @@
     (let ((ed (allocate-buffer)))
       (with-current-buffer ed (insert "abc"))
       (text-editor-undo-boundary! ed)
-      (text-editor-set-cursor ed 3)
+      (set-point ed 3)
       (with-current-buffer ed (insert "def"))
       (let ((one (begin (undo-command! ed 1) (with-current-buffer ed (buffer-substring-no-properties (point-min) (point-max))))))
         (list one (begin (undo-command! ed 1) (with-current-buffer ed (buffer-substring-no-properties (point-min) (point-max)))))))))
@@ -566,7 +569,7 @@
 (test-equal '((2 . 3) (1 . 4) (t . 0))
   (let ((ed (allocate-buffer)))
     (with-current-buffer ed (insert "abc"))
-    (text-editor-set-cursor ed 2)
+    (set-point ed 2)
     (with-current-buffer ed (insert "X"))
     (text-editor-undo-list ed)))
 
@@ -577,16 +580,16 @@
   (let ((ed (allocate-buffer)))
     (with-current-buffer ed (insert "abc"))
     (text-editor-undo-boundary! ed)
-    (text-editor-set-cursor ed (buffer-beg ed))
-    (text-editor-delete-from-cursor ed 100)
+    (set-point ed (buffer-beg ed))
+    (with-current-buffer ed (delete-region (point) (point-max)))
     (car (text-editor-undo-list ed))))
 
 (test-equal "abc"
   (let ((ed (allocate-buffer)))
     (with-current-buffer ed (insert "abc"))
     (text-editor-undo-boundary! ed)
-    (text-editor-set-cursor ed (buffer-beg ed))
-    (text-editor-delete-from-cursor ed 100)
+    (set-point ed (buffer-beg ed))
+    (with-current-buffer ed (delete-region (point) (point-max)))
     (undo! ed 1)
     (with-current-buffer ed (buffer-substring-no-properties (point-min) (point-max)))))
 
@@ -598,16 +601,16 @@
   (let ((ed (allocate-buffer)))
     (with-current-buffer ed (insert "abcd"))
     (text-editor-undo-boundary! ed)
-    (text-editor-set-cursor ed 1)
-    (text-editor-delete-from-cursor ed 2)
+    (set-point ed 1)
+    (with-current-buffer ed (delete-region (point) (+ (point) 2)))
     (cdr (car (text-editor-undo-list ed)))))
 
 (test-equal -1
   (let ((ed (allocate-buffer)))
     (with-current-buffer ed (insert "abcd"))
     (text-editor-undo-boundary! ed)
-    (text-editor-set-cursor ed 3)
-    (text-editor-delete-from-cursor ed -2)
+    (set-point ed 3)
+    (with-current-buffer ed (delete-region (- (point) 2) (point)))
     (cdr (car (text-editor-undo-list ed)))))
 
 ;; **Point after the undo is where the boundary left it, not where the
@@ -622,8 +625,8 @@
   (let ((ed (allocate-buffer)))
     (with-current-buffer ed (insert "abcd"))
     (text-editor-undo-boundary! ed)
-    (text-editor-set-cursor ed 3)
-    (text-editor-delete-from-cursor ed -2)
+    (set-point ed 3)
+    (with-current-buffer ed (delete-region (- (point) 2) (point)))
     (undo! ed 1)
     (list (with-current-buffer ed (buffer-substring-no-properties (point-min) (point-max))) (buffer-pt ed))))
 
@@ -639,8 +642,8 @@
   (let ((ed (allocate-buffer)))
     (with-current-buffer ed (insert "abcd"))
     (text-editor-undo-boundary! ed)
-    (text-editor-set-cursor ed 1)
-    (text-editor-delete-from-cursor ed 2)
+    (set-point ed 1)
+    (with-current-buffer ed (delete-region (point) (+ (point) 2)))
     (undo! ed 1)
     (list (with-current-buffer ed (buffer-substring-no-properties (point-min) (point-max))) (buffer-pt ed))))
 
@@ -727,10 +730,12 @@
     (buffer-modified-p ed)))
 
 ;; Deleting nothing is not a change either (there is nothing after the
-;; cursor to delete).
+;; cursor to delete). Emacs's `(delete-region 1 1)' on an empty buffer is
+;; the same no-op - the C's `delete-char' would signal `end-of-buffer',
+;; which is the departure the engine's clamping wrapper existed for.
 (test-equal #f
   (let ((ed (allocate-buffer)))
-    (text-editor-delete-from-cursor ed 5)
+    (with-current-buffer ed (delete-region (point) (point)))
     (buffer-modified-p ed)))
 
 ;; Saving clears the flag and leaves the undo list alone, as in GNU
@@ -770,7 +775,7 @@
     (with-current-buffer ed (insert "hello"))        ; visit
     (with-current-buffer ed (set-buffer-modified-p #f))
     (text-editor-undo-boundary! ed)
-    (text-editor-set-cursor ed (buffer-beg ed))
+    (set-point ed (buffer-beg ed))
     (with-current-buffer ed (insert "a"))            ; the change to be undone
     (let ((before (buffer-modified-p ed)))
       (undo! ed 1)
@@ -802,7 +807,7 @@
       (set-buffer-modified-p #f)
       (set-visited-file-modtime '(1000 . 1)))
     (text-editor-undo-boundary! ed)
-    (text-editor-set-cursor ed 3)
+    (set-point ed 3)
     (with-current-buffer ed (insert "x"))              ; now "abcx"
     (undo! ed 1)                             ; back to "abc" == the file
     (let ((at-save-point (buffer-modified-p ed)))
@@ -849,7 +854,7 @@
   (let ((ed (allocate-buffer)))
     (with-current-buffer ed (insert "abc"))
     (set!buffer-read-only ed #t)
-    (text-editor-set-cursor ed (buffer-beg ed))
+    (set-point ed (buffer-beg ed))
     (let ((refused (refused? (lambda () (with-current-buffer ed (insert "X"))))))
       (list refused (with-current-buffer ed (buffer-substring-no-properties (point-min) (point-max)))))))
 
@@ -858,8 +863,8 @@
   (let ((ed (allocate-buffer)))
     (with-current-buffer ed (insert "abc"))
     (set!buffer-read-only ed #t)
-    (text-editor-set-cursor ed (buffer-beg ed))
-    (let ((refused (refused? (lambda () (text-editor-delete-from-cursor ed 2)))))
+    (set-point ed (buffer-beg ed))
+    (let ((refused (refused? (lambda () (with-current-buffer ed (delete-region (point) (+ (point) 2)))))))
       (list refused (with-current-buffer ed (buffer-substring-no-properties (point-min) (point-max)))))))
 
 ;; Deleting nothing is not an edit, so it is not refused - there is
@@ -868,8 +873,8 @@
   (let ((ed (allocate-buffer)))
     (with-current-buffer ed (insert "abc"))
     (set!buffer-read-only ed #t)
-    (text-editor-set-cursor ed (buffer-beg ed))
-    (let ((refused (refused? (lambda () (text-editor-delete-from-cursor ed 0)))))
+    (set-point ed (buffer-beg ed))
+    (let ((refused (refused? (lambda () (with-current-buffer ed (delete-region (point) (point)))))))
       (list refused (with-current-buffer ed (buffer-substring-no-properties (point-min) (point-max)))))))
 
 ;; Undo is refused too, and refuses before it starts: a half-undone
@@ -879,7 +884,7 @@
   (let ((ed (allocate-buffer)))
     (with-current-buffer ed (insert "abc"))
     (text-editor-undo-boundary! ed)
-    (text-editor-set-cursor ed (buffer-beg ed))
+    (set-point ed (buffer-beg ed))
     (with-current-buffer ed (insert "X"))
     (set!buffer-read-only ed #t)
     (let* ((refused
@@ -918,7 +923,7 @@
   (let ((ed (allocate-buffer)))
     (with-current-buffer ed (insert "abc"))
     (set!buffer-read-only ed #t)
-    (text-editor-set-cursor ed (buffer-beg ed))
+    (set-point ed (buffer-beg ed))
     (set!buffer-read-only ed #f)
     (with-current-buffer ed (insert "X"))
     (list (with-current-buffer ed (buffer-substring-no-properties (point-min) (point-max))) (buffer-read-only? ed))))
@@ -1008,7 +1013,7 @@
 (test-equal '(1 1 3 1 4)
   (let ((ed (allocate-buffer)))
     (with-current-buffer ed (insert "abc"))
-    (text-editor-move-cursor ed 100)
+    (set-point ed (buffer-z ed))
     (list (+ 1 (count-lines ed (buffer-beg ed) (buffer-z ed)))
           (text-editor-cursor-line ed)
           (text-editor-cursor-column ed)
@@ -1021,7 +1026,7 @@
 (test-equal '(1 3)
   (let ((ed (allocate-buffer)))
     (with-current-buffer ed (insert "abc"))
-    (text-editor-move-cursor ed 100)
+    (set-point ed (buffer-z ed))
     (list (text-editor-cursor-line ed)
           (text-editor-cursor-column ed))))
 
@@ -1032,7 +1037,7 @@
 (test-equal '(2 1)
   (let* ((ed (allocate-buffer))
          (pos (begin (with-current-buffer ed (insert "ab\ncd"))
-                     (text-editor-set-cursor ed 5)
+                     (set-point ed 5)
                      (buffer-pt ed))))
     (list (+ 1 (count-lines ed (buffer-beg ed) pos))
           (- pos (text-editor-get-start-of-line ed pos)))))
@@ -1042,9 +1047,9 @@
 (test-equal 1
   (let ((ed (allocate-buffer)))
     (with-current-buffer ed (insert "abc"))
-    (text-editor-move-cursor ed 100)
-    (text-editor-set-cursor ed (text-editor-get-end-of-line ed))
-    (text-editor-set-cursor ed (text-editor-get-start-of-line ed))
+    (set-point ed (buffer-z ed))
+    (set-point ed (text-editor-get-end-of-line ed))
+    (set-point ed (text-editor-get-start-of-line ed))
     (buffer-pt ed)))
 
 ;; A line break at the end of the buffer does start a line: the buffer
@@ -1052,7 +1057,7 @@
 (test-equal '(2 2 0 5 5)
   (let ((ed (allocate-buffer)))
     (with-current-buffer ed (insert "abc\n"))
-    (text-editor-move-cursor ed 100)
+    (set-point ed (buffer-z ed))
     (list (+ 1 (count-lines ed (buffer-beg ed) (buffer-z ed)))
           (text-editor-cursor-line ed)
           (text-editor-cursor-column ed)
@@ -1070,7 +1075,7 @@
     ;; line 2 does not exist in `"abc"', and Emacs's `goto-line' stops at
     ;; `point-max' when the line runs out - which is what the old
     ;; line-addressed cursor did here too
-    (text-editor-set-cursor ed (buffer-z ed))
+    (set-point ed (buffer-z ed))
     (list (text-editor-cursor-line ed)
           (buffer-pt ed)
           (- (buffer-z ed) (buffer-beg ed)))))
@@ -1081,7 +1086,7 @@
   (let ((ed (allocate-buffer)))
     (with-current-buffer ed (insert "abc\n"))
     ;; the empty line the break started is `point-max'
-    (text-editor-set-cursor ed (buffer-z ed))
+    (set-point ed (buffer-z ed))
     (list (text-editor-cursor-line ed)
           (buffer-pt ed)
           (+ 1 (count-lines ed (buffer-beg ed) (buffer-z ed))))))
@@ -1091,7 +1096,7 @@
 (test-equal '(2 2 0)
   (let ((ed (allocate-buffer)))
     (with-current-buffer ed (insert "abc"))
-    (text-editor-move-cursor ed 100)
+    (set-point ed (buffer-z ed))
     (with-current-buffer ed (insert "\n"))
     (list (+ 1 (count-lines ed (buffer-beg ed) (buffer-z ed)))
           (text-editor-cursor-line ed)
@@ -1102,7 +1107,7 @@
 (test-equal '(3 3 0)
   (let ((ed (allocate-buffer)))
     (with-current-buffer ed (insert "one\ntwo\n"))
-    (text-editor-move-cursor ed 100)
+    (set-point ed (buffer-z ed))
     (list (+ 1 (count-lines ed (buffer-beg ed) (buffer-z ed)))
           (text-editor-cursor-line ed)
           (text-editor-cursor-column ed))))
@@ -1124,7 +1129,7 @@
 (test-equal '(1 4 5)
   (let ((ed (allocate-buffer)))
     (with-current-buffer ed (insert "abcd"))
-    (text-editor-set-cursor ed 5)
+    (set-point ed 5)
     (list (+ 1 (count-lines ed (buffer-beg ed) (buffer-z ed)))
           (text-editor-cursor-column ed)
           (buffer-pt ed))))
@@ -1132,14 +1137,15 @@
 ;; Deleting backwards at the end takes the two characters before it:
 ;; Emacs: "abcd" with point at the end and `(delete-char -2)' is "ab"
 ;; with point 3.
-(test-equal '("ab" 3 2)
+(test-equal '("ab" 3)
   (let ((ed (allocate-buffer)))
     (with-current-buffer ed (insert "abcd"))
-    (text-editor-set-cursor ed 5)
-    (let ((deleted (text-editor-delete-from-cursor ed -2)))
-      (list (with-current-buffer ed (buffer-substring-no-properties (point-min) (point-max)))
-            (buffer-pt ed)
-            deleted))))
+    (set-point ed 5)
+    ;; `delete-region' answers nil, as Emacs's does - the engine's
+    ;; wrapper answered the count, and that answer was its own invention.
+    (with-current-buffer ed (delete-region (- (point) 2) (point)))
+    (list (with-current-buffer ed (buffer-substring-no-properties (point-min) (point-max)))
+          (buffer-pt ed))))
 
 ;; ... and the deletion is recorded as what was really deleted, so
 ;; undoing it gives the buffer back: before this was fixed the entry said
@@ -1147,9 +1153,9 @@
 (test-equal "abcd"
   (let ((ed (allocate-buffer)))
     (with-current-buffer ed (insert "abcd"))
-    (text-editor-set-cursor ed 4)
+    (set-point ed 4)
     (text-editor-undo-boundary! ed)
-    (text-editor-delete-from-cursor ed -2)
+    (with-current-buffer ed (delete-region (- (point) 2) (point)))
     (with-current-buffer ed (primitive-undo 1 (text-editor-undo-list ed)))
     (with-current-buffer ed (buffer-substring-no-properties (point-min) (point-max)))))
 
@@ -1169,8 +1175,8 @@
 (test-equal '("abc" 4)
   (let ((ed (allocate-buffer)))
     (with-current-buffer ed (insert "abcd\n"))
-    (text-editor-set-cursor ed 6)
-    (text-editor-delete-from-cursor ed -2)
+    (set-point ed 6)
+    (with-current-buffer ed (delete-region (- (point) 2) (point)))
     (list (with-current-buffer ed (buffer-substring-no-properties (point-min) (point-max))) (buffer-pt ed))))
 
 ;; Writing a line back while the cursor is in the middle of it leaves the
@@ -1179,7 +1185,7 @@
 (test-equal '("abXcdef" 4 4)
   (let ((ed (allocate-buffer)))
     (with-current-buffer ed (insert "abcdef"))
-    (text-editor-set-cursor ed 3)          ; writes the line back
+    (set-point ed 3)          ; writes the line back
     (with-current-buffer ed (insert "X"))            ; the line is changed again
     (let ((before (buffer-pt ed)))
       (make-buffer-string ed 1 8)     ; a read, which writes back
@@ -1191,8 +1197,8 @@
 (test-equal '("acdef" 2)
   (let ((ed (allocate-buffer)))
     (with-current-buffer ed (insert "abcdef"))
-    (text-editor-set-cursor ed 3)
-    (text-editor-delete-from-cursor ed -1)
+    (set-point ed 3)
+    (with-current-buffer ed (delete-region (- (point) 1) (point)))
     (list (with-current-buffer ed (buffer-substring-no-properties (point-min) (point-max))) (buffer-pt ed))))
 
 (test-end "schemacs_editor_engine_end_of_buffer")
@@ -1253,7 +1259,7 @@
     (let ((unset (marker-position (%mark-marker ed))))
       (set-marker (%mark-marker ed) 5 ed)
       (let ((set-at (marker-position (%mark-marker ed))))
-        (text-editor-set-cursor ed 0)
+        (set-point ed 0)
         (with-current-buffer ed (insert "XY"))
         (list unset set-at (marker-position (%mark-marker ed)))))))
 
@@ -1313,8 +1319,8 @@
 (test-equal '(7 7 "abcdef\n")
   (let ((ed (allocate-buffer)))
     (with-current-buffer ed (insert "abc\ndef\n"))
-    (text-editor-set-cursor ed (+ (buffer-beg ed) 3))
-    (text-editor-delete-from-cursor ed 1)
+    (set-point ed (+ (buffer-beg ed) 3))
+    (with-current-buffer ed (delete-region (point) (+ (point) 1)))
     (list (- (buffer-z ed) (buffer-beg ed))
           (string-length (with-current-buffer ed (buffer-substring-no-properties (point-min) (point-max))))
           (with-current-buffer ed (buffer-substring-no-properties (point-min) (point-max))))))
@@ -1325,8 +1331,8 @@
   (let ((ed (allocate-buffer)))
     (with-current-buffer ed (insert "abc\ndef\n"))
     ;; line 2 begins at 5 - which is also where the line break is
-    (text-editor-set-cursor ed (+ (buffer-beg ed) 4))
-    (text-editor-delete-from-cursor ed -1)
+    (set-point ed (+ (buffer-beg ed) 4))
+    (with-current-buffer ed (delete-region (- (point) 1) (point)))
     (list (- (buffer-z ed) (buffer-beg ed))
           (string-length (with-current-buffer ed (buffer-substring-no-properties (point-min) (point-max))))
           (with-current-buffer ed (buffer-substring-no-properties (point-min) (point-max))))))
@@ -1336,8 +1342,8 @@
 (test-equal '(0 0 "")
   (let ((ed (allocate-buffer)))
     (with-current-buffer ed (insert "schemacs/\nscratch.md\nscratch-ro.md\n"))
-    (text-editor-set-cursor ed (buffer-beg ed))
-    (text-editor-delete-from-cursor ed 35)
+    (set-point ed (buffer-beg ed))
+    (with-current-buffer ed (delete-region (point) (point-max)))
     (list (- (buffer-z ed) (buffer-beg ed))
           (string-length (with-current-buffer ed (buffer-substring-no-properties (point-min) (point-max))))
           (with-current-buffer ed (buffer-substring-no-properties (point-min) (point-max))))))
@@ -1349,8 +1355,8 @@
   (let ((ed (allocate-buffer)))
     (with-current-buffer ed (insert "schemacs/\nscratch.md\nscratch-ro.md\n"))
     (let ((full (- (buffer-z ed) (buffer-beg ed))))
-      (text-editor-set-cursor ed 0)
-      (text-editor-delete-from-cursor ed (- (buffer-z ed) (buffer-beg ed)))
+      (set-point ed 0)
+      (with-current-buffer ed (delete-region (point-min) (point-max)))
       (let ((emptied (- (buffer-z ed) (buffer-beg ed))))
         (with-current-buffer ed (insert "schemacs/\nscratch.md\nscratch-ro.md\n"))
         (list full emptied (- (buffer-z ed) (buffer-beg ed)))))))
@@ -1409,9 +1415,9 @@
 (test-equal 9
   (let ((ed (allocate-buffer)))
     (with-current-buffer ed (insert "abcdefghij"))
-    (text-editor-set-cursor ed 1)
+    (set-point ed 1)
     (with-current-buffer ed (set-buffer-modified-p #f))
-    (text-editor-delete-from-cursor ed 10)
+    (with-current-buffer ed (delete-region (point) (point-max)))
     (buffer-modified-tick ed)))
 
 (test-end "schemacs_editor_engine_modiff")

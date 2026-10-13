@@ -20,15 +20,12 @@
     ;; predicate is built from - they arrived with the word motions from
     ;; `simple.sld', which had them imported.
     (scheme char)
-    (only (schemacs editor engine)
-          buffer-pt
-          buffer-beg buffer-z
-          text-editor-set-cursor)
+    
     (only (schemacs editor buffer) current-buffer
           ;; `FETCH_CHAR` (`buffer.h`) - the raw read of a named
           ;; buffer. It has no Lisp name, and it was the engine's
           ;; until 2026-10-13.
-          fetch-char)
+          fetch-char set-point buffer-pt buffer-beg buffer-z)
     )
 
   (export
@@ -124,7 +121,7 @@
         (if (>= i count)
             pos
             (begin
-              (text-editor-set-cursor ed pos)
+              (set-point ed pos)
               (let ((next (forward-word-position ed)))
                 (if (= next pos) pos (loop (+ 1 i) next)))))))
 
@@ -136,7 +133,7 @@
         (if (>= i count)
             pos
             (begin
-              (text-editor-set-cursor ed pos)
+              (set-point ed pos)
               (let ((prev (backward-word-position ed)))
                 (if (= prev pos) prev (loop (+ 1 i) prev)))))))
 
@@ -170,7 +167,7 @@
               (let ((c (fetch-char ed pos)))
                 (if (and c (memv c members))
                     (begin
-                      (text-editor-set-cursor ed (+ pos 1))
+                      (set-point ed (+ pos 1))
                       (loop (+ pos 1) (+ moved 1)))
                     moved))))))
 
@@ -190,7 +187,7 @@
               (let ((c (fetch-char ed (- pos 1))))
                 (if (and c (memv c members))
                     (begin
-                      (text-editor-set-cursor ed (- pos 1))
+                      (set-point ed (- pos 1))
                       (loop (- pos 1) (+ moved 1)))
                     moved))))))
 

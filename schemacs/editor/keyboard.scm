@@ -23,6 +23,7 @@
   ;; See LAYOUT-PLAN.txt for the rule this library is a step of.
 
   (import
+ (only (schemacs editor undo) *point-before-last-command-or-undo* *buffer-before-last-command-or-undo*)
     (scheme base)
     (scheme char)
     (scheme case-lambda)
@@ -44,14 +45,7 @@
     ;; `intervals.scm`'s - it must live below `search.scm`, which
     ;; calls it and cannot import `editfns.scm` (2026-10-13).
     (only (schemacs editor intervals) make-buffer-string)
-    (only (schemacs editor engine)
-          allocate-buffer
-          buffer-pt
-          ;; the two the command loop must set before every command -
-          ;; `keyboard.c`'s `point_before_last_command_or_undo`
-          ;; (`:232`), which undo.c reads
-          *point-before-last-command-or-undo*
-          *buffer-before-last-command-or-undo*)
+    
     (only (schemacs editor command)
           *last-command-event*
           command-interactive-spec command-name command-record-of
@@ -90,7 +84,7 @@
           ;; (`keyboard.c:14030'), not a slot of the buffer record: the
           ;; command loop clears it before every command and applies it
           ;; after, reading and writing it by name.
-          buffer-local-value set-buffer-local-value!)
+          buffer-local-value set-buffer-local-value! allocate-buffer buffer-pt)
     (only (schemacs editor simple)
           *last-change-was-undo* *last-command* *this-command*
           *select-active-regions*

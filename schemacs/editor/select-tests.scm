@@ -36,10 +36,8 @@
  ;; it, subclassed below so that the four selection generics answer like a
  ;; window system's. (The terminal's own OSC 52 selection moved out, to
  ;; `xterm-tests.scm' beside `xterm.sld'.)
- (only (schemacs editor engine)
-       allocate-buffer text-editor-set-cursor
-       buffer-pt)
- (only (schemacs editor buffer) with-current-buffer)
+ 
+ (only (schemacs editor buffer) with-current-buffer set-point allocate-buffer buffer-pt)
  (only (schemacs editor editfns)
        buffer-substring-no-properties point-max point-min insert
 )
@@ -151,7 +149,7 @@
                    (*gui-last-cut-in-clipboard* #f)
                    (*gui-last-cut-in-primary* #f))
       (with-current-buffer ed (insert text))
-      (text-editor-set-cursor ed 0)
+      (set-point ed 0)
       (thunk frame ed d))))
 
 ;; The plain terminal: no selections behind it, which is `emacs -nw'.
@@ -166,7 +164,7 @@
                    (*gui--last-selected-text-clipboard* #f)
                    (*gui-last-cut-in-clipboard* #f))
       (with-current-buffer ed (insert text))
-      (text-editor-set-cursor ed 0)
+      (set-point ed 0)
       (thunk frame ed))))
 
 (define (keys! frame . evs)
@@ -197,7 +195,7 @@
   (with-editor "hello world"
     (lambda (frame ed d)
       (keys! frame C-SPC)
-      (text-editor-set-cursor ed 6)
+      (set-point ed 6)
       (M-w! frame)
       (stub-clipboard d))))
 
@@ -214,7 +212,7 @@
   (with-editor "hello world"
     (lambda (frame ed d)
       (keys! frame C-SPC)
-      (text-editor-set-cursor ed 6)
+      (set-point ed 6)
       (M-w! frame)
       (stub-primary d))))
 
@@ -298,7 +296,7 @@
   (with-editor "selected text here"
     (lambda (frame ed d)
       (keys! frame C-SPC)
-      (text-editor-set-cursor ed 14)
+      (set-point ed 14)
       (deactivate-mark)
       (stub-primary d))))
 
@@ -329,7 +327,7 @@
   (with-tty "hello world"
     (lambda (frame ed)
       (keys! frame C-SPC)
-      (text-editor-set-cursor ed 6)
+      (set-point ed 6)
       (deactivate-mark)
       (mark-active))))
 
@@ -472,7 +470,7 @@
   (with-editor "hello world"
     (lambda (frame ed d)
       (keys! frame C-SPC)
-      (text-editor-set-cursor ed 6)
+      (set-point ed 6)
       (M-w! frame)
       (let ((answer (xselect-convert-to-delete 'CLIPBOARD #f "x")))
         (list answer (stub-clipboard d))))))

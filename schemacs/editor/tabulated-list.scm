@@ -24,16 +24,14 @@
   ;; See LAYOUT-PLAN.txt for the rule this library is a step of.
 
   (import
+ (only (schemacs editor undo) text-editor-undo-disable! text-editor-undo-enable!)
     (scheme base)
     (scheme char)
     ;; `erase-buffer` is `buffer.c`'s and `with-current-buffer` is its
     ;; neighbour; the insertion is `editfns.c`'s `insert`.
-    (only (schemacs editor buffer) erase-buffer with-current-buffer)
+    (only (schemacs editor buffer) erase-buffer with-current-buffer set-point buffer-beg buffer-z)
     (only (schemacs editor editfns) insert text-editor-cursor-line)
-    (only (schemacs editor engine)
-          buffer-beg buffer-z
-          text-editor-set-cursor
-          text-editor-undo-disable! text-editor-undo-enable!))
+    )
 
   (export
    tabulated-list-entries
@@ -201,7 +199,7 @@
                       (insert "\n"))
                     entries))
         (text-editor-undo-enable! ed)
-        (text-editor-set-cursor ed (buffer-beg ed))
+        (set-point ed (buffer-beg ed))
         entries))
 
     (define (tabulated-list-revert ed)

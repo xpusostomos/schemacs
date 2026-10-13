@@ -19,10 +19,7 @@
     ;; `kbd' - see `character.sld''s export note for why it is there
     (only (schemacs editor character) kbd)
     (scheme base)
-    (only (schemacs editor engine)
-          buffer-beg buffer-z
-          buffer-pt
-          text-editor-set-cursor)
+    
     (only (schemacs editor editfns)
           goto-char save-excursion forward-line
           text-editor-get-start-of-line)
@@ -39,7 +36,7 @@
           ;; `FETCH_CHAR` (`buffer.h`) - the raw read of a named
           ;; buffer. It has no Lisp name, and it was the engine's
           ;; until 2026-10-13.
-          fetch-char)
+          fetch-char set-point buffer-beg buffer-z buffer-pt)
     (only (schemacs editor simple) *last-command*)
     (only (schemacs editor command) current-prefix-arg define-command
           uarg->integer)
@@ -81,8 +78,8 @@
       (let ((start (text-editor-get-start-of-line ed)))
         (if (> start (buffer-beg ed))
             (begin
-              (text-editor-set-cursor ed (- start 1))
-              (text-editor-set-cursor
+              (set-point ed (- start 1))
+              (set-point
                ed (text-editor-get-start-of-line ed))
               0)
             1)))
@@ -152,13 +149,13 @@
                               (buffer-beg ed))
                           #f
                           (let ((above (begin
-                                         (text-editor-set-cursor
+                                         (set-point
                                           ed (- (text-editor-get-start-of-line ed)
                                                 1))
-                                         (text-editor-set-cursor
+                                         (set-point
                                           ed (text-editor-get-start-of-line ed))
                                          (buffer-pt ed))))
-                            (text-editor-set-cursor ed above)
+                            (set-point ed above)
                             (unless (%blank-line? ed)
                               (find)))))
                     (loop (- left 1)))

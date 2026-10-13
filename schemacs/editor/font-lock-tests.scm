@@ -1,10 +1,11 @@
 (import
+ (only (schemacs editor insdel) *after-change-functions*)
  (scheme base)
  (scheme char)
  (only (srfi 64) test-assert test-equal test-begin test-end)
- (only (schemacs editor engine) allocate-buffer *after-change-functions*)
+ 
  (only (schemacs editor frame) *current-frame* new-frame)
- (only (schemacs editor buffer) current-buffer erase-buffer)
+ (only (schemacs editor buffer) current-buffer erase-buffer allocate-buffer)
  (only (schemacs editor editfns)
        buffer-string goto-char insert point point-max point-min)
  (only (schemacs editor textprop)

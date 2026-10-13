@@ -3,9 +3,7 @@
  (scheme char)
  (only (srfi 64) test-assert test-equal test-begin test-end)
  (only (guile) setvbuf)
- (only (schemacs editor engine)
-       allocate-buffer buffer-beg buffer-z text-editor-delete-from-cursor
-text-editor-set-cursor text-editor-text-props)
+ 
  (only (schemacs editor intervals)
        find-interval next-interval interval-position interval-last-pos
        interval-total-length
@@ -13,13 +11,13 @@ text-editor-set-cursor text-editor-text-props)
  (only (schemacs editor buffer)
        *inhibit-read-only* erase-buffer get-buffer-create set-buffer
        set!buffer-read-only set-buffer-modified-p text-editor-undo-list with-current-buffer
-)
+ set-point allocate-buffer buffer-beg buffer-z text-editor-text-props)
  ;; the `(t . TOKEN)' entry `record_first_change' pushes is read back with
  ;; `undo.c`'s own predicate for it.
  (only (schemacs editor undo) undo-modified-entry?)
  (only (schemacs editor editfns)
-       buffer-substring buffer-substring-no-properties insert insert-and-inherit
-       propertize)
+       buffer-substring buffer-substring-no-properties delete-region insert insert-and-inherit
+       point point-min point-max propertize)
  (only (schemacs editor fns) concat copy-sequence)
  (prefix (schemacs editor textprop) tp:)
  (only (ice-9 exceptions) exception-message))
@@ -191,7 +189,7 @@ text-editor-set-cursor text-editor-text-props)
 (test-equal '(5 8 (face bold))
   (let ((ed (buffer-of "abcdefghij")))
     (tp:put-text-property 3 6 'face 'bold ed)
-    (text-editor-set-cursor ed 1)
+    (set-point ed 1)
     (with-current-buffer ed (insert "XY"))
     (let ((i (find-interval (text-editor-text-props ed) 5)))
       (list (interval-position i) (interval-last-pos i) (interval-plist i)))))
@@ -201,8 +199,8 @@ text-editor-set-cursor text-editor-text-props)
 (test-equal '(1 4 (face bold))
   (let ((ed (buffer-of "abcdefghij")))
     (tp:put-text-property 3 6 'face 'bold ed)
-    (text-editor-set-cursor ed 1)
-    (text-editor-delete-from-cursor ed 2)
+    (set-point ed 1)
+    (with-current-buffer ed (delete-region (point) (+ (point) 2)))
     (let ((i (find-interval (text-editor-text-props ed) 2)))
       (list (interval-position i) (interval-last-pos i) (interval-plist i)))))
 
@@ -228,7 +226,7 @@ text-editor-set-cursor text-editor-text-props)
   (let ((ed (buffer-of "abcdefghij")))
     (tp:put-text-property 3 6 'face 'bold ed)
     (set-buffer ed)
-    (text-editor-set-cursor ed 4)
+    (set-point ed 4)
     (insert "XYZ")
     (runs ed)))
 
@@ -240,7 +238,7 @@ text-editor-set-cursor text-editor-text-props)
   (let ((ed (buffer-of "abcdefghij")))
     (tp:put-text-property 3 6 'face 'bold ed)
     (set-buffer ed)
-    (text-editor-set-cursor ed 4)
+    (set-point ed 4)
     (insert-and-inherit "XYZ")
     (runs ed)))
 
@@ -272,7 +270,7 @@ text-editor-set-cursor text-editor-text-props)
     ;; position 2 and not 1: the clear then begins *inside* the root, which
     ;; is what makes `set_text_properties_1` split it - the case that was
     ;; broken. An insert at `point-min` alone does not split the root.
-    (text-editor-set-cursor ed 2)
+    (set-point ed 2)
     (insert "XYZ")
     (let* ((len (- (buffer-z ed) (buffer-beg ed)))
            (root (text-editor-text-props ed))

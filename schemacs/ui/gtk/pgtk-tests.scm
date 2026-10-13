@@ -37,11 +37,10 @@
  (prefix (schemacs editor xdisp) xd:)
  (prefix (schemacs editor dispnew) dn:)
  (prefix (schemacs editor frame) fr:)
- (only (schemacs editor engine)
-        allocate-buffer text-editor-set-cursor)
+ 
  (only (schemacs editor buffer) buffer-local-value set-buffer-local-value!
        %mark-marker with-current-buffer
-)
+ set-point allocate-buffer buffer-pt)
  ;; the mark's read and write are marker.c's now, on the buffer's own
  ;; slot; `text-editor-mark`/`set!text-editor-mark` are gone.
  (only (schemacs editor marker) marker-position set-marker)
@@ -54,7 +53,7 @@
  ;; not a test-only dependency.
  (only (schemacs editor dired))
  (only (schemacs editor keyboard) dispatch-input-event)
- (only (schemacs editor engine) buffer-pt)
+ 
  (only (cairo) cairo-image-surface-create-from-png cairo-image-surface-get-data
        cairo-image-surface-get-stride))
 
@@ -160,7 +159,7 @@
          (frame (fr:new-frame ed 24 80)))
     (parameterize ((fr:*current-frame* frame))
       (with-current-buffer ed (insert "hello world"))
-      (text-editor-set-cursor ed 1)
+      (set-point ed 1)
       (dispatch-input-event frame key)
       ;; C-f is a *motion* command, which keeps the mark active - it is how
       ;; a region is made at all.
@@ -225,7 +224,7 @@
   (let* ((d (new-display))
          (ed (allocate-buffer)))
     (with-current-buffer ed (insert text))
-    (text-editor-set-cursor ed point)
+    (set-point ed point)
     (set-marker (%mark-marker ed) mark ed)
     (set-buffer-local-value! ed 'mark-active #t)
     (let ((frame (fr:new-frame ed 24 80)))
@@ -372,7 +371,7 @@
   (let* ((d (new-display))
          (ed (allocate-buffer)))
     (with-current-buffer ed (insert text))
-    (text-editor-set-cursor ed 0)
+    (set-point ed 0)
     (put-text-property face-start face-end 'face 'font-lock-keyword-face ed)
     (let ((frame (fr:new-frame ed 24 80)))
       (parameterize ((fr:*current-frame* frame))
@@ -453,7 +452,7 @@
   (let* ((d (new-display))
          (ed (allocate-buffer)))
     (with-current-buffer ed (insert text))
-    (text-editor-set-cursor ed 0)
+    (set-point ed 0)
     (let ((frame (fr:new-frame ed 24 80)))
       (parameterize ((fr:*current-frame* frame))
         (when pattern
@@ -475,7 +474,7 @@
 ;; it, and the lazy highlighter makes one per other match.
 (let* ((ed (allocate-buffer)))
   (with-current-buffer ed (insert "alpha beta alpha"))
-  (text-editor-set-cursor ed 0)
+  (set-point ed 0)
   (parameterize ((fr:*current-frame* (fr:new-frame ed 24 80)))
     (is:isearch-highlight 0 5)
     (is:isearch-lazy-highlight-update ed (fr:frame-selected-window
@@ -536,7 +535,7 @@
   (let* ((d (new-display))
          (ed (allocate-buffer)))
     (with-current-buffer ed (insert text))
-    (text-editor-set-cursor ed 0)
+    (set-point ed 0)
     (when prop?
       (put-text-property (- (string-length text) 1) (string-length text)
                          'display ": (15 GiB available)" ed))
@@ -650,11 +649,11 @@
                         (let loop ((i 1) (acc '()))
                           (if (> i 60) (reverse acc)
                               (loop (+ i 1) (cons i acc))))))))
-        (text-editor-set-cursor ed 1)
+        (set-point ed 1)
         (let ((f1 (fr:new-frame-on d1 ed 24 80))
               (f2 (fr:new-frame-on d2 ed 24 80)))
           (parameterize ((fr:*current-frame* f1))
-            (text-editor-set-cursor ed 300)
+            (set-point ed 300)
             (xd:render! f1)
             (xd:render! f2)
             (list (= 1 (xd:window-start (fr:frame-selected-window f2)))

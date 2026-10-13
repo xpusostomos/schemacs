@@ -15,6 +15,7 @@
   ;; See LAYOUT-PLAN.txt for the rule this library is a step of.
 
   (import
+ (only (schemacs editor undo) undo-insertion-entry? undo-deletion-entry? undo-modified-entry? text-editor-undo-boundary!)
     (scheme base)
     (scheme char)
     (scheme case-lambda)
@@ -44,16 +45,7 @@
     ;; `intervals.scm`'s - it must live below `search.scm`, which
     ;; calls it and cannot import `editfns.scm` (2026-10-13).
     (only (schemacs editor intervals) make-buffer-string)
-    (only (schemacs editor engine)
-         undo-insertion-entry? undo-deletion-entry? undo-modified-entry?
-         text-editor-delete-from-cursor
-         buffer-pt
-         text-editor-move-cursor
-         buffer-beg buffer-z
-         buffer-read-only? text-editor-set-cursor
-         set!buffer-read-only
-         set!text-editor-undo-list
-         text-editor-undo-boundary! text-editor-undo-list)
+    
     ;; `visited-file-modtime' is `fileio.c`'s, and the `(t . TIME)' undo
     ;; branch below is what reads it - the same questions asked of the
     ;; same buffer, and `simple.el' is above both.
@@ -100,10 +92,10 @@
           ;; `FETCH_CHAR` (`buffer.h`) - the raw read of a named
           ;; buffer. It has no Lisp name, and it was the engine's
           ;; until 2026-10-13.
-          fetch-char)
+          fetch-char set-point buffer-pt buffer-beg buffer-z buffer-read-only? set!buffer-read-only set!text-editor-undo-list text-editor-undo-list)
     (only (schemacs editor command) *mark-even-if-inactive*)
     (only (schemacs editor editfns)
-          bolp buffer-size buffer-substring delete-and-extract-region delete-region eobp
+          bobp bolp buffer-size buffer-substring delete-and-extract-region delete-region eobp
           eolp following-char forward-line insert insert-and-inherit
           line-beginning-position
           line-end-position goto-char mark-marker message point point-max
@@ -113,6 +105,10 @@
     (only (schemacs editor syntax) skip-chars-forward skip-chars-backward
           word-char? forward-word-position backward-word-position
           word-run-end word-run-start)
+    ;; `transpose-chars' reads the `read-only' property of the character
+    ;; before point, which is `textprop.c`'s - Emacs's own test, added
+    ;; with the `text-editor-move-cursor' removal 2026-10-13.
+    (only (schemacs editor textprop) get-text-property)
     ;; `casify-region` is `casefiddle.c`'s, and `upcase-region` and
     ;; `downcase-region` - which read the region and so cannot live in
     ;; `casefiddle.scm` - are defined in this file and call it.
@@ -364,11 +360,11 @@ a specialization of overwrite mode, entered by setting the
                ;; end of this line, there being no line break after it
                ;; - and reports `end-of-buffer'.
                ((not next)
-                (text-editor-set-cursor
+                (set-point
                  ed (text-editor-get-end-of-line ed))
                 (error "End of buffer"))
                (else
-                (text-editor-set-cursor
+                (set-point
                  ed (min (text-editor-get-end-of-line ed next)
                          (+ next goal)))
                 (loop (+ 1 i) next))))))))
@@ -385,11 +381,11 @@ a specialization of overwrite mode, entered by setting the
           (when (< i count)
             (cond
              ((= start (buffer-beg ed))
-              (text-editor-set-cursor ed start)
+              (set-point ed start)
               (error "Beginning of buffer"))
              (else
               (let ((prev (text-editor-get-start-of-line ed (- start 1))))
-                (text-editor-set-cursor
+                (set-point
                  ed (min (text-editor-get-end-of-line ed prev)
                          (+ prev goal)))
                 (loop (+ 1 i) prev))))))))
@@ -544,7 +540,7 @@ a specialization of overwrite mode, entered by setting the
             (error "No mark set in this buffer")
             (begin
               (set-mark (buffer-pt (current-buffer)))
-              (text-editor-set-cursor (current-buffer) omark)
+              (set-point (current-buffer) omark)
               (if (eq? (and arg #t)
                        (not (if (*exchange-point-and-mark-highlight-region*)
                                 (region-active-p)
@@ -650,7 +646,7 @@ a specialization of overwrite mode, entered by setting the
               (let ((point (buffer-pt ed))
                     (bottom (window-move-lines ed new vheight)))
                 (when (or (< point new) (>= point bottom))
-                  (text-editor-set-cursor ed new)))))))
+                  (set-point ed new)))))))
 
     (define-command (scroll-down-command uarg)
       ;; Scroll the view toward the beginning of the buffer, the mirror
@@ -673,7 +669,7 @@ a specialization of overwrite mode, entered by setting the
                 (when (or (< point new) (>= point bottom))
                   ;; point is off the bottom: it goes to the window's last
                   ;; line, which is what the line arithmetic did
-                  (text-editor-set-cursor
+                  (set-point
                    ed (window-move-lines ed new (- vheight 1)))))))))
 	
 	(define-command (toggle-truncate-lines arg)
@@ -712,13 +708,13 @@ non-nil."
       (interactive)
       (let ((window (selected-window)))
         (set-window-start! window 1)
-        (text-editor-set-cursor (window-buffer window) 1)))
+        (set-point (window-buffer window) 1)))
 
     (define-command (end-of-buffer)
       "Move point to the end of the buffer."
       (interactive)
       (let ((ed (current-buffer)))
-        (text-editor-set-cursor ed (buffer-z ed))))
+        (set-point ed (buffer-z ed))))
 
     ;;----------------------------------------------------------------
     ;; Kill ring and word motion
@@ -778,8 +774,7 @@ non-nil."
         ;; "Any command that calls this function is a kill command": it
         ;; says so by becoming `kill-region' for the next one.
         (*this-command* kill-region)
-        (text-editor-set-cursor ed (min start end))
-        (text-editor-delete-from-cursor ed (abs (- end start)))
+        (delete-region start end)
         text))
 
     (define-command (forward-word count)
@@ -789,7 +784,7 @@ non-nil."
       (interactive "p")
       (let loop ((i 0))
         (when (< i count)
-          (text-editor-set-cursor
+          (set-point
            (current-buffer) (forward-word-position (current-buffer)))
           (loop (+ 1 i)))))
 
@@ -799,7 +794,7 @@ non-nil."
       (interactive "p")
       (let loop ((i 0))
         (when (< i count)
-          (text-editor-set-cursor
+          (set-point
            (current-buffer) (backward-word-position (current-buffer)))
           (loop (+ 1 i)))))
 
@@ -1168,7 +1163,7 @@ non-nil."
         (when (pair? arg)
           (let ((was (mark #t)))
             (set-marker (mark-marker) (buffer-pt ed) (current-buffer))
-            (text-editor-set-cursor ed was))))
+            (set-point ed was))))
       ;; "If we do get all the way thru, make this-command indicate
       ;; that" - which is what `yank-pop' asks about, and what makes a
       ;; run of M-y possible.
@@ -1362,7 +1357,7 @@ non-nil."
                  ;; undo group and left `n` alone, so the walk ran on
                  ;; past the boundary and undid the next group too.
                  ((integer? entry)
-                  (text-editor-set-cursor ed entry)
+                  (set-point ed entry)
                   (loop rest n #f))
                  ;; Undoing back past the mark of the last save makes the
                  ;; buffer unmodified again, which is what tells the user
@@ -1417,19 +1412,19 @@ non-nil."
                       ;; Move point first, so that undoing this undo does
                       ;; not send point back to where it is now (Emacs's
                       ;; comment in `primitive-undo').
-                      (text-editor-set-cursor ed beg)
-                      (text-editor-delete-from-cursor ed (- end beg))))
+                      (set-point ed beg)
+                      (with-current-buffer ed (delete-region beg end))))
                    ((undo-deletion-entry? entry)
                     (let* ((text (car entry))
                            (pos (cdr entry))
                            (at (abs pos)))
-                      (text-editor-set-cursor ed at)
+                      (set-point ed at)
                       (with-current-buffer ed (insert text))
                       ;; POS was positive when point was at the beginning
                       ;; of the deleted text and negative when it was at
                       ;; the end; undo puts point back on the side it was
                       ;; on (Emacs's rule for the sign of POS).
-                      (text-editor-set-cursor
+                      (set-point
                        ed (if (< pos 0) (+ at (string-length text)) at)))))
                   (loop rest n #f)))))))
       )
@@ -2015,7 +2010,7 @@ non-nil."
           (begin
             (when (= (buffer-pt (current-buffer)) (mark #t))
               (set!frame-message (*current-frame*) "Mark popped"))
-            (text-editor-set-cursor (current-buffer) (mark #t))
+            (set-point (current-buffer) (mark #t))
             (pop-mark))))
 
     (define-command (set-mark-command arg)
@@ -2059,7 +2054,7 @@ non-nil."
       (interactive)
       (push-mark)
       (push-mark (buffer-z (current-buffer)) #f #t)
-      (text-editor-set-cursor (current-buffer) 1))
+      (set-point (current-buffer) 1))
 
     ;;----------------------------------------------------------------
     ;; The keys GNU Emacs binds these commands to
@@ -2271,7 +2266,7 @@ non-nil."
         ;; this replaces inserted raw `#\newline`s through the engine
         ;; facade - no `self-insert`, and so no property inheritance.
         (insert-newline n)
-        (text-editor-set-cursor ed loc)))
+        (set-point ed loc)))
 
     (define-command (open-line-command n)
       ;; `open-line' as a command - the name keeps `open-line''s, the
@@ -2438,9 +2433,9 @@ non-nil."
               (begin
                 ;; the newline that ends the line above POS, which is
                 ;; where the previous line starts
-                (text-editor-set-cursor ed (- p 1))
+                (set-point ed (- p 1))
                 (let ((start (text-editor-get-start-of-line ed)))
-                  (text-editor-set-cursor ed start)
+                  (set-point ed start)
                   (if (%blank-line? ed)
                       (walk start)
                       ;; the first non-blank line: past it, which is
@@ -2461,8 +2456,8 @@ non-nil."
           (if (>= p (buffer-z ed))
               #f
               (begin
-                (text-editor-set-cursor ed p)
-                (text-editor-set-cursor ed (text-editor-get-start-of-line ed))
+                (set-point ed p)
+                (set-point ed (text-editor-get-start-of-line ed))
                 (if (%blank-line? ed)
                     (let ((eol (text-editor-get-end-of-line ed)))
                       (if (< eol (buffer-z ed))
@@ -2492,16 +2487,16 @@ non-nil."
                      (let ((eol (text-editor-get-end-of-line ed)))
                        (or (>= eol (buffer-z ed))
                            (begin
-                             (text-editor-set-cursor ed (+ eol 1))
+                             (set-point ed (+ eol 1))
                              (not (%blank-line? ed)))))
                      ;; and the line before it is not blank - or there
                      ;; is none
                      (or (<= (text-editor-get-start-of-line ed)
                              (buffer-beg ed))
                          (begin
-                           (text-editor-set-cursor
+                           (set-point
                             ed (- (text-editor-get-start-of-line ed) 1))
-                           (text-editor-set-cursor
+                           (set-point
                             ed (text-editor-get-start-of-line ed))
                            (not (%blank-line? ed))))))))
         ;; Delete preceding blank lines, and this one too if it's the
@@ -2575,16 +2570,21 @@ non-nil."
               ;; Without a marker the boundary is tracked by where
               ;; the edits move it: +LEN2 for the first insert
               ;; (BEG2 is at or after it), -LEN1 for the delete.
-              (text-editor-set-cursor ed (cdr pos1))
+              (set-point ed (cdr pos1))
               (insert word)
-              (text-editor-set-cursor ed (car pos1))
+              ;; `delete-and-extract-region` takes the two ends outright,
+              ;; as the C's `del_range_1` does - **the `(+ 1 ...)` that
+              ;; stood here was a bug** (found 2026-10-13): it deleted the
+              ;; character *after* the first object, so the three edits
+              ;; cancelled and `C-t' left the text unchanged. `(car pos1)'
+              ;; is where Emacs cuts.
               (let ((first (delete-and-extract-region
-                            (+ 1 (car pos1))
-                            (+ 1 (car pos1) len1))))
-                (text-editor-set-cursor
+                            (car pos1)
+                            (+ (car pos1) len1))))
+                (set-point
                  ed (+ (car pos2) (- len2 len1)))
                 (insert first)
-                (text-editor-set-cursor
+                (set-point
                  ed (+ (car pos2) (- len2 len1) len1))
                 (delete-region
                  (+ (car pos2) (- len2 len1) len1)
@@ -2620,7 +2620,7 @@ non-nil."
               (if (not (mark #t))
                   (error "No mark set in this buffer")
                   (begin
-                    (text-editor-set-cursor (current-buffer) (mark #t))
+                    (set-point (current-buffer) (mark #t))
                     (let ((pos2 (aux 1)))
                       (%transpose-subr-1 pos1 pos2))))))
           (exchange-point-and-mark #f))
@@ -2628,14 +2628,14 @@ non-nil."
           (let* ((pos1 (aux -1))
                  (pos2 (aux arg)))
             (%transpose-subr-1 pos1 pos2)
-            (text-editor-set-cursor (current-buffer) (car pos2))))
+            (set-point (current-buffer) (car pos2))))
          (else
           (let* ((pos1 (aux -1))
                  (ed (current-buffer)))
-            (text-editor-set-cursor ed (car pos1))
+            (set-point ed (car pos1))
             (let ((pos2 (aux arg)))
               (%transpose-subr-1 pos1 pos2)
-              (text-editor-set-cursor
+              (set-point
                ed (+ (car pos2) (- (cdr pos1) (car pos1))))))))))
 
     (define-command (transpose-chars arg)
@@ -2645,15 +2645,18 @@ non-nil."
       ;; the backward step the eolp case makes first.
       "Interchange characters around point, moving forward one character."
       (interactive (list (uarg->integer 1 (current-prefix-arg))))
-      (let ((ed (current-buffer)))
-        (when (and (= (buffer-pt ed)
-                      (text-editor-get-end-of-line ed))
-                   (> (buffer-pt ed) 0))
-          (text-editor-move-cursor ed -1)))
-      (%transpose-subr
-       (lambda (x)
-         (text-editor-move-cursor (current-buffer) x))
-       arg))
+      ;; Emacs's own three tests before the backward step - eolp, not
+      ;; bobp, and the character before point is not `read-only'.
+      (when (and (eolp) (not (bobp))
+                 (not (get-text-property (- (point) 1) 'read-only)))
+        (forward-char -1))
+      ;; MOVER is `#'forward-char' in Emacs, and it is the function
+      ;; rather than a wrapper here too: `transpose-subr' calls it with
+      ;; a signed count, and `forward-char' is what moves point that
+      ;; way - the tree's `text-editor-move-cursor', which this used to
+      ;; call, clamped where `forward-char' signals, and the endgame
+      ;; removed it.
+      (%transpose-subr forward-char arg))
 
     (define-command (transpose-words arg)
       ;; GNU Emacs's `transpose-words' (simple.el:8798), over

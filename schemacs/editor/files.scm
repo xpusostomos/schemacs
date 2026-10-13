@@ -16,6 +16,7 @@
   ;; See LAYOUT-PLAN.txt for the rule this library is a step of.
 
   (import
+ (only (schemacs editor undo) text-editor-undo-disable! text-editor-undo-enable!)
     (scheme base)
     (scheme char)
     ;; Reading and writing the file itself, and the `display' that writes
@@ -41,15 +42,7 @@
           decode-eol encode-eol *last-coding-system-used*
           *coding-system-for-read* *coding-system-for-write*)
     (only (schemacs editor mule) set-auto-coding)
-    (only (schemacs editor engine)
-          set!text-editor-file-name
-          text-editor-buffer-name
-          text-editor-file-name  buffer-pt
-          buffer-beg buffer-z
-          buffer-modified-p buffer-read-only?
-          text-editor-set-cursor set-buffer-modified-p
-          set!buffer-read-only
-          text-editor-undo-disable! text-editor-undo-enable!)
+    
     (only (schemacs editor frame)
           *current-frame* delete-frame
           frame-editor frame-list frame-quit-cont
@@ -77,7 +70,7 @@
           ;; buffer. It has no Lisp name, and it was the engine's
           ;; until 2026-10-13.
           fetch-char with-current-buffer
-)
+ set-point set!text-editor-file-name text-editor-buffer-name text-editor-file-name buffer-pt buffer-beg buffer-z buffer-modified-p buffer-read-only? set-buffer-modified-p set!buffer-read-only)
     (only (schemacs editor simple) push-mark)
     ;; `string-prefix-p' is `subr.el''s and now lives in
     ;; `(schemacs editor subr)', which is below this library.
@@ -1893,7 +1886,7 @@ save-buffer
         ;; It was `(text-editor-set-cursor ed 1 0)`, the engine's
         ;; invented line-and-column form; line 1 column 0 *is*
         ;; `point-min', so the plain position says it without the detour.
-        (text-editor-set-cursor ed (buffer-beg ed))
+        (set-point ed (buffer-beg ed))
         ed)))))
 
     (define *save-silently* (make-parameter #f))

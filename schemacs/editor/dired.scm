@@ -113,7 +113,7 @@
           set!major-mode set-buffer
           *inhibit-read-only*
           set!mode-name set-buffer-local-value! set-buffer-modified-p
-          use-local-map with-current-buffer)
+          use-local-map with-current-buffer set!buffer-read-only bufferp)
     (only (schemacs editor editfns)
           bobp bolp buffer-substring buffer-substring-no-properties char-after
           char-before delete-region eobp eolp forward-line format goto-char
@@ -143,7 +143,7 @@
           *default-keymap*)
     (only (schemacs editor command) current-prefix-arg define-command
           uarg->integer)
-    (only (schemacs editor engine) set!buffer-read-only bufferp)
+    
     ;; the markers, from marker.c's own library
     (only (schemacs editor marker) marker-position set-marker)
     ;; the three mark faces are dired.el's own `defface's

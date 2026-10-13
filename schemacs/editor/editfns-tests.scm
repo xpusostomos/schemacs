@@ -2,10 +2,9 @@
  (scheme base)
  (scheme char)
  (only (srfi 64) test-assert test-equal test-begin test-end)
- (only (schemacs editor engine) allocate-buffer)
  (only (schemacs editor buffer)
        *current-buffer* current-buffer erase-buffer get-buffer-create
-       set-buffer)
+       set-buffer allocate-buffer)
  (only (schemacs editor frame) *current-frame* new-frame)
  (only (schemacs editor editfns)
        *text-quoting-style* buffer-string char-before format format-message

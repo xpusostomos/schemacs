@@ -65,10 +65,7 @@
     ;; `intervals.scm`'s - it must live below `search.scm`, which
     ;; calls it and cannot import `editfns.scm` (2026-10-13).
     (only (schemacs editor intervals) make-buffer-string)
-    (only (schemacs editor engine)
-          bufferp
-          buffer-beg buffer-z buffer-pt
-          text-editor-set-cursor)
+    
     ;; `*case-fold-search*' is the case folding every search here
     ;; consults (`case-fold-search', buffer.c:6009), `with-current-buffer'
     ;; what `looking-at' and the like read the buffer through. The
@@ -78,7 +75,7 @@
           *case-fold-search* current-buffer with-current-buffer
           text-editor-text
           %text-editor-newline-cache set!%text-editor-newline-cache
-          text-editor-cache-long-scans)
+          text-editor-cache-long-scans set-point bufferp buffer-beg buffer-z buffer-pt)
     ;; The raw character store: `buffer.h`'s macros, which the scans below
     ;; read character by character as `find_newline` does with
     ;; `FETCH_CHAR`.
@@ -1266,7 +1263,7 @@
               (if noerror #f (error "Search failed" string)))
              ((> left 1) (loop (- left 1) found))
              (else
-              (text-editor-set-cursor ed found)
+              (set-point ed found)
               ;; FOUND is a position now - the engine's positions are
               ;; Emacs's - so the match starts `(string-length string)'
               ;; before it and neither the register nor the answer adds
@@ -1304,7 +1301,7 @@
              (else
               ;; `found' is the match's start, where the backward
               ;; search leaves point
-              (text-editor-set-cursor ed found)
+              (set-point ed found)
               (%set-search-regs found (string-length string))
               found))))))
 
@@ -1418,7 +1415,7 @@
              ((> left 1) (loop (- left 1) (if backward (cadr found)
                                               (caddr found))))
              (else
-              (text-editor-set-cursor ed
+              (set-point ed
                                       (if backward (cadr found) (caddr found)))
               ;; the registers of the match actually made, not a
               ;; re-derivation of it from a copy of the matched text -
@@ -1763,7 +1760,7 @@
         ;; C's `opoint <= 0` is not `< 0` - a zero names a place counted
         ;; from the end of the buffer, which is how `replace-match-string'
         ;; (the C's string path) spells "at the end".
-        (text-editor-set-cursor
+        (set-point
          ed (max (buffer-beg ed)
                  (min zv (if (<= opoint 0)
                              (+ zv opoint)
@@ -1772,7 +1769,7 @@
         ;; replacement." The C's `move_if_not_intangible` is not ported -
         ;; there is no intangible text here - so this is the `goto-char`
         ;; it amounts to.
-        (text-editor-set-cursor ed newpoint)
+        (set-point ed newpoint)
         #f))
 
     ;; Install the seam `replace_range` reads. In the C `search.c` is

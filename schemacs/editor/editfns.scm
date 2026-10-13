@@ -40,18 +40,18 @@
           ;; `FETCH_CHAR` (`buffer.h`) - the raw read of a named
           ;; buffer. It has no Lisp name, and it was the engine's
           ;; until 2026-10-13.
-          fetch-char)
+          fetch-char
+          ;; `SET_PT` (`buffer.h:170`), the write below `goto-char` -
+          ;; also the engine's until 2026-10-13, where it was
+          ;; `text-editor-set-cursor`.
+          set-point buffer-read-only? buffer-beg buffer-z buffer-pt)
     (only (schemacs editor marker)
           build-marker markerp marker-position set-marker)
     ;; `make-buffer-string` is `editfns.c:1561`'s and is
     ;; `intervals.scm`'s - it must live below `search.scm`, which
     ;; calls it and cannot import `editfns.scm` (2026-10-13).
     (only (schemacs editor intervals) make-buffer-string)
-    (only (schemacs editor engine)
-          buffer-read-only?
-          buffer-beg buffer-z
-          buffer-pt
-          text-editor-set-cursor)
+    
     ;; The scans `bol', `eol' and the line arithmetic below are built on -
     ;; `find_newline`, `scan_newline_from_point` and
     ;; `find_before_next_newline`. **They are `search.c`'s and this file
@@ -292,13 +292,12 @@ point-marker
       ;; POSITION" - and which callers depend on: `(goto-char
       ;; (match-end 0))' and `(goto-char (next-single-property-change
       ;; ...))' read the answer, and `dired-move-to-end-of-filename'
-      ;; returns its property branch's value outright. The engine's
-      ;; `text-editor-set-cursor' answers something else entirely.
+      ;; returns its property branch's value outright.
       ;;--------------------------------------------------------------
       (let ((at (cond
                  ((markerp position) (marker-position position))
                  (else position))))
-        (text-editor-set-cursor (current-buffer) at)
+        (set-point (current-buffer) at)
         at))
 
     (define (general-insert-function inherit args)
@@ -705,7 +704,7 @@ moved."
         (call-with-values
             (lambda () (scan-newline-from-point ed n))
           (lambda (pos counted)
-            (text-editor-set-cursor ed pos)
+            (set-point ed pos)
             (let ((shortage (- n (if (<= n 0) 1 0) counted)))
               (if (= shortage 0)
                   shortage
@@ -781,7 +780,7 @@ moved."
                (set-buffer saved-buffer)
                ;; `Fgoto_char (marker)' - where the marker ended up
                ;; after BODY's edits, unchained once read
-               (text-editor-set-cursor
+               (set-point
                 saved-buffer (marker-position marker))
                (set-marker marker #f)))))))
 

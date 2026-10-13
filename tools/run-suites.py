@@ -55,6 +55,14 @@ SUITES = [
     'schemacs/editor/search-tests.scm',
     'schemacs/editor/replace-tests.scm',
     'schemacs/editor/faces-tests.scm',
+    # **Three suites that were on disk and passing but were never run**
+    # (added 2026-10-13): they are listed here for the first time. A test
+    # file that is not in this list is not run by anything - the tree had
+    # four, and only `intervals-tests.scm' (still out, still failing on
+    # its pre-2026-10-05 positions) was known about.
+    'schemacs/editor/xfaces-tests.scm',
+    'schemacs/editor/minibuffer-tests.scm',
+    'schemacs/editor/minibuf-tests.scm',
     'schemacs/ui/gtk/pgtk-tests.scm',
     'schemacs/editor/timer-tests.scm',
     'schemacs/editor/select-tests.scm',

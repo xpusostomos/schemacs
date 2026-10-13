@@ -29,6 +29,10 @@
   ;; excluded pair.
 
   (import
+ (only (schemacs editor buffer) allocate-buffer bufferp buffer-pt buffer-beg buffer-z text-editor-buffer-name set!text-editor-buffer-name text-editor-file-name set!text-editor-file-name buffer-modified-p set-buffer-modified-p buffer-read-only? set!buffer-read-only text-editor-text-props set!text-editor-text-props *inhibit-read-only* *buffer-visited-file-modtime-function* buffer-modified-tick buffer-chars-modified-tick text-editor-cache-long-scans set!text-editor-cache-long-scans show-text-editor text-editor-undo-list set!text-editor-undo-list)
+ (only (schemacs editor undo) record-insert record-delete text-editor-undo-boundary! text-editor-undo-disable! text-editor-undo-enable! text-editor-undo-recording? *undo-limit* undo-insertion-entry? undo-deletion-entry? undo-modified-entry? *point-before-last-command-or-undo* *buffer-before-last-command-or-undo*)
+ (only (schemacs editor insdel) *after-change-functions* signal-after-change *text-property-offset-function* invalidate-buffer-caches)
+ (only (schemacs editor fns) count-lines)
     (scheme base)
     ;; `import' and `eval' are `(guile)''s - the `(scheme eval)' library
     ;; is not what evaluates an `import' form - and so is `resolve-module'.
@@ -116,7 +120,7 @@
         (schemacs editor dispnew)
         (schemacs editor easy-mmode)
         (schemacs editor editfns)
-        (schemacs editor engine)
+        
         (schemacs editor env)
         (schemacs editor faces)
         (schemacs editor fileio)
