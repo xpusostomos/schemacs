@@ -65,6 +65,7 @@
     (schemacs editor command)
     (except (schemacs editor fns)  compare-strings line-number-at-pos)
     (schemacs editor timefns)
+    (schemacs editor custom)
     (schemacs editor derived)
     (schemacs editor easy-mmode)
     (schemacs editor window)
@@ -171,6 +172,9 @@
     *current-keymap*
     *current-message-function*
     *cursor-in-echo-area*
+    *custom-current-group-alist*
+    *custom-declare-variable-hook*
+    *custom-dont-initialize*
     *deactivate-mark-hook*
     *default-keymap*
     *default-text-properties*
@@ -657,7 +661,24 @@
     current-time
     current-time-string
     cursor-screen-position
+    custom--standard-value
+    custom-add-dependencies
+    custom-add-frequent-value
+    custom-add-link
+    custom-add-load
+    custom-add-option
+    custom-add-package-version
+    custom-add-to-group
+    custom-add-version
+    custom-current-group
     custom-declare-face
+    custom-declare-variable
+    custom-handle-keyword
+    custom-initialize-changed
+    custom-initialize-default
+    custom-initialize-reset
+    custom-initialize-set
+    custom-variable-p
     deactivate-mark
     debugger-mode-map
     debugger-quit
@@ -670,6 +691,7 @@
     defface
     define-charset
     define-command
+    define-custom
     define-derived-mode
     define-key
     define-minor-mode

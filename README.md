@@ -102,7 +102,7 @@ project there.
   `-r`/`--remote[=PORT] FILE...` is `emacsclient` itself it hands the 
   file names to a running editor's `find-file`, so they open in 
   that editor, and starts no editor.
-
+q
   Starting with no file arguments shows the **startup screen**, a file
   splash.txt on your load-path. q to quit it.
   
@@ -274,3 +274,12 @@ array, with very little downside. This is 2026 where memory is
 important but not *that* important. There may be other departures, but
 they are very small. Small enough that AI conversion of elisp packages
 should be *very* smooth.
+
+
+One area that is rather problematic is dynamic binding of variables.
+Emacs has syntax like with-current-buffer that dynamically binds
+variables with new values for the duration of the function. Rather
+than invent a new binding mechanism, we've made it so that it saves
+and restores the global value of the buffer. Long term we probably
+should wind the variables throughout the APIs... maybe. It will take
+time to fully contemplate the issues.

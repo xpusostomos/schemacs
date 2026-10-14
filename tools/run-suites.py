@@ -43,6 +43,7 @@ SUITES = [
     'schemacs/editor/charset-tests.scm',
     'schemacs/editor/mule-cmds-tests.scm',
     'schemacs/editor/cmds-tests.scm',
+    'schemacs/editor/custom-tests.scm',
     'schemacs/editor/casefiddle-tests.scm',
     'schemacs/editor/mouse-tests.scm',
     'schemacs/repl-client-tests.scm',

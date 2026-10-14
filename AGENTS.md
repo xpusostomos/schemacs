@@ -6388,3 +6388,247 @@ imports in the three live libraries; not the library alone.
   not "the graph is buggy" but **do not delete on one tool's say-so**:
   `grep -rl "$(name)" --include='*.sld' --include='*.scm' .` over the whole
   tree, for *every* file about to go, and read the hits.
+
+# The imports facility, and `define-custom` (2026-10-14)
+
+Chris, after the session that ended with "you can start working on the
+imports scheme":
+
+> the editor should try and load `$XDG_CONFIG_HOME/imports.scm`, which
+> should be just a list of imports, and that should load `(schemacs editor
+> imports)` which includes all the editors built in imports. ... it loads
+> that as the environment for M-: and REPL and also for the init.scm
+> environment ... The name wouldn't be loadup, but `(schemacs editor
+> imports)`. And to be clear, the editor itself shouldn't use that
+> internally as a cheat, it should only use that for those 3 scenarios.
+
+and later, on what the user gets:
+
+> the user has full control over what is imported into his default
+> environment ... I wouldn't want some thing where he has to write a file
+> importing a bunch of things and re-exporting it again.
+
+## The user environment
+
+Three places evaluate code the editor did not write, and so three places
+with no `import` to write: **`M-:`**, the **REPL back door**, and the
+user's **`init.scm`**. GNU Emacs has one obarray, so all three reach
+`find-file` with no `require`; this tree's names live one library per
+Emacs file, so they need somewhere to look.
+
+- **`schemacs/editor/imports.scm`** - `(schemacs editor imports)`, which
+  imports all 62 `(schemacs editor ...)` libraries and re-exports their
+  1712 names. **Generated**: `tools/gen-imports.scm` (with `--check`),
+  because a hand-written list of that size is wrong within a week. Guile's
+  `define-library` has **no `re-export`** (measured), which is why the
+  export list is written out rather than named.
+- **`loadup.scm`** - `imports-path` and **`open-user-environment!`**:
+  imports the whole editor into a module, or, when the user has one,
+  evaluates `$XDG_CONFIG_HOME/imports.scm` - or
+  `$XDG_CONFIG_HOME/schemacs/imports.scm`, beside `init.scm` - *as* the
+  environment. **A file replaces the default rather than adding to it**,
+  which is the "full control" reading: a file that does not name the
+  editor gets an environment without it (and the pty check asserts
+  exactly that).
+- The three consumers are one call each: `start-repl!`, the boot in
+  `startup.scm` (Emacs's `normal-top-level`), and
+  `%eval-expression-environment`.
+
+**What it fixed.** `M-:` evaluated in `(current-module)`, and the module
+current while a *command's* interactive spec is being evaluated is the
+command's defining library - so the same expression went to a different
+module depending on whether it was typed at a prompt or read by the back
+door, and in a library, which has no `import` to offer. All three now read
+one module.
+
+**The editor's own libraries do not use it**, and `loadup-tests.scm`
+keeps the list honest: it walks `schemacs/editor/*.scm` and fails on a
+library that is neither in `editor-libraries` nor excluded on purpose.
+`(schemacs editor imports)` is excluded, and must be - it imports every
+library, so a list naming it would be a cycle.
+
+Tests: `loadup-tests.scm` (16) and `pty-check.py`'s **`imports`**, which
+drives all three consumers in one run and is verified to fail when
+`imports.scm` is ignored (reverted by making `open-user-environment!`
+read the default).
+
+## The clash census, and the four bugs under it
+
+`(schemacs editor imports)` imports sixty libraries into one module, which
+is the first thing that ever asked *"do two libraries export the same
+name?"*. The generator resolves the harmless case (one binding offered
+twice - `simple` re-exporting what `cmds` owns, `files` re-exporting
+`buffer`'s `find-buffer-visiting`) by `except`-ing it from all but the
+first library, and `loadup-tests.scm` **checks that every excepted name is
+one binding** - because the same trick would silently pick a winner for two
+libraries that each define their own. Four were:
+
+1. **`casefiddle` still exported `upcase-region`/`downcase-region`** after
+   the commands moved to `simple.scm`. An export of a name a library does
+   not have is an **unbound variable** in every module that imports it -
+   `(import (schemacs editor casefiddle))` was handing out two of them, and
+   had been since the move.
+2. **`*minor-mode-alist*` was defined twice**, in `subr.scm` and in
+   `xdisp.scm`, so the mode line read one alist and `add-minor-mode` wrote
+   the other: a minor mode registered the Emacs way never reached the mode
+   line. `xdisp` imports it from `subr` now, which is where
+   `add-minor-mode` lives.
+3. **`kill-buffer`**: `buffer.c`'s one function is two here - the
+   *mechanism* (which asks `kill-buffer-query-functions` and leaves the
+   buffer list) and the *command* (which needs the minibuffer's "modified;
+   kill anyway?"), because commands that prompt cannot live below the
+   minibuffer. The command kept Emacs's name; **the mechanism is
+   `%kill-buffer` now** (`window.scm`, `files.scm` and `buff-menu.scm`
+   updated). And the Buffer Menu's `x` now calls the **command**, as
+   `Buffer-menu-execute` does (`buff-menu.el:619`) - so it asks about a
+   modified buffer, which it did not.
+4. **`mouse-position`**: `frame.c`'s Lisp function and the display *hole*
+   the C calls through (`terminal->mouse_position_hook`) shared a name,
+   with `frame.scm` importing the generic under an alias to get by. The
+   seam is **`display-mouse-position`** now - the tree's spelling for a
+   display method - and the alias is gone.
+
+## `define-custom`
+
+`schemacs/editor/custom.scm`, mirroring **`custom.el`** (Emacs 31 keeps
+`defcustom` there, not in `cus-edit.el`):
+
+```scheme
+(define-custom *scroll-step* 0
+  "Number of lines to scroll when point goes off screen."
+  :type 'integer
+  :group 'scrolling)
+```
+
+`custom-declare-variable` with the C's whole keyword walk, the
+`custom-add-*` family, `custom-handle-keyword`, the four live initializers,
+`custom-variable-p`, `custom--standard-value`, the hook and
+`custom-dont-initialize`. **Not ported**, each named in the file: the
+Customize buffers and widgets, themes, `setopt`/`custom-set-variables`
+(nothing writes `saved-value` yet - the initializers read it, so the day
+something does, they honour it), `custom-initialize-delay` and
+`-after-file-load` (dump-time; no dump here), `defface`/`defgroup`.
+
+Every expectation in `custom-tests.scm` (18) was measured on Emacs 31.1
+first. The one worth knowing: **the default initializer calls the `:set`
+function when the declaration runs**, so an option whose `:set` doubles
+reads 10 and not 5.
+
+**What `define-custom` defines is an ordinary variable** - `(define name
+standard)`, read as `name`, set with `set!` - so a user option is used
+exactly as `defcustom`'s is. It was a **parameter** in the first version of
+this file, and that was wrong; see "Parameters are a convention, not a
+requirement" below.
+
+**Departures, all named in the file**:
+
+- **`custom-declare-variable` is handed the variable's reader and writer.**
+  Emacs reaches a variable through `symbol-value`/`set`, and a Scheme
+  binding has no such reflection, so the macro passes the two closures
+  down. The variable itself is a plain one.
+- the keyword is written `:type`, as Elisp writes it, and read as *data* by
+  the macro - Scheme has no self-evaluating `:type`, and this is how
+  `define-minor-mode` already spells `:lighter` and `:variable`.
+- **STANDARD is kept as a thunk** where Emacs keeps the form and `eval`s
+  it; same contract (callable again for the standard value), no `eval`,
+  and the expression keeps its lexical scope.
+- **the variable is bound before `custom-declare-variable` runs**, because
+  a parameter must be made with a value; the initializer then sets it to
+  what it already holds. Observably Emacs's.
+
+## `get` and `put` were wrong, and had never had a caller
+
+`intervals.scm`'s `get`/`put` - `fns.c`'s symbol properties - were
+`symbol-property`/`set-symbol-property!`, Guile's object properties. Two
+things wrong with that, and the second is the one that bites:
+
+1. Guile's `symbol-property` takes a property **object** made by
+   `make-object-property`, not a name, so `(get 'foo 'standard-value)` -
+   Emacs's spelling - raised.
+2. **The values are held weakly.** Measured:
+
+       (put 'a 'x (list 1))
+       (gc)                      ; -> (1), still there
+       (put 'b 'y (list 2))
+       (gc) (gc)                 ; -> #f  and  #f
+
+   This is what made a `custom-group` vanish between two reads in
+   `custom-tests.scm`, and it is invisible in any test that does not
+   allocate in between - which is why "the first caller" is where it
+   showed up.
+
+They are a table keyed by `(symbol . property)` now: any symbol may be a
+property name and the value lives as long as the symbol, as Emacs's plist
+does. `make-object-property` is still used where it is the right tool -
+`string-intervals-property`, where the owner is a string and the weakness
+is the point.
+
+**The lesson, again**: `get`/`put` had no caller in the tree, so both
+faults sat there. A primitive with no caller is not "probably fine"; it is
+unmeasured.
+
+## Two method notes from this pass
+
+- **`'#,(x)` is not `(quote <datum>)`.** Splicing a keyword into a macro's
+  output as a *datum* is "raw symbol in macro output"; keeping the keyword
+  as an *identifier syntax* and unsyntaxing it inside a `quote` form -
+  `#`(list (quote #,k) ...)` - is the ordinary `(quote :type)` and emits
+  the symbol. The first version did it the other way and cost a round.
+- **The clause walk lives in one procedure** (`custom--apply-clause!`),
+  not in a `cond` nested in a walk nested in a `let` nested in a
+  procedure. The arms are the C's arms; the nesting is where the
+  parenthesis errors came from, and flattening it removed them.
+
+## Parameters are a convention, not a requirement (2026-10-14)
+
+Worth writing down because it took a long argument to get straight, and
+because it is a standing decision.
+
+This tree defines its dynamic variables as **parameters** (SRFI 39):
+`(define *current-buffer* (make-parameter #f))`, read as
+`(*current-buffer*)`. 287 of its definitions are parameters and there are
+326 `parameterize` forms. The first version of `define-custom` followed
+that, and Chris rejected it:
+
+> having custom variables as parameters is a worse departure than the
+> supposed thing it tries to fix
+
+He is right, and the arguments I first offered for it were all bad:
+
+- **"you cannot rebind a plain variable for a scope"** - you can.
+  `save-current-buffer` (`buffer.scm:498`), *the* dynamic-binding idiom in
+  this tree, does its save and restore **by hand** and never calls
+  `parameterize`:
+
+      (define (save-current-buffer thunk)
+        (let ((saved (*current-buffer*)))
+          (dynamic-wind (lambda () #f) thunk
+                        (lambda () (*current-buffer* saved)))))
+
+  A parameter is being used there as a settable box, and a plain variable
+  would do the same.
+- **"the one-line spelling"** - a `syntax-rules` over a plain variable
+  gives the same one line. Nothing about it needs a parameter.
+- **"thread-locality"** - a parameter's value is per-thread, which is not a
+  feature here: it *hides* state, and this tree has already been bitten by
+  exactly that (the `*repl-wake*` fluid a thread created earlier could not
+  see, so it had to become a plain variable).
+- **"continuation-correct restoration"** - a real difference from
+  `dynamic-wind` on re-entry, and irrelevant here: the editor's
+  continuations are one-shot escapes.
+
+**So a variable being a parameter is a style choice this tree made, and it
+is paid for at every use site** - `(foo)` rather than `foo`. Custom
+variables must not pay it: a user option is read by naming it, and that is
+the whole shape of `defcustom`.
+
+Chris, on where this leaves the rest:
+
+> I think maybe the long term goal might be to thread variables through the
+> call hierarchy, but having custom variables as parameters is a worse
+> departure than the supposed thing it tries to fix.
+
+So: the editor's internal state (`*current-buffer*`, `*case-fold-search*`,
+...) stays as it is for now; threading it through call signatures is a
+possible direction and a separate decision, and it is *not* what the
+parameters are doing - they are dynamic binding, not argument passing.

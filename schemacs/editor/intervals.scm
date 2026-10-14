@@ -56,7 +56,10 @@
     ;; `get' and `put' below are Emacs's names for, and
     ;; `make-object-property' is the weak side table a *string* keeps its
     ;; tree in - see "The string's tree" below.
-    (only (guile) make-object-property set-symbol-property! symbol-property)
+    ;; `make-object-property' is still the right tool where the
+    ;; *owner* is a string (`string-intervals-property' below) and the
+    ;; weakness is the point; it is not used for symbol properties.
+    (only (guile) hash-ref hash-set! make-hash-table make-object-property)
     ;; The weak reference a *string* owner is held by - see
     ;; `set-interval-object!'.
     (only (ice-9 weak-vector) list->weak-vector weak-vector-ref weak-vector?)
@@ -417,21 +420,43 @@
       ;;--------------------------------------------------------------
       (make-parameter '()))
 
+    (define %symbol-properties (make-hash-table))
+    ;; ^ Emacs's symbol properties, keyed by `(SYMBOL . PROPERTY)'.
+    ;;
+    ;; **A plist per symbol in Emacs, one table here**, which is the same
+    ;; thing said once: any symbol may be a key and any symbol may be a
+    ;; property name, so the pair is what identifies a slot.
+    ;;
+    ;; **Not Guile's object properties, which look like the right tool and
+    ;; are not.** `(symbol-property symbol property)' is what Guile offers
+    ;; for this, but its property must be an object made by
+    ;; `make-object-property' - a *name* raises - and, worse, **the values
+    ;; are held weakly**: measured, `(put 'a 'x (list 1))' then `(gc)'
+    ;; with a second property in the table reads back #f. Emacs's `put'
+    ;; holds its value for as long as the symbol lives. This was found by
+    ;; a `custom-group' that vanished between two reads (`custom.scm`'s
+    ;; tests, 2026-10-14); the object-property version is gone.
+    ;;
+    ;; The property name is not `eq?'-hashed on its own: `(cons symbol
+    ;; property)' is what a table with the default `equal?' hash takes,
+    ;; and `equal?' on two pairs of symbols is what `eq?' on each would
+    ;; say.
+
     (define (get symbol property)
-      ;; GNU Emacs's `get': the value of a *symbol* property. This is not
-      ;; the same thing as a text property - it is how a `category' symbol
-      ;; carries the properties its text shares - and Emacs keeps `get'
-      ;; and `put' in `fns.c' rather than here. They are defined here for
-      ;; now, because `textget' below is their only caller in the ported
-      ;; code so far; they move to `fns.sld' when the elisp layer grows
-      ;; one, and this definition goes with them.
+      ;; GNU Emacs's `get': the value of a *symbol* property, or #f when
+      ;; there is none. This is not the same thing as a text property - it
+      ;; is how a `category' symbol carries the properties its text shares
+      ;; - and Emacs keeps `get' and `put' in `fns.c' rather than here.
+      ;; They live here until the elisp layer grows an `fns.sld' of its
+      ;; own, and this definition goes with them when it does.
       ;;--------------------------------------------------------------
-      (symbol-property symbol property))
+      (hash-ref %symbol-properties (cons symbol property)))
 
     (define (put symbol property value)
-      ;; GNU Emacs's `put'.
+      ;; GNU Emacs's `put'. It answers VALUE, as the C does, so that
+      ;; `(put ...)' reads as the assignment it is.
       ;;--------------------------------------------------------------
-      (set-symbol-property! symbol property value)
+      (hash-set! %symbol-properties (cons symbol property) value)
       value)
 
     (define (plist-member plist prop)

@@ -133,6 +133,7 @@
         (schemacs editor cmds)
         (schemacs editor coding)
         (schemacs editor command)
+        (schemacs editor custom)
         (schemacs editor data)
         (schemacs editor derived)
         (schemacs editor dired)
