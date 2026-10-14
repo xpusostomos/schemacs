@@ -168,6 +168,13 @@
           ;; the `*Messages*' buffer's own mode, which `message-dolog'
           ;; switches a newly made buffer into
           messages-buffer-mode)
+    ;; `minor-mode-alist' is `bindings.el`'s and lives in `subr.scm`,
+    ;; beside `add-minor-mode' - **the one function that writes it**. It
+    ;; is imported here rather than declared here, which it was until
+    ;; 2026-10-14: two `(make-parameter ...)' forms of the same name meant
+    ;; the mode line read one and `add-minor-mode' wrote the other, so a
+    ;; minor mode registered the Emacs way never reached the mode line.
+    (only (schemacs editor subr) *minor-mode-alist*)
     ;; `find_newline' (`search.c:675'), which is what the C's
     ;; `scan_newline' is - the line arithmetic `message-dolog' walks the
     ;; log with.
@@ -193,7 +200,7 @@
    *mode-line-format*
    ;; `bindings.el''s other mode-line variable, and the construct that
    ;; reads it. A minor mode with a lighter adds itself to the alist.
-   *minor-mode-alist* mode-line-minor-modes
+   mode-line-minor-modes
    face-at-buffer-position
    overlay-strings-at
    face->attribute
@@ -1025,25 +1032,6 @@
             (string-append "(" (mode-name (window-buffer window))
                            (mode-line-minor-modes) ")"))))
 
-    (define *minor-mode-alist*
-      ;; GNU Emacs's `minor-mode-alist` (`bindings.el:976`): "Alist
-      ;; saying how to show minor modes in the mode line. Each element
-      ;; looks like (VARIABLE STRING); STRING is included in the mode
-      ;; line if VARIABLE's value is non-nil. ... Actually, STRING need
-      ;; not be a string; any mode-line construct is okay."
-      ;;
-      ;; bindings.el's own default has four entries; only the first of
-      ;; the ones this editor has is carried, because `abbrev-mode`,
-      ;; `auto-fill-function` and `defining-kbd-macro` are not ported.
-      ;;
-      ;; `overwrite-mode`'s indicator is the *symbol* of the same name
-      ;; and not a string, which is the "need not be a string" clause
-      ;; doing real work: the construct is evaluated, so what is shown is
-      ;; the variable's value - `overwrite-mode-textual` or
-      ;; `overwrite-mode-binary` - and then *that* symbol's value, which
-      ;; is the string. Two evaluations, as in Emacs.
-      ;;--------------------------------------------------------------
-      (make-parameter (list (list 'overwrite-mode 'overwrite-mode))))
 
     (define (minor-mode-indicator-value buffer indicator)
       ;; The *first* of the two evaluations an indicator goes through.
@@ -3042,7 +3030,12 @@
                          (<= (+ i 8) (string-length tail))
                          (string=? (substring tail i (+ i 7)) " times]")
                          (char=? (string-ref tail (+ i 7)) #\newline))
-                    (string->number (substring tail 2 i)))
+                    ;; **`n + 1', the C's own return**: a line already
+                    ;; saying " [n times]" has now been seen n+1 times
+                    ;; (`xdisp.c:12568'), and the caller prints what it
+                    ;; is handed. Returning N rather than N+1 left every
+                    ;; count stuck at two.
+                    (+ 1 (string->number (substring tail 2 i))))
                    (else #f)))))
 
     (define (message-log-check-duplicate prev-bol this-bol)
@@ -3061,24 +3054,32 @@
              (p1 prev-bol)
              (p2 this-bol))
         (let loop ((i 0) (seen-dots #f))
-          (cond
-           ((>= i len)
-            ;; The whole of the new line matched, so the previous line is
-            ;; at least as long: what follows it decides.
-            (let ((tail (buffer-substring-no-properties
-                         (+ p1 len) (min (buffer-z ed) (+ p1 len 32)))))
-              (cond ((and (> (string-length tail) 0)
-                          (char=? (string-ref tail 0) #\newline))
-                     2)
-                    (else (or (message--times tail) 0)))))
-           ((and (>= i 3)
-                 (char=? (fetch-char ed (+ p1 (- i 3))) #\.)
-                 (char=? (fetch-char ed (+ p1 (- i 2))) #\.)
-                 (char=? (fetch-char ed (+ p1 (- i 1))) #\.))
-            (loop (+ i 1) #t))
-           ((not (char=? (fetch-char ed (+ p1 i)) (fetch-char ed (+ p2 i))))
-            (if seen-dots 1 0))
-           (else (loop (+ i 1) seen-dots))))))
+          (if (>= i len)
+              ;; The whole of the new line matched, so the previous line is
+              ;; at least as long: what follows it decides.
+              (let ((tail (buffer-substring-no-properties
+                           (+ p1 len) (min (buffer-z ed) (+ p1 len 32)))))
+                (cond ((and (> (string-length tail) 0)
+                            (char=? (string-ref tail 0) #\newline))
+                       2)
+                      (else (or (message--times tail) 0))))
+              ;; **The C's `seen_dots' test is not exclusive with the
+              ;; comparison** (`xdisp.c:12543'): at each index it first
+              ;; looks back three characters for `...' *and then* compares
+              ;; the two lines at that same index. Written as two `cond'
+              ;; clauses the dots clause won and the comparison at that
+              ;; index was skipped - so a line that differed exactly where
+              ;; the dots ended ran to the end of the loop and the tail
+              ;; check answered 0, and "abc...Q" did not fold onto
+              ;; "abc...xyz" the way Emacs folds it.
+              (let ((seen-dots (or seen-dots
+                                   (and (>= i 3)
+                                        (char=? (fetch-char ed (+ p1 (- i 3))) #\.)
+                                        (char=? (fetch-char ed (+ p1 (- i 2))) #\.)
+                                        (char=? (fetch-char ed (+ p1 (- i 1))) #\.)))))
+                (if (not (char=? (fetch-char ed (+ p1 i)) (fetch-char ed (+ p2 i))))
+                    (if seen-dots 1 0)
+                    (loop (+ i 1) seen-dots)))))))
 
     (define (message-dolog text nlflag)
       ;; GNU Emacs's `message_dolog' (`xdisp.c:12340'): append TEXT to the

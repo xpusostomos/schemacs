@@ -58,6 +58,12 @@
     (only (schemacs editor buff-menu) list-buffers)
     (only (schemacs editor keymap) define-key)
     (prefix (schemacs editor keymap) km:)
+    ;; The user environment - `$XDG_CONFIG_HOME/imports.scm', or the whole
+    ;; editor when there is no such file - which the init file is loaded
+    ;; into when it is evaluated. It is built here, in the boot, because
+    ;; this is Emacs's `normal-top-level': the place the names are there
+    ;; before anything of the user's is read.
+    (only (schemacs editor loadup) open-user-environment!)
     (only (schemacs editor simple)
           messages-buffer-mode scroll-down-command scroll-up-command)
     (only (schemacs editor subr) kbd)
@@ -275,12 +281,23 @@
           ;;     (import (schemacs editor startup))
           ;;     (set! inhibit-startup-screen #t)
           ;;
-          ;; An `open-editor-namespace!' call stood here, importing *every*
-          ;; editor library into the user's module so that no import was
-          ;; needed. That is the wrong trade: it is one bloated namespace
-          ;; instead of one line, it makes "which library holds this name"
-          ;; unnecessary by making the question meaningless, and the rule
-          ;; is that a name lives in the file its Emacs source lives in.
+          ;; **The init file is evaluated in the user environment** -
+          ;; the module `open-user-environment!' has just built, which is
+          ;; `$XDG_CONFIG_HOME/imports.scm' when the user has one and the
+          ;; whole editor when they do not. So `(set! inhibit-startup-screen
+          ;; #t)' needs no import, as `(setq inhibit-startup-screen t)'
+          ;; needs no `require' in Emacs, and the same is true of `M-:' and
+          ;; the back door - one environment for the three places where the
+          ;; editor did not write the code.
+          ;;
+          ;; **The editor's own libraries are not in that position and must
+          ;; not be**: each imports what it uses with an `(only ...)' list,
+          ;; which is the rule that keeps a name in the library mirroring
+          ;; its Emacs file. It is only the user's code that has no library
+          ;; to write an import in.
+          ;;
+          ;; A second `import' in the file is still fine, and is how a name
+          ;; from a library the environment does not hold is reached.
           (let ((here (current-module)))
             (catch #t
               (lambda ()
@@ -507,6 +524,17 @@
           (messages-buffer-mode)
           (set!buffer-default-directory (current-buffer)
                                        (or dir (expand-file-name "~/")))))
+      ;; **The user's environment, built before anything of the user's is
+      ;; read.** Emacs's `normal-top-level' has one obarray and every name
+      ;; in Emacs is already in it by the time the init file runs; this is
+      ;; the same moment for the same reason - `imports.scm' and
+      ;; `init.scm' are both the user's code, and both are evaluated in
+      ;; what this builds.
+      ;;
+      ;; The *placement* is a departure, as the `*Messages*' block above
+      ;; is: this tree has no `normal-top-level', so the boot it would
+      ;; have run is here.
+      (open-user-environment!)
       (load-init)
       (let ((displayable-buffers '()))
         (for-each

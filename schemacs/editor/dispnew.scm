@@ -40,7 +40,7 @@
    screen-size
    column-width
    line-height
-   mouse-position
+   display-mouse-position
    *mouse-event-keys*
    display-color-cells
    ;; the selections, which `select' reads and writes through
@@ -142,7 +142,15 @@
         down-mouse-3 mouse-3 drag-mouse-3
         mouse-movement))
 
-    (define-generic mouse-position)
+    (define-generic display-mouse-position)
+    ;; **`display-mouse-position' and not `mouse-position'**, which is
+    ;; `frame.c`'s `Fmouse_position` and is `frame.scm`'s. This is the
+    ;; *hole* the C calls through - `terminal->mouse_position_hook`,
+    ;; `XQueryPointer` on X - and a C struct field has no Lisp name to
+    ;; borrow, so it takes this tree's spelling for a display seam. It was
+    ;; called `mouse-position' until 2026-10-14, which is two libraries
+    ;; exporting one name with two bindings; `frame.scm' imported it under
+    ;; this name anyway (`(rename ... mouse-position display-mouse-position)').
     ;; Where the pointer is on this display, as `(X . Y)' in the display's
     ;; own cell units, or `#f' when there is no pointer to be found - a
     ;; terminal, or a window that is not on the screen yet.
@@ -169,7 +177,7 @@
     ;; nil when GPM has never been active). `frame.sld''s `mouse-position'
     ;; then gives the selected frame with nil coordinates, as the C's
     ;; docstring describes for "a mouseless terminal".
-    (define-method (mouse-position (d <display>)) #f)
+    (define-method (display-mouse-position (d <display>)) #f)
 
     (define-generic draw-window-cursor!)
     ;; Put the display cursor at pixel ROW, COLUMN (frame coordinates),

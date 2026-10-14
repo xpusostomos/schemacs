@@ -2575,6 +2575,12 @@
   (list "saved\noriginal\n"
         (string-append
          "CRM Buffer                 Size Mode             File\n"
+         ;; the log the save wrote: `message_dolog` made the buffer, so
+         ;; the list holds its line - as Emacs's list holds one for the
+         ;; `*Messages*' its `normal-top-level' makes. Read-only (`%')
+         ;; and modified (`*'), the two flags `special-mode' and the
+         ;; insert give it.
+         " %* *Messages*               23 Fundamental      \n"
          ".   bm-save.txt              15 Fundamental      /tmp/bm-save.txt\n"))
   ;; **The marks are in the list buffer's text**, so a test that wants a
   ;; clean slate has to start from a fresh list buffer: the old
@@ -2587,6 +2593,15 @@
                  (*kill-buffer-query-functions* '()))
     (when (get-buffer "*Buffer List*")
       (kill-buffer (get-buffer "*Buffer List*")))
+    ;; **The save says "Wrote ..." now, and a message is logged** - the
+    ;; log is `message_dolog`, which creates `*Messages*` if it is not
+    ;; there, and a new buffer joins the buffer list. So the list holds a
+    ;; line for it, exactly as Emacs's does (Emacs makes `*Messages*' in
+    ;; `normal-top-level', before anything else). Killing it first makes
+    ;; the line deterministic: this save is what creates it, and what it
+    ;; holds is this one message.
+    (when (get-buffer "*Messages*")
+      (kill-buffer (get-buffer "*Messages*")))
     (call-with-output-file "/tmp/bm-save.txt"
       (lambda (port) (display "original\n" port)))
     (let* ((ed (find-file-noselect "/tmp/bm-save.txt"))

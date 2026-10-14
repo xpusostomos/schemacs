@@ -63,11 +63,12 @@
     ;; runs what has been queued.
     (only (schemacs coop-server)
           spawn-coop-repl-server poll-coop-repl-server)
-    ;; The editor's names, which the session is given when the door opens
-    ;; - `(schemacs editor loadup)' is `loadup.el''s file, and holds what
-    ;; the editor is made of. A user's *init file* is not given them: it
-    ;; imports what it needs, which is how a name is reached here.
-    (only (schemacs editor loadup) open-editor-namespace!)
+    ;; The names the session's expressions are evaluated against - the
+    ;; *user environment*, which `(schemacs editor loadup)' builds:
+    ;; `$XDG_CONFIG_HOME/imports.scm' when the user has one, the whole
+    ;; editor when they do not. The same environment `M-:' and the init
+    ;; file get, because all three are code the editor did not write.
+    (only (schemacs editor loadup) open-user-environment!)
     ;; `poll-repl!' draws after it has run something, because nothing else
     ;; would: see its comment. `xdisp' is *below* `keyboard', which is
     ;; what imports this library, so this is not a cycle.
@@ -184,8 +185,8 @@
       (unless server
         ;; The session's namespace first, so that a client already
         ;; connected when the first expression arrives finds the editor
-        ;; there (`open-editor-namespace!').
-        (open-editor-namespace!)
+        ;; there (`open-user-environment!').
+        (open-user-environment!)
         (let ((port (if (pair? args) (car args)
                         (+ 20000 (modulo (getpid) 12000)))))
           (let loop ((candidate port) (left 32))

@@ -75,6 +75,10 @@
           *buffer-list* buffer-name bufferp other-buffer set-point allocate-buffer buffer-beg buffer-z buffer-pt set!buffer-read-only)
     ;; `getcwd' is Guile's, for a buffer that has no `default-directory'.
     (only (guile) getcwd)
+    ;; The environment `M-:' evaluates in (`%eval-expression-environment') -
+    ;; the same one the back door and the init file get. `loadup' is
+    ;; `loadup.el`'s file and holds what the editor is made of.
+    (only (schemacs editor loadup) open-user-environment!)
     ;; `(scheme eval)''s `eval' is the evaluator `eval-expression' runs,
     ;; and Guile's stack is where its `*Backtrace*' frames come from.
     (scheme eval)
@@ -3024,17 +3028,28 @@ Just \\[universal-argument] as argument means to use the current column."
                         (number->string value 16))))))
 
     (define (%eval-expression-environment)
-      ;; Where the typed expression is evaluated.
+      ;; Where the typed expression is evaluated: **the user environment**
+      ;; - `$XDG_CONFIG_HOME/imports.scm' when there is one, the whole
+      ;; editor when there is not (`open-user-environment!'), which is the
+      ;; same module the init file is loaded into and the back door's
+      ;; session is pinned to.
       ;;
-      ;; GNU Emacs evaluates in the current buffer's own context. The
-      ;; nearest thing here is the module that is current when the command
-      ;; runs, which is where the editor's own bindings live - so
-      ;; `(+ 40 2)' finds `+' and a name the editor defines finds that
-      ;; too. `(interaction-environment)' is *not* it: under `--r7rs' that
-      ;; is a minimal environment with no `+' in it at all, which is how
-      ;; the first version of this answered "Unbound variable: +".
+      ;; GNU Emacs evaluates a typed expression against its one obarray,
+      ;; where every name in Emacs is bound. This is this tree's stand-in
+      ;; for that, and it is deliberately *not* `(current-module)', which
+      ;; was the first answer here: the module that is current when the
+      ;; command runs is the command's *defining* library while the
+      ;; command's own minibuffer prompt is being read (`eval' binds it
+      ;; for the whole of the interactive spec's evaluation), so the same
+      ;; expression was evaluated in a different module depending on
+      ;; whether it was typed at a prompt or read by the back door - and
+      ;; in a library, which has no `import' to offer.
+      ;;
+      ;; `(interaction-environment)' is *not* it either: under `--r7rs'
+      ;; that is a minimal environment with no `+' in it at all, which is
+      ;; how the first version of this answered "Unbound variable: +".
       ;;--------------------------------------------------------------
-      (current-module))
+      (open-user-environment!))
 
     (define (%eval-expression-value->string value)
       (call-with-port (open-output-string)

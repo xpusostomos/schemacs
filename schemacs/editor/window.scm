@@ -63,7 +63,7 @@
     (only (schemacs editor buffer)
           bury-buffer default-directory erase-buffer
           get-buffer-create
-          kill-all-local-variables kill-buffer other-buffer record-buffer!
+          kill-all-local-variables %kill-buffer other-buffer record-buffer!
           *scratch-buffer-name*
           set-buffer
           set!buffer-default-directory set!buffer-file-name set!buffer-read-only
@@ -1025,7 +1025,7 @@ by this function.  This happens in an interactive call."
       (let ((buffer (window-buffer window)))
         (when (and (window-live-p window) (< 1 (length (window-list))))
           (delete-window window))
-        (cond ((eq? bury-or-kill 'kill) (kill-buffer buffer))
+        (cond ((eq? bury-or-kill 'kill) (%kill-buffer buffer))
               ((eq? bury-or-kill 'bury) (bury-buffer buffer))
               (else #f))))
 

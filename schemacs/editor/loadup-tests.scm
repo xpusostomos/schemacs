@@ -26,8 +26,12 @@
        closedir eof-object? opendir readdir sort)
  (only (srfi srfi-13) string-drop-right string-suffix?)
  (only (srfi 64) test-assert test-equal test-begin test-end)
+ (only (scheme file) call-with-input-file delete-file file-exists?
+       open-output-file)
+ (only (guile) getenv module-variable resolve-module setenv system
+       variable-bound? variable-ref)
  (only (schemacs editor loadup) editor-libraries editor-excluded-libraries
-       open-editor-namespace!))
+       imports-path open-editor-namespace! open-user-environment!))
 
 (define (bound? module name)
   ;; Whether MODULE answers to NAME. `module-ref' raises for a name it has
@@ -136,5 +140,160 @@
     (cond ((null? rest) (reverse out))
           ((member (car rest) seen) (loop (cdr rest) seen (cons (car rest) out)))
           (else (loop (cdr rest) (cons (car rest) seen) out)))))
+
+
+;;-------------------------------------------------------------
+;; The user's environment - `imports.scm'
+;;-------------------------------------------------------------
+;; The three consumers of it are a REPL prompt, a typed expression and
+;; the user's `init.scm': code the editor did not write, and so code with
+;; no library to write an import in for it. What is testable here is the
+;; builder - that it gives a module the editor's names when the user has
+;; said nothing, that it reads `$XDG_CONFIG_HOME/imports.scm' when there
+;; is one, and that **the file says what the environment is** rather than
+;; adding to a fixed base.
+;;-------------------------------------------------------------
+(define (with-imports-file body thunk)
+  ;; Run THUNK with `$XDG_CONFIG_HOME' pointing at a throwaway directory
+  ;; that holds BODY as `schemacs/imports.scm' - or, for #f, holds
+  ;; nothing at all.
+  ;;-------------------------------------------------------------
+  (let* ((dir (string-append "/tmp/schemacs-loadup-tests-" (number->string (getpid))))
+         (sub (string-append dir "/schemacs")))
+    (system (string-append "mkdir -p " sub))
+    (when body
+      (call-with-output-file (string-append sub "/imports.scm")
+        (lambda (port) (display body port))))
+    (let ((old (getenv "XDG_CONFIG_HOME")))
+      (setenv "XDG_CONFIG_HOME" dir)
+      (dynamic-wind
+        (lambda () #t)
+        thunk
+        (lambda ()
+          (if old (setenv "XDG_CONFIG_HOME" old) (setenv "XDG_CONFIG_HOME" #f)))))))
+
+(with-imports-file #f
+ (lambda ()
+   (test-assert "no imports.scm: the environment is the whole editor"
+     (let ((m (make-fresh-user-module)))
+       (open-user-environment! m)
+       (and (bound? m 'find-file)
+            (bound? m 'message)
+            (bound? m 'render!))))
+   (test-equal "no imports.scm: imports-path answers #f"
+     #f (imports-path))))
+
+(with-imports-file "(import (schemacs editor imports))\n"
+ (lambda ()
+   (test-assert "imports.scm naming the editor gives the editor's names"
+     (let ((m (make-fresh-user-module)))
+       (open-user-environment! m)
+       (and (bound? m 'find-file) (bound? m 'message))))
+   (test-equal "the file is found where it is written"
+     "imports.scm"
+     (let ((p (imports-path))) (substring p (- (string-length p) 11))))))
+
+;; **The file replaces the default**, which is what "the user has full
+;; control over what is imported into his default environment" means: a
+;; file that does not name the editor gets an environment without it.
+(with-imports-file "(import (scheme base))\n"
+ (lambda ()
+   (test-assert "imports.scm that leaves the editor out gets none of it"
+     (let ((m (make-fresh-user-module)))
+       (open-user-environment! m)
+       (not (bound? m 'find-file))))))
+
+;;-------------------------------------------------------------
+;; One name, one binding
+;;-------------------------------------------------------------
+;; Sixty-odd libraries are imported into one module by `(schemacs editor
+;; imports)', and a name two of them export is a collision - Guile's
+;; "imported from both" - which the generated library resolves by
+;; `except'-ing it from every library but the first. That is only correct
+;; when the two are the *same* binding: `simple' re-exports what `cmds'
+;; owns, `files' re-exports `buffer''s `kill-buffer', and those are one
+;; procedure offered twice.
+;;
+;; **Two libraries that each define their own is the bug**, and it is not
+;; hypothetical: `xdisp' used to `(make-parameter ...)' its own
+;; `*minor-mode-alist*' beside `subr''s, so the mode line read one alist
+;; and `add-minor-mode' wrote the other - and `casefiddle' exported
+;; `upcase-region' after the command had moved to `simple', which handed
+;; an *unbound* name to every importer. Both were found by writing this
+;; down and looking. So the check is a test.
+;;-------------------------------------------------------------
+;; **The names a library *exports*, and not every binding it has.** A
+;; private helper is invisible to an importer, so two libraries with a
+;; private `keyword?' of their own is not a clash - `module-for-each'
+;; shows local bindings and would report one, which is how this test
+;; first came out with `xfaces' against `textprop' for a predicate
+;; neither exports.
+(define (exported-names file)
+  (let* ((forms (call-with-input-file file
+                  (lambda (port)
+                    (let loop ((acc '()))
+                      (let ((form (read port)))
+                        (if (eof-object? form) (reverse acc) (loop (cons form acc))))))))
+         (lib (let loop ((rest forms))
+                (cond ((null? rest) #f)
+                      ((and (pair? (car rest)) (eq? (car (car rest)) 'define-library))
+                       (car rest))
+                      (else (loop (cdr rest))))))
+         (decl (and lib
+                    (let loop ((rest (cddr lib)))
+                      (cond ((null? rest) #f)
+                            ((and (pair? (car rest)) (eq? (car (car rest)) 'export))
+                             (car rest))
+                            (else (loop (cdr rest))))))))
+    (map (lambda (item)
+           (if (and (pair? item) (eq? (car item) 'rename)) (cadr (cadr item)) item))
+         (if decl (cdr decl) '()))))
+
+(define (editor-library-files)
+  ;; The `(name . path)' of every library the environment is built from.
+  ;;-------------------------------------------------------------
+  (let ((dir (opendir "schemacs/editor")))
+    (let loop ((out '()))
+      (let ((name (readdir dir)))
+        (if (eof-object? name)
+            (begin (closedir dir) out)
+            (loop (if (and (string-suffix? ".scm" name)
+                           (not (string-suffix? "-tests.scm" name))
+                           (not (string=? name "imports.scm")))
+                      (cons (cons (string-append "schemacs/editor/" name)
+                                  (string->symbol (string-drop-right name 4)))
+                            out)
+                      out)))))))
+
+(define (duplicate-export offender)
+  ;; Walk every library the environment is built from and answer the
+  ;; `(NAME . LIBRARY)' of each export that is a *different* binding from
+  ;; the one an earlier library exported under the same name.
+  ;;-------------------------------------------------------------
+  (let ((seen (make-hash-table)) (bad '()))
+    (for-each
+     (lambda (entry)
+       (let* ((name (cdr entry))
+              (library (list 'schemacs 'editor name))
+              (m (resolve-module library #f #:ensure #f)))
+         (when m
+           (for-each
+            (lambda (exported)
+              (let ((v (catch #t
+                         (lambda () (module-variable m exported))
+                         (lambda args #f))))
+                (when (and v (variable-bound? v))
+                  (let ((prev (hashq-ref seen exported)))
+                    (if (not prev)
+                        (hashq-set! seen exported v)
+                        (if (not (eq? prev v))
+                            (set! bad (cons (cons exported name) bad))))))))
+            (exported-names (car entry))))))
+     (editor-library-files))
+    bad))
+
+(test-equal "no exported name is two different bindings"
+  '()
+  (duplicate-export #f))
 
 (test-end "schemacs_loadup")

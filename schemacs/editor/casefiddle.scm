@@ -83,8 +83,15 @@
   (export
    casify-region
    casify-word
-   upcase-region
-   downcase-region
+   ;; **`upcase-region' and `downcase-region' are NOT here**, though
+   ;; `casefiddle.c`'s DEFUNs they are: their interactive specs read the
+   ;; region, which is `editfns.c`'s, so the commands moved to
+   ;; `simple.scm` (see the note where they were). The export list was
+   ;; left naming them, and an export of a name a library does not have
+   ;; is an *unbound variable* in every module that imports it - which is
+   ;; what `(import (schemacs editor casefiddle))' was handing out. Found
+   ;; by the census `tools/gen-imports.scm` uses: two libraries exported
+   ;; `upcase-region' and one of them was `#<undefined>'.
    upcase-word
    downcase-word
    capitalize-word

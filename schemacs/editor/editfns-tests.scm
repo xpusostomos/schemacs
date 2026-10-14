@@ -3,14 +3,18 @@
  (scheme char)
  (only (srfi 64) test-assert test-equal test-begin test-end)
  (only (schemacs editor buffer)
-       *current-buffer* current-buffer erase-buffer get-buffer-create
-       set-buffer allocate-buffer)
+       *current-buffer* *inhibit-read-only* allocate-buffer buffer-name
+       buffer-read-only? current-buffer erase-buffer get-buffer
+       get-buffer-create major-mode set-buffer with-current-buffer)
  (only (schemacs editor frame) *current-frame* new-frame)
  (only (schemacs editor editfns)
-       *text-quoting-style* buffer-string char-before format format-message
+       *inhibit-message* *text-quoting-style* buffer-string char-before format
+       format-message
        forward-line goto-char insert insert-and-inherit insert-buffer-substring
-       line-beginning-position line-end-position line-number-at-pos point
-       propertize)
+       line-beginning-position line-end-position line-number-at-pos message
+       point propertize)
+ (only (schemacs editor xdisp) *message-log-max*)
+ (only (schemacs editor simple) messages-buffer)
  (only (schemacs editor textprop) get-text-property)
  (only (ice-9 exceptions) exception-message))
 
@@ -336,5 +340,115 @@
     (goto-char 4)
     (insert (propertize "d" 'face 'italic))
     (list (buffer-string) (get-text-property 4 'face ed))))
+
+;; ------------------------------------------------------------------
+;; `message' and the `*Messages*' buffer
+;;
+;; `message3' is `log_message' (the `*Messages*' buffer) and *then* the
+;; display, and the log half is `xdisp.scm`'s `message_dolog` - a port of
+;; the C's. Every expectation below is `emacs -Q --batch' on Emacs 31.1,
+;; run over the same keys.
+;;
+;; The duplicate folding is the C's `message_log_check_duplicate`
+;; (`xdisp.c:12535'), and it returns **N + 1** for a line that already
+;; says " [N times]" - so the count grows. Ours returned N, and four
+;; identical messages read "a [2 times]" where Emacs reads "a [4 times]".
+
+(define (messages-text)
+  (with-current-buffer (get-buffer "*Messages*") (buffer-string)))
+
+(define (messages-erase!)
+  ;; `messages-buffer' is the one that creates the buffer *and* switches
+  ;; it to `messages-buffer-mode' - the mode `message_dolog' gives it when
+  ;; it is the one that creates it (`xdisp.c:12368').
+  (with-current-buffer (messages-buffer)
+    ;; `parameterize', not `let': a `let' binding of a parameter name is a
+    ;; silent no-op (`*inhibit-read-only*' is one).
+    (parameterize ((*inhibit-read-only* #t)) (erase-buffer))))
+
+;; Emacs, four times: `(dotimes (i 4) (message "a"))' -> "a [4 times]".
+;; And a fifth is " [5 times]": the count is read back out of the line.
+(test-equal "a [4 times]\n"
+  (with-text "x"
+    (lambda ()
+      (messages-erase!)
+      (message "a") (message "a") (message "a") (message "a")
+      (messages-text))))
+(test-equal "a [5 times]\n"
+  (with-text "x"
+    (lambda ()
+      (messages-erase!)
+      (message "a") (message "a") (message "a") (message "a") (message "a")
+      (messages-text))))
+
+;; Two different lines both stay, and a repeat folds onto the one before.
+(test-equal "a [2 times]\nb\n"
+  (with-text "x"
+    (lambda ()
+      (messages-erase!)
+      (message "a") (message "a") (message "b")
+      (messages-text))))
+
+;; The C's `seen_dots` rule (`xdisp.c:12544`): a line that *differs* still
+;; counts as a duplicate when the previous one had "..." just before the
+;; difference - a continued line folds onto what it continues. Emacs
+;; answers "abc...Q\n" for these two.
+(test-equal "abc...Q\n"
+  (with-text "x"
+    (lambda ()
+      (messages-erase!)
+      (message "abc...xyz") (message "abc...Q")
+      (messages-text))))
+
+;; `message-log-max' is "Maximum number of lines to keep"; 2 keeps the
+;; last two, which is Emacs's "m3\nm4\n" for five messages.
+(test-equal "m3\nm4\n"
+  (with-text "x"
+    (lambda ()
+      (messages-erase!)
+      (parameterize ((*message-log-max* 2))
+        (message "m0") (message "m1") (message "m2")
+        (message "m3") (message "m4"))
+      (messages-text))))
+
+;; nil disables the log entirely, which is the variable's other documented
+;; job - the same messages leave the buffer empty.
+(test-equal ""
+  (with-text "x"
+    (lambda ()
+      (messages-erase!)
+      (parameterize ((*message-log-max* #f))
+        (message "suppressed"))
+      (messages-text))))
+
+;; An empty message *clears* the echo area and logs nothing - the C's
+;; `message1 (0)' arm, which never reaches `message3'.
+(test-equal ""
+  (with-text "x"
+    (lambda ()
+      (messages-erase!)
+      (message "") (message #f)
+      (messages-text))))
+
+;; `messages-buffer-mode' is a `special-mode': the buffer is read-only and
+;; the log writes to it anyway (`message_dolog' inserts with PREPARE false,
+;; which is what skips the read-only check), and its name is the C's
+;; `messages-buffer-name'.
+(test-equal (list "*Messages*" 'messages-buffer-mode #t)
+  (with-text "x"
+    (lambda ()
+      (messages-erase!)
+      (message "one")
+      (with-current-buffer (get-buffer "*Messages*")
+        (list (buffer-name (messages-buffer)) (major-mode) (buffer-read-only? (current-buffer)))))))
+
+;; The log is written before the display, so a message the echo area is
+;; told not to show still reaches `*Messages*' - `message3''s order.
+(test-equal "hidden\n"
+  (with-text "x"
+    (lambda ()
+      (messages-erase!)
+      (parameterize ((*inhibit-message* #t)) (message "hidden"))
+      (messages-text))))
 
 (test-end "schemacs_editor_editfns")

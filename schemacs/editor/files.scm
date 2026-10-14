@@ -144,14 +144,13 @@
     ;; Buffers by name, and killing one: `buffer.c'. `BUFFER-FILE-NAME' and
     ;; the buffer-local store are what `save-buffer' writes and what the
     ;; visited file's line-break convention is kept in.
-    ;; `buffer.c''s `kill-buffer' is imported apart, because the command
-    ;; below keeps Emacs's name `kill-buffer' for the interactive entry,
-    ;; and the mechanism runs as `%kill-buffer'. (In Emacs the two are
-    ;; one function; here the mechanism - which asks
-    ;; `kill-buffer-query-functions' and leaves the buffer list - is in
-    ;; `(schemacs editor buffer)', and the command, which needs the
-    ;; minibuffer's question, is here.)
-    (rename (only (schemacs editor buffer)
+    ;; `buffer.c''s `kill-buffer' is imported apart, as `%kill-buffer',
+    ;; because the command below keeps Emacs's name `kill-buffer' for the
+    ;; interactive entry. (In Emacs the two are one function; here the
+    ;; mechanism - which asks `kill-buffer-query-functions' and leaves the
+    ;; buffer list - is in `(schemacs editor buffer)', and the command,
+    ;; which needs the minibuffer's question, is here.)
+    (only (schemacs editor buffer)
                   *current-buffer*
                   buffer-modified-p
                   buffer-name
@@ -169,13 +168,12 @@
                   current-buffer
                   generate-new-buffer
                   get-buffer-create
-                  kill-buffer
+                  %kill-buffer
                   record-buffer!
                   set!buffer-default-directory
                   set!buffer-file-name
                   set-buffer-local-value!
                   with-current-buffer)
-            (kill-buffer %kill-buffer))
     (only (schemacs editor keymap)
           define-key
           *default-keymap*
@@ -2289,12 +2287,17 @@ at point instead."
             ;; the write's own door.
             (set-visited-file-modtime)
             (set-buffer-modified-p #f)
-            (set!frame-message (*current-frame*)
-                                       (string-append "Wrote " path))
-            ;; the C's `(when save-silently (message nil))', which
-            ;; `basic-save-buffer' runs after the write: with the
-            ;; variable set there is nothing in the echo area to say
-            (when (*save-silently*) (message #f))
+            ;; The message is `write-region`'s, and it is `files--message`
+            ;; that says it: "Wrote %s" (`fileio.c:5864`, through
+            ;; `message_with_string`, which logs) is the C's, and
+            ;; `basic-save-buffer` reaches it the same way.
+            ;;
+            ;; **It was `set!frame-message` here**, which put the text in
+            ;; the echo area and nowhere else - the frame's display is
+            ;; `message1`'s half, and `message1` does not log
+            ;; (`xdisp.c:12594`). So a save said "Wrote ..." and
+            ;; `*Messages*` stayed empty.
+            (files--message "Wrote %s" path)
             path))))
 
     (define (set-visited-file-name filename . args)

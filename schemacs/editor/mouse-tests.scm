@@ -43,11 +43,12 @@
  ;; whole suite out of the battery with "Unbound variable:
  ;; test-display-script" and no test line at all.
  (only (schemacs editor test-display) test-display-script)
- ;; the display's generic, renamed: the test defines a method on it,
- ;; and `mouse-position' below is the frame-level function that calls it
+ ;; the display's generic - `display-mouse-position', which is the C's
+ ;; `mouse_position_hook' field and not the Lisp `mouse-position' - and
+ ;; `mouse-position' below is the frame-level function that calls it
  (rename (only (schemacs editor dispnew)
-               current-display key-event->key mouse-position read-input-event)
-         (mouse-position display-mouse-position)
+               current-display display-mouse-position key-event->key
+               read-input-event)
          (read-input-event display-read-input-event))
  (only (schemacs editor frame)
        *current-frame* frame-message frame-selected-window mouse-position

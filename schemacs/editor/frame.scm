@@ -36,13 +36,11 @@
     ;; (`FRAME_TERMINAL (f)->mouse_position_hook'), so the display's
     ;; answer is imported under a name of its own and the DEFUN below
     ;; takes Emacs's.
-    (rename
-     (only (schemacs editor dispnew)
+    (only (schemacs editor dispnew)
            column-width current-display delete-frame-display!
-           display-selections-supported?
-           line-height mouse-position resume-display!
+           display-selections-supported? display-mouse-position
+           line-height resume-display!
            screen-size suspend-display!)
-     (mouse-position display-mouse-position))
     (only (schemacs editor marker) build-marker marker-position set-marker make-marker)
     
     ;; `*current-buffer*' is the C global `current_buffer', which this

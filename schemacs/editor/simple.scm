@@ -2006,7 +2006,10 @@ non-nil."
                                                  (current-buffer)))
                     (current-buffer))
         (unless (or nomsg (*echo-area-buffer*))
-          (set!frame-message (*current-frame*) "Mark set"))
+          ;; `(message "Mark set")', the C's own call - which logs, so a
+          ;; `C-SPC` leaves its line in `*Messages*` (measured, Emacs
+          ;; 31.1; `set!frame-message` is the display half and does not).
+          (message "Mark set"))
         (when (or activate (not (transient-mark-mode)))
           (set-mark (mark #t)))
         #f))
@@ -2764,28 +2767,32 @@ non-nil."
                              (single-key-description char)
                              (string char))))
              (code (and char (char->integer char))))
+        ;; **`message', not `set-message!'**: the C's both arms are
+        ;; `(message "point=%d of %d ...")` (`simple.el:2757`), which logs
+        ;; to `*Messages*' - `set-message!' is `message1`'s display half
+        ;; and does not.
         (if (= pos (point-max))
             ;; Emacs's `(= pos end)' - the end being `point-max'
-            (set-message! frame
-                          (format #f "point=~a of ~a (EOB) column=~a~a"
-                                  pos total col hscroll))
-            (set-message! frame
-                          ;; **`~o' and `~x' are not Guile's**, which is
-                          ;; why the two numbers are rendered before the
-                          ;; format call: the message Emacs builds with
-                          ;; `#o%o' and `#x%x' (`simple.el') is the same
-                          ;; text, and Guile's own `format' - which the
-                          ;; whole tree uses - has no directive for
-                          ;; either. (The compiler said so: "unsupported
-                          ;; format option ~o, use (ice-9 format)
-                          ;; instead" - and `(ice-9 format)' is not this
-                          ;; tree's format.)
-                          (format #f
-                                  "Char: ~a (~a, #o~a, #x~a) point=~a of ~a (~a%) column=~a~a"
-                                  shown code
-                                  (number->string code 8)
-                                  (number->string code 16)
-                                  pos total percent col hscroll)))))
+            (message "%s"
+                     (format #f "point=~a of ~a (EOB) column=~a~a"
+                             pos total col hscroll))
+            (message "%s"
+                     ;; **`~o' and `~x' are not Guile's**, which is
+                     ;; why the two numbers are rendered before the
+                     ;; format call: the message Emacs builds with
+                     ;; `#o%o' and `#x%x' (`simple.el') is the same
+                     ;; text, and Guile's own `format' - which the
+                     ;; whole tree uses - has no directive for
+                     ;; either. (The compiler said so: "unsupported
+                     ;; format option ~o, use (ice-9 format)
+                     ;; instead" - and `(ice-9 format)' is not this
+                     ;; tree's format.)
+                     (format #f
+                             "Char: ~a (~a, #o~a, #x~a) point=~a of ~a (~a%) column=~a~a"
+                             shown code
+                             (number->string code 8)
+                             (number->string code 16)
+                             pos total percent col hscroll)))))
 
     (define-key *default-keymap* (kbd "C-x =")
       what-cursor-position)

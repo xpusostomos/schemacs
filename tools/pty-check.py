@@ -64,6 +64,7 @@ C_x = b"\x18"
 RET = b"\r"
 C_c = b"\x03"
 C_f = b"\x06"
+M_colon = b"\x1b:"
 C_a = b"\x01"
 C_k = b"\x0b"
 C_s = b"\x13"
@@ -1882,6 +1883,85 @@ def check_kill_buffer():
     return problems
 
 
+def check_imports():
+    """The user's environment - `imports.scm' - for `M-:', the REPL and the
+    init file.
+
+    The three consumers are code the editor did not write, and so the three
+    with no library to write an import in for them. GNU Emacs has one
+    obarray and they all just reach into it; this tree's names live in one
+    library per Emacs file, so `(schemacs editor loadup)' builds a module
+    for them - the whole editor, or `$XDG_CONFIG_HOME/imports.scm' when the
+    user has one.
+
+    Three things, each of which was a separate bug before it existed:
+
+      * an init file can call `message' with **no import**, as an Emacs
+        init file needs no `require' - it is evaluated in that module;
+      * `M-:' reaches the editor's names from inside a command, which
+        `(current-module)' did not (the module current while a command's
+        interactive spec is being evaluated is the command's own library);
+      * a user's `imports.scm' that does **not** name the editor leaves it
+        out - "full control over what is imported into his default
+        environment", so a file replaces the default rather than adding to
+        it.
+    """
+    problems = []
+    port = free_port()
+    cfg = tempfile.mkdtemp(prefix="schemacs-imports-")
+    os.makedirs(os.path.join(cfg, "schemacs"))
+    open(os.path.join(cfg, "schemacs", "init.scm"), "w").write(
+        '(message "INIT-RAN")\n(set! inhibit-startup-screen #t)\n')
+    open(os.path.join(cfg, "schemacs", "imports.scm"), "w").write(
+        "(import (schemacs editor imports))\n")
+    path = "/tmp/pty-check-imports.txt"
+    open(path, "w").write("hello\n")
+
+    # the door is how the screen is read back, and `M-:' is the second
+    # consumer - both at once in one run
+    saved = {k: os.environ.get(k) for k in ("SCHEMACS_REPL", "XDG_RUNTIME_DIR")}
+    os.environ["SCHEMACS_REPL"] = str(port)
+    os.environ["XDG_RUNTIME_DIR"] = tempfile.mkdtemp(prefix="schemacs-imports-rt-")
+
+    answer = {}
+
+    def during():
+        # `tools/repl.py' is the same door the `back-door' check uses
+        r = subprocess.run(
+            [sys.executable, "tools/repl.py", "-p", str(port),
+             '(with-current-buffer (get-buffer "*Messages*") (buffer-string))'],
+            capture_output=True, text=True, timeout=90)
+        answer["messages"] = r.stdout
+
+    out = drive([M_colon, b'(buffer-name (current-buffer))', RET], path,
+                settle=2.0, config=cfg, during=during)
+
+    if "INIT-RAN" not in answer.get("messages", ""):
+        problems.append(
+            "an init file calling `message' with no import did not run it: %r"
+            % answer.get("messages"))
+    # M-:'s answer is echoed in the echo area and logged by `message'
+    if '(buffer-name (current-buffer))' not in out or "pty-check-imports.txt" not in answer.get("messages", ""):
+        problems.append("M-: did not evaluate an expression against the editor's "
+                        "names; screen: %r" % out[-300:])
+
+    # and a file that leaves the editor out leaves it out
+    open(os.path.join(cfg, "schemacs", "imports.scm"), "w").write("(import (scheme base))\n")
+    out = drive([M_colon, b"(procedure? find-file)", RET], path,
+                settle=2.0, config=cfg)
+    if "Unbound variable" not in out:
+        problems.append("an imports.scm that does not name the editor still had "
+                        "`find-file': %r" % out[-300:])
+
+    for k, v in saved.items():
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v
+    shutil.rmtree(cfg, ignore_errors=True)
+    return problems
+
+
 def check_delete_frame():
     """`C-x 5 0' - `delete-frame' - is a command, and the key reaches it.
 
@@ -3502,6 +3582,7 @@ CHECKS = {
     "kill-buffer": check_kill_buffer,
     "delete-frame": check_delete_frame,
     "isearch-mark": check_isearch_mark,
+    "imports": check_imports,
 }
 
 

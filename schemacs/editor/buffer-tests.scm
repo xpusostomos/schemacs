@@ -196,7 +196,7 @@
    (lambda ()
      (let ((gone (get-buffer-create "gone")))
        (get-buffer-create "keep")
-       (let ((name (kill-buffer gone)))
+       (let ((name (%kill-buffer gone)))
          (list (names) name (buffer-live-p gone) (bufferp gone)))))))
 
 ;; A buffer shown in a window is not left there: the window is given
@@ -208,7 +208,7 @@
             (window (selected-window)))
        (set-window-buffer! window doomed)
        (get-buffer-create "other")
-       (kill-buffer doomed)
+       (%kill-buffer doomed)
        (list (buffer-name (window-buffer window)))))))
 
 ;; `kill-buffer-query-functions' can refuse the kill, and then nothing
@@ -218,12 +218,12 @@
    (lambda ()
      (let ((kept (get-buffer-create "kept")))
        (parameterize ((*kill-buffer-query-functions* (list (lambda () #f))))
-         (let ((refused (kill-buffer kept)))
+         (let ((refused (%kill-buffer kept)))
            (list refused
                  (buffer-live-p kept)
                  (begin (*kill-buffer-query-functions* '())
                         (names))
-                 (kill-buffer kept))))))))
+                 (%kill-buffer kept))))))))
 
 ;;--------------------------------------------------------------------
 ;; The slots a buffer has besides its text
@@ -240,7 +240,7 @@
          (set-buffer-local-value! buffer 'a-variable 17)
          (let ((after (buffer-local-keymap buffer))
                (value (buffer-local-value buffer 'a-variable #f)))
-           (kill-buffer buffer)
+           (%kill-buffer buffer)
            (list before after (buffer-local-keymap buffer) value)))))))
 
 ;;--------------------------------------------------------------------

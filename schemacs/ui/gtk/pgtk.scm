@@ -110,7 +110,7 @@
           delete-frame-display!
           display-color-cells
           draw-window-cursor! flush-display! key-event->key
-          get-selection line-height mouse-position read-input-event
+          display-mouse-position get-selection line-height read-input-event
           realize-face resume-display! screen-size
           selection-exists? selection-owner?
           set-selection! suspend-display! update-window-begin!
@@ -1357,7 +1357,7 @@
       ;;--------------------------------------------------------------
       (pgtk-cells d))
 
-    (define-method (mouse-position (d <pgtk-display>))
+    (define-method (display-mouse-position (d <pgtk-display>))
       ;; **The generic has to be imported, or this defines a new one.** A
       ;; `define-method' on a name that is not bound makes a *fresh*
       ;; generic in this module with only this method on it, and the

@@ -25,7 +25,8 @@ functions it depends on. That just results in something half assed that has
 to be rewritten later. If you have to implement something, start from the bottom
 implementing each primtive in turn that the function needs and work your way
 up until the final function works, and it works exactly the same as emacs because
-it is built up from exactly the same primitives.
+it is built up from exactly the same primitives. If this results in a ballooning
+amount of work, check back with the user to approve the scope.
 
 When there is a bug, and the user complains about the behavior, never just put in
 what you think the fix should be, what you should do is find out how our implementation

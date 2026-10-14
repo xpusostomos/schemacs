@@ -33,13 +33,28 @@
  (only (schemacs editor undo) record-insert record-delete text-editor-undo-boundary! text-editor-undo-disable! text-editor-undo-enable! text-editor-undo-recording? *undo-limit* undo-insertion-entry? undo-deletion-entry? undo-modified-entry? *point-before-last-command-or-undo* *buffer-before-last-command-or-undo*)
  (only (schemacs editor insdel) *after-change-functions* signal-after-change *text-property-offset-function* invalidate-buffer-caches)
  (only (schemacs editor fns) count-lines)
+    ;; `file-exists-p' is `fileio.c`'s, and is what finds the user's
+    ;; `imports.scm' - the tree's own, so that a `~' in a path is
+    ;; expanded the way every other file name in this editor is.
+    (only (schemacs editor fileio) file-exists-p)
     (scheme base)
+    ;; `call-with-input-file', for the user's file.
+    (scheme file)
     ;; `import' and `eval' are `(guile)''s - the `(scheme eval)' library
     ;; is not what evaluates an `import' form - and so is `resolve-module'.
-    (only (guile) eval resolve-module))
+    ;; `getenv' is how `$XDG_CONFIG_HOME' is read (`(scheme base)' has
+    ;; neither it nor `read').
+    ;;
+    ;; **`read' and not `load', for the user's `imports.scm'.** A
+    ;; declarative module - which is what this Guile's `define-library'
+    ;; makes - may not `load', and it says so ("Use of `load' in
+    ;; declarative module"); reading the forms and evaluating each one in
+    ;; the environment module does the same job here, and does it
+    ;; directly: the file *is* a list of forms to evaluate in that module.
+    (only (guile) eval getenv read resolve-module))
 
   (export editor-libraries editor-excluded-libraries
-          open-editor-namespace!)
+          imports-path open-editor-namespace! open-user-environment!)
 
   (begin
     ;;------------------------------------------------------------------
@@ -95,7 +110,13 @@
       ;;   `schemacs/main.scm' says the same thing about the front ends
       ;;   ("a terminal editor has no business needing guile-gi, and a
       ;;   windowed one no business needing ncurses").
+      ;;   `(schemacs editor imports)' is the whole editor under one
+      ;;   name, which is what the list above *is* - a second way to say
+      ;;   it. It cannot be in the list in any case: it imports every
+      ;;   library, and this one is one of them, so the list naming it
+      ;;   would be a cycle.
       '((schemacs editor loadup)
+        (schemacs editor imports)
         (schemacs editor test-display)))
 
     (define %editor-libraries
@@ -213,5 +234,115 @@
         (eval (cons 'import %editor-libraries)
               (if (pair? module) (car module)
                   (resolve-module '(guile-user))))))
+
+    ;;------------------------------------------------------------------
+    ;; The user's environment - `imports.scm'
+    ;;------------------------------------------------------------------
+    ;;
+    ;; Three things evaluate code that the editor did not write, and
+    ;; therefore have no `import' form to write for them:
+    ;;
+    ;;   * `M-:' - an expression typed at a prompt (`eval-expression');
+    ;;   * the REPL back door - the same, line by line;
+    ;;   * the user's `init.scm' - a *file* of the user's, loaded whole.
+    ;;
+    ;; In GNU Emacs all three reach every name there is, because Emacs has
+    ;; **one obarray**: `find-file' is bound in it, so a typed expression,
+    ;; a REPL line and an init file all find it with no `require'. This
+    ;; tree's names live one library per Emacs file and a module holds
+    ;; none of them until it imports them, so the three need somewhere to
+    ;; look - and this is that place.
+    ;;
+    ;; **It is one place, deliberately.** Before it, the three got three
+    ;; different answers: the back door was given every editor library
+    ;; (`open-editor-namespace!'), `M-:' evaluated in `(current-module)'
+    ;; - which is the editor's module only by luck, and is the *command's*
+    ;; module while a prompt is up, so `M-:' failed inside `find-file`'s
+    ;; minibuffer read and not outside it - and an init file got whatever
+    ;; it imported for itself. Now all three read the same module.
+    ;;
+    ;; **And the user says what is in it.** `$XDG_CONFIG_HOME/imports.scm`
+    ;; is a plain Scheme file - "just a list of imports" - evaluated in
+    ;; that module; the conventional first line names the whole editor:
+    ;;
+    ;;     (import (schemacs editor imports))     ; the whole editor
+    ;;     (import (my-utils))                    ; and whatever else
+    ;;
+    ;; With no such file the environment is that first line alone, which
+    ;; is GNU Emacs's starting position: every editor name and nothing
+    ;; else. **A file replaces the default rather than adding to it**,
+    ;; which is what "full control over what is imported into his default
+    ;; environment" means (Chris, 2026-10-13) - and it is why the file has
+    ;; to say `(schemacs editor imports)' itself if it wants the editor.
+    ;;
+    ;; **The editor's own libraries never use this.** They import what
+    ;; they use, one `(only ...)` list each, which is the rule that keeps
+    ;; a name in the library that mirrors its Emacs file. This is the
+    ;; stand-in for the obarray in the three places where there is no
+    ;; library to write an import in, and nowhere else.
+
+    (define (first-existing paths)
+      ;; The first of PATHS that names a file that is there, or #f.
+      ;; `init-path' in `startup.scm' is the same walk over the init
+      ;; file's locations; this one is here rather than there because the
+      ;; environment is built here and `startup.scm' is above this
+      ;; library.
+      ;;--------------------------------------------------------------
+      (cond ((null? paths) #f)
+            ((not (car paths)) (first-existing (cdr paths)))
+            ((file-exists-p (car paths)) (car paths))
+            (else (first-existing (cdr paths)))))
+
+    (define (imports-path)
+      ;; Where the user's `imports.scm' is, or #f when there is none.
+      ;;
+      ;; **`$XDG_CONFIG_HOME/imports.scm' first, because that is where
+      ;; Chris said it goes** - and its `schemacs' subdirectory second,
+      ;; which is where this tree's `init.scm' has always been looked for,
+      ;; so a user who keeps the two together finds them both.
+      ;;--------------------------------------------------------------
+      (let ((xdg (getenv "XDG_CONFIG_HOME"))
+            (home (getenv "HOME")))
+        (if xdg
+            (first-existing (list (string-append xdg "/imports.scm")
+                                  (string-append xdg "/schemacs/imports.scm")))
+            (first-existing (list (and home
+                                       (string-append home "/.config/schemacs/imports.scm")))))))
+
+    (define %default-user-imports '(import (schemacs editor imports)))
+    ;; ^ What the environment is when the user has said nothing: the whole
+    ;; editor, by the one name that stands for it. It is the same line a
+    ;; user's `imports.scm' writes, which is the point - there is one way
+    ;; to say "all of it", and the default uses it too.
+
+    (define (open-user-environment! . module)
+      ;; Give MODULE - `(guile-user)' when none is named, which is where
+      ;; the command loop runs and what the back door's session is pinned
+      ;; to - the names its code is evaluated against: the user's
+      ;; `imports.scm' when there is one, and the whole editor when there
+      ;; is not.
+      ;;
+      ;; Repeat calls are cheap and harmless: an `import' evaluated twice
+      ;; is the same import, and the user's file is only read when it is
+      ;; there. The front ends call it once, from the boot in
+      ;; `startup.scm' - which is Emacs's `normal-top-level', the place
+      ;; the obarray is complete before anything is read from the user.
+      ;;--------------------------------------------------------------
+      (let ((m (if (pair? module) (car module) (resolve-module '(guile-user)))))
+        (let ((file (imports-path)))
+          (if file
+              ;; **Each form in MODULE and not this library's**, so the
+              ;; `import' forms land where their reader expects them -
+              ;; exactly as `load-init' loads an init file into the
+              ;; user's module, and for the same reason.
+              (call-with-input-file file
+                (lambda (port)
+                  (let loop ()
+                    (let ((form (read port)))
+                      (unless (eof-object? form)
+                        (eval form m)
+                        (loop))))))
+              (eval %default-user-imports m)))
+        m))
 
     ))

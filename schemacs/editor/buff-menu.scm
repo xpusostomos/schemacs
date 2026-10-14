@@ -73,7 +73,7 @@
     (only (schemacs editor buffer)
           buffer-list buffer-live-p buffer-local-value
           buffer-name bury-buffer current-buffer get-buffer-create
-          kill-buffer set!buffer-local-keymap
+          set!buffer-local-keymap
           set-buffer-local-value!
           with-current-buffer set-point buffer-modified-p set-buffer-modified-p buffer-read-only? buffer-beg buffer-z set!buffer-read-only text-editor-file-name)
     ;; `quit-window' is `window.el''s and lives in `(schemacs editor
@@ -84,8 +84,14 @@
     ;; `Buffer-menu-execute' saves the buffers marked `s' with
     ;; `save-buffer', as Emacs's does - in the buffer, so it writes that
     ;; buffer's own file.
+    ;; `kill-buffer' is `files.scm`'s - **the command**, not the
+    ;; mechanism: GNU Emacs's `Buffer-menu-execute` calls `kill-buffer`
+    ;; (`buff-menu.el:619`), which is `Fkill_buffer` and asks
+    ;; `kill-buffer--possibly-save` when the buffer is modified. This
+    ;; imported `buffer`'s half of the tree's split until 2026-10-14, so
+    ;; `x` on a modified buffer killed it without asking.
     (only (schemacs editor files)
-          abbreviate-file-name revert-buffer save-buffer)
+          abbreviate-file-name kill-buffer revert-buffer save-buffer)
     ;; `g' in the Buffer List runs the GLOBAL `revert-buffer' - in
     ;; Emacs `g' is inherited from `special-mode-map' and runs the
     ;; global command, which dispatches through the buffer-local

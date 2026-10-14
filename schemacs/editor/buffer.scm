@@ -147,6 +147,17 @@
    validate-region
    %text-editor-incr-modiff!
    *kill-buffer-query-functions*
+   ;; **The mechanism, under a name of this tree's own.** GNU Emacs's
+   ;; `kill-buffer` (`buffer.c:1890') is one function: the command, with
+   ;; the interactive spec, and it asks `kill-buffer--possibly-save`
+   ;; (`simple.el:11568') when the buffer is modified. The asking needs
+   ;; the minibuffer, which is *above* this library, so the two halves are
+   ;; two functions here - the command is `files.scm`'s and keeps Emacs's
+   ;; name, and this is the half that kills. It was exported *as*
+   ;; `kill-buffer` until 2026-10-14, which is a name two libraries
+   ;; exported with two different bindings: the environment built for
+   ;; `M-:`, the REPL and the init file picked whichever came first, so
+   ;; `M-x kill-buffer` there was not the command.
    *scratch-buffer-name*
    buffer-default-directory
    default-directory
@@ -222,7 +233,7 @@
    get-buffer-create
    generate-new-buffer
    generate-new-buffer-name
-   kill-buffer
+   %kill-buffer
    other-buffer
    record-buffer!
    rename-buffer
@@ -912,7 +923,7 @@
                      (list (cons name buffer))))
             (run-buffer-list-update-hook!)))
         buffer))
-    (define (kill-buffer . args)
+    (define (%kill-buffer . args)
       ;; Kill a buffer: GNU Emacs's `kill-buffer'. The optional argument
       ;; is the buffer, or its name; with none, the current buffer.
       ;;

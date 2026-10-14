@@ -90,7 +90,7 @@
   ;; that marks a line would leave it marked for the next one. Killing it
   ;; first also exercises the registry dropping a killed buffer, which
   ;; `dired-buffers-for-dir' does as a side effect.
-  (for-each kill-buffer (dired-buffers-for-dir root))
+  (for-each %kill-buffer (dired-buffers-for-dir root))
   (let ((buffer (dired-noselect (string-append root "/")
                                 (if (pair? switches) (car switches) "-al"))))
     (set-buffer buffer)
@@ -436,7 +436,7 @@
   ;; a Dired buffer on the deletion tree, current. A fresh one, for the
   ;; reason `listing' gives: `dired-noselect' hands back the registered
   ;; buffer for a directory, and a reverting one keeps the marks.
-  (for-each kill-buffer (dired-buffers-for-dir delete-root))
+  (for-each %kill-buffer (dired-buffers-for-dir delete-root))
   (let ((b (dired-noselect (string-append delete-root "/"))))
     (set-buffer b)
     (goto-char (point-min))

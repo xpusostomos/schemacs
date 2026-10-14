@@ -91,7 +91,10 @@
           deactivate-mark clear-prefix! delete-char pending-uarg
           place-undo-boundary!
           undo undo-redo update-prefix!)
-    (only (schemacs editor editfns) insert)
+    ;; `message` is the C's `message3`, which logs before it displays:
+    ;; `report-command-error!` below says an error the way Emacs does,
+    ;; and in Emacs that leaves the line in `*Messages*` too.
+    (only (schemacs editor editfns) insert message)
     ;; `barf-if-buffer-read-only' is `buffer.c`'s (`:2453'), and it lives
     ;; in `buffer.scm' now - `insdel.c`'s `prepare_to_modify_buffer_1' is
     ;; its main caller and `insdel.scm' is below `editfns.scm'.
@@ -483,8 +486,21 @@
       ;; ("Wrong type argument in position ~A: ~S"), so the text is put
       ;; together here; Emacs shows the formatted message too.
       ;;--------------------------------------------------------------
-      (set!frame-message
-       frame
+      ;; **`message', not `set!frame-message'**, because Emacs's error
+      ;; path logs: `print_error_message` (`print.c:1098') prints with
+      ;; `Fprinc (errmsg, Qt)`, and `Qt' as a print function is the echo
+      ;; area *through* `message_dolog` (`print.c:410') - which is why
+      ;; `C-f` at the end of a buffer leaves "End of buffer" in
+      ;; `*Messages*` (measured, Emacs 31.1).
+      ;;
+      ;; The C also prefixes the line with the function the error was
+      ;; signalled in - `print_error_message`'s CALLER, from
+      ;; `Vsignaling_function` - so Emacs's line reads
+      ;; "funcall-interactively: End of buffer". This tree's command loop
+      ;; does not carry that variable, so the text is logged without the
+      ;; prefix: a named departure, not a guess at the name.
+      (message
+       "%s"
        (cond
         ((quit-condition? ex) "Quit")
         ((error-object? ex)

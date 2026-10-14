@@ -39,7 +39,7 @@
           set-message!)
     (only (schemacs editor editfns)
           bobp char-after
-          eobp goto-char insert point point-min point-max
+          eobp goto-char insert message point point-min point-max
           save-excursion)
     ;; `barf-if-buffer-read-only' is `buffer.c`'s and lives in
     ;; `buffer.scm' now - see the note in `keyboard.scm'.
@@ -1297,12 +1297,17 @@ re-executed as a normal key sequence.")
                      (main-loop)))))
              (lambda ()
                (replace-dehighlight)))
-            ;; the message the C's ends with
-            (set!frame-message
-             frame
-             (format #f "Replaced ~a occurrence~a"
-                     replace-count
-                     (if (= 1 replace-count) "" "s")))
+            ;; The message the C's ends with, and it is `(message ...)'
+            ;; there (`replace.el:3712') - so it logs. **The prompt
+            ;; above is the other half and stays `set!frame-message'**:
+            ;; it is displayed by the C's `read-key`/`read-char` prompt,
+            ;; which is `message_with_string (..., 0)` - `log' false
+            ;; (`keyboard.c:10741`), and logging a line per keystroke of
+            ;; a query-replace is not what Emacs does.
+            (message "%s"
+                     (format #f "Replaced ~a occurrence~a"
+                             replace-count
+                             (if (= 1 replace-count) "" "s")))
             (or (and keep-going stack) multi-buffer)))))
 
 
