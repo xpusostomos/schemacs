@@ -164,7 +164,7 @@
     ;; The development back door. `poll-repl!' is a no-op unless
     ;; `main-gtk.scm' was asked to open it; this loop is the only place a
     ;; windowed editor is ever idle, so it is where the REPL gets its turn.
-    (only (schemacs repl) poll-repl! set-repl-wake!)
+    (only (scheme-utils repl server) poll-repl! repl-wake!)
     ;; **The command loop's two hooks into this display.** When the front
     ;; end's own loop is the one absorbing input, `*dispatch-event*' is
     ;; the procedure an event is handed to and `command-loop-ready?' says
@@ -2012,7 +2012,7 @@
       (set-program-class "schemacs")
       (init-check!)
       ;; **The back door can be woken here, so nothing has to poll for
-      ;; it.** `(schemacs repl)''s `REPL-WAKE' is how a front end says
+      ;; it.** The shared module's `repl-wake' is how a front end says
       ;; it can be told that the REPL has work; Gtk says it with an idle
       ;; callback, which the main loop runs out of the very
       ;; `g_main_loop_run' the read is blocked in. `keyboard.sld' asks
@@ -2028,9 +2028,14 @@
       ;; is captured per thread when the thread is made. As a parameter
       ;; this read `#f' in every server thread for ever, so nothing ever
       ;; woke the editor and only a keystroke let a queued expression
-      ;; run. See `(schemacs repl)''s `SET-REPL-WAKE!'.
-      (set-repl-wake! (lambda ()
-                        (idle-add 0 (lambda (data) (poll-repl!) #f) #f)))
+      ;; run. See `(scheme-utils repl server)''s `repl-wake!'.
+      ;;
+      ;; The wake is handed a thunk to run on the thread that owns the
+      ;; program's state; this front end runs `poll-repl!' instead, which is the
+      ;; same thing with the "no door open" guard on it. The parameter is named
+      ;; and ignored: the arity is the contract.
+      (repl-wake! (lambda (drain)
+                    (idle-add 0 (lambda (data) (poll-repl!) #f) #f)))
       (let ((d (pgtk-open-window 80 24)))
         (current-display d)
         (initialize-pgtk-faces! d)

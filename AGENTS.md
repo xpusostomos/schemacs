@@ -5074,6 +5074,33 @@ process - which front end this is - not state that varies with the dynamic
 extent, so a fluid was the wrong tool for it. `pgtk.sld` sets it with
 `set-repl-wake!`; `keyboard.sld` reads it with `(repl-wake)`.
 
+> **SUPERSEDED ON 2026-10-31 - read the names below, not the ones quoted
+> around them.** The door moved to `(scheme-utils repl server)`, and what was
+> left in `(schemacs repl)` was a facade: it imported the door's procedures in
+> order to export them again, under renames (`repl-open?`,
+> `remove-repl-port-file!`) and behind a wrapper (`start-repl!`, which takes a
+> port), plus a *second* pair for the wake - `repl-wake`, `set-repl-wake!` over
+> a private variable, and an adapter to bridge the arity. That library now
+> exports **nothing**: it is the settings (transport, directory name, module,
+> the before/after hooks) and is imported for its effect. The names its callers
+> use are the door's own - `repl-running?`, `repl-unpublish-port!`, `repl-wake`,
+> `repl-wake!`, `start-repl!`, `poll-repl!` - imported from the door. The two
+> `module-ref` reaches into it that this ambiguity produced (`main.scm` imported
+> `remove-repl-port-file!` and then looked it up by name 200 lines later, and
+> did the same for `start-repl!`) are gone with it. The init file's import is
+> `(import (scheme-utils repl server))` now.
+>
+> **And the wake taught us why a host's callback may not raise.** The adapter
+> read the front end's wake with `(%repl-wake)` - applying the variable, which
+> holds the thunk - instead of `(repl-wake)`, so it called the thunk and then
+> applied what the thunk returned. That raise happened on the coop server's
+> *reader* thread, which died: the door then answered exactly ONE expression per
+> connection and never read another line, keystrokes included, and nothing in
+> that symptom pointed at a wake. `(scheme-utils repl server)`'s `wake!` now
+> guards the host's wake and reports it, so this cannot happen to any host
+> again. See `guile-dead-thread-is-silent` in the memory index for the general
+> shape: a Guile thread that dies says so on stderr only.
+
 **And it is still not enough to be idle-correct on a terminal**, where the
 wake has to be a byte written to a descriptor the wait selects on - which
 is the next thing, below.

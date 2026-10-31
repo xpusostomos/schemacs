@@ -59,6 +59,23 @@ MANPAGES := $(wildcard man/*.1)
 # under the site directory, its .go under the site ccache.  
 # bin/ holds launchers, installed as they stand.
 
+# WHERE A SHARED LIBRARY LIVES, for the COMPILE step and not just for running.
+#
+# `(schemacs repl)' imports `(scheme-utils repl server)', so `guild compile' has
+# to be able to find it - and Guile does NOT search the user's own site directory
+# (measured: the default %load-path has nothing under $HOME). The launcher
+# (`bin/se') adds it for RUNNING; this is what adds it for BUILDING, and without
+# it `make install' fails on repl.scm with "no code for module
+# (scheme-utils repl server)".
+#
+# Overridable, because a different machine may keep the library elsewhere, or
+# have it installed system-wide - in which case `make SHARED_SITE=' is right and
+# this contributes nothing.
+SHARED_SITE ?= $(if $(XDG_DATA_HOME),$(XDG_DATA_HOME),$(HOME)/.local/share)/guile/site/$(EFFVER)
+# Only if it is there: a checkout that does not use a shared library at all
+# should not have a load path entry for a directory that does not exist.
+LOADPATH_FLAGS := -L . $(if $(wildcard $(SHARED_SITE)),-L $(SHARED_SITE),)
+
 DIRS    := schemacs
 SCRIPTS := script/prelude.scm
 MODULES := $(filter-out $(SCRIPTS),$(wildcard $(addsuffix /*.scm,$(DIRS))))
@@ -73,10 +90,11 @@ SOURCES := $(shell find $(DIRS) -type f ! -name '*~')
 
 all: $(GOS)
 
-# -L . so a module's own imports resolve from the tree while it compiles
+# -L . so a module's own imports resolve from the tree while it compiles, and
+# SHARED_SITE so an import from a shared library resolves too.
 build/%.go: %.scm
 	@mkdir -p $(dir $@)
-	$(GUILD) compile -L . -o $@ $<
+	$(GUILD) compile $(LOADPATH_FLAGS) -o $@ $<
 
 # The per-file prerequisites come from Guile's own dependency tool.  They are
 # conservative -- a .go is rebuilt when any module it uses changes, not only
@@ -84,7 +102,7 @@ build/%.go: %.scm
 # is asked about too, so its .go is rebuilt when a module it imports changes.
 build/deps.mk: $(MODULES) $(SCRIPTS) tools/mkdeps.scm
 	@mkdir -p build
-	@GUILE_LOAD_PATH=. $(GUILE) -q tools/mkdeps.scm $(MODULES) $(SCRIPTS) > $@
+	@GUILE_LOAD_PATH=.:$(SHARED_SITE) $(GUILE) -q tools/mkdeps.scm $(MODULES) $(SCRIPTS) > $@
 
 -include build/deps.mk
 

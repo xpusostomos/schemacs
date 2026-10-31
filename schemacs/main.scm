@@ -52,7 +52,14 @@
         (ice-9 exceptions)
         (srfi srfi-37)
         (only (srfi srfi-13) string-contains)
-        (only (schemacs repl) remove-repl-port-file! start-repl!)
+        ;; THE BACK DOOR. Its SETTINGS are `(schemacs repl)'s and are taken by
+        ;; importing it - that library exports nothing on purpose (see its
+        ;; header). The procedures are the shared module's and are imported from
+        ;; it directly: a library that re-exported them would be a facade over
+        ;; one that is not an implementation detail of anything.
+        (schemacs repl)
+        (only (scheme-utils repl server)
+              start-repl! repl-transport-tcp! repl-unpublish-port!)
         ;; `command-line' and `exit' are `(scheme process-context)''s in
         ;; R7RS and core bindings in `(guile-user)'; they are named here for
         ;; the same reason as everything else in this list.
@@ -407,7 +414,18 @@
           (else #f))))
 
 (define (start-repl-in! . port)
-  (apply (module-ref (resolve-module '(schemacs repl)) 'start-repl!) port))
+  ;; Open the back door, at PORT when the command line - or `SCHEMACS_REPL' -
+  ;; named one.
+  ;;
+  ;; Naming a port is a fact about THIS program's command line and not about
+  ;; being a door, which is why it is said here: the transport is a seam in the
+  ;; shared module (`repl-transport-tcp!'), and this is the program setting it.
+  ;; What stood here reached into `(schemacs repl)' for `start-repl!' by
+  ;; `module-ref' while importing the same name at the top of the file.
+  ;;--------------------------------------------------------------
+  (when (pair? port)
+    (repl-transport-tcp! #:port (car port)))
+  (start-repl!))
 
 (define (with-command-line-errors thunk)
   ;; Run THUNK with a bad command line reported rather than raised: the
@@ -541,7 +559,6 @@
                 ;; here - the one step `main-gtk.scm' and `main-ncurses.scm'
                 ;; also end with.
                 (when opened
-                  ((module-ref (resolve-module '(schemacs repl))
-                               'remove-repl-port-file!)))))))))
+                  (repl-unpublish-port!))))))))
 
 (run-command-line (cdr (command-line)))

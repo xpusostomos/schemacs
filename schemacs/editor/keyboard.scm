@@ -118,7 +118,7 @@
     (only (schemacs editor xdisp) render! redisplay-frames!)
     ;; The development back door, which the command loop gives its turn
     ;; between keys. A no-op unless `SCHEMACS_REPL' opened it.
-    (only (schemacs repl) poll-repl! repl-open? repl-wake)
+    (only (scheme-utils repl server) poll-repl! repl-running? repl-wake)
     ;; The clock. The read's timeout is shortened to the next timer
     ;; (`read-timeout-or'), and the timers are run when it expires - which
     ;; is how a cursor blink happens while the editor sits still.
@@ -1258,7 +1258,7 @@
       ;; end that can be woken - Gtk, through `REPL-WAKE' - sets that
       ;; parameter and gets no cap at all, so its read blocks properly.
       ;;--------------------------------------------------------------
-      (read-timeout-or -1 #f (and (repl-open?) (not (repl-wake)) 100)))
+      (read-timeout-or -1 #f (and (repl-running?) (not (repl-wake)) 100)))
 
     (define *mouse-keys*
       ;; The mouse events this front end makes - what `dispatch-key' asks
@@ -1315,8 +1315,8 @@
     ;; A parameter is safe here in a way `REPL-WAKE' was not: this is
     ;; read and written on the one thread - Gtk's callbacks are the main
     ;; thread - and the `parameterize' that sets it encloses the loop
-    ;; that runs the callbacks. See `(schemacs repl)` on what happens when
-    ;; that is not true.
+    ;; that runs the callbacks. See `(scheme-utils repl server)` on what
+    ;; happens when that is not true.
 
     (define (command-loop-idle! frame)
       ;; The housekeeping that belongs to the moment the editor settles
@@ -1351,7 +1351,7 @@
     ;; ^ Whether a command is running right now, so that a front end can
     ;; tell "hand this event over" from "a command is already running, put
     ;; it on the queue". A plain variable rather than a parameter for the
-    ;; reason `(schemacs repl)`'s wake is: it is read from a callback, and
+    ;; reason the shared module's wake is: it is read from a callback, and
     ;; a fluid's value is captured per thread when the thread is made.
 
     (define (command-loop-ready?)
@@ -1446,7 +1446,7 @@
                           ;; that cannot - a terminal, whose read blocks
                           ;; in `getch' with nothing to hang a poll on -
                           ;; keeps the cap. See `REPL-WAKE'.
-                          (and (repl-open?) (not (repl-wake)) 100))))
+                          (and (repl-running?) (not (repl-wake)) 100))))
              (let ((ev (read-key-event want)))
                (cond
                 ((key-event? ev)

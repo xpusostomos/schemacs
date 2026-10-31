@@ -266,8 +266,8 @@
         (when path
           ;; In the *user's* module and not this library's, so that the
           ;; file has Guile's ordinary bindings - `display', `getenv' and
-          ;; the rest - and `(import (schemacs repl))' works, rather than
-          ;; only what this library happens to import. Emacs's init file
+          ;; the rest - and `(import (scheme-utils repl server))' works,
+          ;; rather than only what this library happens to import. Emacs's init file
           ;; has the same property: it runs with all of Emacs's Lisp to
           ;; hand, not with the internals of `startup.el'.
           ;;

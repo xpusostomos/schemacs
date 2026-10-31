@@ -1,285 +1,85 @@
 (define-library (schemacs repl)
-  ;; A development back door: talk to a *running* editor through a Guile
-  ;; REPL server, so its own state can be read and poked without keys,
-  ;; without a compositor, and without restarting it.
+  ;; HOW THIS EDITOR OPENS ITS BACK DOOR: the settings, and no names at all.
   ;;
-  ;; Why this is worth having, in one sentence: the alternative for the GTK
-  ;; backend is `wtype` to type at the window and `grim` to look at it, and
-  ;; a keyed run goes to whichever window the compositor has focused, which
-  ;; is not necessarily the editor. A silent mis-focus then produces a
-  ;; screenshot of *something else* that looks exactly like evidence, and
-  ;; one was believed here before the mis-focus was noticed. A REPL cannot
-  ;; mis-focus: it is the process.
+  ;; **THE DOOR ITSELF IS `(scheme-utils repl server)`.** It was written here,
+  ;; and the same file in scheme-shell, and it moved to the tree those two
+  ;; programs share. What is left here is the part that is actually schemacs':
+  ;; the settings that say what a back door in *this* editor is, made at the one
+  ;; point where they can be made before anything opens one.
   ;;
-  ;; **The server is Guile's, and lives in `schemacs/coop-server.scm`.**
-  ;; It used to be copied into this file with a line added, because
-  ;; upstream's server cannot be told that it has work: its contract is
-  ;; that you call `poll-coop-repl-server` periodically, and polling it is
-  ;; what made the GTK editor burn a quarter of a processor doing nothing
-  ;; (see `pgtk.sld`'s `pgtk-wait!` for the measurements). Now that the
-  ;; notification is a hook designed into that file - `#:notify`, written
-  ;; up so it could be sent upstream - this library holds only what is
-  ;; actually ours: the port file, the wake, and `start-repl!`.
+  ;; **IT EXPORTS NOTHING, ON PURPOSE, and that is the fix for a real
+  ;; complaint.** It used to re-export the door's procedures - `start-repl!'
+  ;; behind a rename and a wrapper, `poll-repl!' and `repl-port-file' as
+  ;; themselves, `repl-open?' and `remove-repl-port-file!' under schemacs'
+  ;; older spellings - so that its callers went on importing the door from where
+  ;; they always had. That is a facade: importing a name in order to export it
+  ;; again, from a library that is not an implementation detail of anything.
   ;;
-  ;; **The session must be evaluated in the main thread.** A parameter
-  ;; binding is thread-local, so a REPL running in a thread of its own
-  ;; sees the *default* of everything the editor set with `parameterize` -
-  ;; `(*current-frame*)` is #f there and `(buffer-list)` is empty. That is
-  ;; why the server's reader runs in a thread but the evaluation does not:
-  ;; the reader posts, and the main thread's `poll-repl!` is what resumes
-  ;; the session's continuation.
+  ;; Two things went wrong because of it. A library that exports a name it also
+  ;; imports **rebinds it silently**, which is what forced that rename in the
+  ;; first place: without it, the wrapper called itself. And the ambiguity of
+  ;; where a name lives reached out into `main.scm', which imported
+  ;; `remove-repl-port-file!' and then reached back into this module for it with
+  ;; `module-ref' two hundred lines later.
   ;;
-  ;; **The port is written down**, in `$XDG_RUNTIME_DIR/schemacs-repl-PID`
-  ;; (or `/tmp`, when the variable is unset; the runtime directory is a
-  ;; tmpfs the session manager empties at logout, which is what makes it
-  ;; the right home for a file that must not outlive the session). It is
-  ;; there because a port nobody can name is no better than a fixed one:
-  ;; `tools/repl.py` reads this file rather than computing anything, the
-  ;; way `emacsclient` reads `$XDG_RUNTIME_DIR/emacs/server` rather than
-  ;; working out a socket. A file left behind by a killed editor is
-  ;; recognised by its *pid* - which is in the name - and ignored.
+  ;; So: callers import the door from the door, this library is imported for its
+  ;; effect, and a name here would be the facade again.
   ;;
-  ;; This is not a port of `server.el': there is no `server-name`, no
-  ;; `server-start` command, no socket file and none of the client
-  ;; machinery. It is a back door for development, and that is all it
-  ;; claims to be.
-
+  ;; **A BACK DOOR IN THIS EDITOR IS TCP ON LOOPBACK, WITH ITS PORT WRITTEN
+  ;; DOWN.** The port file, `tools/repl.py' and `se --repl=PORT' are all built on
+  ;; that, so it is what this program asks for. The shared module's default is a
+  ;; Unix socket, and its header says why that is the safer transport; changing
+  ;; the transport is a separate piece of work from sharing the code, and it is
+  ;; now the one line below when it is wanted.
+  ;;
+  ;; **The wake is NOT here.** Being woken is a property of the *front end* - the
+  ;; terminal's half is `(schemacs ui ncurses term)' and Gtk's is
+  ;; `(schemacs ui gtk pgtk)' - and the seam they install into is the shared
+  ;; module's `repl-wake!'. What was also here was a second pair of names for it,
+  ;; `repl-wake' and `set-repl-wake!' over a private variable plus an adapter to
+  ;; bridge the arity, which was the facade's mistake again.
   (import
     (scheme base)
-    ;; `(scheme file)' is here for `call-with-output-file' and
-    ;; `delete-file' both - and `delete-file' must NOT also come from
-    ;; `(guile)', which exports its own: the same name from two libraries
-    ;; is a conflicting import in a `define-library', and the library then
-    ;; does not compile at all.
-    (scheme file)
-    ;; a message needs saying, and `display' is `(scheme write)''s
-    ;; (`newline' is `(scheme base)''s)
-    (only (scheme write) display)
-    ;; `poll-repl!' pins the module every expression is read and
-    ;; evaluated in, which is the three below; see its comment.
-    (only (guile) catch getenv getpid
-          resolve-module save-module-excursion set-current-module)
-    ;; The server itself, and the two ends of it: `eval' queues, `poll'
-    ;; runs what has been queued.
-    (only (schemacs coop-server)
-          spawn-coop-repl-server poll-coop-repl-server)
-    ;; The names the session's expressions are evaluated against - the
-    ;; *user environment*, which `(schemacs editor loadup)' builds:
-    ;; `$XDG_CONFIG_HOME/imports.scm' when the user has one, the whole
-    ;; editor when they do not. The same environment `M-:' and the init
-    ;; file get, because all three are code the editor did not write.
+    ;; The door's settings, and only the settings: this library is imported for
+    ;; its effect, so every name it takes is one it uses.
+    (only (scheme-utils repl server)
+          repl-directory-name! repl-transport-tcp! repl-module!
+          repl-before-start! repl-after-poll!)
+    ;; The session's namespace, which `(schemacs editor loadup)' builds:
+    ;; `$XDG_CONFIG_HOME/imports.scm' when the user has one, the whole editor
+    ;; when they do not. The same environment `M-:' and the init file get,
+    ;; because all three are code the editor did not write.
     (only (schemacs editor loadup) open-user-environment!)
     ;; `poll-repl!' draws after it has run something, because nothing else
-    ;; would: see its comment. `xdisp' is *below* `keyboard', which is
-    ;; what imports this library, so this is not a cycle.
-    (only (schemacs editor xdisp) redisplay-frames!)
-    (only (system repl repl) %inhibit-welcome-message)
-    (only (system repl server) make-tcp-server-socket))
+    ;; would - see `repl-after-poll!' below.
+    (only (schemacs editor xdisp) redisplay-frames!))
 
-  (export repl-wake set-repl-wake!
-          poll-repl! remove-repl-port-file! repl-open? repl-port-file
-          start-repl!)
+  (export)
 
   (begin
 
-    ;;------------------------------------------------------------------
-    ;; Telling the front end there is work
-    ;;------------------------------------------------------------------
+    ;; The name in the path is this program's, so that a listing of the runtime
+    ;; directory is a listing of this editor's instances.
+    (repl-directory-name! "schemacs")
 
-    (define %repl-wake #f)
-    ;; ^ How this front end is told that the back door has something to
-    ;; do, or #f when it cannot be told. A front end that sets it needs no
-    ;; polling: Gtk puts the wake on the GLib main loop (`idle-add'), and
-    ;; a terminal will write a byte to the descriptor its wait selects on.
+    (repl-transport-tcp!)
+
+    ;; A symbol, or a list of symbols: the shared module resolves it to a module
+    ;; at poll time, on the main thread, which is the only place a parameter
+    ;; binding is this editor's.
+    (repl-module! '(guile-user))
+
+    ;; THE SESSION'S NAMESPACE FIRST, so that a client already connected when
+    ;; the first expression arrives finds the editor there.
+    (repl-before-start! open-user-environment!)
+
+    ;; **It redraws afterwards**, and that is not a convenience: it is
+    ;; `redisplay`'s job in the C. Emacs displays a change made from outside the
+    ;; command loop because its main loop redisplays after it processes input,
+    ;; and a socket *is* input. Here nothing would repaint at all - measured -
+    ;; because the command loop's redisplay comes *after a command*, and this
+    ;; runs in the wait between them.
     ;;
-    ;; `keyboard.sld' is the reader: with a wake it does not shorten its
-    ;; waits at all, which is where the GTK editor's idle CPU went.
-
-    (define (repl-wake)
-      ;; Whether this front end can be told about queued work.
-      ;;--------------------------------------------------------------
-      %repl-wake)
-
-    (define (set-repl-wake! thunk)
-      ;; Say how to wake this front end, or #f for one that cannot be.
-      ;;--------------------------------------------------------------
-      (set! %repl-wake thunk))
-
-    ;; **A plain variable, and not a parameter, and that is the whole
-    ;; point.** A parameter is a fluid, and a fluid's value is captured
-    ;; per *thread*, at the moment the thread is made. The wake is called
-    ;; from the server's reader thread; that thread is made by the accept
-    ;; thread, which `start-repl!' makes - and `main-gtk.scm' runs
-    ;; `start-repl!' *before* `main-gtk', so before the front end's
-    ;; `with-gtk-display' sets this. A parameter would therefore read `#f'
-    ;; in every server thread for ever, the wake would do nothing, and the
-    ;; editor - whose waits are no longer shortened precisely *because* it
-    ;; believes it can be woken - would block until a key. The symptom was
-    ;; an idle editor that answered a REPL only after a keystroke, at 0%
-    ;; CPU, which read as the idle burn having been fixed. It had not
-    ;; been: the editor had stopped hearing the back door at all.
-    ;;
-    ;; The value is a fact about the process - which front end this is -
-    ;; and not state that varies with the dynamic extent, so a variable is
-    ;; what it is.
-
-    (define (wake!)
-      ;; The server's notify procedure, called from whichever thread has
-      ;; queued something - never from the main thread, which is the one
-      ;; being woken. It ignores the server argument, because a front end
-      ;; only has to be prodded; what is queued is `poll-repl!`'s to run.
-      ;; Cheap and safe to call when nobody can be woken.
-      ;;--------------------------------------------------------------
-      (let ((w (repl-wake)))
-        (when w (w))))
-
-    ;;------------------------------------------------------------------
-    ;; The back door
-    ;;------------------------------------------------------------------
-
-    (define server #f)
-    ;; ^ The cooperative server, or #f when the back door is shut.
-
-    (define *repl-port* #f)
-    ;; ^ The port it took, once it is open.
-
-    (define (repl-port-file)
-      ;; Where this process writes the port it took. The pid is in the
-      ;; name so that several editors can have the back door open at once
-      ;; and each file says which editor it belongs to.
-      ;;--------------------------------------------------------------
-      (string-append (or (getenv "XDG_RUNTIME_DIR") "/tmp")
-                     "/schemacs-repl-" (number->string (getpid)) ".port"))
-
-    (define (write-port! port)
-      ;; Put the port where `tools/repl.py' looks for it.
-      ;;--------------------------------------------------------------
-      (call-with-output-file (repl-port-file)
-        (lambda (out) (display port out))))
-
-    (define (spawn-on! port)
-      ;; The server on PORT, or #f when it cannot have it. A port already
-      ;; in use is not an error worth stopping for: this is a back door.
-      ;;--------------------------------------------------------------
-      (catch #t
-        (lambda ()
-          ;; The socket first, so that a port already taken is refused
-          ;; here rather than after a server has been made. `spawn-on!'s
-          ;; caller walks to the next candidate when this answers #f.
-          (let ((socket (make-tcp-server-socket #:port port)))
-            (set! server (spawn-coop-repl-server socket #:notify (lambda (s) (wake!))))
-            #t))
-        (lambda (key . args) #f)))
-
-    (define (start-repl! . args)
-      ;; Open the back door. PORT as an argument, or `SCHEMACS_REPL''s
-      ;; number passed by an entry point - otherwise one is chosen here
-      ;; and written to `repl-port-file'.
-      ;;
-      ;; A chosen port starts at 20000 + this process's pid reduced into
-      ;; 0..11999, which is below Linux's ephemeral range (32768..60999 by
-      ;; default) so that an ordinary outbound connection is not sitting on
-      ;; it, and it walks upward from there until one binds. The number
-      ;; never has to be known by anyone: it is in the file.
-      ;;--------------------------------------------------------------
-      (unless server
-        ;; The session's namespace first, so that a client already
-        ;; connected when the first expression arrives finds the editor
-        ;; there (`open-user-environment!').
-        (open-user-environment!)
-        (let ((port (if (pair? args) (car args)
-                        (+ 20000 (modulo (getpid) 12000)))))
-          (let loop ((candidate port) (left 32))
-            (cond ((<= left 0)
-                   ;; Every candidate was taken. Say so: otherwise "the
-                   ;; door is shut" and "nobody asked for a door" look
-                   ;; exactly alike from outside, which is a confusing
-                   ;; thing to debug from.
-                   (display "schemacs: no free port for the REPL back door")
-                   (newline))
-                  ((spawn-on! candidate)
-                   (set! *repl-port* candidate)
-                   (write-port! candidate))
-                  (else (loop (+ candidate 1) (- left 1))))))))
-
-    (define (repl-open?)
-      ;; Whether the back door is open. A front end that can be woken by
-      ;; `REPL-WAKE' never has to ask - see the note on it.
-      ;;--------------------------------------------------------------
-      (and server #t))
-
-    (define (poll-repl!)
-      ;; Run whatever the back door has queued. Called by the loops that
-      ;; wait: from the wake where the front end can give one, and from a
-      ;; timed turn where it cannot.
-      ;;
-      ;; **The whole queue is drained, not one item.** A wake says "there
-      ;; is work", not "there is one item of work" - Gtk's `idle-add` is
-      ;; one source per item today, but a wake that coalesces or a byte
-      ;; that stands for a run of items is no less correct, and draining
-      ;; makes this indifferent to which it is. That is what
-      ;; `poll-coop-repl-server` answering #t or #f is for.
-      ;;
-      ;; **The module is pinned, and that is not decoration.** This
-      ;; procedure is reached from wherever the editor's thread was
-      ;; waiting, at whatever depth: the command loop between keys, or a
-      ;; command's own prompt - and a prompt is read from inside
-      ;; `(eval spec module)', so it has *that command's* module bound
-      ;; for as long as it waits. Guile's REPL reads and evaluates every
-      ;; expression in `(current-module)' (`(system repl repl)'), so
-      ;; without this the meaning of what is typed at the back door
-      ;; would depend on how deep the editor happened to be nested:
-      ;; measured, `(module-name (current-module))` answered
-      ;; `(guile-user)` at idle and was an *unbound variable* while
-      ;; "Find file:" was up, because the module was then
-      ;; `(schemacs editor files)` - a library that has no `import` to
-      ;; offer, which broke the documented `tools/repl.py -m'.
-      ;;
-      ;; `(guile-user)` is what that tool's own docstring promises, and
-      ;; it is where a name like `import` lives. Everyone else's module
-      ;; is theirs; the back door's is ours.
-      ;;
-      ;; **Guile's welcome banner is suppressed here**, because the
-      ;; session is started from inside this call (`start-repl*', by way
-      ;; of the server's `new-repl'). `run-repl*' prints the copyright
-      ;; notice, the warranty line and "Enter `,help' for help." when
-      ;; its REPL is the outermost one on the *server process's* stack
-      ;; (`system/repl/repl.scm:158') unless `%inhibit-welcome-message'
-      ;; says otherwise - and a banner is for a program you started, not
-      ;; for one you connected to. It is the editor's Guile that would be
-      ;; printing it, over the socket, which is why a client cannot
-      ;; suppress it and why `tools/repl.py' had to read past it.
-      ;;--------------------------------------------------------------
-      ;; **It redraws afterwards**, and that is not a convenience: it is
-      ;; `redisplay`'s job in the C. Emacs displays a change made from
-      ;; outside the command loop because its main loop redisplays after
-      ;; it processes input, and a socket *is* input. Here nothing would
-      ;; repaint at all - measured, `se --remote` opened the file and the
-      ;; terminal went on showing the previous buffer until the next
-      ;; keypress - because the command loop's redisplay comes *after a
-      ;; command*, and this runs in the wait between them.
-      ;;
-      ;; `redisplay-frames!` and not `render!`: the C loops over every
-      ;; frame (`FOR_EACH_FRAME`, `xdisp.c:14350`), the same reason
-      ;; `read-key-event` draws with it after a special event.
-      ;;--------------------------------------------------------------
-      (when server
-        (save-module-excursion
-         (lambda ()
-           (set-current-module (resolve-module '(guile-user)))
-           (parameterize ((%inhibit-welcome-message #t))
-             (let loop ((ran #f))
-               (if (poll-coop-repl-server server)
-                   (loop #t)
-                   (when ran (redisplay-frames!)))))))))
-
-    (define (remove-repl-port-file!)
-      ;; Delete the file this process wrote, if it wrote one. Called on
-      ;; the way out; a file a *crash* leaves behind is the reader's
-      ;; problem - `tools/repl.py' ignores one whose editor is gone.
-      ;;--------------------------------------------------------------
-      (when *repl-port*
-        (catch #t (lambda () (delete-file (repl-port-file))) (lambda (k . a) #f))
-        (set! *repl-port* #f)))
-
-    ))
+    ;; `redisplay-frames!' and not `render!': the C loops over every frame, the
+    ;; same reason `read-key-event' draws with it after a special event.
+    (repl-after-poll! redisplay-frames!)))

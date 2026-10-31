@@ -93,15 +93,27 @@
 (define site (string-append prefix "/share/guile/site/" version))
 (define ccache (string-append prefix "/lib/guile/" version "/site-ccache"))
 
+;; THE USER'S OWN SITE DIRECTORY, which Guile does NOT search by default:
+;; measured, the default `%load-path' has nothing under `$HOME' at all. That is
+;; where `(scheme-utils repl server)' goes when scheme-utils is installed with
+;; `make install-local' - so without this line the back door stops loading, and
+;; the failure appears only when someone asks for it. The shared module's README
+;; names this as the launcher's job, for exactly this reason.
+(define user-site
+  (string-append (or (getenv "XDG_DATA_HOME")
+                     (string-append (or (getenv "HOME") "") "/.local/share"))
+                 "/guile/site/" version))
+
 (define load-roots
   ;; Where the editor's libraries can be, in the order to look: the tree
   ;; first, so that a checkout's `se' uses the checkout and not an
   ;; installed copy of itself, then the prefix's own site directory, which
-  ;; is where `make install' puts them.
+  ;; is where `make install' puts them, and then the user's, where a shared
+  ;; library installed for one user lives.
   ;;
-  ;; One of the two exists in each case, and the filter is what lets this
-  ;; file serve both without asking which it is.
-  (filter (lambda (d) (and d (file-exists? d))) (list prefix site)))
+  ;; Each may or may not exist, and the filter is what lets this file serve
+  ;; every case without asking which it is.
+  (filter (lambda (d) (and d (file-exists? d))) (list prefix site user-site)))
 
 (set! %load-path (append (filter (lambda (d) (not (member d %load-path)))
                                  load-roots)

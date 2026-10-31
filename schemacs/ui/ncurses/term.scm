@@ -50,7 +50,7 @@
           get-internal-real-time internal-time-units-per-second)
     ;; A terminal can be *told* that the back door has work, rather than
     ;; asking on a timer - see `with-terminal' and `read-input-event'.
-    (only (schemacs repl) poll-repl! set-repl-wake!))
+    (only (scheme-utils repl server) poll-repl! repl-wake!))
 
   (export
    with-terminal
@@ -366,7 +366,7 @@
     ;; A terminal has no event loop to call back into, so the REPL's
     ;; notification has to arrive as something this display's wait can
     ;; see: a byte in a pipe, selected on beside the keyboard.
-    ;; `set-repl-wake!' is the same hook Gtk sets with an `idle-add' -
+    ;; `repl-wake!' is the same hook Gtk sets with an `idle-add' -
     ;; `pgtk.sld''s `with-gtk-display' is where the reasoning for what it
     ;; is and why it is a global lives, and what follows is the
     ;; terminal's half of it.
@@ -405,11 +405,19 @@
           (set! %wake-read rd)
           (set! %wake-read-fd (fileno rd))
           (set! %wake-write wr)
-          (set-repl-wake!
+          (repl-wake!
+           ;; **THE WAKE TAKES ONE ARGUMENT AND THIS FRONT END DOES NOT USE
+           ;; IT.** The contract hands the wake a thunk to run on the thread
+           ;; that owns the program's state, which is what Gtk's `idle-add'
+           ;; needs (`pgtk.scm'); a terminal instead puts a byte where its own
+           ;; wait will see it, and that wait is what runs the poll. The
+           ;; parameter is named and ignored rather than dropped, because the
+           ;; arity IS the contract.
+           ;;
            ;; Writing must not raise into the server's reader thread - a
            ;; wake that fails is a wake that did not happen, and the poll
            ;; that follows the byte is what does the work.
-           (lambda () (guard (e (else #f)) (write-u8 1 wr)))))))
+           (lambda (drain) (guard (e (else #f)) (write-u8 1 wr)))))))
 
     (define (tty-now-ms)
       ;; The clock the deadline in `read-input-event' is measured

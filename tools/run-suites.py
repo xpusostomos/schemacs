@@ -104,9 +104,25 @@ SUITES = [
 TEST_CONFIG_HOME = tempfile.mkdtemp(prefix='schemacs-test-config-')
 
 
+# WHERE A SHARED LIBRARY LIVES. `(schemacs repl)' imports
+# `(scheme-utils repl server)', and Guile does NOT search the user's own site
+# directory -- measured, the default %load-path has nothing under $HOME. The
+# launcher (`bin/se') adds it for running and the Makefile adds it for
+# building; without this line a suite that reaches the back door fails to load
+# with "no code for module", which reads as a broken suite rather than a
+# missing load path.
+#
+# Only when it is there, and overridable, so a machine that installs the
+# library system-wide (where Guile looks by itself) needs nothing here.
+SHARED_SITE = os.path.join(
+    os.environ.get('XDG_DATA_HOME', os.path.join(os.path.expanduser('~'), '.local', 'share')),
+    'guile', 'site', '3.0')
+LOAD_PATH_ARGS = ['-L', REPO] + (['-L', SHARED_SITE] if os.path.isdir(SHARED_SITE) else [])
+
+
 def run(path):
     proc = subprocess.run(
-        ['guile', '--no-auto-compile', '-L', REPO, '-s', path],
+        ['guile', '--no-auto-compile'] + LOAD_PATH_ARGS + ['-s', path],
         capture_output=True, text=True, cwd=REPO, timeout=900,
         env=dict(os.environ, GUILE_WARN_DEPRECATED='no',
                  # No developer's init file: `startup.sld' loads

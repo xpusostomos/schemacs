@@ -1,5 +1,6 @@
-;; Tests for `(schemacs repl)': the *server* half of the development back
-;; door - what an editor runs when it opens it.
+;; Tests for the session's namespace: the *server* half of the development
+;; back door - what an editor runs when it opens it, and what `(schemacs repl)'
+;; configures (the door itself is `(scheme-utils repl server)').
 ;;
 ;; The client half has its own suite (`repl-client-tests.scm'). Here it is
 ;; the session's namespace, which is the thing that made `se --repl' look
