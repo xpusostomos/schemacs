@@ -52,8 +52,8 @@
     ;; The door's settings, and only the settings: this library is imported for
     ;; its effect, so every name it takes is one it uses.
     (only (scheme-utils repl server)
-          repl-directory-name! repl-name! repl-module!
-          repl-before-start! repl-after-poll!)
+          repl-directory-name! repl-name! repl-endpoint-path socket-alive?
+          repl-module! repl-before-start! repl-after-poll!)
     ;; The instance name comes from the environment, or from the pid: `(guile)'s
     ;; names, because this library is an R7RS one and takes what it names.
     (only (guile) getenv getpid number->string)
@@ -79,12 +79,24 @@
     ;; is loaded, and an editor started with `SCHEMACS_INSTANCE=work' answers to
     ;; `work' without anything having to pass it through.
     ;;
-    ;; The pid is the fallback and not a friendlier word like `schemacs', which
-    ;; would be ONE endpoint every editor shares - the second one to start would
-    ;; find the path taken and open no door at all.
-    (repl-name! (lambda ()
-                  (or (getenv "SCHEMACS_INSTANCE")
-                      (number->string (getpid)))))
+    ;; **THE FALLBACK IS THE PROGRAM'S OWN NAME, because that is what the name
+    ;; of a socket is FOR.** `repl schemacs' has to reach the editor, and it
+    ;; reaches whatever is at `$XDG_RUNTIME_DIR/schemacs/schemacs.sock': a fixed,
+    ;; obvious address, which is the whole gain over a port nobody can guess.
+    ;; Naming every door by pid gave that up - `repl <pid>' is not a name
+    ;; anybody types.
+    ;;
+    ;; The cost is that the path is ONE FILE, so a second editor to start would
+    ;; find it taken and open no door at all, silently. It therefore takes
+    ;; `schemacs-<pid>': the first editor answers to the plain name and any later
+    ;; one to a name `repl' lists. That is `emacsclient' with a server per
+    ;; editor rather than one, and nothing is left doorless.
+    (repl-name!
+     (lambda ()
+       (or (getenv "SCHEMACS_INSTANCE")
+           (if (socket-alive? (repl-endpoint-path "schemacs"))
+               (string-append "schemacs-" (number->string (getpid)))
+               "schemacs"))))
 
     ;; A symbol, or a list of symbols: the shared module resolves it to a module
     ;; at poll time, on the main thread, which is the only place a parameter
