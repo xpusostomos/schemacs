@@ -9,10 +9,11 @@
   ;; **One thing wants that: the back door.** Its session is pinned to
   ;; `(guile-user)', which has none of the editor's names, and it answered
   ;; `Unbound variable: find-file' until it was given them
-  ;; (`schemacs/repl.sld'). A user typing at that prompt can `import' what
-  ;; it wants, and `tools/repl.py -m MODULE' does it for them; what this
-  ;; saves is knowing *which* library holds a name while poking at a
-  ;; running editor.
+  ;; (`schemacs/repl.scm'). A user typing at that prompt can `import' what
+  ;; it wants, and `repl -e '(begin (import MODULE) EXPR)' NAME' does it for
+  ;; them from a terminal - the `-m MODULE' that `tools/repl.py' had is that
+  ;; line, now that the client is the shared one; what this saves is knowing
+  ;; *which* library holds a name while poking at a running editor.
   ;;
   ;; **The init file is deliberately not a caller.** It imports what it
   ;; needs - `(import (schemacs editor startup))' for
