@@ -1475,7 +1475,7 @@ def check_back_door():
 
     which read as the door being broken when what was broken was the
     *namespace*: the session's module had none of the editor's names. See
-    `open-editor-namespace!' in `schemacs/repl.sld'.
+    `open-editor-namespace!' in `schemacs/repl.scm'.
 
     Three things, each of which has been wrong at some point:
 
@@ -1490,7 +1490,12 @@ def check_back_door():
         session is started).
     """
     problems = []
-    port = free_port()
+    # **THE DOOR IS A UNIX SOCKET NOW, AND ITS NAME IS ITS ADDRESS**, so this
+    # check names the editor's door rather than hunting for the port it took:
+    # `SCHEMACS_INSTANCE' below is that name. What is left of the old port
+    # machinery here is nothing - `free_port' is for the checks that drive a
+    # *window*, which is a different socket.
+    instance = "pty-check"
     path = "/tmp/pty-check-door.txt"
     open(path, "w").write("back door\n")
     # and a second file, for `se --remote' to open in the *running* editor,
@@ -1501,12 +1506,24 @@ def check_back_door():
 
     # The door is opened by the environment variable, which is the way the
     # entry points have always offered it; `--server' is the launcher's
-    # spelling of the same thing. `XDG_RUNTIME_DIR' is pointed at a
-    # throwaway directory so the port file does not land in the live
-    # session's (`/run/user/NNNN'), where a killed editor leaves one.
-    saved = {k: os.environ.get(k) for k in ("SCHEMACS_REPL", "XDG_RUNTIME_DIR")}
-    os.environ["SCHEMACS_REPL"] = str(port)
-    os.environ["XDG_RUNTIME_DIR"] = tempfile.mkdtemp(prefix="schemacs-door-")
+    # spelling of the same thing.
+    #
+    # **`SCHEMACS_REPL' IS A FLAG**: what the editor is *called* is
+    # `SCHEMACS_INSTANCE''s business, and naming it here is what lets this
+    # check ask for that editor by name - in the greeting below, and in
+    # `se --remote=NAME' - instead of guessing where it listens. The socket
+    # is at `$XDG_RUNTIME_DIR/schemacs/<name>.sock'.
+    #
+    # `XDG_RUNTIME_DIR' is pointed at a throwaway directory so the socket does
+    # not land in the live session's (`/run/user/NNNN'), where a killed editor
+    # leaves one behind.
+    saved = {k: os.environ.get(k)
+             for k in ("SCHEMACS_REPL", "SCHEMACS_INSTANCE", "XDG_RUNTIME_DIR")}
+    os.environ["SCHEMACS_REPL"] = "1"
+    os.environ["SCHEMACS_INSTANCE"] = instance
+    runtime = tempfile.mkdtemp(prefix="schemacs-door-")
+    os.environ["XDG_RUNTIME_DIR"] = runtime
+    socket_path = "%s/schemacs/%s.sock" % (runtime, instance)
 
     answer = {}
 
@@ -1516,9 +1533,11 @@ def check_back_door():
         # printed by `run-repl*' only when the session is the outermost
         # one on the editor's REPL stack (`system/repl/repl.scm:158'), so
         # a second client would see none even if nothing suppressed it.
-        # `tools/repl.py' cannot be asked either - it reads up to the
-        # first prompt and throws away whatever came before.
-        s = socket.create_connection(("127.0.0.1", port), timeout=30)
+        # The `repl' CLI cannot be asked either - it reads up to the first
+        # prompt and throws away whatever came before.
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(30)
+        s.connect(socket_path)
         s.settimeout(20)
         buf = b""
         try:
@@ -1549,9 +1568,12 @@ def check_back_door():
         # names, which is the point: this is the expression a session had
         # to be able to write on the day it could not.
         answer["greeting"] = greeting()
+        # `repl', which is `(scheme-utils repl client)' in a terminal: one
+        # expression, its answer, and out. It is a *tool the user has*, not
+        # something this tree installs, so a missing one is reported as
+        # itself rather than as a back-door failure.
         answer["run"] = subprocess.run(
-            [sys.executable, "tools/repl.py", "-p", str(port),
-             "(buffer-file-name (current-buffer))"],
+            ["repl", "-e", "(buffer-file-name (current-buffer))", instance],
             capture_output=True, text=True, cwd=REPO, timeout=120)
         # ...and the launcher's `--remote', which is `emacsclient' from the
         # other side: it opens a file in the running editor and starts none
@@ -1559,12 +1581,11 @@ def check_back_door():
         # visiting the file, and the *screen* shows it, which is what a
         # back-door change did not do until `poll-repl!' was made to
         # redisplay.
-        answer["remote"] = run_se("--remote=%d" % port, remote)
+        answer["remote"] = run_se("--remote=" + instance, remote)
         answer["after"] = subprocess.run(
-            [sys.executable, "tools/repl.py", "-p", str(port),
-             "(buffer-file-name (current-buffer))"],
+            ["repl", "-e", "(buffer-file-name (current-buffer))", instance],
             capture_output=True, text=True, cwd=REPO, timeout=120)
-        answer["no-files"] = run_se("--remote=%d" % port)
+        answer["no-files"] = run_se("--remote=" + instance)
 
     try:
         screen = drive([], path, during=poke)

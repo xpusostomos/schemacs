@@ -25,12 +25,21 @@
   ;; So: callers import the door from the door, this library is imported for its
   ;; effect, and a name here would be the facade again.
   ;;
-  ;; **A BACK DOOR IN THIS EDITOR IS TCP ON LOOPBACK, WITH ITS PORT WRITTEN
-  ;; DOWN.** The port file, `tools/repl.py' and `se --repl=PORT' are all built on
-  ;; that, so it is what this program asks for. The shared module's default is a
-  ;; Unix socket, and its header says why that is the safer transport; changing
-  ;; the transport is a separate piece of work from sharing the code, and it is
-  ;; now the one line below when it is wanted.
+  ;; **A BACK DOOR IN THIS EDITOR IS A UNIX SOCKET, AND ITS NAME IS ITS
+  ;; ADDRESS.** `$XDG_RUNTIME_DIR/schemacs/<instance>.sock' - so listing that
+  ;; one directory is listing the editors that have a door open, a dead endpoint
+  ;; is told from a live one by CONNECTING rather than by reading a file, and
+  ;; there is no port file to write, to read, or to leave behind after a crash.
+  ;; It is what the shared module does by default. This program used to override
+  ;; it with TCP on loopback because `tools/repl.py' and `se --repl=PORT' were
+  ;; built around the port file; both are gone.
+  ;;
+  ;; **THE INSTANCE NAME IS `SCHEMACS_INSTANCE', OR THE PID.** One editor, one
+  ;; door: the pid keeps two editors off one path, exactly as the pid in the
+  ;; port file's name did, and a client given no name takes the NEWEST live
+  ;; socket in this directory - which is the rule it followed before. Naming one
+  ;; is what a path buys over a port: `SCHEMACS_INSTANCE=work se' can then be
+  ;; asked for as `se --repl=work'.
   ;;
   ;; **The wake is NOT here.** Being woken is a property of the *front end* - the
   ;; terminal's half is `(schemacs ui ncurses term)' and Gtk's is
@@ -43,8 +52,11 @@
     ;; The door's settings, and only the settings: this library is imported for
     ;; its effect, so every name it takes is one it uses.
     (only (scheme-utils repl server)
-          repl-directory-name! repl-transport-tcp! repl-module!
+          repl-directory-name! repl-name! repl-module!
           repl-before-start! repl-after-poll!)
+    ;; The instance name comes from the environment, or from the pid: `(guile)'s
+    ;; names, because this library is an R7RS one and takes what it names.
+    (only (guile) getenv getpid number->string)
     ;; The session's namespace, which `(schemacs editor loadup)' builds:
     ;; `$XDG_CONFIG_HOME/imports.scm' when the user has one, the whole editor
     ;; when they do not. The same environment `M-:' and the init file get,
@@ -59,10 +71,20 @@
   (begin
 
     ;; The name in the path is this program's, so that a listing of the runtime
-    ;; directory is a listing of this editor's instances.
+    ;; directory is a listing of this editor's doors and of nobody else's.
     (repl-directory-name! "schemacs")
 
-    (repl-transport-tcp!)
+    ;; **A THUNK, because the name is read each time one is needed** - so the
+    ;; environment is consulted when a client asks rather than when this library
+    ;; is loaded, and an editor started with `SCHEMACS_INSTANCE=work' answers to
+    ;; `work' without anything having to pass it through.
+    ;;
+    ;; The pid is the fallback and not a friendlier word like `schemacs', which
+    ;; would be ONE endpoint every editor shares - the second one to start would
+    ;; find the path taken and open no door at all.
+    (repl-name! (lambda ()
+                  (or (getenv "SCHEMACS_INSTANCE")
+                      (number->string (getpid)))))
 
     ;; A symbol, or a list of symbols: the shared module resolves it to a module
     ;; at poll time, on the main thread, which is the only place a parameter

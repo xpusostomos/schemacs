@@ -5090,6 +5090,34 @@ extent, so a fluid was the wrong tool for it. `pgtk.sld` sets it with
 > did the same for `start-repl!`) are gone with it. The init file's import is
 > `(import (scheme-utils repl server))` now.
 >
+> **AND THE TRANSPORT IS A UNIX SOCKET, WHICH IT ALWAYS SHOULD HAVE BEEN.** The
+> port file, `tools/repl.py` and `--repl=PORT` are gone. The door is at
+> `$XDG_RUNTIME_DIR/schemacs/<instance>.sock`, so listing that directory lists
+> the running editors, a stale endpoint is told from a live one by CONNECTING,
+> and there is no port to write, read, or leave behind. The instance is
+> `SCHEMACS_INSTANCE`, or the pid - one editor, one door, and the pid is what
+> kept two of them off one path in the port file's day too. A bare `se --repl'
+> still means the NEWEST editor that answers; `--repl=NAME' asks for one by
+> name, which is the thing a path buys and a port could not. `SCHEMACS_REPL' is
+> a FLAG now (a name is `SCHEMACS_INSTANCE`'s business), and `--server',
+> `--repl' and `--remote' take a NAME where they took a port - refused if it has
+> a `/` in it, because the name is a file name in the runtime directory. The
+> client half of this file's subject is `(scheme-utils repl client)`'s, and
+> `se --repl' keeps only the policy: which editor a bare `--repl' means.
+>
+> **`tools/repl.py' is deleted**, and `repl' (installed from scheme-utils) is
+> what replaces it: `repl -e EXPR NAME' for one expression, `repl NAME' for a
+> session, `repl -p PATH' when the path is known. Everything AGENTS.md says
+> about `tools/repl.py' below was measured with that tool and holds for this one.
+>
+> **AND `repl-eval' HAD TO CLOSE ITS SOCKET.** A program serves one client
+> session at a time, and the day `se --remote FILE' was followed by `se --repl'
+> against the same editor, the second client was accepted and then never
+> greeted: the session `--remote' left open had the door's reader parked on it.
+> `repl -e' reported "nothing is answering for NAME" and exited 2, and
+> `se --repl' hung with no banner - for the *shared* client, which is fixed
+> there rather than here.
+>
 > **And the wake taught us why a host's callback may not raise.** The adapter
 > read the front end's wake with `(%repl-wake)` - applying the variable, which
 > holds the thunk - instead of `(repl-wake)`, so it called the thunk and then

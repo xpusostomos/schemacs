@@ -4,9 +4,9 @@
 ;;
 ;; and the three that talk to a *running* editor instead of starting one:
 ;;
-;;     se --server[=PORT]            open this editor's back door
-;;     se --repl[=PORT]              be a REPL for another editor's
-;;     se --remote[=PORT] FILE...    open files in another editor
+;;     se --server[=NAME]            open this editor's back door
+;;     se --repl[=NAME]              be a REPL for another editor's
+;;     se --remote[=NAME] FILE...    open files in another editor
 ;;
 ;; `se' (in `bin/') is the launcher - it puts the tree, or an installed
 ;; copy's own site directory, on the load path and loads this file. Like
@@ -59,7 +59,7 @@
         ;; one that is not an implementation detail of anything.
         (schemacs repl)
         (only (scheme-utils repl server)
-              start-repl! repl-transport-tcp! repl-unpublish-port!)
+              start-repl! repl-unpublish-port!)
         ;; `command-line' and `exit' are `(scheme process-context)''s in
         ;; R7RS and core bindings in `(guile-user)'; they are named here for
         ;; the same reason as everything else in this list.
@@ -116,21 +116,22 @@
         (option (list #\q "no-init-file") #f #f
                 (lambda (opt name arg seen)
                   (argument-set seen 'no-init-file #t)))
-        ;; `--server[=PORT]' and `--repl[=PORT]': the argument is
+        ;; `--server[=NAME]' and `--repl[=NAME]': the argument is
         ;; *optional*, and SRFI 37 takes an optional argument only
-        ;; attached - `--server=37146' and not `--server 37146', because
+        ;; attached - `--server=work' and not `--server work', because
         ;; otherwise the next word could be a file name
         ;; (`srfi/srfi-37.scm:206'). Emacs spells its own optional
-        ;; arguments the same way (`--daemon[=NAME]'). The value is left a
-        ;; *string* here and checked in `option-port', so that
-        ;; `--repl=abc' can be told from a port.
+        ;; arguments the same way (`--daemon[=NAME]'), which is where the
+        ;; name for one comes from. The value is left a *string* here and
+        ;; checked in `option-name', because a name is a FILE NAME in the
+        ;; runtime directory and not every string is one.
         (option (list "server") #f #t
                 (lambda (opt name arg seen)
                   (argument-set seen 'server (or arg #t))))
         (option (list "repl") #f #t
                 (lambda (opt name arg seen)
                   (argument-set seen 'repl (or arg #t))))
-        ;; `-r'/`--remote[=PORT]': `emacsclient' from the other side - the
+        ;; `-r'/`--remote[=NAME]': `emacsclient' from the other side - the
         ;; file names on the command line are opened by a *running*
         ;; editor, and no editor is started here.
         ;;
@@ -138,9 +139,9 @@
         ;; 37 fills a *short* option's argument out of the next word when
         ;; nothing is attached (`srfi-37.scm:143' - `-oARG' and `-o ARG'
         ;; are one code path there), so a `-r' that took an optional
-        ;; argument would read `se -r foo.txt' as "port foo.txt". `-r' is
-        ;; a plain flag and the port is spelled `--remote=PORT';
-        ;; `-rPORT', the attached form, is rewritten below the way
+        ;; argument would read `se -r foo.txt' as "name foo.txt". `-r' is
+        ;; a plain flag and the name is spelled `--remote=NAME';
+        ;; `-rNAME', the attached form, is rewritten below the way
         ;; `--chdir DIR' is.
         (option (list #\r) #f #f
                 (lambda (opt name arg seen)
@@ -239,12 +240,13 @@
   (%guile-format port "  -w, --window        start the Gtk editor (the terminal is the default)~%")
   (%guile-format port "      --chdir=DIR     change to directory DIR before starting~%")
   (%guile-format port "  -q, --no-init-file  do not load an init file~%")
-  (%guile-format port "      --server[=PORT] open the REPL back door (on PORT when given)~%")
-  (%guile-format port "      --repl[=PORT]   connect to a running editor's back door as a~%")
-  (%guile-format port "                      REPL, and start no editor~%")
-  (%guile-format port "  -r, --remote[=PORT] open FILE... in a running editor's `find-file',~%")
-  (%guile-format port "                      and start no editor (`-r' takes no port;~%")
-  (%guile-format port "                      `--remote=PORT' names one)~%")
+  (%guile-format port "      --server[=NAME] open the REPL back door (called NAME when given)~%")
+  (%guile-format port "      --repl[=NAME]   connect to a running editor's back door as a~%")
+  (%guile-format port "                      REPL, and start no editor (NAME picks which one;~%")
+  (%guile-format port "                      the newest is used when none is named)~%")
+  (%guile-format port "  -r, --remote[=NAME] open FILE... in a running editor's `find-file',~%")
+  (%guile-format port "                      and start no editor (`-r' takes no name;~%")
+  (%guile-format port "                      `--remote=NAME' picks the editor)~%")
   (%guile-format port "  -h, --help          print this and exit~%"))
 
 (define (launcher-error message . irritants)
@@ -367,65 +369,52 @@
   ;;--------------------------------------------------------------
   (apply (module-ref (resolve-module module) name) args))
 
-(define (option-port seen key)
-  ;; The port an option with an *optional* argument was given: a number
-  ;; for `--repl=37146', #t for a bare `--repl', and #f when the option
-  ;; was not there at all. Anything else is a bad port number and says so.
+(define (option-name seen key)
+  ;; The name an option with an *optional* argument was given: a string for
+  ;; `--repl=work', #t for a bare `--repl', and #f when the option was not
+  ;; there at all.
+  ;;
+  ;; **A SLASH IS REFUSED**, and that is the check a port number needed and a
+  ;; name does too: the name is a FILE NAME in the runtime directory
+  ;; (`$XDG_RUNTIME_DIR/schemacs/<name>.sock'), so `--repl=../x' would name a
+  ;; socket outside it. What the option means is "the editor called this", and a
+  ;; path is not a word for one.
   ;;--------------------------------------------------------------
   (let ((given (argument-value seen key #f)))
     (cond ((eq? given #t) #t)
           ((not given) #f)
-          (else
-           (let ((port (string->number given)))
-             (unless (and port (exact-integer? port) (> port 0) (< port 65536))
-               (launcher-error "--~a needs a port number, not `~a'"
-                               key given))
-             port)))))
+          ((string-contains given "/")
+           (launcher-error
+            "--~a takes the NAME of an editor, and `~a' has a `/` in it"
+            key given))
+          (else given))))
 
 (define (start-back-door! server)
-  ;; Open the development back door - see `schemacs/repl.sld', and
-  ;; `schemacs/repl-client.sld' for the other end of it.
+  ;; Open the development back door - see `schemacs/repl.scm', and
+  ;; `schemacs/repl-client.scm' for the other end of it.
   ;;
-  ;; SERVER is a number for `--server=PORT', #t for a bare `--server'
-  ;; (which chooses a port and writes it where clients look), or #f when
-  ;; the command line did not ask - in which case `SCHEMACS_REPL' is the
-  ;; older way to ask, and either of them is a door.
+  ;; SERVER is a NAME for `--server=NAME', #t for a bare `--server', or #f
+  ;; when the command line did not ask - in which case `SCHEMACS_REPL' is
+  ;; the older way to ask, and either of them is a door.
+  ;;
+  ;; **A NAME HERE IS AN OVERRIDE OF THE EDITOR'S OWN**, which
+  ;; `(schemacs repl)' takes from `SCHEMACS_INSTANCE' or the pid: naming it
+  ;; on the command line only says what a client asks for.
   ;;
   ;; **Loaded here, not imported at the top of the file**, for the same
   ;; reason the front ends are: `--repl' must not load the editor's
   ;; libraries, and this is one of them.
   ;;--------------------------------------------------------------
   (let ((env (getenv "SCHEMACS_REPL")))
-    (cond ((number? server) (start-repl-in! server) #t)
-          ((eq? server #t) (start-repl-in!) #t)
-          (env
-           ;; **`port' is bound by this `let' and returned by it.** It was
-           ;; written as `(let ((port ...)) (when port (start-repl-in!
-           ;; port))) port' - the answer outside the `let` that binds it -
-           ;; so `SCHEMACS_REPL` answered "Unbound variable: port" and the
-           ;; door never opened. It went unnoticed because nothing drove
-           ;; this path: `tools/pty-check.py' started `main-ncurses.scm',
-           ;; which opened its own door from the same variable, and
-           ;; `--server'/`--repl' take the branches above. Found the day
-           ;; the harness was pointed at `se'.
-           (let ((port (string->number env)))
-             (when port (start-repl-in! port))
-             port))
+    (cond ((string? server) (start-repl! #:name server) #t)
+          ((eq? server #t) (start-repl!) #t)
+          ;; **`SCHEMACS_REPL' IS A FLAG NOW, NOT A PORT NUMBER.** What an
+          ;; editor is *called* is `SCHEMACS_INSTANCE''s business, so one door
+          ;; is named once - in the environment, where the launcher that starts
+          ;; the editor can say it - and reached from a config file, from
+          ;; `--repl=NAME' and from `SCHEMACS_REPL' alike.
+          ((and env (not (string=? env ""))) (start-repl!) #t)
           (else #f))))
-
-(define (start-repl-in! . port)
-  ;; Open the back door, at PORT when the command line - or `SCHEMACS_REPL' -
-  ;; named one.
-  ;;
-  ;; Naming a port is a fact about THIS program's command line and not about
-  ;; being a door, which is why it is said here: the transport is a seam in the
-  ;; shared module (`repl-transport-tcp!'), and this is the program setting it.
-  ;; What stood here reached into `(schemacs repl)' for `start-repl!' by
-  ;; `module-ref' while importing the same name at the top of the file.
-  ;;--------------------------------------------------------------
-  (when (pair? port)
-    (repl-transport-tcp! #:port (car port)))
-  (start-repl!))
 
 (define (with-command-line-errors thunk)
   ;; Run THUNK with a bad command line reported rather than raised: the
@@ -501,10 +490,10 @@
   ;; mistake worth saying out loud rather than ignoring.
   ;;--------------------------------------------------------------
   (check-connect-only 'repl seen)
-  (let ((port (option-port seen 'repl)))
+  (let ((name (option-name seen 'repl)))
     (apply (module-ref (resolve-module '(schemacs repl-client))
                        'run-repl-client)
-           (list (if (eq? port #t) #f port)))))
+           (list (if (eq? name #t) #f name)))))
 
 (define (run-remote-option seen)
   ;; `--remote': hand the file names to a running editor's `find-file',
@@ -519,10 +508,10 @@
     (unless (pair? files)
       (launcher-error "--remote needs a file to open~%~a --remote FILE [FILE...]"
                       *program-name*))
-    (let ((port (option-port seen 'remote)))
+    (let ((name (option-name seen 'remote)))
       (apply (module-ref (resolve-module '(schemacs repl-client))
                          'run-remote-files)
-             (list (if (eq? port #t) #f port) files)))))
+             (list (if (eq? name #t) #f name) files)))))
 
 (define (run-command-line args)
   ;; The order is the C's: the options are read, then `--chdir' moves the
@@ -552,7 +541,7 @@
                 (change-directory! dir))
               (let ((opened (with-command-line-errors
                              (lambda () (start-back-door!
-                                         (option-port seen 'server))))))
+                                         (option-name seen 'server))))))
                 (start-editor files window no-init-file)
                 ;; The editor proper does not know the back door exists and
                 ;; cannot tidy up after it, so the file it wrote is removed
