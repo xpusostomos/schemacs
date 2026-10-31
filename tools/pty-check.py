@@ -1928,7 +1928,10 @@ def check_imports():
         it.
     """
     problems = []
-    port = free_port()
+    # **THE DOOR IS A SOCKET AND ITS NAME IS ITS ADDRESS**, so this check names
+    # the editor's door instead of counting on a port it chose - the same three
+    # lines as the `back-door' check, and for the same reason.
+    instance = "pty-check-imports"
     cfg = tempfile.mkdtemp(prefix="schemacs-imports-")
     os.makedirs(os.path.join(cfg, "schemacs"))
     open(os.path.join(cfg, "schemacs", "init.scm"), "w").write(
@@ -1940,17 +1943,21 @@ def check_imports():
 
     # the door is how the screen is read back, and `M-:' is the second
     # consumer - both at once in one run
-    saved = {k: os.environ.get(k) for k in ("SCHEMACS_REPL", "XDG_RUNTIME_DIR")}
-    os.environ["SCHEMACS_REPL"] = str(port)
+    saved = {k: os.environ.get(k)
+             for k in ("SCHEMACS_REPL", "SCHEMACS_INSTANCE", "XDG_RUNTIME_DIR")}
+    os.environ["SCHEMACS_REPL"] = "1"
+    os.environ["SCHEMACS_INSTANCE"] = instance
     os.environ["XDG_RUNTIME_DIR"] = tempfile.mkdtemp(prefix="schemacs-imports-rt-")
 
     answer = {}
 
     def during():
-        # `tools/repl.py' is the same door the `back-door' check uses
+        # `repl', the shared CLI, is the same door the `back-door' check uses:
+        # one expression, its answer, and out.
         r = subprocess.run(
-            [sys.executable, "tools/repl.py", "-p", str(port),
-             '(with-current-buffer (get-buffer "*Messages*") (buffer-string))'],
+            ["repl", "-e",
+             '(with-current-buffer (get-buffer "*Messages*") (buffer-string))',
+             instance],
             capture_output=True, text=True, timeout=90)
         answer["messages"] = r.stdout
 
