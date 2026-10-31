@@ -86,7 +86,17 @@ GOS     := $(patsubst %.scm,build/%.go,$(MODULES))
 # editor left lying in the working tree ended up in the system's site directory
 # -- where nothing ever removes it.  One file at a time, by name, with `find'
 # rather than a wildcard so the list holds files and not directories.
-SOURCES := $(shell find $(DIRS) -type f ! -name '*~')
+#
+# **AND NOT THE TESTS.** They are part of the TREE and not of the program: the
+# editor never loads one, `make test` runs them from here, and an installed
+# `schemacs/editor/foo-tests.scm` is a file no user wants in their site
+# directory. Worse, its `.go` was INSTALLED TOO, into the site ccache - where a
+# stale compiled INTERFACE shadows the tree's source the next time `make` runs
+# and Guile resolves `(schemacs something)' through it. Measured: a rebuild
+# failed with "no binding `repl-endpoint' in module (schemacs repl-client)" from
+# a client that plainly had it, because the interface being read was the
+# installed one.
+SOURCES := $(shell find $(DIRS) -type f ! -name '*~' ! -name '*-tests.scm')
 
 all: $(GOS)
 
@@ -116,6 +126,10 @@ install: all
 	rm -rf $(DESTDIR)$(CCACHEDIR)/schemacs
 	for f in $(SOURCES); do install -D -m 644 $$f $(DESTDIR)$(SITEDIR)/$$f; done
 	cp -r build/schemacs $(DESTDIR)$(CCACHEDIR)/
+	@# The tests' .go files are compiled (`make' checks them by compiling) but
+	@# not shipped - see SOURCES. Removed from the COPY and not from build/, so
+	@# that a later `make' has nothing to redo.
+	find $(DESTDIR)$(CCACHEDIR) -name '*-tests.go' -delete
 	install -m 755 bin/se $(DESTDIR)$(BINDIR)/se
 	for f in $(MANPAGES); do install -D -m 644 $$f $(DESTDIR)$(MAN1DIR)/$$(basename $$f); done
 
