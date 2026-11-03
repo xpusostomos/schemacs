@@ -46,8 +46,6 @@ forward, money, AI tokens or human assistence would help it move
 forward much faster. Having said that, look at whats been achieved by
 one guy in a short time.
 
-![One Scheme](images/one-scheme.jpg)
-
 ## Check out my other projects:
 
 [Hyprscheme - program Hyprland in scheme](https://github.com/xpusostomos/Hyprscheme)
@@ -292,3 +290,5 @@ than invent a new binding mechanism, we've made it so that it saves
 and restores the global value of the buffer. Long term we probably
 should wind the variables throughout the APIs... maybe. It will take
 time to fully contemplate the issues.
+
+![One Scheme](images/one-scheme.jpg)
