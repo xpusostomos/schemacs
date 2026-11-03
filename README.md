@@ -36,6 +36,8 @@ Here's what works already:
 How does it feel? Zippy! They say they fixed Emacs' performance, 
 but it isn't as zippy as this!
 
+![Screen Shot](images/schemacs-screenshot-1.jpg)
+
 ## A quick word from our lack of sponsors...
 
 This project has been moderately expensive to implement in its use of
