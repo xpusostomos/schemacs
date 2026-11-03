@@ -110,7 +110,6 @@ q
   
   Can be disabled in your init.scm
 ```
-      (import (schemacs editor startup))
       (set! inhibit-startup-screen #t)
 ```
 
