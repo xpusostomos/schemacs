@@ -46,11 +46,20 @@ forward, money, AI tokens or human assistence would help it move
 forward much faster. Having said that, look at whats been achieved by
 one guy in a short time.
 
+![One Scheme](images/one-scheme.jpg)
+
+## Check out my other projects:
+
+[Link Text](https://github.com)
+
 ## Developer Discussion
 
 Github forum is turned on above, you should feel free to discuss the
 project there.
-
+![Hyprscheme - program Hyprland in scheme](https://github.com/xpusostomos/Hyprscheme)
+![Scheme Desktop - a replacement for Quickshell in Scheme] (https://github.com/xpusostomos/scheme-desktop)
+![Scheme Terminal - terminal app programmable in Scheme] (https://github.com/xpusostomos/scheme-terminal)
+![Guile scsh - a scheme shell with structured editing] (https://github.com/xpusostomos/guile-scsh)
 
 ### Prerequisites
 
