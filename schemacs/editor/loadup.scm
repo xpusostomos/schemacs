@@ -143,6 +143,7 @@
         (schemacs editor dispnew)
         (schemacs editor easy-mmode)
         (schemacs editor editfns)
+        (schemacs editor face-remap)
         
         (schemacs editor env)
         (schemacs editor faces)

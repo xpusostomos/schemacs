@@ -39,7 +39,7 @@
     (schemacs editor indentc)
     (schemacs editor search)
     (schemacs editor ls-lisp)
-    (schemacs editor xdisp)
+    (except (schemacs editor xdisp)  *truncate-partial-width-windows* line-display-rows window-line-rows window-line-slices window-start window-truncates-lines? vertical-motion)
     (schemacs editor minibuffer)
     (schemacs editor pages)
     (schemacs editor keyboard)
@@ -73,6 +73,7 @@
     (schemacs editor env)
     (except (schemacs editor fileio)  directory-name-p expand-file-name file-exists-p file-name-directory-part file-name-nondirectory-part file-writable-p *buffer-visited-file-modtime-function*)
     (schemacs editor paragraphs)
+    (schemacs editor face-remap)
     (schemacs editor indent)
     (schemacs editor cmds)
     (schemacs editor keymap)
@@ -98,6 +99,8 @@
     %mark-marker
     %marker-charpos
     %nonexistent-modtime-nsecs
+    %row-beginning
+    %row-of-position
     %text-editor-incr-modiff!
     %text-editor-newline-cache
     %unknown-modtime-nsecs
@@ -107,6 +110,8 @@
     %window-end-valid?
     %window-end-vpos
     %window-hscroll
+    %window-line-rows
+    %window-line-slices
     %window-min-hscroll
     %window-old-point
     %window-point
@@ -248,6 +253,7 @@
     *gap-bytes-dfl*
     *gap-bytes-min*
     *get-text-property-function*
+    *goal-column*
     *graft-intervals-function*
     *gui--last-selected-text-clipboard*
     *gui--last-selected-text-primary*
@@ -282,6 +288,7 @@
     *last-read-event*
     *last-thing-searched*
     *lazy-highlight-cleanup*
+    *line-move-visual*
     *line-number-display-limit*
     *line-number-display-limit-width*
     *lispy-function-keys*
@@ -318,6 +325,7 @@
     *minibuffer-setup-hook*
     *minor-mode-alist*
     *minor-mode-list*
+    *minor-mode-map-alist*
     *mode-line-format*
     *mouse-event-keys*
     *mouse-scroll-delay*
@@ -382,6 +390,7 @@
     *timer-idle-list*
     *timer-list*
     *timer-wake*
+    *track-eol*
     *transient-mark-mode*
     *truncate-partial-width-windows*
     *tty-colors*
@@ -393,6 +402,7 @@
     *unread-command-events*
     *update-search-regs-function*
     *use-empty-active-region*
+    *visual-line-fringe-indicators*
     *window-system*
     *x-select-request-type*
     *yank-pop-change-selection*
@@ -453,6 +463,7 @@
     barf-if-buffer-read-only
     beginning-of-buffer
     beginning-of-line
+    beginning-of-visual-line
     binary-overwrite-mode
     binary-overwrite-mode-hook
     blink-cursor--rescan-frames
@@ -479,6 +490,8 @@
     buffer-hscroll-margin
     buffer-hscroll-step
     buffer-intervals
+    buffer-line-texts
+    buffer-line-texts-at
     buffer-list
     buffer-list-alist
     buffer-live-p
@@ -605,6 +618,7 @@
     command-name
     command-procedure
     command-record-of
+    command-remapping
     command-type?
     command-value-of
     command?
@@ -678,6 +692,7 @@
     custom-initialize-default
     custom-initialize-reset
     custom-initialize-set
+    custom-set-variables
     custom-variable-p
     deactivate-mark
     debugger-mode-map
@@ -841,6 +856,7 @@
     encode-eol
     end-of-buffer
     end-of-line
+    end-of-visual-line
     ensure-final-newline-on-save!
     ensure-final-newline-on-visit
     env--substitute-vars-regexp
@@ -1024,6 +1040,11 @@
     get-specified-cursor-type
     get-text-property
     get-window-cursor-type
+    global-text-scale-adjust
+    global-text-scale-adjust--default-height
+    global-text-scale-adjust--increment-factor
+    global-text-scale-adjust-limits
+    global-text-scale-adjust-resizes-frames
     glyphs->text
     goto-char
     goto-line
@@ -1044,6 +1065,7 @@
     handle-delete-frame
     history-entries
     history?
+    hscroll-line-slice
     ignore
     imports-path
     indent-rigidly
@@ -1137,23 +1159,36 @@
     kill-append
     kill-buffer
     kill-line
+    kill-local-variable
     kill-new
     kill-paragraph
     kill-range
     kill-region
     kill-ring-save
+    kill-visual-line
     kill-word
     know-region-cache
     lazy-highlight-cleanup
     line-beginning-position
     line-display-offsets
     line-display-rows
+    line-display-texts
     line-display-width
     line-end-fill-attribute
     line-end-position
     line-face-runs
     line-height
+    line-move
+    line-move-1
+    line-move-visual
+    line-next-start
     line-number-at-pos
+    line-texts-column
+    line-texts-glyphs
+    line-texts-offsets
+    line-texts-rows
+    line-texts-slice-width
+    line-texts-width
     lisp-time-arguments
     list-buffers
     list-buffers--refresh
@@ -1300,6 +1335,7 @@
     next-history-element
     next-interval
     next-line
+    next-logical-line
     next-overlay-change
     next-single-property-change
     normal-splash-screen
@@ -1333,6 +1369,7 @@
     overlays-in
     overwrite-mode
     overwrite-mode-hook
+    pad-line
     parse-colon-path
     parse-modifiers-uncached
     parse-solitary-modifier
@@ -1362,6 +1399,7 @@
     previous-history-element
     previous-interval
     previous-line
+    previous-logical-line
     previous-overlay-change
     previous-single-property-change
     primitive-undo
@@ -1444,6 +1482,8 @@
     revert-buffer
     revert-buffer--default
     revert-buffer-with-coding-system
+    rows-above
+    rows-row-of-column
     run-at-time
     run-buffer-list-update-hook!
     run-command
@@ -1588,6 +1628,7 @@
     set-face-attribute
     set-file-modes
     set-fill-column
+    set-goal-column
     set-interval-object!
     set-keymap-char-table!
     set-keymap-parent
@@ -1632,6 +1673,7 @@
     split-window-right
     status-string
     store-in-keymap
+    string->texts
     string-collate-lessp
     string-intervals
     string-lessp
@@ -1695,6 +1737,8 @@
     text-property-not-all
     text-quoting-style
     textget
+    texts-glyph
+    texts-width
     time-equal-p
     time-less-p
     time-subtract
@@ -1716,6 +1760,7 @@
     transient-mark-mode
     transpose-chars
     transpose-words
+    truncate-line
     try-completion
     tty-capable-p
     tty-color-24bit
@@ -1736,6 +1781,7 @@
     tty-standard-colors
     tty-weight-number
     turn-on-font-lock
+    turn-on-visual-line-mode
     uarg->integer
     unchain-marker
     undo
@@ -1761,6 +1807,8 @@
     verify-visited-file-modtime
     vertical-motion
     visited-file-modtime
+    visual-line-mode
+    visual-line-mode-map
     what-cursor-position
     wildcard-to-regexp
     window-absorb!
@@ -1774,12 +1822,16 @@
     window-edges
     window-end
     window-frame
+    window-full-width?
     window-height
     window-hscroll
     window-internal?
     window-left
     window-line-rows
+    window-line-rows-at
     window-line-slices
+    window-line-slices-at
+    window-line-start
     window-list
     window-live-p
     window-min-height
@@ -1795,6 +1847,7 @@
     window-truncates-lines?
     window-type?
     window-width
+    window-wraps?
     with-current-buffer
     with-current-buffer-window
     with-selected-window
