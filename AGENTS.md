@@ -78,6 +78,51 @@ number of functions, same everything. Of course this is scheme rather than
 lisp, so there will be some deference to it being a different language, 
 but there should be very minimal departures from emacs algorithms.
 
+The only exception to the "same shape as emacs" is we want to avoid
+dynamic binding of variables. Scheme is a lexically bound language.
+There are ways I know of trying to get around that, but it's
+ugly, we never want to rely on dynamically bound variables.
+How to resolve that is a difficult problem to solve on a case by case basis but
+it may mean adding extra parameters to some functions.
+So that means we don't use parameterize or fluid-let or similar.
+Don't save and restore global variables, that's also the same thing.
+If a function refers to global variables and is called by other functions
+that don't want it to use the global value, then the function should be changed
+to take an extra parameter. that's the only case where you should
+add more parameters than what emacs has, and in that case
+it should be documented that is what happened that the parameter was
+added to avoid dynamic binding.
+
+**The convention, settled 2026-11-07: dynamic variables are parameters,
+and their names are `*...*`.**
+
+The editor's dynamically bound variables are SRFI-39 parameters - made
+with `make-parameter`, read as `(*name*)`, bound with `parameterize`.
+A parameter's name carries an asterisk at each end, so a reader can see
+that its value may change under the code reading it. The stars are this
+tree's, in the Common Lisp tradition; they are not part of Emacs's name.
+
+The exceptions, where the name is the interface:
+- `current-prefix-arg`, `current-display`, `replace-overlay`,
+  `isearch-overlay`, `isearch-lazy-highlight-overlays`,
+  `xterm-query-timeout`, `xterm-max-cut-length` keep Emacs's bare name;
+- `MODE-hook`, one per `define-minor-mode`, is generated.
+
+Everything that is *not* dynamically bound is a plain `define` and takes
+no stars: constants, objects built at load time (coding systems, keymaps,
+faces), value aliases, and process-global registries, caches and
+counters. The test for which one a variable is: does the ported Elisp
+`let`-bind it? If it does, it is a parameter; if it is only ever read
+and `setq`-ed, it is a plain variable.
+
+That supersedes "we don't use parameterize or fluid-let" above: the
+editor's dynamic state is parameters and cannot be anything else.
+Emacs binds a value around a thunk the caller wrote - `delay-mode-hooks`,
+`called-interactively`, dired's `dired-map-over-marks` - and a thunk has
+no argument to receive it, so no amount of parameter-passing reaches the
+reader. `fluid-let` is deleted (2026-11-07): it was a second spelling of
+`parameterize` for plain variables, and nothing used it.
+
 You need to be aware of the range of differences between elisp and scheme.
 t in elisp is #t in scheme. nil in elisp might be '() or #f depending
 on the circumstances.
@@ -94,6 +139,9 @@ about why it doesn't work. The emacs code works, so if you ported it faithfully,
 yours will work too. Where you get bugs is mostly where you try to wander off
 your own way. Many times you found that you were chasing rabbit holes of bugs
 but when you read the emacs source you landed it first time.
+
+Do NOT name variables with a "*" in the name, unless that occurs in emacs
+which I don't think it does.
 
 You will most likely find full emacs sources at @../../GITE/emacs/
 
@@ -6569,18 +6617,20 @@ first. The one worth knowing: **the default initializer calls the `:set`
 function when the declaration runs**, so an option whose `:set` doubles
 reads 10 and not 5.
 
-**What `define-custom` defines is an ordinary variable** - `(define name
-standard)`, read as `name`, set with `set!` - so a user option is used
-exactly as `defcustom`'s is. It was a **parameter** in the first version of
-this file, and that was wrong; see "Parameters are a convention, not a
-requirement" below.
+**What `define-custom` defines is a parameter** - `(define *name*
+(make-parameter standard))`, read as `(*name*)` - because Emacs's
+`defcustom` makes a *special* variable and ported Elisp `let`-binds
+options (`(let ((fill-column 40)) ...)`). It was a plain variable between
+2026-10-14 and 2026-11-07, while the plan was to purge parameters; that
+plan is dead, and the convention above makes a dynamically bound variable
+a parameter whose name carries asterisks.
 
 **Departures, all named in the file**:
 
 - **`custom-declare-variable` is handed the variable's reader and writer.**
   Emacs reaches a variable through `symbol-value`/`set`, and a Scheme
   binding has no such reflection, so the macro passes the two closures
-  down. The variable itself is a plain one.
+  down. The variable itself is a parameter.
 - the keyword is written `:type`, as Elisp writes it, and read as *data* by
   the macro - Scheme has no self-evaluating `:type`, and this is how
   `define-minor-mode` already spells `:lighter` and `:variable`.
@@ -6687,3 +6737,12 @@ So: the editor's internal state (`*current-buffer*`, `*case-fold-search*`,
 ...) stays as it is for now; threading it through call signatures is a
 possible direction and a separate decision, and it is *not* what the
 parameters are doing - they are dynamic binding, not argument passing.
+
+**Superseded 2026-11-07.** The two paragraphs above record a decision that
+has been reversed. Custom variables are parameters after all: `defcustom`
+makes a *special* variable, ported Elisp `let`-binds options, and the
+convention formalised at the top of this file makes a dynamically bound
+variable a parameter whose name carries asterisks. The argument for a
+plain variable - "a user option is read by naming it" - was an argument
+for spelling, and it bought a variable that a ported `let` would shadow
+silently instead of binding.

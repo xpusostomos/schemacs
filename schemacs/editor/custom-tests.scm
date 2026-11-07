@@ -30,37 +30,48 @@
 ;; A declaration, and what it records
 ;;-------------------------------------------------------------
 
-(define-custom gx 2
+(define-custom *gx* 2
   "A test option."
   :type 'integer
   :group 'editing
   :version "31.1")
 
 (test-equal "the variable has its standard value"
-  2 gx)
+  2 (*gx*))
+
+;; **The option is a parameter**, so it can be bound for one command the
+;; way Elisp's `let` binds a `defcustom` - `(let ((fill-column 40)) ...)'
+;; is ordinary Emacs code. That is the reason it is a parameter and not a
+;; plain variable: a plain one would make the ported `let` shadow
+;; lexically while the called function went on reading the global.
+(test-equal "an option can be bound with `parameterize', as `let' binds a defcustom"
+  '(2 40 2)
+  (list (*gx*)
+        (parameterize ((*gx* 40)) (*gx*))
+        (*gx*)))
 
 (test-equal "`standard-value' holds the expression, as a thunk"
   '(2)
-  (list ((car (get 'gx 'standard-value)))))
+  (list ((car (get '*gx* 'standard-value)))))
 
 (test-equal "`custom--standard-value' evaluates it"
-  2 (custom--standard-value 'gx))
+  2 (custom--standard-value '*gx*))
 
 (test-equal "`:type' is the property `custom-type'"
-  'integer (get 'gx 'custom-type))
+  'integer (get '*gx* 'custom-type))
 
 (test-equal "`:version' is `custom-version'"
-  "31.1" (get 'gx 'custom-version))
+  "31.1" (get '*gx* 'custom-version))
 
 (test-equal "the docstring is `variable-documentation'"
-  "A test option." (get 'gx 'variable-documentation))
+  "A test option." (get '*gx* 'variable-documentation))
 
 (test-equal "`:group' adds the option to the group's member list"
-  '((gx custom-variable))
+  '((*gx* custom-variable))
   (get 'editing 'custom-group))
 
 (test-assert "`custom-variable-p' knows a customizable variable"
-  (custom-variable-p 'gx))
+  (custom-variable-p '*gx*))
 
 (test-assert "and does not claim a variable that is not one"
   (not (custom-variable-p 'car)))
@@ -74,45 +85,45 @@
 ;; `:set` written for this tree does.
 ;;-------------------------------------------------------------
 
-(define-custom gset 5
+(define-custom *gset* 5
   "Doubles on set."
   :type 'integer
   :set (lambda (symbol value)
          ((get symbol 'custom-writer) symbol (* 2 value))))
 
 (test-equal "the default initializer calls `:set` at definition"
-  10 gset)
+  10 (*gset*))
 
-(define-custom ginit 7
+(define-custom *ginit* 7
   "Not re-set when it is already bound."
   :type 'integer
   :initialize custom-initialize-set)
 
 (test-equal "`custom-initialize-set` leaves an already-bound variable alone"
-  7 ginit)
+  7 (*ginit*))
 
 ;;-------------------------------------------------------------
 ;; The clauses the walk must recognise, and the two errors
 ;;-------------------------------------------------------------
 
-(define-custom goptions 1
+(define-custom *goptions* 1
   "Has options."
   :type 'integer
   :options '(1 2 3))
 
 (test-equal "`:options' is `custom-options'"
-  '(1 2 3) (get 'goptions 'custom-options))
+  '(1 2 3) (get '*goptions* 'custom-options))
 
-(define-custom greq 1 "Requires a feature." :require 'foo)
+(define-custom *greq* 1 "Requires a feature." :require 'foo)
 
 (test-equal "`:require' is `custom-requests'"
-  '(foo) (get 'greq 'custom-requests))
+  '(foo) (get '*greq* 'custom-requests))
 
 (test-equal "`custom-add-option' conses onto the front, as the C does"
   '(4 1 2 3)
-  (begin (custom-add-option 'goptions 1)     ; already there
-         (custom-add-option 'goptions 4)
-         (get 'goptions 'custom-options)))
+  (begin (custom-add-option '*goptions* 1)     ; already there
+         (custom-add-option '*goptions* 4)
+         (get '*goptions* 'custom-options)))
 
 (test-equal "`custom-add-dependencies' keeps the order the C keeps"
   '(b a)
@@ -125,7 +136,7 @@
   "Unknown keyword ~a"
   (exception-message
    (guard (e (#t e))
-     (custom-handle-keyword 'gx ':bogus 1 'custom-variable))))
+     (custom-handle-keyword '*gx* ':bogus 1 'custom-variable))))
 
 (test-equal "a docstring that is a keyword is 'Doc string is missing'"
   "Doc string is missing"

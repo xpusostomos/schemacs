@@ -26,7 +26,7 @@ Each check starts `se` (the editor's entry point) on a real terminal, sends keys
 asserts on the screen and on the files left behind. Exit status is 0 when
 every check passes.
 """
-import os, pty, re, select, shutil, socket, subprocess, sys, time, base64, tempfile
+import os, pty, re, select, shutil, signal, socket, subprocess, sys, time, base64, tempfile
 
 # The editor loads `$XDG_CONFIG_HOME/schemacs/init.scm' as it starts
 # (`startup.sld', GNU Emacs's `user-init-file' search). A developer's own
@@ -3541,6 +3541,38 @@ def check_isearch_mark():
     return problems
 
 
+def check_no_display():
+    """`se -w' with no display says so and exits 1, instead of crashing.
+
+    Gtk needs a display.  The front end threw the answer of `init-check!'
+    away and went on to make a `GtkWindow' with no screen behind it: Gtk
+    logged three `GTK_IS_STYLE_PROVIDER_PRIVATE' assertions, dereferenced
+    the NULL it had been handed, and the process died with a
+    segmentation fault - exit status -11, which is what this check saw
+    before the fix.  Emacs dies in the same place (`gtk_init',
+    `pgtkterm.c:7133'), but says what is wrong first.
+
+    An `ssh' login has no display unless X is forwarded, and that is how
+    this was found.
+    """
+    env = dict(os.environ)
+    for var in ("DISPLAY", "WAYLAND_DISPLAY", "GDK_BACKEND"):
+        env.pop(var, None)
+    env["XDG_CONFIG_HOME"] = TEST_CONFIG_HOME
+    p = subprocess.run([os.path.join(REPO, "bin", "se"), "-w"],
+                       capture_output=True, text=True, cwd=REPO,
+                       env=env, timeout=180)
+    out = (p.stdout or "") + (p.stderr or "")
+    problems = []
+    if p.returncode == -signal.SIGSEGV:
+        problems.append("the editor segfaulted instead of reporting the display")
+    elif p.returncode != 1:
+        problems.append("exit status %d, expected 1" % p.returncode)
+    if "cannot open a display" not in out:
+        problems.append("no message about the display: %r" % out[-300:])
+    return problems
+
+
 CHECKS = {
     "buffer-menu": check_buffer_menu,
     "query-replace": check_query_replace,
@@ -3611,6 +3643,7 @@ CHECKS = {
     "delete-frame": check_delete_frame,
     "isearch-mark": check_isearch_mark,
     "imports": check_imports,
+    "no-display": check_no_display,
 }
 
 

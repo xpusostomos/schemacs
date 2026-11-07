@@ -19,10 +19,14 @@
   ;;      writer.** Emacs reaches a variable's value from its symbol
   ;;      (`symbol-value', `set') and a Scheme binding has no such
   ;;      reflection, so `define-custom' passes the two closures down and
-  ;;      everything goes through them. **The variable itself is an
-  ;;      ordinary `(define …)', read as its name**, exactly as `defcustom`
-  ;;      makes one - *not* a parameter, which would have made every use of
-  ;;      a user option read `(foo)' instead of `foo'.
+  ;;      everything goes through them. **The variable itself is a
+  ;;      parameter** - `(define *foo* (make-parameter standard))', read as
+  ;;      `(*foo*)' - because Emacs's `defcustom' makes a *special*
+  ;;      variable: ported Elisp `let`-binds options (`(let ((fill-column
+  ;;      40)) ...)' is ordinary code), and a plain variable would make
+  ;;      that `let` shadow lexically while the callee went on reading the
+  ;;      global. The name carries the asterisks every parameter's name
+  ;;      carries, per the convention in AGENTS.md.
   ;;
   ;;   2. **Elisp's keyword is written `:type' without a `#'.** In Elisp
   ;;      `:type' is a self-evaluating symbol; in Scheme `:type' is an
@@ -519,15 +523,14 @@
       ;; `define-minor-mode' walks its clauses the same way for the same
       ;; reason, so this is that walk with these keywords in it.
       ;;
-      ;; **It defines an ordinary variable** - `(define name standard)`,
-      ;; read as `name`, written with `set!` - which is what Emacs's
-      ;; `defcustom' makes: a variable that is read by naming it. It is
-      ;; *not* a parameter, and that was a deliberate undoing (2026-10-14):
-      ;; a parameter reads as `(name)', so every use of a user option would
-      ;; have departed from Emacs's spelling, and the thing that bought -
-      ;; `parameterize' - is a save/set!/restore that a macro over a plain
-      ;; variable does just as well (`save-current-buffer` in `buffer.scm`
-      ;; already does it by hand with `dynamic-wind').
+      ;; **It defines a parameter** - `(define *name* (make-parameter
+      ;; standard))`, read as `(*name*)`, written by calling it - because
+      ;; Emacs's `defcustom' makes a *special* variable: ported Elisp
+      ;; `let`-binds options (`(let ((fill-column 40)) ...)' is ordinary
+      ;; code), and under this tree's convention a dynamically bound
+      ;; variable is a parameter whose name carries asterisks (AGENTS.md).
+      ;; A plain variable would make that `let` shadow lexically, and the
+      ;; callee would go on reading the global without a word.
       ;;
       ;; `custom-declare-variable' is still handed the binding's own reader
       ;; and writer, because a procedure cannot reach a binding by name -
@@ -569,13 +572,13 @@
           ((_ name standard docstring clause ...)
            (let ((clauses (parse #'(clause ...))))
              #`(begin
-                 (define name standard)
+                 (define name (make-parameter standard))
                  (custom-declare-variable
                   'name
                   (lambda () standard)
                   docstring
-                  (lambda (symbol) name)
-                  (lambda (symbol value) (set! name value))
+                  (lambda (symbol) (name))
+                  (lambda (symbol value) (name value))
                   #,@(map (lambda (clause)
                             ;; `(list ':type <the value expression>)' - the
                             ;; keyword as data and the value as code, which

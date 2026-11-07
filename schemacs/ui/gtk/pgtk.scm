@@ -42,7 +42,7 @@
     (only (system foreign) pointer->procedure string->pointer pointer->string
           pointer->bytevector null-pointer? int void double unsigned-int)
     (only (guile) dynamic-link dynamic-func assq-ref filter
-          u32vector->list)
+          u32vector->list current-error-port simple-format exit)
     ;; `alist-delete' removes one selection from the ownership record;
     ;; `iota' builds the element offsets the 16- and 32-bit selection
     ;; data rows are read at.
@@ -2010,7 +2010,33 @@
       ;;--------------------------------------------------------------
       (set-prgname "schemacs")
       (set-program-class "schemacs")
-      (init-check!)
+      ;; **Gtk needs a display, and `init-check!' answers #f when it cannot
+      ;; open one.** That answer used to be thrown away, so a run with no
+      ;; display went on to make a `<GtkWindow>' with no screen behind it:
+      ;; Gtk logged three `GTK_IS_STYLE_PROVIDER_PRIVATE' assertions, then
+      ;; dereferenced the NULL it had been handed, and the editor died
+      ;; with a segmentation fault instead of saying what was wrong.
+      ;;
+      ;; Emacs dies in the same place for the same reason - `gtk_init'
+      ;; (`pgtkterm.c:7133') exits the process when there is no display -
+      ;; but it says so first. This says so in this tree's own words, as
+      ;; `check-cairo!' does for its missing primitive.
+      (unless (init-check!)
+        (simple-format (current-error-port)
+                       "~a: cannot open a display for the Gtk window.~%"
+                       "schemacs")
+        (simple-format (current-error-port)
+                       "~%  Gtk needs a display: a Wayland compositor (`WAYLAND_DISPLAY')~%")
+        (simple-format (current-error-port)
+                       "  or an X server (`DISPLAY'). An `ssh' login has neither unless~%")
+        (simple-format (current-error-port)
+                       "  it forwards one.~%~%")
+        (simple-format (current-error-port)
+                       "  `~a' with no `-w' is a terminal editor and needs no display~%"
+                       "schemacs")
+        (simple-format (current-error-port)
+                       "  at all.~%")
+        (exit 1))
       ;; **The back door can be woken here, so nothing has to poll for
       ;; it.** The shared module's `repl-wake' is how a front end says
       ;; it can be told that the REPL has work; Gtk says it with an idle
