@@ -295,6 +295,15 @@
        ((string=? spec "P") (lambda (uarg)
                               (parameterize ((*called-interactively* #t))
                                 (command uarg))))
+       ;; **`^' is a marker, not an argument code.** `callint.c` reads it
+       ;; as "this command shifts the mark" (`shift-select-mode`) and then
+       ;; goes on with the rest of the string - `"^p"` is `"p"` with that
+       ;; flag. This tree has no shift-select, so the marker is recognised
+       ;; and dropped, and what follows is read as it would have been.
+       ((and (string? spec)
+             (> (string-length spec) 1)
+             (char=? (string-ref spec 0) #\^))
+        (interactive-proc (substring spec 1) command module))
        (else (error "Unsupported interactive specification" spec))))
 
     (define (register-command! command spec)

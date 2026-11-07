@@ -65,7 +65,7 @@
    ;; `minor-mode-alist' and the function that fills it. See the note on
    ;; `add-minor-mode' for why the alist lives here and not with the mode
    ;; line that reads it.
-   *minor-mode-alist* *minor-mode-list* add-minor-mode
+   *minor-mode-alist* *minor-mode-list* *minor-mode-map-alist* add-minor-mode
    regexp-unmatchable
    string-prefix-p
    string-replace
@@ -201,6 +201,20 @@
     ;; `overwrite-mode-binary` - and then *that* symbol's value, which is
     ;; the string. The mode line does both steps.
 
+    (define *minor-mode-map-alist* (make-parameter '()))
+    ;; ^ GNU Emacs's `minor-mode-map-alist' (`keymap.c', `Vminor_mode_map_alist'):
+    ;; "Alist of keymaps to use for minor modes. Each element looks like
+    ;; (VARIABLE . KEYMAP); KEYMAP is used if VARIABLE's value is non-nil."
+    ;;
+    ;; **It is read before the buffer's own map**, as `current_active_maps'
+    ;; (`keymap.c:...)` places it: a minor mode's key shadows the buffer's,
+    ;; and an entry added later shadows one added earlier. `keyboard.sld''s
+    ;; `lookup-keymaps' is where it is consulted.
+    ;;
+    ;; A variable is buffer-local in this tree - `define-minor-mode'
+    ;; writes it with `set-buffer-local-value!' - so "is this mode on in
+    ;; this buffer" is `buffer-local-value', which is what the lookup does.
+
     (define (add-minor-mode toggle name . rest)
       ;; GNU Emacs's `add-minor-mode' (`subr.el:3201'): "Register a new
       ;; minor mode. ... TOGGLE is a symbol that is the name of a
@@ -219,9 +233,19 @@
       ;; already there, which is how `overwrite-mode' gets its lighter
       ;; from bindings.el rather than from its own definition.
       ;;
-      ;; Not carried: KEYMAP and `minor-mode-map-alist' (per-mode keymaps
-      ;; are not ported), and the `:included'/`:menu-tag' menu entry,
-      ;; which needs a symbol plist and the mode-line menu.
+      ;; The two lists it maintains: the mode line's (`minor-mode-alist')
+      ;; and the key lookup's (`minor-mode-map-alist'). A NAME of nil adds
+      ;; nothing to the first - the entry it would add is already there,
+      ;; which is how `overwrite-mode' gets its lighter from bindings.el
+      ;; rather than from its own definition.
+      ;;
+      ;; **KEYMAP is the third argument** and is registered when it is
+      ;; non-nil, as `subr.el''s `(when keymap ... (push (cons toggle map)
+      ;; minor-mode-map-alist))' does. It was named as not carried until
+      ;; 2026-11-07, which is why no minor mode here had keys of its own.
+      ;;
+      ;; Not carried: the `:included'/`:menu-tag' menu entry, which needs
+      ;; a symbol plist and the mode-line menu.
       ;;--------------------------------------------------------------
       (let ((keymap (if (pair? rest) (car rest) #f))
             (after (if (and (pair? rest) (pair? (cdr rest))) (cadr rest) #f))
@@ -238,6 +262,14 @@
                   (set-cdr! existing (list name))
                   (*minor-mode-alist*
                    (cons (list toggle name) alist))))))
+        ;; "KEYMAP is used if VARIABLE's value is non-nil": the entry is
+        ;; `(TOGGLE . KEYMAP)', and a KEYMAP that is itself a list of maps
+        ;; is registered as its first, which is `subr.el''s `(if (consp
+        ;; keymap) (car keymap) keymap)'.
+        (when keymap
+          (let ((map (if (pair? keymap) (car keymap) keymap)))
+            (*minor-mode-map-alist*
+             (cons (cons toggle map) (*minor-mode-map-alist*)))))
         keymap after toggle-fun
         #f))
 

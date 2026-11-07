@@ -141,7 +141,7 @@
     (only (guile) get-internal-real-time internal-time-units-per-second)
     ;; `ignore' is what the special-event-map binds a key that the loop
     ;; must receive but not act on to - the frame's resize.
-    (only (schemacs editor subr) kbd ignore)
+    (only (schemacs editor subr) kbd ignore *minor-mode-map-alist*)
     (only (schemacs editor character)
           char-meta event-convert-list)
     )
@@ -157,6 +157,10 @@
    dispatch-key
    dispatch-key-event
    dispatch-input-event *last-read-event*
+   ;; GNU Emacs's `command-remapping' - what a `[remap COMMAND]' binding
+   ;; in the active maps answers, applied by the loop before a command
+   ;; runs (`keyboard.c').
+   command-remapping
    function-key-translate
    event-loop
    ;; The outermost loop for a front end that owns its own: no loop at
@@ -363,7 +367,8 @@
       ;; `last-change-was-undo', which is how a redo knows there is
       ;; something to redo.
       ;;--------------------------------------------------------------
-      (let* ((uarg (pending-uarg))
+      (let* ((action (remapped-command action))
+             (uarg (pending-uarg))
              ;; C-x RET c leaves a coding system for *this* command, the
              ;; way C-u leaves a prefix argument - read here so that
              ;; `clear-prefix!' below is what consumes both.
@@ -531,6 +536,56 @@
     ;; that own the commands bind into it, and they cannot import this
     ;; library.
 
+    (define (minor-mode-keymaps)
+      ;; The keymaps of the minor modes that are on *in this buffer*, in
+      ;; `*minor-mode-map-alist*' order - the order an alist is walked in,
+      ;; and the order `current_active_maps' (`keymap.c') walks it, so an
+      ;; entry added later shadows one added earlier.
+      ;;
+      ;; A mode's variable is buffer-local here (`define-minor-mode'
+      ;; writes it with `set-buffer-local-value!'), so "is the mode on" is
+      ;; the same question and the same answer as Emacs's.
+      ;;--------------------------------------------------------------
+      (let loop ((rest (*minor-mode-map-alist*)) (acc '()))
+        (cond ((null? rest) (reverse acc))
+              ((buffer-local-value (current-buffer) (caar rest) #f)
+               (loop (cdr rest) (cons (cdar rest) acc)))
+              (else (loop (cdr rest) acc)))))
+
+    (define (command-remapping command)
+      ;; GNU Emacs's `command-remapping' (`keymap.c:1216'): "Return the
+      ;; remapping for command COMMAND. Returns nil if COMMAND is not
+      ;; remapped (or not a symbol)."
+      ;;
+      ;; The C makes the vector `[remap COMMAND]' and asks `key-binding'
+      ;; for it in the active maps. A key here is already an event or a
+      ;; vector, so that binding is an ordinary one and this is the same
+      ;; lookup the command loop makes.
+      ;; "if (!SYMBOLP (command)) return Qnil" - the C's first line. A
+      ;; command name here is a string, so the test is the guard that keeps
+      ;; a string from being taken for a key event.
+      ;;--------------------------------------------------------------
+      (and (symbol? command)
+           (let loop ((maps (lookup-keymaps)))
+             (and (pair? maps)
+                  (or (km:keymap-lookup (car maps) (vector 'remap command))
+                      (loop (cdr maps)))))))
+
+    (define (remapped-command action)
+      ;; ACTION, or the command a keymap remaps it to. Emacs applies this
+      ;; at the top of `command_loop_1' - `cmd = Fcommand_remapping (cmd,
+      ;; Qnil, Qnil)' - before `this-command' is set, so the remapped
+      ;; command is the one that runs and the one recorded.
+      ;;
+      ;; COMMAND is a symbol in Emacs. A command here is a procedure whose
+      ;; record carries the symbol it was defined under, and the symbol is
+      ;; what a `[remap ...]' binding names.
+      ;;--------------------------------------------------------------
+      (let* ((record (if (command-type? action) action (command-record-of action)))
+             (name (and record (command-name record)))
+             (mapped (and name (command-remapping name))))
+        (or mapped action)))
+
     (define (lookup-keymaps)
       ;; What a key sequence is looked up in, in precedence order. GNU
       ;; Emacs's `read_key_sequence' searches, in order: the current
@@ -567,6 +622,11 @@
         ;; command loop's head.
         (append
          (or *overriding-terminal-local-map* '())
+         ;; **The enabled minor modes' maps come before the buffer's own**,
+         ;; where `current_active_maps' (`keymap.c') puts them: a minor
+         ;; mode's key shadows the buffer's, and the buffer's shadows
+         ;; `global-map'.
+         (minor-mode-keymaps)
          (if buffer-keys (%keymap-and-parents buffer-keys) '())
          (if mode-keys (%keymap-and-parents mode-keys) '())
          (%keymap-and-parents *default-keymap*))))

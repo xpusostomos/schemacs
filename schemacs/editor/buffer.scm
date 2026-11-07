@@ -241,6 +241,7 @@
    save-current-buffer
    set-buffer
    set-buffer-local-value!
+   kill-local-variable
    set-buffer-modified-p
    restore-buffer-modified-p
    set!buffer-default-directory
@@ -1317,6 +1318,25 @@
                                        (else (cons (car rest)
                                                    (loop (cdr rest))))))))
         value))
+    (define (kill-local-variable symbol)
+      ;; GNU Emacs's `kill-local-variable' (`data.c:1849'): "Make VARIABLE
+      ;; have no buffer-local binding in the current buffer's buffer-local
+      ;; bindings." The next read falls back to the default the reader is
+      ;; given, which is what the variable's global value is there.
+      ;;
+      ;; `make-local-variable' and `kill-local-variable' are the pair that
+      ;; turns a local binding on and off; a buffer-local store keyed by
+      ;; name has nothing to make - a slot is local the moment it is
+      ;; written - so only the second half has anything to do.
+      ;;--------------------------------------------------------------
+      (let ((buffer (current-buffer)))
+        (when buffer
+          (hashq-set! buffer-slots-table buffer
+                      (let loop ((rest (hashq-ref buffer-slots-table buffer '())))
+                        (cond ((null? rest) '())
+                              ((eq? (caar rest) symbol) (loop (cdr rest)))
+                              (else (cons (car rest) (loop (cdr rest))))))))
+        #f))
     (define (use-local-map keymap)
       ;; GNU Emacs's `use-local-map' (keymap.c:1900): "Select KEYMAP as
       ;; the current local keymap. If KEYMAP is nil, that means no local

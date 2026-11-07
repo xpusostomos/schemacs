@@ -63,6 +63,11 @@
 
   (import
     (scheme base)
+    ;; `custom-set-variables' evaluates each saved expression in the
+    ;; module that called it - Emacs `eval's it in the init file's
+    ;; context, which is the same thing here.
+    (scheme eval)
+    (only (guile) current-module)
     ;; `syntax-case' and friends, for `define-custom' below - the same
     ;; device `easy-mmode`'s `define-minor-mode' uses, and for the same
     ;; reason: a clause list cannot be walked by `syntax-rules'. `syntax'
@@ -82,7 +87,7 @@
    custom-add-version custom-add-package-version custom-add-load
    custom-add-link custom-add-dependencies
    custom-handle-keyword
-   custom-variable-p custom--standard-value
+   custom-variable-p custom--standard-value custom-set-variables
    *custom-current-group-alist* custom-current-group
    *custom-declare-variable-hook* *custom-dont-initialize*
    )
@@ -586,6 +591,35 @@
                             ;; walks.
                             #`(list (quote #,(car clause)) #,(cdr clause)))
                           clauses))))))))
+
+
+    (define (custom-set-variables . args)
+      ;; GNU Emacs's `custom-set-variables' (`custom.el:1039'): "Initialize
+      ;; variables according to settings specified in the init file. ...
+      ;; Each argument should be a list of the form
+      ;; (SYMBOL EXP [NOW [REQUEST [COMMENT]]])."
+      ;;
+      ;; Emacs delegates to `custom-theme-set-variables' for the `user'
+      ;; theme. Themes are not ported, so what is carried is that
+      ;; function's user half: EXP is evaluated, its value stored in
+      ;; SYMBOL's `saved-value' property - "EXP will also be stored,
+      ;; without evaluating it, in SYMBOL's saved-value property" - and
+      ;; then installed through the variable's `:set' function, or its
+      ;; writer when it has none, which is the default `:set'.
+      ;;
+      ;; NOW matters in Emacs only for a symbol whose `defcustom' has not
+      ;; run yet; here a variable exists as soon as it is declared, so the
+      ;; install is unconditional, as it is there for a declared one.
+      ;;--------------------------------------------------------------
+      (for-each
+       (lambda (entry)
+         (let ((symbol (car entry))
+               (value (eval (cadr entry) (current-module))))
+           (put symbol 'saved-value (list value))
+           ((or (get symbol 'custom-set) (custom--setter symbol))
+            symbol value)))
+       args)
+      #f)
 
     )
 )

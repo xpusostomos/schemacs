@@ -32,7 +32,7 @@
        window-height window-point window-right-border? window-top
        window-width)
  (only (schemacs editor keyboard)
-       dispatch-key-event dispatch-input-event timer-check!)
+       command-remapping dispatch-key-event dispatch-input-event timer-check!)
  ;; The cursor's type, which `xdisp.sld' resolves from the buffer's
  ;; `cursor-type' - the tests below are its rule, not the drawing of it.
  (only (schemacs editor xdisp)
@@ -72,7 +72,10 @@
        define-command command? command-record-of)
  (only (schemacs editor command)
        command-doc-string command-interactive-spec command-name)
+ (only (schemacs editor custom) custom-set-variables)
+ (only (schemacs editor intervals) get)
  (only (schemacs editor buffer)
+       buffer-local-value set-buffer-local-value!
        *buffer-list* *current-buffer* *kill-buffer-query-functions*
        buffer-cursor-in-non-selected-windows buffer-cursor-type
        buffer-list buffer-name bufferp get-buffer get-buffer-create
@@ -145,12 +148,20 @@
        *this-command*
        *prefix-cu* *prefix-digits* *prefix-negative*
        clear-prefix! pending-uarg prefix-argument-description
-       prefix-echo-pending? request-prefix-echo! self-insert-command)
+       prefix-echo-pending? request-prefix-echo! self-insert-command
+       ;; The vertical motion of `simple.el` and Visual Line mode's
+       ;; commands.
+       next-line previous-line line-move line-move-1
+       *line-move-visual* *goal-column* *track-eol*
+       visual-line-mode beginning-of-visual-line end-of-visual-line
+       kill-visual-line next-logical-line previous-logical-line
+       set-goal-column)
  (only (schemacs editor isearch)
        *search-case-fold?* *search-pattern* isearch-find isearch-message)
  (only (schemacs editor window)
        delete-window delete-other-windows display-buffer get-buffer-window
        pop-to-buffer-same-window
+       set-window-hscroll!
        split-window
        switch-to-buffer)
  (only (schemacs editor xdisp)
@@ -4165,3 +4176,135 @@
   (run-keys "foo bar baz" (append (keys-to 7) M-t)))
 
 (test-end "schemacs_ncurses_editor_transpose")
+
+(test-begin "schemacs_ncurses_editor_line_movement")
+
+;;--------------------------------------------------------------------
+;; Vertical motion: physical lines and visual lines
+;;--------------------------------------------------------------------
+;;
+;; A 40-character line in a 20-column window takes three screen rows -
+;; 19 cells each in the first two, the last cell of a wrapped row being
+;; the continuation marker's - so `next-line` has two different answers
+;; there. With `line-move-visual` (its default) point goes one screen row
+;; at a time; with it nil, one *logical* line. Emacs's `line-move`
+;; (`simple.el:8059`) is the function that chooses, and the choice is
+;; this tree's since 2026-11-07.
+
+(define (with-narrow-frame width text thunk)
+  (parameterize ((*buffer-list* '()) (*current-buffer* #f)
+                 (*echo-area-buffer* #f) (*last-command* #f))
+    (let* ((ed (allocate-buffer))
+           (frame (new-frame ed 24 width)))
+      (parameterize ((*current-frame* frame))
+        (set-buffer ed)
+        (insert text)
+        (goto-char 1)
+        (thunk ed frame)))))
+
+(test-equal "visual motion moves one screen row at a time"
+  '(20 39)
+  (with-narrow-frame 20 (string-append (make-string 40 #\a) "\nbb\n")
+    (lambda (ed frame)
+      (list (begin (next-line 1) (point))
+            (begin (next-line 1) (point))))))
+
+(test-equal "logical motion moves one buffer line at a time"
+  42
+  (with-narrow-frame 20 (string-append (make-string 40 #\a) "\nbb\n")
+    (lambda (ed frame)
+      (set-buffer-local-value! ed 'line-move-visual #f)
+      (next-line 1)
+      (point))))
+
+;; "A window that is horizontally scrolled also forces movement by logical
+;; lines" - `line-move-visual`'s docstring. A truncated, scrolled line is
+;; one row whatever its length, so the two answers coincide.
+(test-equal "a horizontally scrolled window moves by logical lines"
+  42
+  (with-narrow-frame 20 (string-append (make-string 40 #\a) "\nbb\n")
+    (lambda (ed frame)
+      (set-window-hscroll! (window-of frame) 3)
+      (next-line 1)
+      (point))))
+
+;; `previous-line` is the same walk with the sign turned round.
+(test-equal '(21 2)
+  (with-narrow-frame 20 (string-append (make-string 40 #\a) "\nbb\n")
+    (lambda (ed frame)
+      (goto-char 40)
+      (list (begin (previous-line 1) (point))
+            (begin (previous-line 1) (point))))))
+
+;;--------------------------------------------------------------------
+;; Visual Line mode, and the remapping its keymap is made of
+;;--------------------------------------------------------------------
+;;
+;; `visual-line-mode` is `define-minor-mode` plus a map of *command
+;; remappings* (`simple.el:8699`). The three subsystems that makes work -
+;; `minor-mode-map-alist`, a `[remap ...]` binding, and
+;; `command-remapping` at the dispatch point - did not exist before
+;; 2026-11-07, so this is the first test that can see them.
+
+(test-equal "the mode turns on word wrap and visual motion, and off again"
+  '(#f unset #t #f #t unset unset)
+  (with-narrow-frame 20 "abc\n"
+    (lambda (ed frame)
+      (let* ((before-wrap (buffer-local-value ed 'word-wrap #f))
+             (before-truncate (buffer-local-value ed 'truncate-lines 'unset)))
+        (visual-line-mode 1)
+        (let* ((on-wrap (buffer-local-value ed 'word-wrap #f))
+               (on-truncate (buffer-local-value ed 'truncate-lines 'unset))
+               (on-visual (buffer-local-value ed 'line-move-visual 'unset)))
+          (visual-line-mode -1)
+          (list before-wrap before-truncate
+                on-wrap on-truncate on-visual
+                (buffer-local-value ed 'word-wrap 'unset)
+                (buffer-local-value ed 'truncate-lines 'unset)))))))
+
+(test-equal "the mode remaps kill-line, and stops when it is off"
+  '(#f #t #f)
+  (with-narrow-frame 20 "abc\n"
+    (lambda (ed frame)
+      (let ((off (command-remapping 'kill-line)))
+        (visual-line-mode 1)
+        (let ((on (command-remapping 'kill-line)))
+          (visual-line-mode -1)
+          (list off (eq? on kill-visual-line)
+                (command-remapping 'kill-line)))))))
+
+(test-equal "end-of-visual-line stops at the end of the screen row"
+  20
+  (with-narrow-frame 20 (string-append (make-string 40 #\a) "\n")
+    (lambda (ed frame)
+      (end-of-visual-line 1)
+      (point))))
+
+
+;; The goal column (`simple.el:7819`): `set-goal-column` records the
+;; current column in the buffer's `goal-column`, which `line-move` then
+;; moves to, and a prefix argument clears it again.
+(test-equal "set-goal-column keeps the column, and an argument clears it"
+  '(4 2 #f)
+  (with-narrow-frame 20 "abcdef\nxy\nabcdef"
+    (lambda (ed frame)
+      (goto-char 5)
+      (set-goal-column #f)
+      (let ((goal (buffer-local-value ed 'goal-column #f)))
+        (next-line 1)
+        (let ((column (text-editor-cursor-column ed)))
+          (set-goal-column #t)
+          (list goal column
+                (buffer-local-value ed 'goal-column 'unset)))))))
+
+;; `custom-set-variables` (`custom.el:1039`) is what makes a `defcustom`
+;; settable the Customize way: the value is installed and remembered in
+;; `saved-value`.
+(test-equal "custom-set-variables installs and remembers the value"
+  '(5 (5))
+  (with-narrow-frame 20 "abc\n"
+    (lambda (ed frame)
+      (custom-set-variables '(*goal-column* 5))
+      (list (*goal-column*) (get '*goal-column* 'saved-value)))))
+
+(test-end "schemacs_ncurses_editor_line_movement")

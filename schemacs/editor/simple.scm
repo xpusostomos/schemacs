@@ -57,7 +57,7 @@
          frame-keymap-state
          selected-window set!frame-keymap-state
          set!frame-message window-body-height
-         window-buffer window-list
+         window-buffer window-list window-width
          %window-hscroll %window-start set-window-start!)
     ;; The kill ring's window-system half: the cut and paste functions
     ;; are simple.el's `interprogram-*-function' variables' defaults,
@@ -86,7 +86,7 @@
           *show-trailing-whitespace*
           buffer-local-value buffer-truncate-lines current-buffer mark-active
           set!buffer-truncate-lines set!mark-active
-          set-buffer-local-value! transient-mark-mode
+          set-buffer-local-value! transient-mark-mode kill-local-variable
           ;; the *global* value, which is what `kill-local-variable'
           ;; falls back to
           *transient-mark-mode*
@@ -103,6 +103,17 @@
           preceding-char region-beginning region-end save-excursion
           text-editor-cursor-column text-editor-get-end-of-line
           text-editor-get-start-of-line)
+    ;; The line movement's screen geometry: `vertical-motion` is
+    ;; `indent.c`'s and lives in `indent.c`'s library since 2026-11-07,
+    ;; with the row walk under it. `current-column` and `move-to-column`
+    ;; are the same file's, and `line-move-finish` needs them.
+    (only (schemacs editor indentc)
+          current-column move-to-column vertical-motion
+          window-line-slices-at %row-of-position line-texts-column
+          buffer-line-texts-at)
+    ;; The line options are `defcustom's in Emacs, so a user can set them
+    ;; through Customize as well as by name.
+    (only (schemacs editor custom) define-custom)
     (only (schemacs editor syntax) skip-chars-forward skip-chars-backward
           word-char? forward-word-position backward-word-position
           word-run-end word-run-start)
@@ -170,6 +181,18 @@
    ;; so the command is named `insert-newline' here; see below.
    insert-newline
    place-undo-boundary! previous-line read-only-mode
+   ;; GNU Emacs's `line-move' and the three variables it reads
+   ;; (`simple.el:7811-7866'). `next-line' and `previous-line' are
+   ;; `line-move' with a sign, as they are in Emacs.
+   line-move line-move-1 line-move-visual
+   *line-move-visual* *goal-column* *track-eol*
+   ;; Visual Line mode (`simple.el:8580-8785') and the commands its map
+   ;; remaps to.
+   visual-line-mode visual-line-mode-map *visual-line-fringe-indicators*
+   turn-on-visual-line-mode
+   beginning-of-visual-line end-of-visual-line kill-visual-line
+   next-logical-line previous-logical-line
+   set-goal-column
    scroll-down-command scroll-up-command self-insert-command
    self-insert-layer self-insert-tab
    overwrite-mode binary-overwrite-mode
@@ -373,61 +396,183 @@ a specialization of overwrite mode, entered by setting the
     (define-key *default-keymap* (kbd "<insertchar>") overwrite-mode)
 
     (define *temporary-goal-column* (make-parameter 0))
+    ;; ^ GNU Emacs's `temporary-goal-column' (`simple.el:7827'): "Current
+    ;; goal column for vertical motion. It is the column where point was at
+    ;; the start of the current run of vertical motion commands."
+
+    (define-custom *line-move-visual* #t
+      "When non-nil, `line-move' moves point by visual lines.
+This movement is based on where the cursor is displayed on the
+screen, instead of relying on buffer contents alone.  It takes
+into account variable-width characters and line continuation.
+If nil, `line-move' moves point by logical lines.
+A non-nil setting of `goal-column' overrides the value of this variable
+and forces movement by logical lines.
+A window that is horizontally scrolled also forces movement by logical
+lines."
+      :type 'boolean
+      :group 'editing-basics
+      :version "23.1")
+    ;; ^ GNU Emacs's `line-move-visual' (`simple.el:7854'): "When non-nil,
+    ;; `line-move' moves point by visual lines. ... If nil, `line-move'
+    ;; moves point by logical lines. A non-nil setting of `goal-column'
+    ;; overrides the value of this variable and forces movement by logical
+    ;; lines. A window that is horizontally scrolled also forces movement
+    ;; by logical lines." The global value is the defcustom's; a buffer
+    ;; that `visual-line-mode' turned on has its own, which is why
+    ;; `line-move' reads it through the buffer-local store.
+
+    (define-custom *goal-column* #f
+      "Semipermanent goal column for vertical motion, as set by
+\\[set-goal-column], or nil.
+A non-nil setting overrides the variable `line-move-visual', which see."
+      :type 'integer
+      :group 'editing-basics)
+    ;; ^ GNU Emacs's `goal-column' (`simple.el:7819'): "Semipermanent goal
+    ;; column for vertical motion, as set by \\[set-goal-column], or nil. A
+    ;; non-nil setting overrides the variable `line-move-visual', which
+    ;; see." Emacs makes it buffer-local; the read below honours that.
+
+    (define-custom *track-eol* #f
+      "Non-nil means vertical motion starting at end of line keeps to ends of lines.
+This means moving to the end of each line moved onto.
+The beginning of a blank line does not count as the end of a line.
+This has no effect when the variable `line-move-visual' is non-nil."
+      :type 'boolean
+      :group 'editing-basics)
+    ;; ^ GNU Emacs's `track-eol' (`simple.el:7811'): "Non-nil means
+    ;; vertical motion starting at end of line keeps to ends of lines. ...
+    ;; This has no effect when the variable `line-move-visual' is non-nil."
+
+    (define (line-move-visual arg noerror)
+      ;; GNU Emacs's `line-move-visual' (`simple.el:8126'): move ARG screen
+      ;; lines, keeping the cursor's column across a wrapped line.
+      ;;
+      ;; Emacs reads the goal from `posn-at-point' - the x of point on the
+      ;; screen. The same column here is the display column of point less
+      ;; the display column of the row's first character, both measured by
+      ;; `line-texts-column' from the line's beginning: their difference is
+      ;; the column within the row, which is what `vertical-motion' takes.
+      ;;--------------------------------------------------------------
+      (let* ((window (selected-window))
+             (ed (current-buffer))
+             (pt (point))
+             (line-start (text-editor-get-start-of-line ed pt))
+             (slices (window-line-slices-at window line-start))
+             (row (%row-of-position window line-start (- pt line-start)))
+             (row-start (if (< row (length slices))
+                            (car (list-ref slices row))
+                            0))
+             (texts (buffer-line-texts-at window line-start))
+             ;; **The goal survives a run of vertical commands**, which is
+             ;; `temporary-goal-column`'s whole purpose (`simple.el:8135`):
+             ;; a short line clamps the cursor, and the next move must come
+             ;; back to the original column rather than to the clamped one.
+             ;; Emacs keeps it as a `(COL . HSCROLL)` cons here; the hscroll
+             ;; is 0 because `line-move` only comes this way when the window
+             ;; is not scrolled.
+             (goal (if (and (pair? (*temporary-goal-column*))
+                            (memq (*last-command*)
+                                  (list next-line previous-line)))
+                       (car (*temporary-goal-column*))
+                       (let ((g (- (line-texts-column texts (- pt line-start))
+                                   (line-texts-column texts row-start))))
+                         (*temporary-goal-column* (cons g 0))
+                         g)))
+             (moved (vertical-motion (cons (max 0 goal) arg) window)))
+        (unless (or noerror
+                    (if (>= arg 0) (>= moved arg) (<= moved arg)))
+          (error (if (< arg 0) "Beginning of buffer" "End of buffer")))
+        moved))
+
+    (define (line-move-1 arg noerror)
+      ;; GNU Emacs's `line-move-1' (`simple.el:8203'): move ARG *logical*
+      ;; lines and then to the goal column on the line it reaches - the
+      ;; second half is `line-move-finish' (`:8333') in Emacs.
+      ;;
+      ;; Not carried, because this tree has none of them: invisible text,
+      ;; `selective-display', fields and intangibility. The C's two loops,
+      ;; one per direction, are the one walk here.
+      ;;--------------------------------------------------------------
+      (let* ((ed (current-buffer))
+             (forward? (> arg 0))
+             (goal (if (memq (*last-command*) (list next-line previous-line))
+                       (*temporary-goal-column*)
+                       (let ((g (if (and (buffer-local-value
+                                          (current-buffer) 'track-eol
+                                          (*track-eol*))
+                                         (eolp)
+                                         (not (bolp)))
+                                    (expt 2 62)   ; Emacs's most-positive-fixnum
+                                    (current-column))))
+                         (*temporary-goal-column* g)
+                         g))))
+        (let loop ((left (abs arg)) (moved 0))
+          (cond
+           ((= left 0)
+            ;; `line-move-finish': the column, on the line reached.
+            (move-to-column goal)
+            moved)
+           (forward?
+            (let* ((start (text-editor-get-start-of-line ed))
+                   (end (text-editor-get-end-of-line ed start))
+                   (next (and (< end (buffer-z ed)) (+ end 1))))
+              (if next
+                  (begin
+                    (set-point ed next)
+                    (loop (- left 1) (+ moved 1)))
+                  (begin
+                    ;; Emacs goes to the end of the buffer there, which is
+                    ;; the end of this line - no line break follows it -
+                    ;; and reports `end-of-buffer'.
+                    (set-point ed (buffer-z ed))
+                    (unless noerror (error "End of buffer"))
+                    moved))))
+           (else
+            (let ((start (text-editor-get-start-of-line ed)))
+              (if (> start (buffer-beg ed))
+                  (begin
+                    (set-point ed (text-editor-get-start-of-line ed (- start 1)))
+                    (loop (- left 1) (+ moved 1)))
+                  (begin
+                    (set-point ed (buffer-beg ed))
+                    (unless noerror (error "Beginning of buffer"))
+                    moved))))))))
+
+    (define (line-move arg . rest)
+      ;; GNU Emacs's `line-move' (`simple.el:8059'): "Move forward ARG
+      ;; lines" - by *screen* lines when `line-move-visual' is on and
+      ;; nothing forces the other answer, by logical lines otherwise.
+      ;;
+      ;; The C's conditions are kept: a non-nil `goal-column' forces
+      ;; logical motion ("Display-based columns are incompatible with
+      ;; goal-column"), and so does a horizontally scrolled window ("each
+      ;; logical line occupies exactly one screen line"). It is the
+      ;; window's own `hscroll', as `(window-hscroll)' is the C's.
+      ;;--------------------------------------------------------------
+      (let* ((noerror (and (pair? rest) (car rest)))
+             (window (selected-window))
+             (visual (buffer-local-value (current-buffer) 'line-move-visual
+                                         (*line-move-visual*)))
+             (goal (buffer-local-value (current-buffer) 'goal-column
+                                       (*goal-column*))))
+        (if (and visual
+                 (not goal)
+                 (= 0 (%window-hscroll window)))
+            (line-move-visual arg noerror)
+            (line-move-1 arg noerror))))
 
     (define-command (next-line count)
-      "Move point down N lines, keeping the column."
+      "Move cursor vertically down ARG lines."
       (interactive "p")
-      (let* ((ed (current-buffer))
-             (goal (if (memq (*last-command*) (list next-line previous-line))
-                       (*temporary-goal-column*)
-                       (text-editor-cursor-column ed))))
-        (*temporary-goal-column* goal)
-        ;; The walk carries the line's *position*: line numbers would be
-        ;; a scan of the buffer for every step, and one more to notice
-        ;; that the step did not move - the move below costs the lines it
-        ;; crosses and nothing above them.
-        (let loop ((i 0) (start (text-editor-get-start-of-line ed)))
-          (when (< i count)
-            (let* ((end (text-editor-get-end-of-line ed start))
-                   ;; the buffer's last line starts no other
-                   (next (and (< end (buffer-z ed))
-                              (+ end 1))))
-              (cond
-               ;; There was no line to move to: point is on the last
-               ;; line, and the engine will not leave it. Emacs moves
-               ;; point to the end of the buffer there - which is the
-               ;; end of this line, there being no line break after it
-               ;; - and reports `end-of-buffer'.
-               ((not next)
-                (set-point
-                 ed (text-editor-get-end-of-line ed))
-                (error "End of buffer"))
-               (else
-                (set-point
-                 ed (min (text-editor-get-end-of-line ed next)
-                         (+ next goal)))
-                (loop (+ 1 i) next))))))))
+      (line-move (or count 1) #f)
+      #f)
 
     (define-command (previous-line count)
-      "Move point up N lines, keeping the column."
+      "Move cursor vertically up ARG lines."
       (interactive "p")
-      (let* ((ed (current-buffer))
-             (goal (if (memq (*last-command*) (list next-line previous-line))
-                       (*temporary-goal-column*)
-                       (text-editor-cursor-column ed))))
-        (*temporary-goal-column* goal)
-        (let loop ((i 0) (start (text-editor-get-start-of-line ed)))
-          (when (< i count)
-            (cond
-             ((= start (buffer-beg ed))
-              (set-point ed start)
-              (error "Beginning of buffer"))
-             (else
-              (let ((prev (text-editor-get-start-of-line ed (- start 1))))
-                (set-point
-                 ed (min (text-editor-get-end-of-line ed prev)
-                         (+ prev goal)))
-                (loop (+ 1 i) prev))))))))
+      (line-move (- (or count 1)) #f)
+      #f)
 
     (define-command (backward-delete-char count)
       ;; GNU Emacs's `delete-backward-char` (`simple.el:1478`), which
@@ -2976,5 +3121,185 @@ mark is operated on."
     (define-key special-mode-map (kbd "DEL") scroll-down-command)
     (define-key special-mode-map (kbd ">") end-of-buffer)
     (define-key special-mode-map (kbd "<") beginning-of-buffer)
+
+    ;;----------------------------------------------------------------
+    ;; Visual Line mode - `simple.el:8580-8785'
+    ;;------------------------------------------------------------------
+
+    (define (line-move-with-visual arg noerror visual)
+      ;; `line-move' with the visual decision *given* rather than read,
+      ;; for the visual commands. Emacs binds `line-move-visual' to t
+      ;; around its own call (`simple.el:8602`); a parameter binding here
+      ;; would not override a buffer-local value - which the mode sets -
+      ;; so the answer is passed instead.
+      ;;--------------------------------------------------------------
+      (let ((window (selected-window)))
+        (if (and visual
+                 (not (buffer-local-value (current-buffer) 'goal-column
+                                          (*goal-column*)))
+                 (= 0 (%window-hscroll window)))
+            (line-move-visual arg noerror)
+            (line-move-1 arg noerror))))
+
+    (define-command (end-of-visual-line n)
+      "Move point to end of current visual line.
+With argument N not nil or 1, move forward N - 1 visual lines first.
+If point reaches the beginning or end of buffer, it stops there."
+      (interactive "^p")
+      (or n (set! n 1))
+      (unless (= n 1)
+        (line-move-with-visual (- n 1) #t #t))
+      ;; "Unlike `move-beginning-of-line', `move-end-of-line' doesn't
+      ;; constrain to field boundaries, so we don't either" - and this is
+      ;; the whole of it: to the window's width on the row reached.
+      (vertical-motion (cons (window-width (selected-window)) 0)))
+
+    (define-command (beginning-of-visual-line n)
+      "Move point to beginning of current visual line.
+With argument N not nil or 1, move forward N - 1 visual lines first.
+If point reaches the beginning or end of buffer, it stops there."
+      (interactive "^p")
+      (or n (set! n 1))
+      (unless (= n 1)
+        (line-move-with-visual (- n 1) #t #t))
+      (vertical-motion 0))
+
+    (define-command (kill-visual-line arg)
+      "Kill the rest of the visual line.
+With prefix argument ARG, kill that many visual lines from point."
+      (interactive "P")
+      (let ((opoint (point))
+            (kill-whole (and (*kill-whole-line*) (bolp))))
+        (if arg
+            (vertical-motion (uarg->integer 1 arg))
+            (begin
+              (end-of-visual-line 1)
+              (if (= (point) opoint)
+                  ;; no text left on this row: the row break goes too
+                  (vertical-motion 1)
+                  ;; "Make sure we delete the character where the line
+                  ;; wraps ... be it whitespace or a character whose
+                  ;; category set permits wrapping at it" - Emacs's
+                  ;; `(looking-at-p "[ \t]")'. The `word-wrap-by-category'
+                  ;; half of that test is not carried: this tree wraps at
+                  ;; spaces and tabs only.
+                  (when (memv (following-char) '(#\space #\tab))
+                    (forward-char 1)))))
+        (kill-region opoint
+                     (if (and kill-whole
+                              (eqv? (following-char) #\newline))
+                         (+ 1 (point))
+                         (point)))))
+
+    (define-command (next-logical-line arg)
+      "Move cursor vertically down ARG lines, by logical lines."
+      (interactive "^p")
+      (line-move-with-visual (or arg 1) #t #f))
+
+    (define-command (previous-logical-line arg)
+      "Move cursor vertically up ARG lines, by logical lines."
+      (interactive "^p")
+      (line-move-with-visual (- (or arg 1)) #t #f))
+
+    (define-custom *visual-line-fringe-indicators* '(nil nil)
+      "How fringe indicators are shown for wrapped lines in `visual-line-mode'.
+The value should be a list of the form (LEFT RIGHT), where LEFT
+and RIGHT are symbols representing the bitmaps to display, to
+indicate wrapped lines, in the left and right fringes respectively."
+      :type 'list
+      :group 'visual-line)
+    ;; ^ GNU Emacs's `visual-line-fringe-indicators' (`simple.el:8710'):
+    ;; "How fringe indicators are shown for wrapped lines in
+    ;; `visual-line-mode'." This editor has no fringes - `init_iterator`
+    ;; reserves no continuation cell for one, which is why a wrapped row
+    ;; holds WIDTH-1 cells and draws `\' - so the variable exists for the
+    ;; mode to set and has no drawing behind it.
+
+    (define visual-line-mode-map (km:keymap 'visual-line-mode-map))
+    ;; ^ GNU Emacs's `visual-line-mode-map' (`simple.el:8699'). The three
+    ;; bindings are *command remappings*, which `define-key' stores as the
+    ;; ordinary vector `[remap COMMAND]'; `command-remapping' is what
+    ;; reads one, and the command loop applies it before running.
+    ;; The value is the command's *procedure*, as every other `define-key'
+    ;; in this tree writes one: Emacs stores the symbol and resolves it
+    ;; through the obarray at call time, and a Scheme binding has no
+    ;; obarray to resolve through.
+    (define-key visual-line-mode-map (vector 'remap 'kill-line)
+                kill-visual-line)
+    (define-key visual-line-mode-map (vector 'remap 'beginning-of-line)
+                beginning-of-visual-line)
+    (define-key visual-line-mode-map (vector 'remap 'end-of-line)
+                end-of-visual-line)
+
+    (define-minor-mode visual-line-mode
+      "Toggle visual line based editing (Visual Line mode) in the current buffer.
+
+When Visual Line mode is enabled, `word-wrap' is turned on in this
+buffer, and simple editing commands are redefined to act on visual
+lines, not logical lines.
+Turning on this mode disables line truncation set up by variables
+`truncate-lines' and `truncate-partial-width-windows'."
+      :lighter " Wrap"
+      :keymap visual-line-mode-map
+      (if (buffer-local-value (current-buffer) 'visual-line-mode #f)
+          (let ((buffer (current-buffer)))
+            (unless (buffer-local-value buffer 'visual-line--saved-state #f)
+              (set-buffer-local-value! buffer 'visual-line--saved-state '(#f))
+              ;; "Save the local values of some variables, to be restored
+              ;; if visual-line-mode is turned off."
+              (for-each
+               (lambda (var)
+                 (let ((value (buffer-local-value buffer var 'unset)))
+                   (unless (eq? value 'unset)
+                     (set-buffer-local-value!
+                      buffer 'visual-line--saved-state
+                      (cons (cons var value)
+                            (buffer-local-value buffer 'visual-line--saved-state
+                                                '(#f)))))))
+               '(line-move-visual truncate-lines
+                 truncate-partial-width-windows word-wrap)))
+            (set-buffer-local-value! buffer 'line-move-visual #t)
+            (set-buffer-local-value! buffer 'truncate-partial-width-windows #f)
+            (set-buffer-local-value! buffer 'truncate-lines #f)
+            (set-buffer-local-value! buffer 'word-wrap #t))
+          (let ((saved (buffer-local-value (current-buffer)
+                                           'visual-line--saved-state #f)))
+            (kill-local-variable 'line-move-visual)
+            (kill-local-variable 'word-wrap)
+            (kill-local-variable 'truncate-lines)
+            (kill-local-variable 'truncate-partial-width-windows)
+            (for-each
+             (lambda (entry)
+               ;; Emacs's `(when (car saved) ...)' - the list starts with
+               ;; nil, and `(car nil)' is nil there where `(car #f)'
+               ;; raises here.
+               (when (pair? entry)
+                 (set-buffer-local-value! (current-buffer)
+                                          (car entry) (cdr entry))))
+             (or saved '()))
+            (kill-local-variable 'visual-line--saved-state))))
+
+    (define (turn-on-visual-line-mode)
+      ;; GNU Emacs's `turn-on-visual-line-mode' (`simple.el:8780').
+      (visual-line-mode 1))
+
+    (define-command (set-goal-column arg)
+      "Set the current horizontal position as a goal column.
+This goal column will affect the \\[next-line] and \\[previous-line] commands,
+as well as the \\[scroll-up-command] and \\[scroll-down-command] commands.
+With a non-nil argument ARG, clears out the goal column so that these
+commands resume normal motion.
+The goal column is stored in the variable `goal-column'.  This is
+a buffer-local setting."
+      (interactive "P")
+      (if arg
+          (begin
+            (set-buffer-local-value! (current-buffer) 'goal-column #f)
+            (message "No goal column"))
+          (let ((column (current-column)))
+            (set-buffer-local-value! (current-buffer) 'goal-column column)
+            (message "Goal column ~a (use \\[set-goal-column] with an arg to unset it)"
+                     column)))
+      #f)
 
     ))

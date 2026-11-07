@@ -210,6 +210,11 @@
                (lambda (opts body)
                  (let* ((doc (opt opts ':docstring))
                         (lighter (opt opts ':lighter))
+                        ;; The mode's own keymap, registered against the
+                        ;; mode's variable so that `lookup-keymaps' finds
+                        ;; it while the mode is on - `subr.el''s
+                        ;; `(add-minor-mode mode lighter keymap ...)'.
+                        (keymap (opt opts ':keymap))
                         ;; `:variable' is the one clause with two
                         ;; values, so it is the one read as a list.
                         (variable (let ((e (assq ':variable opts)))
@@ -331,6 +336,6 @@
                        ;; `(add-minor-mode ',modevar ',lighter ...)' -
                        ;; the lighter goes into `minor-mode-alist', where
                        ;; the mode line reads it.
-                       (add-minor-mode #,quoted-mode #,lighter #f #f #,quoted-mode)
+                       (add-minor-mode #,quoted-mode #,lighter #,(or keymap #'#f) #f #,quoted-mode)
                        #,hook-id)))))))))
     ))
