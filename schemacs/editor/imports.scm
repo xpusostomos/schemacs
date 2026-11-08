@@ -252,6 +252,7 @@
     *font-lock-support-mode*
     *font-lock-unfontify-region-function*
     *frame-background-mode*
+    *frame-background-mode-function*
     *frame-creation-function*
     *frame-cursor-type*
     *frame-focus*
@@ -616,6 +617,7 @@
     coding-system-raw?
     coding-system?
     coding-write-char
+    color-dark-p
     column-width
     command-doc-string
     command-interactive-spec
@@ -1068,6 +1070,7 @@
     frame-output
     frame-quit-cont
     frame-selected-window
+    frame-set-background-mode
     frame-type?
     frame-width
     frame-windows

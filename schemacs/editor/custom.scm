@@ -734,11 +734,22 @@
     ;; are the three this tree's callers need.
     ;;--------------------------------------------------------------
 
-    (define *custom-known-themes* (make-parameter '(user changed)))
+    (define *custom-known-themes* '(user changed))
     ;; ^ GNU Emacs's `custom-known-themes' (`custom.el:915'): "Themes
     ;; that have been defined with `deftheme'. ... The theme `changed'
     ;; is for internal use, for user settings that have been changed
     ;; outside of customize."
+    ;;
+    ;; **A plain variable, and not a parameter.** It is only ever
+    ;; setq'd - by `custom-declare-theme' when a theme file's
+    ;; `define-theme' runs, inside the `parameterize' round
+    ;; `load-theme''s `(load file)' - and a parameter *set* inside a
+    ;; parameterized extent mutates that extent's value, which reverts:
+    ;; measured, a theme file loaded through the gate left
+    ;; `custom-theme-p' answering #f, and `enable-theme' raised "Unknown
+    ;; theme". Emacs's defvar mutation is a global set, and this is the
+    ;; tree's convention for a process-global registry (`AGENTS.md':
+    ;; "process-global registries ... are a plain define").
 
     (define *custom-enabled-themes* (make-parameter '()))
     ;; ^ GNU Emacs's `custom-enabled-themes' (`custom.el:1630'). The
@@ -773,7 +784,7 @@
       ;; GNU Emacs's `custom-theme-p' (`custom.el:921'): "Return non-nil
       ;; if THEME has been defined through `deftheme'."
       ;;--------------------------------------------------------------
-      (memq theme (*custom-known-themes*)))
+      (memq theme *custom-known-themes*))
 
     (define (custom-check-theme theme)
       ;; GNU Emacs's `custom-check-theme' (`custom.el:928').
@@ -1093,9 +1104,9 @@
       ;;--------------------------------------------------------------
       (unless (custom-theme-name-valid-p theme)
         (error "Custom theme cannot be named" theme))
-      (unless (memq theme (*custom-known-themes*))
-        (*custom-known-themes*
-         (cons theme (*custom-known-themes*))))
+      (unless (memq theme *custom-known-themes*)
+        (set! *custom-known-themes*
+              (cons theme *custom-known-themes*)))
       (put theme 'theme-feature feature)
       (when doc
         (put theme 'theme-documentation doc))
@@ -1201,8 +1212,18 @@
       ;; `define-theme', then `custom-theme-set-faces', then
       ;; `provide-theme' - so a theme file reads the same in both.
       ;;--------------------------------------------------------------
+      ;; **Both optionals are guarded on their own existence.** A
+      ;; `cdr' of an empty list raises - and the no-argument call,
+      ;; `(load-theme 'dusk)', which is what an init file says, died
+      ;; here before the file search: measured on the real boot,
+      ;; `error: init file ...: cdr', with the theme file's presence
+      ;; beside the point. Emacs's `&optional' reads answer nil for
+      ;; the missing argument; the guard per argument is what that
+      ;; is here.
       (let* ((no-confirm (and (pair? optional) (car optional)))
-             (no-enable (and (pair? (cdr optional)) (cadr optional))))
+             (no-enable (if (pair? optional)
+                            (and (pair? (cdr optional)) (cadr optional))
+                            #f)))
         (unless (symbol? theme)
           (error "Wrong type argument: symbolp"))
         (unless (custom-theme-name-valid-p theme)
@@ -1245,11 +1266,18 @@
               ;; "Treat this theme as safe in future sessions?" is not
               ;; asked either: nothing writes the answer anywhere, so
               ;; asking would be a lie. Both are named in the header.
-              (when (or no-confirm
-                        (eq? (*custom-safe-themes*) #t)
-                        (member hash (*custom-safe-themes*)))
-                (parameterize ((*custom--inhibit-theme-enable* #t))
-                  (load file)))))))
+              ;; **The refusal is an error, not a silent fall-through.**
+              ;; A `when' whose test fails just continues, and the
+              ;; `enable-theme' at the end of this function then raised
+              ;; "Unknown theme" - a message about the wrong thing. The
+              ;; load was *refused*, and Emacs's own words for it are
+              ;; `custom.el:1404''s: "Unable to load theme".
+              (if (or no-confirm
+                      (eq? (*custom-safe-themes*) #t)
+                      (member hash (*custom-safe-themes*)))
+                  (parameterize ((*custom--inhibit-theme-enable* #t))
+                    (load file))
+                  (error "Unable to load theme `" (symbol->string theme) "'"))))))
         ;; "Optimization: if the theme changes the `default' face, put
         ;; that entry first. This avoids some `frame-set-background-mode'
         ;; rigmarole by assigning the new background immediately."
