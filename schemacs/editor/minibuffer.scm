@@ -62,7 +62,7 @@
           get-text-property put-text-property remove-text-properties)
     (only (schemacs editor buffer)
           *case-fold-search*
-          *current-buffer*
+          *current-buffer* *inhibit-read-only*
           buffer-default-directory bury-buffer current-buffer get-buffer
           get-buffer-create record-buffer!
           buffer-fill-column set!buffer-fill-column
@@ -1819,26 +1819,36 @@ read-number-history
       ;; leaves the highlighting it had rather than a line with no
       ;; faces at all.
       ;;--------------------------------------------------------------
-      (remove-text-properties start end '(face) buffer)
-      (let* ((candidate (make-buffer-string buffer start end))
-             (matched (min (string-length (*completions-common-substring*))
-                           (string-length candidate))))
-        (when highlight?
-          (put-text-property start end 'face 'completions-highlight buffer))
-        (when (< 0 matched)
-          (put-text-property
-           start (+ start matched) 'face
-           (if highlight?
-               '(completions-common-part completions-highlight)
-               'completions-common-part)
-           buffer))
-        (when (< (+ start matched) end)
-          (put-text-property
-           (+ start matched) (+ 1 start matched) 'face
-           (if highlight?
-               '(completions-first-difference completions-highlight)
-               'completions-first-difference)
-           buffer))))
+      ;; **The buffer is read-only and the write is allowed.** The
+      ;; *Completions* buffer is `special-mode''s - buffer-read-only -
+      ;; and a property write barfs on it: measured, M-<down> moved
+      ;; point (which needs no write) while the selection face never
+      ;; landed, the command loop catching the `buffer-read-only' signal
+      ;; into the echo-area message the pty dump showed beside the
+      ;; prompt. Emacs writes into this buffer under
+      ;; `inhibit-read-only' (`minibuffer.el:2402', the lazy insert's
+      ;; own `let'), which is what binds this.
+      (parameterize ((*inhibit-read-only* #t))
+        (remove-text-properties start end '(face) buffer)
+        (let* ((candidate (make-buffer-string buffer start end))
+               (matched (min (string-length (*completions-common-substring*))
+                             (string-length candidate))))
+          (when highlight?
+            (put-text-property start end 'face 'completions-highlight buffer))
+          (when (< 0 matched)
+            (put-text-property
+             start (+ start matched) 'face
+             (if highlight?
+                 '(completions-common-part completions-highlight)
+                 'completions-common-part)
+             buffer))
+          (when (< (+ start matched) end)
+            (put-text-property
+             (+ start matched) (+ 1 start matched) 'face
+             (if highlight?
+                 '(completions-first-difference completions-highlight)
+                 'completions-first-difference)
+             buffer)))))
 
     (define *completion-show-help*
       ;; GNU Emacs's `completion-show-help': whether the `*Completions*'

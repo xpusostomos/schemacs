@@ -1508,8 +1508,11 @@
             (begin
               (set-point ed (+ 1 (* 2 n)))
               (render! f)
+              ;; the recorded triple is `(Y X TYPE)' - `draw-window-
+              ;; cursor!' answers the display cursor, and the y is its
+              ;; first element.
               (walk (+ n 1)
-                    (cons (cadr (test-display-cursor d)) out))))))))
+                    (cons (car (test-display-cursor d)) out))))))))
 
 (test-end "schemacs_ncurses_editor_cursor_position")
 
