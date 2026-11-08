@@ -41,7 +41,9 @@
     (only (scheme cxr) caddr)
     ;; `ash' and `logior' are Guile's: Emacs compares 8-bit components,
     ;; and a 24-bit pixel is three of them packed.
-    (only (guile) ash logior)
+    ;; `inexact->exact' is what `float-comp' rounds with; `round' is
+    ;; `(scheme base)''s but the exact answer needs the conversion.
+    (only (guile) ash logior inexact->exact round)
     ;; `tty-color-24bit' asks how many colours the display has.
     (only (schemacs editor faces) *display-color-cells*))
 
@@ -57,6 +59,7 @@
    tty-color-off-gray-diag
    tty-color-approximate
    tty-color-standard-values
+   color-values-from-color-spec
    tty-color-translate
    tty-color-by-index
    tty-color-values
@@ -210,14 +213,96 @@
                           (loop (cdr candidates) dist candidate)
                           (loop (cdr candidates) best-distance best-color)))))))))
 
-    (define (tty-color-standard-values color)
-      ;; GNU Emacs's `tty-color-standard-values': the RGB of COLOR by its
-      ;; standard definition, whatever the terminal can show. Emacs tries
-      ;; `color-values-from-color-spec' first - "#RRGGBB" and "rgb:R/G/B",
-      ;; which are `xfaces.c''s and not ported - and then the name table.
+    (define (color-values-from-color-spec spec)
+      ;; GNU Emacs's `color-values-from-color-spec' (`xfaces.c:1007'):
+      ;; "Parse color SPEC as a numeric color and return (RED GREEN
+      ;; BLUE)." The three forms are #RGB with 1-4 hex digits a
+      ;; component, rgb:R/G/B with the same, and rgbi:R/G/B with
+      ;; floats; nil when SPEC is none of them. Each member is
+      ;; normalized to [0,65535].
       ;;--------------------------------------------------------------
-      (let ((entry (assoc color *color-name-rgb-alist*)))
-        (and entry (cdr entry))))
+      (define (len-of) (string-length spec))
+      (define (str-index c from)
+        ;; the first index of the character C at or after FROM, or #f
+        (let loop ((i from))
+          (cond ((>= i (string-length spec)) #f)
+                ((char=? (string-ref spec i) c) i)
+                (else (loop (+ i 1))))))
+      (define (hex-comp s e)
+        ;; `parse_hex_color_comp' (`xfaces.c:928'): 1-4 hex digits,
+        ;; scaled to the digits' own range - "#fff" is 65535, as
+        ;; "#ffffff" is.
+        (let ((n (- e s)))
+          (if (or (<= n 0) (> n 4))
+              #f
+              (let ((maxval (- (ash 1 (* n 4)) 1)))
+                (let loop ((i s) (val 0))
+                  (cond ((>= i e)
+                         (quotient (* val 65535) maxval))
+                        ((and (char>=? (string-ref spec i) #\0)
+                              (char<=? (string-ref spec i) #\9))
+                         (loop (+ i 1)
+                               (+ (* val 16)
+                                  (- (char->integer (string-ref spec i)) 48))))
+                        ((and (char>=? (string-ref spec i) #\A)
+                              (char<=? (string-ref spec i) #\F))
+                         (loop (+ i 1)
+                               (+ (* val 16)
+                                  (- (char->integer (string-ref spec i)) 55))))
+                        ((and (char>=? (string-ref spec i) #\a)
+                              (char<=? (string-ref spec i) #\f))
+                         (loop (+ i 1)
+                               (+ (* val 16)
+                                  (- (char->integer (string-ref spec i)) 87))))
+                        (else #f)))))))
+      (define (float-comp s e)
+        ;; `parse_float_color_comp': a decimal float literal in [0,1].
+        (let ((x (string->number (substring spec s e))))
+          (and x (>= x 0) (<= x 1)
+               (inexact->exact (round (* x 65535))))))
+      (let ((len (string-length spec)))
+        (cond ((char=? (string-ref spec 0) #\#)
+               (let ((rest (- len 1)))
+                 (if (= 0 (remainder rest 3))
+                     (let ((n (quotient rest 3)))
+                       (let ((r (hex-comp (+ 1 (* 0 n)) (+ 1 (* 1 n))))
+                             (g (hex-comp (+ 1 (* 1 n)) (+ 1 (* 2 n))))
+                             (b (hex-comp (+ 1 (* 2 n)) (+ 1 (* 3 n)))))
+                         (and r g b (list r g b))))
+                     #f)))
+              ((and (>= (string-length spec) 4) (string=? "rgb:" (substring spec 0 4)))
+               (let ((sep1 (str-index #\/ 4)))
+                 (let ((sep2 (and sep1 (str-index #\/ (+ sep1 1)))))
+                   (if (and sep1 sep2)
+                       (let ((r (hex-comp 4 sep1))
+                             (g (hex-comp (+ sep1 1) sep2))
+                             (b (hex-comp (+ sep2 1) len)))
+                         (and r g b (list r g b)))
+                       #f))))
+              ((and (>= (string-length spec) 5) (string=? "rgbi:" (substring spec 0 5)))
+               (let* ((sep1 (str-index #\/ 5))
+                      (sep2 (and sep1 (str-index #\/ (+ sep1 1)))))
+                 (if (and sep1 sep2)
+                     (let ((r (float-comp 5 sep1))
+                           (g (float-comp (+ sep1 1) sep2))
+                           (b (float-comp (+ sep2 1) len)))
+                       (and r g b (list r g b)))
+                     #f)))
+              (else #f))))
+
+
+    (define (tty-color-standard-values color)
+      ;; GNU Emacs's `tty-color-standard-values' (`term/tty-colors.el:
+      ;; 918'): "Return standard RGB values of the color COLOR.  The
+      ;; result is a list of integer RGB values--(RED GREEN BLUE). ...
+      ;; The returned value reflects the standard Emacs definition of
+      ;; COLOR ... regardless of what display is being used."  The C
+      ;; tries `color-values-from-color-spec' first - the numeric forms,
+      ;; which a theme's "#242424" is - and the name table second.
+      ;;--------------------------------------------------------------
+      (or (color-values-from-color-spec color)
+          (let ((entry (assoc color *color-name-rgb-alist*)))
+            (and entry (cdr entry)))))
 
     (define (tty-color-translate color . _frame)
       ;; GNU Emacs's `tty-color-translate': the terminal index for COLOR,
