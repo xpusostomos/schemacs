@@ -50,16 +50,32 @@
   ;;      `custom-initialize-reset' calls one, and `:get' is consulted
   ;;      first, as that initializer does.
   ;;
+  ;; **Ported since 2026-11-08: the themes** - `custom.el''s second half,
+  ;; at the bottom of this file: `define-theme', `custom-theme-set-faces'
+  ;; and `-variables', `custom-push-theme', `load-theme'/'enable-theme'/
+  ;; `disable-theme', and `custom-set-faces' - `custom-set-variables''s
+  ;; twin. A theme file is Scheme here and Elisp there, which is the one
+  ;; departure of substance; everything else - the properties, the
+  ;; precedence, the recalculation - is the C's shape.
+  ;;
   ;; **Not ported, each for want of a thing this tree does not have**: the
   ;; Customize buffers themselves (`customize-*', `cus-edit.el', the widget
-  ;; library), themes, `setopt' and `custom-set-variables' (there is no
-  ;; `custom-file' to save into and nothing writes `saved-value' yet - the
-  ;; initializers read the property, so the day something does, they honour
-  ;; it), `custom-initialize-delay' and `custom-initialize-after-file-load'
+  ;; library) and `cus-theme.el''s theme *editor*; `setopt'
+  ;; (`custom-set-variables' is here, so `setopt' is the spelling apart);
+  ;; `custom-initialize-delay' and `custom-initialize-after-file-load'
   ;; (both exist for the dump and for `after-load-functions', neither of
-  ;; which this tree has), and `defface'/'defgroup'
-  ;; (`custom-declare-face', `custom-declare-group') - `defface' is the
-  ;; next piece, and it is a face library's.
+  ;; which this tree has); and `defgroup' (`custom-declare-group') -
+  ;; `defface' is faces.scm's, and the group is the Custom UI's one
+  ;; missing half.
+  ;;
+  ;; **Two departures inside the themes, each named where it lives**:
+  ;; `custom-theme-load-confirm' (the "Loading a theme can run Lisp code"
+  ;; question) is answered "no" rather than asked, `y-or-n-p' being in
+  ;; `(schemacs editor files)', a library above this one - so an init
+  ;; file passes `#:no-confirm #t' as Emacs's does, and a theme not on
+  ;; the safe list is refused; and "Treat this theme as safe in future
+  ;; sessions?" is never asked, there being nothing to write the answer
+  ;; into (`custom-file' does not exist yet).
 
   (import
     (scheme base)
@@ -74,9 +90,53 @@
     ;; itself is what `#'` reads as, and leaving it out is the "unexpected
     ;; syntax in form ()" the compiler says when it is missing.
     (only (guile) identifier? quasisyntax syntax syntax->datum syntax-case
-          unsyntax unsyntax-splicing)
+          unsyntax unsyntax-splicing
+          ;; `load-theme' reads its file, and `delq' is srfi-1's spelling
+          ;; of the list edit `enable-theme' and `disable-theme' make.
+          string->symbol)
+    ;; `delq' is Elisp's, and `(schemacs editor subr)' is where
+    ;; `assoc-delete-all' beside it lives.
+    (only (srfi srfi-1) delete-duplicates find fold)
+    ;; `string-suffix?' is srfi-13's - `custom-available-themes' tests
+    ;; the "-theme.el" name with it, as the C's `string-match-p' does.
+    (only (srfi srfi-13) string-suffix?)
+    (only (schemacs editor subr) delq assq-delete-all)
     ;; `get' and `put' are `fns.c`'s symbol properties; see the header.
-    (only (schemacs editor intervals) get put))
+    (only (schemacs editor intervals) get put)
+    ;; The faces a theme sets: `make-face' initialises one whose `defface'
+    ;; has not run, `facep' asks whether it has, `face-spec-set' installs
+    ;; a theme's spec, and `face-spec-recalc' is what
+    ;; `custom-theme-recalc-face' runs. `face-attribute' answers `:extend'
+    ;; in `face-spec-recalc'.
+    (only (schemacs editor faces)
+          face-attribute face-spec-set face-spec-recalc make-face facep)
+    ;; The paths a theme file is searched along and the predicates that
+    ;; guard it. `y-or-n-p' is the confirmation the safety hash prompts
+    ;; with.
+    ;; `locate-file-internal' is `lread.c''s, which is fileio's here;
+    ;; Emacs's `load-theme' reaches for its own `locate-file', which is
+    ;; files.el's and lives in `(schemacs editor files)' - a library that
+    ;; cannot be imported here, because `files' imports `simple' and
+    ;; `simple' imports this one. The internal search is what Emacs's
+    ;; `locate-file' is built on, and it answers the same.
+    (only (schemacs editor fileio) file-directory-p locate-file-internal)
+    ;; A theme directory's files, which `custom-available-themes' lists.
+    (only (schemacs editor diredc) directory-files)
+    ;; `%load-path' is where the installed themes directory is
+    ;; looked for - `data-directory'/themes being what Emacs searches.
+    ;; `%load-path' is where the installed themes directory is
+    ;; looked for - `data-directory'/themes being what Emacs searches;
+    ;; `call-with-input-file' and `load' are what `load-theme' reads a
+    ;; theme file with, and `catch' is what
+    ;; `custom-enabled-themes-set' keeps one theme's error from
+    ;; stopping the others with.
+    ;; `set-module-declarative?!' and `datum->syntax' are for the
+    ;; not-declarative declaration at the top of the body, which
+    ;; `load-theme''s `load' needs - the same statement
+    ;; `(schemacs editor startup)' makes for the same reason.
+    (only (guile) getenv %load-path call-with-input-file load catch
+          cadar cadddr provide module-variable resolve-module
+          set-module-declarative?! datum->syntax))
 
   (export
    define-custom
@@ -87,12 +147,53 @@
    custom-add-version custom-add-package-version custom-add-load
    custom-add-link custom-add-dependencies
    custom-handle-keyword
-   custom-variable-p custom--standard-value custom-set-variables
+   custom-variable-p custom--standard-value custom--standard-value-p
+   custom-set-variables
    *custom-current-group-alist* custom-current-group
    *custom-declare-variable-hook* *custom-dont-initialize*
+   ;; The themes: `custom.el''s second half. `define-theme' declares one,
+   ;; a theme file's `custom-theme-set-faces' and
+   ;; `custom-theme-set-variables' record its settings,
+   ;; `load-theme'/'enable-theme'/'disable-theme' apply and unapply them,
+   ;; and `custom-set-faces' is `custom-set-variables'' twin for faces.
+   *custom-known-themes* *custom-enabled-themes* *custom-safe-themes*
+   *custom--inhibit-theme-enable*
+   *custom-theme-directory* *custom-theme-load-path*
+   custom-theme-p custom-check-theme
+   custom-push-theme custom-theme-recalc-variable custom-theme-recalc-face
+   enable-theme custom-theme-enabled-p disable-theme
+   custom-theme-set-faces custom-set-faces
+   custom-theme-set-variables
+   custom-theme-reset-faces custom-theme-reset-variables
+   custom-declare-theme provide-theme
+   custom-theme--load-path custom-available-themes
+   load-theme custom-enabled-themes-set define-theme
    )
 
   (begin
+
+    ;;----------------------------------------------------------------
+    ;; This library is not declarative - Guile's `#:declarative? #f'
+    ;;----------------------------------------------------------------
+    ;; `load' is used below - `load-theme' reads a theme file with it -
+    ;; so this module is not a declarative one. The statement is made
+    ;; the way `(schemacs editor startup)' makes its own, for the same
+    ;; two reasons: the warning is silenced by neither half alone, and
+    ;; a *declarative* module lets the compiler fold a definition into
+    ;; its callers' code, so a later `set!' stops being seen. The
+    ;; definitions at risk here are the theme parameters -
+    ;; `*custom-enabled-themes*' and friends, which `load-theme' sets
+    ;; and every reader reads - and the fold would leave a compiled
+    ;; reader answering the value it was compiled with.
+    (define-syntax %not-declarative!
+      (lambda (x)
+        (set-module-declarative?! (current-module) #f)
+        (datum->syntax x '(if #f #f))))
+    (%not-declarative!)
+    (set-module-declarative?!
+     (resolve-module '(schemacs editor custom) #f)
+     #f)
+
 
     ;;--------------------------------------------------------------
     ;; The groups
@@ -261,6 +362,13 @@
       ;;--------------------------------------------------------------
       (let ((sv (get variable 'standard-value)))
         (and sv ((car sv)))))
+
+    (define (custom--standard-value-p variable value)
+      ;; GNU Emacs's `custom--standard-value-p' (`custom.el:703'): "Return
+      ;; non-nil if VALUE is `equal' to the standard value of VARIABLE."
+      ;;--------------------------------------------------------------
+      (let ((sv (get variable 'standard-value)))
+        (and sv (equal? value ((car sv))))))
 
     (define (custom-variable-p variable)
       ;; GNU Emacs's `custom-variable-p`: "A customizable variable is
@@ -593,33 +701,608 @@
                           clauses))))))))
 
 
-    (define (custom-set-variables . args)
-      ;; GNU Emacs's `custom-set-variables' (`custom.el:1039'): "Initialize
-      ;; variables according to settings specified in the init file. ...
-      ;; Each argument should be a list of the form
-      ;; (SYMBOL EXP [NOW [REQUEST [COMMENT]]])."
-      ;;
-      ;; Emacs delegates to `custom-theme-set-variables' for the `user'
-      ;; theme. Themes are not ported, so what is carried is that
-      ;; function's user half: EXP is evaluated, its value stored in
-      ;; SYMBOL's `saved-value' property - "EXP will also be stored,
-      ;; without evaluating it, in SYMBOL's saved-value property" - and
-      ;; then installed through the variable's `:set' function, or its
-      ;; writer when it has none, which is the default `:set'.
-      ;;
-      ;; NOW matters in Emacs only for a symbol whose `defcustom' has not
-      ;; run yet; here a variable exists as soon as it is declared, so the
-      ;; install is unconditional, as it is there for a declared one.
+    ;;----------------------------------------------------------------
+    ;; Themes
+    ;;
+    ;; GNU Emacs's `custom.el' second half: `deftheme', the settings a
+    ;; theme file makes (`custom-theme-set-faces' and
+    ;; `custom-theme-set-variables'), and the enabling that applies them
+    ;; (`enable-theme', `disable-theme', `load-theme').
+    ;;
+    ;; **The model.** A theme is a symbol whose `theme-settings'
+    ;; property lists everything it set - one `(PROP SYMBOL THEME
+    ;; VALUE)' per setting - and each face or variable it set carries
+    ;; the same record on its own `theme-face' or `theme-value'
+    ;; property, as `(THEME VALUE)'. `custom-push-theme' is the one
+    ;; function that maintains both halves, and it is what makes
+    ;; disabling possible: remove the theme's records from every symbol
+    ;; and the next theme's, or the standard, is what is left.
+    ;;
+    ;; `custom-enabled-themes' is the precedence list - most recently
+    ;; enabled first, with the `user' theme (what `custom-set-faces'
+    ;; and `custom-set-variables' record into) always highest. When a
+    ;; face is realized, `face-spec-recalc' walks its `theme-face'
+    ;; records from the earliest theme forward and the first branch
+    ;; that matches the display wins - which is what makes a later
+    ;; theme's whole-face spec beat an earlier one.
+    ;;
+    ;; `custom--inhibit-theme-enable' is Emacs's dynamic switch: while
+    ;; `load-theme' reads a theme file, its settings are *recorded* but
+    ;; not *applied*; `enable-theme' applies them by walking the
+    ;; records. It is a parameter here, per the convention, and the
+    ;; three states the C distinguishes (`t', `apply-only-user', nil)
+    ;; are the three this tree's callers need.
+    ;;--------------------------------------------------------------
+
+    (define *custom-known-themes* (make-parameter '(user changed)))
+    ;; ^ GNU Emacs's `custom-known-themes' (`custom.el:915'): "Themes
+    ;; that have been defined with `deftheme'. ... The theme `changed'
+    ;; is for internal use, for user settings that have been changed
+    ;; outside of customize."
+
+    (define *custom-enabled-themes* (make-parameter '()))
+    ;; ^ GNU Emacs's `custom-enabled-themes' (`custom.el:1630'). The
+    ;; `:set' function there - which disables the themes dropped from
+    ;; the list and enables the ones added - is what
+    ;; `custom-enabled-themes-set' below is.
+
+    (define *custom-safe-themes* (make-parameter '()))
+    ;; ^ GNU Emacs's `custom-safe-themes' (`custom.el:1582'): the SHA-256
+    ;; hashes of theme files the user has pronounced safe. `t' means
+    ;; every theme is safe; the `default' element means every theme in
+    ;; the *installed* themes directory is. A hash not in the list
+    ;; prompts - Emacs's `custom-theme-load-confirm', which is a `*Help*'
+    ;; question - and here the prompt is `y-or-n-p' with the same words.
+
+    (define *custom-theme-directory* (make-parameter #f))
+    ;; ^ GNU Emacs's `custom-theme-directory' (`custom.el:1204'):
+    ;; "Default user directory for storing custom theme files."
+    ;; `#f' here means "unset", and `custom-theme--load-path' falls back
+    ;; to the init file's directory - which is where a user's own theme
+    ;; lives, and what Emacs's default of `user-emacs-directory' is.
+
+    (define *custom-theme-load-path* (make-parameter '(custom-theme-directory t)))
+    ;; ^ GNU Emacs's `custom-theme-load-path' (`custom.el:1219'): "List
+    ;; of directories to search for custom theme files." `t' is the
+    ;; installed themes directory - Emacs's `data-directory'/themes.
+
+    (define *custom--inhibit-theme-enable* (make-parameter 'apply-only-user))
+    ;; ^ GNU Emacs's `custom--inhibit-theme-enable' (`custom.el:1272').
+
+    (define (custom-theme-p theme)
+      ;; GNU Emacs's `custom-theme-p' (`custom.el:921'): "Return non-nil
+      ;; if THEME has been defined through `deftheme'."
       ;;--------------------------------------------------------------
+      (memq theme (*custom-known-themes*)))
+
+    (define (custom-check-theme theme)
+      ;; GNU Emacs's `custom-check-theme' (`custom.el:928').
+      ;;--------------------------------------------------------------
+      (unless (custom-theme-p theme)
+        (error "Unknown theme `" (symbol->string theme) "'")))
+
+    (define (custom--should-apply-setting theme)
+      ;; GNU Emacs's `custom--should-apply-setting' (`custom.el:932'):
+      ;; "Non-nil if settings for the theme THEME should apply
+      ;; immediately."
+      ;;--------------------------------------------------------------
+      (or (memq theme (*custom-enabled-themes*))
+          (not (*custom--inhibit-theme-enable*))
+          (and (eq? (*custom--inhibit-theme-enable*) 'apply-only-user)
+               (eq? theme 'user))))
+
+    (define (custom-theme-name-valid-p name)
+      ;; GNU Emacs's `custom-theme-name-valid-p' (`custom.el:1505').
+      ;;--------------------------------------------------------------
+      (and (not (memq name '(#f user changed)))
+           (symbol? name)
+           (not (string=? "" (symbol->string name)))))
+
+    (define (custom-push-theme prop symbol theme mode . value)
+      ;; GNU Emacs's `custom-push-theme' (`custom.el:945'): "Record VALUE
+      ;; for face or variable SYMBOL in custom theme THEME. PROP is
+      ;; `theme-face' for a face, `theme-value' for a variable. MODE can
+      ;; be either the symbol `set' or the symbol `reset'."
+      ;;
+      ;; SYMBOL's property and THEME's `theme-settings' carry the same
+      ;; record, and both are kept in step - which is what makes
+      ;; `disable-theme''s removals possible.
+      ;;--------------------------------------------------------------
+      (unless (memq prop '(theme-face theme-value))
+        (error "Unknown theme property"))
+      ;; **`(get ...)' answers #f where Emacs's answers nil**, and an
+      ;; empty list is what every alist walk below wants - the
+      ;; elisp-nil-versus-Scheme trap this file has met before.
+      (let* ((old (or (get symbol prop) '()))
+             (setting (assq theme old))
+             (theme-settings (or (get theme 'theme-settings) '())))
+        (cond
+         ;; Remove a setting:
+         ((eq? mode 'reset)
+          (when setting
+            (put theme 'theme-settings
+                 (let loop ((rest theme-settings))
+                   (cond ((null? rest) '())
+                         ((and (eq? (car (car rest)) prop)
+                               (eq? (cadr (car rest)) symbol))
+                          (loop (cdr rest)))
+                         (else (cons (car rest) (loop (cdr rest)))))))
+            (put symbol prop (assq-delete-all theme old))))
+         ;; Alter an existing setting:
+         (setting
+          (put theme 'theme-settings
+               (cons (list prop symbol theme (car value))
+                     (let loop ((rest theme-settings))
+                       (cond ((null? rest) '())
+                             ((and (eq? (car (car rest)) prop)
+                                   (eq? (cadr (car rest)) symbol))
+                              (loop (cdr rest)))
+                             (else (cons (car rest) (loop (cdr rest))))))))
+          (put symbol prop
+               (cons (list theme (car value)) (assq-delete-all theme old))))
+         ;; Add a new setting:
+         (else
+          (when (custom--should-apply-setting theme)
+            (unless old
+              ;; "If the user changed a variable outside of Customize,
+              ;; save the value to a fake theme, `changed'. If the theme
+              ;; is later disabled, we use this to bring back the old
+              ;; value." Only for variables, and only when the current
+              ;; value is not the standard one and would not be recorded
+              ;; twice for `user' - the C's three guards.
+              (when (and (eq? prop 'theme-value)
+                         (custom--bound? symbol)
+                         (not (custom--standard-value-p
+                               symbol (custom--getter symbol)))
+                         (not (and (eq? theme 'user)
+                                   (equal? (car value)
+                                          (custom--standard-value symbol)))))
+                (put symbol 'theme-value
+                     `((changed ,(custom--getter symbol)))))))
+          (put symbol prop (cons (list theme (car value)) old))
+          (put theme 'theme-settings
+               (cons (list prop symbol theme (car value)) theme-settings))))
+      #f))
+
+    (define (custom-theme-recalc-variable variable)
+      ;; GNU Emacs's `custom-theme-recalc-variable' (`custom.el:1739'):
+      ;; "Set VARIABLE according to currently enabled custom themes."
+      ;; The value is the *theme stack's* head - `(cdr (car ...))' of the
+      ;; property, which `enable-theme' keeps ordered so that the head is
+      ;; the highest-precedence enabled theme - or the standard.
+      ;;--------------------------------------------------------------
+      ;; **The property's record is `(THEME EXP)'**, so the expression is
+      ;; its cadr - `(cdar ...)' would take `(cdr EXP)', which for a
+      ;; self-evaluating EXP like 5 is the one-element list `(5)', and
+      ;; `(eval (5))' calls 5.
+      ;;--------------------------------------------------------------
+      (let* ((theme-value (get variable 'theme-value))
+             (valspec (if (pair? theme-value) (cadar theme-value) #f)))
+        (unless valspec
+          (set! valspec (car (get variable 'standard-value))))
+        (when valspec
+          ((or (get variable 'custom-set) (custom--setter variable))
+           variable
+           ;; The spec is an *expression* - Emacs `eval's it - which is
+           ;; what `custom-set-variables' stored.
+           (eval valspec (current-module))))))
+
+    (define (custom-theme-recalc-face face)
+      ;; GNU Emacs's `custom-theme-recalc-face' (`custom.el:1766'): "Set
+      ;; FACE according to currently enabled custom themes." The
+      ;; realization is `face-spec-recalc''s, which walks the
+      ;; `theme-face' records; here there is one frame's worth of faces,
+      ;; where Emacs recalcs per frame.
+      ;;--------------------------------------------------------------
+      (when (facep face)
+        (face-spec-recalc face)))
+
+    (define (enable-theme theme)
+      ;; GNU Emacs's `enable-theme' (`custom.el:1569'): "Reenable all
+      ;; variable and face settings defined by THEME."
+      ;;
+      ;; The loop re-orders each symbol's property so that THEME's
+      ;; record is at its head - which is what makes the head the
+      ;; highest-precedence enabled theme when
+      ;; `custom-theme-recalc-variable' and `face-spec-recalc' read it.
+      ;;--------------------------------------------------------------
+      (custom-check-theme theme)
+      (let ((settings (or (get theme 'theme-settings) '())))
+        (for-each
+         (lambda (s)
+           (let* ((prop (car s))
+                  (symbol (cadr s))
+                  (spec-list (or (get symbol prop) '())))
+             ;; "We can't call `custom-push-theme' when enabling the
+             ;; theme ... But we might need to save a user setting
+             ;; outside of Customize, in order to get back to it when
+             ;; disabling the theme." - the C's `changed' stash, whose
+             ;; three guards `custom-push-theme' carries. It is needed
+             ;; here because `enable-theme' can be called for a theme
+             ;; whose records were made while it was inhibited, and the
+             ;; user's own setting was never stashed. `custom-push-theme'
+             ;; has done it already when the theme was enabled; the
+             ;; condition below is the C's.
+             (when (and (eq? prop 'theme-value)
+                        (custom--bound? symbol)
+                        (not (assq 'changed spec-list))
+                        (not (assq theme spec-list))
+                        (not (custom--standard-value-p symbol
+                                                       (custom--getter symbol))))
+               (put symbol 'theme-value
+                    (cons `(changed ,(custom--getter symbol)) spec-list)))
+             ;; The re-order: THEME's record to the head.
+             (put symbol prop
+                  (cons (cddr s)
+                        (assq-delete-all theme spec-list)))
+             (cond
+              ((eq? prop 'theme-face)
+               (custom-theme-recalc-face symbol))
+              ((eq? prop 'theme-value)
+               ;; "Ignore `custom-enabled-themes' and `custom-safe-themes'."
+               (unless (memq symbol '(*custom-enabled-themes*
+                                      *custom-safe-themes*))
+                 (custom-theme-recalc-variable symbol))))))
+         settings))
+      (unless (eq? theme 'user)
+        (*custom-enabled-themes*
+         (cons theme (delq theme (*custom-enabled-themes*))))
+        ;; "Give the `user' theme the highest priority."
+        (enable-theme 'user))
+      #f)
+
+    (define (custom-theme-enabled-p theme)
+      ;; GNU Emacs's `custom-theme-enabled-p' (`custom.el:1654').
+      ;;--------------------------------------------------------------
+      (memq theme (*custom-enabled-themes*)))
+
+    (define (disable-theme theme)
+      ;; GNU Emacs's `disable-theme' (`custom.el:1671'): "Disable all
+      ;; variable and face settings defined by THEME."
+      ;;
+      ;; Each symbol loses THEME's record - the C's
+      ;; `assq-delete-all' - and what is left is the next theme's or
+      ;; none; then every touched face and variable is recalculated from
+      ;; what remains. The frame-parameter reset the C does afterwards is
+      ;; `face-set-after-frame-default''s, which this tree has no
+      ;; counterpart for - the faces are recalculated by the loop below,
+      ;; which is the same effect.
+      ;;--------------------------------------------------------------
+      (when (custom-theme-enabled-p theme)
+        (let ((settings (or (get theme 'theme-settings) '())))
+          (for-each
+           (lambda (s)
+             (let* ((prop (car s))
+                    (symbol (cadr s))
+                    (val (assq-delete-all theme (or (get symbol prop) '()))))
+               (put symbol prop val)
+               (cond
+                ((eq? prop 'theme-value)
+                 (custom-theme-recalc-variable symbol)
+                 (unless (get symbol 'theme-value)
+                   (put symbol 'saved-value #f)))
+                ((eq? prop 'theme-face)
+                 (when (equal? (cadddr s) (get symbol 'saved-face))
+                   (put symbol 'saved-face (cadar val)))))))
+           settings)
+          (for-each
+           (lambda (s)
+             (when (eq? (car s) 'theme-face)
+               (custom-theme-recalc-face (cadr s))))
+           settings))
+        (*custom-enabled-themes* (delq theme (*custom-enabled-themes*)))
+        #t))
+
+    (define (custom-theme-set-faces theme . args)
+      ;; GNU Emacs's `custom-theme-set-faces' (`cus-face.el:343'): "Apply
+      ;; a list of face specs associated with theme THEME." Each entry is
+      ;; `(FACE SPEC [NOW [COMMENT]])'.
+      ;;
+      ;; The spec is *data* here - Elisp's backquoted spec evaluates to
+      ;; this same list - and NOW matters in Emacs only for a face whose
+      ;; `defface' has not run yet; `make-face' is called below for
+      ;; exactly that case, which is what the C's `facep' check does.
+      ;;--------------------------------------------------------------
+      (custom-check-theme theme)
       (for-each
        (lambda (entry)
-         (let ((symbol (car entry))
-               (value (eval (cadr entry) (current-module))))
-           (put symbol 'saved-value (list value))
-           ((or (get symbol 'custom-set) (custom--setter symbol))
-            symbol value)))
+         (let ((face (car entry))
+               (spec (cadr entry)))
+           ;; "If FACE is actually an alias, customize the face it is
+           ;; aliased to." This tree has no face aliases, so there is
+           ;; nothing to resolve - named in the file header.
+           (if (not (custom--should-apply-setting theme))
+               ;; Just update theme settings.
+               (custom-push-theme 'theme-face face theme 'set spec)
+             ;; Update theme settings and set the face spec.
+             (let ((oldspec (or (get face 'theme-face) '())))
+               (when (not (and oldspec (eq? 'user (caar oldspec))))
+                 (put face 'saved-face spec))
+               (custom-push-theme 'theme-face face theme 'set spec)
+               ;; The C's NOW - `face-spec-set face spec t' - is
+               ;; `face-spec-recalc' here, there being no
+               ;; `face-new-frame-defaults' to defer to. The spec-type
+               ;; `t' is "record nothing, define and recalculate" -
+               ;; `face-defface-spec' would have *overwritten* the
+               ;; face's real defface spec with the theme's, which is
+               ;; the double-record and the lost spec the first smoke
+               ;; run showed.
+               (make-face face)
+               (face-spec-set face spec #t)))))
        args)
       #f)
 
+    (define (custom-set-faces . args)
+      ;; GNU Emacs's `custom-set-faces' (`cus-face.el:332'): "Apply a
+      ;; list of face specs for user customizations. This works by
+      ;; calling `custom-theme-set-faces' for the `user' theme, a
+      ;; special theme referring to settings made via Customize."
+      ;;--------------------------------------------------------------
+      (apply custom-theme-set-faces 'user args))
+
+    (define (custom-theme-set-variables theme . args)
+      ;; GNU Emacs's `custom-theme-set-variables' (`custom.el:1055'):
+      ;; "Initialize variables for theme THEME according to settings in
+      ;; ARGS. Each of the arguments in ARGS should be a list of this
+      ;; form: (SYMBOL EXP [NOW [REQUEST [COMMENT]]])"
+      ;;--------------------------------------------------------------
+      (custom-check-theme theme)
+      (for-each
+       (lambda (entry)
+         (let ((symbol (car entry)))
+           (custom-push-theme 'theme-value symbol theme 'set (cadr entry))
+           (when (custom--should-apply-setting theme)
+             (put symbol 'saved-value (list (cadr entry)))
+             (custom-theme-recalc-variable symbol))))
+       args)
+      #f)
+
+    (define (custom-set-variables . args)
+      ;; GNU Emacs's `custom-set-variables' (`custom.el:1039'): "Initialize
+      ;; variables according to settings specified in the init file.
+      ;; ... Each argument should be a list of the form
+      ;; (SYMBOL EXP [NOW [REQUEST [COMMENT]]])."
+      ;; It works by calling `custom-theme-set-variables' for the `user'
+      ;; theme - which is this, whole: EXP stays the *expression* the
+      ;; theme stack records and `custom-theme-recalc-variable' evals,
+      ;; and `saved-value' is what the initializers read on the next
+      ;; load.
+      ;;--------------------------------------------------------------
+      (apply custom-theme-set-variables 'user args))
+
+    (define (custom-theme-reset-faces theme . args)
+      ;; GNU Emacs's `custom-theme-reset-faces' (`cus-face.el:406').
+      ;;--------------------------------------------------------------
+      (custom-check-theme theme)
+      (for-each
+       (lambda (arg) (custom-push-theme 'theme-face (car arg) theme 'reset))
+       args)
+      #f)
+
+    (define (custom-theme-reset-variables theme . args)
+      ;; GNU Emacs's `custom-theme-reset-variables' (`custom.el:1778').
+      ;;--------------------------------------------------------------
+      (custom-check-theme theme)
+      (for-each
+       (lambda (arg) (custom-push-theme 'theme-value (car arg) theme 'reset))
+       args)
+      #f)
+
+    (define (custom-declare-theme theme feature doc properties)
+      ;; GNU Emacs's `custom-declare-theme' (`custom.el:1213').
+      ;;--------------------------------------------------------------
+      (unless (custom-theme-name-valid-p theme)
+        (error "Custom theme cannot be named" theme))
+      (unless (memq theme (*custom-known-themes*))
+        (*custom-known-themes*
+         (cons theme (*custom-known-themes*))))
+      (put theme 'theme-feature feature)
+      (when doc
+        (put theme 'theme-documentation doc))
+      (when properties
+        (put theme 'theme-properties properties))
+      theme)
+
+    (define (provide-theme theme)
+      ;; GNU Emacs's `provide-theme' (`custom.el:1284').
+      ;;--------------------------------------------------------------
+      (unless (custom-theme-name-valid-p theme)
+        (error "Custom theme cannot be named" theme))
+      (custom-check-theme theme)
+      ;; `provide' is Guile's, and the feature is the one `deftheme'
+      ;; made - `custom-make-theme-feature''s `THEME-theme'.
+      (provide (get theme 'theme-feature)))
+
+    (define (custom-theme--load-path)
+      ;; GNU Emacs's `custom-theme--load-path' (`custom.el:1536'): "Expand
+      ;; `custom-theme-load-path' into a list of directories. Members
+      ;; that either don't exist or are not directories are omitted."
+      ;;
+      ;; The two symbols have their own meanings. `custom-theme-directory'
+      ;; is the user's - Emacs's default is `user-emacs-directory', and
+      ;; this tree's is `$XDG_CONFIG_HOME/schemacs', the directory the
+      ;; init file lives in; the search is inlined rather than borrowed
+      ;; from `(schemacs editor startup)''s `init-path', because
+      ;; `startup' imports `simple' which imports this one. `t' is the
+      ;; installed themes - Emacs's `data-directory'/themes, and here
+      ;; `schemacs/themes' beside the tree's own libraries, found along
+      ;; the load path the way `splash-file' finds `splash.txt'.
+      ;;--------------------------------------------------------------
+      (reverse
+       (fold
+        (lambda (f out)
+          (let ((dir (cond ((eq? f 'custom-theme-directory)
+                            (or (*custom-theme-directory*)
+                                (let ((xdg (getenv "XDG_CONFIG_HOME"))
+                                      (home (getenv "HOME")))
+                                  (cond (xdg (string-append xdg "/schemacs"))
+                                        (home (string-append
+                                               home "/.config/schemacs"))))))
+                           ;; `t' is the installed themes - the first
+                           ;; load-path directory that has one. This is
+                           ;; a *directory* search, which
+                           ;; `locate-file-internal' does not do; the
+                           ;; walk below is what it would be.
+                           ((eq? f 't)
+                            (let find ((rest %load-path))
+                              (cond ((null? rest) #f)
+                                    (else
+                                     (let ((dir (string-append
+                                                 (car rest)
+                                                 "/schemacs/themes")))
+                                       (if (file-directory-p dir)
+                                           dir
+                                           (find (cdr rest))))))))
+                           (else f))))
+            (if (and dir (file-directory-p dir))
+                (cons dir out)
+                out)))
+        '()
+        (*custom-theme-load-path*))))
+
+    (define (custom-available-themes)
+      ;; GNU Emacs's `custom-available-themes' (`custom.el:1512'): "Return
+      ;; a list of Custom themes available for loading. Search the
+      ;; directories specified by `custom-theme-load-path' for files
+      ;; named FOO-theme.scm - `.scm' and not `.el', a theme file here
+      ;; being Scheme - and return a list of FOO symbols."
+      ;;--------------------------------------------------------------
+      (let loop ((dirs (custom-theme--load-path)) (out '()))
+        (if (null? dirs)
+            (reverse out)
+            (let* ((dir (car dirs))
+                   (files (directory-files dir)))
+              (loop (cdr dirs)
+                    (fold
+                     (lambda (file out)
+                       (if (and (> (string-length file)
+                                   (string-length "-theme.scm"))
+                                (string-suffix? "-theme.scm" file))
+                           (let* ((theme (string->symbol
+                                          (substring file 0
+                                                     (- (string-length file)
+                                                        10)))))
+                             (if (and (custom-theme-name-valid-p theme)
+                                      (not (memq theme out)))
+                                 (cons theme out)
+                                 out))
+                           out))
+                     out
+                     files))))))
+
+    (define (load-theme theme . optional)
+      ;; GNU Emacs's `load-theme' (`custom.el:1340'): "Load Custom theme
+      ;; named THEME from its file and possibly enable it."
+      ;; NO-CONFIRM and NO-ENABLE are the two optionals.
+      ;;
+      ;; **The file is Scheme, and that is the departure.** Emacs evals
+      ;; an Elisp file with `load'; a theme here is a Scheme file, and
+      ;; `load' is Guile's. The contents are the same shape -
+      ;; `define-theme', then `custom-theme-set-faces', then
+      ;; `provide-theme' - so a theme file reads the same in both.
+      ;;--------------------------------------------------------------
+      (let* ((no-confirm (and (pair? optional) (car optional)))
+             (no-enable (and (pair? (cdr optional)) (cadr optional))))
+        (unless (symbol? theme)
+          (error "Wrong type argument: symbolp"))
+        (unless (custom-theme-name-valid-p theme)
+          (error "Invalid theme name `" (symbol->string theme) "'"))
+        ;; "If THEME is already enabled, re-enable it after loading,
+        ;; even if NO-ENABLE is t."
+        (if no-enable
+            (set! no-enable (not (custom-theme-enabled-p theme))))
+        ;; "If reloading, clear out the old theme settings."
+        (when (custom-theme-p theme)
+          (disable-theme theme)
+          (put theme 'theme-settings #f)
+          (put theme 'theme-feature #f)
+          (put theme 'theme-documentation #f))
+        (let ((file (locate-file-internal
+                     (string-append (symbol->string theme) "-theme.scm")
+                     (custom-theme--load-path))))
+          (cond
+           ((not file)
+            (error "Unable to find theme file for `" (symbol->string theme) "'"))
+           (else
+            (let ((hash
+                   ;; `secure-hash' takes a string; the file is read whole.
+                   (call-with-input-file file
+                     (lambda (port)
+                       (let loop ((out '()))
+                         (let ((c (read-char port)))
+                           (if (eof-object? c)
+                               (list->string (reverse out))
+                               (loop (cons c out)))))))))
+              ;; Emacs's gate: `custom-safe-themes' first, then
+              ;; `custom-theme-load-confirm''s question - which is a
+              ;; `y-or-n-p' in a `*Custom Theme*' buffer, and that
+              ;; question lives in `(schemacs editor files)', a library
+              ;; above this one (see the import note). Until the prompt
+              ;; can be reached from here, a theme that is not on the
+              ;; safe list and is not confirmed is refused - which is
+              ;; that question's "no" answer, and is why an init file
+              ;; says `#:no-confirm #t' as Emacs's does.
+              ;; "Treat this theme as safe in future sessions?" is not
+              ;; asked either: nothing writes the answer anywhere, so
+              ;; asking would be a lie. Both are named in the header.
+              (when (or no-confirm
+                        (eq? (*custom-safe-themes*) #t)
+                        (member hash (*custom-safe-themes*)))
+                (parameterize ((*custom--inhibit-theme-enable* #t))
+                  (load file)))))))
+        ;; "Optimization: if the theme changes the `default' face, put
+        ;; that entry first. This avoids some `frame-set-background-mode'
+        ;; rigmarole by assigning the new background immediately."
+        (let* ((settings (or (get theme 'theme-settings) '()))
+               (found (find (lambda (s)
+                              (and (eq? (car s) 'theme-face)
+                                   (eq? (cadr s) 'default)))
+                            settings)))
+          (when found
+            (put theme 'theme-settings
+                 (cons found (delq found settings)))))
+        ;; "Finally, enable the theme."
+        (unless no-enable
+          (enable-theme theme))
+        #t))
+
+    (define (custom-enabled-themes-set symbol themes)
+      ;; GNU Emacs's `custom-enabled-themes'' `:set' function
+      ;; (`custom.el:1648'): "Disable all themes not in THEMES", then
+      ;; enable each of THEMES, then the `user' theme.
+      ;;--------------------------------------------------------------
+      (let ((themes (delq 'user (delete-duplicates themes))))
+        (for-each
+         (lambda (theme)
+           (unless (memq theme themes)
+             (disable-theme theme)))
+         (*custom-enabled-themes*))
+        (for-each
+         (lambda (theme)
+           (catch #t
+             (lambda ()
+               (if (custom-theme-p theme)
+                   (enable-theme theme)
+                   (load-theme theme)))
+             (lambda args #f)))
+         (reverse themes))
+        (enable-theme 'user)
+        (*custom-enabled-themes* themes)))
+
+    (define-syntax define-theme
+      (lambda (x)
+        (syntax-case x ()
+          ((_ theme)
+           #'(custom-declare-theme 'theme
+                (string->symbol
+                 (string-append (symbol->string 'theme) "-theme"))
+                #f '()))
+          ((_ theme doc property ...)
+           (string? (syntax->datum #'doc))
+           #'(custom-declare-theme 'theme
+                (string->symbol
+                 (string-append (symbol->string 'theme) "-theme"))
+                doc
+                (syntax->datum #'(property ...)))))))
     )
 )

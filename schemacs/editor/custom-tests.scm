@@ -2,12 +2,14 @@
  (scheme base)
  (scheme char)
  (only (srfi 64) test-assert test-equal test-begin test-end)
+ (prefix (schemacs editor custom) cu:)
  (only (schemacs editor custom)
        define-custom custom-declare-variable custom-initialize-set
        custom-add-option custom-add-dependencies custom-handle-keyword
        custom-variable-p custom--standard-value
        *custom-dont-initialize* *custom-declare-variable-hook*)
  (only (schemacs editor intervals) get put)
+ (only (schemacs editor faces) face-attribute)
  (only (ice-9 exceptions) exception-message))
 
 ;; `custom.el`'s declaration half: `defcustom' and the
@@ -162,5 +164,72 @@
     ;; the variable was never set to its standard value, and the hook ran
     ;; anyway - the C's `run-hooks' is *outside* the `unless'
     (list hook-ran seen)))
+
+;;-------------------------------------------------------------
+;; The themes - `custom.el''s second half
+;;
+;; A theme is written to a temporary directory - the way a user's own
+;; lives beside their init file - and loaded from there, with
+;; `*custom-theme-load-path*' pointing at it. The whole chain is the
+;; test: `define-theme' declares, `custom-theme-set-faces' records,
+;; `load-theme' reads and enables, the face's attributes change, and
+;; `disable-theme' brings the defface spec back.
+;;-------------------------------------------------------------
+
+(define *theme-dir* "/tmp/schemacs-custom-tests-themes")
+(define *theme-file* (string-append *theme-dir* "/dusk-theme.scm"))
+
+(system (string-append "mkdir -p " *theme-dir*))
+(call-with-output-file *theme-file*
+  (lambda (port)
+    (display "(import (schemacs editor custom) (schemacs editor faces))\n" port)
+    (display "(define-theme dusk \"A dark test theme.\")\n" port)
+    (display "(custom-theme-set-faces\n" port)
+    (display " 'dusk\n" port)
+    (display " '(default ((#t (:foreground \"wheat\" :background \"black\"))))\n" port)
+    (display " '(region ((#t (:foreground \"white\" :background \"dark green\")))))\n" port)
+    (display "(provide-theme 'dusk)\n" port)))
+
+(cu:*custom-theme-load-path* (list *theme-dir*))
+
+(test-equal "the theme is available before it is loaded"
+  '(dusk) (cu:custom-available-themes))
+
+(test-equal "load-theme finds the file, enables the theme and applies its faces"
+  '("wheat" "dark green" (dusk))
+  (begin
+    (cu:load-theme 'dusk #t)
+    (list (face-attribute 'default ':foreground)
+          (face-attribute 'region ':background)
+          (cu:*custom-enabled-themes*))))
+
+(test-equal "disable-theme brings the defface spec back"
+  ;; `default' comes back unspecified - which is what Emacs's reset
+  ;; leaves it on a graphic display, the frame's own colours showing
+  ;; through - and `region' comes back the defface spec's `(min-colors
+  ;; 8)' branch, `blue', for the display-less default of
+  ;; `*display-color-cells*'.
+  (list 'unspecified "blue")
+  (begin
+    (cu:disable-theme 'dusk)
+    (list (face-attribute 'default ':foreground)
+          (face-attribute 'region ':background))))
+
+;; What the theme leaves behind on the face's own property: one
+;; `(THEME SPEC)' record, which `face-spec-recalc' walks. The duplicate
+;; the first version of this left - a second record, from `face-spec-set'
+;; being told the spec was the *defface* one - is what this pins: there
+;; is one record per theme, and the defface spec beside it is the face's
+;; own.
+(test-equal "the face carries one theme record, and its defface spec is untouched"
+  '(#t #t #t)
+  (begin
+    (cu:load-theme 'dusk #t)
+    (let ((records (get 'region 'theme-face)))
+      (cu:disable-theme 'dusk)
+      (list (= 1 (length records))
+            (eq? 'dusk (caar records))
+            (not (equal? (cadar records)
+                         (face-defface-spec 'region)))))))
 
 (test-end "schemacs_editor_custom")

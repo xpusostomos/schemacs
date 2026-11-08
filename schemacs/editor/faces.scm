@@ -39,7 +39,14 @@
     (scheme char)
     ;; `(inexact->exact (truncate ...))' for a relative `:height' resolved
     ;; against an absolute one - Emacs's "relative X absolute => absolute".
-    (only (guile) inexact->exact))
+    ;; `(inexact->exact (truncate ...))' for a relative `:height' resolved
+    ;; against an absolute one - Emacs's "relative X absolute => absolute".
+    (only (guile) inexact->exact)
+    ;; `get' reads a face's `theme-face' property - the enabled themes'
+    ;; specs, which `face-spec-recalc' now walks - and `plist-member' is
+    ;; what finds `:extend' in the chosen branch. Both are `fns.c`'s,
+    ;; which is `intervals.scm`'s until there is an `fns.sld' of its own.
+    (only (schemacs editor intervals) get plist-member))
 
   (export
    ;; the face table
@@ -501,18 +508,59 @@
         (and entry (cdr entry))))
 
     (define (face-spec-recalc face)
-      ;; GNU Emacs's `face-spec-recalc': realize FACE again from its
-      ;; specs - reset it, then apply the defface spec's chosen branch and
-      ;; then the override spec's.
+      ;; GNU Emacs's `face-spec-recalc' (`faces.el:1726'): realize FACE
+      ;; again from its specs - reset it, then apply the enabled themes'
+      ;; specs, then the defface spec's chosen branch (only when no theme
+      ;; matched), then the override spec's.
       ;;
-      ;; Emacs does this per frame, applies theme specs in between, and
-      ;; consults X resources; none of those exist here (one frame, no
-      ;; themes, no X), which leaves exactly these three steps.
+      ;; The theme step is the one this tree was missing, and it is
+      ;; Emacs's own shape: each face's `theme-face' property is a list
+      ;; of `(THEME SPEC)', the first element of which is the theme
+      ;; enabled most recently (`enable-theme' conses onto it), so the
+      ;; records are walked in reverse - earliest theme first - and the
+      ;; first branch that matches this display wins. A theme's spec
+      ;; *overrides* the defface spec entirely rather than inheriting
+      ;; from it - `faces.el:1752` - with the one exception of `:extend',
+      ;; which is taken from the defface spec when the theme left it
+      ;; unspecified.
+      ;;
+      ;; Emacs walks frames and consults X resources; here there is one
+      ;; frame's worth of faces and no X, which leaves these steps.
       ;;--------------------------------------------------------------
-      (let ((face (check-face face)))
+      (let* ((face (check-face face))
+             (no-match 0)
+             (defface-attrs
+              (lambda ()
+                (face-spec-choose (face-defface-spec face)))))
         (face-spec-reset-face face)
-        (face-spec-set-2 face (face-spec-choose (face-defface-spec face)))
-        (face-spec-set-2 face (face-spec-choose (face-override-spec face)))
+        ;; (theme and user customization)
+        (let* ((theme-faces (or (get face 'theme-face) '()))
+               (theme-face-applied
+                (let walk ((rest (reverse theme-faces)))
+                  (if (null? rest)
+                      #f
+                      (let ((attrs (face-spec-choose (cadr (car rest))
+                                                     no-match)))
+                        (if (eq? attrs no-match)
+                            (walk (cdr rest))
+                            (begin
+                              (face-spec-set-2 face attrs)
+                              #t)))))))
+          ;; (defface default spec) - only when no theme's spec matched.
+          (unless theme-face-applied
+            (face-spec-set-2 face (defface-attrs)))
+          ;; :extend is inherited from the defface spec even when a
+          ;; theme's spec matched, which is `faces.el:1757''s pair of
+          ;; branches: the C's `default-attrs' is the defface spec's
+          ;; chosen branch, a plist, and `plist-member' is what finds
+          ;; `:extend' in it.
+          (when (and theme-face-applied
+                     (eq? *undefined-face-attribute*
+                          (face-attribute face ':extend)))
+            (let ((tail (plist-member (defface-attrs) ':extend)))
+              (and tail (face-spec-set-2 face (list ':extend (cadr tail))))))
+          ;; defface override spec
+          (face-spec-set-2 face (face-spec-choose (face-override-spec face))))
         face))
 
     (define (face-spec-set face spec . args)

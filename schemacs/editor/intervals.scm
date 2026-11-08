@@ -171,6 +171,7 @@
    ;; `abbreviated-home-dir', as Emacs's does.
    get
    put
+   plist-member
    lookup-char-property
    interval-plist-get
    *text-property-default-nonsticky*

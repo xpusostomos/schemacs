@@ -177,9 +177,15 @@
     *current-keymap*
     *current-message-function*
     *cursor-in-echo-area*
+    *custom--inhibit-theme-enable*
     *custom-current-group-alist*
     *custom-declare-variable-hook*
     *custom-dont-initialize*
+    *custom-enabled-themes*
+    *custom-known-themes*
+    *custom-safe-themes*
+    *custom-theme-directory*
+    *custom-theme-load-path*
     *deactivate-mark-hook*
     *default-keymap*
     *default-text-properties*
@@ -447,6 +453,8 @@
     apply-command
     apply-modifiers
     apply-partially
+    assoc-delete-all
+    assq-delete-all
     attribute-value
     attributes-set
     auto-coding-alist-lookup
@@ -678,6 +686,7 @@
     current-time-string
     cursor-screen-position
     custom--standard-value
+    custom--standard-value-p
     custom-add-dependencies
     custom-add-frequent-value
     custom-add-link
@@ -686,15 +695,30 @@
     custom-add-package-version
     custom-add-to-group
     custom-add-version
+    custom-available-themes
+    custom-check-theme
     custom-current-group
     custom-declare-face
+    custom-declare-theme
     custom-declare-variable
+    custom-enabled-themes-set
     custom-handle-keyword
     custom-initialize-changed
     custom-initialize-default
     custom-initialize-reset
     custom-initialize-set
+    custom-push-theme
+    custom-set-faces
     custom-set-variables
+    custom-theme--load-path
+    custom-theme-enabled-p
+    custom-theme-p
+    custom-theme-recalc-face
+    custom-theme-recalc-variable
+    custom-theme-reset-faces
+    custom-theme-reset-variables
+    custom-theme-set-faces
+    custom-theme-set-variables
     custom-variable-p
     deactivate-mark
     debugger-mode-map
@@ -712,6 +736,7 @@
     define-derived-mode
     define-key
     define-minor-mode
+    define-theme
     del-range
     del-range-1
     del-range-2
@@ -736,6 +761,7 @@
     delete-region
     delete-trailing-space
     delete-window
+    delq
     derived-mode-abbrev-table-name
     derived-mode-hook-name
     derived-mode-map-name
@@ -833,6 +859,7 @@
     dired-unmark
     dired-up-directory
     dired-why
+    disable-theme
     dispatch-input-event
     dispatch-key
     dispatch-key-event
@@ -858,6 +885,7 @@
     easy-mmode-pretty-mode-name
     editor-excluded-libraries
     editor-libraries
+    enable-theme
     encode-coding-string
     encode-eol
     end-of-buffer
@@ -1217,6 +1245,7 @@
     list-substitute
     list-without
     load-init
+    load-theme
     locate-file
     locate-file-internal
     looking-at
@@ -1396,6 +1425,7 @@
     pending-uarg
     perform-replace
     place-undo-boundary!
+    plist-member
     point
     point-marker
     point-max
@@ -1424,6 +1454,7 @@
     previous-single-property-change
     primitive-undo
     propertize
+    provide-theme
     push-mark
     push-mark-command
     put

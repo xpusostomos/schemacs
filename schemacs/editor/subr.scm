@@ -61,6 +61,7 @@
     )
 
   (export
+   assoc-delete-all assq-delete-all delq
    add-to-history
    ;; `minor-mode-alist' and the function that fills it. See the note on
    ;; `add-minor-mode' for why the alist lives here and not with the mode
@@ -492,6 +493,70 @@
       ;; "unbound variable: nil" the echo area showed was.
       ;;--------------------------------------------------------------
       #f)
+
+    (define (assoc-delete-all key alist . rest)
+      ;; GNU Emacs's `assoc-delete-all' (`subr.el:1066'): "Delete from
+      ;; ALIST all elements whose car is KEY. Compare keys with TEST.
+      ;; Defaults to `equal'. Return the modified alist." The C's walk is
+      ;; destructive: `setcdr' unlinks each match from the element before
+      ;; it, and the head matches are skipped by advancing the start.
+      ;;--------------------------------------------------------------
+      (let ((test (if (and (pair? rest) (car rest)) (car rest) equal?)))
+        ;; Emacs's `while' skips the head matches by rebinding ALIST,
+        ;; which is the list everything below then walks - which is why
+        ;; this is a `let*' and not a `let': the splice and the answer
+        ;; both see the advanced list. A first version that skipped with
+        ;; a discarded `(skip ...)' walked the original and never
+        ;; unlinked anything.
+        (let* ((alist (let skip ((rest alist))
+                        (if (and (pair? rest) (test (car (car rest)) key))
+                            (skip (cdr rest))
+                            rest))))
+          ;; The splice is guarded on `pair?' and not on truth: the cdr
+          ;; of the last pair is '(), and '() is true in Scheme - the
+          ;; elisp-nil trap. It is also guarded at the head, because the
+          ;; skip can leave an empty list - every element matched - and
+          ;; the C's `while (setq tail-cdr (cdr tail))' never runs there.
+          (when (pair? alist)
+            (let splice ((tail alist))
+              (let ((next (cdr tail)))
+                (when (pair? next)
+                  (if (and (pair? (car next)) (test (car (car next)) key))
+                      (set-cdr! tail (cdr next))
+                      (splice next))))))
+        ;; the answer is the let*-bound ALIST, which is why this form
+        ;; is the let*'s body and not a form after it.
+        alist)))
+
+    (define (delq elt list)
+      ;; GNU Emacs's `delq' (`fns.c:2081'): "Delete members of LIST which
+      ;; are `eq' to ELT, and return the result. More precisely, this
+      ;; function skips any members `eq' to ELT at the front of LIST,
+      ;; then removes members `eq' to ELT from the remaining sublist by
+      ;; modifying its list structure, then returns the resulting list."
+      ;; The shape is `assoc-delete-all''s, with the elements themselves
+      ;; in place of their cars; the same two guards apply.
+      ;;--------------------------------------------------------------
+      (let* ((list (let skip ((rest list))
+                     (if (and (pair? rest) (eq? (car rest) elt))
+                         (skip (cdr rest))
+                         rest))))
+        (when (pair? list)
+          (let splice ((prev list) (tail (cdr list)))
+            (when (pair? tail)
+              (if (eq? (car tail) elt)
+                  (begin
+                    (set-cdr! prev (cdr tail))
+                    (splice prev (cdr tail)))
+                  (splice tail (cdr tail))))))
+        list))
+
+    (define (assq-delete-all key alist)
+      ;; GNU Emacs's `assq-delete-all' (`subr.el:1084'): "Delete from
+      ;; ALIST all elements whose car is `eq' to KEY" - `assoc-delete-all'
+      ;; with the test `eq'.
+      ;;--------------------------------------------------------------
+      (assoc-delete-all key alist eq?))
 
     (define (nthcdr n list)
       ;; GNU Emacs's `nthcdr': the tail of LIST after the first N
