@@ -475,8 +475,23 @@
           (set! *font-pixel-size* pixels)
           (set! *font-ascent*
                 (pango-units->pixels (pango-font-metrics-get-ascent metrics)))
+          ;; **The line height is ascent plus descent**, which is the C's
+          ;; own assignment: `FRAME_LINE_HEIGHT (f) = font_ascent +
+          ;; font_descent' (`pgtkterm.c:897'), as `xterm.c:27144' and the
+          ;; other window systems'. Pango's `get-height' is a different
+          ;; number - it excludes part of the internal leading - and the
+          ;; mismatch was a row a pixel taller than the cell: 20 against
+          ;; 19 for this font, so the last text row of a window reached
+          ;; into the mode line's row and its bottom half was painted
+          ;; over - the truncated last line of the completions window.
+          ;; `row-metrics' (`face-metrics' on this display) answers the
+          ;; same ascent plus descent, which is why the two disagreed.
           (set! *cell-height*
-                (pango-units->pixels (pango-font-metrics-get-height metrics)))
+                (max 1
+                     (+ (pango-units->pixels
+                         (pango-font-metrics-get-ascent metrics))
+                        (pango-units->pixels
+                         (pango-font-metrics-get-descent metrics)))))
           (set! *cell-width*
                 (max 1 (pango-units->pixels
                         (pango-font-metrics-get-approximate-char-width metrics))))
