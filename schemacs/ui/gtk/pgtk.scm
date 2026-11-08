@@ -1771,11 +1771,26 @@
       ;; new frame: everything drawn from here overwrites it. The surface
       ;; is made here rather than at open, and remade after a resize,
       ;; because its size is the grid's.
+      ;;
+      ;; **The fill is the default face's background, and it used to be
+      ;; hardcoded white.** Only the cells a glyph is written into are
+      ;; painted by `write-glyphs!', so a themed `default' background -
+      ;; `black', in a dark theme - left every cell with no glyph white,
+      ;; and a theme changed the text and the mode line while the frame
+      ;; stayed white: measured, `enable-theme' on this display left
+      ;; `(face-attribute 'default ':background)' "black" and the screen
+      ;; unchanged but for the mode line. Emacs's frame background is
+      ;; the default face's (`x_fill_rectangle' over the frame with
+      ;; `FRAME_BACKGROUND_PIXEL', which `realize_default_face' set from
+      ;; the face).
       ;;--------------------------------------------------------------
       (pgtk-ensure-surface! d)
       (let ((cr (pgtk-cr d)))
         (when cr
-          (cairo-set-source-rgb cr 1 1 1)
+          (apply cairo-set-source-rgb
+                 cr
+                 (or (colour->rgb (face-attribute 'default ':background))
+                     (list 1.0 1.0 1.0)))
           (cairo-paint cr))))
 
     (define-method (update-window-begin! (d <pgtk-display>)) #t)
@@ -1837,7 +1852,14 @@
           ;; **Y is already a pixel offset**, from the redisplay's own
           ;; row walk; only X is still a cell, because the horizontal
           ;; pitch is one per frame.
-          (apply cairo-set-source-rgb cr (or background (list 1.0 1.0 1.0)))
+          ;; A run with no background of its own shows the *frame's* -
+          ;; which is the default face's, `clear-frame-area!'s fill. The
+          ;; hardcoded white this used to fall back to would punch white
+          ;; holes in a themed frame wherever the face named no colour.
+          (apply cairo-set-source-rgb
+                 cr (or background
+                        (colour->rgb (face-attribute 'default ':background))
+                        (list 1.0 1.0 1.0)))
           (cairo-rectangle cr (cell-x x) y
                            (* *cell-width* (text-cells text))
                            *cell-height*)
