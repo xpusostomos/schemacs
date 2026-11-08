@@ -133,7 +133,7 @@
     ;; `x_new_font`'s resize: the frame keeps its rows and columns at the
     ;; new font unless `frame-inhibit-implied-resize' says otherwise.
     (only (schemacs editor frame) adjust-frame-size! *frame-list* frame-width
-          frame-height frame-output)
+          frame-height frame-output frame-set-background-mode)
     ;; Opening a display initializes faces against it, as `term.sld''s
     ;; `with-terminal' does.
     (only (schemacs editor faces)
@@ -2022,14 +2022,25 @@
       ;;     the spec's last-resort `(#t :background "gray")' instead of
       ;;     `lightgoldenrod2'.
       ;;   * `display-color-cells' is the display's own answer.
-      ;;   * `frame-background-mode' is `light': this display paints the
-      ;;     default face as black on white.
+      ;;   * `frame-background-mode' is the frame's own answer, computed
+      ;;     by `frame-set-background-mode' from the default face's
+      ;;     background - which at initialization is the stock white -
+      ;;     and is what a `(background dark)' branch is tested against.
+      ;;     It used to be hardcoded `light', which is why a themed
+      ;;     black frame read every light branch and `Find file:' drew
+      ;;     `medium blue' on black.
       ;;--------------------------------------------------------------
       (*window-system* 'pgtk)
       (*display-color-cells* (display-color-cells d))
       (*display-type* 'color)
-      (*frame-background-mode* 'light)
       (for-each face-spec-recalc (face-list))
+      ;; **The mode is computed and the faces recalculated in one
+      ;; place**, which is `x_create_frame''s `(frame-set-background-
+      ;; mode frame t)' after its own face initialization
+      ;; (`xfaces.c:2243' via `face-set-after-frame-default'). The
+      ;; hardcode this replaces was an initialization of the parameter
+      ;; and a recalculation of nothing.
+      (frame-set-background-mode #f)
       ;; The `default' face has just been reset, which takes its
       ;; `:height' with it - so the font is opened again from what is
       ;; left, exactly as `face-set-after-frame-default' ends by

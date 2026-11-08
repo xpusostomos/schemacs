@@ -94,7 +94,14 @@
     ;; changing it touches every library that makes a window.
     ;; `display-graphic-p' is a question about the window system the frame
     ;; is on, which is what the face machinery records.
-    (only (schemacs editor faces) *window-system*)
+    (only (schemacs editor faces)
+          *window-system* *display-color-cells* *display-type*
+          *frame-background-mode* *frame-background-mode-function*
+          color-dark-p face-list face-attribute
+          face-override-spec face-spec-recalc)
+    ;; A colour *name*'s RGB - `tty-colors.el''s table, which is what a
+    ;; name means here, as `xfaces.c''s `tty_lookup_color' is.
+    (only (schemacs editor tty-colors) tty-color-standard-values)
     (only (schemacs editor timer)
           cancel-timer run-at-time run-with-idle-timer run-with-timer))
 
@@ -110,6 +117,7 @@
    ;; frame.c's pixel geometry, which `text-scale-min-amount' and
    ;; `text-scale-max-amount' (`face-remap.el') are bounded by.
    frame-char-height frame-char-width
+   frame-set-background-mode
    display-pixel-width display-pixel-height
    adjust-frame-size! *frame-inhibit-implied-resize* frame-inhibit-resize?
    *blink-cursor-blinks*
@@ -1210,6 +1218,142 @@
              (unit-height (max 1 (line-height display))))
         (cons (quotient (cdr size) unit-height)
               (quotient (car size) unit-width))))
+
+    ;;----------------------------------------------------------------
+    ;; The background mode
+    ;;
+    ;; `frame-set-background-mode' (`frame.el:1529') and the two
+    ;; functions under it: the face-spec branches that test
+    ;; `(background dark)' and `(background light)' are only as right as
+    ;; this answer, and this tree used to hardcode `light' on Gtk - so a
+    ;; themed black frame read every light branch, and `Find file:' drew
+    ;; `minibuffer-prompt''s `medium blue' on black.
+    ;;--------------------------------------------------------------
+
+    (define (%rgb-of name)
+      ;; NAME's RGB as three [0,1] components, or #f when it is not a
+      ;; colour name this tree knows. Emacs asks `color-values' - the
+      ;; X server's or the terminal's, `tty_lookup_color' on a terminal -
+      ;; and here the one table a name means anything by is
+      ;; `tty-colors''.
+      ;;--------------------------------------------------------------
+      (let ((rgb (and (string? name)
+                      (tty-color-standard-values name))))
+        (and (list? rgb)
+             (= 3 (length rgb))
+             (map (lambda (c) (/ c 65535.0)) rgb))))
+
+    ;; The user's own answer, which is `frame-terminal-default-bg-mode''s
+    ;; first question (`frame.el:1591'): the `frame-background-mode'
+    ;; *defvar*, the one a user sets in an init file to force dark or
+    ;; light over every frame. It is not the recorded answer - that is
+    ;; `*frame-background-mode*', the parameter the spec matcher reads -
+    ;; and conflating the two is what made the recompute a no-op: once
+    ;; initialization had written `light' into the recorded slot, the
+    ;; override branch returned it and no theme's black could ever flip
+    ;; the mode. Measured, the hook fired with the default face's
+    ;; background already "black" and the computation answered the
+    ;; recorded `light'.
+    (define *frame-terminal-default-bg-mode* (make-parameter #f))
+
+    (define (frame--current-background-mode frame)
+      ;; GNU Emacs's `frame--current-background-mode' (`frame.el:1508').
+      ;; The answer comes from FRAME's background colour:
+      ;; `color-dark-p' over its values is dark, anything it cannot ask
+      ;; falls back to the window system's own default - `light' for a
+      ;; window system or an xterm-class terminal, `dark' for the bare
+      ;; consoles.
+      ;;
+      ;; **The background colour is the default face's.** Emacs reads the
+      ;; `background-color' frame parameter, which
+      ;; `realize_default_face' filled from the face; here the fill is
+      ;; the face's colour outright (`clear-frame-area!' reads it), so
+      ;; the face *is* the parameter, and an unspecified background is
+      ;; the `unspecified-fg' inverted-video case's neighbour - the C's
+      ;; `(not (color-values ...))' fallback.
+      ;;--------------------------------------------------------------
+      (let* ((frame-default-bg-mode (*frame-terminal-default-bg-mode*))
+             (bg-color (face-attribute 'default ':background))
+             ;; `window-system' is the window-system-or-nil test the C's
+             ;; `default-bg-mode' makes: a windowed display starts light,
+             ;; a bare tty dark - "xterm and its cousins are asked
+             ;; instead" being the tty half, which `(schemacs ui
+             ;; ncurses xterm)''s OSC 11 answer already covers by
+             ;; setting the parameter itself.
+             (default-bg-mode (if (*window-system*) 'light 'dark)))
+        (cond (frame-default-bg-mode)
+              ((not (string? bg-color)) default-bg-mode)
+              ((not (%rgb-of bg-color)) default-bg-mode)
+              ((color-dark-p (%rgb-of bg-color)) 'dark)
+              (else 'light))))
+
+    (define *inhibit-frame-set-background-mode* (make-parameter #f))
+    ;; ^ GNU Emacs's `inhibit-frame-set-background-mode' (`frame.el:
+    ;; 1506'), the loop guard bug#911 was: `face-spec-recalc' sets the
+    ;; default face's attributes, which re-reaches this function
+    ;; through the hook the C's `calln' is, and the second entry would
+    ;; recalculate for ever. It is bound round the recalculation.
+
+    (define (frame-set-background-mode frame . keep-face-specs)
+      ;; GNU Emacs's `frame-set-background-mode' (`frame.el:1529'):
+      ;; "Set up display-dependent faces on FRAME."
+      ;;
+      ;; The mode and the display type are computed, compared against
+      ;; what the frame last had, and when either changed the face specs
+      ;; are chosen again - `face-spec-recalc' over every face, which is
+      ;; the C's loop over the unmodified ones. The *modified* faces are
+      ;; left alone there: a face with an override spec answers its
+      ;; override, and recalc would take the user's own changes back
+      ;; off. Emacs records the unmodified set by hashing each face's
+      ;; current realization against its user spec; here a face with an
+      ;; override spec is the same question asked one way, so the recalc
+      ;; skips those and runs over the rest.
+      ;;
+      ;; There are no frame parameters to record the old values in, so
+      ;; the comparison is against the parameters themselves - which is
+      ;; the same comparison the C makes against the frame's, on a tree
+      ;; whose one display is what both name.
+      ;;--------------------------------------------------------------
+      (let* ((bg-mode (frame--current-background-mode frame))
+             (display-type
+              (cond ((not (*window-system*))
+                     (if (> (*display-color-cells*) 2) 'color 'mono))
+                    ((> (*display-color-cells*) 2) 'color)
+                    (else 'mono)))
+             (old-bg-mode (*frame-background-mode*))
+             (old-display-type (*display-type*)))
+        (unless (and (eq? bg-mode old-bg-mode)
+                     (eq? display-type old-display-type))
+          ;; **The parameters are set, not parameterized.** A frame's
+          ;; background mode is recorded state - the C's
+          ;; `modify-frame-parameters' - and the recalculation below
+          ;; reads it. A `parameterize' would bind it round the recalc
+          ;; and revert, so the next spec test would see the old
+          ;; answer; a plain `set!' on a parameter *is* its writer.
+          (*frame-background-mode* bg-mode)
+          (*display-type* display-type)
+          ;; The inhibit is the C's own guard round the recalculation
+          ;; (bug#911): without it the default face's recalculation
+          ;; re-reaches this function through the background hook and
+          ;; the recalculation never ends.
+          (parameterize ((*inhibit-frame-set-background-mode* #t))
+            (for-each
+             (lambda (face)
+               (unless (face-override-spec face)
+                 (face-spec-recalc face)))
+             (face-list)))
+          #t)))
+
+    ;; The seam faces.scm's `set-face-attribute' reaches for: the C's
+    ;; `calln (Qframe_set_background_mode, frame)' when the default
+    ;; face's background changes (`xfaces.c:3902'), which a library
+    ;; below this one cannot spell. FRAME is the hook's one argument
+    ;; and `#f' is what a caller without a frame passes - the selected
+    ;; frame's answer being the one that matters on this tree.
+    (define (%frame-background-mode-hook frame)
+      (unless (*inhibit-frame-set-background-mode*)
+        (frame-set-background-mode frame)))
+    (*frame-background-mode-function* %frame-background-mode-hook)
 
     (define *frame-list* (make-parameter '()))
     ;; ^ GNU Emacs's `Vframe_list' (`frame.c:284'): every live frame, most

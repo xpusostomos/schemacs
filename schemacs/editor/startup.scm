@@ -39,6 +39,10 @@
     (only (guile) %load-path catch current-module datum->syntax format
           getenv load resolve-module set-current-module
           set-module-declarative?!)
+    ;; `exception-message' and `-irritants' are `ice-9 exceptions''s -
+    ;; the two reads `%condition-text' makes of a raised condition.
+    (only (ice-9 exceptions) exception-message exception-irritants)
+    (only (guile) string-contains)
     ;; the editor's names are *not* given to the init file: it imports what
     ;; it needs, as an Emacs init file requires what it needs - see
     ;; `load-init'
@@ -220,6 +224,25 @@
                    ((char=? #\~ (string-ref s i)) #t)
                    (else (loop (+ i 1)))))))
 
+    (define (%condition-text condition)
+      ;; A condition's message is a *format template* and its text is in
+      ;; the irritants - `schemacs/main.scm''s `condition-text', which
+      ;; cannot be imported here (it is `(guile)''s file, above this
+      ;; library), spelled out. Both reads are defensive, a handler that
+      ;; raises while reporting being worse than the error it reports.
+      ;;--------------------------------------------------------------
+      (let ((message (catch #t (lambda () (exception-message condition))
+                             (lambda a #f)))
+            (irritants (catch #t (lambda () (exception-irritants condition))
+                               (lambda a '()))))
+        (if (and (string? message)
+                 (pair? irritants)
+                 (string-contains message "~"))
+            (catch #t
+              (lambda () (apply format #f message irritants))
+              (lambda args message))
+            message)))
+
     (define (init-error-text path key args)
       ;; What is said about an init file that failed: the shell's wording,
       ;; then the condition's own - and a Guile condition's text is a
@@ -234,6 +257,18 @@
       ;; so without the join a user is shown `#f Unbound variable: ~S #f'
       ;; and never learns *which* name was unbound - which is the one
       ;; thing an init file's error most needs to say.
+      ;;
+      ;; **A `raise-exception' arrives as `%exception' and the condition
+      ;; object itself.** Guile's `catch' hands the handler KEY and the
+      ;; throw's arguments; the exception machinery's key is
+      ;; `%exception' and its one argument is the condition - a compound
+      ;; one when a library raised it with `error', whose message and
+      ;; irritants are what the user needs. The walk below never finds a
+      ;; template in a condition *object* - it is a record, not text - so
+      ;; the fallback that used to name `%exception' now asks the
+      ;; condition for its own text first. Measured, a `load-theme' that
+      ;; found no theme file read as bare `%exception' and now reads
+      ;; "Unable to find theme file for `dusk'".
       ;;--------------------------------------------------------------
       (let ((words (let flatten ((x args) (out '()))
                      (cond ((null? x) (reverse out))
@@ -243,7 +278,17 @@
         (let loop ((rest words))
           (cond
            ((null? rest)
-            (string-append "error: init file " path ": " (symbol->string key)))
+            ;; The walk found nothing but the condition's key. A
+            ;; `%exception' means ARGS holds the condition object, and
+            ;; its own message - put together with its irritants - is
+            ;; the text; anything else is the key's name, as before.
+            (let ((text (and (eq? key '%exception)
+                             (pair? args)
+                             (%condition-text (car args)))))
+              (string-append "error: init file " path ": "
+                             (if (and text (not (string=? text "")))
+                                 text
+                                 (symbol->string key)))))
            ((%template? (car rest))
             (let ((text (catch #t
                           (lambda () (apply format #f (car rest) (cdr rest)))

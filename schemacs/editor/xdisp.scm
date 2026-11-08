@@ -1414,11 +1414,20 @@
                     ;; The shortcut for a plain row: no text properties,
                     ;; no overlay over it and nothing else painting means
                     ;; every cell is the default face, so the row is one
-                    ;; write with no face at all. An *overlay* is a face
-                    ;; too - the search highlight is an overlay - and
-                    ;; leaving overlays out is what made isearch's matches
-                    ;; invisible on a buffer with no text properties of
-                    ;; its own.
+                    ;; write - **in the default face**, which is what
+                    ;; Emacs's `write_glyphs' draws a no-face run in. The
+                    ;; token #f this passed meant "the display's own
+                    ;; appearance", which was black-on-white while the
+                    ;; default face was the plain one and stopped being
+                    ;; true the day the default face had content: a themed
+                    ;; `default' of wheat-on-black drew the buffer in the
+                    ;; plain token - black ink on the black frame, Chris's
+                    ;; "text is invisible until I click on it", the click
+                    ;; being the region's face arriving over it. An
+                    ;; *overlay* is a face too - the search highlight is
+                    ;; an overlay - and leaving overlays out is what made
+                    ;; isearch's matches invisible on a buffer with no
+                    ;; text properties of its own.
                     ;;
                     ;; It is asked of *this row* and not of the buffer, so
                     ;; that one overlay somewhere does not put every row of
@@ -1428,7 +1437,8 @@
                              (null? (overlays-in slice-start (+ slice-start len))))
                         (write-glyphs! (current-display)
                                        (line-texts-glyphs texts from to)
-                                       row-y x0 #f)
+                                       row-y x0
+                                       (face->attribute 'default))
                         (let ((offsets (list->vector
                                         (line-texts-offsets texts from to)))
                               (glyphs (list->vector

@@ -11,6 +11,8 @@
  (only (schemacs editor test-display) <test-display>)
  (prefix (schemacs editor dispnew) dn:)
  (only (oop goops) define-class make)
+ (only (schemacs editor faces) set-face-attribute)
+ (prefix (schemacs editor xfaces) x:)
  
  (only (schemacs editor buffer) set-buffer-local-value! %mark-marker with-current-buffer
  set-point allocate-buffer)
@@ -224,7 +226,7 @@
 (test-equal '(1 ((0 6 0)))
   (let ((ed (allocate-buffer)))
     (with-current-buffer ed (insert "abcdef"))
-    (let ((runs (xd:line-face-runs ed 1 "abcdef")))
+    (let ((runs (xd:line-face-runs ed 1 6)))
       (list (length runs) runs))))
 
 ;; A face on the middle of a line cuts it into three runs, and each run
@@ -233,11 +235,11 @@
 ;; starting at position 1 are the offsets 1 to 4.
 (test-equal 3
   (length (xd:line-face-runs (buffer-with-face "abcdefgh" 2 5 'bold) 1
-                             "abcdefgh")))
+                             8)))
 
 (test-equal '(#f #t #f)
   (let ((runs (xd:line-face-runs (buffer-with-face "abcdefgh" 2 5 'bold) 1
-                                 "abcdefgh")))
+                                 8)))
     (let loop ((rest runs) (acc '()))
       (if (null? rest)
           (reverse acc)
@@ -246,7 +248,7 @@
 ;; ...and the runs cover the line exactly, with no gap and no overlap.
 (test-equal '((0 1) (1 4) (4 8))
   (map (lambda (run) (list (car run) (cadr run)))
-       (xd:line-face-runs (buffer-with-face "abcdefgh" 2 5 'bold) 1 "abcdefgh")))
+       (xd:line-face-runs (buffer-with-face "abcdefgh" 2 5 'bold) 1 8)))
 
 ;; The runs are bounded by the *line*, and their positions are buffer
 ;; columns offset by where the line starts - which is what makes the
@@ -260,11 +262,11 @@
 (test-equal '((0 1) (1 2) (2 3))
   (let ((ed (buffer-with-face "abcdefgh" 5 6 'bold)))
     (map (lambda (run) (list (car run) (cadr run)))
-         (xd:line-face-runs ed 4 "def"))))
+         (xd:line-face-runs ed 4 3))))
 
 (test-equal #t
   (let* ((ed (buffer-with-face "abcdefgh" 5 6 'bold))
-         (runs (xd:line-face-runs ed 4 "def")))
+         (runs (xd:line-face-runs ed 4 3)))
     (and (not (= (caddr (car runs)) (caddr (cadr runs))))
          (not (= (caddr (cadr runs)) (caddr (caddr runs)))))))
 
@@ -287,12 +289,13 @@
   ;; color palette.
   (with-display
    (lambda ()
-     (xd:line-face-runs (region-buffer text point mark active?) 0 text))
+     (xd:line-face-runs (region-buffer text point mark active?) 1
+                        (string-length text)))
    1 'mono #f))
 
 (define region-attribute (region-runs "abcdef" 2 5 #t))
 
-(test-equal '((0 2) (2 5) (5 6))
+(test-equal '((0 1) (1 4) (4 6))
   (map (lambda (run) (list (car run) (cadr run))) region-attribute))
 (test-equal #t
   (let ((runs region-attribute))
@@ -328,3 +331,63 @@
    1 'mono #f))
 
 (test-end "schemacs_editor_faces_runs")
+
+;;------------------------------------------------------------------
+;; The background mode, and what recomputes it
+;;
+;; `frame-set-background-mode' (`frame.el:1529') computes the mode from
+;; the default face's background and re-chooses the specs that test
+;; `(background dark)' and `(background light)' when it changes - and
+;; the hardcode it replaced on Gtk was why a themed black frame read
+;; every light branch, `Find file:' drawing `minibuffer-prompt''s
+;; `medium blue' on black. The computation is `color-dark-p' over the
+;; colour's values, which is the C's gamma-corrected luminance against
+;; the 0.325 cut-off.
+;;
+;; `set-face-attribute' is the C's trigger (`xfaces.c:3902'): a
+;; background change on `default' reaches the recompute through the
+;; hook parameter, `frame.scm' having installed the function there -
+;; the tree's shape for the C's `calln' across a library boundary.
+;;------------------------------------------------------------------
+
+(test-equal "color-dark-p answers the C's table"
+  '(#t #f)
+  (list (f:color-dark-p '(0.0 0.0 0.0))          ; black
+        (f:color-dark-p '(1.0 1.0 1.0))))        ; white
+
+(test-equal "a dark default flips the mode and the branches follow"
+  '(light dark light)
+  (parameterize ((f:*display-color-cells* 256)
+                 (f:*display-type* 'color)
+                 (f:*frame-background-mode* #f)
+                 (f:*window-system* 'pgtk)
+                 (dn:current-display (make <test-display>)))
+    ;; The hook is what a caller without a frame library reaches
+    ;; through; here the computed answer is driven directly.
+    (let* ((set-mode (@@ (schemacs editor frame) frame-set-background-mode))
+           (mode (lambda () (f:*frame-background-mode*))))
+      ;; a light default - the stock white - and the light branch
+      (set-face-attribute 'default #f ':background "white")
+      (set-mode #f)
+      (let ((light (mode)))
+        ;; the theme's black
+        (set-face-attribute 'default #f ':background "black")
+        (set-mode #f)
+        (let ((dark (mode)))
+          ;; and back
+          (set-face-attribute 'default #f ':background "white")
+          (set-mode #f)
+          (list light dark (mode)))))))
+
+(test-equal "and the prompt's own dark branch answers cyan"
+  'cyan
+  (parameterize ((f:*display-color-cells* 256)
+                 (f:*display-type* 'color)
+                 (f:*frame-background-mode* 'dark)
+                 (f:*window-system* 'pgtk)
+                 (dn:current-display (make <test-display>)))
+    (for-each f:face-spec-recalc (f:face-list))
+    (x:attribute-value
+     (x:merge-face-ref 'minibuffer-prompt
+                       (x:merge-face-ref 'default (x:face-attributes-empty)))
+     ':foreground)))

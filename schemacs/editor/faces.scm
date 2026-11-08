@@ -41,7 +41,9 @@
     ;; against an absolute one - Emacs's "relative X absolute => absolute".
     ;; `(inexact->exact (truncate ...))' for a relative `:height' resolved
     ;; against an absolute one - Emacs's "relative X absolute => absolute".
-    (only (guile) inexact->exact)
+    ;; `caddr' is `(guile)''s - `color-dark-p''s blue component reads
+    ;; it, as most of this tree's three-part accessors do.
+    (only (guile) inexact->exact caddr)
     ;; `get' reads a face's `theme-face' property - the enabled themes'
     ;; specs, which `face-spec-recalc' now walks - and `plist-member' is
     ;; what finds `:extend' in the chosen branch. Both are `fns.c`'s,
@@ -82,6 +84,8 @@
    *display-type*
    *face-attribute-name-alist*
    *face-attributes*
+   color-dark-p
+   *frame-background-mode-function*
    *frame-background-mode*
    *undefined-face-attribute*
    *window-system*
@@ -311,8 +315,37 @@
       ;; when it is not known - in which case a `(background dark)'
       ;; branch does not match either way, which is what Emacs does until
       ;; something asks the terminal.
+      ;;
+      ;; **It is also the user's override**, which is the sense Emacs's
+      ;; defvar has (`frame.el:1467'): "If non-nil, use that setting
+      ;; rather than determine the background mode from the frame
+      ;; color". `frame-terminal-default-bg-mode' asks it first, and
+      ;; `frame--current-background-mode''s computed answer is what it
+      ;; falls through to.
       ;;--------------------------------------------------------------
       (make-parameter #f))
+
+    ;; The relative luminance a background must fall under to count as
+    ;; dark - `faces.el:1894''s "cut-off value determined
+    ;; experimentally".
+    (define *color-luminance-dark-limit* 0.325)
+
+    (define (color-dark-p rgb)
+      ;; GNU Emacs's `color-dark-p' (`faces.el:1900'): "Whether RGB is
+      ;; more readable against white than black. RGB is a 3-element list
+      ;; (R G B), each component in the range [0,1]."
+      ;;
+      ;; "Compute the relative luminance after gamma-correcting
+      ;; (assuming sRGB), and compare to a cut-off value determined
+      ;; experimentally." The gamma is 2.2, "an approximation to sRGB
+      ;; gamma; it should be good enough for the purpose of this
+      ;; function", and the components weigh as the CIE curve does.
+      ;;--------------------------------------------------------------
+      (let* ((r (expt (car rgb) 2.2))
+             (g (expt (cadr rgb) 2.2))
+             (b (expt (caddr rgb) 2.2))
+             (y (+ (* r 0.2126) (* g 0.7152) (* b 0.0722))))
+        (< y *color-luminance-dark-limit*)))
 
     (define (display-supports-face-attributes-p options)
       ;; GNU Emacs's `display-supports-face-attributes-p': whether the
@@ -434,17 +467,43 @@
           (loop (cddr rest) (cons value (cons key acc)) #t))
          (else (loop (cddr rest) (cons (cadr rest) (cons (car rest) acc)) found)))))
 
+    (define *frame-background-mode-function* (make-parameter #f))
+    ;; ^ The seam `Fset_face_attribute''s background-colour branch is
+    ;; (`xfaces.c:3902'): "Changing the background color might change
+    ;; the background mode, so that we have to load new defface specs.
+    ;; Call frame-set-background-mode to do that." The C reaches the
+    ;; Lisp through `calln' - one obarray - which a Scheme library
+    ;; below `frame.scm' cannot; the hook parameter is this tree's
+    ;; shape for it (`buffer.scm''s `*buffer-visited-file-modtime-
+    ;; function*' is the same arrangement). `frame.scm' installs
+    ;; `frame-set-background-mode' as the value, and nobody below
+    ;; knows a frame exists.
+
     (define (set-face-attribute face frame . args)
       ;; GNU Emacs's `set-face-attribute': set attributes of FACE. ARGS is
       ;; the plist, as it is in Elisp; FRAME is accepted and not consulted
       ;; (one frame here - see the header).
+      ;;
+      ;; **A background change on `default' recomputes the background
+      ;; mode**, which is the C's branch - the face-spec branches
+      ;; testing `(background dark)' and `(background light)' are only
+      ;; as right as that answer, and a theme that sets the default
+      ;; face's background has changed them all.
       ;;--------------------------------------------------------------
-      (let loop ((rest args))
-        (cond
-         ((not (and (pair? rest) (pair? (cdr rest)))) face)
-         (else
-          (internal-set-lisp-face-attribute face (car rest) (cadr rest))
-          (loop (cddr rest)))))
+      (let ((background-changed #f))
+        (let loop ((rest args))
+          (cond
+           ((not (and (pair? rest) (pair? (cdr rest)))) face)
+           (else
+            (when (and (eq? face 'default)
+                       (eq? (car rest) ':background)
+                       (not (equal? (cadr rest)
+                                    (face-attribute 'default ':background))))
+              (set! background-changed #t))
+            (internal-set-lisp-face-attribute face (car rest) (cadr rest))
+            (loop (cddr rest)))))
+        (when (and background-changed (*frame-background-mode-function*))
+          ((*frame-background-mode-function*) #f)))
       face)
 
     (define (face-spec-set-2 face face-attrs)
@@ -463,13 +522,25 @@
       ;; set to the values `realize_default_face' would give it rather
       ;; than to unspecified, because a completely unspecified default
       ;; face leaves nothing to fall back on.
+      ;;
+      ;; **A reset of `default''s background reaches the background hook
+      ;; the way `set-face-attribute''s does** - `frame.el''s
+      ;; recompute-and-recalculate is what reads a disabled theme's
+      ;; restoration back into the spec branches. The reset used to
+      ;; write the table directly, and a disabled theme's black default
+      ;; left the mode dark until the next background change.
       ;;--------------------------------------------------------------
-      (let ((face (check-face face)))
+      (let ((face (check-face face))
+            (background-was (face-attribute 'default ':background)))
         (let loop ((rest (*face-attributes*)) (acc '()))
           (cond
            ((null? rest) (*face-attributes* (reverse acc)))
            ((eq? (caar rest) face) (loop (cdr rest) (cons (cons face '()) acc)))
-           (else (loop (cdr rest) (cons (car rest) acc))))))
+           (else (loop (cdr rest) (cons (car rest) acc)))))
+        (when (and (eq? face 'default)
+                   (not (equal? background-was *undefined-face-attribute*))
+                   (*frame-background-mode-function*))
+          ((*frame-background-mode-function*) #f)))
       face)
 
     ;;----------------------------------------------------------------
