@@ -114,7 +114,11 @@
     (only (schemacs editor search) search-backward search-forward)
     ;; `current-column' is indent.c's, which this library is the first
     ;; user of - `set-fill-column''s bare-C-u case reads it.
-    (only (schemacs editor indentc) current-column)
+    ;; `line-next-start' and `window-line-rows-at' are what
+    ;; `completion-fitted-height' measures the buffer's display rows
+    ;; with - `window-text-pixel-size''s answer, in rows.
+    (only (schemacs editor indentc)
+          current-column line-next-start window-line-rows-at)
     ;; `self-insert-command' is what SPC does in a file-name minibuffer
     ;; (`minibuffer-local-filename-completion-map' below), and
     ;; `with-current-buffer' and the line motion are the ordinary
@@ -127,7 +131,7 @@
        *this-command* *last-command*)
     (only (schemacs editor frame)
           *current-frame* *echo-area-buffer* *echo-area-prompt* *minibuffer*
-          frame-height select-window set!frame-message
+          frame-height select-window selected-window set!frame-message
           set-message! set-window-point! window-buffer window-height
           window-list window-width)
     ;; `try-completion' and `all-completions' are `minibuf.c''s and live in
@@ -2123,15 +2127,34 @@ read-number-history
     (define (completion-fitted-height buffer)
       ;; The height `completion-display-window' gives the `*Completions*'
       ;; window, as GNU Emacs's `fit-window-to-buffer' computes it: the
-      ;; buffer's text lines plus its mode line, at least
+      ;; buffer's text *rows* plus its mode line, at least
       ;; `window-min-height', at most `*completions-max-height*' or -
       ;; that being nil - the frame's text area less a minimum for the
       ;; window above.
       ;;--------------------------------------------------------------
-      ;; The buffer's text lines plus its mode line: Emacs writes this as
-      ;; `line-number-at-pos' of the end of the buffer, which is
-      ;; `(count_lines BEGV ZV) + 1' - and the outer `+ 1' is the mode line.
-      (let* ((needed (+ 1 (+ 1 (count-lines buffer (buffer-beg buffer) (buffer-z buffer)))))
+      ;; **The measure is the display's, not the line count.** Emacs
+      ;; asks `window-text-pixel-size' (`window.el:10415') - how many
+      ;; pixels the text will occupy *as drawn*, wrapped rows included -
+      ;; and rounds to lines. This tree's `count-lines' is the logical
+      ;; line breaks, and a candidate line wider than the window wraps
+      ;; into more rows than it has breaks: measured on a 60-column
+      ;; window, a buffer of 3 logical lines is 5 display rows, and the
+      ;; window fitted from the logical count left its last line under
+      ;; the mode line - Chris's report. The walk
+      ;; `window-line-rows-at' answers what the display will draw, one
+      ;; line's rows at a time, which is the same question the C's
+      ;; measure answers.
+      ;;--------------------------------------------------------------
+      (let* ((row-walk
+              (let loop ((pos (buffer-beg buffer)) (rows 0))
+                (if pos
+                    (loop (line-next-start buffer pos)
+                          (+ rows (window-line-rows-at
+                                   (or (get-buffer-window buffer)
+                                       (selected-window))
+                                   pos)))
+                    rows)))
+             (needed (+ 1 row-walk))
              (max-height (or (*completions-max-height*)
                              (max 1
                                   (- (- (frame-height (*current-frame*)) 1)
