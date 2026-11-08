@@ -37,7 +37,7 @@
  ;; `cursor-type' - the tests below are its rule, not the drawing of it.
  (only (schemacs editor xdisp)
        *truncate-partial-width-windows* get-window-cursor-type
-       line-display-rows window-truncates-lines? scroll-to-cursor!
+       line-display-rows render! window-truncates-lines? scroll-to-cursor!
        window-start)
  ;; The dispatch asks the display what a raw event means, and this is the
  ;; display it asks: a terminal object with no curses behind it, which is
@@ -45,7 +45,7 @@
  ;; keycode would ask the terminal's terminfo, and none is used here).
  (only (schemacs editor dispnew) current-display key-event->key)
  (only (schemacs editor test-display) <test-display> test-display-script
-       test-display-frames-deleted)
+       test-display-frames-deleted test-display-cursor)
  (only (schemacs editor keymap) *current-keymap* *default-keymap*)
  ;; `kbd' - the tree's spelling of a key, and the event a test presses.
  (only (schemacs editor character) kbd)
@@ -1474,6 +1474,42 @@
           (let ((back (minibuffer-cursor-column)))
             (set-point ed (buffer-beg ed))
             (list at-start at-end back (minibuffer-cursor-column))))))))
+
+;; The cursor's y is a *pixel offset*, one cell per row: the redisplay
+;; hands `draw-window-cursor!' the pixel y its own row walk produced -
+;; `w->cursor.y' in the C - and the GTK back end used to multiply it by
+;; the cell height a second time (`cell-y'), putting the cursor of row 3
+;; at row 60 of a 20-pixel cell: a dozen lines below point, drawing the
+;; glyph it found there. The terminal was unaffected (its cell is 1x1,
+;; so the second multiply is the identity), which is why the pty battery
+;; never saw it. This display's 20-pixel cell is what can.
+;;--------------------------------------------------------------
+(test-equal "the cursor lands one cell per row, not one cell squared"
+  '(0 20 40 60 80)
+  (let* ((d (make <test-display> #:rows 12 #:columns 40
+                  #:line-height 20 #:column-width 9))
+         (ed (allocate-buffer))
+         ;; `new-frame' takes the frame's size, and the display the
+         ;; frame is on is made current around it.
+         (f (parameterize ((current-display d))
+              (new-frame ed 12 40))))
+    (with-current-buffer ed
+      (let loop ((i 0)) (when (< i 20) (insert "L\n") (loop (+ i 1)))))
+    (parameterize ((*current-frame* f) (*current-buffer* ed))
+      ;; the lines are two characters each - "L" and its break - so the
+      ;; first character of line N+1 is at (+ 1 (* 2 N)), and its row is
+      ;; N of a window that has not been scrolled. The buffer is current
+      ;; as well: the hazard the file's header names - a parameterize
+      ;; that fabricates a frame must bind `*current-buffer*' too, or a
+      ;; prior test's pin answers instead.
+      (let walk ((n 0) (out '()))
+        (if (= n 5)
+            (reverse out)
+            (begin
+              (set-point ed (+ 1 (* 2 n)))
+              (render! f)
+              (walk (+ n 1)
+                    (cons (cadr (test-display-cursor d)) out))))))))
 
 (test-end "schemacs_ncurses_editor_cursor_position")
 

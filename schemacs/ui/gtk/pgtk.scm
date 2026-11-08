@@ -1913,8 +1913,18 @@
       ;;--------------------------------------------------------------
       (let ((cr (pgtk-cr d)))
         (when cr
+          ;; **ROW is a pixel y and COLUMN a cell x.** The redisplay
+          ;; hands the cursor the same coordinates it hands
+          ;; `write-glyphs!' - a pixel y from its own row walk, which is
+          ;; `w->cursor.y' in the C - and this used to multiply it by the
+          ;; cell height a second time (`cell-y'): a cursor on row 3 of a
+          ;; 20-pixel cell landed at 1200 pixels, below the document.
+          ;; Chris, on the font-resizing editor: "it goes down a dozen
+          ;; lines to an empty square, but the cursor flashes /" - the
+          ;; glyph was right, the place was not. X stays a cell, the
+          ;; horizontal pitch being one per frame, as in the run draw.
           (let ((left (cell-x column))
-                (top (cell-y row))
+                (top row)
                 (box-w (* *cell-width* (max 1 cells))))
             (case type
               ((no-cursor) #t)
