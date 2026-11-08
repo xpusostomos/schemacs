@@ -4,7 +4,12 @@
  (only (srfi 64) test-assert test-equal test-begin test-end)
  (only (guile) setvbuf)
  (prefix (schemacs editor faces) f:)
- (prefix (schemacs editor xfaces) x:))
+ (prefix (schemacs editor xfaces) x:)
+ ;; A buffer, because `face-remapping-alist' is buffer-local and the
+ ;; remapping is read through whatever buffer is current.
+ (only (schemacs editor buffer)
+       allocate-buffer current-buffer set-buffer-local-value!
+       with-current-buffer))
 
 ;; Unbuffered output, so a run that hangs shows where it got to.
 (setvbuf (current-output-port) 'none)
@@ -56,15 +61,24 @@
          ':underline))
 
 ;; A `face' property may be a face name, a property list, or a list of
-;; either - and a list merges left to right so the last one wins.
+;; either. A property list merged into what is already there is the
+;; ordinary case: the later attribute wins.
 (test-equal 'italic
   (let ((to (x:merge-face-ref 'bold (x:face-attributes-empty))))
     (value (x:merge-face-ref '(:weight italic) to) ':weight)))
 
-;; A *list* of references merges left to right, so the last one wins -
-;; which is what makes `(face 'bold '(:weight italic))' mean italic.
-(test-equal 'italic
+;; **A *list* of references is merged from the end backwards**, so the
+;; *first* element wins - `xfaces.c:2989`: "This is a list of face refs.
+;; Those at the beginning of the list take precedence over what follows,
+;; so we have to merge from the end backwards." This test used to pin
+;; the opposite, and it is the reason `text-scale-mode` did nothing: the
+;; relative `:height` a remapping puts *first* lost to the base face
+;; that follows it.
+(test-equal 'bold
   (value (x:merge-face-ref '(bold (:weight italic)) (x:face-attributes-empty))
+         ':weight))
+(test-equal 'italic
+  (value (x:merge-face-ref '((:weight italic) bold) (x:face-attributes-empty))
          ':weight))
 
 ;; The fold-down. What survives on a terminal is the switches and the
@@ -105,5 +119,48 @@
 (test-equal '(#t #f)
   (list (x:tty-capable-p '(:weight bold :underline t))
         (x:tty-capable-p '(:box (:line-width 1)))))
+
+
+;;------------------------------------------------------------------
+;; `face-remapping-alist'
+;;
+;; GNU Emacs's `get_lface_attributes' (`xfaces.c:2124') answers a face
+;; name through the *buffer's* `face-remapping-alist' before the global
+;; definition, and a remapped face is answered **entirely** by the
+;; mapping - the attribute vector is reset first, so the global face does
+;; not show through. That is what `text-scale-mode' (`face-remap.el')
+;; adjusts the font size with, and it is what this checks.
+;;------------------------------------------------------------------
+
+(define (attributes-with-remapping remapping)
+  ;; The attributes the `default' face realizes to in a buffer whose
+  ;; `face-remapping-alist' is REMAPPING, and in one with none.
+  (let ((remapped (allocate-buffer))
+        (plain (allocate-buffer)))
+    (set-buffer-local-value! remapped 'face-remapping-alist remapping)
+    (list (with-current-buffer remapped
+            (x:merge-face-ref 'default (x:face-attributes-empty)))
+          (with-current-buffer plain
+            (x:merge-face-ref 'default (x:face-attributes-empty))))))
+
+(let ((answer (attributes-with-remapping '((default (:background "red"))))))
+  (test-equal "a remapped face takes the buffer's mapping"
+    "red" (value (car answer) ':background))
+  ;; **And nothing of the global face shows through** - the mapping is
+  ;; the whole answer, which is Emacs's reset-before-merge.
+  (test-equal "a remapped face has no attribute it does not name"
+    'unspecified (value (car answer) ':weight))
+  ;; a buffer with no mapping is untouched
+  (test-equal "a buffer with no mapping uses the global face"
+    'unspecified (value (cadr answer) ':background)))
+
+;; A face the mapping does not name is not remapped at all: `bold` still
+;; realizes its own `(:weight bold)` spec.
+(test-equal "a face the mapping does not name is the global one"
+  (list 'unspecified 'bold)
+  (let* ((buffer (allocate-buffer))
+         (answer (with-current-buffer buffer
+                   (x:merge-face-ref 'bold (x:face-attributes-empty)))))
+    (list (value answer ':background) (value answer ':weight))))
 
 (test-end "schemacs_editor_xfaces")

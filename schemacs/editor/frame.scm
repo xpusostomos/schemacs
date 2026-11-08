@@ -38,9 +38,9 @@
     ;; takes Emacs's.
     (only (schemacs editor dispnew)
            column-width current-display delete-frame-display!
-           display-selections-supported? display-mouse-position
-           line-height resume-display!
-           screen-size suspend-display!)
+           display-cell-size display-selections-supported?
+           display-mouse-position display-set-size! line-height
+           resume-display! screen-size suspend-display!)
     (only (schemacs editor marker) build-marker marker-position set-marker make-marker)
     
     ;; `*current-buffer*' is the C global `current_buffer', which this
@@ -107,6 +107,11 @@
    next-frame previous-frame other-frame delete-frame
    delete-other-frames make-frame make-frame-command
    display-graphic-p frame-name
+   ;; frame.c's pixel geometry, which `text-scale-min-amount' and
+   ;; `text-scale-max-amount' (`face-remap.el') are bounded by.
+   frame-char-height frame-char-width
+   display-pixel-width display-pixel-height
+   adjust-frame-size! *frame-inhibit-implied-resize* frame-inhibit-resize?
    *blink-cursor-blinks*
    *blink-cursor-delay*
    *blink-cursor-interval*
@@ -1126,6 +1131,68 @@
                             (current-display))))
                  (and d (display-selections-supported? d))))))
 
+    (define (%display-of args)
+      ;; The display an optional DISPLAY-or-FRAME argument names: the
+      ;; frame's own output when it is a frame, the display itself when it
+      ;; is one, and the selected frame's otherwise - which is what
+      ;; Emacs's `frame-char-height' and `display-pixel-width' do with a
+      ;; nil argument.
+      ;;--------------------------------------------------------------
+      (let ((thing (and (pair? args) (car args))))
+        (cond ((not thing) (or (and (*current-frame*)
+                                    (frame-output (*current-frame*)))
+                               (current-display)))
+              ((frame? thing) (frame-output thing))
+              (else thing))))
+
+    (define (frame-char-height . args)
+      ;; GNU Emacs's `frame-char-height' (`frame.c:4345'): "Height in
+      ;; pixels of a line in the font in frame FRAME. If FRAME is omitted
+      ;; or nil, the selected frame is used. For a terminal frame, the
+      ;; value is always 1."
+      ;;--------------------------------------------------------------
+      (let ((display (%display-of args)))
+        (if display
+            (cdr (display-cell-size display))
+            1)))
+
+    (define (frame-char-width . args)
+      ;; GNU Emacs's `frame-char-width' (`frame.c:4363'): the same
+      ;; question across a line rather than down one.
+      ;;--------------------------------------------------------------
+      (let ((display (%display-of args)))
+        (if display
+            (car (display-cell-size display))
+            1)))
+
+    (define (display-pixel-height . args)
+      ;; GNU Emacs's `display-pixel-height' (`frame.el:2817'): "Return the
+      ;; height of DISPLAY's screen in pixels. ... For character
+      ;; terminals, each character counts as a single pixel."
+      ;;
+      ;; **A departure: this is the frame's size, not the monitor's.**
+      ;; Emacs asks the window system for the whole screen; this tree has
+      ;; no screen object, and every frame here is as large as its
+      ;; window. The one caller - `text-scale-max-amount' - wants an
+      ;; upper bound on a glyph's pixel width, and a frame's width serves
+      ;; it as well as a monitor's.
+      ;;--------------------------------------------------------------
+      (let ((display (%display-of args)))
+        (if display
+            (* (cdr (screen-size display))
+               (cdr (display-cell-size display)))
+            1)))
+
+    (define (display-pixel-width . args)
+      ;; GNU Emacs's `display-pixel-width' (`frame.el:2838'), with the
+      ;; same departure as `display-pixel-height' above.
+      ;;--------------------------------------------------------------
+      (let ((display (%display-of args)))
+        (if display
+            (* (car (screen-size display))
+               (car (display-cell-size display)))
+            1)))
+
     (define (display-rows-cols display)
       ;; The display's size in character units, as `(ROWS . COLUMNS)': its
       ;; pixel size divided by the size of one character unit. This is
@@ -1558,6 +1625,147 @@
     ;; commands use, and which live in `window.el' - default to larger
     ;; numbers; Emacs has both, and so does this.
 
+    (define (resize-frame-windows! frame old-height old-width new-height
+                                   new-width)
+      ;; Give the frame's windows the frame's new size, in proportion to
+      ;; the size they had: GNU Emacs's `resize_frame_windows', of which
+      ;; this is the result rather than the mechanism. Emacs hands the
+      ;; root window the *difference* and lets `window_resize_apply'
+      ;; distribute it among the children - machinery that also serves
+      ;; `enlarge-window' and `window-combination-resize'. What it
+      ;; produces, for a frame that has simply changed size, is each
+      ;; window scaled to the new frame with the remainder kept whole at
+      ;; the end, and that is what this computes.
+      ;;
+      ;; The row above the echo area is the text area: the echo area has
+      ;; the frame's last row, as GNU Emacs's minibuffer window does.
+      ;;--------------------------------------------------------------
+      (scale-window! (car (frame-windows frame))
+                     0 0 old-width (max 1 (- old-height 1))
+                     0 0 new-width (max 1 (- new-height 1))))
+
+    (define *frame-inhibit-implied-resize* (make-parameter #f))
+    ;; ^ GNU Emacs's `frame-inhibit-implied-resize' (`frame.el`): "Non-nil
+    ;; means frames will not be resized to keep the same number of lines
+    ;; and columns when the font changes." `t' inhibits for every
+    ;; parameter, a list inhibits for the parameters it names, and the
+    ;; symbol `force' inhibits always. `global-text-scale-adjust' binds it
+    ;; to `(not global-text-scale-adjust-resizes-frames)'.
+
+    (define (frame-inhibit-resize? frame horizontal parameter)
+      ;; GNU Emacs's `frame_inhibit_resize' (`frame.c:200'): whether a
+      ;; change to PARAMETER - `font', here - should leave the frame's
+      ;; pixel size alone.
+      ;;
+      ;; The C also consults `fullscreen' and `is_tty_frame'; this tree
+      ;; has neither a fullscreen parameter nor a separate terminal
+      ;; frame type, and the caller (`adjust_frame_size` with inhibit 3)
+      ;; is the font's own, so what is left is the variable.
+      ;;--------------------------------------------------------------
+      (let ((v (*frame-inhibit-implied-resize*)))
+        (if (or (eq? v 'force) (eq? v #t))
+            #t
+            (and (pair? v) (memq parameter v) #t))))
+
+    (define (adjust-frame-size! frame new-text-width new-text-height
+                                inhibit pretend parameter . args)
+      ;; GNU Emacs's `adjust_frame_size' (`frame.c:826'), for the case
+      ;; this tree has: the *text* size in pixels and a window system
+      ;; that can be asked to change the frame's native size.
+      ;;
+      ;; INHIBIT is the C's small integer, and the only value reached
+      ;; here is 3 - "call set_window_size_hook if window minimum sizes
+      ;; must be preserved or `frame_inhibit_resize' allows it ... also
+      ;; used when the frame's default font changes", which is `x_new_font'.
+      ;;
+      ;; **What is not carried**: `frame_windows_min_size' (there is no
+      ;; per-window minimum size here - `window-min-height'/`-width' are
+      ;; the split commands' business), the internal border and margins
+      ;; (neither exists), and the `fullscreen' parameter. The arithmetic
+      ;; that is left - unit sizes, the new text columns and lines, and
+      ;; the inhibit test - is the C's.
+      ;;--------------------------------------------------------------
+      (let* ((display (frame-output frame))
+             ;; `FRAME_COLUMN_WIDTH' and `FRAME_LINE_HEIGHT' are the
+             ;; *real* size of a character, which is what the frame's
+             ;; rows and columns are pixels divided by - so it is
+             ;; `display-cell-size' and not `column-width', which answers
+             ;; in this redisplay's own unit (1 for a windowed display).
+             ;;
+             ;; **`screen-size' answers in the redisplay's unit**, so the
+             ;; native size in real pixels is that times the cell; the two
+             ;; are converted in one place rather than mixed.
+             (cell (display-cell-size display))
+             (unit-width (max 1 (car cell)))
+             (unit-height (max 1 (cdr cell)))
+             (size (screen-size display))
+             (old-native-width (* (car size) unit-width))
+             (old-native-height (* (cdr size) unit-height))
+             (old-text-width (* (frame-width frame) unit-width))
+             (old-text-height (* (frame-height frame) unit-height)))
+        (if (= inhibit 5)
+            ;; "call resize_frame_windows" and never the window system:
+            ;; what `change_frame_size' does, which is what this tree's
+            ;; `sync-frame-size!' already is.
+            (sync-frame-size! frame)
+            (let* ((inhibit-horizontal
+                    (and (>= inhibit 2) (<= inhibit 4)
+                         (frame-inhibit-resize? frame #t parameter)))
+                   (inhibit-vertical
+                    (and (>= inhibit 2) (<= inhibit 4)
+                         (frame-inhibit-resize? frame #f parameter)))
+                   (new-native-width
+                    (if (and inhibit-horizontal (< inhibit 5))
+                        old-native-width
+                        (max new-text-width 1)))
+                   (new-native-height
+                    (if (and inhibit-vertical (< inhibit 5))
+                        old-native-height
+                        (max new-text-height 1)))
+                   (new-cols (max 1 (quotient new-native-width unit-width)))
+                   (new-lines (max 1 (quotient new-native-height unit-height))))
+              ;; "For inhibit == 1 call the window_size_hook only if a
+              ;; native size changes. For inhibit == 0 or 2 always call
+              ;; it."
+              (when (or (= inhibit 0) (= inhibit 2)
+                        (and (not inhibit-horizontal)
+                             (not (= new-native-width old-native-width)))
+                        (and (not inhibit-vertical)
+                             (not (= new-native-height old-native-height))))
+                (display-set-size! (frame-output frame)
+                                   new-native-width new-native-height))
+              ;; **The tail runs whether or not the window system was
+              ;; asked**, and it is the half that makes
+              ;; `global-text-scale-adjust-resizes-frames` mean
+              ;; something: the frame takes the new column and row count
+              ;; and `resize_frame_windows` re-tiles it. Emacs reaches
+              ;; this after the `set_window_size_hook` block with the
+              ;; same "no change" early return.
+              ;;
+              ;; **Where the answer comes from**: the display's own size
+              ;; once the hook has run, because `pgtk-resize!` records the
+              ;; allocation and the display is the authority - not the
+              ;; number computed above, which is what was *asked for*.
+              ;; The two agree when the request was honoured, and differ
+              ;; when it was not (an inhibited request, or a compositor
+              ;; that refused), which is the case that matters.
+              (let* ((size (display-rows-cols display))
+                     (old-cols (frame-width frame))
+                     (old-lines (frame-height frame))
+                     (final-cols (if (> (car size) 0) (cdr size) new-cols))
+                     (final-lines (if (> (car size) 0) (car size) new-lines)))
+                (unless (and (= final-cols old-cols)
+                             (= final-lines old-lines)
+                             (= new-native-width old-native-width)
+                             (= new-native-height old-native-height))
+                  (set!frame-width frame final-cols)
+                  (set!frame-height frame final-lines)
+                  (when (or (not (= old-cols final-cols))
+                            (not (= old-lines final-lines)))
+                    (resize-frame-windows! frame old-lines old-cols
+                                           final-lines final-cols))))
+              #t))))
+
     (define (sync-frame-size! frame)
       ;; Take the frame's size from the terminal it is drawn on, if one
       ;; is open. A terminal that has been resized gives new numbers, so
@@ -1590,25 +1798,6 @@
                 (set!frame-width frame new-width)
                 (resize-frame-windows! frame old-height old-width
                                        new-height new-width)))))))
-
-    (define (resize-frame-windows! frame old-height old-width new-height
-                                   new-width)
-      ;; Give the frame's windows the frame's new size, in proportion to
-      ;; the size they had: GNU Emacs's `resize_frame_windows', of which
-      ;; this is the result rather than the mechanism. Emacs hands the
-      ;; root window the *difference* and lets `window_resize_apply'
-      ;; distribute it among the children - machinery that also serves
-      ;; `enlarge-window' and `window-combination-resize'. What it
-      ;; produces, for a frame that has simply changed size, is each
-      ;; window scaled to the new frame with the remainder kept whole at
-      ;; the end, and that is what this computes.
-      ;;
-      ;; The row above the echo area is the text area: the echo area has
-      ;; the frame's last row, as GNU Emacs's minibuffer window does.
-      ;;--------------------------------------------------------------
-      (scale-window! (car (frame-windows frame))
-                     0 0 old-width (max 1 (- old-height 1))
-                     0 0 new-width (max 1 (- new-height 1))))
 
     (define (scale-window! window old-top old-left old-width old-height
                            new-top new-left new-width new-height)

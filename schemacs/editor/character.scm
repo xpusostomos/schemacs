@@ -780,15 +780,31 @@
       ;; GNU Emacs's `event-basic-type' (`subr.el':1862): "Return the basic
       ;; type of the given event (all modifiers removed). The value is a
       ;; printing character (not upper case) or a symbol."
+      ;;
+      ;; Two things that do not arise in the C and do here: a *list*
+      ;; event - a mouse position, `(down-mouse-1 (window POS ...))' - is
+      ;; answered from its `car', which is Emacs's `(if (consp event)
+      ;; (setq event (car event)))'; and a character event arrives here as
+      ;; a character where an Emacs event is always an integer, so it is
+      ;; its code point that is masked.
       ;;--------------------------------------------------------------
-      (if (symbol? event)
-          (car (event-symbol-elements event))
-          (let* ((base (logand event (- char-alt 1)))
-                 (uncontrolled (if (< base 32) (logior base 64) base)))
-            ;; "There are some numbers that are invalid characters and
-            ;; cause `downcase' to get an error."
-            (guard (e (#t (integer->char uncontrolled)))
-              (char-downcase (integer->char uncontrolled))))))
+      (when (pair? event) (set! event (car event)))
+      (cond
+       ;; Emacs's nil *is* a symbol, so its version reaches
+       ;; `(car (get nil 'event-symbol-elements))' and answers nil for an
+       ;; event that is nil - a command called with no key behind it,
+       ;; which is what a direct call from `M-x' leaves. Here nil is `#f',
+       ;; which is not a symbol, so it is answered here.
+       ((not event) #f)
+       ((symbol? event) (car (event-symbol-elements event)))
+       (else
+        (let* ((event (if (char? event) (char->integer event) event))
+               (base (logand event (- char-alt 1)))
+               (uncontrolled (if (< base 32) (logior base 64) base)))
+          ;; "There are some numbers that are invalid characters and
+          ;; cause `downcase' to get an error."
+          (guard (e (#t (integer->char uncontrolled)))
+            (char-downcase (integer->char uncontrolled)))))))
 
     (define (apply-modifiers modifiers base)
       ;; GNU Emacs's `apply_modifiers_uncached' (`keyboard.c':7479):

@@ -73,6 +73,11 @@
  (only (schemacs editor command)
        command-doc-string command-interactive-spec command-name)
  (only (schemacs editor custom) custom-set-variables)
+ ;; `face-remap.el`'s buffer-local scaling, whose *lighter* is what a
+ ;; terminal can show of it - see the test below.
+ (only (schemacs editor face-remap)
+       text-scale-increase text-scale-mode-amount text-scale-mode-lighter
+       face-remapping-alist)
  (only (schemacs editor intervals) get)
  (only (schemacs editor buffer)
        buffer-local-value set-buffer-local-value!
@@ -1737,6 +1742,68 @@
                      (mode-line-string w))
               (begin (dispatch-key-event frame 'insertchar)
                      (mode-line-string w)))))))
+
+;; `text-scale-mode`'s lighter is a *list* construct - `(" " text-scale-
+;; mode-lighter)` (`face-remap.el:334`) - where `overwrite-mode`'s is a
+;; symbol and a plain string before that. A list was spliced into
+;; `minor-mode-alist` unquoted by `define-minor-mode`, so the mode line
+;; evaluated it as *code*: `(" " ...)` is a call of the string " " as a
+;; procedure. Quoting it is Emacs's `',lighter`, and it is what makes the
+;; mode line read `(Fundamental +1)`.
+;;
+;; **A terminal cannot show the scaling itself** - the glyphs are the
+;; terminal's font - so the lighter is the honest check here, and the
+;; pixels are checked in `pgtk-tests.scm`.
+(test-equal '("-UUU:**- alpha.txt    -- L1 C0  (Fundamental)"
+              "-UUU:**- alpha.txt    -- L1 C0  (Fundamental +1)"
+              "-UUU:**- alpha.txt    -- L1 C0  (Fundamental)")
+  (let* ((frame (frame-with "alpha\nbeta\n"))
+         (ed (frame-editor frame)))
+    (set!text-editor-buffer-name ed "alpha.txt")
+    (parameterize ((*current-frame* frame))
+      (let ((w (car (window-list frame))))
+        (list (mode-line-string w)
+              (begin (text-scale-increase 1)
+                     (mode-line-string w))
+              (begin (text-scale-increase 0)
+                     (mode-line-string w)))))))
+
+;; **The `C-x C-` family is `text-scale-adjust`, and it works through the
+;; real command loop** - a chord, then the *transient map* taking the next
+;; bare key. That is the whole point of `text-scale-adjust` rather than
+;; `text-scale-increase`: the key is read as an event (`event-basic-type`),
+;; so the modifier does not matter, and the map Emacs installs afterwards
+;; keeps it going.
+;;
+;; **It goes up, not down, and that is Emacs's behaviour on a terminal
+;; too.** `text-scale-min-amount` is `log(1/frame-char-height)`, and a
+;; terminal's character height is 1 pixel - `frame-char-height` answers 1
+;; for a non-window frame (`frame.c:4345`) - so the minimum is 0 steps and
+;; "Cannot decrease the font size any further" is the answer, on a
+;; terminal, in both. Going *up* is bounded by the width in characters
+;; instead, which is 80 here.
+;;
+;; `C-x C-+` is one step; a bare `+` after it is two; `0` back to nothing,
+;; with the remapping gone entirely.
+(test-equal '(1 "+1" 2 0 ())
+  (let* ((frame (frame-with "alpha\nbeta\n"))
+         (ed (frame-editor frame)))
+    (parameterize ((*current-frame* frame))
+      ;; `dispatch-key-event` takes the *key event* - the decoded form a
+      ;; keymap is keyed by - which is what `kbd` answers and what the
+      ;; read produces.
+      (let ((send (lambda (key) (dispatch-key-event frame key))))
+        (with-current-buffer ed
+          (for-each send (vector->list (kbd "C-x C-+")))
+          (let ((first (list (text-scale-mode-amount)
+                             (text-scale-mode-lighter))))
+            (send #\+)
+            (let ((second (text-scale-mode-amount)))
+              (send #\0)
+              (append first
+                      (list second
+                            (text-scale-mode-amount)
+                            (face-remapping-alist))))))))))
 
 ;; C-x 3 splits the selected window into two side by side, the new one
 ;; to the right, sharing the width. An even width divides evenly; an odd

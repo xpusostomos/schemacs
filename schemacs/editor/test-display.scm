@@ -67,7 +67,8 @@
     (only (schemacs editor dispnew)
           <display>
           clear-frame-area! column-width delete-frame-display! glyphs->text
-          display-color-cells
+          display-cell-size display-color-cells display-set-size!
+          face-metrics
           draw-window-cursor! flush-display! key-event->key line-height
           read-input-event realize-face resume-display! screen-size
           suspend-display! update-window-begin! update-window-end!
@@ -129,13 +130,47 @@
                       #:setter set!test-display-frames-deleted))
 
     (define-method (screen-size (d <test-display>))
-      ;; The tty's own answer shape: a cons of columns and rows
-      ;; (`term.sld''s `(cons (cols) (lines))').
+      ;; **In pixels, which is the interface's unit** - Emacs's
+      ;; `FRAME_PIXEL_WIDTH' and `FRAME_PIXEL_HEIGHT'. The display is
+      ;; configured in *cells* (`#:columns', `#:rows') because that is
+      ;; how a test thinks about a screen, and this multiplies them out
+      ;; by the cell it was given, so that a display with a 9x20 cell
+      ;; answers 720x480 for 80x24 - rather than answering in cells and
+      ;; then being divided by the cell size again by
+      ;; `display-rows-cols'.
+      ;;
+      ;; A terminal's cell is 1x1, so the two spellings coincide there,
+      ;; which is why the `(cons columns rows)' this used to answer was
+      ;; right for every test until one gave the display a real font.
       ;;--------------------------------------------------------------
-      (cons (test-display-columns d) (test-display-rows d)))
+      (cons (* (test-display-columns d) (test-display-column-width d))
+            (* (test-display-rows d) (test-display-line-height d))))
 
     (define-method (column-width (d <test-display>)) (test-display-column-width d))
     (define-method (line-height (d <test-display>)) (test-display-line-height d))
+    (define-method (face-metrics (d <test-display>) face-attrs)
+      ;; One height for every face, like a terminal - unless a test asks
+      ;; for otherwise, this display has no font to ask.
+      ;;--------------------------------------------------------------
+      (cons 0 (max 1 (test-display-line-height d))))
+
+    (define-method (display-set-size! (d <test-display>) width height)
+      ;; A test display takes the size it is asked for, which is what lets
+      ;; a test see `adjust-frame-size!' do something.
+      ;;--------------------------------------------------------------
+      (set!test-display-columns
+       d (max 1 (quotient width (test-display-column-width d))))
+      (set!test-display-rows
+       d (max 1 (quotient height (test-display-line-height d))))
+      #t)
+
+    (define-method (display-cell-size (d <test-display>))
+      ;; The real size of one character. It is asked by
+      ;; `frame-char-height', which `text-scale-min-amount'
+      ;; (`face-remap.el') is bounded by, and by `adjust-frame-size!',
+      ;; which converts a pixel size into rows and columns.
+      ;;--------------------------------------------------------------
+      (cons (test-display-column-width d) (test-display-line-height d)))
     (define-method (display-color-cells (d <test-display>)) (test-display-color-cells d))
 
     (define-method (write-glyphs! (d <test-display>) glyphs y x attribute)

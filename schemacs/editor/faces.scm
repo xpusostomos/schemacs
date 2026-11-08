@@ -36,7 +36,10 @@
 
   (import
     (scheme base)
-    (scheme char))
+    (scheme char)
+    ;; `(inexact->exact (truncate ...))' for a relative `:height' resolved
+    ;; against an absolute one - Emacs's "relative X absolute => absolute".
+    (only (guile) inexact->exact))
 
   (export
    ;; the face table
@@ -166,20 +169,27 @@
           value)))
 
     (define (face-attribute-relative-p attribute value)
-      ;; The C `face_attribute_relative_p': whether VALUE has to be merged
-      ;; with what the face inherits from rather than used as it stands.
-      ;; A weight of `light' or `bold' is relative (it means "one step
-      ;; from the inherited weight"); a float height is relative; an
-      ;; underline that is neither nil nor t is a *colour*; a box that is
-      ;; a list carries attributes to merge.
+      ;; GNU Emacs's `face-attribute-relative-p' (`xfaces.c:4193'). Its
+      ;; docstring is the whole rule:
+      ;;
+      ;;   "A relative value is one that doesn't entirely override
+      ;;    whatever is inherited from another face. For most possible
+      ;;    attributes, the only relative value that users see is
+      ;;    `unspecified'. However, for `:height', floating point values
+      ;;    are also relative."
+      ;;
+      ;; So `unspecified' is relative for *every* attribute, `:height' is
+      ;; relative for anything that is not a fixnum, and nothing else is
+      ;; relative at all. **This used to answer `t' for `:weight bold',
+      ;; `:slant italic', a coloured `:underline' and a `:box' list,
+      ;; which is not this function.** Those values are merged rather
+      ;; than replaced, but by `merge_face_vectors' (`xfaces.sld'), and
+      ;; conflating the two made `face-remap-order' sort absolute
+      ;; remappings as if they were relative.
       ;;--------------------------------------------------------------
       (cond
-       ((eq? attribute ':weight) (or (eq? value 'light) (eq? value 'bold)))
-       ((eq? attribute ':slant) (eq? value 'italic))
-       ((eq? attribute ':height) (real? value))
-       ((eq? attribute ':underline)
-        (and (not (eq? value #f)) (not (eq? value #t))))
-       ((eq? attribute ':box) (pair? value))
+       ((eq? value *undefined-face-attribute*) #t)
+       ((eq? attribute ':height) (not (and (integer? value) (exact? value))))
        (else #f)))
 
     (define (merge-face-attribute attribute value1 value2)
@@ -198,11 +208,17 @@
       (cond
        ((eq? value1 *undefined-face-attribute*) value2)
        ((eq? attribute ':height)
-        ;; A float height is a *scale* of what was inherited; an absolute
-        ;; one is itself.
-        (if (and (real? value1) (inexact? value1) (number? value2))
-            (* value1 value2)
-            value1))
+        ;; `merge_face_heights' (`xfaces.c:2253'), which this C function
+        ;; calls: a fixnum is absolute and is used as it stands; a
+        ;; flonum is a *scale* of VALUE2, and "relative X absolute =>
+        ;; absolute".
+        (cond
+         ((and (integer? value1) (exact? value1)) value1)
+         ((and (real? value1) (number? value2))
+          (if (and (integer? value2) (exact? value2))
+              (inexact->exact (truncate (* value1 value2)))
+              (* value1 value2)))
+         (else value1)))
        (else value1)))
 
     (define (face-attribute-merged-with attribute value faces . args)

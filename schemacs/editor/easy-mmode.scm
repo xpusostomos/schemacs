@@ -210,6 +210,15 @@
                (lambda (opts body)
                  (let* ((doc (opt opts ':docstring))
                         (lighter (opt opts ':lighter))
+                        ;; `',lighter' - a mode-line *construct*, quoted:
+                        ;; `text-scale-mode`'s is `(" " text-scale-mode-lighter)`,
+                        ;; which unquoted would be a call of the string " "
+                        ;; as a procedure.
+                        (quoted-lighter
+                         (if lighter
+                             (datum->syntax
+                              #'mode (list 'quote (syntax->datum lighter)))
+                             #'#f))
                         ;; The mode's own keymap, registered against the
                         ;; mode's variable so that `lookup-keymaps' finds
                         ;; it while the mode is on - `subr.el''s
@@ -336,6 +345,15 @@
                        ;; `(add-minor-mode ',modevar ',lighter ...)' -
                        ;; the lighter goes into `minor-mode-alist', where
                        ;; the mode line reads it.
-                       (add-minor-mode #,quoted-mode #,lighter #,(or keymap #'#f) #f #,quoted-mode)
+                       ;;
+                       ;; **The lighter is quoted.** It is a *mode-line
+                       ;; construct*, not code: `text-scale-mode`'s is
+                       ;; `(" " text-scale-mode-lighter)`, which spliced
+                       ;; in unquoted would be a call of the string " "
+                       ;; as a procedure. Emacs quotes it too - `',lighter`
+                       ;; - and a string literal quoted is itself, so
+                       ;; every lighter written before this still works.
+                       (add-minor-mode #,quoted-mode #,quoted-lighter
+                                       #,(or keymap #'#f) #f #,quoted-mode)
                        #,hook-id)))))))))
     ))

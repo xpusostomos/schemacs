@@ -625,6 +625,57 @@ def check_m_x():
     return problems
 
 
+def check_text_scale_command():
+    """`M-x global-text-scale-adjust' exists in an editor someone started.
+
+    The commands are `face-remap.el`'s and live in `(schemacs editor
+    face-remap)`. **A library nobody imports is never loaded**, and an
+    editor that never loads that one has no `global-text-scale-adjust`
+    and no `text-scale-*`: this check is what notices when a front end
+    leaves it off the list of libraries it loads for their bindings.
+    (The boot also loads it, through `(schemacs editor imports)` - so a
+    plain `se` had it all along; a user with their own `imports.scm` does
+    not, which is why the front ends name it themselves.)
+
+    `global-text-scale-adjust` does nothing on a terminal - it is
+    graphic-only in Emacs too, "a terminal has one font" - so what is
+    asserted of it is that the name is *there*. `text-scale-increase`
+    does have something to show on a terminal: the **lighter** `+1` in the
+    mode line, because the mode's `:lighter` is a space and the value of
+    `text-scale-mode-lighter`, and the construct is evaluated when the
+    mode line is drawn. That also exercises the minor-mode machinery this
+    needed - a buffer-local mode variable and a *list* lighter.
+    """
+    import re as _re
+    path = "/tmp/pty-check-text-scale.txt"
+    open(path, "w").write("scale\n")
+    problems = []
+
+    out = drive([b"\x1b", b"x", b"global-text-s", b"\t"], path,
+                settle=2.5, gap=0.35)
+    plain = _re.sub(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\(B|\x1b.", "", out)
+    if "global-text-scale-adjust" not in plain:
+        problems.append("M-x did not complete `global-text-s' to "
+                        "`global-text-scale-adjust': the library that "
+                        "defines it is not loaded by the front end")
+
+    out = drive([b"\x1b", b"x", b"global-text-scale-adjust", b"\r"], path,
+                settle=2.5, gap=0.35)
+    for bad in ("No match", "Undefined", "error:"):
+        if bad in out:
+            problems.append("running global-text-scale-adjust said %r: %r"
+                            % (bad, out[-300:]))
+
+    # The buffer-local scaling, whose lighter the mode line shows.
+    out = drive([b"\x1b", b"x", b"text-scale-increase", b"\r"], path,
+                settle=2.5, gap=0.35)
+    mode = [r for r in screen_of(out).split("\n") if "-- L" in r]
+    if not mode or "+1" not in mode[-1]:
+        problems.append("M-x text-scale-increase did not put `+1` in the "
+                        "mode line: %r" % (mode[-1][:80] if mode else None,))
+    return problems
+
+
 def check_isearch_highlight():
     """Search and check the matches are drawn with something.
 
@@ -3642,6 +3693,7 @@ CHECKS = {
     "kill-buffer": check_kill_buffer,
     "delete-frame": check_delete_frame,
     "isearch-mark": check_isearch_mark,
+    "text-scale": check_text_scale_command,
     "imports": check_imports,
     "no-display": check_no_display,
 }

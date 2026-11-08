@@ -88,6 +88,7 @@
    pop-to-buffer
    quit-window
    pop-to-buffer-same-window
+   force-window-update
    split-window
    split-window-below
    split-main-window-below
@@ -230,6 +231,18 @@
              frame (list-substitute window (list parent)
                                     (frame-windows frame))))
         parent))
+
+    (define (force-window-update . args)
+      ;; GNU Emacs's `force-window-update' (`window.c`): "Force
+      ;; re-display of all windows of OBJECT" - mark them so the next
+      ;; redisplay rebuilds them whether or not they look out of date.
+      ;;
+      ;; **Nothing to mark here**: this redisplay redraws every window of
+      ;; every frame on every `render!`, so a window is always rebuilt on
+      ;; the next frame. `force-mode-line-update' (`xdisp.sld') is the
+      ;; same no-op for the same reason.
+      ;;--------------------------------------------------------------
+      #f)
 
     (define (split-window window size horizontal)
       ;; GNU Emacs's `split-window' - `Fsplit_window' in window.c - the

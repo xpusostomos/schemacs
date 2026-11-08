@@ -249,6 +249,7 @@
     *frame-creation-function*
     *frame-cursor-type*
     *frame-focus*
+    *frame-inhibit-implied-resize*
     *frame-list*
     *gap-bytes-dfl*
     *gap-bytes-min*
@@ -433,6 +434,7 @@
     add-text-properties-from-list
     add-to-history
     adjust-coding-eol-type
+    adjust-frame-size!
     adjust-intervals-for-deletion
     adjust-intervals-for-insertion
     adjust-markers-for-delete
@@ -836,12 +838,16 @@
     dispatch-key-event
     display-buffer
     display-buffer-below-selected
+    display-cell-size
     display-color-cells
     display-completion-list
     display-graphic-p
     display-mouse-position
+    display-pixel-height
+    display-pixel-width
     display-selections-p
     display-selections-supported?
+    display-set-size!
     display-startup-screen
     display-supports-face-attributes-p
     display-text-width
@@ -889,11 +895,19 @@
     face-attribute-merged-with
     face-attribute-relative-p
     face-attributes-empty
+    face-attrs-more-relative-p
     face-defface-spec
     face-documentation
     face-list
+    face-metrics
     face-override-spec
     face-realized-attributes
+    face-remap-add-relative
+    face-remap-order
+    face-remap-remove-relative
+    face-remap-reset-base
+    face-remap-set-base
+    face-remapping-alist
     face-spec-choose
     face-spec-recalc
     face-spec-reset-face
@@ -999,6 +1013,8 @@
     font-lock-unfontify-buffer
     font-lock-unfontify-region
     font-lock-value-in-major-mode
+    force-mode-line-update
+    force-window-update
     format
     format-message
     format-mode-line
@@ -1010,8 +1026,11 @@
     forward-paragraph
     forward-word
     forward-word-position
+    frame-char-height
+    frame-char-width
     frame-editor
     frame-height
+    frame-inhibit-resize?
     frame-keymap-state
     frame-list
     frame-live-p
@@ -1088,6 +1107,7 @@
     internal-complete-buffer
     internal-complete-buffer-except
     internal-get-lisp-face-attribute
+    internal-lisp-face-attributes
     internal-pop-keymap
     internal-push-keymap
     internal-self-insert
@@ -1610,6 +1630,7 @@
     set!text-editor-text
     set!text-editor-text-props
     set!text-editor-undo-list
+    set!text-scale-mode-variable!
     set!timer-due-at
     set!window-buffer
     set!window-children
@@ -1736,6 +1757,18 @@
     text-property-list
     text-property-not-all
     text-quoting-style
+    text-scale-adjust
+    text-scale-decrease
+    text-scale-increase
+    text-scale-max-amount
+    text-scale-min-amount
+    text-scale-mode
+    text-scale-mode-amount
+    text-scale-mode-lighter
+    text-scale-mode-step
+    text-scale-mode-variable
+    text-scale-remap-header-line
+    text-scale-set
     textget
     texts-glyph
     texts-width

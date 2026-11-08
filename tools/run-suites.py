@@ -62,6 +62,7 @@ SUITES = [
     # four, and only `intervals-tests.scm' (still out, still failing on
     # its pre-2026-10-05 positions) was known about.
     'schemacs/editor/xfaces-tests.scm',
+    'schemacs/editor/face-remap-tests.scm',
     'schemacs/editor/minibuffer-tests.scm',
     'schemacs/editor/minibuf-tests.scm',
     'schemacs/ui/gtk/pgtk-tests.scm',

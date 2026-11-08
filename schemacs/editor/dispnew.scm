@@ -40,6 +40,9 @@
    screen-size
    column-width
    line-height
+   face-metrics
+   display-cell-size
+   display-set-size!
    display-mouse-position
    *mouse-event-keys*
    display-color-cells
@@ -88,6 +91,22 @@
     ;; Emacs derives `FRAME_COLS' from `FRAME_PIXEL_WIDTH'.
     ;;------------------------------------------------------------------
 
+    (define-generic face-metrics)
+    ;; The ascent and descent of a face on this display, in pixels, as
+    ;; `(ASCENT . DESCENT)` - Emacs's `struct face`'s font, whose
+    ;; `font->ascent` and `font->descent` are what
+    ;; `compute_line_metrics` (`xdisp.c:24077`) accumulates into a glyph
+    ;; row:
+    ;;
+    ;;     row->ascent = it->max_ascent;
+    ;;     row->height = it->max_ascent + it->max_descent;
+    ;;
+    ;; **A row is as tall as the tallest face on it**, which is what makes
+    ;; a line of scaled text taller than its neighbours instead of moving
+    ;; them. A terminal answers `(0 . 1)` for everything - one line, one
+    ;; pixel, as `FRAME_LINE_HEIGHT` is 1 there.
+    ;; `(face-metrics display face-attrs)`.
+
     (define-generic write-glyphs!)
     ;; Draw a run of GLYPHS at pixel Y, X with ATTRIBUTE: the cells xdisp
     ;; has decided are one face. Emacs's `write_glyphs'.
@@ -100,6 +119,13 @@
     ;; the device wants. A run used to be one string built by the
     ;; redisplay, so a row -- and behind it a line -- became a string on
     ;; every repaint; nothing above the boundary materialises one now.
+    ;;
+    ;; **Y is a pixel offset, not a screen row.** That is Emacs's
+    ;; `glyph->y` in a glyph matrix: a row's glyphs carry the pixel
+    ;; position they are drawn at, and `append_glyph` fills it from
+    ;; `it->current_y` (`xdisp.c`), which advances by each row's own
+    ;; `height`. A screen-row index cannot say that once rows differ in
+    ;; height, which is exactly what a scaled buffer's rows do.
     ;; `(write-glyphs! display glyphs y x attribute)'.
 
     (define-generic clear-frame-area!)
@@ -298,6 +324,22 @@
     ;; The height of one character unit in pixels: Emacs's
     ;; `FRAME_LINE_HEIGHT', 1 on a text terminal. `(line-height display)'.
 
+    (define-generic display-cell-size)
+    ;; The size of one character unit in *real* pixels, as
+    ;; `(WIDTH . HEIGHT)' - `FRAME_COLUMN_WIDTH' and `FRAME_LINE_HEIGHT'
+    ;; themselves, where `column-width' and `line-height' answer in this
+    ;; redisplay's own unit (a windowed display counts in cells and
+    ;; scales when it draws, so its answers are 1 and its pixels are
+    ;; here). `frame-char-width' and `frame-char-height' read this, and
+    ;; so does `display-pixel-width', which is `screen-size' times it.
+    ;; `(display-cell-size display)'.
+
+
+    (define-generic display-set-size!)
+    ;; Ask the display for a frame of WIDTH x HEIGHT pixels: Emacs's
+    ;; `set_window_size_hook' (`FRAME_TERMINAL (f)->set_window_size_hook'),
+    ;; which `adjust_frame_size' calls once it has decided the native
+    ;; size. `(display-set-size! display width height)'.
     (define-generic display-color-cells)
     ;; How many colours the display can show at once - zero for a
     ;; monochrome one. `(display-color-cells display)'.

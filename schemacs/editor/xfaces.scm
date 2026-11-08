@@ -37,9 +37,15 @@
     (scheme char)
     (only (schemacs editor faces)
           *face-attributes* *undefined-face-attribute*)
+    ;; The buffer's own `face-remapping-alist' - a buffer-local variable,
+    ;; so its reader is the buffer's slot table (`buffer.c'). It is a
+    ;; leaf below this library, which is what lets it be read here.
+    (only (schemacs editor buffer) current-buffer buffer-local-value)
     ;; What a colour *name* means on this terminal - which is not its own
     ;; business, and lives where Emacs has it, in `tty-colors.el'.
-    (only (schemacs editor tty-colors) tty-color-translate))
+    (only (schemacs editor tty-colors) tty-color-translate)
+    ;; `(inexact->exact (truncate ...))' for a resolved relative height.
+    (only (guile) inexact->exact))
 
   (export
    attribute-value
@@ -131,39 +137,97 @@
                     (cond
                      ((eq? value *undefined-face-attribute*) to)
                      ((eq? (car names) ':height)
-                      ;; A relative height scales what it merges into.
+                      ;; A relative height scales what it merges into, and
+                      ;; the answer is ABSOLUTE - Emacs's
+                      ;; `merge_face_heights' (`xfaces.c:2253') makes a
+                      ;; fixnum of "relative X absolute". Leaving the
+                      ;; product a flonum makes it look *relative* to
+                      ;; whoever reads it next, and the renderer then
+                      ;; scales it again.
                       (let ((was (attribute-value to ':height)))
                         (attributes-set
                          to ':height
                          (if (and (real? value) (inexact? value) (real? was)
                                   (not (eq? was *undefined-face-attribute*)))
-                             (* value was)
+                             (inexact->exact (truncate (* value was)))
                              value))))
                      (else (attributes-set to (car names) value))))))))))
 
-    (define (merge-face-ref face-ref to)
+    (define (face-remapping-alist)
+      ;; GNU Emacs's `Vface_remapping_alist' (`xfaces.c:2141'), which is
+      ;; buffer-local wherever a remapping mode has set it: an alist of
+      ;; `(FACE SPEC ...)', where the specs are what FACE is *drawn* as in
+      ;; this buffer.
+      ;;
+      ;; Read through the buffer's own slots, which is where a
+      ;; buffer-local variable lives here, and with `()' when there is no
+      ;; current buffer - Emacs's global value.
+      ;;--------------------------------------------------------------
+      (let ((buffer (current-buffer)))
+        (if buffer
+            (buffer-local-value buffer 'face-remapping-alist '())
+            '())))
+
+    (define (merge-face-ref face-ref to . args)
       ;; GNU Emacs's `merge_face_ref': merge a *reference* to a face or
       ;; faces - what the `face' text property holds - into TO.
       ;;
       ;; A reference may be a face name, a property list of attributes,
-      ;; or a list of either, and a list is merged left to right so that
-      ;; the *last* one wins (which is what makes
-      ;; `(face (:weight bold) bold)' mean what it looks like).
+      ;; or a list of either.
+      ;;
+      ;; **A list is merged from the END backwards**, which is Emacs's
+      ;; own rule and the opposite of reading order: "This is a list of
+      ;; face refs.  Those at the beginning of the list take precedence
+      ;; over what follows, so we have to merge from the end backwards"
+      ;; (`xfaces.c:2989'). So a list whose first element is
+      ;; `(:weight italic)' and whose last is `bold' comes out *italic* -
+      ;; the first element wins - and a remapping's relative `:height`,
+      ;; which `face-remap-add-relative' puts first, survives the base
+      ;; face that follows it. Merging forwards instead is what made
+      ;; `text-scale-mode' do nothing: the base face's absolute height
+      ;; overwrote the scale.
+      ;;
+      ;; **A face name goes through the buffer's remapping first**, and a
+      ;; remapped face is answered *entirely* by its remapping - that is
+      ;; Emacs's `get_lface_attributes' (`xfaces.c:2124'), which resets
+      ;; the attribute vector before merging the mapping, so a
+      ;; buffer-local adjustment overrides the global face rather than
+      ;; adding to it.
+      ;;
+      ;; **ARGS carries the faces being remapped right now**, which is
+      ;; Emacs's `named_merge_points' (`push_named_merge_point',
+      ;; `xfaces.c:2100'). A remapping's base spec is usually the face
+      ;; itself - `face-remap-add-relative' writes `(FACE SPEC ... FACE)'
+      ;; - so without the guard reading a remapped face recurses for
+      ;; ever. Emacs's answer when the face is already on the chain is
+      ;; `get_lface_attributes_no_remap': its global definition.
+      ;;
+      ;; This is the second argument the tree's rule sanctions: Emacs
+      ;; threads `named_merge_points' through the call, and a dynamic
+      ;; binding here would be exactly what the rule forbids.
       ;;--------------------------------------------------------------
-      (cond
-       ((not face-ref) to)
-       ((symbol? face-ref)
-        (merge-face-vectors (face-realized-attributes face-ref) to))
-       ((pair? face-ref)
-        (if (keyword? (car face-ref))
-            ;; The property-list form: the attributes themselves.
-            (merge-face-vectors face-ref to)
-            ;; Or a list of references.
-            (let loop ((rest face-ref) (to to))
-              (if (null? rest)
-                  to
-                  (loop (cdr rest) (merge-face-ref (car rest) to))))))
-       (else to)))
+      (let ((pending (if (pair? args) (car args) '())))
+        (cond
+         ((not face-ref) to)
+         ((symbol? face-ref)
+          (let ((remapping (and (not (memq face-ref pending))
+                                (assq face-ref (face-remapping-alist)))))
+            (if remapping
+                (merge-face-ref (cdr remapping) (face-attributes-empty)
+                                (cons face-ref pending))
+                (merge-face-vectors (face-realized-attributes face-ref) to))))
+         ((pair? face-ref)
+          (if (keyword? (car face-ref))
+              ;; The property-list form: the attributes themselves.
+              (merge-face-vectors face-ref to)
+              ;; Or a list of references, merged backwards so that the
+              ;; first one is merged last and therefore wins.
+              (let loop ((rest (reverse face-ref)) (to to))
+                (if (null? rest)
+                    to
+                    (loop (cdr rest)
+                          (merge-face-ref (car rest) to pending))))))
+         (else to))))
 
     (define (keyword? x)
       ;; A face attribute name: a symbol whose name starts with a colon.

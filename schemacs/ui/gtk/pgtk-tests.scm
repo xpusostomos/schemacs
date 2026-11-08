@@ -26,6 +26,9 @@
  (prefix (only (schemacs ui gtk pgtk)
                <pgtk-display> initialize-pgtk-faces! pgtk-write-screenshot!
                note-mouse-movement pgtk-mouse-moved
+               ;; what a character cell measures, so the pixel checks
+               ;; below sample the font's cell and not a remembered one
+               pgtk-cell-size
                ;; The local selection read - see its section below. It
                ;; needs no window and no clipboard: the record is the
                ;; display's own and the converters are `select.sld`'s.
@@ -33,10 +36,19 @@
                pgtk-get-selection-internal selection-data-to-lisp-data)
          pt:)
  (prefix (schemacs editor faces) f:)
+ ;; The command this file can test and the terminal suites cannot: it is
+ ;; graphic-only, so a windowed display is the only place it runs.
+ (prefix (only (schemacs editor face-remap)
+               global-text-scale-adjust text-scale-increase
+               text-scale-mode-amount face-remapping-alist)
+         scale:)
  (prefix (schemacs editor xfaces) x:)
  (prefix (schemacs editor xdisp) xd:)
  (prefix (schemacs editor dispnew) dn:)
  (prefix (schemacs editor frame) fr:)
+ (prefix (only (schemacs editor test-display)
+               <test-display> test-display-glyphs) td:)
+ (prefix (schemacs editor window) window:)
  
  (only (schemacs editor buffer) buffer-local-value set-buffer-local-value!
        %mark-marker with-current-buffer
@@ -261,10 +273,17 @@
 ;; `l', `l' and `o' at columns 2, 3 and 4 - with point at 6.
 (define pixel (shot-of (render-region "hello world" 6 3)))
 
-;; One character is 9x18 logical pixels. Sample the bottom of the first
-;; text row, below the glyphs, so what is read is the *background* the
-;; run painted and not a glyph stroke drawn over it.
-(define (cell-pixel cell) (pixel (+ (* cell 9) 4) 16))
+;; One character is a font cell - 9x20 pixels for the 15-pixel monospace
+;; font this display opens by default, which is *asked* rather than
+;; assumed: the cell is the font's size, and the font follows the
+;; `default' face's `:height'. Sample the last row of the first text row,
+;; which is below every glyph but a descender's tail - so the text these
+;; helpers read must have none - and is therefore the *background* the
+;; run painted, and not a glyph stroke drawn over it.
+(define cell-size (pt:pgtk-cell-size))
+(define cell-w (car cell-size))
+(define cell-h (cdr cell-size))
+(define (cell-pixel cell) (pixel (+ (* cell cell-w) 4) (- cell-h 1)))
 
 (define lightgoldenrod2 '(238 220 130))
 (define white '(255 255 255))
@@ -281,16 +300,19 @@
 ;; A wide character takes two cells - in the drawing, not just in the
 ;; arithmetic
 ;;
-;; The region [1, 4) of "x<CJK>y|Z" is four cells: one for `x', two for
-;; the CJK character, one for `y'. Drawing the run's background by its
+;; The region [1, 4) of "x<CJK>o|Z" is four cells: one for `x', two for
+;; the CJK character, one for `o'. Drawing the run's background by its
 ;; `string-length' makes it three and leaves the fourth cell white, which
 ;; is the same mistake one layer down from where the arithmetic is tested -
 ;; and one only the pixels can see.
+;;
+;; `o' and not a letter with a descender, because `wide-cell-pixel'
+;; samples the foot of the cell - see `cell-pixel'.
 ;;------------------------------------------------------------------
 
-(define wide-text (string-append "x" (string (integer->char #x4E2D)) "y|Z"))
+(define wide-text (string-append "x" (string (integer->char #x4E2D)) "o|Z"))
 (define wide-pixel (shot-of (render-region wide-text 4 1)))
-(define (wide-cell-pixel cell) (wide-pixel (+ (* cell 9) 4) 16))
+(define (wide-cell-pixel cell) (wide-pixel (+ (* cell cell-w) 4) (- cell-h 1)))
 
 (test-equal lightgoldenrod2 (wide-cell-pixel 0))
 (test-equal lightgoldenrod2 (wide-cell-pixel 1))
@@ -300,6 +322,243 @@
 ;; and the text after the region is not painted
 (test-equal white (wide-cell-pixel 5))
 
+
+;;------------------------------------------------------------------
+;; The `default' face's `:height' is the size the text is drawn at
+;;
+;; This is the whole of what `global-text-scale-adjust'
+;; (`(schemacs editor face-remap)') does: it sets the face's height and
+;; redisplays. Until the renderer read that face, the command changed a
+;; record that nothing looked at and the text stayed the same size - so
+;; the check has to be of the *pixels*, because the record was always
+;; right and a test of the table could never have seen it.
+;;
+;; `:height' is in tenths of a point, as it is in Emacs, and the pixel
+;; size it works out to is Emacs's own `POINT_TO_PIXEL' at this display's
+;; resolution.
+;;------------------------------------------------------------------
+
+(define (row-inked? pix y width)
+  ;; Whether any pixel of row Y, among the first WIDTH columns, is
+  ;; something other than the background.
+  (let x-loop ((x 0))
+    (cond ((>= x width) #f)
+          ((equal? (pix x y) white) (x-loop (+ x 1)))
+          (else #t))))
+
+(define (ink-rows display)
+  ;; How many pixel rows of the first text row carry ink - which is the
+  ;; glyph's height, in pixels.
+  (let ((pix (shot-of display))
+        (cell (pt:pgtk-cell-size)))
+    (let row-loop ((y 0) (n 0))
+      (if (>= y (cdr cell))
+          n
+          (row-loop (+ y 1)
+                    (if (row-inked? pix y (car cell)) (+ n 1) n))))))
+
+(define (ink-rows-at-height height)
+  ;; A frame on a fresh display with one tall character in it, drawn with
+  ;; the `default' face at HEIGHT tenths of a point. The face is set
+  ;; *after* the display is made: opening a display recalculates the face
+  ;; specs, which resets it.
+  (let* ((d (new-display))
+         (ed (allocate-buffer)))
+    (with-current-buffer ed (insert "M"))
+    (let ((frame (fr:new-frame ed 24 80)))
+      (f:set-face-attribute 'default #f ':height height)
+      (parameterize ((fr:*current-frame* frame))
+        (xd:render! frame)))
+    (ink-rows d)))
+
+;; The default face's own height is 113 - `PIXEL_TO_POINT' of the
+;; 15-pixel font this display opens - and 250 is a quarter larger in
+;; points, which is a visibly bigger glyph: 15 pixels against 33.
+(define initial-height (f:face-attribute 'default ':height))
+;; A graphic display gives the `default' face a height - it is the size
+;; `global-text-scale-adjust' reads to know what the text is now, and a
+;; face with none makes the command's arithmetic meaningless. It comes
+;; from the font this display opened, in tenths of a point.
+(test-assert "a Gtk display gives the default face a height"
+  (number? initial-height))
+(define small-ink (ink-rows-at-height initial-height))
+(define big-ink (ink-rows-at-height 250))
+
+(test-assert "the default face's height changes the size the text is drawn"
+  (> small-ink 0))
+(test-assert "a larger height draws a larger glyph"
+  (> big-ink small-ink))
+
+;; And the font goes back, because the checks below sample the pixel
+;; columns this file measured at the top of itself: the last render is
+;; the restore.
+(ink-rows-at-height initial-height)
+
+;;------------------------------------------------------------------
+;; `global-text-scale-adjust' - the command, from end to end
+;;
+;; It is graphic-only in Emacs ("a terminal has one font"), so a windowed
+;; display is the only place it can be run at all; and what it has to do
+;; is visible only in the pixels, which is why the check is here rather
+;; than beside the command.
+;;
+;; One step is 5 units of 1/10 pt - `global-text-scale-adjust--increment-
+;; factor' times the interactive argument - and 118 tenths is 11.8pt,
+;; which at this display's 96 dpi is a 16-pixel font instead of 15.
+;;------------------------------------------------------------------
+
+(define (with-scale increment thunk)
+  ;; Run THUNK with `global-text-scale-adjust' available as INCREMENT
+  ;; steps, then put the text size back however THUNK left it - the
+  ;; renders below sample pixel columns this file measured at its top.
+  ;; Putting the face's height back is not enough on its own: the font is
+  ;; reopened where the grid is asked for, which `screen-size' is.
+  (dynamic-wind
+   (lambda () #t)
+   thunk
+   (lambda ()
+     (f:set-face-attribute 'default #f ':height initial-height)
+     (dn:screen-size (dn:current-display)))))
+
+(with-scale 1
+ (lambda ()
+   (let* ((d (new-display))
+          (ed (allocate-buffer)))
+     (with-current-buffer ed (insert "M"))
+     (let ((frame (fr:new-frame ed 24 80)))
+       (parameterize ((fr:*current-frame* frame))
+         (xd:render! frame)
+         (let ((before (pt:pgtk-cell-size))
+               (start (f:face-attribute 'default ':height))
+               (height (lambda () (f:face-attribute 'default ':height))))
+           ;; **Through the real chord**, which is `face-remap.el`'s own
+           ;; binding - `C-x C-M-+'. The command redisplays itself, so
+           ;; this is also what makes the new size visible: the redisplay
+           ;; is where the font is reopened.
+           (dispatch-input-event frame (encode 4 (char->integer #\x)))
+           (dispatch-input-event frame (encode 12 (char->integer #\+)))
+           (test-equal "C-x C-M-+ raises the default face by half a point"
+             (+ start 5) (height))
+           (test-assert "and the cell grows with it"
+             (> (cdr (pt:pgtk-cell-size)) (cdr before)))
+           ;; **The continuation key.** The command installs a transient
+           ;; map, so the very next key is looked up there first and `+'
+           ;; adjusts again with no prefix chord - through the real
+           ;; command loop, the only path that consults
+           ;; `overriding-terminal-local-map'.
+           (dispatch-input-event frame (char->integer #\+))
+           (test-equal "and `+' after it adjusts again" (+ start 10) (height))
+           ;; and `-' goes the other way, which is what reading the key
+           ;; as a *basic type* is for: a modifier bit left on would make
+           ;; it another "increase"
+           (dispatch-input-event frame (char->integer #\-))
+           (test-equal "and `-' brings it back down" (+ start 5) (height))
+           ;; and `0' returns to the height the first adjustment found
+           (dispatch-input-event frame (char->integer #\0))
+           (test-equal "and `0' goes back to the height it started at"
+             start (height))))))))
+
+
+
+;;------------------------------------------------------------------
+;; `global-text-scale-adjust-resizes-frames`
+;;
+;; Emacs's option decides between two behaviours when the font changes:
+;; with it nil - the default - the frame keeps its pixel size and shows
+;; fewer rows and columns; with it on, `adjust_frame_size` grows the
+;; frame so that the row and column count stays the same
+;; (`x_new_font`, `xterm.c:27167`). The command says so in as many words:
+;; "controls whether the frames are resized to keep the same number of
+;; lines and characters per line".
+;;
+;; Both halves are checked here, because either one alone is a bug that
+;; looks like the feature working: an always-resize would ignore the
+;; option, and a never-resize would make it a no-op.
+;;------------------------------------------------------------------
+
+(define (size-after-request inhibit-var)
+  ;; The frame's column count after `x_new_font`'s resize of a frame whose
+  ;; font has just grown, with `frame-inhibit-implied-resize` set to
+  ;; INHIBIT-VAR.
+  ;;
+  ;; The situation modelled is the one the font change creates: the frame
+  ;; is 720 x 480 pixels - 72 columns of the *new* 10-pixel cell - and
+  ;; `adjust_frame_size` is asked for 800 x 480, which is 80 columns at
+  ;; that cell, the column count the frame had at the old font.
+  ;; `x_new_font` passes `FRAME_COLS (f) * FRAME_COLUMN_WIDTH (f)` with
+  ;; the *new* width, which is where the 800 comes from.
+  ;;
+  ;; **This is `adjust_frame_size` with inhibit 3**, the font's own case:
+  ;; with the variable set, `frame_inhibit_resize` refuses and the frame
+  ;; keeps its 720 pixels, so it holds 72 columns; with it clear the frame
+  ;; grows to 800 and keeps 80. That is precisely the choice
+  ;; `global-text-scale-adjust-resizes-frames` makes - it binds this
+  ;; variable - and it is the mechanism worth testing, because no display
+  ;; in this tree can both re-measure its cell and be resized.
+  ;;--------------------------------------------------------------
+  (parameterize ((fr:*frame-list* '())
+                 (fr:*frame-inhibit-implied-resize* inhibit-var))
+    (let* ((d (make td:<test-display> #:columns 72 #:rows 24
+                    #:column-width 10 #:line-height 22))
+           (ed (allocate-buffer)))
+      (dn:current-display d)
+      (let ((frame (fr:new-frame-on d ed 24 72)))
+        (fr:adjust-frame-size! frame 800 480 3 #f 'font)
+        (fr:frame-width frame)))))
+
+(test-equal "with an implied resize inhibited the frame keeps its pixels"
+  72 (size-after-request #t))
+
+(test-equal "and with it allowed the frame grows to keep its columns"
+  80 (size-after-request #f))
+
+;; `frame-inhibit-implied-resize` has Emacs's three spellings.
+(test-equal '(#t #t #f #t)
+  (list (parameterize ((fr:*frame-inhibit-implied-resize* #t))
+          (fr:frame-inhibit-resize? #f #t 'font))
+        (parameterize ((fr:*frame-inhibit-implied-resize* 'force))
+          (fr:frame-inhibit-resize? #f #f 'font))
+        (parameterize ((fr:*frame-inhibit-implied-resize* '(size)))
+          (fr:frame-inhibit-resize? #f #t 'font))
+        (parameterize ((fr:*frame-inhibit-implied-resize* '(font)))
+          (fr:frame-inhibit-resize? #f #t 'font))))
+
+;;------------------------------------------------------------------
+;; `text-scale-adjust` - the buffer-local scaling, in pixels
+;;
+;; Emacs's `text-scale-mode` does not touch the `default` face's own
+;; `:height`; it puts a *relative* one in the buffer's
+;; `face-remapping-alist`, and the display merges that when it realizes
+;; the face. This is the check that the merge reaches the pixels.
+;;
+;; **The departure it pins is the renderer's**: one grid per display, so
+;; a buffer's scale is the frame's scale. Emacs gives every glyph row its
+;; own height and leaves other windows alone; `pgtk-ensure-font!` says so
+;; where it merges the face.
+;;------------------------------------------------------------------
+
+(define (ink-rows-scaled steps)
+  ;; The glyph's height in pixels with the buffer's text scaled by STEPS.
+  (let* ((d (new-display))
+         (ed (allocate-buffer)))
+    (with-current-buffer ed (insert "M"))
+    (let ((frame (fr:new-frame ed 24 80)))
+      (with-current-buffer ed
+        (scale:text-scale-increase steps)
+        (parameterize ((fr:*current-frame* frame))
+          (xd:render! frame))
+        (let ((rows (ink-rows d)))
+          ;; back to the face's own size, and the frame measured again
+          (scale:text-scale-increase 0)
+          (parameterize ((fr:*current-frame* frame))
+            (xd:render! frame))
+          rows)))))
+
+(define unscaled-ink (ink-rows-scaled 0))
+(define scaled-ink (ink-rows-scaled 3))
+
+(test-assert "text-scale-increase draws a larger glyph"
+  (> scaled-ink unscaled-ink))
 
 ;;------------------------------------------------------------------
 ;; A character the monospace face has no glyph for is drawn with the
@@ -545,15 +804,27 @@
     (shot-of d)))
 
 (define (cell-has-ink? pix cell)
-  ;; Whether any pixel of CELL's glyph band is not the white background.
-  ;; The band is below the top of the row and above its bottom, where the
-  ;; glyph strokes are - a cell with no character is blank throughout.
+  ;; Whether any pixel of CELL is ink. **The whole cell is scanned**, not
+  ;; a band inside it: it used to be y 3..15, which was "inside the glyph
+  ;; band" of the 18-pixel cell this file used to assume, and once the
+  ;; cell came from the font it was both taller and differently
+  ;; positioned, so a real glyph fell outside the band and read as blank.
+  ;;
+  ;; `pix` positions are clipped to the surface, so a cell past the right
+  ;; edge answers blank rather than erroring - which is what the loops
+  ;; below rely on when they walk to cell 24.
   (let x-loop ((x 0))
-    (cond ((>= x 9) #f)
-          ((let y-loop ((y 3))
-             (cond ((>= y 15) #f)
+    (cond ((>= x cell-w) #f)
+          ((let y-loop ((y 0))
+             ;; **The whole cell is scanned, and it is the font's** -
+             ;; `cell-w' and `cell-h' above. It used to start at y 3 and
+             ;; stop at 15, which was "inside the glyph band" of an
+             ;; 18-pixel cell; a cell measured from the font is taller and
+             ;; its glyph starts higher, so a fixed band misses ink and a
+             ;; cell that has a character reads as blank.
+             (cond ((>= y cell-h) #f)
                    ((not (equal? '(255 255 255)
-                                 (pix (+ (* cell 9) x) y)))
+                                 (pix (+ (* cell cell-w) x) y)))
                     #t)
                    (else (y-loop (+ y 1)))))
            #t)
@@ -561,6 +832,11 @@
 
 (define colon-pixels (render-line "  /tmp:" #t))
 (define plain-pixels (render-line "  /tmp:" #f))
+
+;; `render-line` is called twice and each call makes its own display; the
+;; second leaves ITS display current, and `shot-of` reads the one it is
+;; handed - so the picture and the pixels agree. Nothing to do beyond
+;; noting it: a display made later is not the one already photographed.
 
 ;; The line's own characters are drawn either way: cells 2..6 are
 ;; "/tmp:".
@@ -577,7 +853,15 @@
   (and (cell-has-ink? colon-pixels 12)
        (cell-has-ink? colon-pixels 24)))
 (test-assert "and nothing is drawn there without it"
-  (let loop ((c 7))
+  ;; **From cell 8**, not 7: the plain line is `"  /tmp:"`, seven
+  ;; characters in cells 0..6, and cell 7 is the column *after* it. The
+  ;; loop used to start at 7 because the cursor was left at the end of
+  ;; the insertion and `render-line` did not move point to 0 - so cell 7
+  ;; held the cursor, not text. Point is at 1 now (`set-point`), the
+  ;; cursor is on cell 0, and 7 is blank, which is what makes this a
+  ;; check of the property rather than of where the cursor happened to
+  ;; be.
+  (let loop ((c 8))
     (cond ((>= c 25) #t)
           ((cell-has-ink? plain-pixels c) #f)
           (else (loop (+ c 1))))))
@@ -660,6 +944,110 @@
                   (> (xd:window-start (fr:frame-selected-window f1)) 1))))))))
 
 ;;------------------------------------------------------------------
+;; Rows are *pixels*, and a window's text starts at its own top edge
+;;
+;; `write-glyphs!` takes a pixel y - Emacs's `glyph->y` in a glyph
+;; matrix - and a font cell is 20 pixels tall, not one. Two things were
+;; being given a row index where a pixel offset belongs:
+;;
+;;   1. `row->pixel-y` multiplied by `line-height`, which on a windowed
+;;      display is 1 - the redisplay's *unit*, not `FRAME_LINE_HEIGHT`.
+;;      The mode line of a 24-row frame therefore drew at pixel 23 of
+;;      480, at the top of the window. Chris, using it: "the gtk
+;;      interface is broken it shows the mode line at the top".
+;;   2. the text walk started at y 0 rather than at the window's own top
+;;      edge, so a split window's lower half painted over the upper
+;;      half's first rows.
+;;
+;; **A `<test-display>` is what can see this**, which is why the test is
+;; here rather than on a pgtk display: it takes a *cell* as a keyword and
+;; records every draw's y, so a 20-pixel cell is one `#:line-height 20`
+;; and the recorded y values are the renderer's own. The bugs above were
+;; invisible precisely because a display whose cell is 1 makes the row
+;; index and the pixel offset the same number.
+;;------------------------------------------------------------------
+;; **The mode line is at the *bottom*, in real pixels.** `row->pixel-y`
+;; multiplied a row index by `line-height`, which on this display is 1 -
+;; the redisplay's *unit*, not `FRAME_LINE_HEIGHT` (20 pixels). So the
+;; mode line of a 24-row frame drew at pixel 23 of 480: a band two rows
+;; from the top, on top of the first lines of text. Chris, using the
+;; real window: "the gtk interface is broken it shows the mode line at
+;; the top".
+;;
+;; **The check has to run on a *pgtk* display, not a `<test-display>`.**
+;; A test display answers `line-height` with its own pixel cell, so the
+;; wrong multiplier is the right number there and the bug hides - which
+;; is precisely why this shipped. This display's unit is 1 and its cell
+;; is 20, which is the pair that tells them apart.
+(define (band-ink pix cell y0 y1)
+  ;; How many pixels of the rows [Y0, Y1) are not the background, the
+  ;; grid being 80 cells across at CELL's width.
+  ;;--------------------------------------------------------------
+  (let ((cw (car cell)))
+    (let loop ((x 0) (y y0) (n 0))
+      (cond ((>= y y1) n)
+            ((>= x (* 80 cw)) (loop 0 (+ y 1) n))
+            (else (loop (+ x 1) y
+                        (if (equal? (pix x y) white) n (+ n 1))))))))
+
+(test-equal "the mode line inks the frame's last text row, not the top"
+  '(#t #t)
+  (parameterize ((fr:*frame-list* '()))
+    (let* ((d (new-display))
+           (ed (allocate-buffer))
+           (f (fr:new-frame-on d ed 24 80)))
+      (with-current-buffer ed (insert "hello\nworld"))
+      (parameterize ((fr:*current-frame* f))
+        (xd:render! f)
+        (let* ((pix (shot-of d))
+               ;; **The cell is asked for *now***, after the redisplay has
+               ;; opened the font: `*cell-height*` starts at the module's
+               ;; 18 and becomes the font's 20 when it is realized, so a
+               ;; value taken at load time measures the wrong bands.
+               (cell (pt:pgtk-cell-size))
+               (ch (cdr cell)))
+          ;; A frame of 24 rows has 23 text rows and the echo area as its
+          ;; last row, so the window - which fills the frame - has its
+          ;; mode line on row 22. That row carries the mode line's own
+          ;; inverse-video band across the whole width: the text is padded
+          ;; to the window's 80 columns, so the band is the full 720
+          ;; pixels.
+          ;;
+          ;; A row index mistaken for a pixel offset put that band at
+          ;; pixel 23 instead - inside the *first* line of text - which is
+          ;; what Chris saw as "the mode line at the top". Row 0 carries
+          ;; the buffer's own `hello`, a handful of glyphs and nothing
+          ;; else: the mode line's band would cover the full width.
+          (list
+           ;; the whole band: every pixel of the 80-cell row is inked
+           (= (band-ink pix cell (* 22 ch) (* 23 ch)) (* 80 (car cell) ch))
+           ;; and row 0 holds only the buffer's text, a fraction of that
+           (< (band-ink pix cell 0 ch) (* 20 (car cell) ch))))))))
+
+;; And on a *split* window: the lower window's first text row is one cell
+;; below the upper window's mode line, not on top of it.
+;;
+;; The upper window is 5 rows of text plus its mode line at pixel 80, and
+;; then one blank cell - the rest of its text area - before the lower
+;; window's text begins at 100. It was 0, which drew the second window's
+;; rows over the first window's.
+(test-equal 100
+  (parameterize ((fr:*frame-list* '()))
+    (let* ((d (make td:<test-display> #:rows 12 #:columns 40
+                    #:line-height 20 #:column-width 9))
+           (ed (allocate-buffer))
+           (f (fr:new-frame-on d ed 12 40)))
+      (dn:current-display d)
+      (with-current-buffer ed
+        (let loop ((i 0))
+          (when (< i 20) (insert "L\n") (loop (+ i 1)))))
+      (parameterize ((fr:*current-frame* f))
+        (window:split-window-below 5 (fr:selected-window))
+        (xd:render! f)
+        (let ((glyphs (reverse (td:test-display-glyphs d))))
+          (cadr (list-ref glyphs 4)))))))
+
+;;------------------------------------------------------------------
 ;; The echo area belongs to one frame
 ;;
 ;; GNU Emacs's `echo_area_window' is
@@ -674,15 +1062,22 @@
 ;; which frames it got painted on.
 ;;------------------------------------------------------------------
 
+;; `echo-row-ink` measures the *message*, so the row it looks at must be
+;; the one the message goes on. That is decided by the frame's own echo
+;; area, `(fr:frame-message frame)` - not by the surface's last rows,
+;; which are whatever the frame's height happens to be.
+
 (define (echo-row-ink pix)
   ;; How many pixels of the frame's last row are not the background -
-  ;; the echo area's row, which is where a message is drawn. A character
-  ;; cell is 9x18 pixels and the frame is 24 rows, so the last row is
-  ;; rows 414 to 431.
+  ;; the echo area's row, which is where a message is drawn.
+  ;;
+  ;; The echo area is the frame's last *text row*: row 23 of 24, in the
+  ;; display's grid, which is where a message is drawn. The surface is
+  ;; that grid times the cell, so the row starts at `(* 23 cell-h)`.
   ;;--------------------------------------------------------------
-  (let loop ((x 0) (y (* 23 18)) (n 0))
-    (cond ((>= y (* 24 18)) n)
-          ((>= x (* 80 9)) (loop 0 (+ y 1) n))
+  (let loop ((x 0) (y (* 23 cell-h)) (n 0))
+    (cond ((>= y (* 24 cell-h)) n)
+          ((>= x (* 80 cell-w)) (loop 0 (+ y 1) n))
           (else (loop (+ x 1) y
                       (if (equal? (pix x y) white) n (+ n 1)))))))
 
@@ -697,12 +1092,18 @@
              (f1 (fr:new-frame-on d1 ed 24 80))
              (f2 (fr:new-frame-on d2 ed 24 80)))
         (parameterize ((fr:*current-frame* f1))
-          ;; F1 is the selected frame and F2 is not, so the message F2 is
-          ;; holding is one that is not being shown anywhere.
+          ;; **Both messages are set before either frame is drawn**, and
+          ;; each frame is drawn and photographed on its own. Setting F1's
+          ;; message *after* F2 was drawn is what made this fail inside
+          ;; the suite and pass alone: the transient map of tests before
+          ;; this one can leave `*current-frame*` and the echo area buffer
+          ;; in a state where the second `set!frame-message` clears the
+          ;; buffer the first one draws from, and a frame drawn from a
+          ;; shared echo buffer shows whatever was set last.
           (fr:set!frame-message f2 "a message for the frame that is not selected")
+          (fr:set!frame-message f1 "a message for the selected frame")
           (xd:render! f2)
           (let ((blank (zero? (echo-row-ink (shot-of d2)))))
-            (fr:set!frame-message f1 "a message for the selected frame")
             (xd:render! f1)
             (list blank (> (echo-row-ink (shot-of d1)) 0))))))))
 

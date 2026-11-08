@@ -300,10 +300,16 @@
     ;;------------------------------------------------------------------
 
     (define-method (write-glyphs! (d <tty-display>) glyphs y x attribute)
-      ;; Draw TEXT at row Y, column X with ATTRIBUTE - or the terminal's
+      ;; Draw TEXT at pixel Y, column X with ATTRIBUTE - or the terminal's
       ;; own appearance when ATTRIBUTE is #f, which is what not starting
       ;; a face means. This is the one operation everything a window
       ;; shows comes down to.
+      ;;
+      ;; **Y is a pixel offset and a terminal's line is one pixel tall**,
+      ;; so the row is Y itself - which is Emacs's tty backend: the glyph
+      ;; matrix carries pixel y and `FRAME_LINE_HEIGHT` is 1
+      ;; (`frame.c:1182`), so `cursor_to (f, row, col)` is the pixel y
+      ;; divided by that one.
       ;;--------------------------------------------------------------
       (when attribute (attr-on! (stdscr) attribute))
       ;; The cells joined: ncurses writes a string, and a run is one face,
@@ -534,6 +540,30 @@
       ;; `FRAME_LINE_HEIGHT' for a non-window frame.
       ;;--------------------------------------------------------------
       1)
+
+    (define-method (face-metrics (d <tty-display>) face-attrs)
+      ;; A terminal has one height for every face: `FRAME_LINE_HEIGHT` is
+      ;; 1 there (`frame.c:1182`), so a row is one pixel tall whatever face
+      ;; it is drawn in. Ascent 0, because the terminal places the glyph
+      ;; itself.
+      ;;--------------------------------------------------------------
+      (cons 0 (max 1 (line-height d))))
+
+    (define-method (display-set-size! (d <tty-display>) width height)
+      ;; **A terminal cannot be asked for a size.** Its rows and columns
+      ;; are the tty's, and Emacs's tty backend leaves
+      ;; `set_window_size_hook' unset for exactly that reason
+      ;; (`FRAME_TERMINAL (f)->set_window_size_hook' is NULL on a termcap
+      ;; frame). The frame follows the terminal instead, which is
+      ;; `sync-frame-size!`.
+      ;;--------------------------------------------------------------
+      #f)
+
+    (define-method (display-cell-size (d <tty-display>))
+      ;; And that *is* the pixel size here, which is why the two answers
+      ;; above are 1: a terminal has no font to ask for a bigger cell.
+      ;;--------------------------------------------------------------
+      (cons 1 1))
 
     (define-method (display-color-cells (d <tty-display>))
       ;; How many colours the terminal can show at once, 0 for a
