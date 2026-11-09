@@ -4,8 +4,12 @@
  (only (guile) setvbuf)
  (only (srfi 64) test-assert test-equal test-begin test-end)
  (only (schemacs editor subr) kbd event-modifiers event-basic-type
-       event-convert-list event-symbol-elements with-silent-modifications)
- (only (schemacs editor keymap) keymap-index keymap-index->events)
+       event-convert-list event-symbol-elements with-silent-modifications
+       define-key-after keymap-canonicalize)
+ (only (schemacs editor keymap)
+       keymap-index keymap-index->events
+       make-sparse-keymap define-key set-keymap-parent keymap-parent
+       keymap-type? keymap-lookup map-keymap)
  ;; `function-key-map''s translation of a named key into the character it
  ;; means, which is `read_key_sequence''s step.
  (only (schemacs editor keyboard) function-key-translate)
@@ -213,5 +217,106 @@
     (with-silent-modifications
       (put-text-property 1 3 'face 'bold ed))
     (buffer-modified-p ed)))
+
+;;------------------------------------------------------------------
+;; define-key-after and keymap-canonicalize - `subr.el`'s keymap half
+;;
+;; Every expectation is `emacs -Q --batch`'s own answer for the same
+;; bindings: `define-key' prepends, so a map's order is newest first, and
+;; only `define-key-after' places one anywhere else.
+;;------------------------------------------------------------------
+
+(define (subr-keymap-pairs keymap)
+  (let ((out '()))
+    (map-keymap (lambda (event def)
+                  (set! out (append out (list (list event def)))))
+                keymap)
+    out))
+
+(test-equal "define-key-after: right after AFTER's binding"
+  '((99 fc) (98 fb) (120 fx) (97 fa))
+  (let ((m (make-sparse-keymap)))
+    (define-key m (kbd "a") 'fa)
+    (define-key m (kbd "b") 'fb)
+    (define-key m (kbd "c") 'fc)
+    (define-key-after m (kbd "x") 'fx #\b)
+    (subr-keymap-pairs m)))
+
+(test-equal "define-key-after: AFTER t goes at the end"
+  '((98 fb) (97 fa) (120 fx))
+  (let ((m (make-sparse-keymap)))
+    (define-key m (kbd "a") 'fa)
+    (define-key m (kbd "b") 'fb)
+    (define-key-after m (kbd "x") 'fx)
+    (subr-keymap-pairs m)))
+
+(test-equal "define-key-after: an AFTER that is not there goes at the end"
+  '((98 fb) (97 fa) (120 fx))
+  (let ((m (make-sparse-keymap)))
+    (define-key m (kbd "a") 'fa)
+    (define-key m (kbd "b") 'fb)
+    (define-key-after m (kbd "x") 'fx #\z)
+    (subr-keymap-pairs m)))
+
+(test-equal "define-key-after: an existing binding is moved, not duplicated"
+  '((99 fc) (98 fb) (120 fx2) (97 fa))
+  (let ((m (make-sparse-keymap)))
+    (define-key m (kbd "a") 'fa)
+    (define-key m (kbd "b") 'fb)
+    (define-key m (kbd "c") 'fc)
+    (define-key m (kbd "x") 'fx)
+    (define-key-after m (kbd "x") 'fx2 #\b)
+    (subr-keymap-pairs m)))
+
+(test-equal "define-key-after: a sequence defines in the prefix map it reaches"
+  'fab
+  (let ((m (make-sparse-keymap)))
+    (define-key m (kbd "a") (make-sparse-keymap))
+    (define-key-after m (kbd "a b") 'fab)
+    (keymap-lookup m (kbd "a b"))))
+
+(test-equal "define-key-after: a missing prefix defines nothing"
+  #f
+  (let ((m (make-sparse-keymap)))
+    (define-key-after m (kbd "a b") 'fab)
+    (keymap-lookup m (kbd "a b"))))
+
+(test-equal "keymap-canonicalize: inheritance resolved, child wins"
+  '((98 cb) (97 pa))
+  (let ((parent (make-sparse-keymap))
+        (child (make-sparse-keymap)))
+    (define-key parent (kbd "a") 'pa)
+    (define-key parent (kbd "b") 'pb)
+    (define-key child (kbd "b") 'cb)
+    (set-keymap-parent child parent)
+    (subr-keymap-pairs (keymap-canonicalize child))))
+
+(test-assert "keymap-canonicalize: the result has no parent"
+  (let ((parent (make-sparse-keymap))
+        (child (make-sparse-keymap)))
+    (define-key parent (kbd "a") 'pa)
+    (set-keymap-parent child parent)
+    (not (keymap-parent (keymap-canonicalize child)))))
+
+(test-assert "keymap-canonicalize: two submenus merge, the child's first"
+  (let ((parent (make-sparse-keymap))
+        (child (make-sparse-keymap))
+        (cm (make-sparse-keymap))
+        (pm (make-sparse-keymap)))
+    (define-key cm (kbd "x") 'cx)
+    (define-key pm (kbd "y") 'py)
+    (define-key parent (kbd "s") pm)
+    (define-key child (kbd "s") cm)
+    (set-keymap-parent child parent)
+    (let* ((canon (keymap-canonicalize child))
+           (merged (keymap-lookup canon (kbd "s"))))
+      ;; Emacs: (keymap (keymap (120 . cx)) (keymap (121 . py))) - a list
+      ;; of two maps, walked in that order. Here a record with the child
+      ;; map's bindings and the parent map as its own parent, which
+      ;; `map-keymap' walks in the same order and `lookup-key' resolves
+      ;; the same way.
+      (and (keymap-type? merged)
+           (equal? '((120 cx) (121 py)) (subr-keymap-pairs merged))
+           (keymap-type? (keymap-parent merged))))))
 
 (test-end "schemacs_editor_subr")

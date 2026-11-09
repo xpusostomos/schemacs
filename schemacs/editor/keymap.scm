@@ -66,11 +66,17 @@
    keymap make-sparse-keymap keymap-type? keymap-lookup
    define-key
    store-in-keymap access-keymap
-   keymap-parent set-keymap-parent
+   keymap-parent set-keymap-parent keymap-prompt
    keymap-char-table set-keymap-char-table!
    self-insert-char-table
    keymap-bindings
+   keymap-order %set!keymap-order!
    keymap-lookup-binding-key
+   ;; `map_keymap' and its DEFUN: menu construction is their first caller
+   ;; (`keyboard.c''s `menu_bar_items' walks each active map with
+   ;; `map_keymap_canonical'), and `define-key-after' (subr.el) reads the
+   ;; order they expose.
+   map-keymap map-keymap-internal
 
    single-key-description key-description
 
@@ -203,9 +209,18 @@
     ;; -------------------------------------------------------------------------------------------------
 
     (define-record-type <keymap-type>
-      (make<keymap> bindings char-table parent label)
+      (make<keymap> bindings order char-table parent label)
       keymap-type?
       (bindings  keymap-bindings  %set!keymap-bindings!)
+      ;; `order' is the *sequence* of events as Emacs's sparse-keymap
+      ;; alist has it. The hash `bindings' is this tree's one-step
+      ;; lookup, and it has no order at all - which a menu needs, since
+      ;; a menu bar is the keymap in its written order. A newly defined
+      ;; event goes to the FRONT, which is `store_in_keymap`'s own
+      ;; insertion point (`keymap.c:795'), and `define-key-after'
+      ;; (subr.el) is what places one anywhere else. A binding made
+      ;; again keeps its place, as `XSETCDR (elt, def)' keeps the cons.
+      (order     keymap-order     %set!keymap-order!)
       (char-table keymap-char-table %set!keymap-char-table!)
       (parent    keymap-parent    %set-keymap-parent!)
       (label     keymap-label     set!keymap-label))
@@ -230,13 +245,17 @@
       ;; the tree uses.
       ;;--------------------------------------------------------------
       (cond
-       ((null? rest) (make<keymap> (make-hash-table) #f #f #f))
+       ((null? rest) (make<keymap> (make-hash-table) '() #f #f #f))
+       ;; `(make-sparse-keymap nil)' is Emacs's: "nil" is a prompt-less
+       ;; map, which `keymap-canonicalize' builds.
+       ((and (not (car rest)) (null? (cdr rest)))
+        (make<keymap> (make-hash-table) '() #f #f #f))
        ;; a prompt, and nothing else: `make-sparse-keymap' takes the
        ;; prompt and stops, so a second argument is an error rather than
        ;; something quietly ignored.
        ((and (or (string? (car rest)) (symbol? (car rest)))
              (null? (cdr rest)))
-        (make<keymap> (make-hash-table) #f #f (car rest)))
+        (make<keymap> (make-hash-table) '() #f #f (car rest)))
        ((and (keymap-type? (car rest)) (null? (cdr rest)))
         ;; `(keymap MAP)' is MAP - what `(keymap kml)' meant before, when
         ;; a keymap argument stood for its layers.
@@ -245,6 +264,15 @@
         (error "make-sparse-keymap takes one prompt" rest))))
 
     (define keymap make-sparse-keymap)
+
+    (define (keymap-prompt keymap)
+      ;; GNU Emacs's `keymap-prompt' (`keymap.c'): "Return the prompt
+      ;; which is usually a string, but could be a list, associated with
+      ;; KEYMAP, or nil if it doesn't have one." Here the prompt is the
+      ;; record's label - `define-as-prefix' puts "Prefix Command" there
+      ;; in Emacs, and `make-sparse-keymap' takes it as PROMPT.
+      ;;--------------------------------------------------------------
+      (and (keymap-type? keymap) (keymap-label keymap)))
 
     (define (keymap-lookup-binding-key keymap binding)
       ;; The key sequence a BINDING is reached by in KEYMAP, or #f. It is
@@ -258,18 +286,65 @@
       ;; sequence is the two events joined, which is what the caller needs
       ;; to be able to press.
       ;;--------------------------------------------------------------
-      (let loop ((alist (hash-map->list cons (keymap-bindings keymap))))
+      ;; In `keymap-order`, Emacs's alist order, so "the first key that
+      ;; runs BINDING" is the first one *in the map's own order* - the
+      ;; hash alone had no order to answer that question with.
+      (let loop ((events (keymap-order keymap)))
         (cond
-         ((null? alist) #f)
+         ((null? events) #f)
          (else
-          (let ((event (caar alist))
-                (def   (cdar alist)))
+          (let ((event (car events))
+                (def (hashv-ref (keymap-bindings keymap) (car events) #f)))
             (cond
              ((eq? binding def) (list event))
              ((keymap-type? def)
               (let ((under (keymap-lookup-binding-key def binding)))
-                (if under (cons event under) (loop (cdr alist)))))
-             (else (loop (cdr alist)))))))))
+                (if under (cons event under) (loop (cdr events)))))
+             (else (loop (cdr events)))))))))
+
+    (define (map-keymap-internal function keymap)
+      ;; GNU Emacs's `map_keymap_internal' (`keymap.c:535'): call
+      ;; FUNCTION with each event bound in KEYMAP's own table and its
+      ;; definition, and return the parent map without processing it.
+      ;;
+      ;; **The char-table is not walked, and that is the one deviation.**
+      ;; Emacs's full keymap keeps a char-table whose *ranges* this
+      ;; function enumerates (`map_char_table'); this tree's slot holds a
+      ;; single procedure (see the record's note), so there is nothing to
+      ;; enumerate. Nothing that uses this yet needs it - the menu-bar
+      ;; walk reads sparse bindings.
+      ;;
+      ;; `map_keymap_item's one rule is kept: a binding of `t' (the
+      ;; marker the C stores for an explicitly unbound key) is passed as
+      ;; nil.
+      ;;--------------------------------------------------------------
+      (unless (keymap-type? keymap)
+        (error "map-keymap-internal: not a keymap" keymap))
+      (for-each
+       (lambda (event)
+         (let ((def (hashv-ref (keymap-bindings keymap) event #f)))
+           (function event (if (eq? def #t) #f def))))
+       (keymap-order keymap))
+      (keymap-parent keymap))
+
+    (define (map-keymap function keymap)
+      ;; GNU Emacs's `map-keymap' (`keymap.c:625'): "Call FUNCTION once
+      ;; for each event binding in KEYMAP. ... If KEYMAP has a parent,
+      ;; the parent's bindings are included as well."
+      ;;
+      ;; Emacs accepts a symbol whose function is a keymap, and autoloads
+      ;; one; this tree's keymaps are values - `access-keymap's note says
+      ;; the same - so a symbol is an error rather than being resolved.
+      ;; The third Emacs argument, SORT-FIRST, belongs to
+      ;; `map-keymap-sorted', which is not ported.
+      ;;--------------------------------------------------------------
+      (unless (keymap-type? keymap)
+        (error "map-keymap: not a keymap" keymap))
+      (let loop ((map keymap))
+        (when map
+          (map-keymap-internal function map)
+          (loop (keymap-parent map))))
+      #f)
 
     ;; -------------------------------------------------------------------------------------------------
 
@@ -371,6 +446,13 @@
       (let ((event (if (char? event) (char->integer event) event)))
         (unless (or (integer? event) (symbol? event))
           (error "store-in-keymap: not an event" event))
+        ;; **The first binding of an event decides its place.** The C
+        ;; inserts a new cons at the map's front (`keymap.c:795') and
+        ;; rewrites an existing cons's cdr in place, so a redefinition
+        ;; keeps its position. The hash has no order; `order' carries
+        ;; Emacs's.
+        (unless (memv event (keymap-order keymap))
+          (%set!keymap-order! keymap (cons event (keymap-order keymap))))
         (hashv-set! (keymap-bindings keymap) event def)
         def))
 

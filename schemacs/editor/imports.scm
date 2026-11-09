@@ -39,6 +39,7 @@
     (schemacs editor indentc)
     (schemacs editor search)
     (schemacs editor ls-lisp)
+    (schemacs editor menu)
     (except (schemacs editor xdisp)  *truncate-partial-width-windows* line-display-rows window-line-rows window-line-slices window-start window-truncates-lines? vertical-motion)
     (schemacs editor minibuffer)
     (schemacs editor pages)
@@ -106,6 +107,7 @@
     %nonexistent-modtime-nsecs
     %row-beginning
     %row-of-position
+    %set!keymap-order!
     %text-editor-incr-modiff!
     %text-editor-newline-cache
     %unknown-modtime-nsecs
@@ -232,6 +234,7 @@
     *display-type*
     *echo-area-buffer*
     *echo-area-prompt*
+    *enable-disabled-menus-and-buttons*
     *enable-multibyte-characters*
     *eval-expression-debug-on-error*
     *eval-expression-print-maximum-character*
@@ -289,6 +292,7 @@
     *interprogram-paste-function*
     *isearch-lazy-highlight*
     *iso-2022-charset-list*
+    *item-properties*
     *kill-buffer-query-functions*
     *kill-do-not-save-duplicates*
     *kill-read-only-ok*
@@ -326,6 +330,8 @@
     *max-5-byte-char*
     *max-char*
     *max-eol-check-count*
+    *menu-bar-final-items*
+    *menu-state*
     *message-function*
     *message-log-function*
     *message-log-max*
@@ -346,6 +352,7 @@
     *mouse-scroll-delay*
     *mouse-scroll-min-lines*
     *next-selection-coding-system*
+    *overriding-local-map-menu-flag*
     *overriding-terminal-local-map*
     *overwrite-mode-binary*
     *overwrite-mode-textual*
@@ -752,6 +759,7 @@
     define-custom
     define-derived-mode
     define-key
+    define-key-after
     define-minor-mode
     define-theme
     del-range
@@ -877,6 +885,7 @@
     dired-up-directory
     dired-why
     disable-theme
+    discard-menu-items
     dispatch-input-event
     dispatch-key
     dispatch-key-event
@@ -1023,6 +1032,7 @@
     find-interval
     find-newline
     find-operation-coding-system
+    finish-menu-items
     fixup-whitespace
     float-time
     flush-display!
@@ -1144,6 +1154,7 @@
     indent-rigidly
     indent-to
     inhibit-startup-screen
+    init-menu-items
     init-path
     insert
     insert-and-inherit
@@ -1214,6 +1225,15 @@
     isearch-search!
     isearch-word-at-point
     iso-charset-table
+    item-property-def
+    item-property-enable
+    item-property-help
+    item-property-item
+    item-property-keyeq
+    item-property-map
+    item-property-name
+    item-property-selected
+    item-property-type
     just-one-space
     kbd
     key-description
@@ -1222,12 +1242,16 @@
     keyboard-quit
     keymap
     keymap-bindings
+    keymap-canonicalize
     keymap-char-table
     keymap-index
     keymap-index->events
     keymap-lookup
     keymap-lookup-binding-key
+    keymap-order
+    keymap-panes
     keymap-parent
+    keymap-prompt
     keymap-type?
     keyword?
     kill-all-local-variables
@@ -1268,6 +1292,8 @@
     list-buffers
     list-buffers--refresh
     list-buffers-noselect
+    list-of-items
+    list-of-panes
     list-ref-or
     list-substitute
     list-without
@@ -1308,6 +1334,7 @@
     make-lisp-time
     make-local-variable
     make-marker
+    make-menu-state
     make-overlay
     make-sparse-keymap
     make<command>
@@ -1317,6 +1344,8 @@
     make<marker>
     make<minibuffer>
     make<window>
+    map-keymap
+    map-keymap-internal
     map-tty-color
     mark
     mark-active
@@ -1336,6 +1365,24 @@
     match-end
     match-string
     match-substitute-replacement
+    menu-bar-items
+    menu-items
+    menu-items-item-definition
+    menu-items-item-enable
+    menu-items-item-equiv-key
+    menu-items-item-help
+    menu-items-item-length
+    menu-items-item-name
+    menu-items-item-selected
+    menu-items-item-type
+    menu-items-item-value
+    menu-items-n-panes
+    menu-items-pane-length
+    menu-items-pane-name
+    menu-items-pane-prefix
+    menu-items-submenu-depth
+    menu-items-used
+    menu-state?
     merge-coding-systems
     merge-face-attribute
     merge-face-ref
@@ -1448,12 +1495,16 @@
     overwrite-mode-hook
     pad-line
     parse-colon-path
+    parse-menu-item
     parse-modifiers-uncached
+    parse-single-submenu
     parse-solitary-modifier
     pending-uarg
     perform-replace
     place-undo-boundary!
+    plist-get
     plist-member
+    plist-put
     point
     point-marker
     point-max
@@ -1484,8 +1535,13 @@
     primitive-undo
     propertize
     provide-theme
+    push-left-right-boundary
     push-mark
     push-mark-command
+    push-menu-item
+    push-menu-pane
+    push-submenu-end
+    push-submenu-start
     put
     put-text-property
     pwd
@@ -1744,6 +1800,8 @@
     signal-before-change
     signal-quit
     single-key-description
+    single-keymap-panes
+    single-menu-item
     sit-for
     skip-chars-backward
     skip-chars-forward
@@ -1896,6 +1954,7 @@
     undo-redo
     unibyte-to-char
     universal-coding-system-argument
+    unuse-menu-items
     upcase
     upcase-initials
     upcase-region

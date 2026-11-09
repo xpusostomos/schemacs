@@ -31,6 +31,11 @@
     ;; callbacks a *promise* of the key sequence rather than the sequence,
     ;; because only one of the three outcomes uses it.
     (only (scheme lazy) delay force)
+    ;; `eval' is `menu_item_eval_property`'s - the dynamic parts of a
+    ;; menu item (`:visible`, `:enable`, `:filter`) are forms.
+    (scheme eval)
+    ;; `let/ec' is the early `return' `parse_menu_item` is written with.
+    (only (ice-9 control) let/ec)
     ;; The error the loop reports is formatted from the format string its
     ;; arguments arrive apart in.
     ;; `format' and `string-index' are Guile's and not R7RS's, and both are
@@ -39,12 +44,13 @@
     ;; reporting an error failed - and only a test that makes a command
     ;; signal one could see it, because the error path is not otherwise
     ;; reached.
-    (only (guile) format inexact->exact logior string-index)
+    (only (guile) format inexact->exact logior string-index
+          current-module filter caddr)
     (prefix (schemacs editor keymap) km:)
     ;; `make-buffer-string` is `editfns.c:1561`'s and is
     ;; `intervals.scm`'s - it must live below `search.scm`, which
     ;; calls it and cannot import `editfns.scm` (2026-10-13).
-    (only (schemacs editor intervals) make-buffer-string)
+    (only (schemacs editor intervals) make-buffer-string get)
     
     (only (schemacs editor command)
           *last-command-event*
@@ -141,7 +147,8 @@
     (only (guile) get-internal-real-time internal-time-units-per-second)
     ;; `ignore' is what the special-event-map binds a key that the loop
     ;; must receive but not act on to - the frame's resize.
-    (only (schemacs editor subr) kbd ignore *minor-mode-map-alist*)
+    (only (schemacs editor subr)
+          kbd ignore *minor-mode-map-alist* keymap-canonicalize)
     (only (schemacs editor character)
           char-meta event-convert-list)
     )
@@ -176,6 +183,17 @@
    read-quoted-char
    *overriding-terminal-local-map*
    *this-command-keys*
+   ;; `keyboard.c`'s menu-bar half. `menu_bar_items` and `parse_menu_item`
+   ;; are C-internal in Emacs (the front end calls them); here the front
+   ;; end is Scheme and must import them, so the property slots are
+   ;; exported with them.
+   *menu-bar-final-items* *overriding-local-map-menu-flag*
+   menu-bar-items parse-menu-item
+   *enable-disabled-menus-and-buttons*
+   *item-properties*
+   item-property-item item-property-name item-property-def
+   item-property-map item-property-type item-property-keyeq
+   item-property-selected item-property-help item-property-enable
    ;; The modal lookup state - `read_key_sequence''s one-event-at-a-time
    ;; walk. It was `(schemacs keymap)''s and is `keyboard.c''s; the
    ;; accessors are published because the tests drive the walk by hand.
@@ -1794,6 +1812,320 @@ With argument, insert ARG copies of the character."
         ;; The editor starts out waiting for input.
         (command-loop-idle! frame)
         (run-loop)))
+
+    ;;--------------------------------------------------------------
+    ;; The menu bar - `keyboard.c`'s `menu_bar_items', its parser and the
+    ;; `menu-item' properties it fills in.
+    ;;
+    ;; The bar is not a table anywhere: it is the `[menu-bar]' binding of
+    ;; every ACTIVE keymap, walked in precedence order and parsed into
+    ;; `(KEY NAME DEFS UNUSED)' quads - the C's four-slot entries. What
+    ;; is not here yet is the widget side and `parse_menu_item`'s
+    ;; key-equivalent computation (see its note).
+    ;;--------------------------------------------------------------
+
+    (define *enable-disabled-menus-and-buttons* #f)
+    ;; ^ `(defvar enable-disabled-menus-and-buttons nil)'
+    ;; (`keyboard.c:14342'): "If non-nil, then the menus and buttons of
+    ;; type `:enable' are enabled even when their :enable is nil." A
+    ;; plain variable, being `setq'ed.
+
+    (define *menu-bar-final-items* '())
+    ;; ^ `(defvar menu-bar-final-items nil)' (`keyboard.c:14110'): "List
+    ;; of menu bar items to move to the end of the menu bar." `menu-bar.el'
+    ;; sets it to `(help-menu)'. A plain variable.
+
+    (define *overriding-local-map-menu-flag* #f)
+    ;; ^ `(defvar overriding-local-map-menu-flag nil)'
+    ;; (`keyboard.c:14147'): "Non-nil means `overriding-local-map'
+    ;; applies to the menu bar. Otherwise, the menu bar continues to
+    ;; reflect the buffer's local map and the minor mode maps regardless
+    ;; of `overriding-local-map'." **Nil is the C's default**, so an
+    ;; overriding map puts no items in the bar unless it is set.
+
+    ;; `item_properties''s slots - the C's `enum item_property_idx'.
+    (define item-property-item 0)
+    (define item-property-name 1)
+    (define item-property-def 2)
+    (define item-property-map 3)
+    (define item-property-type 4)
+    (define item-property-keyeq 5)
+    (define item-property-selected 6)
+    (define item-property-help 7)
+    (define item-property-enable 8)
+    (define *item-properties* (make-vector 9 #f))
+
+    (define (menu-item-eval-property sexpr)
+      ;; GNU Emacs's `menu_item_eval_property' (`keyboard.c:8843'):
+      ;; "Evaluate an expression and return the result (or nil if
+      ;; something went wrong). Used to evaluate dynamic parts of menu
+      ;; items."
+      ;;
+      ;; Emacs binds `inhibit-redisplay' around it and catches `quit'
+      ;; specially; there is no redisplay to inhibit here and no quit
+      ;; signal, so this is the `condition-case' half only. The form is
+      ;; evaluated in the CURRENT MODULE - the environment the caller's
+      ;; own code lives in; Emacs evaluates in the global environment.
+      ;;--------------------------------------------------------------
+      (guard (e (else #f))
+        (eval sexpr (current-module))))
+
+    (define (help-echo-substitute-command-keys string)
+      ;; `help_echo_substitute_command_keys' (`keyboard.c'): Emacs runs
+      ;; `substitute-command-keys' over a menu item's help string. That
+      ;; function is not ported - it needs `documentation' and the
+      ;; keymap-description machinery - so the string is carried through
+      ;; unchanged. Named departure: a `:help' containing `\[command]'
+      ;; shows the escape.
+      ;;--------------------------------------------------------------
+      string)
+
+    (define (parse-menu-item item inmenubar)
+      ;; GNU Emacs's `parse_menu_item' (`keyboard.c:8899'): "This
+      ;; function parses a menu item and leaves the result in the vector
+      ;; `item_properties'. ... INMENUBAR is > 0 when this is considered
+      ;; for an entry in a menu bar top level. INMENUBAR is < 0 when this
+      ;; is considered for an entry in a keyboard menu."
+      ;;
+      ;; **The key-equivalent computation is not carried.** After the
+      ;; menu-bar arm the C asks `where-is-internal', `key-binding' and
+      ;; `substitute-command-keys' to fill ITEM_PROPERTY_KEYEQ; the
+      ;; first exists here only in the reduced
+      ;; `keymap-lookup-binding-key' form, and the other two not at all.
+      ;; It is reached only when INMENUBAR <= 0, so the menu bar itself
+      ;; is unaffected; ITEM_PROPERTY_KEYEQ stays nil.
+      ;;--------------------------------------------------------------
+      (and
+       (pair? item)
+       (let/ec return
+         (let ((item-string (car item))
+               (filter #f)
+               (start item))
+           ;; Initialize the optional entries; ENABLE starts true.
+           (let loop ((i item-property-def))
+             (when (<= i item-property-enable)
+               (vector-set! *item-properties* i #f)
+               (loop (+ i 1))))
+           (vector-set! *item-properties* item-property-enable #t)
+           (vector-set! *item-properties* item-property-item item)
+           (set! item (cdr item))
+           (cond
+            ((string? item-string)
+             ;; Old format: `(STRING [HELP] [KEY-CACHE] . DEF)'.
+             (vector-set! *item-properties* item-property-name item-string)
+             (when (and (pair? item) (string? (car item)))
+               (vector-set! *item-properties* item-property-help
+                            (help-echo-substitute-command-keys (car item)))
+               (set! start item)
+               (set! item (cdr item)))
+             ;; Maybe an obsolete key binding cache.
+             (when (and (pair? item) (pair? (car item))
+                        (or (not (car (car item)))
+                            (vector? (car (car item)))))
+               (set! item (cdr item)))
+             (vector-set! *item-properties* item-property-def item)
+             (when (symbol? item)
+               (let ((tem (get item 'menu-enable)))
+                 (if *enable-disabled-menus-and-buttons*
+                     (vector-set! *item-properties* item-property-enable #t)
+                     (when tem
+                       (vector-set! *item-properties* item-property-enable
+                                    tem))))))
+            ((and (eq? item-string 'menu-item) (pair? item))
+             ;; New format: `(menu-item NAME [DEF . PROPS])'.
+             (vector-set! *item-properties* item-property-name (car item))
+             (set! start (cdr item))
+             (cond
+              ((pair? start)
+               (vector-set! *item-properties* item-property-def (car start))
+               (set! item (cdr start))
+               ;; Maybe an obsolete cache list with key equivalences.
+               (when (and (pair? item) (pair? (car item)))
+                 (set! item (cdr item)))
+               ;; The properties, two at a time.
+               (let loop ((rest item))
+                 (when (pair? rest)
+                   (cond
+                    ((not (pair? (cdr rest))) #f)
+                    (else
+                     (let ((prop (car rest))
+                           (value (cadr rest)))
+                       (cond
+                        ((eq? prop ':enable)
+                         (if *enable-disabled-menus-and-buttons*
+                             (vector-set! *item-properties*
+                                          item-property-enable #t)
+                             (vector-set! *item-properties*
+                                          item-property-enable value)))
+                        ((eq? prop ':visible)
+                         ;; A :visible form that evaluates to nil
+                         ;; makes this item vanish.
+                         (unless (menu-item-eval-property value)
+                           (return #f)))
+                        ((eq? prop ':help)
+                         (vector-set! *item-properties* item-property-help
+                                      (if (string? value)
+                                          (help-echo-substitute-command-keys
+                                           value)
+                                          value)))
+                        ((eq? prop ':filter)
+                         ;; The C keeps the TAIL whose car is the
+                         ;; filter; the definition is passed through
+                         ;; it below.
+                         (set! filter (cdr rest)))
+                        ((eq? prop ':key-sequence)
+                         (when (or (symbol? value) (string? value)
+                                   (vector? value))
+                           ;; `keyhint' is unused while KEYEQ is not
+                           ;; computed; the parse is kept anyway.
+                           #f))
+                        ((eq? prop ':keys)
+                         (vector-set! *item-properties* item-property-keyeq
+                                      (cond ((procedure? value) (value))
+                                            ((or (pair? value) (string? value))
+                                             value)
+                                            (else #f))))
+                        ((and (eq? prop ':button) (pair? value))
+                         (let ((type (car value)))
+                           (when (or (eq? type ':toggle) (eq? type ':radio))
+                             (vector-set! *item-properties*
+                                          item-property-selected (cdr value))
+                             (vector-set! *item-properties*
+                                          item-property-type type))))
+                        (else #f))
+                       (loop (cddr rest))))))))
+              ((or (not (= inmenubar 0)) (not (null? start)))
+               (return #f))
+              (else #f)))
+            (else
+             (return #f)))                 ; not a menu item
+
+           ;; If the item string is not a string, evaluate it to get
+           ;; one; if that is not a string either, skip the item.
+           (let ((name (vector-ref *item-properties* item-property-name)))
+             (unless (string? name)
+               (set! name (menu-item-eval-property name))
+               (unless (string? name) (return #f))
+               (vector-set! *item-properties* item-property-name name)))
+
+           ;; A filter applies to the definition.
+           (when filter
+             (let ((def (vector-ref *item-properties* item-property-def)))
+               (set! def (menu-item-eval-property
+                          (list (car filter) (list 'quote def))))
+               (vector-set! *item-properties* item-property-def def)))
+
+           ;; Enable or disable selection.
+           (let ((tem (vector-ref *item-properties* item-property-enable)))
+             (unless (eq? tem #t)
+               (set! tem (menu-item-eval-property tem))
+               ;; Disabled items are ignored in the menu bar.
+               (when (and (not (= inmenubar 0)) (not tem)) (return #f))
+               (vector-set! *item-properties* item-property-enable tem)))
+
+           ;; No definition: unselectable text, which is OK in a submenu
+           ;; but not in the menu bar.
+           (when (not (vector-ref *item-properties* item-property-def))
+             (return (= inmenubar 0)))
+
+           ;; A subkeymap is a submenu.
+           (let ((def (vector-ref *item-properties* item-property-def)))
+             (when (km:keymap-type? def)
+               (vector-set! *item-properties* item-property-map def)
+               (vector-set! *item-properties* item-property-def def)
+               (return #t)))
+
+           ;; The menu bar does not display key equivalents.
+           (when (> inmenubar 0) (return #t))
+
+           ;; Radio buttons and toggle boxes.
+           (let ((tem (vector-ref *item-properties* item-property-selected)))
+             (when tem
+               (vector-set! *item-properties* item-property-selected
+                            (menu-item-eval-property tem))))
+           #t))))
+
+    (define (menu-bar-items)
+      ;; GNU Emacs's `menu_bar_items' (`keyboard.c:8641'): the
+      ;; `[menu-bar]' bindings of every active keymap, in precedence
+      ;; order, as `(KEY NAME DEFS UNUSED)' quads.
+      ;;
+      ;; Emacs builds an array least-specific-first and walks it
+      ;; BACKWARDS, so the global map contributes first and a more
+      ;; specific map's entry is later merged over it. `lookup-keymaps'
+      ;; is most-specific-first, so it is walked in reverse here. The
+      ;; C's `menu_bar_one_keymap_changed_items' is the per-map
+      ;; `changed' list: a key one map has already contributed is not
+      ;; contributed again, even when the parse then rejects it.
+      ;;
+      ;; The 4th slot is the C's unused `0', kept so a front-end port
+      ;; reads the same quad layout (`(key string maps unused)' - see
+      ;; `set_frame_menubar`'s `AREF (items, 4 * i)').
+      ;;--------------------------------------------------------------
+      (let ((items '()))
+        (define (find-item key)
+          (let loop ((rest items))
+            (cond ((null? rest) #f)
+                  ((eq? (car (car rest)) key) (car rest))
+                  (else (loop (cdr rest))))))
+        (define (remove-item! key)
+          (set! items
+                (filter (lambda (quad) (not (eq? (car quad) key))) items)))
+        (define (append-item! quad)
+          (set! items (append items (list quad))))
+        (for-each
+         (lambda (map)
+           (let ((def (km:keymap-lookup map 'menu-bar)))
+             (when (km:keymap-type? def)
+               (let ((changed '()))
+                 (km:map-keymap
+                  (lambda (key item)
+                    (cond
+                     ;; An explicit `undefined' removes an item another
+                     ;; map put there.
+                     ((eq? item 'undefined) (remove-item! key))
+                     ((or (memq key changed) (not item)) #f)
+                     (else
+                      (set! changed (cons key changed))
+                      (when (parse-menu-item item 1)
+                        (let ((def (vector-ref *item-properties*
+                                               item-property-def))
+                              (name (vector-ref *item-properties*
+                                                item-property-name))
+                              (old (find-item key)))
+                          (if (not old)
+                              (append-item! (list key name (list def) 0))
+                              ;; Both keymaps: keep both, the new first.
+                              ;; Otherwise the lookup only finds the
+                              ;; new one.
+                              (let ((defs (caddr old)))
+                                (set-car! (cddr old)
+                                          (if (and (km:keymap-type? def)
+                                                   (km:keymap-type? (car defs)))
+                                              (cons def defs)
+                                              (list def))))))))))
+                  (keymap-canonicalize def))))))
+         ;; `overriding-local-map-menu-flag` is nil by default, and the C
+         ;; then specbinds both overriding maps to nil
+         ;; (`keyboard.c:8677') - the bar keeps reflecting the buffer's
+         ;; maps. This tree has the terminal one only, so it is that
+         ;; entry that is dropped.
+         (reverse (if *overriding-local-map-menu-flag*
+                      (lookup-keymaps)
+                      (filter (lambda (map)
+                                (not (memq map
+                                           (or *overriding-terminal-local-map*
+                                               '()))))
+                              (lookup-keymaps)))))
+        ;; Move the named items to the end, in the order listed.
+        (for-each
+         (lambda (key)
+           (let ((old (find-item key)))
+             (when old
+               (remove-item! key)
+               (append-item! old))))
+         *menu-bar-final-items*)
+        items))
 
     (define-key *default-keymap* (kbd "C-q") quoted-insert)
 

@@ -18,7 +18,8 @@
     ;; `logior' and `lognot' are the event model's bit arithmetic, beside
     ;; the `logand' `key-parse' already folds control characters with, and
     ;; `filter' orders a symbol event's modifiers.
-    (only (guile) delete string-contains format catch string-index)
+    (only (guile) delete string-contains format catch string-index hashv-ref
+          caddr cdddr)
     ;; a condition that is not an error object is read through these
     (only (ice-9 exceptions) exception-message)
     ;; `char-downcase' is `event-basic-type''s.
@@ -27,7 +28,8 @@
     ;; fns.c's and lives in `(schemacs editor fns)'. That library is
     ;; below this one - it imports none of subr - so this is not a
     ;; cycle.
-    (only (schemacs editor fns) compare-strings concat)
+    (only (schemacs editor fns)
+          compare-strings concat copy-sequence plist-get plist-put)
     ;; The key event model and `kbd' live in `character.sld', the lowest
     ;; editor library - see its export note. They are re-exported from
     ;; here so that a library importing `(schemacs editor subr) kbd' still
@@ -41,7 +43,17 @@
     ;; library needs the keymap layer to build one. `(schemacs editor
     ;; keymap)' is a leaf - it imports `character' and nothing else of the
     ;; editor - so this is not a cycle.
-    (only (schemacs editor keymap) keymap *default-keymap* define-key)
+    (only (schemacs editor keymap)
+          keymap *default-keymap* define-key make-sparse-keymap
+          store-in-keymap
+          ;; `define-key-after' places a binding in the map's *order*, and
+          ;; `keymap-canonicalize' walks a map and its parents - the
+          ;; primitives `keymap.c` gives those two (`subr.el`'s side of
+          ;; them).
+          keymap-type? keymap-index keymap-lookup keymap-parent
+          set-keymap-parent
+          keymap-prompt keymap-order %set!keymap-order! keymap-bindings
+          map-keymap)
     ;; `kill-all-local-variables' (`buffer.c') runs `change-major-mode-hook'
     ;; through `run-hooks', and the buffer library cannot import this one -
     ;; this library reaches the engine through `fns.sld' and
@@ -81,6 +93,10 @@
    string-trim string-trim-left string-trim-right
    intern error-message-string
    with-temp-buffer
+   ;; `subr.el`'s keymap half: `define-key-after' places a binding in a
+   ;; map's order, and `keymap-canonicalize' resolves inheritance for the
+   ;; menu walk (`keyboard.c`'s `map_keymap_canonical' calls it).
+   define-key-after keymap-canonicalize
    ;; the separator regexp `split-string` defaults to (`subr.el`'s
    ;; `split-string-default-separators`)
    *split-string-default-separators*
@@ -747,6 +763,189 @@
                    (set!text-editor-undo-list buffer undo-list)
                    (unless modified
                      (restore-buffer-modified-p #f))))))))))
+
+    ;;----------------------------------------------------------------
+    ;; Keymap helpers - `subr.el`'s, beside `keymap.c`'s primitives
+    ;;----------------------------------------------------------------
+
+    (define (%keymap-order-without order event)
+      ;; ORDER without EVENT, keeping the rest's sequence.
+      ;;--------------------------------------------------------------
+      (let loop ((rest order) (out '()))
+        (cond ((null? rest) (reverse out))
+              ((eqv? (car rest) event) (loop (cdr rest) out))
+              (else (loop (cdr rest) (cons (car rest) out))))))
+
+    (define (%keymap-order-with-after order event after)
+      ;; EVENT placed immediately after AFTER in ORDER, or at the end
+      ;; when AFTER is `t', nil, or absent - Emacs's
+      ;; `define-key-after`'s three insertion points, the third being
+      ;; "if we reach the end of this keymap". An inherited map cannot
+      ;; stand in the order: parents are a separate field here, and
+      ;; every own binding already precedes them.
+      ;;--------------------------------------------------------------
+      (let ((rest (%keymap-order-without order event)))
+        (if (or (not after) (eq? after #t))
+            (append rest (list event))
+            (let loop ((tail rest) (out '()))
+              (cond ((null? tail) (append (reverse out) (list event)))
+                    ((eqv? (car tail) after)
+                     (append (reverse (cons (car tail) out))
+                             (cons event (cdr tail))))
+                    (else (loop (cdr tail) (cons (car tail) out))))))))
+
+    (define (define-key-after keymap key definition . optional)
+      ;; GNU Emacs's `define-key-after' (`subr.el:1345'): "Add binding
+      ;; in KEYMAP for KEY => DEFINITION, right after AFTER's binding.
+      ;; ... If AFTER is t or omitted, the new binding goes at the end
+      ;; of the keymap. ... The order of bindings in a keymap matters
+      ;; only when it is used as a menu, so this function is not useful
+      ;; for non-menu keymaps."
+      ;;
+      ;; A KEY longer than one event defines in the prefix map that
+      ;; `lookup-key' reaches, which is what `[menu-bar file new]'
+      ;; is. AFTER is one event (a character or a symbol), not a
+      ;; sequence - the C's comparison is against `(car-safe (car tail))'.
+      ;;--------------------------------------------------------------
+      (let ((after (if (pair? optional) (car optional) #t)))
+        (unless (keymap-type? keymap)
+          (error "Wrong type argument: keymapp" keymap))
+        (let ((events (keymap-index key)))
+          (unless events
+            (error "Empty key is invalid"))
+          (let* ((last (car (reverse events)))
+                 (prefix (if (null? (cdr events))
+                             keymap
+                             (keymap-lookup
+                              keymap
+                              (reverse (cdr (reverse events))))))
+                 (target (cond ((keymap-type? prefix) prefix)
+                               ;; **A missing prefix silently defines
+                               ;; nothing**, which is the Elisp's own
+                               ;; behaviour: `keymap' becomes nil, the
+                               ;; `while' loop does not run, and the
+                               ;; function answers nil. `define-key'
+                               ;; creates a prefix; this one does not.
+                               ((not prefix) #f)
+                               (else
+                                (error "Wrong type argument: keymapp"
+                                       prefix))))
+                 (after (cond ((or (not after) (eq? after #t)) #t)
+                              ((char? after) (char->integer after))
+                              ((or (integer? after) (symbol? after)) after)
+                              (else (error "AFTER must be a single event"
+                                           after)))))
+            (when target
+              (store-in-keymap target last definition)
+              (%set!keymap-order!
+               target
+               (%keymap-order-with-after (keymap-order target) last after)))
+            #f))))
+
+    (define (keymap--menu-item-binding val)
+      ;; GNU Emacs's `keymap--menu-item-binding' (`subr.el:1432'):
+      ;; "Return the binding part of a menu-item."
+      ;;
+      ;; The four arms are the Elisp's: a plain binding, the new
+      ;; `(menu-item NAME BINDING ...)' form (whose `:filter' is a
+      ;; *function* here, called on the binding), and the two old
+      ;; formats - `(NAME STRING . BINDING)' and `(STRING . BINDING)'.
+      ;;--------------------------------------------------------------
+      (cond
+       ((not (pair? val)) val)
+       ((eq? 'menu-item (car val))
+        (let* ((binding (if (pair? (cddr val)) (caddr val) #f))
+               (filter (plist-get (cdddr val) ':filter)))
+          (if filter (filter binding) binding)))
+       ((and (pair? (cdr val)) (string? (cadr val))) (cddr val))
+       ((string? (car val)) (cdr val))
+       (else val)))
+
+    (define (keymap--menu-item-with-binding item binding)
+      ;; GNU Emacs's (`subr.el:1448'): "Build a menu-item like ITEM but
+      ;; with its binding changed to BINDING."
+      ;;--------------------------------------------------------------
+      (cond
+       ((not (pair? item)) binding)
+       ((eq? 'menu-item (car item))
+        (let ((item (copy-sequence item)))
+          (let ((tail (cddr item)))
+            (set-car! tail binding)
+            ;; Remove any potential filter.
+            (when (plist-get (cdr tail) ':filter)
+              (set-cdr! tail (plist-put (cdr tail) ':filter #f))))
+          item))
+       ((and (pair? (cdr item)) (string? (cadr item)))
+        (cons (car item) (cons (cadr item) binding)))
+       (else (cons (car item) binding))))
+
+    (define (keymap--merge-bindings val1 val2)
+      ;; GNU Emacs's (`subr.el:1464'): "Merge bindings VAL1 and VAL2."
+      ;;
+      ;; When both are submenus their keymaps are merged. Emacs builds
+      ;; `(keymap MAP1 MAP2)', a list of layers; this tree's keymap is a
+      ;; record, so the merge is a new map with MAP1's own bindings and
+      ;; MAP2 as its parent - lookup order MAP1 then MAP2. **MAP1's own
+      ;; parent, if it had one, is not carried** (Emacs's layered list
+      ;; would search it); submenus with parents are rare, and
+      ;; canonicalize does not canonicalize subkeymaps either.
+      ;;--------------------------------------------------------------
+      (let ((map1 (keymap--menu-item-binding val1))
+            (map2 (keymap--menu-item-binding val2)))
+        (if (not (and (keymap-type? map1) (keymap-type? map2)))
+            val1
+            (let ((map (make-sparse-keymap (keymap-prompt map1))))
+              (for-each
+               (lambda (event)
+                 (store-in-keymap
+                  map event
+                  (hashv-ref (keymap-bindings map1) event #f)))
+               (reverse (keymap-order map1)))
+              (set-keymap-parent map map2)
+              (keymap--menu-item-with-binding
+               (if (keymap-type? val1)
+                   (if (keymap-type? val2) #f val2)
+                   val1)
+               map)))))
+
+    (define (keymap-canonicalize map)
+      ;; GNU Emacs's `keymap-canonicalize' (`subr.el:1475'): "Return a
+      ;; simpler equivalent keymap. This resolves inheritance and
+      ;; redefinitions."
+      ;;
+      ;; Emacs's keymap is a list of layers and the canon is a new list
+      ;; with no parent; this tree's is a record, so the resolution is a
+      ;; walk over MAP and its parents in precedence order, copying the
+      ;; first definition seen for each event into a new parentless map.
+      ;; Where both definitions are keymaps they are merged into a list
+      ;; of keymaps, the more specific first - what `keymap--merge-bindings'
+      ;; builds in the Elisp, and what the menu code reads as a submenu.
+      ;;
+      ;; **Not carried**: Emacs's character *ranges* - a cons event,
+      ;; which this tree's event table cannot key - and with them the
+      ;; Elisp's two FIXMEs (nil bindings, menu ordering) are out of
+      ;; reach. `map-keymap' already walks parents, so the walk here is
+      ;; the Elisp's `while (keymapp map)'.
+      ;;--------------------------------------------------------------
+      (let* ((new (make-sparse-keymap (keymap-prompt map)))
+             (seen '()))                ; alist, in encounter order
+        (map-keymap
+         (lambda (event def)
+           (let ((old (assv event seen)))
+             (cond
+              ((not old)
+               (set! seen (append seen (list (cons event def)))))
+              ((and (keymap-type? (keymap--menu-item-binding (cdr old)))
+                    (keymap-type? (keymap--menu-item-binding def)))
+               (set-cdr! old (keymap--merge-bindings (cdr old) def)))
+              (else #f))))
+         map)
+        ;; `store-in-keymap' puts each new event at the front; filling in
+        ;; reverse makes the new map's order the encounter order.
+        (for-each (lambda (cell)
+                    (store-in-keymap new (car cell) (cdr cell)))
+                  (reverse seen))
+        new))
 
     (define (apply-partially function . args)
       ;; GNU Emacs's `apply-partially' (`subr.el:129'): "Return a function

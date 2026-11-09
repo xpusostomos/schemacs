@@ -63,6 +63,7 @@
           count-lines
           install-fns-textprop!
           line-number-at-pos
+          plist-get plist-put
           string-collate-lessp
           string-lessp
           )
@@ -317,5 +318,69 @@
                   (string-locale-ci<? s1 s2)
                   (string-locale<? s1 s2))))
         (compare)))
+
+    ;;----------------------------------------------------------------
+    ;; Property lists - `fns.c`'s three, which the menu machinery needs
+    ;; (`keymap--menu-item-binding` reads a `:filter` out of a
+    ;; `menu-item` definition) and nothing here had yet.
+    ;;
+    ;; Emacs 31 added the optional PREDICATE to all three; it defaults
+    ;; to `eq', which is what the two-argument calls get.
+    ;;----------------------------------------------------------------
+
+    (define (%plist-match? predicate a b)
+      (if predicate (predicate a b) (eq? a b)))
+
+    (define (plist-get plist prop . optional)
+      ;; GNU Emacs's `plist-get' (`fns.c:2609'): "Extract a value from a
+      ;; property list. ... This function doesn't signal an error if
+      ;; PLIST is invalid."
+      ;;
+      ;; **Nil is also a value**, so a missing property and a property
+      ;; whose value is nil both answer nil - that is why `plist-member'
+      ;; exists.
+      ;;--------------------------------------------------------------
+      (let ((predicate (if (pair? optional) (car optional) #f)))
+        (let loop ((tail plist))
+          (cond ((not (pair? tail)) #f)
+                ((not (pair? (cdr tail))) #f)
+                ((%plist-match? predicate (car tail) prop) (cadr tail))
+                ;; TWO conses a step: the C's body advances one and
+                ;; `FOR_EACH_TAIL' advances the other, so it only ever
+                ;; lands on a property, never on a value.
+                (else (loop (cddr tail)))))))
+
+    (define (plist-put plist prop val . optional)
+      ;; GNU Emacs's `plist-put' (`fns.c:2667'): "Change value in PLIST
+      ;; of PROP to VAL. ... The PLIST is modified by side effects."
+      ;;
+      ;; The new pair goes at the END when PROP is absent, and the list
+      ;; itself is answered when a previous element was changed, so
+      ;; `(setq x (plist-put x prop val))' is the caller's shape.
+      ;;--------------------------------------------------------------
+      (let ((predicate (if (pair? optional) (car optional) #f)))
+        (let loop ((prev #f) (tail plist))
+          (cond
+           ((not (pair? tail))
+            (unless (null? tail)
+              (error "Wrong type argument: plistp" plist))
+            (let ((newcell (cons prop
+                                 (cons val (if prev (cddr prev) plist)))))
+              (if prev
+                  (begin (set-cdr! (cdr prev) newcell) plist)
+                  newcell)))
+           ((not (pair? (cdr tail)))
+            (error "Wrong type argument: plistp" plist))
+           ((%plist-match? predicate (car tail) prop)
+            (set-car! (cdr tail) val)
+            plist)
+           (else (loop tail (cddr tail)))))))
+
+    ;; `plist-member' is **intervals.scm's**, not this file's, even
+    ;; though `fns.c' keeps all three together: `merge_properties_sticky'
+    ;; needs it, `intervals' is below this library, and a second copy
+    ;; here would be the tree's duplicate-binding bug (`loadup-tests'
+    ;; fails on two definitions of one name). Its walk is the same
+    ;; two-cons step these use.
 
     ))

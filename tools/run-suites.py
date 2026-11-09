@@ -16,8 +16,10 @@ with no passes either failed to load or has no tests - both worth knowing.
 
 Exit status is 1 if a suite failed to run or reported a failure.
 """
+import glob
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import sys
@@ -94,6 +96,8 @@ SUITES = [
     # take `(srfi 64)` directly now, as every other suite in the tree
     # already did.
     'schemacs/keymap-tests.scm',
+    'schemacs/editor/menu-bar-tests.scm',
+    'schemacs/editor/menu-tests.scm',
 ]
 
 
@@ -126,6 +130,23 @@ SHARED_SITE = os.path.join(
 LOAD_PATH_ARGS = ['-L', REPO] + (['-L', SHARED_SITE] if os.path.isdir(SHARED_SITE) else [])
 
 
+def drop_tree_ccache():
+    """Forget this tree's compiled files, and only this tree's.
+
+    **A stale `.go` is loaded by `--no-auto-compile` even when no record
+    changed** (AGENTS.md): it made bisecting meaningless once, and it
+    also hides `module-set!` from procedures the compiler has already
+    resolved - a suite that sets a plain global read them stale and
+    failed only with a warm cache. The cache entries are keyed by the
+    absolute source path, so this removes exactly the ones this tree
+    wrote and leaves every other project's alone.
+    """
+    home = os.environ.get('XDG_CACHE_HOME',
+                          os.path.join(os.path.expanduser('~'), '.cache'))
+    for entry in glob.glob(os.path.join(home, 'guile', 'ccache', '*' + REPO)):
+        shutil.rmtree(entry, ignore_errors=True)
+
+
 def run(path):
     proc = subprocess.run(
         ['guile', '--no-auto-compile'] + LOAD_PATH_ARGS + ['-s', path],
@@ -153,6 +174,7 @@ def run(path):
 
 
 def main():
+    drop_tree_ccache()
     paths = [a for a in sys.argv[1:] if not a.startswith('-')] or SUITES
     bad = 0
     for p in paths:

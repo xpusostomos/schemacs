@@ -429,4 +429,63 @@
 (test-assert "no keymap at all is refused"
   (guard (e (#t #t)) (new-modal-lookup-state '()) #f))
 
+;; -------------------------------------------------------------------------------------------------
+;;
+;; `map-keymap' - `keymap.c''s walk, in the map's OWN ORDER. Emacs's sparse
+;; keymap is an alist and `store_in_keymap' puts a new binding at its front,
+;; which is what gives a menu bar a defined order; the hash this tree keeps
+;; for lookup had no order at all until the record gained `keymap-order'.
+;;
+;; Every expectation below is `emacs -Q --batch''s own answer for the same
+;; definitions.
+
+(define (map-keymap-pairs keymap)
+  (let ((out '()))
+    (map-keymap (lambda (event def)
+                  (set! out (append out (list (list event def)))))
+                keymap)
+    out))
+
+(define (map-keymap-internal-pairs keymap)
+  (let ((out '()))
+    (map-keymap-internal (lambda (event def)
+                           (set! out (append out (list (list event def)))))
+                         keymap)
+    out))
+
+(test-equal "map-keymap visits newest first: c, b, a"
+  '((99 fc) (98 fb) (97 fa))
+  (let ((m (make-sparse-keymap)))
+    (define-key m (kbd "a") 'fa)
+    (define-key m (kbd "b") 'fb)
+    (define-key m (kbd "c") 'fc)
+    (map-keymap-pairs m)))
+
+(test-equal "a redefinition keeps its first position"
+  '((98 fb) (97 fa2))
+  (let ((m (make-sparse-keymap)))
+    (define-key m (kbd "a") 'fa)
+    (define-key m (kbd "b") 'fb)
+    (define-key m (kbd "a") 'fa2)
+    (map-keymap-pairs m)))
+
+(test-equal "map-keymap includes a parent's bindings, after its own"
+  '((98 cb) (98 pb) (97 pa))
+  (let ((parent (make-sparse-keymap))
+        (child (make-sparse-keymap)))
+    (define-key parent (kbd "a") 'pa)
+    (define-key parent (kbd "b") 'pb)
+    (define-key child (kbd "b") 'cb)
+    (set-keymap-parent child parent)
+    (map-keymap-pairs child)))
+
+(test-assert "map-keymap-internal stops at the parent and answers it"
+  (let ((parent (make-sparse-keymap))
+        (child (make-sparse-keymap)))
+    (define-key parent (kbd "a") 'pa)
+    (define-key child (kbd "b") 'cb)
+    (set-keymap-parent child parent)
+    (and (eq? parent (map-keymap-internal (lambda (event def) #f) child))
+         (equal? '((98 cb)) (map-keymap-internal-pairs child)))))
+
 (test-end "schemacs_keymap")

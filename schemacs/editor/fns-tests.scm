@@ -3,6 +3,8 @@
  (scheme char)
  (only (guile) sort)
  (schemacs editor fns)
+ ;; `plist-member` is intervals.scm's - see the note in fns.scm.
+ (only (schemacs editor intervals) plist-member)
  (only (srfi 64) test-assert test-equal test-begin test-end)
  ;; the buffer a line count needs: `count-lines' and `line-number-at-pos'
  ;; are both `fns.scm''s now and both work on a buffer's text.
@@ -206,5 +208,23 @@
   (with-text "a\nb\nc"
     (lambda ()
       (guard (e (#t (exception-message e))) (line-number-at-pos "x")))))
+
+;;------------------------------------------------------------------
+;; fns.c's plist primitives - every expectation `emacs -Q --batch`'s own
+;;------------------------------------------------------------------
+
+(test-equal 2 (plist-get '(:a 1 :b 2) ':b))
+;; a missing property and a property whose value is nil answer the same
+(test-equal #f (plist-get '(:a 1 :b 2) ':c))
+(test-equal #f (plist-get '(:a #f :b 2) ':a))
+(test-equal '(:a #f :b 2) (plist-member '(:a #f :b 2) ':a))
+(test-equal #f (plist-member '(:a 1) ':c))
+(test-equal '(:a 1 :b 2 :c 3) (plist-put (list ':a 1 ':b 2) ':c 3))
+(let ((p (list ':a 1 ':b 2)))
+  (let ((q (plist-put p ':a 9)))
+    (test-assert "plist-put modifies and answers the same list"
+      (eq? p q))
+    (test-equal '(:a 9 :b 2) q)))
+(test-equal 2 (plist-get '("a" 1 "b" 2) "b" equal?))
 
 (test-end "schemacs_editor_fns")
