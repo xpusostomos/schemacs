@@ -777,9 +777,20 @@
       ;; `case-fold-search', as the C's `string_match_1' reads the
       ;; buffer's value.
       ;;--------------------------------------------------------------
-      (let* ((start (if (pair? args) (car args) 0))
+      (let* (;; "If NILP (start) pos = 0" (`search.c:384`). A nil START is
+             ;; 0, not a number to compare - `string-trim` passes nil
+             ;; here whenever the leading trim did not match, which is
+             ;; the ordinary case.
+             (start (if (pair? args) (or (car args) 0) 0))
              (inhibit (and (pair? args) (pair? (cdr args)) (cadr args)))
-             (start (if (< start 0) (+ start (string-length string)) start))
+             (len (string-length string))
+             ;; "if (pos < 0 && -pos <= len) pos = len + pos; else if
+             ;; (0 > pos || pos > len) args_out_of_range"
+             (start (cond ((and (< start 0) (<= (- start) len))
+                           (+ len start))
+                          ((or (< start 0) (> start len))
+                           (error "Args out of range: ~a, ~a" string start))
+                          (else start)))
              (icase? (*case-fold-search*)))
         (let ((m (regexp-exec (%compile-emacs-regexp pattern icase?)
                               string start
@@ -1571,7 +1582,7 @@
                      ;; that subexp did not match: nothing
                      (else (loop (+ i 2) acc)))))
                  ((char=? c #\\)
-                  (loop (+ i 2) (cons "\\\\" acc)))
+                  (loop (+ i 2) (cons "\\" acc)))
                  (else
                   (error "Invalid use of `\\' in replacement text"))))))
          (else (loop (+ i 1) (cons (make-string 1 (string-ref newtext i)) acc))))))
@@ -1696,7 +1707,7 @@
                                     acc))
                         ;; did not match: nothing
                         (loop (+ i 2) acc))))
-                 ((char=? c #\\) (loop (+ i 2) (cons "\\\\" acc)))
+                 ((char=? c #\\) (loop (+ i 2) (cons "\\" acc)))
                  (else (error "Invalid use of `\\' in replacement text"))))))
          (else (loop (+ i 1) (cons (make-string 1 (string-ref newtext i)) acc))))))
 

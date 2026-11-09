@@ -64,11 +64,12 @@
     ;; `prepare_to_modify_buffer_1` is its main caller and `insdel.scm`
     ;; is below `editfns.scm`.
     (only (schemacs editor editfns)
-          goto-char insert message point point-max save-excursion)
+          goto-char insert message point point-min point-max save-excursion)
     (only (schemacs editor buffer) barf-if-buffer-read-only
           ;; `FETCH_CHAR` (`buffer.h`) - the raw read of a named
           ;; buffer. It has no Lisp name, and it was the engine's
           ;; until 2026-10-13.
+          buffer-name generate-new-buffer %kill-buffer
           fetch-char with-current-buffer
  set-point set!text-editor-file-name text-editor-buffer-name text-editor-file-name buffer-pt buffer-beg buffer-z buffer-modified-p buffer-read-only? set-buffer-modified-p set!buffer-read-only)
     (only (schemacs editor simple) push-mark)
@@ -76,7 +77,9 @@
     ;; `(schemacs editor subr)', which is below this library.
     (only (schemacs editor subr)
           kbd run-hook-with-args-until-success
-          string-prefix-p ctl-x-4-map
+          ;; `with-temp-file` below is built on the temp-buffer macro.
+          with-temp-buffer
+          string-prefix-p split-string ctl-x-4-map
           ;; The window-system event's own accessors, which
           ;; `handle-delete-frame` reads the frame out of
           ;; (`subr.el`'s, as Emacs's does).
@@ -109,7 +112,8 @@
           file-name-as-directory
           file-name-case-insensitive-p
           file-name-directory-part file-name-nondirectory-part
-          file-symlink-p file-system-info file-writable-p
+          make-directory-internal
+          file-executable-p file-symlink-p file-system-info file-writable-p
           find-file-name-handler
           ;; `read-file-name' runs the typed name through it before
           ;; expanding - see the note there.
@@ -293,6 +297,10 @@ directory-name-p
    ;; `parse-colon-path' that fills it, and the `locate-file' the
    ;; command resolves through
    cd  cd-absolute  cd-path  set!cd-path  parse-colon-path  locate-file
+   ;; files.el's executable search, which reads `exec-path`
+   executable-find exec-path *exec-suffixes*
+   ;; files.el's directory creation and subr.el's temp-file macro
+   make-directory with-temp-file
    save-answer-char->decision
 save-buffer
    set-visited-file-name
@@ -467,6 +475,60 @@ save-buffer
                  (get-output-bytevector port)))))
         (call-with-port (open-output-file path #:encoding #f)
           (lambda (port) (put-bytevector port bytes)))))
+
+    (define-syntax with-temp-file
+      ;; GNU Emacs's `with-temp-file` (`subr.el`): "Create a new buffer,
+      ;; evaluate BODY there, and write the buffer to FILE.  The value
+      ;; returned is the value of the last form in BODY."
+      ;;
+      ;; Emacs writes with `write-region`; this tree's writer is
+      ;; `write-file-code-points`, so the text goes through the same
+      ;; coding machinery a save does. The departure is that none of
+      ;; `write-region`'s visit bookkeeping, backup or message happens
+      ;; here - which is what the Elisp's VISIT nil asks for anyway.
+      ;;--------------------------------------------------------------
+      (syntax-rules ()
+        ((_ file body ...)
+         (let ((temp-file file)
+               (temp-buffer (generate-new-buffer " *temp-file*")))
+           (dynamic-wind
+             (lambda () #t)
+             (lambda ()
+               (let ((value (with-current-buffer temp-buffer body ...)))
+                 (with-current-buffer temp-buffer
+                   (write-file-code-points
+                    (expand-file-name temp-file)
+                    (buffer-text-to-code-points
+                     (text-editor-text (current-buffer)))
+                    (buffer-file-coding-system (current-buffer))))
+                 value))
+             (lambda ()
+               (and (buffer-name temp-buffer)
+                    (%kill-buffer temp-buffer))))))))
+
+    (define (make-directory dir . args)
+      ;; GNU Emacs's `make-directory` (`files.el`): "Create the
+      ;; directory DIR and optionally any nonexistent parent dirs."
+      ;;
+      ;; PARENTS means create the missing ancestors first. A directory
+      ;; that is already there is success, and one that cannot be made is
+      ;; an error - the observable contract `omarchy-install-hooks` and
+      ;; anything else writing a tree depends on.
+      ;;--------------------------------------------------------------
+      (let* ((parents (and (pair? args) (car args)))
+             (dir (directory-file-name (expand-file-name dir))))
+        (cond
+         ((file-directory-p dir) #t)
+         (parents
+          (let ((parent (file-name-directory-part dir)))
+            (unless (or (string=? parent "")
+                        (string=? parent dir))
+              (make-directory parent #t)))
+          (make-directory-internal dir))
+         (else (make-directory-internal dir)))
+        (unless (file-directory-p dir)
+          (error (format #f "Creating directory: ~a" dir)))
+        #t))
 
     (define (file-write-protected? path)
       ;; Whether PATH cannot be written. This is GNU Emacs's `(not
@@ -2774,6 +2836,40 @@ at point instead."
                            (cadr rest)
                            #f)))
         (locate-file-internal filename path suffixes predicate)))
+
+    (define exec-path
+      ;; GNU Emacs's `exec-path` (`emacs.c`): "List of directories to
+      ;; search for programs when they are run." Set from PATH as the
+      ;; editor starts - Emacs's `init_callproc` splits it on the path
+      ;; separator and drops empty entries. A plain variable, because
+      ;; Emacs only `setq`s it; placing it here is a departure from
+      ;; `emacs.c`'s file, for the same reason `locate-file-internal`
+      ;; sits in `fileio`: this is the library that reads it.
+      ;;--------------------------------------------------------------
+      (let ((path (getenv "PATH")))
+        (if path (split-string path ":" #t) '())))
+
+    (define *exec-suffixes*
+      ;; GNU Emacs's `exec-suffixes` (`files.el`): "List of suffixes to
+      ;; try for executables. ... used by `executable-find`." The
+      ;; defcustom's POSIX value is the one empty suffix.
+      ;;--------------------------------------------------------------
+      (make-parameter '("")))
+
+    (define (executable-find command . args)
+      ;; GNU Emacs's `executable-find` (`files.el:1318`): "Search for
+      ;; COMMAND in `exec-path` and return the absolute file name.
+      ;; Return nil if COMMAND is not found anywhere in `exec-path`."
+      ;;
+      ;; The REMOTE arm is not carried: there are no file-name handlers
+      ;; in this tree, so every name is local and the local arm is the
+      ;; whole of the function. The C's predicate is the integer `1`
+      ;; ("Use 1 rather than file-executable-p to better match the
+      ;; behavior of call-process"); the access-bit form of
+      ;; `locate-file`'s predicate is not carried, so
+      ;; `file-executable-p` asks the same question of a regular file.
+      ;;--------------------------------------------------------------
+      (locate-file command exec-path (*exec-suffixes*) file-executable-p))
 
     (define (cd-absolute dir)
       ;; GNU Emacs's `cd-absolute' (`files.el:962'): "Change current

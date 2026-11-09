@@ -69,6 +69,7 @@
           set!buffer-local-keymap set!buffer-default-directory
           ;; `completion-base-position' is a variable local to `*Completions*'
           buffer-local-value erase-buffer set!mode-name
+          buffer-chars-modified-tick
           set-buffer-local-value! use-local-map with-current-buffer
           ;; `read-buffer''s completion is over the buffer registry, which
           ;; is an alist of `(NAME . BUFFER)' - see `internal-complete-buffer'
@@ -94,7 +95,7 @@
           delete-window get-buffer-window pop-to-buffer
           quit-window
           split-main-window-below switch-to-buffer-other-window
-          window-min-height)
+          window-live-p window-min-height with-selected-window)
     ;; `line-number-at-pos' is `fns.c''s (`fns.c:6688'), re-exported by
     ;; `editfns' so that its readers here do not move: the default
     ;; `goto-line' offers is the line point is on. It is read straight
@@ -104,7 +105,7 @@
     ;; which have their own library now (`zap-to-char' walks with them).
     (only (schemacs editor editfns)
           buffer-substring buffer-substring-no-properties
-          char-after delete-region forward-line goto-char insert
+          char-after char-before delete-region forward-line goto-char insert
           line-end-position
           line-number-at-pos message point point-max point-min
           text-editor-cursor-column text-editor-cursor-line)
@@ -118,7 +119,10 @@
     ;; `completion-fitted-height' measures the buffer's display rows
     ;; with - `window-text-pixel-size''s answer, in rows.
     (only (schemacs editor indentc)
-          current-column line-next-start window-line-rows-at)
+          current-column line-next-start window-line-rows-at
+          ;; the completions window's start, which the repeated-TAB
+          ;; scroll reads and `scroll-to-cursor!` moves
+          window-start)
     ;; `self-insert-command' is what SPC does in a file-name minibuffer
     ;; (`minibuffer-local-filename-completion-map' below), and
     ;; `with-current-buffer' and the line motion are the ordinary
@@ -128,12 +132,21 @@
     (only (schemacs editor simple) special-mode special-mode-map
        self-insert-command
        kill-region push-mark region-active-p
-       *this-command* *last-command*)
+       *this-command* *last-command*
+       ;; the two scroll commands the repeated TAB runs, through
+       ;; `with-selected-window` as Emacs runs them
+       scroll-up-command scroll-down-command
+       ;; `M-<down>` past the last candidate wraps to the first unless
+       ;; this is nil (`next-column-completion`, simple.el:10169).
+       *completion-auto-wrap*)
     (only (schemacs editor frame)
           *current-frame* *echo-area-buffer* *echo-area-prompt* *minibuffer*
           frame-height select-window selected-window set!frame-message
           set-message! set-window-point! window-buffer window-height
-          window-list window-width)
+          window-list window-width
+          ;; the completions window's display, as
+          ;; `completion--in-region-1` reads and moves it
+          frame-visible-p set-window-start! window-frame)
     ;; `try-completion' and `all-completions' are `minibuf.c''s and live in
     ;; `(schemacs editor minibuf)'; this library is `minibuffer.el' and uses
     ;; them rather than defining them.
@@ -153,7 +166,10 @@
     ;; called again.
     (only (schemacs editor keyboard)
           abort-recursive-edit exit-recursive-edit read-key-event
-          recursive-edit signal-quit)
+          recursive-edit signal-quit
+          ;; `completion--in-region-1` asks whether the repeated key was
+          ;; S-TAB; `this-command-keys` is how it knows.
+          *this-command-keys*)
     ;; The event model, for `read-char-from-minibuffer': it asks the
     ;; key *event* what it is, `char-alt' being `lisp.h''s lowest
     ;; modifier bit - the boundary between a plain character and a
@@ -163,7 +179,10 @@
     ;; `read-char-from-minibuffer' reads the one key that answers it with
     ;; the command loop's read, so a pushed-back event reaches it too;
     ;; what it draws with is the display's `render!'.
-    (only (schemacs editor xdisp) render!)
+    (only (schemacs editor xdisp) render!
+          ;; the repeated TAB's test, and the scrolling `M-<down>` gets
+          ;; from the display when point leaves the window
+          pos-visible-in-window-p scroll-to-cursor!)
     ;; The global map `minibuffer-local-map' is built from, and the local
     ;; map it becomes while it is read.
     (only (schemacs editor keymap)
@@ -266,6 +285,7 @@ read-number-history
    previous-history-element
    read-char-from-minibuffer
    read-from-minibuffer
+   read-string
    ;; the history record itself, for the libraries that hold their own
    ;; histories - `replace.el''s `query-replace-history' - the way
    ;; `read-number-history' would have wanted its accessors exported
@@ -734,7 +754,58 @@ read-number-history
                       (window2 (completion-fit-window filled)))
                  (set-buffer-local-value! filled 'completion-base-position
                                           (list base-size (string-length typed)))
+                 ;; `temp-buffer-window-show` (`window.el:138`): the
+                 ;; window shown becomes `minibuffer-scroll-window`, and
+                 ;; its start is the beginning of the list - point in the
+                 ;; buffer goes to `point-min` there too, which is the
+                 ;; heading line, above the first candidate.
+                 (set! minibuffer-scroll-window window2)
+                 (with-current-buffer filled
+                   (goto-char (point-min)))
+                 (set-window-start! window2 (point-min))
+                 (set-window-point! window2 (point-min))
                  (record-buffer! filled)))))))
+
+    (define minibuffer-scroll-window #f)
+    ;; ^ GNU Emacs's `minibuffer-scroll-window` (`window.c:9274'): "Non-nil
+    ;; means it is the window that C-M-v in minibuffer should scroll."
+    ;; Its other reader is `completion--in-region-1`
+    ;; (`minibuffer.el:1764`), which is what a repeated TAB uses, and
+    ;; `temp-buffer-window-show` (`window.el:138`) sets it when the
+    ;; `*Completions*` window is shown - which is
+    ;; `minibuffer-completion-help` below. A plain variable and not a
+    ;; parameter, per the tree's rule: Emacs `setq`s it and never
+    ;; `let`-binds it.
+
+    (define (completion--scroll-completions)
+      ;; The repeated-TAB branch of GNU Emacs's `completion--in-region-1`
+      ;; (`minibuffer.el:1761`): scroll the completions window one screen
+      ;; down, and once the end of the list is in view go back to the
+      ;; top; S-TAB is the mirror. The trailing newline the list may end
+      ;; with is disregarded when asking whether the end is visible, as
+      ;; the C does (bug#81630): otherwise a vertical list never counts
+      ;; as fully shown.
+      ;;--------------------------------------------------------------
+      (let ((window minibuffer-scroll-window))
+        (with-current-buffer (window-buffer window)
+          (let* ((pm (point-max))
+                 (pt (if (and (> pm (point-min))
+                              (char=? (char-before pm) #\newline))
+                         (- pm 1)
+                         pm)))
+            (cond
+             ((equal? (*this-command-keys*) (kbd "<backtab>"))
+              (if (pos-visible-in-window-p (point-min) window)
+                  ;; If the beginning is in view, scroll up to the end.
+                  (set-window-point! window pt)
+                  ;; Else scroll down one screen.
+                  (with-selected-window window (scroll-down-command #f))))
+             (else
+              (if (pos-visible-in-window-p pt window)
+                  ;; If the end is in view, scroll up to the top.
+                  (set-window-start! window (point-min))
+                  ;; Else scroll down one screen.
+                  (with-selected-window window (scroll-up-command #f)))))))))
 
     (define-command (minibuffer-complete)
       ;; GNU Emacs's `minibuffer-complete': complete as far as the text
@@ -757,11 +828,35 @@ read-number-history
       ;; far - the region half of it is step G of COMPLETION-PLAN.txt.
       "Complete the text in the minibuffer as far as it can be (bound to TAB)."
       (interactive)
-      (let ((typed (or (minibuffer-contents) "")))
-        (completion--do-completion typed (*minibuffer-completion-table*)
-                                   (*minibuffer-completion-predicate*)
-                                   (string-length typed)
-                                   #f)))
+      (let* ((mb (*minibuffer*))
+             (ed (and mb (minibuffer-editor mb)))
+             (typed (or (minibuffer-contents) ""))
+             (state (and ed (cons (buffer-chars-modified-tick ed)
+                                  (buffer-pt ed))))
+             (same? (and ed
+                         (equal? state
+                                 (buffer-local-value
+                                  ed 'completion--attempt-state #f)))))
+        ;; `completion--in-region-1` (`minibuffer.el:1749`): a completion
+        ;; command that follows something else throws the recorded state
+        ;; away, so the repeat is a property of the command and not of
+        ;; the key - TAB after `?` completes rather than scrolls.
+        (unless (eq? (*last-command*) 'completion-at-point)
+          (set! minibuffer-scroll-window #f))
+        (when ed
+          (set-buffer-local-value! ed 'completion--attempt-state state))
+        ;; "`this-command` is set to `completion-at-point`" (`:1745`), so
+        ;; the next command sees the repeat.
+        (*this-command* 'completion-at-point)
+        (if (and same?
+                 (window-live-p minibuffer-scroll-window)
+                 (frame-visible-p (window-frame minibuffer-scroll-window)))
+            (begin (completion--scroll-completions) #f)
+            (completion--do-completion typed
+                                       (*minibuffer-completion-table*)
+                                       (*minibuffer-completion-predicate*)
+                                       (string-length typed)
+                                       #f))))
 
     (define (read-char-from-minibuffer prompt)
       ;; GNU Emacs's `read-char-from-minibuffer': ask a question whose
@@ -1714,6 +1809,19 @@ read-number-history
     ;; this; see the note on `read-buffer-to-switch` above.
     (*read-buffer-to-switch* read-buffer-to-switch)
 
+    (define (read-string prompt . args)
+      ;; GNU Emacs's `read-string` (`subr.el`): "Read a string from the
+      ;; minibuffer, prompting with string PROMPT." Its body is
+      ;; `read-from-minibuffer` with no keymap - `minibuffer-local-map`
+      ;; - and the optional INITIAL-INPUT, HISTORY and DEFAULT-VALUE
+      ;; passed through. INHERIT-INPUT-METHOD is not carried: there is
+      ;; no input method here.
+      ;;--------------------------------------------------------------
+      (let ((initial (list-ref-or args 0 #f))
+            (history (list-ref-or args 1 #f))
+            (default (list-ref-or args 2 #f)))
+        (read-from-minibuffer prompt initial #f history default)))
+
     (define (completing-read prompt collection . args)
       ;; GNU Emacs's `completing-read': read a string in the minibuffer,
       ;; completing against COLLECTION.
@@ -2472,6 +2580,28 @@ read-number-history
                 ((completion-start-at? buffer i) i)
                 (else (loop (+ i 1)))))))
 
+    (define (first-completion-start buffer)
+      ;; GNU Emacs's `first-completion` (`simple.el:10244`): "Move to the
+      ;; first item in the completions buffer." The position that command
+      ;; would leave point on, which is where a wrapping `M-<down>` goes.
+      ;; The help and heading lines above the first candidate carry no
+      ;; `completion--string`, so this is the first index that does.
+      ;;--------------------------------------------------------------
+      (let loop ((i (buffer-beg buffer)))
+        (cond ((>= i (buffer-z buffer)) #f)
+              ((completion-start-at? buffer i) i)
+              (else (loop (+ i 1))))))
+
+    (define (last-completion-start buffer)
+      ;; GNU Emacs's `last-completion` (`simple.el:10260`), for the
+      ;; horizontal format: the start of the last candidate in the
+      ;; buffer.
+      ;;--------------------------------------------------------------
+      (let loop ((i (- (buffer-z buffer) 1)))
+        (cond ((< i (buffer-beg buffer)) #f)
+              ((completion-start-at? buffer i) i)
+              (else (loop (- i 1))))))
+
     (define (completion-previous-cell-start buffer from)
       ;; The last completion cell start before FROM, or #f.
       ;;--------------------------------------------------------------
@@ -2497,17 +2627,29 @@ read-number-history
     (define (move-completions n)
       ;; Move the `*Completions*' buffer's point N candidates, through
       ;; the cells the layout arranged them in, and mark the one that is
-      ;; on. This is GNU Emacs's `next-column-completion' for a
+      ;; on. This is GNU Emacs's `next-column-completion` for a
       ;; `horizontal' format: the next cell is the next in the buffer,
       ;; which is the next column of the row and then the first of the
-      ;; next. The ends are clamped rather than wrapped, which is
-      ;; `completion-auto-wrap' being nil - this editor's one-column
-      ;; navigation always worked that way.
+      ;; next.
+      ;;
+      ;; **The ends wrap.** `completion-auto-wrap` (`simple.el:10169')
+      ;; defaults to t, and with it `next-column-completion` goes to
+      ;; `first-completion` when there is no next candidate and to
+      ;; `last-completion` when there is no previous one - so `M-<down>`
+      ;; at the bottom comes back to the top, and the window scrolls up
+      ;; to it. This port used to clamp at both ends, on the reading that
+      ;; the variable was nil; it is not.
+      ;;
+      ;; **There is always a window to move in**: GNU Emacs's
+      ;; `with-minibuffer-completions-window` (`minibuffer.el:5334`)
+      ;; makes one with `minibuffer-completion-help` when none is up.
       ;;
       ;; Point starts on the heading line, above the first candidate, so
       ;; the first move finds the first cell and the moves after it walk
       ;; the cells in display order.
       ;;--------------------------------------------------------------
+      (unless (completions-window)
+        (minibuffer-completion-help))
       (let ((buffer (get-buffer "*Completions*")))
         (when buffer
           (let loop ((left (abs n)) (step (if (< n 0) -1 1)))
@@ -2518,15 +2660,35 @@ read-number-history
                                  buffer (buffer-pt buffer))
                                 (completion-next-cell-start
                                  buffer (buffer-pt buffer)))))
-                  (if next
-                      (begin (set-point buffer next)
-                             (loop (- left 1) step))
-                      (loop 0 step))))
+                  (cond
+                   (next
+                    (set-point buffer next)
+                    (loop (- left 1) step))
+                   ((*completion-auto-wrap*)
+                    (let ((wrapped (if (< step 0)
+                                       (last-completion-start buffer)
+                                       (first-completion-start buffer))))
+                      (if wrapped
+                          (begin (set-point buffer wrapped)
+                                 (loop (- left 1) step))
+                          (loop 0 step))))
+                   (else (loop 0 step))))))
           ;; the window is a view of the buffer, so its point follows
           (let ((window (completions-window)))
             (when window
-              (set-window-point! window (buffer-pt buffer))))
-          (show-completions-selection! buffer)))))
+              (set-window-point! window (buffer-pt buffer))
+              ;; **The window follows the selection.** GNU Emacs's
+              ;; `with-minibuffer-completions-window` (`minibuffer.el:5334`)
+              ;; *selects* the completions window and moves point in it,
+              ;; and redisplay then keeps that window's point visible -
+              ;; which is why `M-<down>` scrolls once the selection
+              ;; reaches the bottom. The window is not selected here, and
+              ;; this display scrolls only the selected window
+              ;; (`render!`'s `scroll-to-cursor!` call at `xdisp`'s
+              ;; selection), so the same decision is made for this one
+              ;; directly.
+              (scroll-to-cursor! window)))
+          (show-completions-selection! buffer))))
 
     (define (completion--selected-candidate)
       ;; GNU Emacs's `completion--selected-candidate': the candidate the
@@ -2638,6 +2800,10 @@ read-number-history
       (let ((map (minibuffer-map-from-bindings
                   '*minibuffer-local-completion-map*
                   (list (cons (kbd "TAB") minibuffer-complete)
+                        ;; `"<backtab>" #'minibuffer-complete`
+                        ;; (`minibuffer.el:3432`); the repeated-TAB
+                        ;; branch above uses it for the reverse scroll.
+                        (cons (kbd "<backtab>") minibuffer-complete)
                         (cons (kbd "SPC") minibuffer-complete-word)
                         (cons (kbd "?") minibuffer-completion-help)
                         (cons (kbd "RET") minibuffer-completion-exit)

@@ -25,6 +25,7 @@
    <display>
    current-display
    write-glyphs!
+   draw-box!
    glyphs->text
    clear-frame-area!
    update-window-begin!
@@ -46,6 +47,7 @@
    display-mouse-position
    *mouse-event-keys*
    display-color-cells
+   display-font-families
    ;; the selections, which `select' reads and writes through
    get-selection
    set-selection!
@@ -205,6 +207,26 @@
     ;; docstring describes for "a mouseless terminal".
     (define-method (display-mouse-position (d <display>)) #f)
 
+    (define-generic draw-box!)
+    ;; Draw the `:box` face attribute around a run: GNU Emacs's
+    ;; `draw_glyph_string_box` (`pgtkterm.c`, `xterm.c`). A terminal has
+    ;; no box - `term.c`'s face realization drops `:box` entirely and
+    ;; `tty_write_glyphs` draws only the run - so this is a no-op there.
+    ;; `(draw-box! display box token x y cells height left? right?)`.
+    ;;
+    ;; BOX is the face's `:box` value, unparsed (`t`, a colour string, an
+    ;; integer, a cons, or the `(:line-width ... :color ... :style ...)`
+    ;; plist); TOKEN is the run's realized face, whose foreground and
+    ;; background are the defaults the box's colour falls back to. X is
+    ;; a cell column like `write-glyphs!`'s, Y a pixel, CELLS the run's
+    ;; width in cells and HEIGHT its height in pixels. LEFT? and RIGHT?
+    ;; are Emacs's `left_box_line_p`/`right_box_line_p`: a box drawn
+    ;; over several runs has its vertical edges only where the boxed
+    ;; region begins and ends.
+    (define-method (draw-box! (d <display>) box token x y cells height
+                              left? right?)
+      #f)
+
     (define-generic draw-window-cursor!)
     ;; Put the display cursor at pixel ROW, COLUMN (frame coordinates),
     ;; in the shape TYPE, over the text TEXT drawn in TOKEN's face.
@@ -323,6 +345,15 @@
     (define-generic line-height)
     ;; The height of one character unit in pixels: Emacs's
     ;; `FRAME_LINE_HEIGHT', 1 on a text terminal. `(line-height display)'.
+
+    (define-generic display-font-families)
+    ;; The font families the display can draw with - what `font.c`'s
+    ;; `font-family-list` asks each of the frame's font drivers
+    ;; (`list_family`). A terminal has no font driver and answers nil;
+    ;; a graphical one answers the family names as strings.
+    ;; `(display-font-families display)`.
+
+    (define-method (display-font-families (d <display>)) '())
 
     (define-generic display-cell-size)
     ;; The size of one character unit in *real* pixels, as

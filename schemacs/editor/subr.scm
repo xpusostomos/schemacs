@@ -18,14 +18,16 @@
     ;; `logior' and `lognot' are the event model's bit arithmetic, beside
     ;; the `logand' `key-parse' already folds control characters with, and
     ;; `filter' orders a symbol event's modifiers.
-    (only (guile) delete string-contains)
+    (only (guile) delete string-contains format catch string-index)
+    ;; a condition that is not an error object is read through these
+    (only (ice-9 exceptions) exception-message)
     ;; `char-downcase' is `event-basic-type''s.
     (scheme char)
     ;; `string-prefix-p' compares with `compare-strings', which is
     ;; fns.c's and lives in `(schemacs editor fns)'. That library is
     ;; below this one - it imports none of subr - so this is not a
     ;; cycle.
-    (only (schemacs editor fns) compare-strings)
+    (only (schemacs editor fns) compare-strings concat)
     ;; The key event model and `kbd' live in `character.sld', the lowest
     ;; editor library - see its export note. They are re-exported from
     ;; here so that a library importing `(schemacs editor subr) kbd' still
@@ -46,8 +48,18 @@
     ;; `intervals.sld', and the engine is built on the buffer library. So
     ;; the hook runner arrives there through a seam, and this is where it
     ;; is installed.
+    ;; `replace-regexp-in-string` and `split-string` are `subr.el`'s and
+    ;; are built on `search.c`'s primitives, which are above this
+    ;; library - nothing `search` imports reaches back here, so the edge
+    ;; is not a cycle.
+    (only (schemacs editor search)
+          string-match string-match-p match-beginning match-end match-string
+          replace-match match-data--translate save-match-data)
     (only (schemacs editor buffer)
           *run-hooks-function*
+          ;; `with-temp-buffer` makes and kills one; `kill-buffer` is
+          ;; the command and asks questions, so it is not this one.
+          generate-new-buffer %kill-buffer with-current-buffer buffer-name
           ;; `with-silent-modifications` binds four of `buffer.c`'s
           ;; things, so the macro's template has to resolve them here -
           ;; and it does resolve them here: a `syntax-rules` template's
@@ -62,7 +74,16 @@
 
   (export
    assoc-delete-all assq-delete-all delq
-   add-to-history
+   add-to-history add-to-list
+   ;; string/list helpers `subr.el`'s, for the external packages and
+   ;; anything else written in Emacs's idiom
+   split-string replace-regexp-in-string shell-quote-argument
+   string-trim string-trim-left string-trim-right
+   intern error-message-string
+   with-temp-buffer
+   ;; the separator regexp `split-string` defaults to (`subr.el`'s
+   ;; `split-string-default-separators`)
+   *split-string-default-separators*
    ;; `minor-mode-alist' and the function that fills it. See the note on
    ;; `add-minor-mode' for why the alist lives here and not with the mode
    ;; line that reads it.
@@ -162,6 +183,270 @@
 
 
 
+
+    ;;----------------------------------------------------------------
+    ;; The string and list helpers, and the temp buffer
+    ;;
+    ;; These are `subr.el`'s under their Emacs names. Where Guile has a
+    ;; function with the same object it is called rather than copied:
+    ;; `intern` is `string->symbol` (this tree has no obarray, which is
+    ;; the second argument's purpose), and `concat` is used to rebuild a
+    ;; string so that text properties survive as they do in the C.
+    ;;------------------------------------------------------------------
+
+    (define (%subr-opt args n default)
+      (let loop ((rest args) (k n))
+        (cond ((null? rest) default)
+              ((= k 0) (car rest))
+              (else (loop (cdr rest) (- k 1))))))
+
+    (define *split-string-default-separators*
+      ;; `subr.el`'s `split-string-default-separators`, "[ \f\t\n\r\v]+" -
+      ;; written as the characters themselves, because a regexp engine's
+      ;; opinion of `\f` and `\v` is not the string's.
+      (string-append "[" (string (integer->char 32) (integer->char 12)
+                                 (integer->char 9) (integer->char 10)
+                                 (integer->char 13) (integer->char 11))
+                     "]+"))
+
+    (define (split-string string . args)
+      ;; GNU Emacs's `split-string` (`subr.el`): "Split STRING into
+      ;; substrings bounded by matches for SEPARATORS." The beginning and
+      ;; end of STRING and each match are split points; a match that
+      ;; leaves nothing between the last split and this one is dropped
+      ;; unless OMIT-EMPTY is nil, and with no SEPARATORS the whitespace
+      ;; default forces OMIT-EMPTY.
+      ;;--------------------------------------------------------------
+      (let* ((separators (%subr-opt args 0 #f))
+             (omit-empty (%subr-opt args 1 #f))
+             (trim (%subr-opt args 2 #f))
+             (keep-empty (and separators (not omit-empty)))
+             (len (string-length string))
+             (trim-left-re (and trim (string-append "\\`\\(?:" trim "\\)")))
+             (trim-right-re (and trim (string-append "\\(?:" trim "\\)\\'")))
+             (sep-re (or separators *split-string-default-separators*)))
+        (save-match-data
+          (let loop ((next 0) (start 0) (acc '()))
+            (let ((sep (string-match sep-re string next)))
+              (if (and sep
+                       (let ((sep-end (match-end 0)))
+                         (when (or keep-empty (< start sep))
+                           (let ((item (substring string start sep)))
+                             (if trim
+                                 (let* ((item-beg
+                                         (if (string-match trim-left-re item 0)
+                                             (match-end 0)
+                                             0))
+                                        (item-len (string-length item))
+                                        (item-end
+                                         (or (string-match-p trim-right-re item
+                                                             item-beg)
+                                             item-len)))
+                                   (when (or (> item-beg 0)
+                                             (< item-end item-len))
+                                     (set! item (substring item item-beg
+                                                           item-end)))
+                                   (when (or keep-empty (< item-beg item-end))
+                                     (set! acc (cons item acc))))
+                                 (set! acc (cons item acc)))))
+                         (set! next (max (+ 1 next) sep-end))
+                         (set! start sep-end)
+                         (< start len)))
+                  (loop next start acc)
+                  (let ((item (if (= start 0) string (substring string start))))
+                    (when trim
+                      (let* ((item-beg
+                              (if (string-match trim-left-re item 0)
+                                  (match-end 0)
+                                  0))
+                             (item-len (string-length item))
+                             (item-end
+                              (or (string-match-p trim-right-re item item-beg)
+                                  item-len)))
+                        (when (or (> item-beg 0) (< item-end item-len))
+                          (set! item (substring item item-beg item-end)))))
+                    (if (or keep-empty (not (string=? item "")))
+                        (reverse (cons item acc))
+                        (reverse acc)))))))))
+
+    (define (replace-regexp-in-string regexp rep string . args)
+      ;; GNU Emacs's `replace-regexp-in-string` (`subr.el`): "Replace all
+      ;; matches for REGEXP with REP in STRING." REP is a replacement
+      ;; string for `replace-match` or a function of the matched text.
+      ;; The walk builds the answer reversed and joins it with `concat`,
+      ;; which is how the C keeps text properties; `matched empty string`
+      ;; advances one character so a zero-width regexp terminates.
+      ;;--------------------------------------------------------------
+      (let ((fixedcase (%subr-opt args 0 #f))
+            (literal (%subr-opt args 1 #f))
+            (subexp (%subr-opt args 2 #f))
+            (start (or (%subr-opt args 3 #f) 0))
+            (l (string-length string)))
+        (save-match-data
+          (let loop ((start start) (matches '()))
+            (if (and (< start l) (string-match regexp string start))
+                (let* ((mb (match-beginning 0))
+                       (me (match-end 0))
+                       (me (if (= me mb) (min l (+ mb 1)) me)))
+                  (match-data--translate (- mb))
+                  (let* ((str (substring string mb me))
+                         (replacement
+                          (replace-match
+                           (if (string? rep) rep (rep (match-string 0 str)))
+                           fixedcase literal str subexp)))
+                    (loop me (cons replacement
+                                   (cons (substring string start mb)
+                                         matches)))))
+                (apply concat
+                       (reverse (cons (substring string start l) matches))))))))
+
+    (define (string-trim-left string . args)
+      ;; GNU Emacs's `string-trim-left` (`subr.el:7745`): "Trim STRING of
+      ;; leading string matching REGEXP." REGEXP defaults to
+      ;; "[ \t\n\r]+", anchored to the string's beginning.
+      ;;--------------------------------------------------------------
+      (let ((regexp (%subr-opt args 0 #f)))
+        (if (string-match (if regexp
+                              (string-append "\\`\\(?:" regexp "\\)")
+                              "\\`[ \t\n\r]+")
+                          string)
+            (substring string (match-end 0))
+            string)))
+
+    (define (string-trim-right string . args)
+      ;; GNU Emacs's `string-trim-right` (`subr.el:7757`): "Trim STRING
+      ;; of trailing string matching REGEXP." Anchored at the end, and
+      ;; `string-match-p` so the match data is left alone.
+      ;;--------------------------------------------------------------
+      (let* ((regexp (%subr-opt args 0 #f))
+             (i (string-match-p (if regexp
+                                    (string-append "\\(?:" regexp "\\)\\'")
+                                    "[ \t\n\r]+\\'")
+                                string)))
+        (if i (substring string 0 i) string)))
+
+    (define (string-trim string . args)
+      ;; GNU Emacs's `string-trim` (`subr.el:7768`): "Trim STRING of
+      ;; leading and trailing strings matching TRIM-LEFT and TRIM-RIGHT."
+      ;;--------------------------------------------------------------
+      (let* ((trim-left (%subr-opt args 0 #f))
+             (trim-right (%subr-opt args 1 #f))
+             (beg (and (string-match
+                        (if trim-left
+                            (string-append "\\`\\(?:" trim-left "\\)")
+                            "\\`[ \t\n\r]+")
+                        string)
+                       (match-end 0)))
+             (end (string-match-p
+                   (if trim-right
+                       (string-append "\\(?:" trim-right "\\)\\'")
+                       "[ \t\n\r]+\\'")
+                   string beg)))
+        (if (or beg end)
+            ;; Emacs's `substring' treats a nil START as 0
+            ;; (`validate_substring_args'), and BEG is nil whenever the
+            ;; leading trim did not match. Guile's `substring' has no
+            ;; such rule, so the nil is resolved here.
+            (substring string (or beg 0) (or end (string-length string)))
+            string)))
+
+    (define (shell-quote-argument argument . args)
+      ;; GNU Emacs's `shell-quote-argument` (`subr.el`): "Quote ARGUMENT
+      ;; for passing as argument to an inferior shell." **The POSIX arm
+      ;; only**: the MS-DOS and Windows arms are selected by `system-type`
+      ;; values this tree cannot have, and it is 'gnu/linux (see
+      ;; `startup.sld`). The replacement prefixes every character that is
+      ;; not a POSIX filename character with a backslash, and a newline
+      ;; is quoted in single quotes so the whole argument stays one word.
+      ;;--------------------------------------------------------------
+      (if (string=? argument "")
+          "''"
+          (string-replace
+           (string #\newline)
+           (string #\' #\newline #\')
+           (replace-regexp-in-string
+            "[^-0-9a-zA-Z_./\n]"
+            ;; `\` then `\&` - a literal backslash followed by the whole
+            ;; match, which is the replacement `replace-match` reads from
+            ;; Emacs's `"\\\\\\&"`.
+            (string (integer->char 92) (integer->char 92)
+                    (integer->char 92) #\&)
+            argument))))
+
+    (define (add-to-list list-var element . args)
+      ;; GNU Emacs's `add-to-list` (`subr.el`): "Add ELEMENT to the value
+      ;; of LIST-VAR if it isn't there yet."
+      ;;
+      ;; **LIST-VAR is the *parameter* and not its name.** A Scheme
+      ;; binding has no `symbol-value`/`set`, so the two halves Emacs
+      ;; reaches through the symbol are the parameter's read and its
+      ;; call - the tree's convention for what Elisp does with `set`.
+      ;;--------------------------------------------------------------
+      (let* ((append? (%subr-opt args 0 #f))
+             (compare-fn (or (%subr-opt args 1 #f) equal?))
+             (value (list-var)))
+        (if (let loop ((rest value))
+              (cond ((null? rest) #f)
+                    ((compare-fn element (car rest)) #t)
+                    (else (loop (cdr rest)))))
+            value
+            (list-var (if append?
+                          (append value (list element))
+                          (cons element value))))))
+
+    (define (intern name . args)
+      ;; GNU Emacs's `intern` (`print.c`): "Return the canonical symbol
+      ;; whose name is STRING." Emacs's second argument names the obarray
+      ;; to intern in; this tree has no obarray and one namespace, so the
+      ;; answer is `string->symbol` - the same symbol for the same name.
+      ;;--------------------------------------------------------------
+      (string->symbol name))
+
+    (define (error-message-string err)
+      ;; GNU Emacs's `error-message-string` (`print.c:1037`): "Return a
+      ;; string describing an error." A Guile condition carries a *format
+      ;; template* and its values in the irritants, so the two are put
+      ;; back together here the way `schemacs/main.scm`'s
+      ;; `condition-text` and the command loop's reporter do it.
+      ;;--------------------------------------------------------------
+      (let ((message (catch #t
+                       (lambda () (%condition-message err))
+                       (lambda a #f)))
+            (irritants (catch #t
+                         (lambda () (error-object-irritants err))
+                         (lambda a '()))))
+        (cond
+         ((not (string? message)) (format #f "~a" err))
+         ((and (pair? irritants) (string-index message #\~))
+          (catch #t
+            (lambda () (apply format #f message irritants))
+            (lambda a message)))
+         (else message))))
+
+    (define (%condition-message err)
+      ;; `error-object-message` when the condition is an error object,
+      ;; and `exception-message` otherwise - the two Guile spellings.
+      (if (error-object? err)
+          (error-object-message err)
+          (exception-message err)))
+
+    (define-syntax with-temp-buffer
+      ;; GNU Emacs's `with-temp-buffer` (`subr.el`): "Create a temporary
+      ;; buffer, and evaluate BODY there like `progn'." The buffer is
+      ;; made with `generate-new-buffer` and killed afterwards whatever
+      ;; BODY does - `dynamic-wind` is the `unwind-protect`.
+      ;;--------------------------------------------------------------
+      (syntax-rules ()
+        ((_ body ...)
+         (let ((temp-buffer (generate-new-buffer " *temp*")))
+           ;; `kill-buffer` can change current-buffer in some odd cases.
+           (with-current-buffer temp-buffer
+             (dynamic-wind
+               (lambda () #t)
+               (lambda () body ...)
+               (lambda ()
+                 (and (buffer-name temp-buffer)
+                      (%kill-buffer temp-buffer)))))))))
 
     ;;------------------------------------------------------------------
     ;; Minor modes

@@ -91,6 +91,8 @@
    ;; whether the init file is loaded at all - the command line's
    ;; `--no-init-file' (`-q'), which an entry point binds
    *init-file-user*
+   ;; emacs.c's two process facts the Lisp layer reads
+   system-type daemonp
    )
 
   (begin
@@ -198,6 +200,26 @@
             (first-existing (list (and home
                                        (string-append home "/.config/schemacs/init.scm"))
                                   (and home (string-append home "/.schemacs")))))))
+
+    (define system-type
+      ;; GNU Emacs's `system-type` (`emacs.c:3500'): "Value is symbol
+      ;; indicating the operating system type." On Linux that is
+      ;; `gnu/linux`, and this tree runs on Linux. It lives here rather
+      ;; than in a library of its own because `emacs.c` has no mirror -
+      ;; `main.scm` is this tree's entry - and `startup.el` is where the
+      ;; Lisp layer is next to the process facts it asks about.
+      ;;--------------------------------------------------------------
+      'gnu/linux)
+
+    (define (daemonp)
+      ;; GNU Emacs's `daemonp` (`emacs.c:3398`): "Return non-nil if the
+      ;; current Emacs is a daemon." This tree has no `--daemon` mode:
+      ;; it is started attached to a terminal or a window and exits with
+      ;; it, so the answer is always nil. Named rather than faked - an
+      ;; external package that branches on it takes the non-daemon
+      ;; branch, which is the true one here.
+      ;;--------------------------------------------------------------
+      #f)
 
     (define *init-file-user* (make-parameter #t))
     ;; ^ GNU Emacs's `init-file-user' (`startup.el:341'), which is what

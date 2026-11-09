@@ -158,6 +158,7 @@
 
   (export
    messages-buffer messages-buffer-mode
+   string-empty-p
    special-mode special-mode-hook special-mode-map
    ;; `casefiddle.c`'s two region commands, defined here because they
    ;; read the region - see the note at their definitions.
@@ -186,6 +187,8 @@
    ;; `line-move' with a sign, as they are in Emacs.
    line-move line-move-1 line-move-visual
    *line-move-visual* *goal-column* *track-eol*
+   ;; completion.el's - `simple.el`'s `completion-auto-wrap`
+   *completion-auto-wrap*
    ;; Visual Line mode (`simple.el:8580-8785') and the commands its map
    ;; remaps to.
    visual-line-mode visual-line-mode-map *visual-line-fringe-indicators*
@@ -421,6 +424,22 @@ lines."
     ;; by logical lines." The global value is the defcustom's; a buffer
     ;; that `visual-line-mode' turned on has its own, which is why
     ;; `line-move' reads it through the buffer-local store.
+
+    (define-custom *completion-auto-wrap* #t
+      "Non-nil means to wrap around when selecting completion candidates.
+This affects the commands `next-completion', `previous-completion',
+`next-line-completion' and `previous-line-completion'.
+When `completion-auto-select' is t, it wraps through the minibuffer
+for the commands bound to the TAB key."
+      :type 'boolean
+      :version "29.1"
+      :group 'completion)
+    ;; ^ GNU Emacs's `completion-auto-wrap' (`simple.el:10169'), whose
+    ;; default is **t** - so `M-<down>` past the last candidate goes back
+    ;; to the first, and the completions window scrolls back to the top
+    ;; with it. This tree's `move-completions` clamped at both ends and
+    ;; said that was this variable being nil; it was Emacs's default
+    ;; being missed.
 
     (define-custom *goal-column* #f
       "Semipermanent goal column for vertical motion, as set by
@@ -805,6 +824,13 @@ This has no effect when the variable `line-move-visual' is non-nil."
                   (if (< end (buffer-z ed))
                       (loop (- n 1) (+ end 1))
                       pos))))))
+
+    (define (string-empty-p string)
+      ;; GNU Emacs's `string-empty-p` (`simple.el:11590'): "Check whether
+      ;; STRING is empty." The defsubst's whole body is `(string= string
+      ;; "")`, so that is the whole of this.
+      ;;--------------------------------------------------------------
+      (string=? string ""))
 
     (define-command (scroll-up-command uarg)
       ;; Scroll the view toward the end of the buffer, with a two-line

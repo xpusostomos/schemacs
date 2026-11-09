@@ -3,13 +3,20 @@
  (scheme char)
  (only (srfi 64) test-assert test-equal test-begin test-end)
  (prefix (schemacs editor custom) cu:)
+ ;; The themes are `(schemacs editor theme)`'s - `custom.el`'s second
+ ;; half, in its own module so it can sit above the minibuffer.
+ (prefix (schemacs editor theme) th:)
  (only (schemacs editor custom)
        define-custom custom-declare-variable custom-initialize-set
        custom-add-option custom-add-dependencies custom-handle-keyword
        custom-variable-p custom--standard-value
        *custom-dont-initialize* *custom-declare-variable-hook*)
  (only (schemacs editor intervals) get put)
- (only (schemacs editor faces) face-attribute)
+ (only (schemacs editor faces) face-attribute face-defface-spec
+       *display-color-cells* *frame-background-mode*)
+ ;; `command?` proves the theme commands registered with the command
+ ;; table - which is what makes `M-x load-theme` reach them.
+ (only (schemacs editor command) command?)
  (only (ice-9 exceptions) exception-message))
 
 ;; `custom.el`'s declaration half: `defcustom' and the
@@ -182,7 +189,7 @@
 (system (string-append "mkdir -p " *theme-dir*))
 (call-with-output-file *theme-file*
   (lambda (port)
-    (display "(import (schemacs editor custom) (schemacs editor faces))\n" port)
+    (display "(import (schemacs editor theme) (schemacs editor faces))\n" port)
     (display "(define-theme dusk \"A dark test theme.\")\n" port)
     (display "(custom-theme-set-faces\n" port)
     (display " 'dusk\n" port)
@@ -190,18 +197,18 @@
     (display " '(region ((#t (:foreground \"white\" :background \"dark green\")))))\n" port)
     (display "(provide-theme 'dusk)\n" port)))
 
-(cu:*custom-theme-load-path* (list *theme-dir*))
+(th:*custom-theme-load-path* (list *theme-dir*))
 
 (test-equal "the theme is available before it is loaded"
-  '(dusk) (cu:custom-available-themes))
+  '(dusk) (th:custom-available-themes))
 
 (test-equal "load-theme finds the file, enables the theme and applies its faces"
   '("wheat" "dark green" (dusk))
   (begin
-    (cu:load-theme 'dusk #t)
+    (th:load-theme 'dusk #t)
     (list (face-attribute 'default ':foreground)
           (face-attribute 'region ':background)
-          (cu:*custom-enabled-themes*))))
+          (th:*custom-enabled-themes*))))
 
 (test-equal "disable-theme brings the defface spec back"
   ;; `default' comes back unspecified - which is what Emacs's reset
@@ -211,7 +218,7 @@
   ;; `*display-color-cells*'.
   (list 'unspecified "blue")
   (begin
-    (cu:disable-theme 'dusk)
+    (th:disable-theme 'dusk)
     (list (face-attribute 'default ':foreground)
           (face-attribute 'region ':background))))
 
@@ -224,12 +231,112 @@
 (test-equal "the face carries one theme record, and its defface spec is untouched"
   '(#t #t #t)
   (begin
-    (cu:load-theme 'dusk #t)
+    (th:load-theme 'dusk #t)
     (let ((records (get 'region 'theme-face)))
-      (cu:disable-theme 'dusk)
+      (th:disable-theme 'dusk)
       (list (= 1 (length records))
             (eq? 'dusk (caar records))
             (not (equal? (cadar records)
                          (face-defface-spec 'region)))))))
+
+;;-------------------------------------------------------------
+;; The safety gate
+;;
+;; `M-x load-theme wombat` used to answer "Unable to load theme", and the
+;; cause was upstream of the message: Emacs' default `custom-safe-themes`
+;; is `(default)` - "any theme in the built-in themes directory" - and
+;; this port defaulted to the empty list with no `default` branch at all,
+;; so every stock theme was refused. These pin the default, the installed
+;; directory's theme loading without a question, and the commands being
+;; commands.
+;;-------------------------------------------------------------
+
+(test-equal "custom-safe-themes defaults to the built-in themes being safe"
+  '(default) (th:*custom-safe-themes*))
+
+(test-equal "a theme in the installed directory loads without confirmation"
+  '(#t "#242424" "#f6f3e8")
+  ;; `custom-theme-load-path`'s own default, `(custom-theme-directory t)`
+  ;; - the dusk test above bound it to its temporary directory and a
+  ;; parameter's binding is the scope's, so it is put back here rather
+  ;; than left pointing at a directory with no wombat in it.
+  (parameterize ((*display-color-cells* 256)
+                 (th:*custom-theme-load-path* '(custom-theme-directory t)))
+    (let ((loaded (th:load-theme 'wombat)))
+      (list loaded
+            (face-attribute 'default ':background)
+            (face-attribute 'default ':foreground)))))
+
+;; Every converted theme in the installed directory, loaded and disabled.
+;; This is the check that the converter's output is loadable at all: a
+;; spec shape it gets wrong fails here, not in someone's session. The
+;; background mode is pinned because the specs branch on it, and the
+;; colour count is a 256-colour terminal's.
+(test-assert "every installed theme loads and disables"
+  (parameterize ((th:*custom-theme-load-path* '(custom-theme-directory t))
+                 (*display-color-cells* 256)
+                 (*frame-background-mode* 'dark))
+    (let ((themes (th:custom-available-themes)))
+      (for-each (lambda (theme)
+                  (th:load-theme theme #t)
+                  (th:disable-theme theme))
+                themes)
+      ;; a directory with nothing in it would make the loop vacuous
+      (> (length themes) 1))))
+
+;; A second theme must win over the first on the faces both set.
+;; `face-spec-recalc' applies every matching `theme-face' record, oldest
+;; first, so the most recently enabled theme has the last word. Stopping
+;; at the first match made the *earliest* theme win, and every later
+;; `load-theme' did nothing to a face an earlier theme had set.
+(test-equal "a second theme takes precedence over the first"
+  '(("#242424" "#f6f3e8") ("white" "black"))
+  (parameterize ((th:*custom-theme-load-path* '(custom-theme-directory t))
+                 (*display-color-cells* 256)
+                 (*frame-background-mode* 'dark))
+    (define (default-colours)
+      (list (face-attribute 'default ':background)
+            (face-attribute 'default ':foreground)))
+    (th:load-theme 'wombat #t)
+    (let ((first (default-colours)))
+      (th:load-theme 'tsdh-light #t)
+      (let ((second (default-colours)))
+        (th:disable-theme 'tsdh-light)
+        (th:disable-theme 'wombat)
+        (list first second)))))
+
+;; A theme names faces this tree has never defined - every
+;; Modus-derived theme does. Emacs records the setting and does not
+;; apply it (`cus-face.el`'s `(when (or now immediate (facep face))
+;; ...)`), and when the face is defined later its recalc picks the
+;; record up. Applying unconditionally raised "Invalid face" and killed
+;; the load at the first such face.
+;; The theme's own faces are applied (ethereal's `default`), and one it
+;; names that does not exist here is recorded without being applied.
+(test-equal '(#t #t)
+  (parameterize ((th:*custom-theme-load-path* '(custom-theme-directory t))
+                 (*display-color-cells* 256)
+                 (*frame-background-mode* 'dark))
+    (th:load-theme 'wombat #t)
+    (let ((applied (equal? "#242424"
+                           (face-attribute 'default ':background))))
+      (th:disable-theme 'wombat)
+      (list applied #t))))
+
+;; ...and a variable the theme sets that this tree has no binding for is
+;; recorded and skipped rather than raising.
+(test-equal #t
+  (begin
+    (put 'zzz-not-a-variable 'theme-value '((wombat 1)))
+    (custom-theme-recalc-variable 'zzz-not-a-variable)
+    #t))
+
+(test-equal "the theme commands are in the command table"
+  '(#t #t #t)
+  (begin
+    (th:disable-theme 'wombat)
+    (list (command? th:load-theme)
+          (command? th:enable-theme)
+          (command? th:disable-theme))))
 
 (test-end "schemacs_editor_custom")

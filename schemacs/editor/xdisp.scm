@@ -26,7 +26,7 @@
     ;; `caddr' is `(scheme cxr)'s. The mode line's evaluator uses both, and
     ;; neither is missed until a mode line is drawn.
     (only (scheme write) display)
-    (only (scheme cxr) caddr)
+    (only (scheme cxr) caddr cadddr)
     ;; `filter' and `sort' order the overlay strings at a position, as
     ;; `load_overlay_strings' does with qsort.
     ;; `inexact->exact' is `posn-at-x-y''s: a mouse event's
@@ -39,7 +39,7 @@
     ;; and `term.sld' answers them for the curses terminal.
     (only (schemacs editor dispnew)
           current-display
-          write-glyphs! face-metrics display-cell-size clear-frame-area!
+          write-glyphs! draw-box! face-metrics display-cell-size clear-frame-area!
           update-window-begin! update-window-end!
           draw-window-cursor! flush-display!
           realize-face
@@ -59,9 +59,23 @@
          *message-log-function*
          buffer-substring-no-properties delete-region goto-char insert
          point-max point-min
+         ;; `:propertize' in the mode line is Emacs's `propertize',
+         ;; `editfns.c:3296'.
+         propertize
          text-editor-cursor-column
          text-editor-get-end-of-line
          text-editor-get-start-of-line)
+    ;; The mode line's *text properties*: `format-mode-line' returns a
+    ;; propertized string in Emacs, and `render-window!' draws its runs by
+    ;; the faces those properties name. `text-property-list' and
+    ;; `add-text-properties-from-list' are what carry the properties
+    ;; across the truncation that fits the line to the window.
+    (only (schemacs editor textprop)
+          get-text-property text-property-list add-text-properties-from-list)
+    ;; `concat' is `fns.c`'s and is what joins a mode line's runs - and
+    ;; unlike `string-append' it copies the pieces' text properties, as
+    ;; the C's does; `pad-line`'s padding goes on through it.
+    (only (schemacs editor fns) concat)
     ;; `count-lines' is `xdisp.c''s own (`:29892') and reads straight from
     ;; this file's library - it is placed in `fns.scm' beside the
     ;; `line-number-at-pos' that wants it, because this library is the top
@@ -197,8 +211,10 @@
     ;; log with.
     (only (schemacs editor search) find-newline)
     (only (schemacs editor faces) *undefined-face-attribute*
-          ;; `%z' asks whether this frame has a window system behind it.
-          *window-system*)
+          ;; `%z' asks whether this frame has a window system behind it,
+          ;; and the mode line's `:box` is read with the base face as the
+          ;; inheritance source.
+          *window-system* face-attribute)
     (only (schemacs editor xfaces)
           attribute-value face-attributes-empty face-realized-attributes
           merge-face-ref merge-face-vectors)
@@ -235,6 +251,7 @@
    scroll-to-cursor!
    status-string
    window-end
+   pos-visible-in-window-p
    window-line-rows
    window-line-slices
    posn-at-x-y buffer-posn-from-coords
@@ -683,7 +700,11 @@
              ;; `mode-line-modified' and `mode-line-window-dedicated'.
              "%1@"
              " "
-             "%12b"
+             ;; `mode-line-buffer-identification' (`bindings.el:797'):
+             ;; `%12b` carrying the `mode-line-buffer-id` face, so a
+             ;; theme's colour for the buffer name is applied and the
+             ;; default one makes it bold.
+             (list ':propertize "%12b" 'face 'mode-line-buffer-id)
              " -- L" "%l" " C" "%c"
        ;; and the mode name, where Emacs's default puts `mode-line-modes':
        ;; after the position, two spaces along. Emacs names the variable
@@ -1021,9 +1042,11 @@
       (let ((len (string-length text)))
         (cond
          ((<= width len) text)
+         ;; `concat`, so a propertized construct keeps its properties
+         ;; through the field's padding.
          ((number-in-field? text)
-          (string-append (make-string (- width len) #\space) text))
-         (else (string-append text (make-string (- width len) #\space))))))
+          (concat (make-string (- width len) #\space) text))
+         (else (concat text (make-string (- width len) #\space))))))
 
     (define (pad-mode-line-element text width)
       ;; TEXT in the field of an `(N ...)' element. This is a different
@@ -1035,8 +1058,8 @@
       ;;--------------------------------------------------------------
       (let ((len (string-length text)))
         (if (>= len width)
-            (substring text 0 width)
-            (string-append text (make-string (- width len) #\space)))))
+            (mode-line-substring text 0 width)
+            (concat text (make-string (- width len) #\space)))))
 
     (define (expand-mode-line-string str window)
       ;; STR with its `%'-constructs expanded: GNU Emacs's processing of a
@@ -1088,11 +1111,22 @@
              ((symbol? construct) "")
              ((pair? construct)
               (cond
-               ((and (memq (car construct) '(:eval :propertize))
+               ((and (eq? (car construct) ':propertize)
                      (pair? (cdr construct)))
-                (process (if (eq? (car construct) ':eval)
-                             ((cadr construct))
-                             (cadr construct))))
+                ;; GNU Emacs's `propertized-buffer-identification' is
+                ;; `(propertize "%12b" 'face 'mode-line-buffer-id)', and
+                ;; the `:propertize' construct is how that reaches the
+                ;; string `format-mode-line` returns: the properties are
+                ;; name/value pairs after the expression, and they are
+                ;; *added* to whatever properties the text already has
+                ;; (`propertize` copies, then `add-text-properties`).
+                (let ((text (process (cadr construct))))
+                  (if (pair? (cddr construct))
+                      (apply propertize text (cddr construct))
+                      text)))
+               ((and (eq? (car construct) ':eval)
+                     (pair? (cdr construct)))
+                (process ((cadr construct))))
                ((symbol? (car construct))
                 (process (if (and (pair? (cdr construct))
                                   (pair? (cddr construct)))
@@ -1107,7 +1141,12 @@
                           (substring text 0 (- width))
                           text)
                       (pad-mode-line-element text width))))
-               (else (apply string-append (map process construct)))))
+               ;; `concat`, not `string-append`: the latter drops the
+               ;; text properties of its pieces, so a `:propertize`
+               ;; construct lost its face the moment it was joined to
+               ;; the rest of the line. GNU Emacs's `format-mode-line`
+               ;; joins with `concat` for exactly this reason.
+               (else (apply concat (map process construct)))))
              (else ""))))))
 
     (define (mode-line-string window)
@@ -1193,17 +1232,37 @@
     ;;----------------------------------------------------------------
     ;; Faces
 
-    (define (face->attribute face-name)
+    (define (face->attribute face-name . args)
       ;; The display's drawing token for a *named* face: GNU Emacs's
       ;; `face_at_buffer_position' where the face is known by name, which
       ;; is what the mode line and the echo area need. The realized
-      ;; attributes are merged here - the default face under any other -
-      ;; and the display turns them into its token
-      ;; (`realize-face' is the display side of a face).
+      ;; attributes are merged here - BASE under any other, and the
+      ;; default face under BASE - and the display turns them into its
+      ;; token (`realize-face' is the display side of a face).
+      ;;
+      ;; BASE is the default face everywhere but the mode line. A mode
+      ;; line's text properties name faces like `mode-line-buffer-id'
+      ;; that carry only the attributes they change (`:weight bold'), and
+      ;; the rest must come from the mode line's own face - Emacs merges
+      ;; them onto `mode_line_face_id`, not onto `default` (`xdisp.c`'s
+      ;; `display_mode_element` calls `face_at_string_position` with the
+      ;; mode line's face as the base).
       ;;--------------------------------------------------------------
-      (realize-face (current-display)
-                    (merge-face-vectors (face-realized-attributes face-name)
-                                        (face-realized-attributes 'default))))
+      (let* ((base (if (pair? args) (car args) 'default))
+             ;; **The base starts from the *default* face's attributes**,
+             ;; which is Emacs's `realize_named_face` (`xfaces.c:6590`):
+             ;; it calls `get_lface_attributes_no_remap` for `default`,
+             ;; then `merge_face_vectors (symbol_attrs, attrs)` - so a
+             ;; basic face that names no `:foreground` takes the default
+             ;; face's. `mode-line` with only a background and a box
+             ;; (`tsdh-dark`'s) is white text in Emacs for that reason;
+             ;; merging the face's own chain alone left the foreground
+             ;; unspecified, and an unspecified foreground is black in
+             ;; the Gtk backend and the terminal default on a tty.
+             (base-attrs (merge-face-ref base (merge-face-ref 'default '()))))
+        (realize-face (current-display)
+                      (merge-face-vectors (face-realized-attributes face-name)
+                                          base-attrs))))
 
     (define (line-face-runs ed line-start len)
       ;; LINE-STRING as maximal runs of characters that share one face:
@@ -1275,8 +1334,12 @@
             (let* ((entry (car rest))
                    (text (cdr entry))
                    (face (overlay-get (car entry) 'face)))
+              ;; A string with no `face' of its own is drawn in the
+              ;; *default* face, as any other text without properties is
+              ;; - not with "no face", which on a terminal is the
+              ;; terminal's own colours and stops following a theme.
               (write-glyphs! (current-display) (list text) row-y x
-                             (and face (face->attribute face)))
+                             (face->attribute (or face 'default)))
               (loop (cdr rest) (+ x (line-display-width text)))))))
 
     (define (row-overlay-strings ed slice-start len)
@@ -2022,6 +2085,33 @@
                         ;; window: the last row that fits ends it
                         (+ pos (cdr (list-ref slices (- fits 1)))))))))))
 
+    (define (pos-visible-in-window-p position . args)
+      ;; GNU Emacs's `pos-visible-in-window-p` (`window.c:1977`): "Return
+      ;; non-nil if position POS is currently on the frame in WINDOW."
+      ;;
+      ;; Emacs answers from the glyph matrix and can say whether the
+      ;; character is *fully* visible (a line cut off at the bottom is
+      ;; not, unless PARTIALLY); this tree's `window-end` already ends at
+      ;; the last *row* that fits, so a position inside a line that is
+      ;; cut off is past the answer and reads as not visible - the same
+      ;; answer for the caller the completion window's TAB uses
+      ;; (`completion--in-region-1` asks whether the list's last
+      ;; character is on the screen).
+      ;;
+      ;; POSITION nil is WINDOW's point, as there; `t`, "the first
+      ;; position of the last visible line", needs the row walk and is
+      ;; not carried - nothing here asks for it. PARTIALLY, whose value
+      ;; is the coordinates list, is accepted and ignored for the same
+      ;; reason: this answers the boolean case.
+      ;;--------------------------------------------------------------
+      (let* ((window (if (and (pair? args) (car args))
+                         (car args)
+                         (selected-window)))
+             (pos (if position position (window-point window)))
+             (start (window-start window))
+             (end (window-end window)))
+        (and (>= pos start) (<= pos end) #t)))
+
     (define (render-window-rows! window ed width x0 vheight)
       ;; Draw WINDOW's rows of text: the buffer lines from its top line
       ;; down, each taking as many screen rows as it lays out.
@@ -2206,6 +2296,104 @@
       ;;--------------------------------------------------------------
       (* row (cdr (display-cell-size (current-display)))))
 
+    ;;----------------------------------------------------------------
+    ;; The mode line's text properties
+    ;;
+    ;; GNU Emacs's `format-mode-line` answers a *propertized* string:
+    ;; the buffer name carries `mode-line-buffer-id`, and a theme that
+    ;; sets that face colours it. Scheme's `substring` and
+    ;; `string-append` do not carry a string's properties the way
+    ;; Emacs's do, so the truncation and padding that fit the line to
+    ;; the window go through these two - without them the whole line
+    ;; was plain by the time it reached the display, which is why the
+    ;; buffer name was drawn like the rest of the mode line.
+    ;;------------------------------------------------------------------
+
+    (define (mode-line-substring str start end)
+      ;; GNU Emacs's `substring` keeps text properties ("The value is a
+      ;; copy of SUBSTRING's elements; its properties are copied") -
+      ;; `text_property_list` and `add_text_properties_from_list` moved
+      ;; with the C's own range, so the triples are absolute and the
+      ;; copy's offset is START.
+      ;;--------------------------------------------------------------
+      (let ((copy (substring str start end)))
+        (add-text-properties-from-list copy
+                                       (text-property-list str start end #f)
+                                       (- start))
+        copy))
+
+    (define (mode-line-truncate str width)
+      ;; `truncate-line` at the mode line, keeping its text properties.
+      ;;--------------------------------------------------------------
+      (cond ((<= (string-length str) width) str)
+            ((<= width 0) "")
+            (else (mode-line-substring str 0 width))))
+
+    (define (mode-line-pad str width)
+      ;; `pad-line` at the mode line, keeping its text properties:
+      ;; `concat` rather than `string-append` because only `concat` is
+      ;; `fns.c`'s and copies the pieces' properties.
+      ;;--------------------------------------------------------------
+      (let ((len (string-length str)))
+        (if (< width len)
+            (mode-line-truncate str width)
+            (concat str (make-string (- width len) #\space)))))
+
+    (define (draw-mode-line! line base row-y x0)
+      ;; DRAW LINE at X0 in BASE, one `write-glyphs!` per run of equal
+      ;; `face` text property, merged onto BASE - GNU Emacs's
+      ;; `display_mode_element` drawing each run with
+      ;; `face_at_string_position` under the mode line's face id. A run
+      ;; with no face is the mode line's own.
+      ;;
+      ;; A run whose face carries `:box` also gets `draw-box!` around it.
+      ;; **The box's vertical edges are only where the boxed region
+      ;; begins and ends**, which is Emacs's `start_of_box_run_p` and
+      ;; `end_of_box_run_p`: `restore_face_box_flags` (`xdisp.c:7426`)
+      ;; sets the start only when the *previous* face had no box, so a
+      ;; run of adjacent boxed faces - a mode line's buffer name over the
+      ;; mode-line face, say - is one box and not a row of them.
+      ;;--------------------------------------------------------------
+      (let* ((len (string-length line))
+             (runs
+              (let loop ((i 0) (acc '()))
+                (if (>= i len)
+                    (reverse acc)
+                    (let* ((face (get-text-property i 'face line))
+                           (j (let find ((k (+ i 1)))
+                                (if (or (>= k len)
+                                        (not (eq? (get-text-property
+                                                   k 'face line)
+                                                  face)))
+                                    k
+                                    (find (+ k 1)))))
+                           (box (face-attribute (or face base)
+                                                ':box #f base)))
+                      (loop j (cons (list i j face box) acc)))))))
+        (let loop ((rest runs) (prev-boxed? #f))
+          (when (pair? rest)
+            (let* ((run (car rest))
+                   (i (car run))
+                   (j (cadr run))
+                   (face (caddr run))
+                   (box (cadddr run))
+                   (next (if (pair? (cdr rest)) (cadr rest) #f))
+                   (next-boxed? (and next (cadddr next) #t))
+                   (token (if face
+                              (face->attribute face base)
+                              (face->attribute base base))))
+              (write-glyphs! (current-display)
+                             (list (mode-line-substring line i j))
+                             row-y (+ x0 i)
+                             token)
+              (when box
+                (draw-box! (current-display) box token (+ x0 i) row-y
+                           (- j i)
+                           (cdr (display-cell-size (current-display)))
+                           (and (not prev-boxed?) #t)
+                           (and (not next-boxed?) #t)))
+              (loop (cdr rest) (and box #t)))))))
+
     (define (render-window! window)
       ;; Draw one window: its rows of text within its rectangle, then its
       ;; mode line along its last row. The display is told a window
@@ -2238,16 +2426,20 @@
         ;; against the *global* selected window - so a window in a frame
         ;; that is not the selected one gets the inactive face, however
         ;; that frame's own selected window compares.
-        (write-glyphs! (current-display)
-                       (pad-line (truncate-line (mode-line-string window)
-                                                width)
-                                 width)
-                       (row->pixel-y
-                        (+ (window-top window) (window-height window) -1))
-                       x0
-                       (face->attribute (if (eq? window (selected-window))
-                                            'mode-line
-                                            'mode-line-inactive)))
+        ;; GNU Emacs's face for the selected window's mode line is
+        ;; `mode-line-active`, which inherits `mode-line` (`faces.el`),
+        ;; and the inactive face for the others. Each *run* of the
+        ;; line's text then merges its own face onto that base.
+        (draw-mode-line! (mode-line-pad
+                          (mode-line-truncate (mode-line-string window)
+                                              width)
+                          width)
+                         (if (eq? window (selected-window))
+                             'mode-line-active
+                             'mode-line-inactive)
+                         (row->pixel-y
+                          (+ (window-top window) (window-height window) -1))
+                         x0)
         ;; the vertical border between this window and the one to its
         ;; right: GNU Emacs draws it down every row of the windows,
         ;; their mode lines included
@@ -2256,7 +2448,7 @@
                      (end (+ (window-top window) (window-height window))))
             (when (< row end)
               (write-glyphs! (current-display) "|" (row->pixel-y row)
-                             border #f)
+                             border (face->attribute 'vertical-border))
               (loop (+ 1 row) end))))))
       (update-window-end! (current-display)))
 
@@ -2415,11 +2607,21 @@
                                     (point-min) (point-max)))
                                  (frame-message frame))
                                 (- width pwidth))
-                               (row->pixel-y (- height 1)) pwidth #f)))
+                               (row->pixel-y (- height 1)) pwidth
+                               ;; The typed text carries no face
+                               ;; property, so it is displayed in the
+                               ;; *default* face - Emacs's echo area is
+                               ;; the minibuffer window, redisplayed like
+                               ;; any other. `#f' here meant the
+                               ;; terminal's own colours, which is the
+                               ;; same thing only until a theme sets the
+                               ;; default face.
+                               (face->attribute 'default))))
              (else
               (write-glyphs! (current-display)
                              (truncate-line (frame-message frame) width)
-                             (row->pixel-y (- height 1)) 0 #f)))))
+                             (row->pixel-y (- height 1)) 0
+                             (face->attribute 'default))))))
         ;; Place the terminal cursor: in the minibuffer while one is
         ;; active (Emacs's `cursor-in-echo-area'), else at the selected
         ;; window's point - the only window whose cursor is drawn, there
