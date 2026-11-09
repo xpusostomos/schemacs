@@ -340,6 +340,17 @@
     (define-method (update-window-end! (d <tty-display>))
       #t)
 
+    (define-method (draw-box! (d <tty-display>) box token x y cells height
+                              left? right?)
+      ;; A terminal draws no box. GNU Emacs's `realize_tty_face`
+      ;; (`xfaces.c:6756`) folds a face down to weight, slant, underline,
+      ;; strike-through, overline and a colour pair - `:box` is not among
+      ;; them - and `tty_write_glyphs` writes the run and nothing else.
+      ;; Measured, `tsdh-dark`'s red `:box` on the mode line is invisible
+      ;; in a terminal Emacs. Asking for one here would be a departure.
+      ;;--------------------------------------------------------------
+      #f)
+
     (define-method (draw-window-cursor! (d <tty-display>) row column cells
                                         type width text token)
       ;; The one terminal cursor, put where input shows itself going.

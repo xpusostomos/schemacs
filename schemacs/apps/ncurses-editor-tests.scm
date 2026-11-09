@@ -67,12 +67,14 @@
  ;; command does
  (only (schemacs editor tabulated-list)
        tabulated-list-get-id tabulated-list-set-col)
- (only (guile) string-contains string-prefix? string-split)
+ (only (guile) string-contains string-prefix? string-split string-index)
  (only (schemacs editor command) run-command apply-command
        define-command command? command-record-of)
  (only (schemacs editor command)
        command-doc-string command-interactive-spec command-name)
- (only (schemacs editor custom) custom-set-variables)
+ ;; `custom-set-variables' records into the `user' theme, so it is
+ ;; `(schemacs editor theme)`'s - `custom.el`'s theme half.
+ (only (schemacs editor theme) custom-set-variables)
  ;; `face-remap.el`'s buffer-local scaling, whose *lighter* is what a
  ;; terminal can show of it - see the test below.
  (only (schemacs editor face-remap)
@@ -1781,6 +1783,25 @@
                      (mode-line-string w))
               (begin (dispatch-key-event frame 'insertchar)
                      (mode-line-string w)))))))
+
+;; The mode line is a *propertized* string, as GNU Emacs's
+;; `format-mode-line` returns one: the buffer name carries
+;; `mode-line-buffer-id` (`bindings.el`'s
+;; `propertized-buffer-identification`), whose default spec is
+;; `:weight bold` and which a theme may colour. The whole line used to be
+;; joined with `string-append`, which drops text properties, so the name
+;; was drawn like the rest of the line - and a terminal Emacs draws it
+;; bold.
+(test-equal 'mode-line-buffer-id
+  (let* ((frame (frame-with "alpha\n"))
+         (ed (frame-editor frame)))
+    (set!text-editor-buffer-name ed "alpha.txt")
+    (parameterize ((*current-frame* frame))
+      (let* ((w (car (window-list frame)))
+             (line (mode-line-string w))
+             ;; the first `a' is the buffer name's, after "-UUU:**- "
+             (at (string-index line #\a)))
+        (get-text-property at 'face line)))))
 
 ;; `text-scale-mode`'s lighter is a *list* construct - `(" " text-scale-
 ;; mode-lighter)` (`face-remap.el:334`) - where `overwrite-mode`'s is a

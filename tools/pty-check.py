@@ -442,10 +442,24 @@ def check_redisplay():
     path = "/tmp/pty-check-draw.txt"
     open(path, "w").write("VISIBLE-LINE\n")
     screen = drive([C_x + C_c], path)
+    problems = []
     if "VISIBLE-LINE" not in screen:
         return ["the buffer was never drawn (a run-time error before "
                 "redisplay?)"]
-    return []
+    # **The mode line's buffer name is `mode-line-buffer-id`, which is
+    # `:weight bold`** (`bindings.el`'s
+    # `propertized-buffer-identification`, faces.el's defface). The line
+    # used to be joined with `string-append`, which drops text
+    # properties, so the name was drawn like the rest of it.
+    import re as _re
+    i = screen.rfind("pty-check-draw.txt")
+    before = screen[max(0, i - 60):i]
+    sgr = _re.findall(r"\x1b\[([0-9;]*)m", before)
+    bold = bool(sgr) and "1" in sgr[-1].split(";")
+    if not bold:
+        problems.append("the mode line's buffer name is not drawn bold: %r"
+                        % screen[max(0, i - 60):i + 25])
+    return problems
 
 
 def check_newline():
@@ -2038,6 +2052,211 @@ def check_imports():
         else:
             os.environ[k] = v
     shutil.rmtree(cfg, ignore_errors=True)
+    return problems
+
+
+def check_load_theme():
+    """`M-x load-theme wombat` loads the stocked theme.
+
+    Two bugs met here, and the second is why this check exists. The
+    commands were plain definitions, so `M-x` could not find them; and the
+    safety gate refused every theme not on `custom-safe-themes`, whose
+    default in Emacs is `(default)` - "any theme in the built-in themes
+    directory" - where this port defaulted to the empty list and had no
+    `default` branch at all. A stock theme answered "Unable to load theme"
+    and the message ended at a backquote, because Guile's `error` does not
+    format its arguments the way Emacs's does.
+
+    Two things are asserted: the editor's state through the back door (the
+    enabled list after the prompt, which is exact where a screenshot of a
+    dark background is not), and the colour of the file name typed at a
+    `C-x C-f' prompt afterwards - the echo area's input used to be drawn
+    with no face at all, so a dark theme left it black while everything
+    around it followed the theme.
+    """
+    problems = []
+    M_x = b"\x1b" + b"x"
+    instance = "pty-check-theme"
+    path = "/tmp/pty-check-theme.txt"
+    open(path, "w").write("theme\n")
+
+    saved = {k: os.environ.get(k)
+             for k in ("SCHEMACS_REPL", "SCHEMACS_INSTANCE", "XDG_RUNTIME_DIR")}
+    os.environ["SCHEMACS_REPL"] = "1"
+    os.environ["SCHEMACS_INSTANCE"] = instance
+    os.environ["XDG_RUNTIME_DIR"] = tempfile.mkdtemp(prefix="schemacs-theme-rt-")
+
+    answer = {}
+
+    def during():
+        r = subprocess.run(
+            ["repl", "-e",
+             "(list (command? load-theme) (*custom-enabled-themes*)"
+             " (face-attribute (quote default) (quote :background)))",
+             instance],
+            capture_output=True, text=True, timeout=90)
+        answer["state"] = r.stdout + r.stderr
+
+    try:
+        # A 256-colour terminal, because wombat's specs say
+        # `(min-colors 89)': on the harness's usual 8-colour xterm the
+        # spec does not match and `face-attribute` answers `unspecified`,
+        # exactly as Emacs does there. The check is that the theme loads
+        # and *applies*, so it needs a display the spec matches.
+        #
+        # **And the file name typed at a prompt is asserted in colour.**
+        # The echo area's input was drawn with "no face" (`#f'), which on
+        # a terminal is the terminal's own colours - black there - so a
+        # dark theme left the typed name unreadable while the prompt and
+        # the buffer around it followed the theme. The default face is
+        # `#f6f3e8` on `#242424`, which xterm's 256 colours quantize to
+        # 255 on 235.
+        # **Two theme loads, in one run**, because the second is what
+        # broke: `face-spec-recalc' stopped at the first matching
+        # `theme-face' record, so the *earliest* theme won and a later
+        # `load-theme' did nothing to a face an earlier theme had set.
+        # Wombat's background is #242424 and tsdh-light's is white, so a
+        # second load that does nothing is visible in the state below.
+        out = drive([M_x, b"load-theme", RET, b"wombat", RET,
+                     C_x, C_f, b"abc", C_g,
+                     M_x, b"load-theme", RET, b"tsdh-light", RET],
+                    path, settle=2.5, during=during, term="xterm-256color")
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    state = answer.get("state", "")
+    if "\x1b[38;5;255m\x1b[48;5;235m/tmp/abc" not in out:
+        problems.append(
+            "the file name typed at the prompt is not drawn in the "
+            "theme's default face (white on #242424): %r"
+            % [row for row in out.split("\n") if "abc" in row][-2:])
+    if "Unable to load theme" in out:
+        problems.append("M-x load-theme wombat refused a stock theme: %r"
+                        % [row for row in out.split("\n")
+                           if "Unable" in row])
+    if "(#t (tsdh-light wombat) \"white\")" not in state:
+        problems.append(
+            "two M-x load-theme calls did not leave tsdh-light in charge "
+            "of the default face; the editor answered %r; screen %r"
+            % (state.strip()[-300:], out[-200:]))
+    return problems
+
+
+def check_completion_scroll():
+    """The completions window scrolls, as GNU Emacs's does.
+
+    Two behaviours, both from `minibuffer.el':
+
+      * `completion--in-region-1` (`:1761`): TAB repeated with the
+        minibuffer unchanged scrolls the completions window one screen,
+        and once the list's end is in view the next TAB goes back to the
+        top. Emacs keeps the window in `minibuffer-scroll-window` and
+        asks `pos-visible-in-window-p` whether the end is on the screen.
+      * `with-minibuffer-completions-window` (`:5334`) and
+        `minibuffer-next-completion`: `M-<down>` moves point through the
+        candidates with the completions window selected, so redisplay
+        keeps the selected candidate visible. Ours moved the selection
+        and left the window where it was, so the highlight walked off
+        the bottom of the list.
+
+    A small terminal is used on purpose: 30 candidates in a 10x40 window
+    are two screens, so both behaviours fit in a handful of keys.
+    """
+    problems = []
+    directory = "/tmp/pty-check-completion-scroll"
+    os.makedirs(directory, exist_ok=True)
+    for i in range(15):
+        for prefix in ("aa", "bb"):
+            open(os.path.join(directory, "%s%02d.txt" % (prefix, i)),
+                 "w").write("x\n")
+    path = os.path.join(directory, "aa00.txt")
+    find = [C_x + C_f, C_a, C_k, directory.encode() + b"/"]
+
+    state_expr = (
+        '(let ((w (car (filter (lambda (x) (equal? (buffer-name '
+        '(window-buffer x)) "*Completions*")) (window-list))))) '
+        '(and w (list (window-start w) (window-end w) (window-point w))))')
+
+    saved = {k: os.environ.get(k)
+             for k in ("SCHEMACS_REPL", "SCHEMACS_INSTANCE", "XDG_RUNTIME_DIR")}
+    os.environ["SCHEMACS_REPL"] = "1"
+
+    import re as _re
+
+    def observe(keys, name, gap=0.25):
+        os.environ["SCHEMACS_INSTANCE"] = name
+        os.environ["XDG_RUNTIME_DIR"] = tempfile.mkdtemp(
+            prefix="schemacs-scroll-rt-")
+        answer = {}
+
+        def during():
+            r = subprocess.run(["repl", "-e", state_expr, name],
+                               capture_output=True, text=True, timeout=90)
+            answer["state"] = r.stdout + r.stderr
+
+        drive([("resize", 10, 40)] + find + keys, path, settle=2.5,
+              during=during, gap=gap)
+        m = _re.search(r"\((\d+) (\d+) (\d+)\)", answer.get("state", ""))
+        return tuple(int(x) for x in m.groups()) if m else None
+
+    try:
+        two = observe([b"\t"] * 2, "pty-check-scroll-2")
+        three = observe([b"\t"] * 3, "pty-check-scroll-3")
+        eight = observe([b"\t"] * 8, "pty-check-scroll-8")
+        # 30 candidates: 30 M-<down>s reach the last one, the 31st wraps
+        # to the first - `completion-auto-wrap` (`simple.el:10169') is t
+        # by default, which is why Emacs' own `M-<down>` comes back to
+        # the top of the list.
+        mdown = observe([b"\t", b"\t"] + [M_DOWN] * 30,
+                        "pty-check-scroll-down", gap=0.12)
+        wrapped = observe([b"\t", b"\t"] + [M_DOWN] * 31,
+                          "pty-check-scroll-wrap", gap=0.12)
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    if two is None or two[0] != 1:
+        problems.append("after two TABs the completions window is not at the "
+                        "top of the list: %r" % (two,))
+    if three is None or three[0] <= 1:
+        problems.append("a third TAB did not scroll the completions window: "
+                        "%r (was %r after two)" % (three, two))
+    if eight is None or eight[0] != 1:
+        problems.append("TAB kept scrolling past the end instead of going "
+                        "back to the top: %r" % (eight,))
+    if mdown is None:
+        problems.append("M-<down> left no completions window state behind")
+    else:
+        start, end, point = mdown
+        if start <= 1:
+            problems.append("M-<down> 30 times did not scroll the completions "
+                            "window: %r" % (mdown,))
+        if not (start <= point <= end):
+            problems.append("M-<down> moved the selection out of the window: "
+                            "start %d, end %d, point %d" % mdown)
+    if wrapped is None:
+        problems.append("the wrapping M-<down> left no window state behind")
+    else:
+        start2, end2, point2 = wrapped
+        if mdown is not None and point2 >= mdown[2]:
+            problems.append("M-<down> past the last candidate did not wrap to "
+                            "the first: point %d, was %d at the last one"
+                            % (point2, mdown[2]))
+        if not (start2 <= point2 <= end2):
+            problems.append("after the wrap the selection is out of the "
+                            "completions window: start %d, end %d, point %d"
+                            % wrapped)
+        if mdown is not None and start2 >= mdown[0]:
+            problems.append("the completions window did not scroll back up "
+                            "after the wrap: start %d, was %d"
+                            % (start2, mdown[0]))
     return problems
 
 
@@ -3695,6 +3914,8 @@ CHECKS = {
     "isearch-mark": check_isearch_mark,
     "text-scale": check_text_scale_command,
     "imports": check_imports,
+    "load-theme": check_load_theme,
+    "completion-scroll": check_completion_scroll,
     "no-display": check_no_display,
 }
 

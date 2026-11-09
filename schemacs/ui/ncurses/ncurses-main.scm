@@ -71,7 +71,11 @@
     ;; that depend on a config file. This line is the one that makes them
     ;; the front end's.
     (only (schemacs editor face-remap))
-    )
+    ;; `custom.el`'s theme half - `M-x load-theme`, `enable-theme` and
+    ;; `disable-theme` register with the command table as this library
+    ;; loads. Imported for that alone, as the binding-carrying libraries
+    ;; above are.
+    (only (schemacs editor theme)))
 
   (export
    main-ncurses

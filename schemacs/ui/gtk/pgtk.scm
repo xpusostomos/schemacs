@@ -34,6 +34,8 @@
   (import
     (scheme base)
     (scheme char)
+    ;; the `:box` parser reads a four-element result
+    (only (scheme cxr) caddr cadddr)
     ;; The clipboard comes through Gtk's own C functions, which
     ;; guile-gi does not bind (see the selections section at the end).
     ;; The pointer procedures are `(system foreign)''s; `dynamic-link'
@@ -41,13 +43,13 @@
     ;; reaches through `(guile)' - as `frame.sld''s SIGTSTP does.
     (only (system foreign) pointer->procedure string->pointer pointer->string
           pointer->bytevector null-pointer? make-pointer int void double
-          unsigned-int)
+          unsigned-int make-c-struct parse-c-struct %null-pointer)
     (only (guile) dynamic-link dynamic-func assq-ref filter
           u32vector->list current-error-port simple-format exit)
     ;; `alist-delete' removes one selection from the ownership record;
     ;; `iota' builds the element offsets the 16- and 32-bit selection
     ;; data rows are read at.
-    (only (srfi srfi-1) alist-delete iota)
+    (only (srfi srfi-1) alist-delete iota make-list)
     (only (guile) ash logand logior lognot inexact->exact round
           get-internal-real-time internal-time-units-per-second)
     (oop goops)
@@ -110,10 +112,10 @@
           current-display
           delete-frame-display!
           display-cell-size
-          display-color-cells
+          display-color-cells display-font-families
           display-set-size!
           face-metrics
-          draw-window-cursor! flush-display! key-event->key
+          draw-box! draw-window-cursor! flush-display! key-event->key
           display-mouse-position get-selection line-height read-input-event
           realize-face resume-display! screen-size
           selection-exists? selection-owner?
@@ -1776,6 +1778,53 @@
       ;;--------------------------------------------------------------
       (pgtk-cell-size))
 
+    ;;----------------------------------------------------------------
+    ;; The font families this display can draw with
+    ;;------------------------------------------------------------------
+    ;; GNU Emacs's `font-family-list` (`font.c:4442`) asks each font
+    ;; driver of the frame for its families; Pango is this frame's
+    ;; driver. **Through the FFI, not guile-gi**: `font-map:list-families`
+    ;; exists but cannot marshal its out-array - measured, "unhandled
+    ;; argument type 'pointer to CArray of type gpointer'" - so the C
+    ;; call is made the way the Pango text already is.
+
+    (define pango-font-map-list-families
+      (pango-foreign-fn "libpango-1.0.so.0" "pango_font_map_list_families"
+                        void (list '* '* '*)))
+    (define pango-font-family-get-name
+      (pango-foreign-fn "libpango-1.0.so.0" "pango_font_family_get_name"
+                        '* (list '*)))
+    (define %g-free-pointer
+      (pointer->procedure void
+                          (dynamic-func "g_free"
+                                        (dynamic-link "libglib-2.0.so.0"))
+                          (list '*)))
+
+    (define-method (display-font-families (d <pgtk-display>))
+      ;; The frame's families as a list of names, duplicates dropped -
+      ;; the C's `Fmemq` test, keeping the first occurrence of each and
+      ;; answering the list most-recently-seen first, as its `Fcons`
+      ;; does.
+      ;;--------------------------------------------------------------
+      (let ((out-array (make-c-struct (list '*) (list %null-pointer)))
+            (out-count (make-c-struct (list int) (list 0))))
+        (pango-font-map-list-families (pango-font-map-default)
+                                      out-array out-count)
+        (let* ((array (car (parse-c-struct out-array (list '*))))
+               (count (car (parse-c-struct out-count (list int)))))
+          (if (or (= count 0) (null-pointer? array))
+              '()
+              (let ((ptrs (parse-c-struct array (make-list count '*))))
+                (let loop ((rest ptrs) (acc '()))
+                  (if (null? rest)
+                      (begin (%g-free-pointer array) acc)
+                      (let ((name
+                             (pointer->string
+                              (pango-font-family-get-name (car rest))
+                              -1 "UTF-8")))
+                        (loop (cdr rest)
+                              (if (member name acc) acc (cons name acc)))))))))))
+
     (define-method (display-color-cells (d <pgtk-display>)) 16777216)
 
     (define-method (realize-face (d <pgtk-display>) face-attrs)
@@ -1879,7 +1928,14 @@
                            (* *cell-width* (text-cells text))
                            *cell-height*)
           (cairo-fill cr)
-          (apply cairo-set-source-rgb cr (or foreground (list 0.0 0.0 0.0)))
+          ;; An unspecified foreground is the *frame's* - the default
+          ;; face's foreground, which is `FRAME_FOREGROUND_PIXEL` after
+          ;; `realize_named_face` merged it in (`xfaces.c:6590`). Black
+          ;; is right only for the frame that a dark theme replaces.
+          (apply cairo-set-source-rgb
+                 cr (or foreground
+                        (colour->rgb (face-attribute 'default ':foreground))
+                        (list 0.0 0.0 0.0)))
           (let loop ((i 0) (col 0))
             (when (< i (string-length text))
               (let* ((end (let scan ((j (+ i 1)))
@@ -1893,6 +1949,147 @@
                                  (cell-x (+ x col))
                                  (+ y *font-ascent*))
                 (loop end (+ col (char-display-width c col)))))))))
+
+    ;;----------------------------------------------------------------
+    ;; The `:box` face attribute
+    ;;
+    ;; GNU Emacs's `realize_x_face` (`xfaces.c:6445-6533`) turns the
+    ;; face's `:box` value into a box type, a colour and two line
+    ;; widths; `pgtk_draw_glyph_string_box` (`pgtkterm.c:2004`) then
+    ;; draws it around the glyph string, and `pgtk_draw_box_rect`
+    ;; (`:1960`) is the rectangle arithmetic below.
+    ;;
+    ;; A terminal has no box at all (`realize_tty_face` drops it), which
+    ;; is why `term.sld` answers this generic with `#f`.
+    ;;------------------------------------------------------------------
+
+    (define (box-attributes box token)
+      ;; BOX parsed as `(COLOUR VWIDTH HWIDTH TYPE)`, or `#f` for no
+      ;; box. TYPE is `simple`, `raised` or `sunken`.
+      ;;
+      ;; The defaults are `xfaces.c:6445`'s: a colour string is a
+      ;; one-pixel simple box in that colour; a number is a simple box
+      ;; in the face's foreground, `N` pixels wide vertically and
+      ;; horizontally (`(abs n) . n`); a `(VWIDTH . HWIDTH)` cons is the
+      ;; same with the two widths given; and the plist form starts as a
+      ;; one-pixel simple box in the foreground and takes `:line-width`,
+      ;; `:color` and `:style` from there. `flat-button` with no colour
+      ;; uses the *background* instead, which is the C's one exception
+      ;; (`xfaces.c:6528`).
+      ;;--------------------------------------------------------------
+      (define fg (or (face-token-foreground token) (list 0.0 0.0 0.0)))
+      (define bg (or (face-token-background token) (list 1.0 1.0 1.0)))
+      (cond
+       ((not box) #f)
+       ((eq? box #t) (list fg 1 1 'simple))
+       ((string? box) (list (or (colour->rgb box) fg) 1 1 'simple))
+       ((integer? box) (list fg (abs box) box 'simple))
+       ((and (pair? box) (integer? (car box)) (integer? (cdr box)))
+        (list fg (car box) (cdr box) 'simple))
+       ((pair? box)
+        (let ((colour #f) (explicit? #f) (flat? #f) (vwidth 1) (hwidth 1)
+              (type 'simple))
+          (let loop ((rest box))
+            (when (pair? rest)
+              (when (pair? (cdr rest))
+                (let ((keyword (car rest)) (value (cadr rest)))
+                  (cond
+                   ((eq? keyword ':line-width)
+                    (cond
+                     ((integer? value)
+                      (set! vwidth (abs value))
+                      (set! hwidth value))
+                     ((and (pair? value) (integer? (car value))
+                           (integer? (cdr value)))
+                      (set! vwidth (car value))
+                      (set! hwidth (cdr value)))))
+                   ((eq? keyword ':color)
+                    (when (string? value)
+                      (let ((rgb (colour->rgb value)))
+                        (when rgb
+                          (set! colour rgb)
+                          (set! explicit? #t)))))
+                   ((eq? keyword ':style)
+                    (cond ((eq? value 'released-button)
+                           (set! type 'raised))
+                          ((eq? value 'pressed-button)
+                           (set! type 'sunken))
+                          ((eq? value 'flat-button)
+                           (set! type 'simple)
+                           (set! flat? #t)))))))
+              (loop (cddr rest))))
+          ;; A plain box defaults to the foreground; a 3D one and
+          ;; `flat-button` default to the background (the manual's rule,
+          ;; which is what the C's relief colours and its flat-button
+          ;; branch amount to).
+          (cond ((and (eq? type 'simple) explicit?)
+                 (list colour vwidth hwidth type))
+                ((and (eq? type 'simple) flat?)
+                 (list bg vwidth hwidth type))
+                ((eq? type 'simple)
+                 (list fg vwidth hwidth type))
+                ;; raised/sunken without a colour: shadows from the
+                ;; face's background (`pgtk_setup_relief_colors`).
+                ((not explicit?) (list bg vwidth hwidth type))
+                (else (list colour vwidth hwidth type)))))
+       (else #f)))
+
+    (define (rgb-lighten rgb)
+      ;; Emacs makes the light relief with `x_alloc_lighter_color`'s
+      ;; factor 1.2 (`pgtkterm.c:1848`). That function also works in
+      ;; the display's colour depth and tries a delta; this frame's
+      ;; colours are already floats, so the factor is applied to them.
+      ;;--------------------------------------------------------------
+      (map (lambda (v) (min 1.0 (* v 1.2))) rgb))
+
+    (define (rgb-darken rgb)
+      ;; The dark relief: factor 0.6 (`pgtkterm.c:1850`).
+      ;;--------------------------------------------------------------
+      (map (lambda (v) (* v 0.6)) rgb))
+
+    (define (fill-box-rect! cr colour x y w h)
+      (apply cairo-set-source-rgb cr colour)
+      (cairo-rectangle cr x y w h)
+      (cairo-fill cr))
+
+    (define-method (draw-box! (d <pgtk-display>) box token x y cells height
+                              left? right?)
+      ;; Draw BOX around the run at cell X, pixel Y: the four sides of
+      ;; `pgtk_draw_box_rect`, with the two colours of
+      ;; `pgtk_draw_relief_rect` (`pgtkterm.c:1994`) when the box is 3D.
+      ;; The C's diagonal corner triangles are not drawn - overlapping
+      ;; square corners give the same visible edges.
+      ;;--------------------------------------------------------------
+      (let ((cr (pgtk-cr d)))
+        (when cr
+          (let ((spec (box-attributes box token)))
+            (when spec
+              (let* ((colour (car spec))
+                     (vwidth (max 1 (abs (cadr spec))))
+                     (hwidth (max 1 (abs (caddr spec))))
+                     (type (cadddr spec))
+                     (left (cell-x x))
+                     (right (+ (cell-x x) (* *cell-width* cells) -1))
+                     (top y)
+                     (bottom (+ y height -1))
+                     (top-left-colour
+                      (if (eq? type 'sunken) (rgb-darken colour) colour))
+                     (bottom-right-colour
+                      (if (eq? type 'sunken) (rgb-lighten colour) colour)))
+                (when (eq? type 'raised)
+                  (set! top-left-colour (rgb-lighten colour))
+                  (set! bottom-right-colour (rgb-darken colour)))
+                ;; left, right, top, bottom - the C's order
+                (when left?
+                  (fill-box-rect! cr top-left-colour left top vwidth height))
+                (when right?
+                  (fill-box-rect! cr bottom-right-colour
+                                  (+ 1 (- right vwidth)) top vwidth height))
+                (fill-box-rect! cr top-left-colour left top
+                                (+ 1 (- right left)) hwidth)
+                (fill-box-rect! cr bottom-right-colour left
+                                (+ 1 (- bottom hwidth))
+                                (+ 1 (- right left)) hwidth)))))))
 
     (define (cursor-box-colour) (list 0.0 0.0 0.0))
     ;; ^ The colour the cursor is filled or outlined with. GNU Emacs's is

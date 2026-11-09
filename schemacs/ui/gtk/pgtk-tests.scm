@@ -64,6 +64,8 @@
  ;; realizes. Loaded by both front ends in the real editor, so this is
  ;; not a test-only dependency.
  (only (schemacs editor dired))
+ ;; `tsdh-dark`'s mode-line names no foreground - the case below.
+ (only (schemacs editor theme) load-theme disable-theme)
  (only (schemacs editor keyboard) dispatch-input-event)
  
  (only (cairo) cairo-image-surface-create-from-png cairo-image-surface-get-data
@@ -295,6 +297,64 @@
 (test-equal white (cell-pixel 0))
 (test-equal white (cell-pixel 1))
 (test-equal white (cell-pixel 6))
+
+;;------------------------------------------------------------------
+;; The `:box` face attribute is drawn - on a window system only
+;;
+;; GNU Emacs draws a face's `:box` around its glyph run in the
+;; graphical back ends (`pgtk_draw_glyph_string_box`, `pgtkterm.c:2004`)
+;; and not on a terminal (`realize_tty_face` drops the attribute). The
+;; box `tsdh-dark` puts on the mode line is this: a one-pixel red line
+;; along the top and bottom of the mode line row. The pixel is read at
+;; the row's first line, where the box's top side is.
+;;------------------------------------------------------------------
+
+(define (render-with-mode-line-box)
+  (let* ((d (new-display))
+         (ed (allocate-buffer)))
+    (with-current-buffer ed (insert "hello\n"))
+    (f:set-face-attribute 'mode-line #f ':box
+                          '(:line-width 1 :color "red"))
+    (let ((frame (fr:new-frame ed 24 80)))
+      (parameterize ((fr:*current-frame* frame))
+        (xd:render! frame)))
+    d))
+
+(define box-shot (shot-of (render-with-mode-line-box)))
+;; The mode line is the row above the echo area: a 24-row frame has 22
+;; text rows, the mode line at row 22 and the echo area under it.
+(define mode-line-y (* 22 cell-h))
+(define red '(255 0 0))
+(test-equal red (box-shot 2 mode-line-y))
+(test-equal red (box-shot (- (* 80 cell-w) 1) mode-line-y))
+;; ...and the box's *inside* keeps the mode line's own colours, so the
+;; line is a box and not a filled rectangle.
+(test-assert "the box encloses the mode line rather than filling it"
+             (not (equal? red (box-shot 2 (+ mode-line-y 5)))))
+
+;;------------------------------------------------------------------
+;; A basic face with no foreground takes the default face's
+;;
+;; GNU Emacs's `realize_named_face` (`xfaces.c:6590`) starts every basic
+;; face from the *default* face's fully-specified attributes and merges
+;; the named face over them. `tsdh-dark` gives `mode-line` a background
+;; and a box and no `:foreground`, so Emacs draws white-smoke text on
+;; it; merging the mode-line chain alone left the foreground
+;; unspecified, and the Gtk backend's fallback is black - a black mode
+;; line on a dark theme.
+;;------------------------------------------------------------------
+
+(define (token-foreground token)
+  ((@@ (schemacs ui gtk pgtk) face-token-foreground) token))
+
+(test-equal #t
+  (let ((d (new-display)))
+    (load-theme 'tsdh-dark #t)
+    (let ((ml (token-foreground (xd:face->attribute 'mode-line-active
+                                                    'mode-line-active)))
+          (df (token-foreground (xd:face->attribute 'default 'default))))
+      (disable-theme 'tsdh-dark)
+      (equal? ml df))))
 
 ;;------------------------------------------------------------------
 ;; A wide character takes two cells - in the drawing, not just in the
@@ -1044,8 +1104,14 @@
       (parameterize ((fr:*current-frame* f))
         (window:split-window-below 5 (fr:selected-window))
         (xd:render! f)
-        (let ((glyphs (reverse (td:test-display-glyphs d))))
-          (cadr (list-ref glyphs 4)))))))
+        ;; The lower window's first text row is found by its *pixel
+        ;; position*, not by counting draw calls: a mode line is a run
+        ;; per face now (the buffer name carries `mode-line-buffer-id`),
+        ;; so the fifth call is no longer a fixed thing.
+        (let loop ((glyphs (reverse (td:test-display-glyphs d))))
+          (cond ((null? glyphs) #f)
+                ((>= (cadr (car glyphs)) 100) (cadr (car glyphs)))
+                (else (loop (cdr glyphs)))))))))
 
 ;;------------------------------------------------------------------
 ;; The echo area belongs to one frame
