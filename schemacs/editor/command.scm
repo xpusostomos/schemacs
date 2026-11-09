@@ -27,6 +27,7 @@
    uarg->integer
    run-command apply-command show-command
    define-command *command-table* command? command-record-of command-value-of
+   command-record-named
    register-command!
    )
 
@@ -342,6 +343,29 @@
              (cond ((null? rest) #f)
                    ((eq? (command-api (cdar rest)) thing) (cdar rest))
                    (else (loop (cdr rest)))))))
+
+    (define (command-record-named name)
+      ;; The command record NAME names, or #f.
+      ;;
+      ;; GNU Emacs needs no such function: `Fcommand_execute`
+      ;; (`keyboard.c:1428`) is handed a *symbol* and finds its function in
+      ;; the obarray. This tree's obarray is `*command-table*`, a table of
+      ;; name to record, so the same step is a lookup here - and it is
+      ;; what makes a keymap or menu item written Emacs's way (a symbol,
+      ;; not a procedure) run.
+      ;;--------------------------------------------------------------
+      ;;
+      ;; **The table is keyed by the command's *name string*.** Emacs's
+      ;; obarray is keyed by the symbol; this tree's `new-command` takes
+      ;; the name from `procedure-name` and keeps it as a string, so a
+      ;; symbol - which is how Elisp spells a command - is compared as
+      ;; its string.
+      ;;--------------------------------------------------------------
+      (let ((key (if (symbol? name) (symbol->string name) name)))
+        (let loop ((rest (*command-table*)))
+          (cond ((null? rest) #f)
+                ((equal? (caar rest) key) (cdar rest))
+                (else (loop (cdr rest)))))))
 
     (define (command? thing)
       ;; Whether THING is a command: GNU Emacs's `commandp'.

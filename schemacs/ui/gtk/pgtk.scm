@@ -105,7 +105,33 @@
           ;; which was used there without being imported, so the
           ;; first click raised inside the signal handler, where
           ;; Gtk swallows it: a click that did nothing at all.
-          event:get-coords)
+          event:get-coords
+          ;;----------------------------------------------------------------
+          ;; The menu bar's widgets - gtkutil.c's `create_menus',
+          ;; `make_menu_item` and `make_widget_for_menu_item`.
+          ;;
+          ;; **Every one of these proxies is held for the display's whole
+          ;; life** (`pgtk-hold-widget!'). A guile-gi proxy owns its
+          ;; GObject through a toggle reference, so a proxy that is
+          ;; collected destroys the widget even though Gtk's container
+          ;; holds it - measured: a menu bar that survived one GC built
+          ;; and then died with "instance with invalid (NULL) class
+          ;; pointer" the moment the collector ran. Emacs has no proxy and
+          ;; so no such rule.
+          ;;----------------------------------------------------------------
+          <GtkBox> <GtkMenuBar> <GtkMenu> <GtkMenuItem> <GtkCheckMenuItem>
+          <GtkRadioMenuItem> <GtkSeparatorMenuItem> <GtkLabel>
+          <GtkOrientation> <GtkAlign>
+          box:pack-start box:set-homogeneous
+          menu-shell:append menu-item:set-label menu-item:set-submenu
+          check-menu-item:set-active check-menu-item:active
+          radio-menu-item:join-group
+          container:remove container:get-children
+          label:set-text widget:set-sensitive widget:set-tooltip-text
+          widget:set-halign widget:set-valign orientable:set-orientation)
+    ;; `symbol->enum`, for the box's orientation; `(gi types)`'
+    ;; (pgtk-names holds the typelib itself).
+    (only (gi types) symbol->enum)
     ;; The display interface this implements.
     (only (schemacs editor dispnew)
           <display> *mouse-event-keys* clear-frame-area! column-width
@@ -185,7 +211,25 @@
     (only (schemacs editor keyboard)
           *dispatch-event* command-loop-ready?
           ;; a mouse event's own value, for the hand-over path above
-          *last-read-event*)
+          *last-read-event*
+          ;; What the bar shows: `menu_bar_items`' `[menu-bar]` walk,
+          ;; and `menu_separator_name_p`, which the widget builder needs
+          ;; to know a `"--"` item from a real one.
+          menu-bar-items menu-separator-name?)
+    ;; The platform-independent half of the menu: `menu_items`, the
+    ;; `widget_value` tree, and the click's key sequence.
+    (only (schemacs editor menu)
+          menu-items menu-items-used menu-items-n-panes
+          set!menu-items-n-panes!
+          init-menu-items finish-menu-items
+          parse-single-submenu digest-single-submenu update-submenu-strings
+          find-and-call-menu-selection
+          make-widget-value widget-value?
+          widget-value-name widget-value-key widget-value-contents
+          widget-value-next widget-value-call-data widget-value-button-type
+          widget-value-selected? widget-value-enabled? widget-value-help
+          set!widget-value-name set!widget-value-contents set!widget-value-next
+          set!widget-value-enabled! set!widget-value-button-type)
     ;; A colour *name* means what `term/tty-colors.el' says it means.
     (only (schemacs editor tty-colors) tty-color-standard-values))
 
@@ -841,6 +885,24 @@
       ;; The drawing area: the widget Gtk asks for a repaint, and the
       ;; widget whose allocation is the size the display draws at.
       (area    #:init-value #f #:accessor pgtk-area)
+      ;; The box the window holds, with the menu bar above the drawing
+      ;; area - GNU Emacs's `FRAME_GTK_OUTER_WIDGET` (`wtop') holding the
+      ;; edit widget and the menu bar (`gtkutil.c:1670').
+      (vbox    #:init-value #f #:accessor pgtk-vbox)
+      ;; The menu bar and what it is built from, which is Emacs's
+      ;; `f->output_data.pgtk->menubar_widget' beside
+      ;; `f->menu_bar_vector' and `f->menu_bar_items_used':
+      ;; `menubar-held' is every proxy the current bar was built from
+      ;; (see `pgtk-hold-widget!`), and `menubar-vector'/`menubar-used'
+      ;; are the snapshot a click's `call_data` is an index into.
+      (menubar       #:init-value #f #:accessor pgtk-menubar)
+      (menubar-held  #:init-value '() #:accessor pgtk-menubar-held)
+      (menubar-vector #:init-value #f #:accessor pgtk-menubar-vector)
+      (menubar-used  #:init-value 0 #:accessor pgtk-menubar-used)
+      (menubar-height #:init-value 0 #:accessor pgtk-menubar-height)
+      ;; Whether the bar is currently taken down. An empty bar is hidden
+      ;; once and then left alone; see `pgtk-set-frame-menubar`.
+      (menubar-hidden #:init-value #f #:accessor pgtk-menubar-hidden?)
       (surface #:init-value #f #:accessor pgtk-surface)
       (cr      #:init-value #f #:accessor pgtk-cr)
       (layout  #:init-value #f #:accessor pgtk-layout)
@@ -1469,6 +1531,11 @@
        ;; twitches are one event, and a drag's scroll loop - which ends on
        ;; any input at all - is not ended by each of them.
        ((eq? item 'pgtk-mouse-moved) (pgtk-mouse-movement-event from))
+       ;; A menu selection: one key of the sequence a clicked item
+       ;; stands for (`pgtk-menu-selection!`). It is already a *key*, so
+       ;; it is tagged rather than decoded - `key-event->key` answers it
+       ;; as it stands, and nothing asks it for a keysym.
+       ((and (pair? item) (eq? (car item) 'menu-bar-event)) item)
        ((memv (pgtk-event-keysym item) modifier-keysyms) *pgtk-skip*)
        (else
           ;; A key from a window that is not the selected frame's selects
@@ -1616,6 +1683,11 @@
        ;; moving the region after the button came up.
        ((and (pair? ev) (memq (car ev) *mouse-event-keys*))
         (car ev))
+       ;; A menu selection is one key of the sequence the item stands
+       ;; for - the C's `MENU_BAR_EVENT`, whose `event->arg` is already
+       ;; the key (`keyboard.c:7231`).
+       ((and (pair? ev) (eq? (car ev) 'menu-bar-event))
+        (cdr ev))
        ((eqv? ev *resize-code*) 'resize)
        ((eqv? ev *focus-in-code*) 'focus-in)
        ((eqv? ev *focus-out-code*) 'focus-out)
@@ -2186,7 +2258,14 @@
     (define-method (flush-display! (d <pgtk-display>))
       ;; What has been drawn becomes visible when Gtk next asks us to
       ;; paint: there is no buffer to hand over any more.
+      ;;
+      ;; **The menu bar is rebuilt here**, which is where GNU Emacs's
+      ;; `redisplay_window` reaches `set_frame_menubar` from
+      ;; (`xdisp.c:14489`): once per redisplay, after the frame's text,
+      ;; because the bar is part of what the frame shows and the hook
+      ;; that changes it runs during the same redisplay.
       ;;--------------------------------------------------------------
+      (pgtk-set-frame-menubar d)
       (let ((area (pgtk-area d)))
         (when area (widget:queue-draw area))))
 
@@ -2297,12 +2376,28 @@
       (let* ((width (* columns *cell-width*))
              (height (* rows *cell-height*))
              (win (make <GtkWindow>))
+             (vbox (make <GtkBox>))
+             (bar (make <GtkMenuBar>))
              (area (make <GtkDrawingArea>))
              (d (make <pgtk-display>)))
         (set! (pgtk-window d) win)
+        (set! (pgtk-vbox d) vbox)
+        (set! (pgtk-menubar d) bar)
         (set! (pgtk-area d) area)
         (set! (pgtk-columns d) columns)
         (set! (pgtk-rows d) rows)
+        ;; **The menu bar is above the drawing area, as Gtk wants it** -
+        ;; GNU Emacs's `xg_create_frame_widgets` puts the menu bar and the
+        ;; edit widget in a vertical box inside the toplevel
+        ;; (`gtkutil.c:1800`), and `FRAME_GTK_WIDGET` is the edit widget
+        ;; alone. The bar's size request is `1 x -1` for the reason the C
+        ;; gives: a width of 1 keeps an empty bar from forcing a small
+        ;; frame wider, and -1 takes its natural height.
+        (orientable:set-orientation vbox
+                                   (symbol->enum <GtkOrientation> 'vertical))
+        (widget:set-size-request bar 1 -1)
+        (box:pack-start vbox bar #f #f 0)
+        (box:pack-start vbox area #t #t 0)
         ;; Keys arrive here and go on the queue the read drains. The
         ;; event is queued raw and decoded by the read. A toplevel window
         ;; receives key events without being told to ask for them;
@@ -2410,12 +2505,21 @@
         ;; 3.2 ms apiece, and asking during redisplay asked again on
         ;; every frame for an answer that changes only when this signal
         ;; fires. `pgtk-allocation' answers from what is recorded here.
-        (connect win (make <signal> #:name "size-allocate")
+        ;;
+        ;; **The drawing area's, not the window's.** The window now holds
+        ;; a box with the menu bar above this area, so the window is
+        ;; taller than the grid by the bar. What the display draws at,
+        ;; and what `screen-size' counts cells in, is the area's
+        ;; allocation - `FRAME_PIXEL_HEIGHT` in Emacs is the window's,
+        ;; with the menu bar's rows subtracted (`frame.c`), and the
+        ;; subtraction is what the box does instead.
+        (connect area (make <signal> #:name "size-allocate")
                  (lambda (w rect)
                    (let ((aw (widget:get-allocated-width w))
                          (ah (widget:get-allocated-height w)))
                      (set! (pgtk-allocated-size d) (cons aw ah))
-                     (pgtk-resize! d aw ah))
+                     (pgtk-resize! d aw ah)
+                     (pgtk-grow-by-menubar! d))
                    #t))
         ;; Draw again once the window has actually been mapped and
         ;; allocated: the first frame is drawn before that, and if the
@@ -2484,7 +2588,9 @@
         ;; drawing into the context it gives us, at its size.
         (connect area (make <signal> #:name "draw")
                  (lambda (w cr) (pgtk-present! d cr) #t))
-        (container:add win area)
+        ;; The toplevel holds the box, and the box holds the bar and the
+        ;; area - `xg_create_frame_widgets`' arrangement.
+        (container:add win vbox)
         ;; Key events go to the focused widget. A drawing area does not
         ;; take focus, so the window itself must - otherwise a keystroke
         ;; has nowhere to be delivered and the editor silently never
@@ -2494,6 +2600,308 @@
         (widget:grab-focus win)
         (*pgtk-displays* (cons d (*pgtk-displays*)))
         d))
+
+    ;;----------------------------------------------------------------
+    ;; The menu bar - gtkutil.c's widget builders over menu.c's tree
+    ;;----------------------------------------------------------------
+    ;;
+    ;; GNU Emacs builds the bar in three steps that this keeps apart the
+    ;; same way: `set_frame_menubar` fills `menu_items` from
+    ;; `menu_bar_items` and digests it into a `widget_value` tree
+    ;; (`menu.c`, all of it in `(schemacs editor menu)`), `create_menus`
+    ;; turns that tree into Gtk widgets (`gtkutil.c:3405`), and
+    ;; `menubar_selection_callback` turns a click back into a key
+    ;; sequence (`menu.c`'s `find_and_call_menu_selection`).
+
+    (define (pgtk-hold-widget! d w)
+      ;; Keep W's proxy alive for as long as the display lives.
+      ;;
+      ;; **This is not tidiness; without it the bar dies at the next
+      ;; GC.** A guile-gi proxy owns its GObject through a toggle
+      ;; reference, so when the proxy is collected the object goes with
+      ;; it *even though Gtk's container holds it* - measured under
+      ;; broadway: a bar that built and activated correctly lost its
+      ;; widgets to `instance with invalid (NULL) class pointer` at the
+      ;; first forced collection. Emacs has no proxy, so it has no such
+      ;; rule; the nearest thing here is to hold them, exactly as
+      ;; `pgtk-window`/`pgtk-area` are held (and for the same reason).
+      ;;
+      ;; A rebuild builds *new* widgets and leaves the old ones held, so
+      ;; a proxy is never released while an object is alive.
+      ;;--------------------------------------------------------------
+      (set! (pgtk-menubar-held d) (cons w (pgtk-menubar-held d)))
+      w)
+
+    (define (pgtk-widget-for-menu-item d label key)
+      ;; gtkutil.c's `make_widget_for_menu_item` (`:3222`): a horizontal
+      ;; box with the label and, right-aligned, the key's description.
+      ;;--------------------------------------------------------------
+      (let ((wbox (pgtk-hold-widget! d (make <GtkBox>)))
+            (wlbl (pgtk-hold-widget! d (make <GtkLabel>)))
+            (wkey (pgtk-hold-widget! d (make <GtkLabel>))))
+        (box:set-homogeneous wbox #f)
+        (label:set-text wlbl label)
+        (label:set-text wkey key)
+        (widget:set-halign wlbl (symbol->enum <GtkAlign> 'start))
+        (widget:set-valign wlbl (symbol->enum <GtkAlign> 'center))
+        (widget:set-halign wkey (symbol->enum <GtkAlign> 'start))
+        (widget:set-valign wkey (symbol->enum <GtkAlign> 'center))
+        (box:pack-start wbox wlbl #t #t 0)
+        (box:pack-start wbox wkey #f #f 0)
+        wbox))
+
+    (define (pgtk-make-menu-item d label key item group)
+      ;; gtkutil.c's `make_menu_item` (`:3256`): the widget for one item,
+      ;; without its submenu. Answers `(WIDGET . GROUP)`, GROUP being the
+      ;; radio item a following radio joins or `#f`.
+      ;;--------------------------------------------------------------
+      (let* ((wtoadd (and key (pgtk-widget-for-menu-item d label key)))
+             (type (widget-value-button-type item))
+             (w (cond
+                 ((eq? type 'toggle)
+                  (let ((w (pgtk-hold-widget! d (make <GtkCheckMenuItem>))))
+                    (unless wtoadd (menu-item:set-label w label))
+                    (check-menu-item:set-active w
+                                                (widget-value-selected? item))
+                    w))
+                 ((eq? type 'radio)
+                  (let ((w (pgtk-hold-widget! d (make <GtkRadioMenuItem>))))
+                    (unless wtoadd (menu-item:set-label w label))
+                    ;; `gtk_radio_menu_item_new (group)` - joining a group
+                    ;; that already has a first item is the same call.
+                    (when group (radio-menu-item:join-group w group))
+                    (when (widget-value-selected? item)
+                      (check-menu-item:set-active w #t))
+                    w))
+                 (else
+                  (let ((w (pgtk-hold-widget! d (make <GtkMenuItem>))))
+                    (unless wtoadd (menu-item:set-label w label))
+                    w)))))
+        (when wtoadd (container:add w wtoadd))
+        (unless (widget-value-enabled? item) (widget:set-sensitive w #f))
+        (when (widget-value-help item)
+          (widget:set-tooltip-text w (widget-value-help item)))
+        (cons w (if (eq? type 'radio) (or group w) #f))))
+
+    (define (pgtk-create-one-menuitem d item select-proc group)
+      ;; gtkutil.c's `xg_create_one_menuitem` (`:3317`): the widget, its
+      ;; tooltip, and the activate signal for a command.
+      ;;--------------------------------------------------------------
+      (let* ((label (or (widget-value-name item) " "))
+             (key (and (string? (widget-value-key item))
+                       (widget-value-key item)))
+             (made (pgtk-make-menu-item d label key item group))
+             (w (car made))
+             (type (widget-value-button-type item)))
+        ;; A submenu item has no command of its own; only a final item
+        ;; does, which is the C's `item->call_data && !item->contents`.
+        (when (and select-proc
+                   (widget-value-call-data item)
+                   (not (widget-value-contents item)))
+          (connect w (make <signal> #:name "activate")
+                   (lambda (widget)
+                     ;; **A radio's deactivation emits this signal too**,
+                     ;; which is `menubar_selection_callback`'s own guard
+                     ;; (`xmenu.c:808`): without it the item being left
+                     ;; would run its command as well.
+                     (when (or (not (eq? type 'radio))
+                               (check-menu-item:active widget))
+                       (select-proc (widget-value-call-data item)))
+                     #f)))
+        (cons w (cdr made))))
+
+    (define (pgtk-create-menus data d select-proc topmenu menu-bar-p)
+      ;; gtkutil.c's `create_menus` (`:3405`): one menu shell for DATA,
+      ;; recursing into every item that has contents. TOPMENU is an
+      ;; existing shell to append to, or `#f` to make one.
+      ;;--------------------------------------------------------------
+      (let ((wmenu (or topmenu
+                       (pgtk-hold-widget! d (if menu-bar-p
+                                                (make <GtkMenuBar>)
+                                                (make <GtkMenu>))))))
+        (let loop ((item data) (group #f))
+          (cond
+           ((not item) wmenu)
+           ((menu-separator-name? (widget-value-name item))
+            (menu-shell:append wmenu
+                               (pgtk-hold-widget! d
+                                                  (make <GtkSeparatorMenuItem>)))
+            (loop (widget-value-next item) #f))
+           (else
+            (let* ((made (pgtk-create-one-menuitem d item select-proc group))
+                   (w (car made)))
+              ;; "Create a possibly empty submenu for menu bar items,
+              ;; since some themes don't highlight items correctly
+              ;; without it" - the C's own note.
+              (when (or (widget-value-contents item) menu-bar-p)
+                (menu-item:set-submenu
+                 w (pgtk-create-menus (widget-value-contents item) d
+                                      select-proc #f #f)))
+              (menu-shell:append wmenu w)
+              (loop (widget-value-next item) (cdr made))))))))
+
+    (define (pgtk-menu-selection! d call-data)
+      ;; xmenu.c's `menubar_selection_callback` (`:794`): the clicked
+      ;; item's `call_data` is its index in the snapshot the bar was
+      ;; built from, and what the command loop needs is the key sequence
+      ;; it stands for.
+      ;;
+      ;; **Each key goes through `pgtk-enqueue!`, like a keystroke.**
+      ;; The first is a *prefix* (`menu-bar`) and the rest are the keys
+      ;; beneath it, so they must reach the command loop's modal lookup
+      ;; one at a time, in order - which is exactly what a fast typist's
+      ;; `C-x C-f' does. Emacs puts the same events in the keyboard
+      ;; buffer; this front end has two ways in and `pgtk-enqueue!` is
+      ;; the one that picks between them.
+      ;;--------------------------------------------------------------
+      (let ((vector (pgtk-menubar-vector d)))
+        (when vector
+          (find-and-call-menu-selection
+           vector (pgtk-menubar-used d) call-data
+           (lambda (key)
+             (pgtk-enqueue! d (cons 'menu-bar-event key)))))))
+
+    (define (pgtk-grow-by-menubar! d)
+      ;; Keep the *grid* the same when the bar appears.
+      ;;
+      ;; GNU Emacs's `adjust_frame_size (f, -1, -1, 2, false,
+      ;; Qmenu_bar_lines)` (`xmenu.c:1342`) grows the frame by the menu
+      ;; bar's height instead of letting the edit area give the rows up,
+      ;; which is why a menu bar never costs a line of text there. The
+      ;; box gives them up by default, so this asks the window for the
+      ;; height back - once per change of the bar's own height, so that
+      ;; the resize it causes cannot ask again.
+      ;;--------------------------------------------------------------
+      (let ((bar (pgtk-menubar d))
+            (win (pgtk-window d)))
+        (when (and bar win)
+          (let ((h (widget:get-allocated-height bar)))
+            (when (and h (>= h 0) (not (= h (pgtk-menubar-height d))))
+              (set! (pgtk-menubar-height d) h)
+              (let ((alloc (pgtk-allocation d)))
+                (when alloc
+                  (window:resize win (car alloc) (+ (cdr alloc) h)))))))))
+
+    (define (pgtk-install-menubar! d items submenus vector)
+      ;; Digest the freshly built `menu_items` into a `widget_value` tree
+      ;; and hang Gtk widgets off the bar - the half of `set_frame_menubar`
+      ;; that only runs when the array has changed.
+      ;;--------------------------------------------------------------
+      (let ((bar (pgtk-menubar d))
+            (root (make-widget-value "menubar" #f #t #f)))
+        (let loop ((rest submenus) (prev #f))
+          (when (pair? rest)
+            (let* ((sub (car rest))
+                   (wv (begin
+                         ;; The digest reads the pane count, and the C
+                         ;; sets it per submenu before each call.
+                         (set!menu-items-n-panes! (list-ref sub 2))
+                         (digest-single-submenu
+                          (list-ref sub 0) (list-ref sub 1)
+                          (list-ref sub 3)))))
+              (set!widget-value-enabled! wv #t)
+              (set!widget-value-button-type wv 'none)
+              (if prev
+                  (set!widget-value-next prev wv)
+                  (set!widget-value-contents root wv))
+              (loop (cdr rest) wv))))
+        ;; **The C's second loop** (`xmenu.c:1103`): each submenu's root
+        ;; takes the *bar item's* name - which is why `digest_single_submenu`
+        ;; leaves it as "menu" and this sets it - and only its *contents*
+        ;; have their strings moved from `lname`/`lkey` to `name`/`key`.
+        (let loop ((rest items) (wv (widget-value-contents root)))
+          (when (and (pair? rest) wv)
+            (set!widget-value-name wv (list-ref (car rest) 1))
+            (update-submenu-strings (widget-value-contents wv))
+            (loop (cdr rest) (widget-value-next wv))))
+        ;; What the widgets' `call_data` indexes, kept beside the
+        ;; widgets that carry it - `fset_menu_bar_vector`.
+        (set! (pgtk-menubar-vector d) vector)
+        (set! (pgtk-menubar-used d) (vector-length vector))
+        ;; The old children are removed and their proxies left held;
+        ;; Gtk unparents them, and a proxy released while its object
+        ;; lives is the crash `pgtk-hold-widget!` exists to prevent.
+        (for-each (lambda (w) (container:remove bar w))
+                  (container:get-children bar))
+        (if (null? (widget-value-contents root))
+            (begin
+              (widget:hide bar)
+              (set! (pgtk-menubar-hidden? d) #t))
+            (begin
+              (pgtk-create-menus (widget-value-contents root) d
+                                 (lambda (call-data)
+                                   (pgtk-menu-selection! d call-data))
+                                 bar #t)
+              (widget:show-all bar)
+              (set! (pgtk-menubar-hidden? d) #f)))))
+
+    (define (pgtk-set-frame-menubar d)
+      ;; GNU Emacs's `set_frame_menubar (f, false)` (`xmenu.c:970`): build
+      ;; `menu_items` from `menu-bar-items`, and rebuild the widgets only
+      ;; when the built array differs from the one they were made from.
+      ;;
+      ;; **The comparison is on the built array, not on the item list.**
+      ;; That is Emacs's own rule - an `memcmp` over `menu_items` and a
+      ;; length check (`xmenu.c:1082`) - and the difference matters: a
+      ;; keymap's *contents* can change while `menu-bar-items` answers the
+      ;; same objects, so comparing the list would leave a binding added
+      ;; to an existing menu invisible. The array has a slot per item
+      ;; pushed, so an added or removed binding changes it.
+      ;;
+      ;; `redisplay_window` decides *whether* to do the work at all from
+      ;; `windows_or_buffers_changed` and `update_mode_lines`
+      ;; (`xdisp.c:14443`), neither of which this redisplay has; doing it
+      ;; every redisplay and comparing afterwards is the same decision
+      ;; made from the result.
+      ;;--------------------------------------------------------------
+      (let ((bar (pgtk-menubar d)))
+        (when bar
+          (let ((items (menu-bar-items)))
+            (cond
+             ((null? items)
+              ;; **An empty bar is taken down once, not rebuilt.** The C
+              ;; rebuilds it (`i != 0` in its guard) because its rebuild
+              ;; is a few Lisp calls; here it is `container:get-children`
+              ;; and `widget:hide`, two guile-gi crossings measured at
+              ;; ~6 ms together - 6 ms *per redisplay*, which is a
+              ;; keystroke's worth of lag for a bar that is not even
+              ;; showing. Nothing can change a bar with no items except
+              ;; items arriving, and the non-empty branch below is what
+              ;; notices those.
+              (unless (pgtk-menubar-hidden? d)
+                (set! (pgtk-menubar-hidden? d) #t)
+                (set! (pgtk-menubar-vector d) #f)
+                (set! (pgtk-menubar-used d) 0)
+                (for-each (lambda (w) (container:remove bar w))
+                          (container:get-children bar))
+                (widget:hide bar)))
+             (else
+              (set! (pgtk-menubar-hidden? d) #f)
+              (let ((submenus '()))
+            (init-menu-items)
+            (for-each
+             (lambda (quad)
+               (let ((start (menu-items-used)))
+                 ;; The C's `menu_items_n_panes = 0` before every
+                 ;; submenu: the count is per menu bar item, and a
+                 ;; running total would give the second item's digest the
+                 ;; first one's panes.
+                 (set!menu-items-n-panes! 0)
+                 (let ((top (parse-single-submenu
+                             (list-ref quad 0) (list-ref quad 1)
+                             (list-ref quad 2)))
+                       (n (menu-items-n-panes)))
+                   (set! submenus (cons (list start (menu-items-used) n top)
+                                        submenus)))))
+             items)
+            (finish-menu-items)
+            (let ((vector (vector-copy (menu-items) 0 (menu-items-used)))
+                  (old (pgtk-menubar-vector d)))
+              ;; The C's guard: unchanged, and not empty, means no work.
+              (unless (and old
+                           (> (vector-length vector) 0)
+                           (equal? vector old))
+                (pgtk-install-menubar! d items (reverse submenus) vector))))))))))
 
     (define (pgtk-title-frame! frame)
       ;; Give FRAME's window the frame's name as its title. GNU Emacs's

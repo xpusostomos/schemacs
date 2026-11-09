@@ -15,10 +15,13 @@
   ;; menu from within a menu-entry" error therefore has no counterpart -
   ;; the reentry it forbids is safe here. Named departure.
   ;;
-  ;; **What is not carried yet**: `digest_single_submenu` and the
-  ;; `widget_value` tree it builds, and the front-end widget builders.
-  ;; This is the data half; `menu-bar-items` (`keyboard.scm`) is what
-  ;; feeds the bar.
+  ;; This is the data half: `menu-bar-items` (`keyboard.scm`) feeds it,
+  ;; and it feeds the front end's widget builder. Both of menu.c's other
+  ;; halves are here too - `digest_single_submenu`'s `widget_value` tree,
+  ;; and `find_and_call_menu_selection`, which turns a click back into
+  ;; the key sequence it stands for. What is *not* here is the front
+  ;; end's widget builder itself (`gtkutil.c`'s `create_menus` for Gtk),
+  ;; which belongs beside the widgets it makes.
   ;;
   ;; `have-boxes` is `(display-graphic-p)`: a toolkit's menus draw real
   ;; checks and radios, a tty's do not. The TTY's `[ ]`/`( )` prefixes
@@ -43,7 +46,8 @@
 
   (export
    *menu-state* make-menu-state menu-state?
-   menu-items menu-items-used menu-items-n-panes menu-items-submenu-depth
+   menu-items menu-items-used menu-items-n-panes set!menu-items-n-panes!
+   menu-items-submenu-depth
    init-menu-items finish-menu-items unuse-menu-items discard-menu-items
    push-menu-pane push-menu-item push-submenu-start push-submenu-end
    push-left-right-boundary
@@ -70,7 +74,9 @@
    menu-items-item-name menu-items-item-enable menu-items-item-value
    menu-items-item-equiv-key menu-items-item-definition
    menu-items-item-type menu-items-item-selected menu-items-item-help
-   menu-items-item-length)
+   menu-items-item-length
+   ;; What a click means: the key sequence the selected item stands for.
+   find-and-call-menu-selection)
 
   (begin
 
@@ -105,6 +111,12 @@
     (define (menu-items) (menu-state-items (*menu-state*)))
     (define (menu-items-used) (menu-state-used (*menu-state*)))
     (define (menu-items-n-panes) (menu-state-n-panes (*menu-state*)))
+    (define (set!menu-items-n-panes! n)
+      ;; `menu_items_n_panes = submenu_n_panes[i]` - `set_frame_menubar`
+      ;; sets it before every `digest_single_submenu` because the digest
+      ;; decides from it whether a single pane's items hang off the root.
+      ;;--------------------------------------------------------------
+      (%set!menu-state-n-panes! (*menu-state*) n))
     (define (menu-items-submenu-depth)
       (menu-state-submenu-depth (*menu-state*)))
 
@@ -314,8 +326,16 @@
       ;; item ITEM-KEY/ITEM-NAME whose contents come from the list of
       ;; keymaps MAPS. Answers whether a top-level *command* was among
       ;; them (which is what makes a one-item menu a button).
+      ;;
+      ;; **The caller owns `init_menu_items`.** The C's caller
+      ;; (`set_frame_menubar`) initializes ONCE and then appends every
+      ;; menu bar item's panes into the same array, because the whole
+      ;; array is what `find_and_call_menu_selection` later indexes;
+      ;; `keymap_panes` and `list_of_panes` are the other two callers and
+      ;; each does its own. This used to initialize and finish here,
+      ;; which was invisible while it had one caller per array and makes
+      ;; the bar impossible - each item's panes would discard the last.
       ;;--------------------------------------------------------------
-      (init-menu-items)
       (let ((top-level-items #f))
         (for-each
          (lambda (map)
@@ -327,7 +347,6 @@
                (single-keymap-panes
                 map (or (keymap-prompt map) item-name) item-key 10)))
          maps)
-        (finish-menu-items)
         top-level-items))
 
     ;;----------------------------------------------------------------
@@ -480,5 +499,70 @@
           (when (widget-value-contents wv)
             (update-submenu-strings (widget-value-contents wv)))
           (loop (widget-value-next wv)))))
+
+    ;;----------------------------------------------------------------
+    ;; The selection - what happens when a menu item is clicked
+    ;;----------------------------------------------------------------
+
+    (define (find-and-call-menu-selection items used selected emit)
+      ;; GNU Emacs's `find_and_call_menu_selection' (`menu.c:876'): walk
+      ;; the `menu_items` array for the item whose index is SELECTED and
+      ;; hand the front end the *key sequence* it stands for - the
+      ;; `(menu-bar)` prefix, every submenu prefix above it, its own
+      ;; pane's prefix, and finally the item's own key.
+      ;;
+      ;; **EMIT is the keyboard buffer.** The C stores one
+      ;; `MENU_BAR_EVENT` per element with `kbd_buffer_store_event`, and
+      ;; `make_lispy_event` turns each into `event->arg` - except the
+      ;; first, whose argument is the frame, which becomes the symbol
+      ;; `menu-bar` (`keyboard.c:7231`). This tree's reader is the front
+      ;; end's queue, so the same values are handed to EMIT in the same
+      ;; order and the front end queues them; EMIT is called with
+      ;; `menu-bar`, then each non-nil subprefix, then the pane's prefix,
+      ;; then the item's value. That is a departure in *where* they go
+      ;; and none at all in what they are.
+      ;;
+      ;; **ITEMS is the frame's own snapshot**, not the live array: the
+      ;; C's `f->menu_bar_vector`, which `set_frame_menubar` stores
+      ;; precisely so that a rebuild later cannot move the indices the
+      ;; widgets were made with.
+      ;;
+      ;; The C walks the array with a prefix stack indexed by depth; so
+      ;; does this, and `#f` in the stack is the C's nil.
+      ;;--------------------------------------------------------------
+      (let ((subprefix-stack (make-vector (max used 1) #f))
+            (submenu-depth 0))
+        (let loop ((i 0) (prefix #f) (entry #f))
+          (when (< i used)
+            (let ((slot (vector-ref items i)))
+              (cond
+               ;; A submenu opens: remember where we were and descend.
+               ((not slot)
+                (vector-set! subprefix-stack submenu-depth prefix)
+                (set! submenu-depth (+ submenu-depth 1))
+                (loop (+ i 1) entry entry))
+               ;; A submenu closes: back to the prefix it was under.
+               ((eq? slot 'lambda)
+                (set! submenu-depth (- submenu-depth 1))
+                (loop (+ i 1) (vector-ref subprefix-stack submenu-depth)
+                      entry))
+               ;; A pane: its prefix is what the next items descend from.
+               ((eq? slot #t)
+                (loop (+ i menu-items-pane-length)
+                      (vector-ref items (+ i menu-items-pane-prefix))
+                      entry))
+               (else
+                (set! entry (vector-ref items (+ i menu-items-item-value)))
+                (if (not (= selected i))
+                    (loop (+ i menu-items-item-length) prefix entry)
+                    (begin
+                      (emit 'menu-bar)
+                      (let loop2 ((j 0))
+                        (when (< j submenu-depth)
+                          (let ((sub (vector-ref subprefix-stack j)))
+                            (when sub (emit sub)))
+                          (loop2 (+ j 1))))
+                      (when prefix (emit prefix))
+                      (emit entry))))))))))
 
     ))

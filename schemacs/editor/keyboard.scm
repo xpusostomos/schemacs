@@ -108,7 +108,7 @@
     ;; `uarg->integer' is `callint.c''s, in the command library the
     ;; commands' interactive specs come from.
     (only (schemacs editor command) uarg->integer current-prefix-arg
-          *pending-coding-system*)
+          *pending-coding-system* command-record-named)
     ;; The two variables C-x RET c names for the next command. They are
     ;; `coding.c`'s, and they are bound here because the command loop is
     ;; what has the extent Emacs binds them for.
@@ -188,7 +188,7 @@
    ;; end is Scheme and must import them, so the property slots are
    ;; exported with them.
    *menu-bar-final-items* *overriding-local-map-menu-flag*
-   menu-bar-items parse-menu-item
+   menu-bar-items parse-menu-item menu-separator-name?
    *enable-disabled-menus-and-buttons*
    *item-properties*
    item-property-item item-property-name item-property-def
@@ -440,6 +440,20 @@
             (if (command-interactive-spec action)
                 (run-command action uarg)
                 (run-command action)))
+           ((symbol? action)
+            ;; **A command *name*.** GNU Emacs's `command-execute` is
+            ;; handed a symbol and finds its function in the obarray
+            ;; (`keyboard.c:1428`); a menu item is usually written that
+            ;; way - `(menu-item "Save" save-buffer)` - while this
+            ;; tree's keymaps usually hold the procedure itself. Both
+            ;; have to run, and an item holding the symbol that did not
+            ;; is `not a command`.
+            (let ((record (command-record-named action)))
+              (if record
+                  (if (command-interactive-spec record)
+                      (run-command record uarg)
+                      (run-command record))
+                  (error "not a command" action))))
            ((procedure? action)
             ;; A procedure the keymap holds. It may be a
             ;; `define-command' - a bare procedure whose command record sits
@@ -1756,7 +1770,14 @@ With argument, insert ARG copies of the character."
       ;; own loop is the one absorbing input.
       ;;--------------------------------------------------------------
       (parameterize ((*current-frame* frame)
-                     (*current-keymap* *default-keymap*))
+                     ;; **`#f`, not the global map.** The parameter's
+                     ;; false value already means "no mode map, use
+                     ;; `global-map'", and naming it explicitly listed
+                     ;; the map a second time - which `lookup-keymaps`
+                     ;; dutifully returned twice, harmless for a key
+                     ;; lookup and visible in the menu bar, where each
+                     ;; item was contributed twice.
+                     (*current-keymap* #f))
         (redisplay-frames!)
         (call/cc
          (lambda (k)
@@ -1793,7 +1814,7 @@ With argument, insert ARG copies of the character."
       ;; `*DISPATCH-EVENT*`.
       ;;--------------------------------------------------------------
       (parameterize ((*current-frame* frame)
-                     (*current-keymap* *default-keymap*)
+                     (*current-keymap* #f)
                      (*dispatch-event*
                       (lambda (ev)
                         ;; The selected frame is read each time, as
@@ -2044,6 +2065,39 @@ With argument, insert ARG copies of the character."
                (vector-set! *item-properties* item-property-selected
                             (menu-item-eval-property tem))))
            #t))))
+
+    (define %separator-names
+      ;; The C's `separator_names` table (`keyboard.c:8579').
+      '("space" "no-line" "single-line" "double-line"
+        "single-dashed-line" "double-dashed-line"
+        "shadow-etched-in" "shadow-etched-out"
+        "shadow-etched-in-dash" "shadow-etched-out-dash"
+        "shadow-double-etched-in" "shadow-double-etched-out"
+        "shadow-double-etched-in-dash" "shadow-double-etched-out-dash"))
+
+    (define (menu-separator-name? label)
+      ;; GNU Emacs's `menu_separator_name_p' (`keyboard.c:8608'):
+      ;; whether LABEL names a separator line rather than an item.
+      ;;
+      ;; Two spellings: a name containing only dashes, and the
+      ;; toolkit's own `--NAMES` list - `--space`, `--double-line` and
+      ;; the shadowed etchings. The C tests `strnlen (label, 4) == 4`
+      ;; first, so `--` itself falls to the all-dashes branch, and a
+      ;; label shorter than two characters cannot match either.
+      ;;--------------------------------------------------------------
+      (cond
+       ((not (string? label)) #f)
+       ((and (>= (string-length label) 4)
+             (string=? (substring label 0 2) "--")
+             (not (char=? (string-ref label 2) #\-)))
+        (if (member (substring label 2 (string-length label)) %separator-names)
+            #t
+            #f))
+       (else
+        (let loop ((i 0))
+          (cond ((>= i (string-length label)) #t)
+                ((char=? (string-ref label i) #\-) (loop (+ i 1)))
+                (else #f))))))
 
     (define (menu-bar-items)
       ;; GNU Emacs's `menu_bar_items' (`keyboard.c:8641'): the

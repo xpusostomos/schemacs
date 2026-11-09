@@ -14,7 +14,7 @@
               get-buffer-create *current-buffer*)
         (only (schemacs editor intervals) put)
         (only (schemacs editor keyboard)
-              parse-menu-item menu-bar-items
+              parse-menu-item menu-bar-items menu-separator-name?
               *item-properties* item-property-name item-property-def
               item-property-map item-property-enable item-property-keyeq
               item-property-type item-property-selected
@@ -224,5 +224,25 @@
       (set-menu-flag! #f)
       (set-overriding-map! #f)
       result)))
+
+;;------------------------------------------------------------------
+;; menu-separator-name? - `menu_separator_name_p` (`keyboard.c:8608`)
+;;------------------------------------------------------------------
+
+(test-equal "a name of nothing but dashes is a separator"
+  '(#t #t #t #t)
+  (map menu-separator-name? '("--" "---" "-" "")))
+
+(test-equal "the toolkit's own separator names, after the two dashes"
+  '(#t #t #t)
+  (map menu-separator-name? '("--space" "--double-line" "--shadow-etched-in")))
+
+(test-equal "anything else is an item"
+  '(#f #f #f #f)
+  (map menu-separator-name? '("-x" "a-" "File" "--not-a-name")))
+
+(test-assert "a label that is not a string is not a separator"
+  (and (not (menu-separator-name? #f))
+       (not (menu-separator-name? 'symbol))))
 
 (test-end "schemacs_editor_menu_bar")

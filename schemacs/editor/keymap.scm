@@ -474,6 +474,26 @@
           (error "access-keymap: not an event" event))
         (let ((own (hashv-ref (keymap-bindings keymap) event #f)))
           (cond
+           ;; **"If the keymap contents looks like (STRING . DEFN), use
+           ;; DEFN."** - the C's own words (`keymap.c:719`). It is how a
+           ;; menu bar item is stored: `menu-bar.el' binds
+           ;; `[menu-bar file]' to `(cons "File" menu-bar-file-menu)',
+           ;; the string being the name the bar shows and the cdr the
+           ;; keymap the next event of the sequence is looked up in.
+           ;; Without this `[menu-bar file save-buffer]' has no binding
+           ;; at all, and `parse_menu_item' - which *wants* that cons -
+           ;; is the one reader that never goes through here.
+           ((and (pair? own) (string? (car own))) (cdr own))
+           ;; **"If the keymap contents looks like (menu-item name .
+           ;; DEFN) or (menu-item name DEFN ...) then use DEFN."** The
+           ;; other half of `get_keyelt` (`keymap.c:685`). A menu item
+           ;; is a *binding*, and the thing it runs is inside it - so a
+           ;; menu clicked with the mouse and the same item typed as
+           ;; `[menu-bar file save-buffer]` both have to reach the
+           ;; command itself, not the list describing it.
+           ((and (pair? own) (eq? (car own) 'menu-item) (pair? (cdr own)))
+            (let ((rest (cddr own)))
+              (if (pair? rest) (car rest) rest)))
            (own own)
            (else
             (let ((ct (keymap-char-table keymap)))

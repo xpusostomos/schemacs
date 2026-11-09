@@ -6746,3 +6746,177 @@ variable a parameter whose name carries asterisks. The argument for a
 plain variable - "a user option is read by naming it" - was an argument
 for spelling, and it bought a variable that a ported `let` would shadow
 silently instead of binding.
+
+# The menu bar on Gtk - the widget tree, and a click back to a key
+# (2026-11-09)
+
+The Lisp stack landed in `b796e33` (keymaps -> `map-keymap` ->
+`define-key-after`/`keymap-canonicalize` -> `parse_menu_item`/
+`menu_bar_items` -> `menu.c`'s `menu_items` -> `digest_single_submenu`).
+This pass is the other end: `gtkutil.c`'s widget builders, and
+`menu.c`'s `find_and_call_menu_selection`, so that clicking an item runs
+the command the item stands for.
+
+## What is where
+
+| Emacs | here |
+|---|---|
+| `set_frame_menubar` (deep branch, `xmenu.c:970`) | `pgtk-set-frame-menubar` / `pgtk-install-menubar!` |
+| `create_menus` (`gtkutil.c:3405`) | `pgtk-create-menus` |
+| `make_menu_item` (`:3256`) | `pgtk-make-menu-item` |
+| `make_widget_for_menu_item` (`:3222`) | `pgtk-widget-for-menu-item` |
+| `xg_create_one_menuitem` (`:3317`) | `pgtk-create-one-menuitem` |
+| `find_and_call_menu_selection` (`menu.c:876`) | `find-and-call-menu-selection` (`menu.scm`) |
+| `menubar_selection_callback` (`xmenu.c:794`) | `pgtk-menu-selection!` |
+| `menu_separator_name_p` (`keyboard.c:8608`) | `menu-separator-name?` (`keyboard.scm`) |
+| `xg_create_frame_widgets`' vbox (`gtkutil.c:1800`) | `pgtk-open-window`'s `vbox`: bar above the drawing area |
+
+The window is now `GtkWindow > GtkBox > {GtkMenuBar, GtkDrawingArea}` -
+`FRAME_GTK_OUTER_WIDGET` holding the menu bar and the edit widget. The
+grid is the *area's* allocation (`size-allocate` moved there), and the
+window is grown by the bar's height so a menu bar costs no text rows,
+which is what `adjust_frame_size (f, -1, -1, 2, false, Qmenu_bar_lines)`
+does (`pgtk-grow-by-menubar!`).
+
+A click emits the item's key sequence - `menu-bar`, then each submenu
+prefix, then the item's key - one event at a time through
+`pgtk-enqueue!`, so the command loop's modal lookup walks it exactly as it
+walks a fast-typed chord. Verified live under broadway: a menu item bound
+to a `define-command` ran when `menu-item:activate` was called on the
+widget.
+
+## guile-gi owns widgets through the proxy - measured, twice
+
+A guile-gi proxy owns its GObject with a **toggle reference**, so a proxy
+that is collected *destroys the widget*, even though Gtk's container
+holds it. Measured under broadway, with `gc` forced: a bar with all its
+items' proxies in a Scheme variable built and activated correctly; the
+same bar with the *vbox* unheld died at the first collection with
+`instance with invalid (NULL) class pointer` and `g_signal_handlers_destroy`
+CRITICALs. Every menu widget's proxy is therefore held for the display's
+life (`pgtk-hold-widget!`, the `menubar-held` slot) - the same rule
+`pgtk-window`/`pgtk-area` already follow and `*pgtk-destroyed-displays*`
+documents. Emacs has no proxy and so no such rule.
+
+**Departure, named**: a rebuild keeps the old widgets' proxies too, so a
+menu whose contents change often (a Buffers menu) grows the hold list.
+Freeing them needs "unparent the whole subtree, then drop the proxies",
+which is not the same order as the crash-free case above and has not been
+worked out.
+
+## Three departures in the machinery, all resolved against the C
+
+1. **`access_keymap` does `get_keyelt`'s coercions** (`keymap.c:678`):
+   `(STRING . DEFN)` -> DEFN, and `(menu-item NAME DEF ...)` -> DEF. Both
+   are *menu spellings* of a keymap binding, and without them
+   `[menu-bar file save-buffer]` has no binding and a clicked item's key
+   sequence stops at the first symbol. This is what `menu-bar.el`'s
+   `(define-key global-map [menu-bar file] (cons "File" ...))` needs.
+2. **`parse_single_submenu` no longer initializes `menu_items`** - its C
+   caller does, once for the whole bar, and initializing per submenu made
+   every bar item's panes discard the last. `menu-tests.scm` wraps its
+   calls the way `set_frame_menubar` does.
+3. **`dispatch-action` accepts a command *symbol*.** Elisp writes
+   `(menu-item "Save" save-buffer)`; this tree's keymaps hold procedures.
+   `command-record-named` is the obarray lookup (`*command-table*` is
+   keyed by the command's name *string*, not a symbol).
+
+Found on the way: `lookup-keymaps` listed `*default-keymap*` twice,
+because the front ends bound `*current-keymap*` to it explicitly. Harmless
+for a key and visible in the bar (every item contributed twice); the front
+ends now bind `#f`, which the parameter already documents as "use
+global-map".
+
+## Not carried yet
+
+- **`menu-bar.el` itself** - the standard menus (File/Edit/Options/
+  Buffers/Tools/Help), `menu-bar-update-hook`, `activate-menubar-hook`,
+  `menu-bar-mode` (which needs frame parameters: `menu-bar-lines`), and
+  `easy-menu-define`. Until then the bar shows whatever user code defines
+  under `[menu-bar]`, and is hidden when there is nothing.
+- `set_frame_menubar`'s *shallow* branch (only item names recomputed),
+  and the `menu-bar-lines` frame parameter.
+- The `:filter`-driven `get_keyelt` re-evaluation (`autoload` argument).
+
+## The empty menu bar cost a keystroke (2026-11-09)
+
+Chris, after the menu bar landed: *"performance seems to have gone to hell.
+Just moving the cursor around is dog slow."* Two causes, both measured.
+
+**1. An empty bar was rebuilt on every redisplay - 6.6 ms of it.** The C
+rebuilds an empty bar (`i != 0` in its guard) because its rebuild is a few
+Lisp calls; here `pgtk-install-menubar!` ran `container:get-children` and
+`widget:hide` every time, two guile-gi crossings, on every keystroke, for
+a bar with nothing in it. `pgtk-set-frame-menubar` now takes an empty bar
+down **once** (`menubar-hidden?`) and returns. Measured on a compiled
+editor: `pgtk-set-frame-menubar` **6.6 ms -> 0.009 ms** per redisplay.
+
+**2. The editor was running *interpreted*.** `bin/se` passes
+`--no-auto-compile`, so a library with no `.go` in
+`~/.cache/guile/ccache` is *loaded as source and evaluated*, not compiled.
+Measured on the same editor and buffer: `render!` **79 ms** with a cold
+cache, **22 ms** warm. Deleting this tree's cache while working - which
+every measurement run does - leaves any editor started afterwards
+interpreted, and an interpreted redisplay is the "dog slow" that started
+this. **Compile the tree before saying a performance number means
+anything**, and remember that a running editor keeps the code it started
+with.
+
+The break-down, once both are fixed (compiled, 80x24, themed): `render!`
+6-7 ms, of which `render-window!` is 1.2 ms and `flush-display!` 3.3 ms
+(two guile-gi crossings). The rest is the per-keystroke full redraw this
+file already names as the remaining gap - `render!` clears the surface and
+redraws every row instead of an incremental update.
+
+## `message` moved point in `*Messages*` (2026-11-09)
+
+Chris: *"`(message "")` moves point to the end of the messages buffer.
+Emacs doesn't move point. If point moves it is hard to copy out of
+messages because setting mark to copy outputs a message 'mark set' which
+moves point."* Both halves are one bug: our `message-dolog` ended with a
+flat `(goto-char (point-max))`.
+
+`message_dolog` (`xdisp.c:12381`) reads `PT == Z` *before* it moves to the
+end, and restores afterwards:
+
+```c
+      if (PT == Z) point_at_end = 1;
+      ...
+      TEMP_SET_PT_BOTH (Z, Z_BYTE);            /* insert at the end */
+      ...
+      if (point_at_end) TEMP_SET_PT_BOTH (Z, Z_BYTE);
+      else TEMP_SET_PT_BOTH (marker_position (oldpoint), ...);
+```
+
+So a log buffer left at its end follows new messages - which is what
+scrolling with the log looks like - and one whose point is anywhere else
+keeps it. The old point is kept as a **marker**, so trimming the oldest
+lines for `message-log-max` moves it back with the text it was on.
+
+Ported as it stands: `point-at-end?` from `(= (point) (point-max))`
+before the move, `(point-marker)` for the old point, and the restore at
+the very end, after the duplicate folding and the trim.
+`ncurses-editor-tests.scm` has the three cases (point kept, point at the
+end follows, both messages logged), measured against Emacs 31.1, and the
+first one fails with the old code (`actual 265`, the end of the buffer).
+
+## `[Confirm]` could never fire from a TAB (2026-11-09)
+
+Found by the pty battery, and *not* this pass's doing: the `switch-buffer`
+check failed on `HEAD` as well (checked by stashing and running it on the
+clean tree). `C-x b SWI TAB RET` showed `[No match]` from the TAB and
+then made a buffer named `SWI` - the typo `confirm-after-completion`
+exists to catch, exited straight through.
+
+`completion--in-region-1` (`minibuffer.el:1745`) sets **`this-command` to
+the *symbol* `completion-at-point`**, so a RET straight after a TAB sees
+`last-command` = that symbol. Emacs's `minibuffer-confirm-exit-commands`
+is a list of symbols and contains it. Ours had been translated to the two
+*procedures* that are bound to TAB ("a command is its procedure here"),
+and `completion-at-point` was left out because it is not ported as a
+command - so `(memq last-command ...)` was false for the symbol, and the
+confirm branch was never taken.
+
+The list now holds `(completion-at-point minibuffer-complete
+minibuffer-complete-word)` - Emacs's list, with the two that are bound
+given as the procedures they are bound as. The pty check passes again.

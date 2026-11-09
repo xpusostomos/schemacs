@@ -433,6 +433,7 @@
     <interval>
     <marker>
     <test-display>
+    <widget-value>
     Buffer-menu-beginning
     Buffer-menu-buffer
     Buffer-menu-bury
@@ -647,6 +648,7 @@
     command-loop-ready?
     command-name
     command-procedure
+    command-record-named
     command-record-of
     command-remapping
     command-type?
@@ -795,6 +797,7 @@
     detect-coding-bytes
     detect-coding-system
     detect-eol
+    digest-single-submenu
     digit-argument
     directory-abbrev-apply
     directory-abbrev-make-regexp
@@ -1020,6 +1023,7 @@
     files--name-absolute-system-p
     files--use-insert-directory-program-p
     find-alternate-file
+    find-and-call-menu-selection
     find-auto-coding
     find-before-next-newline
     find-buffer-visiting
@@ -1337,6 +1341,7 @@
     make-menu-state
     make-overlay
     make-sparse-keymap
+    make-widget-value
     make<command>
     make<frame>
     make<history>
@@ -1382,6 +1387,7 @@
     menu-items-pane-prefix
     menu-items-submenu-depth
     menu-items-used
+    menu-separator-name?
     menu-state?
     merge-coding-systems
     merge-face-attribute
@@ -1732,6 +1738,7 @@
     set!major-mode
     set!mark-active
     set!mark-ring
+    set!menu-items-n-panes!
     set!mode-name
     set!string-intervals
     set!test-display-color-cells
@@ -1753,6 +1760,18 @@
     set!text-editor-undo-list
     set!text-scale-mode-variable!
     set!timer-due-at
+    set!widget-value-button-type
+    set!widget-value-call-data
+    set!widget-value-contents
+    set!widget-value-enabled!
+    set!widget-value-help
+    set!widget-value-key
+    set!widget-value-lkey
+    set!widget-value-lname
+    set!widget-value-name
+    set!widget-value-next
+    set!widget-value-selected!
+    set!widget-value-value
     set!window-buffer
     set!window-children
     set!window-cursor-off?
@@ -1961,6 +1980,7 @@
     upcase-word
     update-interval
     update-prefix!
+    update-submenu-strings
     update-window-begin!
     update-window-end!
     use-local-map
@@ -1974,6 +1994,19 @@
     visual-line-mode
     visual-line-mode-map
     what-cursor-position
+    widget-value-button-type
+    widget-value-call-data
+    widget-value-contents
+    widget-value-enabled?
+    widget-value-help
+    widget-value-key
+    widget-value-lkey
+    widget-value-lname
+    widget-value-name
+    widget-value-next
+    widget-value-selected?
+    widget-value-value
+    widget-value?
     wildcard-to-regexp
     window-absorb!
     window-base-line-number

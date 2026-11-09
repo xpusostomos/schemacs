@@ -13,6 +13,7 @@
         (only (schemacs editor faces) *window-system*)
         (only (schemacs editor menu)
               *menu-state* menu-items menu-items-used menu-items-n-panes
+              init-menu-items finish-menu-items
               menu-items-pane-name menu-items-pane-prefix
               menu-items-pane-length
               menu-items-item-name menu-items-item-enable
@@ -21,6 +22,7 @@
               menu-items-item-length
               parse-single-submenu keymap-panes list-of-panes
               digest-single-submenu update-submenu-strings
+              find-and-call-menu-selection
               widget-value? widget-value-name widget-value-value
               widget-value-lname widget-value-next widget-value-contents
               widget-value-call-data widget-value-button-type
@@ -60,6 +62,15 @@
                                           (+ i menu-items-item-selected)))
                         out))))))))
 
+;; `parse_single_submenu` no longer initializes the array - its C caller
+;; does, once for the whole bar - so every call here is wrapped the way
+;; `set_frame_menubar` wraps it.
+(define (parse-submenu key name maps)
+  (init-menu-items)
+  (let ((answer (parse-single-submenu key name maps)))
+    (finish-menu-items)
+    answer))
+
 (define (file-map)
   (let ((m (make-sparse-keymap "File"))
         (sub (make-sparse-keymap "Sub")))
@@ -81,20 +92,20 @@
     (item "New" 110 #f #f))
   (begin
     (parameterize ((*window-system* 'pgtk))
-      (parse-single-submenu 'file "File" (list (file-map))))
+      (parse-submenu 'file "File" (list (file-map))))
     (state-list)))
 
 (test-equal "one top-level pane in the bar"
   1
   (begin
-    (parse-single-submenu 'file "File" (list (file-map)))
+    (parse-submenu 'file "File" (list (file-map)))
     (menu-items-n-panes)))
 
 (test-equal "a keymap with no prompt uses the item name as the pane name"
   '((pane "Mine" item) (item "X" 120 #f #f))
   (let ((m (make-sparse-keymap)))
     (define-key m (kbd "x") '(menu-item "X" ignore))
-    (parse-single-submenu 'item "Mine" (list m))
+    (parse-submenu 'item "Mine" (list m))
     (state-list)))
 
 (test-equal "a command as the bar item is a button, top-level"
@@ -102,14 +113,14 @@
   (begin
     ;; `parse_single_submenu` pushes a pane with a nil name and an item
     ;; whose VALUE is the key; the def is the command. TYPE/SELECTED nil.
-    (parse-single-submenu 'run "Run" (list 'ignore))
+    (parse-submenu 'run "Run" (list 'ignore))
     (state-list)))
 
 (test-assert "parse-single-submenu answers whether a top-level command was there"
   (let ((plain (make-sparse-keymap "M")))
     (define-key plain (kbd "x") '(menu-item "X" ignore))
-    (and (not (parse-single-submenu 'm "M" (list plain)))
-         (parse-single-submenu 'run "Run" (list 'ignore)))))
+    (and (not (parse-submenu 'm "M" (list plain)))
+         (parse-submenu 'run "Run" (list 'ignore)))))
 
 (test-equal "the `@' item becomes a separate pane after the main one"
   '((pane "File" file)
@@ -119,7 +130,7 @@
         (tools (make-sparse-keymap "Tools")))
     (define-key tools (kbd "t") '(menu-item "T" ignore))
     (define-key m (kbd "t") (list 'menu-item "@Tools" tools))
-    (parse-single-submenu 'file "File" (list m))
+    (parse-submenu 'file "File" (list m))
     (state-list)))
 
 (test-equal "keymap-panes makes one pane per keymap"
@@ -154,7 +165,7 @@
   ;; A single top-level pane: its items hang directly under the root -
   ;; `digest_single_submenu` makes no pane widget when there is one pane.
   (parameterize ((*window-system* 'pgtk))
-    (parse-single-submenu 'file "File" (list (file-map))))
+    (parse-submenu 'file "File" (list (file-map))))
   (digest-single-submenu 0 (menu-items-used) #f))
 
 (test-assert "one pane: its items chain under the root, submenu nested"
@@ -196,7 +207,7 @@
 
 (test-assert "a single top-level command comes back as the item itself"
   (begin
-    (parse-single-submenu 'run "Run" (list 'ignore))
+    (parse-submenu 'run "Run" (list 'ignore))
     (let ((wv (digest-single-submenu 0 (menu-items-used) #t)))
       (and (widget-value? wv)
            (string=? (widget-value-lname wv) "Run")
@@ -206,10 +217,46 @@
   (let ((m (make-sparse-keymap "M")))
     (define-key m (kbd "t")
                 (list 'menu-item "T" 'ignore ':button (cons ':toggle #t)))
-    (parse-single-submenu 'm "M" (list m))
+    (parse-submenu 'm "M" (list m))
     (let* ((wv (digest-single-submenu 0 (menu-items-used) #f))
            (item (widget-value-contents wv)))
       (and (eq? (widget-value-button-type item) 'toggle)
            (widget-value-selected? item)))))
+
+;;------------------------------------------------------------------
+;; find-and-call-menu-selection - the click back into a key sequence
+;;
+;; The C stores one MENU_BAR_EVENT per element of the sequence in the
+;; keyboard buffer; this hands the same values to EMIT. The indices are
+;; the `menu_items` slots the widget's `call_data` holds - 3 for the
+;; "Sub" item and 15 for "X" inside it, from the digest test above.
+;;------------------------------------------------------------------
+
+(define (selection-keys i)
+  (let ((keys '()))
+    (find-and-call-menu-selection (menu-items) (menu-items-used) i
+                                  (lambda (k) (set! keys (cons k keys))))
+    (reverse keys)))
+
+(test-equal "a pane's item gives the menu-bar prefix, the pane's key, the item's"
+  '(menu-bar file 118)
+  (begin
+    (parameterize ((*window-system* 'pgtk))
+      (parse-submenu 'file "File" (list (file-map))))
+    (selection-keys 3)))
+
+(test-equal "an item inside a submenu carries the submenu's key too"
+  '(menu-bar file 118 120)
+  (begin
+    (parameterize ((*window-system* 'pgtk))
+      (parse-submenu 'file "File" (list (file-map))))
+    (selection-keys 15)))
+
+(test-equal "a slot that is not an item gives nothing"
+  '()
+  (begin
+    (parameterize ((*window-system* 'pgtk))
+      (parse-submenu 'file "File" (list (file-map))))
+    (selection-keys 0)))
 
 (test-end "schemacs_editor_menu")
