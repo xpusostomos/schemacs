@@ -7110,3 +7110,40 @@ Verified live: from `two`, the menu's **Next Buffer** went to
 trip: switching a->b->c leaves `(b a)` as the window's previous buffers,
 `switch-to-prev-buffer` goes to `b` and `switch-to-next-buffer` back to
 `c`. `ncurses-editor-tests` pins both.
+
+## Frame parameters, and `menu-bar-mode` (2026-11-09)
+
+The blocker shared by the Frames sub-menu and `menu-bar-mode` was frame
+parameters: `<frame>` had no `param_alist`. It has one now, with
+`frame.c`'s four readers - `frame-parameters` (the stored alist plus the
+computed keys: name, height, width, modeline, unsplittable, the buffer
+lists, `menu-bar-lines`, tab bar, visibility), `frame-parameter`,
+`set-frame-parameter` and `modify-frame-parameters` - and `frame.el`'s
+two alists, `default-frame-alist` and `initial-frame-alist`, merged into
+a new frame in that order (`initial-` first only for the first frame).
+
+**Not stored**: `foreground-color`/`background-color`/`font` and the
+window-system keys - the first three are the face machinery's and this
+library sits below it, and the rest describe a display server this tree
+does not model.
+
+`menu-bar-mode` is a plain command, not the `define-minor-mode` the C
+uses: `:global` is one of the keywords this tree's macro does not carry,
+so it would have generated a buffer-local mode for a switch about every
+frame. Its body is the C's - set `menu-bar-lines` on every frame, replace
+it in `default-frame-alist` when it is there - and its numeric rule is
+the macro's own (`easy-mmode.el:367`): `(not (and (numberp arg) (< arg
+1)))`, so 1 or more enables and 0 or a negative one disables. Measured
+against Emacs 31.1 first; my first attempt had `(not (zero? arg))`,
+which turned `C--` *on*.
+
+The gtk front end acts on the parameter where Emacs's
+`x_set_menu_bar_lines` does: `pgtk-set-frame-menubar` takes the bar down
+and stops when `menu-bar-lines` is 0, because running the hooks and the
+rebuild after hiding would put it straight back. Verified live: the bar
+is visible, `(menu-bar-mode -1)` + redisplay leaves `widget:visible` #f
+and the hidden flag set, and `(menu-bar-mode 1)` brings it back.
+
+Tests: `ncurses-editor-tests` pins the computed parameters, a stored
+value winning, `modify-frame-parameters`, and the numeric rule
+`(#f #t #f #t)` for 0, 1, -1, 2.

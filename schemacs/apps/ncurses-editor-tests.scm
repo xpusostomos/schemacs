@@ -20,6 +20,8 @@
        frame-selected-window new-frame set!frame-selected-window
        *frame-list* *frame-creation-function* frame? frame-list frame-live-p
        frame-output *before-make-frame-hook* *after-make-frame-functions*
+       frame-parameter frame-parameters set-frame-parameter
+       modify-frame-parameters *default-frame-alist*
        frame-name selected-frame select-frame next-frame previous-frame
        select-window window-frame
        delete-frame delete-other-frames other-frame make-frame
@@ -166,6 +168,10 @@
        set-goal-column)
  (only (schemacs editor isearch)
        *search-case-fold?* *search-pattern* isearch-find isearch-message)
+ ;; `menu-bar-mode` sets a frame parameter on every frame; loading the
+ ;; library also puts the standard menus in the global map, which nothing
+ ;; in this suite reads.
+ (only (schemacs editor menu-bar) menu-bar-mode *menu-bar-mode*)
  (only (schemacs editor window)
    window-prev-buffers switch-to-prev-buffer switch-to-next-buffer
        delete-window delete-other-windows display-buffer get-buffer-window
@@ -3848,7 +3854,7 @@
         (list (equal? (*frame-list*) (reverse frames))
               (let loop ((n created) (ok #t))
                 (cond ((null? n) ok)
-                      ((char=? (string-ref (symbol->string (car n)) 0) #\F)
+                      ((char=? (string-ref (car n) 0) #\F)
                        (loop (cdr n) ok))
                       (else #f))))))))
 
@@ -4512,3 +4518,50 @@
               (list now back (buffer-name (window-buffer window))))))))))
 
 (test-end "schemacs_ncurses_editor_buffer_history")
+
+;;------------------------------------------------------------------
+;; Frame parameters, and `menu-bar-mode`
+;;------------------------------------------------------------------
+
+(test-begin "schemacs_ncurses_editor_frame_parameters")
+
+;; A frame answers its name, its size and its menu bar lines without any
+;; of them having been stored - `frame-parameters` computes them, as the C
+;; does - and a stored value wins.
+(test-equal '("F" 24 1 0 1 x)
+  (let ((frame (test-frame (allocate-buffer))))
+    (parameterize ((*current-frame* frame))
+      (let ((name (frame-parameter frame 'name)))
+        (list (substring name 0 1)
+              (frame-parameter frame 'height)
+              (frame-parameter frame 'menu-bar-lines)
+              (begin (set-frame-parameter frame 'menu-bar-lines 0)
+                     (frame-parameter frame 'menu-bar-lines))
+              (begin (modify-frame-parameters
+                      frame (list (cons 'menu-bar-lines 1) (cons 'mine 'x)))
+                     (cdr (assq 'menu-bar-lines (frame-parameters frame))))
+              (frame-parameter frame 'mine))))))
+
+;; `define-minor-mode`'s numeric rule, measured on Emacs 31.1: a prefix of
+;; 1 or more enables, and 0 or a negative one disables.
+(test-equal '(#f #t #f #t)
+  (let ((frame (test-frame (allocate-buffer))))
+    (parameterize ((*current-frame* frame)
+                   (*frame-list* (list frame))
+                   (*default-frame-alist* '()))
+      (list (begin (menu-bar-mode 0) (*menu-bar-mode*))
+            (begin (menu-bar-mode 1) (*menu-bar-mode*))
+            (begin (menu-bar-mode -1) (*menu-bar-mode*))
+            (begin (menu-bar-mode 2) (*menu-bar-mode*))))))
+
+(test-equal '(0 1)
+  (let ((frame (test-frame (allocate-buffer))))
+    (parameterize ((*current-frame* frame)
+                   (*frame-list* (list frame))
+                   (*default-frame-alist* '()))
+      (list (begin (menu-bar-mode -1)
+                   (frame-parameter frame 'menu-bar-lines))
+            (begin (menu-bar-mode 1)
+                   (frame-parameter frame 'menu-bar-lines))))))
+
+(test-end "schemacs_ncurses_editor_frame_parameters")

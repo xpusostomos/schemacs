@@ -151,6 +151,11 @@
    frame-width
    make-frame-window
    make<frame>
+   ;; Frame parameters - `frame.c`'s `param_alist` and its readers.
+   frame-parameters frame-parameter set-frame-parameter
+   modify-frame-parameters store-in-alist
+   *default-frame-alist* *initial-frame-alist*
+   frame-parameters-alist
    make<window>
    frame-editor
    frame-keymap-state
@@ -678,7 +683,8 @@
     (define-record-type <frame>
       (make<frame>
        windows selected-window height width
-       message message-timer keymap-state quit-cont output name)
+       message message-timer keymap-state quit-cont output name
+       parameters)
       frame-type?
       (windows   frame-windows   set!frame-windows)
       ;; ^ The frame's windows, top to bottom. Emacs's `window-list'.
@@ -737,6 +743,13 @@
       ;; (`mode-line-frame-identification'), which this tree does not draw
       ;; yet; the name is here because a frame has one and it is what the
       ;; frame commands report.
+      (parameters frame-parameters-alist set!frame-parameters-alist)
+      ;; ^ `f->param_alist` (`frame.h`): the frame's parameters, as
+      ;; `(NAME . VALUE)` pairs. `frame-parameters` (`frame.c:4083`) and
+      ;; its three relatives below read and write it. A parameter that
+      ;; only the display can act on is read where it is used: the gtk
+      ;; front end asks `menu-bar-lines` when it decides whether the bar
+      ;; is showing.
       )
 
     (define (frame? thing)
@@ -745,6 +758,138 @@
       ;; *type*; this tree has one frame type, so it is a predicate.
       ;;--------------------------------------------------------------
       (frame-type? thing))
+
+    ;;----------------------------------------------------------------
+    ;; Frame parameters - `frame.c`'s `param_alist` and its readers
+    ;;----------------------------------------------------------------
+
+    (define *default-frame-alist* (make-parameter '()))
+    ;; ^ GNU Emacs's `default-frame-alist` (`frame.el:170`): "Alist of
+    ;; default values for the parameters of all frames you create."
+    ;; A frame's parameters start from this.
+
+    (define *initial-frame-alist* (make-parameter '()))
+    ;; ^ GNU Emacs's `initial-frame-alist` (`frame.el:135`): "Alist of
+    ;; frame parameters for the frame that is created at startup" -
+    ;; merged over `default-frame-alist` for the first frame only.
+
+    (define (store-in-alist alist prop value)
+      ;; GNU Emacs's `store_in_alist` (`frame.c:4037`): "Store PROP's
+      ;; VALUE into ALIST, which is an association list." A new pair is
+      ;; *prepended*; an existing one is changed in place.
+      ;;--------------------------------------------------------------
+      (let ((cell (assq prop alist)))
+        (if cell
+            (begin (set-cdr! cell value) alist)
+            (cons (cons prop value) alist))))
+
+    (define (%make-frame-parameters)
+      ;; The parameters a new frame starts with: `initial-frame-alist`
+      ;; for the first frame, then `default-frame-alist` over it - which
+      ;; is the order `make-frame` merges them in.
+      ;;--------------------------------------------------------------
+      ;; `frame-initial-frame-alist` (`frame.el:427`) is
+      ;; `(append initial-frame-alist default-frame-alist)` - initial
+      ;; first, so it *wins* where the two name the same parameter.
+      (if (null? (*frame-list*))
+          (append (*initial-frame-alist*) (*default-frame-alist*))
+          (append (*default-frame-alist*) '())))
+
+    (define (%frame-menu-bar-lines frame)
+      ;; `FRAME_MENU_BAR_LINES` (`frame.h`), which `x_set_menu_bar_lines`
+      ;; sets from the `menu-bar-lines` parameter. **A frame with no such
+      ;; parameter shows the bar**: Emacs's toolkit backends build the
+      ;; menu bar with the frame (`xg_create_frame_widgets`), and
+      ;; `menu-bar-mode` is on by default - the parameter is how it is
+      ;; turned off, not on.
+      ;;--------------------------------------------------------------
+      (let ((pair (assq 'menu-bar-lines (frame-parameters-alist frame))))
+        (if pair (cdr pair) 1)))
+
+    (define (frame-parameters . args)
+      ;; GNU Emacs's `frame-parameters` (`frame.c:4083`): "Return the
+      ;; parameters-alist of frame FRAME."
+      ;;
+      ;; The C copies `f->param_alist` and then *stores* what the frame
+      ;; knows: its name, size, whether it wants a mode line, its menu bar
+      ;; lines. A stored value wins over a computed one only if it was
+      ;; stored, which is what `store_in_alist` does.
+      ;;
+      ;; **Not stored here**: `foreground-color`/`background-color`/`font`
+      ;; and the window-system keys. The first three are the face
+      ;; machinery's - this library sits below it - and the rest describe
+      ;; a display server this tree does not model.
+      ;;--------------------------------------------------------------
+      (let ((frame (if (and (pair? args) (car args)) (car args)
+                       (*current-frame*))))
+        (if (not (frame-live-p frame))
+            #f
+            (let ((alist (map (lambda (pair) (cons (car pair) (cdr pair)))
+                              (frame-parameters-alist frame))))
+              (set! alist (store-in-alist alist 'name (frame-name frame)))
+              (set! alist (store-in-alist alist 'height (frame-height frame)))
+              (set! alist (store-in-alist alist 'width (frame-width frame)))
+              (set! alist (store-in-alist alist 'modeline #t))
+              (set! alist (store-in-alist alist 'unsplittable #f))
+              (set! alist (store-in-alist alist 'buffer-list '()))
+              (set! alist (store-in-alist alist 'buried-buffer-list '()))
+              (set! alist (store-in-alist alist 'menu-bar-lines
+                                          (%frame-menu-bar-lines frame)))
+              (set! alist (store-in-alist alist 'tab-bar-lines 0))
+              (set! alist (store-in-alist alist 'visibility #t))
+              (set! alist (store-in-alist alist 'no-accept-focus #f))
+              alist))))
+
+    (define (frame-parameter frame parameter)
+      ;; GNU Emacs's `frame-parameter` (`frame.c:4172`): "Return FRAME's
+      ;; value for parameter PARAMETER."
+      ;;
+      ;; The C answers `name` from the field without an alist lookup, and
+      ;; everything else out of `frame-parameters` when the alist has no
+      ;; entry - so a computed parameter (the size, the menu bar lines)
+      ;; answers even though it was never stored.
+      ;;--------------------------------------------------------------
+      (let ((frame (or frame (*current-frame*))))
+        (cond ((not (frame-live-p frame)) #f)
+              ((eq? parameter 'name) (frame-name frame))
+              (else
+               (let ((pair (assq parameter (frame-parameters-alist frame))))
+                 (if pair
+                     (cdr pair)
+                     (let ((all (assq parameter (frame-parameters frame))))
+                       (and all (cdr all)))))))))
+
+    (define (set-frame-parameter frame parameter value)
+      ;; GNU Emacs's `set-frame-parameter` (`frame.c`): "Set FRAME's
+      ;; parameter PARAMETER to VALUE." Stored, and acted on where the
+      ;; parameter means something this tree can act on: `name` renames
+      ;; the frame, and `menu-bar-lines` is read by the front end when it
+      ;; decides whether the bar is showing.
+      ;;--------------------------------------------------------------
+      (let ((frame (or frame (*current-frame*))))
+        (set!frame-parameters-alist
+         frame (store-in-alist (frame-parameters-alist frame) parameter value))
+        (when (eq? parameter 'name)
+          (set!frame-name frame value))
+        value))
+
+    (define (modify-frame-parameters frame alist)
+      ;; GNU Emacs's `modify-frame-parameters` (`frame.c:4244`): "Modify
+      ;; FRAME according to new values of its parameters in ALIST."
+      ;;
+      ;; The C's terminal branch applies `height` and `width` through
+      ;; `Fset_frame_size` and stores everything else. Here the size is
+      ;; the compositor's and the mode line is drawn from `frame-height`
+      ;; on every redisplay, so a stored size takes effect on the next
+      ;; frame that is asked for - which is what `adjust-frame-size!`
+      ;; already arranges for the font. Everything is stored either way,
+      ;; which is what the C's last paragraph promises.
+      ;;--------------------------------------------------------------
+      (let ((frame (or frame (*current-frame*))))
+        (for-each (lambda (entry)
+                    (set-frame-parameter frame (car entry) (cdr entry)))
+                  alist)
+        frame))
 
     (define (frame-cancel-message-timer! frame)
       ;; Take down the timer that would clear FRAME's message, if one is
@@ -1413,7 +1558,12 @@
       (let ((n 0))
         (lambda ()
           (set! n (+ n 1))
-          (string->symbol (string-append "F" (number->string n))))))
+          ;; **A *string***, as `f->name` is: the title, the
+          ;; `name` parameter and `frame-parameters`' answer are all the
+          ;; one string `"F1"`. It was a symbol here, which made
+          ;; `(frame-parameter frame 'name)` answer a symbol where Emacs
+          ;; answers a string.
+          (string-append "F" (number->string n)))))
 
     (define (new-frame-on display editor height width)
       ;; A frame of HEIGHT x WIDTH showing EDITOR, drawn on DISPLAY -
@@ -1435,7 +1585,13 @@
       ;; A window's frame is fixed for its life, so it cannot be filled
       ;; in afterwards - the window has to be built knowing it.
       (let* ((frame (make<frame> '() #f height width
-                                 "" #f #f #f display (%next-frame-name)))
+                                 "" #f #f #f display (%next-frame-name)
+                                 ;; "The parameters a frame is made with":
+                                 ;; `make-frame` merges `default-frame-alist`
+                                 ;; (and, for the first frame,
+                                 ;; `initial-frame-alist`) before it makes
+                                 ;; one (`frame.el:830`).
+                                 (%make-frame-parameters)))
              (window (make-frame-window frame editor
                                         0 (max 1 (- height 1)) 0 width)))
         (set!frame-windows frame (list window))

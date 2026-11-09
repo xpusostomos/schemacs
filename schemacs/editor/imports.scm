@@ -203,6 +203,7 @@
     *custom-theme-directory*
     *custom-theme-load-path*
     *deactivate-mark-hook*
+    *default-frame-alist*
     *default-keymap*
     *default-text-properties*
     *del-range-function*
@@ -294,6 +295,7 @@
     *inhibit-message*
     *inhibit-read-only*
     *init-file-user*
+    *initial-frame-alist*
     *insert-default-directory*
     *insert-directory-program*
     *interprogram-cut-function*
@@ -340,6 +342,7 @@
     *max-eol-check-count*
     *menu-bar-close-window*
     *menu-bar-final-items*
+    *menu-bar-mode*
     *menu-bar-update-hook*
     *menu-state*
     *message-function*
@@ -1119,6 +1122,9 @@
     frame-name
     frame-or-buffer-changed-p
     frame-output
+    frame-parameter
+    frame-parameters
+    frame-parameters-alist
     frame-quit-cont
     frame-selected-window
     frame-set-background-mode
@@ -1392,6 +1398,7 @@
     menu-bar-file-menu
     menu-bar-i-search-menu
     menu-bar-items
+    menu-bar-mode
     menu-bar-replace-menu
     menu-bar-separator
     menu-bar-update-buffers
@@ -1462,6 +1469,7 @@
     mode-line-minor-modes
     mode-line-string
     mode-name
+    modify-frame-parameters
     modify-text
     modify-text-properties
     mouse--drag-set-mark-and-point
@@ -1818,6 +1826,7 @@
     set-face-attribute
     set-file-modes
     set-fill-column
+    set-frame-parameter
     set-goal-column
     set-interval-object!
     set-keymap-char-table!
@@ -1869,6 +1878,7 @@
     split-window-below
     split-window-right
     status-string
+    store-in-alist
     store-in-keymap
     string->texts
     string-collate-lessp

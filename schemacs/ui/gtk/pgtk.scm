@@ -161,7 +161,10 @@
     ;; `x_new_font`'s resize: the frame keeps its rows and columns at the
     ;; new font unless `frame-inhibit-implied-resize' says otherwise.
     (only (schemacs editor frame) adjust-frame-size! *frame-list* frame-width
-          frame-height frame-output frame-set-background-mode)
+          frame-height frame-output frame-set-background-mode
+          ;; `menu-bar-mode` turns the bar off by setting this on every
+          ;; frame, and `set_frame_menubar` acts on it.
+          frame-parameter)
     ;; Opening a display initializes faces against it, as `term.sld''s
     ;; `with-terminal' does.
     (only (schemacs editor faces)
@@ -2883,6 +2886,24 @@
               (widget:show-all bar)
               (set! (pgtk-menubar-hidden? d) #f)))))
 
+    (define (pgtk-hide-menubar! d)
+      ;; Take the bar down, once: remove its widgets and hide it.
+      ;;
+      ;; Used by both the empty-bar case and `menu-bar-lines` 0. Doing it
+      ;; once matters: `container:get-children` and `widget:hide` are two
+      ;; guile-gi crossings, measured at ~6 ms together, and running them
+      ;; on every redisplay is a keystroke's worth of lag for a bar that
+      ;; is not even showing.
+      ;;--------------------------------------------------------------
+      (let ((bar (pgtk-menubar d)))
+        (unless (pgtk-menubar-hidden? d)
+          (set! (pgtk-menubar-hidden? d) #t)
+          (set! (pgtk-menubar-vector d) #f)
+          (set! (pgtk-menubar-used d) 0)
+          (for-each (lambda (w) (container:remove bar w))
+                    (container:get-children bar))
+          (widget:hide bar))))
+
     (define (pgtk-set-frame-menubar d)
       ;; GNU Emacs's `set_frame_menubar (f, false)` (`xmenu.c:970`): build
       ;; `menu_items` from `menu-bar-items`, and rebuild the widgets only
@@ -2904,6 +2925,18 @@
       ;;--------------------------------------------------------------
       (let ((bar (pgtk-menubar d)))
         (when bar
+          ;; **`menu-bar-lines` turns the bar off**, which is what
+          ;; `menu-bar-mode` sets on every frame
+          ;; (`(set-frame-parameter frame 'menu-bar-lines val)`). The C's `x_set_menu_bar_lines` hides
+          ;; the widget and leaves the display to redraw; this takes the
+          ;; bar down once and forgets the built items, so turning it
+          ;; back on rebuilds from scratch.
+          (let ((frame (pgtk-frame-for d)))
+            (if (and frame (eqv? 0 (frame-parameter frame 'menu-bar-lines)))
+                ;; Off: take it down and stop - the hooks and the rebuild
+                ;; below would put it straight back.
+                (pgtk-hide-menubar! d)
+                (begin
           ;; **The two hooks, as `set_frame_menubar` runs them**
           ;; (`xmenu.c:994-1000`): the Lucid hook first, which lets a
           ;; package set the bar wholesale, then `menu-bar-update-hook`,
@@ -2926,13 +2959,7 @@
               ;; showing. Nothing can change a bar with no items except
               ;; items arriving, and the non-empty branch below is what
               ;; notices those.
-              (unless (pgtk-menubar-hidden? d)
-                (set! (pgtk-menubar-hidden? d) #t)
-                (set! (pgtk-menubar-vector d) #f)
-                (set! (pgtk-menubar-used d) 0)
-                (for-each (lambda (w) (container:remove bar w))
-                          (container:get-children bar))
-                (widget:hide bar)))
+              (pgtk-hide-menubar! d))
              (else
               (set! (pgtk-menubar-hidden? d) #f)
               (let ((submenus '()))
@@ -2959,7 +2986,7 @@
               (unless (and old
                            (> (vector-length vector) 0)
                            (equal? vector old))
-                (pgtk-install-menubar! d items (reverse submenus) vector))))))))))
+                (pgtk-install-menubar! d items (reverse submenus) vector)))))))))))))
 
     (define (pgtk-title-frame! frame)
       ;; Give FRAME's window the frame's name as its title. GNU Emacs's
@@ -2975,8 +3002,7 @@
       ;;--------------------------------------------------------------
       (let ((d (and frame (frame-output frame))))
         (when (and d (pgtk-window d) (frame-name frame))
-          (set! (window:title (pgtk-window d))
-                (symbol->string (frame-name frame))))
+          (set! (window:title (pgtk-window d)) (frame-name frame)))
         d))
 
     (define *pgtk-destroyed-displays* '())

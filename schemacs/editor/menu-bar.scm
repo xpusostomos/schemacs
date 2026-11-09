@@ -99,7 +99,15 @@
     (only (schemacs editor frame) frame-list frame-name)
     ;; The hook that rebuilds the Buffers menu, `xdisp.c`'s.
     (only (schemacs editor xdisp) *menu-bar-update-hook*)
-    (only (schemacs editor marker) marker-position))
+    ;; `menu-bar-mode` sets the parameter on every frame, and rewrites
+    ;; `default-frame-alist` when it is there.
+    (only (schemacs editor frame)
+          *frame-list* set-frame-parameter *default-frame-alist*)
+    (only (schemacs editor command) current-prefix-arg called-interactively?)
+    (only (schemacs editor subr) assq-delete-all)
+    (only (schemacs editor marker) marker-position)
+    ;; "Menu Bar mode disabled ..." - `message` is `editfns.c`'s.
+    (only (schemacs editor editfns) message))
 
   (export
    menu-bar-separator
@@ -107,6 +115,7 @@
    menu-bar-i-search-menu menu-bar-replace-menu
    kill-this-buffer kill-this-buffer-enabled-p
    *menu-bar-close-window*
+   menu-bar-mode *menu-bar-mode*
    ;; The Buffers menu and what it is built from.
    global-buffers-menu-map menu-bar-update-buffers
    frame-or-buffer-changed-p
@@ -628,6 +637,60 @@ to invoke a similar command with `M-x', use `kill-current-buffer'."
       ;; the limit and which the tuple of numbers makes the same as `=`.
       ;;--------------------------------------------------------------
       (and a b (= a b)))
+
+    ;;----------------------------------------------------------------
+    ;; `menu-bar-mode` - `menu-bar.el:2627`
+    ;;----------------------------------------------------------------
+
+    (define *menu-bar-mode* (make-parameter #t))
+    ;; ^ GNU Emacs's `menu-bar-mode` (`menu-bar.el:2635`): the global
+    ;; minor mode's variable, `:init-value t`.
+
+    (define-command (menu-bar-mode arg)
+      "Toggle display of a menu bar on each frame (Menu Bar mode).
+
+This command applies to all frames that exist and frames to be
+created in the future."
+      ;; **A plain command, where the C is a `define-minor-mode`.**
+      ;; `:global` is one of the keywords this tree's `define-minor-mode`
+      ;; does not carry (`easy-mmode.scm` says why: there is no global
+      ;; mode machinery), so the macro would generate a buffer-local mode
+      ;; for a switch that is about every frame. The C's body is what is
+      ;; here, and its interactive form - "toggle" with no prefix - is
+      ;; what `define-minor-mode` would have passed.
+      ;;--------------------------------------------------------------
+      (interactive (list (or (current-prefix-arg) 'toggle)))
+      ;; **`define-minor-mode`'s own rule** (`easy-mmode.el:367`):
+      ;;
+      ;;   (cond ((eq arg 'toggle) (not ,getter))
+      ;;         (t (not (and (numberp arg) (< arg 1)))))
+      ;;
+      ;; so a prefix of 1 or more enables, and 0 or a negative one
+      ;; disables - `C-0` is not "on". Measured on Emacs 31.1: 1 -> t,
+      ;; 2 -> t, 0 -> nil, -1 -> nil.
+      (let ((value (if (eq? arg 'toggle)
+                       (not (*menu-bar-mode*))
+                       (not (and (number? arg) (< arg 1))))))
+        (*menu-bar-mode* value)
+        ;; "Turn the menu-bars on all frames on or off."
+        (let ((val (if value 1 0)))
+          (for-each (lambda (frame)
+                      (set-frame-parameter frame 'menu-bar-lines val))
+                    (*frame-list*))
+          ;; "If the user has given `default-frame-alist` a
+          ;; `menu-bar-lines` parameter, replace it."
+          (if (assq 'menu-bar-lines (*default-frame-alist*))
+              (*default-frame-alist*
+               (cons (cons 'menu-bar-lines val)
+                     (assq-delete-all 'menu-bar-lines
+                                      (*default-frame-alist*))))))
+        ;; "Make the message appear when Emacs is idle" - the C defers it
+        ;; through `run-with-idle-timer` so the minor mode's own message
+        ;; does not overwrite it. There is no minor mode message here, so
+        ;; it is said at once.
+        (when (and (not value) (called-interactively?))
+          (message "Menu Bar mode disabled.  Use \\[menu-bar-mode] to make the menu bar appear."))
+        value))
 
     ;;----------------------------------------------------------------
     ;; The entries the bar is given - `menu-bar.el:2204-2217`
