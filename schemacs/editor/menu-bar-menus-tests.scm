@@ -14,15 +14,20 @@
 
 (import (scheme base) (scheme write)
         (only (srfi 64) test-assert test-equal test-begin test-end)
-        (only (schemacs editor keymap) keymap-lookup *default-keymap*)
+        (only (schemacs editor keymap) keymap-lookup keymap-order
+              keymap-bindings *default-keymap*)
+        (only (guile) hashv-ref)
         (only (schemacs editor character) kbd)
         (only (schemacs editor keyboard) menu-bar-items *menu-bar-final-items*)
-        (only (schemacs editor menu-bar) menu-bar-separator))
+        (only (schemacs editor buffer) get-buffer-create buffer-list)
+        (only (schemacs editor menu-bar)
+              menu-bar-separator global-buffers-menu-map
+              menu-bar-update-buffers frame-or-buffer-changed-p))
 
 (test-begin "schemacs_editor_menu_bar_menus")
 
-(test-equal "the bar has the menus this tree can back, in keymap order"
-  '("File" "Edit")
+(test-equal "the bar has the menus this tree can back, in display order"
+  '("File" "Edit" "Buffers")
   (map cadr (menu-bar-items)))
 
 (test-equal "an item's key sequence reaches its command"
@@ -46,5 +51,47 @@
 (test-equal "`menu-bar-final-items` is what `menu-bar.el` sets"
   '(help-menu)
   *menu-bar-final-items*)
+
+;;------------------------------------------------------------------
+;; The Buffers menu - the one that rebuilds itself
+;;------------------------------------------------------------------
+
+(test-equal "frame-or-buffer-changed-p answers only when the state moved"
+  '(#f #t #f)
+  (begin
+    ;; The first call settles the state; the ones after it compare.
+    (frame-or-buffer-changed-p)
+    (let* ((same (frame-or-buffer-changed-p))
+           (created (get-buffer-create "menu-bar-buffers-test"))
+           (changed (frame-or-buffer-changed-p))
+           (settled (frame-or-buffer-changed-p)))
+      (list same changed settled))))
+
+(test-assert "the Buffers menu lists a live buffer and the command entries"
+  (begin
+    (get-buffer-create "menu-bar-buffers-test")
+    (menu-bar-update-buffers #t)
+    (let ((order (keymap-order global-buffers-menu-map)))
+      (and ;; the buffer entries come first, under events 0..n-1 ...
+           (memv 0 order)
+           ;; ... and the command entries after them, in Emacs's order.
+           (let ((rest (memq 'command-separator order)))
+             (and rest
+                  (memq 'select-named-buffer (cdr rest))
+                  (memq 'list-all-buffers
+                        (cddr rest))))))))
+
+(test-assert "a buffer entry is a name and a command"
+  (begin
+    (get-buffer-create "menu-bar-buffers-test")
+    (menu-bar-update-buffers #t)
+    (let ((raw (hashv-ref (keymap-bindings global-buffers-menu-map) 0 #f)))
+      (and (pair? raw)
+           (string? (car raw))
+           (procedure? (cdr raw))
+           ;; ...and the lookup answers the *command*, because a
+           ;; `(STRING . DEFN)` binding is unwrapped by `access_keymap` -
+           ;; which is what makes a click and a typed chord agree.
+           (eq? (keymap-lookup global-buffers-menu-map 0) (cdr raw))))))
 
 (test-end "schemacs_editor_menu_bar_menus")

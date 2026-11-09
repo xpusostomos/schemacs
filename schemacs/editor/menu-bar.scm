@@ -48,7 +48,12 @@
     ;; The key sequence a binding is written with, and the map it is
     ;; written into.
     (only (schemacs editor keymap)
-          make-sparse-keymap define-key keymap-lookup *default-keymap*)
+          make-sparse-keymap define-key keymap-lookup *default-keymap*
+          keymap-bindings %set!keymap-order!)
+    ;; The Buffers menu rebuilds its keymap in place, so the clearing is
+    ;; here: `hash-clear!` is Guile's, and the order list is the keymap's
+    ;; own export.
+    (only (guile) format filter hash-clear!)
     (only (schemacs editor character) kbd)
     ;; `menu-bar-final-items` is `keyboard.c`'s variable, which
     ;; `menu-bar.el` sets (`:46`).
@@ -73,7 +78,11 @@
           find-file insert-file save-buffer write-file revert-buffer
           kill-buffer save-buffers-kill-terminal)
     (only (schemacs editor window)
-          split-window-below split-window-right delete-other-windows)
+          split-window-below split-window-right delete-other-windows
+          switch-to-buffer)
+    ;; "List All Buffers" is `buff-menu.el`'s, which `menu-bar.el` names.
+    (only (schemacs editor buff-menu) list-buffers)
+    (only (schemacs editor fileio) file-name-directory-part)
     (only (schemacs editor frame) make-frame-command delete-frame
           *echo-area-buffer*)
     (only (schemacs editor dired) dired)
@@ -83,8 +92,13 @@
     ;; spells Emacs's variables with: `mark-active` is `(mark-active)`,
     ;; and `buffer-read-only` is `(buffer-read-only? (current-buffer))`.
     (only (schemacs editor buffer)
-          buffer-list current-buffer buffer-read-only? buffer-modified-p
-          buffer-file-name)
+          buffer-list buffer-local-value buffer-name current-buffer
+          buffer-read-only? buffer-modified-p buffer-file-name)
+    ;; The menu lists frames as well as buffers, which is what
+    ;; `frame-or-buffer-changed-p` compares.
+    (only (schemacs editor frame) frame-list frame-name)
+    ;; The hook that rebuilds the Buffers menu, `xdisp.c`'s.
+    (only (schemacs editor xdisp) *menu-bar-update-hook*)
     (only (schemacs editor marker) marker-position))
 
   (export
@@ -92,7 +106,12 @@
    menu-bar-file-menu menu-bar-edit-menu
    menu-bar-i-search-menu menu-bar-replace-menu
    kill-this-buffer kill-this-buffer-enabled-p
-   *menu-bar-close-window*)
+   *menu-bar-close-window*
+   ;; The Buffers menu and what it is built from.
+   global-buffers-menu-map menu-bar-update-buffers
+   frame-or-buffer-changed-p
+   *buffers-menu-max-size* *buffers-menu-buffer-name-length*
+   *buffers-menu-show-directories* *buffers-menu-show-status*)
 
   (begin
 
@@ -361,6 +380,252 @@ to invoke a similar command with `M-x', use `kill-current-buffer'."
         menu))
 
     ;;----------------------------------------------------------------
+    ;; The Buffers menu - `menu-bar.el:2353-2570`
+    ;;----------------------------------------------------------------
+    ;;
+    ;; The one menu that rebuilds itself while the editor runs: its
+    ;; entries are the live buffers, most recently used first, and it is
+    ;; rebuilt by `menu-bar-update-hook` (which the gtk front end runs
+    ;; before it recomputes the bar) whenever the buffer or frame state
+    ;; has changed.
+    ;;
+    ;; **What is not here**: the "Next Buffer" and "Previous Buffer"
+    ;; entries, which are `window.el`'s `next-buffer`/`previous-buffer`
+    ;; and those are `switch-to-prev-buffer` - window.c's per-window
+    ;; buffer history, which this tree does not have; and the "Frames"
+    ;; sub-menu, which needs frame parameters (and `raise-frame`) to
+    ;; name and select a frame.
+
+    (define *buffers-menu-max-size* (make-parameter 15))
+    ;; ^ GNU Emacs's `buffers-menu-max-size` (`menu-bar.el:2357`):
+    ;; "Maximum number of entries which may appear on the Buffers menu."
+    ;; A number or nil for all.
+
+    (define *buffers-menu-buffer-name-length* (make-parameter 30))
+    ;; ^ GNU Emacs's `buffers-menu-buffer-name-length` (`:2367`): "Maximum
+    ;; length of the buffer name on the Buffers menu." A number or nil.
+
+    (define *buffers-menu-show-directories* (make-parameter 'unless-uniquify))
+    ;; ^ GNU Emacs's `buffers-menu-show-directories` (`:2376`): whether a
+    ;; buffer's directory is shown. `unless-uniquify` means "show it
+    ;; unless `uniquify-buffer-name-style` is set" - and that variable is
+    ;; not ported, so the answer is always "show it", which is what the C
+    ;; answers when the variable is unbound (`(boundp ...)` is nil).
+
+    (define *buffers-menu-show-status* (make-parameter #t))
+    ;; ^ GNU Emacs's `buffers-menu-show-status` (`:2394`): "show
+    ;; modified/read-only status of buffers in the Buffers menu".
+
+    (define *menu-bar-select-buffer-function* (make-parameter switch-to-buffer))
+    ;; ^ GNU Emacs's `menu-bar-select-buffer-function` (`:2476`): "Function
+    ;; to select the buffer chosen from the `Buffers` menu-bar menu."
+    ;; A parameter holding the procedure, where the C holds the symbol.
+
+    (define *frame-and-buffer-state* (make-parameter #f))
+    ;; ^ The C's `frame_and_buffer_state` (`dispnew.c:7030`), the state
+    ;; `frame-or-buffer-changed-p` compares and updates.
+
+    (define (frame-or-buffer-changed-p)
+      ;; GNU Emacs's `frame-or-buffer-changed-p` (`dispnew.c:7048'):
+      ;; "Return non-nil if the frame and buffer state appears to have
+      ;; changed. ... This allows a fast check to see whether buffer
+      ;; menus might need to be recomputed."
+      ;;
+      ;; **Placement is a departure**: the C lives in `dispnew.c`, and
+      ;; `dispnew.scm` here is the display interface - a leaf that cannot
+      ;; see a buffer. The only caller in this tree is the Buffers menu,
+      ;; so it lives beside it, as `locate-file-internal` lives in
+      ;; `fileio.scm`.
+      ;;
+      ;; The C keeps the state in one flat vector of frames, buffers and
+      ;; their flags, ending with a `lambda`; a list of the same facts
+      ;; compares the same way, and `equal?` on the record objects is
+      ;; identity, which is what the C's `BASE_EQ` asks.
+      ;;--------------------------------------------------------------
+      (let* ((frames (map (lambda (f) (list 'frame f (frame-name f)))
+                          (frame-list)))
+             (buffers (filter (lambda (b)
+                                (not (char=? (string-ref (buffer-name b) 0)
+                                             #\space)))
+                              (buffer-list)))
+             (state (append
+                     frames
+                     (map (lambda (b)
+                            (list 'buffer b
+                                  (buffer-local-value b 'buffer-read-only #f)
+                                  (buffer-modified-p b)))
+                          buffers))))
+        (if (equal? state (*frame-and-buffer-state*))
+            #f
+            (begin (*frame-and-buffer-state* state) #t))))
+
+    (define (menu-bar-update-buffers-1 elt)
+      ;; GNU Emacs's `menu-bar-update-buffers-1` (`menu-bar.el:2426`):
+      ;; one buffer's line - its display name, and with
+      ;; `buffers-menu-show-status` its `*`/`%` flags and its directory.
+      ;;--------------------------------------------------------------
+      (let* ((buf (car elt))
+             (name (cdr elt))
+             (file (and (if (eq? (*buffers-menu-show-directories*) 'unless-uniquify)
+                            #t
+                            (*buffers-menu-show-directories*))
+                        (or (buffer-file-name buf)
+                            (buffer-local-value buf 'list-buffers-directory #f)))))
+        (when file
+          ;; `file-name-directory` answers nil for a bare name; this
+          ;; tree's `file-name-directory-part` answers "" - so the
+          ;; "no directory" answer is spelled out here.
+          (let ((dir (file-name-directory-part file)))
+            (set! file (if (string=? dir "") #f dir))))
+        (when (and file (> (string-length file) 20))
+          (set! file (string-append "..."
+                                    (substring file (- (string-length file) 17)
+                                               (string-length file)))))
+        (cons (if (*buffers-menu-show-status*)
+                  (let ((mod (if (buffer-modified-p buf) "*" ""))
+                        (ro (if (buffer-local-value buf 'buffer-read-only #f)
+                                "%" "")))
+                    (if file
+                        (format #f "~a  ~a~a  --  ~a" name mod ro file)
+                        (format #f "~a  ~a~a" name mod ro)))
+                  (if file
+                      (format #f "~a  --  ~a" name file)
+                      name))
+              buf)))
+
+    (define (menu-bar-buffer-vector alist)
+      ;; GNU Emacs's `menu-bar-buffer-vector` (`menu-bar.el:2478`): "Turn
+      ;; ((name . buffer) ...) into a menu."
+      ;;
+      ;; The C makes a *vector* of `(NAME . COMMAND)` pairs - the command
+      ;; being a closure that selects the buffer - and the keymap reads
+      ;; the vector by event. This tree's keymap is an alist of events, so
+      ;; the same pairs are hung off the events 0..n-1, which is exactly
+      ;; what a keymap vector is.
+      ;;--------------------------------------------------------------
+      (let ((vec (make-vector (length alist) #f))
+            (i (length alist)))
+        (for-each
+         (lambda (pair)
+           (set! i (- i 1))
+           (let ((buf (cdr pair)))
+             (vector-set! vec i
+                          (cons (car pair)
+                                (lambda ()
+                                  ((*menu-bar-select-buffer-function*) buf))))))
+         alist)
+        vec))
+
+    (define menu-bar-buffers-menu-command-entries
+      ;; GNU Emacs's `menu-bar-buffers-menu-command-entries`
+      ;; (`menu-bar.el:2441`), less the `next-buffer`/`previous-buffer`
+      ;; pair (window.c's buffer history - see the note above) and the
+      ;; two project entries (`project-switch-to-buffer`,
+      ;; `project-list-buffers`).
+      ;;
+      ;; Each entry is `(KEY menu-item NAME COMMAND ...)`, which
+      ;; `menu-bar-update-buffers` splits into a binding.
+      ;;--------------------------------------------------------------
+      (list '(command-separator "--")
+            (list 'select-named-buffer
+                  'menu-item
+                  "Select Named Buffer..."
+                  'switch-to-buffer
+                  ':help "Prompt for a buffer name, and select that buffer in the current window")
+            (list 'list-all-buffers
+                  'menu-item
+                  "List All Buffers"
+                  'list-buffers
+                  ':help "Pop up a window listing all Emacs buffers")))
+
+    (define global-buffers-menu-map
+      ;; GNU Emacs's `global-buffers-menu-map` (`menu-bar.el:50`), "just
+      ;; to show what this looks like. It gets modified in place when
+      ;; `menu-bar-update-buffers` is called."
+      ;;--------------------------------------------------------------
+      (make-sparse-keymap "Buffers"))
+
+    (define (menu-bar-update-buffers . force)
+      ;; GNU Emacs's `menu-bar-update-buffers` (`menu-bar.el:2496`):
+      ;; rebuild the Buffers menu from the live buffers.
+      ;;
+      ;; The C tests `(lookup-key (current-global-map) [menu-bar buffer])`
+      ;; first - "If user discards the Buffers item, play along" - and
+      ;; then `frame-or-buffer-changed-p`, or FORCE. The map is rebuilt in
+      ;; place, because the `[menu-bar buffer]` binding holds this object.
+      ;;--------------------------------------------------------------
+      (when (and (keymap-lookup *default-keymap* (kbd "<menu-bar> <buffer>"))
+                 (or (and (pair? force) (car force))
+                     (frame-or-buffer-changed-p)))
+        (let* ((buffers (buffer-list))
+               (limit (and (exact-integer? (*buffers-menu-max-size*))
+                           (> (*buffers-menu-max-size*) 1)
+                           (*buffers-menu-max-size*)))
+               (i 0)
+               (alist '()))
+          ;; "Put into each element of buffer-list the name for actual
+          ;; display, perhaps truncated in the middle."
+          (let loop ((rest buffers))
+            (when (pair? rest)
+              (let* ((buf (car rest))
+                     (name (buffer-name buf)))
+                (unless (char=? #\space (string-ref name 0))
+                  (set! alist
+                        (cons (menu-bar-update-buffers-1
+                               (cons buf
+                                     (if (and (exact-integer?
+                                               (*buffers-menu-buffer-name-length*))
+                                              (> (string-length name)
+                                                 (*buffers-menu-buffer-name-length*)))
+                                         (string-append
+                                          (substring name 0
+                                                     (quotient (*buffers-menu-buffer-name-length*) 2))
+                                          "..."
+                                          (substring name
+                                                     (- (string-length name)
+                                                        (quotient (*buffers-menu-buffer-name-length*) 2))
+                                                     (string-length name)))
+                                         name)))
+                              alist))
+                  ;; `set!` answers the unspecified value where Emacs's
+                  ;; `setq` answers the new one, so the count is taken
+                  ;; first and compared from a `let`.
+                  (let ((next (+ i 1)))
+                    (set! i next)
+                    (if (eql? limit next)
+                        (set! rest '())
+                        (loop (cdr rest))))))))
+          (let ((vec (menu-bar-buffer-vector alist)))
+            ;; Clear what the last build left, then install the buffer
+            ;; entries from the last event down so the keymap's order -
+            ;; which prepends - comes out 0, 1, 2, ..., which is the
+            ;; display order (`menu-bar-buffer-vector` put the most
+            ;; recently used at 0).
+            (hash-clear! (keymap-bindings global-buffers-menu-map))
+            (%set!keymap-order! global-buffers-menu-map '())
+            ;; **Defined from the last display slot backwards**, because
+            ;; `define-key` prepends and the keymap's order *is* its
+            ;; display order. Emacs's map is a vector followed by an
+            ;; alist and shows them in that order; here the two are one
+            ;; alist, so the command entries - which show last - are
+            ;; defined first, and the buffer entries after them, highest
+            ;; index first.
+            (for-each (lambda (entry)
+                        (define-key global-buffers-menu-map (car entry)
+                                    (cdr entry)))
+                      (reverse menu-bar-buffers-menu-command-entries))
+            (let loop ((n (- (vector-length vec) 1)))
+              (when (>= n 0)
+                (define-key global-buffers-menu-map n (vector-ref vec n))
+                (loop (- n 1))))))))
+
+    (define (eql? a b)
+      ;; Emacs's `eql`, which `menu-bar-update-buffers` uses to stop at
+      ;; the limit and which the tuple of numbers makes the same as `=`.
+      ;;--------------------------------------------------------------
+      (and a b (= a b)))
+
+    ;;----------------------------------------------------------------
     ;; The entries the bar is given - `menu-bar.el:2204-2217`
     ;;----------------------------------------------------------------
 
@@ -370,9 +635,28 @@ to invoke a similar command with `M-x', use `kill-current-buffer'."
     ;; - a string and the menu's keymap - which is the old-format menu
     ;; item `parse_menu_item` reads for the bar's name and
     ;; `access_keymap` unwraps for the key sequence beneath it.
+    ;; **In `menu-bar.el`'s own definition order**: it binds tools, then
+    ;; buffer, options, edit, file and help-menu, and `define-key`
+    ;; prepends - so the bar shows them reversed, Help last and Tools
+    ;; first. With three of the six, defined buffer, edit, file, the bar
+    ;; reads File, Edit, Buffers, which is where those three sit in the
+    ;; full bar.
+    ;;
+    ;; `[menu-bar buffer]` holds the *map*, which `menu-bar-update-buffers`
+    ;; rebuilds in place - so this binding is made once.
+    (define-key *default-keymap* (kbd "<menu-bar> <buffer>")
+                (cons "Buffers" global-buffers-menu-map))
     (define-key *default-keymap* (kbd "<menu-bar> <edit>")
                 (cons "Edit" menu-bar-edit-menu))
     (define-key *default-keymap* (kbd "<menu-bar> <file>")
                 (cons "File" menu-bar-file-menu))
+    ;; The hook that rebuilds it, where `menu-bar.el` puts it.
+    ;;
+    ;; **The parameter is *called*, not `set!`** - `set!` would replace
+    ;; the parameter object with a list, and the front end's
+    ;; `(*menu-bar-update-hook*)` would then apply a list.
+    (*menu-bar-update-hook*
+     (cons menu-bar-update-buffers (*menu-bar-update-hook*)))
+    (menu-bar-update-buffers #t)
 
     ))

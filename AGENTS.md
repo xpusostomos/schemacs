@@ -6998,3 +6998,80 @@ every test in `menu-bar-tests.scm` would then see (importing it there
 broke six of them). It pins the two menus, `access_keymap`'s coercion
 for five item sequences - including one through the nested Replace
 sub-menu - the separator's shape, and `menu-bar-final-items`.
+
+## The cursor was black, always (2026-11-09)
+
+Chris, after the theming work: *"the cursor color doesn't seem to change
+with the theme."* It could not: `cursor-box-colour` in `pgtk.scm`
+returned `(list 0.0 0.0 0.0)` with a note saying black is Emacs's
+default. True of a light frame, and the reason every dark theme drew a
+cursor nobody could see.
+
+Emacs's chain is the `cursor` face's `:background` -> the `cursor-color`
+frame parameter -> `x->cursor_pixel` (`x_set_cursor_color`, `xfns.c:1481`),
+with `x->cursor_foreground_pixel` (the frame's background) as the ink a
+filled cursor redraws the glyph in. The face is also a *standard* face -
+`faces.el:2948` - black on a light frame and white on a dark one, before
+any theme says otherwise, and it was missing from `faces.scm` entirely.
+
+So: `cursor` and `mouse` deffaces added (`mouse` because the C's
+guard reads it), and `cursor-box-colour`/`cursor-ink-colour` read the
+faces, keeping the C's two adjustments - a cursor the colour of the
+frame's background is replaced by the mouse pointer's colour, and the ink
+falls back to the frame's background rather than to white.
+
+**Departure**: the frame parameter is not carried. `xfaces.c` turns a
+change of the face into `cursor-color` and the backend turns the
+parameter into the pixel; this tree has no frame parameters, so the face
+is read where the pixel is used. Same rule, one hop shorter.
+
+Verified on a gtk editor under broadway: with `manoj-dark` (cursor
+`orchid`) the cursor cell's pixel is `(218 112 214)`, which is orchid;
+under `wombat` (cursor `#656565`) it is `(101 101 101)`. `faces-tests`
+pins the face itself: black on a light frame, white on a dark one.
+
+## The Buffers menu (2026-11-09)
+
+The dynamic menu: its entries are the live buffers, most recently used
+first, rebuilt by `menu-bar-update-hook` when the buffer or frame state
+has moved. `frame-or-buffer-changed-p` (`dispnew.c:7048`) is the check -
+a state list of frames and buffers with their read-only and modified
+flags, compared and replaced.
+
+**Placement departure**: that function is `dispnew.c`'s, but
+`dispnew.scm` here is the display interface - a leaf that cannot see a
+buffer - so it lives in `menu-bar.scm`, beside its only caller, as
+`locate-file-internal` lives in `fileio.scm`.
+
+Three tree-spellings again, each caught by running it:
+
+- **A parameter's value is set by calling it** -
+  `(*menu-bar-update-hook* (cons f ...))`, never `set!`. `set!` replaces
+  the parameter object with a list, and the front end's
+  `(*menu-bar-update-hook*)` then applies a list: "Wrong type to apply".
+  And the setter's *result* is the unspecified value, so `((*p* v))` -
+  the form I wrote twice - applies that.
+- **`set!` answers the unspecified value**, so Emacs's `(eql limit (setq
+  i (1+ i)))` has to take the count into a `let` first.
+- **`define-key` prepends and the keymap's order is the display order**,
+  so a menu built from a list is defined back to front: the command
+  entries last in the display are defined first, then the buffer entries
+  from the highest event down. Emacs's map is a vector followed by an
+  alist and shows them in that order; here both are one alist.
+
+The bar's menus are also defined in `menu-bar.el`'s own order -
+buffer, edit, file - because it defines tools, buffer, options, edit,
+file, help-menu and the prepending turns that into the display order
+Help, File, Edit, Options, Buffers, Tools. With three of the six the bar
+reads File, Edit, Buffers.
+
+**Not here**: "Next Buffer" and "Previous Buffer" (window.c's
+`switch-to-prev-buffer` - the per-window buffer history, which this tree
+does not have) and the Frames sub-menu (frame parameters, `raise-frame`).
+
+Verified live: the menu reads *beta, alpha, \*Schemacs\*, hello.txt --
+/tmp/menutest/, \*Messages\* \*, \*scratch\*, --, Select Named Buffer...,
+List All Buffers*, and activating `alpha` switched to it. Tests: the
+menu's order, the entry's shape (`("name" . command)`, and the lookup's
+answer being the command), and `frame-or-buffer-changed-p`'s
+`(#f #t #f)`.

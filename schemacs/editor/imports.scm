@@ -152,6 +152,10 @@
     *buffer-list*
     *buffer-list-update-hook*
     *buffer-visited-file-modtime-function*
+    *buffers-menu-buffer-name-length*
+    *buffers-menu-max-size*
+    *buffers-menu-show-directories*
+    *buffers-menu-show-status*
     *build-marker-function*
     *byte-count-to-string-function*
     *called-interactively*
@@ -1107,6 +1111,7 @@
     frame-message
     frame-message-timer
     frame-name
+    frame-or-buffer-changed-p
     frame-output
     frame-quit-cont
     frame-selected-window
@@ -1131,6 +1136,7 @@
     get-specified-cursor-type
     get-text-property
     get-window-cursor-type
+    global-buffers-menu-map
     global-text-scale-adjust
     global-text-scale-adjust--default-height
     global-text-scale-adjust--increment-factor
@@ -1382,6 +1388,7 @@
     menu-bar-items
     menu-bar-replace-menu
     menu-bar-separator
+    menu-bar-update-buffers
     menu-items
     menu-items-item-definition
     menu-items-item-enable
