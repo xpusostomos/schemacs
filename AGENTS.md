@@ -7147,3 +7147,46 @@ and the hidden flag set, and `(menu-bar-mode 1)` brings it back.
 Tests: `ncurses-editor-tests` pins the computed parameters, a stored
 value winning, `modify-frame-parameters`, and the numeric rule
 `(#f #t #f #t)` for 0, 1, -1, 2.
+
+## "New Frame" killed the editor; Delete Frame was never greyed (2026-11-09)
+
+Two reports from Chris. The first was mine to fix and is a port:
+**`delete-frame-enabled-p`** (`menu-bar.el:2296`) counts the *visible*
+frames and wants more than one, so the sole frame's Delete Frame item is
+greyed rather than signalling when clicked. `frame-visible-p` is not
+ported; nothing here iconifies, so every live frame is visible and the
+count is the list's length. The item had `:enable #t`, written as a
+placeholder and named as one.
+
+A live check then showed it *still* disabled after a second frame: the
+`:enable` expression names `delete-frame-enabled-p`, which was not yet in
+`imports.scm`, and `menu-item-eval-property` turns an unbound variable
+into nil - the item is quietly disabled. **A menu `:enable` that names a
+function is only as good as the generated imports list.**
+
+The second was a stack overflow. `(make-frame)` from the menu, or from
+the REPL, overflows as soon as a second frame exists - and the trace led
+to `frame-or-buffer-changed-p`:
+
+- **Guile's `equal?` recurses into record fields.** A frame holds its
+  windows and each window holds its frame, so `equal?` on two *different*
+  frames walks a cycle until the stack runs out. Measured with two SRFI-9
+  records pointing at each other: `eqv?` answers at once, `equal?` raises
+  "Stack overflow". With one frame the old and new states were `eq?` and
+  it answered immediately, which is why nothing showed until there were
+  two. Emacs's C compares its state vector element by element with
+  `BASE_EQ`/`EQ`, and `%same-state?` is that comparison.
+- **The Buffers menu's selection closures were made fresh on every
+  rebuild**, so the built `menu_items` array never compared equal, so the
+  bar was rebuilt on every redisplay - and every rebuild laid its widgets
+  out again. They are now made once per buffer and cached
+  (`*menu-bar-buffer-commands*`), so an unchanged menu compares equal.
+
+`*redisplay-in-progress*` (Emacs's `redisplaying_p`) also landed with
+this: the gtk front end does not dispatch an event from a signal while a
+redisplay is running, because the layout that a redisplay causes can fire
+`size-allocate`, whose only effect is another redisplay.
+
+Verified live: with one frame Delete Frame is insensitive, with two it is
+sensitive; "New Frame" from the menu gives `F2`/`F3` and the editor stays
+up.

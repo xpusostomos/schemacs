@@ -114,6 +114,7 @@
    menu-bar-file-menu menu-bar-edit-menu
    menu-bar-i-search-menu menu-bar-replace-menu
    kill-this-buffer kill-this-buffer-enabled-p
+   delete-frame-enabled-p
    *menu-bar-close-window*
    menu-bar-mode *menu-bar-mode*
    ;; The Buffers menu and what it is built from.
@@ -158,6 +159,20 @@
     ;;----------------------------------------------------------------
     ;; `kill-this-buffer` - `menu-bar.el`'s own command
     ;;----------------------------------------------------------------
+
+    (define (delete-frame-enabled-p)
+      ;; GNU Emacs's `delete-frame-enabled-p` (`menu-bar.el:2296`):
+      ;; "Return non-nil if `delete-frame` should be enabled in the menu
+      ;; bar." It counts the *visible* frames and wants more than one, so
+      ;; the sole frame's Delete Frame item is greyed out rather than
+      ;; signalling "Attempt to delete the sole visible or iconified
+      ;; frame" when clicked.
+      ;;
+      ;; `frame-visible-p` is not ported - nothing here iconifies a frame,
+      ;; so every live frame is visible and the count is the list's
+      ;; length.
+      ;;--------------------------------------------------------------
+      (> (length (*frame-list*)) 1))
 
     (define (kill-this-buffer-enabled-p)
       ;; GNU Emacs's `kill-this-buffer-enabled-p`: enabled when there is a
@@ -216,7 +231,7 @@ to invoke a similar command with `M-x', use `kill-current-buffer'."
         (define-key menu (kbd "<delete-this-frame>")
           '(menu-item "Delete Frame" delete-frame
                       :visible #t
-                      :enable #t
+                      :enable (delete-frame-enabled-p)
                       :help "Delete currently selected frame"))
 
         (define-key menu (kbd "<make-frame>")
@@ -460,9 +475,39 @@ to invoke a similar command with `M-x', use `kill-current-buffer'."
                                   (buffer-local-value b 'buffer-read-only #f)
                                   (buffer-modified-p b)))
                           buffers))))
-        (if (equal? state (*frame-and-buffer-state*))
+        (if (%same-state? state (*frame-and-buffer-state*))
             #f
             (begin (*frame-and-buffer-state* state) #t))))
+
+    (define (%same-state? a b)
+      ;; The C's comparison, element for element - `BASE_EQ` on the frame
+      ;; and buffer objects, `EQ` on what hangs off them.
+      ;;
+      ;; **It has to be shallow, and this is the whole reason it is
+      ;; written out.** A frame record holds its windows and each window
+      ;; holds its frame, so `equal?` on two *different* frames walks a
+      ;; cycle until the stack runs out - measured: creating a second
+      ;; frame raised "Stack overflow" the first time the state held a
+      ;; frame the old one did not. With one frame the two states are
+      ;; `eq?` and `equal?` answers at once, which is why it did not show
+      ;; until there were two.
+      ;;--------------------------------------------------------------
+      (define (entry-equal? x y)
+        (cond
+         ((and (pair? x) (eq? 'frame (list-ref x 0)))
+          (and (eq? (list-ref x 1) (list-ref y 1))
+               (equal? (list-ref x 2) (list-ref y 2))))
+         ((and (pair? x) (eq? 'buffer (list-ref x 0)))
+          (and (eq? (list-ref x 1) (list-ref y 1))
+               (equal? (list-ref x 2) (list-ref y 2))
+               (equal? (list-ref x 3) (list-ref y 3))))
+         (else #f)))
+      (cond ((and (null? a) (null? b)) #t)
+            ;; #f is the C's nil, "no state recorded yet" - always
+            ;; "changed", which is what makes the first call build.
+            ((or (not (pair? a)) (not (pair? b))) #f)
+            ((not (entry-equal? (car a) (car b))) #f)
+            (else (%same-state? (cdr a) (cdr b)))))
 
     (define (menu-bar-update-buffers-1 elt)
       ;; GNU Emacs's `menu-bar-update-buffers-1` (`menu-bar.el:2426`):
@@ -498,6 +543,9 @@ to invoke a similar command with `M-x', use `kill-current-buffer'."
                       name))
               buf)))
 
+    (define *menu-bar-buffer-commands* (make-parameter '()))
+    ;; ^ The one selection command per buffer - see `menu-bar-buffer-vector`.
+
     (define (menu-bar-buffer-vector alist)
       ;; GNU Emacs's `menu-bar-buffer-vector` (`menu-bar.el:2478`): "Turn
       ;; ((name . buffer) ...) into a menu."
@@ -508,16 +556,33 @@ to invoke a similar command with `M-x', use `kill-current-buffer'."
       ;; the same pairs are hung off the events 0..n-1, which is exactly
       ;; what a keymap vector is.
       ;;--------------------------------------------------------------
+      ;; **The selection command is made once per buffer, not once per
+      ;; rebuild.** Emacs makes a fresh closure each time because its
+      ;; rebuild runs only when the redisplay is told something changed;
+      ;; this tree compares the *built* array to decide - and a vector
+      ;; holding a fresh closure every time never compares equal, so the
+      ;; bar was rebuilt on every redisplay and each rebuild laid its
+      ;; widgets out again. The layout's `size-allocate` came back
+      ;; through the front end, which redispatched, which rebuilt: a
+      ;; stack overflow the moment a second frame gave the display two
+      ;; readers' worth of flushes. The closure depends on the buffer
+      ;; alone, so a table keyed by the buffer makes the two builds
+      ;; compare equal and the rebuild happen when something really
+      ;; changed.
+      ;;--------------------------------------------------------------
       (let ((vec (make-vector (length alist) #f))
             (i (length alist)))
         (for-each
          (lambda (pair)
            (set! i (- i 1))
-           (let ((buf (cdr pair)))
-             (vector-set! vec i
-                          (cons (car pair)
-                                (lambda ()
-                                  ((*menu-bar-select-buffer-function*) buf))))))
+           (let* ((buf (cdr pair))
+                  (cached (assq buf (*menu-bar-buffer-commands*))))
+             (unless cached
+               (set! cached
+                     (cons buf (lambda ()
+                                 ((*menu-bar-select-buffer-function*) buf))))
+               (*menu-bar-buffer-commands* (cons cached (*menu-bar-buffer-commands*))))
+             (vector-set! vec i (cons (car pair) (cdr cached)))))
          alist)
         vec))
 

@@ -389,6 +389,7 @@
     *read-buffer-to-switch*
     *record-window-buffer-function*
     *recursive-edit-exit*
+    *redisplay-in-progress*
     *replace-buffer-in-windows-function*
     *require-final-newline*
     *run-hooks-function*
@@ -795,6 +796,7 @@
     delete-file-internal
     delete-frame
     delete-frame-display!
+    delete-frame-enabled-p
     delete-horizontal-space
     delete-indentation-command
     delete-interval

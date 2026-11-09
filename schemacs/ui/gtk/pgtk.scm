@@ -186,6 +186,7 @@
     ;; A mouse event needs the *position* it happened at, which is the
     ;; redisplay's own walk - see `posn-at-x-y'.
     (only (schemacs editor xdisp) posn-at-x-y remember-mouse-glyph track-mouse
+          *redisplay-in-progress*
           ;; The two hooks `set_frame_menubar` runs before it recomputes
           ;; the bar.
           *activate-menubar-hook* *menu-bar-update-hook*)
@@ -1091,9 +1092,16 @@
       ;; and this says where it goes.
       ;;--------------------------------------------------------------
       (let ((dispatch (*dispatch-event*)))
+        ;; **Not while a redisplay is running.** The drawing asks Gtk to
+        ;; lay out, the layout fires `size-allocate`, and this would
+        ;; dispatch the resize event - whose handler is `ignore` and whose
+        ;; only effect is another redisplay - inside the redisplay that
+        ;; caused it. The redisplay in progress reads the size it just
+        ;; observed, so queueing the event loses nothing.
         (if (and dispatch
                  (command-loop-ready?)
-                 (null? *pgtk-running*))
+                 (null? *pgtk-running*)
+                 (not (*redisplay-in-progress*)))
             ;; Hand it over - through the *same two decodes a read uses*.
             ;; `pgtk-item->event' is this display's own form of the event
             ;; and `key-event->key' is the *key event* the command loop

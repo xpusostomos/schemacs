@@ -253,7 +253,7 @@
    line-display-rows
    line-display-width
    mode-line-string
-   render! redisplay-frames!
+   render! redisplay-frames! *redisplay-in-progress*
    force-mode-line-update
    scroll-to-cursor!
    status-string
@@ -2501,6 +2501,15 @@
                      (render! f)))
                  (loop (cdr frames)))))))
 
+    (define *redisplay-in-progress* (make-parameter #f))
+    ;; ^ GNU Emacs's `redisplaying_p` (`xdisp.c:`: "True means we are in
+    ;; the middle of `redisplay_internal`"). It is what stops a redisplay
+    ;; that a redisplay has asked for: `redisplay_internal` answers early
+    ;; when it is already set. This tree needs it for the same reason and
+    ;; one more - a front end that dispatches an event from a signal
+    ;; handler must not do it here, or a window resize signal fired by the
+    ;; drawing itself would run `ignore` and redisplay again, and again.
+
     (define (render! frame)
       ;; Draw every window, then the echo area, then place the terminal
       ;; cursor at the selected window's point. Each window has its own
@@ -2535,7 +2544,8 @@
       ;; display: they are the redisplay's oldest and most fragile code,
       ;; and rebinding here is the same answer for every one of them.
       (parameterize ((current-display (or (frame-output frame)
-                                          (current-display))))
+                                          (current-display)))
+                     (*redisplay-in-progress* #t))
       (sync-frame-size! frame)
       (let ((width (frame-width frame))
             (height (frame-height frame))
