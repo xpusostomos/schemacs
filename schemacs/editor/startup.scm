@@ -70,6 +70,14 @@
     (only (schemacs editor loadup) open-user-environment!)
     (only (schemacs editor simple)
           messages-buffer-mode scroll-down-command scroll-up-command)
+    ;; **The menu bar is loaded for its side effect**, which is where
+    ;; `loadup.el` loads it: `(load "menu-bar")` among the preloaded
+    ;; libraries. What that runs is the `[menu-bar]` keymap's creation
+    ;; and the standard menus. Without this line they
+    ;; would exist only when the *user's* `imports.scm` happened to
+    ;; import the whole editor - and a user who replaces that file is
+    ;; exactly the one the menus must still be there for.
+    (only (schemacs editor menu-bar) menu-bar-file-menu menu-bar-edit-menu)
     (only (schemacs editor subr) kbd)
     (only (schemacs editor window)
           display-buffer other-window quit-window switch-to-buffer

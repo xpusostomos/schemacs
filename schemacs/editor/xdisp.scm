@@ -226,6 +226,9 @@
 
   (export
    *messages-buffer-name* *message-log-max*
+   ;; The two hooks a menu bar is refreshed through (`xdisp.c`'s
+   ;; DEFVARs, run by the front end's `set_frame_menubar`).
+   *activate-menubar-hook* *menu-bar-update-hook*
    ;; `render!' and the mode line are what the rest calls. The search
    ;; highlight used to be here as a parameter; it is isearch's overlays
    ;; now, and the display only reads faces.
@@ -2901,6 +2904,27 @@
                   (loop (cdr rest))))))))
 
 )
+    ;;----------------------------------------------------------------
+    ;; The menu bar's two hooks - `xdisp.c`'s own, not `menu-bar.el`'s
+    ;;------------------------------------------------------------------
+    ;;
+    ;; `set_frame_menubar` runs both before it recomputes the bar
+    ;; (`xmenu.c:994-1000`): `activate-menubar-hook` first - the Lucid
+    ;; hook, which lets a package *set* the bar wholesale - and then
+    ;; `menu-bar-update-hook`, where a menu that rebuilds itself
+    ;; registers (`menu-bar.el` puts `menu-bar-update-buffers` there).
+    ;; They are `xdisp.c`'s DEFVARs (`:39113`, `:39128`), so they live
+    ;; here rather than with the menus that use them.
+
+    (define *activate-menubar-hook* (make-parameter '()))
+    ;; ^ GNU Emacs's `activate-menubar-hook' (`xdisp.c:39128').
+
+    (define *menu-bar-update-hook* (make-parameter '()))
+    ;; ^ GNU Emacs's `menu-bar-update-hook' (`xdisp.c:39113'): "Hook run
+    ;; before displaying a menu bar, usually to make the menu contents up
+    ;; to date. Each function is called with no args and should update
+    ;; the frame's menu bar contents."
+
     ;;----------------------------------------------------------------
     ;; The `*Messages*' buffer - `message_dolog' and what feeds it
     ;;------------------------------------------------------------------

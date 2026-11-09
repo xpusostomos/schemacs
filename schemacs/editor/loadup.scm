@@ -165,6 +165,7 @@
         (schemacs editor ls-lisp)
         (schemacs editor marker)
         (schemacs editor menu)
+        (schemacs editor menu-bar)
         (schemacs editor minibuf)
         (schemacs editor minibuffer)
         (schemacs editor mouse)

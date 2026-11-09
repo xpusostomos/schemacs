@@ -182,7 +182,13 @@
           char-super function-key-name make-ctrl-char)
     ;; A mouse event needs the *position* it happened at, which is the
     ;; redisplay's own walk - see `posn-at-x-y'.
-    (only (schemacs editor xdisp) posn-at-x-y remember-mouse-glyph track-mouse)
+    (only (schemacs editor xdisp) posn-at-x-y remember-mouse-glyph track-mouse
+          ;; The two hooks `set_frame_menubar` runs before it recomputes
+          ;; the bar.
+          *activate-menubar-hook* *menu-bar-update-hook*)
+    ;; `run-hooks` is `subr.el`'s, and a hook is the list of procedures
+    ;; it is handed.
+    (only (schemacs editor subr) run-hooks)
     ;; The frame's focus, which the window tells us about: it decides
     ;; whether the cursor blinks and whether it is drawn hollow.
     (only (schemacs editor frame)
@@ -2856,6 +2862,16 @@
       ;;--------------------------------------------------------------
       (let ((bar (pgtk-menubar d)))
         (when bar
+          ;; **The two hooks, as `set_frame_menubar` runs them**
+          ;; (`xmenu.c:994-1000`): the Lucid hook first, which lets a
+          ;; package set the bar wholesale, then `menu-bar-update-hook`,
+          ;; where a menu that rebuilds itself registers. They run
+          ;; before the items are read, and they run on every redisplay
+          ;; because this tree has no `windows_or_buffers_changed` to
+          ;; decide with; a hook that is expensive is a hook that should
+          ;; be guarded by its own cheap test.
+          (run-hooks (*activate-menubar-hook*))
+          (run-hooks (*menu-bar-update-hook*))
           (let ((items (menu-bar-items)))
             (cond
              ((null? items)

@@ -97,6 +97,10 @@ SUITES = [
     # already did.
     'schemacs/keymap-tests.scm',
     'schemacs/editor/menu-bar-tests.scm',
+    # `menu-bar.el`'s standard menus, in a process of their own:
+    # loading the library defines entries in `global-map`, which the
+    # suite above would then see.
+    'schemacs/editor/menu-bar-menus-tests.scm',
     'schemacs/editor/menu-tests.scm',
 ]
 

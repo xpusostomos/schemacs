@@ -83,6 +83,7 @@
     (schemacs editor keymap)
     (schemacs editor theme)
     (schemacs editor data)
+    (schemacs editor menu-bar)
     (except (schemacs editor simple)  backward-char beginning-of-line delete-char end-of-line forward-char self-insert-command self-insert-tab)
     (schemacs editor mule-cmds)
     (schemacs editor buffer-text)
@@ -132,6 +133,7 @@
     *Buffer-menu-size-width*
     *abbreviated-home-dir*
     *activate-mark-hook*
+    *activate-menubar-hook*
     *adjust-suspend-auto-hscroll-function*
     *after-change-functions*
     *after-change-major-mode-hook*
@@ -330,7 +332,9 @@
     *max-5-byte-char*
     *max-char*
     *max-eol-check-count*
+    *menu-bar-close-window*
     *menu-bar-final-items*
+    *menu-bar-update-hook*
     *menu-state*
     *message-function*
     *message-log-function*
@@ -1268,6 +1272,8 @@
     kill-range
     kill-region
     kill-ring-save
+    kill-this-buffer
+    kill-this-buffer-enabled-p
     kill-visual-line
     kill-word
     know-region-cache
@@ -1370,7 +1376,12 @@
     match-end
     match-string
     match-substitute-replacement
+    menu-bar-edit-menu
+    menu-bar-file-menu
+    menu-bar-i-search-menu
     menu-bar-items
+    menu-bar-replace-menu
+    menu-bar-separator
     menu-items
     menu-items-item-definition
     menu-items-item-enable

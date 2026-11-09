@@ -6920,3 +6920,81 @@ confirm branch was never taken.
 The list now holds `(completion-at-point minibuffer-complete
 minibuffer-complete-word)` - Emacs's list, with the two that are bound
 given as the procedures they are bound as. The pty check passes again.
+
+# `menu-bar.el`, as far as the tree can back it (2026-11-09)
+
+`schemacs/editor/menu-bar.scm` is new and mirrors `lisp/menu-bar.el`.
+It is not the whole file: most of that file's items name commands this
+editor does not have, and an item that names one is a menu entry that
+signals when clicked. What is here is the machinery and the two menus
+the tree can back, with every omission listed in the header against
+the thing it waits for - which is the accounting this file asks for,
+rather than a "faithful subset" that stops the next person asking.
+
+## What landed
+
+- **The bar's own keymap** (`menu-bar.el:40`): `[menu-bar]` in
+  `global-map`, made only if nothing has made it ("Don't clobber an
+  existing menu-bar keymap"), and **`menu-bar-final-items` set to
+  `(help-menu)`** (`:46`).
+- **`menu-bar-separator`**, and the lesson it carries: a separator is
+  `'(menu-item "--")`, *not* a bare `"--"`. `parse_menu_item` refuses a
+  binding that is not a cons, so a string in a menu is skipped
+  entirely - which is why a first attempt at these menus showed one
+  fewer item than it defined.
+- **`kill-this-buffer`**, with the C's guard ported as far as the event
+  model goes: the item's key is the symbol `kill-buffer`, and a menu
+  selection leaves that as `last-command-event`, so a call from the
+  menu is told from a call typed at M-x by exactly Emacs's test.
+- **The File menu**, less Print, the tabs, Undelete Frame, the monitor
+  and display-server frames, Recover Session and the project entries;
+  **the Edit menu**, less Fill, Bookmarks, Go To and Search, with its
+  Incremental Search and Replace sub-menus, themselves less the regexp
+  and symbol searches. Same keys, same order, same labels and `:help`
+  strings as the C.
+- **`activate-menubar-hook` and `menu-bar-update-hook`** in `xdisp.scm`
+  (they are `xdisp.c`'s DEFVARs, not `menu-bar.el`'s), and
+  `pgtk-set-frame-menubar` runs them before it reads the items, as
+  `set_frame_menubar` does (`xmenu.c:994-1000`).
+
+## Two things the tree spells differently, both on purpose
+
+- **`t` in a menu item is `#t`.** `:enable t` left `t` as a *symbol*,
+  `menu-item-eval-property` tried to evaluate it, failed, and answered
+  nil - so "Revert Buffer" and "Remove Other Windows" were greyed out.
+  A literal in a menu item is Scheme; `t` is not a value here.
+- **`:enable` reads functions, not variables.** `mark-active` is
+  `(mark-active)`, `buffer-read-only` is `(buffer-read-only? (current-
+  buffer))`. They are evaluated when the bar is built, in the editor's
+  own environment, which is the same environment the item's command is
+  found in.
+
+## Verified live, on a gtk editor under broadway
+
+The bar shows `File` and `Edit`; File reads *Visit New File... Open
+File... Open Directory... Insert File... Close / Save Save As... Revert
+Buffer / New Window Below New Window on Right Remove Other Windows /
+New Frame Delete Frame / Quit*; Edit reads *Undo Redo Cut Copy Paste
+Select All Incremental Search Replace Execute Command*, with Replace
+opening on its two entries.
+
+`:enable` is live in both directions: **Save** is greyed on an unmodified
+buffer, **Cut** and **Copy** are greyed with no mark, and activating
+**Select All** then re-reading the widgets shows them enabled - the
+built `menu_items` array carries the *evaluated* enable slots, so a
+change in them is what makes the bar rebuild.
+
+Activating **Cut** from the menu emptied the buffer and put the text on
+the kill ring; **Select All** on `"abc"` left point at 1 and the mark at
+4, which is Emacs 31.1's own answer measured on the same buffer. (A
+first run looked wrong - mark 1 - because the test buffer was empty:
+`mark-whole-buffer` on an empty buffer *is* point 1, mark 1.)
+
+## Tests
+
+`menu-bar-menus-tests.scm` is a suite of its own, in a process of its
+own, because loading the library defines entries in `global-map` that
+every test in `menu-bar-tests.scm` would then see (importing it there
+broke six of them). It pins the two menus, `access_keymap`'s coercion
+for five item sequences - including one through the nested Replace
+sub-menu - the separator's shape, and `menu-bar-final-items`.
