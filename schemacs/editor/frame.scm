@@ -187,6 +187,13 @@
    ;; its last glyph was, and the line-number cache `%l' counts from.
    %window-start set!%window-start
    %window-start-at-line-beg set!%window-start-at-line-beg
+   %window-prev-buffers set!%window-prev-buffers
+   %window-next-buffers set!%window-next-buffers
+   ;; The seam `set-window-buffer!' records through: `record-window-buffer`
+   ;; is `window.el`'s, and this library is below the one that can write
+   ;; it. `window.scm` installs the function at load, as `frame.scm`
+   ;; installs the message function.
+   *record-window-buffer-function*
    %window-end-pos set!%window-end-pos
    %window-end-vpos set!%window-end-vpos
    %window-end-valid? set!%window-end-valid?
@@ -267,7 +274,8 @@
        buffer point start start-at-line-beg
        end-pos end-vpos end-valid base-line-number base-line-pos
        top height left width parent children
-       hscroll min-hscroll suspend-auto-hscroll? old-point)
+       hscroll min-hscroll suspend-auto-hscroll? old-point
+       prev-buffers next-buffers)
       window-type?
       (frame     window-frame       set!window-frame)
       ;; ^ The frame this window is on: GNU Emacs's `w->frame', the first
@@ -383,6 +391,18 @@
       ;; ^ The window point the last redisplay saw, for that comparison.
       ;; Emacs's `w->old_pointm', a marker there and the integer it
       ;; holds here - the comparison is `Fequal' either way.
+      (prev-buffers %window-prev-buffers set!%window-prev-buffers)
+      (next-buffers %window-next-buffers set!%window-next-buffers)
+      ;; ^ The buffers this window showed before the one it shows, and
+      ;; the ones `switch-to-prev-buffer' has stepped off. GNU Emacs's
+      ;; `w->prev_buffers' and `w->next_buffers' (`window.h`, fields of
+      ;; the window itself since 30.1), reached through
+      ;; `window-prev-buffers`/`set-window-prev-buffers` in `window.scm`.
+      ;;
+      ;; The entries are `(BUFFER START POINT)`: the buffer, the start
+      ;; the window had for it and the window's point in it, as markers
+      ;; so that they follow edits. `record-window-buffer` (`window.el`)
+      ;; fills them.
       )
 
     (define (window-internal? window)
@@ -543,6 +563,16 @@
                (and (char? before) (char=? #\newline before)))))
         position))
 
+    (define *record-window-buffer-function*
+      ;; GNU Emacs's `Fset_window_buffer` calls `record-window-buffer`
+      ;; (`window.c:4475`: `calln (Qrecord_window_buffer, window)`) on the
+      ;; way in, so a window's previous buffer is recorded before it is
+      ;; replaced. That function is `window.el`'s, in the library above
+      ;; this one, so the call goes through this seam - the same device as
+      ;; `*message-function*`.
+      ;;--------------------------------------------------------------
+      (make-parameter (lambda (window) #f)))
+
     (define (set-window-buffer! window buffer)
       ;; Show BUFFER in WINDOW - GNU Emacs's `set_window_buffer'
       ;; (`window.c:4337'). For a window that is actually changing
@@ -576,6 +606,12 @@
       ;; keeps the invariant that the flag always describes the start.
       ;;--------------------------------------------------------------
       (let ((old (window-buffer window)))
+        ;; "Record the buffer the window was showing before it is
+        ;; replaced" - the C's `calln (Qrecord_window_buffer, window)`
+        ;; (`window.c:4475`), made only when the buffer is really
+        ;; changing, which is the `if` it sits in.
+        (unless (eq? old buffer)
+          ((*record-window-buffer-function*) window))
         (set!window-buffer window buffer)
         (set!%window-end-pos window 0)
         (set!%window-end-vpos window 0)
@@ -634,7 +670,7 @@
                             (build-marker buffer 1) #t
                             0 0 #f 0 0
                             top height left width #f '()
-                            0 0 #f 0))
+                            0 0 #f 0 '() '()))
 
     ;;----------------------------------------------------------------
     ;; Editor state

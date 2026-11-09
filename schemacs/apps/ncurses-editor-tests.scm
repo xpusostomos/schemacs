@@ -167,6 +167,7 @@
  (only (schemacs editor isearch)
        *search-case-fold?* *search-pattern* isearch-find isearch-message)
  (only (schemacs editor window)
+   window-prev-buffers switch-to-prev-buffer switch-to-next-buffer
        delete-window delete-other-windows display-buffer get-buffer-window
        pop-to-buffer-same-window
        set-window-hscroll!
@@ -4472,3 +4473,42 @@
            (string-contains text "fourth line")))))
 
 (test-end "schemacs_ncurses_editor_messages_buffer")
+
+;;------------------------------------------------------------------
+;; A window's buffer history - `window.el`'s `switch-to-prev-buffer`
+;;------------------------------------------------------------------
+;;
+;; The window is where the history lives: `set-window-buffer!` records
+;; the buffer it is leaving (`window.c:4475`), so stepping back returns
+;; to it, and stepping forward returns to where you came from.
+
+(test-begin "schemacs_ncurses_editor_buffer_history")
+
+(test-equal '("hist-a")
+  (parameterize ((*buffer-list* '()) (*current-buffer* #f))
+    (let* ((a (get-buffer-create "hist-a"))
+           (b (get-buffer-create "hist-b"))
+           (frame (test-frame a)))
+      (parameterize ((*current-frame* frame))
+        (let ((window (frame-selected-window frame)))
+          (set-window-buffer! window b)
+          (map (lambda (entry) (buffer-name (car entry)))
+               (window-prev-buffers window)))))))
+
+(test-equal '("hist-c" "hist-b" "hist-c")
+  (parameterize ((*buffer-list* '()) (*current-buffer* #f))
+    (let* ((a (get-buffer-create "hist-a"))
+           (b (get-buffer-create "hist-b"))
+           (c (get-buffer-create "hist-c"))
+           (frame (test-frame a)))
+      (parameterize ((*current-frame* frame))
+        (let ((window (frame-selected-window frame)))
+          (set-window-buffer! window b)
+          (set-window-buffer! window c)
+          (let ((now (buffer-name (window-buffer window))))
+            (switch-to-prev-buffer window)
+            (let ((back (buffer-name (window-buffer window))))
+              (switch-to-next-buffer window)
+              (list now back (buffer-name (window-buffer window))))))))))
+
+(test-end "schemacs_ncurses_editor_buffer_history")

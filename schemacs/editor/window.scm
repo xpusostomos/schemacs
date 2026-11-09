@@ -30,6 +30,12 @@
     (only (schemacs editor command)
           current-prefix-arg define-command uarg->integer)
     (only (schemacs editor marker) build-marker marker-position set-marker)
+    ;; `catch`/`throw` is the C's `throw 'found`; Guile's escape
+    ;; continuation is `let/ec`.
+    (only (ice-9 control) let/ec)
+    ;; `switch-to-prev-buffer-skip-regexp` is matched against a buffer
+    ;; name: `search.c`'s `string-match`.
+    (only (schemacs editor search) string-match)
     
     ;; `define-key' and the global map: the window keys are stated here,
     ;; beside the commands they run.
@@ -55,7 +61,13 @@
           window-parent
           window-body-width window-top window-width
           %window-start
-          %window-start-at-line-beg)
+          %window-start-at-line-beg
+          set-window-start! set-window-point! window-point
+          ;; The buffer history, and the seam `set-window-buffer!` records
+          ;; through.
+          %window-prev-buffers set!%window-prev-buffers
+          %window-next-buffers set!%window-next-buffers
+          *record-window-buffer-function*)
     ;; `display-buffer' puts what it shows in the buffer list's
     ;; most-recently-used order, which is Emacs's `record_buffer';
     ;; `pop-to-buffer' makes a buffer current by name when a string is
@@ -68,10 +80,15 @@
           set-buffer
           set!buffer-default-directory set!buffer-file-name set!buffer-read-only
           set-buffer-modified-p
-          with-current-buffer *inhibit-read-only* buffer-pt bufferp)
+          with-current-buffer *inhibit-read-only* buffer-pt bufferp
+          buffer-list buffer-live-p buffer-name current-buffer
+          *buffer-list-update-hook*)
     ;; `run-hooks' is `subr.el''s, and the two temp-buffer hooks below
     ;; are run through it.
-    (only (schemacs editor subr) kbd run-hooks)
+    ;; `assq-delete-all` and `delq` are `subr.el`'s - `record-window-buffer`
+    ;; drops an older entry with the first, and the history lists with the
+    ;; second.
+    (only (schemacs editor subr) assq-delete-all delq kbd run-hooks)
     ;; `temp-buffer-window-show' puts point at the beginning of the
     ;; buffer it is about to show, which `goto-char' is.
     (only (schemacs editor editfns) goto-char point-min)
@@ -96,6 +113,15 @@
    switch-to-buffer
    switch-to-buffer-other-window
    window-normalize-buffer-to-switch-to
+   ;; A window's buffer history - `window.el`'s.
+   window-prev-buffers set-window-prev-buffers
+   window-next-buffers set-window-next-buffers
+   record-window-buffer unrecord-window-buffer
+   set-window-buffer-start-and-point
+   switch-to-prev-buffer switch-to-next-buffer
+   next-buffer previous-buffer
+   *switch-to-visible-buffer* *switch-to-prev-buffer-skip*
+   *switch-to-prev-buffer-skip-regexp*
    *read-buffer-to-switch*
    window-absorb!
    window-min-height
@@ -212,7 +238,7 @@
       (make<window> (window-frame window) #f #f #f #f 0 0 #f 0 0
                             top height left width
                             (window-parent window) (list window new)
-                            0 0 #f 0))
+                            0 0 #f 0 '() '()))
 
     (define (install-window-parent! frame window parent)
       ;; Put PARENT where WINDOW was in the tree, in WINDOW's own place in
@@ -308,7 +334,7 @@
                           (+ start left)
                           right
                           #f '()
-                          0 0 #f 0)))
+                          0 0 #f 0 '() '())))
                 (install-window-parent!
                  frame window
                  (make-window-parent window new top height start width))
@@ -346,7 +372,7 @@
                           left
                           width
                           #f '()
-                          0 0 #f 0)))
+                          0 0 #f 0 '() '())))
                 (install-window-parent!
                  frame window
                  (make-window-parent window new top height left width))
@@ -383,7 +409,7 @@
                     left
                     width
                     #f '()
-                    0 0 #f 0)))
+                    0 0 #f 0 '() '())))
           (install-window-parent!
            frame main
            (make-window-parent main new top total left width))
@@ -706,6 +732,366 @@ Return the buffer switched to."
         ;; buffer with no listing in it for ever.
         (set-buffer buffer)
         buffer))
+
+    ;;----------------------------------------------------------------
+    ;; A window's buffer history - `window.el:4564-5010`
+    ;;----------------------------------------------------------------
+    ;;
+    ;; The entries are `(BUFFER START POINT)`: the window's start and
+    ;; point for a buffer it showed before. They are what `C-x <left>`
+    ;; and `C-x <right>` walk, and what the Buffers menu's "Next/Previous
+    ;; Buffer" entries call.
+    ;;
+    ;; **What is not carried**, each because the thing its test reads does
+    ;; not exist here: every branch on a *window parameter*
+    ;; (`window-side`, `quit-restore`, `quit-restore-prev`), every branch
+    ;; on a *frame parameter* (`buffer-predicate`), the minibuffer-window
+    ;; branch (the echo area stands in for the minibuffer and is not a
+    ;; window), and the dedicated-window check (nothing here dedicates a
+    ;; window). What is left is the walk itself.
+
+    (define (window-prev-buffers . args)
+      ;; GNU Emacs's `window-prev-buffers` (`window.c:2322`): the buffers
+      ;; WINDOW showed before the one it shows, as `(BUFFER START POS)`
+      ;; triples, most recently replaced first.
+      ;;--------------------------------------------------------------
+      (%window-prev-buffers (or (and (pair? args) (car args))
+                                (selected-window))))
+
+    (define (set-window-prev-buffers window value)
+      ;; GNU Emacs's `set-window-prev-buffers` (`window.c:2339`): "Set
+      ;; WINDOW's previous buffers to PREV-BUFFERS." Answers the value,
+      ;; as the C does.
+      ;;--------------------------------------------------------------
+      (set!%window-prev-buffers window value)
+      value)
+
+    (define (window-next-buffers . args)
+      ;; GNU Emacs's `window-next-buffers` (`window.c:2353`): the buffers
+      ;; `switch-to-prev-buffer` has stepped off, which
+      ;; `switch-to-next-buffer` puts back first.
+      ;;--------------------------------------------------------------
+      (%window-next-buffers (or (and (pair? args) (car args))
+                                (selected-window))))
+
+    (define (set-window-next-buffers window value)
+      ;; GNU Emacs's `set-window-next-buffers` (`window.c:2376`).
+      ;;--------------------------------------------------------------
+      (set!%window-next-buffers window value)
+      value)
+
+    (define *switch-to-visible-buffer* (make-parameter #t))
+    ;; ^ GNU Emacs's `switch-to-visible-buffer` (`window.el:4685`): "If
+    ;; this variable is non-nil, `switch-to-prev-buffer' and
+    ;; `switch-to-next-buffer' may switch to a buffer that is visible in
+    ;; some other window" - off, they skip such buffers.
+
+    (define *switch-to-prev-buffer-skip* (make-parameter #f))
+    ;; ^ GNU Emacs's `switch-to-prev-buffer-skip` (`window.el:4699`): nil,
+    ;; `t`, `visible`, `0`, or a function of WINDOW, BUFFER and
+    ;; BURY-OR-KILL.
+
+    (define *switch-to-prev-buffer-skip-regexp* (make-parameter #f))
+    ;; ^ GNU Emacs's `switch-to-prev-buffer-skip-regexp` (`:4749`): a
+    ;; regexp, or a list of them, naming buffers never to switch to.
+
+    (define (switch-to-prev-buffer-skip-p skip window buffer . args)
+      ;; GNU Emacs's `switch-to-prev-buffer-skip-p` (`window.el:4762`):
+      ;; whether BUFFER should be skipped for WINDOW.
+      ;;
+      ;; The C's non-function SKIP is a frame, and asks
+      ;; `(get-buffer-window buffer skip)` - "is BUFFER shown on that
+      ;; frame". This tree's `get-buffer-window` takes no frame: there is
+      ;; one buffer list and a window's frame is its own, so the answer is
+      ;; "is it shown in any window", which is what a single-frame editor
+      ;; asks anyway.
+      ;;--------------------------------------------------------------
+      (or (and skip
+               (if (procedure? skip)
+                   (apply skip window buffer args)
+                   (get-buffer-window buffer)))
+          (and (*switch-to-prev-buffer-skip-regexp*)
+               (let ((name (buffer-name buffer))
+                     (regexps (let ((r (*switch-to-prev-buffer-skip-regexp*)))
+                                (if (list? r) r (list r)))))
+                 (let loop ((rest regexps))
+                   (and (pair? rest)
+                        (or (string-match (car rest) name)
+                            (loop (cdr rest)))))))))
+
+    (define (record-window-buffer . args)
+      ;; GNU Emacs's `record-window-buffer` (`window.el:4590`): "Add the
+      ;; buffer currently shown in WINDOW to the list of WINDOW's previous
+      ;; buffers."
+      ;;
+      ;; The C calls this from `Fset_window_buffer` (`window.c:4475`)
+      ;; *before* the buffer is replaced, which is why the entry can still
+      ;; read the window's buffer, start and point.
+      ;;--------------------------------------------------------------
+      (let* ((window (or (and (pair? args) (car args)) (selected-window)))
+             (buffer (window-buffer window))
+             (prev-buffers (%window-prev-buffers window))
+             (entry (assq buffer prev-buffers)))
+        (when entry
+          (set! prev-buffers (assq-delete-all buffer prev-buffers)))
+        ;; "Reset WINDOW's next buffers. If needed, they are resurrected
+        ;; by `switch-to-prev-buffer' and `switch-to-next-buffer'."
+        (set!%window-next-buffers window '())
+        ;; "For normal windows do not record insignificant buffers" - a
+        ;; name starting with a space is one.
+        (unless (char=? #\space (string-ref (buffer-name buffer) 0))
+          (let ((start (marker-position (%window-start window)))
+                (point (window-point window)))
+            (set! entry
+                  (cons buffer
+                        (with-current-buffer buffer
+                          (if entry
+                              ;; "We have an entry, update marker
+                              ;; positions."
+                              (list (set-marker (list-ref entry 1) start buffer)
+                                    (set-marker (list-ref entry 2) point buffer))
+                              (list (build-marker buffer start)
+                                    (build-marker buffer point))))))
+            (set!%window-prev-buffers window (cons entry prev-buffers))
+            (run-hooks (*buffer-list-update-hook*))))))
+
+    ;; The seam `set-window-buffer!` records through - see
+    ;; `*record-window-buffer-function*` in `frame.scm`.
+    (*record-window-buffer-function* record-window-buffer)
+
+    (define (unrecord-window-buffer window buffer . args)
+      ;; GNU Emacs's `unrecord-window-buffer` (`window.el:4642`), without
+      ;; the `quit-restore` half: "Make BUFFER disappear from most
+      ;; components specified by the object of WINDOW." What is here is
+      ;; the two it can reach - the previous-buffers alist and the
+      ;; next-buffers list.
+      ;;--------------------------------------------------------------
+      (set!%window-prev-buffers
+       window
+       (delq (assq buffer (%window-prev-buffers window))
+             (%window-prev-buffers window)))
+      (set!%window-next-buffers window
+                                 (delq buffer (%window-next-buffers window))))
+
+    (define (set-window-buffer-start-and-point window buffer . args)
+      ;; GNU Emacs's `set-window-buffer-start-and-point` (`window.el:4670`):
+      ;; show BUFFER in WINDOW, and put the window's start and point at
+      ;; what the history recorded for it.
+      ;;--------------------------------------------------------------
+      (let ((start (and (pair? args) (car args)))
+            (point (and (and (pair? args) (pair? (cdr args))) (cadr args)))
+            (selected (eq? window (selected-window)))
+            (current (eq? (window-buffer window) (current-buffer))))
+        (set-window-buffer! window buffer)
+        (when (and selected current)
+          (set-buffer buffer))
+        (when start
+          (set-window-start! window (marker-position start)))
+        (when point
+          (set-window-point! window (marker-position point)))))
+
+    (define (switch-to-prev-buffer . args)
+      ;; GNU Emacs's `switch-to-prev-buffer` (`window.el:4782`): "In
+      ;; WINDOW switch to previous buffer. Return the buffer switched to,
+      ;; nil if no suitable buffer could be found."
+      ;;
+      ;; BURY-OR-KILL says the buffer being left is about to go, so it is
+      ;; not offered again; `append` keeps its entry but moves it to the
+      ;; end of the list, so it is less likely to come back.
+      ;;--------------------------------------------------------------
+      (let* ((window (or (and (pair? args) (car args)) (selected-window)))
+             (bury-or-kill (and (and (pair? args) (pair? (cdr args)))
+                                (cadr args)))
+             (old-buffer (window-buffer window))
+             ;; "Save this since it's destroyed by `set-window-buffer'."
+             (next-buffers (%window-next-buffers window))
+             (skip (cond ((or (procedure? (*switch-to-prev-buffer-skip*))
+                              (memq (*switch-to-prev-buffer-skip*)
+                                    '(t visible 0)))
+                          (*switch-to-prev-buffer-skip*))
+                         ((or (*switch-to-prev-buffer-skip*)
+                              (not (*switch-to-visible-buffer*)))
+                          #t)
+                         (else #f)))
+             (new-buffer #f)
+             (skipped #f))
+        (let/ec found
+          ;; "Scan WINDOW's previous buffers first, skipping entries of
+          ;; next buffers."
+          (for-each
+           (lambda (entry)
+             (let ((buffer (car entry)))
+               (when (and (not (eq? buffer old-buffer))
+                          (buffer-live-p buffer)
+                          ;; "When BURY-OR-KILL is nil, avoid switching to
+                          ;; a buffer in WINDOW's next buffers list."
+                          (or bury-or-kill (not (memq buffer next-buffers))))
+                 (if (switch-to-prev-buffer-skip-p skip window buffer bury-or-kill)
+                     (set! skipped buffer)
+                     (begin
+                       (set-window-buffer-start-and-point
+                        window buffer (list-ref entry 1) (list-ref entry 2))
+                       (found #t))))))
+           (%window-prev-buffers window))
+          ;; "Scan reverted buffer list of WINDOW's frame next, skipping
+          ;; entries of next buffers."
+          (for-each
+           (lambda (buffer)
+             (when (and (buffer-live-p buffer)
+                        (not (eq? buffer old-buffer))
+                        (not (char=? #\space (string-ref (buffer-name buffer) 0)))
+                        (or bury-or-kill (not (memq buffer next-buffers))))
+               (if (switch-to-prev-buffer-skip-p skip window buffer bury-or-kill)
+                   (set! skipped (or skipped buffer))
+                   (begin
+                     (set! new-buffer buffer)
+                     (set-window-buffer-start-and-point window new-buffer)
+                     (found #t)))))
+           (if bury-or-kill (buffer-list) (reverse (buffer-list))))
+          ;; "Scan reverted next buffers last (must not use nreverse
+          ;; here!)"
+          (unless bury-or-kill
+            (for-each
+             (lambda (buffer)
+               (let ((entry (assq buffer (%window-prev-buffers window))))
+                 (when (and (buffer-live-p buffer)
+                            (not (eq? buffer old-buffer))
+                            entry)
+                   (if (switch-to-prev-buffer-skip-p skip window buffer bury-or-kill)
+                       (set! skipped (or skipped buffer))
+                       (begin
+                         (set! new-buffer buffer)
+                         (set-window-buffer-start-and-point
+                          window new-buffer (list-ref entry 1) (list-ref entry 2))
+                         (found #t))))))
+             (reverse next-buffers)))
+          (when (and skipped (not (procedure? (*switch-to-prev-buffer-skip*))))
+            ;; "Show first skipped buffer, unless skip was a function."
+            (set! new-buffer skipped)
+            (set-window-buffer-start-and-point window new-buffer)))
+        (if bury-or-kill
+            (let ((entry (and (eq? bury-or-kill 'append)
+                              (assq old-buffer (%window-prev-buffers window)))))
+              (unrecord-window-buffer window old-buffer)
+              (when entry
+                ;; "Append old-buffer's entry to list of WINDOW's
+                ;; previous buffers so it's less likely to get switched
+                ;; to soon."
+                (set!%window-prev-buffers
+                 window (append (%window-prev-buffers window) (list entry)))))
+            ;; "Move `old-buffer' to head of WINDOW's restored list of
+            ;; next buffers."
+            (set!%window-next-buffers
+             window (cons old-buffer (delq old-buffer next-buffers))))
+        ;; "Return new-buffer."
+        new-buffer))
+
+    (define (switch-to-next-buffer . args)
+      ;; GNU Emacs's `switch-to-next-buffer` (`window.el:4915`): "In
+      ;; WINDOW switch to next buffer." The opposite direction to
+      ;; `switch-to-prev-buffer`, and it reads the same lists in the
+      ;; opposite order.
+      ;;--------------------------------------------------------------
+      (let* ((window (or (and (pair? args) (car args)) (selected-window)))
+             (old-buffer (window-buffer window))
+             (next-buffers (%window-next-buffers window))
+             (skip (cond ((or (procedure? (*switch-to-prev-buffer-skip*))
+                              (memq (*switch-to-prev-buffer-skip*)
+                                    '(t visible 0)))
+                          (*switch-to-prev-buffer-skip*))
+                         ((or (*switch-to-prev-buffer-skip*)
+                              (not (*switch-to-visible-buffer*)))
+                          #t)
+                         (else #f)))
+             (new-buffer #f)
+             (skipped #f))
+        (let/ec found
+          ;; "Scan WINDOW's next buffers first."
+          (for-each
+           (lambda (buffer)
+             (let ((entry (assq buffer (%window-prev-buffers window))))
+               (when (and (buffer-live-p buffer)
+                          (not (eq? buffer old-buffer))
+                          entry)
+                 (if (switch-to-prev-buffer-skip-p skip window buffer)
+                     (set! skipped buffer)
+                     (begin
+                       (set! new-buffer buffer)
+                       (set-window-buffer-start-and-point
+                        window new-buffer (list-ref entry 1) (list-ref entry 2))
+                       (found #t))))))
+           next-buffers)
+          ;; "Scan the buffer list of WINDOW's frame next, skipping
+          ;; previous buffers entries."
+          (for-each
+           (lambda (buffer)
+             (when (and (buffer-live-p buffer)
+                        (not (eq? buffer old-buffer))
+                        (not (char=? #\space (string-ref (buffer-name buffer) 0)))
+                        (not (assq buffer (%window-prev-buffers window))))
+               (if (switch-to-prev-buffer-skip-p skip window buffer)
+                   (set! skipped (or skipped buffer))
+                   (begin
+                     (set! new-buffer buffer)
+                     (set-window-buffer-start-and-point window new-buffer)
+                     (found #t)))))
+           (buffer-list))
+          ;; "Scan WINDOW's reverted previous buffers last (must not use
+          ;; nreverse here!)"
+          (for-each
+           (lambda (entry)
+             (let ((buffer (car entry)))
+               (when (and (not (eq? new-buffer buffer))
+                          (not (eq? old-buffer buffer))
+                          (buffer-live-p buffer))
+                 (set! new-buffer buffer)
+                 (if (switch-to-prev-buffer-skip-p skip window buffer)
+                     (set! skipped (or skipped buffer))
+                     (begin
+                       (set-window-buffer-start-and-point
+                        window buffer (list-ref entry 1) (list-ref entry 2))
+                       (found #t))))))
+           (reverse (%window-prev-buffers window)))
+          (when (and skipped (not (procedure? (*switch-to-prev-buffer-skip*))))
+            (set! new-buffer skipped)
+            (set-window-buffer-start-and-point window new-buffer)))
+        ;; "Remove `new-buffer' from and restore WINDOW's next buffers."
+        (set!%window-next-buffers window (delq new-buffer next-buffers))
+        new-buffer))
+
+    (define-command (next-buffer arg interactive)
+      "In selected window switch to ARGth next buffer.
+Call `switch-to-next-buffer' unless the selected window is the
+minibuffer window or is dedicated to its buffer."
+      ;; "p\np": the prefix argument, and whether this is interactive -
+      ;; which is what decides between an error and a quiet nil when
+      ;; there is no next buffer.
+      ;;--------------------------------------------------------------
+      (interactive (list (uarg->integer 1 (current-prefix-arg)) #t))
+      (let ((count (or arg 1)))
+        (let loop ((n 0))
+          (when (< n count)
+            (when (and (not (switch-to-next-buffer)) interactive)
+              (error "No next buffer"))
+            (loop (+ n 1))))))
+
+    (define-command (previous-buffer arg interactive)
+      "In selected window switch to ARGth previous buffer.
+Call `switch-to-prev-buffer' unless the selected window is the
+minibuffer window or is dedicated to its buffer."
+      (interactive (list (uarg->integer 1 (current-prefix-arg)) #t))
+      (let ((count (or arg 1)))
+        (let loop ((n 0))
+          (when (< n count)
+            (when (and (not (switch-to-prev-buffer)) interactive)
+              (error "No previous buffer"))
+            (loop (+ n 1))))))
+
+    ;; `bindings.el`'s pair for them: `(define-key ctl-x-map [right]
+    ;; 'next-buffer)' and its two neighbours, stated here beside the
+    ;; commands as this library states its other keys.
+    (define-key *default-keymap* (kbd "C-x <right>") next-buffer)
+    (define-key *default-keymap* (kbd "C-x <left>") previous-buffer)
 
     (define (switch-to-buffer-other-window buffer-or-name . args)
       ;; Select BUFFER-OR-NAME in another window: GNU Emacs's

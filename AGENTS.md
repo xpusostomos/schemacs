@@ -7075,3 +7075,38 @@ List All Buffers*, and activating `alpha` switched to it. Tests: the
 menu's order, the entry's shape (`("name" . command)`, and the lookup's
 answer being the command), and `frame-or-buffer-changed-p`'s
 `(#f #t #f)`.
+
+## A window's buffer history, and Next/Previous Buffer (2026-11-09)
+
+`C-x <left>`/`C-x <right>` and the Buffers menu's Next/Previous entries
+are `window.el`'s `switch-to-prev-buffer`/`switch-to-next-buffer`, which
+walk a window's own record of what it showed before. Ported bottom up:
+
+- **`<window>` gains `prev-buffers`/`next-buffers`** - `w->prev_buffers`
+  and `w->next_buffers`, fields of the window since 30.1 - and
+  `set-window-buffer!` **records the buffer it is leaving**, which is
+  what the C's `Fset_window_buffer` does through `calln
+  (Qrecord_window_buffer, window)` (`window.c:4475`). The recorder is
+  `window.el`'s and lives above `frame.scm`, so it arrives through the
+  seam `*record-window-buffer-function*`, as the message function does.
+- **`record-window-buffer`, `switch-to-prev-buffer`,
+  `switch-to-next-buffer`** in `window.scm`, with
+  `set-window-buffer-start-and-point`, `unrecord-window-buffer`,
+  `window-prev-buffers`/`-next-buffers` and their setters, and the three
+  defcustoms (`switch-to-visible-buffer`,
+  `switch-to-prev-buffer-skip`, `-skip-regexp`).
+- `next-buffer`/`previous-buffer`, and `bindings.el`'s `C-x <right>`/
+  `C-x <left>` pairs.
+
+**Not carried**, each because what its test reads does not exist here:
+every branch on a *window parameter* (`window-side`, `quit-restore`,
+`quit-restore-prev`), on a *frame parameter* (`buffer-predicate`), the
+minibuffer-window branch (the echo area stands in and is not a window),
+the dedicated-window check, and `(buffer-list FRAME)` - there is one
+buffer list here.
+
+Verified live: from `two`, the menu's **Next Buffer** went to
+`hello.txt` and **Previous Buffer** came back to `two`. A batch round
+trip: switching a->b->c leaves `(b a)` as the window's previous buffers,
+`switch-to-prev-buffer` goes to `b` and `switch-to-next-buffer` back to
+`c`. `ncurses-editor-tests` pins both.

@@ -79,7 +79,7 @@
           kill-buffer save-buffers-kill-terminal)
     (only (schemacs editor window)
           split-window-below split-window-right delete-other-windows
-          switch-to-buffer)
+          switch-to-buffer next-buffer previous-buffer)
     ;; "List All Buffers" is `buff-menu.el`'s, which `menu-bar.el` names.
     (only (schemacs editor buff-menu) list-buffers)
     (only (schemacs editor fileio) file-name-directory-part)
@@ -389,12 +389,8 @@ to invoke a similar command with `M-x', use `kill-current-buffer'."
     ;; before it recomputes the bar) whenever the buffer or frame state
     ;; has changed.
     ;;
-    ;; **What is not here**: the "Next Buffer" and "Previous Buffer"
-    ;; entries, which are `window.el`'s `next-buffer`/`previous-buffer`
-    ;; and those are `switch-to-prev-buffer` - window.c's per-window
-    ;; buffer history, which this tree does not have; and the "Frames"
-    ;; sub-menu, which needs frame parameters (and `raise-frame`) to
-    ;; name and select a frame.
+    ;; **What is not here**: the "Frames" sub-menu, which needs frame
+    ;; parameters (and `raise-frame`) to name and select a frame.
 
     (define *buffers-menu-max-size* (make-parameter 15))
     ;; ^ GNU Emacs's `buffers-menu-max-size` (`menu-bar.el:2357`):
@@ -518,15 +514,23 @@ to invoke a similar command with `M-x', use `kill-current-buffer'."
 
     (define menu-bar-buffers-menu-command-entries
       ;; GNU Emacs's `menu-bar-buffers-menu-command-entries`
-      ;; (`menu-bar.el:2441`), less the `next-buffer`/`previous-buffer`
-      ;; pair (window.c's buffer history - see the note above) and the
-      ;; two project entries (`project-switch-to-buffer`,
-      ;; `project-list-buffers`).
+      ;; (`menu-bar.el:2441`), less the two project entries
+      ;; (`project-switch-to-buffer`, `project-list-buffers`).
       ;;
       ;; Each entry is `(KEY menu-item NAME COMMAND ...)`, which
       ;; `menu-bar-update-buffers` splits into a binding.
       ;;--------------------------------------------------------------
       (list '(command-separator "--")
+            (list 'next-buffer
+                  'menu-item
+                  "Next Buffer"
+                  'next-buffer
+                  ':help "Switch to the \"next\" buffer in a cyclic order")
+            (list 'previous-buffer
+                  'menu-item
+                  "Previous Buffer"
+                  'previous-buffer
+                  ':help "Switch to the \"previous\" buffer in a cyclic order")
             (list 'select-named-buffer
                   'menu-item
                   "Select Named Buffer..."

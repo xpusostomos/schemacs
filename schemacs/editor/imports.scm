@@ -121,8 +121,10 @@
     %window-line-rows
     %window-line-slices
     %window-min-hscroll
+    %window-next-buffers
     %window-old-point
     %window-point
+    %window-prev-buffers
     %window-start
     %window-start-at-line-beg
     %window-suspend-auto-hscroll?
@@ -382,6 +384,7 @@
     *read-buffer-completion-ignore-case*
     *read-buffer-function*
     *read-buffer-to-switch*
+    *record-window-buffer-function*
     *recursive-edit-exit*
     *replace-buffer-in-windows-function*
     *require-final-newline*
@@ -405,6 +408,9 @@
     *special-event-map*
     *split-string-default-separators*
     *standard-display-table*
+    *switch-to-prev-buffer-skip*
+    *switch-to-prev-buffer-skip-regexp*
+    *switch-to-visible-buffer*
     *system-time-locale*
     *tab-width*
     *tabulated-list-entries*
@@ -1479,6 +1485,7 @@
     new-frame-on
     new-modal-lookup-state
     new-region-cache
+    next-buffer
     next-frame
     next-history-element
     next-interval
@@ -1549,6 +1556,7 @@
     prefix-echo-pending?
     prepare-to-modify-buffer
     prepare-to-modify-buffer-1
+    previous-buffer
     previous-frame
     previous-history-element
     previous-interval
@@ -1609,6 +1617,7 @@
     record-delete
     record-first-change
     record-insert
+    record-window-buffer
     recursive-edit
     redisplay-frames!
     regexp-quote
@@ -1701,8 +1710,10 @@
     set!%window-end-vpos
     set!%window-hscroll
     set!%window-min-hscroll
+    set!%window-next-buffers
     set!%window-old-point
     set!%window-point
+    set!%window-prev-buffers
     set!%window-start
     set!%window-start-at-line-beg
     set!%window-suspend-auto-hscroll?
@@ -1826,8 +1837,11 @@
     set-visited-file-modtime
     set-visited-file-name
     set-window-buffer!
+    set-window-buffer-start-and-point
     set-window-hscroll!
+    set-window-next-buffers
     set-window-point!
+    set-window-prev-buffers
     set-window-start!
     shell-quote-argument
     show-command
@@ -1877,6 +1891,8 @@
     suspend-frame
     switch-to-buffer
     switch-to-buffer-other-window
+    switch-to-next-buffer
+    switch-to-prev-buffer
     sync-frame-size!
     system-type
     tabulated-list-delete-entry
@@ -1991,6 +2007,7 @@
     undo-redo
     unibyte-to-char
     universal-coding-system-argument
+    unrecord-window-buffer
     unuse-menu-items
     upcase
     upcase-initials
@@ -2051,10 +2068,12 @@
     window-live-p
     window-min-height
     window-min-width
+    window-next-buffers
     window-normalize-buffer-to-switch-to
     window-parent
     window-point
     window-position
+    window-prev-buffers
     window-right-border?
     window-start
     window-start-at-line-beg
