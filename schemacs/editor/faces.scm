@@ -789,6 +789,18 @@ This inherits from the `mode-line` face.")
           '((((class color) (min-colors 88) (background light)) :background "darkseagreen2") (((class color) (min-colors 88) (background dark)) :background "darkolivegreen") (((class color) (min-colors 16) (background light)) :background "darkseagreen2") (((class color) (min-colors 16) (background dark)) :background "darkolivegreen") (((class color) (min-colors 8)) :background "green" :foreground "black") (#t :inverse-video #t))
           "Basic face for highlighting.")
 
+    (defface 'cursor
+          '((((background light)) :background "black") (((background dark)) :background "white"))
+          "Basic face for the cursor color under X.
+Currently, only the `:background` attribute is meaningful; all
+other attributes are ignored.  The cursor foreground color is
+taken from the background color of the underlying text.
+
+Note: Other faces cannot inherit from the cursor face.")
+
+    (defface 'mouse '((#t #f))
+          "Basic face for the mouse color under X.")
+
     (defface 'minibuffer-prompt
           '((((background dark)) :foreground "cyan") (((type pc)) :foreground "magenta") (#t :foreground "medium blue"))
           "Face for minibuffer prompts.

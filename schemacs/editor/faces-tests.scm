@@ -175,6 +175,17 @@
     (list (f:face-spec-set-match-display '((class color) (min-colors 8)))
           (f:face-spec-set-match-display '((class color) (min-colors 88))))))
 
+;; The cursor face is what the *display* draws the cursor in - black on a
+;; light frame, white on a dark one (`faces.el:2948`) - and a theme may
+;; set it to anything, which is how a themed editor gets a visible
+;; cursor. Reading the face is the whole of the C's `cursor_pixel`;
+;; the gtk backend's `cursor-box-colour` is that read.
+(test-equal '("black" "white")
+  (list (with-display (lambda () (f:face-attribute 'cursor ':background))
+                      88 'color 'light)
+        (with-display (lambda () (f:face-attribute 'cursor ':background))
+                      88 'color 'dark)))
+
 ;; `defface' defines a face, gives it a spec, and realizes it - which is
 ;; what a ported Elisp file full of `defface' forms will do.
 (test-equal '(#t bold)

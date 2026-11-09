@@ -2169,22 +2169,63 @@
                                 (+ 1 (- bottom hwidth))
                                 (+ 1 (- right left)) hwidth)))))))
 
-    (define (cursor-box-colour) (list 0.0 0.0 0.0))
-    ;; ^ The colour the cursor is filled or outlined with. GNU Emacs's is
-    ;; the frame's `cursor-color' parameter, whose default is black
-    ;; (`x_set_cursor_color' passes `BLACK_PIX_DEFAULT (f)'), adjusted
-    ;; only if it happens to equal the frame's background - which on this
-    ;; frame, whose background is white, black does not.
+    (define (frame-background-colour frame)
+      ;; The frame's background, as cairo components: `FRAME_BACKGROUND_PIXEL`
+      ;; is the `default' face's `:background', and a frame with no default
+      ;; face to ask is white, which is the C's `WHITE_PIX_DEFAULT'.
+      ;;--------------------------------------------------------------
+      (or (and frame (colour->rgb (face-attribute 'default ':background frame)))
+          (list 1.0 1.0 1.0)))
 
-    (define (cursor-ink-colour token)
+    (define (cursor-box-colour frame)
+      ;; The colour the cursor is filled or outlined with - GNU Emacs's
+      ;; `cursor_pixel' (`x_set_cursor_color', `xfns.c:1481`).
+      ;;
+      ;; **It is the `cursor' face's `:background`**, which is what a
+      ;; theme sets: black on a light frame, white on a dark one, and
+      ;; whatever a theme names in between. Emacs reaches it through the
+      ;; `cursor-color` frame parameter (`xfaces.c` turns a change of the
+      ;; face's background into that parameter and `x_set_cursor_color`
+      ;; turns the parameter back into the pixel); this tree has no frame
+      ;; parameters to wait for the end of a redisplay in, so the face is
+      ;; read where the pixel is used.
+      ;;
+      ;; The C's two adjustments are kept: a cursor the colour of the
+      ;; frame's own background is replaced by the mouse pointer's colour
+      ;; (`x->mouse_pixel`), so a cursor can never be invisible, and a
+      ;; missing answer falls back the same way.
+      ;;
+      ;; **What it used to be was black, always**, on the reasoning that
+      ;; black is Emacs's default - true of a light frame, and the reason
+      ;; every dark theme drew a cursor nobody could see.
+      ;;--------------------------------------------------------------
+      (let* ((bg (frame-background-colour frame))
+             (pixel (or (and frame
+                             (colour->rgb (face-attribute 'cursor ':background
+                                                          frame)))
+                        (list 0.0 0.0 0.0))))
+        (if (equal? pixel bg)
+            (let ((mouse (and frame
+                              (colour->rgb (face-attribute 'mouse ':background
+                                                           frame)))))
+              (if (and mouse (not (equal? mouse bg))) mouse bg))
+            pixel)))
+
+    (define (cursor-ink-colour token frame)
       ;; The colour the glyph *under* the cursor is redrawn in. Emacs
       ;; draws a filled-box cursor by redrawing the glyph - "so that the
       ;; text inside the cursor stays visible" - with the face's own
-      ;; background as the ink, or the frame's background when the face
-      ;; names none (`x_set_cursor_gc' sets `xgcv.foreground =
-      ;; s->face->background'). This frame's background is white.
+      ;; background as the ink (`x_set_cursor_gc' sets `xgcv.foreground =
+      ;; s->face->background'), or, for the default face, with the
+      ;; frame's background (`x_set_cursor_color`'s
+      ;; `cursor_foreground_pixel', which is `FRAME_BACKGROUND_PIXEL'
+      ;; unless `x-cursor-fore-pixel' names another).
+      ;;
+      ;; **The fallback was white, not the frame's background**, so a
+      ;; themed dark frame redrew the glyph under the cursor in white
+      ;; whatever the theme's background was.
       ;;--------------------------------------------------------------
-      (or (face-token-background token) (list 1.0 1.0 1.0)))
+      (or (face-token-background token) (frame-background-colour frame)))
 
     (define-method (draw-window-cursor! (d <pgtk-display>) row column cells
                                         type width text token)
@@ -2216,33 +2257,34 @@
           (let ((left (cell-x column))
                 (top row)
                 (box-w (* *cell-width* (max 1 cells))))
-            (case type
-              ((no-cursor) #t)
-              ((filled-box-cursor)
-               (apply cairo-set-source-rgb cr (cursor-box-colour))
-               (cairo-rectangle cr left top box-w *cell-height*)
-               (cairo-fill cr)
-               ;; the glyph again, in the ink colour, so it is visible
-               (apply cairo-set-source-rgb cr (cursor-ink-colour token))
-               (pgtk-show-text! d text left (+ top *font-ascent*)))
-              ((hollow-box-cursor)
-               (apply cairo-set-source-rgb cr (cursor-box-colour))
-               (cairo-set-line-width cr 1)
-               (cairo-rectangle cr (+ left 0.5) (+ top 0.5)
-                                (- box-w 1) (- *cell-height* 1))
-               (cairo-stroke cr))
-              ((bar-cursor)
-               (apply cairo-set-source-rgb cr (cursor-box-colour))
-               (cairo-rectangle cr left top (max 1 width) *cell-height*)
-               (cairo-fill cr))
-              ((hbar-cursor)
-               ;; the bar sits at the foot of the cell, as Emacs's does
-               (apply cairo-set-source-rgb cr (cursor-box-colour))
-               (cairo-rectangle cr left (- (+ top *cell-height*)
-                                           (max 1 width))
-                                box-w (max 1 width))
-               (cairo-fill cr))
-              (else #t))))))
+            (let ((frame (pgtk-frame-for d)))
+              (case type
+                ((no-cursor) #t)
+                ((filled-box-cursor)
+                 (apply cairo-set-source-rgb cr (cursor-box-colour frame))
+                 (cairo-rectangle cr left top box-w *cell-height*)
+                 (cairo-fill cr)
+                 ;; the glyph again, in the ink colour, so it is visible
+                 (apply cairo-set-source-rgb cr (cursor-ink-colour token frame))
+                 (pgtk-show-text! d text left (+ top *font-ascent*)))
+                ((hollow-box-cursor)
+                 (apply cairo-set-source-rgb cr (cursor-box-colour frame))
+                 (cairo-set-line-width cr 1)
+                 (cairo-rectangle cr (+ left 0.5) (+ top 0.5)
+                                  (- box-w 1) (- *cell-height* 1))
+                 (cairo-stroke cr))
+                ((bar-cursor)
+                 (apply cairo-set-source-rgb cr (cursor-box-colour frame))
+                 (cairo-rectangle cr left top (max 1 width) *cell-height*)
+                 (cairo-fill cr))
+                ((hbar-cursor)
+                 ;; the bar sits at the foot of the cell, as Emacs's does
+                 (apply cairo-set-source-rgb cr (cursor-box-colour frame))
+                 (cairo-rectangle cr left (- (+ top *cell-height*)
+                                             (max 1 width))
+                                  box-w (max 1 width))
+                 (cairo-fill cr))
+                (else #t)))))))
 
     (define (pgtk-present! d gtk-cr)
       ;; Paint what we have drawn into the context Gtk handed us. This is
