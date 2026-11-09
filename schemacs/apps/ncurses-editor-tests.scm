@@ -136,6 +136,7 @@
  (only (schemacs editor command) *mark-even-if-inactive*)
  (only (schemacs editor editfns)
        buffer-substring-no-properties delete-region goto-char point point-max point-min
+       message
        region-beginning region-end
        text-editor-cursor-column insert
 )
@@ -4435,3 +4436,39 @@
       (list (*goal-column*) (get '*goal-column* 'saved-value)))))
 
 (test-end "schemacs_ncurses_editor_line_movement")
+
+;;------------------------------------------------------------------
+;; `*Messages*' keeps its point - `message_dolog`'s own rule
+;;
+;; Measured on Emacs 31.1: a message logged while point is in the middle
+;; of `*Messages*' leaves point where it is, and one logged with point at
+;; the end follows the new text. Without the first rule, marking a line
+;; to copy it out of the log emitted "Mark set" as another message, which
+;; moved point again - so the region could not be made.
+;;------------------------------------------------------------------
+
+(test-begin "schemacs_ncurses_editor_messages_buffer")
+
+(message "first line of the log")
+(message "second line of the log")
+
+(test-equal "a message does not move point in *Messages*"
+  2
+  (with-current-buffer (get-buffer-create "*Messages*")
+    (goto-char 2)
+    (message "third line")
+    (point)))
+
+(test-assert "a message at the end of *Messages* follows the new text"
+  (with-current-buffer (get-buffer-create "*Messages*")
+    (goto-char (point-max))
+    (message "fourth line")
+    (= (point) (point-max))))
+
+(test-assert "both messages reached the log"
+  (with-current-buffer (get-buffer-create "*Messages*")
+    (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+      (and (string-contains text "third line")
+           (string-contains text "fourth line")))))
+
+(test-end "schemacs_ncurses_editor_messages_buffer")

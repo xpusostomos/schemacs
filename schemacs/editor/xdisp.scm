@@ -48,7 +48,7 @@
           ;; measured in - see `posn-at-x-y'.
           column-width line-height)
     ;; the markers, from marker.c's own library
-    (only (schemacs editor marker) marker-position)
+    (only (schemacs editor marker) marker-position set-marker)
     ;; `make-buffer-string` is `editfns.c:1561`'s and is
     ;; `intervals.scm`'s - it must live below `search.scm`, which
     ;; calls it and cannot import `editfns.scm` (2026-10-13).
@@ -58,13 +58,17 @@
     (only (schemacs editor editfns)
          *message-log-function*
          buffer-substring-no-properties delete-region goto-char insert
-         point-max point-min
+         point point-max point-min
          ;; `:propertize' in the mode line is Emacs's `propertize',
          ;; `editfns.c:3296'.
          propertize
          text-editor-cursor-column
          text-editor-get-end-of-line
-         text-editor-get-start-of-line)
+         text-editor-get-start-of-line
+         ;; `message_dolog` keeps the log buffer's point in a *marker*, so
+         ;; that it follows the text it was on when the oldest lines are
+         ;; trimmed off the front.
+         point-marker)
     ;; The mode line's *text properties*: `format-mode-line' returns a
     ;; propertized string in Emacs, and `render-window!' draws its runs by
     ;; the faces those properties name. `text-property-list' and
@@ -3023,6 +3027,18 @@
           (with-current-buffer (get-buffer-create name)
             ;; "If we created it, set the major-mode."
             (when new? (messages-buffer-mode))
+            ;; **The log buffer's point is saved, and put back.**
+            ;; `message_dolog` reads `PT == Z` first and restores point
+            ;; at the end: at the end it follows the new text, anywhere
+            ;; else it stays where it was - as a *marker*, so trimming
+            ;; the oldest lines moves it back with the text it was on.
+            ;;
+            ;; Without this every message yanked point to the end of
+            ;; `*Messages*`, and marking a line to copy it out ran
+            ;; `(message "Mark set")`, which moved point again - so the
+            ;; region could not be made.
+            (let ((point-at-end? (= (point) (point-max)))
+                  (old-point (point-marker)))
             ;; "This is safe because we don't have undo in this buffer" -
             ;; and it does not cache long scans, the C's second line.
             ;;
@@ -3058,7 +3074,10 @@
                  (point-min)
                  (message--back-lines (point-max)
                                       (- 0 (*message-log-max*) 1))))
-              (goto-char (point-max))))))))
+              (if point-at-end?
+                  (goto-char (point-max))
+                  (goto-char (marker-position old-point)))
+              (set-marker old-point #f))))))))
 
     (define (log-message text)
       ;; GNU Emacs's `log_message' (`xdisp.c:12569'), the half of
