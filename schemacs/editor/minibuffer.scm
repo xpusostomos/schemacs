@@ -1510,13 +1510,22 @@ read-number-history
       ;; consults `last-command' for.
       ;;
       ;; Emacs lists the *symbols* `completion-at-point',
-      ;; `minibuffer-complete' and `minibuffer-complete-word'; a command
-      ;; is its procedure here (`*this-command*' holds one, see
-      ;; `simple.sld'), and `completion-at-point' is not ported. It is
-      ;; defined *after* the two commands for the same reason: a list of
-      ;; procedures can only be made once they exist.
+      ;; `minibuffer-complete' and `minibuffer-complete-word'. A bound
+      ;; command is its procedure here, so the two that are bound are
+      ;; listed as procedures - but **`completion-at-point` is listed as
+      ;; the symbol**, because that is what a completing command sets
+      ;; `this-command` to (`completion--in-region-1`,
+      ;; `minibuffer.el:1745` - see `minibuffer-complete`), and that
+      ;; symbol is therefore what `last-command` holds when the user
+      ;; types RET straight after a TAB.
+      ;;
+      ;; Without it the `confirm-after-completion` rule could never fire
+      ;; from a TAB: `(memq last-command ...)` was false for the symbol,
+      ;; so RET exited and made a buffer from the typo that `[Confirm]`
+      ;; exists to catch. Measured, `C-x b SWI TAB RET`: `[No match]`
+      ;; from the TAB and then a buffer named SWI.
       ;;--------------------------------------------------------------
-      (list minibuffer-complete minibuffer-complete-word))
+      (list 'completion-at-point minibuffer-complete minibuffer-complete-word))
 
     ;;----------------------------------------------------------------
     ;; Reading with completion
