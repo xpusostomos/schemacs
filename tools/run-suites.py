@@ -56,6 +56,10 @@ SUITES = [
     'schemacs/editor/search-tests.scm',
     'schemacs/editor/replace-tests.scm',
     'schemacs/editor/faces-tests.scm',
+    # The omarchy port's own suite - the font-height logic upstream added
+    # with its daemon font-size fix. It lives beside the library, under
+    # `external/', because that is where the port does.
+    'schemacs/external/omarchy/omarchy-tests.scm',
     # **Three suites that were on disk and passing but were never run**
     # (added 2026-10-13): they are listed here for the first time. A test
     # file that is not in this list is not run by anything - the tree had
@@ -67,6 +71,7 @@ SUITES = [
     'schemacs/editor/minibuf-tests.scm',
     'schemacs/ui/gtk/pgtk-tests.scm',
     'schemacs/editor/timer-tests.scm',
+    'schemacs/editor/seq-tests.scm',
     'schemacs/editor/select-tests.scm',
     # The terminal's own OSC 52 selection, which came out of
     # `select-tests.scm' when the platform libraries moved under

@@ -12,6 +12,7 @@
 #   make install            into $(PREFIX), default /usr/local, with .go files
 #   make install-local      into ~/.local, sources only (Guile compiles on use)
 #   make uninstall          remove what install put there
+#   make install-omarchy-hooks  this user's Omarchy theme/font hooks
 #   make clean              remove build/
 #
 # Both installs also put man/schemacs.1 where man(1) looks for it: PREFIX's
@@ -78,7 +79,11 @@ LOADPATH_FLAGS := -L . $(if $(wildcard $(SHARED_SITE)),-L $(SHARED_SITE),)
 
 DIRS    := schemacs
 SCRIPTS := script/prelude.scm
-MODULES := $(filter-out $(SCRIPTS),$(wildcard $(addsuffix /*.scm,$(DIRS))))
+# Every .scm under the tree, not only at its top: `schemacs/external/` and the
+# front ends below it hold libraries too, and a file left out of MODULES is one
+# `make install` never copies.
+MODULES := $(filter-out $(SCRIPTS),$(shell find $(DIRS) -name '*.scm' \
+                     ! -name '*-tests.scm' ! -name '*~'))
 GOS     := $(patsubst %.scm,build/%.go,$(MODULES))
 
 # What gets installed from the tree: every file under $(DIRS) except editor
@@ -142,6 +147,31 @@ install-local:
 	for f in $(SOURCES); do install -D -m 644 $$f $(LOCALSITEDIR)/$$f; done
 	install -m 755 bin/se $(LOCALBINDIR)/se
 	for f in $(MANPAGES); do install -D -m 644 $$f $(LOCALMAN1DIR)/$$(basename $$f); done
+
+# --- Omarchy desktop integration ---------------------------------------------
+# ITS OWN TARGET, AND NOT PART OF `install'.  These are two drop-ins in this
+# USER'S desktop configuration, not part of the package: a system `make install'
+# may run as another user (or as root, whose HOME is not the desktop's), and a
+# machine that does not run Omarchy has nothing to install.  So the package
+# install never writes them, and `make uninstall' never removes them.
+#
+# What is written, by `omarchy-install-hooks' itself (the same code `M-x
+# omarchy-install-hooks' runs):
+#
+#   $(OMARCHY_HOOKS)/theme-set.d/50-emacs   calls `omarchy-apply-theme'
+#   $(OMARCHY_HOOKS)/font-set.d/50-emacs    calls `omarchy-apply-font'
+#
+# Omarchy runs every non-`.sample' file in those directories after a theme or
+# font change.  The scripts find every live schemacs back door (`repl -l'), so
+# they work whichever editor is in front; `SCHEMACS_INSTANCE' narrows them to
+# one.  They need the shared `repl' client on PATH - the command says so.
+#
+# XDG_CONFIG_HOME is honoured the way the editor honours it; override
+# OMARCHY_HOOKS to put them elsewhere.
+OMARCHY_HOOKS ?= $(if $(XDG_CONFIG_HOME),$(XDG_CONFIG_HOME),$(HOME)/.config)/omarchy/hooks
+
+install-omarchy-hooks:
+	@GUILE_WARN_DEPRECATED=no $(GUILE) $(LOADPATH_FLAGS) -c '(begin (import (schemacs external omarchy omarchy)) (parameterize ((*omarchy-hooks-directory* "$(OMARCHY_HOOKS)")) (for-each (lambda (p) (display p) (newline)) (omarchy-install-hooks))))'
 
 # uninstall removes what install put there: the site tree, its ccache, the
 # launcher, and the manual page.  It does NOT touch the auto-compile cache,

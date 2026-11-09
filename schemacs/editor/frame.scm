@@ -110,7 +110,8 @@
    *current-frame* *frame-list* *frame-creation-function*
    *current-buffer*
    *before-make-frame-hook* *after-make-frame-functions*
-   frame? frame-list frame-live-p selected-frame select-frame new-frame-on
+   frame? frame-list frame-live-p frame-visible-p selected-frame
+   select-frame with-selected-frame new-frame-on
    next-frame previous-frame other-frame delete-frame
    delete-other-frames make-frame make-frame-command
    display-graphic-p frame-name
@@ -1442,6 +1443,17 @@
       ;;--------------------------------------------------------------
       (and (frame-type? frame) (memq frame (*frame-list*)) #t))
 
+    (define (frame-visible-p frame)
+      ;; GNU Emacs's `frame-visible-p' (`frame.c:1863'): "Return t for a
+      ;; visible frame, `icon' for an iconified one, nil for an invisible
+      ;; one." This tree hides nothing and has no iconification - every
+      ;; live frame is drawn - so a live frame answers `t', which is the
+      ;; `(eq t (frame-visible-p frame))' test Emacs's completion code
+      ;; makes (`minibuffer.el:1765'). A non-frame or a deleted one is
+      ;; nil, as there.
+      ;;--------------------------------------------------------------
+      (and (frame-live-p frame) #t))
+
     (define (frame-list)
       ;; GNU Emacs's `frame-list' (`frame.c:2161'): "Return a list of all
       ;; live frames." A *copy* - `Fcopy_sequence (Vframe_list)'
@@ -1518,6 +1530,26 @@
         ;; answers that frame's buffer.
         (*current-buffer* (current-editor)))
       frame)
+
+    (define-syntax with-selected-frame
+      ;; GNU Emacs's `with-selected-frame' (`frame.el'): "Execute the
+      ;; forms in BODY with FRAME as the selected frame.  The value
+      ;; returned is the value of the last form in BODY.  See also
+      ;; `with-temp-buffer' and `with-selected-window'."
+      ;;
+      ;; Emacs selects with NORECORD and restores in `unwind-protect';
+      ;; `dynamic-wind' here is the same two calls around the body. It
+      ;; is the first caller that made this worth having: `omarchy.el'
+      ;; selects a graphical frame before asking `set-face-attribute'
+      ;; to load a font, since that call acts on the selected frame.
+      ;;--------------------------------------------------------------
+      (syntax-rules ()
+        ((_ frame body ...)
+         (let ((old-frame (selected-frame)))
+           (dynamic-wind
+             (lambda () (select-frame frame))
+             (lambda () body ...)
+             (lambda () (select-frame old-frame)))))))
 
     (define (%frame-step frame back?)
       ;; The frame after - or before - FRAME in the cyclic order, or #f
@@ -2227,7 +2259,15 @@
     ;; library's. They are the C's own two ends: `message3' writes
     ;; `FRAME_MESSAGE_BUF (f)' and `current-message' reads it back.
     (*message-function*
-     (lambda (text) (set-message! (*current-frame*) text)))
+     (lambda (text)
+       ;; `message3` (`xdisp.c:12592`) with no frame - a batch run, or a
+       ;; message before the first frame exists - has no echo area to
+       ;; write; `FRAME_MESSAGE_BUF (f)` is only reached through a live
+       ;; frame. Silently dropping it is Emacs's answer there too (the
+       ;; text has already gone to `*Messages*` through
+       ;; `message_dolog`).
+       (let ((frame (*current-frame*)))
+         (when frame (set-message! frame text)))))
     (*current-message-function*
      (lambda ()
        (let ((frame (*current-frame*)))

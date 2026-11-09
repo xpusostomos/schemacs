@@ -55,6 +55,7 @@
     (schemacs editor subr)
     (schemacs editor xfaces)
     (schemacs editor editfns)
+    (schemacs editor callproc)
     (schemacs editor casefiddle)
     (except (schemacs editor character)  char-alt char-super char-hyper char-shift char-ctl char-meta parse-solitary-modifier make-ctrl-char parse-modifiers-uncached event-symbol-elements event-modifiers event-basic-type apply-modifiers event-convert-list kbd *tab-width*)
     (schemacs editor characters)
@@ -69,14 +70,17 @@
     (schemacs editor derived)
     (schemacs editor easy-mmode)
     (schemacs editor window)
+    (schemacs editor warnings)
     (schemacs editor loadup)
     (schemacs editor env)
     (except (schemacs editor fileio)  directory-name-p expand-file-name file-exists-p file-name-directory-part file-name-nondirectory-part file-writable-p *buffer-visited-file-modtime-function*)
+    (schemacs editor font)
     (schemacs editor paragraphs)
     (schemacs editor face-remap)
     (schemacs editor indent)
     (schemacs editor cmds)
     (schemacs editor keymap)
+    (schemacs editor theme)
     (schemacs editor data)
     (except (schemacs editor simple)  backward-char beginning-of-line delete-char end-of-line forward-char self-insert-command self-insert-tab)
     (schemacs editor mule-cmds)
@@ -86,6 +90,7 @@
     (schemacs editor rmc)
     (except (schemacs editor undo)  text-editor-undo-list set!text-editor-undo-list)
     (schemacs editor select)
+    (schemacs editor seq)
     (except (schemacs editor syntax)  word-char? forward-word-position backward-word-position word-run-end word-run-start)
     (schemacs editor tabulated-list)
     (schemacs editor tty-colors)
@@ -161,6 +166,7 @@
     *color-name-rgb-alist*
     *command-table*
     *completion-auto-help*
+    *completion-auto-wrap*
     *completion-ignore-case*
     *completion-ignored-extensions*
     *completion-setup-hook*
@@ -230,6 +236,7 @@
     *eval-expression-debug-on-error*
     *eval-expression-print-maximum-character*
     *exchange-point-and-mark-highlight-region*
+    *exec-suffixes*
     *extended-command-history*
     *face-attribute-name-alist*
     *face-attribute-names*
@@ -381,6 +388,7 @@
     *set-marker-insertion-type-function*
     *show-trailing-whitespace*
     *special-event-map*
+    *split-string-default-separators*
     *standard-display-table*
     *system-time-locale*
     *tab-width*
@@ -440,6 +448,7 @@
     add-text-properties
     add-text-properties-from-list
     add-to-history
+    add-to-list
     adjust-coding-eol-type
     adjust-frame-size!
     adjust-intervals-for-deletion
@@ -553,6 +562,7 @@
     byte8-to-char
     bytes-have-null?
     cache-long-scans
+    call-process
     called-interactively?
     cancel-timer
     capitalize
@@ -618,6 +628,7 @@
     coding-system?
     coding-write-char
     color-dark-p
+    color-values-from-color-spec
     column-width
     command-doc-string
     command-interactive-spec
@@ -687,6 +698,9 @@
     current-time
     current-time-string
     cursor-screen-position
+    custom--bound?
+    custom--getter
+    custom--setter
     custom--standard-value
     custom--standard-value-p
     custom-add-dependencies
@@ -722,6 +736,7 @@
     custom-theme-set-faces
     custom-theme-set-variables
     custom-variable-p
+    daemonp
     deactivate-mark
     debugger-mode-map
     debugger-quit
@@ -870,6 +885,7 @@
     display-cell-size
     display-color-cells
     display-completion-list
+    display-font-families
     display-graphic-p
     display-mouse-position
     display-pixel-height
@@ -880,9 +896,11 @@
     display-startup-screen
     display-supports-face-attributes-p
     display-text-width
+    display-warning
     downcase
     downcase-region
     downcase-word
+    draw-box!
     draw-window-cursor!
     easy-mmode-pretty-mode-name
     editor-excluded-libraries
@@ -900,6 +918,7 @@
     eol
     eolp
     erase-buffer
+    error-message-string
     eval-expression
     eval-expression-print-format
     eval-region
@@ -912,6 +931,8 @@
     event-start
     event-symbol-elements
     exchange-point-and-mark
+    exec-path
+    executable-find
     execute-extended-command
     exit-recursive-edit
     exit-splash-screen
@@ -1006,6 +1027,7 @@
     float-time
     flush-display!
     following-char
+    font-family-list
     font-lock-add-keywords
     font-lock-after-change-function
     font-lock-append-text-property
@@ -1072,6 +1094,7 @@
     frame-selected-window
     frame-set-background-mode
     frame-type?
+    frame-visible-p
     frame-width
     frame-windows
     frame?
@@ -1135,6 +1158,7 @@
     install-fns-textprop!
     install-intervals-set-text-properties!
     install-ls-lisp-files!
+    intern
     internal-complete-buffer
     internal-complete-buffer-except
     internal-get-lisp-face-attribute
@@ -1275,6 +1299,7 @@
     make-buffer-string
     make-coding-system
     make-ctrl-char
+    make-directory
     make-directory-internal
     make-face
     make-frame
@@ -1437,6 +1462,7 @@
     pop-to-buffer
     pop-to-buffer-same-window
     pop-to-mark-command
+    pos-visible-in-window-p
     posn-area
     posn-at-x-y
     posn-point
@@ -1494,6 +1520,7 @@
     read-number-history
     read-only-mode
     read-quoted-char
+    read-string
     read-wait-ms
     realize-face
     realize-tty-face
@@ -1524,6 +1551,7 @@
     replace-range
     replace-range-2
     replace-regexp
+    replace-regexp-in-string
     replace-string
     report-command-error!
     reproduce-interval
@@ -1578,6 +1606,9 @@
     self-insert-command
     self-insert-layer
     self-insert-tab
+    seq-filter
+    seq-find
+    seq-remove
     set!%buffer-modtime
     set!%buffer-modtime-size
     set!%mark-marker
@@ -1705,6 +1736,7 @@
     set-window-hscroll!
     set-window-point!
     set-window-start!
+    shell-quote-argument
     show-command
     show-prefix-echo!
     show-text-editor
@@ -1723,6 +1755,7 @@
     split-interval-left
     split-interval-right
     split-main-window-below
+    split-string
     split-window
     split-window-below
     split-window-right
@@ -1730,6 +1763,7 @@
     store-in-keymap
     string->texts
     string-collate-lessp
+    string-empty-p
     string-intervals
     string-lessp
     string-match
@@ -1737,6 +1771,9 @@
     string-prefix-p
     string-replace
     string-search-forward
+    string-trim
+    string-trim-left
+    string-trim-right
     string-width
     strip-undo-boundaries
     substitute-env-vars
@@ -1746,6 +1783,7 @@
     switch-to-buffer
     switch-to-buffer-other-window
     sync-frame-size!
+    system-type
     tabulated-list-delete-entry
     tabulated-list-entries
     tabulated-list-format
@@ -1917,8 +1955,11 @@
     window-wraps?
     with-current-buffer
     with-current-buffer-window
+    with-selected-frame
     with-selected-window
     with-silent-modifications
+    with-temp-buffer
+    with-temp-file
     word-char?
     word-run-end
     word-run-start

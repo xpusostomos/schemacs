@@ -1588,10 +1588,18 @@
               (set!text-editor-save-modiff ed modiff)
               (%text-editor-incr-modiff! ed 0)))
         flag))
-    (define (buffer-file-name buffer)
-      ;; The file BUFFER visits, or false: GNU Emacs's `buffer-file-name'.
+    (define (buffer-file-name . args)
+      ;; The file BUFFER visits, or false: GNU Emacs's `buffer-file-name'
+      ;; (`buffer.c:5837'), whose argument is optional - "Return the name
+      ;; of file BUFFER is visiting, or nil if no file is being visited.
+      ;; No argument or nil means the current buffer."
+      ;;
+      ;; It took the buffer as a required argument until now, which is a
+      ;; departure the compiler found in `omarchy-terminal-at-cwd': an
+      ;; Emacs function called the Emacs way does not pass one.
       ;;--------------------------------------------------------------
-      (text-editor-file-name buffer))
+      (let ((buffer (and (pair? args) (car args))))
+        (text-editor-file-name (or buffer (current-buffer)))))
     (define (set!buffer-file-name buffer path)
       ;; Make BUFFER visit PATH: GNU Emacs's `set-visited-file-name' ends
       ;; here. Emacs also renames the buffer after the file and marks it

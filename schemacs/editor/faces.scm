@@ -48,7 +48,7 @@
     ;; specs, which `face-spec-recalc' now walks - and `plist-member' is
     ;; what finds `:extend' in the chosen branch. Both are `fns.c`'s,
     ;; which is `intervals.scm`'s until there is an `fns.sld' of its own.
-    (only (schemacs editor intervals) get plist-member))
+    (only (schemacs editor intervals) get put plist-member))
 
   (export
    ;; the face table
@@ -245,11 +245,34 @@
          (face-attribute-merged-with attribute value (car faces))
          (cdr faces)))
        (else
+        ;; "It's not resource, but it's a list of faces. One of them may
+        ;; not exist." - `faces.el`'s own guard in
+        ;; `face-attribute-merged-with`: an inherited face that is not
+        ;; defined contributes nothing. A theme converted from Modus
+        ;; inherits faces this editor has no `defface` for
+        ;; (`modus-themes-ui-variable-pitch` is one), and raising
+        ;; "Invalid face" there killed the whole redisplay.
         (merge-face-attribute attribute value
-                              (face-attribute faces attribute #f #t)))))
+                              (if (facep faces)
+                                  (face-attribute faces attribute #f #t)
+                                  *undefined-face-attribute*)))))
 
     (define (face-attribute face attribute . args)
       ;; GNU Emacs's `face-attribute': ATTRIBUTE's value on FACE.
+      ;;
+      ;; The optional arguments are FRAME and then INHERIT
+      ;; (`(face-attribute FACE ATTRIBUTE &optional FRAME INHERIT)').
+      ;; FRAME is accepted and not consulted: Emacs reads the attribute
+      ;; off the frame the face is realized on, and there is one frame
+      ;; here - the same deviation `internal-get-lisp-face-attribute'
+      ;; documents.
+      ;;
+      ;; **It read INHERIT where FRAME belongs until 2026-11-09.** Every
+      ;; existing caller that passed an INHERIT passed a FRAME first
+      ;; (`(face-attribute FACE A #f INHERIT)'), so the two shapes
+      ;; agreed; the omarchy port's `(face-attribute 'default :height
+      ;; FRAME)' is the first that passes only a FRAME, and it was read
+      ;; as an inherit face.
       ;;
       ;; With no INHERIT only what FACE itself defines is read, so the
       ;; answer may be `unspecified` or a relative value; with INHERIT the
@@ -258,8 +281,9 @@
       ;; it is absolute. That is what makes `(face-attribute F :weight nil
       ;; 'default)' always answer a weight.
       ;;--------------------------------------------------------------
-      (let ((inherit (if (and (pair? args) (pair? (cdr args))) (cadr args) #f)))
-        (let* ((value (internal-get-lisp-face-attribute face attribute))
+      (let ((frame (if (pair? args) (car args) #f))
+            (inherit (if (and (pair? args) (pair? (cdr args))) (cadr args) #f)))
+        (let* ((value (internal-get-lisp-face-attribute face attribute frame))
                (value (if (and inherit (face-attribute-relative-p attribute value))
                           (let ((inh-from (face-attribute face ':inherit)))
                             (if (or (not inh-from)
@@ -325,6 +349,18 @@
       ;;--------------------------------------------------------------
       (make-parameter #f))
 
+    ;; **The Emacs name of this parameter, for theme data.** A theme file
+    ;; is written in Emacs's names, and this tree's dynamically bound
+    ;; variables carry stars; `frame-background-mode` is the one variable
+    ;; a Modus-derived theme sets, so its two halves are registered under
+    ;; the Emacs name - where `custom--getter` and `custom--setter` read
+    ;; them - while the starred parameter stays the name a library here
+    ;; uses.
+    (put 'frame-background-mode 'custom-reader
+         (lambda () (*frame-background-mode*)))
+    (put 'frame-background-mode 'custom-writer
+         (lambda (symbol value) (*frame-background-mode* value)))
+
     ;; The relative luminance a background must fall under to count as
     ;; dark - `faces.el:1894''s "cut-off value determined
     ;; experimentally".
@@ -367,7 +403,17 @@
       ;; conjunct list from a spec, matches this display. Every conjunct
       ;; must match; a conjunct is `(REQ OPTION ...)'.
       ;;--------------------------------------------------------------
-      (if (eq? display #t)
+      ;; **Two spellings of Elisp's `t' meet here.** This tree's own
+      ;; `defface' specs write `#t' for "matches every display", but a
+      ;; *theme file* carries Elisp data: inside a backquoted spec the
+      ;; symbol `t' is literal, and Emacs compares against that symbol
+      ;; (`faces.el', `face-spec-set-match-display' starts `(if (eq
+      ;; conjuncts t) ...)'). A stock theme's `((t (:inherit ...)))'
+      ;; therefore read as a conjunct list beginning with the symbol `t'
+      ;; and failed as "expecting pair" - every theme converted from
+      ;; GNU Emacs's `etc/themes' has entries of that shape.
+      ;;--------------------------------------------------------------
+      (if (or (eq? display #t) (eq? display 't))
           #t
           (let loop ((conjuncts display) (match #t))
             (cond
@@ -607,16 +653,25 @@
         ;; (theme and user customization)
         (let* ((theme-faces (or (get face 'theme-face) '()))
                (theme-face-applied
-                (let walk ((rest (reverse theme-faces)))
+                ;; **Every matching theme is applied, in order - not
+                ;; the first one that matches.** Emacs's `dolist' over
+                ;; the reversed records calls `face-spec-set-2' for each
+                ;; record whose spec matches, so the *last* one applied
+                ;; (the most recently enabled theme) has the final say.
+                ;; Stopping at the first match gave the earliest theme
+                ;; precedence and made every later `load-theme' a no-op
+                ;; on any face an earlier theme had set - the "first
+                ;; theme load works, later ones do nothing" report.
+                (let walk ((rest (reverse theme-faces)) (applied #f))
                   (if (null? rest)
-                      #f
+                      applied
                       (let ((attrs (face-spec-choose (cadr (car rest))
                                                      no-match)))
                         (if (eq? attrs no-match)
-                            (walk (cdr rest))
+                            (walk (cdr rest) applied)
                             (begin
                               (face-spec-set-2 face attrs)
-                              #t)))))))
+                              (walk (cdr rest) #t))))))))
           ;; (defface default spec) - only when no theme's spec matched.
           (unless theme-face-applied
             (face-spec-set-2 face (defface-attrs)))
@@ -699,6 +754,15 @@
           '((((supports :underline #t)) :underline #t) (((supports :weight bold :underline #t)) :weight bold) (#t :underline #t))
           "Basic underlined face.")
 
+    (defface 'mode-line-active
+          '((#t :inherit mode-line))
+          "Face for the selected mode line.
+This inherits from the `mode-line` face.")
+
+    (defface 'mode-line-buffer-id
+          '((#t (:weight bold)))
+          "Face used for buffer identification parts of the mode line.")
+
     (defface 'mode-line
           '((((class color grayscale) (min-colors 88) (background light)) :box (:line-width -1 :style released-button) :background "grey75" :foreground "black") (((class color grayscale) (min-colors 88) (background dark)) :box (:line-width -1 :style released-button) :background "grey20" :foreground "white") (#t :inverse-video #t))
           "Face for the mode lines as well as header lines.
@@ -708,6 +772,10 @@
     (defface 'mode-line-inactive
           '((default :inherit mode-line) (((class color grayscale) (min-colors 88) (background light)) :weight light :box (:line-width -1 :color "grey75" :style #f) :foreground "grey20" :background "grey90") (((class color grayscale) (min-colors 88) (background dark)) :weight light :box (:line-width -1 :color "grey40" :style #f) :foreground "grey80" :background "grey30"))
           "Basic mode line face for non-selected windows.")
+
+    (defface 'vertical-border
+          '((((type tty)) :inherit mode-line-inactive))
+          "Face used for vertical window dividers on ttys.")
 
     (defface 'header-line
           '((default :inherit mode-line) (((type tty)) :inverse-video #f :underline #t) (((class color grayscale) (background light)) :background "grey90" :foreground "grey20" :box #f) (((class color grayscale) (background dark)) :background "grey20" :foreground "grey90" :box #f) (((class mono) (background light)) :background "white" :foreground "black" :inverse-video #f :box #f :underline #t) (((class mono) (background dark)) :background "black" :foreground "white" :inverse-video #f :box #f :underline #t))
