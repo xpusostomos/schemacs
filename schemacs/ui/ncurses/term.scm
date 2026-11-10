@@ -16,6 +16,9 @@
   ;; See LAYOUT-PLAN.txt for the rule this library is a step of.
   (import
     (scheme base)
+    ;; `string-ci=?' compares `$COLORTERM' with "truecolor" case-insensitively,
+    ;; as `term.c''s `strcasecmp' does.
+    (only (scheme char) string-ci=?)
     (oop goops)
     ;; The terminal itself.
     (ncurses curses)
@@ -45,7 +48,8 @@
     ;; back door's pipe, the pipe itself, and the clock its deadline is
     ;; measured with. `internal-time-units-per-second' is a VALUE and not
     ;; a call, as `pgtk.sld''s `pgtk-now-ms' reads it.
-    (only (guile) getenv string-prefix? logior
+    (only (guile) getenv string-prefix? logior logand ash delq
+          delete last-pair caddr
           select pipe setvbuf fileno
           get-internal-real-time internal-time-units-per-second)
     ;; A terminal can be *told* that the back door has work, rather than
@@ -89,6 +93,51 @@
                 (string-prefix? "eterm" term))
             'light
             'dark)))
+
+    (define *tty-direct-color* (make-parameter #f))
+    ;; ^ Non-#f when the terminal can be told a colour by its 24-bit value
+    ;; instead of by palette index - GNU Emacs's `TF_rgb_separate' and
+    ;; `TN_max_colors = 16777216' (`term.c:4755'). A terminal with it is
+    ;; drawn in exact colours; one without is drawn through the palette.
+
+    (define (%tiget-safe name)
+      ;; `tiget' for a capability the terminal may not have: this binding
+      ;; answers #f for one that is absent (and raises for nothing it
+      ;; knows), which is `tigetstr''s `(char *) -1' in the C.
+      ;;--------------------------------------------------------------
+      (guard (err (else #f)) (tiget name)))
+
+    (define (tty-direct-color-supported?)
+      ;; GNU Emacs's test, in its order (`term.c:4718-4762'):
+      ;;
+      ;;   if (tigetstr ("setf24") && tigetstr ("setb24"))  -> 24-bit
+      ;;   else if (tigetstr ("setrgbf") && tigetstr ("setrgbb")) -> 24-bit
+      ;;   else if (tigetflag ("RGB") > 0)                   -> 24-bit
+      ;;   else if (tigetflag ("Tc") > 0
+      ;;            || COLORTERM is "truecolor")             -> 24-bit
+      ;;
+      ;; **The two `tigetflag' tests are not reachable through this
+      ;; binding**: guile-ncurses has `tiget' (a *string* capability) and
+      ;; `colors' only - no `tigetflag' and no `tigetnum' (checked). A
+      ;; terminal that advertises `Tc' or `RGB' and does not set
+      ;; `COLORTERM' is therefore drawn through the palette here where
+      ;; Emacs would use exact colours - named, and the two string
+      ;; capabilities plus `COLORTERM' cover every terminal that sets
+      ;; one of them.
+      ;;
+      ;; `can-change-color?' gates it because the colours are made
+      ;; through `init-color!' below: a terminal that will not take the
+      ;; redefinition cannot be drawn this way either.
+      ;;--------------------------------------------------------------
+      (let ((colorterm (getenv "COLORTERM")))
+        (and (can-change-color?)
+             ;; The colours are *made* in palette slots, so there have to
+             ;; be slots - above the sixteen whose meanings are not ours.
+             (> (colors) %tty-slot-floor)
+             (or (and (%tiget-safe "setf24") (%tiget-safe "setb24") #t)
+                 (and (%tiget-safe "setrgbf") (%tiget-safe "setrgbb") #t)
+                 (and colorterm (string-ci=? colorterm "truecolor") #t)
+                 #f))))
 
     (define (initialize-display-faces!)
       ;; What `startup.el' does to the terminal's faces, in its order:
@@ -138,7 +187,19 @@
             ;; unless this has been called: without it Emacs's `region'
             ;; on a 16-colour dark display - `blue3' and no foreground -
             ;; came out as pair 0, black on black.
-            (use-default-colors))
+            (use-default-colors)
+            ;; **Before `initialize-display-faces!', because that is what
+            ;; asks the display how many colours it has** - and a
+            ;; 24-bit terminal answers `16777216', which is what makes
+            ;; `tty-color-24bit' (`tty-colors.scm') stop approximating
+            ;; and give a colour its own value.
+            (*tty-direct-color* (tty-direct-color-supported?))
+            (when (*tty-direct-color*)
+              ;; A slot has to be one the terminal has.
+              (set! %tty-slot-limit (min 256 (colors)))
+              (set! %tty-slots-taken 0)
+              (*tty-color-slots* '())
+              (*tty-color-pairs* '())))
           (initialize-display-faces!)
           ;; disable the insert/delete-character optimizations: they
           ;; corrupt the display when lines merge (ncurses tracks a
@@ -600,9 +661,14 @@
 
     (define-method (display-color-cells (d <tty-display>))
       ;; How many colours the terminal can show at once, 0 for a
-      ;; monochrome one.
+      ;; monochrome one - and `16777216' when it takes a colour by its
+      ;; 24-bit value, which is what GNU Emacs answers on such a terminal
+      ;; (`TN_max_colors', `term.c:4760'), and what a spec's
+      ;; `(min-colors 256)' branches are tested against.
       ;;--------------------------------------------------------------
-      (if (has-colors?) (max 1 (colors)) 0))
+      (if (*tty-direct-color*)
+          16777216
+          (if (has-colors?) (max 1 (colors)) 0)))
 
     ;;----------------------------------------------------------------
     ;; The selection: OSC 52
@@ -646,9 +712,84 @@
 
     (define *tty-color-pairs*
       ;; The colour pairs made so far, as `((FOREGROUND . BACKGROUND) .
-      ;; PAIR)'.
+      ;; PAIR)'. In direct colour the two ends are 24-bit pixels, not
+      ;; palette indices.
       ;;--------------------------------------------------------------
       (make-parameter '()))
+
+    (define %tty-slots-taken 0)
+    ;; ^ How many palette slots the direct-colour cache has handed out.
+    (define %tty-slot-limit 256)
+    ;; ^ The slots it may use: above the sixteen ANSI colours, whose
+    ;; meanings other programs on the terminal share.
+    (define %tty-slot-floor 16)
+
+    (define *tty-color-slots* (make-parameter '()))
+    ;; ^ The 24-bit colours given a palette slot, as `((PIXEL . SLOT)
+    ;; ...)', most recently used first - the cache below.
+
+    (define (%tty-split-pixel pixel)
+      ;; PIXEL's three 8-bit components, as `init-color!' takes them.
+      ;;--------------------------------------------------------------
+      (list (ash pixel -16)
+            (logand (ash pixel -8) #xff)
+            (logand pixel #xff)))
+
+    (define (%tty-slot-of-pixel pixel)
+      ;; The palette slot that shows PIXEL, defining one if there is
+      ;; none - **the one way a terminal that can take a 24-bit colour
+      ;; can be drawn in exact colours through ncurses.** ncurses's
+      ;; colour pairs take an index and nothing else: `init-pair!' refuses
+      ;; a 24-bit value ("out of range -32768 to < 32767", measured),
+      ;; and writing the `38;2;r;g;bm' sequence around `addstr' would
+      ;; leave ncurses's own account of the screen and the cursor behind.
+      ;; `init-color!' redefines a palette entry instead, and ncurses
+      ;; sends it as OSC 4 in the right place in its output and resets
+      ;; the palette on `endwin' (both measured) - so a colour a face
+      ;; asks for is the colour the terminal shows, exactly, which is
+      ;; what GNU Emacs's `TF_rgb_separate' path does with its own
+      ;; escape sequences.
+      ;;--------------------------------------------------------------
+      (let ((hit (assq pixel (*tty-color-slots*))))
+        (cond
+         (hit
+          ;; touch: most recently used first
+          (*tty-color-slots* (cons hit (delq hit (*tty-color-slots*))))
+          (cdr hit))
+         (else
+          (let ((slot
+                 (cond
+                  ((< %tty-slots-taken (- %tty-slot-limit %tty-slot-floor))
+                   (set! %tty-slots-taken (+ %tty-slots-taken 1))
+                   (- %tty-slot-limit %tty-slots-taken))
+                  (else
+                   ;; full: the least recently used slot, reused - and
+                   ;; every pair that named it is stale, so they go.
+                   (let ((victim (car (last-pair (*tty-color-slots*)))))
+                     (*tty-color-slots* (delete victim (*tty-color-slots*)))
+                     (*tty-color-pairs* '())
+                     (cdr victim))))))
+            (let ((rgb (%tty-split-pixel pixel)))
+              ;; `init-color!' takes thousandths of the component, and
+              ;; ncurses turns them back into eighths of a byte by
+              ;; truncating - `(VALUE * 255) / 1000' - so the value handed
+              ;; in is the *smallest* that truncates back to the byte it
+              ;; came from. Rounding instead loses a step: measured,
+              ;; `#123456' came back as `rgb:12/34/55'.
+              (init-color! slot
+                           (quotient (+ (* (car rgb) 1000) 254) 255)
+                           (quotient (+ (* (cadr rgb) 1000) 254) 255)
+                           (quotient (+ (* (caddr rgb) 1000) 254) 255)))
+            (*tty-color-slots* (cons (cons pixel slot) (*tty-color-slots*)))
+            slot)))))
+
+    (define (tty-color-index color)
+      ;; COLOR - a 24-bit pixel in direct colour, a palette index
+      ;; otherwise - as the index the pair table wants.
+      ;;--------------------------------------------------------------
+      (cond ((not color) -1)
+            ((*tty-direct-color*) (%tty-slot-of-pixel color))
+            (else color)))
 
     (define (tty-color-pair foreground background)
       ;; The ncurses colour-pair number for FOREGROUND and BACKGROUND,
@@ -666,8 +807,9 @@
            (entry (cdr entry))
            (else
             (let ((n (+ 1 (length (*tty-color-pairs*)))))
-              (init-pair! n (if foreground foreground -1)
-                          (if background background -1))
+              (init-pair! n
+                          (tty-color-index foreground)
+                          (tty-color-index background))
               (*tty-color-pairs* (cons (cons key n) (*tty-color-pairs*)))
               n)))))))
 

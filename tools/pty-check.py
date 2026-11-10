@@ -143,7 +143,7 @@ EXITED = ("exited",)
 
 
 def drive(keys, path, settle=1.5, gap=0.3, term=None, background="0000/0000/0000",
-          report_exit=False, during=None, config=None):
+          report_exit=False, during=None, config=None, colorterm=None):
     """Run the editor on PATH, send KEYS, and return everything it drew.
 
     PATH of None starts the editor with **no file arguments**, which is
@@ -185,6 +185,12 @@ def drive(keys, path, settle=1.5, gap=0.3, term=None, background="0000/0000/0000
         os.environ["GUILE_WARN_DEPRECATED"] = "no"
         os.environ["XDG_CONFIG_HOME"] = config or TEST_CONFIG_HOME
         os.environ["TERM"] = term or os.environ.get("SCHEMACS_TEST_TERM", "xterm")
+        # **Pinned, not inherited.** `COLORTERM' is Emacs's cue for a
+        # direct-colour terminal (`term.c:4755'), and a developer's own
+        # shell may or may not set it - so a check would draw differently
+        # on two machines. `colorterm="truecolor"' is how the check that
+        # is *about* it asks for it.
+        os.environ["COLORTERM"] = colorterm or ""
         os.chdir(REPO)
         # **`bin/se', which is the editor's one entry point.** This used to
         # run `main-ncurses.scm', a second launcher of its own that
@@ -440,6 +446,56 @@ def check_minibuffer_arrows():
     if prompt_with in screen:
         problems.append("<down> did not come back from the history entry "
                         "(screen %r)" % (screen[-400:],))
+    return problems
+
+
+def check_truecolor():
+    """A truecolor terminal is drawn in the theme's exact colours.
+
+    GNU Emacs takes a colour by its 24-bit value when the terminal says
+    it can take one (`term.c:4755`: the `setf24`/`setrgbf` string
+    capabilities, the `RGB`/`Tc` flags, or `COLORTERM=truecolor`), and
+    `(display-color-cells)` is then 16777216. Without it a theme's
+    `:background "#142620"` goes through the 256-colour palette and comes
+    out as `#005f00` - a hard green where Emacs shows a near-black nobody
+    can see. ncurses cannot carry a 24-bit pair (`init-pair!` refuses
+    one, measured), so each exact colour is defined into a palette slot
+    with `init-color!`, which ncurses sends as OSC 4.
+
+    The probe is a theme of its own so the colour is this check's:
+    `#123456` must reach the terminal as `rgb:12/34/56` - and on the
+    same terminal with `COLORTERM` empty it must not, which is what the
+    editor drew before this existed.
+    """
+    themes = tempfile.mkdtemp(prefix="pty-check-themes-")
+    open(os.path.join(themes, "truecolor-probe-theme.scm"), "w").write(
+        '(define-theme truecolor-probe "A colour no 256-palette has.")\n'
+        '(custom-theme-set-faces\n'
+        " 'truecolor-probe\n"
+        '  \'(default ((#t (:background "#123456" :foreground "#fedcba")))))\n'
+        "(provide-theme 'truecolor-probe)\n")
+    config = tempfile.mkdtemp(prefix="pty-check-truecolor-")
+    os.makedirs(os.path.join(config, "schemacs"))
+    open(os.path.join(config, "schemacs", "init.scm"), "w").write(
+        NO_SPLASH_INIT
+        + "(import (schemacs editor theme))\n"
+        + '(*custom-theme-load-path* (cons "%s" (*custom-theme-load-path*)))\n' % themes
+        + "(load-theme 'truecolor-probe #t)\n")
+    path = "/tmp/pty-check-truecolor.txt"
+    open(path, "w").write("truecolor\n")
+    keys = [C_x + C_f, C_a, C_k, path.encode(), RET]
+    problems = []
+    screen = drive(keys, path, config=config, term="xterm-256color",
+                  colorterm="truecolor")
+    if "rgb:12/34/56" not in screen:
+        problems.append("the exact background never reached the terminal "
+                        "(no OSC 4 for rgb:12/34/56; screen %r)"
+                        % (screen[-400:],))
+    screen = drive(keys, path, config=config, term="xterm-256color",
+                  colorterm="")
+    if "rgb:12/34/56" in screen:
+        problems.append("a terminal that did not claim 24-bit colour was "
+                        "sent one anyway")
     return problems
 
 
@@ -3934,6 +3990,7 @@ CHECKS = {
     "special-mode-keys": check_special_mode_keys,
     "scroll": check_scroll,
     "save": check_save,
+    "truecolor": check_truecolor,
     "save-y-n": check_save_y_n,
     "redisplay": check_redisplay,
     "newline": check_newline,
