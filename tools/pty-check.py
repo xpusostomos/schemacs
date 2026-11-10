@@ -984,6 +984,9 @@ def check_isearch_quit():
     return []
 
 
+_HEIGHT = 24   # every editor the checks drive is a 24-row pty
+
+
 def screen_of(out, width=80):
     """The newest full repaint, as plain text with the rows on separate lines.
 
@@ -1014,7 +1017,34 @@ def screen_of(out, width=80):
     import re
     tail = out.rsplit("\x1b[2J", 1)[-1]
     rows, row, col = {}, 0, 0
-    for chunk in re.split(r"(\x1b\[[0-9;]*[A-Za-z]|\x1b\(B|\r|\n|\x08)", tail):
+
+    def blank(r):
+        rows.pop(r, None)
+
+    def scroll_up(n, top=0, bottom=_HEIGHT - 1):
+        # SU, or DL with the cursor at TOP: the lines move up and blank
+        # lines appear at the bottom of the region.
+        for r in range(top, bottom - n + 1):
+            if r + n in rows:
+                rows[r] = rows[r + n]
+            else:
+                rows.pop(r, None)
+        for r in range(bottom - n + 1, bottom + 1):
+            blank(r)
+
+    def scroll_down(n, top=0, bottom=_HEIGHT - 1):
+        # SD, or IL: the lines move down and blank lines appear at TOP.
+        for r in range(bottom, top + n - 1, -1):
+            if r - n in rows:
+                rows[r] = rows[r - n]
+            else:
+                rows.pop(r, None)
+        for r in range(top, top + n):
+            blank(r)
+
+    scroll_region = [0, _HEIGHT - 1]
+    for chunk in re.split(r"(\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"
+                          r"|\x1b\[[0-9;?]*[A-Za-z]|\x1b\(B|\r|\n|\x08)", tail):
         if not chunk:
             continue
         if chunk == "\r":
@@ -1064,7 +1094,41 @@ def screen_of(out, width=80):
                 for c in [c for c in rows.get(row, {}) if c >= col]:
                     del rows[row][c]
             elif cmd == "J":
-                rows = {}
+                # **ED is a range, not "clear the screen".** `ESC [ J`
+                # (which ncurses writes as `ESC [ 0 J`) erases from the
+                # cursor *down*; treating it as "erase everything" wiped
+                # every row above, which is how a line of text that the
+                # terminal was showing read as never drawn.
+                if not nums or nums[0] == 0:
+                    for r in sorted([r for r in rows if r > row]):
+                        del rows[r]
+                    for c in [c for c in rows.get(row, {}) if c >= col]:
+                        del rows[row][c]
+                elif nums[0] == 1:
+                    for r in sorted([r for r in rows if r < row]):
+                        del rows[r]
+                    for c in [c for c in rows.get(row, {}) if c <= col]:
+                        del rows[row][c]
+                else:
+                    rows = {}
+            elif cmd == "r":
+                # **DECSTBM.** ncurses sets a scroll region and then
+                # scrolls inside it with `S`/`T` - which is how a window
+                # that changes height is redrawn without moving every
+                # line - and a reader with no region model drew nothing
+                # for the scrolled rows, so the main window's mode line
+                # vanished when a completions window opened.
+                scroll_region[0] = (nums[0] if nums else 1) - 1
+                scroll_region[1] = ((nums[1] if len(nums) > 1 else _HEIGHT)
+                                    - 1)
+            elif cmd == "S":
+                scroll_up(n, scroll_region[0], scroll_region[1])
+            elif cmd == "T":
+                scroll_down(n, scroll_region[0], scroll_region[1])
+            elif cmd == "L":
+                scroll_down(n, row, scroll_region[1])
+            elif cmd == "M":
+                scroll_up(n, row, scroll_region[1])
             elif cmd == "G":
                 # **CHA, horizontal position.** ncurses reaches a column
                 # with this whenever it is cheaper than a full address -
@@ -3413,9 +3477,12 @@ def check_query_replace_quit():
     path = "/tmp/pty-check-qrq.txt"
     open(path, "w").write("apple apple\n")
     problems = []
-    out = drive([C_x + C_f, C_a, C_k, path.encode(), RET,
-                 ESC, b"%", b"apple", RET, b"pear", RET,
-                 C_g], path, gap=0.35)
+    # **The screen, not the byte stream.** With the row diff in place the
+    # echo area is emitted as the cells that changed, so "Quit" need not
+    # appear as a contiguous run of bytes even though it is on the screen.
+    out = screen_of(drive([C_x + C_f, C_a, C_k, path.encode(), RET,
+                           ESC, b"%", b"apple", RET, b"pear", RET,
+                           C_g], path, gap=0.35))
     if "Quit" not in out:
         problems.append("C-g during query-replace did not report Quit")
     # no y was pressed, so nothing was replaced: no "Replaced N" message
@@ -3585,20 +3652,20 @@ def check_quoted_insert():
     path = "/tmp/pty-check-qi.txt"
     open(path, "w").write("")
     problems = []
-    out = drive([C_q, C_g], path)
+    out = screen_of(drive([C_q, C_g], path))
     if "^G" not in out:
         problems.append("C-q C-g did not insert ^G (screen %r)" % out[-200:])
     # 101 octal is 65, `A'; the RET that terminates the digits is
     # discarded
-    out = drive([C_q, b"1", b"0", b"1", RET], path)
+    out = screen_of(drive([C_q, b"1", b"0", b"1", RET], path))
     if "A" not in out:
         problems.append("C-q 1 0 1 RET did not insert A")
     # a non-digit terminator is used itself as input: the code 010 = 8
     # is inserted and the `x' runs as a command
-    out = drive([C_q, b"1", b"0", b"x"], path)
+    out = screen_of(drive([C_q, b"1", b"0", b"x"], path))
     if "^Hx" not in out:
         problems.append("C-q 1 0 x did not insert ^H and run the x")
-    out = drive([C_u, b"3", C_q, b"a"], path)
+    out = screen_of(drive([C_u, b"3", C_q, b"a"], path))
     if "aaa" not in out:
         problems.append("C-u 3 C-q a did not insert aaa")
     return problems

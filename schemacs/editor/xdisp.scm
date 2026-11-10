@@ -2696,15 +2696,19 @@
                 ;; does not port. Until it does, a terminal repaints the
                 ;; frame it is drawing, and a graphics frame uses the diff.
                 (not (graphical-frame?)))
-        ;; **The terminal still clears, and a graphics frame does not.**
-        ;; `redraw_frame` (`dispnew.c:3212`) is guarded by
-        ;; `if (FRAME_WINDOW_P (f))` for `SET_FRAME_GARBAGED` and calls
-        ;; `clear_frame` for the rest - and this tree's terminal says why
-        ;; in `clear-frame-area!`: "the partial-update optimizations
-        ;; (scroll regions, insert/delete character) desync the physical
-        ;; terminal when lines merge, so a forced whole repaint is asked
-        ;; for every screen". A GUI surface holds every pixel it was
-        ;; given, so it needs only the matrices invalidated.
+        ;; **The terminal's surface is erased, and a graphics frame's is
+        ;; not.** A GUI surface holds every pixel it was given, so
+        ;; invalidating the matrices is enough. A terminal's is the
+        ;; physical line the rows are written into, and the harness that
+        ;; is the only regression net for the drawing cannot yet certify
+        ;; the no-erase path - so it erases as well as invalidating.
+        ;;
+        ;; `clear_garbaged_frames`' own note (quoted above) says a clear
+        ;; is not necessary, and on a real terminal it is not: `tmux
+        ;; capture-pane` shows the no-erase path drawing, paging and
+        ;; opening a completions window correctly. What is missing is a
+        ;; faithful screen reader in `tools/pty-check.py`; DEPARTURES.md
+        ;; says what is left.
         (when (not (graphical-frame?))
           (clear-frame-area! (current-display)))
         (for-each (lambda (w)

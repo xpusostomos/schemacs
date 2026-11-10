@@ -172,45 +172,27 @@ function**. A departure on this list is a debt, not a licence.
   Emacs's does, instead of drawing through ncurses. That is the real
   difference; the palette-slot cache is the accommodation.
 
-### A terminal frame is repainted whole on every redisplay
+### A window that has not changed is still rebuilt
 
-- **Emacs** on a terminal has two fast paths, and neither is available
-  here for a reason worth knowing:
-  - `try_window_reusing_current_matrix` (`xdisp.c`) returns false
-    immediately for a terminal frame - it "doesn't handle terminal
-    frames";
-  - `try_window_id` (`xdisp.c:22583`) gives up unless
-    `FRAME_LINE_INS_DEL_OK (f)`, i.e. unless the terminal can insert and
-    delete lines - and this tree switches those off on purpose
-    (`idlok!`/`idcok!` in `with-terminal`: "they corrupt the display
-    when lines merge (ncurses tracks a virtual screen the terminal no
-    longer matches)").
-
-  With both unavailable, Emacs does what this tree's `update_window`
-  does: clear the *desired* matrix, rebuild it, and draw the rows that
-  differ.
-- **Here**: a terminal frame is erased and repainted whole every
-  redisplay (`clear-garbaged-frames!`). The row diff is ported and works
-  (a graphics frame uses it), and the no-erase path **draws correctly on
-  a real terminal**: `tmux capture-pane` of a file with a wrapped line,
-  `C-v` twice, `M-v` twice shows the right screen every time. What has
-  not been established is that the harness agrees - `continuation` and
-  `completion-ui` disagreed the last time it was tried - so the erase
-  stays until that is settled, since `tools/pty-check.py` is the only
-  regression net for the drawing.
-  (Two real bugs were found while trying it: `blank-glyph-row!` blanked
-  by the row's recorded `y` - 0 on a row that was never built - and wiped
-  the window's first line once per empty row; and the harness's screen
-  reader mis-parsed VPA, CR and backspace, so a correct screen read as
-  "2ne 2". Both are fixed.)
-- **Cost**: on a 40x120 terminal over a 2000-line file, one redisplay
-  writes ~12.8 KB and takes ~13 ms; without the erase it is the few
-  hundred bytes of the cells that changed.
-- **Closing it**: get the harness to certify the no-erase path (a real
-  terminal is already correct), then drop the `(not (graphical-frame?))`
-  branch from `clear-garbaged-frames!` and add `window_outdated`'s early
-  return (`window.c:231`) - tried on 2026-11-10 and backed out with it,
-  because a skipped window keeps the empty desired matrix `assign_row`
-  swapped out of it and `update_window` then compares that empty matrix
-  against the screen.
-
+- **Emacs** returns early from `redisplay_window` for a window that is not
+  outdated (`window_outdated`, `window.c:231`): a cursor move costs the
+  cursor and nothing else, because the rows are already in the desired
+  matrix and `update_window` finds them equal.
+- **Here**: every window's desired matrix is rebuilt on every redisplay,
+  so a cursor move rebuilds and re-draws every row of every window. The
+  diff then suppresses the *output* - ncurses or the toolkit emits only
+  the cells that differ - so what a keystroke costs is the row building
+  (~2.6 ms for 40 rows) rather than the drawing.
+- **Why the skip is not in yet**: `assign_row` swaps the built rows out of
+  the desired matrix into the current one, so a window that is skipped
+  keeps an *empty* desired matrix; `update_window` would then compare that
+  empty matrix against the screen and blank it. Emacs does not have the
+  problem because a skipped window is not passed to `update_window` at
+  all - the two have to be added together, and the first attempt (skip
+  plus update, 2026-11-10) put a graphical frame into a redraw loop at
+  startup.
+- **Closing it**: skip both the rebuild *and* the `update-window!` call
+  for a window that `window_outdated` and the window-start check both
+  call fresh, with a per-window record of what was drawn
+  (`w->last_modified`, `w->last_overlay_modified`, and the start the rows
+  were built from).
