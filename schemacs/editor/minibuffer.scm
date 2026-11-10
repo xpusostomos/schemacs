@@ -145,6 +145,7 @@
     (only (schemacs editor frame)
           *current-frame* *echo-area-buffer* *echo-area-prompt* *minibuffer*
           frame-height select-window selected-window set!frame-message
+          frame-minibuffer-window set-window-buffer!
           set-message! set-window-point! window-buffer window-height
           window-list window-width
           ;; the completions window's display, as
@@ -547,6 +548,16 @@ read-number-history
                          ;; or a click in another window - left it.
                          (*current-buffer* #f))
             (set-buffer ed)
+            ;; **The minibuffer *window* shows the prompt's buffer.**
+            ;; GNU Emacs's `read_minibuf` ends its setup with
+            ;; `set_window_buffer (minibuffer_window, ...)` - the prompt
+            ;; is not a state the frame knows about but a *buffer in a
+            ;; window*, which is why a click on it selects it and `C-x o`
+            ;; can cycle into it. This is the same two lines, and it is
+            ;; what `minibuffer-window-active-p` reads.
+            (let ((mini (and frame (frame-minibuffer-window frame))))
+              (when mini
+                (set-window-buffer! mini ed)))
             ;; `minibuffer-setup-hook', run where the C runs it: after
             ;; the prompt and the initial input are in place, before the
             ;; recursive edit that reads (minibuf.c:912).

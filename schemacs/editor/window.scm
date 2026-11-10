@@ -1135,7 +1135,13 @@ windows it was combined with."
              (siblings (and parent (list-without window (window-children parent))))
              (selected (frame-selected-window frame)))
         (cond
-         ((and (not parent) (<= (length (frame-windows frame)) 1))
+         ;; GNU Emacs's `delete_window` (`window.c:5706`): "Never delete a
+         ;; minibuffer or frame root window" - the test is `NILP (w->parent)`
+         ;; and nothing else. Counting the frame's windows was the same
+         ;; answer while the minibuffer was not a window; now that it is,
+         ;; a frame holding one ordinary window and the minibuffer has two,
+         ;; and the count let the last ordinary window be deleted.
+         ((not parent)
           (error "Attempt to delete minibuffer or sole ordinary window"))
          (else
           (for-each (lambda (taker) (window-absorb! taker window)) siblings)
@@ -1265,9 +1271,16 @@ windows on from the selected one; a negative COUNT goes the other way."
              (window (list-ref windows (modulo (+ at count) n))))
         (select-window window)
         ;; ... and the buffer it shows becomes current, which in Emacs is
-        ;; `select-window''s own doing (`Fselect_window', window.c:3803)
-        (set-buffer (window-buffer window))
-        (record-buffer! (window-buffer window))
+        ;; `select-window''s own doing (`Fselect_window', window.c:3803).
+        ;; **A window with no buffer has nothing to make current** - the
+        ;; minibuffer window before a prompt is read - and the C guards
+        ;; both calls the same way (`Fset_buffer (w->contents)` with a nil
+        ;; `contents`, and `record_buffer` inside `if (NILP (norecord))`
+        ;; after it has checked the buffer).
+        (let ((buffer (window-buffer window)))
+          (when buffer
+            (set-buffer buffer)
+            (record-buffer! buffer)))
         window))
 
 

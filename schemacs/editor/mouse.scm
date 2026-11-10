@@ -60,7 +60,7 @@
           window-edges window-height window-point window-type?
           ;; `mouse-minibuffer-check` asks whether a prompt is up: the
           ;; echo area is this tree's minibuffer window.
-          *echo-area-buffer*)
+          *echo-area-buffer* minibuffer-window-active-p window-minibuffer-p)
     (only (schemacs editor editfns) goto-char point)
     ;; The mark a drag sets, and the region it leaves active:
     ;; `push-mark', `pop-mark', `activate-mark' and `region-active-p' are
@@ -133,34 +133,21 @@
       ;;          (user-error "Minibuffer window is not active")))
       ;;   (run-hooks 'mouse-leave-buffer-hook)
       ;;
-      ;; **This tree has no minibuffer window**, so the C-shaped test has
-      ;; nothing to test. The same *condition* is still reachable, and it
-      ;; is what a click on the echo area row hits: the echo area is a
-      ;; row of the frame, `posn-at-x-y` answers the frame for it, and
-      ;; `posn-set-point` would then try to select a frame. Active means
-      ;; a prompt is up (`*echo-area-buffer*` is a live read), and then
-      ;; the event is already inside that recursive edit and there is
-      ;; nothing to do; not active means the click is on a row that holds
-      ;; no buffer, and Emacs's answer is to refuse it. So a frame
-      ;; position on the echo row is this tree's "minibuffer window that
-      ;; is not active".
+      ;; This is the C's test now, not a stand-in for it: the echo area is
+      ;; a real minibuffer window (`frame-minibuffer-window`), so
+      ;; `posn-at-x-y` names it when it is active and the frame when it is
+      ;; not. **`window-minibuffer-p` and the active test are the same
+      ;; question here** - the frame has exactly one minibuffer window, so
+      ;; being it means being the frame's, and `minibuffer-window-active-p`
+      ;; is what says whether a prompt is being read in it.
       ;;
       ;; Not carried: `mouse-leave-buffer-hook`, which no caller here
       ;; registers on.
       ;;--------------------------------------------------------------
       (let ((w (posn-window (event-start event))))
-        (when (and (frame? w)
-                   (not (*echo-area-buffer*))
-                   ;; The event is on the frame's last row, which is where
-                   ;; the echo area is drawn (`render!`). **The coordinate
-                   ;; is the one `posn-at-x-y` was given**: a *cell* row,
-                   ;; not a pixel - the gtk front end converts the pointer
-                   ;; to cells before it asks, so the event carries the
-                   ;; same number `posn-at-x-y` divided nothing into.
-                   (let ((y (cdr (posn-x-y (event-start event)))))
-                     (and (number? y)
-                          (>= (inexact->exact (round y))
-                              (- (frame-height w) 1)))))
+        (when (and (window-type? w)
+                   (window-minibuffer-p w)
+                   (not (minibuffer-window-active-p w)))
           (error "Minibuffer window is not active"))))
 
     (define (posn-set-point position)
@@ -544,7 +531,18 @@ This should be bound to a mouse drag event."
       (deactivate-mark)
       (let* ((start-posn (event-start start-event))
              (start-point (posn-point start-posn))
-             (start-window (posn-window start-posn))
+             ;; **A press outside every window names the frame**, which
+             ;; is `posn-at-x-y`'s answer by design; `window-buffer` and
+             ;; `window-height` below would then be asked of a frame -
+             ;; "Wrong type argument: #<<frame> windows: ...". Emacs's
+             ;; `mouse-drag-track` never meets it because its position
+             ;; names a window (the minibuffer is one), so the rule for
+             ;; what a frame position means is the one `posn-set-point`
+             ;; states: the frame's own selected window.
+             (start-window (let ((w (posn-window start-posn)))
+                             (if (window-type? w)
+                                 w
+                                 (frame-selected-window w))))
              ;; "We've recorded what we needed from the current buffer
              ;; and window" - Emacs clears the buffer's deferred
              ;; `deactivate-mark' flag here, because this drag is about to

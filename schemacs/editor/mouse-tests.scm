@@ -52,6 +52,9 @@
          (read-input-event display-read-input-event))
  (only (schemacs editor frame)
        *current-frame* *echo-area-buffer* *frame-list* frame? frame-height
+       frame-minibuffer-window frame-windows minibuffer-window-active-p
+       select-window
+       set-window-buffer! window-height window-top
        frame-message
        selected-window
        frame-selected-window mouse-position
@@ -67,6 +70,7 @@
  (only (schemacs editor mouse) *mouse-scroll-delay* *mouse-scroll-min-lines*
        mouse-minibuffer-check posn-set-point)
  (only (schemacs editor subr) event-start posn-window)
+ (only (schemacs editor window) other-window)
  (only (schemacs editor simple) region-active-p)
  (only (schemacs editor editfns) point insert
 )
@@ -534,38 +538,46 @@
 ;; Active (a prompt is up): allowed, because the click is inside that
 ;; recursive edit already.
 (let* ((ed (allocate-buffer))
-       (f (new-frame ed 24 80)))
+       (f (new-frame ed 24 80))
+       (mini (frame-minibuffer-window f)))
   (with-current-buffer ed (insert "hello\n"))
-  ;; a frame of its own: an earlier test's frame is left in `*frame-list*`
-  ;; and `posn-at-x-y` walks `(window-list frame)`, so the frame has to be
-  ;; the current one *and* the only one for the echo row to be outside
-  ;; every window
+  ;; a frame of its own: `posn-at-x-y` walks `(window-list frame)`, and
+  ;; the minibuffer window is in that list only while it is active
   (parameterize ((*current-frame* f) (*frame-list* (list f))
                  (*echo-area-buffer* #f))
     (render! f)
     (let ((echo-row (- (frame-height f) 1))
           (event (lambda (row) (list 'down-mouse-1 (posn-at-x-y 0 row f)))))
-      ;; the position really is the frame's, which is the whole problem
-      (test-equal "a click on the echo row names the frame"
+      ;; **with no prompt the echo row is nobody's window**, which is
+      ;; Emacs's rule for an inactive minibuffer window: `window-list`
+      ;; leaves it out, so the position is the frame's and there is
+      ;; nothing to select.
+      (test-equal "with no prompt the echo row names the frame"
         #t (frame? (posn-window (event-start (event echo-row)))))
-      (test-equal "and mouse-minibuffer-check refuses it"
-        "Minibuffer window is not active"
-        (guard (e (#t (if (error-object? e)
-                          (error-object-message e)
-                          'ERR)))
-          (mouse-minibuffer-check (event echo-row))
-          'no-error))
-      (test-equal "and allows it while a prompt is up"
+      ;; **with a prompt up it is the minibuffer window**, and that is
+      ;; what makes both a click and `C-x o` reach it.
+      (parameterize ((*echo-area-buffer* (get-buffer-create "*echo*")))
+        (set-window-buffer! mini (*echo-area-buffer*))
+        (test-equal "with a prompt the echo row names the minibuffer window"
+          #t (eq? mini (posn-window (event-start (event echo-row)))))
+        (test-equal "and that window is active"
+          #t (minibuffer-window-active-p mini))
+        (test-equal "so selecting it works, which is the click"
+          #t (begin (posn-set-point (posn-at-x-y 0 echo-row f))
+                    (eq? (selected-window) mini)))
+        ;; the assertion above left the minibuffer selected, so start
+        ;; from an ordinary window
+        (select-window (car (frame-windows f)))
+        (test-equal "C-x o reaches the prompt"
+          #t (begin (other-window 1) (eq? (selected-window) mini)))
+        (test-equal "and C-x o comes back out of it"
+          #t (begin (other-window 1)
+                    (eq? (selected-window) (car (frame-windows f))))))
+      ;; and a click in the text area still selects its own window
+      (test-equal "a click in the text area selects that window"
         #t
-        (parameterize ((*echo-area-buffer* (get-buffer-create "*echo*")))
-          (mouse-minibuffer-check (event echo-row))
-          #t))
-      ;; and a click in the text area still selects, so the guard is not
-      ;; refusing everything
-      (test-equal "a click in the text area still selects"
-        #t
-        (let ((w (posn-at-x-y 0 2 f)))
-          (posn-set-point w)
-          (eq? (posn-window w) (selected-window)))))))
+        (let ((p (posn-at-x-y 0 2 f)))
+          (posn-set-point p)
+          (eq? (posn-window p) (selected-window)))))))
 
 (test-end "schemacs_editor_mouse")

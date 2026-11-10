@@ -86,7 +86,7 @@
     ;; `window-cursor-table' is held weakly - see the note above
     ;; `WINDOW-CURSOR-TABLE'. Guile's own weak table, a key held weakly.
     (only (guile)
-          kill getpid SIGTSTP
+          delq kill getpid SIGTSTP
           make-weak-key-hash-table hashq-ref hashq-set!)
     ;; `w->cursor_off_p' and the blink's timers are kept beside the
     ;; window and the frame rather than in the window, for the reason
@@ -158,6 +158,9 @@
    frame-parameters-alist
    ;; `FRAME_GARBAGED_P` and `SET_FRAME_GARBAGED` (`frame.h:1173`).
    frame-garbaged-p set-frame-garbaged!
+   ;; `FRAME_MINIBUF_WINDOW (f)` and the test that it is being read.
+   frame-minibuffer-window set!frame-minibuffer-window
+   minibuffer-window-active-p window-minibuffer-p
    make<window>
    frame-editor
    frame-keymap-state
@@ -420,19 +423,68 @@
 
     (define (window-list . args)
       ;; The frame's windows that show a buffer, in the order they are
-      ;; arranged on the screen: GNU Emacs's `(window-list)'. The tree's
-      ;; internal windows are not among them - nothing can be shown in
-      ;; one and no command can select one.
+      ;; arranged on the screen: GNU Emacs's `(window-list frame minibuf)'.
+      ;; The tree's internal windows are not among them - nothing can be
+      ;; shown in one and no command can select one.
       ;;
-      ;; With no frame argument the current frame's windows are walked.
+      ;; **MINIBUF decides about the minibuffer window**, exactly as
+      ;; `window_list_1` does (`window.c`): "MINIBUF t means include the
+      ;; minibuffer window, even if it isn't active. MINIBUF nil or
+      ;; omitted means include the minibuffer window only if it's
+      ;; active. MINIBUF neither nil nor t means never include the
+      ;; minibuffer window." That rule is what makes `C-x o` cycle into
+      ;; the prompt while it is being read and skip it otherwise - and
+      ;; what keeps `posn-at-x-y` from answering the echo row when
+      ;; nothing is being prompted there.
       ;;--------------------------------------------------------------
-      (let ((frame (if (pair? args) (car args) (*current-frame*))))
-        (let walk ((windows (if frame (frame-windows frame) '())))
-          (cond ((null? windows) '())
-                ((window-internal? (car windows))
-                 (append (walk (window-children (car windows)))
-                         (walk (cdr windows))))
-                (else (cons (car windows) (walk (cdr windows))))))))
+      (let* ((frame (if (pair? args) (car args) (*current-frame*)))
+             (minibuf (if (and (pair? args) (pair? (cdr args))) (cadr args) #f))
+             (all (let walk ((windows (if frame (frame-windows frame) '())))
+                    (cond ((null? windows) '())
+                          ((window-internal? (car windows))
+                           (append (walk (window-children (car windows)))
+                                   (walk (cdr windows))))
+                          (else (cons (car windows) (walk (cdr windows))))))))
+        (let ((mini (and frame (frame-minibuffer-window frame))))
+          (cond
+           ((not mini) all)
+           ;; t: include it whether or not it is active
+           ((eq? minibuf #t) all)
+           ;; nil or omitted: include it only while it is active
+           ((or (null? minibuf) (eq? minibuf #f))
+            (if (minibuffer-window-active-p mini)
+                all
+                (delq mini all)))
+           ;; any other value: never include it
+           (else (delq mini all))
+           ))))
+
+    (define (window-minibuffer-p window)
+      ;; GNU Emacs's `window-minibuffer-p' (`window.c`): "Return t if
+      ;; WINDOW is a minibuffer window." The frame has exactly one, and it
+      ;; is `FRAME_MINIBUF_WINDOW`.
+      ;;--------------------------------------------------------------
+      (and (window-type? window)
+           (let ((frame (window-frame window)))
+             (and frame (eq? window (frame-minibuffer-window frame))))))
+
+    (define (minibuffer-window-active-p window)
+      ;; GNU Emacs's `minibuffer-window-active-p' (`window.c:...`): whether
+      ;; WINDOW is the frame's minibuffer window *and* is being used for a
+      ;; read right now.
+      ;;
+      ;; It asks about the window's buffer, which is how Emacs can tell:
+      ;; the minibuffer window always exists, and `read_minibuf` gives it
+      ;; the prompt's buffer (`set_window_buffer`). Here it is the same
+      ;; question - the window has a buffer, and that buffer is the one
+      ;; `*echo-area-buffer*` names.
+      ;;--------------------------------------------------------------
+      (and window
+           (window-type? window)
+           (eq? window (and (*current-frame*)
+                            (frame-minibuffer-window (*current-frame*))))
+           (let ((b (window-buffer window)))
+             (and b (eq? b (*echo-area-buffer*))))))
 
     (define (window-point window)
       ;; The character index point is at in WINDOW: GNU Emacs's
@@ -559,7 +611,13 @@
       ;; start begins a line.
       ;;--------------------------------------------------------------
       (let ((buffer (window-buffer window)))
-        (set-marker (%window-start window) position buffer)
+        ;; `set_marker_restricted` makes the marker if the window has
+        ;; none - which a window made without a buffer (`make_window`,
+        ;; and this tree's minibuffer window) does not until its first
+        ;; `set_window_buffer`.
+        (if (%window-start window)
+            (set-marker (%window-start window) position buffer)
+            (set!%window-start window (build-marker buffer position)))
         ;; `fetch-char' is `char-after', so the comparison is `char=?'
         ;; and `#\newline' - and a position with no character before it is
         ;; the beginning of the buffer by definition.
@@ -617,7 +675,11 @@
         ;; replaced" - the C's `calln (Qrecord_window_buffer, window)`
         ;; (`window.c:4475`), made only when the buffer is really
         ;; changing, which is the `if` it sits in.
-        (unless (eq? old buffer)
+        ;;
+        ;; **And only when there was a buffer to record.** The minibuffer
+        ;; window is bufferless until its first prompt, and recording that
+        ;; `#f` puts a nil entry in its `prev-buffers`.
+        (when (and old (not (eq? old buffer)))
           ((*record-window-buffer-function*) window))
         (set!window-buffer window buffer)
         (set!%window-end-pos window 0)
@@ -628,8 +690,14 @@
         (set!%window-hscroll window 0)
         (set!%window-min-hscroll window 0)
         (set!%window-suspend-auto-hscroll? window #f)
-        (set-marker (%window-point window) (buffer-pt buffer)
-                     buffer)
+        ;; **The point marker is made when the window first gets a
+        ;; buffer.** `make_window` leaves `w->pointm` nil and
+        ;; `set_window_buffer` makes it here (`set_marker_both (w->pointm,
+        ;; buffer, BUF_PT (b), ...)`, `window.c:4375`); the minibuffer
+        ;; window is made with no buffer, so it has none to write.
+        (if (%window-point window)
+            (set-marker (%window-point window) (buffer-pt buffer) buffer)
+            (set!%window-point window (build-marker buffer (buffer-pt buffer))))
         (set-window-start! window 1)
         ;; **A window that changed buffer has nothing of the new one on
         ;; the screen**, so the frame is garbaged and the next redisplay
@@ -687,23 +755,53 @@
       ;; showing that place. Written as 1, `C-x 5 2' put the new window
       ;; at the top of the file wherever the old one was - measured on
       ;; Emacs 31.1: point at 21, the new frame's `window-point' is 21.
-      (make<window> frame buffer (build-marker buffer (buffer-pt buffer))
-                            (build-marker buffer 1) #t
-                            0 0 #f 0 0
-                            top height left width #f '()
-                            0 0 #f 0 '() '()))
+      ;; **A window may show no buffer yet**, which is the minibuffer
+      ;; window before a prompt is read: GNU Emacs's `make_window` gives
+      ;; `w->contents` as nil and `set_window_buffer` fills it in
+      ;; (`window.c:4337`). `minibuffer-window-active-p` is the test for
+      ;; whether it has one.
+      (if buffer
+          (make<window> frame buffer (build-marker buffer (buffer-pt buffer))
+                        (build-marker buffer 1) #t
+                        0 0 #f 0 0
+                        top height left width #f '()
+                        0 0 #f 0 '() '())
+          (make<window> frame #f #f #f #f
+                        0 0 #f 0 0
+                        top height left width #f '()
+                        0 0 #f 0 '() '())))
 
     ;;----------------------------------------------------------------
     ;; Editor state
 
     (define-record-type <frame>
       (make<frame>
-       windows selected-window height width
+       windows selected-window minibuffer-window height width
        message message-timer keymap-state quit-cont output name
        parameters garbaged)
       frame-type?
       (windows   frame-windows   set!frame-windows)
       ;; ^ The frame's windows, top to bottom. Emacs's `window-list'.
+      (minibuffer-window frame-minibuffer-window
+                         set!frame-minibuffer-window)
+      ;; ^ `f->minibuffer_window` (`frame.h`), read as
+      ;; `FRAME_MINIBUF_WINDOW (f)`: **the window the echo area is**.
+      ;; GNU Emacs gives every frame one (`make_frame` sets it,
+      ;; `frame.c:1237`), it is the frame's last row, and its buffer is
+      ;; the minibuffer while a prompt is being read. Emacs therefore has
+      ;; no "echo area" concept in the redisplay path at all - a prompt is
+      ;; an ordinary window showing an ordinary buffer, which is why a
+      ;; click on it selects it and `C-x o` can cycle into it.
+      ;;
+      ;; This tree drew the echo area as a special row of the frame, and
+      ;; that one departure was the root of three bugs at once: a click on
+      ;; the prompt reached `select-window` as a *frame* ("Wrong type
+      ;; argument: #<<frame> ..."), `C-x o` could not reach the prompt so
+      ;; a click into another buffer could not be undone, and
+      ;; `mouse-drag-track` asked `window-buffer` of a frame. The window
+      ;; is made with the frame and is *always* in `frame-windows`; every
+      ;; consumer asks `minibuffer-window-active-p` rather than being
+      ;; handed it only when it is wanted.
       (selected-window frame-selected-window
                        set!frame-selected-window)
       ;; ^ The window commands act on and the cursor is drawn in, Emacs's
@@ -1327,7 +1425,8 @@
       ;; prompt shadowed it from *below* the selection, not just while it
       ;; was being read.
       ;;--------------------------------------------------------------
-      (window-buffer (selected-window)))
+      (let ((w (selected-window)))
+        (and w (window-buffer w))))
 
     (define *tty-select-active-regions*
       ;; GNU Emacs's `tty-select-active-regions' (frame.el:2759): "If
@@ -1631,7 +1730,7 @@
       ;; `wset_frame (rw, frame)' tells the window which frame it is on.
       ;; A window's frame is fixed for its life, so it cannot be filled
       ;; in afterwards - the window has to be built knowing it.
-      (let* ((frame (make<frame> '() #f height width
+      (let* ((frame (make<frame> '() #f #f height width
                                  "" #f #f #f display (%next-frame-name)
                                  ;; "The parameters a frame is made with":
                                  ;; `make-frame` merges `default-frame-alist`
@@ -1644,8 +1743,17 @@
                                  ;; so its matrices mean nothing yet.
                                  #t))
              (window (make-frame-window frame editor
-                                        0 (max 1 (- height 1)) 0 width)))
-        (set!frame-windows frame (list window))
+                                        0 (max 1 (- height 1)) 0 width))
+             ;; **The minibuffer window is the frame's last row**, made
+             ;; with the frame as `make_frame` makes it (`frame.c:1237`,
+             ;; `fset_minibuffer_window (f, make_minibuffer_window ())`).
+             ;; It shows no buffer until a prompt is read, which is what
+             ;; `minibuffer-window-active-p` asks; the row is drawn as
+             ;; the echo area either way.
+             (mini (make-frame-window frame #f
+                                      (max 0 (- height 1)) 1 0 width)))
+        (set!frame-minibuffer-window frame mini)
+        (set!frame-windows frame (list window mini))
         (set!frame-selected-window frame window)
         ;; Every frame joins the list as it is made, exactly as
         ;; `make_frame' and `make_terminal_frame' push it.
@@ -2061,7 +2169,22 @@
       ;;--------------------------------------------------------------
       (scale-window! (car (frame-windows frame))
                      0 0 old-width (max 1 (- old-height 1))
-                     0 0 new-width (max 1 (- new-height 1))))
+                     0 0 new-width (max 1 (- new-height 1)))
+      ;; **The minibuffer window is the frame's last row, so a resize
+      ;; moves it too.** `resize_frame_windows` (`window.c`) sizes the
+      ;; root window to `new_height - 1` and leaves `FRAME_MINIBUF_WINDOW`
+      ;; the row that is left. This walk used to re-tile only the first of
+      ;; the frame's windows, so the minibuffer window kept the row it was
+      ;; made with, and after any resize the prompt was drawn part way up
+      ;; the frame - over the text - at a position that had nothing to do
+      ;; with point and everything to do with the size the frame used to
+      ;; be.
+      (let ((mini (frame-minibuffer-window frame)))
+        (when mini
+          (set!window-top mini (max 0 (- new-height 1)))
+          (set!window-left mini 0)
+          (set!window-width mini new-width)
+          (set!window-height mini 1))))
 
     (define *frame-inhibit-implied-resize* (make-parameter #f))
     ;; ^ GNU Emacs's `frame-inhibit-implied-resize' (`frame.el`): "Non-nil
@@ -2365,14 +2488,24 @@
       (let ((frame (*current-frame*))
             (old (selected-window)))
         (when (and old (not (eq? old window)))
-          ;; the window being left keeps the point it had ...
-          (set-marker (%window-point old)
-                       (buffer-pt (window-buffer old))
-                       (window-buffer old))
+          ;; the window being left keeps the point it had. **Only a
+          ;; window that shows a buffer has a point to keep** - the C's
+          ;; `if (BUFFERP (ow->contents))` (`window.c:600`) - and the
+          ;; minibuffer window is one with no buffer until a prompt is
+          ;; read (`redisplay_window` likewise skips a nil `contents`).
+          (let ((old-buffer (window-buffer old)))
+            (when old-buffer
+              (set-marker (%window-point old)
+                          (buffer-pt old-buffer)
+                          old-buffer)))
           (set!frame-selected-window frame window)
-          ;; ... and the one being selected gives the buffer its point
-          (set-point (window-buffer window)
-                                  (marker-position (%window-point window))))
+          ;; ... and the one being selected gives the buffer its point.
+          ;; `set_point_from_marker (w->pointm)` is conditional in the
+          ;; same way: a window with no point marker has none to go to.
+          (let ((new-buffer (window-buffer window)))
+            (when (and new-buffer (%window-point window))
+              (set-point new-buffer
+                         (marker-position (%window-point window))))))
         ;; **`Fset_buffer (w->contents)' - the first line of
         ;; `Fselect_window' (`window.c:534'), which runs before the C
         ;; even tests whether the window is already selected.** "Make
@@ -2388,7 +2521,11 @@
         ;; prompt's buffer. This tree has no minibuffer window, so the
         ;; echo area stands for it - which is exactly the case
         ;; `current-editor' exists for.
-        (*current-buffer* (current-editor))
+        ;; a nil answer leaves `*current-buffer*' as it was, which is
+        ;; `Fset_buffer' handed a nil `contents' - the C checks
+        ;; `BUFFERP (w->contents)' before it does anything with it
+        (let ((buffer (current-editor)))
+          (when buffer (*current-buffer* buffer)))
         window))
 
     (define-command (recenter arg)

@@ -33,7 +33,7 @@
     ;; coordinates arrive as inexact numbers and every cell here
     ;; is an exact one - `pgtk.sld''s `pgtk-ensure-surface!' makes
     ;; the same conversion for the same reason.
-    (only (guile) filter sort inexact->exact)
+    (only (guile) delq filter sort inexact->exact)
     ;; The display interface: the redisplay draws through these generics
     ;; and never touches a terminal itself. `dispnew.sld' defines them,
     ;; and `term.sld' answers them for the curses terminal.
@@ -92,7 +92,8 @@
          *frame-cursor-type* *frame-focus* frame-height frame-width
          ;; `FRAME_GARBAGED_P` / `SET_FRAME_GARBAGED` (`frame.h:1173`),
          ;; consumed by `clear-garbaged-frames!`.
-         frame-garbaged-p set-frame-garbaged!
+         frame-garbaged-p set-frame-garbaged! frame-minibuffer-window
+         window-minibuffer-p
          frame-message frame-selected-window
          ;; `render!' binds the display from the frame it was handed: the
          ;; frame's `output' is Emacs's `output_data', and this is what
@@ -2658,12 +2659,20 @@
                                           (current-display)))
                      (*redisplay-in-progress* #t))
       (sync-frame-size! frame)
-      (let ((width (frame-width frame))
-            (height (frame-height frame))
+      (let* ((width (frame-width frame))
+             (height (frame-height frame))
             ;; the *leaves*: a window that holds children shows no buffer
             ;; and has no mode line of its own, so what is drawn is the
-            ;; windows at the bottom of the tree
-            (windows (window-list frame)))
+            ;; windows at the bottom of the tree.
+            ;;
+            ;; **The minibuffer window is always one of them**, which is
+            ;; the MINIBUF t form of `window-list`: the echo area is a
+            ;; window now, so it is drawn by the same loop as any other
+            ;; and nothing special-cases it. `render-window-mode-line!`
+            ;; is what skips it - a minibuffer window has no mode line
+            ;; (`MINI_WINDOW_P`).
+            (windows (window-list frame #t))
+            (body (delq (frame-minibuffer-window frame) windows)))
         ;; **The frame is not cleared.** GNU Emacs has no `clear_frame` in
         ;; the per-keystroke path at all: `update_window` writes into the
         ;; existing surface and the toolkit composites it, which is only
@@ -2695,7 +2704,7 @@
         ;; (`redisplay_internal', `xdisp.c'), and only the selected
         ;; window's *start* is scrolled, while hscrolling is a property
         ;; each window's own point decides
-        (for-each hscroll-window! windows)
+        (for-each hscroll-window! body)
         ;; **Build the rows, then draw the ones that changed.** GNU
         ;; Emacs's `redisplay_window` then `update_window`: the first makes
         ;; the desired matrix, the second compares it with what is on the
@@ -2710,10 +2719,24 @@
         (for-each (lambda (w)
                     (ensure-window-matrices! w (window-body-width w)
                                             (window-body-height w))
-                    (display-window! w))
+                    ;; **A window that shows no buffer builds nothing.**
+                    ;; The minibuffer window is one until a prompt is
+                    ;; read (`minibuffer-window-active-p`), and Emacs's
+                    ;; `redisplay_window` likewise has nothing to display
+                    ;; for a window whose `w->contents` is nil. Its
+                    ;; current matrix is emptied instead, so the diff
+                    ;; draws nothing over the row and the echo-area block
+                    ;; below is what paints there.
+                    (cond ((window-buffer w) (display-window! w))
+                          (else
+                           (let ((m (window-current-matrix w)))
+                             (when m (clear-glyph-matrix m))))))
                   windows)
         (for-each update-window! windows)
-        (for-each render-window-mode-line! windows)
+        ;; **No mode line for the minibuffer window**, which is Emacs's
+        ;; `MINI_WINDOW_P` test in `display_mode_lines`: a minibuffer
+        ;; window is one row and that row is its text.
+        (for-each render-window-mode-line! body)
         ;; **The echo area is drawn on one frame only.** GNU Emacs's
         ;; `echo_area_window' is `FRAME_MINIBUF_WINDOW (SELECTED_FRAME ())'
         ;; (`xdisp.c:13782') and `redisplay_window' draws the message only
@@ -3068,8 +3091,17 @@
                    (width (window-width w)))
               (if (and (>= row top) (< row (+ top height))
                        (>= column left) (< column (+ left width)))
-                  (if (= row (+ top height -1))
-                      ;; the window's last row is its mode line
+                  (if (and (= row (+ top height -1))
+                           ;; **A minibuffer window has no mode line**, so
+                           ;; its one row is text - GNU Emacs's
+                           ;; `coordinates_in_window` asks
+                           ;; `WINDOW_WANTS_MODELINE_P`, which is false for
+                           ;; `MINI_WINDOW_P`. Reporting `mode-line` here
+                           ;; is what made a click on the prompt a click on
+                           ;; nothing: `posn-point` is nil for that area, so
+                           ;; the prompt was selected but point never moved
+                           ;; in it.
+                           (not (window-minibuffer-p w)))
                       (list w 'mode-line (cons x y) 0)
                       (list w (buffer-posn-from-coords
                                w (- row top) (- column left))
