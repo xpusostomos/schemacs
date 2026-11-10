@@ -196,3 +196,33 @@ function**. A departure on this list is a debt, not a licence.
   call fresh, with a per-window record of what was drawn
   (`w->last_modified`, `w->last_overlay_modified`, and the start the rows
   were built from).
+
+### The terminal still repaints its whole frame
+
+- **Emacs** on a terminal rebuilds the whole frame matrix every redisplay
+  too (`build_frame_matrix` + `update_frame`, `dispnew.c`) - but the
+  *cost* is as small as the diff because the terminal is handed a frame
+  matrix it diffs itself.
+- **Here** the terminal erases and repaints, and that is what makes a
+  cursor move a whole-screen draw at ~13 ms. Removing it was tried on
+  2026-11-10 and **five pty checks failed** (`insert-file`, `dired`,
+  `find-alternate-file`, `revert-buffer`, `buffer-menu`), for a reason
+  worth recording: **ncurses takes its own scrolling shortcut**
+  (`ESC [ 1 ; 22 r` then `ESC M`, which shifts a region of rows) whenever
+  it can, so ncurses's idea of the screen stops agreeing with the glyph
+  matrices - and a row diff computed against the unscrolled matrix then
+  writes to the wrong rows. Measured: `C-x i` drew the inserted file over
+  the echo-area row, and Dired's marks never appeared.
+- **The two ways out**, both real ports:
+  - `try_window_id` (`xdisp.c:22583`) and
+    `try_window_reusing_current_matrix`, which let a scrolled window reuse
+    its matrix instead of rebuilding it - and give the diff a matrix that
+    matches what ncurses already scrolled;
+  - or the tty backend written as Emacs's is, owning its own frame matrix
+    and writing escape sequences itself (`tty_write_glyphs`,
+    `tty_update_window`), instead of drawing through ncurses and letting
+    curses decide what to send.
+- **Also needed either way**: the cursor has to be erased explicitly.
+  That is now ported - `erase-window-cursor!` and `*phys-cursor*` are
+  `erase_phys_cursor` and `w->phys_cursor` - and it was the other half of
+  why the GTK front end left a trail of cursor boxes behind it.

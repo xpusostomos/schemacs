@@ -434,6 +434,16 @@
       ;;--------------------------------------------------------------
       #f)
 
+    (define-method (erase-window-cursor! (d <tty-display>) row column cells
+                                        text token)
+      ;; **Nothing to do, and that is the terminal's own cursor.** A
+      ;; terminal has one cursor that curses moves when the next glyph is
+      ;; written, so there is never an old one left behind; the GUI has a
+      ;; cursor *painted* into the surface, which is why it needs the
+      ;; glyph put back (`erase_phys_cursor`).
+      ;;--------------------------------------------------------------
+      #t)
+
     (define-method (draw-window-cursor! (d <tty-display>) row column cells
                                         type width text token)
       ;; The one terminal cursor, put where input shows itself going.

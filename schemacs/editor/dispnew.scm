@@ -33,6 +33,7 @@
    update-window-begin!
    update-window-end!
    draw-window-cursor!
+   erase-window-cursor!
    flush-display!
    read-input-event
    key-event->key
@@ -248,6 +249,26 @@
     (define-method (draw-box! (d <display>) box token x y cells height
                               left? right?)
       #f)
+
+    (define-generic erase-window-cursor!)
+    ;; Take the cursor off the screen: GNU Emacs's `erase_phys_cursor`
+    ;; (`xdisp.c:35146`), whose last act is
+    ;;
+    ;;     /* Erase the cursor by redrawing the character underneath it.  */
+    ;;     draw_phys_cursor_glyph (w, cursor_row, hl);
+    ;;
+    ;; - the glyph at the *previous* cursor position, redrawn in its own
+    ;; face. `(erase-window-cursor! display row column cells text token)',
+    ;; with the arguments `draw-window-cursor!' takes less TYPE and
+    ;; WIDTH: there is no shape to draw, only the glyph to put back.
+    ;;
+    ;; **This is not optional once a frame stops being repainted whole.**
+    ;; The cursor is painted *over* a row, so moving it leaves the old
+    ;; one behind - Chris, on GTK: "moving the cursor around leaves a
+    ;; trail like a snake". Emacs gets it right by remembering
+    ;; `w->phys_cursor` and erasing it before drawing the new one. A
+    ;; terminal does not need the glyph put back - curses moves one
+    ;; cursor - which is why its method here does nothing.
 
     (define-generic draw-window-cursor!)
     ;; Put the display cursor at pixel ROW, COLUMN (frame coordinates),

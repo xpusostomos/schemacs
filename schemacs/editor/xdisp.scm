@@ -42,7 +42,7 @@
           write-glyphs! draw-box! face-metrics display-cell-size clear-frame-area!
           clear-end-of-line! ensure-surface!
           update-window-begin! update-window-end!
-          draw-window-cursor! flush-display!
+          draw-window-cursor! erase-window-cursor! flush-display!
           realize-face
           ;; how many pixels a cell is, which is what turns a mouse
           ;; event's coordinates into the cells the windows are
@@ -2645,6 +2645,29 @@
     ;; handler must not do it here, or a window resize signal fired by the
     ;; drawing itself would run `ignore` and redisplay again, and again.
 
+    (define *phys-cursor* (make-parameter #f))
+    ;; ^ Where the cursor was last *painted*, and what was under it, as
+    ;; `(DISPLAY ROW COLUMN CELLS TEXT TOKEN)' - GNU Emacs's
+    ;; `w->phys_cursor` and `w->phys_cursor_on_p` (`window.h`). The
+    ;; cursor is drawn over a row, so it has to be taken off again before
+    ;; the next one is drawn; Emacs does that in `erase_phys_cursor`
+    ;; (`xdisp.c:35146`) by redrawing the glyph underneath. A display
+    ;; whose frame is repainted whole never showed the need; one that
+    ;; draws only the rows that changed does - moving the cursor left a
+    ;; trail of boxes behind it.
+
+    (define (erase-phys-cursor!)
+      ;; GNU Emacs's `erase_phys_cursor`: put the glyph that was under
+      ;; the cursor back.
+      ;;--------------------------------------------------------------
+      (let ((saved (*phys-cursor*)))
+        (when saved
+          (*phys-cursor* #f)
+          (apply erase-window-cursor! saved))))
+
+    (define (note-phys-cursor! display row column cells text token)
+      (*phys-cursor* (list display row column cells text token)))
+
     (define (clear-garbaged-frames! frame windows)
       ;; GNU Emacs's `clear_garbaged_frames` (`xdisp.c:13699`) for the one
       ;; frame being redisplayed. Its own note is the reason this is a
@@ -2689,26 +2712,20 @@
       ;; the same diff `update_window` does - a cursor move now costs
       ;; one cell.
       (when (or (frame-garbaged-p frame)
-                ;; **A terminal is still fully repainted.** The matrix diff
-                ;; is not yet safe for a scrolled window: Emacs answers that
-                ;; case in `try_window_id`, reusing the current matrix when
-                ;; the desired one is the old one shifted - which this tree
-                ;; does not port. Until it does, a terminal repaints the
-                ;; frame it is drawing, and a graphics frame uses the diff.
+                ;; **A terminal still repaints the frame it draws.**
+                ;; GNU Emacs's terminal redisplay is `build_frame_matrix`
+                ;; + `update_frame` (`dispnew.c`): every frame matrix is
+                ;; rebuilt and handed to the terminal whole, and the
+                ;; *terminal* decides how little of it to send. Here it
+                ;; has to be the same, because ncurses takes its own
+                ;; scrolling shortcut (`ESC [ 1 ; 22 r`, `ESC M` - it
+                ;; shifts a region of rows) whenever it can, and a row
+                ;; diff computed against the *unscrolled* matrix then
+                ;; writes the wrong text: measured, `C-x i` drew the
+                ;; inserted file over the echo-area row, and Dired's
+                ;; marks never appeared. The erase is what tells ncurses
+                ;; the whole screen is ours to redraw.
                 (not (graphical-frame?)))
-        ;; **The terminal's surface is erased, and a graphics frame's is
-        ;; not.** A GUI surface holds every pixel it was given, so
-        ;; invalidating the matrices is enough. A terminal's is the
-        ;; physical line the rows are written into, and the harness that
-        ;; is the only regression net for the drawing cannot yet certify
-        ;; the no-erase path - so it erases as well as invalidating.
-        ;;
-        ;; `clear_garbaged_frames`' own note (quoted above) says a clear
-        ;; is not necessary, and on a real terminal it is not: `tmux
-        ;; capture-pane` shows the no-erase path drawing, paging and
-        ;; opening a completions window correctly. What is missing is a
-        ;; faithful screen reader in `tools/pty-check.py`; DEPARTURES.md
-        ;; says what is left.
         (when (not (graphical-frame?))
           (clear-frame-area! (current-display)))
         (for-each (lambda (w)
@@ -2788,6 +2805,13 @@
         ;; the surface exists before anything is drawn into it, whether
         ;; or not this redisplay clears
         (ensure-surface! (current-display))
+        ;; **The cursor comes off before the frame is drawn.** It is
+        ;; painted *into* the surface, so a row that the diff does not
+        ;; select would keep the box the cursor left behind - Emacs's
+        ;; `redisplay_window` calls `erase_phys_cursor` for the same
+        ;; reason, and it is the only thing an incremental redisplay
+        ;; needs that a full repaint got for free.
+        (erase-phys-cursor!)
         (clear-garbaged-frames! frame windows)
         ;; Only the selected window is scrolled to show its point here:
         ;; it is the one point moves in, and its buffer is the one
@@ -2955,6 +2979,17 @@
                      ;; is the same thing here.
                      (at (buffer-pt reading))
                      (glyph (cursor-glyph reading at)))
+                (note-phys-cursor! (current-display)
+                                   (row->pixel-y (- height 1))
+                                   (min (+ (line-display-width
+                                            (or (*echo-area-prompt*) ""))
+                                           (current-line-display-column
+                                            reading
+                                            (text-editor-cursor-column reading)))
+                                        (- width 1))
+                                   (cursor-cells reading at)
+                                   (car glyph)
+                                   (cdr glyph))
                 (draw-window-cursor! (current-display)
                                      (row->pixel-y (- height 1))
                                      (min (+ (line-display-width
@@ -2979,6 +3014,16 @@
                              ;; glyph row the display iterator stopped on)
                              (glyph (cursor-glyph buffer
                                                   (window-point selected))))
+                        (note-phys-cursor!
+                         (current-display)
+                         (window-to-frame-pixel-y
+                          selected
+                          (window-pixel-y
+                           selected
+                           (- (car at) (window-top selected))))
+                         (cdr at)
+                         (cursor-cells buffer (window-point selected))
+                         (car glyph) (cdr glyph))
                         (draw-window-cursor! (current-display)
                                              ;; **The cursor's pixel y**,
                                              ;; which is `w->cursor.y` in

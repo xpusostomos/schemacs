@@ -71,7 +71,8 @@
           delete-frame-display! glyphs->text
           display-cell-size display-color-cells display-set-size!
           face-metrics
-          draw-window-cursor! flush-display! key-event->key line-height
+          draw-window-cursor! erase-window-cursor! flush-display!
+          key-event->key line-height
           read-input-event realize-face resume-display! screen-size
           suspend-display! update-window-begin! update-window-end!
           write-glyphs!))
@@ -200,6 +201,10 @@
 
     (define-method (update-window-begin! (d <test-display>)) #t)
     (define-method (update-window-end! (d <test-display>)) #t)
+
+    (define-method (erase-window-cursor! (d <test-display>) row column cells
+                                        text token)
+      (set!test-display-cursor d #f))
 
     (define-method (draw-window-cursor! (d <test-display>) row column cells
                                         type width text token)

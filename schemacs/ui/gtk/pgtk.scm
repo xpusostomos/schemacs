@@ -142,7 +142,8 @@
           display-color-cells display-font-families
           display-set-size!
           face-metrics
-          draw-box! draw-window-cursor! flush-display! key-event->key
+          draw-box! draw-window-cursor! erase-window-cursor! flush-display!
+          key-event->key
           display-mouse-position get-selection line-height read-input-event
           realize-face resume-display! screen-size
           selection-exists? selection-owner?
@@ -915,6 +916,11 @@
       ;; once and then left alone; see `pgtk-set-frame-menubar`.
       (menubar-hidden #:init-value #f #:accessor pgtk-menubar-hidden?)
       (surface #:init-value #f #:accessor pgtk-surface)
+      ;; ^ The image surface the frame is drawn into, and the size it was
+      ;; made at. `ensure-surface!' must not remake it while it is already
+      ;; the right shape: Emacs's equivalent is the frame's X window,
+      ;; which is *resized* and never recreated.
+      (surface-size #:init-value #f #:accessor pgtk-surface-size)
       (cr      #:init-value #f #:accessor pgtk-cr)
       (layout  #:init-value #f #:accessor pgtk-layout)
       ;; ^ The Pango layout the text is drawn through. It belongs to a
@@ -1419,10 +1425,21 @@
              ;; sends you hunting for a size that was never the problem.
              (size (cons (inexact->exact (round (car raw)))
                          (inexact->exact (round (cdr raw))))))
+        ;; **A surface that is already the right shape is kept.**
+        ;; Remaking it throws away every pixel the last redisplay drew,
+        ;; and `ensure-surface!` runs at the top of every `render!` - so
+        ;; with the row diff working (a row that did not change is not
+        ;; drawn again) the frame came out blank one redisplay after it
+        ;; was drawn: a file's text flashed and then vanished, and a
+        ;; resize did the same again. Emacs's frame has one X window for
+        ;; its whole life and *resizes* it; this is that.
+        (if (and (pgtk-surface d) (equal? (pgtk-surface-size d) size))
+            #t
         (let* ((surface (cairo-image-surface-create 'argb32
                                                     (car size) (cdr size)))
                (cr (cairo-create surface)))
           (set! (pgtk-surface d) surface)
+          (set! (pgtk-surface-size d) size)
           (set! (pgtk-cr d) cr)
           ;; **A new surface is filled with the frame's background.**
           ;; `cairo-image-surface-create` makes a *transparent* one, and
@@ -1440,7 +1457,7 @@
                  cr
                  (or (colour->rgb (face-attribute 'default ':background))
                      (list 1.0 1.0 1.0)))
-          (cairo-paint cr))))
+          (cairo-paint cr)))))
 
     (define (pgtk-resize! d width height)
       ;; Take the window's new size in pixels as the grid's new size, and
@@ -2345,6 +2362,36 @@
                                   box-w (max 1 width))
                  (cairo-fill cr))
                 (else #t)))))))
+
+    (define-method (erase-window-cursor! (d <pgtk-display>) row column cells
+                                        text token)
+      ;; Put the glyph at the old cursor position back: GNU Emacs's
+      ;; `erase_phys_cursor`'s last act, `draw_phys_cursor_glyph (w,
+      ;; cursor_row, hl)` - the glyph at the *old* cursor position drawn
+      ;; back in its own face. A box or bar cursor is painted over the
+      ;; row, so the character under it is in the surface again only if
+      ;; this puts it there: the row the cursor sits on is usually one
+      ;; the diff did not select.
+      ;;--------------------------------------------------------------
+      (let ((cr (pgtk-cr d)))
+        (when cr
+          (let* ((left (cell-x column))
+                 (top row)
+                 (box-w (* *cell-width* (max 1 cells))))
+            (apply cairo-set-source-rgb
+                   cr
+                   (or (face-token-background token)
+                       (colour->rgb (face-attribute 'default ':background))
+                       (list 1.0 1.0 1.0)))
+            (cairo-rectangle cr left top box-w *cell-height*)
+            (cairo-fill cr)
+            ;; and the glyph in its own colour, which is what
+            ;; `draw_phys_cursor_glyph` ends by doing
+            (when (and text (> (string-length text) 0))
+              (apply cairo-set-source-rgb
+                     cr
+                     (or (face-token-foreground token) (list 0.0 0.0 0.0)))
+              (pgtk-show-text! d text left (+ top *font-ascent*)))))))
 
     (define (pgtk-present! d gtk-cr)
       ;; Paint what we have drawn into the context Gtk handed us. This is
