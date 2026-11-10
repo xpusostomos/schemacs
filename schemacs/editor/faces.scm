@@ -177,7 +177,35 @@
                                    *undefined-face-attribute*)
                                   ((eq? (car plist) attribute) (cadr plist))
                                   (else (loop (cddr plist))))))))
-          value)))
+          ;; **The `default' face always answers a `:height'.** GNU
+          ;; Emacs's `set_lface_from_font` (`xfaces.c:2211`) fills an
+          ;; unspecified height in from the frame's font -
+          ;;
+          ;;   if (force_p || UNSPECIFIEDP (LFACE_HEIGHT (lface)))
+          ;;     { int pt = PIXEL_TO_POINT (font->pixel_size * 10, ...);
+          ;;       ASET (lface, LFACE_HEIGHT_INDEX, make_fixnum (pt)); }
+          ;;
+          ;; - so a configured Emacs never reports `unspecified' here, and
+          ;; 10pt is what its terminal font answers. This tree has no font
+          ;; object (a terminal's cell is one character, a GUI's is the
+          ;; display's), so the answer is the display's own height in
+          ;; points, and 100 - 10pt - when nothing says otherwise. Without
+          ;; it the omarchy port's guard sees `unspecified', decides the
+          ;; face is unusable and falls back to its own default.
+          ;;
+          ;; Only `:height' and only `default': every other attribute of
+          ;; this face is legitimately unspecified, and `#t' inherits.
+          (if (and (eq? *undefined-face-attribute* value)
+                   (eq? (check-face face) 'default)
+                   (eq? attribute ':height)
+                   ;; **Only on a terminal.** A graphics frame's height
+                   ;; comes from the font it actually opened, and answering
+                   ;; 10pt there would silently override it - measured: it
+                   ;; made every pixel test in `pgtk-tests` fail because
+                   ;; the text changed size.
+                   (not (memq (*window-system*) '(x w32 ns pgtk))))
+              100
+              value))))
 
     (define (face-attribute-relative-p attribute value)
       ;; GNU Emacs's `face-attribute-relative-p' (`xfaces.c:4193'). Its
