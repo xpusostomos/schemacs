@@ -134,7 +134,8 @@
     (only (gi types) symbol->enum)
     ;; The display interface this implements.
     (only (schemacs editor dispnew)
-          <display> *mouse-event-keys* clear-frame-area! column-width
+          <display> *mouse-event-keys* clear-frame-area! clear-end-of-line!
+          ensure-surface! column-width
           current-display
           delete-frame-display!
           display-cell-size
@@ -1422,7 +1423,24 @@
                                                     (car size) (cdr size)))
                (cr (cairo-create surface)))
           (set! (pgtk-surface d) surface)
-          (set! (pgtk-cr d) cr))))
+          (set! (pgtk-cr d) cr)
+          ;; **A new surface is filled with the frame's background.**
+          ;; `cairo-image-surface-create` makes a *transparent* one, and
+          ;; until now `clear-frame-area!` did this fill on every
+          ;; redisplay. A redisplay that does not clear (`clear-garbaged-
+          ;; frames!` on a GUI frame) would otherwise leave the whole
+          ;; surface unpainted - measured: a frame rendered twice, the
+          ;; second not clearing, came out with every pixel non-white,
+          ;; the echo row included. Emacs's realize fills the frame
+          ;; (`x_make_gc` sets the background and the first
+          ;; `x_clear_area` paints it), and this is that fill, made
+          ;; where the surface is.
+          ;;------------------------------------------------------------
+          (apply cairo-set-source-rgb
+                 cr
+                 (or (colour->rgb (face-attribute 'default ':background))
+                     (list 1.0 1.0 1.0)))
+          (cairo-paint cr))))
 
     (define (pgtk-resize! d width height)
       ;; Take the window's new size in pixels as the grid's new size, and
@@ -1919,6 +1937,19 @@
     (define-method (realize-face (d <pgtk-display>) face-attrs)
       (realize-face-token face-attrs))
 
+    (define-method (ensure-surface! (d <pgtk-display>))
+      ;; Make the drawing surface if it is not there. **This is
+      ;; separate from `clear-frame-area!` because Emacs separates them**:
+      ;; the surface is the frame's X window, made when the frame is
+      ;; realized (`x_make_frame_visible` -> `x_wm_set_size_hint` and the
+      ;; `x_create_bitmap` path), and `clear_frame_area` only fills it.
+      ;; This tree used to make it inside `clear-frame-area!`, which was
+      ;; harmless while every redisplay cleared - but a redisplay that
+      ;; does not clear (a GUI frame with an unspoiled surface) then had
+      ;; no surface to draw into at all.
+      ;;--------------------------------------------------------------
+      (pgtk-ensure-surface! d))
+
     (define-method (clear-frame-area! (d <pgtk-display>))
       ;; Fill the surface with the default face's background and start a
       ;; new frame: everything drawn from here overwrites it. The surface
@@ -1945,6 +1976,24 @@
                  (or (colour->rgb (face-attribute 'default ':background))
                      (list 1.0 1.0 1.0)))
           (cairo-paint cr))))
+
+    (define-method (clear-end-of-line! (d <pgtk-display>) y x width token)
+      ;; Blank the cells [X, X+WIDTH) of row Y. A GUI fill already covers
+      ;; the rectangle a run is drawn in, so this is what a *shorter* row
+      ;; needs: the cells past its text still hold the previous frame's
+      ;; glyphs. Same call as `write-glyphs!` makes for a run, without
+      ;; any text - GNU Emacs's `gui_clear_end_of_line`
+      ;; (`xdisp.c:34644`) fills from X to the window's right edge.
+      ;;--------------------------------------------------------------
+      (let ((cr (pgtk-cr d)))
+        (when (and cr (> width 0))
+          (apply cairo-set-source-rgb
+                 cr (or (face-token-background token)
+                        (colour->rgb (face-attribute 'default ':background))
+                        (list 1.0 1.0 1.0)))
+          (cairo-rectangle cr (cell-x x) y
+                           (* *cell-width* width) *cell-height*)
+          (cairo-fill cr))))
 
     (define-method (update-window-begin! (d <pgtk-display>)) #t)
     (define-method (update-window-end! (d <pgtk-display>)) #t)

@@ -156,6 +156,8 @@
    modify-frame-parameters store-in-alist
    *default-frame-alist* *initial-frame-alist*
    frame-parameters-alist
+   ;; `FRAME_GARBAGED_P` and `SET_FRAME_GARBAGED` (`frame.h:1173`).
+   frame-garbaged-p set-frame-garbaged!
    make<window>
    frame-editor
    frame-keymap-state
@@ -629,6 +631,20 @@
         (set-marker (%window-point window) (buffer-pt buffer)
                      buffer)
         (set-window-start! window 1)
+        ;; **A window that changed buffer has nothing of the new one on
+        ;; the screen**, so the frame is garbaged and the next redisplay
+        ;; repaints all of it. GNU Emacs reaches the same place without a
+        ;; flag: `set_window_buffer` ends with `w->window_end_valid =
+        ;; false` and `redisplay_window` then finds the current matrix
+        ;; does not describe what should be there and runs `redraw_frame`
+        ;; through `try_window_reusing`'s failure path. This tree compares
+        ;; matrices rather than checking a validity flag, and the rows it
+        ;; would compare are the *old buffer's* - so without this the diff
+        ;; matched them, drew nothing, and the previous file's lines stayed
+        ;; on screen under the new file's. That is "two files in one
+        ;; window".
+        (unless (eq? old buffer)
+          (set-frame-garbaged! (window-frame window) #t))
         window))
 
     (define (window-start-at-line-beg window)
@@ -684,7 +700,7 @@
       (make<frame>
        windows selected-window height width
        message message-timer keymap-state quit-cont output name
-       parameters)
+       parameters garbaged)
       frame-type?
       (windows   frame-windows   set!frame-windows)
       ;; ^ The frame's windows, top to bottom. Emacs's `window-list'.
@@ -743,6 +759,29 @@
       ;; (`mode-line-frame-identification'), which this tree does not draw
       ;; yet; the name is here because a frame has one and it is what the
       ;; frame commands report.
+      (garbaged   frame-garbaged-p  set-frame-garbaged!)
+      ;; ^ `f->garbaged` (`frame.h:1172`): "True if frame F is currently
+      ;; garbaged." The reader is `FRAME_GARBAGED_P` and the writer is
+      ;; `SET_FRAME_GARBAGED` (`:1173`), which is what the two are named
+      ;; for - Emacs spells a boolean predicate `..._P` and this tree
+      ;; spells it `-p`, so neither carries a `?` that would belong to a
+      ;; different kind of question. Consumed by `clear_garbaged_frames`
+      ;; (`xdisp.c:13699`).
+      ;;
+      ;; **This is the whole of "the surface holds nothing of ours".**
+      ;; Emacs's own note there says why a flag and not a clear:
+      ;; "The call to clear_frame was a source of flickering. I believe
+      ;; a clear_frame is not necessary. It should suffice ... to
+      ;; invalidate all current matrices, and ensure a complete
+      ;; redisplay of all windows." Clearing the surface and then
+      ;; redrawing only the rows the diff calls changed leaves every
+      ;; other row erased - which is a redisplay that flickers between
+      ;; two half-painted screens, and the reason paging to the end of a
+      ;; buffer appeared to loop.
+      ;;
+      ;; Set when the frame is made and when a resize throws the
+      ;; toolkit's contents away (`f->resized_p`); consumed by
+      ;; `render!`'s `clear-garbaged-frames!`.
       (parameters frame-parameters-alist set!frame-parameters-alist)
       ;; ^ `f->param_alist` (`frame.h`): the frame's parameters, as
       ;; `(NAME . VALUE)` pairs. `frame-parameters` (`frame.c:4083`) and
@@ -1268,9 +1307,8 @@
 
     (define (current-editor)
       ;; Which buffer the *selected window* shows - the window half of GNU
-      ;; Emacs's `current-buffer', which is the buffer this frame's window
-      ;; code writes when the window changes, and the echo area's while a
-      ;; minibuffer is being read.
+      ;; Emacs's `current-buffer', which is the buffer the window code
+      ;; writes when the window changes.
       ;;
       ;; It is not `(current-buffer)' on its own: Emacs's `current_buffer'
       ;; is written by `set-buffer' as well as by the window code, and
@@ -1278,9 +1316,18 @@
       ;; `(or (*current-buffer*) (current-editor))'. Commands want *that*;
       ;; this is what the renderer, `display-buffer' and `switch-to-buffer'
       ;; want, and it is the fallback inside it.
+      ;;
+      ;; **It used to answer the echo-area buffer first**, so that a
+      ;; minibuffer read was "current" without anyone saying so. Emacs
+      ;; says so: `read_minibuf` does `Fset_buffer (minibuffer)`
+      ;; (`minibuf.c:794`) and `record_unwind_current_buffer` (`:675`),
+      ;; and `read-minibuffer-1` does the same pair now. Preferring the
+      ;; echo area here was the reason a click in another window could not
+      ;; make that window's buffer current while a prompt was up - the
+      ;; prompt shadowed it from *below* the selection, not just while it
+      ;; was being read.
       ;;--------------------------------------------------------------
-      (or (*echo-area-buffer*)
-          (window-buffer (selected-window))))
+      (window-buffer (selected-window)))
 
     (define *tty-select-active-regions*
       ;; GNU Emacs's `tty-select-active-regions' (frame.el:2759): "If
@@ -1591,7 +1638,11 @@
                                  ;; (and, for the first frame,
                                  ;; `initial-frame-alist`) before it makes
                                  ;; one (`frame.el:830`).
-                                 (%make-frame-parameters)))
+                                 (%make-frame-parameters)
+                                 ;; A frame that has never been drawn is
+                                 ;; garbaged: the surface holds nothing,
+                                 ;; so its matrices mean nothing yet.
+                                 #t))
              (window (make-frame-window frame editor
                                         0 (max 1 (- height 1)) 0 width)))
         (set!frame-windows frame (list window))
@@ -2165,7 +2216,18 @@
                 (set!frame-height frame new-height)
                 (set!frame-width frame new-width)
                 (resize-frame-windows! frame old-height old-width
-                                       new-height new-width)))))))
+                                       new-height new-width)
+                ;; **A resized frame is garbaged.** GNU Emacs's
+                ;; `resize_frame_windows` is reached from
+                ;; `change_frame_size`, whose callers set `f->resized_p`
+                ;; and the redisplay's `clear_garbaged_frames` then
+                ;; `redraw_frame`s a frame that "has been resized
+                ;; (probably due to a window manager resize)" - the
+                ;; toolkit has thrown the surface away, so nothing on it
+                ;; is ours to keep. Without this a window grown by the
+                ;; window manager kept drawing into the old rectangles
+                ;; and scrolled only the top half of itself.
+                (set-frame-garbaged! frame #t)))))))
 
     (define (scale-window! window old-top old-left old-width old-height
                            new-top new-left new-width new-height)

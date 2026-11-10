@@ -20,6 +20,7 @@
        frame-selected-window new-frame set!frame-selected-window
        *frame-list* *frame-creation-function* frame? frame-list frame-live-p
        frame-output *before-make-frame-hook* *after-make-frame-functions*
+       *frame-focus*
        frame-parameter frame-parameters set-frame-parameter
        modify-frame-parameters *default-frame-alist*
        frame-name selected-frame select-frame next-frame previous-frame
@@ -1175,8 +1176,14 @@
                    ;; minibuffer's - so that typing goes into the prompt
                    ;; whatever buffer was current before
                    (*current-buffer* #f)
-                   (*echo-area-buffer* mb-ed)
-                   (*current-keymap* minibuffer-local-map))
+                   (*echo-area-buffer* mb-ed))
+      ;; **The buffer and its own map**, which is the pair
+      ;; `read-minibuffer-1' sets up: `Fset_buffer (minibuffer)` and
+      ;; `bset_keymap (current_buffer, map)` (`minibuf.c:794`, `:906`).
+      ;; The map is the buffer's and not a parameter, so `C-f` here is
+      ;; found through the buffer the loop is looking at.
+      (set-buffer mb-ed)
+      (set!buffer-local-keymap mb-ed minibuffer-local-map)
       ;; `dispatch-key-event' takes one *event*, which is what
       ;; `read-key-event' answers with; `(vector 6)' is a key sequence.
       (dispatch-key-event frame 6)
@@ -2889,6 +2896,13 @@
                    (*last-command* #f)
                    (*pending-undo-list* #f)
                    (*last-change-was-undo* #f))
+      ;; What `read-minibuffer-1' does with the current buffer and the
+      ;; map: `Fset_buffer (minibuffer)' and `bset_keymap
+      ;; (current_buffer, map)' (`minibuf.c:794', `:906'). The map is the
+      ;; *buffer's*, not a parameter, so a click into another window
+      ;; makes that window's map live.
+      (set-buffer mb-ed)
+      (set!buffer-local-keymap mb-ed minibuffer-local-map)
       (for-each (lambda (ev) (dispatch-input-event frame ev)) evs)
       (list (with-current-buffer mb-ed (buffer-substring-no-properties (point-min) (point-max)))
             (with-current-buffer ed (buffer-substring-no-properties (point-min) (point-max)))
@@ -4565,3 +4579,38 @@
                    (frame-parameter frame 'menu-bar-lines))))))
 
 (test-end "schemacs_ncurses_editor_frame_parameters")
+
+;;------------------------------------------------------------------
+;; The minibuffer read and the buffer it is read in
+;;------------------------------------------------------------------
+;;
+;; `read_minibuf` makes the minibuffer buffer current (`Fset_buffer
+;; (minibuffer)`, `minibuf.c:794`) and gives it its keymap as a
+;; *buffer-local* (`bset_keymap (current_buffer, map)`, `:906`) - not a
+;; dynamic binding. That is what lets a click into another window make
+;; that window's buffer current, and its own keys live, while the prompt
+;; stays on screen.
+
+(test-begin "schemacs_ncurses_editor_minibuffer_buffer")
+
+;; The prompt's buffer carries the minibuffer's map - `bset_keymap
+;; (current_buffer, map)` (`minibuf.c:906`) - and the map is *not* a
+;; dynamic binding, so a click into another window makes that window's
+;; buffer current without taking the prompt's keys with it.
+(test-equal '(#t #f #t)
+  (let* ((ed (allocate-buffer))
+         (mb-ed (allocate-buffer))
+         (mb (make<minibuffer> mb-ed "> " minibuffer-local-map
+                              #f minibuffer-history 0 #f)))
+    ;; what `read-minibuffer-1' sets up: `Fset_buffer (minibuffer)` and
+    ;; `bset_keymap (current_buffer, map)` (`minibuf.c:794`, `:906`)
+    (set-buffer mb-ed)
+    (set!buffer-local-keymap mb-ed minibuffer-local-map)
+    (list (eq? (buffer-local-keymap mb-ed) minibuffer-local-map)
+          ;; the asking buffer never got that map
+          (eq? (buffer-local-keymap ed) minibuffer-local-map)
+          ;; and the map is not in `*current-keymap*' either: that would
+          ;; pin it for the whole read
+          (not (eq? (*current-keymap*) minibuffer-local-map)))))
+
+(test-end "schemacs_ncurses_editor_minibuffer_buffer")

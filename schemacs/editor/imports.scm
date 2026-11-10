@@ -48,6 +48,7 @@
     (schemacs editor disp-table)
     (except (schemacs editor timer)  timer-next-delay)
     (schemacs editor dispnew)
+    (schemacs editor matrix)
     (schemacs editor intervals)
     (schemacs editor marker)
     (schemacs editor test-display)
@@ -78,6 +79,7 @@
     (schemacs editor font)
     (schemacs editor paragraphs)
     (schemacs editor face-remap)
+    (schemacs editor glyph)
     (schemacs editor indent)
     (schemacs editor cmds)
     (schemacs editor keymap)
@@ -448,6 +450,9 @@
     *x-select-request-type*
     *yank-pop-change-selection*
     <display>
+    <glyph-matrix>
+    <glyph-row>
+    <glyph>
     <interval>
     <marker>
     <test-display>
@@ -477,6 +482,7 @@
     add-to-list
     adjust-coding-eol-type
     adjust-frame-size!
+    adjust-glyph-matrix
     adjust-intervals-for-deletion
     adjust-intervals-for-insertion
     adjust-markers-for-delete
@@ -489,6 +495,7 @@
     apply-command
     apply-modifiers
     apply-partially
+    assign-row
     assoc-delete-all
     assq-delete-all
     attribute-value
@@ -572,6 +579,7 @@
     buffer-text-insert-code-points!
     buffer-text-length
     buffer-text-modiff
+    buffer-text-overlay-modiff
     buffer-text-ref
     buffer-text-set!
     buffer-text-substring
@@ -631,6 +639,8 @@
     check-face
     choose-completion
     clear-frame-area!
+    clear-glyph-matrix
+    clear-glyph-matrix-row
     clear-prefix!
     code-point->char
     coding-read-char
@@ -944,6 +954,7 @@
     end-of-visual-line
     ensure-final-newline-on-save!
     ensure-final-newline-on-visit
+    ensure-window-matrices!
     env--substitute-vars-regexp
     eobp
     eol
@@ -1156,6 +1167,41 @@
     global-text-scale-adjust--increment-factor
     global-text-scale-adjust-limits
     global-text-scale-adjust-resizes-frames
+    glyph-area-text
+    glyph-char
+    glyph-char-and-face-equal?
+    glyph-equal?
+    glyph-face-id
+    glyph-matrix-height
+    glyph-matrix-row
+    glyph-matrix-row-ref
+    glyph-matrix-rows
+    glyph-matrix-width
+    glyph-matrix?
+    glyph-padding?
+    glyph-pixel-width
+    glyph-row-ascent
+    glyph-row-continued?
+    glyph-row-displays-text?
+    glyph-row-enabled?
+    glyph-row-end
+    glyph-row-ends-at-zv?
+    glyph-row-fill-line?
+    glyph-row-glyphs
+    glyph-row-hash
+    glyph-row-height
+    glyph-row-mode-line?
+    glyph-row-pixel-width
+    glyph-row-start
+    glyph-row-truncated-on-right?
+    glyph-row-used
+    glyph-row-x
+    glyph-row-y
+    glyph-row?
+    glyph-type
+    glyph-type-char
+    glyph-voffset
+    glyph?
     glyphs->text
     goto-char
     goto-line
@@ -1361,6 +1407,9 @@
     make-frame
     make-frame-command
     make-frame-window
+    make-glyph
+    make-glyph-matrix
+    make-glyph-row
     make-lisp-time
     make-local-variable
     make-marker
@@ -1396,6 +1445,8 @@
     match-end
     match-string
     match-substitute-replacement
+    matrix-diff-rows
+    matrix-mark-current!
     menu-bar-edit-menu
     menu-bar-file-menu
     menu-bar-i-search-menu
@@ -1663,6 +1714,8 @@
     revert-buffer
     revert-buffer--default
     revert-buffer-with-coding-system
+    row-equal?
+    row-hash
     rows-above
     rows-row-of-column
     run-at-time
@@ -1747,6 +1800,7 @@
     set!buffer-text-beg-unchanged
     set!buffer-text-chars-modiff
     set!buffer-text-modiff
+    set!buffer-text-overlay-modiff
     set!buffer-truncate-lines
     set!buffer-word-wrap
     set!cache-long-scans
@@ -1829,6 +1883,32 @@
     set-file-modes
     set-fill-column
     set-frame-parameter
+    set-glyph-char!
+    set-glyph-face-id!
+    set-glyph-matrix-height!
+    set-glyph-matrix-rows!
+    set-glyph-matrix-width!
+    set-glyph-padding!
+    set-glyph-pixel-width!
+    set-glyph-row-ascent!
+    set-glyph-row-continued!
+    set-glyph-row-displays-text!
+    set-glyph-row-enabled!
+    set-glyph-row-end!
+    set-glyph-row-ends-at-zv!
+    set-glyph-row-fill-line!
+    set-glyph-row-glyphs!
+    set-glyph-row-hash!
+    set-glyph-row-height!
+    set-glyph-row-mode-line!
+    set-glyph-row-pixel-width!
+    set-glyph-row-start!
+    set-glyph-row-truncated-on-right!
+    set-glyph-row-used!
+    set-glyph-row-x!
+    set-glyph-row-y!
+    set-glyph-type!
+    set-glyph-voffset!
     set-goal-column
     set-interval-object!
     set-keymap-char-table!
@@ -1849,6 +1929,8 @@
     set-visited-file-name
     set-window-buffer!
     set-window-buffer-start-and-point
+    set-window-current-matrix!
+    set-window-desired-matrix!
     set-window-hscroll!
     set-window-next-buffers
     set-window-point!
@@ -2062,7 +2144,9 @@
     window-body-width
     window-buffer
     window-children
+    window-current-matrix
     window-cursor-off?
+    window-desired-matrix
     window-edges
     window-end
     window-frame

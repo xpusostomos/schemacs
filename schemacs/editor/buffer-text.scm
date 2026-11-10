@@ -70,8 +70,9 @@
    buffer-text-to-code-points
    buffer-text-clear!
    buffer-text-beg-unchanged  set!buffer-text-beg-unchanged
-   buffer-text-modiff  buffer-text-chars-modiff
+   buffer-text-modiff  buffer-text-chars-modiff buffer-text-overlay-modiff
    set!buffer-text-modiff  set!buffer-text-chars-modiff
+   set!buffer-text-overlay-modiff
    *gap-bytes-dfl*  *gap-bytes-min*
    )
 
@@ -82,7 +83,7 @@
 
     (define-record-type <buffer-text-type>
       (make<buffer-text> base store gpt z gap-size beg-unchanged
-                        modiff chars-modiff)
+                        modiff chars-modiff overlay-modiff)
       buffer-text-type?
       (base     buffer-text-base)
       ;; ^ The coordinate base of every *position* this class answers,
@@ -122,6 +123,16 @@
       ;; `buffer-modified-p' is derived from it (`SAVE_MODIFF <
       ;; MODIFF'), and a great deal of redisplay freshness is too.
       (chars-modiff buffer-text-chars-modiff set!buffer-text-chars-modiff)
+      (overlay-modiff buffer-text-overlay-modiff
+                      set!buffer-text-overlay-modiff)
+
+      ;; ^ GNU Emacs's `overlay_modiff` (`buffer.h:265'): "Counts
+      ;; modifications to overlays." Its one reader in the C is
+      ;; `window_outdated' (`window.c:231'), which compares it against
+      ;; the window's remembered `w->last_overlay_modified' - an overlay
+      ;; added, moved or given a property changes what a row draws
+      ;; without changing a single character, so `modiff' alone cannot
+      ;; see it.
       ;; ^ GNU Emacs's `chars_modiff': set to `modiff' when the change
       ;; was to the *characters*, and left alone when it was only to
       ;; their properties (`textprop.c:90' raises `MODIFF' and does not
@@ -191,7 +202,7 @@
         ;; what Emacs reports for a buffer that has just been made
         ;; (`(buffer-modified-tick)' on a fresh buffer is 1).
         (make<buffer-text> base (make-typed-array 'u32 0 size) base base size 0
-                           1 1)
+                           1 1 1)
         )))
 
     ;;----------------------------------------------------------------

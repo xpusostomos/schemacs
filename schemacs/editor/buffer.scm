@@ -76,6 +76,7 @@
           new-buffer-text  buffer-text-base  buffer-text-z
           buffer-text-ref
           buffer-text-modiff  buffer-text-chars-modiff
+          buffer-text-overlay-modiff
           set!buffer-text-modiff  set!buffer-text-chars-modiff)
     (scheme case-lambda))
   (cond-expand

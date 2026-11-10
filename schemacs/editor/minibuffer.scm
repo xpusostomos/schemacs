@@ -71,6 +71,9 @@
           buffer-local-value erase-buffer set!mode-name
           buffer-chars-modified-tick
           set-buffer-local-value! use-local-map with-current-buffer
+          ;; `read-minibuffer-1` makes the minibuffer buffer current, which
+          ;; is `read_minibuf`'s `Fset_buffer (minibuffer)` (`minibuf.c:794`).
+          set-buffer
           ;; `read-buffer''s completion is over the buffer registry, which
           ;; is an alist of `(NAME . BUFFER)' - see `internal-complete-buffer'
           *buffer-list* buffer-name bufferp other-buffer set-point allocate-buffer buffer-beg buffer-z buffer-pt set!buffer-read-only)
@@ -504,6 +507,24 @@ read-number-history
           ;; rather than the one being typed about.
           (set!buffer-default-directory
            ed (or (buffer-default-directory (current-buffer)) (getcwd)))
+          ;; **The minibuffer's keymap is its buffer's**, which is
+          ;; where `read_minibuf' puts it: `bset_keymap (current_buffer,
+          ;; map)' (`minibuf.c:906'), the buffer-local slot `use-local-map`
+          ;; writes. So the map follows the *buffer* the command loop is
+          ;; looking at, not this dynamic extent - which is what lets a
+          ;; click into another window make that window's buffer current
+          ;; and its own keymap live, while the prompt stays on screen and
+          ;; on the stack. Held in `*current-keymap*` instead, the map was
+          ;; pinned for the whole read and every click went on typing into
+          ;; the prompt.
+          ;;
+          ;; **ED, and not `(current-buffer)`**: the parameterize below
+          ;; has not run yet, so the current buffer here is still the
+          ;; *asking* one. Emacs has the same order and gets away with it
+          ;; because it made the minibuffer buffer current first
+          ;; (`Fset_buffer (minibuffer)`, `minibuf.c:794`, long before
+          ;; `read_minibuf` is entered).
+          (set!buffer-local-keymap ed (minibuffer-keymap mb))
           ;; The current buffer is restored when the read is over, however
           ;; it was left: `read_minibuf' (minibuf.c:675) does
           ;; `record_unwind_current_buffer' for exactly this. Without it,
@@ -516,8 +537,16 @@ read-number-history
           (parameterize ((*minibuffer* mb)
                          (*echo-area-buffer* ed)
                          (*echo-area-prompt* prompt)
-                         (*current-keymap* (minibuffer-keymap mb))
+                         ;; **`(*current-buffer* #f)` is the unwind, and
+                         ;; the `set-buffer` inside is the value** - which
+                         ;; is `read_minibuf`'s `Fset_buffer (minibuffer)`
+                         ;; (`minibuf.c:794`) followed by its
+                         ;; `record_unwind_current_buffer` (`:675`). The
+                         ;; parameterize puts the asking buffer back when
+                         ;; the read ends, however the prompt's commands -
+                         ;; or a click in another window - left it.
                          (*current-buffer* #f))
+            (set-buffer ed)
             ;; `minibuffer-setup-hook', run where the C runs it: after
             ;; the prompt and the initial input are in place, before the
             ;; recursive edit that reads (minibuf.c:912).

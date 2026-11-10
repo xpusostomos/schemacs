@@ -51,16 +51,22 @@
                read-input-event)
          (read-input-event display-read-input-event))
  (only (schemacs editor frame)
-       *current-frame* frame-message frame-selected-window mouse-position
+       *current-frame* *echo-area-buffer* *frame-list* frame? frame-height
+       frame-message
+       selected-window
+       frame-selected-window mouse-position
        new-frame
        set-window-start!
        window-body-height window-buffer window-edges window-height)
  (only (schemacs editor xdisp)
-       render! track-mouse vertical-motion window-end window-start)
+       posn-at-x-y render! track-mouse vertical-motion
+       window-end window-start)
  (only (schemacs editor keyboard)
        *last-read-event* *overriding-terminal-local-map*
        *unread-command-events* dispatch-key sit-for)
- (only (schemacs editor mouse) *mouse-scroll-delay* *mouse-scroll-min-lines*)
+ (only (schemacs editor mouse) *mouse-scroll-delay* *mouse-scroll-min-lines*
+       mouse-minibuffer-check posn-set-point)
+ (only (schemacs editor subr) event-start posn-window)
  (only (schemacs editor simple) region-active-p)
  (only (schemacs editor editfns) point insert
 )
@@ -68,7 +74,8 @@
  ;; `%mark-marker` is the buffer's mark slot - `BVAR (b, mark)` - and
  ;; `text-editor-mark`, the read that used to be here, is gone.
  (only (schemacs editor buffer) %mark-marker with-current-buffer
- set-point allocate-buffer buffer-pt buffer-z)
+ set-point allocate-buffer buffer-pt buffer-z
+ get-buffer-create)
  (only (schemacs editor marker) marker-position))
 
 ;; Unbuffered output, so a run that hangs shows where it got to.
@@ -512,5 +519,53 @@
     (test-equal "window-end is one past the last line displayed"
       (+ 1 (* (window-body-height w) 5))
       (window-end w))))
+
+;;-------------------------------------------------------------------
+;; A click on the echo area row
+;;-------------------------------------------------------------------
+;;
+;; The echo area is a row of the frame, not a minibuffer window, so
+;; `posn-at-x-y` answers the *frame* for a click there and `posn-set-point`
+;; would hand a frame to `select-window` - "Wrong type argument: #<<frame>".
+;; GNU Emacs never reaches that state because `mouse-set-point` calls
+;; `mouse-minibuffer-check` first, and this is that guard.
+;;
+;; Not active: refused, as Emacs refuses a click on an inactive minibuffer.
+;; Active (a prompt is up): allowed, because the click is inside that
+;; recursive edit already.
+(let* ((ed (allocate-buffer))
+       (f (new-frame ed 24 80)))
+  (with-current-buffer ed (insert "hello\n"))
+  ;; a frame of its own: an earlier test's frame is left in `*frame-list*`
+  ;; and `posn-at-x-y` walks `(window-list frame)`, so the frame has to be
+  ;; the current one *and* the only one for the echo row to be outside
+  ;; every window
+  (parameterize ((*current-frame* f) (*frame-list* (list f))
+                 (*echo-area-buffer* #f))
+    (render! f)
+    (let ((echo-row (- (frame-height f) 1))
+          (event (lambda (row) (list 'down-mouse-1 (posn-at-x-y 0 row f)))))
+      ;; the position really is the frame's, which is the whole problem
+      (test-equal "a click on the echo row names the frame"
+        #t (frame? (posn-window (event-start (event echo-row)))))
+      (test-equal "and mouse-minibuffer-check refuses it"
+        "Minibuffer window is not active"
+        (guard (e (#t (if (error-object? e)
+                          (error-object-message e)
+                          'ERR)))
+          (mouse-minibuffer-check (event echo-row))
+          'no-error))
+      (test-equal "and allows it while a prompt is up"
+        #t
+        (parameterize ((*echo-area-buffer* (get-buffer-create "*echo*")))
+          (mouse-minibuffer-check (event echo-row))
+          #t))
+      ;; and a click in the text area still selects, so the guard is not
+      ;; refusing everything
+      (test-equal "a click in the text area still selects"
+        #t
+        (let ((w (posn-at-x-y 0 2 f)))
+          (posn-set-point w)
+          (eq? (posn-window w) (selected-window)))))))
 
 (test-end "schemacs_editor_mouse")

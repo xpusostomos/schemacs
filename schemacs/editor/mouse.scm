@@ -35,24 +35,32 @@
   ;;   the mode-line, scroll-bar and fringe areas - `posn-area''s other
   ;;                       answers, and the bindings in `bindings.el'
   ;;   `mouse-autoselect-window' - the hover half, a different mechanism
-  ;;   `mouse-minibuffer-check' - it refuses an event inside a
-  ;;                       minibuffer-only frame, and this tree has no
-  ;;                       such frame: the echo area is a row
+  ;;   `mouse-minibuffer-check''s `mouse-leave-buffer-hook' half - the
+  ;;                       hook is not carried; the refusal itself is,
+  ;;                       adapted to a tree with no minibuffer window
   (import
     (scheme base)
+    ;; `inexact->exact` is Guile's, not `(scheme base)`'s - the echo-row
+    ;; test in `mouse-minibuffer-check` needs it to compare a cell row
+    ;; that arrived as an inexact number.
+    (only (guile) inexact->exact)
     ;; `posn-set-point' is `subr.el''s and lives here because it needs
     ;; the two below, and `(schemacs editor subr)' is beneath both of
     ;; them and cannot reach either - see the note on the posn cluster
     ;; there.
     (only (schemacs editor subr) event-start event-end posn-point posn-window
+          posn-x-y
           ;; where the pointer is, which a drag that has left its window
           ;; asks for
           ;; where a release lands if the tracking loop did not eat it
           ignore)
     (only (schemacs editor frame)
-          frame? frame-selected-window mouse-position select-window
-          selected-window set-window-start! window-buffer window-edges
-          window-height window-point window-type?)
+          frame? frame-height frame-selected-window mouse-position
+          select-window selected-window set-window-start! window-buffer
+          window-edges window-height window-point window-type?
+          ;; `mouse-minibuffer-check` asks whether a prompt is up: the
+          ;; echo area is this tree's minibuffer window.
+          *echo-area-buffer*)
     (only (schemacs editor editfns) goto-char point)
     ;; The mark a drag sets, and the region it leaves active:
     ;; `push-mark', `pop-mark', `activate-mark' and `region-active-p' are
@@ -101,6 +109,7 @@
           *last-command-event* current-prefix-arg define-command))
 
   (export posn-set-point mouse-set-point mouse-drag-region mouse-drag-track
+          mouse-minibuffer-check
           mouse-set-region mouse-start-end mouse--drag-set-mark-and-point
           mouse-scroll-subr mouse-set-region-1
           *mouse-scroll-delay* *mouse-scroll-min-lines*
@@ -111,6 +120,48 @@
     ;;----------------------------------------------------------------
     ;; Where a mouse event happened
     ;;------------------------------------------------------------------
+
+    (define (mouse-minibuffer-check event)
+      ;; GNU Emacs's `mouse-minibuffer-check` (`mouse.el:768`): refuse a
+      ;; mouse event that landed in a minibuffer window that is not
+      ;; active, then let temporary modes - an isearch, say - turn off.
+      ;;
+      ;;   (let ((w (posn-window (event-start event))))
+      ;;     (and (windowp w)
+      ;;          (window-minibuffer-p w)
+      ;;          (not (minibuffer-window-active-p w))
+      ;;          (user-error "Minibuffer window is not active")))
+      ;;   (run-hooks 'mouse-leave-buffer-hook)
+      ;;
+      ;; **This tree has no minibuffer window**, so the C-shaped test has
+      ;; nothing to test. The same *condition* is still reachable, and it
+      ;; is what a click on the echo area row hits: the echo area is a
+      ;; row of the frame, `posn-at-x-y` answers the frame for it, and
+      ;; `posn-set-point` would then try to select a frame. Active means
+      ;; a prompt is up (`*echo-area-buffer*` is a live read), and then
+      ;; the event is already inside that recursive edit and there is
+      ;; nothing to do; not active means the click is on a row that holds
+      ;; no buffer, and Emacs's answer is to refuse it. So a frame
+      ;; position on the echo row is this tree's "minibuffer window that
+      ;; is not active".
+      ;;
+      ;; Not carried: `mouse-leave-buffer-hook`, which no caller here
+      ;; registers on.
+      ;;--------------------------------------------------------------
+      (let ((w (posn-window (event-start event))))
+        (when (and (frame? w)
+                   (not (*echo-area-buffer*))
+                   ;; The event is on the frame's last row, which is where
+                   ;; the echo area is drawn (`render!`). **The coordinate
+                   ;; is the one `posn-at-x-y` was given**: a *cell* row,
+                   ;; not a pixel - the gtk front end converts the pointer
+                   ;; to cells before it asks, so the event carries the
+                   ;; same number `posn-at-x-y` divided nothing into.
+                   (let ((y (cdr (posn-x-y (event-start event)))))
+                     (and (number? y)
+                          (>= (inexact->exact (round y))
+                              (- (frame-height w) 1)))))
+          (error "Minibuffer window is not active"))))
 
     (define (posn-set-point position)
       ;; GNU Emacs's `posn-set-point' (`subr.el:2013'): move point to
@@ -128,12 +179,27 @@
       ;;--------------------------------------------------------------
       (if (frame? (posn-window position))
           ;; The press was outside every window - on the frame's own
-          ;; area - so Emacs means the frame's selected window, and
-          ;; refuses a frame whose selected window is not one.
+          ;; area. GNU Emacs means the frame's selected window here,
+          ;; because every part of a frame that is not a window *is* a
+          ;; window in Emacs: the minibuffer is one.
+          ;;
+          ;; **This tree has no minibuffer window** - the echo area is a
+          ;; row of the frame (`frame.scm` keeps `*echo-area-buffer*` for
+          ;; it) - so a click on that row arrives here as a *frame*
+          ;; position, and `select-window` cannot take a frame. Emacs
+          ;; never reaches this state: `mouse-set-point` calls
+          ;; `mouse-minibuffer-check` first (`mouse.el:768`, ported
+          ;; below), which is where a click on the minibuffer is
+          ;; answered. There is nothing to select for that area either
+          ;; way - the echo area holds no buffer of its own - so the
+          ;; selection is left alone.
           (let ((window (frame-selected-window (posn-window position))))
-            (unless (window-type? window)
-              (error "Position not in text area of window"))
-            (select-window window))
+            (if (window-type? window)
+                (select-window window)
+                ;; Emacs's own error for a frame whose selected window is
+                ;; not a window. It is what this raised before it could
+                ;; tell that case from the echo area's.
+                (error "Position not in text area of window")))
           (let ((window (posn-window position)))
             (unless (window-type? window)
               (error "Position not in text area of window"))
@@ -163,7 +229,13 @@ point determined by `mouse-select-region-move-to-beginning'."
       ;; **The multi-click branch is not carried**: it needs the click
       ;; count and the region, and neither is here yet. A single press
       ;; reports a click count of 1, which is the branch below.
+      ;;
+      ;; `mouse-minibuffer-check` first, as Emacs's first line is: it is
+      ;; what refuses a click on the echo area row, which reaches here as
+      ;; a frame position and would otherwise be handed to
+      ;; `posn-set-point`'s `select-window`.
       ;;--------------------------------------------------------------
+      (mouse-minibuffer-check event)
       (posn-set-point (event-end event)))
 
     (define (mouse-key? key)
@@ -380,8 +452,8 @@ This should be bound to a mouse drag event."
       ;; the region back. That is why `mouse.el:3783' binds
       ;; `[drag-mouse-1]' and not `[mouse-1]'.
       ;;
-      ;; NOT CARRIED, each named: `mouse-minibuffer-check';
-      ;; `mouse-shift-adjust-point' (no shift-adjust machinery here);
+      ;; NOT CARRIED, each named: `mouse-shift-adjust-point' (no
+      ;; shift-adjust machinery here);
       ;; the `mouse-drag-start' terminal parameter and the click count it
       ;; is read for; `mouse-drag-copy-region' (nil in Emacs by default,
       ;; so nothing is copied); and the "(or transient-mark-mode
@@ -459,14 +531,16 @@ This should be bound to a mouse drag event."
       ;; expression supplies and has no `&optional' to make one skippable,
       ;; so a programmatic call passes the same two.
       ;;
-      ;; NOT CARRIED, each named where Emacs has it: `mouse-minibuffer-
-      ;; check' (this tree has no minibuffer-only frame);
+      ;; NOT CARRIED, each named where Emacs has it:
       ;; `mouse-selection-click-count' and the click count itself, which
       ;; need a clock; `echo-keystrokes' and `make-cursor-line-fully-
       ;; visible', neither of which exists here; `mouse-shift-adjust-
       ;; point'; and the `terminal-parameter' the drag's start event is
       ;; recorded in for `mouse-drag-and-drop-region'.
       ;;--------------------------------------------------------------
+      ;; the C's first line, "Don't do anything for a click in an
+      ;; inactive minibuffer" - which for this tree is the echo row
+      (mouse-minibuffer-check start-event)
       (deactivate-mark)
       (let* ((start-posn (event-start start-event))
              (start-point (posn-point start-posn))

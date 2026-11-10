@@ -318,6 +318,28 @@
       (addstr (stdscr) (glyphs->text glyphs) #:y y #:x x)
       (when attribute (attr-off! (stdscr) attribute)))
 
+    (define-method (clear-end-of-line! (d <tty-display>) y x width token)
+      ;; Blank the cells [X, X+WIDTH) of row Y. `addstr` writes over the
+      ;; cells it is handed and leaves whatever was to their right, so a
+      ;; row that got shorter than the one before kept the old row's
+      ;; tail - which is how visiting a second file left the first one's
+      ;; lines visible past the end of the new one's. GNU Emacs's tty
+      ;; backend answers `clear_end_of_line` with
+      ;; `tty_clear_end_of_line` (`term.c`), a run of spaces in the
+      ;; row's own face, and that is what this is.
+      ;;--------------------------------------------------------------
+      (when (> width 0)
+        (when token (attr-on! (stdscr) token))
+        (addstr (stdscr) (make-string width #\space) #:y y #:x x)
+        (when token (attr-off! (stdscr) token))))
+
+    (define-method (ensure-surface! (d <tty-display>))
+      ;; A terminal's "surface" is the screen it was opened on; there is
+      ;; nothing to make. Emacs's tty backend likewise has no realize
+      ;; step - `clear_frame` writes to the terminal it already has.
+      ;;--------------------------------------------------------------
+      #t)
+
     (define-method (clear-frame-area! (d <tty-display>))
       ;; Erase the whole screen. The full-repaint flag that follows is
       ;; this terminal's own: the partial-update optimizations (scroll

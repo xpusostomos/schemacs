@@ -28,6 +28,8 @@
    draw-box!
    glyphs->text
    clear-frame-area!
+   clear-end-of-line!
+   ensure-surface!
    update-window-begin!
    update-window-end!
    draw-window-cursor!
@@ -134,6 +136,26 @@
     ;; Clear the whole display surface, ready for the frame drawn next.
     ;; Emacs's `clear_frame_area' over the frame's whole rectangle.
     ;; `(clear-frame-area! display)'.
+
+    (define-generic ensure-surface!)
+    ;; Make sure DISPLAY has a surface to draw into, without painting it.
+    ;; Emacs makes a frame's surface when the frame is *realized* and
+    ;; `clear_frame_area` only fills it; this tree had them in one call,
+    ;; which is invisible until a redisplay legitimately stops clearing.
+    ;; `(ensure-surface! display)`.
+
+    (define-generic clear-end-of-line!)
+    ;; Blank ROW's cells from column X to the window's right edge - the
+    ;; cell range [X, WIDTH) of the row at pixel Y, in the face/cell
+    ;; colour TOKEN. GNU Emacs's `clear_end_of_line` (`dispnew.c:4731`,
+    ;; `:4960`), whose whole job is the case a terminal's `addstr`
+    ;; cannot express: "This can happen when the new row is shorter than
+    ;; the old one." **Both back ends need it for the same reason and
+    ;; only one gets it for free**: a GUI fill paints a rectangle, but
+    ;; `addstr` writes over the cells it is given and leaves whatever
+    ;; was to their right - which is how two files came to be visible in
+    ;; one window after the second was visited.
+    ;; `(clear-end-of-line! display y x width token)`.
 
     (define-generic update-window-begin!)
     ;; A window is about to be updated: the begin half of Emacs's

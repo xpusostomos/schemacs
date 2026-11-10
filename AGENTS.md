@@ -7190,3 +7190,66 @@ redisplay is running, because the layout that a redisplay causes can fire
 Verified live: with one frame Delete Frame is insensitive, with two it is
 sensitive; "New Frame" from the menu gives `F2`/`F3` and the editor stays
 up.
+
+## The minibuffer is a buffer, not a dynamic extent (2026-11-09/10)
+
+Chris, using the editor: *"if I'm prompted in the minibuffer, I can ignore
+that, click on a buffer and go on working, whereas in schemacs I'm stuck in
+the minibuffer until I exit it"* - and then, once that was fixed, *"the
+cursor should follow where I'm typing, but no it's stuck in the minibuffer"*.
+
+**Emacs's minibuffer read does not own the keyboard; the minibuffer
+*buffer* does.** `read_minibuf` makes that buffer current
+(`Fset_buffer (minibuffer)`, `minibuf.c:794`) and gives it its keymap as a
+*buffer-local* (`bset_keymap (current_buffer, map)`, `:906`). A click in
+another window runs `Fselect_window`, which makes *that* window's buffer
+current (`window.c:534`), so key lookup and `current-buffer` both follow
+the click while the prompt stays on screen and on the stack
+(`minibuf_level` still 1). `get_window_cursor_type` (`xdisp.c:34825`) then
+puts the cursor in the selected window, because it is not
+`XWINDOW (echo_area_window)`.
+
+We had the keymap in a `parameterize` and the echo buffer shadowing
+`current-editor` from below, so neither could move. Two changes:
+
+- `read-minibuffer-1` sets the map on the **buffer**
+  (`set!buffer-local-keymap ed ...`) and makes it current (`set-buffer ed`)
+  inside the existing `(*current-buffer* #f)` unwind - which is the C's
+  `Fset_buffer` + `record_unwind_current_buffer` pair;
+- `current-editor` (`frame.scm`) is `(window-buffer (selected-window))`
+  again, with no echo-area preference.
+
+**The cursor** is gated on the current buffer being the prompt's, which is
+this tree's stand-in for "the selected window is the minibuffer window".
+
+**A bug this pass introduced and fixed in the same pass**: the gate was
+written `(and A B (eq? ...))`, and `and` answers its *last* test - so
+`reading` was `#t`, and `(buffer-pt #t)` killed `C-x C-f` with "Wrong type
+argument ... #t". The buffer has to come last: `(and echo (eq? cur echo)
+echo)`.
+
+**Not reachable**: C-x o *back into* the prompt. `next-window`'s MINIBUF
+nil "considers the minibuffer window only if active" (`window.c:2947`), so
+Emacs's C-x o mid-prompt cycles through it - and this tree has no
+minibuffer window at all. Named, not faked.
+
+
+## The redraw skip I tried, and why it came out (2026-11-10)
+
+Chris: *"surely if nothing changed the only incremental render you need to
+do is the cursor."* Right, and it is Emacs's `w->redisplay` +
+`window_outdated` (`window.c:231`). I ported the tick comparison
+(`last_modified`/`last_overlay_modified` against `MODIFF`/`OVERLAY_MODIFF`,
+new `overlay_modiff` field on buffer-text, `window-outdated?`), skipped an
+unfresh window in `render-window!`, and measured **16 ms -> 5.4 ms** per
+keystroke. It was correct on its own terms - fresh after a draw, stale
+after an edit, verified live both ways.
+
+**And it broke the editor**, because `render!` begins with
+`clear-frame-area!`: a skipped window is not merely left alone, it is
+*wiped*. The splash went blank and `mouse-tests` hung in the scroll loop.
+Emacs can skip a window because it never clears the frame - it keeps a
+glyph matrix per window and diffs it. The skip is therefore blocked on the
+thing this file has named for two years: incremental redraw. Removing the
+`clear-frame-area!` is the first step of that work, not a detail of it.
+Reverted; the fields it added to `<window>` are left in place, unread.

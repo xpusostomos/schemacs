@@ -66,7 +66,9 @@
     (only (guile) hash-ref hash-set! make-hash-table)
     (only (schemacs editor dispnew)
           <display>
-          clear-frame-area! column-width delete-frame-display! glyphs->text
+          clear-frame-area! clear-end-of-line! ensure-surface!
+          column-width
+          delete-frame-display! glyphs->text
           display-cell-size display-color-cells display-set-size!
           face-metrics
           draw-window-cursor! flush-display! key-event->key line-height
@@ -182,8 +184,19 @@
        d (cons (list (glyphs->text glyphs) y x attribute)
                (test-display-glyphs d))))
 
+    (define-method (ensure-surface! (d <test-display>)) #t)
+
     (define-method (clear-frame-area! (d <test-display>))
       (set!test-display-glyphs d '()))
+
+    (define-method (clear-end-of-line! (d <test-display>) y x width token)
+      ;; Recorded as the spaces it would draw, so a test reading the
+      ;; script can see that a row's tail was blanked.
+      ;;--------------------------------------------------------------
+      (when (> width 0)
+        (set!test-display-glyphs
+         d (cons (list (make-string width #\space) y x token)
+                 (test-display-glyphs d)))))
 
     (define-method (update-window-begin! (d <test-display>)) #t)
     (define-method (update-window-end! (d <test-display>)) #t)
