@@ -166,7 +166,8 @@
     ;; says which faces are in effect, `xfaces' merges them and folds
     ;; them down, and the display realizes what that means on itself
     ;; (`realize-face').
-    (only (schemacs editor textprop) get-text-property)
+    (only (schemacs editor textprop)
+          get-text-property next-single-property-change)
     (only (schemacs editor buffer)
           *transient-mark-mode*
           current-buffer get-buffer get-buffer-create with-current-buffer
@@ -190,6 +191,10 @@
           ;; and the overlays at a position are merged into its face
           overlay-end overlay-get overlay-priority overlay-start
           overlays-at overlays-in
+          ;; `face_at_buffer_position`'s `*limit`: the next position a
+          ;; face can change is the nearer of this and the next `face`
+          ;; property change (`face-change-limit` below)
+          next-overlay-change
           ;; `FETCH_CHAR` (`buffer.h`) - the raw read of a named
           ;; buffer. It has no Lisp name, and it was the engine's
           ;; until 2026-10-13.
@@ -1306,43 +1311,79 @@
                       (merge-face-vectors (face-realized-attributes face-name)
                                           base-attrs))))
 
+    (define (face-change-limit ed position limit)
+      ;; The next position at or after POSITION where the face can differ,
+      ;; and at least POSITION+1: `face_at_buffer_position`'s `*limit`
+      ;; (`xfaces.c`), which is
+      ;;
+      ;;     *limit = next_single_property_change (pos, Qface, ...);
+      ;;     l = next_overlay_change (pos);
+      ;;     if (l < *limit) *limit = l;
+      ;;
+      ;; - a run of one face is [POSITION, LIMIT) and nothing inside it
+      ;; can change. The region's own edges are candidates too, because
+      ;; the redisplay merges the `region' face over the text face inside
+      ;; it, so a run cannot span the mark.
+      ;;
+      ;; **This is what makes a row cheap.** Asking for the face at every
+      ;; character is ~13us a character here - 0.64ms for a 50-column
+      ;; row, measured - because each ask re-merges the `default' face
+      ;; and walks the interval tree. Emacs asks once per run for the
+      ;; same reason, and the primitive it asks with is
+      ;; `next_single_property_change`.
+      ;;--------------------------------------------------------------
+      (let* ((by-property
+              (or (next-single-property-change position 'face ed limit) limit))
+             (by-overlay (next-overlay-change position))
+             (by-region
+              (if (buffer-local-value ed 'mark-active #f)
+                  (let ((mark (and (%mark-marker ed)
+                                   (marker-position (%mark-marker ed)))))
+                    (if mark
+                        (let ((point (buffer-pt ed)))
+                          (let ((beg (min mark point)) (end (max mark point)))
+                            (cond ((and (> beg position) (< beg limit)) beg)
+                                  ((and (> end position) (< end limit)) end)
+                                  (else limit))))
+                        limit))
+                  limit))
+             (next (min by-property by-overlay by-region)))
+        (max (+ position 1) (min next limit))))
+
     (define (line-face-runs ed line-start len)
-      ;; LINE-STRING as maximal runs of characters that share one face:
+      ;; LINE-TEXT as maximal runs of characters that share one face:
       ;; `(FROM TO ATTRIBUTE)' in buffer columns, ATTRIBUTE being the
-      ;; display's token for the face `face-at-buffer-position' finds.
+      ;; display's token for the face `attrs-at-buffer-position' finds.
       ;;
       ;; The runs, not the characters, are what gets drawn: a terminal is
       ;; told "these cells are bold" once per run rather than once per
-      ;; character, which is the same reason Emacs walks faces with
-      ;; `next-single-property-change' instead of asking at every
-      ;; position.
+      ;; character, and the *walk* is by run too - `face-change-limit`
+      ;; jumps to the next position the face can change, which is the
+      ;; C's `*limit`, instead of asking at every character.
       ;;
       ;; So the comparison that finds a run's end is on the merged,
-      ;; *unrealized* attributes, and the face is realized once at the end
-      ;; of the run. Realizing per character is 15us on the GTK display
-      ;; against 1.2us for the attribute lookup - twelve times the cost, to
-      ;; intern a face a run is about to hand over unchanged. With a search
-      ;; face on every row of a wide window that is most of a redisplay,
-      ;; which is what made isearch look like it had hung on Gtk; a
-      ;; terminal's realize is a cheap intern, so nothing showed there.
+      ;; *unrealized* attributes, and the face is realized once per run.
+      ;; Realizing per character is 15us on the GTK display against
+      ;; 1.2us for the attribute lookup - twelve times the cost, to
+      ;; intern a face a run is about to hand over unchanged. With a
+      ;; search face on every row of a wide window that is most of a
+      ;; redisplay, which is what made isearch look like it had hung on
+      ;; Gtk; a terminal's realize is a cheap intern, so nothing showed
+      ;; there.
       ;;--------------------------------------------------------------
       (if (= len 0)
-            '()
-            (let loop ((i 1)
-                       (start 0)
-                       (attrs (attrs-at-buffer-position ed line-start))
-                       (acc '()))
-              (if (>= i len)
-                  (reverse (cons (list start len
-                                       (realize-face (current-display) attrs))
-                                 acc))
-                  (let ((a (attrs-at-buffer-position ed (+ line-start i))))
-                    (if (equal? a attrs)
-                        (loop (+ 1 i) start attrs acc)
-                        (loop (+ 1 i) i a
-                              (cons (list start i
-                                          (realize-face (current-display) attrs))
-                                    acc))))))))
+          '()
+          (let loop ((from 0) (acc '()))
+            (if (>= from len)
+                (reverse acc)
+                (let* ((position (+ line-start from))
+                       (attrs (attrs-at-buffer-position ed position))
+                       (next (face-change-limit ed position (+ line-start len)))
+                       (to (min len (max (+ from 1) (- next line-start)))))
+                  (loop to
+                        (cons (list from to
+                                    (realize-face (current-display) attrs))
+                              acc)))))))
 
     (define (draw-overlay-strings! entries row-y x)
       ;; Draw each `(OVERLAY . STRING)' of ENTRIES at X, in order, in the
@@ -2049,24 +2090,39 @@
       (let* ((strings (line-texts-glyphs texts from to))
              (offsets (list->vector (line-texts-offsets texts from to)))
              (n (length strings))
-             (vec (make-vector n #f)))
-        (let loop ((i 0) (rest strings) (attrs #f) (token #f))
+             (vec (make-vector n #f))
+             ;; **The faces come from the runs, not from an ask per
+             ;; glyph.** `line-face-runs` walks by `face-change-limit`,
+             ;; so a row of one face costs one attribute merge and one
+             ;; realize however wide it is; asking `attrs-at-buffer-position`
+             ;; at every glyph was ~13us a character (measured) and ran
+             ;; the whole row's cost up with the window's width. A
+             ;; `display` string stands for the column it starts on, and
+             ;; a run is in buffer columns, so the two line up: glyph I
+             ;; is character FROM+I.
+             (runs (line-face-runs (current-buffer)
+                                   (+ line-start from) (- to from))))
+        (let loop ((i 0) (rest strings) (rs runs))
           (when (< i n)
-            (let* ((text (car rest))
+            ;; Skip the runs that end at or before this glyph; the
+            ;; first run still covering column I is this glyph's face.
+            (let* ((rs (let skip ((rs rs))
+                         (if (and (pair? rs) (pair? (cdr rs))
+                                  (>= i (cadr (car rs))))
+                             (skip (cdr rs))
+                             rs)))
+                   (token (if (pair? rs)
+                              (caddr (car rs))
+                              (realize-face (current-display)
+                                            (attrs-at-buffer-position
+                                             (current-buffer) (+ line-start from i)))))
+                   (text (car rest))
                    (next-x (if (< (+ i 1) (vector-length offsets))
                                (vector-ref offsets (+ i 1))
                                (+ (vector-ref offsets i) (text-cells-width text))))
-                   (w (max 1 (- next-x (vector-ref offsets i))))
-                   ;; The face at this *buffer column*. A `display' string
-                   ;; stands for the column it starts on, which is what
-                   ;; `face-at-buffer-position` is asked about.
-                   (a (attrs-at-buffer-position
-                       (current-buffer) (+ line-start from i)))
-                   (tok (if (and token (equal? a attrs))
-                            token
-                            (realize-face (current-display) a))))
-              (vector-set! vec i (make-glyph text tok w 'char #f 0))
-              (loop (+ i 1) (cdr rest) a tok))))
+                   (w (max 1 (- next-x (vector-ref offsets i)))))
+              (vector-set! vec i (make-glyph text token w 'char #f 0))
+              (loop (+ i 1) (cdr rest) rs))))
         (cons vec n)))
 
     (define (text-cells-width text)
@@ -2278,11 +2334,37 @@
           (update-window-begin! (current-display))
           (for-each (lambda (i)
                       (let ((d (glyph-matrix-row-ref desired i)))
-                        (when (and d (glyph-row-enabled? d))
-                          (draw-glyph-row! window d))))
+                        (cond ((and d (glyph-row-enabled? d))
+                               (draw-glyph-row! window d))
+                              ;; **A row with nothing to show is blanked,
+                              ;; not left as it was.** GNU Emacs's
+                              ;; `update_window` clears a row whose
+                              ;; desired row is not enabled; without that,
+                              ;; a window that scrolled past the end of
+                              ;; its buffer kept the rows that used to be
+                              ;; there - the "corrupted screen" that
+                              ;; showed up the moment the frame stopped
+                              ;; being repainted whole.
+                              (else (blank-glyph-row! window i d)))))
                     (matrix-diff-rows current desired))
           (matrix-mark-current! current desired)
           (update-window-end! (current-display)))))
+
+    (define (blank-glyph-row! window index desired-row)
+      ;; Blank one row of WINDOW: the cells are written as spaces in the
+      ;; default face - `update_window`'s "this row is not enabled" case,
+      ;; which is `clear_end_of_line` across the row's whole width
+      ;; (`dispnew.c`).
+      ;;--------------------------------------------------------------
+      ;; **The row index, not the row's `y`.** A row that was never built
+      ;; - every row past the end of the buffer - still carries the y its
+      ;; record was made with (0), so blanking from the record wiped the
+      ;; window's first line once for every empty row.
+      (let ((y (row->pixel-y (+ (window-top window) index))))
+        (clear-end-of-line! (current-display)
+                            y (window-left window)
+                            (window-body-width window)
+                            (face->attribute 'default))))
 
     (define (draw-glyph-row! window row)
       ;; Draw a built row: one `write-glyphs!` per run of glyphs that share
@@ -2591,17 +2673,28 @@
       ;; frame too (`sync-frame-size!`), because the toolkit has already
       ;; thrown the old contents away.
       ;;--------------------------------------------------------------
+      ;; **One rule for both front ends: a frame is repainted when it is
+      ;; garbaged, and otherwise only the rows that changed.** The
+      ;; terminal used to be excluded here - every keystroke erased the
+      ;; screen and repainted all of it - on the strength of a note in
+      ;; `clear-frame-area!` about the partial-update optimizations
+      ;; (scroll regions, insert/delete character) desyncing the
+      ;; physical terminal when lines merge. Those optimizations are
+      ;; switched *off* in `with-terminal` (`idlok!` and `idcok!`), so
+      ;; there was nothing to desync, and the terminal paid a whole
+      ;; frame per keypress for it: measured on a 40x120 tty over a
+      ;; 2000-line file, `render!` wrote 20 KB a keystroke, and the
+      ;; screen visibly flashed. ncurses keeps its own account of the
+      ;; screen and emits only the cells whose content differs, which is
+      ;; the same diff `update_window` does - a cursor move now costs
+      ;; one cell.
       (when (or (frame-garbaged-p frame)
-                ;; **A terminal is always fully repainted.** Its
-                ;; `clear-frame-area!` says why: the partial-update
-                ;; optimizations (scroll regions, insert/delete
-                ;; character) desync the physical terminal when lines
-                ;; merge. GNU Emacs's tty redisplay has the same shape -
-                ;; `clear_garbaged_frames`' note says tty updating
-                ;; "requires building a frame matrix from window
-                ;; matrices", i.e. every window every time. So the
-                ;; matrix diff is what a *graphical* frame uses, and the
-                ;; terminal keeps the whole-screen repaint it had.
+                ;; **A terminal is still fully repainted.** The matrix diff
+                ;; is not yet safe for a scrolled window: Emacs answers that
+                ;; case in `try_window_id`, reusing the current matrix when
+                ;; the desired one is the old one shifted - which this tree
+                ;; does not port. Until it does, a terminal repaints the
+                ;; frame it is drawing, and a graphics frame uses the diff.
                 (not (graphical-frame?)))
         ;; **The terminal still clears, and a graphics frame does not.**
         ;; `redraw_frame` (`dispnew.c:3212`) is guarded by
@@ -2727,10 +2820,19 @@
                     ;; current matrix is emptied instead, so the diff
                     ;; draws nothing over the row and the echo-area block
                     ;; below is what paints there.
-                    (cond ((window-buffer w) (display-window! w))
-                          (else
-                           (let ((m (window-current-matrix w)))
-                             (when m (clear-glyph-matrix m))))))
+                    (cond ((window-buffer w)
+                   ;; **Every window is rebuilt every redisplay.** GNU
+                   ;; Emacs returns early for a window that is not
+                   ;; outdated (`window_outdated`, `window.c:231`), and
+                   ;; that is the next step - but it needs
+                   ;; `try_window_id` with it: a skipped window keeps the
+                   ;; desired matrix `assign_row` swapped out of it, and
+                   ;; `update_window` then compares an empty matrix
+                   ;; against the screen.
+                   (display-window! w))
+                  (else
+                   (let ((m (window-current-matrix w)))
+                     (when m (clear-glyph-matrix m))))))
                   windows)
         (for-each update-window! windows)
         ;; **No mode line for the minibuffer window**, which is Emacs's

@@ -147,7 +147,16 @@
       ;; the six that decide what appears.
       ;;--------------------------------------------------------------
       (and (eq? (glyph-type x) (glyph-type y))
-           (eqv? (glyph-char x) (glyph-char y))
+           ;; **`equal?`, not `eqv?`.** The C's `u.val` is an integer
+           ;; character code, so `GLYPH_EQUAL_P`'s `==` works; this
+           ;; tree's `glyph-char` is the cell's whole *string* (a
+           ;; `display` property can make one cell several characters),
+           ;; and `eqv?` on two equal strings is #f unless they are the
+           ;; same object. Every rebuilt row therefore compared unequal
+           ;; with the one on the screen, `update_window` redrew all of
+           ;; them, and the matrix diff never matched - which is what
+           ;; made a keystroke cost the whole window.
+           (equal? (glyph-char x) (glyph-char y))
            (eqv? (glyph-face-id x) (glyph-face-id y))
            (eq? (glyph-padding? x) (glyph-padding? y))
            (eqv? (glyph-voffset x) (glyph-voffset y))
@@ -159,7 +168,7 @@
       ;; The weaker test `update_text_area` uses to decide that a run can
       ;; be left as it stands.
       ;;--------------------------------------------------------------
-      (and (eqv? (glyph-char x) (glyph-char y))
+      (and (equal? (glyph-char x) (glyph-char y))
            (eqv? (glyph-face-id x) (glyph-face-id y))
            (eq? (glyph-padding? x) (glyph-padding? y))))
 

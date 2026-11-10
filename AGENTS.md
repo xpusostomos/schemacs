@@ -78,20 +78,9 @@ number of functions, same everything. Of course this is scheme rather than
 lisp, so there will be some deference to it being a different language, 
 but there should be very minimal departures from emacs algorithms.
 
-The only exception to the "same shape as emacs" is we want to avoid
-dynamic binding of variables. Scheme is a lexically bound language.
-There are ways I know of trying to get around that, but it's
-ugly, we never want to rely on dynamically bound variables.
-How to resolve that is a difficult problem to solve on a case by case basis but
-it may mean adding extra parameters to some functions.
-So that means we don't use parameterize or fluid-let or similar.
-Don't save and restore global variables, that's also the same thing.
-If a function refers to global variables and is called by other functions
-that don't want it to use the global value, then the function should be changed
-to take an extra parameter. that's the only case where you should
-add more parameters than what emacs has, and in that case
-it should be documented that is what happened that the parameter was
-added to avoid dynamic binding.
+If you either make, or find a departure from real emacs when working
+on this project, put as much information as possible in the
+DEPARTURES.md file so that we can return to this work later.
 
 **The convention, settled 2026-11-07: dynamic variables are parameters,
 and their names are `*...*`.**
