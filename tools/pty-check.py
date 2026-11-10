@@ -382,6 +382,67 @@ def check_minibuffer():
     return problems
 
 
+def check_minibuffer_cx_o():
+    """One C-x o leaves the prompt; the next key edits the buffer.
+
+    GNU Emacs's `read_minibuf' selects the minibuffer window
+    (`minibuf.c:840`), so `C-x o' steps *out* of the prompt and the next
+    character goes to the buffer behind it. This tree set the prompt's
+    buffer in that window and never selected it, so the asking window
+    stayed selected and `C-x o' stepped *on* to the minibuffer: leaving
+    took two presses, and a key typed after the first one went into the
+    prompt. The file on disk is the assertion that cannot be faked -
+    typing into the prompt leaves it untouched.
+    """
+    path = "/tmp/pty-check-cxo.txt"
+    open(path, "w").write("hello\n")
+    screen = drive([C_x + C_f, C_x + b"o", b"Z", C_x + C_s], path)
+    problems = []
+    got = open(path).read()
+    if got != "Zhello\n":
+        problems.append("after one C-x o the typed Z did not reach the "
+                        "buffer (file %r, screen %r)" % (got, screen[:300]))
+    if "Find file: " not in screen:
+        problems.append("the prompt went away: %r" % (screen[-300:],))
+    return problems
+
+
+def check_minibuffer_arrows():
+    """<up> in a prompt recalls the previous name; <down> comes back.
+
+    `bindings.el:1284` and `:1288` bind the minibuffer's arrows to
+    `next-line-or-history-element' and `previous-line-or-history-element',
+    and this editor binds the same. `<down>' used to reach the *global*
+    `next-line' - which, before the minibuffer window was selected, took
+    the window's lines from the body buffer and point's offset from the
+    prompt and died in `vector-ref'.
+    """
+    path = "/tmp/pty-check-arrows.txt"
+    open(path, "w").write("arrows\n")
+    # **Application-mode arrows**: the bytes a real xterm sends once
+    # ncurses has put it in keypad mode (`\eOA`, `\eOB`), which is what
+    # `keypad!' does. The `\e[A` spelling is the *normal*-mode one, and
+    # a terminal only sends it when it has not been switched, so it is
+    # not what this editor ever sees.
+    UP = b"\x1bOA"
+    DOWN = b"\x1bOB"
+    prompt_with = "Find file: " + path
+    problems = []
+    # `C-a C-k` clears the directory the prompt is prefilled with, as the
+    # `minibuffer` check does: the prefill is real text, and typing after
+    # it would make the history entry the doubled name.
+    typed = [C_x + C_f, C_a, C_k, path.encode(), RET]
+    screen = screen_of(drive(typed + [C_x + C_f, UP], path))
+    if prompt_with not in screen:
+        problems.append("<up> did not recall the previous name "
+                        "(screen %r)" % (screen[-400:],))
+    screen = screen_of(drive(typed + [C_x + C_f, UP, DOWN], path))
+    if prompt_with in screen:
+        problems.append("<down> did not come back from the history entry "
+                        "(screen %r)" % (screen[-400:],))
+    return problems
+
+
 def check_save():
     """Type, save with C-x C-s, and check the file on disk.
 
@@ -3865,6 +3926,8 @@ CHECKS = {
     "suspend": check_suspend,
     "resize": check_resize,
     "minibuffer": check_minibuffer,
+    "minibuffer-cx-o": check_minibuffer_cx_o,
+    "minibuffer-arrows": check_minibuffer_arrows,
     "pagedown": check_pagedown,
     "eval-expression": check_eval_expression,
     "eval-region": check_eval_region,

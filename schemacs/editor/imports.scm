@@ -638,6 +638,7 @@
     check-coding-system
     check-face
     choose-completion
+    clear-end-of-line!
     clear-frame-area!
     clear-glyph-matrix
     clear-glyph-matrix-row
@@ -954,6 +955,7 @@
     end-of-visual-line
     ensure-final-newline-on-save!
     ensure-final-newline-on-visit
+    ensure-surface!
     ensure-window-matrices!
     env--substitute-vars-regexp
     eobp
@@ -1001,6 +1003,7 @@
     face-remap-reset-base
     face-remap-set-base
     face-remapping-alist
+    face-set-after-frame-default
     face-spec-choose
     face-spec-recalc
     face-spec-reset-face
@@ -1125,6 +1128,7 @@
     frame-char-height
     frame-char-width
     frame-editor
+    frame-garbaged-p
     frame-height
     frame-inhibit-resize?
     frame-keymap-state
@@ -1132,6 +1136,7 @@
     frame-live-p
     frame-message
     frame-message-timer
+    frame-minibuffer-window
     frame-name
     frame-or-buffer-changed-p
     frame-output
@@ -1510,9 +1515,11 @@
     minibuffer-position
     minibuffer-previous-completion
     minibuffer-prompt
+    minibuffer-prompt-end
     minibuffer-prompt-string
     minibuffer-restore-windows
     minibuffer-set-contents!
+    minibuffer-window-active-p
     minibuffer-with-setup-hook
     minibufferp
     modal-lookup-state-key-index
@@ -1529,6 +1536,7 @@
     mouse-drag-region
     mouse-drag-track
     mouse-key?
+    mouse-minibuffer-check
     mouse-position
     mouse-scroll-subr
     mouse-set-point
@@ -1551,6 +1559,7 @@
     next-history-element
     next-interval
     next-line
+    next-line-or-history-element
     next-logical-line
     next-overlay-change
     next-single-property-change
@@ -1622,6 +1631,7 @@
     previous-history-element
     previous-interval
     previous-line
+    previous-line-or-history-element
     previous-logical-line
     previous-overlay-change
     previous-single-property-change
@@ -1817,6 +1827,7 @@
     set!frame-keymap-state
     set!frame-message
     set!frame-message-timer
+    set!frame-minibuffer-window
     set!frame-quit-cont
     set!frame-selected-window
     set!frame-width
@@ -1882,6 +1893,7 @@
     set-face-attribute
     set-file-modes
     set-fill-column
+    set-frame-garbaged!
     set-frame-parameter
     set-glyph-char!
     set-glyph-face-id!
@@ -2164,6 +2176,7 @@
     window-live-p
     window-min-height
     window-min-width
+    window-minibuffer-p
     window-next-buffers
     window-normalize-buffer-to-switch-to
     window-parent

@@ -108,9 +108,11 @@
     ;; which have their own library now (`zap-to-char' walks with them).
     (only (schemacs editor editfns)
           buffer-substring buffer-substring-no-properties
-          char-after char-before delete-region forward-line goto-char insert
+          char-after char-before delete-region eolp forward-line goto-char
+          insert
           line-end-position
           line-number-at-pos message point point-max point-min
+          save-excursion
           text-editor-cursor-column text-editor-cursor-line)
     (only (schemacs editor fns) count-lines)
     ;; `forward-char' is `cmds.c''s and lives in `(schemacs editor cmds)'.
@@ -122,7 +124,7 @@
     ;; `completion-fitted-height' measures the buffer's display rows
     ;; with - `window-text-pixel-size''s answer, in rows.
     (only (schemacs editor indentc)
-          current-column line-next-start window-line-rows-at
+          current-column line-next-start move-to-column window-line-rows-at
           ;; the completions window's start, which the repeated-TAB
           ;; scroll reads and `scroll-to-cursor!` moves
           window-start)
@@ -134,6 +136,9 @@
     ;; `%eval-expression-backtrace'.
     (only (schemacs editor simple) special-mode special-mode-map
        self-insert-command
+       ;; the two the minibuffer's arrow keys run, and the goal column
+       ;; they reset - see `next-line-or-history-element`
+       next-line previous-line *temporary-goal-column*
        kill-region push-mark region-active-p
        *this-command* *last-command*
        ;; the two scroll commands the repeated TAB runs, through
@@ -161,7 +166,7 @@
           all-completions test-completion try-completion)
     ;; `apply-partially' is `subr.el''s, and `internal-complete-buffer-except'
     ;; is written with it, as Emacs writes it.
-    (only (schemacs editor subr) apply-partially)
+    (only (schemacs editor subr) apply-partially error-message-string)
     ;; `caddr' is `(scheme cxr)'s: a style's entry in
     ;; `completion-styles-alist' is a four-element list.
     (only (scheme cxr) caddr)
@@ -282,11 +287,14 @@ read-number-history
    minibuffer-local-map
    minibuffer-position
    minibuffer-prompt
+   minibuffer-prompt-end
    minibuffer-prompt-string
    minibuffer-set-contents!
    minibufferp
    next-history-element
+   next-line-or-history-element
    previous-history-element
+   previous-line-or-history-element
    read-char-from-minibuffer
    read-from-minibuffer
    read-string
@@ -477,14 +485,13 @@ read-number-history
       ;; here (minibuffer.el:5214), because the two functions disagree.
       ;;--------------------------------------------------------------
       (let* ((frame (*current-frame*))
-             ;; **The selected window when the prompt began.** GNU Emacs's
-             ;; `read_minibuf` does `Fset_buffer (minibuffer)` and never
-             ;; `Fselect_window`, so the *selected window* is the one it
-             ;; was - which is why `switch-to-buffer` after RET acts on the
-             ;; body window and not on the prompt. Nothing restores that
-             ;; here, so a click or a `C-x o` into the minibuffer window
-             ;; left it selected and the command that had asked went to
-             ;; work in a one-row window at the bottom of the frame.
+             ;; **The selected window when the prompt began.** The read
+             ;; selects the minibuffer window (`read_minibuf`,
+             ;; `minibuf.c:840`), and puts this one back on the way out -
+             ;; the C's `record_unwind_protect` of the selection - so a
+             ;; click or a `C-x o` that left the prompt selected elsewhere
+             ;; does not leave the command that asked working in a
+             ;; one-row window at the bottom of the frame.
              (entry-window (selected-window))
              (ed (allocate-buffer))
              (text (if (pair? initial) (car initial) initial))
@@ -557,16 +564,30 @@ read-number-history
                          ;; or a click in another window - left it.
                          (*current-buffer* #f))
             (set-buffer ed)
-            ;; **The minibuffer *window* shows the prompt's buffer.**
-            ;; GNU Emacs's `read_minibuf` ends its setup with
-            ;; `set_window_buffer (minibuffer_window, ...)` - the prompt
-            ;; is not a state the frame knows about but a *buffer in a
-            ;; window*, which is why a click on it selects it and `C-x o`
-            ;; can cycle into it. This is the same two lines, and it is
-            ;; what `minibuffer-window-active-p` reads.
+            ;; **The minibuffer *window* shows the prompt's buffer, and
+            ;; is the selected window.** GNU Emacs's `read_minibuf` does
+            ;; both, one line after the other (`minibuf.c:839`, `:840`):
+            ;;
+            ;;   set_window_buffer (minibuf_window, Fcurrent_buffer (), 0, 0);
+            ;;   Fselect_window (minibuf_window, Qnil);
+            ;;
+            ;; The prompt is therefore not a state the frame knows about
+            ;; but a *buffer in a window*, which is why a click on it
+            ;; selects it and `C-x o` cycles out of it. **The selection
+            ;; is not decoration**: with the asking window still selected
+            ;; and the minibuffer buffer current, every command that reads
+            ;; `(selected-window)` together with `(current-buffer)` sees
+            ;; two different buffers - `<down>` in a prompt ran
+            ;; `next-line`, whose `line-move-visual` took the window's
+            ;; lines from the body buffer and point's offset from the
+            ;; prompt, and died in `vector-ref` - and `C-x o` from the
+            ;; prompt stepped *onto* the minibuffer window instead of out
+            ;; of it, so leaving took two presses where Emacs takes one.
+            ;; It is what `minibuffer-window-active-p` reads, too.
             (let ((mini (and frame (frame-minibuffer-window frame))))
               (when mini
-                (set-window-buffer! mini ed)))
+                (set-window-buffer! mini ed)
+                (select-window mini)))
             ;; `minibuffer-setup-hook', run where the C runs it: after
             ;; the prompt and the initial input are in place, before the
             ;; recursive edit that reads (minibuf.c:912).
@@ -673,18 +694,154 @@ read-number-history
                     (or (minibuffer-typed-content mb) "")
                     (list-ref entries (- next 1))))))))
 
+    (define (minibuffer-prompt-end)
+      ;; GNU Emacs's `minibuffer-prompt-end' (`minibuf.c:505'): "Return
+      ;; the buffer position of the end of the minibuffer prompt. Return
+      ;; (point-min) if current buffer is not a minibuffer."
+      ;;
+      ;; The C reads the prompt's `field' text property -
+      ;; `read_minibuf' inserts the prompt with
+      ;; `minibuffer-prompt-properties', whose first entry is `field t' -
+      ;; and its own answer when there is no such property is
+      ;; `(point-min)' (`:521'). **This tree paints the prompt instead of
+      ;; inserting it**, the departure named at `read-minibuffer-1`, so
+      ;; the no-property answer is the only one there is.
+      ;;--------------------------------------------------------------
+      (point-min))
+
+    (define-command (next-line-or-history-element arg)
+      ;; GNU Emacs's `next-line-or-history-element' (`simple.el:3136'):
+      ;; move down a screen line inside the minibuffer's text, and once
+      ;; point is on the last one, put the next history element in.
+      ;;
+      ;; `next-line-add-newlines' - "Don't add newlines if they have the
+      ;; mode enabled globally" - is not carried: this tree's `next-line'
+      ;; has no such option to bind.
+      ;;
+      ;; `(minibuffer-prompt-end)' is `(point-min)' here, so the column
+      ;; the prompt ends at is column 0 and the `(1- prompt-end)' the
+      ;; Elisp measures against would be position 0 - out of range.
+      ;; `(max (point-min) (1- prompt-end))' is the same position the
+      ;; Elisp reaches when a prompt is really in the buffer, and
+      ;; position 1, column 0, when it is not.
+      "Move cursor vertically down ARG lines, or to the next history element.
+When point moves over the bottom line of multi-line minibuffer, puts ARGth
+next element of the minibuffer history in the minibuffer."
+      (interactive "^p")
+      (let* ((arg (or arg 1))
+             (old-point (point))
+             (prompt-end (minibuffer-prompt-end))
+             (old-column (if (and (eolp) (> (point) prompt-end))
+                             #f
+                             (if (= (line-number-at-pos) 1)
+                                 (max (- (current-column)
+                                         (save-excursion
+                                           (goto-char (max (point-min)
+                                                           (- prompt-end 1)))
+                                           (current-column)))
+                                      0)
+                                 (current-column)))))
+        (guard (err (else
+                     (cond
+                      ((not (string=? "End of buffer"
+                                      (error-message-string err)))
+                       (raise err))
+                      (else
+                         ;; "Restore old position since `line-move-visual'
+                         ;; moves point to the end of the line when it
+                         ;; fails to go to the next line."
+                         (goto-char old-point)
+                         (next-history-element arg)
+                         ;; "Reset `temporary-goal-column' because a
+                         ;; correct value is not calculated when
+                         ;; `next-line' above fails by bumping against the
+                         ;; bottom of the minibuffer (bug#22544)."
+                         (*temporary-goal-column* 0)
+                         ;; "Restore the original goal column on the last
+                         ;; line of possibly multi-line input."
+                         (goto-char (point-max))
+                         (when old-column
+                           (if (= (line-number-at-pos) 1)
+                               (move-to-column
+                                (+ old-column
+                                   (save-excursion
+                                     (goto-char (max (point-min)
+                                                     (- (minibuffer-prompt-end) 1)))
+                                     (current-column))))
+                               (move-to-column old-column)))))))
+          (next-line arg))))
+
+    (define-command (previous-line-or-history-element arg)
+      ;; GNU Emacs's `previous-line-or-history-element' (`simple.el:3179'):
+      ;; the same rule upwards, and the same fall to the history.
+      ;;
+      ;; The Elisp's "avoid moving point to the prompt" test -
+      ;; `(< (point) (minibuffer-prompt-end))' - cannot be true here for
+      ;; the reason `minibuffer-prompt-end' gives above: the prompt is not
+      ;; in the buffer, so its end is `(point-min)' and no point is before
+      ;; it. `previous-line' signals `beginning-of-buffer' at the top of
+      ;; the minibuffer's text, which is the branch below.
+      "Move cursor vertically up ARG lines, or to the previous history element.
+When point moves over the top line of multi-line minibuffer, puts ARGth
+previous element of the minibuffer history in the minibuffer."
+      (interactive "^p")
+      (let* ((arg (or arg 1))
+             (old-point (point))
+             (prompt-end (minibuffer-prompt-end))
+             (old-column (if (and (eolp) (> (point) prompt-end))
+                             #f
+                             (if (= (line-number-at-pos) 1)
+                                 (max (- (current-column)
+                                         (save-excursion
+                                           (goto-char (max (point-min)
+                                                           (- prompt-end 1)))
+                                           (current-column)))
+                                      1)
+                                 (current-column)))))
+        (guard (err (else
+                     (cond
+                      ((not (string=? "Beginning of buffer"
+                                      (error-message-string err)))
+                       (raise err))
+                      (else
+                         (goto-char old-point)
+                         (previous-history-element arg)
+                         (*temporary-goal-column* 0)
+                         (goto-char (point-max))
+                         (when old-column
+                           (if (= (line-number-at-pos) 1)
+                               (move-to-column
+                                (+ old-column
+                                   (save-excursion
+                                     (goto-char (max (point-min)
+                                                     (- (minibuffer-prompt-end) 1)))
+                                     (current-column))))
+                               (move-to-column old-column)))))))
+          (previous-line arg))))
+
     (define (minibuffer-local-bindings)
       ;; The keys GNU Emacs's `minibuffer-local-map' carries, as (KEY .
       ;; COMMAND) pairs. One list, because two maps are built from it:
       ;; the minibuffer's own, and the expression prompt's - see the note
       ;; on `read--expression-map' for why the second cannot inherit the
       ;; first.
+      ;;
+      ;; `<down>` and `<up>` are `next-line-or-history-element' and
+      ;; `previous-line-or-history-element' (`bindings.el:1284`, `:1288`),
+      ;; not `next-line`/`previous-line`: those two are global, and on a
+      ;; one-line prompt they had no history to fall back on - `<down>`
+      ;; signalled `End of buffer' and, before the minibuffer window was
+      ;; selected, died in `vector-ref` instead.
       ;;--------------------------------------------------------------
       (list (cons (kbd "RET") exit-minibuffer)
             (cons (kbd "C-j") exit-minibuffer)
             (cons (kbd "C-g") abort-recursive-edit)
             (cons (kbd "M-p") previous-history-element)
-            (cons (kbd "M-n") next-history-element)))
+            (cons (kbd "M-n") next-history-element)
+            (cons (kbd "<next>") next-history-element)
+            (cons (kbd "<prior>") previous-history-element)
+            (cons (kbd "<down>") next-line-or-history-element)
+            (cons (kbd "<up>") previous-line-or-history-element)))
 
     (define (minibuffer-map-from-bindings name bindings)
       ;; `(make-sparse-keymap NAME)' with each `(KEY . BINDING)' of
