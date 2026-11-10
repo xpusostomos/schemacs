@@ -999,12 +999,41 @@ def screen_of(out, width=80):
     just below the last one is a `ESC [ B`, not an absolute address - and
     a reader that only understood absolute addressing would drift a row and
     lose the mode line.
+
+    **Every sequence ncurses actually uses has to be modelled, and the
+    ones it took three tries to find were `ESC [ n d` (VPA, which moves
+    the row and leaves the *column*), `ESC [ n G` (CHA, which moves the
+    column), a bare `\r` (which returns to column 0) and a bare
+    backspace (which moves left one). A reader that treated `d` like `H`
+    or skipped `\r` without resetting the column put the text at the
+    wrong place and *looked* like a corrupted screen - which is exactly
+    how it was read for an afternoon: the renderer was right and the
+    reader was wrong. When this reader disagrees with the editor, check
+    which sequences the stream actually contains before believing it.
     """
     import re
     tail = out.rsplit("\x1b[2J", 1)[-1]
     rows, row, col = {}, 0, 0
-    for chunk in re.split(r"(\x1b\[[0-9;]*[A-Za-z]|\x1b\(B|\r|\n)", tail):
-        if not chunk or chunk in ("\r", "\n"):
+    for chunk in re.split(r"(\x1b\[[0-9;]*[A-Za-z]|\x1b\(B|\r|\n|\x08)", tail):
+        if not chunk:
+            continue
+        if chunk == "\r":
+            # **CR returns to the start of the row.** Skipping it without
+            # resetting the column put every line drawn after a `\r` at
+            # the column the previous one ended at.
+            col = 0
+            continue
+        if chunk == "\n":
+            row += 1
+            continue
+        if chunk == "\x08":
+            # **BS.** ncurses moves left one cell with a bare backspace
+            # whenever that is cheaper than an address - `ESC [ 2 d BS 2`
+            # puts a `2` one column left of where the cursor was - and a
+            # reader that wrote it into the grid shifted the rest of the
+            # row by one, which is what turned a correct page-up into
+            # "2ne 2".
+            col = max(0, col - 1)
             continue
         if chunk.startswith("\x1b"):
             m = re.match(r"\x1b\[([0-9;]*)([A-Za-z])", chunk)
@@ -1012,9 +1041,16 @@ def screen_of(out, width=80):
                 continue
             nums = [int(x) for x in m.group(1).split(";") if x.isdigit()]
             cmd, n = m.group(2), (nums[0] if nums else 1)
-            if cmd in "Hd":
+            if cmd == "H":
                 row = (nums[0] if nums else 1) - 1
                 col = (nums[1] if len(nums) > 1 else 1) - 1
+            elif cmd == "d":
+                # **VPA moves the row and leaves the column alone.** It was
+                # read as `H` here, so `ESC [ 3 d` reset the column to 0
+                # and the text after it landed at the start of the row -
+                # "line 23" came out as "23", and with a backspace in
+                # front of it as "2ne 2".
+                row = (nums[0] if nums else 1) - 1
             elif cmd == "A":
                 row -= n
             elif cmd == "B":
@@ -1029,6 +1065,25 @@ def screen_of(out, width=80):
                     del rows[row][c]
             elif cmd == "J":
                 rows = {}
+            elif cmd == "G":
+                # **CHA, horizontal position.** ncurses reaches a column
+                # with this whenever it is cheaper than a full address -
+                # `ESC [ 6 G` before writing at column 5 - and a reader
+                # that did not model it wrote the next run at whatever
+                # column the last one ended at, which is how "line 21"
+                # came out as "21" and a page-up read as corruption.
+                col = n - 1
+            elif cmd == "X":
+                # ECH, erase N characters from here
+                for c in range(col, col + n):
+                    rows.get(row, {}).pop(c, None)
+            elif cmd == "P":
+                # DCH, delete N characters here and shift the rest left
+                line = rows.get(row, {})
+                rest = {c: ch for c, ch in line.items() if c >= col + n}
+                rows[row] = {c: ch for c, ch in line.items() if c < col}
+                for c, ch in rest.items():
+                    rows[row][c - n] = ch
             continue
         for ch in chunk:
             rows.setdefault(row, {})[col] = ch
@@ -1060,8 +1115,17 @@ def row_attrs(out, want_row=0):
     tail = out.rsplit("\x1b[2J", 1)[-1]
     active, row, col = frozenset(), 0, 0
     row_active = {}
-    for chunk in re.split(r"(\x1b\[[0-9;]*[A-Za-z]|\x1b\(B|\r|\n)", tail):
+    for chunk in re.split(r"(\x1b\[[0-9;]*[A-Za-z]|\x1b\(B|\r|\n|\x08)", tail):
         if not chunk or chunk in ("\r", "\n"):
+            continue
+        if chunk == "\x08":
+            # **BS.** ncurses moves left one cell with a bare backspace
+            # whenever that is cheaper than an address - `ESC [ 2 d BS 2`
+            # puts a `2` one column left of where the cursor was - and a
+            # reader that wrote it into the grid shifted the rest of the
+            # row by one, which is what turned a correct page-up into
+            # "2ne 2".
+            col = max(0, col - 1)
             continue
         if chunk.startswith("\x1b"):
             m = re.match(r"\x1b\[([0-9;]*)([A-Za-z])", chunk)
@@ -1069,9 +1133,16 @@ def row_attrs(out, want_row=0):
                 continue
             nums = [int(x) for x in m.group(1).split(";") if x.isdigit()]
             cmd, n = m.group(2), (nums[0] if nums else 1)
-            if cmd in "Hd":
+            if cmd == "H":
                 row = (nums[0] if nums else 1) - 1
                 col = (nums[1] if len(nums) > 1 else 1) - 1
+            elif cmd == "d":
+                # **VPA moves the row and leaves the column alone.** It was
+                # read as `H` here, so `ESC [ 3 d` reset the column to 0
+                # and the text after it landed at the start of the row -
+                # "line 23" came out as "23", and with a backspace in
+                # front of it as "2ne 2".
+                row = (nums[0] if nums else 1) - 1
             elif cmd == "A":
                 row -= n
             elif cmd == "B":

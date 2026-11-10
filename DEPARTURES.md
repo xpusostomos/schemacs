@@ -190,22 +190,27 @@ function**. A departure on this list is a debt, not a licence.
   does: clear the *desired* matrix, rebuild it, and draw the rows that
   differ.
 - **Here**: a terminal frame is erased and repainted whole every
-  redisplay (`clear-garbaged-frames!`). That predates the row diff and
-  was kept when the diff landed, because dropping it produced a
-  corrupted screen - measured: after a page-up, fragments of the
-  previous page ("2ne 2", stray backspaces) - and that is **a bug in our
-  row drawing, not a missing Emacs feature**, since Emacs with line
-  insert/delete off takes the same path we do.
+  redisplay (`clear-garbaged-frames!`). The row diff is ported and works
+  (a graphics frame uses it), and the no-erase path **draws correctly on
+  a real terminal**: `tmux capture-pane` of a file with a wrapped line,
+  `C-v` twice, `M-v` twice shows the right screen every time. What has
+  not been established is that the harness agrees - `continuation` and
+  `completion-ui` disagreed the last time it was tried - so the erase
+  stays until that is settled, since `tools/pty-check.py` is the only
+  regression net for the drawing.
+  (Two real bugs were found while trying it: `blank-glyph-row!` blanked
+  by the row's recorded `y` - 0 on a row that was never built - and wiped
+  the window's first line once per empty row; and the harness's screen
+  reader mis-parsed VPA, CR and backspace, so a correct screen read as
+  "2ne 2". Both are fixed.)
 - **Cost**: on a 40x120 terminal over a 2000-line file, one redisplay
-  writes ~12.8 KB and takes ~13 ms; with the diff working it would be a
-  few hundred bytes, and a keystroke one cell.
-- **Closing it**: find that bug. The suspects, in order: `draw-glyph-row!`
-  writing a row's runs at the window's own columns while `clear-end-of-line!`
-  blanks the tail in the default face; `update-window!`'s treatment of a
-  desired row that is *not* enabled (a row past the end of the buffer,
-  which `blank-glyph-row!` now blanks by index); and a row drawn from a
-  slice that begins mid-line after a scroll. When it is fixed, drop the
-  `(not (graphical-frame?))` branch from `clear-garbaged-frames!` and add
-  `window_outdated`'s early return (`window.c:231`) - tried on 2026-11-10
-  and backed out with it, because a skipped window keeps the empty
-  desired matrix `assign_row` swapped out of it.
+  writes ~12.8 KB and takes ~13 ms; without the erase it is the few
+  hundred bytes of the cells that changed.
+- **Closing it**: get the harness to certify the no-erase path (a real
+  terminal is already correct), then drop the `(not (graphical-frame?))`
+  branch from `clear-garbaged-frames!` and add `window_outdated`'s early
+  return (`window.c:231`) - tried on 2026-11-10 and backed out with it,
+  because a skipped window keeps the empty desired matrix `assign_row`
+  swapped out of it and `update_window` then compares that empty matrix
+  against the screen.
+
