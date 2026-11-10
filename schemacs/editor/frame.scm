@@ -86,7 +86,7 @@
     ;; `window-cursor-table' is held weakly - see the note above
     ;; `WINDOW-CURSOR-TABLE'. Guile's own weak table, a key held weakly.
     (only (guile)
-          delq kill getpid SIGTSTP
+          delq kill getpid SIGTSTP caddr
           make-weak-key-hash-table hashq-ref hashq-set!)
     ;; `w->cursor_off_p' and the blink's timers are kept beside the
     ;; window and the frame rather than in the window, for the reason
@@ -97,7 +97,7 @@
     (only (schemacs editor faces)
           *window-system* *display-color-cells* *display-type*
           *frame-background-mode* *frame-background-mode-function*
-          color-dark-p face-list face-attribute
+          color-dark-p face-list face-attribute set-face-attribute
           face-override-spec face-spec-recalc)
     ;; A colour *name*'s RGB - `tty-colors.el''s table, which is what a
     ;; name means here, as `xfaces.c''s `tty_lookup_color' is.
@@ -119,6 +119,7 @@
    ;; `text-scale-max-amount' (`face-remap.el') are bounded by.
    frame-char-height frame-char-width
    frame-set-background-mode
+   face-set-after-frame-default
    display-pixel-width display-pixel-height
    adjust-frame-size! *frame-inhibit-implied-resize* frame-inhibit-resize?
    *blink-cursor-blinks*
@@ -1027,6 +1028,64 @@
                     (set-frame-parameter frame (car entry) (cdr entry)))
                   alist)
         frame))
+
+    (define (face-set-after-frame-default frame . optional)
+      ;; GNU Emacs's `face-set-after-frame-default' (`faces.el:2274'):
+      ;; "Initialize the frame-local faces of FRAME. Calculate the face
+      ;; definitions using the face specs, custom theme settings, X
+      ;; resources, and `face--new-frame-defaults'. Finally, apply any
+      ;; relevant face attributes found amongst the frame parameters in
+      ;; PARAMETERS."
+      ;;
+      ;; **The placement is a departure, of the kind this tree already
+      ;; has in `fileio.scm' and `menu-bar.scm'**: the function is
+      ;; `faces.el''s, and it reads the frame's parameters, which are
+      ;; this library's. `faces.scm' is below `frame.scm`, so the
+      ;; function that needs both lives in the library that has the
+      ;; upper half.
+      ;;
+      ;; **Not carried**: `face--new-frame-defaults' and
+      ;; `internal-merge-in-global-face', the attributes a frame that is
+      ;; not made yet carries. This tree has one set of face attributes
+      ;; rather than one per frame plus a set of defaults, which
+      ;; `faces.scm''s header names as the data-model deviation.
+      ;;
+      ;; It is what `disable-theme' runs after resetting the frame's
+      ;; colours (`custom.el:1704'): a disabled theme's colour lives in
+      ;; the default face until the frame parameters are put back over
+      ;; it. `pgtk-ensure-font!' and `initialize-display-faces!' already
+      ;; do this function's two halves at frame creation in their own
+      ;; front ends; this is the same pair, in the same order, for a
+      ;; caller that has no frame of its own to create.
+      ;;--------------------------------------------------------------
+      (let ((parameters (if (and (pair? optional) (car optional))
+                            (car optional)
+                            (frame-parameters frame))))
+        ;; "The `reverse' is so that `default' goes first."
+        (for-each (lambda (face)
+                    ;; "Don't let invalid specs prevent frame creation."
+                    (guard (err (else #f))
+                      (face-spec-recalc face)))
+                  (reverse (face-list)))
+        ;; Apply attributes specified by frame parameters.
+        (for-each
+         (lambda (param)
+           ;; The C's `(cdr (assq PARAM-NAME parameters))' - and it is
+           ;; `assq''s answer that has to be tested, not the `cdr`'s:
+           ;; `(cdr #f)' raises here where Elisp's `(cdr nil)' is nil.
+           (let ((cell (assq (car param) parameters)))
+             (when cell
+               (set-face-attribute (cadr param) frame (caddr param)
+                                   (cdr cell)))))
+         '((foreground-color default :foreground)
+           (background-color default :background)
+           (font default :font)
+           (border-color border :background)
+           (cursor-color cursor :background)
+           (scroll-bar-foreground scroll-bar :foreground)
+           (scroll-bar-background scroll-bar :background)
+           (mouse-color mouse :background))))
+      frame)
 
     (define (frame-cancel-message-timer! frame)
       ;; Take down the timer that would clear FRAME's message, if one is

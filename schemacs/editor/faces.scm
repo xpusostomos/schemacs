@@ -47,8 +47,14 @@
     ;; `get' reads a face's `theme-face' property - the enabled themes'
     ;; specs, which `face-spec-recalc' now walks - and `plist-member' is
     ;; what finds `:extend' in the chosen branch. Both are `fns.c`'s,
-    ;; which is `intervals.scm`'s until there is an `fns.sld' of its own.
-    (only (schemacs editor intervals) get put plist-member))
+    ;; which is `intervals.scm`'s until there is an `fns.sld` of its own.
+    (only (schemacs editor intervals) get put plist-member)
+    ;; `current-display' answers "is there a frame to realize a face
+    ;; against?" - which is what Emacs's `(dolist (frame (frame-list))
+    ;; (face-spec-recalc face frame))' asks, and why a `defface' at load
+    ;; time recalculates nothing. It is #f until a front end opens the
+    ;; display, which is Emacs's empty frame list.
+    (only (schemacs editor dispnew) current-display))
 
   (export
    ;; the face table
@@ -171,41 +177,21 @@
       ;; deviation of the data model, not of the meaning: see the header.
       ;;--------------------------------------------------------------
       (let ((entry (assq (check-face face) (*face-attributes*))))
-        (let ((value (and entry
-                          (let loop ((plist (cdr entry)))
-                            (cond ((not (and (pair? plist) (pair? (cdr plist))))
-                                   *undefined-face-attribute*)
-                                  ((eq? (car plist) attribute) (cadr plist))
-                                  (else (loop (cddr plist))))))))
-          ;; **The `default' face always answers a `:height'.** GNU
-          ;; Emacs's `set_lface_from_font` (`xfaces.c:2211`) fills an
-          ;; unspecified height in from the frame's font -
-          ;;
-          ;;   if (force_p || UNSPECIFIEDP (LFACE_HEIGHT (lface)))
-          ;;     { int pt = PIXEL_TO_POINT (font->pixel_size * 10, ...);
-          ;;       ASET (lface, LFACE_HEIGHT_INDEX, make_fixnum (pt)); }
-          ;;
-          ;; - so a configured Emacs never reports `unspecified' here, and
-          ;; 10pt is what its terminal font answers. This tree has no font
-          ;; object (a terminal's cell is one character, a GUI's is the
-          ;; display's), so the answer is the display's own height in
-          ;; points, and 100 - 10pt - when nothing says otherwise. Without
-          ;; it the omarchy port's guard sees `unspecified', decides the
-          ;; face is unusable and falls back to its own default.
-          ;;
-          ;; Only `:height' and only `default': every other attribute of
-          ;; this face is legitimately unspecified, and `#t' inherits.
-          (if (and (eq? *undefined-face-attribute* value)
-                   (eq? (check-face face) 'default)
-                   (eq? attribute ':height)
-                   ;; **Only on a terminal.** A graphics frame's height
-                   ;; comes from the font it actually opened, and answering
-                   ;; 10pt there would silently override it - measured: it
-                   ;; made every pixel test in `pgtk-tests` fail because
-                   ;; the text changed size.
-                   (not (memq (*window-system*) '(x w32 ns pgtk))))
-              100
-              value))))
+        ;; **No fallback is invented here.** The `default' face answers a
+        ;; `:height' because the two places Emacs writes one into the
+        ;; LFace are ported - `face-spec-reset-face' pins it to 1 on a
+        ;; non-graphic frame (`faces.el:1667') and leaves a realized
+        ;; height alone on a graphic one, and the GUI front end fills it
+        ;; from the frame's font the way `set_lface_from_font'
+        ;; (`xfaces.c:2211') does (`pgtk-ensure-font!'). Answering a
+        ;; made-up height here looked like a fix and was a departure: it
+        ;; said 100 on a terminal, where Emacs says 1.
+        (and entry
+             (let loop ((plist (cdr entry)))
+               (cond ((not (and (pair? plist) (pair? (cdr plist))))
+                      *undefined-face-attribute*)
+                     ((eq? (car plist) attribute) (cadr plist))
+                     (else (loop (cddr plist))))))))
 
     (define (face-attribute-relative-p attribute value)
       ;; GNU Emacs's `face-attribute-relative-p' (`xfaces.c:4193'). Its
@@ -591,31 +577,77 @@
           #f))
 
     (define (face-spec-reset-face face)
-      ;; GNU Emacs's `face-spec-reset-face': every attribute of FACE back
-      ;; to unspecified. Emacs makes an exception of `default', which is
-      ;; set to the values `realize_default_face' would give it rather
-      ;; than to unspecified, because a completely unspecified default
-      ;; face leaves nothing to fall back on.
+      ;; GNU Emacs's `face-spec-reset-face' (`faces.el:1652'): "Reset all
+      ;; attributes of FACE on FRAME to unspecified", with one exception,
+      ;; which is the Elisp's own:
       ;;
-      ;; **A reset of `default''s background reaches the background hook
-      ;; the way `set-face-attribute''s does** - `frame.el''s
-      ;; recompute-and-recalculate is what reads a disabled theme's
-      ;; restoration back into the spec branches. The reset used to
-      ;; write the table directly, and a disabled theme's black default
-      ;; left the mode dark until the next background change.
+      ;;   (if (eq face 'default)
+      ;;       ;; For the default face, avoid making any attribute
+      ;;       ;; unspecified.  Instead, set attributes to default values
+      ;;       ;; (see also realize_default_face in xfaces.c).
+      ;;       (append
+      ;;        '(:underline nil :overline nil :strike-through nil
+      ;;          :box nil :inverse-video nil :stipple nil :inherit nil
+      ;;          :extend nil)
+      ;;        (when (fboundp 'display-graphic-p)
+      ;;          (unless (display-graphic-p frame)
+      ;;            `(:family "default" :foundry "default" :width normal
+      ;;              :height 1 :weight normal :slant normal
+      ;;              :foreground ,(if (frame-parameter nil 'reverse)
+      ;;                               "unspecified-bg" "unspecified-fg")
+      ;;              :background ,(if (frame-parameter nil 'reverse)
+      ;;                               "unspecified-fg" "unspecified-bg")))))
+      ;;     ;; For all other faces, unspecify all attributes.
+      ;;     face--attributes-unspecified)
+      ;;
+      ;; **The `default' branch is what keeps a `:height' alive.** On a
+      ;; graphic frame the Elisp names no `:height', so the one the
+      ;; frame's font gave it - `set_lface_from_font' (`xfaces.c:2211'),
+      ;; `pgtk-ensure-font!' here - survives a theme load; on a terminal
+      ;; it is pinned to 1, which is `realize_default_face''s non-window
+      ;; branch (`xfaces.c:6088'). Both measured on Emacs 31.1:
+      ;; `(face-attribute 'default :height)' is 113 before and after
+      ;; `(load-theme 'wombat t)' under pgtk, and 1 under `emacs -nw'.
+      ;; This used to wipe the whole plist, so a theme load left the
+      ;; height `unspecified' - and the omarchy port's guard, which reads
+      ;; exactly that attribute, warned and fell back to its own size.
+      ;;
+      ;; The reset goes through `set-face-attribute' rather than writing
+      ;; the table, which is the Elisp's `apply' and is what puts the
+      ;; background through the background-mode hook.
+      ;;
+      ;; Three departures, all of them about the frame this tree does not
+      ;; have: there is no `reverse' frame parameter (nothing iconifies
+      ;; or reverses), so the ordinary pair is used; `display-graphic-p'
+      ;; is `*window-system*' for its one frame; and the `default' branch
+      ;; runs only when a display exists at all, because the values it
+      ;; writes describe a *frame* and a library loaded before any front
+      ;; end has opened one would otherwise pin a terminal's stock height
+      ;; into the single set of attributes a GUI frame later inherits -
+      ;; measured: a GTK editor opened its font at a tenth of a point and
+      ;; the omarchy port warned "height is 1" and fell back to 110.
       ;;--------------------------------------------------------------
-      (let ((face (check-face face))
-            (background-was (face-attribute 'default ':background)))
-        (let loop ((rest (*face-attributes*)) (acc '()))
-          (cond
-           ((null? rest) (*face-attributes* (reverse acc)))
-           ((eq? (caar rest) face) (loop (cdr rest) (cons (cons face '()) acc)))
-           (else (loop (cdr rest) (cons (car rest) acc)))))
-        (when (and (eq? face 'default)
-                   (not (equal? background-was *undefined-face-attribute*))
-                   (*frame-background-mode-function*))
-          ((*frame-background-mode-function*) #f)))
-      face)
+      (let ((face (check-face face)))
+        (if (and (eq? face 'default) (current-display))
+            (apply set-face-attribute face #f
+                   (append
+                    '(:underline #f :overline #f :strike-through #f :box #f
+                      :inverse-video #f :stipple #f :inherit #f :extend #f)
+                    (if (*window-system*)
+                        '()
+                        '(:family "default" :foundry "default"
+                          :width normal :height 1
+                          :weight normal :slant normal
+                          :foreground "unspecified-fg"
+                          :background "unspecified-bg"))))
+            (apply set-face-attribute face #f
+                   (let loop ((rest *face-attribute-name-alist*) (acc '()))
+                     (if (null? rest)
+                         (reverse acc)
+                         (loop (cdr rest)
+                               (cons *undefined-face-attribute*
+                                     (cons (caar rest) acc)))))))
+        face))
 
     ;;----------------------------------------------------------------
     ;; Specs, and how they become attributes
@@ -740,9 +772,24 @@
         face))
 
     (define (custom-declare-face face spec docstring)
-      ;; GNU Emacs's `custom-declare-face', which `defface' expands into:
-      ;; define the face, record its defface spec and its documentation,
-      ;; and realize it.
+      ;; GNU Emacs's `custom-declare-face' (`cus-face.el:32'), which
+      ;; `defface' expands into: define the face, record its defface spec
+      ;; and its documentation, and realize it.
+      ;;
+      ;; **"Realize" means against a *frame*, and a `defface' the
+      ;; libraries run while they load has none yet.** `face-spec-set'
+      ;; ends `(dolist (frame (frame-list)) (face-spec-recalc face
+      ;; frame))', and this library is loaded before any front end opens
+      ;; a display - where Emacs is never in that position, because
+      ;; `faces.el' is loaded during the dump and the first frame exists
+      ;; before any user-visible `defface' runs. `face-spec-reset-face'
+      ;; is the one place that matters, since its `default' branch pins
+      ;; a *terminal frame's* stock values (`:height 1' among them); it
+      ;; asks `(current-display)' - "is there a frame at all?" - and
+      ;; leaves the face unspecified when the answer is no. The frames'
+      ;; own initialization recalcs every face when the display opens
+      ;; (`initialize-pgtk-faces!', `initialize-display-faces!'), which
+      ;; is what a real `frame-list' would have pointed at.
       ;;--------------------------------------------------------------
       (make-face face)
       (*face-specs* (cons (cons face spec) (*face-specs*)))

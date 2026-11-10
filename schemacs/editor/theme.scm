@@ -116,9 +116,14 @@
     ;; `:extend' in `face-spec-recalc'.
     (only (schemacs editor faces)
           face-attribute face-spec-set face-spec-recalc make-face facep
+          face-list
           ;; the theme parameters the specs test, and the mode recomputed
           *frame-background-mode* *frame-background-mode-function*
-          face-attribute-merged-with)
+          face-attribute-merged-with
+          ;; `custom--frame-color-default' asks whether the frame is on a
+          ;; window system, which is `(window-system FRAME)' - and the
+          ;; only frame's answer is this parameter.
+          *window-system*)
     ;; The paths a theme file is searched along and the predicates that
     ;; guard it.
     (only (schemacs editor fileio) file-directory-p locate-file-internal
@@ -138,7 +143,13 @@
     ;; This library is ABOVE both, which is the whole point of the
     ;; module.
     (only (schemacs editor command) define-command)
-    (only (schemacs editor minibuffer) completing-read))
+    (only (schemacs editor minibuffer) completing-read)
+    ;; `disable-theme''s last act is Emacs's own: put the frame's colours
+    ;; back and recalculate every face for it - `face-set-after-frame-default'
+    ;; (`faces.el:2274'), which lives in `frame.scm' because it reads
+    ;; frame parameters.
+    (only (schemacs editor frame)
+          *frame-list* set-frame-parameter face-set-after-frame-default))
 
   (export
    ;; The theme commands - `M-x load-theme' and its neighbours.
@@ -501,11 +512,12 @@ function runs.  To disable other themes, use `disable-theme'."
       ;;
       ;; Each symbol loses THEME's record - the C's
       ;; `assq-delete-all' - and what is left is the next theme's or
-      ;; none; then every touched face and variable is recalculated from
-      ;; what remains. The frame-parameter reset the C does afterwards is
-      ;; `face-set-after-frame-default''s, which this tree has no
-      ;; counterpart for - the faces are recalculated by the loop below,
-      ;; which is the same effect.
+      ;; none; then the frame's two colours are put back and every face
+      ;; recalculated for it. **The frame-parameter reset is not
+      ;; optional**: since `face-spec-reset-face' stopped wiping the
+      ;; `default' face's colours on a graphic frame - which is what
+      ;; keeps its font `:height' alive, see `faces.scm' - the theme's
+      ;; colour would otherwise outlive the theme.
       ;;
       ;; **The interactive spec is Emacs's** (`custom.el:1683'): the
       ;; enabled themes only, and a match is required.
@@ -536,13 +548,58 @@ See `custom-enabled-themes' for a list of enabled themes."
                  (when (equal? (cadddr s) (get symbol 'saved-face))
                    (put symbol 'saved-face (cadar val)))))))
            settings)
+          ;; "We must reset the fg and bg color frame parameters, or
+          ;; `face-set-after-frame-default' will use the existing
+          ;; parameters, which could be from the disabled theme."
           (for-each
-           (lambda (s)
-             (when (eq? (car s) 'theme-face)
-               (custom-theme-recalc-face (cadr s))))
-           settings))
+           (lambda (frame)
+             (set-frame-parameter
+              frame 'background-color
+              (custom--frame-color-default frame ':background
+                                           "unspecified-bg" "white"))
+             (set-frame-parameter
+              frame 'foreground-color
+              (custom--frame-color-default frame ':foreground
+                                           "unspecified-fg" "black")))
+           (*frame-list*))
+          ;; "Recompute faces on all frames."
+          (if (null? (*frame-list*))
+              ;; **Not a case Emacs can be in** - `(frame-list)' always
+              ;; has a frame at runtime, even in batch - while this tree
+              ;; can be: faces exist before a front end opens a display,
+              ;; and the test suites run exactly there. The one set of
+              ;; realized attributes still holds the theme's values, so
+              ;; it is recalculated all the same; that is `faces.scm''s
+              ;; one-set model, not a second code path.
+              (for-each face-spec-recalc (face-list))
+              (for-each face-set-after-frame-default (*frame-list*))))
         (*custom-enabled-themes* (delq theme (*custom-enabled-themes*)))
         #t))
+
+    (define (custom--frame-color-default frame attribute tty-default x-default)
+      ;; GNU Emacs's `custom--frame-color-default' (`custom.el:1727'):
+      ;;
+      ;;   (let ((col (face-attribute 'default attribute t)))
+      ;;     (cond
+      ;;      ((and col (not (eq col 'unspecified))) col)
+      ;;      ((null (window-system frame)) tty-default)
+      ;;      ((setq col (x-get-resource nil nil)) col)
+      ;;      (t x-default)))
+      ;;
+      ;; **The first test answers nothing here, and that is the honest
+      ;; answer rather than a shortcut.** Emacs's FRAME `t' is "the
+      ;; defaults for FACE (for new frames)" (`faces.el:466') - a set it
+      ;; keeps apart from a frame's realized faces. This tree has one set
+      ;; and no frame defaults (`faces.scm''s header says so), so asking
+      ;; `face-attribute' would report the *realized* colour, which is
+      ;; the very thing being replaced. Measured on Emacs 31.1:
+      ;; `(face-attribute 'default :background t)' is `unspecified' both
+      ;; with a theme loaded and after it is disabled, so the Elisp falls
+      ;; through to these defaults too. `x-get-resource' has no
+      ;; counterpart - there is no X resource database here - which is
+      ;; the same answer Emacs gives on a machine with none.
+      ;;--------------------------------------------------------------
+      (if (*window-system*) x-default tty-default))
 
     (define (custom-theme-set-faces theme . args)
       ;; GNU Emacs's `custom-theme-set-faces' (`cus-face.el:343'): "Apply
