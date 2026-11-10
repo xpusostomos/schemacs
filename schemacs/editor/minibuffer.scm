@@ -145,7 +145,7 @@
     (only (schemacs editor frame)
           *current-frame* *echo-area-buffer* *echo-area-prompt* *minibuffer*
           frame-height select-window selected-window set!frame-message
-          frame-minibuffer-window set-window-buffer!
+          frame-minibuffer-window set-window-buffer! window-type?
           set-message! set-window-point! window-buffer window-height
           window-list window-width
           ;; the completions window's display, as
@@ -477,6 +477,15 @@ read-number-history
       ;; here (minibuffer.el:5214), because the two functions disagree.
       ;;--------------------------------------------------------------
       (let* ((frame (*current-frame*))
+             ;; **The selected window when the prompt began.** GNU Emacs's
+             ;; `read_minibuf` does `Fset_buffer (minibuffer)` and never
+             ;; `Fselect_window`, so the *selected window* is the one it
+             ;; was - which is why `switch-to-buffer` after RET acts on the
+             ;; body window and not on the prompt. Nothing restores that
+             ;; here, so a click or a `C-x o` into the minibuffer window
+             ;; left it selected and the command that had asked went to
+             ;; work in a one-row window at the bottom of the frame.
+             (entry-window (selected-window))
              (ed (allocate-buffer))
              (text (if (pair? initial) (car initial) initial))
              ;; point, counting from zero into TEXT, or #f for its end
@@ -562,6 +571,14 @@ read-number-history
             ;; the prompt and the initial input are in place, before the
             ;; recursive edit that reads (minibuf.c:912).
             (for-each (lambda (hook) (hook)) (*minibuffer-setup-hook*))
+            ;; **The selected window is put back however the read ends**,
+            ;; which is `read_minibuf`'s `record_unwind_protect` of the
+            ;; window selection. A `dynamic-wind` and not a statement
+            ;; after the read, because a quit unwinds past everything
+            ;; between: C-g must leave the body window selected too.
+            (dynamic-wind
+             (lambda () #t)
+             (lambda ()
             (let ((result (recursive-edit frame)))
               ;; `minibuffer-exit-hook', which GNU Emacs runs on the way
               ;; out however the minibuffer was left - RET, C-g, or a
@@ -588,7 +605,13 @@ read-number-history
                       (let ((h (minibuffer-history-of mb)))
                         (set!history-entries
                          h (cons answer (history-entries h)))))
-                    answer)))))))
+                    answer))))
+             ;; the unwind: the window this prompt began in is the
+             ;; selected one again, whatever the prompt's own commands -
+             ;; or a click - did to the selection
+             (lambda ()
+               (when (and entry-window (window-type? entry-window))
+                 (select-window entry-window))))))))
 
     (define read-from-minibuffer
       ;; GNU Emacs's `read-from-minibuffer'. Of its arguments this takes
