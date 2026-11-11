@@ -160,39 +160,71 @@ Ours today, and the three departures:
 **The gate**: all 76 pty checks green, and `pgtk-tests`' pixel checks green -
 they are what proves the run split still produces the same pixels.
 
-### Phase 2 - the screen is ours (~900 lines)
+### Phase A - ncurses leaves the tree, before anything is drawn (~500 lines)
+
+**Revised 2026-11-11, Chris's correction**: *"I thought you had done
+everything below GOOPs, that would mean ncurses is gone, which means you
+shouldn't be shadowing anything."*
+
+The line is at **the display interface**. Everything under it is ours, so
+ncurses has nothing left to do in `term.scm` - and the first attempt at
+doing the screen *while keeping ncurses* proved it: both
+`(ncurses curses)` and `(schemacs ui ncurses tinfo)` export the C symbol
+`setupterm`, the import silently picked one, every `tparm` answered `#f`,
+and the editor drew nothing at all. **A shadowing bug can only happen
+while two things are imported.** Remove one and the whole class goes away.
+
+This phase changes what sits under the interface without changing a pixel,
+which is what makes it testable:
+
+| ncurses call | replaced by | Emacs's |
+|---|---|---|
+| `getch` | a byte read from the descriptor we already `select` on, with our own timeout | `read_char` over `read_socket_hook` |
+| `keyname`/`tiget` for keys | `tigetstr` over Emacs's `keys[]` table (58 entries, `term.c`) into `input-decode-map` | `term.c`'s own loop |
+| `initscr`/`endwin` | `smcup`/`rmcup` via `tputs` | `tty_set_terminal_modes` (`term.c:202`) |
+| `raw!`/`noecho!`/`nonl!` | `tcsetattr` via libc FFI | `init_sys_modes` (`sysdep.c`) |
+| `keypad!` | `smkx`/`rmkx` | same function |
+| `start-color!`/`init-pair!`/`color-pair`/`use-default-colors` | `setaf`/`setab` with `tparm`, over the pair table we already keep | `turn_on_face` (`term.c`) |
+| `attr-on!`/`attr-off!` | the SGR sequence from our realized face | `turn_on_face` |
+| `addstr`/`erase`/`refresh`/`clearok!`/`idlok!`/`idcok!`/`scroll`/`move` | the `tty_*` hooks of Phase B | `term.c` |
+
+Order, each verifiable on its own:
+
+1. **Colours** - the pair table is already ours (`*tty-color-pairs*`); the
+   emission is `setaf`/`setab`. Immediately visible: the same colours, or
+   not.
+2. **Attributes** - `attr-on!`/`attr-off!` already take a realized token;
+   the sequence comes from terminfo (`bold`, `smul`, `rev`, `smso`).
+3. **Terminal modes** - `tcsetattr` for raw, `smcup`/`smkx` from terminfo.
+4. **Keys** - the 58-entry table and a byte read instead of `getch`. This
+   is the one to do last, because `getch` also handles the escape delay and
+   `KEY_RESIZE`, and both must be replaced rather than lost.
+5. **Then delete `(ncurses curses)` from `term.scm`** - at which point
+   `addstr`/`erase`/`refresh` have no definition, and the Phase B work is
+   forced rather than optional.
+
+**This is why it comes before the screen.** Drawing through ncurses and
+owning the screen at the same time is the straddle that produced the
+shadowing bug; with ncurses out of the file, the screen writer is the only
+thing writing bytes, and a bad call fails loudly instead of quietly
+answering `#f`.
+
+### Phase B - the screen is ours (~400 lines)
 
 - **`build_frame_matrix`** and friends (`dispnew.c:2521`): one matrix for
   the frame, each window's rows copied in at its offset. ~150 lines.
-  `build_frame_matrix_from_window_tree` 11, `..._from_leaf_window` 130,
-  `make_matrix_current` 7, `clear_desired_matrices` 23.
 - **`write_matrix` + `write_row`**: the tick. Compare the desired frame row
-  against the current one and emit the differing cells. 25 + 304 lines.
-  `scrolling` (97) comes in Phase 3 or never - see below.
-- **`cmgoto`** (`cm.c`, 467 lines): the cursor-motion cost model that picks
-  `cup` vs `hpa`/`vpa` vs relative moves, and only pays for what it must.
-  This is what makes Emacs's tty output short, and it is pure logic over
-  terminfo strings. ~250 lines in Scheme.
-- **The `tty_*` hooks** (`term.c`): `tty_cursor_to` 408, `tty_raw_cursor_to`
-  430, `tty_write_glyphs_1` 760, `tty_clear_end_of_line` 494,
-  `tty_clear_to_end` 449, `tty_clear_frame` 472, hide/show cursor 346/363,
-  highlight on/off 318-395. ~400 lines.
-- Then, and only then: delete `addstr`, `attr-on!`/`attr-off!`, `erase`,
-  `refresh`, `clearok!` from the drawing path, and **delete the
-  `(not (graphical-frame?))` branch** from `clear-garbaged-frames!` - the
-  departure disappears rather than being worked around.
-
-### Phase 3 - colours, and ncurses leaves the tree (~300 lines)
-
-- Colour emission: we already compute OSC 4 for truecolor and use
-  `init-pair!` for the palette. The pairs become direct `setaf`/`setab`
-  emission from the same computed values, and the palette-slot cache stops
-  being an ncurses workaround and becomes the design (`DEPARTURES.md`,
-  "Direct colour is carried in redefined palette slots").
-- `init_pair`/`color_pair`/`start_color`/`use_default_colors` all go; the
-  pair table is ours, which is what Emacs's `tty_face_1` already is.
-- Remove `(ncurses curses)` from `term.scm` entirely. The library becomes
-  `tinfo.scm` + the screen, and the dependency list loses its toolkit.
+  against the current one and emit the differing cells. 25 + 304 lines. The
+  branch this tree is on is `!FRAME_CHAR_INS_DEL_OK` (`dispnew.c:6028`):
+  find the first glyph that differs and write from there.
+- **`cmgoto`** (`cm.c`, 467 lines): the cursor-motion cost model, which is
+  what makes Emacs's tty output short. ~250 lines in Scheme.
+- **`scrolling`** (`dispnew.c`, 97) and `try_window_id` are *not* here: both
+  are gated on `FRAME_LINE_INS_DEL_OK`, which we do not have - and
+  `try_window_id` gives up on exactly that (see below).
+- Then **delete the `(not (graphical-frame?))` branch** from
+  `clear-garbaged-frames!`: the departure disappears rather than being
+  worked around.
 
 ## What this buys
 
