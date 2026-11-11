@@ -231,6 +231,15 @@
       ;;--------------------------------------------------------------
       (set!test-display-glyphs d '()))
 
+    (define-method (cursor-to! (d <test-display>) window vpos hpos)
+      ;; `tty_cursor_to`: a stub display has no cursor to move, and the
+      ;; *rows* it draws are placed by `write-glyphs!` from the row's own
+      ;; y. Nothing to do - but the method has to exist, because the
+      ;; redisplay calls it after a row that filled the width (GNU
+      ;; Emacs's `write_row` ends with `cursor_to (f, vpos, 0)`).
+      ;;--------------------------------------------------------------
+      #t)
+
     (define-method (clear-end-of-line! (d <test-display>) window row area x
                                        width token)
       ;; Recorded as the spaces it would draw, so a test reading the

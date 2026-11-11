@@ -42,6 +42,7 @@
           write-glyphs! draw-box! face-metrics display-cell-size clear-frame-area!
           clear-end-of-line! ensure-surface!
           update-window-begin! update-window-end!
+          cursor-to!
           draw-window-cursor! erase-window-cursor! flush-display!
           realize-face
           ;; how many pixels a cell is, which is what turns a mouse
@@ -2425,10 +2426,25 @@
                                 (sum (+ i 1)
                                      (+ n2 (glyph-pixel-width
                                             (vector-ref glyphs i)))))))))
-          (when (< end limit)
-            (clear-end-of-line-row! (current-display) window 0 y end
-                                    (- limit end)
-                                    (face->attribute 'default))))
+          (if (< end limit)
+              (clear-end-of-line-row! (current-display) window 0 y end
+                                      (- limit end)
+                                      (face->attribute 'default))
+              ;; **`write_row`: "Don't call clear_end_of_line if we
+              ;; already wrote the whole line. The cursor will not be at
+              ;; the right margin in that case but in the line below"-
+              ;; and then `cursor_to (f, vpos, 0)`, "to make sure we are
+              ;; in the right row, otherwise cursor movement with cmgoto
+              ;; might use `ch' in the wrong row".
+              ;;
+              ;; It is not cosmetic. Writing the last column arms the
+              ;; terminal's wrap; `cmplus` books that as "moved to the
+              ;; next row", so `cm` and the terminal would both be one
+              ;; row below where the picture is, and every later
+              ;; `cursor_to` would be off by one. Going back to the row
+              ;; cancels it. Measured, without this a 23-row frame drew
+              ;; 62.
+              (cursor-to! (current-display) window y x0)))
         ;; the left truncation glyph, when the row was drawn one cell in
         ;; from the window's left edge - which is what `display-window!`
         ;; does for an hscrolled line. `$` overwrites the cell at the
@@ -2478,12 +2494,32 @@
       ;; vector is made with TOKEN on every glyph, and the row is given
       ;; the y and x the caller had.
       ;;--------------------------------------------------------------
-      (let* ((n (length glyphs))
+      ;; **One glyph per CELL.** The interface asks for `(w, row,
+      ;; string, area, len)` where each glyph is one cell, and a caller
+      ;; that passes a whole *run* as a single element - the mode line and
+      ;; the echo area do, one string for a stretch of text - has to have
+      ;; it split, or `write-glyphs!` advances the cursor by one column
+      ;; for a thirty-character run and every later run in the row is
+      ;; addressed from where that drift left it. Measured, the mode line
+      ;; read `-UU-:--- *p32.txt  &  -- L1 C0`.
+      (let* ((cells (let loop ((rest glyphs) (acc '()))
+                      (cond ((null? rest) (reverse acc))
+                            ((string? (car rest))
+                             (if (= (string-length (car rest)) 1)
+                                 (loop (cdr rest) (cons (car rest) acc))
+                                 (loop (cdr rest)
+                                       (append (reverse
+                                                (map string
+                                                     (string->list
+                                                      (car rest))))
+                                               acc))))
+                            (else (loop (cdr rest) (cons (car rest) acc))))))
+             (n (length cells))
              (vec (if (= n 0)
                       (vector)
                       (list->vector
                        (map (lambda (g) (make-glyph g token 1 'char #f 0))
-                            glyphs)))))
+                            cells)))))
         (when (> n 0)
           (write-glyphs! display #f
                          (make-glyph-row vec n x y (max 1 n) 0 1 x x)
@@ -2606,7 +2642,16 @@
                            (cdr (display-cell-size (current-display)))
                            (and (not prev-boxed?) #t)
                            (and (not next-boxed?) #t)))
-              (loop (cdr rest) (and box #t)))))))
+              (loop (cdr rest) (and box #t)))))
+        ;; **`write_row`'s last three lines, which apply to any row.** A
+        ;; mode line that fills the window arms the terminal's wrap;
+        ;; `cmplus` books that as "moved to the next row", so `cm` ends
+        ;; one row below the picture and every later `cursor_to` is off
+        ;; by one. GNU Emacs ends `write_row` with `cursor_to (f, vpos,
+        ;; 0)` for exactly this, and the mode line goes through
+        ;; `write_row` there as well. Measured, without it a 23-row
+        ;; frame drew 62.
+        (cursor-to! (current-display) #f row-y x0)))
 
     (define (render-window-mode-line! window)
       ;; Draw WINDOW's mode line and its vertical border - the part of a

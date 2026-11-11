@@ -490,7 +490,13 @@
       (set-cm-ll! tty (tgetstr "ll"))
       (set-cm-tab! tty (tgetstr "ta"))
       (set-cm-tabwidth! tty (max 0 (tigetnum "it")))
-      (set-cm-magicwrap! tty (> (tigetflag "xn") 0))
+      ;; **`xenl`, not `xn`.** `tgetflag ("xn")` is termcap's name for
+      ;; it and `tigetflag` is terminfo's, where the capability is
+      ;; `xenl`. Measured on this terminal, `xn` answers -1 and `xenl`
+      ;; answers 1 - so magicwrap was off when it should be on, `cmplus`
+      ;; booked a wrap the terminal had only *armed*, and every row was
+      ;; one lower than the picture. The same trap as `Co`/`colors`.
+      (set-cm-magicwrap! tty (> (tigetflag "xenl") 0))
       ;; "Since we make MagicWrap terminals look like AutoWrap, we need
       ;; to have the former flag imply the latter."
       (set-cm-autowrap! tty (or (cm-magicwrap tty) (> (tigetflag "am") 0)))
