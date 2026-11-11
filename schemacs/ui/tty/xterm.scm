@@ -60,11 +60,17 @@
     ;; the OSC 52 sequence carries and back, are `(scheme base)''s.
     (only (guile) ash logior string-contains string-split)
     ;; The terminal: the query goes out on the output port, and the reply
-    ;; is read one event at a time with a timeout, as
-    ;; `xterm--read-event-for-query' reads it. What was read and was not
-    ;; the reply goes back with `ungetch', which is
-    ;; `unread-command-events' here.
-    (only (ncurses curses) flushinp getch stdscr timeout! ungetch)
+    ;; is read one byte at a time with a timeout, as
+    ;; `xterm--read-event-for-query' reads it. **This used to be
+    ;; ncurses's `getch`/`timeout!`/`flushinp`/`ungetch`**, which stopped
+    ;; existing the moment the screen became ours; a terminal query is
+    ;; just a `select` on the keyboard and a byte, which is what
+    ;; `tty-read-query-byte` is. What was read and was not the reply goes
+    ;; back with `tty-unread-query-bytes`, which is `unread-command-events`
+    ;; here.
+    (only (schemacs ui tty sysdep)
+          tty-read-query-byte tty-unread-query-bytes
+          tty-flush-query-input)
     (only (schemacs editor tty-colors)
           tty-color-clear tty-color-define *color-name-rgb-alist*)
     (only (schemacs editor faces) *display-color-cells* *frame-background-mode*))
@@ -260,10 +266,7 @@
       ;; not make the screen flash; nothing here redisplays while it
       ;; waits.
       ;;--------------------------------------------------------------
-      (timeout! (stdscr) (exact (round (* 1000 (xterm-query-timeout)))))
-      (let ((event (getch (stdscr))))
-        (timeout! (stdscr) -1)
-        event))
+      (tty-read-query-byte (xterm-query-timeout)))
 
     (define (xterm--read-string term1 . rest)
       ;; GNU Emacs's `xterm--read-string': read up to TERM1, or to TERM1
@@ -293,12 +296,12 @@
       ;; next character of a handler's STRING is pushed back to be read
       ;; as a key, and so are the characters of the STRING matched before
       ;; it, in order - which is what `unread-command-events' gets in
-      ;; Emacs, and `ungetch' here (last pushed is first read, so the
-      ;; pushes run backwards).
+      ;; Emacs, and `tty-unread-query-bytes' here (last pushed is first
+      ;; read, so the pushes run backwards).
       ;;--------------------------------------------------------------
       ;; Pending input can be mistakenly returned by the calls to
       ;; read-event below: discard it.
-      (flushinp)
+      (tty-flush-query-input)
       (xterm--send-string-to-terminal query)
       (let next ((handlers handlers))
         (when (pair? handlers)
@@ -312,10 +315,11 @@
                      ((and (char? evt) (char=? evt (string-ref prefix i)))
                       (loop (+ i 1)))
                      (else
-                      (when evt (ungetch evt))
+                      (when evt (tty-unread-query-bytes (string evt)))
                       (let back ((i i))
                         (when (> i 0)
-                          (ungetch (string-ref prefix (- i 1)))
+                          (tty-unread-query-bytes
+                           (string (string-ref prefix (- i 1))))
                           (back (- i 1))))
                       (next (cdr handlers)))))
                   ((cdr handler))))))))

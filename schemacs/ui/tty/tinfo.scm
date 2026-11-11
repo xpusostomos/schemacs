@@ -59,6 +59,12 @@
 
   (begin
 
+    (define (%pointer-of-string string)
+      ;; A pointer to STRING that outlives the call - `tparm` reads it.
+      ;;--------------------------------------------------------------
+      (let ((bv (string->utf8 string)))
+        (bytevector->pointer bv)))
+
     ;;----------------------------------------------------------------
     ;; The library, and the terminal it describes
     ;;----------------------------------------------------------------
@@ -255,9 +261,21 @@
       ;; Answers the expanded *string*, or #f when the terminal has no
       ;; such capability.
       ;;--------------------------------------------------------------
-      (let ((pointer (cond ((string? cap) (and (tigetstr cap)
-                                               (%cap-pointer cap)))
-                           (else cap))))
+      ;; **CAP is a capability NAME or the capability *string*.** A name
+      ;; (`cup`) is looked up; anything else is taken as the expanded
+      ;; format itself, which is what `cm.scm` hands over - it speaks
+      ;; termcap, and terminfo has no name for `cm`. Testing "is this a
+      ;; name" by `tigetstr` answering non-#f is the only way to tell
+      ;; them apart, and it is what the two callers make necessary.
+      (let ((pointer (cond ((not (string? cap)) cap)
+                           ((and (tigetstr cap) (%cap-pointer cap))
+                            (%cap-pointer cap))
+                           ;; not a name: the string is the format
+                           ((string-contains cap "%")
+                            ;; a format string: bind it to a name of its
+                            ;; own so `tparm` can be given a pointer
+                            (%pointer-of-string cap))
+                           (else #f))))
         (cond
          ((or (not %tparm) (not pointer) (null-pointer? pointer)) #f)
          (else
