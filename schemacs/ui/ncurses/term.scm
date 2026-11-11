@@ -29,6 +29,11 @@
     ;; and what the terminal can draw of it is computed here - that
     ;; last step is the whole of this library's face code.
     (only (schemacs editor xfaces) attribute-value realize-tty-face)
+    ;; `write-glyphs!` reads the row it is handed: the pixel y is the
+    ;; row's, and each glyph carries its own face - as `term.c`'s
+    ;; `tty_write_glyphs` reads `glyph->face_id`.
+    (only (schemacs editor glyph)
+          glyph-char glyph-face-id glyph-pixel-width glyph-row-y)
     ;; Opening a terminal runs `startup.el''s color and face
     ;; initialization against it, so it needs what ncurses.sld used to
     ;; import for that: the eight standard colors, the xterm driver for
@@ -360,11 +365,55 @@
     ;; but answers the same generics.
     ;;------------------------------------------------------------------
 
-    (define-method (write-glyphs! (d <tty-display>) glyphs y x attribute)
-      ;; Draw TEXT at pixel Y, column X with ATTRIBUTE - or the terminal's
-      ;; own appearance when ATTRIBUTE is #f, which is what not starting
-      ;; a face means. This is the one operation everything a window
-      ;; shows comes down to.
+    (define-method (write-glyphs! (d <tty-display>) window row area x
+                                  glyphs len)
+      ;; Draw LEN glyphs of ROW from cell column X - GNU Emacs's
+      ;; `write_glyphs` (`dispextern.h`), whose terminal method is
+      ;; `tty_write_glyphs` (`term.c:973`) over the same argument list.
+      ;;
+      ;; A terminal writes one *run* at a time here, because `addstr`
+      ;; writes a string in one face - which is `term.c`'s own split
+      ;; inside `tty_write_glyphs_1` (`term.c:760`: "Identify a run of
+      ;; glyphs with the same face"). The split is below the interface
+      ;; now, where Emacs has it, rather than in the redisplay.
+      ;;
+      ;; **The row carries the position**: `row->y` is the pixel y, and a
+      ;; terminal's line is one pixel tall, so `cursor_to (f, row, col)`
+      ;; is that y (`frame.c:1182`).
+      ;;--------------------------------------------------------------
+      (let ((y (glyph-row-y row)))
+        (let loop ((i 0) (col x))
+          (when (< i len)
+            (let* ((g (vector-ref glyphs i))
+                   (token (glyph-face-id g))
+                   (end (let scan ((j (+ i 1)))
+                          (if (and (< j len)
+                                   (eqv? (glyph-face-id (vector-ref glyphs j))
+                                         token))
+                              (scan (+ j 1))
+                              j)))
+                   (parts (let build ((j i) (acc '()))
+                            (if (>= j end)
+                                (reverse acc)
+                                (build (+ j 1)
+                                       (cons (glyph-char
+                                              (vector-ref glyphs j))
+                                             acc)))))
+                   (cells (let sum ((j i) (n 0))
+                            (if (>= j end)
+                                n
+                                (sum (+ j 1)
+                                     (+ n (glyph-pixel-width
+                                           (vector-ref glyphs j))))))))
+              (%tty-write-run d parts y col token)
+              (loop end (+ col cells)))))))
+
+    (define (%tty-write-run d glyphs y x attribute)
+      ;; One run: the cells from column X of the row at pixel Y, in
+      ;; ATTRIBUTE's face - or the terminal's own appearance when
+      ;; ATTRIBUTE is #f, which is what not starting a face means. This is
+      ;; the old body of `write-glyphs!`, and it is what everything a
+      ;; window shows comes down to.
       ;;
       ;; **Y is a pixel offset and a terminal's line is one pixel tall**,
       ;; so the row is Y itself - which is Emacs's tty backend: the glyph
@@ -379,7 +428,8 @@
       (addstr (stdscr) (glyphs->text glyphs) #:y y #:x x)
       (when attribute (attr-off! (stdscr) attribute)))
 
-    (define-method (clear-end-of-line! (d <tty-display>) y x width token)
+    (define-method (clear-end-of-line! (d <tty-display>) window row area x
+                                       width token)
       ;; Blank the cells [X, X+WIDTH) of row Y. `addstr` writes over the
       ;; cells it is handed and leaves whatever was to their right, so a
       ;; row that got shorter than the one before kept the old row's
@@ -389,10 +439,11 @@
       ;; `tty_clear_end_of_line` (`term.c`), a run of spaces in the
       ;; row's own face, and that is what this is.
       ;;--------------------------------------------------------------
-      (when (> width 0)
-        (when token (attr-on! (stdscr) token))
-        (addstr (stdscr) (make-string width #\space) #:y y #:x x)
-        (when token (attr-off! (stdscr) token))))
+      (let ((y (glyph-row-y row)))
+        (when (> width 0)
+          (when token (attr-on! (stdscr) token))
+          (addstr (stdscr) (make-string width #\space) #:y y #:x x)
+          (when token (attr-off! (stdscr) token)))))
 
     (define-method (ensure-surface! (d <tty-display>))
       ;; A terminal's "surface" is the screen it was opened on; there is
@@ -433,6 +484,52 @@
       ;; in a terminal Emacs. Asking for one here would be a departure.
       ;;--------------------------------------------------------------
       #f)
+
+    (define-method (cursor-to! (d <tty-display>) window vpos hpos)
+      ;; Put the terminal's cursor at VPOS, HPOS - GNU Emacs's
+      ;; `tty_cursor_to` (`term.c:408`), whose body is `cmgoto` and then
+      ;; `curs_set`. ncurses owns the cursor here, so `move` is that, and
+      ;; `cmgoto` arrives with Phase 2 when the screen is ours.
+      ;;--------------------------------------------------------------
+      (move (stdscr) vpos hpos))
+
+    (define-method (raw-cursor-to! (d <tty-display>) vpos hpos)
+      ;; `tty_raw_cursor_to` (`term.c:430`): absolute, no cost model.
+      ;;--------------------------------------------------------------
+      (move (stdscr) vpos hpos))
+
+    (define-method (clear-to-end! (d <tty-display>))
+      ;; `tty_clear_to_end` (`term.c:449`): erase from the cursor down.
+      ;;--------------------------------------------------------------
+      (clrtobot (stdscr)))
+
+    (define-method (clear-frame! (d <tty-display>))
+      ;; `tty_clear_frame` (`term.c:472`).
+      ;;--------------------------------------------------------------
+      (erase (stdscr)))
+
+    (define-method (update-begin! (d <tty-display>)) #t)
+
+    (define-method (update-end! (d <tty-display>))
+      ;; **Nothing yet, and it is `tty_update_end`'s job later.** Emacs's
+      ;; puts the terminal cursor back where the redisplay said it should
+      ;; be (`term.c:254` -> `tty_set_cursor`); here `ncurses` owns the
+      ;; cursor and `draw-window-cursor!` is what places it.
+      ;;--------------------------------------------------------------
+      #t)
+
+    (define-method (set-terminal-modes! (d <tty-display>))
+      ;; `tty_set_terminal_modes` (`term.c:202`) sends `smcup` and
+      ;; `smkx`. `initscr`/`keypad!` already did both, in
+      ;; `with-terminal`; this becomes the real one in Phase 1.
+      ;;--------------------------------------------------------------
+      #t)
+
+    (define-method (reset-terminal-modes! (d <tty-display>))
+      ;; `tty_reset_terminal_modes` (`term.c:231`): `rmkx`, `rmcup`.
+      ;; `endwin` does it today.
+      ;;--------------------------------------------------------------
+      #t)
 
     (define-method (erase-window-cursor! (d <tty-display>) row column cells
                                         text token)

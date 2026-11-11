@@ -148,7 +148,15 @@
           realize-face resume-display! screen-size
           selection-exists? selection-owner?
           set-selection! suspend-display! update-window-begin!
-          glyphs->text update-window-end! write-glyphs!)
+          glyphs->text update-window-end! write-glyphs!
+          ;; the terminal hooks and the row the Emacs-shaped
+          ;; `write-glyphs!` takes (`define-generic`d beside it)
+          cursor-to! raw-cursor-to! clear-to-end! clear-frame!
+          update-begin! update-end! set-terminal-modes! reset-terminal-modes!)
+    ;; A glyph and a glyph row, which `write-glyphs!` now reads: the
+    ;; pixel y is the row's, and each glyph carries its own face.
+    (only (schemacs editor glyph)
+          glyph-char glyph-face-id glyph-pixel-width glyph-row-y)
     ;; The Lisp half of a *read* of a selection this process owns:
     ;; `pgtk-get-local-selection' looks the requested target up in
     ;; `selection-converter-alist' - the C's `Vselection_converter_alist'
@@ -1994,7 +2002,8 @@
                      (list 1.0 1.0 1.0)))
           (cairo-paint cr))))
 
-    (define-method (clear-end-of-line! (d <pgtk-display>) y x width token)
+    (define-method (clear-end-of-line! (d <pgtk-display>) window row area x
+                                       width token)
       ;; Blank the cells [X, X+WIDTH) of row Y. A GUI fill already covers
       ;; the rectangle a run is drawn in, so this is what a *shorter* row
       ;; needs: the cells past its text still hold the previous frame's
@@ -2002,7 +2011,8 @@
       ;; any text - GNU Emacs's `gui_clear_end_of_line`
       ;; (`xdisp.c:34644`) fills from X to the window's right edge.
       ;;--------------------------------------------------------------
-      (let ((cr (pgtk-cr d)))
+      (let ((cr (pgtk-cr d))
+            (y (glyph-row-y row)))
         (when (and cr (> width 0))
           (apply cairo-set-source-rgb
                  cr (or (face-token-background token)
@@ -2031,7 +2041,12 @@
             (loop (+ i 1)
                   (+ col (char-display-width (string-ref text i) col))))))
 
-    (define-method (write-glyphs! (d <pgtk-display>) glyphs y x token)
+    (define (%pgtk-write-run d glyphs y x token)
+      ;; One run: the cells [X, X+width) of the row at pixel Y, all in
+      ;; TOKEN's face. The body of the old `write-glyphs!`, which is now
+      ;; `write-glyphs!`'s per-run step below - `fill_glyph_string`'s
+      ;; split is the caller's.
+      ;;--------------------------------------------------------------
       ;; Draw TEXT at cell (X, Y), a *cluster* at a time.
       ;;
       ;; The surface is ours, so the cell grid is exact and there is no
@@ -2104,6 +2119,79 @@
                                  (cell-x (+ x col))
                                  (+ y *font-ascent*))
                 (loop end (+ col (char-display-width c col)))))))))
+
+    (define-method (write-glyphs! (d <pgtk-display>) window row area x
+                                  glyphs len)
+      ;; Draw LEN glyphs of ROW, from cell column X - GNU Emacs's
+      ;; `write_glyphs` (`dispextern.h`), whose `fill_glyph_string`
+      ;; (`xdisp.c:31157`) does the same split this does:
+      ;;
+      ;;   while (glyph < last
+      ;;          && glyph->type == CHAR_GLYPH
+      ;;          && glyph->voffset == voffset
+      ;;          && glyph->face_id == face_id ...)
+      ;;
+      ;; - a run is a maximal stretch of one face, and each run is drawn
+      ;; once. **The split is here and not in the redisplay** because that
+      ;; is where Emacs has it: a backend that can draw a mixed-face row
+      ;; in one go (or must) is free to, and nothing above the interface
+      ;; has an opinion.
+      ;;
+      ;; **The row carries the position.** `row->y` is the pixel y, which
+      ;; is `it->current_y` after `display_line` laid the row out - a
+      ;; pixel offset and not a screen row, since rows differ in height
+      ;; once a buffer is scaled.
+      ;;--------------------------------------------------------------
+      (let ((y (glyph-row-y row))
+            (x0 (+ x (if (eq? area 'text) 0 0))))
+        (if (= len 0)
+            (clear-end-of-line! d window row area x)
+            (let loop ((i 0) (col x0))
+              (when (< i len)
+                (let* ((g (vector-ref glyphs i))
+                       (token (glyph-face-id g))
+                       (end (let scan ((j (+ i 1)))
+                              (if (and (< j len)
+                                       (eqv? (glyph-face-id
+                                              (vector-ref glyphs j))
+                                             token))
+                                  (scan (+ j 1))
+                                  j)))
+                       (parts (let build ((j i) (acc '()))
+                                (if (>= j end)
+                                    (reverse acc)
+                                    (build (+ j 1)
+                                           (cons (glyph-char
+                                                  (vector-ref glyphs j))
+                                                 acc)))))
+                       (cells (let sum ((j i) (n 0))
+                                (if (>= j end)
+                                    n
+                                    (sum (+ j 1)
+                                         (+ n (glyph-pixel-width
+                                               (vector-ref glyphs j))))))))
+                  (%pgtk-write-run d parts y col token)
+                  (loop end (+ col cells))))))))
+
+    (define-method (cursor-to! (d <pgtk-display>) window vpos hpos)
+      ;; A window system has no terminal cursor to move: the cursor is
+      ;; *drawn*, by `draw-window-cursor!`, and `render!` does that after
+      ;; the window loop. Emacs's `output_cursor_to` (`xdisp.c`) is the
+      ;; same division for a frame with `FRAME_WINDOW_P`.
+      ;;
+      ;; It does not record where the cursor is either: this tree places
+      ;; the cursor from `cursor-screen-position` at draw time, where
+      ;; Emacs reads back `w->cursor` set by `display_and_set_cursor`.
+      ;;--------------------------------------------------------------
+      #t)
+
+    (define-method (raw-cursor-to! (d <pgtk-display>) vpos hpos) #t)
+    (define-method (clear-to-end! (d <pgtk-display>)) #t)
+    (define-method (clear-frame! (d <pgtk-display>)) (clear-frame-area! d))
+    (define-method (update-begin! (d <pgtk-display>)) #t)
+    (define-method (update-end! (d <pgtk-display>)) #t)
+    (define-method (set-terminal-modes! (d <pgtk-display>)) #t)
+    (define-method (reset-terminal-modes! (d <pgtk-display>)) #t)
 
     ;;----------------------------------------------------------------
     ;; The `:box` face attribute

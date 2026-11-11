@@ -1401,8 +1401,8 @@
               ;; *default* face, as any other text without properties is
               ;; - not with "no face", which on a terminal is the
               ;; terminal's own colours and stops following a theme.
-              (write-glyphs! (current-display) (list text) row-y x
-                             (face->attribute (or face 'default)))
+              (write-run! (current-display) (list text) row-y x
+                          (face->attribute (or face 'default)))
               (loop (cdr rest) (+ x (line-display-width text)))))))
 
     (define (row-overlay-strings ed slice-start len)
@@ -1480,8 +1480,8 @@
       ;; text, and Emacs draws it with the default face even inside a
       ;; region - `produce_special_glyphs' uses `DEFAULT_FACE_ID'.
       ;;--------------------------------------------------------------
-      (write-glyphs! (current-display) (list glyph) row-y (+ x0 width -1)
-                     (face->attribute 'default)))
+      (write-run! (current-display) (list glyph) row-y (+ x0 width -1)
+                  (face->attribute 'default)))
 
     (define (line-end-fill-attribute ed row-end row-width width)
       ;; Face used for cells after a line's text when the line-end
@@ -2361,10 +2361,10 @@
       ;; record was made with (0), so blanking from the record wiped the
       ;; window's first line once for every empty row.
       (let ((y (row->pixel-y (+ (window-top window) index))))
-        (clear-end-of-line! (current-display)
-                            y (window-left window)
-                            (window-body-width window)
-                            (face->attribute 'default))))
+        (clear-end-of-line-row! (current-display) window index y
+                                (window-left window)
+                                (window-body-width window)
+                                (face->attribute 'default))))
 
     (define (draw-glyph-row! window row)
       ;; Draw a built row: one `write-glyphs!` per run of glyphs that share
@@ -2398,28 +2398,25 @@
                           (glyph-row-truncated-on-right? row)))
              ;; the last cell belongs to a marker when the row has one
              (limit (+ x0 width (if marker? -1 0))))
-        ;; the runs, each written at the column it starts at; the answer
-        ;; is the column the text ended at, where the blanking begins
-        (let loop ((i 0) (col x0))
-          (if (>= i n)
-              (when (< col limit)
-                (clear-end-of-line! (current-display) y col (- limit col)
-                                    (face->attribute 'default)))
-              (let* ((g (vector-ref glyphs i))
-                     (token (glyph-face-id g)))
-                (let run ((j (+ i 1))
-                          (parts (list (glyph-char g)))
-                          (cells (glyph-pixel-width g)))
-                  (if (and (< j n)
-                           (eqv? (glyph-face-id (vector-ref glyphs j)) token))
-                      (let ((gj (vector-ref glyphs j)))
-                        (run (+ j 1)
-                             (cons (glyph-char gj) parts)
-                             (+ cells (glyph-pixel-width gj))))
-                      (begin
-                        (write-glyphs! (current-display)
-                                       (reverse parts) y col token)
-                        (loop j (+ col cells))))))))
+        ;; **The row is handed over whole, and the backend splits it into
+        ;; runs** - `write_glyphs`' argument list, `(w, row, string, area,
+        ;; len)`. The split moved out of here when the interface was
+        ;; re-shaped: Emacs has it below the boundary (`fill_glyph_string`
+        ;; for a window system, `tty_write_glyphs_1`'s own loop for a
+        ;; terminal), and a redisplay that split for both back ends had an
+        ;; opinion it should not have had.
+        (when (> n 0)
+          (write-glyphs! (current-display) window row 'text x0 glyphs n))
+        ;; the cells past the text, blanked in the default face
+        (let ((end (+ x0 (let sum ((i 0) (n2 0))
+                            (if (>= i n) n2
+                                (sum (+ i 1)
+                                     (+ n2 (glyph-pixel-width
+                                            (vector-ref glyphs i)))))))))
+          (when (< end limit)
+            (clear-end-of-line-row! (current-display) window 0 y end
+                                    (- limit end)
+                                    (face->attribute 'default))))
         ;; the left truncation glyph, when the row was drawn one cell in
         ;; from the window's left edge - which is what `display-window!`
         ;; does for an hscrolled line. `$` overwrites the cell at the
@@ -2429,9 +2426,9 @@
           ;; at the window's *first* cell, which is the cell the text
           ;; gave up - `draw-special-glyph!` writes the last cell, so
           ;; this is its own `write-glyphs!`
-          (write-glyphs! (current-display) (list "$") y
-                         (window-left window)
-                         (face->attribute 'default)))
+          (write-run! (current-display) (list "$") y
+                      (window-left window)
+                      (face->attribute 'default)))
         ;; the right marker sits in the window's last cell, so the row's
         ;; own width (one cell short when it made room for the left
         ;; marker) is not what places it - `window-left window` plus the
@@ -2442,6 +2439,43 @@
                  (draw-special-glyph! y window-x window-width "\\"))
                 ((glyph-row-truncated-on-right? row)
                  (draw-special-glyph! y window-x window-width "$"))))))
+
+    (define (clear-end-of-line-row! display window index y x width token)
+      ;; Blank the cells [X, X+WIDTH) of the row at pixel Y - GNU Emacs's
+      ;; `clear_end_of_line (w, row, area, x)`, whose backend takes the
+      ;; row's y from `row` and the width from `window_box_width (w,
+      ;; area)`. This tree's callers have the y and the width already, so
+      ;; the row is synthesised the way `write-run!` synthesises one.
+      ;;--------------------------------------------------------------
+      (when (> width 0)
+        (clear-end-of-line! display window
+                            (make-glyph-row (vector) 0 x y width 0 1 x x)
+                            'text x width token)))
+
+    (define (write-run! display glyphs y x token)
+      ;; Draw GLYPHS - a list, one per cell - at pixel Y, cell column X,
+      ;; in TOKEN's face. A *one-run* `write-glyphs!`: the adapter for the
+      ;; places that draw a fragment the redisplay made rather than a row
+      ;; it built (an overlay string, a special glyph, a mode-line
+      ;; segment, the echo area).
+      ;;
+      ;; **It builds the row the interface asks for.** `write_glyphs`
+      ;; takes `(w, row, string, area, len)`, and a backend reads the
+      ;; position from the row and the face from each *glyph*
+      ;; (`glyph->face_id`), so a fragment has to arrive that way: the
+      ;; vector is made with TOKEN on every glyph, and the row is given
+      ;; the y and x the caller had.
+      ;;--------------------------------------------------------------
+      (let* ((n (length glyphs))
+             (vec (if (= n 0)
+                      (vector)
+                      (list->vector
+                       (map (lambda (g) (make-glyph g token 1 'char #f 0))
+                            glyphs)))))
+        (when (> n 0)
+          (write-glyphs! display #f
+                         (make-glyph-row vec n x y (max 1 n) 0 1 x x)
+                         'text x vec n))))
 
     (define (row->pixel-y row)
       ;; The pixel y of screen row ROW, counting from the frame's top, as
@@ -2550,10 +2584,10 @@
                    (token (if face
                               (face->attribute face base)
                               (face->attribute base base))))
-              (write-glyphs! (current-display)
-                             (list (mode-line-substring line i j))
-                             row-y (+ x0 i)
-                             token)
+              (write-run! (current-display)
+                          (list (mode-line-substring line i j))
+                          row-y (+ x0 i)
+                          token)
               (when box
                 (draw-box! (current-display) box token (+ x0 i) row-y
                            (- j i)
@@ -2590,8 +2624,8 @@
           (let loop ((row (window-top window))
                      (end (+ (window-top window) (window-height window))))
             (when (< row end)
-              (write-glyphs! (current-display) "|" (row->pixel-y row)
-                             border (face->attribute 'vertical-border))
+              (write-run! (current-display) (list "|") (row->pixel-y row)
+                          border (face->attribute 'vertical-border))
               (loop (+ 1 row) end))))))
 
     (define (force-mode-line-update . args)
@@ -2903,13 +2937,13 @@
               (let* ((prompt (truncate-line (or (*echo-area-prompt*) "") width))
                      (pwidth (min (line-display-width prompt) width)))
                 (when (> pwidth 0)
-                  (write-glyphs! (current-display)
-                                 prompt
-                                 (row->pixel-y (- height 1)) 0
-                                 (face->attribute 'minibuffer-prompt)))
-                (write-glyphs! (current-display)
-                               (truncate-line
-                                (string-append
+                  (write-run! (current-display)
+                              (list prompt)
+                              (row->pixel-y (- height 1)) 0
+                              (face->attribute 'minibuffer-prompt)))
+                (write-run! (current-display)
+                            (list (truncate-line
+                                   (string-append
                                  ;; The echo buffer's characters, which
                                  ;; is `buffer-substring-no-properties'
                                  ;; over the whole of it - Emacs's
@@ -2918,13 +2952,13 @@
                                  ;; It was `text-editor-to-string',
                                  ;; which was that composition under an
                                  ;; invented name (deleted 2026-10-13).
-                                 (with-current-buffer reading
-                                   (buffer-substring-no-properties
-                                    (point-min) (point-max)))
-                                 (frame-message frame))
-                                (- width pwidth))
-                               (row->pixel-y (- height 1)) pwidth
-                               ;; The typed text carries no face
+                                    (with-current-buffer reading
+                                      (buffer-substring-no-properties
+                                       (point-min) (point-max)))
+                                    (frame-message frame))
+                                   (- width pwidth)))
+                            (row->pixel-y (- height 1)) pwidth
+                            ;; The typed text carries no face
                                ;; property, so it is displayed in the
                                ;; *default* face - Emacs's echo area is
                                ;; the minibuffer window, redisplayed like
@@ -2934,10 +2968,10 @@
                                ;; default face.
                                (face->attribute 'default))))
              (else
-              (write-glyphs! (current-display)
-                             (truncate-line (frame-message frame) width)
-                             (row->pixel-y (- height 1)) 0
-                             (face->attribute 'default))))))
+              (write-run! (current-display)
+                          (list (truncate-line (frame-message frame) width))
+                          (row->pixel-y (- height 1)) 0
+                          (face->attribute 'default))))))
         ;; Place the terminal cursor: in the minibuffer while one is
         ;; active (Emacs's `cursor-in-echo-area'), else at the selected
         ;; window's point - the only window whose cursor is drawn, there

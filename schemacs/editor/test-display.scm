@@ -64,6 +64,8 @@
     ;; The face-token interning below is Guile's hash table, as
     ;; `(schemacs editor minibuf)' uses it for the same job.
     (only (guile) hash-ref hash-set! make-hash-table)
+    (only (schemacs editor glyph)
+          glyph-char glyph-face-id glyph-pixel-width glyph-row-y)
     (only (schemacs editor dispnew)
           <display>
           clear-frame-area! clear-end-of-line! ensure-surface!
@@ -72,6 +74,8 @@
           display-cell-size display-color-cells display-set-size!
           face-metrics
           draw-window-cursor! erase-window-cursor! flush-display!
+          cursor-to! raw-cursor-to! clear-to-end! clear-frame!
+          update-begin! update-end! set-terminal-modes! reset-terminal-modes!
           key-event->key line-height
           read-input-event realize-face resume-display! screen-size
           suspend-display! update-window-begin! update-window-end!
@@ -176,28 +180,58 @@
       (cons (test-display-column-width d) (test-display-line-height d)))
     (define-method (display-color-cells (d <test-display>)) (test-display-color-cells d))
 
-    (define-method (write-glyphs! (d <test-display>) glyphs y x attribute)
-      ;; Nothing is drawn anywhere; the cells and where they would have
-      ;; gone are kept, newest first - joined, so that what a test reads
-      ;; back is the run's text as a device would write it.
+    (define-method (write-glyphs! (d <test-display>) window row area x
+                                  glyphs len)
+      ;; Nothing is drawn anywhere; each run's cells and where they would
+      ;; have gone are kept, newest first - joined, so that what a test
+      ;; reads back is the run's text as a device would write it. The split
+      ;; is the backend's, as it is in Emacs: a run is a maximal stretch of
+      ;; one `face_id` (`fill_glyph_string`, `xdisp.c:31157`).
       ;;--------------------------------------------------------------
-      (set!test-display-glyphs
-       d (cons (list (glyphs->text glyphs) y x attribute)
-               (test-display-glyphs d))))
+      (let ((y (glyph-row-y row)))
+        (let loop ((i 0) (col x))
+          (when (< i len)
+            (let* ((g (vector-ref glyphs i))
+                   (token (glyph-face-id g))
+                   (end (let scan ((j (+ i 1)))
+                          (if (and (< j len)
+                                   (eqv? (glyph-face-id (vector-ref glyphs j))
+                                         token))
+                              (scan (+ j 1))
+                              j)))
+                   (parts (let build ((j i) (acc '()))
+                            (if (>= j end)
+                                (reverse acc)
+                                (build (+ j 1)
+                                       (cons (glyph-char
+                                              (vector-ref glyphs j))
+                                             acc)))))
+                   (cells (let sum ((j i) (n 0))
+                            (if (>= j end)
+                                n
+                                (sum (+ j 1)
+                                     (+ n (glyph-pixel-width
+                                           (vector-ref glyphs j))))))))
+              (set!test-display-glyphs
+               d (cons (list (apply string-append parts) y col token)
+                       (test-display-glyphs d)))
+              (loop end (+ col cells)))))))
 
     (define-method (ensure-surface! (d <test-display>)) #t)
 
     (define-method (clear-frame-area! (d <test-display>))
       (set!test-display-glyphs d '()))
 
-    (define-method (clear-end-of-line! (d <test-display>) y x width token)
+    (define-method (clear-end-of-line! (d <test-display>) window row area x
+                                       width token)
       ;; Recorded as the spaces it would draw, so a test reading the
       ;; script can see that a row's tail was blanked.
       ;;--------------------------------------------------------------
-      (when (> width 0)
-        (set!test-display-glyphs
-         d (cons (list (make-string width #\space) y x token)
-                 (test-display-glyphs d)))))
+      (let ((y (glyph-row-y row)))
+        (when (> width 0)
+          (set!test-display-glyphs
+           d (cons (list (make-string width #\space) y x token)
+                   (test-display-glyphs d))))))
 
     (define-method (update-window-begin! (d <test-display>)) #t)
     (define-method (update-window-end! (d <test-display>)) #t)

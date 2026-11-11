@@ -34,6 +34,10 @@
    update-window-end!
    draw-window-cursor!
    erase-window-cursor!
+   ;; the terminal hooks, which are `struct terminal`'s `*_hook`
+   ;; fields in Emacs (`termhooks.h`)
+   cursor-to! raw-cursor-to! clear-to-end! clear-frame!
+   update-begin! update-end! set-terminal-modes! reset-terminal-modes!
    flush-display!
    read-input-event
    key-event->key
@@ -113,25 +117,65 @@
     ;; `(face-metrics display face-attrs)`.
 
     (define-generic write-glyphs!)
-    ;; Draw a run of GLYPHS at pixel Y, X with ATTRIBUTE: the cells xdisp
-    ;; has decided are one face. Emacs's `write_glyphs'.
+    ;; Draw LEN glyphs of ROW's area AREA, starting at cell column X.
+    ;; GNU Emacs's `write_glyphs` (`dispextern.h`):
     ;;
-    ;; **GLYPHS is a list, one entry per buffer column of the run**, each
-    ;; entry being what that cell shows - a character, or the string the
-    ;; display table draws in its place. Emacs hands `write_glyphs' a
-    ;; `struct glyph *' array for the same reason: what crosses the
-    ;; boundary is the cells, and only the *display* turns them into what
-    ;; the device wants. A run used to be one string built by the
-    ;; redisplay, so a row -- and behind it a line -- became a string on
-    ;; every repaint; nothing above the boundary materialises one now.
+    ;;   void (*write_glyphs) (struct window *w, struct glyph_row *row,
+    ;;                         struct glyph *string, enum glyph_row_area area,
+    ;;                         int len);
     ;;
-    ;; **Y is a pixel offset, not a screen row.** That is Emacs's
-    ;; `glyph->y` in a glyph matrix: a row's glyphs carry the pixel
-    ;; position they are drawn at, and `append_glyph` fills it from
-    ;; `it->current_y` (`xdisp.c`), which advances by each row's own
-    ;; `height`. A screen-row index cannot say that once rows differ in
-    ;; height, which is exactly what a scaled buffer's rows do.
-    ;; `(write-glyphs! display glyphs y x attribute)'.
+    ;; **Everything the call needs is in ROW**, which is why the C passes
+    ;; it: the pixel y is `row->y`, the pixel x comes from the row's own
+    ;; geometry and the column, and each glyph carries its `face_id`. This
+    ;; generic used to take `(glyphs y x attribute)` - a position and an
+    ;; already-realized face - which meant the redisplay worked out what a
+    ;; backend could work out for itself, and it left no place for a
+    ;; terminal backend that wants to decide for itself.
+    ;;
+    ;; **The run split is the backend's**, as it is in Emacs: the GUI
+    ;; backend groups by `face_id` exactly as `fill_glyph_string`
+    ;; (`xdisp.c:31157`) does, and a terminal backend has its own writer.
+    ;; Splitting above the interface put that decision in the redisplay
+    ;; for both back ends whether or not they wanted it.
+    ;;
+    ;; One glyph is one buffer column: a character, or the string the
+    ;; display table draws in its place.
+    ;; `(write-glyphs! display window row area x glyphs len)`.
+
+    (define-generic cursor-to!)
+    ;; Put the cursor at screen row / cell column VPOS, HPOS - GNU Emacs's
+    ;; `cursor_to` (`xdisp.c`), which is `tty_cursor_to` (`term.c:408`)
+    ;; for a terminal. `(cursor-to! display window vpos hpos)`.
+
+    (define-generic raw-cursor-to!)
+    ;; Move the cursor to absolute screen row/column VPOS, HPOS without
+    ;; the cost model - Emacs's `raw_cursor_to` (`term.c:430`), used when
+    ;; nothing else is being drawn. `(raw-cursor-to! display vpos hpos)`.
+
+    (define-generic clear-to-end!)
+    ;; Erase from the cursor to the end of the screen - Emacs's
+    ;; `clear_to_end` (`term.c:449`). `(clear-to-end! display)`.
+
+    (define-generic clear-frame!)
+    ;; Erase the whole terminal screen - Emacs's `clear_frame`
+    ;; (`term.c:472`). `(clear-frame! display)`.
+
+    (define-generic update-begin!)
+    ;; The terminal's begin-update hook, Emacs's `update_begin`.
+    ;; `(update-begin! display)`.
+
+    (define-generic update-end!)
+    ;; The terminal's end-update hook, Emacs's `update_end`
+    ;; (`term.c:254`), which puts the cursor back.
+    ;; `(update-end! display)`.
+
+    (define-generic set-terminal-modes!)
+    ;; Enter the terminal's program modes, Emacs's `set_terminal_modes`
+    ;; (`term.c:202`). `(set-terminal-modes! display)`.
+
+    (define-generic reset-terminal-modes!)
+    ;; Leave them again, Emacs's `reset_terminal_modes` (`term.c:231`).
+    ;; `(reset-terminal-modes! display)`.
 
     (define-generic clear-frame-area!)
     ;; Clear the whole display surface, ready for the frame drawn next.
@@ -146,17 +190,24 @@
     ;; `(ensure-surface! display)`.
 
     (define-generic clear-end-of-line!)
-    ;; Blank ROW's cells from column X to the window's right edge - the
-    ;; cell range [X, WIDTH) of the row at pixel Y, in the face/cell
-    ;; colour TOKEN. GNU Emacs's `clear_end_of_line` (`dispnew.c:4731`,
-    ;; `:4960`), whose whole job is the case a terminal's `addstr`
-    ;; cannot express: "This can happen when the new row is shorter than
-    ;; the old one." **Both back ends need it for the same reason and
-    ;; only one gets it for free**: a GUI fill paints a rectangle, but
-    ;; `addstr` writes over the cells it is given and leaves whatever
-    ;; was to their right - which is how two files came to be visible in
-    ;; one window after the second was visited.
-    ;; `(clear-end-of-line! display y x width token)`.
+    ;; Blank ROW's area AREA from cell column X to the window's right
+    ;; edge. GNU Emacs's `clear_end_of_line`
+    ;;
+    ;;   void (*clear_end_of_line) (struct window *w, struct glyph_row *row,
+    ;;                              enum glyph_row_area area, int x);
+    ;;
+    ;; whose whole job is the case a terminal's `addstr` cannot express:
+    ;; "This can happen when the new row is shorter than the old one"
+    ;; (`dispnew.c:4731`, `:4960`). **Both back ends need it** and only
+    ;; one gets it for free: a GUI fill paints a rectangle, but `addstr`
+    ;; writes over the cells it is given and leaves whatever was to their
+    ;; right - which is how two files came to be visible in one window
+    ;; after the second was visited.
+    ;;
+    ;; The backend takes the row's pixel y from ROW and the width from
+    ;; `window_box_width (w, area)`, as Emacs's do; the height argument
+    ;; the old shape carried is gone with them.
+    ;; `(clear-end-of-line! display window row area x width)`.
 
     (define-generic update-window-begin!)
     ;; A window is about to be updated: the begin half of Emacs's
