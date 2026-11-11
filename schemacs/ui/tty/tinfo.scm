@@ -59,10 +59,24 @@
 
   (begin
 
+    (define %string-pointers '())
+    ;; ^ The bytevectors whose addresses have been handed to `tparm`, held
+    ;; for the life of the process.
+
     (define (%pointer-of-string string)
-      ;; A pointer to STRING that outlives the call - `tparm` reads it.
+      ;; A pointer to STRING that OUTLIVES the call - `tparm` reads it.
+      ;;
+      ;; **The bytevector has to be kept.** A pointer into a temporary is
+      ;; only valid while something references the temporary: measured,
+      ;; `(let ((bv (string->utf8 s))) (bytevector->pointer bv))` let the
+      ;; collector free `bv` and `tparm` then read freed memory, so a
+      ;; capability expanded to rubbish and the rubbish landed in the mode
+      ;; line (`?T]` where `--` belongs) and in the echo area. Holding it
+      ;; here is the whole fix; there are a handful of capabilities per
+      ;; process, so nothing needs evicting.
       ;;--------------------------------------------------------------
       (let ((bv (string->utf8 string)))
+        (set! %string-pointers (cons bv %string-pointers))
         (bytevector->pointer bv)))
 
     ;;----------------------------------------------------------------
