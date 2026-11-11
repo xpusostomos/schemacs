@@ -289,3 +289,53 @@ optimisation, gated on `FRAME_LINE_INS_DEL_OK`, and it belongs with
   to be a fallible oracle (five harness reader bugs and two check bugs found
   in one day), so a phase is not "done" on a green battery alone: it also
   gets a `tmux capture-pane` comparison for the drawing.
+
+## What landed, and what is still open (2026-11-12)
+
+ncurses is out. `schemacs/ui/` is `gtk` + `tty`, and `term.scm` writes every
+byte itself. `cm.scm` (`src/cm.c`) and `sysdep.scm` (`src/sysdep.c`) are new
+and are ports, not stand-ins.
+
+Seven bugs were found by reading the C, and each was introduced by the port
+rather than being a property of the design:
+
+1. `tty_set_terminal_modes` ends with `losecursor (tty)`, not
+   `Wcm_clear (tty)`. The wrong one wiped every capability after the
+   terminal opened, so `cmgoto` could emit nothing and every row was drawn
+   where the last one ended.
+2. `tgetnum ("Co")` is termcap; `tigetnum` needs `colors`. `Co` answers -2,
+   so the terminal had no colours.
+3. A Guile port's buffer is invisible to `select`. Keys are read with
+   `read(2)` on the descriptor, and `select` watches the same descriptor.
+4. The same seam in three more places: `%take-port-bytes!`,
+   `tty-read-query-byte` and `tty-flush-query-input`.
+5. `%pointer-of-string` handed `tparm` a pointer into a temporary
+   bytevector. The collector freed it and `tparm` read freed memory.
+6. A row wider than the frame made the terminal autowrap mid-run while
+   `cmplus` counted one wrap.
+7. `display_line` sets `truncated_on_right_p` only when `line_wrap` is
+   TRUNCATE; the walk set it on any line wider than the window, so a
+   wrapped line got a `$` after its tail.
+
+**Still open, in order of what it would unblock:**
+
+- **`write-run!` makes one glyph for a whole run.** Its contract is "one
+  glyph per cell", but the mode line and the echo area pass one string for
+  a stretch of text, so `write-glyphs!` advances the cursor by *one* column
+  for a ten-character run and every later run in the row is addressed from
+  the wrong place. Measured, the mode line reads
+  `-UU-:--- *p32.txt  &  -- L1 C0`. A first attempt expanded the elements
+  per character and made the frame draw 62 rows instead of 23, so the fix
+  needs more care than the one-liner it looks like.
+  **`split` and `splash` both fail on this.**
+- `truecolor` and `region-highlight` assert ncurses's OSC 4 palette
+  workaround. Its docstring says the workaround exists *because ncurses
+  cannot carry a 24-bit pair*; `term.c` writes `38;2;r;g;bm` directly and
+  so does this now. The checks should assert the 24-bit sequence.
+- The completion family and `buffer-menu` fail on the pre-removal commit
+  too, so they are not regressions from this work.
+
+The pty harness gained two readers of its own along the way: autowrap (and
+that a terminal arms its wrap lazily, so a full-width mode line stays on
+its row) and `HT` as a cursor move rather than a character. Both were the
+oracle being wrong about a correct stream.
