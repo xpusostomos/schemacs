@@ -487,13 +487,19 @@ def check_truecolor():
     problems = []
     screen = drive(keys, path, config=config, term="xterm-256color",
                   colorterm="truecolor")
-    if "rgb:12/34/56" not in screen:
+    # **`ESC[48;2;R;G;Bm`, which is what `term.c` sends.** The old
+    # expectation was OSC 4 - ncurses defining each exact colour into a
+    # palette slot - and that workaround existed only because ncurses
+    # cannot carry a 24-bit pair in `init_pair!`. The backend owns the
+    # output now, so it writes the sequence `turn_on_face` writes:
+    # `#123456` is R 18, G 52, B 86.
+    if "\x1b[48;2;18;52;86m" not in screen:
         problems.append("the exact background never reached the terminal "
-                        "(no OSC 4 for rgb:12/34/56; screen %r)"
+                        "(no `ESC[48;2;18;52;86m'; screen %r)"
                         % (screen[-400:],))
     screen = drive(keys, path, config=config, term="xterm-256color",
                   colorterm="")
-    if "rgb:12/34/56" in screen:
+    if "\x1b[48;2;18;52;86m" in screen:
         problems.append("a terminal that did not claim 24-bit colour was "
                         "sent one anyway")
     return problems
