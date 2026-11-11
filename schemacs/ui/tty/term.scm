@@ -798,7 +798,13 @@
                ((member more (%known-sequences)) more)
                ((any-prefix? more) (loop more))
                (else
-                (%unread-bytes (substring sofar 1))
+                ;; **Push back everything after the event's first
+                ;; character - `more`, not `sofar`.** `NEXT` was taken off
+                ;; the queue to build `more`, so pushing back only
+                ;; `sofar`'s tail dropped it: measured, `ESC ~` (M-~)
+                ;; arrived as a bare ESC and the `~` vanished, so
+                ;; `not-modified` never ran and nothing was said.
+                (%unread-bytes (substring more 1))
                 (substring sofar 0 1)))))))))
 
     ;;----------------------------------------------------------------
