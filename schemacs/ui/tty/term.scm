@@ -850,16 +850,27 @@
                                   glyphs len)
       ;; GNU Emacs's `tty_write_glyphs` (`term.c:973`).
       ;;
-      ;; **The run split is here**, as `tty_write_glyphs_1`'s own loop
-      ;; has it (`term.c:760`: "Identify a run of glyphs with the same
-      ;; face"), and `turn_on_face`/`turn_off_face` bracket each run. One
-      ;; writer, one output stream, in the order the C writes them -
-      ;; which is exactly what was impossible while ncurses held the
-      ;; screen.
+      ;; **The run split is here**, as `tty_write_glyphs_1`'s own loop has
+      ;; it (`term.c:760`: "Identify a run of glyphs with the same face"),
+      ;; and `turn_on_face`/`turn_off_face` bracket each run. One writer,
+      ;; one output stream, in the order the C writes them.
+      ;;
+      ;; **Nothing is written past the frame's last column.** GNU Emacs
+      ;; cannot reach that state: `write_row` writes `desired_row->used`,
+      ;; and `build_frame_matrix` never lets a row exceed `FRAME_COLS`.
+      ;; Here the renderer can hand over a wider row - a long line whose
+      ;; slice was not cut to the window - and the terminal then autowraps
+      ;; *in the middle of a run*, moving the real cursor down a row while
+      ;; `cmplus` has counted only one wrap. Every later `cursor_to` is
+      ;; then wrong and the following row is drawn over the wrong cells.
+      ;; Measured, a 100-column line on an 80-column terminal put the next
+      ;; buffer line on the same screen row as the wrapped tail. The clip
+      ;; is where the C's guarantee is enforced instead.
       ;;--------------------------------------------------------------
-      (let ((caps %terminal))
+      (let ((caps %terminal)
+            (cm (tty-cm %terminal)))
         (let loop ((i 0) (col x))
-          (when (< i len)
+          (when (and (< i len) (< col (cm-cols cm)))
             (let* ((g (vector-ref glyphs i))
                    (face (glyph-face-id g))
                    (end (let scan ((j (+ i 1)))
@@ -869,28 +880,31 @@
                                         face))
                               (scan (+ j 1))
                               j)))
-                   (runner (let build ((j i) (acc '()))
-                             (if (>= j end)
+                   (room (- (cm-cols cm) col))
+                   (taken (let sum ((j i) (n 0))
+                            (if (or (>= j end) (>= n room))
+                                n
+                                (sum (+ j 1)
+                                     (+ n (glyph-pixel-width
+                                           (vector-ref glyphs j)))))))
+                   (runner (let build ((j i) (acc '()) (n 0))
+                             (if (or (>= j end) (>= n room))
                                  (reverse acc)
                                  (build (+ j 1)
                                         (cons (glyph-char
                                                (vector-ref glyphs j))
-                                              acc)))))
-                   (cells (let sum ((j i) (n 0))
-                            (if (>= j end)
-                                n
-                                (sum (+ j 1)
-                                     (+ n (glyph-pixel-width
-                                           (vector-ref glyphs j))))))))
+                                              acc)
+                                        (+ n (glyph-pixel-width
+                                              (vector-ref glyphs j))))))))
               (cursor-to! d window (glyph-row-y row) col)
               (tty-highlight-if-desired caps)
               (when face (tty-turn-on-face face))
               (%tty-write-string (apply string-append runner))
               (when face (tty-turn-off-face face))
               (tty-turn-off-highlight caps)
-              (%cm-plus cells)
-              (cmcheckmagic (tty-cm caps))
-              (loop end (+ col cells)))))))
+              (%cm-plus taken)
+              (cmcheckmagic cm)
+              (loop end (+ col taken)))))))
 
     (define (%cm-plus n)
       ;; `cmplus (tty, n)` (`cm.h`) - where the cursor is now that N
