@@ -1159,18 +1159,20 @@ def screen_of(out, width=80):
                     rows[row][c - n] = ch
             continue
         for ch in chunk:
-            rows.setdefault(row, {})[col] = ch
-            col += 1
-            # **Autowrap.** `cmplus` (`cm.h`) counts the cells it wrote
-            # and lets the terminal wrap at the frame's edge - so a run
-            # that crosses column WIDTH continues on the next row with no
-            # escape of its own. A reader that kept writing past the edge
-            # put the wrapped tail on the row above, which is how a
-            # correct wrap read as a missing line. The editor emits no
-            # explicit address for the wrap, because GNU Emacs does not.
+            # **Autowrap, and it is LAZY.** `cmplus` (`cm.h`) counts the
+            # cells it wrote and lets the terminal wrap at the frame's
+            # edge - so a run that crosses column WIDTH continues on the
+            # next row with no escape of its own. But a terminal writes
+            # the last column and *then* arms the wrap: the cursor stays
+            # in the last column until another character is written. A
+            # reader that wrapped eagerly put a full-width mode line on
+            # the row below, which read as "the mode line is not on the
+            # screen at all".
             if col >= width:
                 col = 0
                 row += 1
+            rows.setdefault(row, {})[col] = ch
+            col += 1
     if not rows:
         return ""
     return "\n".join(
