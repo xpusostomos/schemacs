@@ -902,7 +902,7 @@ def check_isearch_scroll():
             continue
         if chunk.startswith("\x1b["):
             mm = _re.match(r"\x1b\[([0-9;]*)([A-Za-z])", chunk)
-            if mm.group(2) == "m":
+            if mm and mm.group(2) == "m":
                 sgr = set(mm.group(1).split(";"))
             continue
         if "alpha" in chunk and sgr:
@@ -950,7 +950,7 @@ def check_isearch_highlight_row():
             continue
         if chunk.startswith("\x1b["):
             mm = _re.match(r"\x1b\[([0-9;]*)([A-Za-z])", chunk)
-            if mm.group(2) == "m":
+            if mm and mm.group(2) == "m":
                 sgr = set(x for x in mm.group(1).split(";") if x)
             continue
         if "second" in chunk:
@@ -3533,7 +3533,7 @@ def check_query_replace_prompt():
             continue
         if chunk.startswith("\x1b["):
             mm = _re.match(r"\x1b\[([0-9;]*)([A-Za-z])", chunk)
-            if mm.group(2) == "m":
+            if mm and mm.group(2) == "m":
                 sgr = set(x for x in mm.group(1).split(";") if x)
             continue
         if "Query replace" in chunk and sgr:
