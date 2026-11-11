@@ -738,14 +738,11 @@
                     (else (%blocking-read-byte)))))
         (if (not first)
             #f
-            (begin
-              ;; whatever arrived with it
-              (%drain-bytes!)
-              (let ((sofar (string (integer->char first))))
-                (if (and (any-prefix? sofar)
-                         (not (member sofar (%known-sequences))))
-                    (assembling sofar)
-                    sofar))))))
+            (let ((sofar (string (integer->char first))))
+              (if (and (any-prefix? sofar)
+                       (not (member sofar (%known-sequences))))
+                  (assembling sofar)
+                  sofar)))))
 
     (define (any-prefix? sofar)
       ;; Is SOFAR the beginning of any known sequence?

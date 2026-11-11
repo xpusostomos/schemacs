@@ -222,6 +222,15 @@
     (define-method (clear-frame-area! (d <test-display>))
       (set!test-display-glyphs d '()))
 
+    (define-method (clear-frame! (d <test-display>))
+      ;; `tty_clear_frame`: the screen is wiped. A stub display has no
+      ;; screen of its own, so its record of what was drawn is what goes -
+      ;; the same answer `clear-frame-area!` gives, and for the same
+      ;; reason: a test reading the script must see that the frame was
+      ;; emptied.
+      ;;--------------------------------------------------------------
+      (set!test-display-glyphs d '()))
+
     (define-method (clear-end-of-line! (d <test-display>) window row area x
                                        width token)
       ;; Recorded as the spaces it would draw, so a test reading the
