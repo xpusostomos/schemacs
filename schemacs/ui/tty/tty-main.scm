@@ -1,4 +1,4 @@
-(define-library (schemacs ui ncurses ncurses-main)
+(define-library (schemacs ui tty tty-main)
   ;; The ncurses-terminal editor's entry point. Entering and leaving
   ;; curses mode, drawing and reading keys are `term.sld`'s - the mirror
   ;; of GNU Emacs's `term.c` - and what is left here is the other half
@@ -9,7 +9,7 @@
   ;; It is the last piece out of `(schemacs apps ncurses-editor)`, which
   ;; held the whole frontend when LAYOUT-PLAN.txt was written: the editing
   ;; half is in `(schemacs editor *)` - twenty libraries, one per Emacs file
-  ;; - and this is the half that knows about the terminal. `main-ncurses.scm`
+  ;; - and this is the half that knows about the terminal. `main-tty.scm`
   ;; stays the entry point and calls `MAIN-NCURSES` here.
   ;;
   ;; See LAYOUT-PLAN.txt for the rule this library is the last step of.
@@ -19,7 +19,7 @@
     ;; Opening the terminal - curses mode, the display object, the face
     ;; initialization - is `term.sld''s (the mirror of Emacs's term.c);
     ;; what is left here is the entry point that opens an editor on one.
-    (only (schemacs ui ncurses term) with-terminal)
+    (only (schemacs ui tty term) with-terminal)
     (only (schemacs editor frame) *current-frame* new-frame)
     ;; Everything this needs of the editor: the buffers named on the
     ;; command line - which is `startup.el''s job, not this one's - and
@@ -78,7 +78,7 @@
     (only (schemacs editor theme)))
 
   (export
-   main-ncurses
+   main-tty
    with-terminal
    )
 
@@ -87,7 +87,7 @@
     ;;----------------------------------------------------------------
     ;; Main entry
 
-    (define (main-ncurses . args)
+    (define (main-tty . args)
       ;; The editor's entry point: GNU Emacs's `command-line'. There is
       ;; always a `*scratch*' buffer - Emacs makes one before it looks at
       ;; the command line, and every file named is visited after it - and

@@ -42,7 +42,7 @@
   ;; asked for as `se --repl=work'.
   ;;
   ;; **The wake is NOT here.** Being woken is a property of the *front end* - the
-  ;; terminal's half is `(schemacs ui ncurses term)' and Gtk's is
+  ;; terminal's half is `(schemacs ui tty term)' and Gtk's is
   ;; `(schemacs ui gtk pgtk)' - and the seam they install into is the shared
   ;; module's `repl-wake!'. What was also here was a second pair of names for it,
   ;; `repl-wake' and `set-repl-wake!' over a private variable plus an adapter to

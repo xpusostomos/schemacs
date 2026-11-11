@@ -1,4 +1,4 @@
-(define-library (schemacs ui ncurses term)
+(define-library (schemacs ui tty term)
   ;; This library mirrors GNU Emacs's `term.c': the text terminal.
   ;; Emacs has one redisplay that draws through a per-display interface
   ;; (`dispnew.sld''s generics here); this library is the implementation
@@ -28,7 +28,7 @@
     (ncurses curses)
     ;; The terminfo database, read and written the way Emacs reads and
     ;; writes it: `tigetstr`, `tparm`, `tputs`. See `plans/TTY.md`.
-    (only (schemacs ui ncurses tinfo) setup-term tgetstr tigetstr
+    (only (schemacs ui tty tinfo) setup-term tgetstr tigetstr
           tigetnum tigetflag tparm tputs)
     ;; The display interface this implements.
     (schemacs editor dispnew)
@@ -50,7 +50,7 @@
     ;; import for that: the eight standard colors, the xterm driver for
     ;; a TERM of xterm*, and the face registry to recalc.
     (only (schemacs editor tty-colors) tty-register-default-colors)
-    (only (schemacs ui ncurses xterm)
+    (only (schemacs ui tty xterm)
           *input-decode-map* terminal-init-xterm
           *xterm--set-selection*
           xterm--tty-set-selection xterm--tty-get-selection)

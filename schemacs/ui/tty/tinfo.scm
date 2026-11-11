@@ -1,4 +1,4 @@
-(define-library (schemacs ui ncurses tinfo)
+(define-library (schemacs ui tty tinfo)
   ;; GNU Emacs's `src/termcap.c` and the terminfo *client* half of
   ;; `src/term.c`: the six functions that read the terminal's description
   ;; and write a capability string out.

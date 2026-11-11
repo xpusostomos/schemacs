@@ -86,8 +86,8 @@ SUITES = [
     # suite ran, whatever the handoff notes said. It failed at parse time
     # with exit 1, which reads like a failing suite; the one thing this
     # file must never be is the reason nobody noticed.
-    'schemacs/ui/ncurses/xterm-tests.scm',
-    'schemacs/ui/ncurses/tinfo-tests.scm',
+    'schemacs/ui/tty/xterm-tests.scm',
+    'schemacs/ui/tty/tinfo-tests.scm',
     'schemacs/editor/startup-tests.scm',
     'schemacs/apps/ncurses-editor-tests.scm',
     # The two suites of the top-level libraries. **They are here for the

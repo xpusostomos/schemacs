@@ -48,8 +48,8 @@ EDITOR_LIBS = [
     '(schemacs editor isearch)', '(schemacs editor xdisp)',
     '(schemacs editor disp-table)', '(schemacs editor files)',
     '(schemacs ui gtk gtk-main)', '(schemacs ui gtk pgtk)',
-    '(schemacs ui ncurses ncurses-main)', '(schemacs ui ncurses term)',
-    '(schemacs ui ncurses xterm)',
+    '(schemacs ui tty tty-main)', '(schemacs ui tty term)',
+    '(schemacs ui tty xterm)',
 ]
 R7RS_MODULES = ['(scheme base)', '(scheme char)', '(scheme write)',
                 '(scheme file)', '(scheme cxr)', '(scheme case-lambda)',

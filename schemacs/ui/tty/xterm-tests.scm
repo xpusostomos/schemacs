@@ -3,7 +3,7 @@
  (only (srfi 64) test-assert test-equal test-begin test-end)
  ;; The terminal's own selection: OSC 52, which `xterm.el' implements
  ;; because the *terminal* carries the clipboard, not the display.
- (only (schemacs ui ncurses xterm)
+ (only (schemacs ui tty xterm)
        *xterm--set-selection* *xterm--get-selection*
        xterm-max-cut-length xterm--selection-char
        xterm--base64-encode xterm--base64-decode
@@ -25,7 +25,7 @@
 ;; the split clean: these ask `xterm--tty-set-selection' what it wrote to
 ;; `current-output-port'.
 
-(test-begin "schemacs_ui_ncurses_xterm")
+(test-begin "schemacs_ui_tty_xterm")
 
 ;;--------------------------------------------------------------------
 ;; The terminal's selection: OSC 52
@@ -152,4 +152,4 @@
   (apply + (map (lambda (e) (if (char=? (string-ref (car e) 0) #\esc) 1 0))
                 (*input-decode-map*))))
 
-(test-end "schemacs_ui_ncurses_xterm")
+(test-end "schemacs_ui_tty_xterm")

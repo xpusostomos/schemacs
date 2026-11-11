@@ -1,4 +1,4 @@
-;; Tests for `(schemacs ui ncurses tinfo)' - the terminfo client layer
+;; Tests for `(schemacs ui tty tinfo)' - the terminfo client layer
 ;; that replaces what this tree borrowed from ncurses.
 ;;
 ;; Every expectation below is the C library's own answer for the same
@@ -12,9 +12,9 @@
 (import (scheme base)
         (scheme char)
         (only (srfi 64) test-assert test-equal test-begin test-end)
-        (schemacs ui ncurses tinfo))
+        (schemacs ui tty tinfo))
 
-(test-begin "schemacs_ui_ncurses_tinfo")
+(test-begin "schemacs_ui_tty_tinfo")
 
 ;; There is a terminfo library on this machine, and it describes a
 ;; terminal.
@@ -79,4 +79,4 @@
    (test-assert (string? (tigetstr cap))))
  '("cup" "csr" "smcup" "rmcup" "smkx" "rmkx" "clear" "el" "ed"))
 
-(test-end "schemacs_ui_ncurses_tinfo")
+(test-end "schemacs_ui_tty_tinfo")

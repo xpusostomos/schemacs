@@ -1,6 +1,6 @@
 (define-library (schemacs ui gtk gtk-main)
   ;; The GTK platform: open the editor on a GTK window. This mirrors
-  ;; `(schemacs ui ncurses ncurses-main)' exactly - the same buffers, the
+  ;; `(schemacs ui tty tty-main)' exactly - the same buffers, the
   ;; same frame, the same command loop - with the display opened by
   ;; `with-gtk-display' instead of `with-terminal'. Nothing here knows
   ;; what the editor does; nothing in the editor knows this exists.

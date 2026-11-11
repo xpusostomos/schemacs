@@ -28,7 +28,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # The front end this asks about: one file per toolkit now, under
 # `schemacs/ui/'. It was `schemacs/apps/ncurses-editor.sld' before the
 # LAYOUT pass dissolved that file into the editor's libraries.
-FRONT = os.path.join(REPO, 'schemacs/ui/ncurses/ncurses-main.scm')
+FRONT = os.path.join(REPO, 'schemacs/ui/tty/tty-main.scm')
 
 # Libraries a section may reach, and the form to import them with.
 LIBS = [
@@ -47,10 +47,10 @@ LIBS = [
     # The toolkit libraries, one directory per front end
     ('(schemacs ui gtk gtk-main)', '(only (schemacs ui gtk gtk-main) main-gtk)'),
     ('(schemacs ui gtk pgtk)', '(only (schemacs ui gtk pgtk) with-gtk-display)'),
-    ('(schemacs ui ncurses ncurses-main)',
-     '(only (schemacs ui ncurses ncurses-main) main-ncurses)'),
-    ('(schemacs ui ncurses term)', '(only (schemacs ui ncurses term) with-terminal)'),
-    ('(schemacs ui ncurses xterm)', '(only (schemacs ui ncurses xterm) xterm-function-map)'),
+    ('(schemacs ui tty tty-main)',
+     '(only (schemacs ui tty tty-main) main-tty)'),
+    ('(schemacs ui tty term)', '(only (schemacs ui tty term) with-terminal)'),
+    ('(schemacs ui tty xterm)', '(only (schemacs ui tty xterm) xterm-function-map)'),
 ]
 
 QUERY = '''

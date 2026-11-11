@@ -32,8 +32,8 @@
       ;;     tools/check-exports.scm schemacs/apps/debugui.scm
       ;; The UI directories are walked too: the toolkit libraries moved
       ;; there when they stopped being `(schemacs editor ...)'
-      ;; (`schemacs/ui/gtk' and `schemacs/ui/ncurses').
-      (let loop ((dirs '("schemacs/editor" "schemacs/ui/gtk" "schemacs/ui/ncurses"))
+      ;; (`schemacs/ui/gtk' and `schemacs/ui/tty').
+      (let loop ((dirs '("schemacs/editor" "schemacs/ui/gtk" "schemacs/ui/tty"))
                  (acc '()))
         (if (null? dirs)
             (reverse acc)

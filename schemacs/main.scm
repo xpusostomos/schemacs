@@ -10,7 +10,7 @@
 ;;
 ;; `se' (in `bin/') is the launcher - it puts the tree, or an installed
 ;; copy's own site directory, on the load path and loads this file. Like
-;; `main-gtk.scm' and `main-ncurses.scm' this is a *program* and not a
+;; `gtk-main.scm' and `tty-main.scm' this is a *program* and not a
 ;; library: it does its work as it is loaded rather than exporting a
 ;; function.
 ;;
@@ -364,7 +364,7 @@
   ;; business needing guile-gi, and a windowed one no business needing
   ;; ncurses.
   ;;
-  ;; `main-gtk' and `main-ncurses' return when the editor quits, which is
+  ;; `main-gtk' and `main-tty' return when the editor quits, which is
   ;; how the caller knows it is on the way out.
   ;;--------------------------------------------------------------
   (apply (module-ref (resolve-module module) name) args))
@@ -457,8 +457,8 @@
                        (check-cairo!)
                        (start-front-end '(schemacs ui gtk gtk-main)
                                         'main-gtk files))
-                     (start-front-end '(schemacs ui ncurses ncurses-main)
-                                      'main-ncurses files)))))
+                     (start-front-end '(schemacs ui tty tty-main)
+                                      'main-tty files)))))
     (if no-init-file
         (let ((param (init-file-user)))
           (parameterize ((param #f)) (start)))
@@ -545,7 +545,7 @@
                 (start-editor files window no-init-file)
                 ;; The editor proper does not know the back door exists and
                 ;; cannot tidy up after it, so the file it wrote is removed
-                ;; here - the one step `main-gtk.scm' and `main-ncurses.scm'
+                ;; here - the one step `gtk-main.scm' and `tty-main.scm'
                 ;; also end with.
                 (when opened
                   (repl-unpublish-port!))))))))
