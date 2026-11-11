@@ -699,28 +699,26 @@
         (when (and (< n 16) (> (%take-port-bytes!) 0))
           (loop (+ n 1)))))
 
-    (define (%blocking-read-byte)
-      ;; One byte, waiting for it. #f at end of input.
-      ;;--------------------------------------------------------------
-      (let ((b (guard (e (else 'eof)) (read-u8 (current-input-port)))))
-        (if (or (eq? b 'eof) (eof-object? b))
-            #f
-            b)))
-
-    (define (%timed-read-byte ms)
-      ;; One byte, waiting at most MS milliseconds - `read-event` with a
-      ;; timeout. Answers #f when none came.
+    (define (%wait-and-read deadline)
+      ;; Wait for the descriptor with `select`, then read one byte off it.
+      ;; Answers #f when the wait ended with nothing readable - a
+      ;; DEADLINE that passed, or a *signal*.
       ;;
-      ;; **The wait is the kernel's.** `VMIN` 0 with `VTIME` in tenths
-      ;; makes the tty return after that long with nothing read, which is
-      ;; exactly this, and one tenth is the finest the tty offers.
+      ;; **The wait is `select`, and an empty ready set is an event.**
+      ;; `select(2)` is on the manual's never-restarted list, so a signal
+      ;; interrupts it and it returns with nothing ready - which is how
+      ;; GNU Emacs learns that the terminal was resized: `pselect` comes
+      ;; back to `wait_reading_process_output`, the SIGWINCH flag is seen,
+      ;; and `read_char` makes the `resize` event. A blocking `read` on
+      ;; the port would instead be restarted and the resize never
+      ;; noticed, which is what kept a resized terminal drawing 24 rows.
       ;;--------------------------------------------------------------
-      (set-read-timeout! (max 1 (min 255 (ceiling (/ ms 100)))))
-      (let ((b (guard (e (else 'eof)) (read-u8 (current-input-port)))))
-        (set-read-timeout! 0)
-        (if (or (eq? b 'eof) (eof-object? b))
-            #f
-            b)))
+      (let* ((left (and deadline (- deadline (tty-now-ms))))
+             (ready (car (select (list %keyboard-fd) '() '()
+                                 (if left
+                                     (max 0.001 (/ left 1000.0))
+                                     #f)))))
+        (and (memq %keyboard-fd ready) (tty-read-byte))))
 
     (define (%read-key-bytes deadline)
       ;; One *event* from the terminal, as bytes; #f when DEADLINE passed
@@ -745,10 +743,7 @@
                      (let ((b (car %byte-queue)))
                        (set! %byte-queue (cdr %byte-queue))
                        b))
-                    (deadline
-                     (let ((left (- deadline (tty-now-ms))))
-                       (and (> left 0) (%timed-read-byte left))))
-                    (else (%blocking-read-byte)))))
+                    (else (%wait-and-read deadline)))))
         (if (not first)
             #f
             (begin
@@ -1080,10 +1075,23 @@
       (flush-output-port (current-output-port)))
 
     (define-method (screen-size (d <tty-display>))
-      ;; One character is one pixel unit on a terminal.
+      ;; The terminal's size in cells, which for a terminal is its size in
+      ;; pixels - one character is one unit.
+      ;;
+      ;; **Asked every time, not remembered.** The size is read once at
+      ;; `init_tty` into `FrameRows`/`FrameCols`, and GNU Emacs *updates*
+      ;; them when it sees the terminal change: `change_frame_size` from
+      ;; the SIGWINCH path. Nothing here installs that handler, so the
+      ;; way a resize is noticed is this call - caching the startup size
+      ;; meant a resized terminal kept drawing a 24-row frame: measured,
+      ;; "at 40 rows the mode line is on row 22". `ioctl` is cheap and
+      ;; `sync-frame-size!` is what asks.
       ;;--------------------------------------------------------------
-      (let ((caps %terminal))
-        (cons (tty-cols caps) (tty-rows caps))))
+      (let ((size (get-tty-size *tty-fd*)))
+        (if (and (> (car size) 0) (> (cdr size) 0))
+            (cons (cdr size) (car size))
+            (let ((caps %terminal))
+              (cons (tty-cols caps) (tty-rows caps))))))
 
     (define-method (column-width (d <tty-display>))
       ;; `FRAME_COLUMN_WIDTH' for a non-window frame.
