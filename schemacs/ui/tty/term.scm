@@ -80,6 +80,10 @@
     (only (rnrs bytevectors) bytevector-length bytevector-u8-ref)
     (only (guile) getenv string-prefix? logior logand ash delq
           delete last-pair caddr sort
+          ;; `select` waits on the keyboard descriptor - the same call GNU
+          ;; Emacs makes as `pselect` (`process.c:5830`), minus the
+          ;; subprocess and self-pipe sets this editor has no use for.
+          select
           get-internal-real-time internal-time-units-per-second)
     ;; **Nothing from the back door.** The command loop asks
     ;; `(schemacs editor keyboard)` for a timed read when the REPL is open
@@ -651,29 +655,38 @@
                 (cons (char->integer (string-ref string i)) %byte-queue))
           (loop (- i 1)))))
 
-    (define (%take-port-bytes!)
-      ;; Move whatever the port has *buffered* into the queue, answering
-      ;; how many bytes that was.
-      ;;
-      ;; **`char-ready?`, not `select`.** `select` reports on the
-      ;; *descriptor*; a Scheme port keeps a buffer of its own, so a byte
-      ;; already inside that buffer is invisible to `select` and the port
-      ;; then blocks anyway. Measured, that is exactly how `C-x C-s`
-      ;; written as one burst lost the `C-s` while the same two keys
-      ;; typed separately saved. `char-ready?` asks the port, which is
-      ;; the object actually being read.
+    (define (%queue-byte! b)
+      ;; Put one byte at the back of the queue - a byte read off the
+      ;; descriptor and not yet turned into an event.
       ;;--------------------------------------------------------------
-      (let ((bv (and (char-ready? (current-input-port))
-                     (get-bytevector-some (current-input-port)))))
-        (if (or (not bv) (zero? (bytevector-length bv)))
+      (set! %byte-queue (append %byte-queue (list b))))
+
+    (define %keyboard-fd 0)
+    ;; ^ The descriptor the terminal reads keys from - stdin, which is
+    ;; what `initscr` used and what `sysdep.scm` puts in raw mode. A
+    ;; value rather than a call because `select` wants it on every read.
+
+    (define (%take-port-bytes!)
+      ;; Move the bytes the *descriptor* has into the queue, answering how
+      ;; many that was.
+      ;;
+      ;; **`read(2)` on the fd, and `select` on the fd - not the port.**
+      ;; Every other reader here is on the descriptor (`%blocking-read-byte`,
+      ;; `%timed-read-byte`, `tty-read-query-byte`), and a port keeps a
+      ;; buffer they cannot see: a byte that arrived in one is invisible
+      ;; to `select`, and a byte `select` reports is not in the port. That
+      ;; split is what made `ESC [ 2 ~` (Insert) assemble as `ESC` and
+      ;; then push `[2~` back as three typed characters - measured, the
+      ;; mode line read `I??` after a press of it.
+      ;;--------------------------------------------------------------
+      (let ((b (and (memq %keyboard-fd
+                          (car (select (list %keyboard-fd) '() '() 0)))
+                    (tty-read-byte))))
+        (if (not b)
             0
-            (let ((n (bytevector-length bv)))
-              (let loop ((i 0))
-                (when (< i n)
-                  (set! %byte-queue
-                        (append %byte-queue (list (bytevector-u8-ref bv i))))
-                  (loop (+ i 1))))
-              n))))
+            (begin
+              (%queue-byte! b)
+              1))))
 
     (define (%drain-bytes!)
       ;; Move everything the port has buffered into the queue.
@@ -738,11 +751,19 @@
                     (else (%blocking-read-byte)))))
         (if (not first)
             #f
-            (let ((sofar (string (integer->char first))))
-              (if (and (any-prefix? sofar)
-                       (not (member sofar (%known-sequences))))
-                  (assembling sofar)
-                  sofar)))))
+            (begin
+              ;; **The rest of the burst.** The drain above ran before the
+              ;; first byte was read, so when it found nothing the byte
+              ;; came from `%blocking-read-byte` and the *tail* of the
+              ;; sequence - already on the descriptor - has not been taken
+              ;; yet. Without this, `\e[2~` (Insert) assembled as `\e` and
+              ;; the `[2~` came back as three typed characters.
+              (%drain-bytes!)
+              (let ((sofar (string (integer->char first))))
+                (if (and (any-prefix? sofar)
+                         (not (member sofar (%known-sequences))))
+                    (assembling sofar)
+                    sofar))))))
 
     (define (any-prefix? sofar)
       ;; Is SOFAR the beginning of any known sequence?
