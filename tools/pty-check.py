@@ -1044,7 +1044,7 @@ def screen_of(out, width=80):
 
     scroll_region = [0, _HEIGHT - 1]
     for chunk in re.split(r"(\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"
-                          r"|\x1b\[[0-9;?]*[A-Za-z]|\x1b\(B|\r|\n|\x08)", tail):
+                          r"|\x1b\[[0-9;?]*[A-Za-z]|\x1b\(B|\r|\n|\x08|\t)", tail):
         if not chunk:
             continue
         if chunk == "\r":
@@ -1055,6 +1055,15 @@ def screen_of(out, width=80):
             continue
         if chunk == "\n":
             row += 1
+            continue
+        if chunk == "\t":
+            # **HT is a cursor move, not a character.** `cmgoto` picks a
+            # tab when it is cheaper than stepping right (`cm_tab`, and
+            # `calccost` prices it), and the terminal moves to the next
+            # multiple of 8 without printing anything. Written into the
+            # grid as text it put a literal tab in front of whatever was
+            # drawn next.
+            col = (col // 8 + 1) * 8
             continue
         if chunk == "\x08":
             # **BS.** ncurses moves left one cell with a bare backspace
@@ -1191,6 +1200,15 @@ def row_attrs(out, want_row=0):
     row_active = {}
     for chunk in re.split(r"(\x1b\[[0-9;]*[A-Za-z]|\x1b\(B|\r|\n|\x08)", tail):
         if not chunk or chunk in ("\r", "\n"):
+            continue
+        if chunk == "\t":
+            # **HT is a cursor move, not a character.** `cmgoto` picks a
+            # tab when it is cheaper than stepping right (`cm_tab`, and
+            # `calccost` prices it), and the terminal moves to the next
+            # multiple of 8 without printing anything. Written into the
+            # grid as text it put a literal tab in front of whatever was
+            # drawn next.
+            col = (col // 8 + 1) * 8
             continue
         if chunk == "\x08":
             # **BS.** ncurses moves left one cell with a bare backspace
