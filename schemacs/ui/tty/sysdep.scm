@@ -337,9 +337,11 @@
       ;; `flushinp`: discard whatever has been typed and not read.
       ;;--------------------------------------------------------------
       (set! %pushed-bytes '())
+      (set! %query-bytes '())
       (let drain ((n 0))
-        (when (and (< n 4096) (char-ready? (current-input-port)))
-          (read-u8 (current-input-port))
+        (when (and (< n 4096)
+                   (memq *tty-fd* (car (select (list *tty-fd*) '() '() 0))))
+          (%read-byte)
           (drain (+ n 1)))))
 
     (define %query-bytes '())
@@ -382,8 +384,14 @@
                                         (max 0.001 (/ ms 1000.0))))))
                 (if (not (memq *tty-fd* ready))
                     #f
-                    (let ((b (read-u8 (current-input-port))))
-                      (and (not (eof-object? b)) (integer->char b)))))))))
+                    ;; **`read(2)` on the descriptor, not the port.** The
+                    ;; key reader uses the fd (`tty-read-byte`), and a
+                    ;; second reader on the *port* keeps a buffer the fd
+                    ;; reader cannot see - so a byte taken here could be
+                    ;; one the key path was about to read, and vice versa.
+                    ;; One descriptor, one reader.
+                    (let ((b (%read-byte)))
+                      (and b (integer->char b)))))))))
 
 
     (define (tty-pushed-bytes?)
