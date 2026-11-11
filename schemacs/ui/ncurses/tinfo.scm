@@ -3,7 +3,7 @@
   ;; `src/term.c`: the six functions that read the terminal's description
   ;; and write a capability string out.
   ;;
-  ;;   setupterm    read the terminal's description from $TERM
+  ;;   setup-term   read the terminal's description from $TERM
   ;;   tigetstr     a string capability   (`cup`, `csr`, `smcup`, ...)
   ;;   tigetnum     a numeric capability  (`colors`, `lines`, `cols`)
   ;;   tigetflag    a boolean capability  (`bce`, `xenl`, `am`)
@@ -36,9 +36,15 @@
           ;; import `pgtk.scm` and `fileio.scm` make for their FFI.
           (only (guile) dynamic-link dynamic-func inexact->exact
                 string-contains false-if-exception)
-          ;; The pointer surface is `(system foreign)`'s, not `(guile)`'s:
+          ;; The pointer surface is `(system foreign)`'s, not `(guile)`'s -
           ;; `string->pointer`, `pointer->string`, `pointer-address`,
-          ;; `pointer->procedure` and `make-c-struct` live there.
+          ;; `pointer->procedure`, `make-c-struct` **and `%null-pointer`**,
+          ;; which is a *variable holding a NULL*, not a constructor:
+          ;; `(%null-pointer)` is "wrong type to apply: pointer 0x0".
+          ;; **Whole, not `only`**: the C type descriptors `int`, `long`
+          ;; and `void` and the `*` wildcard are core bindings that no
+          ;; module exports, so an `only` list cannot name them - measured,
+          ;; "no binding `*' in module (system foreign)".
           (system foreign)
           ;; `display` is `(scheme write)`'s - `(scheme base)` does not
           ;; export it, which is the trap `term.sld` already records:
@@ -46,7 +52,7 @@
           ;; leaves an empty log behind.
           (only (scheme write) display))
 
-  (export setupterm tigetstr tigetnum tigetflag
+  (export setup-term tgetstr tigetstr tigetnum tigetflag
           tparm tputs
           ;; the capability cache, and whether there is a terminal at all
           tinfo-capability tinfo-ready? tinfo-close!)
@@ -90,6 +96,14 @@
     ;; `char *tigetstr (const char *capname)' - a pointer into a static
     ;; buffer, or (char *)-1 for a capability the terminal has not got,
     ;; which arrives here as a pointer that is *not* null.
+    ;; `char *tgetstr (const char *capname, char **area)' - the
+    ;; **termcap** spelling of a capability, which is what `term.c` uses
+    ;; for every face attribute: `tgetstr ("md")` is `ESC[1m` where
+    ;; `tigetstr ("md")` is #f, because terminfo calls bold `bold`. The
+    ;; AREA argument is a `char **` ncurses may write its own buffer
+    ;; into; #f means "use your internal buffer", which is what every
+    ;; `term.c` call passes.
+    (define %tgetstr (%fn "tgetstr" '* (list '* '*)))
     (define %tigetstr (%fn "tigetstr" '* (list '*)))
     (define %tigetnum (%fn "tigetnum" int (list '*)))
     (define %tigetflag (%fn "tigetflag" int (list '*)))
@@ -107,16 +121,27 @@
     ;; `TS_set_foreground` and friends.
 
     (define (%null-string-pointer)
-      ;; A NULL `char *`, which `(system foreign)` has no constructor for
-      ;; (it exports the *predicate* `null-pointer?` and nothing that
-      ;; makes one). A one-field struct of zero is a zeroed pointer, which
-      ;; is what `setupterm (NULL, ...)` means: "use $TERM".
+      ;; A NULL `char *` - `(system foreign)`'s own `%null-pointer`,
+      ;; which is **a variable holding one, not a constructor**:
+      ;; `(%null-pointer)` is "wrong type to apply: pointer 0x0".
+      ;;
+      ;; Not `(make-c-struct (list '*) (list 0))` either - that asks Guile
+      ;; to build a struct *containing* a pointer, and a `0` where a
+      ;; pointer belongs is dereferenced: measured, "In procedure
+      ;; pointer-address: Wrong type argument in position 1 (expecting
+      ;; POINTER_P): 0".
       ;;--------------------------------------------------------------
-      (make-c-struct (list '*) (list 0)))
+      %null-pointer)
 
-    (define (setupterm . optional)
+    (define (setup-term . optional)
       ;; Read the terminal's description - GNU Emacs does this in
       ;; `term_init` (`term.c`), through `tgetent`/`setupterm`.
+      ;;
+      ;; **`setup-term`, not `setupterm`**: `(ncurses curses)` exports a
+      ;; `setupterm` of its own, and importing both made Guile pick one
+      ;; silently - measured, the editor then drew nothing because every
+      ;; `tparm` answered #f. Phase A removes ncurses from `term.scm`
+      ;; entirely; until then the name has to be distinct.
       ;;
       ;; TERM is a string or #f for `$TERM`; FD is where errors are
       ;; reported (1, stdout, is what the C uses). Answer `#t` when the
@@ -174,6 +199,26 @@
             (set! *tinfo-caps*
                   (cons (cons name value) *tinfo-caps*))
             (and value (pointer->string value)))))))
+
+    (define (tgetstr name . optional)
+      ;; GNU Emacs's `tgetstr`: the capability NAME in **termcap** form
+      ;; (`md`, `us`, `mr`, `me`, `op`, `AF`, `AB`), expanded or not.
+      ;; Answers #f when the terminal has not got it.
+      ;;
+      ;; The AREA argument the C takes is #f here - ncurses uses its own
+      ;; buffer, which is what `term.c` passes too (`&address` with
+      ;; `address` nil).
+      ;;--------------------------------------------------------------
+      (let ((area (if (and (pair? optional) (car optional))
+                      (car optional)
+                      ;; `%null-pointer` is `(system foreign)`'s own NULL -
+                      ;; **a variable holding one, not a constructor** -
+                      ;; and "no area" is what `term.c` passes.
+                      %null-pointer)))
+        (if (not %tgetstr)
+            #f
+            (let ((p (%tgetstr (string->pointer name) area)))
+              (and p (not (null-pointer? p)) (pointer->string p))))))
 
     (define (tigetstr name)
       ;; GNU Emacs's `tigetstr`, as `term.c` calls it: the capability's

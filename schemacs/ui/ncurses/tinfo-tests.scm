@@ -19,7 +19,7 @@
 ;; There is a terminfo library on this machine, and it describes a
 ;; terminal.
 (test-assert (tinfo-ready?))
-(test-assert (setupterm "xterm-256color" 1))
+(test-assert (setup-term "xterm-256color" 1))
 
 ;; `colors` is the capability `term.c` reads into `TN_max_colors`. An
 ;; xterm-256color answers 256, and that is what `display-color-cells` on

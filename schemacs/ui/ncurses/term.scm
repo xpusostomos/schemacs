@@ -19,15 +19,26 @@
     ;; `string-ci=?' compares `$COLORTERM' with "truecolor" case-insensitively,
     ;; as `term.c''s `strcasecmp' does.
     (only (scheme char) string-ci=?)
+    ;; `display` is `(scheme write)`'s - `(scheme base)` does not export
+    ;; it, which this file's gotcha section records.
+    (only (scheme write) display)
     (oop goops)
-    ;; The terminal itself.
+    ;; The terminal itself - its screen management (Phase A removes the
+    ;; rest of it), and the input path.
     (ncurses curses)
+    ;; The terminfo database, read and written the way Emacs reads and
+    ;; writes it: `tigetstr`, `tparm`, `tputs`. See `plans/TTY.md`.
+    (only (schemacs ui ncurses tinfo) setup-term tgetstr tigetstr
+          tigetnum tigetflag tparm tputs)
     ;; The display interface this implements.
     (schemacs editor dispnew)
     ;; A face is realized through the same machinery the redisplay
     ;; merges faces with: `realize-tty-face' makes the realized face,
     ;; and what the terminal can draw of it is computed here - that
     ;; last step is the whole of this library's face code.
+    ;; `*undefined-face-attribute*` is `faces.scm`'s - the "the face does
+    ;; not say" value, which `xfaces` uses and re-exports one of.
+    (only (schemacs editor faces) *undefined-face-attribute*)
     (only (schemacs editor xfaces) attribute-value realize-tty-face)
     ;; `write-glyphs!` reads the row it is handed: the pixel y is the
     ;; row's, and each glyph carries its own face - as `term.c`'s
@@ -421,12 +432,27 @@
       ;; (`frame.c:1182`), so `cursor_to (f, row, col)` is the pixel y
       ;; divided by that one.
       ;;--------------------------------------------------------------
-      (when attribute (attr-on! (stdscr) attribute))
-      ;; The cells joined: ncurses writes a string, and a run is one face,
-      ;; so this is one `addstr'. (A loop of `addch' is the other spelling,
-      ;; and the cells are never a *line* either way.)
+      ;; **The token is the folded face, and the drawing hands it to
+      ;; ncurses.** `term.c`'s `turn_on_face` writes its sequences to the
+      ;; terminal's output and then `tty_write_glyphs` writes the cells to
+      ;; the same output, in that order - one writer. Here ncurses is the
+      ;; writer: `addstr` fills its *virtual* screen and nothing reaches
+      ;; the tty until `refresh`, so a byte we wrote ourselves would land
+      ;; ahead of every glyph on the screen.
+      ;;
+      ;; Measured, and it is what turned Phase A's steps 1 and 2 round:
+      ;; the whole capture was `ESC[7m ESC(B ESC[m` three times, then
+      ;; `ESC[H ESC[2J` and the text - every attribute before every cell,
+      ;; so no face could ever be applied. `tty-face-attribute` is the
+      ;; conversion `turn_on_face` does, expressed as the one thing
+      ;; ncurses can be told; `tty-turn-on-face` is the same function
+      ;; written the way Emacs writes it, and it is wired when the screen
+      ;; is (Phase B). See `plans/TTY.md`.
+      ;;--------------------------------------------------------------
+      (when attribute (attr-on! (stdscr) (tty-face-attribute attribute)))
+      ;; The cells joined: a run is one face, so this is one `addstr'.
       (addstr (stdscr) (glyphs->text glyphs) #:y y #:x x)
-      (when attribute (attr-off! (stdscr) attribute)))
+      (when attribute (attr-off! (stdscr) (tty-face-attribute attribute))))
 
     (define-method (clear-end-of-line! (d <tty-display>) window row area x
                                        width token)
@@ -441,9 +467,9 @@
       ;;--------------------------------------------------------------
       (let ((y (glyph-row-y row)))
         (when (> width 0)
-          (when token (attr-on! (stdscr) token))
+          (when token (attr-on! (stdscr) (tty-face-attribute token)))
           (addstr (stdscr) (make-string width #\space) #:y y #:x x)
-          (when token (attr-off! (stdscr) token)))))
+          (when token (attr-off! (stdscr) (tty-face-attribute token))))))
 
     (define-method (ensure-surface! (d <tty-display>))
       ;; A terminal's "surface" is the screen it was opened on; there is
@@ -625,6 +651,13 @@
            ;; wake that fails is a wake that did not happen, and the poll
            ;; that follows the byte is what does the work.
            (lambda (drain) (guard (e (else #f)) (write-u8 1 wr)))))))
+
+    (define (%tty-write string)
+      ;; Put STRING on the terminal - `cmputc` (`term.c`), which is the
+      ;; C's one-character writer and this tree's one write.
+      ;;--------------------------------------------------------------
+      (display string (current-output-port))
+      (flush-output-port (current-output-port)))
 
     (define (tty-now-ms)
       ;; The clock the deadline in `read-input-event' is measured
@@ -898,6 +931,149 @@
             ((*tty-direct-color*) (%tty-slot-of-pixel color))
             (else color)))
 
+    ;;----------------------------------------------------------------
+    ;; Appearances, emitted as bytes
+    ;;
+    ;; GNU Emacs's `turn_on_face`/`turn_off_face` (`term.c:2111`, `:2203`)
+    ;; over the capability strings `tty_init` reads (`term.c:4642-4705`).
+    ;; The names below are the *capability* names, which is what
+    ;; `tgetstr` takes in the C - `md` for bold, `us` for underline, `me`
+    ;; to turn everything off again.
+    ;;------------------------------------------------------------------
+
+    (define *tty-inverse-video* (make-parameter #f))
+    ;; ^ GNU Emacs's `inverse-video` (a `DEFVAR_BOOL`, `dispnew.c:7492`):
+    ;; "Non-nil means invert the video attributes of all frames." It picks
+    ;; *which way* `tty_toggle_highlight` toggles standout for a
+    ;; default-coloured face (`term.c:2121`), and it is a user option, so
+    ;; it is a parameter here, per this tree's convention.
+
+    (define (%cap name)
+      ;; A capability string, or #f - **`tgetstr`, not `tigetstr`**.
+      ;; The names below are termcap's two-letter ones (`md`, `us`,
+      ;; `mr`, `me`, `op`, `AF`, `AB`) because that is what `term.c`
+      ;; reads: `tgetstr ("md")` is `ESC[1m` while `tigetstr ("md")` is
+      ;; #f, since terminfo spells bold `bold`. Measured both ways
+      ;; against a C program linked to `-ltinfo`.
+      ;;--------------------------------------------------------------
+      (tgetstr name))
+
+    (define (%emit cap)
+      ;; `OUTPUT1_IF`: write CAP's sequence when the terminal has one.
+      ;;--------------------------------------------------------------
+      (let ((seq (and cap (%cap cap))))
+        (when seq (%tty-write seq))))
+
+    (define (tty-turn-on-face token)
+      ;; GNU Emacs's `turn_on_face` (`term.c:2111`).
+      ;;
+      ;; TOKEN is this display's realized face - the plist
+      ;; `realize-tty-face` folds down to, carrying exactly the fields
+      ;; `struct face` does for a terminal: `tty_bold_p`, `tty_italic_p`,
+      ;; `tty_reverse_p`, `underline`, `tty_strike_through_p`,
+      ;; `tty_overline_p` and the two colours.
+      ;;
+      ;; Three rules from the C decide what is emitted:
+      ;;
+      ;;  * **`:inverse-video` swaps the colours** when both come from
+      ;;    the face - `realize_tty_face` (`xfaces.c:6860`):
+      ;;
+      ;;      if (face->tty_reverse_p && !face_colors_defaulted)
+      ;;        { swap (foreground, background); }
+      ;;
+      ;;    so the two colour sequences below carry the swap and no
+      ;;    standout is needed.
+      ;;  * **when a colour is defaulted there is nothing to swap**, and
+      ;;    `turn_on_face` (`term.c:2118`) toggles standout instead -
+      ;;    `so`/`se`, and which way depends on the *user option*
+      ;;    `inverse-video` (`dispnew.c:7202`), not the face's attribute.
+      ;;  * **bold is suppressed on a default-coloured inverted face** -
+      ;;    `tty_suppress_bold_inverse_default_colors_p` (`xfaces.c:6869`),
+      ;;    which is what keeps a reverse-video mode line readable.
+      ;;
+      ;; Everything is `tgetstr`'s termcap spelling (`md`, `us`, `so`,
+      ;; `se`, `AF`, `AB`), which is what `term.c` reads.
+      ;;--------------------------------------------------------------
+      (let* ((fg (attribute-value token ':foreground))
+             (bg (attribute-value token ':background))
+             (fg-defaulted? (or (eq? fg *undefined-face-attribute*) (not fg)))
+             (bg-defaulted? (or (eq? bg *undefined-face-attribute*) (not bg)))
+             (reverse? (eq? (attribute-value token ':reverse) #t))
+             (swap? (and reverse? (not fg-defaulted?) (not bg-defaulted?)))
+             (fg (if swap? bg fg))
+             (bg (if swap? fg bg)))
+        ;; the appearance modes, in the C's order
+        (when (and (eq? (attribute-value token ':bold) #t)
+                   (not (and reverse? fg-defaulted? bg-defaulted?)))
+          (%emit "md"))
+        (when (eq? (attribute-value token ':italic) #t)
+          ;; "Italics mode is unavailable on many terminals; map slant to
+          ;; dimmed text" - `ZH`, else `mh`.
+          (if (%cap "ZH") (%emit "ZH") (%emit "mh")))
+        (when (attribute-value token ':underline)
+          (%emit "us"))
+        (when (eq? (attribute-value token ':strike-through) #t)
+          (%emit "smxx"))
+        (when (eq? (attribute-value token ':overline) #t)
+          (%emit "Smol"))
+        ;; standout, for the case there is no swap to make
+        (when (and reverse? (not swap?))
+          (if (*tty-inverse-video*)
+              (%emit "se")
+              (%emit "so")))
+        ;; the colours: `AF`/`AB`, or the 24-bit pair when the terminal
+        ;; has them (the same `setf24`/`setb24` the truecolor work reads).
+        (unless fg-defaulted?
+          (when fg
+            (let ((seq (if (%cap "setf24")
+                           (tparm "setf24" (ash fg -16)
+                                  (logand (ash fg -8) 255) (logand fg 255))
+                           (and (%cap "AF") (tparm "AF" fg)))))
+              (when seq (%tty-write seq)))))
+        (unless bg-defaulted?
+          (when bg
+            (let ((seq (if (%cap "setb24")
+                           (tparm "setb24" (ash bg -16)
+                                  (logand (ash bg -8) 255) (logand bg 255))
+                           (and (%cap "AB") (tparm "AB" bg)))))
+              (when seq (%tty-write seq)))))))
+
+    (define (tty-turn-off-face token)
+      ;; GNU Emacs's `turn_off_face` (`term.c:2203`).
+      ;;
+      ;; `me` turns off every appearance mode at once - "double-bright,
+      ;; half-bright, reverse-video, standout, underline, overline,
+      ;; strike-through" - and is used only when the face had one on;
+      ;; otherwise there is nothing to undo. Then the colours go back to
+      ;; the terminal's own with `op`.
+      ;;--------------------------------------------------------------
+      ;; **`me` only when something was turned on, and reverse only
+      ;; counts when `tty-turn-on-face` would have sent it** - the same
+      ;; guard, so the two cannot disagree. A face whose `:reverse` was
+      ;; suppressed because it names both colours has nothing to undo.
+      (let* ((fg (attribute-value token ':foreground))
+             (bg (attribute-value token ':background))
+             (reverse-emitted?
+              (and (eq? (attribute-value token ':reverse) #t)
+                   (or (eq? fg *undefined-face-attribute*)
+                       (not fg)
+                       (eq? bg *undefined-face-attribute*)
+                       (not bg))))
+             (on? (or (eq? (attribute-value token ':bold) #t)
+                      (eq? (attribute-value token ':italic) #t)
+                      reverse-emitted?
+                      (attribute-value token ':underline)
+                      (eq? (attribute-value token ':strike-through) #t)
+                      (eq? (attribute-value token ':overline) #t))))
+        (cond
+         ((%cap "me") (when on? (%emit "me")))
+         (else (when (attribute-value token ':underline) (%emit "ue")))))
+      (let ((fg (attribute-value token ':foreground))
+            (bg (attribute-value token ':background)))
+        (when (or (and fg (not (eq? fg *undefined-face-attribute*)))
+                  (and bg (not (eq? bg *undefined-face-attribute*))))
+          (%emit "op"))))
+
     (define (tty-color-pair foreground background)
       ;; The ncurses colour-pair number for FOREGROUND and BACKGROUND,
       ;; making the pair the first time it is asked for. A missing colour
@@ -940,11 +1116,17 @@
 
     (define-method (realize-face (d <tty-display>) face-attrs)
       ;; FACE-ATTRS - the realized attributes the redisplay merged - as
-      ;; the terminal's attribute number, drawing token and pair table
-      ;; included. This is the display's realization of a face, the step
-      ;; after the redisplay chose what face a position has.
+      ;; this display's *token* for the face.
+      ;;
+      ;; **The token is the folded plist itself now, not an ncurses
+      ;; attribute integer.** GNU Emacs's realized face for a terminal is
+      ;; `struct face`, whose `tty_bold_p`, `foreground`, `background` and
+      ;; the rest are exactly what `realize-tty-face` folds down to - and
+      ;; `turn_on_face` reads those fields to decide which sequences to
+      ;; send. An integer could only be read by ncurses, which is the
+      ;; thing this phase removes.
       ;;--------------------------------------------------------------
-      (tty-face-attribute (realize-tty-face face-attrs)))
+      (realize-tty-face face-attrs))
 
     ;;----------------------------------------------------------------
     ;; Suspending and resuming the terminal

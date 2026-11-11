@@ -160,22 +160,38 @@ Ours today, and the three departures:
 **The gate**: all 76 pty checks green, and `pgtk-tests`' pixel checks green -
 they are what proves the run split still produces the same pixels.
 
-### Phase A - ncurses leaves the tree, before anything is drawn (~500 lines)
+### Phase A - ncurses leaves the tree, **all at once** (~500 lines)
 
-**Revised 2026-11-11, Chris's correction**: *"I thought you had done
+**Revised twice.** First on 2026-11-11 by Chris: *"I thought you had done
 everything below GOOPs, that would mean ncurses is gone, which means you
-shouldn't be shadowing anything."*
+shouldn't be shadowing anything."* Then again the same day, because the
+first revision still had a false split in it, and the measurement is what
+showed the split was false:
 
-The line is at **the display interface**. Everything under it is ours, so
-ncurses has nothing left to do in `term.scm` - and the first attempt at
-doing the screen *while keeping ncurses* proved it: both
-`(ncurses curses)` and `(schemacs ui ncurses tinfo)` export the C symbol
-`setupterm`, the import silently picked one, every `tparm` answered `#f`,
-and the editor drew nothing at all. **A shadowing bug can only happen
-while two things are imported.** Remove one and the whole class goes away.
+```
+ESC[7m ESC(B ESC[m   ESC[7m ESC(B ESC[m   ESC[7m ESC(B ESC[m   ESC[H ESC[2J VISIBLE-LINE
+```
 
-This phase changes what sits under the interface without changing a pixel,
-which is what makes it testable:
+That is a real capture of a tty redisplay with the face bytes emitted the
+Emacs way (`turn_on_face` writing to the output). **Every attribute landed
+before every glyph.** `addstr` fills ncurses's *virtual* screen; nothing
+reaches the tty until `refresh`. A byte written straight to the fd goes out
+at once, so it lands ahead of everything ncurses will later flush. Not one
+face can be applied that way.
+
+Emacs gets away with it because there is **one writer**: `turn_on_face`
+writes to the terminal's output and `tty_write_glyphs` writes the cells to
+that same output, in that order. ncurses is a second writer with its own
+buffer, so while it draws, it owns the output stream, and nothing under it
+can be ours. `turn_on_face`/`turn_off_face` are written (`term.scm`, beside
+`tty-face-attribute`) and **stay unwired until the screen is**.
+
+So there is no "colours first, then attributes, then modes, then keys, then
+delete ncurses". The last step of that list cannot follow the others: it
+must *coincide* with them. ncurses leaves in one commit, and that commit is
+also the one that starts writing the screen. The old ordering was a plan to
+have two writers to one terminal and to check that it looked right, which is
+the straddle itself.
 
 | ncurses call | replaced by | Emacs's |
 |---|---|---|
@@ -184,30 +200,27 @@ which is what makes it testable:
 | `initscr`/`endwin` | `smcup`/`rmcup` via `tputs` | `tty_set_terminal_modes` (`term.c:202`) |
 | `raw!`/`noecho!`/`nonl!` | `tcsetattr` via libc FFI | `init_sys_modes` (`sysdep.c`) |
 | `keypad!` | `smkx`/`rmkx` | same function |
-| `start-color!`/`init-pair!`/`color-pair`/`use-default-colors` | `setaf`/`setab` with `tparm`, over the pair table we already keep | `turn_on_face` (`term.c`) |
-| `attr-on!`/`attr-off!` | the SGR sequence from our realized face | `turn_on_face` |
+| `start-color!`/`init-pair!`/`color-pair`/`use-default-colors` | `setaf`/`setab` with `tparm` | `turn_on_face` (`term.c`) |
+| `attr-on!`/`attr-off!` | `tty-turn-on-face`/`tty-turn-off-face`, already written | `turn_on_face` (`term.c:2111`) |
 | `addstr`/`erase`/`refresh`/`clearok!`/`idlok!`/`idcok!`/`scroll`/`move` | the `tty_*` hooks of Phase B | `term.c` |
 
-Order, each verifiable on its own:
+**The one thing that can be done while ncurses still draws** is a change
+that goes through ncurses rather than around it: `tty-face-attribute` is
+`turn_on_face` expressed as the one thing ncurses can be told. That is what
+`write-glyphs!` calls today, and it is correct *because* ncurses is the
+writer.
 
-1. **Colours** - the pair table is already ours (`*tty-color-pairs*`); the
-   emission is `setaf`/`setab`. Immediately visible: the same colours, or
-   not.
-2. **Attributes** - `attr-on!`/`attr-off!` already take a realized token;
-   the sequence comes from terminfo (`bold`, `smul`, `rev`, `smso`).
-3. **Terminal modes** - `tcsetattr` for raw, `smcup`/`smkx` from terminfo.
-4. **Keys** - the 58-entry table and a byte read instead of `getch`. This
-   is the one to do last, because `getch` also handles the escape delay and
-   `KEY_RESIZE`, and both must be replaced rather than lost.
-5. **Then delete `(ncurses curses)` from `term.scm`** - at which point
-   `addstr`/`erase`/`refresh` have no definition, and the Phase B work is
-   forced rather than optional.
+So Phase A and Phase B are one commit, and the order inside it is the order
+the C has - `build_frame_matrix`, `write_matrix`, then the hooks that write
+bytes. What used to be Phase A's steps 1-4 are not separate commits; they
+are the last four things before the old writer is deleted.
 
-**This is why it comes before the screen.** Drawing through ncurses and
-owning the screen at the same time is the straddle that produced the
-shadowing bug; with ncurses out of the file, the screen writer is the only
-thing writing bytes, and a bad call fails loudly instead of quietly
-answering `#f`.
+**The shadowing bug is still the reason this is one commit.** Both
+`(ncurses curses)` and `(schemacs ui ncurses tinfo)` export `setupterm`; the
+import silently picked one, every `tparm` answered `#f`, and the editor drew
+nothing. A shadowing bug can only happen while two things are imported, so
+the two-writer period is also the period in which that class of bug lives.
+It cannot be made safe by ordering.
 
 ### Phase B - the screen is ours (~400 lines)
 

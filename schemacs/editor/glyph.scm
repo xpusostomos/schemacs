@@ -24,7 +24,10 @@
   ;; images, xwidgets, margins - each named on the field it would be.
   ;;--------------------------------------------------------------
 
-  (import (scheme base))
+  (import (scheme base)
+          ;; `inexact->exact` is Guile's, and a folded face's `:height`
+          ;; can be a flonum.
+          (only (guile) inexact->exact))
 
   (export
    ;; the C's enums, as far as this tree reaches
@@ -259,8 +262,33 @@
               (loop (+ i 1)
                     (modulo (+ (* v 33)
                                (glyph-text-hash (glyph-char g))
-                               (glyph-face-id g))
+                               (glyph-face-hash (glyph-face-id g)))
                             #x7fffffff))))))
+
+    (define (glyph-face-hash face)
+      ;; A glyph's face folded to one integer, so `row-hash` can add it.
+      ;;
+      ;; **The C's `glyph->face_id` is an integer index; this tree's token
+      ;; is whatever `realize-face` answers**, and the terminal answers
+      ;; the folded face plist (`struct face`'s fields), because that is
+      ;; what `turn_on_face` reads. So the hash is over the plist's
+      ;; values: two equal faces hash the same, and `row_equal_p`'s second
+      ;; test - `glyph-equal?` - is what actually decides.
+      ;;--------------------------------------------------------------
+      (if (integer? face)
+          face
+          (let loop ((rest face) (v 5381))
+            (cond ((not (pair? rest)) v)
+                  ((null? (cdr rest)) (loop (cdr rest) v))
+                  (else
+                   (loop (cddr rest)
+                         (modulo (+ (* v 33)
+                                    (let ((e (cadr rest)))
+                                      (cond ((not e) 0)
+                                            ((number? e) (inexact->exact (abs e)))
+                                            ((symbol? e) (string-length (symbol->string e)))
+                                            (else 1))))
+                                 #x7fffffff)))))))
 
     (define (glyph-text-hash text)
       ;; A glyph's text hashed to one integer, so `row-hash` can fold it in
