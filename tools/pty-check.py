@@ -1152,6 +1152,16 @@ def screen_of(out, width=80):
         for ch in chunk:
             rows.setdefault(row, {})[col] = ch
             col += 1
+            # **Autowrap.** `cmplus` (`cm.h`) counts the cells it wrote
+            # and lets the terminal wrap at the frame's edge - so a run
+            # that crosses column WIDTH continues on the next row with no
+            # escape of its own. A reader that kept writing past the edge
+            # put the wrapped tail on the row above, which is how a
+            # correct wrap read as a missing line. The editor emits no
+            # explicit address for the wrap, because GNU Emacs does not.
+            if col >= width:
+                col = 0
+                row += 1
     if not rows:
         return ""
     return "\n".join(

@@ -2271,15 +2271,27 @@
                                         (build-row! slot texts (car slice) (cdr slice)
                                                     row-x yy row-width line-start
                                                     (pair? (cdr rest))
-                                                    ;; cut off at the right
-                                                    ;; edge. On an hscrolled
-                                                    ;; line the edge moves:
-                                                    ;; `render-line-rows!`
-                                                    ;; compares against
+                                                    ;; Cut off at the right
+                                                    ;; edge - `row->
+                                                    ;; truncated_on_right_p`,
+                                                    ;; which `display_line`
+                                                    ;; sets only when
+                                                    ;; `it->line_wrap` is
+                                                    ;; TRUNCATE. A *wrapped*
+                                                    ;; line whose last row is
+                                                    ;; short is not truncated,
+                                                    ;; and marking it so put a
+                                                    ;; `$' after the wrapped
+                                                    ;; tail that Emacs never
+                                                    ;; draws.
+                                                    ;;
+                                                    ;; On an hscrolled line the
+                                                    ;; edge moves: it is
                                                     ;; `hscroll + width - 1`,
                                                     ;; the cell the left
                                                     ;; marker took.
-                                                    (and (null? (cdr rest))
+                                                    (and (not (window-wraps? window))
+                                                         (null? (cdr rest))
                                                          (> (line-texts-width texts)
                                                             (if hscrolled?
                                                                 (+ (%window-hscroll window)
