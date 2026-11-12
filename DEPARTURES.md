@@ -226,3 +226,238 @@ function**. A departure on this list is a debt, not a licence.
   That is now ported - `erase-window-cursor!` and `*phys-cursor*` are
   `erase_phys_cursor` and `w->phys_cursor` - and it was the other half of
   why the GTK front end left a trail of cursor boxes behind it.
+
+## A terminal resize: the change of size, and the bug that made the editor quit
+
+A resized terminal did not resize the frame: the modeline stayed on row 22
+at 40 rows and the vertical border of a `C-x 3` split stayed in column 39 at
+100 columns. Two separate faults were under it, and the second one *exited
+the editor*, which is how it showed itself as "resize partly works, but it
+dies sometimes doing it".
+
+### What Emacs does
+
+    SIGWINCH -> handle_window_change_signal      (dispnew.c:6606)
+                  get_tty_size (fileno (tty->input), &width, &height)
+                  if (width > 5 && height > 2)
+                    change_frame_size (f, width, height, false, true, false)
+    pselect returns -> do_pending_window_change (0)   (process.c:5862)
+                  change_frame_size (..., delay = false)
+                  adjust_frame_size (f, ..., 5, ...)   (frame.c)
+                  -> resize_frame_windows              (window.c)
+
+The handler **only parks the numbers** - the C says why: "Record the new
+sizes, but don't reallocate the data structures now. Let that be done later
+outside of the signal handler" (`dispnew.c:6630`). The wait applies them,
+immediately after `pselect` returns and *before* the bytes are looked at, so
+a key and a resize arriving together both count.
+
+### What this tree had, and what is now there
+
+- the SIGWINCH handler was a no-op `(lambda (sig) #t)`, with a comment
+  claiming "the size is read from `ioctl` when `sync-frame-size!` asks" -
+  and nothing ever asked, because nothing told the editor a redraw was due;
+- `change_frame_size` / `do_pending_window_change` were not ported at all;
+- `read-input-event` answered the symbol `resize` for **every** timeout and
+  every signal alike, and `key-event->key` answered `#f` for a symbol - so
+  the event existed only inside `read-input-event` and was dropped one frame
+  later.
+
+Now: `handle-window-change-signal` (term.scm), `change-frame-size`,
+`%apply-frame-size` and `do-pending-window-change` (frame.scm), the frame's
+`new-width`/`new-height`/`new-size-p` (`f->new_width`, `f->new_height`,
+`f->new_size_p`) and the global `delayed-size-change`
+(`delayed_size_change`); `sync-frame-size!` is now expressed on top of
+`change-frame-size`; and `%wait-and-read` does the `pselect`-then-apply pair.
+
+### The bug that quit the editor
+
+The command loop's rule is `keyboard.scm`, `command_loop`:
+
+    ((< want 0)                  ; a *blocking* read
+     (let ((quit (frame-quit-cont frame))) (when quit (quit 'eof))))
+
+"Nothing to read on a blocking read is the end of input", and the editor
+exits with status 0. A signal interrupts `select` and it returns with an
+empty ready set; the wait answered `#f`; the loop read that as end of input
+and quit. Measured: 1 run in 3 with a bare resize, 3 in 3 with `C-x 3`
+before it.
+
+`key-event?` is `(not (eq? ev #f))`, so a *symbol* would at least not have
+quit - but `read-key-event` never returned one, because `dispatch-special-
+event` consumed it. The `#f` was the whole path.
+
+The fix is Emacs's own loop shape: after an empty ready set the wait asks
+whether the size changed, and if it did not it **selects again** rather than
+answering `#f`. Only a deadline or a real end of input answers `#f` now.
+
+### Departures, and whether they should be closed
+
+1. **`read-input-event` makes a `resize` event, which Emacs's tty does not
+   have.** Emacs applies the change inside the wait and never makes an event;
+   its `special-event-map` has no `[resize]`. This tree's redisplay belongs
+   to the read loop (`read-key-event` redisplays and loops on a special
+   event), so the event is the seam. It is the design the gtk front end
+   already uses (`*resize-code*`), and `[resize]` is bound to `ignore` in
+   `special-event-map`. **Keep** unless the tty grows an independent
+   redisplay trigger; closing it means redisplaying from the wait, which is a
+   change to the loop rather than to this path.
+2. **The wait calls `handle-window-change-signal` as well as the installed
+   handler.** Emacs's handler body runs in signal context; Guile defers a
+   `sigaction` handler to the VM's next safe point, and **measured, that
+   point can be after `select` has already returned to Scheme** - the signal
+   ends the wait, the wait's code runs, and the handler has not parked
+   anything. So the wait reads the size itself (which is the same
+   `get_tty_size` the C does) and the handler's own run is a harmless second
+   opinion. **Cannot be closed** without a Guile signal API that runs
+   handlers synchronously; what makes it safe is that parking is idempotent.
+3. **`do-pending-window-change` answers whether a frame's size actually
+   changed**, where the C returns void. Without it, a signal that woke the
+   wait for nothing (any other signal, a coalesced SIGWINCH) would be
+   indistinguishable from a resize and would either redraw the frame for
+   every wake or - worse - return `#f` and quit. `%apply-frame-size` answers
+   it, and `adjust_frame_size`'s no-op-for-an-unchanged-size is where the C
+   gets the same answer implicitly.
+4. **The C's `redisplaying_p || dont_resize_frames` guard is not
+   enforceable here.** `*redisplay-in-progress*` is `(schemacs editor
+   xdisp)`'s and that library imports `frame`, so `change-frame-size` cannot
+   read it; nothing sets `dont_resize_frames` at all. What the guard protects
+   - a size change requested *during* a redisplay - is this tree's
+   `sync-frame-size!` call at the top of `render!`, which wants it applied
+   there. The one caller that must be deferred is the signal path, and it
+   passes DELAY. **Fine as it stands**, but it is a departure in the guard,
+   not in the algorithm.
+5. **`get-tty-size` answers `(ROWS . COLUMNS)`**; the C's out-parameters are
+   `(width, height)`. A Scheme pair carries no names, and the rest of this
+   tree reads a display size as `(height . width)` (`display-rows-cols`).
+   Cosmetic, but worth knowing when comparing against `sysdep.c`.
+6. **A pty that was never given a size answers 0 x 0**, which `get_tty_size`
+   treats as "no valid information" and `screen-size` answers with the
+   startup capabilities - so 24x80 until the first resize. That is why a
+   harness must set the pty size *and* send SIGWINCH; the C's `> 5 / > 2`
+   guard is the same rule from the other side.
+
+### A Scheme trap this walked into
+
+`%apply-frame-size` answers whether the size actually changed, and its first
+version said so with `(and (< 0 new-height) (let ... (unless <unchanged> ...
+#t)))`. On an *unchanged* size `unless` has nothing to do and returns the
+**unspecified** value - which is *true* in Scheme - so the answer was yes for
+every call, `do-pending-window-change` reported a resize for every wake, and
+after the first real resize the editor would have redrawn its frame for ever.
+Both results are `#t` values, so no test could see it; it was found by
+reading the shape. The file's old lesson is the same one in the other
+direction: `(or ring (error ...))` fires on `'()`. **A predicate answered by
+a `when`/`unless` is not a predicate.**
+
+### Two method notes
+
+- **A truncating log hid the handler's line.** `(open-output-file ...)`
+  truncates on every call, so a handler that logged on entry and a wait that
+  logged after it left only the last line - and I concluded from that that
+  the handler never ran, then built a whole explanation on it. `open-file`
+  with `"a"` showed `(HANDLER ran)` *before* `(returned ...)`: Guile does run
+  the handler before `select` returns to Scheme, at least most of the time.
+  Check the instrument before believing the reading.
+- **`change_frame_size`'s DELAY is not an optimisation.** Re-tiling windows
+  from a signal handler - or from anywhere the redisplay is not expecting it
+  - is the class of bug that shows up three screens away. Emacs parks and
+  applies for that reason, and the port keeps the two steps apart even though
+  Guile would often let one function do both.
+
+## Giving the terminal back: two bugs in `init_sys_modes`, and the copy that was not one
+
+Chris: *"it used to (and emacs does) save and restore the old terminal state
+when you exit."* It did not, for two reasons, and `C-x C-c` never actually
+reached the editor at all.
+
+### 1. `c_cc[VINTR]` was still `^C`, so the quit command killed the editor
+
+GNU Emacs's `init_sys_modes` (`sysdep.c:1163`) writes the control characters
+after the flags:
+
+```c
+  tty.main.c_cc[VINTR]  = quit_char;   /* C-g gives SIGINT */
+  tty.main.c_cc[VQUIT]  = quit_char;
+  ...
+  tty.main.c_cc[VSUSP]  = CDISABLE;    /* C-z is the editor's */
+  tty.main.c_cc[V_DSUSP] = CDISABLE;   /* C-y */
+  tty.main.c_cc[VLNEXT] = CDISABLE;    /* C-v */
+  tty.main.c_cc[VREPRINT] = CDISABLE;  /* C-r */
+  tty.main.c_cc[VWERASE] = CDISABLE;   /* C-w */
+  tty.main.c_cc[VDISCARD] = CDISABLE;  /* C-o */
+  tty.main.c_cc[VSTART] = CDISABLE;    /* flow_control is off */
+  tty.main.c_cc[VSTOP]  = CDISABLE;
+```
+
+This tree wrote none of them, so every one of those characters was eaten by
+the kernel before the editor saw it. The one that mattered: **`C-x C-c`'s
+`C-c` became SIGINT**, and the editor died where it stood - no
+`reset_sys_modes`, no `te`, no `tcsetattr`. Measured: `C-x C-c` gave
+exit-by-signal-2, an all-raw termios afterwards, and not one byte of
+teardown in the stream. `C-z`, `C-r`, `C-w` and `C-v` were unreachable for
+the same reason.
+
+**Departure: `VINTR`/`VQUIT` are `CDISABLE` here, not `quit_char`.** Emacs
+turns C-g into SIGINT and its `read_char` notices `pending_signals`; this
+tree has no SIGINT handler at all, so a signal from the keyboard would kill
+the editor - the very thing the line exists to prevent. C-g is already a key
+here (the minibuffer binds it to `abort-recursive-edit`), so it arrives as
+one byte and nothing is lost **except** the C code that depends on a signal
+interrupting a blocked read. **Closing the gap** means porting
+`handle_interrupt` (`keyboard.c`) and the `pending_signals` test where reads
+happen - the same machinery `maybe_quit` needs - and then setting `VINTR` to
+`quit-char` as the C does.
+
+### 2. The "saved" terminal mode was the one being edited
+
+`init_sys_modes` did
+
+```scheme
+(let ((settings (or (tty-save-modes! *tty-fd*) (tty-read-modes *tty-fd*))))
+  ... (%flag-and-not! settings ...) (%write-modes! *tty-fd* settings))
+```
+
+and `tty-save-modes!` **is** `*tty-old-modes*`. So the raw-mode edits were
+written into the copy that exists to be restored, and `reset_sys_modes`
+faithfully put raw mode back. The C has the copy:
+
+```c
+  emacs_get_tty (fileno (tty_out->input), &tty_out->old_tty);
+  tty = tty_out->old_tty;               /* sysdep.c:1153 */
+  ... edits `tty`, not `tty_out->old_tty` ...
+```
+
+`init-sys-modes` now copies before it edits. Measured, after both fixes: the
+termios the editor exits into is byte-identical to the one it found.
+
+### 3. `bytevector-copy!` was called source-first, and `(scheme base)`'s is not
+
+Writing the copy above with `(bytevector-copy! saved 0 settings 0 60)` - the
+order `(rnrs bytevectors)` uses - copied the *empty* destination over the
+saved mode, and the editor exited into an all-zero termios. `(scheme base)`
+exports R7RS's `(bytevector-copy! TO AT FROM ...)`, and `sysdep.scm` imports
+`(scheme base)` whole, so that is the one it gets. **The same call was in
+`set-read-timeout!`**, where it silently never copied anything, so the timed
+read's `VMIN`/`VTIME` were written into a bytevector that was then thrown
+away - nothing calls that function today, which is why it never showed.
+
+Both are called target-first now, with the trap named at the call site.
+
+### The check
+
+`tools/pty-check.py` grew **`terminal-restored`**, which forks its own pty
+(it needs the slave side after the editor is gone, which `drive` cannot
+give), records a fresh pty's termios as the reference, quits with `C-x C-c`
+and asserts three things: the editor **exited** rather than being signalled,
+the termios is byte-identical to the reference, and `te` was sent. Verified
+failing both ways - with the control characters unwritten (signal 2, `iflag,
+oflag, lflag, cc` different, no `te`) and with the save-then-copy reversed
+(every field different).
+
+### Also found in passing
+
+`init_sys_modes` reads `(or (tty-save-modes! fd) (tty-read-modes fd))` -
+i.e. "remember the mode, and if that failed use what is there". The `or`
+made a second `tcgetattr` unreachable in the normal case, which is right;
+what was wrong was that the two were the same object.

@@ -42,6 +42,10 @@
    <cm> make-cm
    cm-rows cm-cols cm-curY cm-curX
    set-cm-curY! set-cm-curX!
+   ;; The screen's size, which `adjust_frame_size` writes when a tty
+   ;; frame is resized (`frame.c:1053`, `:1088`) and which nothing here
+   ;; had a way to write.
+   set-cm-rows! set-cm-cols!
    cmputc set-cmputc!
    cmcheckmagic
    cmcostinit calccost cmgoto

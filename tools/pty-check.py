@@ -1588,10 +1588,15 @@ def check_completion_resize():
     # Two windows, the list up, the terminal grown, C-g, and the list
     # again: it must be the bottom-most window on a frame whose two
     # file windows fill everything above it.
+    # **WIDTH is the frame's, not the default 80.** A resize really does
+    # resize the frame now, and a screen emulator still modelling 80
+    # columns wraps every row of a 160-column frame - which reads as the
+    # windows being in the wrong place when the frame is right.
     screen = screen_of(drive([C_x + b"2", C_x + C_f, C_a, C_k, typed.encode(),
                               b"?", ("resize", 40, 160), C_g,
                               C_x + C_f, C_a, C_k, typed.encode(), b"?"],
-                             path, settle=1.5))
+                             path, settle=1.5),
+                       width=160)
     rows = screen.split("\n")
     ml = mode(screen)
     if len(ml) != 3:
@@ -1611,7 +1616,8 @@ def check_completion_resize():
     # The crash (reported with exactly these keys): start big, open the
     # list with TAB TAB, and shrink the terminal while it is up.
     screen = screen_of(drive([("resize", 60, 240), C_x + C_f, b"\t", b"\t",
-                              ("resize", 22, 90)], path, settle=1.6))
+                              ("resize", 22, 90)], path, settle=1.6),
+                       width=90)
     rows = screen.split("\n")
     ml = mode(screen)
     if len(ml) != 2:
@@ -3248,7 +3254,11 @@ def check_resize():
     problems = []
 
     def border_column(rows, cols):
-        screen = screen_of(drive([C_x + b"3", ("resize", rows, cols)], path))
+        # the frame's width, so the emulator models the terminal the editor
+        # is actually drawing into - a 100-column row wrapped onto the next
+        # line by an 80-column model puts the border in the wrong place
+        screen = screen_of(drive([C_x + b"3", ("resize", rows, cols)], path),
+                           width=cols)
         columns = [r.index("|") for r in screen.split("\n") if "|" in r]
         return max(columns) if columns else -1
 
@@ -3258,10 +3268,33 @@ def check_resize():
             problems.append("after resizing to %d columns the border is in "
                             "column %d, expected %d" % (cols, got, want))
 
+    # **and the rows are as wide as the frame.** The cost model's idea of
+    # the screen (`cm_cols`, `cm.h`) is what clips a row, and it used to
+    # keep the width `Wcm_init` gave it at startup: measured, a frame
+    # resized to 100 columns drew its mode line to column 79 and stopped,
+    # so the right-hand window's mode line lost its `(Fundamental)`. Two
+    # of them on the row is the whole assertion - one per window.
+    # 100 columns and not 60: a window 30 columns wide clips its own mode
+    # line whatever the frame does, so the second `(Fundamental)` can only
+    # be missing for the reason this is about when the window is wide
+    # enough to hold it.
+    for cols in (100,):
+        screen = screen_of(drive([C_x + b"3", ("resize", 24, cols)], path),
+                           width=cols)
+        wide = [r for r in screen.split("\n") if "resize.txt" in r]
+        if not wide:
+            problems.append("at %d columns there is no mode line" % cols)
+        elif max(r.count("(Fundamental)") for r in wide) != 2:
+            problems.append(
+                "at %d columns the mode line row is %r - the right-hand "
+                "window's mode line is clipped"
+                % (cols, max(wide, key=len)))
+
     # and the rows follow too: the mode line sits on the row above the echo
     # area, whatever the height is
     for rows in (40, 12):
-        screen = screen_of(drive([C_x + b"3", ("resize", rows, 80)], path))
+        screen = screen_of(drive([C_x + b"3", ("resize", rows, 80)], path),
+                           width=80)
         on = [i for i, r in enumerate(screen.split("\n")) if "resize.txt" in r]
         want = rows - 2
         if not on:
@@ -3270,6 +3303,137 @@ def check_resize():
         elif max(on) != want:
             problems.append("at %d rows the mode line is on row %d, expected "
                             "%d" % (rows, max(on), want))
+    return problems
+
+
+def check_terminal_restored():
+    """Quitting must hand the terminal back exactly as it was found.
+
+    A terminal editor puts the tty in raw mode, takes the alternate screen
+    and turns off echo; all of it has to be undone on the way out or the
+    shell that comes back has no line editing and no echo. GNU Emacs does
+    it in `reset_sys_modes` (`tty_out->old_tty` written back with
+    `emacs_set_tty`) and `tty_reset_terminal_modes`.
+
+    **This one check needs the pty's slave side after the editor is gone**,
+    which `drive` cannot give - it closes the master - so it forks its own
+    and opens the slave by name from `/proc/PID/fd/0`. The reference is a
+    fresh pty's own termios, which is what a program started from a shell
+    inherits.
+
+    Three things measured here, each of which has been wrong:
+
+    * `C-x C-c` must *exit* rather than be killed - it died of SIGINT while
+      `c_cc[VINTR]` was still `^C`, and a process killed by a signal runs no
+      cleanup at all;
+    * the termios afterwards must be the one the editor found;
+    * and the alternate screen must be left (`te`), so the shell's own
+      screen comes back rather than the editor's last frame.
+    """
+    import termios as _termios
+
+    path = "/tmp/pty-check-restore.txt"
+    open(path, "w").write("hello\n")
+
+    ref_master, ref_slave = pty.openpty()
+    default = _termios.tcgetattr(ref_slave)
+    os.close(ref_master)
+    os.close(ref_slave)
+
+    pid, fd = pty.fork()
+    if pid == 0:
+        os.environ["GUILE_WARN_DEPRECATED"] = "no"
+        os.environ["XDG_CONFIG_HOME"] = TEST_CONFIG_HOME
+        os.environ["TERM"] = "xterm"
+        os.environ["COLORTERM"] = ""
+        os.chdir(REPO)
+        os.execv(os.path.join(REPO, "bin", "se"),
+                 [os.path.join(REPO, "bin", "se"), path])
+
+    answers = {b"\x1b[>0c": b"\x1b[>41;370;0c",
+               b"\x1b]11;?\x1b\\": b"\x1b]11;rgb:0000/0000/0000\x1b\\",
+               b"\x1b]10;?\x1b\\": b"\x1b]10;rgb:ffff/ffff/ffff\x1b\\"}
+    answered = set()
+    out = b""
+
+    def drain(timeout):
+        nonlocal out
+        got = 0
+        while select.select([fd], [], [], timeout)[0]:
+            try:
+                data = os.read(fd, 65536)
+            except OSError:
+                return got
+            out += data
+            got += len(data)
+            for q, a in answers.items():
+                if q in out and q not in answered:
+                    answered.add(q)
+                    os.write(fd, a)
+        return got
+
+    # wait for the first draw, as `drive` does - with its *floor*: a quiet
+    # terminal is not the same as a loaded one, and quitting into a terminal
+    # that is not yet raw is what this check is about
+    floor = time.time() + 2.0
+    while time.time() < floor:
+        drain(0.05)
+    quiet, deadline = 0.0, time.time() + SETTLE_MAX
+    while time.time() < deadline and quiet < QUIET:
+        quiet = 0.0 if drain(0.05) else quiet + 0.05
+
+    # the editor's own terminal, held open by this process so the pty
+    # outlives it
+    slave = None
+    for _ in range(100):
+        try:
+            link = os.readlink("/proc/%d/fd/0" % pid)
+            if link.startswith("/dev/pts/"):
+                slave = os.open(link, os.O_RDWR | os.O_NOCTTY)
+                break
+        except OSError:
+            pass
+        time.sleep(0.05)
+    if slave is None:
+        os.kill(pid, signal.SIGKILL)
+        os.waitpid(pid, 0)
+        return ["the editor is not on a pty (no /dev/pts on its fd 0)"]
+
+    problems = []
+    during = _termios.tcgetattr(slave)
+    if during == default:
+        problems.append("the editor never put the terminal in raw mode")
+
+    os.write(fd, C_x + C_c)
+    status = None
+    deadline = time.time() + KEY_MAX
+    while time.time() < deadline:
+        drain(0.1)
+        w, s = os.waitpid(pid, os.WNOHANG)
+        if w == pid:
+            status = s
+            break
+    if status is None:
+        os.kill(pid, signal.SIGKILL)
+        os.waitpid(pid, 0)
+        problems.append("C-x C-c did not exit the editor")
+    else:
+        if os.WIFSIGNALED(status):
+            problems.append("C-x C-c killed the editor with signal %d - a "
+                            "process killed by a signal runs no cleanup"
+                            % os.WTERMSIG(status))
+        after = _termios.tcgetattr(slave)
+        if after != default:
+            names = ("iflag", "oflag", "cflag", "lflag", "ispeed", "ospeed",
+                     "cc", "ospeed-b")
+            wrong = [names[i] if i < len(names) else "field %d" % i
+                     for i, (a, b) in enumerate(zip(after, default)) if a != b]
+            problems.append("the terminal was not given back: %s differ(s) "
+                            "from what the editor found"
+                            % ", ".join(wrong))
+    os.close(slave)
+    if b"\x1b[?1049l" not in out:
+        problems.append("the alternate screen was not left (`te` never sent)")
     return problems
 
 
@@ -4155,6 +4319,7 @@ CHECKS = {
     "set-fill-column": check_set_fill_column,
     "suspend": check_suspend,
     "resize": check_resize,
+    "terminal-restored": check_terminal_restored,
     "minibuffer": check_minibuffer,
     "minibuffer-cx-o": check_minibuffer_cx_o,
     "minibuffer-arrows": check_minibuffer_arrows,

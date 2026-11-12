@@ -124,6 +124,21 @@
 
     (define VMIN 6)
     (define VTIME 5)
+    ;; The control characters Emacs's `init_sys_modes` writes. The numbers
+    ;; are Linux's `c_cc` indices (`asm-generic/termbits.h`), which is the
+    ;; same measured layout as the offsets above.
+    (define VINTR 0)
+    (define VQUIT 1)
+    (define VSTART 8)
+    (define VSTOP 9)
+    (define VSUSP 10)
+    (define VREPRINT 12)
+    (define VDISCARD 13)
+    (define VWERASE 14)
+    (define VLNEXT 15)
+    (define CDISABLE 0)
+    ;; ^ `_POSIX_VDISABLE', which is 0 on Linux: the character that turns
+    ;; the special meaning *off*.
 
     (define ICANON #x2)
     (define ECHO #x8)
@@ -227,13 +242,30 @@
       ;;   c_cflag |= CS8; c_cflag &= ~PARENB;
       ;;   c_cc[VMIN] = 1; c_cc[VTIME] = 0;
       ;;
-      ;; **`raw!' was not this.** ncurses's `raw' clears ISIG, which is
-      ;; the opposite of what Emacs wants - C-g has to raise SIGINT so
-      ;; the editor can see it. That mismatch is why this tree called
-      ;; `raw!' and then had to work around the signals it lost.
+      ;; **`raw!' was not this.** ncurses's `raw' clears ISIG *and* leaves
+      ;; the interrupt characters alone, which is two departures at once:
+      ;; Emacs keeps ISIG and decides what the keyboard does with the
+      ;; control characters itself, below. That mismatch is why this tree
+      ;; called `raw!' and then had to work around the signals it lost.
       ;;--------------------------------------------------------------
-      (let ((settings (or (tty-save-modes! *tty-fd*) (tty-read-modes *tty-fd*))))
+      (let* ((saved (or (tty-save-modes! *tty-fd*) (tty-read-modes *tty-fd*)))
+             ;; **A COPY, and that is the C's `tty = tty_out->old_tty;`**
+             ;; (`sysdep.c:1153`). `tty_save_modes!` keeps the mode the
+             ;; terminal arrived in; this works on a copy of it and writes
+             ;; *that*. Editing the saved one in place threw away the mode
+             ;; to restore, so `reset_sys_modes` put the raw mode straight
+             ;; back - measured, every setting below survived the editor's
+             ;; exit, and a shell that came back had no echo and no line
+             ;; editing.
+             (settings (and saved (make-bytevector %termios-size 0))))
         (when settings
+          ;; **Target first.** `(scheme base)`'s `bytevector-copy!` is
+          ;; `(bytevector-copy! TO AT FROM ...)`, the opposite of
+          ;; `(rnrs bytevectors)`' source-first one, and this file imports
+          ;; `(scheme base)` whole - so written the other way round this
+          ;; copied the *empty* destination over the mode it was there to
+          ;; preserve, and the editor exited into an all-zero termios.
+          (bytevector-copy! settings 0 saved 0 %termios-size)
           (%flag-or! settings %off-iflag IGNBRK)
           (%flag-and-not! settings %off-iflag (logior ICRNL INLCR ISTRIP IXON))
           (%flag-and-not! settings %off-lflag (logior ECHO ICANON IEXTEN))
@@ -243,6 +275,45 @@
           (%flag-and-not! settings %off-cflag PARENB)
           (bytevector-u8-set! settings (+ %off-cc VMIN) 1)
           (bytevector-u8-set! settings (+ %off-cc VTIME) 0)
+          ;; **The control characters, and this is the rest of the C.**
+          ;; `init_sys_modes` (`sysdep.c:1163`) writes `VINTR`/`VQUIT` on a
+          ;; controlling tty - `quit_char` (C-g) for both, so that C-g
+          ;; raises SIGINT and ^C is nothing but a key - and then turns
+          ;; off every shell character the editor wants as input:
+          ;;
+          ;;     c_cc[VSUSP]   = CDISABLE;   /* C-z stops nothing here */
+          ;;     c_cc[V_DSUSP] = CDISABLE;   /* nor does C-y */
+          ;;     c_cc[VLNEXT]  = CDISABLE;   /* nor C-v */
+          ;;     c_cc[VREPRINT]= CDISABLE;   /* nor C-r */
+          ;;     c_cc[VWERASE] = CDISABLE;   /* nor C-w */
+          ;;     c_cc[VDISCARD]= CDISABLE;   /* nor C-o */
+          ;;     c_cc[VSTART]  = CDISABLE;   /* flow_control is off */
+          ;;     c_cc[VSTOP]   = CDISABLE;
+          ;;
+          ;; **Without this C-x C-c killed the editor.** `VINTR` was still
+          ;; `^C`, so the byte that finishes the quit command never reached
+          ;; the editor: the kernel turned it into SIGINT and the process
+          ;; died where it stood - no `reset_sys_modes`, no `te`, no
+          ;; `tcsetattr`, so the terminal was left in raw mode on the
+          ;; alternate screen. Measured: `C-x C-c` gave exit-by-SIGINT, a
+          ;; raw termios afterwards and not one byte of teardown. Every
+          ;; shell character above is a key some mode binds, and the kernel
+          ;; was eating them the same way.
+          ;;
+          ;; **`VINTR` is disabled rather than set to `quit_char`.** Emacs
+          ;; turns C-g into SIGINT and its `read_char` notices the flag;
+          ;; this tree has no SIGINT handler at all, so a signal from the
+          ;; keyboard would kill the editor - which is the very thing this
+          ;; line exists to stop. C-g is already a key here (the minibuffer
+          ;; binds it to `abort-recursive-edit`), so nothing is lost by
+          ;; letting it arrive as one byte. Closing the gap means porting
+          ;; `handle_interrupt` (`keyboard.c`) and the `pending_signals`
+          ;; test in the read path - the departure is recorded in
+          ;; DEPARTURES.md.
+          (for-each (lambda (index)
+                      (bytevector-u8-set! settings (+ %off-cc index) CDISABLE))
+                    (list VINTR VQUIT VSTART VSTOP VSUSP VREPRINT VDISCARD
+                          VWERASE VLNEXT))
           (%write-modes! *tty-fd* settings)
           #t)))
 
@@ -264,7 +335,8 @@
       (let ((current (tty-read-modes *tty-fd*)))
         (and current
              (let ((settings (make-bytevector %termios-size 0)))
-               (bytevector-copy! current 0 settings 0 %termios-size)
+               ;; Target first - see `init-sys-modes`.
+               (bytevector-copy! settings 0 current 0 %termios-size)
                (if (> tenths 0)
                    (begin
                      (bytevector-u8-set! settings (+ %off-cc VMIN) 0)

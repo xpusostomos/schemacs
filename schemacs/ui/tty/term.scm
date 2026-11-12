@@ -71,7 +71,9 @@
           *input-decode-map* terminal-init-xterm
           *xterm--set-selection*
           xterm--tty-set-selection xterm--tty-get-selection)
-    (only (schemacs editor frame) *tty-select-active-regions*)
+    (only (schemacs editor frame) *tty-select-active-regions*
+          *frame-list* frame-output change-frame-size
+          do-pending-window-change)
     (only (schemacs editor faces)
           *display-color-cells* *display-type* *frame-background-mode*
           face-list face-spec-recalc)
@@ -403,15 +405,23 @@
           ;; `SIGWINCH`'s default action is "ignore", and an ignored
           ;; signal does not interrupt `select` - so with no handler the
           ;; editor sat in `select` through a resize and never asked how
-          ;; big the terminal was. GNU Emacs installs
-          ;; `handle_sigwinch` for exactly this ("the terminal has been
-          ;; resized"), and what it buys is that `pselect` returns early
-          ;; with nothing ready. The handler itself has nothing to do:
-          ;; the size is read from `ioctl` when `sync-frame-size!` asks.
-          ;; Measured, with a handler a `select` on a pipe returned after
-          ;; the signal with an empty ready set; without one it waited
-          ;; the full timeout.
-          (sigaction SIGWINCH (lambda (sig) #t))
+          ;; big the terminal was. Measured, with a handler a `select` on
+          ;; a pipe returned after the signal with an empty ready set;
+          ;; without one it waited the full timeout.
+          ;;
+          ;; **What the handler does is `handle_window_change_signal`**
+          ;; (`dispnew.c:6606`): read the size and *park* it on the frame,
+          ;; because a signal handler cannot re-tile windows - the C says
+          ;; so where it calls `change_frame_size` with DELAY set. The
+          ;; work is done by `do-pending-window-change` in the wait below.
+          ;;
+          ;; The version before this one had a handler that did nothing at
+          ;; all, on the reasoning that the size is read again when the
+          ;; frame is redrawn - and then nothing told the editor a redraw
+          ;; was wanted, so a resized terminal kept drawing the size it
+          ;; started with. Measured: at 40 rows the mode line stayed on
+          ;; row 22.
+          (sigaction SIGWINCH (lambda (sig) (handle-window-change-signal)))
           (let* ((size (get-tty-size *tty-fd*))
                  (rows (car size))
                  (cols (cdr size))
@@ -606,6 +616,15 @@
       (cond
        ((char? ev) (char->integer ev))
        ((integer? ev) ev)
+       ;; **A frame event is its own symbol.** A resize is not a key and
+       ;; has no code a terminal ever sends: `read-input-event` makes it
+       ;; when the wait applied a parked size change, and what it must
+       ;; become is the event `special-event-map` is keyed on - `(kbd
+       ;; "<resize>")` is the symbol `resize`, exactly as the gtk front
+       ;; end's `*resize-code*` decodes to it. Answering #f here (which
+       ;; this did) threw the resize away one frame after it was noticed,
+       ;; so a resized terminal was never redrawn.
+       ((symbol? ev) ev)
        ((string? ev)
         (or (function-key-sequence->event ev)
             ;; **A one-byte string that the decode map does not know is
@@ -714,24 +733,64 @@
 
     (define (%wait-and-read deadline)
       ;; Wait for the descriptor with `select`, then read one byte off it.
-      ;; Answers #f when the wait ended with nothing readable - a
-      ;; DEADLINE that passed, or a *signal*.
+      ;; Answers #f when the wait ended with nothing to read - a DEADLINE
+      ;; that passed, the end of input, or a *resize*, which
+      ;; `read-input-event` turns into its event.
       ;;
-      ;; **The wait is `select`, and an empty ready set is an event.**
-      ;; `select(2)` is on the manual's never-restarted list, so a signal
-      ;; interrupts it and it returns with nothing ready - which is how
-      ;; GNU Emacs learns that the terminal was resized: `pselect` comes
-      ;; back to `wait_reading_process_output`, the SIGWINCH flag is seen,
-      ;; and `read_char` makes the `resize` event. A blocking `read` on
-      ;; the port would instead be restarted and the resize never
-      ;; noticed, which is what kept a resized terminal drawing 24 rows.
+      ;; **An empty ready set is an event, and it is the whole of how a
+      ;; terminal resize is noticed.** `select(2)` is on the manual's
+      ;; never-restarted list, so a signal interrupts it and it returns
+      ;; with nothing ready; a blocking `read` on a port would be restarted
+      ;; instead and the resize never seen. That is why the wait is
+      ;; `select` on the descriptor and not a read.
+      ;;
+      ;; **What follows the wait is `wait_reading_process_output`'s own
+      ;; line** - "If we woke up due to SIGWINCH, actually change size
+      ;; now", `do_pending_window_change (0)` at `process.c:5862`,
+      ;; immediately after `pselect` returns and *before* the bytes are
+      ;; looked at, so a key and a resize in the same moment both count.
+      ;;
+      ;; **The size is asked for here, not taken from the handler.** Guile
+      ;; runs a `sigaction' handler at the VM's next safe point, and
+      ;; measured, that point can be *after* `select` has already returned
+      ;; to Scheme: the signal ends the wait, this code runs, and the
+      ;; handler has not parked anything yet. So the wait does the read
+      ;; Emacs's handler does, and the handler's own run is a harmless
+      ;; second opinion. `do-pending-window-change` answers whether the
+      ;; frame's size *actually* changed.
+      ;;
+      ;; **A wake with no size change waits again** rather than answering
+      ;; `#f`: a `#f` on a blocking read is the end of input as far as the
+      ;; command loop is concerned, and quitting the editor because a
+      ;; signal arrived is not a resize. Emacs loops there for the same
+      ;; reason.
       ;;--------------------------------------------------------------
-      (let* ((left (and deadline (- deadline (tty-now-ms))))
-             (ready (car (select (list %keyboard-fd) '() '()
-                                 (if left
-                                     (max 0.001 (/ left 1000.0))
-                                     #f)))))
-        (and (memq %keyboard-fd ready) (tty-read-byte))))
+      (let loop ()
+        (let* ((left (and deadline (- deadline (tty-now-ms))))
+               (ready (car (select (list %keyboard-fd) '() '()
+                                   (if left
+                                       (max 0.001 (/ left 1000.0))
+                                       #f)))))
+          ;; **"If we woke up due to SIGWINCH, actually change size now"**,
+          ;; `wait_reading_process_output`'s own line (`process.c:5862`):
+          ;; the size is read and applied *before* the bytes are looked
+          ;; at, so a key and a resize in the same moment both count.
+          (handle-window-change-signal)
+          (when (do-pending-window-change #f)
+            (set! %size-change-pending? #t))
+          (cond
+           ;; Readable: a byte, or #f at the end of input.
+           ((memq %keyboard-fd ready) (tty-read-byte))
+           ;; A resize. `read-input-event` answers it as an event and
+           ;; clears the flag; if a byte was read above, the key wins and
+           ;; the next read reports the resize.
+           (%size-change-pending? #f)
+           ;; Neither: the deadline has passed, or a signal woke us for
+           ;; nothing. **Only the deadline ends the wait with nothing** -
+           ;; answering #f for a spurious wake is what quit the editor,
+           ;; because a #f on a blocking read is the end of input.
+           ((and deadline (<= deadline (tty-now-ms))) #f)
+           (else (loop))))))
 
     (define (%read-key-bytes deadline)
       ;; One *event* from the terminal, as bytes; #f when DEADLINE passed
@@ -819,6 +878,45 @@
     ;; The clock, and reading a key
     ;;------------------------------------------------------------------
 
+    (define %size-change-pending? #f)
+    ;; ^ Whether the last wait applied a size change the editor has not
+    ;; been told about yet.
+    ;;
+    ;; **This is how a signal is told from a timeout.** `select` answers an
+    ;; empty ready set for both, so without it every timed read - a
+    ;; `sit-for`, a minibuffer's next-timer wait - would look like a
+    ;; resize and redraw the whole frame for nothing.
+    ;;--------------------------------------------------------------
+
+    (define (handle-window-change-signal)
+      ;; GNU Emacs's `handle_window_change_signal` (`dispnew.c:6606`).
+      ;;
+      ;; "The frame size change obviously applies to a single
+      ;; termcap-controlled terminal, but we can't decide which.
+      ;; Therefore, we resize the frames corresponding to each tty." There
+      ;; is one tty here, so this walks the frames drawn on it.
+      ;;
+      ;; **Nothing is re-tiled here.** The numbers go on the frame with
+      ;; `change_frame_size`'s DELAY set - "they could not be reallocated
+      ;; now ... let that be done later outside of the signal handler" -
+      ;; and the wait below applies them.
+      ;;
+      ;; **The `> 5' / `> 2' guard is Emacs's**, and it is not decoration:
+      ;; a pty that has never been given a size answers 0 x 0, and a
+      ;; resize to nothing must not throw the layout away.
+      ;;--------------------------------------------------------------
+      (let ((display (current-display)))
+        (when display
+          (let* ((size (get-tty-size *tty-fd*))
+                 (height (car size))
+                 (width (cdr size)))
+            (when (and (> width 5) (> height 2))
+              (for-each
+               (lambda (frame)
+                 (when (eq? (frame-output frame) display)
+                   (change-frame-size frame width height #f #t)))
+               (*frame-list*)))))))
+
     (define (tty-now-ms)
       ;; The clock the deadline in `read-input-event' is measured
       ;; against.
@@ -830,27 +928,46 @@
       ;; Read one key event, TIMEOUT milliseconds allowed - a negative
       ;; TIMEOUT blocks until one is there.
       ;;
-      ;; **No `select`.** Emacs uses `pselect` because it waits on
-      ;; subprocesses, several terminals and a SIGCHLD pipe together; one
-      ;; keyboard does not need it, and a Scheme port has a buffer of its
-      ;; own that `select` cannot see - measured, a burst written as one
-      ;; `write` was lost by a `select` that said "not ready" while the
-      ;; bytes sat in the port. A timed read is the tty's own `VTIME`.
+      ;; **The wait is `select`, on the descriptor `tty-read-byte` reads.**
+      ;; Emacs uses `pselect` because it waits on subprocesses, several
+      ;; terminals and a SIGCHLD pipe together; one keyboard needs `select`
+      ;; for one thing - a *signal* has to end the wait - and a `read` on
+      ;; the port would be restarted instead. Two things this pins down:
+      ;; the waiting and the reading are on the **descriptor**, never on a
+      ;; Scheme port, because a port keeps a buffer of its own that
+      ;; `select` cannot see (measured: a burst written as one `write` was
+      ;; lost by a `select` that said "not ready" while the bytes sat in
+      ;; the port); and an empty ready set after a signal is *how a
+      ;; resize is noticed*, which `%wait-and-read` acts on and this
+      ;; answers as a `resize` event.
       ;;
-      ;; The back door needs no timer either: the cooperative server posts
-      ;; its work to *this* thread and `poll-repl!` runs it between keys.
-      ;; The wake pipe only shortened an idle wait so the poll could
-      ;; happen; `VTIME` does that natively, and an idle editor costs
-      ;; nothing because a blocking read blocks.
+      ;; **#f means a deadline expired with nothing read**, which is not
+      ;; a resize - the command loop reads `#f` as "nothing happened,
+      ;; wait again". The back door needs no timer of its own: the
+      ;; cooperative server posts its work to *this* thread, and
+      ;; `poll-repl!` runs it between keys.
       ;;--------------------------------------------------------------
       (if (tty-pushed-bytes?)
           ;; A byte pushed back by a terminal query is a key the user
           ;; typed, so it comes before anything the terminal has sent
           ;; since - `unread-command-events` is read first.
-          (let ((ch (tty-read-query-byte 0)))
-            (if ch ch 'resize))
-          (let ((deadline (and (>= timeout 0) (+ (tty-now-ms) timeout))))
-            (or (%read-key-bytes deadline) 'resize))))
+          ;; Nothing parked to apply: a query byte or nothing, and
+          ;; "nothing" is a timed-out read, not a resize.
+          (tty-read-query-byte 0)
+          (let* ((deadline (and (>= timeout 0) (+ (tty-now-ms) timeout)))
+                 (bytes (%read-key-bytes deadline)))
+            (cond
+             (bytes bytes)
+             ;; **A resize, and only a resize.** `%wait-and-read` applies
+             ;; a parked size change and says whether it applied one; a
+             ;; deadline that simply expired applied nothing and answers
+             ;; #f, which the command loop reads as "nothing happened,
+             ;; wait again". Returning `resize` for every timeout - which
+             ;; this did - both dropped real resizes (nothing downstream
+             ;; knew the symbol) and would have made every timed wait
+             ;; redraw the whole frame.
+             (%size-change-pending? (set! %size-change-pending? #f) 'resize)
+             (else #f)))))
 
     ;;----------------------------------------------------------------
     ;; The display interface, for a text terminal
@@ -968,7 +1085,31 @@
     (define-method (ensure-surface! (d <tty-display>))
       ;; A terminal's "surface" is the screen it is open on; there is
       ;; nothing to make.
+      ;;
+      ;; **What it does do is put the cost model's idea of the screen in
+      ;; step with it**, which is `adjust_frame_size`'s own line for a tty
+      ;; frame (`frame.c:1053`, `:1088`):
+      ;;
+      ;;     FrameCols (FRAME_TTY (f)) = new_text_cols;
+      ;;     FrameRows (FRAME_TTY (f)) = new_text_lines;
+      ;;
+      ;; **Without it a resized frame was still drawn 80 columns wide.**
+      ;; The cost model's rows and columns were set once by `Wcm_init` at
+      ;; startup, and `cmplus`'s wrap rule and `write-glyphs!`'s clip read
+      ;; them - measured, a 100-column frame's mode line stopped at column
+      ;; 79 while the `C-x 3` border moved to 49, because the border is an
+      ;; absolute column and each row was clipped.
+      ;;
+      ;; It belongs to the display because the state is the display's: the
+      ;; C reaches it through `FRAME_TTY (f)`, and this tree's frame has
+      ;; no business importing `term.c`. `render!` calls this after
+      ;; `sync-frame-size!` and before the first glyph, which is when the
+      ;; C's line runs inside `adjust_frame_size`.
       ;;--------------------------------------------------------------
+      (let ((size (screen-size d)))
+        (when (and (> (car size) 0) (> (cdr size) 0))
+          (set-cm-cols! (tty-cm %terminal) (car size))
+          (set-cm-rows! (tty-cm %terminal) (cdr size))))
       #t)
 
     (define-method (clear-frame-area! (d <tty-display>))

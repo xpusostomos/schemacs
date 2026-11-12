@@ -220,6 +220,9 @@
    suspend-frame
    set-window-point!
    sync-frame-size!
+   ;; `change_frame_size` and `do_pending_window_change` (`dispnew.c`),
+   ;; and the frame field a deferred change waits in.
+   change-frame-size do-pending-window-change frame-new-size-p
    window-body-height
    window-children
    window-internal?
@@ -779,7 +782,7 @@
       (make<frame>
        windows selected-window minibuffer-window height width
        message message-timer keymap-state quit-cont output name
-       parameters garbaged)
+       parameters garbaged new-width new-height new-size-p)
       frame-type?
       (windows   frame-windows   set!frame-windows)
       ;; ^ The frame's windows, top to bottom. Emacs's `window-list'.
@@ -888,6 +891,19 @@
       ;; only the display can act on is read where it is used: the gtk
       ;; front end asks `menu-bar-lines` when it decides whether the bar
       ;; is showing.
+      (new-width  frame-new-width  set!frame-new-width)
+      (new-height frame-new-height set!frame-new-height)
+      (new-size-p frame-new-size-p set!frame-new-size-p)
+      ;; ^ `f->new_width`, `f->new_height` and `f->new_size_p`
+      ;; (`frame.h`): a size change that could not be made where it was
+      ;; asked for, waiting to be applied. A signal handler runs at a
+      ;; point where re-tiling windows is not safe - Emacs's
+      ;; `handle_window_change_signal` says so in as many words: "Record
+      ;; the new sizes, but don't reallocate the data structures now. Let
+      ;; that be done later outside of the signal handler"
+      ;; (`dispnew.c:6630`) - so a tty resize is parked here and applied
+      ;; by `do-pending-window-change`. -1 in both means "no change
+      ;; pending", as it does in the C: a native size is never negative.
       )
 
     (define (frame? thing)
@@ -1800,7 +1816,10 @@
                                  ;; A frame that has never been drawn is
                                  ;; garbaged: the surface holds nothing,
                                  ;; so its matrices mean nothing yet.
-                                 #t))
+                                 #t
+                                 ;; Nothing is queued for later - -1 is
+                                 ;; the C's "no size change pending".
+                                 -1 -1 #f))
              (window (make-frame-window frame editor
                                         0 (max 1 (- height 1)) 0 width))
              ;; **The minibuffer window is the frame's last row**, made
@@ -2367,6 +2386,121 @@
                                            final-lines final-cols))))
               #t))))
 
+    (define delayed-size-change #f)
+    ;; ^ `delayed_size_change` (`dispnew.c:121`): "True means SIGWINCH
+    ;; happened when not safe." A plain variable and not a parameter,
+    ;; because nothing `let`-binds it - it is a fact about the frames, not
+    ;; about the dynamic extent of anything.
+
+    (define (change-frame-size frame new-width new-height pretend delay)
+      ;; GNU Emacs's `change_frame_size` (`dispnew.c:6742`) over
+      ;; `change_frame_size_1` (`:6693`): give FRAME a new size.
+      ;;
+      ;; **DELAY means the caller cannot do the work here.** The C's
+      ;; comment is the whole reason this function exists: "If DELAY,
+      ;; assume we're being called from a signal handler, and queue the
+      ;; change for later - perhaps the next redisplay. Since this tries
+      ;; to resize windows, we can't call it from a signal handler"
+      ;; (`:6735`). So the numbers are parked on the frame and
+      ;; `do-pending-window-change` applies them where it is safe.
+      ;;
+      ;; PRETEND is Emacs's "don't change the frame's size, just say what
+      ;; it would be". Nothing here passes it; it is carried because the
+      ;; C's signature has it and a caller that has to ask the question
+      ;; will want it.
+      ;;--------------------------------------------------------------
+      (if delay
+          (begin
+            (set!frame-new-width frame new-width)
+            (set!frame-new-height frame new-height)
+            (set!frame-new-size-p frame #t)
+            (set! delayed-size-change #t))
+          (begin
+            ;; "Storing -1 in the new_width/new_height slots means that no
+            ;; size change is pending" (`dispnew.c:6716`).
+            (set!frame-new-width frame -1)
+            (set!frame-new-height frame -1)
+            (set!frame-new-size-p frame #f)
+            ;; `adjust_frame_size (f, ..., 5, ...)`, whose inhibit 5 is
+            ;; "call resize_frame_windows and never the window system".
+            (%apply-frame-size frame new-width new-height pretend))))
+
+    (define (%apply-frame-size frame new-width new-height pretend)
+      ;; The half of `adjust_frame_size` (`frame.c`) that an inhibit-5
+      ;; change needs: take the new size and re-tile the windows into it.
+      ;;--------------------------------------------------------------
+      (let ((old-height (frame-height frame))
+            (old-width (frame-width frame)))
+        (if (or (<= new-height 0)
+                (and (= old-height new-height)
+                     (= old-width new-width)))
+            ;; **#f and not the value of an `unless`.** Scheme's
+            ;; unspecified value is *true*, so a caller asking "did the
+            ;; size change?" would be told yes on every call, and
+            ;; `do-pending-window-change` would report a resize for every
+            ;; wake - a redisplay loop.
+            #f
+            (begin
+            (unless pretend
+              (set!frame-height frame new-height)
+              (set!frame-width frame new-width)
+              (resize-frame-windows! frame old-height old-width
+                                     new-height new-width))
+            ;; **A resized frame is garbaged.** GNU Emacs's
+            ;; `resize_frame_windows` is reached from
+            ;; `change_frame_size`, whose callers set `f->resized_p`
+            ;; and the redisplay's `clear_garbaged_frames` then
+            ;; `redraw_frame`s a frame that "has been resized
+            ;; (probably due to a window manager resize)" - the
+            ;; toolkit has thrown the surface away, so nothing on it
+            ;; is ours to keep. Without this a window grown by the
+            ;; window manager kept drawing into the old rectangles
+            ;; and scrolled only the top half of itself.
+            (set-frame-garbaged! frame #t)
+            ;; Answers whether the frame's size actually changed, which
+            ;; the C leaves implicit: `adjust_frame_size` is a no-op for
+            ;; an unchanged size, so nothing notices. A caller that has
+            ;; to know - `do-pending-window-change`, because the command
+            ;; loop reads a resize as a redisplay - needs to be told.
+            #t))))
+
+    (define (do-pending-window-change safe)
+      ;; GNU Emacs's `do_pending_window_change` (`dispnew.c:6664`): "Do
+      ;; any change in frame size that was requested by a signal."
+      ;; Answers whether it applied one.
+      ;;
+      ;; The C's guard is `(redisplaying_p || dont_resize_frames) &&
+      ;; !safe`, and neither of those can be read from here: they live
+      ;; above this library (`redisplaying_p` is `xdisp`'s) and nothing
+      ;; sets `dont_resize_frames` at all. What the guard protects is a
+      ;; change asked for *during* a redisplay, and the one caller is a
+      ;; wait for input, which is never one. SAFE is kept because the C's
+      ;; signature has it and a caller that knows it is a redisplay can
+      ;; say so.
+      ;;--------------------------------------------------------------
+      (let loop ((applied #f))
+        (if (not delayed-size-change)
+            applied
+            (begin
+              ;; The C clears the flag *before* the walk, because
+              ;; `change_frame_size` can set it again from inside.
+              (set! delayed-size-change #f)
+              (for-each
+               (lambda (frame)
+                 ;; "Negative new_width or new_height values mean no
+                 ;; change is required ... If new_size_p is not set,
+                 ;; this means the size change was requested by
+                 ;; adjust_frame_size but has not been honored by the
+                 ;; window manager yet" (`dispnew.c:6679`).
+                 (when (and (frame-new-size-p frame)
+                            (or (>= (frame-new-height frame) 0)
+                                (>= (frame-new-width frame) 0)))
+                   (when (change-frame-size frame (frame-new-width frame)
+                                            (frame-new-height frame) #f #f)
+                     (set! applied #t))))
+               (*frame-list*))
+              (loop applied)))))
+
     (define (sync-frame-size! frame)
       ;; Take the frame's size from the terminal it is drawn on, if one
       ;; is open. A terminal that has been resized gives new numbers, so
@@ -2387,29 +2521,8 @@
       ;; redisplay. The `or' covers the test frames, whose output is #f.
       (let ((display (or (frame-output frame) (current-display))))
         (when display
-          (let* ((size (display-rows-cols display))
-                 (old-height (frame-height frame))
-                 (old-width (frame-width frame))
-                 (new-height (car size))
-                 (new-width (cdr size)))
-            (when (< 0 new-height)
-              (unless (and (= old-height new-height)
-                           (= old-width new-width))
-                (set!frame-height frame new-height)
-                (set!frame-width frame new-width)
-                (resize-frame-windows! frame old-height old-width
-                                       new-height new-width)
-                ;; **A resized frame is garbaged.** GNU Emacs's
-                ;; `resize_frame_windows` is reached from
-                ;; `change_frame_size`, whose callers set `f->resized_p`
-                ;; and the redisplay's `clear_garbaged_frames` then
-                ;; `redraw_frame`s a frame that "has been resized
-                ;; (probably due to a window manager resize)" - the
-                ;; toolkit has thrown the surface away, so nothing on it
-                ;; is ours to keep. Without this a window grown by the
-                ;; window manager kept drawing into the old rectangles
-                ;; and scrolled only the top half of itself.
-                (set-frame-garbaged! frame #t)))))))
+          (let ((size (display-rows-cols display)))
+            (change-frame-size frame (cdr size) (car size) #f #f)))))
 
     (define (scale-window! window old-top old-left old-width old-height
                            new-top new-left new-width new-height)
