@@ -3437,6 +3437,46 @@ def check_terminal_restored():
     return problems
 
 
+def check_quit_signal():
+    """C-g arrives as a signal, and is still the C-g key.
+
+    `init_sys_modes` makes C-g the terminal's interrupt character, so the
+    kernel consumes the byte and sends SIGINT; `handle_interrupt` records
+    the request and the read answers `quit_char` (`read_char`,
+    `keyboard.c:2806`). Both halves have to be in place, and each has been
+    missing: with no SIGINT handler the signal kills the editor where it
+    stands - no terminal restore, no unwind - and with no answer for the
+    flag the C-g never reaches the keymaps that bind it.
+
+    The echo area is checked here too: a `Quit` shorter than the prompt it
+    replaces used to leave the prompt's tail behind it ("Quit/tmp/"),
+    because the row was written without blanking the rest of it.
+    """
+    path = "/tmp/pty-check-quit.txt"
+    open(path, "w").write("hello\n")
+    problems = []
+
+    out, exited = drive([b"\x07"], path, report_exit=True)
+    if exited:
+        problems.append("C-g killed the editor - the terminal's interrupt "
+                        "character has no handler behind it")
+    elif "Quit" not in screen_of(out):
+        problems.append("C-g at top level did not report `Quit'")
+
+    out, exited = drive([C_x + C_f, b"zzz", b"\x07"], path, report_exit=True)
+    if exited:
+        problems.append("C-g inside the minibuffer killed the editor")
+    else:
+        rows = screen_of(out).split("\n")
+        last = rows[-1] if rows else ""
+        if "Quit" not in last:
+            problems.append("C-g inside the minibuffer did not report `Quit'")
+        elif last.strip() != "Quit":
+            problems.append("the echo area kept the prompt behind `Quit': "
+                            "%r" % last)
+    return problems
+
+
 def check_suspend():
     """C-z must hand the terminal back, stop, and take it again.
 
@@ -4320,6 +4360,7 @@ CHECKS = {
     "suspend": check_suspend,
     "resize": check_resize,
     "terminal-restored": check_terminal_restored,
+    "quit-signal": check_quit_signal,
     "minibuffer": check_minibuffer,
     "minibuffer-cx-o": check_minibuffer_cx_o,
     "minibuffer-arrows": check_minibuffer_arrows,

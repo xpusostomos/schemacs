@@ -73,7 +73,10 @@
     (only (schemacs editor window) quit-window set-window-hscroll!)
     (only (schemacs editor command)
          current-prefix-arg uarg->integer
-         define-command *last-command-event*)
+         define-command *last-command-event*
+         ;; `keyboard-quit` signals `quit` and clears the flag the SIGINT
+         ;; handler set - both of them live down there for this reason.
+         signal-quit *quit-flag* *inhibit-quit*)
     ;; The buffer-local store, for `mark-ring' - which is the buffer's
     ;; own - and the variables that come from the libraries Emacs
     ;; declares them in: `mark-active' and `transient-mark-mode' are
@@ -689,10 +692,27 @@ This has no effect when the variable `line-move-visual' is non-nil."
     ;; `exchange-point-and-mark' are simple.el's; they were
     ;; misfiled under the Windows and isearch banners.
     (define-command (keyboard-quit)
-      "Cancel the current action and clear the echo area."
+      ;; GNU Emacs's `keyboard-quit` (`simple.el:9785`): "Signal a `quit'
+      ;; condition. During execution of Lisp code, this character causes a
+      ;; quit directly. At top-level, as an editor command, this simply
+      ;; beeps."
+      ;;
+      ;; Ours clears the echo area and any half-entered chord as well,
+      ;; which is what the tree did before it signalled anything - and is
+      ;; what `C-g` after `C-x` looks like it should do.
+      ;;
+      ;; **`saved-region-selection` and `defining-kbd-macro` are not
+      ;; carried**: the command loop clears the former itself after every
+      ;; command (`keyboard.c:1647`), and there are no keyboard macros yet.
+      "Signal a `quit' condition: cancel the current action."
       (interactive)
       (set!frame-message (*current-frame*) "")
-      (set!frame-keymap-state (*current-frame*) #f))
+      (set!frame-keymap-state (*current-frame*) #f)
+      ;; "Avoid adding the region to the window selection" -
+      ;; `(let (select-active-regions) (deactivate-mark))`.
+      (parameterize ((*select-active-regions* #f))
+        (deactivate-mark))
+      (signal-quit))
 
     (define-command (read-only-mode uarg)
       ;; GNU Emacs's `read-only-mode' (it used to be called

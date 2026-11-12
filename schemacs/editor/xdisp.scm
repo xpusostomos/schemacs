@@ -2998,8 +2998,7 @@
                               (list prompt)
                               (row->pixel-y (- height 1)) 0
                               (face->attribute 'minibuffer-prompt)))
-                (write-run! (current-display)
-                            (list (truncate-line
+                (let* ((typed (truncate-line
                                    (string-append
                                  ;; The echo buffer's characters, which
                                  ;; is `buffer-substring-no-properties'
@@ -3014,21 +3013,48 @@
                                        (point-min) (point-max)))
                                     (frame-message frame))
                                    (- width pwidth)))
-                            (row->pixel-y (- height 1)) pwidth
-                            ;; The typed text carries no face
-                               ;; property, so it is displayed in the
-                               ;; *default* face - Emacs's echo area is
-                               ;; the minibuffer window, redisplayed like
-                               ;; any other. `#f' here meant the
-                               ;; terminal's own colours, which is the
-                               ;; same thing only until a theme sets the
-                               ;; default face.
-                               (face->attribute 'default))))
+                       (twidth (min (line-display-width typed)
+                                    (- width pwidth))))
+                  (write-run! (current-display)
+                              (list typed)
+                              (row->pixel-y (- height 1)) pwidth
+                              ;; The typed text carries no face
+                              ;; property, so it is displayed in the
+                              ;; *default* face - Emacs's echo area is
+                              ;; the minibuffer window, redisplayed like
+                              ;; any other. `#f' here meant the
+                              ;; terminal's own colours, which is the
+                              ;; same thing only until a theme sets the
+                              ;; default face.
+                              (face->attribute 'default))
+                  ;; and the rest of the row, as in the message branch
+                  (clear-end-of-line-row! (current-display)
+                                          (frame-minibuffer-window frame)
+                                          (- height 1)
+                                          (row->pixel-y (- height 1))
+                                          (+ pwidth twidth)
+                                          (- width (+ pwidth twidth))
+                                          (face->attribute 'default)))))
              (else
-              (write-run! (current-display)
-                          (list (truncate-line (frame-message frame) width))
-                          (row->pixel-y (- height 1)) 0
-                          (face->attribute 'default))))))
+              (let* ((text (truncate-line (frame-message frame) width))
+                     (tw (min (line-display-width text) width)))
+                (write-run! (current-display)
+                            (list text)
+                            (row->pixel-y (- height 1)) 0
+                            (face->attribute 'default))
+                ;; **The rest of the row is blanked, because a window's
+                ;; glyph row is `window_box_width` cells** - the text and
+                ;; then spaces - and `update_window` diffs the whole of it.
+                ;; Without this a message shorter than what was on the row
+                ;; left the tail of the old one behind: measured, `M-x zzzz
+                ;; RET` drew "No matchzzzz", and a `Quit` after a
+                ;; minibuffer prompt left "/tmp/" after it.
+                (clear-end-of-line-row! (current-display)
+                                        (frame-minibuffer-window frame)
+                                        (- height 1)
+                                        (row->pixel-y (- height 1))
+                                        tw (- width tw)
+                                        (face->attribute 'default)))))))
         ;; Place the terminal cursor: in the minibuffer while one is
         ;; active (Emacs's `cursor-in-echo-area'), else at the selected
         ;; window's point - the only window whose cursor is drawn, there

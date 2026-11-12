@@ -29,9 +29,55 @@
    define-command *command-table* command? command-record-of command-value-of
    command-record-named
    register-command!
+   ;; The quit condition and the flag the SIGINT handler sets. They are
+   ;; here, not in `keyboard.c`'s library, because `keyboard-quit`
+   ;; (`simple.el`) has to signal the one and clear the other and
+   ;; `keyboard.scm` is above `simple.scm` - the same reason
+   ;; `current-prefix-arg` is here.
+   quit-char *quit-flag* *inhibit-quit*
+   <quit-condition> quit-condition? signal-quit
    )
 
   (begin
+
+    ;;----------------------------------------------------------------
+    ;; Quitting
+    ;;
+    ;; GNU Emacs's `quit_char` (`keyboard.c:13227`), `Vquit_flag` and
+    ;; `Vinhibit_quit` (`keyboard.c`), and the `quit` condition its
+    ;; `Fsignal (Qquit, Qnil)` raises (`eval.c`).
+    ;;
+    ;; **Why they are here and not in `keyboard.c`'s library.** The
+    ;; terminal makes C-g the interrupt character (`init_sys_modes`), so a
+    ;; C-g arrives as SIGINT and never as a byte; `handle_interrupt` sets
+    ;; the flag and the read answers `quit_char` for it. Both ends of that
+    ;; are `keyboard.scm`'s, which re-exports these. But `keyboard-quit`
+    ;; is `simple.el`'s, and `simple.scm` is *below* `keyboard.scm` - so a
+    ;; command that signals quit and clears the flag could reach neither.
+    ;; It is the same wall `current-prefix-arg` was moved down for.
+    ;;------------------------------------------------------------------
+
+    (define quit-char 7)
+    ;; ^ `quit_char = Ctl ('g')' (`keyboard.c:13227`).
+
+    (define *quit-flag* (make-parameter #f))
+    ;; ^ `Vquit_flag`. A parameter because the C `let`-binds it -
+    ;; `read_char` saves and clears it around the special-event lookup
+    ;; (`keyboard.c:3112`), which is what stops a resize or a focus change
+    ;; from swallowing a pending quit.
+
+    (define *inhibit-quit* (make-parameter #f))
+    ;; ^ `Vinhibit_quit`: while this is true `maybe_quit` does nothing.
+
+    (define-record-type <quit-condition>
+      (make-quit-condition) quit-condition?)
+
+    (define (signal-quit)
+      ;; Signal that the user quit, the way C-g does: GNU Emacs's
+      ;; `(signal 'quit nil)'. The command loop reports it as "Quit"
+      ;; (`keyboard.scm`'s `report-command-error!`, which is `cmd_error`).
+      ;;--------------------------------------------------------------
+      (raise (make-quit-condition)))
 
     (define-record-type <command-type>
       ;; A command is a structure containing a function that responds to

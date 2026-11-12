@@ -398,16 +398,11 @@ exit-by-signal-2, an all-raw termios afterwards, and not one byte of
 teardown in the stream. `C-z`, `C-r`, `C-w` and `C-v` were unreachable for
 the same reason.
 
-**Departure: `VINTR`/`VQUIT` are `CDISABLE` here, not `quit_char`.** Emacs
-turns C-g into SIGINT and its `read_char` notices `pending_signals`; this
-tree has no SIGINT handler at all, so a signal from the keyboard would kill
-the editor - the very thing the line exists to prevent. C-g is already a key
-here (the minibuffer binds it to `abort-recursive-edit`), so it arrives as
-one byte and nothing is lost **except** the C code that depends on a signal
-interrupting a blocked read. **Closing the gap** means porting
-`handle_interrupt` (`keyboard.c`) and the `pending_signals` test where reads
-happen - the same machinery `maybe_quit` needs - and then setting `VINTR` to
-`quit-char` as the C does.
+~~**Departure: `VINTR`/`VQUIT` were `CDISABLE` here, not `quit_char`** -
+closed the same day, see "C-g is a signal" below.~~ The first fix disabled
+them, because there was no SIGINT handler for C-g to raise and a keyboard
+signal would have killed the editor. `handle_interrupt` is ported now and
+the characters are `quit_char`, as the C has them.
 
 ### 2. The "saved" terminal mode was the one being edited
 
@@ -461,3 +456,121 @@ oflag, lflag, cc` different, no `te`) and with the save-then-copy reversed
 i.e. "remember the mode, and if that failed use what is there". The `or`
 made a second `tcgetattr` unreachable in the normal case, which is right;
 what was wrong was that the two were the same object.
+
+## C-g is a signal, and `keyboard-quit` signals `quit`
+
+The departure the previous section left open, closed. GNU Emacs makes C-g
+the terminal's **interrupt character** (`c_cc[VINTR] = quit_char`,
+`init_sys_modes`, `sysdep.c:1163`), so a C-g never arrives as a byte: the
+kernel consumes it and sends SIGINT. Everything else is built on that.
+
+### What is ported
+
+| Emacs | here |
+|---|---|
+| `quit_char = Ctl ('g')` (`keyboard.c:13227`) | `quit-char` (`command.scm`) |
+| `Vquit_flag`, `Vinhibit_quit` | `*quit-flag*`, `*inhibit-quit*` |
+| `handle_interrupt` (`keyboard.c`) | `handle-interrupt` (`keyboard.scm`) |
+| `init_signals`' SIGINT/SIGQUIT | `init-signals`, called where the terminal opens |
+| `maybe_quit` / `probably_quit` (`lisp.h:3897`, `eval.c:1887`) | `maybe-quit` |
+| `read_key_sequence`'s opening `maybe_quit ()` (`keyboard.c:11917`) | the top of `read-key-event`'s loop |
+| `read_char` answering `quit_char` for a pending flag (`:2806`) | `read-input-event` |
+| `cmd_error`'s `Vquit_flag = Qnil; Vinhibit_quit = Qnil` (`:1014`) | `report-command-error!` |
+| `keyboard-quit` (`simple.el:9785`) | `keyboard-quit` (`simple.scm`) |
+
+`force_quit_count` is ported too: the third C-g in a row clears
+`inhibit-quit`, which is how a user escapes a loop that meant to be
+uninterruptible.
+
+### The one mechanism that is not the C's
+
+**There is no `longjmp`.** Emacs's `handle_interrupt` calls
+`quit_throw_to_read_char`, which longjmps out of `pselect` and lands in
+`read_char` with `c = quit_char`. Here the signal interrupts `select` (it
+already did, for SIGWINCH), `%wait-and-read` stops waiting when the flag is
+set, and `read-input-event` answers `quit-char` for it. Same event, same
+place in the stream, no throw out of a signal handler - which is the part of
+the C that a Scheme signal handler should not be asked to do.
+
+**What that costs**: a C-g that arrives while a *long command* is running is
+noticed at the next read rather than at the next `QUIT` inside the command.
+Emacs calls `maybe_quit` from its C loops - `search_buffer`, the insdel
+loops, `redisplay` - and those are `engine.scm` and `search.scm` here, which
+are *below* `keyboard.scm` and cannot import it. Closing that needs the seam
+this tree already uses for `*message-function*` and
+`*record-window-buffer-function*`: a `*maybe-quit-function*` installed by
+`keyboard.scm` and called from the engine's walks. Not done here, and named
+rather than implied.
+
+### Two departures in `keyboard-quit`
+
+- **`saved-region-selection` and `defining-kbd-macro` are not carried.**
+  The command loop clears the former after every command already
+  (`keyboard.c:1647`), and there are no keyboard macros yet.
+- **It clears the echo area and any half-entered chord**, which Emacs's does
+  not - that is what this tree's `keyboard-quit` did before it signalled
+  anything, and it is what `C-g` after `C-x` should look like.
+
+### Where the quit condition lives, and why
+
+`quit-char`, `*quit-flag*`, `*inhibit-quit*`, `<quit-condition>` and
+`signal-quit` are in **`command.scm`**, not `keyboard.scm`, and re-exported
+from `keyboard.scm` so every importer is unchanged. `keyboard-quit` is
+`simple.el`'s and `simple.scm` is *below* `keyboard.scm`, so a command that
+signals quit and clears the flag could reach neither - the same wall
+`current-prefix-arg` was moved down for.
+
+### The echo area did not blank the rest of its row
+
+Found while testing this, and not caused by it: a message shorter than what
+was already on the echo row left the tail behind. Measured, `M-x zzzz RET`
+drew `No matchzzzz`, and a `Quit` after a minibuffer prompt left
+`Quit/tmp/`. A window's glyph row is `window_box_width` cells - the text and
+then spaces - and `update_window` diffs the whole of it; the echo area was
+written with `write-run!` and nothing after it. Both branches now call
+`clear-end-of-line-row!` for the rest of the row, which is what
+`draw-glyph-row!` already did for every other row.
+
+### The check
+
+`tools/pty-check.py` grew **`quit-signal`**: C-g at top level must report
+`Quit` and leave the editor running, and C-g inside a prompt must report
+`Quit` with nothing of the prompt left behind it. Verified failing both ways
+- with `init-signals` removed (the editor is killed by SIGINT) and with the
+echo-area blanking removed (`'Quit/zzz'`).
+
+## The terminal's back door had no wake, and an idle editor could not be woken
+
+Found while testing the C-g work, and not caused by it: `back-door` and
+`imports` had been failing in the full battery (and, because
+`tools/pty-check.py`'s `main` does not catch exceptions, the battery was
+**stopping at `back-door`** - the "everything else passed" runs had simply
+not reached the later checks).
+
+The command loop shortens its read for the door only when the front end
+*has no* wake:
+
+```scheme
+(read-timeout-or -1 (timer-next-delay)
+                 (and (repl-running?) (not (repl-wake)) 100))
+```
+
+`(repl-wake)` is `(scheme-utils repl server)`'s, and its default is
+`default-wake` - **a procedure, so always true**. The terminal's own wake -
+the self-pipe the notes say landed on 2026-10-07 - went away when this file
+stopped being ncurses, so no cap was applied and no pipe was waited on: an
+idle editor's `select` blocked for ever and the door answered only when a
+key was typed. Measured: `repl -e '(+ 1 2)' NAME` timed out against an idle
+editor and answered at once with a key being typed.
+
+`install-repl-wake!` (`term.scm`, called by `with-terminal`) is that pipe
+again: an unbuffered write end, `repl-wake!` given a procedure that stores
+the thunk the server wants run on this thread and writes one byte, and
+`%wait-and-read` selecting on **two** descriptors - the keyboard and the
+pipe - and running the stored thunk when the pipe is the one that woke it.
+`get-u8` drains it (a buffered read end would leave bytes behind and wake
+the wait for ever).
+
+Two Guile spellings worth knowing, both cost a round each: `put-u8` is
+`(rnrs io ports)`'s and **not** `(guile)`'s, and that library's read is
+`get-u8`, not `read-u8`.

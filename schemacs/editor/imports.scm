@@ -65,7 +65,7 @@
     (schemacs editor faces)
     (schemacs editor coding)
     (schemacs editor startup)
-    (schemacs editor command)
+    (except (schemacs editor command)  quit-char *quit-flag* *inhibit-quit* signal-quit)
     (except (schemacs editor fns)  compare-strings line-number-at-pos)
     (schemacs editor timefns)
     (schemacs editor custom)
@@ -295,6 +295,7 @@
     *inhibit-file-name-handlers*
     *inhibit-file-name-operation*
     *inhibit-message*
+    *inhibit-quit*
     *inhibit-read-only*
     *init-file-user*
     *initial-frame-alist*
@@ -386,6 +387,7 @@
     *query-replace-map*
     *query-replace-read-from-default*
     *query-replace-read-from-regexp-default*
+    *quit-flag*
     *read-buffer-completion-ignore-case*
     *read-buffer-function*
     *read-buffer-to-switch*
@@ -455,6 +457,7 @@
     <glyph>
     <interval>
     <marker>
+    <quit-condition>
     <test-display>
     <widget-value>
     Buffer-menu-beginning
@@ -606,6 +609,7 @@
     cd
     cd-absolute
     cd-path
+    change-frame-size
     char-after
     char-alt
     char-before
@@ -639,10 +643,12 @@
     check-face
     choose-completion
     clear-end-of-line!
+    clear-frame!
     clear-frame-area!
     clear-glyph-matrix
     clear-glyph-matrix-row
     clear-prefix!
+    clear-to-end!
     code-point->char
     coding-read-char
     coding-setup-port!
@@ -736,6 +742,7 @@
     current-time
     current-time-string
     cursor-screen-position
+    cursor-to!
     custom--bound?
     custom--getter
     custom--setter
@@ -939,6 +946,7 @@
     display-supports-face-attributes-p
     display-text-width
     display-warning
+    do-pending-window-change
     downcase
     downcase-region
     downcase-word
@@ -962,6 +970,7 @@
     eol
     eolp
     erase-buffer
+    erase-window-cursor!
     error-message-string
     eval-expression
     eval-expression-print-format
@@ -1138,6 +1147,7 @@
     frame-message-timer
     frame-minibuffer-window
     frame-name
+    frame-new-size-p
     frame-or-buffer-changed-p
     frame-output
     frame-parameter
@@ -1225,6 +1235,7 @@
     gui-selection-value
     gui-set-selection
     handle-delete-frame
+    handle-interrupt
     history-entries
     history?
     hscroll-line-slice
@@ -1235,6 +1246,7 @@
     inhibit-startup-screen
     init-menu-items
     init-path
+    init-signals
     insert
     insert-and-inherit
     insert-buffer-substring
@@ -1452,6 +1464,7 @@
     match-substitute-replacement
     matrix-diff-rows
     matrix-mark-current!
+    maybe-quit
     menu-bar-edit-menu
     menu-bar-file-menu
     menu-bar-i-search-menu
@@ -1654,9 +1667,12 @@
     query-replace-read-from
     query-replace-read-to
     query-replace-regexp
+    quit-char
+    quit-condition?
     quit-restore-window
     quit-window
     quoted-insert
+    raw-cursor-to!
     re-search-backward
     re-search-forward
     read--expression
@@ -1718,6 +1734,7 @@
     reproduce-tree
     reproduce-tree-object
     request-prefix-echo!
+    reset-terminal-modes!
     resize-frame-windows!
     restore-buffer-modified-p
     resume-display!
@@ -1935,6 +1952,7 @@
     set-object-intervals
     set-point
     set-selection!
+    set-terminal-modes!
     set-text-properties
     set-transient-map
     set-visited-file-modtime
@@ -2119,6 +2137,8 @@
     upcase-initials
     upcase-region
     upcase-word
+    update-begin!
+    update-end!
     update-interval
     update-prefix!
     update-submenu-strings

@@ -35,7 +35,11 @@
           (only (rnrs bytevectors) bytevector-u8-ref bytevector-u8-set!
                 bytevector-u32-ref bytevector-u32-set!
                 bytevector-u16-ref native-endianness)
-          (only (schemacs ui tty tinfo) tgetstr))
+          (only (schemacs ui tty tinfo) tgetstr)
+          ;; `quit_char` is `keyboard.c`'s, and `sysdep.c` reads it as an
+          ;; `extern` - `init_sys_modes` makes it the terminal's interrupt
+          ;; and quit character. The same cross-reference here.
+          (only (schemacs editor keyboard) quit-char))
 
   (export init-sys-modes reset-sys-modes get-tty-size
           tty-save-modes! tty-restore-modes!
@@ -298,21 +302,22 @@
           ;; alternate screen. Measured: `C-x C-c` gave exit-by-SIGINT, a
           ;; raw termios afterwards and not one byte of teardown. Every
           ;; shell character above is a key some mode binds, and the kernel
-          ;; was eating them the same way.
-          ;;
-          ;; **`VINTR` is disabled rather than set to `quit_char`.** Emacs
-          ;; turns C-g into SIGINT and its `read_char` notices the flag;
-          ;; this tree has no SIGINT handler at all, so a signal from the
-          ;; keyboard would kill the editor - which is the very thing this
-          ;; line exists to stop. C-g is already a key here (the minibuffer
-          ;; binds it to `abort-recursive-edit`), so nothing is lost by
-          ;; letting it arrive as one byte. Closing the gap means porting
-          ;; `handle_interrupt` (`keyboard.c`) and the `pending_signals`
-          ;; test in the read path - the departure is recorded in
-          ;; DEPARTURES.md.
+          ;; was eating them the same way. The gap that left - `VINTR`
+          ;; disabled, because there was no SIGINT handler for C-g to raise
+          ;; - is closed: `handle_interrupt` and `maybe_quit` are
+          ;; `(schemacs editor keyboard)`'s now, and `init-signals` is
+          ;; installed where the terminal is opened.
+          ;; **C-g is the interrupt character, as the C has it**:
+          ;; `c_cc[VINTR] = quit_char` and `VQUIT` too, so C-g and C-\
+          ;; both arrive as SIGINT/SIGQUIT and `handle_interrupt` records
+          ;; the quit. The byte never reaches the reader - which is why
+          ;; `read-key-event` answers `quit-char` for a pending flag, and
+          ;; why `C-q C-g` can still insert a ^G.
+          (bytevector-u8-set! settings (+ %off-cc VINTR) quit-char)
+          (bytevector-u8-set! settings (+ %off-cc VQUIT) quit-char)
           (for-each (lambda (index)
                       (bytevector-u8-set! settings (+ %off-cc index) CDISABLE))
-                    (list VINTR VQUIT VSTART VSTOP VSUSP VREPRINT VDISCARD
+                    (list VSTART VSTOP VSUSP VREPRINT VDISCARD
                           VWERASE VLNEXT))
           (%write-modes! *tty-fd* settings)
           #t)))

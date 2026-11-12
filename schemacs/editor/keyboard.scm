@@ -45,7 +45,11 @@
     ;; signal one could see it, because the error path is not otherwise
     ;; reached.
     (only (guile) format inexact->exact logior string-index
-          current-module filter caddr)
+          current-module filter caddr
+          ;; `init_signals`: C-g and C-\ arrive as signals, because
+          ;; `init_sys_modes` made them the terminal's interrupt and quit
+          ;; characters.
+          sigaction SIGINT SIGQUIT)
     (prefix (schemacs editor keymap) km:)
     ;; `make-buffer-string` is `editfns.c:1561`'s and is
     ;; `intervals.scm`'s - it must live below `search.scm`, which
@@ -53,6 +57,10 @@
     (only (schemacs editor intervals) make-buffer-string get)
     
     (only (schemacs editor command)
+          ;; The quit condition and its flag, which `keyboard-quit`
+          ;; (`simple.scm`) has to reach and this library is above it.
+          quit-char *quit-flag* *inhibit-quit* quit-condition?
+          signal-quit
           *last-command-event*
           command-interactive-spec command-name command-record-of
           command-type? define-command
@@ -208,7 +216,12 @@
    set-transient-map
    sit-for
    report-command-error!
-   signal-quit
+   ;; `signal-quit`, `quit-char`, `*quit-flag*` and `*inhibit-quit*` are
+   ;; `(schemacs editor command)`'s and re-exported here, so that every
+   ;; importer of this library is unchanged.
+   signal-quit quit-char *quit-flag* *inhibit-quit*
+   ;; The SIGINT handler and `maybe_quit` - `keyboard.c`'s and `eval.c`'s.
+   handle-interrupt init-signals maybe-quit
    ;; `timer_check' and the read's deadline are the command loop's, so
    ;; they are published the way the rest of the loop is.
    timer-check!
@@ -536,6 +549,13 @@
       ;; "funcall-interactively: End of buffer". This tree's command loop
       ;; does not carry that variable, so the text is logged without the
       ;; prefix: a named departure, not a guess at the name.
+      ;; **`cmd_error` clears the quit state** (`keyboard.c:1014`):
+      ;; "Vquit_flag = Qnil; Vinhibit_quit = Qnil;". Without it the flag
+      ;; the SIGINT handler set would still be there when the next read
+      ;; began, and the editor would quit again and again.
+      (when (quit-condition? ex)
+        (*quit-flag* #f)
+        (*inhibit-quit* #f))
       (message
        "%s"
        (cond
@@ -1015,14 +1035,73 @@
     ;; that same trick: the loop returns a thunk, and the caller runs it.
     ;;------------------------------------------------------------------
 
-    (define-record-type <quit-condition>
-      (make-quit-condition) quit-condition?)
+    ;;----------------------------------------------------------------
+    ;; Quitting: `quit-flag`, `inhibit-quit`, and C-g as a *signal*
+    ;;
+    ;; GNU Emacs's `keyboard.c` and `eval.c`. The terminal's `VINTR` is
+    ;; `quit-char` (`init_sys_modes`, `sysdep.c:1163`), so a C-g does not
+    ;; arrive as a byte at all: the kernel turns it into SIGINT, and
+    ;; `handle_interrupt` records that the user asked to quit. Two things
+    ;; read that record - `maybe-quit` in a loop, and the read itself,
+    ;; which answers `quit-char` as an event so that the keymaps see the
+    ;; C-g they are bound for.
+    ;;
+    ;; **Why a signal rather than a key.** It is the only way C-g can
+    ;; interrupt a *blocked* wait: the byte would sit in the input queue
+    ;; until the read that is already waiting returned. It is also what
+    ;; makes `C-q C-g` possible - `read_char` answers `quit_char` for a
+    ;; pending flag (`keyboard.c:2806`), so the quoted-insert reads a C-g
+    ;; even though the kernel consumed the byte.
+    ;;------------------------------------------------------------------
 
-    (define (signal-quit)
-      ;; Signal that the user quit, the way C-g does: GNU Emacs's
-      ;; `(signal 'quit nil)'.
+    ;; `quit-char`, `*quit-flag*`, `*inhibit-quit*`, the `<quit-condition>`
+    ;; record and `signal-quit` are `(schemacs editor command)`'s - see the
+    ;; note there. They are re-exported below, so every importer of this
+    ;; library is unchanged.
+
+    (define force-quit-count 0)
+    ;; ^ `force_quit_count`: the third C-g in a row quits even inside
+    ;; `inhibit-quit`, which is how a user escapes a loop that meant to be
+    ;; uninterruptible.
+
+    (define (handle-interrupt sig)
+      ;; GNU Emacs's `handle_interrupt` (`keyboard.c`): "Request quit when
+      ;; it's safe."
+      ;;
+      ;; **The emergency-escape branch is not carried.** The C's first
+      ;; branch is for `quit-flag' holding `kill-emacs' - it drops to a
+      ;; shell and offers to auto-save and dump core - and nothing here
+      ;; sets that value.
       ;;--------------------------------------------------------------
-      (raise (make-quit-condition)))
+      (let ((count (if (*quit-flag*) (+ force-quit-count 1) 1)))
+        (set! force-quit-count count)
+        (when (= count 3)
+          (*inhibit-quit* #f))
+        (*quit-flag* #t)))
+
+    (define (init-signals)
+      ;; GNU Emacs's `init_signals` (`keyboard.c`), the two that matter for
+      ;; a terminal: `init_sys_modes` made C-g the interrupt character and
+      ;; C-\ the quit character, so both arrive here and neither reaches
+      ;; the byte reader.
+      ;;--------------------------------------------------------------
+      (sigaction SIGINT handle-interrupt)
+      (sigaction SIGQUIT handle-interrupt))
+
+    (define (maybe-quit)
+      ;; GNU Emacs's `maybe_quit` (`lisp.h:3897`) over `probably_quit`
+      ;; (`eval.c:1887`): "Every loop that might run for a long time or
+      ;; might not exit ought to call maybe_quit at least once, at a safe
+      ;; place."
+      ;;
+      ;; The C also drains `pending_signals` here - the sigusr1/sigusr2
+      ;; events and the window-change flag. There are no user-signal events
+      ;; in this tree and a resize is applied by the wait, so what is left
+      ;; is the quit.
+      ;;--------------------------------------------------------------
+      (when (and (*quit-flag*) (not (*inhibit-quit*)))
+        (*quit-flag* #f)
+        (signal-quit)))
 
     (define *recursive-edit-exit* (make-parameter #f))
 
@@ -1107,23 +1186,30 @@
       ;;--------------------------------------------------------------
       (let ((deadline (and (>= timeout 0) (+ (%now-ms) timeout))))
         (let loop ()
+          ;; **`read_key_sequence` opens with `maybe_quit ()`**
+          ;; (`keyboard.c:11917`): a quit recorded since the last read is
+          ;; signalled now, which is what makes a C-g that arrived while a
+          ;; command was running take effect at the next read. A C-g that
+          ;; arrives *during* the read below is the other half - the read
+          ;; answers `quit_char` for it, as `read_char` does.
+          (maybe-quit)
           (let* ((unread (*unread-command-events*))
-                 (ev (if (null? unread)
-                         (let ((raw (read-input-event
-                                     (current-display)
-                                     (if deadline
-                                         (max 0 (- deadline (%now-ms)))
-                                         timeout))))
-                           (*last-read-event* raw)
-                           (and raw (key-event->key (current-display) raw)))
-                         (begin
-                           (*unread-command-events* (cdr unread))
-                           (car unread)))))
-            (if (and ev (dispatch-special-event (*current-frame*) ev))
-                (begin
-                  (redisplay-frames!)
-                  (loop))
-                ev)))))
+                   (ev (if (null? unread)
+                           (let ((raw (read-input-event
+                                       (current-display)
+                                       (if deadline
+                                           (max 0 (- deadline (%now-ms)))
+                                           timeout))))
+                             (*last-read-event* raw)
+                             (and raw (key-event->key (current-display) raw)))
+                           (begin
+                             (*unread-command-events* (cdr unread))
+                             (car unread)))))
+              (if (and ev (dispatch-special-event (*current-frame*) ev))
+                  (begin
+                    (redisplay-frames!)
+                    (loop))
+                  ev)))))
 
     (define (sit-for seconds nodisp)
       ;; GNU Emacs's `sit-for' (`subr.el:3836'): "Redisplay, then wait

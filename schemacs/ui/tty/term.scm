@@ -74,19 +74,27 @@
     (only (schemacs editor frame) *tty-select-active-regions*
           *frame-list* frame-output change-frame-size
           do-pending-window-change)
+    ;; `init_signals` and the quit flag (`keyboard.c`): C-g and C-\ are the
+    ;; terminal's interrupt characters, so they arrive as signals.
+    (only (schemacs editor keyboard) init-signals *quit-flag* quit-char)
     (only (schemacs editor faces)
           *display-color-cells* *display-type* *frame-background-mode*
           face-list face-spec-recalc)
     ;; The clock a read's deadline is measured with.
-    (only (rnrs io ports) get-bytevector-some)
+    (only (rnrs io ports) get-bytevector-some put-u8 get-u8)
     (only (rnrs bytevectors) bytevector-length bytevector-u8-ref)
     (only (guile) getenv string-prefix? logior logand ash delq
           delete last-pair caddr sort
-          ;; `select` waits on the keyboard descriptor - the same call GNU
-          ;; Emacs makes as `pselect` (`process.c:5830`), minus the
-          ;; subprocess and self-pipe sets this editor has no use for.
+          ;; `select` waits on the keyboard descriptor and the back door's
+          ;; pipe - the same call GNU Emacs makes as `pselect`
+          ;; (`process.c:5830').
           select sigaction SIGWINCH
+          ;; The back door's wake: a pipe this process selects on, written
+          ;; by the cooperative server's reader thread.
+          pipe setvbuf
           get-internal-real-time internal-time-units-per-second)
+    ;; The back door - how a client's work is handed to this thread.
+    (only (scheme-utils repl server) repl-wake!)
     ;; **Nothing from the back door.** The command loop asks
     ;; `(schemacs editor keyboard)` for a timed read when the REPL is open
     ;; - `read-timeout-or` with a 100 ms cap for a front end that cannot be
@@ -422,6 +430,13 @@
           ;; started with. Measured: at 40 rows the mode line stayed on
           ;; row 22.
           (sigaction SIGWINCH (lambda (sig) (handle-window-change-signal)))
+          ;; GNU Emacs's `init_signals` runs from `main`, before the
+          ;; terminal is opened; here it is the opening that says this
+          ;; process has a keyboard at all.
+          (init-signals)
+          ;; The back door's wake, so that an idle editor can be woken by a
+          ;; client instead of polling for one.
+          (install-repl-wake!)
           (let* ((size (get-tty-size *tty-fd*))
                  (rows (car size))
                  (cols (cdr size))
@@ -767,10 +782,19 @@
       ;;--------------------------------------------------------------
       (let loop ()
         (let* ((left (and deadline (- deadline (tty-now-ms))))
-               (ready (car (select (list %keyboard-fd) '() '()
+               (watched (if %repl-wake-rd
+                            (list %keyboard-fd %repl-wake-rd)
+                            (list %keyboard-fd)))
+               (ready (car (select watched '() '()
                                    (if left
                                        (max 0.001 (/ left 1000.0))
                                        #f)))))
+          ;; **The back door first**: the server's reader thread wrote a
+          ;; byte, and the thunk it queued is what runs the expression in
+          ;; this thread - the only thread that owns the editor's state.
+          ;; Emptying the pipe is what lets the next wait block again.
+          (when (and %repl-wake-rd (memq %repl-wake-rd ready))
+            (%drain-repl-wake!))
           ;; **"If we woke up due to SIGWINCH, actually change size now"**,
           ;; `wait_reading_process_output`'s own line (`process.c:5862`):
           ;; the size is read and applied *before* the bytes are looked
@@ -789,6 +813,13 @@
            ;; nothing. **Only the deadline ends the wait with nothing** -
            ;; answering #f for a spurious wake is what quit the editor,
            ;; because a #f on a blocking read is the end of input.
+           ;; **A quit ends the wait too**, and it is the one signal that
+           ;; cannot simply be waited through: `handle_interrupt` has
+           ;; recorded it (`keyboard.c`), and GNU Emacs leaves
+           ;; `wait_reading_process_output` for it by longjmp
+           ;; (`quit_throw_to_read_char`). The flag is what is left of
+           ;; that here; `read-input-event` answers the C-g it stands for.
+           ((*quit-flag*) #f)
            ((and deadline (<= deadline (tty-now-ms))) #f)
            (else (loop))))))
 
@@ -877,6 +908,49 @@
     ;;----------------------------------------------------------------
     ;; The clock, and reading a key
     ;;------------------------------------------------------------------
+
+    (define %repl-wake-rd #f)
+    (define %repl-wake-wr #f)
+    (define %repl-wake-thunk #f)
+    ;; ^ The back door's wake - "a pipe a terminal selects on", which is
+    ;; what `(scheme-utils repl server)`'s `repl-wake!' documents a host
+    ;; with its own loop as supplying. **It was lost when this file stopped
+    ;; being ncurses** - the terminal went back to a 100 ms cap on the read
+    ;; instead, and that cap is only taken when `(repl-wake)` is false,
+    ;; which it never is (the shared module's default is a GLib idle).
+    ;; Measured: an idle editor with the door open answered nothing until a
+    ;; key was typed.
+
+    (define (install-repl-wake!)
+      ;; Give the back door a way to wake *this* loop: one byte written to a
+      ;; pipe, and the byte is what `%wait-and-read` selects on. The
+      ;; argument is the thunk the server wants run on the thread that owns
+      ;; the editor's state - here, the one about to wait.
+      ;;--------------------------------------------------------------
+      (let ((p (pipe)))
+        (set! %repl-wake-rd (car p))
+        (set! %repl-wake-wr (cdr p))
+        ;; **Unbuffered, or the byte never reaches the descriptor.**
+        ;; Guile's `(pipe)` gives buffered ports, and a `put-u8` that stays
+        ;; in the buffer leaves `select` reporting nothing.
+        (setvbuf %repl-wake-wr 'none)
+        (repl-wake!
+         (lambda (thunk)
+           (set! %repl-wake-thunk thunk)
+           (and %repl-wake-wr
+                (begin (put-u8 %repl-wake-wr (char->integer #\newline))
+                       #t))))))
+
+    (define (%drain-repl-wake!)
+      ;; Run what the server asked for and empty the pipe, so the next wait
+      ;; blocks again.
+      ;;--------------------------------------------------------------
+      (let loop ((thunk %repl-wake-thunk))
+        (set! %repl-wake-thunk #f)
+        (when thunk (thunk))
+        (when (char-ready? %repl-wake-rd)
+          (get-u8 %repl-wake-rd)
+          (loop %repl-wake-thunk))))
 
     (define %size-change-pending? #f)
     ;; ^ Whether the last wait applied a size change the editor has not
@@ -967,6 +1041,11 @@
              ;; knew the symbol) and would have made every timed wait
              ;; redraw the whole frame.
              (%size-change-pending? (set! %size-change-pending? #f) 'resize)
+             ;; **The C-g the kernel turned into a signal.** `read_char`
+             ;; answers `quit_char` for a pending quit
+             ;; (`keyboard.c:2806`); the flag is left for `read-key-event`,
+             ;; which is what clears it.
+             ((*quit-flag*) quit-char)
              (else #f)))))
 
     ;;----------------------------------------------------------------
