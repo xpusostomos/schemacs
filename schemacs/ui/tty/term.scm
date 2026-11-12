@@ -502,17 +502,45 @@
             ((string=? name "AB") (tty-set-background caps))
             (else (tgetstr name))))
 
-    (define (tty-highlight-if-desired caps)
-      ;; GNU Emacs's `tty_highlight_if_desired` (`term.c`): the standout
-      ;; state a face asks for, which is what `turn_on_face` toggles and
-      ;; `tty_write_glyphs_1` restores around a run.
+    (define (tty-turn-on-highlight caps)
+      ;; GNU Emacs's `tty_turn_on_highlight` (`term.c:326`):
+      ;;
+      ;;   if (!tty->standout_mode) OUTPUT_IF (tty, tty->TS_standout_mode);
+      ;;   tty->standout_mode = 1;
       ;;--------------------------------------------------------------
-      (when (tty-standout-mode caps) (%emit (tty-standout caps))))
+      (unless (tty-standout-mode caps) (%emit (tty-standout caps)))
+      (set-tty-standout-mode! caps #t))
 
     (define (tty-turn-off-highlight caps)
-      ;; `tty_turn_off_highlight` (`term.c`).
+      ;; GNU Emacs's `tty_turn_off_highlight` (`term.c:318`):
+      ;;
+      ;;   if (tty->standout_mode) OUTPUT_IF (tty, tty->TS_end_standout_mode);
+      ;;   tty->standout_mode = 0;
+      ;;
+      ;; **The flag is cleared whatever it was**, and that line was
+      ;; missing here: this only emitted `se` when the flag was already
+      ;; set, so a face with `:reverse` (the mode line, the prompt) left
+      ;; it set for ever. Nothing visible followed, because
+      ;; `tty-highlight-if-desired` emitted `so` again and `turn_on_face`
+      ;; swaps the foreground and background while the flag is up - so
+      ;; the picture stayed right while every later run carried an extra
+      ;; `so`/`se` pair and its colours went out in the opposite order.
+      ;; Found by a pty check that pins those bytes (`region-highlight`),
+      ;; when an unrelated change stopped the mode line being redrawn.
       ;;--------------------------------------------------------------
-      (when (tty-standout-mode caps) (%emit (tty-end-standout caps))))
+      (when (tty-standout-mode caps) (%emit (tty-end-standout caps)))
+      (set-tty-standout-mode! caps #f))
+
+    (define (tty-highlight-if-desired caps)
+      ;; GNU Emacs's `tty_highlight_if_desired` (`term.c:398`), which is
+      ;; `tty_background_highlight`'s body too: "Set standout mode to the
+      ;; mode specified for the text to be output" - on or off according
+      ;; to `inverse-video`, not merely "emit `so` if we think we are in
+      ;; it".
+      ;;--------------------------------------------------------------
+      (if (*tty-inverse-video*)
+          (tty-turn-on-highlight caps)
+          (tty-turn-off-highlight caps)))
 
     (define (tty-turn-on-face face)
       ;; GNU Emacs's `turn_on_face` (`term.c:2111`).

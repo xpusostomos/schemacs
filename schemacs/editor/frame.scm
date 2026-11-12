@@ -251,6 +251,10 @@
    ;; the window's picture was built from.
    window-last-point set!window-last-point
    window-last-mark set!window-last-mark
+   ;; The mode line row as it was last drawn, so a row that has not
+   ;; changed is not written again - `update_window`'s diff for the row
+   ;; the mode line occupies.
+   window-last-mode-line set!window-last-mode-line
    ;; `window_outdated` (`window.c:231`), which the redisplay asks before
    ;; it trusts a window's glyph matrix.
    window-outdated?
@@ -313,7 +317,8 @@
        hscroll min-hscroll suspend-auto-hscroll? old-point
        prev-buffers next-buffers
        last-buffer last-modified last-overlay-modified last-start
-       last-width last-height last-hscroll last-point last-mark)
+       last-width last-height last-hscroll last-point last-mark
+       last-mode-line)
       window-type?
       (frame     window-frame       set!window-frame)
       ;; ^ The frame this window is on: GNU Emacs's `w->frame', the first
@@ -446,6 +451,13 @@
       ;; `BUF_PT` for the selected window and `marker_position
       ;; (w->pointm)` otherwise.
       (last-mark window-last-mark set!window-last-mark)
+      (last-mode-line window-last-mode-line set!window-last-mode-line)
+      ;; ^ `(STRING FACE Y X)` as the mode line row was last drawn, or
+      ;; `#f` when nothing of ours is on that row. GNU Emacs needs no such
+      ;; field: the mode line is a row of the window's glyph matrix
+      ;; (`display_mode_line`) and `update_window` diffs it like any
+      ;; other. This tree draws it directly, outside the matrices, so the
+      ;; comparison the matrix would have made is made here.
       ;; ^ `w->last_mark`, the mark that redisplay was built from, and
       ;; -1 where Emacs's is -1: "the value of mark as it was in the last
       ;; display", with the C's rule that an inactive mark reads -1.
@@ -825,12 +837,12 @@
                         top height left width #f '()
                         0 0 #f 0 '() '()
                         ;; nothing built yet: `window_outdated?` says so
-                        #f 0 0 0 0 0 0 0 -1)
+                        #f 0 0 0 0 0 0 0 -1 #f)
           (make<window> frame #f #f #f #f
                         0 0 #f 0 0
                         top height left width #f '()
                         0 0 #f 0 '() '()
-                        #f 0 0 0 0 0 0 0 -1)))
+                        #f 0 0 0 0 0 0 0 -1 #f)))
 
     ;;----------------------------------------------------------------
     ;; Editor state

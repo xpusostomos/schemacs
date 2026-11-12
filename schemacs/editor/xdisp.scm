@@ -144,6 +144,7 @@
          window-last-hscroll set!window-last-hscroll
          window-last-point set!window-last-point
          window-last-mark set!window-last-mark
+         window-last-mode-line set!window-last-mode-line
          ;; `mark_window_display_accurate`'s walk over the window tree
          window-internal? window-children)
     (only (schemacs editor disp-table)
@@ -2755,6 +2756,11 @@
          window (if (and accurate-p buffer)
                     (buffer-overlay-modified-tick buffer)
                     0))
+        ;; The mode line row goes the same way: a frame whose surface was
+        ;; just wiped has no row of ours on the screen, whatever was drawn
+        ;; on it before.
+        (unless accurate-p
+          (set!window-last-mode-line window #f))
         (when accurate-p
           (let ((start (%window-start window)))
             (set!window-last-buffer window buffer)
@@ -2794,26 +2800,41 @@
       ;; Draw WINDOW's mode line and its vertical border - the part of a
       ;; window that is not glyph rows.
       ;;
-      ;; **It is drawn every redisplay, and that is Emacs's rule too**:
-      ;; `mode_line_update_needed` is the C's cheap test, and what it
-      ;; guards is one row's formatting. The row *contents* here are the
-      ;; mode line string, which changes with the buffer, the point and
-      ;; every minor mode; formatting it is the cheap part and comparing
-      ;; it would cost the same.
+      ;; **`update_window`'s diff, for the row the mode line occupies.**
+      ;; GNU Emacs builds the mode line into the window's desired glyph
+      ;; matrix (`display_mode_line`) and then compares that row with the
+      ;; current matrix like any other, so an unchanged mode line costs
+      ;; nothing. This tree draws it directly, outside the matrices, so
+      ;; the same comparison is made here against what was last written:
+      ;; the padded string, the face (which flips when the window is
+      ;; selected), and **the row and column it went to** - a row compared
+      ;; by content alone would be skipped at a position nothing had ever
+      ;; been written to, which is what a split window that moved its mode
+      ;; line up needs.
+      ;;
+      ;; Two things invalidate it beyond the content: a theme or face
+      ;; change (`windows-or-buffers-changed?`, set by
+      ;; `set-face-attribute`), and a surface that is about to be wiped
+      ;; (`frame-garbaged-p`, and `mark-window-display-accurate-1` clears
+      ;; the field when it wipes one).
       ;;--------------------------------------------------------------
       (let* ((x0 (window-left window))
              (width (window-body-width window))
-             (border (and (window-right-border? window) (+ x0 width))))
-        (draw-mode-line! (mode-line-pad
-                          (mode-line-truncate (mode-line-string window)
-                                              width)
-                          width)
-                         (if (eq? window (selected-window))
-                             'mode-line-active
-                             'mode-line-inactive)
-                         (row->pixel-y
-                          (+ (window-top window) (window-height window) -1))
-                         x0)
+             (border (and (window-right-border? window) (+ x0 width)))
+             (y (row->pixel-y
+                 (+ (window-top window) (window-height window) -1)))
+             (line (mode-line-pad
+                    (mode-line-truncate (mode-line-string window) width)
+                    width))
+             (face (if (eq? window (selected-window))
+                       'mode-line-active
+                       'mode-line-inactive))
+             (record (list line face y x0)))
+        (unless (and (not (windows-or-buffers-changed?))
+                     (not (frame-garbaged-p (window-frame window)))
+                     (equal? (window-last-mode-line window) record))
+          (draw-mode-line! line face y x0)
+          (set!window-last-mode-line window record))
         (when border
           (let loop ((row (window-top window))
                      (end (+ (window-top window) (window-height window))))

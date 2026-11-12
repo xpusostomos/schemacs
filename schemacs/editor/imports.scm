@@ -1903,6 +1903,7 @@
     set!window-last-height
     set!window-last-hscroll
     set!window-last-mark
+    set!window-last-mode-line
     set!window-last-modified
     set!window-last-overlay-modified
     set!window-last-point
@@ -2201,6 +2202,7 @@
     window-last-height
     window-last-hscroll
     window-last-mark
+    window-last-mode-line
     window-last-modified
     window-last-overlay-modified
     window-last-point

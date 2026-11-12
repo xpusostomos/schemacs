@@ -699,3 +699,53 @@ and its text is `EDITED original` - which contains `original`. It started
 failing the moment rows that had not changed stopped being redrawn, which
 is the check doing its job for the first time. It now answers `yes` and
 asserts on the final screen: the file's text there, and no `EDITED`.
+
+## The mode line is compared here, and what that exposed in the face code
+
+`update_window` (`dispnew.c:4400`) diffs the mode line like any other row:
+`display_mode_line` builds it into the window's desired glyph matrix, and
+an unchanged mode line therefore costs nothing. This tree draws it
+directly, outside the matrices (`render-window-mode-line!`), so the same
+comparison is made there against what was last written - the padded
+string, the face (it flips when a window is selected), and **the row and
+column it went to**. The position is part of it for a reason that a pty
+check found: `?` in a file prompt splits the window, the file's mode line
+moves up, the string does not change, and a comparison by content alone
+skipped it at the new row - the screen then showed one window where there
+were two.
+
+### `tty_turn_off_highlight` was missing its second statement
+
+The mode-line comparison is what exposed this, and it is a one-line port
+defect. GNU Emacs's `tty_turn_off_highlight` (`term.c:318`) is
+
+```c
+  if (tty->standout_mode) OUTPUT_IF (tty, tty->TS_end_standout_mode);
+  tty->standout_mode = 0;
+```
+
+and this tree had only the first line. The flag is the terminal's model of
+reverse video, and it has to be exact because `turn_on_face` emits a face's
+foreground and background **swapped** while it is set (`term.c:2140` -
+`TS_set_background` for the foreground value and the reverse for the
+background). Leaving it set for ever meant every later glyph run re-emitted
+`so` and sent its colours in the opposite order.
+
+**Nothing looked wrong, which is why it survived**: `tty_highlight_if_desired`
+emits `so` again whenever the flag says so, so the terminal really was in
+reverse and the swapped colours really were right. Only the byte stream
+differed from Emacs's - and `region-highlight`, which pins
+`\e[37m\e[44m`, failed as soon as the mode line stopped being redrawn every
+keystroke (its draw had been clearing the flag by accident).
+
+The other half of the same port is `tty_highlight_if_desired`
+(`term.c:398`), which is "on or off according to `inverse-video`" - both
+`tty_turn_on_highlight` and `tty_turn_off_highlight` also maintain the
+flag, which neither did here.
+
+**The method note**: the evidence for this ("`turn_off_face` only clears
+the flag when `me` and `se` are the same sequence") pointed at the wrong
+function. Backing the optimisation out was the wrong response; reading the
+next function in the same C file found it in one look. That is the rule
+this file already carries - when behaviour is wrong, read the C rather
+than route around it.
