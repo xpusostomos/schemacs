@@ -378,15 +378,20 @@
                                    (else (cm-cc-abs tty)))))
             ;; "In the following comparison, the = in <= is because when
             ;; the costs are the same, it looks nicer to move directly."
-            (if (and dcm
-                     (<= directcost relcost)
-                     (let ((real (%price (if (or habs? vabs?)
-                                             (%cap-expand dcm col 0)
-                                             (%cap-expand dcm row col)))))
-                       (<= real relcost)))
-                (let ((expanded (if (or habs? vabs?)
-                                    (%cap-expand dcm col 0)
-                                    (%cap-expand dcm row col))))
+            ;; **`ch` takes the COLUMN and `cv` takes the ROW.** The
+            ;; C's `tgoto (dcm, col, row)` serves both because `tgoto`
+            ;; hands its first argument to `%p1` and each capability
+            ;; names the one it wants - `ch` is `%i%p1%dG` and `cv` is
+            ;; `%i%p1%dd`. Passing `col` to both sent `cv` the column:
+            ;; measured, a mode line bound for row 11 was moved with
+            ;; `ESC[1d` - VPA to row 1 - and landed on row 0.
+            (let ((expanded (cond (habs? (%cap-expand dcm col 0))
+                                  (vabs? (%cap-expand dcm row 0))
+                                  (else (%cap-expand dcm row col)))))
+              (if (and dcm
+                       (<= directcost relcost)
+                       (<= (%price expanded) relcost))
+                  (begin
                   (%emit expanded)
                   (set-cm-curY! tty row)
                   (set-cm-curX! tty col)
@@ -407,7 +412,7 @@
                   (calccost tty (cm-curY tty) (cm-curX tty) row col #t)
                   (set-cm-curY! tty row)
                   (set-cm-curX! tty col)
-                  #t)))))
+                  #t))))))
 
     ;;----------------------------------------------------------------
     ;; Setting it up, and forgetting it
