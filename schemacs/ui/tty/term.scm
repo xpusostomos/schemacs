@@ -83,7 +83,7 @@
           ;; `select` waits on the keyboard descriptor - the same call GNU
           ;; Emacs makes as `pselect` (`process.c:5830`), minus the
           ;; subprocess and self-pipe sets this editor has no use for.
-          select
+          select sigaction SIGWINCH
           get-internal-real-time internal-time-units-per-second)
     ;; **Nothing from the back door.** The command loop asks
     ;; `(schemacs editor keyboard)` for a timed read when the REPL is open
@@ -399,6 +399,19 @@
           (setup-term #f 1)
           (set! %output (current-output-port))
           (init-sys-modes)
+          ;; **A SIGWINCH handler, so the wait can be interrupted.**
+          ;; `SIGWINCH`'s default action is "ignore", and an ignored
+          ;; signal does not interrupt `select` - so with no handler the
+          ;; editor sat in `select` through a resize and never asked how
+          ;; big the terminal was. GNU Emacs installs
+          ;; `handle_sigwinch` for exactly this ("the terminal has been
+          ;; resized"), and what it buys is that `pselect` returns early
+          ;; with nothing ready. The handler itself has nothing to do:
+          ;; the size is read from `ioctl` when `sync-frame-size!` asks.
+          ;; Measured, with a handler a `select` on a pipe returned after
+          ;; the signal with an empty ready set; without one it waited
+          ;; the full timeout.
+          (sigaction SIGWINCH (lambda (sig) #t))
           (let* ((size (get-tty-size *tty-fd*))
                  (rows (car size))
                  (cols (cdr size))
