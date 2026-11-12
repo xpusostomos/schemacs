@@ -54,7 +54,12 @@
     ;; (face-spec-recalc face frame))' asks, and why a `defface' at load
     ;; time recalculates nothing. It is #f until a front end opens the
     ;; display, which is Emacs's empty frame list.
-    (only (schemacs editor dispnew) current-display))
+    (only (schemacs editor dispnew) current-display
+          ;; `xfaces.c` sets `windows_or_buffers_changed` when a face
+          ;; changes (`:801`, `:3110`, `:3200`): the redisplay skips a
+          ;; window whose glyph matrix is still good, so a face that moves
+          ;; has to say so.
+          set-windows-or-buffers-changed!))
 
   (export
    ;; the face table
@@ -563,7 +568,10 @@
             (internal-set-lisp-face-attribute face (car rest) (cadr rest))
             (loop (cddr rest)))))
         (when (and background-changed (*frame-background-mode-function*))
-          ((*frame-background-mode-function*) #f)))
+          ((*frame-background-mode-function*) #f))
+        ;; "The face changed, so no cached glyph matrix can be trusted" -
+        ;; `xfaces.c:801`.
+        (set-windows-or-buffers-changed! #t))
       face)
 
     (define (face-spec-set-2 face face-attrs)
@@ -747,6 +755,9 @@
               (and tail (face-spec-set-2 face (list ':extend (cadr tail))))))
           ;; defface override spec
           (face-spec-set-2 face (face-spec-choose (face-override-spec face))))
+        ;; a spec was chosen, so the face's appearance may have moved -
+        ;; `xfaces.c:3110`'s `windows_or_buffers_changed`
+        (set-windows-or-buffers-changed! #t)
         face))
 
     (define (face-spec-set face spec . args)

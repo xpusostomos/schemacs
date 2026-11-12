@@ -560,6 +560,7 @@
     buffer-modified-tick
     buffer-name
     buffer-name-history
+    buffer-overlay-modified-tick
     buffer-overlays
     buffer-overwrite-mode
     buffer-posn-from-coords
@@ -1898,6 +1899,15 @@
     set!window-cursor-off?
     set!window-frame
     set!window-height
+    set!window-last-buffer
+    set!window-last-height
+    set!window-last-hscroll
+    set!window-last-mark
+    set!window-last-modified
+    set!window-last-overlay-modified
+    set!window-last-point
+    set!window-last-start
+    set!window-last-width
     set!window-left
     set!window-parent
     set!window-top
@@ -1966,6 +1976,7 @@
     set-window-point!
     set-window-prev-buffers
     set-window-start!
+    set-windows-or-buffers-changed!
     shell-quote-argument
     show-command
     show-prefix-echo!
@@ -2186,6 +2197,15 @@
     window-height
     window-hscroll
     window-internal?
+    window-last-buffer
+    window-last-height
+    window-last-hscroll
+    window-last-mark
+    window-last-modified
+    window-last-overlay-modified
+    window-last-point
+    window-last-start
+    window-last-width
     window-left
     window-line-rows
     window-line-rows-at
@@ -2199,6 +2219,7 @@
     window-minibuffer-p
     window-next-buffers
     window-normalize-buffer-to-switch-to
+    window-outdated?
     window-parent
     window-point
     window-position
@@ -2211,6 +2232,7 @@
     window-type?
     window-width
     window-wraps?
+    windows-or-buffers-changed?
     with-current-buffer
     with-current-buffer-window
     with-selected-frame

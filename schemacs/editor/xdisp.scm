@@ -39,6 +39,9 @@
     ;; and `term.sld' answers them for the curses terminal.
     (only (schemacs editor dispnew)
           current-display
+          ;; `windows_or_buffers_changed` (`xdisp.c`): set by whoever
+          ;; changes a face or forces a redisplay, read by the skip below.
+          windows-or-buffers-changed? set-windows-or-buffers-changed!
           write-glyphs! draw-box! face-metrics display-cell-size clear-frame-area!
           clear-end-of-line! ensure-surface!
           update-window-begin! update-window-end!
@@ -128,7 +131,21 @@
          %window-hscroll %window-min-hscroll
          %window-old-point %window-suspend-auto-hscroll?
          set!%window-hscroll
-         set!%window-old-point set!%window-suspend-auto-hscroll?)
+         set!%window-old-point set!%window-suspend-auto-hscroll?
+         ;; What the window's matrix was built from, and the question
+         ;; `window_outdated` asks about it - the skip below.
+         window-outdated?
+         window-last-buffer set!window-last-buffer
+         window-last-modified set!window-last-modified
+         window-last-overlay-modified set!window-last-overlay-modified
+         window-last-start set!window-last-start
+         window-last-width set!window-last-width
+         window-last-height set!window-last-height
+         window-last-hscroll set!window-last-hscroll
+         window-last-point set!window-last-point
+         window-last-mark set!window-last-mark
+         ;; `mark_window_display_accurate`'s walk over the window tree
+         window-internal? window-children)
     (only (schemacs editor disp-table)
          char-display-cursor-width char-display-width
          char-display-glyph display-text-width)
@@ -171,6 +188,9 @@
           get-text-property next-single-property-change)
     (only (schemacs editor buffer)
           *transient-mark-mode*
+          ;; `mark_window_display_accurate_1` records what the rows were
+          ;; built from, and `window_outdated` asks for the same two ticks.
+          buffer-modified-tick buffer-overlay-modified-tick
           current-buffer get-buffer get-buffer-create with-current-buffer
           text-editor-undo-list set!text-editor-undo-list
           text-editor-cache-long-scans set!text-editor-cache-long-scans
@@ -2653,6 +2673,123 @@
         ;; frame drew 62.
         (cursor-to! (current-display) #f row-y x0)))
 
+    (define (window-matrix-valid? window)
+      ;; Whether the window's glyph matrices still describe what should be
+      ;; on the screen, so that this redisplay can leave them alone.
+      ;;
+      ;; GNU Emacs's version of this question is two: `window_outdated`
+      ;; (`window.c:231`) for the buffer, and `current_matrix_up_to_date_p`
+      ;; (`xdisp.c:20576`) for everything else - the window's size, its
+      ;; start, the horizontal scroll, and whether a redisplay has been
+      ;; forced. When both say yes, `redisplay_window` runs
+      ;; `try_cursor_movement` or `try_window_reusing_current_matrix` and
+      ;; builds nothing: a `C-n` in the middle of a window costs a cursor
+      ;; repaint.
+      ;;--------------------------------------------------------------
+      (and (not (windows-or-buffers-changed?))
+           (not (frame-garbaged-p (window-frame window)))
+           (not (window-outdated? window))
+           ;; `w->start`: the same position the rows were built from. The
+           ;; marker follows edits, so this only means anything together
+           ;; with the ticks above - and `set-window-start!` can move it
+           ;; with no buffer change at all (`recenter`).
+           (let ((start (%window-start window)))
+             (and start
+                  (= (marker-position start) (window-last-start window))))
+           (= (window-body-width window) (window-last-width window))
+           (= (window-body-height window) (window-last-height window))
+           (= (%window-hscroll window) (window-last-hscroll window))
+           ;; **The region is drawn from the buffer's point and mark**,
+           ;; so while one is active the rows depend on both and the
+           ;; matrix is only good for the pair it was built with. GNU
+           ;; Emacs gets the same invalidation from a different place:
+           ;; `redisplay--update-region-highlight` (`simple.el:7332')
+           ;; keeps the region in an *overlay* and moves it on every
+           ;; redisplay, and moving an overlay raises `OVERLAY_MODIFF`
+           ;; (`modify_overlay`), which `window_outdated` reads. This
+           ;; tree's renderer computes the region's face from the mark
+           ;; itself, so the pair has to be recorded where the rest of
+           ;; the matrix's provenance is. Only while the region is
+           ;; active: a window with no region is unaffected by point
+           ;; moving, which is what makes `C-n` rebuild nothing.
+           (let ((ed (window-buffer window)))
+             (or (not (region-face-active? ed))
+                 (and (= (window-point window)
+                         (window-last-point window))
+                      (= (marker-position (%mark-marker ed))
+                         (window-last-mark window)))))))
+
+    (define (mark-window-display-accurate-1 window accurate-p)
+      ;; GNU Emacs's `mark_window_display_accurate_1` (`xdisp.c:18304`):
+      ;; "Mark the display of leaf window W as accurate or inaccurate. If
+      ;; ACCURATE_P, mark display of W as accurate. If !ACCURATE_P,
+      ;; arrange for W to be redisplayed the next time
+      ;; `redisplay_internal` is called."
+      ;;
+      ;; **The inaccurate direction is not optional once the redisplay
+      ;; skips windows.** `redraw_frame` (`dispnew.c:3212`) clears the
+      ;; surface and then ends with `mark_window_display_accurate
+      ;; (FRAME_ROOT_WINDOW (f), 0)`, because a matrix that was built
+      ;; against a screen which has since been wiped is not a matrix the
+      ;; screen holds - and the C says so by zeroing the two ticks. A
+      ;; renderer that wipes the screen and skips the windows whose ticks
+      ;; still match paints nothing at all: measured, the file was on
+      ;; screen, a second redisplay cleared it, and the buffer stayed
+      ;; blank until a resize changed the window's size and forced a
+      ;; rebuild.
+      ;;
+      ;; `w->last_had_star`, `last_point` and the `clip_changed`/
+      ;; `prevent_redisplay_optimizations_p` resets are not carried -
+      ;; nothing here reads them; the tree's fields are the ones
+      ;; `window-matrix-valid?` asks about, and they are recorded here so
+      ;; that there is one place that says what a matrix was built from.
+      ;;--------------------------------------------------------------
+      (let ((buffer (window-buffer window)))
+        (set!window-last-modified
+         window (if (and accurate-p buffer)
+                    (buffer-modified-tick buffer)
+                    ;; "W->last_modified = accurate_p ? BUF_MODIFF (b) : 0"
+                    ;; - and a fresh buffer's tick is 1, so 0 is behind it.
+                    0))
+        (set!window-last-overlay-modified
+         window (if (and accurate-p buffer)
+                    (buffer-overlay-modified-tick buffer)
+                    0))
+        (when accurate-p
+          (let ((start (%window-start window)))
+            (set!window-last-buffer window buffer)
+            (set!window-last-start window (and start (marker-position start)))
+            (set!window-last-width window (window-body-width window))
+            (set!window-last-height window (window-body-height window))
+            (set!window-last-hscroll window (%window-hscroll window))
+            ;; `w->last_point` - "if (w == XWINDOW (selected_window))
+            ;; w->last_point = BUF_PT (b); else w->last_point =
+            ;; marker_position (w->pointm)" (`xdisp.c:18352').
+            (set!window-last-point window (window-point window))
+            ;; and `w->last_mark`, -1 when the mark is not active
+            ;; (`:18359').
+            (set!window-last-mark
+             window (if (region-face-active? buffer)
+                        (marker-position (%mark-marker buffer))
+                        -1))))))
+
+    (define (mark-window-display-accurate windows accurate-p)
+      ;; GNU Emacs's `mark_window_display_accurate` (`xdisp.c:18407`),
+      ;; which walks the window tree rooted at its argument.
+      ;;
+      ;; **Departure**: Emacs hands it the root window and follows
+      ;; `w->contents`/`w->next`; this tree's frame keeps a list of top
+      ;; windows (`frame-windows`), so the walk takes that list and
+      ;; recurses into `window-children`. Same leaves, same order.
+      ;;--------------------------------------------------------------
+      (for-each
+       (lambda (window)
+         (if (window-internal? window)
+             (mark-window-display-accurate (window-children window)
+                                           accurate-p)
+             (mark-window-display-accurate-1 window accurate-p)))
+       windows))
+
     (define (render-window-mode-line! window)
       ;; Draw WINDOW's mode line and its vertical border - the part of a
       ;; window that is not glyph rows.
@@ -2689,15 +2826,20 @@
       ;; GNU Emacs's `force-mode-line-update' (`xdisp.c`): mark the mode
       ;; line, or every mode line with ALL, for redrawing.
       ;;
-      ;; **There is nothing to mark, and that is the honest port.** Emacs
-      ;; keeps a `w->update_mode_line` flag because its redisplay seeks
-      ;; the windows that changed; this one redraws every window on every
-      ;; `render!`, so the mode line a command has just changed is
-      ;; already in the next frame. `face-remap.el` calls this after
-      ;; adjusting `face-remapping-alist` for the same reason - "Force
-      ;; redisplay of this buffer" - and the redisplay that follows the
-      ;; command does it.
+      ;; **It sets `windows_or_buffers_changed`**, which is what Emacs's
+      ;; does (`xdisp.c`): the redisplay now *skips* a window whose glyph
+      ;; matrix is still good, so a command that has changed a face or the
+      ;; mode line's own contents has to say so or the change waits for
+      ;; the next edit. `face-remap.el` calls this after adjusting
+      ;; `face-remapping-alist` for exactly that reason - "Force redisplay
+      ;; of this buffer".
+      ;;
+      ;; Emacs distinguishes the ALL case (`windows_or_buffers_changed`)
+      ;; from the one-window case (`w->update_mode_line`); one flag is
+      ;; enough here, and it costs a rebuild of the windows that would
+      ;; otherwise have been skipped.
       ;;--------------------------------------------------------------
+      (set-windows-or-buffers-changed! #t)
       #f)
 
     (define (redisplay-frames!)
@@ -2725,7 +2867,12 @@
                              (not (eq? (frame-output f)
                                        (and selected (frame-output selected)))))
                      (render! f)))
-                 (loop (cdr frames)))))))
+                 (loop (cdr frames)))))
+        ;; **The flag is cleared once every frame has been drawn**, which
+        ;; is where `redisplay_internal` clears it (`xdisp.c`): it means
+        ;; "something changed since the last redisplay", and after this
+        ;; one nothing has.
+        (set-windows-or-buffers-changed! #f)))
 
     (define *redisplay-in-progress* (make-parameter #f))
     ;; ^ GNU Emacs's `redisplaying_p` (`xdisp.c:`: "True means we are in
@@ -2789,34 +2936,27 @@
       ;;--------------------------------------------------------------
       ;; **One rule for both front ends: a frame is repainted when it is
       ;; garbaged, and otherwise only the rows that changed.** The
-      ;; terminal used to be excluded here - every keystroke erased the
-      ;; screen and repainted all of it - on the strength of a note in
-      ;; `clear-frame-area!` about the partial-update optimizations
-      ;; (scroll regions, insert/delete character) desyncing the
-      ;; physical terminal when lines merge. Those optimizations are
-      ;; switched *off* in `with-terminal` (`idlok!` and `idcok!`), so
-      ;; there was nothing to desync, and the terminal paid a whole
-      ;; frame per keypress for it: measured on a 40x120 tty over a
-      ;; 2000-line file, `render!` wrote 20 KB a keystroke, and the
-      ;; screen visibly flashed. ncurses keeps its own account of the
-      ;; screen and emits only the cells whose content differs, which is
-      ;; the same diff `update_window` does - a cursor move now costs
-      ;; one cell.
-      (when (or (frame-garbaged-p frame)
-                ;; **A terminal still repaints the frame it draws.**
-                ;; GNU Emacs's terminal redisplay is `build_frame_matrix`
-                ;; + `update_frame` (`dispnew.c`): every frame matrix is
-                ;; rebuilt and handed to the terminal whole, and the
-                ;; *terminal* decides how little of it to send. Here it
-                ;; has to be the same, because ncurses takes its own
-                ;; scrolling shortcut (`ESC [ 1 ; 22 r`, `ESC M` - it
-                ;; shifts a region of rows) whenever it can, and a row
-                ;; diff computed against the *unscrolled* matrix then
-                ;; writes the wrong text: measured, `C-x i` drew the
-                ;; inserted file over the echo-area row, and Dired's
-                ;; marks never appeared. The erase is what tells ncurses
-                ;; the whole screen is ours to redraw.
-                (not (graphical-frame?)))
+      ;; terminal is no exception - `write-glyphs!` is handed a row, a
+      ;; column and a run of glyphs and emits exactly that, with no scroll
+      ;; region and no insert/delete character anywhere in the output
+      ;; path - but it took four more rules before the diff could be
+      ;; trusted, and they are all named in DEPARTURES.md: a raised
+      ;; `OVERLAY_MODIFF`, a current row that was never on the screen
+      ;; counting as blank, the region's point and mark, and `SET_FRAME_VISIBLE`'s
+      ;; redisplay after a suspend. Measured on a 24x80 terminal over a
+      ;; 59-line file, one `C-n` now writes ~250 bytes - the cursor's row
+      ;; and the mode line - where the whole-screen repaint wrote the
+      ;; frame.
+      ;;
+      ;; What a terminal *needs*, and what the C gives it in
+      ;; `redraw_frame` (`dispnew.c:3212`), is the pair below: clear the
+      ;; surface, and tell every window its matrix is no longer the
+      ;; screen. **Skipping without the second half is what put a blank
+      ;; screen on a fresh frame**: the first redisplay drew the file, a
+      ;; second redisplay cleared the surface and skipped every window
+      ;; whose ticks still matched, and the file only came back when a
+      ;; resize changed a window's size and forced a rebuild.
+      (when (frame-garbaged-p frame)
         (when (not (graphical-frame?))
           (clear-frame-area! (current-display)))
         (for-each (lambda (w)
@@ -2825,6 +2965,17 @@
                     (let ((m (window-current-matrix w)))
                       (when m (clear-glyph-matrix m))))
                   windows)
+        ;; **And the windows are told their matrices are no longer the
+        ;; screen.** `redraw_frame` (`dispnew.c:3212`) ends with
+        ;; `mark_window_display_accurate (FRAME_ROOT_WINDOW (f), 0)` for
+        ;; exactly this reason: the surface was just wiped, so no window's
+        ;; recorded state describes what is on it any more. Without it the
+        ;; redisplay skipped every window whose ticks still matched and
+        ;; the screen stayed blank - the file was drawn, the second
+        ;; redisplay cleared it, and nothing brought it back until a
+        ;; resize changed the window's size (see the note on
+        ;; `mark-window-display-accurate-1`).
+        (mark-window-display-accurate windows #f)
         (set-frame-garbaged! frame #f)))
 
     (define (render! frame)
@@ -2928,32 +3079,46 @@
         ;; surface, and `clear-frame-area!` is what would wipe it. It is
         ;; still called when the frame is new or has been resized, where
         ;; every row genuinely must be painted.
+        ;; **A window whose matrix is still good is left alone.** GNU
+        ;; Emacs's `redisplay_window` asks `window_outdated` and
+        ;; `current_matrix_up_to_date_p` and, when both are happy, builds
+        ;; nothing at all - `try_cursor_movement` just moves the cursor
+        ;; (`xdisp.c:20946`). That is the difference between a redisplay
+        ;; that costs a window and one that costs a cursor: measured, a
+        ;; `C-n` in the middle of a window used to rebuild every row of it
+        ;; and now rebuilds none.
+        ;;
+        ;; **The mode line is still drawn**, below: it carries the line
+        ;; and column, which change with every cursor motion, and Emacs
+        ;; draws it for the same reason (`update_mode_lines`).
+        ;;
+        ;; A window that is *not* fresh is rebuilt and then diffed, which
+        ;; is `try_window` and `update_window`.
+        ;; One window at a time, build then draw, which is
+        ;; `redisplay_window`'s own order.
         (for-each (lambda (w)
-                    (ensure-window-matrices! w (window-body-width w)
-                                            (window-body-height w))
-                    ;; **A window that shows no buffer builds nothing.**
-                    ;; The minibuffer window is one until a prompt is
-                    ;; read (`minibuffer-window-active-p`), and Emacs's
-                    ;; `redisplay_window` likewise has nothing to display
-                    ;; for a window whose `w->contents` is nil. Its
-                    ;; current matrix is emptied instead, so the diff
-                    ;; draws nothing over the row and the echo-area block
-                    ;; below is what paints there.
-                    (cond ((window-buffer w)
-                   ;; **Every window is rebuilt every redisplay.** GNU
-                   ;; Emacs returns early for a window that is not
-                   ;; outdated (`window_outdated`, `window.c:231`), and
-                   ;; that is the next step - but it needs
-                   ;; `try_window_id` with it: a skipped window keeps the
-                   ;; desired matrix `assign_row` swapped out of it, and
-                   ;; `update_window` then compares an empty matrix
-                   ;; against the screen.
-                   (display-window! w))
-                  (else
-                   (let ((m (window-current-matrix w)))
-                     (when m (clear-glyph-matrix m))))))
+                    ;; A window with no buffer is never fresh - there is
+                    ;; nothing to be fresh *about* - and `window-outdated?`
+                    ;; has no buffer to ask either.
+                    (unless (and (window-buffer w) (window-matrix-valid? w))
+                      (ensure-window-matrices! w (window-body-width w)
+                                               (window-body-height w))
+                      ;; **A window that shows no buffer builds nothing.**
+                      ;; The minibuffer window is one until a prompt is
+                      ;; read (`minibuffer-window-active-p`), and Emacs's
+                      ;; `redisplay_window` likewise has nothing to display
+                      ;; for a window whose `w->contents` is nil. Its
+                      ;; current matrix is emptied instead, so the diff
+                      ;; draws nothing over the row and the echo-area block
+                      ;; below is what paints there.
+                      (if (window-buffer w)
+                          (begin
+                            (display-window! w)
+                            (mark-window-display-accurate-1 w #t))
+                          (let ((m (window-current-matrix w)))
+                            (when m (clear-glyph-matrix m))))
+                      (update-window! w)))
                   windows)
-        (for-each update-window! windows)
         ;; **No mode line for the minibuffer window**, which is Emacs's
         ;; `MINI_WINDOW_P` test in `display_mode_lines`: a minibuffer
         ;; window is one row and that row is its text.

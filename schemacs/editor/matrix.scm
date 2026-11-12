@@ -237,7 +237,29 @@
               (let ((d (glyph-matrix-row-ref desired i))
                     (c (glyph-matrix-row-ref current i)))
                 (loop (+ i 1)
-                      (if (and d c (row-equal? c d))
+                      ;; `update_window_line` (`dispnew.c:4749`): "If rows
+                      ;; are at different X or Y, or rows have different
+                      ;; height, or the current row is marked invalid,
+                      ;; write the entire line."
+                      ;;
+                      ;; **`!current_row->enabled_p` is the one that was
+                      ;; missing**, and it is not a detail: a row the
+                      ;; current matrix has never held compares *equal* to
+                      ;; a blank desired row, so the diff skipped it and
+                      ;; whatever was on the screen under it stayed. A
+                      ;; window whose matrix grew - a window that took
+                      ;; over the rows of one deleted beside it - kept the
+                      ;; deleted window's text and mode line. Measured,
+                      ;; `C-x C-b` then `q` left the buffer list on screen
+                      ;; below the file, and the same for the completions
+                      ;; window.
+                      (if (and d c
+                               (glyph-row-enabled? c)
+                               (eqv? (glyph-row-ascent d)
+                                     (glyph-row-ascent c))
+                               (eqv? (glyph-row-height d)
+                                     (glyph-row-height c))
+                               (row-equal? c d))
                           out
                           (cons i out))))))))
 

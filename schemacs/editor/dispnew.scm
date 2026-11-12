@@ -24,6 +24,8 @@
   (export
    <display>
    current-display
+   ;; `windows_or_buffers_changed` (`xdisp.c`) - see the note below.
+   windows-or-buffers-changed? set-windows-or-buffers-changed!
    write-glyphs!
    draw-box!
    glyphs->text
@@ -64,6 +66,36 @@
    )
 
   (begin
+
+    ;;----------------------------------------------------------------
+    ;; What the redisplay must not trust
+    ;;
+    ;; GNU Emacs's `windows_or_buffers_changed` (`xdisp.c`): non-zero means
+    ;; "a window's contents, its size or its faces have changed, so no
+    ;; cached glyph matrix can be trusted". The redisplay reads it, and it
+    ;; is *set* from far below - `xfaces.c' sets it when a face changes
+    ;; (`:801`, `:3110`, `:3200`), `Fset_window_buffer` sets it, and
+    ;; `force-mode-line-update` sets it.
+    ;;
+    ;; **Emacs keeps it in `xdisp.c' and here it cannot live there**: the
+    ;; redisplay *skips* a window whose matrix is still good, so whoever
+    ;; changes a face has to be able to say so, and faces are realized
+    ;; below this library. This is the lowest library the redisplay, the
+    ;; faces and the front ends all import - the same answer `*current-
+    ;; buffer*' got when `frame' needed what `buffer' owned.
+    ;;------------------------------------------------------------------
+
+    (define windows-or-buffers-changed #f)
+
+    (define (windows-or-buffers-changed?)
+      ;; The reader, because the variable cannot be one across libraries:
+      ;; Emacs's `windows_or_buffers_changed` is a C int that `xfaces.c`
+      ;; writes and `xdisp.c` reads, and a Scheme binding is neither.
+      ;;--------------------------------------------------------------
+      windows-or-buffers-changed)
+
+    (define (set-windows-or-buffers-changed! value)
+      (set! windows-or-buffers-changed (and value #t)))
 
     (define-class <display> ()
       ;; The kind of thing a display is. A display answers the generics

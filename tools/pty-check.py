@@ -3959,16 +3959,29 @@ def check_revert_buffer():
     path = "/tmp/pty-check-rev.txt"
     open(path, "w").write("original\n")
     problems = []
+    # **The answer is `yes', not `y'.** `revert-buffer' asks through
+    # `yes-or-no-p' (`files.el:7280'), which is "the whole word" -
+    # `y-or-n-p' is the one-key question, and this is not it. This check
+    # sent `y' for a long time and passed anyway, because the whole
+    # screen was repainted after every key: the *unreverted* buffer was
+    # redrawn and its text contains `original' too. It only started
+    # failing - correctly - when the terminal stopped repainting rows
+    # that had not changed.
     out = drive([C_x + C_f, C_a, C_k, path.encode(), RET,
                  b"EDITED ", ESC, b"x", b"revert-buffer", RET,
-                 b"y"], path, gap=0.35)
+                 b"yes", RET], path, gap=0.35)
     if "Discard edits and reread from" not in out:
         problems.append("revert of a modified buffer did not ask "
                         "`Discard edits and reread from ...? '")
-    # after the y, the screen shows the file's text again
-    i = out.find("Discard edits")
-    if i >= 0 and "original" not in out[i:]:
-        problems.append("revert did not reread the file after the y")
+    # What the final screen holds is what says the file was reread: the
+    # file's own text, and none of the edits that were thrown away.
+    screen = screen_of(out)
+    if "original" not in screen:
+        problems.append("revert did not reread the file: the screen does "
+                        "not show its text")
+    if "EDITED" in screen:
+        problems.append("revert did not discard the edits: the screen "
+                        "still shows them")
     return problems
 
 

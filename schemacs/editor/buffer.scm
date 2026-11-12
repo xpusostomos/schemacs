@@ -77,6 +77,8 @@
           buffer-text-ref
           buffer-text-modiff  buffer-text-chars-modiff
           buffer-text-overlay-modiff
+          buffer-text-beg-unchanged set!buffer-text-beg-unchanged
+          set!buffer-text-overlay-modiff
           set!buffer-text-modiff  set!buffer-text-chars-modiff)
     (scheme case-lambda))
   (cond-expand
@@ -143,6 +145,9 @@
    ;; comparison `SAVE_MODIFF < MODIFF' and not a flag - and the
    ;; `buffer-read-only' variable.
    buffer-modified-tick  buffer-chars-modified-tick
+   ;; `BUF_OVERLAY_MODIFF` (`buffer.h`), which Emacs has no Lisp function
+   ;; for: `window_outdated` (`window.c:231`) is its only reader.
+   buffer-overlay-modified-tick
    buffer-modified-p  set-buffer-modified-p
    buffer-read-only?  set!buffer-read-only  barf-if-buffer-read-only
    validate-region
@@ -1116,18 +1121,69 @@
       ;;--------------------------------------------------------------
       (let ((cell (assq prop (overlay-properties overlay))))
         (and cell (cdr cell))))
+    (define (modify-overlay buffer start end)
+      ;; GNU Emacs's `modify_overlay` (`buffer.c:3689`): "Record that an
+      ;; overlay was modified in range START..END" - which is how the
+      ;; redisplay learns that a window's glyphs are out of date when no
+      ;; text changed.
+      ;;
+      ;; **This is what makes a highlight appear.** `window_outdated`
+      ;; (`window.c:231`) asks *two* ticks, `w->last_modified` against
+      ;; `MODIFF` and `w->last_overlay_modified` against `OVERLAY_MODIFF`,
+      ;; because moving an overlay does not touch the text. Measured
+      ;; without it, once the redisplay began skipping windows whose
+      ;; matrices still looked good: a search match and an active region
+      ;; were not drawn at all on the GTK front end, and the pty battery's
+      ;; `region-highlight`, `isearch-highlight` and `isearch-multiline`
+      ;; failed on the terminal when it was tried there too.
+      ;;
+      ;; Three parts of the C are not carried, each because nothing here
+      ;; reads what it writes: `BUF_LAST_MODIFIED_POS` and the
+      ;; `BUF_SAVE_MODIFF` clamp, `END_UNCHANGED` (the `%l` cache reads
+      ;; only `BEG_UNCHANGED`), and `bset_redisplay` (`BUF_REDISPLAY`),
+      ;; whose one reader is `redisplay_window`'s "this buffer was
+      ;; flagged" branch - the raised tick is this tree's statement of the
+      ;; same fact.
+      ;;--------------------------------------------------------------
+      (when (> start end)
+        (let ((temp start))
+          (set! start end)
+          (set! end temp)))
+      ;; `BUF_COMPUTE_UNCHANGED (buf, start, end)` - the part `%l` reads.
+      (set!buffer-text-beg-unchanged
+       (text-editor-text buffer)
+       (min (buffer-text-beg-unchanged (text-editor-text buffer))
+            (- start (buffer-beg buffer))))
+      ;; `modiff_incr (&BUF_OVERLAY_MODIFF (buf), 1)`: a change of one
+      ;; character, so the counter rises by `elogb (1) + 1` = 1.
+      (set!buffer-text-overlay-modiff
+       (text-editor-text buffer)
+       (+ (buffer-text-overlay-modiff (text-editor-text buffer)) 1)))
+
     (define (overlay-put overlay prop value)
       ;; GNU Emacs's `overlay-put': "Set the property of overlay OVERLAY
       ;; with property name PROP to the value VALUE. ... Return VALUE."
       ;;--------------------------------------------------------------
-      (set!overlay-properties!
-       overlay
-       (cons (cons prop value)
-             (let loop ((l (overlay-properties overlay)))
-               (cond ((null? l) '())
-                     ((eq? (caar l) prop) (loop (cdr l)))
-                     (else (cons (car l) (loop (cdr l))))))))
-      value)
+      (let* ((cell (assq prop (overlay-properties overlay)))
+             ;; "changed = !EQ (XCAR (XCDR (tail)), value)" / "changed =
+             ;; !NILP (value)" when the property is not there yet
+             ;; (`buffer.c:4072`, `:4081').
+             (changed (not (eq? (and cell (cdr cell)) value))))
+        (set!overlay-properties!
+         overlay
+         (cons (cons prop value)
+               (let loop ((l (overlay-properties overlay)))
+                 (cond ((null? l) '())
+                       ((eq? (caar l) prop) (loop (cdr l)))
+                       (else (cons (car l) (loop (cdr l))))))))
+        ;; "if (changed) modify_overlay" (`buffer.c:4090') - the property
+        ;; list is what the redisplay reads, so a changed plist is a
+        ;; changed display even though the text and the range are
+        ;; untouched.
+        (when (and changed (overlay-buffer overlay))
+          (modify-overlay (overlay-buffer overlay)
+                          (overlay-start overlay) (overlay-end overlay)))
+        value))
     (define (overlay-priority overlay)
       ;; The C's `make_sortvec_item' (buffer.c:3304): the `priority'
       ;; property if there is one - an integer, or a cons of the
@@ -1181,15 +1237,24 @@
       ;;--------------------------------------------------------------
       (let ((buffer (overlay-buffer overlay)))
         (when buffer
-          (set!buffer-overlays!
-           buffer
-           (let loop ((l (buffer-overlays buffer)))
-             (cond ((null? l) '())
-                   ((eq? (car l) overlay) (cdr l))
-                   (else (cons (car l) (loop (cdr l)))))))
-          ((*set-marker-function*) (overlay-start-marker overlay) #f)
-          ((*set-marker-function*) (overlay-end-marker overlay) #f)
-          (%set-overlay-buffer! overlay #f)))
+          ;; "if (!NILP (ov->plist)) modify_overlay (...)" - `drop_overlay`
+          ;; (`buffer.c:977'), which is `Fdelete_overlay`'s first act: an
+          ;; overlay with no properties was never drawn, so there is
+          ;; nothing to take off the screen.
+          (let ((start (overlay-start overlay))
+                (end (overlay-end overlay))
+                (plist (overlay-properties overlay)))
+            (set!buffer-overlays!
+             buffer
+             (let loop ((l (buffer-overlays buffer)))
+               (cond ((null? l) '())
+                     ((eq? (car l) overlay) (cdr l))
+                     (else (cons (car l) (loop (cdr l)))))))
+            ((*set-marker-function*) (overlay-start-marker overlay) #f)
+            ((*set-marker-function*) (overlay-end-marker overlay) #f)
+            (%set-overlay-buffer! overlay #f)
+            (when plist
+              (modify-overlay buffer start end)))))
       #f)
     (define (move-overlay overlay beg end . rest)
       ;; GNU Emacs's `move-overlay': "Move OVERLAY to span the region from
@@ -1200,19 +1265,41 @@
       ;;--------------------------------------------------------------
       (let ((buffer (if (pair? rest) (or (car rest) (overlay-buffer overlay))
                         (overlay-buffer overlay))))
-        (unless (eq? buffer (overlay-buffer overlay))
-          (delete-overlay overlay)
-          (%set-overlay-buffer! overlay buffer))
-        ((*set-marker-function*) (overlay-start-marker overlay) (min beg end) buffer)
-        ((*set-marker-function*) (overlay-end-marker overlay) (max beg end) buffer)
-        ;; the list is kept in order by start, and this may have moved it
-        (when (overlay-buffer overlay)
-          (let ((ovs (let loop ((l (buffer-overlays buffer)))
-                       (cond ((null? l) '())
-                             ((eq? (car l) overlay) (loop (cdr l)))
-                             (else (cons (car l) (loop (cdr l))))))))
-            (set!buffer-overlays! buffer ovs)
-            (add-buffer-overlay! buffer overlay))))
+        ;; "If the overlay has changed buffers, do a thorough redisplay"
+        ;; (`buffer.c:3768'): where it was, and where it is going. The
+        ;; old range is read before the markers move.
+        (let ((old-buffer (overlay-buffer overlay))
+              (o-beg (overlay-start overlay))
+              (o-end (overlay-end overlay))
+              (n-beg (min beg end))
+              (n-end (max beg end)))
+          (unless (eq? buffer (overlay-buffer overlay))
+            (delete-overlay overlay)
+            (%set-overlay-buffer! overlay buffer))
+          ((*set-marker-function*) (overlay-start-marker overlay) (min beg end) buffer)
+          ((*set-marker-function*) (overlay-end-marker overlay) (max beg end) buffer)
+          ;; the list is kept in order by start, and this may have moved it
+          (when (overlay-buffer overlay)
+            (let ((ovs (let loop ((l (buffer-overlays buffer)))
+                         (cond ((null? l) '())
+                               ((eq? (car l) overlay) (loop (cdr l)))
+                               (else (cons (car l) (loop (cdr l))))))))
+              (set!buffer-overlays! buffer ovs)
+              (add-buffer-overlay! buffer overlay)))
+          ;; The C's redisplay rule (`buffer.c:3767'): a propertyless
+          ;; overlay is not drawn, so nothing has to be repainted; one that
+          ;; changed buffer leaves two ranges to repaint; and otherwise it
+          ;; is the range the overlay has *left*, or newly enclosed.
+          (let ((plist (overlay-properties overlay)))
+            (cond
+             ((null? plist) #f)
+             ((not (eq? buffer old-buffer))
+              (when old-buffer (modify-overlay old-buffer o-beg o-end))
+              (modify-overlay buffer n-beg n-end))
+             ((= o-beg n-beg) (modify-overlay buffer o-end n-end))
+             ((= o-end n-end) (modify-overlay buffer o-beg n-beg))
+             (else (modify-overlay buffer
+                                   (min o-beg n-beg) (max o-end n-end)))))))
       overlay)
     (define (overlays-at pos . rest)
       ;; GNU Emacs's `overlays-at' (buffer.c:3898): "Return a list of the
@@ -2007,6 +2094,13 @@
              (max (buffer-beg ed)
                   (min (buffer-z ed) position)))
           (error "text editor index must be set with an integer" position)))
+
+    (define (buffer-overlay-modified-tick buffer)
+      ;; `BUF_OVERLAY_MODIFF` (`buffer.h`): the tick an overlay or a text
+      ;; property raises, which `MODIFF` does not always follow - which is
+      ;; why the two exist apart, and why `window_outdated` asks both.
+      ;;--------------------------------------------------------------
+      (buffer-text-overlay-modiff (text-editor-text buffer)))
 
     (define (buffer-modified-tick . rest)
       ;; GNU Emacs's `buffer-modified-tick' (`buffer.c:1631'): "Return

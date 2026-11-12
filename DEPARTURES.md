@@ -574,3 +574,128 @@ the wait for ever).
 Two Guile spellings worth knowing, both cost a round each: `put-u8` is
 `(rnrs io ports)`'s and **not** `(guile)`'s, and that library's read is
 `get-u8`, not `read-u8`.
+
+## The redisplay skipped a window whose matrix was no longer the screen
+
+The skip itself is a port: `redisplay_window` asks `window_outdated`
+(`window.c:231`) and `current_matrix_up_to_date_p` (`xdisp.c:20576`) and,
+when both are happy, builds nothing and only moves the cursor - so a `C-n`
+in the middle of a window costs a cursor repaint. `xdisp.scm` now asks the
+same questions (`window-matrix-valid?`) and skips the rebuild for a window
+that is still fresh.
+
+**The departure was that clearing the screen did not invalidate the
+windows.** GNU Emacs's `redraw_frame` (`dispnew.c:3212`) ends with
+
+```c
+clear_current_matrices (f);
+mark_window_display_accurate (FRAME_ROOT_WINDOW (f), 0);
+```
+
+and `mark_window_display_accurate_1` (`xdisp.c:18304`) is what gives
+"inaccurate" its teeth: `w->last_modified = 0`, `w->last_overlay_modified
+= 0`, `w->redisplay = true`. This tree cleared the surface and the glyph
+matrices (`clear-garbaged-frames!`) and left the recorded ticks alone - so
+every window still looked fresh, every window was skipped, and the rows
+the clear had wiped were never repainted.
+
+Measured, and it is exactly the symptom reported from using the editor:
+**on startup the file does not appear until the terminal is resized.** The
+first redisplay drew the file; a second redisplay cleared the surface and
+drew only the mode line; the body stayed blank. A resize changed the
+window's body width/height, which `window-matrix-valid?` *does* compare, so
+the next redisplay rebuilt the window and the file came back.
+
+Ported as it stands:
+
+- `mark-window-display-accurate-1` (`xdisp.c:18304`) and
+  `mark-window-display-accurate` (`:18407`), the latter walking
+  `frame-windows`/`window-children` where the C walks `w->contents` and
+  `w->next` (this tree's frame keeps a list of top windows, so there is no
+  single root window object - departure, named in the source);
+- `clear-garbaged-frames!` calls it with `#f` after clearing the matrices,
+  which is `redraw_frame`'s own pair;
+- the "accurate" direction replaces the tree's invented
+  `window-matrix-note!`, so there is one function that records what a
+  matrix was built from rather than two that could drift.
+
+`w->last_had_star`, `w->last_point`, `clip_changed`,
+`prevent_redisplay_optimizations_p`, and `w->redisplay` itself are not
+carried - nothing here reads them; the two ticks are the whole of
+`window_outdated`, and the start/size/hscroll fields are this tree's
+stand-ins for `current_matrix_up_to_date_p`.
+
+### And the overlay tick was never raised
+
+Found by the same work, and a live bug on the GTK front end where the skip
+already applied: `buffer-overlay-modified-tick` existed (`BUF_OVERLAY_MODIFF`,
+`buffer.h`) but nothing ever incremented it, so `window_outdated`'s second
+half was dead. Moving a search overlay or setting the region did not
+invalidate anything, and with the skip in place those highlights simply did
+not appear.
+
+`modify_overlay` (`buffer.c:3689`) is ported now, and called where the C
+calls it: `overlay-put` when a property actually changes (`:4090`),
+`delete-overlay` through `drop_overlay`'s "only if the plist is non-empty"
+rule (`:977`), and `move-overlay` with the C's three-way redisplay rule -
+propertyless overlays are not drawn; a buffer change repaints both ranges;
+otherwise the range the overlay *left* (`:3767`). The `BEG_UNCHANGED` half
+of `BUF_COMPUTE_UNCHANGED` is carried because the `%l` cache reads it;
+`END_UNCHANGED`, `BUF_LAST_MODIFIED_POS` and `bset_redisplay` are not,
+because nothing here reads them.
+
+### The terminal is diffed now, and four things had to be true first
+
+Making the terminal incremental - which looks free, since its output path
+is `term.c`'s and emits only the rows it is handed - turned the pty battery
+from 77/78 into 65/78 on the first attempt. Rather than keep the
+whole-screen repaint, each failure was traced to a missing rule, and all
+four are now ported:
+
+1. **`OVERLAY_MODIFF` was never raised** (above), so `region-highlight`,
+   `isearch-highlight`, `isearch-highlight-row` and `isearch-multiline`
+   were all stale rows.
+2. **A current glyph row that was never on the screen compared equal to a
+   blank desired row.** `update_window_line` (`dispnew.c:4749`) tests
+   `!current_row->enabled_p` *before* comparing contents, "or the current
+   row is marked invalid, write the entire line". `matrix-diff-rows` did
+   not, so a window whose matrix grew - a window taking over the rows of
+   one deleted beside it - kept the deleted window's text and mode line.
+   Measured: `C-x C-b` then `q` left the buffer list on screen under the
+   file; the same for the completions window and its `C-g`.
+3. **The region is drawn from point and mark, and nothing recorded
+   them.** GNU Emacs does not have this problem because
+   `redisplay--update-region-highlight` (`simple.el:7332`) keeps the
+   region in an *overlay* and moves it on every redisplay, which raises
+   `OVERLAY_MODIFF`. This tree's renderer computes the region's face from
+   the mark itself, so the window gained `last-point` and `last-mark`
+   (`window.h`'s `w->last_point`, `w->last_mark`, written by
+   `mark_window_display_accurate_1`) and `window-matrix-valid?` compares
+   the pair **while the region is active**. Only then - a window with no
+   region does not change when point moves, which is what keeps `C-n`
+   costing a cursor.
+4. **`C-z` then `fg` came back to a blank screen.** `Fresume_tty`
+   (`term.c:2604`) ends with `SET_FRAME_VISIBLE (root, true)`, whose body
+   (`frame.h:1537`) is `redisplay_other_windows ()` - "make sure the frame
+   gets redisplayed if some changes were applied to it while it wasn't
+   visible". Re-entering the terminal also blanks the alternate screen.
+   `suspend-frame` now marks every frame on that display garbaged and
+   re-runs the invalidation after `resume-display!`; GNU Emacs needs only
+   the first half because its tty redisplay rebuilds and hands over the
+   whole frame matrix every time. **That is the departure**: the garbage
+   is this tree's half of `SET_FRAME_VISIBLE`.
+
+Result: the pty battery is back to 77/78 with the terminal diffed, and what
+a keystroke writes to a terminal is now the rows that changed.
+
+### A pty check that was passing because of the repaint
+
+`revert-buffer` answered the `Discard edits and reread from ...?` prompt
+with a bare `y`. That prompt is `yes-or-no-p` (`files.el:7280`) - "the
+whole word" - so the answer was rejected with "Please answer yes or no."
+and the revert never happened. The check passed anyway because, on a
+full-repaint terminal, the *unreverted* buffer was redrawn after every key
+and its text is `EDITED original` - which contains `original`. It started
+failing the moment rows that had not changed stopped being redrawn, which
+is the check doing its job for the first time. It now answers `yes` and
+asserts on the final screen: the file's text there, and no `EDITED`.

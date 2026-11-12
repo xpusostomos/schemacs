@@ -40,7 +40,10 @@
            column-width current-display delete-frame-display!
            display-cell-size display-selections-supported?
            display-mouse-position display-set-size! line-height
-           resume-display! screen-size suspend-display!)
+           resume-display! screen-size suspend-display!
+           ;; `SET_FRAME_VISIBLE`'s `redisplay_other_windows`, which
+           ;; `suspend-frame` needs when the terminal comes back.
+           set-windows-or-buffers-changed!)
     (only (schemacs editor marker) build-marker marker-position set-marker make-marker)
     
     ;; `*current-buffer*' is the C global `current_buffer', which this
@@ -54,7 +57,10 @@
           ;; `FETCH_CHAR` (`buffer.h`) - the raw read of a named
           ;; buffer. It has no Lisp name, and it was the engine's
           ;; until 2026-10-13.
-          fetch-char set-point buffer-beg buffer-pt)
+          fetch-char set-point buffer-beg buffer-pt
+          ;; `window_outdated` (`window.c:231`) asks the buffer's two
+          ;; modification ticks.
+          buffer-modified-tick buffer-overlay-modified-tick)
     ;; The seam `insdel.scm` declares for `adjust_suspend_auto_hscroll` -
     ;; it reads the selected window, which is this library's, so it is
     ;; installed here.
@@ -232,6 +238,22 @@
    ;; the hscroll fields of the window record, which `xdisp' and
    ;; `window' read and write
    %window-hscroll set!%window-hscroll
+   ;; what the window's matrix was built from - `window_outdated`'s fields
+   window-last-buffer set!window-last-buffer
+   window-last-modified set!window-last-modified
+   window-last-overlay-modified set!window-last-overlay-modified
+   window-last-start set!window-last-start
+   window-last-width set!window-last-width
+   window-last-height set!window-last-height
+   window-last-hscroll set!window-last-hscroll
+   ;; `w->last_point` and `w->last_mark` (`window.h`), which
+   ;; `mark_window_display_accurate_1` writes: the point and the mark
+   ;; the window's picture was built from.
+   window-last-point set!window-last-point
+   window-last-mark set!window-last-mark
+   ;; `window_outdated` (`window.c:231`), which the redisplay asks before
+   ;; it trusts a window's glyph matrix.
+   window-outdated?
    %window-min-hscroll set!%window-min-hscroll
    %window-suspend-auto-hscroll? set!%window-suspend-auto-hscroll?
    %window-old-point set!%window-old-point
@@ -289,7 +311,9 @@
        end-pos end-vpos end-valid base-line-number base-line-pos
        top height left width parent children
        hscroll min-hscroll suspend-auto-hscroll? old-point
-       prev-buffers next-buffers)
+       prev-buffers next-buffers
+       last-buffer last-modified last-overlay-modified last-start
+       last-width last-height last-hscroll last-point last-mark)
       window-type?
       (frame     window-frame       set!window-frame)
       ;; ^ The frame this window is on: GNU Emacs's `w->frame', the first
@@ -407,6 +431,36 @@
       ;; holds here - the comparison is `Fequal' either way.
       (prev-buffers %window-prev-buffers set!%window-prev-buffers)
       (next-buffers %window-next-buffers set!%window-next-buffers)
+      (last-buffer window-last-buffer set!window-last-buffer)
+      (last-modified window-last-modified set!window-last-modified)
+      (last-overlay-modified window-last-overlay-modified
+                             set!window-last-overlay-modified)
+      (last-start window-last-start set!window-last-start)
+      (last-width window-last-width set!window-last-width)
+      (last-height window-last-height set!window-last-height)
+      (last-hscroll window-last-hscroll set!window-last-hscroll)
+      (last-point window-last-point set!window-last-point)
+      ;; ^ `w->last_point` (`window.h`): "The point value for the
+      ;; last redisplay of this window". Written by
+      ;; `mark_window_display_accurate_1` (`xdisp.c:18352`), which asks
+      ;; `BUF_PT` for the selected window and `marker_position
+      ;; (w->pointm)` otherwise.
+      (last-mark window-last-mark set!window-last-mark)
+      ;; ^ `w->last_mark`, the mark that redisplay was built from, and
+      ;; -1 where Emacs's is -1: "the value of mark as it was in the last
+      ;; display", with the C's rule that an inactive mark reads -1.
+      ;; **This tree's redisplay reads the mark for every window**, not
+      ;; for the selected one alone: the region's face is computed from
+      ;; the buffer's point and mark in `line-display-texts`' callers, so
+      ;; a window showing a buffer whose region moved has to be rebuilt
+      ;; whether or not it is selected.
+      ;; ^ What the window's glyph matrix was built from: the buffer, its
+      ;; two modification ticks, the position it started at, its body size
+      ;; and its horizontal scroll. GNU Emacs's `w->last_modified',
+      ;; `w->last_overlay_modified' and `w->window_end_valid' are the same
+      ;; idea - the redisplay asks `window_outdated' (`window.c:231')
+      ;; whether it may trust the matrix it built last time, and skips
+      ;; rebuilding it when it may.
       ;; ^ The buffers this window showed before the one it shows, and
       ;; the ones `switch-to-prev-buffer' has stepped off. GNU Emacs's
       ;; `w->prev_buffers' and `w->next_buffers' (`window.h`, fields of
@@ -769,11 +823,14 @@
                         (build-marker buffer 1) #t
                         0 0 #f 0 0
                         top height left width #f '()
-                        0 0 #f 0 '() '())
+                        0 0 #f 0 '() '()
+                        ;; nothing built yet: `window_outdated?` says so
+                        #f 0 0 0 0 0 0 0 -1)
           (make<window> frame #f #f #f #f
                         0 0 #f 0 0
                         top height left width #f '()
-                        0 0 #f 0 '() '())))
+                        0 0 #f 0 '() '()
+                        #f 0 0 0 0 0 0 0 -1)))
 
     ;;----------------------------------------------------------------
     ;; Editor state
@@ -905,6 +962,30 @@
       ;; by `do-pending-window-change`. -1 in both means "no change
       ;; pending", as it does in the C: a native size is never negative.
       )
+
+    (define (window-outdated? window)
+      ;; GNU Emacs's `window_outdated` (`window.c:231`): "True if leaf
+      ;; window W doesn't reflect the actual state of displayed buffer due
+      ;; to its text or overlays change."
+      ;;
+      ;; It is the question the redisplay asks before reusing a window's
+      ;; glyph matrix: if neither tick has moved since the matrix was
+      ;; built, the text it was built from is the text the buffer holds.
+      ;; **The buffer itself is compared too.** A window that has just been
+      ;; given another buffer may well find that buffer at the same tick -
+      ;; two fresh buffers are both at 1 - and its matrix is of the wrong
+      ;; text.
+      ;;
+      ;; **It is here and not in `window.scm`**, where Emacs's is: the
+      ;; redisplay is `xdisp.scm`'s and `xdisp.scm` is *below*
+      ;; `window.scm`, so a question the redisplay asks has to be
+      ;; answerable from the library that owns the window record.
+      ;;--------------------------------------------------------------
+      (let ((buffer (window-buffer window)))
+        (or (not (eq? buffer (window-last-buffer window)))
+            (< (window-last-modified window) (buffer-modified-tick buffer))
+            (< (window-last-overlay-modified window)
+               (buffer-overlay-modified-tick buffer)))))
 
     (define (frame? thing)
       ;; GNU Emacs's `framep' (`frame.c'): "Return t if OBJECT is a
@@ -2638,7 +2719,28 @@
                    (current-display))))
         (suspend-display! d)
         (kill (getpid) SIGTSTP)
-        (resume-display! d)))
+        (resume-display! d)
+        ;; **Taking the terminal back is not the same as drawing on it.**
+        ;; `Fresume_tty` (`term.c:2604`) ends with
+        ;; `SET_FRAME_VISIBLE (root, true)`, and that macro's whole job
+        ;; (`frame.h:1537`) is `redisplay_other_windows ()` - "make sure
+        ;; the frame gets redisplayed if some changes were applied to it
+        ;; while it wasn't visible". Whatever the editor did while the
+        ;; shell had the screen was never drawn, and re-entering the
+        ;; terminal (`ti`, `\e[?1049h`) has just blanked it besides.
+        ;;
+        ;; **The garbage is this tree's half of that**, and it is needed
+        ;; only because the terminal can now be diffed: GNU Emacs's tty
+        ;; redisplay rebuilds and hands over the whole frame matrix every
+        ;; time, so a wiped surface costs it nothing to ignore. Here a
+        ;; window whose glyphs still look current is left alone, so the
+        ;; surface has to be declared empty. Measured, without it `C-z`
+        ;; then `fg` came back to a blank screen until the next command.
+        (set-windows-or-buffers-changed! #t)
+        (for-each (lambda (f)
+                    (when (eq? (frame-output f) d)
+                      (set-frame-garbaged! f #t)))
+                  (*frame-list*))))
 
     ;; The key GNU Emacs binds it to, beside the command as the other
     ;; libraries state theirs.
