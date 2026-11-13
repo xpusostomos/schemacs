@@ -21,13 +21,6 @@ Here's what works already:
 * isearch, query-rep
 * Mode line. 
 * Undo list.
-* Faces and color highlighting
-* Font-lock
-* Overlays
-* isearch, query-rep
-* Faces and color highlighting
-* Font-lock
-* Overlays
 * isearch, query-replace, query-replace-regexp 
 * Completions, query-replace have color highlighting like real emacs
 * eval-expression, eval-region
