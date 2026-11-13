@@ -15,12 +15,25 @@ Here's what works already:
 * The minibuffer, completions, exactly like emacs.
 * Minibuffer history
 * M-x and interactive commands
+* Faces and color highlighting
+* Font-lock
+* Overlays
+* isearch, query-rep
 * Mode line. 
 * Undo list.
 * Faces and color highlighting
 * Font-lock
 * Overlays
+* isearch, query-rep
+* Faces and color highlighting
+* Font-lock
+* Overlays
 * isearch, query-replace, query-replace-regexp 
+* Completions, query-replace have color highlighting like real emacs
+* eval-expression, eval-region
+* Multiple character set detection and conversion
+* Handling of illegal characters
+* Multiple Framesery-replace, query-replace-regexp 
 * Completions, query-replace have color highlighting like real emacs
 * eval-expression, eval-region
 * Multiple character set detection and conversion
@@ -67,7 +80,6 @@ project there.
 - `libgio`
 - `libgdk`
 - `libgtk3`
-- `ncurses`
 
 ## Guile Requirements
 
@@ -82,10 +94,6 @@ project there.
   (Note, last I checked the Arch AUR guile-cairo is too old and won't work.
   Suggesting downloading and sudo make install)
   
-- [Guile-Ncurses](https://www.gnu.org/software/guile-ncurses/) must be built and
-  installed in a directory path that is listed in the `%load-path`.
-  The arch AUR version works.
-
 ## How to install
 
 `make install-local` to install in your local directory.
