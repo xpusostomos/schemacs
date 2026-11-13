@@ -45,6 +45,7 @@
           write-glyphs! draw-box! face-metrics display-cell-size clear-frame-area!
           clear-end-of-line! ensure-surface!
           update-window-begin! update-window-end!
+          update-begin! update-end!
           cursor-to!
           draw-window-cursor! erase-window-cursor! flush-display!
           realize-face
@@ -3075,6 +3076,13 @@
         ;; reason, and it is the only thing an incremental redisplay
         ;; needs that a full repaint got for free.
         (erase-phys-cursor!)
+        ;; **The cursor is hidden for the whole frame update**, which is
+        ;; `update_frame`'s `update_begin`/`update_end` pair
+        ;; (`dispnew.c`), and for a terminal it is `tty_hide_cursor`/
+        ;; `tty_show_cursor`. Without it the user watches the cursor walk
+        ;; the screen as the rows are written - measured, it visibly
+        ;; jumps to the mode line and back on every keystroke.
+        (update-begin! (current-display))
         (clear-garbaged-frames! frame windows)
         ;; Only the selected window is scrolled to show its point here:
         ;; it is the one point moves in, and its buffer is the one
@@ -3359,6 +3367,7 @@
         ;; this terminal honours the full-repaint `clear-frame-area!'
         ;; asked for (partial-update optimizations desync the physical
         ;; terminal when lines merge).
+        (update-end! (current-display))
         (flush-display! (current-display))
         )))
 

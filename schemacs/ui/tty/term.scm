@@ -153,6 +153,8 @@
       (exit-attribute tty-exit-attribute set-tty-exit-attribute!)
       (cursor-visible tty-cursor-visible set-tty-cursor-visible!)
       (cursor-normal tty-cursor-normal set-tty-cursor-normal!)
+      (cursor-invisible tty-cursor-invisible set-tty-cursor-invisible!)
+      (cursor-hidden tty-cursor-hidden set-tty-cursor-hidden!)
       (keypad-mode tty-keypad-mode set-tty-keypad-mode!)
       (end-keypad-mode tty-end-keypad-mode set-tty-end-keypad-mode!)
       (termcap-modes tty-termcap-modes set-tty-termcap-modes!)
@@ -313,6 +315,9 @@
         (set-tty-exit-attribute! caps (tgetstr "me"))
         (set-tty-cursor-visible! caps (tgetstr "vs"))
         (set-tty-cursor-normal! caps (tgetstr "ve"))
+        ;; `TS_cursor_invisible` (`vi`, `civis`): the sequence
+        ;; `tty_hide_cursor` emits while the frame is being written.
+        (set-tty-cursor-invisible! caps (tgetstr "vi"))
         (set-tty-keypad-mode! caps (tgetstr "ks"))
         (set-tty-end-keypad-mode! caps (tgetstr "ke"))
         (set-tty-termcap-modes! caps (tgetstr "ti"))
@@ -333,6 +338,7 @@
                 (set-tty-end-standout! caps s)
                 (set-tty-standout! caps #f))))
         (set-tty-standout-mode! caps #f)
+        (set-tty-cursor-hidden! caps #f)
         (set-tty-visible-cursor! caps #f)
         (set-tty-max-colors! caps
                              (if (tty-orig-pair caps)
@@ -501,6 +507,31 @@
             ((string=? name "AF") (tty-set-foreground caps))
             ((string=? name "AB") (tty-set-background caps))
             (else (tgetstr name))))
+
+    (define (tty-hide-cursor caps)
+      ;; GNU Emacs's `tty_hide_cursor` (`term.c:352`): "Make cursor
+      ;; invisible" - and it is the whole of `tty_update_begin` (`:1860`),
+      ;; so the cursor motions a redisplay makes are not seen.
+      ;;
+      ;; **Without it the cursor is visible walking over the frame.** It
+      ;; is one terminal cursor, and every `cursor_to!` in the redisplay
+      ;; moves it - so writing the mode line at the bottom of a window
+      ;; takes the cursor there and back, in front of the user. Emacs
+      ;; hides it for the frame update and shows it at the end
+      ;; (`tty_show_cursor`, the tail of `tty_update_end`).
+      ;;--------------------------------------------------------------
+      (unless (tty-cursor-hidden caps)
+        (set-tty-cursor-hidden! caps #t)
+        (%emit (tty-cursor-invisible caps))))
+
+    (define (tty-show-cursor caps)
+      ;; GNU Emacs's `tty_show_cursor` (`term.c:362`).
+      ;;--------------------------------------------------------------
+      (when (tty-cursor-hidden caps)
+        (set-tty-cursor-hidden! caps #f)
+        (%emit (tty-cursor-normal caps))
+        (when (tty-visible-cursor caps)
+          (%emit (tty-cursor-visible caps)))))
 
     (define (tty-turn-on-highlight caps)
       ;; GNU Emacs's `tty_turn_on_highlight` (`term.c:326`):
@@ -1273,13 +1304,17 @@
           (tty-turn-off-highlight caps)
           (%emit (tty-clr-frame caps)))))
 
-    (define-method (update-begin! (d <tty-display>)) #t)
+    (define-method (update-begin! (d <tty-display>))
+      ;; GNU Emacs's `tty_update_begin` (`term.c`), which is exactly
+      ;; `tty_hide_cursor`.
+      ;;--------------------------------------------------------------
+      (tty-hide-cursor %terminal))
 
     (define-method (update-end! (d <tty-display>))
       ;; `tty_update_end` (`term.c:254`): show the cursor, turn the
       ;; insert mode off, and flush.
       ;;--------------------------------------------------------------
-      (%emit (tty-cursor-normal %terminal))
+      (tty-show-cursor %terminal)
       (flush-output-port (current-output-port)))
 
     (define-method (set-terminal-modes! (d <tty-display>))
