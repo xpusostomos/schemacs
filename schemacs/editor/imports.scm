@@ -449,6 +449,7 @@
     *update-search-regs-function*
     *use-empty-active-region*
     *visual-line-fringe-indicators*
+    *window-scroll-function*
     *window-system*
     *x-select-request-type*
     *yank-pop-change-selection*
@@ -2223,6 +2224,7 @@
     window-min-height
     window-min-width
     window-minibuffer-p
+    window-move-screen-lines
     window-next-buffers
     window-normalize-buffer-to-switch-to
     window-outdated?
@@ -2231,6 +2233,7 @@
     window-position
     window-prev-buffers
     window-right-border?
+    window-scroll
     window-start
     window-start-at-line-beg
     window-system-display?

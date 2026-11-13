@@ -969,6 +969,29 @@ def check_isearch_highlight_row():
     return problems
 
 
+def check_quit_after_prefix():
+    """C-x C-g quits, and the editor is still running afterwards.
+
+    GNU Emacs's `read_key_sequence` throws away a prefix that leads
+    nowhere and looks the last event up by itself, so `C-x C-g` runs
+    `keyboard-quit`.  This tree reported "C-x C-g is undefined" instead,
+    and because C-g arrives as SIGINT the `quit-flag` that
+    `keyboard-quit` clears was left set - the next read raised `quit`
+    and the terminal editor exited.  Measured at a pty: a backtrace and
+    a dead editor.
+    """
+    path = "/tmp/pty-check-quit-prefix.txt"
+    open(path, "w").write("alpha\n")
+    screen, exited = drive([C_x, b"\x07"], path, report_exit=True)
+    if exited:
+        return ["C-x C-g killed the editor"]
+    if "Quit" not in screen:
+        return ["C-x C-g did not report Quit (screen %r)" % screen[-200:]]
+    if "undefined" in screen:
+        return ["C-x C-g was reported undefined instead of quitting"]
+    return []
+
+
 def check_isearch_quit():
     """A control key isearch does not use ends the search and runs.
 
@@ -4403,6 +4426,7 @@ CHECKS = {
     "isearch-multiline": check_isearch_multiline,
     "isearch-scroll": check_isearch_scroll,
     "isearch-highlight-row": check_isearch_highlight_row,
+    "quit-after-prefix": check_quit_after_prefix,
     "isearch-quit": check_isearch_quit,
     "region-highlight": check_region_highlight,
     "continuation": check_continuation,

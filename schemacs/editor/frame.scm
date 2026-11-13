@@ -211,6 +211,10 @@
    ;; it. `window.scm` installs the function at load, as `frame.scm`
    ;; installs the message function.
    *record-window-buffer-function*
+   ;; The seam `scroll-up-command` scrolls through: a screen line is a
+   ;; display fact, and `simple.scm` is below the library that knows one.
+   ;; `xdisp.scm` installs `window-scroll` at load.
+   *window-scroll-function*
    %window-end-pos set!%window-end-pos
    %window-end-vpos set!%window-end-vpos
    %window-end-valid? set!%window-end-valid?
@@ -697,6 +701,18 @@
              (let ((before (fetch-char buffer (- position 1))))
                (and (char? before) (char=? #\newline before)))))
         position))
+
+    (define *window-scroll-function*
+      ;; GNU Emacs's `scroll-up-command` (`simple.el:5175`) is
+      ;; `(scroll-up (prefix-numeric-value arg))` and `scroll-up` is
+      ;; `(window_scroll (selected-window) ...)` (`window.c:7533`) - a
+      ;; **screen**-line scroll, through `window_scroll_pixel_based`.
+      ;; `simple.scm` cannot reach the display, so the call goes through
+      ;; this seam, as `record-window-buffer` does; `xdisp.scm` installs
+      ;; `window-scroll` at load and a front end with no display never
+      ;; sees the seam called.
+      ;;--------------------------------------------------------------
+      (make-parameter #f))
 
     (define *record-window-buffer-function*
       ;; GNU Emacs's `Fset_window_buffer` calls `record-window-buffer`

@@ -57,6 +57,8 @@
          frame-keymap-state
          selected-window set!frame-keymap-state
          set!frame-message window-body-height
+         ;; a screen line is the display's - see `*window-scroll-function*`
+         *window-scroll-function*
          window-buffer window-list window-width
          %window-hscroll %window-start set-window-start!)
     ;; The kill ring's window-system half: the cut and paste functions
@@ -853,54 +855,65 @@ This has no effect when the variable `line-move-visual' is non-nil."
       (string=? string ""))
 
     (define-command (scroll-up-command uarg)
-      ;; Scroll the view toward the end of the buffer, with a two-line
-      ;; overlap, like mg's `forwpage`. If the point falls outside the new
-      ;; window it moves to the top of the window, column zero. Reports
-      ;; "End of buffer" when the view cannot scroll further.
+      ;; Scroll the view toward the end of the buffer, a page at a time.
+      ;; Reports "End of buffer" when the view cannot scroll further.
+      ;;
+      ;; **A page is a page of *screen* lines**, which is
+      ;; `window_scroll_pixel_based` (`window.c`) through
+      ;; `window_scroll`: the seam `xdisp.scm` installs is that
+      ;; function, because a screen line is a display fact and this
+      ;; library is below the display. What follows after the seam is
+      ;; the line arithmetic this command used to do on its own, kept
+      ;; for a window with no display to ask (`window-move-lines`
+      ;; measures *lines*, so it overshoots on a wrapped buffer).
       "Scroll text of selected window upward."
       (interactive "P")
       (let* ((frame (*current-frame*))
              (window (selected-window))
-             (ed (window-buffer window))
-             (vheight (window-body-height window))
              (n (scroll-amount uarg window))
-             (old (marker-position (%window-start window)))
-             (new (window-move-lines ed old n)))
-        (if (<= new old)
-            (set!frame-message frame "; End of buffer")
-            (begin
-              (set-window-start! window new)
-              ;; point is visible when it lies between this window's
-              ;; first line and its last - the same test the line
-              ;; numbers made, in positions
-              (let ((point (buffer-pt ed))
-                    (bottom (window-move-lines ed new vheight)))
-                (when (or (< point new) (>= point bottom))
-                  (set-point ed new)))))))
+             (scroll (*window-scroll-function*)))
+        (if scroll
+            (when (eq? (scroll window n) 'end)
+              (set!frame-message frame "; End of buffer"))
+            (let* ((ed (window-buffer window))
+                   (vheight (window-body-height window))
+                   (old (marker-position (%window-start window)))
+                   (new (window-move-lines ed old n)))
+              (if (<= new old)
+                  (set!frame-message frame "; End of buffer")
+                  (begin
+                    (set-window-start! window new)
+                    (let ((point (buffer-pt ed))
+                          (bottom (window-move-lines ed new vheight)))
+                      (when (or (< point new) (>= point bottom))
+                        (set-point ed new)))))))))
 
     (define-command (scroll-down-command uarg)
-      ;; Scroll the view toward the beginning of the buffer, the mirror
-      ;; of `scroll-up-command'.
+      ;; Scroll the view toward the beginning of the buffer, the mirror of
+      ;; `scroll-up-command` - and a page of *screen* lines for the same
+      ;; reason; see the seam's note there.
       "Scroll text of selected window downward."
       (interactive "P")
       (let* ((frame (*current-frame*))
              (window (selected-window))
-             (ed (window-buffer window))
-             (vheight (window-body-height window))
              (n (scroll-amount uarg window))
-             (old (marker-position (%window-start window)))
-             (new (window-move-lines ed old (- n))))
-        (if (= new old)
-            (set!frame-message frame "; Beginning of buffer")
-            (begin
-              (set-window-start! window new)
-              (let ((point (buffer-pt ed))
-                    (bottom (window-move-lines ed new vheight)))
-                (when (or (< point new) (>= point bottom))
-                  ;; point is off the bottom: it goes to the window's last
-                  ;; line, which is what the line arithmetic did
-                  (set-point
-                   ed (window-move-lines ed new (- vheight 1)))))))))
+             (scroll (*window-scroll-function*)))
+        (if scroll
+            (when (eq? (scroll window (- n)) 'beginning)
+              (set!frame-message frame "; Beginning of buffer"))
+            (let* ((ed (window-buffer window))
+                   (vheight (window-body-height window))
+                   (old (marker-position (%window-start window)))
+                   (new (window-move-lines ed old (- n))))
+              (if (= new old)
+                  (set!frame-message frame "; Beginning of buffer")
+                  (begin
+                    (set-window-start! window new)
+                    (let ((point (buffer-pt ed))
+                          (bottom (window-move-lines ed new vheight)))
+                      (when (or (< point new) (>= point bottom))
+                        (set-point
+                         ed (window-move-lines ed new (- vheight 1)))))))))))
 	
 	(define-command (toggle-truncate-lines arg)
       "Toggle truncating of long lines for the current buffer.

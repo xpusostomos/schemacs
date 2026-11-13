@@ -96,6 +96,7 @@
     (only (schemacs editor fns) count-lines)
     (only (schemacs editor frame)
          *current-frame* *echo-area-buffer* *echo-area-prompt*
+         *window-scroll-function*
          *frame-cursor-type* *frame-focus* frame-height frame-width
          ;; `FRAME_GARBAGED_P` / `SET_FRAME_GARBAGED` (`frame.h:1173`),
          ;; consumed by `clear-garbaged-frames!`.
@@ -321,6 +322,7 @@
    render! redisplay-frames! *redisplay-in-progress*
    force-mode-line-update
    scroll-to-cursor!
+   window-scroll window-move-screen-lines
    status-string
    window-end
    pos-visible-in-window-p
@@ -425,6 +427,96 @@
             (let* ((above (text-editor-get-start-of-line ed (- pos 1)))
                    (tall (window-line-rows-at window above)))
               (loop (- back tall) (+ rows tall) above)))))
+
+    (define (window-move-screen-lines window pos n)
+      ;; POS moved N *screen rows* in WINDOW - negative toward the
+      ;; beginning, positive toward the end - snapping to line starts as
+      ;; Emacs's `move_it_vertically`/`move_it_vertically_backward` do.
+      ;;
+      ;; **A screen row, not a line.** A wrapped line is several rows,
+      ;; and `scroll-down-command` counting *lines* overshot by the
+      ;; wrapping factor: in a split window of long lines one PageUp
+      ;; moved twenty logical lines - eighty rows - and the redisplay's
+      ;; `scroll-to-cursor!` put the window straight back, so the view
+      ;; stuck. Measured, 300-character lines in an 80-column terminal:
+      ;; `window-start` 5863, 5554, then 5554 for ever.
+      ;;--------------------------------------------------------------
+      (let ((ed (window-buffer window)))
+        (if (<= n 0)
+            (let loop ((pos pos) (left (- n)))
+              (if (or (<= left 0) (= pos (buffer-beg ed)))
+                  pos
+                  (let* ((bol (if (= pos (buffer-beg ed))
+                                  pos
+                                  (text-editor-get-start-of-line ed (- pos 1))))
+                         (prev (if (= bol (buffer-beg ed))
+                                   bol
+                                   (text-editor-get-start-of-line ed (- bol 1)))))
+                    (if (= prev bol)
+                        bol
+                        (loop prev (- left (window-line-rows-at window prev)))))))
+            (let loop ((pos pos) (left n))
+              (if (or (<= left 0) (= pos (buffer-z ed)))
+                  pos
+                  (let* ((end (text-editor-get-end-of-line ed pos))
+                         (next (if (< end (buffer-z ed)) (+ end 1) end)))
+                    (if (= next pos)
+                        pos
+                        (loop next (- left (window-line-rows-at window pos))))))))))
+
+    (define (window-scroll window n)
+      ;; GNU Emacs's `window_scroll` (`window.c`) as the two commands use
+      ;; it: move WINDOW's view N screen lines (negative toward the
+      ;; beginning) and keep point in the window.
+      ;;
+      ;; Answers `moved`, `beginning` or `end`, which is the distinction
+      ;; the commands report in the echo area.
+      ;;
+      ;; Emacs's `window_scroll_pixel_based` scrolls the display down or
+      ;; up and then, if point is outside the window, moves it to the
+      ;; window's first or last line (`window_scroll_pixel_based`'s
+      ;; `display_done`/`set_cursor_from_row` tail). **The point rule is
+      ;; what the stall was**: point sat below the window, the command
+      ;; judged it visible because the judgment counted lines, and the
+      ;; next redisplay's `scroll-to-cursor!` scrolled back.
+      ;;--------------------------------------------------------------
+      (let* ((ed (window-buffer window))
+             (old (marker-position (%window-start window)))
+             (vheight (window-body-height window))
+             (new (window-move-screen-lines window old n)))
+        (cond
+         ((= new old) (if (> n 0) 'end 'beginning))
+         (else
+          (set-window-start! window new)
+          (let ((point (buffer-pt ed))
+                (bottom (window-move-screen-lines window new vheight)))
+            (when (or (< point new) (>= point bottom))
+              (set-point ed (if (> n 0)
+                                new
+                                ;; **The last line that *starts* in the
+                                ;; window**, not the line 23 rows on: a
+                                ;; line start that many rows down is on
+                                ;; the first row below the window, so
+                                ;; the redisplay judged point invisible
+                                ;; and recentred straight back - the
+                                ;; stall again, one row out.
+                                (last-visible-line-start window new vheight)))))
+          'moved))))
+
+    (define (last-visible-line-start window start vheight)
+      ;; The start of the last line of WINDOW that begins within its
+      ;; VHEIGHT rows, walking from START - the position
+      ;; `window_scroll_pixel_based` leaves point on when it scrolls the
+      ;; display down (Emacs's `move_it_vertically_backward` from the
+      ;; bottom lands on such a line).
+      ;;--------------------------------------------------------------
+      (let ((ed (window-buffer window)))
+        (let loop ((pos start) (used 0) (last start))
+          (let ((next (line-next-start ed pos))
+                (rows (window-line-rows-at window pos)))
+            (if (or (not next) (>= (+ used rows) vheight))
+                last
+                (loop next (+ used rows) next))))))
 
     (define (scroll-to-cursor! window)
       ;; Adjust WINDOW's start so that its point is visible, as GNU
@@ -3996,5 +4088,10 @@
     ;; The seam the log arrives through: `editfns.scm`'s `message` calls
     ;; this before it displays, as `message3' calls `log_message'.
     (*message-log-function* log-message)
+
+    ;; **The scroll seam** (`frame.scm`'s `*window-scroll-function*`):
+    ;; `scroll-up-command` is `simple.el`'s and a screen line is this
+    ;; library's, so the command calls through here. Installed at load.
+    (*window-scroll-function* window-scroll)
 
     ))

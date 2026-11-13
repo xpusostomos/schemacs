@@ -878,41 +878,35 @@
             (set!frame-keymap-state frame #f))
           ;; any other key: continue (or start) the keymap lookup
           (begin
-            (let ((state
-                   (or (frame-keymap-state frame)
-                       (new-modal-lookup-state (lookup-keymaps)))))
+            (let* ((continuing? (and (frame-keymap-state frame) #t))
+                   (state
+                    (or (frame-keymap-state frame)
+                        (new-modal-lookup-state (lookup-keymaps)))))
               ;; NOTE: the state is stored on the frame BEFORE the lookup
               ;; step, because the step's callbacks read it - `do-action'
               ;; reads the completed chord off it for `*this-command-keys*'
-              ;; and the undefined-key message. (Until 2026-10-10
-              ;; `self-insert-command' and `digit-argument' read it too,
-              ;; re-deriving what Emacs gets from `last-command-event';
-              ;; they take that now, which is why this is a note about the
-              ;; chord and not about commands.)
+              ;; and the undefined-key message.
               (set!frame-keymap-state frame state)
-              (let ((result
-                     (modal-lookup-state-step!
-                      state key
-                      (lambda (full-path action)
+              (let* ((run
+                      (lambda (st action)
                         ;; **The chord that ran the command**, which
-                        ;; `set-transient-map''s keep test reads - GNU
+                        ;; `set-transient-map`'s keep test reads - GNU
                         ;; Emacs's `this-command-keys'. It has to be
-                        ;; bound around `dispatch-action' and not merely
-                        ;; set, because it must cover `pre-command-hook'
-                        ;; (which runs inside it, just before the
-                        ;; command) as well as the command itself.
+                        ;; bound around `dispatch-action` and not merely
+                        ;; set, because it must cover `pre-command-hook`
+                        ;; as well as the command itself.
                         (parameterize
                             ((*this-command-keys*
                               (list->vector
-                               (modal-lookup-state-key-index state))))
+                               (modal-lookup-state-key-index st))))
                           (dispatch-action frame action))
-                        #f)
-                      (lambda (full-path action) #t)
+                        #f))
+                     (report-undefined
                       (lambda (full-path)
                         ;; An undefined key ends the chord: the pending
-                        ;; prefix is discarded with it, the way GNU
-                        ;; Emacs drops a prefix argument when the key
-                        ;; sequence it precedes is not a command.
+                        ;; prefix is discarded with it, the way GNU Emacs
+                        ;; drops a prefix argument when the key sequence it
+                        ;; precedes is not a command.
                         ;;
                         ;; **The message is Emacs's `undefined' command's**
                         ;; (`subr.el:1297'):
@@ -922,12 +916,12 @@
                         ;;
                         ;; so it reads `C-c C-z is undefined' and not this
                         ;; tree's old `; undefined key: ...', which printed
-                        ;; the keymap's *private* spelling at the
-                        ;; user. `key-description' is Emacs's, over the
-                        ;; events the chord actually was. The `ding' that
-                        ;; command does first is not ported - there is no
-                        ;; bell here (the same gap `minibuffer.sld' notes
-                        ;; for the completion messages).
+                        ;; the keymap's *private* spelling at the user.
+                        ;; `key-description` is Emacs's, over the events the
+                        ;; chord actually was. The `ding` that command does
+                        ;; first is not ported - there is no bell here (the
+                        ;; same gap `minibuffer.sld` notes for the
+                        ;; completion messages).
                         (clear-prefix!)
                         (set!frame-message
                          frame
@@ -935,9 +929,54 @@
                           (key-description
                            (list->vector
                             (km:keymap-index->events full-path)))
-                          " is undefined"))))))
-                (set!frame-keymap-state
-                 frame (and result state)))))))))
+                          " is undefined"))))
+                     (fail
+                      (lambda (full-path)
+                        ;; **Emacs's "last event alone" rule.** When a
+                        ;; sequence that began with a prefix has no
+                        ;; binding, `read_key_sequence` throws the prefix
+                        ;; away and looks the event just read up by
+                        ;; itself - which is what makes `C-x C-g` *quit*
+                        ;; rather than being an undefined `C-x C-g`. This
+                        ;; tree only reported it undefined, and that was
+                        ;; not merely cosmetic: C-g arrives as SIGINT, its
+                        ;; `quit-flag` is cleared by `keyboard-quit`, and
+                        ;; `keyboard-quit` never ran - so the flag stayed
+                        ;; set, the next read raised `quit`, and the
+                        ;; terminal editor exited. Measured at a pty:
+                        ;; `C-x C-g` printed a backtrace and killed the
+                        ;; editor.
+                        (let* ((alone (new-modal-lookup-state
+                                       (lookup-keymaps)))
+                               ;; **A step answers #f both for "the chord
+                               ;; ended with a command" and for "nothing
+                               ;; was bound"**, so the answer cannot say
+                               ;; whether the retry succeeded: the command
+                               ;; running is what does.
+                               (found? #f)
+                               (retried
+                                (modal-lookup-state-step!
+                                 alone key
+                                 (lambda (fp action)
+                                   (set! found? #t)
+                                   (run alone action))
+                                 (lambda (fp action)
+                                   (set! found? #t)
+                                   #t)
+                                 (lambda (fp) #f))))
+                          ;; Emacs's rule is "if the last event alone has
+                          ;; a binding, use it"; a last event that is a
+                          ;; prefix map by itself is not used, which is
+                          ;; the one corner this does not take.
+                          (unless found?
+                            (report-undefined full-path)))))
+                     (result
+                      (modal-lookup-state-step!
+                       state key
+                       (lambda (full-path action) (run state action))
+                       (lambda (full-path action) #t)
+                       fail)))
+                (set!frame-keymap-state frame (and result state)))))))))
 
     (define (dispatch-key frame key)
       ;; Dispatch one *key event* - the integer or symbol `read-key-event'
