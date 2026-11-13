@@ -51,6 +51,7 @@
    delete-frame-display!
    realize-face
    lookup-face
+   menu-show
    screen-size
    column-width
    line-height
@@ -539,6 +540,22 @@
             (let ((token (realize-face display face-attrs)))
               (hash-set! cache face-attrs token)
               token))))
+
+    (define-generic menu-show)
+    ;; Show MENU - a tree of panes and items built from `menu_items` by
+    ;; `(schemacs editor menu)` - at X, Y and answer the chosen item's
+    ;; value, or #f when nothing was chosen. Emacs's
+    ;; `terminal->menu_show_hook` (`termhooks.h`), whose terminal
+    ;; implementation is `tty_menu_show` (`term.c:4023`). A display with
+    ;; no menus - every one but a terminal, which builds its own
+    ;; toolkits' - answers #f.
+    ;; `(menu-show display frame x y flags title tree)`.
+    ;;
+    ;; The tree is `(TITLE ITEM ...)' per pane, each ITEM being
+    ;; `#(TEXT VALUE ENABLED HELP SUBMENU)`: SUBMENU is #f or another
+    ;; pane tree, which is `tty_menu_add_pane`/`add_selection`'s shape.
+    (define-method (menu-show (d <display>) frame x y flags title tree)
+      #f)
 
     (define-generic screen-size)
     ;; The display's size in pixels, as `(WIDTH . HEIGHT)' - Emacs's

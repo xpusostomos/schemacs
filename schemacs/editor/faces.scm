@@ -485,7 +485,15 @@
                    ;; An old-style entry is `(DISPLAY ATTRS)' with the
                    ;; attributes as one list; a new-style one is
                    ;; `(DISPLAY ATTR VALUE ...)'.
-                   (thisval (if (null? (cdr attrs)) (car attrs) attrs)))
+                   ;; **An entry may name no attributes at all**, which
+                   ;; is `defface menu`'s `(type x-toolkit)` branch: it
+                   ;; matches a GUI frame and specifies nothing. `(cdr
+                   ;; attrs)` on the empty list raised here, so the one
+                   ;; spec in Emacs with an empty branch could not be
+                   ;; ported.
+                   (thisval (cond ((null? attrs) '())
+                                  ((null? (cdr attrs)) (car attrs))
+                                  (else attrs))))
               (cond
                ((eq? display 'default)
                 (loop (cdr tail) result thisval found))
@@ -870,6 +878,31 @@ This inherits from the `mode-line` face.")
     (defface 'region
           '((((class color) (min-colors 88) (background dark)) :background "blue3" :extend #t) (((class color) (min-colors 88) (background light)) :background "lightgoldenrod2" :extend #t) (((class color) (min-colors 16) (background dark)) :background "blue3" :extend #t) (((class color) (min-colors 16) (background light)) :background "lightgoldenrod2" :extend #t) (((class color) (min-colors 8)) :background "blue" :foreground "white" :extend #t) (((type tty) (class mono)) :inverse-video #t) (#t :background "gray" :extend #t))
           "Basic face for highlighting the region.")
+
+    ;;--------------------------------------------------------------
+    ;; The TTY face and the three the terminal's menus are drawn with
+    ;; (`faces.el:3035`, `:3130`). **Emacs 31's `menu` face has an
+    ;; empty `x-toolkit` branch** - a GUI's menu bar is the toolkit's -
+    ;; and the three `tty-menu-*` faces are what `tty_menu_activate`
+    ;; looks up (`term.c:3635`). They were missing here because there
+    ;; was no terminal menu to draw; `term.scm`'s menu now draws with
+    ;; them.
+    ;;--------------------------------------------------------------
+    (defface 'menu
+          '((((type tty)) :inverse-video #t) (((type x-toolkit))) (#t :inverse-video #t))
+          "Basic face for the font and colors of the menu bar and popup menus.")
+
+    (defface 'tty-menu-enabled-face
+          '((((class color)) :foreground "yellow" :background "blue" :weight #t) (#t :weight #t))
+          "Face for displaying enabled items in TTY menus.")
+
+    (defface 'tty-menu-disabled-face
+          '((((class color) (min-colors 16)) :foreground "lightgray" :background "blue") (((class color)) :foreground "white" :background "blue") (#t :inherit shadow))
+          "Face for displaying disabled items in TTY menus.")
+
+    (defface 'tty-menu-selected-face
+          '((((class color)) :background "red") (#t :inverse-video #t))
+          "Face for displaying the currently selected item in TTY menus.")
 
     (defface 'highlight
           '((((class color) (min-colors 88) (background light)) :background "darkseagreen2") (((class color) (min-colors 88) (background dark)) :background "darkolivegreen") (((class color) (min-colors 16) (background light)) :background "darkseagreen2") (((class color) (min-colors 16) (background dark)) :background "darkolivegreen") (((class color) (min-colors 8)) :background "green" :foreground "black") (#t :inverse-video #t))

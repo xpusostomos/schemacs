@@ -1494,6 +1494,7 @@
     menu-items-submenu-depth
     menu-items-used
     menu-separator-name?
+    menu-show
     menu-state?
     merge-coding-systems
     merge-face-attribute
