@@ -749,3 +749,56 @@ function. Backing the optimisation out was the wrong response; reading the
 next function in the same C file found it in one look. That is the rule
 this file already carries - when behaviour is wrong, read the C rather
 than route around it.
+
+## The redisplay work that is not done, and three things seen from using it
+
+Written down so the gaps are work items rather than discoveries. The first
+table is what was deliberately left after the terminal became diffed; the
+second is what Chris reported from using the editor, with the Emacs
+mechanism each most likely departs from.
+
+### Not done in the redisplay
+
+| Emacs | state here |
+|---|---|
+| `scrolling_window`, `try_window_reusing_current_matrix`, `try_window_id` | not ported. A scroll redraws every row, because `matrix-diff-rows` compares row *i* with row *i*. Emacs shifts the still-valid runs; on a tty it then uses scroll regions or insert/delete-line (`FRAME_SCROLL_REGION_OK`). We carry no `cs`/`sf`/`sr`/`AL`/`DL` capabilities at all, so the row reuse would save CPU but not output - measured, a page scroll is already ~500 bytes on a 24x80 terminal. |
+| the mode line as a row of the glyph matrix (`display_mode_line`) | drawn outside the matrices, so it is diffed by `render-window-mode-line!` instead of by `update_window`. |
+| `w->redisplay`, `w->update_mode_line`, `mode_line_update_needed` | not carried. `windows-or-buffers-changed` is one flag standing in for a subset of them. |
+| GTK damage rectangles | none: a window whose matrix changed repaints the window. |
+| jit-lock / font-lock refontification | the font-lock pass is done up front, not on demand. |
+
+### From using the editor (2026-11-13)
+
+**(1) Holding an arrow key down keeps the cursor moving after the key is
+released.** GNU Emacs stops within a keystroke of the release. Nothing here
+buffers input deliberately: the terminal queues the repeats, we read one
+per command, and while the per-keystroke cost is higher than the repeat
+interval a backlog builds and is then worked off after the release. So the
+question to answer first is what a keystroke actually costs end to end
+(command + redisplay + the terminal's own processing), not whether some
+ioctl is missing. Emacs is not doing anything special here - it is simply
+draining the queue faster than the terminal fills it.
+
+**(2) The cursor visibly jumps to the mode line while it is redrawn.**
+GNU Emacs's `tty_update_begin` (`term.c`) is `tty_hide_cursor`, and
+`tty_update_end` is `tty_show_cursor`: the cursor is made invisible for the
+whole of `update_frame` and shown again afterwards, so the cursor motions
+that write the rows are not seen. `update-window-begin!` here is a no-op
+(`#t`) and `update-end!` only emits `TS_cursor_normal`, so every
+`cursor_to!` the redisplay makes is visible. `TS_cursor_invisible`/`civis`
+is already read into the capability table (`cursor-invisible` does not
+exist - `tty-cursor-visible` holds `cvvis`, so `civis` needs adding) and
+`tty_show_cursor` needs its `cursor_hidden` flag ported with it.
+
+**(3) After the terminal's theme changes, the background behind text is the
+old colour and the rest of each line the new one, so the text forms a
+jagged outline.** The renderer emits the default face with explicit
+truecolor (`\e[38;2;229;229;229m\e[48;2;51;51;51m` for plain text), while
+the parts of a row past the text are cleared with `ce` under no explicit
+colour. When the terminal's palette changes, the cells carrying explicit
+RGB keep what they were given and the cleared cells follow the terminal, so
+the two no longer match. Emacs's tty default face is
+`FACE_TTY_DEFAULT_FG_COLOR`/`..._BG_COLOR` - the terminal's own colours,
+emitted as "no setaf/setab" - so the whole line moves together.
+`realize-tty-face`/`realize-face` giving the default face concrete RGB from
+the frame's background is where to look, not the drawing code.
