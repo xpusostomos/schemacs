@@ -6,7 +6,7 @@
  (only (rnrs io ports) get-bytevector-all put-bytevector)
  (only (guile) chmod mkdir sort)
  ;; `make' is GOOPS's: the test display object is made with it.
- (only (oop goops) make)
+ (only (oop goops) make define-class define-method)
  (only (ice-9 exceptions) exception-message)
  (prefix (schemacs editor keymap) km:)
  (only (srfi 64) test-assert test-equal test-begin test-end)
@@ -46,7 +46,8 @@
  ;; display it asks: a terminal object with no curses behind it, which is
  ;; all the character events these tests feed ever need (only an extended
  ;; keycode would ask the terminal's terminfo, and none is used here).
- (only (schemacs editor dispnew) current-display key-event->key)
+ (only (schemacs editor dispnew) current-display key-event->key
+       lookup-face realize-face)
  (only (schemacs editor test-display) <test-display> test-display-script
        test-display-frames-deleted test-display-cursor)
  (only (schemacs editor keymap) *current-keymap* *default-keymap*)
@@ -4612,5 +4613,37 @@
           ;; and the map is not in `*current-keymap*' either: that would
           ;; pin it for the whole read
           (not (eq? (*current-keymap*) minibuffer-local-map)))))
+
+;;----------------------------------------------------------------
+;; **A realized face is interned per display**, which is `dispnew`'s
+;; `lookup-face` (GNU Emacs's face cache, `xfaces.c`). Emacs's glyphs
+;; carry a `face_id` - an integer - and `GLYPH_EQUAL_P` compares them with
+;; `==`; here the token is an object, and `glyph-equal?` compares tokens
+;; with `eqv?`. So unless the same attributes answer the *same object*
+;; every time, every rebuilt row compares unequal to the one on screen and
+;; `update_window` redraws the whole window: measured, 2311 bytes per
+;; keystroke against GNU Emacs 31.1's 211, and the editor fell behind fast
+;; typing. The display below answers a freshly consed list every call,
+;; which is what the terminal's `realize-tty-face` does.
+;;----------------------------------------------------------------
+(define-class <list-token-display> (<test-display>))
+(define-method (realize-face (d <list-token-display>) attrs)
+  (list 'token attrs))
+
+(test-equal "a face's token is one object for one set of attributes"
+  '(#t #f)
+  (let ((d (make <list-token-display>)))
+    (list (eq? (lookup-face d '(:weight bold))
+               (lookup-face d '(:weight bold)))
+          ;; a different face is a different token
+          (eq? (lookup-face d '(:weight bold))
+               (lookup-face d '(:slant italic))))))
+
+(test-equal "two displays realise the same face separately"
+  #f
+  (let ((a (make <list-token-display>))
+        (b (make <list-token-display>)))
+    (eq? (lookup-face a '(:weight bold))
+         (lookup-face b '(:weight bold)))))
 
 (test-end "schemacs_ncurses_editor_minibuffer_buffer")

@@ -621,6 +621,41 @@
   (> scaled-ink unscaled-ink))
 
 ;;------------------------------------------------------------------
+;; **A row is as tall as the font the frame draws.**
+;;
+;; The renderer has one font per frame (`pgtk-ensure-font!` says so, and
+;; why), and it draws every run at that size. A row's metrics therefore
+;; have to come from the *frame's* font, not from the face's own
+;; `:height`: measuring per face gave 21-pixel rows in an unscaled window
+;; of a frame whose font had been scaled to 60 by the window next door,
+;; and the 60-pixel glyphs were then drawn on 21-pixel rows - on top of
+;; each other. Measured with `C-x C-+` in a split frame.
+;;
+;; The test is the invariant that disagreement violates: the metrics a
+;; row is laid out with are the cell the text is drawn in.
+;;------------------------------------------------------------------
+
+(define (metrics-match-cell steps)
+  (let* ((d (new-display))
+         (ed (allocate-buffer)))
+    (with-current-buffer ed (insert "M"))
+    (let ((frame (fr:new-frame ed 24 80)))
+      (with-current-buffer ed
+        (scale:text-scale-increase steps)
+        (parameterize ((fr:*current-frame* frame))
+          (xd:render! frame))
+        (let ((m (dn:face-metrics d #f))
+              (cell (dn:display-cell-size d)))
+          (scale:text-scale-increase 0)
+          (parameterize ((fr:*current-frame* frame))
+            (xd:render! frame))
+          (= (+ (car m) (cdr m)) (cdr cell)))))))
+
+(test-equal "row metrics are the drawn font's, unscaled and scaled"
+  '(#t #t)
+  (list (metrics-match-cell 0) (metrics-match-cell 3)))
+
+;;------------------------------------------------------------------
 ;; A character the monospace face has no glyph for is drawn with the
 ;; glyph its *fallback* font has, and not as the missing-glyph box
 ;;

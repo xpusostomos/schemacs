@@ -29,7 +29,8 @@
 ;; Only the editor's own libraries are imported here. Each front end's is
 ;; resolved at the moment it is chosen, which is what keeps a terminal
 ;; editor from needing the Gtk stack and the windowed one from needing
-;; ncurses - the reason this is one entry point rather than two.
+;; the terminal's toolkit - the reason this is one entry point rather than
+;; two.
 (import ;; **Nothing is imported from `(scheme base)' or `(scheme write)'**,
         ;; and that is the fix for a warning rather than a style choice.
         ;; This file is loaded into `(guile-user)', whose parent module is
@@ -362,7 +363,7 @@
   ;; **Resolved here, not imported at the top of the file**, so that only
   ;; the front end being started is loaded - a terminal editor has no
   ;; business needing guile-gi, and a windowed one no business needing
-  ;; ncurses.
+  ;; the terminal's terminfo.
   ;;
   ;; `main-gtk' and `main-tty' return when the editor quits, which is
   ;; how the caller knows it is on the way out.

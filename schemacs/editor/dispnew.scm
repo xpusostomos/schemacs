@@ -19,7 +19,8 @@
   ;; imports a display driver.
   ;;
   ;; See LAYOUT-PLAN.txt for the rule this library is a step of.
-  (import (oop goops) (scheme base))
+  (import (oop goops) (scheme base)
+          (only (guile) make-hash-table hash-ref hash-set!))
 
   (export
    <display>
@@ -49,6 +50,7 @@
    resume-display!
    delete-frame-display!
    realize-face
+   lookup-face
    screen-size
    column-width
    line-height
@@ -498,6 +500,45 @@
     ;; `write-glyphs!'. Emacs's face realization (`realize_face' in
     ;; xfaces.c) is per display for the same reason.
     ;; `(realize-face display face-attrs)'.
+
+    (define *realized-face-caches* '())
+    ;; The realized faces, per display: GNU Emacs's `FRAME_FACE_CACHE'.
+
+    (define (lookup-face display face-attrs)
+      ;; GNU Emacs's `lookup_face` (`xfaces.c`): "Look up a realized face
+      ;; with a given combination of face attributes. This uses a
+      ;; hashtable to look up faces by attributes. Return NULL if there is
+      ;; no such face."
+      ;;
+      ;; **A face's token has to be the *same object* for the same
+      ;; attributes**, which is why this exists. Emacs's glyphs carry a
+      ;; `face_id`, an integer, and `GLYPH_EQUAL_P` compares them with
+      ;; `==`; here the token is whatever `realize-face` made, and a fresh
+      ;; one is made per realization. `glyph-equal?` compares tokens with
+      ;; `eqv?`, so every rebuilt row compared *unequal* to the one on the
+      ;; screen and `update_window` redrew the whole window on every
+      ;; keystroke. That was cheap while a row was short and a `ce`; a
+      ;; terminal row filled to the edge made it a frame's worth of
+      ;; spaces per key. Measured typing one character into a one-line
+      ;; buffer: 2311 bytes per keystroke, against GNU Emacs 31.1's 211.
+      ;;
+      ;; The cache is keyed by the *realized* attributes, so a theme
+      ;; change - which produces different attributes - is a different
+      ;; key and no invalidation is needed. It is not bounded: Emacs caps
+      ;; its cache at `FACE_CACHE_SIZE` and prunes least-used faces,
+      ;; which is worth porting if the count ever becomes large.
+      ;;--------------------------------------------------------------
+      (let ((cache (let ((hit (assq display *realized-face-caches*)))
+                     (or (and hit (cdr hit))
+                         (let ((h (make-hash-table)))
+                           (set! *realized-face-caches*
+                                 (cons (cons display h)
+                                       *realized-face-caches*))
+                           h)))))
+        (or (hash-ref cache face-attrs)
+            (let ((token (realize-face display face-attrs)))
+              (hash-set! cache face-attrs token)
+              token))))
 
     (define-generic screen-size)
     ;; The display's size in pixels, as `(WIDTH . HEIGHT)' - Emacs's

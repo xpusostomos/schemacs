@@ -5,9 +5,9 @@
 ;; for `select-active-regions'.
 ;;
 ;; The keys are pressed for real, through the command loop, the way the
-;; ncurses suite presses them - it was a test reaching the commands
+;; tty suite presses them - it was a test reaching the commands
 ;; directly that let the buffer-menu bugs through. The display is the
-;; trick `faces-tests.scm' and the ncurses suite use - now one library,
+;; trick `faces-tests.scm' and the tty suite use - now one library,
 ;; `(schemacs editor test-display)': a display that draws nowhere. Here it
 ;; is subclassed once more, so
 ;; that the four selection generics of `dispnew' answer like a window

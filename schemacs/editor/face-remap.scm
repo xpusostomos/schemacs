@@ -9,7 +9,7 @@
   ;; **It is graphic-only in Emacs, and it is here too**: the command is
   ;; wrapped in `(when (display-graphic-p) ...)', so on a terminal it does
   ;; nothing at all - a terminal has one font and cannot be asked for
-  ;; another. That is why the ncurses front end needs no counterpart.
+  ;; another. That is why the terminal front end needs no counterpart.
   ;;
   ;; **The renderer reads the face.** That was the half missing when the
   ;; command first landed: the Gtk front end drew at a constant, so

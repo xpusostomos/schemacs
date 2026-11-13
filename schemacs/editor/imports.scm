@@ -1399,6 +1399,7 @@
     looking-at-p
     looking-back
     lookup-char-property
+    lookup-face
     ls-lisp--insert-directory
     ls-lisp--sanitize-switches
     ls-lisp-classify

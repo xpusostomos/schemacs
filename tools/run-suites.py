@@ -89,7 +89,7 @@ SUITES = [
     'schemacs/ui/tty/xterm-tests.scm',
     'schemacs/ui/tty/tinfo-tests.scm',
     'schemacs/editor/startup-tests.scm',
-    'schemacs/apps/ncurses-editor-tests.scm',
+    'schemacs/apps/tty-editor-tests.scm',
     # The two suites of the top-level libraries. **They are here for the
     # first time**: both imported `(schemacs test)`, the eighteen-line
     # SRFI-64 re-export shim the reorg deleted, so both died at load and

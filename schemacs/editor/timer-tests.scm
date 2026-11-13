@@ -124,7 +124,7 @@
     (test-equal #t (fr:internal-show-cursor-p #f))
     ;; and the type rule answers "no cursor" while it is off - which is
     ;; what makes the blink something you can see. The rule itself is
-    ;; checked in `ncurses-editor-tests.scm'; what is here is the flag.
+    ;; checked in `tty-editor-tests.scm'; what is here is the flag.
     (fr:internal-show-cursor #f #f)
     (test-equal #t (fr:window-cursor-off? (fr:selected-window)))))
 

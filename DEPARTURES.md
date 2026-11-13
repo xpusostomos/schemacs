@@ -925,3 +925,184 @@ row ends at ZV, in which case the default face; this port uses the last
 glyph's face unconditionally. `build-row!` has no row that ends at ZV
 (the row past the buffer is blanked separately), so the two agree on
 every row this port builds - but `:extend nil` faces are not carried.
+
+## A keystroke redrew the whole window, because a face's token was not interned (2026-11-13)
+
+Chris, after the row-filling pass: *"you've fixed the painting problem, but now
+the buffered keystrokes problem is back. This seems to break again on every time
+you do something"* - and, when the scrolling path was suspected, *"it's not a
+scroll issue."* Both were right. The cause was two departures that had been
+there all along and only became expensive once a terminal row was filled to the
+edge.
+
+### 1. A realized face was a fresh object every time
+
+GNU Emacs's glyphs carry a `face_id`, an integer, and `GLYPH_EQUAL_P` compares
+them with `==`. This tree's glyphs carry the display's opaque token, and
+`glyph-equal?` compares tokens with `eqv?` - which is only right if the same
+attributes answer the *same object*. They did not: `realize-tty-face` conses a
+new plist per call, and every row build realizes its faces again, so every
+rebuilt row compared unequal to the one on the screen and `update_window` drew
+the whole window on every keystroke.
+
+It was invisible while a row was short. Measured on the tree before the filling
+pass, one `C-n` in a 60-line file wrote 261 bytes - every row redrawn, each a
+few characters plus a `ce`. Filling rows to the edge turned each of those into
+80 cells, and the same keystroke wrote 2311 bytes against GNU Emacs 31.1's 211.
+
+The fix is Emacs's: `lookup_face` (`xfaces.c`), the realized-face cache keyed by
+the attributes - `FRAME_FACE_CACHE`'s job. `dispnew.scm` has `lookup-face`, and
+the redisplay's four realization sites go through it. Departure, named in the
+source: Emacs's cache lives on the frame and is capped at `FACE_CACHE_SIZE` with
+least-used pruning; this one is per display and unbounded.
+
+### 2. The rows below the buffer's end were cleared, not built
+
+Emacs's `try_window` calls `display_line` while the window has room, so the rows
+past `ZV` are built like any others - `prepare_desired_row`'s own comment is
+"Clear the result glyph row and enable it" - and `extend_face_to_end_of_line`
+fills them with blank glyphs in the default face. Being built, they compare
+equal next redisplay and are never drawn again.
+
+Ours stopped the loop when the buffer ran out of lines and left those rows
+*disabled*, which is the one state the diff can never match: the current matrix
+holds what was last drawn, the desired row holds nothing, so the row was cleared
+again on every redisplay. That cost three bytes of `ce` each before the filling
+pass and a whole row of spaces after it.
+
+`xdisp.scm`'s `build-blank-row!` is `prepare_desired_row` for those rows, and
+`display-window!` builds them out to the window's body height.
+
+### Measured
+
+| | before this pass | after | GNU Emacs 31.1 |
+|---|---|---|---|
+| typing one character, one-line buffer | 2311 B | **508 B** | 211 B |
+| one `C-n`, no scroll | 421 B | 421 B | 212 B |
+| 60 held `C-n`, quiet after the last key | 1284 ms | **519 ms** | - |
+| editor CPU per `C-n` | 63 ms | **5 ms** | - |
+
+(A *scrolling* keystroke is still 2313 bytes against Emacs's 212: Emacs scrolls
+the screen with `scrolling_window` and a terminal scroll region, and this
+redisplay rewrites every row. That is the gap named in "The redisplay work that
+is not done" above, not this pass's. The paragraph there about holding an arrow
+key down is this same measurement: a keystroke's cost has to be under the
+terminal's repeat interval.)
+
+### Tests
+
+`ncurses-editor-tests.scm` +2: the same attributes answer the same token
+*object* (with a display whose `realize-face` conses, as the terminal's does),
+and two displays realise the same face separately.
+
+# The GTK menu bar takes the mode line's colours (2026-11-13)
+
+Chris asked for it, and named it correctly as a departure: *"Can you make the
+gtk menu bar themed. I think this is a departure from emacs, you can check if
+it has any theming for the menu bar, but I want it anyway."*
+
+**It is one.** GNU Emacs has a `menu` face - "Basic face for the font and
+colors of the menu bar and popup menus" (`faces.el:3035`) - and its
+`((type x-toolkit))` branch is *empty*: a GTK frame's menu bar and popups take
+the toolkit theme, and no face colours them. Emacs's terminal menu bar, by
+contrast, is drawn by Emacs itself and does use the face (`:inverse-video t`).
+
+Here the bar and every submenu take the **`mode-line` face's `:foreground` and
+`:background`** - the active window's, that being the face the selected window
+draws its mode line with - applied with a CSS provider and two class-scoped
+rules (`pgtk.scm`'s "The menu bar's theme"). A hovered item swaps the pair,
+which is the mode line's emphasis seen the way the `menu` face says a menu is
+emphasised on a tty.
+
+Two guile-gi facts, measured:
+
+- `css-provider:load-from-data?` takes **two** arguments and the data is a
+  **bytevector**; the C's third `gssize length` is folded into the marshalling.
+  A string is refused with "Wrong type (expecting bytevector)".
+- `<GtkCssProvider>` is not reachable as a class binding through the typelib
+  module's interface, so the provider is made with `css-provider:new`.
+
+The provider is attached to each widget's own style context rather than to the
+screen, because a popup menu is a toplevel window of its own: a provider added
+to the frame's widget would not follow it.
+
+Verified on a live frame under a real display: the bar is `#bfbfbf` on
+`#000000` (Emacs's default `mode-line`, grey75/blue), the `File` popup opens in
+the same pair, and `css-provider:to-string` round-trips every rule, which is
+GTK saying it parsed them.
+
+**Still Emacs's**: this tree has no `menu` face at all, so nothing can override
+the mode line's colours for menus specifically. That is the next step if the
+two should be configurable apart.
+
+# `C-x C-+` drew rows on top of each other (2026-11-13)
+
+Chris, using the GTK front end: *"when I full screen the gtk interface and
+start changing font size with `C-x C-+` things get corrupt. It's like the
+non active window is not using the right font size and then there is
+multiple mode lines, a large font one and a small font one, it's a real
+mess."*
+
+Two departures, and the second is the one that made the mess.
+
+## 1. A window's rows stop at its text area, not at a row count
+
+`display-window!` laid out `(window-body-height w)` rows and trusted the
+frame's row grid for where each went. A row's *height* is not the frame's
+line height: it comes from the faces on it, and `text-scale-mode` remaps
+`default` for a buffer so a line is two or three lines tall. A scaled
+window laid out the same number of rows and each was taller, so the rows
+ran past the window's own bottom - over its mode line, and over the window
+beneath.
+
+GNU Emacs has the same row count and not the bug because the bound is a
+**pixel**: `try_window`'s loop is `while (it.current_y < it.last_visible_y)`
+with `last_visible_y = window_text_bottom_y (w)`. A tall line uses the
+budget sooner, so a scaled window shows fewer lines.
+
+`display-window!` now computes `y-limit` from the window's own geometry -
+the top of its mode line - and stops laying rows out when the next would
+cross it; the blank rows below a short buffer stop at the same bound.
+
+**A departure inside the departure**: Emacs lays out a row that *starts*
+above `last_visible_y` and clips it; this renderer has no per-window clip,
+so a half row would paint over the mode line. A row that does not fit
+entirely is not laid out at all, which shows one line fewer than Emacs at
+the boundary.
+
+## 2. A row is as tall as the frame's font, because that is what is drawn
+
+`pgtk-ensure-font!` is one font per frame, and a *documented* departure:
+`text-scale-mode` resizes the frame's font from the current buffer's
+default face, where Emacs gives every row its own height and leaves other
+windows alone. What did not follow that departure was `face-metrics`: it
+answered each face's own `:height`, so the window next door - whose buffer
+is not scaled - laid its rows out at the *unscaled* 21 pixels while
+`pgtk-show-text!` drew its glyphs with the frame's font at 60. Rows 21
+pixels apart, glyphs 60 pixels tall: each line was painted over the one
+above it, which is the "large font and small font at once" in the
+screenshot.
+
+`face-metrics` now answers the frame's font, which is what the renderer
+draws. Emacs measures per face because it opens a font per face; per-face
+fonts are the renderer this file has not written yet (see
+`pgtk-ensure-font!`), and until it is, a row's height has to be the height
+of what is drawn. The *width* stays the frame's one cell for the same
+reason `text-scale` cannot widen it: the column arithmetic assumes one
+pitch.
+
+## Tests
+
+`pgtk-tests.scm` +1: row metrics equal the drawn cell, unscaled and at
+scale 3 - the invariant the old code broke. Verified failing before the
+change (21 against 60).
+
+## Recorded, not fixed
+
+- The blank rows below a buffer's end take their metrics from the frame's
+  font as well now, so a scaled frame's blank rows are the scaled height,
+  which is what is drawn but not what Emacs's per-buffer metrics would
+  give for an unscaled buffer in the same frame.
+- `:height` on a face that is not the default (a mode line's `0.9`, say)
+  is likewise drawn at the frame's size, and its row is now that size too.
+  Consistent, and still not Emacs's per-face model.

@@ -121,6 +121,10 @@
           ;;----------------------------------------------------------------
           <GtkBox> <GtkMenuBar> <GtkMenu> <GtkMenuItem> <GtkCheckMenuItem>
           <GtkRadioMenuItem> <GtkSeparatorMenuItem> <GtkLabel>
+          widget:get-style-context style-context:add-class
+          style-context:add-provider
+          css-provider:new
+          css-provider:load-from-data?
           <GtkOrientation> <GtkAlign>
           box:pack-start box:set-homogeneous
           menu-shell:append menu-item:set-label menu-item:set-submenu
@@ -924,6 +928,12 @@
       ;; Whether the bar is currently taken down. An empty bar is hidden
       ;; once and then left alone; see `pgtk-set-frame-menubar`.
       (menubar-hidden #:init-value #f #:accessor pgtk-menubar-hidden?)
+      ;; **The bar's theme**: the CSS provider that colours it and its
+      ;; submenus, and the `(FOREGROUND . BACKGROUND)' it was last given,
+      ;; so it is re-loaded only when the mode line's colours change. See
+      ;; `pgtk-theme-menubar!`.
+      (menubar-css   #:init-value #f #:accessor pgtk-menubar-css)
+      (menubar-theme #:init-value #f #:accessor pgtk-menubar-theme)
       (surface #:init-value #f #:accessor pgtk-surface)
       ;; ^ The image surface the frame is drawn into, and the size it was
       ;; made at. `ensure-surface!' must not remake it while it is already
@@ -1824,68 +1834,29 @@
     (define-method (column-width (d <pgtk-display>)) 1)
     (define-method (line-height (d <pgtk-display>)) 1)
     (define-method (face-metrics (d <pgtk-display>) face-attrs)
-      ;; The ascent and descent of FACE-ATTRS on this display, in pixels.
+      ;; The ascent and descent of the line this display draws, in pixels.
       ;;
-      ;; **This is `compute_line_metrics`'s input** (`xdisp.c:24077`):
-      ;; a row's `ascent` is the greatest ascent among the faces its
-      ;; glyphs use, and its height is that plus the greatest descent.
-      ;; Emacs opens the face's font and reads `font->ascent` and
-      ;; `font->descent`; here the height comes from the face's `:height`
-      ;; when it has one (an absolute one is tenths of a point, a
-      ;; *relative* one a factor of the default, which is what
-      ;; `text-scale-mode` puts in the buffer's remapping) and from the
-      ;; display's own font when it has not.
+      ;; **The answer is the *frame's* font, not the face's `:height`.**
+      ;; That is what the renderer does: `pgtk-show-text!` draws every run
+      ;; at `*font-pixel-size*`, so a face that names a height is drawn at
+      ;; the frame's size whatever its row says. This used to answer the
+      ;; face's own height, and the two disagreed the moment
+      ;; `text-scale-mode` scaled one buffer: `pgtk-ensure-font!` resizes
+      ;; the whole frame's font from the *current* buffer's default face,
+      ;; while a neighbouring window's rows were measured from *its*
+      ;; faces - 60-pixel rows in the scaled window and 21 in the other -
+      ;; and those 21-pixel rows were drawn with 60-pixel glyphs on top of
+      ;; each other. Measured with `C-x C-+` in a split frame.
       ;;
-      ;; The cell's *width* stays the display's, as Emacs's does for a
-      ;; monospaced font: this renderer has one horizontal pitch per
-      ;; frame, and a wider font would break the column arithmetic the
-      ;; whole redisplay is built on. Vertical metrics are per row because
-      ;; that is what a line's height is.
+      ;; Emacs measures per face, because it opens a font per face. That
+      ;; is the renderer this file has not written yet - see
+      ;; `pgtk-ensure-font!`'s own note - and until it is, a row's height
+      ;; has to be the height of what is drawn. The *width* is still the
+      ;; frame's one cell for the same reason `text-scale` cannot widen
+      ;; it: the column arithmetic assumes one pitch.
       ;;--------------------------------------------------------------
-      (let* ((dpi (pango-font-map-get-resolution (pango-font-map-default)))
-             (named (and face-attrs (attribute-value face-attrs ':height)))
-             (own (if (number? named)
-                      named
-                      (face-attribute 'default ':height)))
-             ;; **A `(CAR X)` of `#f` is not nil here.** `attribute-value`
-             ;; answers `unspecified` for an attribute the set does not
-             ;; have, but a face set that is *absent* - #f, which is what
-             ;; the redisplay passes for "the default face" - has no
-             ;; attribute at all, so `own` may still be `unspecified` when
-             ;; the default face has no height either. Both fall back to
-             ;; the font already open.
-             (own (if (number? own)
-                      own
-                      (pixel->point (* 10 *font-pixel-size*) dpi)))
-             (height (if (inexact? own)
-                         (inexact->exact (round (* own *default-face-height*)))
-                         own))
-             (pixels (point->pixel (/ height 10.0) dpi))
-             (key (list pixels))
-             (cached (assoc key *face-metrics-cache*)))
-        (if cached
-            (cdr cached)
-            (let* ((context (pango-font-map-create-context
-                             (pango-font-map-default)))
-                   (fd (pango-font-description-from-string
-                        (string->pointer *font-family*)))
-                   (metrics #f)
-                   (answer #f))
-              (pango-font-description-set-absolute-size fd (* pixels *pango-scale*))
-              (let* ((font (pango-context-load-font context fd))
-                     (m (pango-font-get-metrics font (make-pointer 0))))
-                (set! metrics m)
-                (set! answer
-                      (cons (max 1 (pango-units->pixels
-                                    (pango-font-metrics-get-ascent m)))
-                            (max 0 (pango-units->pixels
-                                    (pango-font-metrics-get-descent m)))))
-                (pango-font-metrics-unref m)
-                (gobject-unref font))
-              (pango-font-description-free fd)
-              (set! *face-metrics-cache*
-                    (cons (cons key answer) *face-metrics-cache*))
-              answer))))
+      (cons (max 1 *font-ascent*)
+            (max 0 (- *cell-height* *font-ascent*))))
 
     (define *face-metrics-cache* '())
     ;; ^ `((PIXELS . (ASCENT . DESCENT)) ...)`. A redisplay asks for the
@@ -2592,6 +2563,125 @@
     ;; frame points at its display through `frame-output', which is the
     ;; direction redisplay uses; this is the other one.
 
+    ;;----------------------------------------------------------------
+    ;; The menu bar's theme
+    ;;----------------------------------------------------------------
+    ;;
+    ;; **This is a deliberate departure from GNU Emacs.** Emacs's `menu`
+    ;; face is "the font and colors of the menu bar and popup menus", but
+    ;; its `(type x-toolkit)` branch is *empty* (`faces.el:3035`) - a GTK
+    ;; frame's menus take the toolkit theme and no face colours them at
+    ;; all. What is wanted here instead is the mode line's own colours, so
+    ;; the bar and its submenus read as part of the editor rather than as
+    ;; part of the desktop.
+    ;;
+    ;; The colours come from the `mode-line` face - the *active* window's,
+    ;; which is the one the selected window draws - and they are applied
+    ;; with a CSS provider carrying two class-scoped rules, so nothing
+    ;; outside the bar is affected.
+
+    (define *menubar-css-priority*
+      ;; `GTK_STYLE_PROVIDER_PRIORITY_APPLICATION` (`gtkstyleprovider.h`):
+      ;; above the theme's settings and below the user's own.
+      600)
+
+    (define (rgb->css rgb)
+      ;; `(R G B)' in cairo's 0..1 as `#rrggbb', or #f.
+      ;;--------------------------------------------------------------
+      (and rgb
+           (apply string-append
+                  "#"
+                  (map (lambda (c)
+                         (let ((n (inexact->exact (round (* c 255)))))
+                           (string-append (if (< n 16) "0" "")
+                                          (number->string n 16))))
+                       rgb))))
+
+    (define (colour->css value)
+      ;; A face attribute value as `#rrggbb`, or #f when it names no
+      ;; colour - `colour->rgb` does the lookup, this only spells it.
+      ;;--------------------------------------------------------------
+      (rgb->css (colour->rgb value)))
+
+    (define (pgtk-menubar-theme-colours frame)
+      ;; `(FOREGROUND . BACKGROUND)' for the bar, from the `mode-line`
+      ;; face of the frame's *active* window.
+      ;;
+      ;; A face that names no colour falls back the way the mode line
+      ;; itself does: the default face's foreground and the frame's
+      ;; background (`frame-background-colour`, which is the `default`
+      ;; face's own `:background`).
+      ;;--------------------------------------------------------------
+      (cons (or (colour->css (face-attribute 'mode-line ':foreground frame))
+                (colour->css (face-attribute 'default ':foreground frame))
+                "#000000")
+            (or (colour->css (face-attribute 'mode-line ':background frame))
+                (rgb->css (frame-background-colour frame))
+                "#ffffff")))
+
+    (define (pgtk-menubar-css-text fg bg)
+      ;; The two rules. A `:hover` inverts the pair, which is the mode
+      ;; line's own emphasis seen the way Emacs's `menu` face says a menu
+      ;; is emphasised on a tty - `:inverse-video t` - and keeps a
+      ;; hovered item distinguishable without inventing a third colour.
+      ;;--------------------------------------------------------------
+      (string-append
+       "menubar.schemacs-menubar { background-color: " bg ";"
+       " background-image: none; color: " fg "; border: none; }\n"
+       "menubar.schemacs-menubar > menuitem { background-color: " bg ";"
+       " background-image: none; color: " fg "; border: none; }\n"
+       "menubar.schemacs-menubar > menuitem:hover { background-color: " fg
+       "; color: " bg "; }\n"
+       "menu.schemacs-menu { background-color: " bg "; border-color: " fg
+       "; }\n"
+       "menu.schemacs-menu > menuitem { background-color: " bg ";"
+       " background-image: none; color: " fg "; }\n"
+       "menu.schemacs-menu > menuitem:hover,"
+       " menu.schemacs-menu > menuitem:selected {"
+       " background-color: " fg "; color: " bg "; }\n"
+       "menu.schemacs-menu > separator { background-color: " fg "; }\n"))
+
+    (define (pgtk-menubar-provider d)
+      ;; The display's CSS provider, made the first time it is needed.
+      ;;--------------------------------------------------------------
+      (or (pgtk-menubar-css d)
+          (let ((provider (css-provider:new)))
+            (set! (pgtk-menubar-css d) provider)
+            provider)))
+
+    (define (pgtk-style-menu-widget! d w bar?)
+      ;; Give W the class the rules are written against, and the provider
+      ;; that carries them. Adding the provider to the widget's own
+      ;; style context is what reaches a *popup* menu: it is a toplevel
+      ;; window of its own, so a provider on the frame's widget would not
+      ;; follow it.
+      ;;--------------------------------------------------------------
+      (let ((ctx (widget:get-style-context w)))
+        (style-context:add-class ctx
+                                 (if bar? "schemacs-menubar" "schemacs-menu"))
+        (style-context:add-provider ctx (pgtk-menubar-provider d)
+                                    *menubar-css-priority*)))
+
+    (define (pgtk-theme-menubar! d)
+      ;; Load the bar's colours, if they have changed since the last
+      ;; redisplay. Cheap when they have not: two face lookups and an
+      ;; `equal?`.
+      ;;--------------------------------------------------------------
+      (let ((frame (pgtk-frame-for d)))
+        (when frame
+          (let ((colours (pgtk-menubar-theme-colours frame)))
+            (unless (equal? colours (pgtk-menubar-theme d))
+              (set! (pgtk-menubar-theme d) colours)
+              ;; **Two arguments, and the data is a *bytevector*.**
+              ;; guile-gi maps `gtk_css_provider_load_from_data`'s
+              ;; `(const gchar *data, gssize length)` to one bytevector
+              ;; argument - a string is refused with "Wrong type
+              ;; (expecting bytevector)" - and takes the length from it.
+              (css-provider:load-from-data? (pgtk-menubar-provider d)
+                                            (string->utf8
+                                             (pgtk-menubar-css-text
+                                              (car colours) (cdr colours)))))))))
+
     (define (pgtk-open-window columns rows)
       ;; Make one GTK window with a drawing area and wire its signals, and
       ;; answer the display that draws into it. The counterpart of one
@@ -2628,6 +2718,9 @@
         (set! (pgtk-window d) win)
         (set! (pgtk-vbox d) vbox)
         (set! (pgtk-menubar d) bar)
+        ;; The bar's theme is the mode line's colours; this is the class
+        ;; its CSS is written against (`pgtk-theme-menubar!` loads it).
+        (pgtk-style-menu-widget! d bar #t)
         (set! (pgtk-area d) area)
         (set! (pgtk-columns d) columns)
         (set! (pgtk-rows d) rows)
@@ -2964,6 +3057,10 @@
                        (pgtk-hold-widget! d (if menu-bar-p
                                                 (make <GtkMenuBar>)
                                                 (make <GtkMenu>))))))
+        ;; A *submenu* takes the bar's colours too; the bar itself got its
+        ;; class when the window was made (`pgtk-open-window`).
+        (unless (or topmenu menu-bar-p)
+          (pgtk-style-menu-widget! d wmenu #f))
         (let loop ((item data) (group #f))
           (cond
            ((not item) wmenu)
@@ -3119,6 +3216,11 @@
       ;;--------------------------------------------------------------
       (let ((bar (pgtk-menubar d)))
         (when bar
+          ;; **The bar is themed with the mode line's colours, every
+          ;; redisplay, until they stop changing** - a theme is loaded by
+          ;; a command, and this is the only place the bar is looked at.
+          ;; See "The menu bar's theme" above.
+          (pgtk-theme-menubar! d)
           ;; **`menu-bar-lines` turns the bar off**, which is what
           ;; `menu-bar-mode` sets on every frame
           ;; (`(set-frame-parameter frame 'menu-bar-lines val)`). The C's `x_set_menu_bar_lines` hides

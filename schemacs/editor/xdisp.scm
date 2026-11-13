@@ -50,6 +50,7 @@
           window-system-display?
           draw-window-cursor! erase-window-cursor! flush-display!
           realize-face
+          lookup-face
           ;; how many pixels a cell is, which is what turns a mouse
           ;; event's coordinates into the cells the windows are
           ;; measured in - see `posn-at-x-y'.
@@ -1331,7 +1332,7 @@
              ;; unspecified, and an unspecified foreground is black in
              ;; the Gtk backend and the terminal default on a tty.
              (base-attrs (merge-face-ref base (merge-face-ref 'default '()))))
-        (realize-face (current-display)
+        (lookup-face (current-display)
                       (merge-face-vectors (face-realized-attributes face-name)
                                           base-attrs))))
 
@@ -1406,7 +1407,7 @@
                        (to (min len (max (+ from 1) (- next line-start)))))
                   (loop to
                         (cons (list from to
-                                    (realize-face (current-display) attrs))
+                                    (lookup-face (current-display) attrs))
                               acc)))))))
 
     (define (draw-overlay-strings! entries row-y x)
@@ -1621,7 +1622,7 @@
       ;; this runs per character; a cache is worth adding when the
       ;; renderer starts asking per character rather than per run.
       ;;--------------------------------------------------------------
-      (realize-face (current-display) (attrs-at-buffer-position ed position)))
+      (lookup-face (current-display) (attrs-at-buffer-position ed position)))
 
     (define (overlay-strings-at position)
       ;; GNU Emacs's `load_overlay_strings' (xdisp.c:7104): the overlay
@@ -2137,7 +2138,7 @@
                              rs)))
                    (token (if (pair? rs)
                               (caddr (car rs))
-                              (realize-face (current-display)
+                              (lookup-face (current-display)
                                             (attrs-at-buffer-position
                                              (current-buffer) (+ line-start from i)))))
                    (text (car rest))
@@ -2273,6 +2274,53 @@
         (set-glyph-row-enabled! row #t)
         row))
 
+    (define (build-blank-row! row ed x0 y width metrics)
+      ;; GNU Emacs's `display_line` for a screen row past the end of the
+      ;; buffer: `prepare_desired_row`, whose own comment is "Clear the
+      ;; result glyph row and enable it", and then
+      ;; `extend_face_to_end_of_line`, which on a terminal produces the
+      ;; blank glyphs that carry the default face across the row.
+      ;;
+      ;; **The row is enabled and holds glyphs, and that is the point.**
+      ;; A row left disabled is one the diff can never skip: the current
+      ;; matrix holds what was last drawn while the desired row holds
+      ;; nothing, so the row was cleared again on *every* redisplay. That
+      ;; cost nothing while a clear was `ce` (three bytes); once a
+      ;; terminal row is filled to the edge it is three bytes for each of
+      ;; the blank rows below the text, per keystroke. Measured typing
+      ;; one character into a one-line buffer: 2227 bytes per keystroke
+      ;; against GNU Emacs 31.1's 211, and with it the editor fell behind
+      ;; fast typing and ran the backlog off in bursts. Emacs builds the
+      ;; row the first time and it compares equal for ever after.
+      ;;--------------------------------------------------------------
+      (set-glyph-row-glyphs! row (vector))
+      (set-glyph-row-used! row 0)
+      ;; the same rule `build-row!` follows: the padding is a *terminal*
+      ;; row's, because a window system paints the remainder with
+      ;; `clear-end-of-line!` at draw time.
+      (unless (window-system-display? (current-display))
+        (extend-face-to-end-of-line row width))
+      (set-glyph-row-x! row x0)
+      (set-glyph-row-y! row y)
+      (set-glyph-row-ascent! row (car metrics))
+      (set-glyph-row-height! row (cdr metrics))
+      (set-glyph-row-pixel-width!
+       row (* width (car (display-cell-size (current-display)))))
+      (set-glyph-row-start! row (buffer-z ed))
+      (set-glyph-row-end! row (buffer-z ed))
+      (set-glyph-row-mode-line! row #f)
+      (set-glyph-row-continued! row #f)
+      (set-glyph-row-truncated-on-right! row #f)
+      (set-glyph-row-displays-text! row #f)
+      ;; **This row *is* the end of its line**, which is what
+      ;; `ends_at_zv_p` means - the C's flag for a row whose last
+      ;; character is the last of the buffer.
+      (set-glyph-row-ends-at-zv! row #t)
+      (set-glyph-row-fill-line! row #t)
+      (set-glyph-row-hash! row (row-hash row))
+      (set-glyph-row-enabled! row #t)
+      row)
+
     ;;----------------------------------------------------------------
     ;; `update_window` - build the desired rows, draw the ones that changed
     ;;----------------------------------------------------------------
@@ -2311,22 +2359,44 @@
              ;; window's text in the leftmost column.
              (x0 (window-left window))
              (vheight (window-body-height window))
+             ;; **The text area's bottom in *pixels***, GNU Emacs's
+             ;; `window_text_bottom_y` - the `it.last_visible_y` that
+             ;; `try_window` compares each row against. The window's
+             ;; `height` is a row count because the frame's grid is rows,
+             ;; but a row is as tall as the faces on it, and
+             ;; `text-scale-mode` makes one line two or three lines tall.
+             ;; Laying out `vheight` of those regardless ran the rows past
+             ;; the window's own bottom: over its mode line, and over the
+             ;; window beneath - measured with `C-x C-+` on a split frame,
+             ;; rows of two sizes and two mode lines drawn on top of each
+             ;; other, which is what Chris saw as "a real mess".
+             (y-limit (row->pixel-y (+ (window-top window)
+                                       (window-height window) -1)))
              (desired (window-desired-matrix window)))
         (let loop ((row 0)
                    (y (row->pixel-y (window-top window)))
                    (line-start (window-start window)))
-          (if (or (>= row vheight) (not desired))
+          (if (or (>= row vheight) (>= y y-limit) (not desired))
               #t
               (let* ((texts (line-display-texts ed line-start))
                      (slices (%window-line-slices window texts)))
                 (if (null? slices)
                     ;; past the buffer's end: the remaining rows are blank
-                    (let clear ((r row))
-                      (if (< r vheight)
-                          (let ((slot (glyph-matrix-row-ref desired r)))
-                            (when slot (set-glyph-row-enabled! slot #f))
-                            (clear r (+ r 1)))
-                          #t))
+                    ;; rows, **built and enabled** rather than left out -
+                    ;; `display_line` is called for them for as long as
+                    ;; the window has room (`try_window`'s `while
+                    ;; (it.current_y < it.last_visible_y)`) and
+                    ;; `prepare_desired_row` enables each one. Built
+                    ;; rows compare equal on the next redisplay and are
+                    ;; skipped; unbuilt ones are cleared again every time.
+                    (let ((metrics (row-metrics ed line-start 0)))
+                      (let blank ((r row) (yy y))
+                        (if (< r vheight)
+                            (let ((slot (glyph-matrix-row-ref desired r)))
+                              (when slot
+                                (build-blank-row! slot ed x0 yy width metrics))
+                              (blank (+ r 1) (+ yy (cdr metrics))))
+                            #t)))
                     (let* ((drawn (min (length slices) (- vheight row)))
                            (next-row
                             (let rloop ((rest slices) (k 0) (yy y) (r row))
@@ -2338,6 +2408,16 @@
                                                    (- (cdr slice) (car slice))))
                                          (slot (and desired
                                                     (glyph-matrix-row-ref desired r))))
+                                    ;; **A row that would not fit in the
+                                    ;; window's text area is not laid out
+                                    ;; at all.** Emacs lays it out and
+                                    ;; clips it at `it.last_visible_y`;
+                                    ;; this renderer has no per-window
+                                    ;; clip, so a half row here paints
+                                    ;; over the mode line.
+                                    (if (> (+ yy (cdr metrics)) y-limit)
+                                        (cons r yy)
+                                        (begin
                                     (when slot
                                       ;; **A row of an hscrolled line gives
                                       ;; its first cell to the left
@@ -2387,7 +2467,7 @@
                                                                 width)))
                                                     0 metrics)))
                                     (rloop (cdr rest) (+ k 1)
-                                           (+ yy (cdr metrics)) (+ r 1)))))))
+                                           (+ yy (cdr metrics)) (+ r 1)))))))))
                       ;; **`w->window_end_pos` is recorded here, as the
                       ;; rows are built.** The C writes it in
                       ;; `display_line` as it walks (`xdisp.c`), and
@@ -2401,14 +2481,15 @@
                       ;; `(window-end)` - left point above the last visible
                       ;; row.
                       (let* ((last-row (car next-row))
+                             (rows-drawn (- (car next-row) row))
                              (next (line-next-start ed line-start))
-                             (end (cond ((< drawn (length slices))
+                             (end (cond ((< rows-drawn (length slices))
                                          ;; this line was cut off by the
                                          ;; bottom: the last row that fits
                                          ;; ends it
                                          (+ line-start
                                             (cdr (list-ref slices
-                                                           (- drawn 1)))))
+                                                           (- rows-drawn 1)))))
                                         (next next)
                                         (else (text-editor-get-end-of-line
                                                ed line-start)))))
@@ -2418,7 +2499,31 @@
                       (let ((next (line-next-start ed line-start)))
                         (if next
                             (loop (car next-row) (cdr next-row) next)
-                            #t))))))))))
+                            ;; **Past the buffer's end the rows below the
+                            ;; last line are built too**, which is
+                            ;; `try_window`'s loop - `while (it.current_y
+                            ;; < it.last_visible_y)` calls `display_line`
+                            ;; for as long as the window has room, and
+                            ;; `prepare_desired_row` enables each row it
+                            ;; starts. A built blank row compares equal to
+                            ;; the last one drawn and is skipped from then
+                            ;; on; a row left unbuilt is one the diff
+                            ;; cannot match, so it was cleared - as a
+                            ;; whole row of spaces, on a terminal - on
+                            ;; every redisplay.
+                            (let ((metrics (row-metrics ed line-start 0)))
+                              (let blank ((r (car next-row))
+                                          (yy (cdr next-row)))
+                                (if (and (< r vheight)
+                                         (<= (+ yy (cdr metrics)) y-limit))
+                                    (let ((slot (glyph-matrix-row-ref
+                                                 desired r)))
+                                      (when slot
+                                        (build-blank-row! slot ed x0 yy
+                                                          width metrics))
+                                      (blank (+ r 1)
+                                             (+ yy (cdr metrics))))
+                                    #t)))))))))))))
 
     (define (update-window! window)
       ;; GNU Emacs's `update_window` (`dispnew.c:4400`): draw the rows the

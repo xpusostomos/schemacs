@@ -4,7 +4,7 @@
   ;;
   ;; Three suites were already doing this by borrowing a front end, each
   ;; with a comment saying so - `faces-tests.scm' and
-  ;; `ncurses-editor-tests.scm' subclassed `<tty-display>' ("a terminal
+  ;; `tty-editor-tests.scm' subclassed `<tty-display>' ("a terminal
   ;; object with nothing behind it - no curses is started"), and
   ;; `mouse-tests.scm' subclassed `<pgtk-display>' for its pixel
   ;; geometry. That is what put a front end's library in the *editor's*
@@ -100,7 +100,7 @@
     (define-class <test-display> (<display>)
       ;; A terminal's geometry by default - `(cols) x (lines)' with one
       ;; character to a cell - so a suite that says nothing gets what
-      ;; `ncurses-editor-tests.scm' used to borrow a `<tty-display>' for.
+      ;; `tty-editor-tests.scm' used to borrow a `<tty-display>' for.
       (rows        #:init-value 24 #:init-keyword #:rows
                    #:accessor test-display-rows
                    #:setter set!test-display-rows)

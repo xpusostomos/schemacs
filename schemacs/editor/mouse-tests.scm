@@ -190,7 +190,7 @@
   ;; `scroll-to-cursor!' - so the window's start lands half a body above
   ;; point. That is the rule a drag past the edge is asserting: it moves
   ;; the window by about half its height, not by `jump' rows. (The same
-  ;; rule, and the same arithmetic, as the ncurses suite's recentring
+  ;; rule, and the same arithmetic, as the tty suite's recentring
   ;; test; the frames here draw 5 characters to a line.)
   ;;--------------------------------------------------------------
   (= (window-start w)

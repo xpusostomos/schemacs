@@ -166,12 +166,20 @@ Omarchy adds can be given the same treatment and one line added here."
       :type 'directory
       :group 'environment)
 
-    (define-custom *omarchy-hook-dropin-name* "50-emacs"
+    (define-custom *omarchy-hook-dropin-name* "60-schemacs"
       "Filename for the drop-in scripts written by `omarchy-install-hooks`.
 Installed into the `theme-set.d` and `font-set.d` directories beneath
 `omarchy-hooks-directory`.  Omarchy runs drop-ins in shell glob order,
 so the numeric prefix decides when Emacs is notified relative to other
-drop-ins.  Names ending in `.sample` are ignored by Omarchy."
+drop-ins.  Names ending in `.sample` are ignored by Omarchy.
+
+**The name is `60-schemacs` and not `omarchy.el`'s `50-emacs`**, which
+is the departure this file makes and the reason for it: that name is
+already written by the upstream Elisp's own `omarchy-install-hooks`,
+which forwards to `emacsclient`.  Installing under it would replace a
+real Emacs's theme hook with one that reaches this editor instead, and
+then a theme change would update one and not the other.  A separate
+name lets the two live side by side."
       :type 'string
       :group 'environment)
 
