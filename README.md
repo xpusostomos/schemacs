@@ -31,10 +31,11 @@ Here's what works already:
 * Modes, minor modes, special mode handling
 * Clipboard integration
 * Mouse support
+* Emacs theming as well as Omarchy theming
+* Menus
 * And many more...
 
-How does it feel? Zippy! They say they fixed Emacs' performance, 
-but it isn't as zippy as this!
+How does it feel? Zippy! 
 
 ![Screen Shot](images/schemacs-screenshot-1.jpg)
 
