@@ -47,6 +47,7 @@
           update-window-begin! update-window-end!
           update-begin! update-end!
           cursor-to! set-terminal-cursor!
+          window-system-display?
           draw-window-cursor! erase-window-cursor! flush-display!
           realize-face
           ;; how many pixels a cell is, which is what turns a mouse
@@ -2148,6 +2149,61 @@
               (loop (+ i 1) (cdr rest) rs))))
         (cons vec n)))
 
+    (define (extend-face-to-end-of-line row width)
+      ;; GNU Emacs's `extend_face_to_end_of_line` (`xdisp.c:24379`) for a
+      ;; *terminal*: fill the rest of the row with space glyphs carrying
+      ;; the extended face, so the whole line is painted in one face.
+      ;;
+      ;; **A terminal cannot paint a background it has not written**, so
+      ;; the cells to the right of the text have to be written too. GNU
+      ;; Emacs does exactly this - the function's own comment: "If the
+      ;; text area is empty, a space glyph is added to it to carry the
+      ;; face used for clearing the line" - and it is what makes a theme
+      ;; change look the same across a whole line. Without it the row's
+      ;; tail is erased with `clear_end_of_line` under the *terminal's*
+      ;; default colours (`\e[39;49m` then `\e[K`), while the text is
+      ;; written with the face's explicit RGB; when the terminal's
+      ;; palette changes, the text keeps its colours and the erased tail
+      ;; takes the new ones, so the line ends in a jagged outline.
+      ;; Measured on Emacs 31.1 in a pty: every text row is written as
+      ;; the text plus spaces to the last column, wrapped in the default
+      ;; face's `\e[38;2;…m\e[48;2;…m … \e[39;49m`.
+      ;;
+      ;; The face is `it->face_id` in the C - the face of the last glyph
+      ;; on the row (so the region or a face with an `:extend` reaches the
+      ;; edge), and the default face for a row with no glyphs at all.
+      ;; A row that ends at ZV is the exception there (`ends_at_zv_p`),
+      ;; and `build-row!` has no such row (a row past the buffer is
+      ;; blanked by `blank-glyph-row!`), so it is the last glyph's face
+      ;; unconditionally.
+      ;;--------------------------------------------------------------
+      (let* ((vec (glyph-row-glyphs row))
+             (n (glyph-row-used row))
+             ;; the cells the row already covers, which is `it->current_x`
+             ;; in the C: a glyph is one entry but a wide character is two
+             ;; cells, so the count and the width are not the same number
+             (used (let loop ((i 0) (w 0))
+                     (if (>= i n)
+                         w
+                         (loop (+ i 1)
+                               (+ w (glyph-pixel-width (vector-ref vec i)))))))
+             (pad (- width used)))
+        (when (> pad 0)
+          (let* ((token (if (> n 0)
+                            (glyph-face-id (vector-ref vec (- n 1)))
+                            (face->attribute 'default)))
+                 (new (make-vector (+ n pad) #f)))
+            (let loop ((i 0))
+              (when (< i n)
+                (vector-set! new i (vector-ref vec i))
+                (loop (+ i 1))))
+            (let loop ((i n))
+              (when (< i (+ n pad))
+                (vector-set! new i (make-glyph " " token 1 'char #f 0))
+                (loop (+ i 1))))
+            (set-glyph-row-glyphs! row new)
+            (set-glyph-row-used! row (+ n pad))))))
+
     (define (text-cells-width text)
       ;; A glyph string's width in cells - `text-cells` is the display's,
       ;; and a row must not ask it, so this is the same sum over the
@@ -2188,6 +2244,15 @@
              (n (cdr made)))
         (set-glyph-row-glyphs! row vec)
         (set-glyph-row-used! row n)
+        ;; **A terminal's row is filled to the window's edge**, which is
+        ;; `extend_face_to_end_of_line`'s terminal branch (`xdisp.c`) and
+        ;; is called here because `display_line` calls it there - the
+        ;; padding is part of the row, so the diff sees it and the whole
+        ;; line is painted in the face. A window-system display needs no
+        ;; glyphs for it: `draw-glyph-row!` paints the remainder with
+        ;; `clear-end-of-line!` in the default face.
+        (unless (window-system-display? (current-display))
+          (extend-face-to-end-of-line row width))
         (set-glyph-row-x! row x0)
         (set-glyph-row-y! row y)
         ;; `compute_line_metrics`: the row is as tall as the tallest face
@@ -2396,10 +2461,10 @@
       ;; record was made with (0), so blanking from the record wiped the
       ;; window's first line once for every empty row.
       (let ((y (row->pixel-y (+ (window-top window) index))))
-        (clear-end-of-line-row! (current-display) window index y
-                                (window-left window)
-                                (window-body-width window)
-                                (face->attribute 'default))))
+        (fill-line-end-row! (current-display) window index y
+                            (window-left window)
+                            (window-body-width window)
+                            (face->attribute 'default))))
 
     (define (draw-glyph-row! window row)
       ;; Draw a built row: one `write-glyphs!` per run of glyphs that share
@@ -2501,6 +2566,25 @@
         (clear-end-of-line! display window
                             (make-glyph-row (vector) 0 x y width 0 1 x x)
                             'text x width token)))
+
+    (define (fill-line-end-row! display window index y x width token)
+      ;; Fill [X, X+WIDTH) of the row at pixel Y so that the *line* carries
+      ;; TOKEN to its edge.
+      ;;
+      ;; GNU Emacs's `extend_face_to_end_of_line` (`xdisp.c:24379`) is
+      ;; called while the row is built, so its padding is glyphs; the two
+      ;; rows that are cleared at draw time rather than built - a row past
+      ;; the end of the buffer and the echo area's - have to be filled the
+      ;; same way, or they keep the terminal's own colours where the rest
+      ;; of the line has the face's. On a window system `clear-end-of-line!`
+      ;; paints the background, which is the same result; on a terminal it
+      ;; emits `ce`, which erases under whatever colours are current - not
+      ;; the face's - so the cells have to be written.
+      ;;--------------------------------------------------------------
+      (when (> width 0)
+        (if (window-system-display? display)
+            (clear-end-of-line-row! display window index y x width token)
+            (write-run! display (list (make-string width #\space)) y x token))))
 
     (define (write-run! display glyphs y x token)
       ;; Draw GLYPHS - a list, one per cell - at pixel Y, cell column X,
@@ -3222,13 +3306,13 @@
                               ;; default face.
                               (face->attribute 'default))
                   ;; and the rest of the row, as in the message branch
-                  (clear-end-of-line-row! (current-display)
-                                          (frame-minibuffer-window frame)
-                                          (- height 1)
-                                          (row->pixel-y (- height 1))
-                                          (+ pwidth twidth)
-                                          (- width (+ pwidth twidth))
-                                          (face->attribute 'default)))))
+                  (fill-line-end-row! (current-display)
+                                      (frame-minibuffer-window frame)
+                                      (- height 1)
+                                      (row->pixel-y (- height 1))
+                                      (+ pwidth twidth)
+                                      (- width (+ pwidth twidth))
+                                      (face->attribute 'default)))))
              (else
               (let* ((text (truncate-line (frame-message frame) width))
                      (tw (min (line-display-width text) width)))
@@ -3243,12 +3327,12 @@
                 ;; left the tail of the old one behind: measured, `M-x zzzz
                 ;; RET` drew "No matchzzzz", and a `Quit` after a
                 ;; minibuffer prompt left "/tmp/" after it.
-                (clear-end-of-line-row! (current-display)
-                                        (frame-minibuffer-window frame)
-                                        (- height 1)
-                                        (row->pixel-y (- height 1))
-                                        tw (- width tw)
-                                        (face->attribute 'default)))))))
+                (fill-line-end-row! (current-display)
+                                    (frame-minibuffer-window frame)
+                                    (- height 1)
+                                    (row->pixel-y (- height 1))
+                                    tw (- width tw)
+                                    (face->attribute 'default)))))))
         ;; Place the terminal cursor: in the minibuffer while one is
         ;; active (Emacs's `cursor-in-echo-area'), else at the selected
         ;; window's point - the only window whose cursor is drawn, there

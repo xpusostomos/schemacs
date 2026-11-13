@@ -870,3 +870,58 @@ Departure left standing, found while measuring: `visible-cursor`
 `tty-visible-cursor` to `#f`, so `vs` (`cvvis`) is never emitted after
 `ve`. Same class of leak as `standout_mode`'s: a state flag with a
 default that is not the C's.
+
+# Emacs paints every terminal row to the edge (2026-11-13)
+
+Chris: *"The main thing outstanding is to investigate if real emacs paints
+every line to the edge, or just to the last character like schemacs."*
+
+It paints to the edge, and the mechanism is `extend_face_to_end_of_line`
+(`xdisp.c:24379`), called from `display_line`. Its comment:
+
+> Extend the face of the last glyph in the text area of IT->glyph_row to
+> the end of the display line. ... If the text area is empty, a space
+> glyph is added to it to carry the face used for clearing the line.
+
+Measured on Emacs 31.1 in a pty (`-nw -Q` on a 24x80 terminal, the
+terminal answering the background queries as an xterm would), every text
+row comes out as
+
+    \e[38;2;255;255;255m\e[48;2;0;0;0m line 19 <73 spaces> \e[39;49m
+
+- the text *and* the padding, in one face, all the way to column 80.
+There is no `\e[K` (`ce`) anywhere in the paint.
+
+Schemacs wrote the text in the default face's explicit truecolor and then
+**erased** the rest of the row with `clear_end_of_line`, under
+`\e[39;49m` - the terminal's default colours. That is exactly the jagged
+outline: on a terminal theme change the written cells keep the explicit
+RGB and the erased cells follow the terminal.
+
+So the port:
+
+- `extend-face-to-end-of-line` (`xdisp.scm`) is the tty branch: append
+  space glyphs, carrying the *last* glyph's face, until the row reaches
+  the window's width. It is called from `build-row!` (`display_line`),
+  so the padding is part of the glyph row and the diff sees it.
+- A row past the end of the buffer and the echo area's row are filled the
+  same way (`fill-line-end-row!`), because they are cleared at draw time
+  rather than built; only a window-system display uses `ce`, where the
+  toolkit paints the background for it.
+- `window-system-display?` is the new generic standing in for
+  `FRAME_WINDOW_P`, because the choice is the *display's*
+  (`<tty-display>` is a terminal; `<pgtk-display>` is not).
+
+Verified on the same pty: schemacs now emits zero `ce` sequences, pads
+every text row to 80 columns, and the padding sits under the same
+`\e[38;2;229;229;229m\e[48;2;51;51;51m` as the text - the same shape as
+Emacs's. `wide-columns`, `redisplay`, `scroll`, `newline`,
+`region-highlight`, `completion-ui`, `truecolor`, `mode-line-eol`,
+`hscroll` and `continuation` pass, and all 35 unit suites pass.
+
+**Departure left standing**: the padding face. Emacs uses the last
+glyph's *extend* face (`face_at_pos (it, LFACE_EXTEND_INDEX)`) unless the
+row ends at ZV, in which case the default face; this port uses the last
+glyph's face unconditionally. `build-row!` has no row that ends at ZV
+(the row past the buffer is blanked separately), so the two agree on
+every row this port builds - but `:extend nil` faces are not carried.

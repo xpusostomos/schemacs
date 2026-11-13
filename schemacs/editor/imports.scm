@@ -2230,6 +2230,7 @@
     window-right-border?
     window-start
     window-start-at-line-beg
+    window-system-display?
     window-top
     window-truncates-lines?
     window-type?

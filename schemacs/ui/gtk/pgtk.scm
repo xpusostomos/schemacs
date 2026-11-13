@@ -152,6 +152,7 @@
           ;; the terminal hooks and the row the Emacs-shaped
           ;; `write-glyphs!` takes (`define-generic`d beside it)
           cursor-to! raw-cursor-to! clear-to-end! clear-frame!
+          window-system-display?
           update-begin! update-end! set-terminal-modes! reset-terminal-modes!)
     ;; A glyph and a glyph row, which `write-glyphs!` now reads: the
     ;; pixel y is the row's, and each glyph carries its own face.
@@ -2186,6 +2187,7 @@
       #t)
 
     (define-method (raw-cursor-to! (d <pgtk-display>) vpos hpos) #t)
+    (define-method (window-system-display? (d <pgtk-display>)) #t)
     (define-method (clear-to-end! (d <pgtk-display>)) #t)
     (define-method (clear-frame! (d <pgtk-display>)) (clear-frame-area! d))
     (define-method (update-begin! (d <pgtk-display>)) #t)

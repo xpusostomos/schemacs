@@ -39,6 +39,7 @@
    ;; the terminal hooks, which are `struct terminal`'s `*_hook`
    ;; fields in Emacs (`termhooks.h`)
    cursor-to! raw-cursor-to! clear-to-end! clear-frame!
+   window-system-display?
    set-terminal-cursor!
    update-begin! update-end! set-terminal-modes! reset-terminal-modes!
    flush-display!
@@ -105,6 +106,19 @@
       ;; generics dispatch on, with `eq?' identity (`#:pure').
       ;;--------------------------------------------------------------
       #:pure #t)
+
+    (define-generic window-system-display?)
+    ;; GNU Emacs's `FRAME_WINDOW_P`: whether this display has a window
+    ;; system behind it. It is what `extend_face_to_end_of_line`
+    ;; (`xdisp.c`) asks before choosing how a row's remainder is filled -
+    ;; a stretch glyph whose background the toolkit paints, or (for a
+    ;; terminal) space glyphs written with the face's colours.
+    ;; `(window-system-display? display)'.
+    ;;
+    ;; The class, not a frame's `window-system', because the redisplay
+    ;; draws the frame's own display and this tree can have two.
+
+    (define-method (window-system-display? (d <display>)) #f)
 
     (define current-display (make-parameter #f))
     ;; ^ The display the editor is running on: Emacs's `terminal'. The
