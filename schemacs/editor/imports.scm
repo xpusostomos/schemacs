@@ -359,6 +359,7 @@
     *minibuffer-completion-table*
     *minibuffer-exit-hook*
     *minibuffer-message-timeout*
+    *minibuffer-selected-window*
     *minibuffer-setup-hook*
     *minor-mode-alist*
     *minor-mode-list*
@@ -1533,6 +1534,7 @@
     minibuffer-prompt-end
     minibuffer-prompt-string
     minibuffer-restore-windows
+    minibuffer-selected-window
     minibuffer-set-contents!
     minibuffer-window-active-p
     minibuffer-with-setup-hook

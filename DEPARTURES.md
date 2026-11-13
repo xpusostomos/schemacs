@@ -1106,3 +1106,53 @@ change (21 against 60).
 - `:height` on a face that is not the default (a mode line's `0.9`, say)
   is likewise drawn at the frame's size, and its row is now that size too.
   Consistent, and still not Emacs's per-face model.
+
+## `C-x C-+` rescales the frame, and Emacs's rescales a buffer (2026-11-13)
+
+Chris: *"if I zoom it until the text is very tiny, and then go C-x C-f the
+entire screen jumps to a bigger zoom level. That's weird. Also I just
+noticed that the C-x C-+ in emacs does not zoom the mode line, only the
+text. C-x C-M-x zooms the text and the mode line."*
+
+### The jump: fixed
+
+`pgtk-ensure-font!` reads the *default face's* height to choose the frame's
+font, because this renderer is one font per frame. It read it from
+`(current-buffer)`, and a prompt makes the minibuffer buffer current - so
+the first keystroke of a `C-x C-f` in a zoomed buffer dropped the whole
+frame back to the normal size for the length of the prompt.
+
+The buffer it reads is now *the window being edited*:
+`minibuffer-selected-window` (`minibuf.c`'s `Vminibuffer_selected_window`),
+which `read-minibuffer-1` records when a prompt begins and which falls back
+to the selected window when there is no prompt. That is a faithful port of
+a C variable this tree did not have; measuring the frame from
+`(current-buffer)` was the departure.
+
+### The mode line: not fixed, and what it would take
+
+In Emacs `text-scale-increase` remaps `default` *for the buffer*, and the
+mode line is looked up as a named face on the frame, never through that
+remapping - so the text grows and the mode line does not.
+`global-text-scale-adjust` (`C-x C-M-+`) changes the frame's `default` face
+itself, which is why that one scales the mode line too.
+
+Reaching that here needs two things this renderer does not have:
+
+1. **Per-face fonts.** `pgtk-show-text!` draws every run at
+   `*font-pixel-size*`; the one-font-per-frame rule above is the same
+   fact. Drawing a run at its own face's height, and measuring the row
+   from it, is what `face-metrics` used to do before the other half was
+   written - the two disagreeing was the "rows on top of each other" bug
+   above.
+2. **A pixel-based horizontal grid.** A scaled font is wider as well as
+   taller. This renderer places glyphs on one column pitch per frame
+   (`*cell-width*`), so a run drawn at twice the size would be twice as
+   wide as its cells and overlap its neighbours. Emacs's `display_line`
+   advances by each glyph's own width and wraps at `last_visible_x` in
+   pixels; this one counts cells.
+
+Until both are done, `C-x C-+` scales the frame (text *and* mode line, in
+both windows), which is a visible departure from Emacs rather than a
+hidden one. `C-x C-M-+` already behaves like Emacs's, because it changes
+the face the frame font is read from.

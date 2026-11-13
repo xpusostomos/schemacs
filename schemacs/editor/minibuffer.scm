@@ -304,9 +304,27 @@ read-number-history
    make<history> history? history-entries set!history-entries
    execute-extended-command *extended-command-history*
    yes-or-no-p
+   ;; `minibuf.c`'s `Vminibuffer_selected_window`
+   *minibuffer-selected-window* minibuffer-selected-window
    )
 
   (begin
+
+    (define *minibuffer-selected-window* (make-parameter #f))
+    ;; ^ GNU Emacs's `Vminibuffer_selected_window` (`minibuf.c`): the
+    ;; window that was selected when the prompt began. `read_minibuf`
+    ;; records it because the read *selects the minibuffer window*
+    ;; (`minibuf.c:839`), so `(selected-window)` during a prompt is the
+    ;; prompt's window and not the one being edited.
+
+    (define (minibuffer-selected-window)
+      ;; GNU Emacs's `minibuffer-selected-window`: "Return the window
+      ;; selected before the minibuffer was entered. If the minibuffer is
+      ;; not active, return nil." The C also tests `WINDOW_LIVE_P`; a
+      ;; window here is live until it is deleted, and a deleted one is not
+      ;; what a prompt would have recorded.
+      ;;--------------------------------------------------------------
+      (and (*minibuffer*) (*minibuffer-selected-window*)))
 
     ;;----------------------------------------------------------------
     ;; The minibuffer
@@ -554,6 +572,9 @@ read-number-history
           (parameterize ((*minibuffer* mb)
                          (*echo-area-buffer* ed)
                          (*echo-area-prompt* prompt)
+                         ;; the window being edited, which the read is
+                         ;; about to take the selection from
+                         (*minibuffer-selected-window* entry-window)
                          ;; **`(*current-buffer* #f)` is the unwind, and
                          ;; the `set-buffer` inside is the value** - which
                          ;; is `read_minibuf`'s `Fset_buffer (minibuffer)`

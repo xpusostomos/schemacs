@@ -177,6 +177,7 @@
     ;; new font unless `frame-inhibit-implied-resize' says otherwise.
     (only (schemacs editor frame) adjust-frame-size! *frame-list* frame-width
           frame-height frame-output frame-set-background-mode
+          frame-selected-window window-buffer
           ;; `menu-bar-mode` turns the bar off by setting this on every
           ;; frame, and `set_frame_menubar` acts on it.
           frame-parameter)
@@ -188,6 +189,11 @@
           set-face-attribute)
     (only (schemacs editor xfaces)
           attribute-value face-attributes-empty merge-face-ref)
+    ;; reading a *window's* buffer, not the current one - see
+    ;; `pgtk-ensure-font!`
+    (only (schemacs editor buffer) with-current-buffer)
+    ;; the window being edited, which a prompt takes the selection from
+    (only (schemacs editor minibuffer) minibuffer-selected-window)
     ;; How many cells a character takes - a CJK ideograph is one character
     ;; and two cells, so a run is not `string-length' wide.
     (only (schemacs editor disp-table) char-display-width)
@@ -615,9 +621,29 @@
              ;; unscaled buffer scales it back. Closing that needs
              ;; per-window row heights (`row->ascent'/'row->height' in
              ;; `dispextern.h'), which is a renderer of its own.
-             (height (attribute-value (merge-face-ref
-                                       'default (face-attributes-empty))
-                                      ':height)))
+             ;; **The buffer is the *selected window's*, not
+             ;; `(current-buffer)`.** A minibuffer prompt makes the echo
+             ;; area current, so reading the current buffer's remapping
+             ;; dropped a scaled frame back to the unscaled font for the
+             ;; whole prompt - `C-x C-f` in a zoomed buffer made the
+             ;; entire screen jump to the normal size, which is what Chris
+             ;; saw. The window you are editing is the one that is scaled;
+             ;; a prompt is not a window.
+             (height (let ((w (let ((frame (*current-frame*)))
+                               (and frame
+                                    (or (minibuffer-selected-window)
+                                        (frame-selected-window frame))))))
+                       (if (and w (window-buffer w))
+                           (with-current-buffer
+                               (window-buffer w)
+                             (attribute-value (merge-face-ref
+                                               'default
+                                               (face-attributes-empty))
+                                              ':height))
+                           (attribute-value (merge-face-ref
+                                             'default
+                                             (face-attributes-empty))
+                                            ':height)))))
         ;; `unspecified' and nil are both "the face does not say": only a
         ;; number can be a height. A face with none takes the height of
         ;; the font already open, which is what `set_lface_from_font'
