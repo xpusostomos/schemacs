@@ -2520,10 +2520,14 @@ def check_completion_scroll():
         m = _re.search(r"\((\d+) (\d+) (\d+)\)", answer.get("state", ""))
         return tuple(int(x) for x in m.groups()) if m else None
 
+    # **The rule, not a count.** One TAB scrolls the window a *screen* -
+    # `(scroll-up)`, `window_scroll` - so how many TABs it takes to reach
+    # the end depends on the rows each line occupies, and a count pins
+    # the arithmetic of the day rather than Emacs's rule: "once the end
+    # is in view the next TAB goes back to the top".
     try:
-        two = observe([b"\t"] * 2, "pty-check-scroll-2")
-        three = observe([b"\t"] * 3, "pty-check-scroll-3")
-        eight = observe([b"\t"] * 8, "pty-check-scroll-8")
+        states = {k: observe([b"\t"] * k, "pty-check-scroll-%d" % k)
+                  for k in range(1, 13)}
         # 30 candidates: 30 M-<down>s reach the last one, the 31st wraps
         # to the first - `completion-auto-wrap` (`simple.el:10169') is t
         # by default, which is why Emacs' own `M-<down>` comes back to
@@ -2539,15 +2543,26 @@ def check_completion_scroll():
             else:
                 os.environ[k] = v
 
-    if two is None or two[0] != 1:
+    # a TAB from the top scrolls; the first TAB *after* the end is in
+    # view returns to the top of the list.
+    reset = None
+    for k in range(3, 13):
+        st = states.get(k)
+        if st and st[0] == 1:
+            reset = k
+            break
+    if states.get(2) is None or states[2][0] != 1:
         problems.append("after two TABs the completions window is not at the "
-                        "top of the list: %r" % (two,))
-    if three is None or three[0] <= 1:
-        problems.append("a third TAB did not scroll the completions window: "
-                        "%r (was %r after two)" % (three, two))
-    if eight is None or eight[0] != 1:
+                        "top of the list: %r" % (states.get(2),))
+    if reset is None:
         problems.append("TAB kept scrolling past the end instead of going "
-                        "back to the top: %r" % (eight,))
+                        "back to the top: %r"
+                        % {k: v for k, v in states.items() if v})
+    else:
+        before = states.get(reset - 1)
+        if before is None or before[0] <= 1:
+            problems.append("the window never scrolled before returning to "
+                            "the top: %r" % (before,))
     if mdown is None:
         problems.append("M-<down> left no completions window state behind")
     else:
