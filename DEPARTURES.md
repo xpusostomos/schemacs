@@ -810,8 +810,9 @@ in the bottom left square when I move around. Is it possible that you should
 have moved the cursor back to its correct position before calling
 tty_update_end?"*
 
-He was right about the cure and about the corner. `draw-window-cursor!` for
-a terminal did
+He was right about the cure and about the corner, and the departure was
+structural rather than an ordering slip. `draw-window-cursor!` for a
+terminal did three jobs in one hook:
 
     (emit cursor-visible)        ; vs / cvvis
     (cursor-to! row column)
@@ -824,23 +825,48 @@ Captured on a pty, one `C-n` from a fresh editor:
 
     before:  ... \e[K  \e[?12;25h  \e[2d  \e[?12l \e[?25h
                         ^ show      ^ move
-    after:   ... \e[K  \e[2d  \e[?12;25h  \e[?12l \e[?25h
+    after:   ... \e[K  \e[2d  \e[?12l \e[?25h
                         ^ move ^ show
 
-GNU Emacs's own order is `update_tty_frame`'s (`dispnew.c`):
-`update_begin` (hide) -> `write_matrix` -> `update_end` (show + flush) ->
-`tty_set_cursor` (move). It shows *then* places, and does not flash,
-because after hiding the frame it flushes once with everything already
-written; this tree's `draw_window_cursor` hook is where the place and the
-show meet, so the two statements simply have to be in the order that cannot
-be seen - place, then show. `cursor_to!` is a direct cursor address (no
-intermediate motion), so addressing a hidden cursor is free.
+**The C has these as three separate things, and this tree had them in
+one.** `update_begin`/`update_end` (`term.c`) own the cursor's
+*visibility* (`tty_hide_cursor` / `tty_show_cursor`); `tty_set_cursor`
+(`dispnew.c:5672`) owns its *placement*, called by `update_frame` after
+the frame's text is written; and the `draw_window_cursor` hook is a
+*window-system* rif method - a termcap frame's `rif` is NULL (`term.c`),
+because a terminal draws its own cursor and there is no reverse-video
+cell to paint. So the port is:
 
-With that, `update-end!`'s `tty_show_cursor` is a second show at the same
-place - harmless, and it keeps the `cursor_hidden` flag discipline that the
-`standout_mode` leak taught us to respect.
+- `draw-window-cursor!` for a tty records only whether the cursor is to
+  be shown at all - GNU Emacs's `cursor_off_p` (`window.h`), which
+  `tty_update_end` reads before showing - and draws nothing;
+- a new display generic **`set-terminal-cursor!`** is `tty_set_cursor`:
+  it addresses the hardware cursor at the position the redisplay
+  recorded, and the window-system default does nothing because the
+  toolkit owns its cursor;
+- `update-end!` shows the cursor unless `cursor_off_p`, then flushes.
 
-Verified by the same byte capture (`\e[2d` before `\e[?12;25h` in both the
-pre-fix and post-fix runs, the two orders being the whole difference), and
-the pty checks `redisplay`, `scroll`, `newline`, `region-highlight`,
-`mode-line-eol` and `truecolor` pass.
+`render!` calls `set-terminal-cursor!` from the `*phys-cursor*` record
+(where `note-phys-cursor!` stored the position, as `display_and_set_cursor`
+stores `w->cursor`) immediately before `update-end!`. That is the order
+Emacs's own `update_frame_with_menu` uses (place, then `update_end`), and
+it is the order that cannot be seen: the address happens while the cursor
+is still hidden.
+
+`update-begin!`/`update-end!` also gained no-op `<display>` defaults,
+which is the C's arrangement: `update_begin` only calls
+`FRAME_TERMINAL (f)->update_begin_hook` when it is non-NULL, and the
+window-system terminals leave the pair NULL. Without them the stub
+display the suites use had no method at all, which is why
+`ncurses-editor-tests` and `pgtk-tests` failed once the bracketing
+landed.
+
+Verified by the byte capture above, and by all 35 suites plus the pty
+checks `redisplay`, `scroll`, `newline`, `region-highlight`,
+`mode-line-eol`, `truecolor` and `no-display`.
+
+Departure left standing, found while measuring: `visible-cursor`
+(`term.c:5347`, `DEFVAR_BOOL`, default `1`) initialises this tree's
+`tty-visible-cursor` to `#f`, so `vs` (`cvvis`) is never emitted after
+`ve`. Same class of leak as `standout_mode`'s: a state flag with a
+default that is not the C's.

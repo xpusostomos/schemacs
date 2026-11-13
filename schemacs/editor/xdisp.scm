@@ -46,7 +46,7 @@
           clear-end-of-line! ensure-surface!
           update-window-begin! update-window-end!
           update-begin! update-end!
-          cursor-to!
+          cursor-to! set-terminal-cursor!
           draw-window-cursor! erase-window-cursor! flush-display!
           realize-face
           ;; how many pixels a cell is, which is what turns a mouse
@@ -3363,6 +3363,23 @@
                                                            (window-point selected))
                                              (car cursor) (cadr cursor)
                                              (car glyph) (cdr glyph)))))))))
+        ;; **The display's own cursor is placed once the frame's text is
+        ;; written.** GNU Emacs's `update_frame` ends with
+        ;; `tty_set_cursor` (`dispnew.c`), which reads the cursor
+        ;; position the redisplay recorded (`w->cursor`) and addresses
+        ;; the hardware cursor there; the visibility is `update_begin`/
+        ;; `update_end`'s. It is a separate step from drawing the cursor
+        ;; even on a window-system display, where the default method does
+        ;; nothing because the toolkit owns its cursor.
+        ;;
+        ;; Placing it here, before `update-end!` shows it, is the order
+        ;; in Emacs's own `update_frame_with_menu` - and it is the order
+        ;; that cannot be seen: the cursor is addressed while
+        ;; `update-begin!` still has it hidden, so it never appears at
+        ;; whatever cell the last glyph write left it in.
+        (let ((phys (*phys-cursor*)))
+          (when phys
+            (set-terminal-cursor! (car phys) (cadr phys) (caddr phys))))
         ;; The screen is what was drawn: the display's flush, which for
         ;; this terminal honours the full-repaint `clear-frame-area!'
         ;; asked for (partial-update optimizations desync the physical

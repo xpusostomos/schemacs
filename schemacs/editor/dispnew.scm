@@ -39,6 +39,7 @@
    ;; the terminal hooks, which are `struct terminal`'s `*_hook`
    ;; fields in Emacs (`termhooks.h`)
    cursor-to! raw-cursor-to! clear-to-end! clear-frame!
+   set-terminal-cursor!
    update-begin! update-end! set-terminal-modes! reset-terminal-modes!
    flush-display!
    read-input-event
@@ -184,6 +185,22 @@
     ;; the cost model - Emacs's `raw_cursor_to` (`term.c:430`), used when
     ;; nothing else is being drawn. `(raw-cursor-to! display vpos hpos)`.
 
+    (define-generic set-terminal-cursor!)
+    ;; Put the display's own cursor where the redisplay decided it goes,
+    ;; once the frame's text has been written - GNU Emacs's
+    ;; `tty_set_cursor` (`dispnew.c`), which `update_frame` calls as its
+    ;; last act before the final flush. It is a *separate* step from
+    ;; drawing the cursor: `draw-window-cursor!` is the C's
+    ;; `draw_window_cursor` hook, and a terminal has no such hook (its
+    ;; `rif` is NULL) because the terminal draws the cursor itself.
+    ;; `(set-terminal-cursor! display row column)'.
+    ;;
+    ;; A window-system display has nothing to place - the toolkit owns
+    ;; its cursor - so the default method does nothing.
+
+    (define-method (set-terminal-cursor! (d <display>) row column)
+      #t)
+
     (define-generic clear-to-end!)
     ;; Erase from the cursor to the end of the screen - Emacs's
     ;; `clear_to_end` (`term.c:449`). `(clear-to-end! display)`.
@@ -195,11 +212,22 @@
     (define-generic update-begin!)
     ;; The terminal's begin-update hook, Emacs's `update_begin`.
     ;; `(update-begin! display)`.
+    ;;
+    ;; **A display that is not a terminal has no such hook**, which is
+    ;; the C's own arrangement: `update_begin` calls
+    ;; `FRAME_TERMINAL (f)->update_begin_hook` only when it is non-NULL
+    ;; (`dispnew.c`), and the window-system terminals leave the pair
+    ;; NULL - their frame update is the toolkit's. So the default does
+    ;; nothing and `term.sld` supplies the terminal's.
+
+    (define-method (update-begin! (d <display>)) #t)
 
     (define-generic update-end!)
     ;; The terminal's end-update hook, Emacs's `update_end`
     ;; (`term.c:254`), which puts the cursor back.
     ;; `(update-end! display)`.
+
+    (define-method (update-end! (d <display>)) #t)
 
     (define-generic set-terminal-modes!)
     ;; Enter the terminal's program modes, Emacs's `set_terminal_modes`

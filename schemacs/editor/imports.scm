@@ -1963,6 +1963,7 @@
     set-object-intervals
     set-point
     set-selection!
+    set-terminal-cursor!
     set-terminal-modes!
     set-text-properties
     set-transient-map

@@ -155,6 +155,7 @@
       (cursor-normal tty-cursor-normal set-tty-cursor-normal!)
       (cursor-invisible tty-cursor-invisible set-tty-cursor-invisible!)
       (cursor-hidden tty-cursor-hidden set-tty-cursor-hidden!)
+      (cursor-off tty-cursor-off set-tty-cursor-off!)
       (keypad-mode tty-keypad-mode set-tty-keypad-mode!)
       (end-keypad-mode tty-end-keypad-mode set-tty-end-keypad-mode!)
       (termcap-modes tty-termcap-modes set-tty-termcap-modes!)
@@ -339,6 +340,10 @@
                 (set-tty-standout! caps #f))))
         (set-tty-standout-mode! caps #f)
         (set-tty-cursor-hidden! caps #f)
+        ;; `w->cursor_off_p` (`window.h`) for the one cursor this
+        ;; terminal has: set by the redisplay when the cursor is not to
+        ;; be shown, and read by `tty_update_end` before it shows it.
+        (set-tty-cursor-off! caps #f)
         (set-tty-visible-cursor! caps #f)
         (set-tty-max-colors! caps
                              (if (tty-orig-pair caps)
@@ -1310,11 +1315,33 @@
       ;;--------------------------------------------------------------
       (tty-hide-cursor %terminal))
 
-    (define-method (update-end! (d <tty-display>))
-      ;; `tty_update_end` (`term.c:254`): show the cursor, turn the
-      ;; insert mode off, and flush.
+    (define-method (set-terminal-cursor! (d <tty-display>) row column)
+      ;; GNU Emacs's `tty_set_cursor` (`dispnew.c:5672`): address the
+      ;; physical cursor at the position the redisplay recorded for it,
+      ;; which `display_and_set_cursor` left in `w->cursor`. It is the
+      ;; terminal's own cursor - there is no reverse-video cell to draw,
+      ;; because this backend's cursor *is* the terminal's - so this is
+      ;; where the terminal is told where it goes.
       ;;--------------------------------------------------------------
-      (tty-show-cursor %terminal)
+      (cursor-to! d #f row column))
+
+    (define-method (update-end! (d <tty-display>))
+      ;; `tty_update_end` (`term.c:254`):
+      ;;
+      ;;   if (!XWINDOW (selected_window)->cursor_off_p)
+      ;;     tty_show_cursor (tty);
+      ;;   tty_turn_off_insert (tty);
+      ;;   tty_background_highlight (tty);
+      ;;   fflush (tty->output);
+      ;;
+      ;; The cursor is shown here and *placed* by `set-terminal-cursor!`
+      ;; - two steps, as they are two functions in the C. Hiding it
+      ;; before the frame's text is written and showing it after is what
+      ;; keeps the writes the redisplay makes from being visible as a
+      ;; cursor walking the screen.
+      ;;--------------------------------------------------------------
+      (unless (tty-cursor-off %terminal)
+        (tty-show-cursor %terminal))
       (flush-output-port (current-output-port)))
 
     (define-method (set-terminal-modes! (d <tty-display>))
@@ -1354,27 +1381,22 @@
 
     (define-method (draw-window-cursor! (d <tty-display>) row column cells
                                         type width text token)
-      ;; The one terminal cursor. A terminal draws a cursor over a
-      ;; double-width character two cells wide without being told, and
-      ;; inverts the glyph under it without being given it; what it can
-      ;; be told is whether to show the cursor at all.
+      ;; **A terminal does not draw its cursor here**, and the C says so
+      ;; structurally: `draw_window_cursor` is a hook of the
+      ;; window-system redisplay interface, and a tty's `rif` is NULL
+      ;; (`term.c`). The terminal has a cursor of its own, which the
+      ;; redisplay *places* (`set-terminal-cursor!`) after the frame's
+      ;; text has been written and *shows* at the end of the update
+      ;; (`update-end!`).
       ;;
-      ;; **The cursor is moved *before* it is made visible.** In the C
-      ;; the two are separate steps of `update_tty_frame` (`dispnew.c`):
-      ;; `update_end` shows the cursor and flushes, and `tty_set_cursor`
-      ;; then addresses it. This tree has one hook where both happen, so
-      ;; the order here is the one that cannot be seen: writing the
-      ;; visibility sequence first shows the cursor wherever the last
-      ;; glyph write left it - the echo area's row, column 0, because
-      ;; that row is cleared last - before the address moves it, which
-      ;; is the flash seen in the bottom-left corner on every keystroke.
-      ;; The address is direct, so placing a hidden cursor costs nothing.
+      ;; What is recorded here is whether the cursor is to be shown at
+      ;; all - GNU Emacs's `cursor_off_p` (`window.h`), which
+      ;; `tty_update_end` consults before showing. Emitting a show
+      ;; sequence from this hook, as this used to, was what put the
+      ;; cursor on screen at whatever cell the last glyph write left it
+      ;; (the echo area's row, column 0) before the address moved it.
       ;;--------------------------------------------------------------
-      (cursor-to! d #f row column)
-      (let ((caps %terminal))
-        (if (eq? type 'no-cursor)
-            (%emit (tgetstr "vi"))
-            (%emit (or (tty-cursor-visible caps) (tgetstr "vs"))))))
+      (set-tty-cursor-off! %terminal (eq? type 'no-cursor)))
 
     (define-method (flush-display! (d <tty-display>))
       ;; Make the screen show the frame.
