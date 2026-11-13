@@ -785,10 +785,10 @@ GNU Emacs's `tty_update_begin` (`term.c`) is `tty_hide_cursor`, and
 whole of `update_frame` and shown again afterwards, so the cursor motions
 that write the rows are not seen. `update-window-begin!` here is a no-op
 (`#t`) and `update-end!` only emits `TS_cursor_normal`, so every
-`cursor_to!` the redisplay makes is visible. `TS_cursor_invisible`/`civis`
-is already read into the capability table (`cursor-invisible` does not
-exist - `tty-cursor-visible` holds `cvvis`, so `civis` needs adding) and
-`tty_show_cursor` needs its `cursor_hidden` flag ported with it.
+`cursor_to!` the redisplay makes is visible. *Fixed - `civis` was read in
+and `tty_hide_cursor`/`tty_show_cursor` bracket the frame now; the residue
+was the show happening before the place, see "The cursor was shown before
+it was placed" at the end of this file.*
 
 **(3) After the terminal's theme changes, the background behind text is the
 old colour and the rest of each line the new one, so the text forms a
@@ -802,3 +802,45 @@ the two no longer match. Emacs's tty default face is
 emitted as "no setaf/setab" - so the whole line moves together.
 `realize-tty-face`/`realize-face` giving the default face concrete RGB from
 the frame's background is where to look, not the drawing code.
+
+# The cursor was shown before it was placed (2026-11-13)
+
+Chris, after `civis`/`cnorm` bracketing landed: *"I can see the cursor flash
+in the bottom left square when I move around. Is it possible that you should
+have moved the cursor back to its correct position before calling
+tty_update_end?"*
+
+He was right about the cure and about the corner. `draw-window-cursor!` for
+a terminal did
+
+    (emit cursor-visible)        ; vs / cvvis
+    (cursor-to! row column)
+
+so the cursor became visible **wherever the last glyph write left it** and
+was then addressed to point. The last write of a frame is the echo area's
+row - `clear-end-of-line-row!` on the frame's bottom row, starting at
+column 0 - so the cursor appeared in the bottom-left cell and then jumped.
+Captured on a pty, one `C-n` from a fresh editor:
+
+    before:  ... \e[K  \e[?12;25h  \e[2d  \e[?12l \e[?25h
+                        ^ show      ^ move
+    after:   ... \e[K  \e[2d  \e[?12;25h  \e[?12l \e[?25h
+                        ^ move ^ show
+
+GNU Emacs's own order is `update_tty_frame`'s (`dispnew.c`):
+`update_begin` (hide) -> `write_matrix` -> `update_end` (show + flush) ->
+`tty_set_cursor` (move). It shows *then* places, and does not flash,
+because after hiding the frame it flushes once with everything already
+written; this tree's `draw_window_cursor` hook is where the place and the
+show meet, so the two statements simply have to be in the order that cannot
+be seen - place, then show. `cursor_to!` is a direct cursor address (no
+intermediate motion), so addressing a hidden cursor is free.
+
+With that, `update-end!`'s `tty_show_cursor` is a second show at the same
+place - harmless, and it keeps the `cursor_hidden` flag discipline that the
+`standout_mode` leak taught us to respect.
+
+Verified by the same byte capture (`\e[2d` before `\e[?12;25h` in both the
+pre-fix and post-fix runs, the two orders being the whole difference), and
+the pty checks `redisplay`, `scroll`, `newline`, `region-highlight`,
+`mode-line-eol` and `truecolor` pass.

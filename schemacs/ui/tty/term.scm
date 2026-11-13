@@ -1358,12 +1358,23 @@
       ;; double-width character two cells wide without being told, and
       ;; inverts the glyph under it without being given it; what it can
       ;; be told is whether to show the cursor at all.
+      ;;
+      ;; **The cursor is moved *before* it is made visible.** In the C
+      ;; the two are separate steps of `update_tty_frame` (`dispnew.c`):
+      ;; `update_end` shows the cursor and flushes, and `tty_set_cursor`
+      ;; then addresses it. This tree has one hook where both happen, so
+      ;; the order here is the one that cannot be seen: writing the
+      ;; visibility sequence first shows the cursor wherever the last
+      ;; glyph write left it - the echo area's row, column 0, because
+      ;; that row is cleared last - before the address moves it, which
+      ;; is the flash seen in the bottom-left corner on every keystroke.
+      ;; The address is direct, so placing a hidden cursor costs nothing.
       ;;--------------------------------------------------------------
+      (cursor-to! d #f row column)
       (let ((caps %terminal))
         (if (eq? type 'no-cursor)
             (%emit (tgetstr "vi"))
-            (%emit (or (tty-cursor-visible caps) (tgetstr "vs")))))
-      (cursor-to! d #f row column))
+            (%emit (or (tty-cursor-visible caps) (tgetstr "vs"))))))
 
     (define-method (flush-display! (d <tty-display>))
       ;; Make the screen show the frame.
