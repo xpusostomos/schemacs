@@ -2105,7 +2105,17 @@
                                         1 first-item))
                                   (begin (set! y1 min-y)
                                          (set! first-item 0))
-                                  (set! first-item (+ first-item 1))))
+                                  (set! first-item (+ first-item 1)))
+                              ;; **The C's `leave = 0`** (`term.c:3751`-
+                              ;; `:3771`).
+                              ;; Scrolling is navigation, not a choice:
+                              ;; without this the loop ends with RESULT,
+                              ;; PANE and SELIDX still holding whatever
+                              ;; the *last* hit test found - so arrowing
+                              ;; down past the end ran the bottom item
+                              ;; instead of wrapping to the top, and on
+                              ;; the File menu that item is Quit.
+                              (set! leave #f))
                              ((scroll-back)
                               (if (= first-item 0)
                                   (begin
@@ -2113,7 +2123,8 @@
                                     (set! first-item
                                           (- (length (tty-menu-items root))
                                              1 (- y1 min-y))))
-                                  (set! first-item (- first-item 1))))
+                                  (set! first-item (- first-item 1)))
+                              (set! leave #f))
                              (else #f))
                            (if (and usable (not (eq? status MI-QUIT-MENU)))
                                (call-with-values

@@ -4420,13 +4420,16 @@ def check_tty_menu():
     the bar *on* (`MENUBAR_CONFIG_HOME`); every other check has it off so
     that its text rows start at the frame's top.
 
-    Three things are asserted, and the third is the one that cost a bug:
+    Four things are asserted, and the third is the one that cost a bug:
     the bar is the first row; left and right move between menus (the
     arrows are `right-char`/`left-char`, which
-    `tty-menu-navigation-map` substitutes); and C-g pops a menu-bar menu
+    `tty-menu-navigation-map` substitutes); C-g pops a menu-bar menu
     down *without* "Quit", because a menu-bar position is a
     `MENU_FOR_CLICK` and `tty_menu_activate` only signals for a menu that
-    was not clicked open.
+    was not clicked open; and the arrows wrap - down past the last entry
+    returns to the top, up past the first goes to the bottom. That last
+    one was a missing `leave = 0`, which made a scroll *end* the menu
+    and run whatever item the cursor was on.
     """
     problems = []
 
@@ -4456,6 +4459,33 @@ def check_tty_menu():
     if "Quit" in screen.split("\n")[-1]:
         problems.append("cancelling a menu-bar menu said Quit, which "
                         "`MENU_FOR_CLICK` exists to prevent")
+
+    # Arrowing past the end wraps to the top - `tty_menu_activate`'s
+    # MI_SCROLL_FORWARD case sets `y = min_y` and `first_item = 0`
+    # (`term.c:3751`), and ends with `leave = 0` because scrolling is
+    # navigation and not a choice. Without that line the loop *ended*
+    # with RESULT, PANE and SELIDX still holding the item under the
+    # cursor, so a down arrow at the bottom ran the last item - which on
+    # the File menu is Quit, so the editor exited as well.
+    #
+    # The File menu is 18 entries, so 17 downs sit on the last and the
+    # 18th wraps to "Visit New File...". RET then prompts.
+    screen = screen_of(drive([b"\x1b[21~"] + [b"\x1bOB"] * 18 + [b"\r"],
+                             None, config=MENUBAR_CONFIG_HOME))
+    if "Find file: " not in screen:
+        problems.append("18 down arrows did not wrap back to the top of "
+                        "the File menu: %r" % (screen.split("\n")[-3:],))
+
+    # ...and the other way: one up from the top wraps to the bottom
+    # item, which on the File menu is Quit, so the editor leaves.
+    # `EXITED` rather than reading the silence after RET: the editor
+    # writes its screen and *then* goes, and a check that kills it in
+    # between reads as "still running" - the race `save-y-n` had.
+    _, exited = drive([b"\x1b[21~", b"\x1bOA", b"\r", EXITED], None,
+                      config=MENUBAR_CONFIG_HOME, report_exit=True)
+    if not exited:
+        problems.append("one up arrow did not wrap to the bottom of the "
+                        "File menu (the Quit item)")
 
     return problems
 

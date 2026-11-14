@@ -1356,6 +1356,32 @@ to be right for C-g in a menu to behave:
   finite, and `read-key-event`'s `maybe-quit` then runs. This is a poll
   where Emacs has a signal; it exists only while a menu is open.
 
+## Arrowing past the end ran the last item (Chris found it)
+
+Chris: *"if you arrow down past the end it executes the last command in
+the menu whereas it should wrap back to the top"* - and on the File menu
+the last command is Quit, so the editor also left.
+
+`tty_menu_activate`'s loop sets `leave = 1` as soon as `read_menu_input`
+answers anything but `MI_CONTINUE`, and the navigation cases put it back
+with `leave = 0`. Three do (`MI_NEXT_ITEM`/`MI_PREV_ITEM` when not
+`kbd_navigation`, and both scroll cases). **The port restored it for the
+first two and not for `MI_SCROLL_FORWARD`/`MI_SCROLL_BACK`**
+(`term.c:3751`, `:3764`). So a scroll past the end *ended* the loop with
+`result`, `pane` and `selidx` still holding whatever the last hit test
+found - the item under the cursor, which is the one at the end of the
+menu - and `tty_menu_show` mapped that to an entry, so the command ran.
+The wrap arithmetic itself was right: `y = min_y; first_item = 0`.
+
+This is the same shape as the note above it - a C statement whose
+absence leaves a variable holding a stale-but-plausible value - and it
+is only visible by *using* the menu: every in-range arrow press behaved.
+
+`tools/pty-check.py`'s `tty-menu` check pins both directions now: 18
+downs (the File menu's 18 entries) then RET must prompt `Find file: `,
+and one up from the top must reach the bottom item, which is Quit, so
+the editor leaves. Both were seen failing with the two lines removed.
+
 ## Tests
 
 `menu-tests` 16, `menu-bar-tests` 28, `menu-bar-menus-tests` 7,
