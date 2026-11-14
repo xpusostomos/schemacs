@@ -35,7 +35,8 @@
        window-height window-point window-right-border? window-top
        window-width)
  (only (schemacs editor keyboard)
-       command-remapping dispatch-key-event dispatch-input-event timer-check!)
+       command-remapping dispatch-key-event dispatch-input-event timer-check!
+       *unread-command-events*)
  ;; The cursor's type, which `xdisp.sld' resolves from the buffer's
  ;; `cursor-type' - the tests below are its rule, not the drawing of it.
  (only (schemacs editor xdisp)
@@ -49,6 +50,7 @@
  (only (schemacs editor dispnew) current-display key-event->key
        lookup-face realize-face)
  (only (schemacs editor test-display) <test-display> test-display-script
+       set!test-display-script
        test-display-frames-deleted test-display-cursor)
  (only (schemacs editor keymap) *current-keymap* *default-keymap*)
  ;; `kbd' - the tree's spelling of a key, and the event a test presses.
@@ -169,7 +171,8 @@
        kill-visual-line next-logical-line previous-logical-line
        set-goal-column)
  (only (schemacs editor isearch)
-       *search-case-fold?* *search-pattern* isearch-find isearch-message)
+       *search-case-fold?* *search-pattern* isearch-find isearch-message
+       isearch-forward)
  ;; `menu-bar-mode` sets a frame parameter on every frame; loading the
  ;; library also puts the standard menus in the global map, which nothing
  ;; in this suite reads.
@@ -1011,6 +1014,32 @@
     (set-point ed 1)
     (list (isearch-find ed "BETA" 'forward #t #f)
           (isearch-find ed "BETA" 'forward #f #f))))
+
+;; **A window system's Return is the *symbol* `return`.** `dispatch-key`
+;; translates it through `function-key-map` (Return is 13, TAB is 9), but
+;; the search reads its own keys *below* that, and it had no translation
+;; of its own: on Gtk the RET branch below never matched, the search
+;; exited through the other-key branch - which puts the key back on
+;; `unread-command-events` - and every later search read that key first,
+;; exited and put it back again. `C-s` was broken for ever after the
+;; first search, while every other command went on working; C-g did not
+;; help, because the stale key is read before any key you type. A test
+;; display can feed the symbol directly, so this is the regression test
+;; for it - `(unread-command-events)' empty and the RET branch's message
+;; are the two halves.
+(test-equal '("Mark saved where search started" ())
+  (let* ((ed (allocate-buffer))
+         (frame (test-frame ed)))
+    (parameterize ((*current-frame* frame) (*current-buffer* ed)
+                   (*echo-area-buffer* #f)
+                   (*unread-command-events* '())
+                   (*search-pattern* #f) (*search-case-fold?* #t))
+      (with-current-buffer ed (insert "alpha 888 beta\n"))
+      (set-point ed 1)
+      (set! (test-display-script *test-display*)
+            (list #\x13 #\8 #\8 #\8 'return))
+      (isearch-forward)
+      (list (frame-message frame) (*unread-command-events*)))))
 
 (test-end "schemacs_ncurses_editor_isearch")
 

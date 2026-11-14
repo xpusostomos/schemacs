@@ -241,7 +241,7 @@
     ;; whether it can take one now; both are #f/the-loop's when a read is
     ;; outstanding instead. See `Pgtk-ENQUEUE!`.
     (only (schemacs editor keyboard)
-          *dispatch-event* command-loop-ready?
+          *dispatch-event* *unread-command-events* command-loop-ready?
           ;; a mouse event's own value, for the hand-over path above
           *last-read-event*
           ;; What the bar shows: `menu_bar_items`' `[menu-bar]` walk,
@@ -1249,15 +1249,36 @@
          (lambda () #t)
          (lambda ()
            (let loop ()
-             (let ((found (%pgtk-next-queued d)))
-               (when found
-                 (let ((raw (pgtk-take-queued d found)))
-                   (unless (eq? raw *pgtk-skip*)
-                     (*last-read-event* raw)
-                     (let ((event (and raw (key-event->key d raw))))
-                       (when event (dispatch event)))))
+             ;; **A key put back on `*unread-command-events*` first.**
+             ;; Emacs consumes that list at the start of every
+             ;; `read_char`; this front end's top level does not read, so
+             ;; a key the command loop handed back - an isearch's
+             ;; `isearch-other-meta-char`, which exits and re-executes the
+             ;; key - was never taken up at all and sat until the next
+             ;; prompt. It is an *event* already, so it goes straight to
+             ;; the dispatch.
+             (let ((unread (*unread-command-events*)))
+               (cond
+                ;; **`pair?`, not the list itself**: an empty list is
+                ;; true in Scheme, and `(car '())` is the error that
+                ;; made the Gtk front end answer nothing at all.
+                ((pair? unread)
+                 (*unread-command-events* (cdr unread))
+                 (let ((ev (car unread)))
+                   (*last-read-event* ev)
+                   (dispatch ev))
                  (when (and (command-loop-ready?) (null? *pgtk-running*))
-                   (loop))))))
+                   (loop)))
+                (else
+                 (let ((found (%pgtk-next-queued d)))
+                   (when found
+                     (let ((raw (pgtk-take-queued d found)))
+                       (unless (eq? raw *pgtk-skip*)
+                         (*last-read-event* raw)
+                         (let ((event (and raw (key-event->key d raw))))
+                           (when event (dispatch event)))))
+                     (when (and (command-loop-ready?) (null? *pgtk-running*))
+                       (loop)))))))))
          (lambda () (set! *draining* #f)))))
 
     (define (pgtk-wake!)
@@ -1472,6 +1493,28 @@
              (cell (pgtk-event-cell e)))
         (posn-at-x-y (car cell) (cdr cell) f)))
 
+    (define (pgtk-key-item d e)
+      ;; What a key press is queued as: the event *decoded now*, in the
+      ;; signal handler, exactly as GNU Emacs makes the Lisp key event
+      ;; the moment the platform event arrives (`kbd_buffer_store_event`,
+      ;; `keyboard.c`).
+      ;;
+      ;; **A queued event outlives the signal emission.** The queue is
+      ;; drained by a read (a prompt, an isearch) or by the redisplay
+      ;; that follows whatever was running - not necessarily while the
+      ;; Gdk event is alive - so what is queued is the integer the decode
+      ;; produced, not the platform event. (This is not what broke
+      ;; `C-s` on Gtk: that was `return` arriving as a symbol, see
+      ;; `isearch-read-key`. It is the shape Emacs has, and it means the
+      ;; queue's contents are plain values.)
+      ;;
+      ;; A modifier key press is `*pgtk-skip*`, as the read path has it.
+      ;;--------------------------------------------------------------
+      (let ((raw (pgtk-item->event d e)))
+        (if (eq? raw *pgtk-skip*)
+            *pgtk-skip*
+            (cons 'key-event raw))))
+
     (define (pgtk-encode-event e)
       ;; A GTK key press as the single INTEGER the interface carries: the
       ;; modifier state in the high bits and the keysym in the low ones.
@@ -1674,6 +1717,7 @@
       ;; and this is the half that knows about frames and key encoding.
       ;;--------------------------------------------------------------
       (cond
+       ((eq? item *pgtk-skip*) *pgtk-skip*)
        ((eq? item 'pgtk-deadline) #f)
        ((eq? item 'resize) *resize-code*)
        ((eq? item 'focus-in) *focus-in-code*)
@@ -1711,6 +1755,10 @@
        ;; it is tagged rather than decoded - `key-event->key` answers it
        ;; as it stands, and nothing asks it for a keysym.
        ((and (pair? item) (eq? (car item) 'menu-bar-event)) item)
+       ;; A key decoded when it *arrived* (see `pgtk-key-item`): the
+       ;; integer is the same one `read-input-event` would have answered,
+       ;; and it is a value that can outlive the Gdk event it came from.
+       ((and (pair? item) (eq? (car item) 'key-event)) (cdr item))
        ((memv (pgtk-event-keysym item) modifier-keysyms) *pgtk-skip*)
        (else
           ;; A key from a window that is not the selected frame's selects
@@ -2855,7 +2903,7 @@
         ;; simply waiting for the next read.
         (connect win (make <signal> #:name "key-press-event")
                  (lambda (w e)
-                   (pgtk-enqueue! d e)
+                   (pgtk-enqueue! d (pgtk-key-item d e))
                    #t))
         ;; **The press and the release, on the drawing area.** A click
         ;; lands on the widget that draws, and that area IS the frame's

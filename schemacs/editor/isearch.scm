@@ -49,7 +49,13 @@
     ;; `*unread-command-events*' when something was. Reading through it is
     ;; what lets the search give the key that ended it back to the loop.
     (only (schemacs editor keyboard)
-          *unread-command-events* read-key-event read-wait-ms)
+          *unread-command-events* read-key-event read-wait-ms
+          ;; `read_key_sequence`'s function-key translation, which the
+          ;; command loop's `dispatch-key` applies and the search's own
+          ;; read must apply for itself: a Gtk Return is the *symbol*
+          ;; `return`, and without this the search never saw the RET
+          ;; branch (see `isearch-read-key`).
+          function-key-translate)
     ;; `char-alt' is the event model's, in `character.sld': the lowest
     ;; of the six modifier bits, `lisp.h''s `CHAR_ALT', which is the
     ;; boundary between a plain character event and a modified one.
@@ -987,10 +993,25 @@
       ;; its own code). Anything else means the prefix led nowhere: the
       ;; other key is put back and the ESC itself is the event, as a
       ;; prefix that leads nowhere is two events in `read_key_sequence`.
+      ;;
+      ;; **Then `function-key-translate`, which `dispatch-key` does for
+      ;; the command loop and the search had no equivalent of.** A Gtk
+      ;; Return keysym arrives as the *symbol* `return`, not as 13, and
+      ;; `function-key-map` is what makes them the same key. Without it
+      ;; the RET branch below never matched on Gtk: the search exited
+      ;; through the other-key branch, which *puts the key back on
+      ;; `unread-command-events*` - and every later search read that key
+      ;; first, exited, and put it back again. `C-s` was broken for ever
+      ;; after the first search, while every other command went on
+      ;; working (they read through `dispatch-key`). Reported by Chris as
+      ;; exactly that; reproduced by queueing Return as the Gtk keysym.
+      ;; TAB was the same bug one key over: a Gtk `tab` symbol never
+      ;; became #\tab for `isearch-printing-char`.
       ;;--------------------------------------------------------------
-      (let ((key (read-key-event (read-wait-ms))))
+      (let ((key (function-key-translate (read-key-event (read-wait-ms)))))
         (if (eqv? key 27)
-            (let ((next (read-key-event (read-wait-ms))))
+            (let ((next (function-key-translate
+                         (read-key-event (read-wait-ms)))))
               (if (and (integer? next) (< next char-alt))
                   (+ next char-meta)
                   (begin

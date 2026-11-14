@@ -1865,17 +1865,18 @@ the queue**. At the outermost level there is no read, so a key that
 arrived in either window sat in the queue until the next prompt or
 isearch consumed it, late and out of order, or for ever.
 
-That is what "C-s works the first time but not the second" was: the
-second C-s arrives while the redisplay after the first search is
-running, is queued, and is never dispatched. Measured with the display's
-own queue: three keys queued, then one delivered while the editor was
-idle; the idle key ran (self-insert), the three were still queued
-afterwards, and the next key to arrive dispatched itself ahead of them.
-`pgtk-drain-queue!` is the missing read: the queue's items are dispatched
-oldest first, through the same two decodes a read uses, until it empties
-or a command leaves a read outstanding (which then owns the rest). This
-is Emacs's `kbd_buffer` order, and the fix makes the three queued keys
-run first, in order.
+Measured with the display's own queue: three keys queued, then one
+delivered while the editor was idle; the idle key ran (self-insert), the
+three were still queued afterwards, and the next key to arrive
+dispatched itself ahead of them. `pgtk-drain-queue!` is the missing
+read: the queue's items are dispatched oldest first, through the same
+two decodes a read uses, until it empties or a command leaves a read
+outstanding (which then owns the rest). This is Emacs's `kbd_buffer`
+order, and the fix makes the three queued keys run first, in order.
+
+**This is not what "C-s broken for ever after the first search" was** -
+that is the section after this one. A stranded key waits for the next
+key; Chris's C-s never came back.
 
 **And the drain has to happen when a redisplay ends, not only when the
 next event arrives.** The cursor-blink timer repaints straight from a
@@ -1981,3 +1982,58 @@ Four things were under the crash, each now fixed:
 4. **One of them expected the symbol `cyan`** where a colour attribute
    holds the string `"cyan"` (Emacs's `(face-attribute 'minibuffer-prompt
    :foreground)` is a string). It had never run, so nobody had seen it.
+
+
+# `C-s` broken for ever on Gtk: Return was a symbol, and the pushed-back
+# key had no reader
+
+Chris: *"If I press C-s 8 RET C-s, the last C-s does nothing, no visible
+prompt, no sign that it registered at all"*, then *"it's not like another
+C-s will work, C-s is broken forever after the first one works. C-g
+doesn't fix it. Other commands continue to work."*
+
+Every detail follows from two departures meeting.
+
+1. **A Gtk Return is the *symbol* `return`, not 13.** `keysym-event`
+   builds the key event from the keysym, and `function-key-map`
+   (`keyboard.scm`, `Return` -> 13, `TAB` -> 9, `escape` -> 27) is what
+   `read_key_sequence` applies before anything is looked up - here
+   `dispatch-key`'s `function-key-translate`. **The search reads its own
+   keys below `dispatch-key`**, so it had no translation at all: the RET
+   branch (`(eqv? code 13)`) never matched on Gtk, and RET fell into the
+   other-key branch, which puts the key back on
+   `unread-command-events` and exits. A terminal was unaffected -
+   ncurses gives 13 - which is why only Gtk showed this, and why the
+   search looked like it exited normally. TAB was the same bug one key
+   over: a Gtk `tab` symbol never became `#\tab` for
+   `isearch-printing-char`.
+
+2. **`*unread-command-events*` is only consumed by a *read*.** In Emacs
+   every `read_char` starts by taking that list. This front end's
+   outermost loop does not read at all, so the `return` the search put
+   back was never taken up at top level. It stayed there, and **every
+   later search's first read answered it**, exited and put it back again:
+   an infinite pushback. `C-s` was dead for ever, `C-g` could not help
+   (the stale key is read before anything typed), and other commands
+   went on working because commands do not read - the stale key only
+   bites whoever reads next, which is the search.
+
+The two fixes:
+
+- `isearch-read-key` applies `function-key-translate` to what it reads,
+  as `read_key_sequence` does - the RET branch matches, RET is not
+  pushed back, and TAB is searchable. Measured with the actual keysym
+  encoding (Return `0xff0d`) through `pgtk-enqueue!`: five searches in a
+  row, every one starting; before the fix, 1 worked and 2-5 did nothing.
+- `pgtk-drain-queue!` dispatches `*unread-command-events*` first, before
+  the display queue, so a key the command loop hands back - an isearch's
+  other-meta/other-control exit, which re-executes the key - runs at once
+  instead of waiting for the next prompt. Measured: `C-y` typed inside a
+  search now runs `yank` ("Kill ring is empty") where before it sat
+  unread.
+
+`tty-editor-tests` has the regression test: a test display feeds the
+symbol `return`, and the search must exit through the RET branch
+("Mark saved where search started") with `*unread-command-events*`
+empty. Without the translation the test sees `(() (return))` - the
+other-key exit and the stale key - which is the bug exactly.
