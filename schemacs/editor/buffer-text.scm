@@ -61,6 +61,9 @@
   (export
    new-buffer-text  buffer-text-type?
    buffer-text-base  buffer-text-z
+   ;; The two a *scan* reads through - `BEG_ADDR' and `GPT' - see
+   ;; `%at' for why they are exported.
+   buffer-text-store  buffer-text-gpt
    buffer-text-length  buffer-text-allocation  buffer-text-gap-size
    buffer-text-ref  buffer-text-set!
    buffer-text-insert!  buffer-text-insert-code-points!

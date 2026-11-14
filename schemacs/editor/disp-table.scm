@@ -52,6 +52,22 @@
 
   (begin
 
+    ;; One-character strings, made once. `(string c)` for the ordinary
+    ;; character is one heap allocation, and a redisplay makes one per
+    ;; column of every row - 1,920 of them for an 80x24 frame, on every
+    ;; keystroke. GNU Emacs has no such allocation to make: a
+    ;; `CHAR_GLYPH` holds the character itself (`glyph->u.ch`), and the
+    ;; string is built once per *run* when it is written. The cache is
+    ;; the equivalent here for the common case - a printable character
+    ;; below 256 - and the else branch still makes a fresh string for
+    ;; anything else, and for tabs and caret notations, whose text
+    ;; depends on the column or on the character.
+    ;;
+    ;; The 256 is ASCII plus Latin-1: both are single characters drawn as
+    ;; themselves, and 256 entries is 2 KB.
+    ;;--------------------------------------------------------------
+    (define %char-glyph-cache (make-vector 256 #f))
+
     (define (char-display-glyph c col)
       ;; The display string for the buffer character C drawn at screen
       ;; column COL. This is *what is written*; how many cells it takes
@@ -67,6 +83,13 @@
         (string #\^ (integer->char (+ 64 (char->integer c)))))
        ((= (char->integer c) 127)
         "^?")
+       ((< (char->integer c) 256)
+        (let* ((i (char->integer c))
+               (s (vector-ref %char-glyph-cache i)))
+          (or s
+              (let ((new (string c)))
+                (vector-set! %char-glyph-cache i new)
+                new))))
        (else (string c))))
 
     (define (char-display-width c col)

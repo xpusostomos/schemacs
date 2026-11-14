@@ -1716,3 +1716,105 @@ performance bug in the harness, not the editor.
 The suites now get `XDG_CACHE_HOME` pointed at a fresh temporary
 directory: nothing cached can be stale, and the developer's cache is
 never touched. `drop_tree_ccache` is deleted with it.
+
+# The failing scan, and the hoisted store
+
+The scan above still called `buffer-text-ref` per character - `%at`'s
+two record reads and the base subtraction - and converted every
+character to a `#\char` to fold it. A failing search in a 240 KB file
+therefore cost **92 ms case-sensitively and 94 ms folded**, which is what
+an isearch keystroke that extends the pattern into "not found" spent.
+
+Two changes, both of them things `search.c` does that the port did not:
+
+1. **The store is read directly.** `search_buffer` reads through the
+   `BUF_BEG_ADDR`/`GPT` macros, which the C compiler expands *into* the
+   loop; here the accessors were called, which is the same algorithm at
+   an interpreted-accessor price. `buffer-text-store` and
+   `buffer-text-gpt` are exported for exactly this - they are Emacs's
+   `BEG_ADDR` and `GPT` - and the scan hoists them, testing the gap once
+   per character with a fixnum compare. Editing still goes through the
+   primitives; these two are read-only.
+
+2. **The first-character prefilter compares code points.** `FETCH_CHAR`
+   and `trt`-lookup are integer work in the C. Here every character was
+   turned into a character and folded before it was compared, so the
+   prefilter - the thing that exists to make the scan cheap - cost as
+   much as the match test it was avoiding. The needle's first character
+   is converted once (`first-cp`, its downcase and its upcase, and its
+   folded form) and the per-character test is integer compares.
+
+Measured on the same 240 KB file, 240,000 characters scanned with no
+match:
+
+| | before | after |
+|---|---|---|
+| failing forward scan | 92.1 ms | **4.9 ms** |
+| failing forward scan, case folding | 93.9 ms | **5.7 ms** |
+| failing backward scan | 89.6 ms | **4.9 ms** |
+| a match on the first line | 0.012 ms | 0.003 ms |
+| four isearch keystrokes (three found, one failing) | 158 ms | **22.9 ms** |
+
+In a live editor the scan is ~8 ms of a ~14 ms keystroke (render 0.7 ms,
+lazy highlight 0.1 ms; the rest is the command loop and the terminal).
+`boyer_moore` (`search.c:1746`) is the C's other half of literal search
+and is deliberately **not** ported: for a repeated-character pattern
+every character of the pattern has shift 1, so the skip table degenerates
+to the naive scan, and that is the workload this measurement was taken
+on.
+
+## A departure this found, and fixed
+
+The first version of the prefilter compared folding by `char-upcase`
+alone. `char-upcase` of an uppercase needle is itself, so an uppercase
+needle ("BETA") never compared equal to the lowercase text it folds
+against - `search-forward` with `case-fold-search` on and an uppercase
+pattern silently found nothing. Both casings are compared now, and
+`engine-tests.scm` has the uppercase-needle case.
+
+## The gap is now genuinely exercised
+
+`engine-tests.scm`'s search group inserted at the end of the buffer, so
+the scan never read a position *past* the gap - the after-gap branch of
+the hoisted access was untested. Six cases added: a match wholly past
+the gap, one that starts before it and ends after it, the backward
+versions, and the folded one; `split-searchable` puts the gap in the
+middle with an insertion at point 6.
+
+# The row's glyphs are written over, not made again
+
+`line-slice-glyphs` made a fresh `<glyph>` record per cell on every
+redisplay - 1,920 of them for an 80x24 frame - and
+`extend-face-to-end-of-line` made a second 80-slot vector and up to 80
+more records per row for the padding. GNU Emacs builds a window's rows
+into a **glyph pool allocated once** and writes them over
+(`append_glyph` fills `row->glyphs[area][row->used[area]++]`), so a
+redisplay's only allocation is the matrix a window does not have yet.
+
+The rows now keep their vectors across redisplays (`prepare_desired_row`'s
+"row->enabled_p = true; row->used = 0"), those vectors are written
+through by `%reset-glyph!`, and the padding is appended into the same
+storage. `build-blank-row!` keeps its storage too instead of resetting
+it to `(vector)`. Measured allocation for one 24x80 render: **433 KB ->
+332 KB**, and the row's glyph objects are proven reused - a probe holds
+the object in a slot across three renders and gets `eq?` (#t), which a
+copy-based allocator could not.
+
+**The remaining 332 KB is not the glyphs**; it is the per-row lists
+`line-texts-glyphs`/`line-texts-offsets` and the face runs, which are
+still built per redisplay. Emacs's `display_line` appends glyphs
+directly from its iterator and builds none of them; walking the line
+into the row in one pass is the next step, and it is a rewrite of the
+row builder rather than a change inside it.
+
+## The one-character strings, which Emacs does not make
+
+A `CHAR_GLYPH` in the C carries the character itself (`glyph->u.ch`), and
+the string for a run is built once when the run is written. Here a glyph
+carries a *string*, so `(string c)` was one allocation per cell per
+keystroke. `disp-table.scm` keeps a 256-entry cache of the one-character
+strings for code points below 256 (ASCII and Latin-1: drawn as
+themselves), and the else branch still makes a fresh string for wide
+characters, tabs and caret notations, whose text depends on the column.
+This is a representation departure - Emacs has no such table - and it is
+2 KB against 1,920 allocations a redisplay.

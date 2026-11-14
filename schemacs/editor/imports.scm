@@ -603,6 +603,7 @@
     buffer-text-delete!
     buffer-text-for-each
     buffer-text-gap-size
+    buffer-text-gpt
     buffer-text-insert!
     buffer-text-insert-code-points!
     buffer-text-length
@@ -610,6 +611,7 @@
     buffer-text-overlay-modiff
     buffer-text-ref
     buffer-text-set!
+    buffer-text-store
     buffer-text-substring
     buffer-text-to-code-points
     buffer-text-type?

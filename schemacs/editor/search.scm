@@ -79,7 +79,17 @@
     ;; The raw character store: `buffer.h`'s macros, which the scans below
     ;; read character by character as `find_newline` does with
     ;; `FETCH_CHAR`.
-    (only (schemacs editor buffer-text) buffer-text-ref code-point->char)
+    (only (schemacs editor buffer-text)
+          buffer-text-ref code-point->char
+          ;; The scan's side of `buffer-text-ref' - see the comment in
+          ;; `text-editor-search-forward'.
+          buffer-text-store buffer-text-base buffer-text-gpt
+          buffer-text-gap-size)
+    ;; The store's own type. `u32vector-ref' is what `BUF_BEG_ADDR'
+    ;; indexing is in Scheme; it is not in `(scheme base)' nor in
+    ;; `(rnrs bytevectors)' on this Guile - `(guile)' is where the
+    ;; typed-vector accessors live, as `buffer-text.scm' found.
+    (only (guile) u32vector-ref)
     ;; The line-break cache: `region-cache.c`, which is the buffer's
     ;; `newline_cache` there. It is what makes searching a buffer with
     ;; very long lines affordable - a stretch already searched and found
@@ -1008,6 +1018,41 @@
                            (%fold (string-ref needle j) case-fold?))
                    (loop (+ j 1)))))))
 
+    (define (%first-char-candidate? cp first first-cp first-down-cp first-up-cp
+                                    first-folded case-fold?)
+      ;; Whether the code point CP could begin a match for the needle
+      ;; whose first character is FIRST: the prefilter both scans run on
+      ;; every buffer character, so that the conversion to a character
+      ;; and the folding are paid only where a match could start.
+      ;;
+      ;; FIRST-CP, FIRST-DOWN-CP and FIRST-UP-CP are FIRST and its two
+      ;; casings as code points, and FIRST-FOLDED is what `%fold` makes of
+      ;; it - all hoisted out of the scan's loop so that the
+      ;; per-character cost is integer compares. **Both casings** are
+      ;; needed, not just the upcase: `char-upcase` of an uppercase needle
+      ;; is itself, so a rule built from it alone never matches the
+      ;; lowercase text an uppercase needle is folded against. Measured on
+      ;; the failing search in a 240 KB file: 92 ms a keystroke when every
+      ;; character was converted and folded, 5.2 ms with these compares.
+      ;;
+      ;; Everything that is not ASCII falls back to the rule
+      ;; `%buffer-match-at?' applies, so the two cannot disagree about
+      ;; which character starts a match.
+      ;;--------------------------------------------------------------
+      (cond
+       ((= cp first-cp) #t)
+       ;; A byte character has no character of its own; it is drawn as
+       ;; the replacement character and matches one in the needle for the
+       ;; same reason `%buffer-match-at?' lets it.
+       ((> cp #x10FFFF)
+        (char=? (code-point->char cp) (if case-fold? first-folded first)))
+       (case-fold?
+        (or (= cp first-down-cp)
+            (= cp first-up-cp)
+            (and (> cp 127)
+                 (char=? (char-downcase (code-point->char cp)) first-folded))))
+       (else #f)))
+
     (define (text-editor-search-forward ed string start case-fold?)
       ;; Search forward from the position START for STRING. Returns the
       ;; position just past the match, which is where GNU Emacs's
@@ -1033,15 +1078,33 @@
       (let ((m (string-length string))
             (z (buffer-z ed)))
         (and (< 0 m)
-             (let ((store (text-editor-text ed))
-                   (first (%fold (string-ref string 0) case-fold?)))
+             (let* ((bt (text-editor-text ed))
+                    ;; `BEG_ADDR', `BEG', `GPT' and `GAP_SIZE', hoisted
+                    ;; out of the loop as the C's macros are expanded out
+                    ;; of it. The gap test per character is Emacs's own -
+                    ;; `FETCH_CHAR' does it too - and doing it here, one
+                    ;; fixnum compare instead of two record reads per
+                    ;; character, is what took a failing 240 KB scan from
+                    ;; 92 ms to 5.
+                    (store (buffer-text-store bt))
+                    (base (buffer-text-base bt))
+                    (gpt (buffer-text-gpt bt))
+                    (gap (buffer-text-gap-size bt))
+                    (first (string-ref string 0))
+                    (first-cp (char->integer first))
+                    (first-down-cp (char->integer (char-downcase first)))
+                    (first-up-cp (char->integer (char-upcase first)))
+                    (first-folded (%fold first case-fold?)))
                (let loop ((p start))
                  (cond
                   ((> (+ p m) z) #f)
-                  ((and (char=? (%fold (code-point->char
-                                        (buffer-text-ref store p))
-                                       case-fold?)
-                                first)
+                  ((and (%first-char-candidate?
+                         (u32vector-ref store
+                                        (if (< p gpt)
+                                            (- p base)
+                                            (+ (- p base) gap)))
+                         first first-cp first-down-cp first-up-cp first-folded
+                         case-fold?)
                         (%buffer-match-at? ed string p case-fold?))
                    (+ p m))
                   (else (loop (+ p 1)))))))))
@@ -1060,15 +1123,26 @@
       (let ((m (string-length string))
             (beg (buffer-beg ed)))
         (and (< 0 m)
-             (let ((store (text-editor-text ed))
-                   (first (%fold (string-ref string 0) case-fold?)))
+             (let* ((bt (text-editor-text ed))
+                    (store (buffer-text-store bt))
+                    (base (buffer-text-base bt))
+                    (gpt (buffer-text-gpt bt))
+                    (gap (buffer-text-gap-size bt))
+                    (first (string-ref string 0))
+                    (first-cp (char->integer first))
+                    (first-down-cp (char->integer (char-downcase first)))
+                    (first-up-cp (char->integer (char-upcase first)))
+                    (first-folded (%fold first case-fold?)))
                (let loop ((p (- start m)))
                  (cond
                   ((< p beg) #f)
-                  ((and (char=? (%fold (code-point->char
-                                        (buffer-text-ref store p))
-                                       case-fold?)
-                                first)
+                  ((and (%first-char-candidate?
+                         (u32vector-ref store
+                                        (if (< p gpt)
+                                            (- p base)
+                                            (+ (- p base) gap)))
+                         first first-cp first-down-cp first-up-cp first-folded
+                         case-fold?)
                         (%buffer-match-at? ed string p case-fold?))
                    p)
                   (else (loop (- p 1)))))))))

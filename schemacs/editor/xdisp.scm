@@ -239,9 +239,11 @@
     ;; The row and its glyphs - `struct glyph`/`struct glyph_row`
     ;; (`dispextern.h`), and the two matrices a window keeps.
     (only (schemacs editor glyph)
-          <glyph> make-glyph glyph-char glyph-face-id glyph-pixel-width
-          glyph-voffset glyph-padding? set-glyph-char!
-          set-glyph-face-id! set-glyph-pixel-width!
+          <glyph> make-glyph glyph? glyph-type-char
+          glyph-char glyph-face-id glyph-pixel-width glyph-voffset
+          glyph-padding?
+          set-glyph-char! set-glyph-face-id! set-glyph-pixel-width!
+          set-glyph-type! set-glyph-padding! set-glyph-voffset!
           <glyph-row> make-glyph-row glyph-row?
           glyph-row-glyphs set-glyph-row-glyphs!
           glyph-row-used set-glyph-row-used!
@@ -2191,7 +2193,30 @@
     ;; is not in the drawing, it is in not drawing the rows that did not
     ;; change.
 
-    (define (line-slice-glyphs texts from to x0 line-start)
+    (define (%reset-glyph! g text token width)
+      ;; Write one glyph into an existing `<glyph>`: the fields
+      ;; `append_glyph` (`xdisp.c:6973') sets as it fills
+      ;; `row->glyphs[area][row->used[area]++]`.
+      ;;
+      ;; **The record is reused, not replaced.** Emacs's glyph matrix is
+      ;; a pool allocated once and written over every redisplay; this
+      ;; tree's rows hold vectors of records, and making a fresh record
+      ;; per cell per keystroke was 1,920 records - measured, 330 KB of
+      ;; garbage for one 24x80 redisplay, which GC then had to collect
+      ;; (half a keystroke's wall time). The vector `line-slice-glyphs`
+      ;; and `extend-face-to-end-of-line` write into is the row's own
+      ;; storage, and after `assign-row` swapped it out of the current
+      ;; matrix it is nobody else's.
+      ;;--------------------------------------------------------------
+      (set-glyph-char! g text)
+      (set-glyph-face-id! g token)
+      (set-glyph-pixel-width! g width)
+      (set-glyph-type! g glyph-type-char)
+      (set-glyph-padding! g #f)
+      (set-glyph-voffset! g 0)
+      g)
+
+    (define (line-slice-glyphs texts from to x0 line-start pool width)
       ;; The `<glyph>`s of one screen row: the slice [FROM, TO) of the
       ;; line's TEXTS, started at cell X0.
       ;;
@@ -2223,7 +2248,20 @@
       (let* ((strings (line-texts-glyphs texts from to))
              (offsets (list->vector (line-texts-offsets texts from to)))
              (n (length strings))
-             (vec (make-vector n #f))
+             ;; **The row's own glyph storage, kept across redisplays.**
+             ;; `POOL` is what the desired row held - after `assign-row`
+             ;; swapped it out of the current matrix, storage nobody else
+             ;; references - and it is written over in place, as Emacs's
+             ;; glyph pool is. Its length is a *capacity*: a row needs
+             ;; room for the window's whole width, because
+             ;; `extend-face-to-end-of-line` fills the rest of the row
+             ;; with space glyphs, and it must be able to do that in the
+             ;; same vector. `used` (below, `n`) is what is drawn; the
+             ;; length never is.
+             (capacity (max n width))
+             (vec (if (and pool (>= (vector-length pool) capacity))
+                      pool
+                      (make-vector capacity #f)))
              ;; **The faces come from the runs, not from an ask per
              ;; glyph.** `line-face-runs` walks by `face-change-limit`,
              ;; so a row of one face costs one attribute merge and one
@@ -2254,7 +2292,12 @@
                                (vector-ref offsets (+ i 1))
                                (+ (vector-ref offsets i) (text-cells-width text))))
                    (w (max 1 (- next-x (vector-ref offsets i)))))
-              (vector-set! vec i (make-glyph text token w 'char #f 0))
+              (let ((slot (vector-ref vec i)))
+                (if (glyph? slot)
+                    (%reset-glyph! slot text token w)
+                    (vector-set! vec i
+                                 (make-glyph text token w
+                                             glyph-type-char #f 0))))
               (loop (+ i 1) (cdr rest) rs))))
         (cons vec n)))
 
@@ -2298,20 +2341,37 @@
                                (+ w (glyph-pixel-width (vector-ref vec i)))))))
              (pad (- width used)))
         (when (> pad 0)
+          ;; **The padding is written into the row's own storage**, the
+          ;; same vector `line-slice-glyphs` just filled. Emacs's
+          ;; `extend_face_to_end_of_line` appends glyphs to the row
+          ;; (`append_glyph`), and appending to a pool that is already
+          ;; wide enough allocates nothing. A `make-vector` here made a
+          ;; second 80-slot vector and up to 80 new glyph records for
+          ;; every row on every keystroke, which was the larger half of
+          ;; the redisplay's garbage.
           (let* ((token (if (> n 0)
                             (glyph-face-id (vector-ref vec (- n 1)))
                             (face->attribute 'default)))
-                 (new (make-vector (+ n pad) #f)))
-            (let loop ((i 0))
-              (when (< i n)
-                (vector-set! new i (vector-ref vec i))
-                (loop (+ i 1))))
+                 (need (+ n pad))
+                 (vec (if (>= (vector-length vec) need)
+                          vec
+                          (let ((new (make-vector need #f)))
+                            (let loop ((i 0))
+                              (when (< i n)
+                                (vector-set! new i (vector-ref vec i))
+                                (loop (+ i 1))))
+                            new))))
             (let loop ((i n))
-              (when (< i (+ n pad))
-                (vector-set! new i (make-glyph " " token 1 'char #f 0))
+              (when (< i need)
+                (let ((slot (vector-ref vec i)))
+                  (if (glyph? slot)
+                      (%reset-glyph! slot " " token 1)
+                      (vector-set! vec i
+                                   (make-glyph " " token 1
+                                               glyph-type-char #f 0))))
                 (loop (+ i 1))))
-            (set-glyph-row-glyphs! row new)
-            (set-glyph-row-used! row (+ n pad))))))
+            (set-glyph-row-glyphs! row vec)
+            (set-glyph-row-used! row need)))))
 
     (define (text-cells-width text)
       ;; A glyph string's width in cells - `text-cells` is the display's,
@@ -2348,7 +2408,8 @@
       ;; draw a row alive for a feature that cannot occur is how the two
       ;; renderers came to disagree in the first place.
       ;;--------------------------------------------------------------
-      (let* ((made (line-slice-glyphs texts from to x0 line-start))
+      (let* ((made (line-slice-glyphs texts from to x0 line-start
+                                      (glyph-row-glyphs row) width))
              (vec (car made))
              (n (cdr made)))
         (set-glyph-row-glyphs! row vec)
@@ -2401,7 +2462,13 @@
       ;; fast typing and ran the backlog off in bursts. Emacs builds the
       ;; row the first time and it compares equal for ever after.
       ;;--------------------------------------------------------------
-      (set-glyph-row-glyphs! row (vector))
+      ;; **The row's glyph storage is kept**, which is
+      ;; `prepare_desired_row`'s "row->enabled_p = true; row->used =
+      ;; 0": a blank row is written from slot 0 by
+      ;; `extend-face-to-end-of-line`, and writing over the row's own
+      ;; glyphs allocates nothing. Resetting the vector here made every
+      ;; blank row below the text allocate its width in glyph records
+      ;; again on every redisplay.
       (set-glyph-row-used! row 0)
       ;; the same rule `build-row!` follows: the padding is a *terminal*
       ;; row's, because a window system paints the remainder with

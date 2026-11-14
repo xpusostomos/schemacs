@@ -1002,10 +1002,20 @@ def check_quit_after_prefix():
     """
     path = "/tmp/pty-check-quit-prefix.txt"
     open(path, "w").write("alpha\n")
-    screen, exited = drive([C_x, b"\x07"], path, report_exit=True)
+    # "Quit" is *waited for* rather than read off the silence after the
+    # key (this check failed once in a battery that way). The wait's
+    # success is what is asserted, so the failure test is the marker's
+    # absence, not the marker's text - `WAIT` appends
+    # `[[harness: gave up waiting for ...]]` to the screen it gives up
+    # on, and `"Quit" in screen` would then pass on the marker alone.
+    #
+    # A first version also waited for the prefix echo `C-x`, which was
+    # wrong: this editor does not echo a lone prefix on a terminal, so
+    # that wait always timed out.
+    screen, exited = drive([C_x, b"\x07", WAIT(b"Quit")], path, report_exit=True)
     if exited:
         return ["C-x C-g killed the editor"]
-    if "Quit" not in screen:
+    if "gave up waiting" in screen:
         return ["C-x C-g did not report Quit (screen %r)" % screen[-200:]]
     if "undefined" in screen:
         return ["C-x C-g was reported undefined instead of quitting"]

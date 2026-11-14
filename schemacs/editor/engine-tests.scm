@@ -976,6 +976,34 @@
 (test-equal #f (text-editor-search-forward (searchable) "" 1 #t))
 (test-equal #f (text-editor-search-backward (searchable) "" 11 #t))
 
+;; **The scan reads through the gap.** `searchable' inserts at the end,
+;; so its gap is after all the text and the scan never sees a position
+;; past it. An insertion in the *middle* leaves the store in two pieces,
+;; and a match may start before the gap and end after it, or lie wholly
+;; after it. The scan hoists `GPT' out of its loop (as the C's macros are
+;; expanded out of `search_buffer`'s), so these are the cases that catch
+;; the hoisted gap test being wrong.
+(define (split-searchable)
+  ;; "alphaXY beta gamma\nbeta delta\n", with the gap after "alpha":
+  ;; X is at 6, the first position past the gap.
+  (let ((ed (allocate-buffer)))
+    (with-current-buffer ed (insert "alpha beta gamma\nbeta delta\n"))
+    (set-point ed 6)
+    (with-current-buffer ed (insert "XY"))
+    ed))
+
+;; Wholly past the gap.
+(test-equal 13 (text-editor-search-forward (split-searchable) "XY beta" 1 #f))
+(test-equal 13 (text-editor-search-forward (split-searchable) "beta" 1 #f))
+(test-equal 6 (text-editor-search-backward (split-searchable) "XY" 13 #f))
+;; Starting before the gap and ending past it: "aXY " covers positions
+;; 5..8, and the gap sits between the "a" and the "X".
+(test-equal 9 (text-editor-search-forward (split-searchable) "aXY " 1 #f))
+;; ... and the same for a backward scan that crosses it.
+(test-equal 5 (text-editor-search-backward (split-searchable) "aXY " 13 #f))
+;; Case folding must agree on both sides of the gap too.
+(test-equal 9 (text-editor-search-forward (split-searchable) "AXY " 1 #t))
+
 ;; A pattern that would run off the end of the buffer finds nothing,
 ;; rather than reading past it. ("delta\n" IS there, at 22..28; two line
 ;; breaks are not.)
