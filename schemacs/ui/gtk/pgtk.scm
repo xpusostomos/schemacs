@@ -3974,9 +3974,9 @@
         ;; dispatches whatever arrived as soon as it has finished
         ;; (`*after-redisplay-hook*`, which `redisplay-frames!` runs).
         ;; Without it a key pressed during the cursor-blink repaint - or
-        ;; during the redisplay after a search exits - sat in the queue
-        ;; until the next key, which is why the first `C-s` after a
-        ;; search often did nothing.
+        ;; during the redisplay after a command - sat in the queue until
+        ;; the next key. (The `C-s`-for-ever bug was not this: it was
+        ;; Return arriving as a symbol; see `isearch-read-key`.)
         (parameterize ((*after-redisplay-hook*
                        (lambda ()
                          (let ((dispatch (*dispatch-event*)))

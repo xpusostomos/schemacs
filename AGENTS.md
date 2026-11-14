@@ -7443,3 +7443,12 @@ dropped. All 50 suites pass; faces-tests 35, pgtk-tests 108.
 - Emacs 29+ makes the region highlight an *overlay* in Lisp; this tree
   merges the region in `attrs-at-buffer-position`. Only the empty-region
   case showed, and it is fixed.
+
+## The battery after the Return fix (2026-11-14)
+
+`tools/pty-check.py` on `4cb94f3`: **80/82**, with `query-replace-quit`
+and `completion-ui` failing ("C-g during query-replace did not report
+Quit"; "the completions window outlived the minibuffer"). Both pass
+**3/3** when run alone, and neither touches anything this pass changed -
+the battery's documented load/order flake class, not a regression.
+`isearch-ring` (C-s C-s and C-s ESC p) and `isearch-line-end` pass.

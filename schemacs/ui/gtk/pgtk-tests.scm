@@ -1552,11 +1552,11 @@
 ;; dispatched.** The outermost loop of this front end does not read - Gtk
 ;; hands each event straight to the command loop - so anything that
 ;; arrived while the editor was busy sat in the queue until the next
-;; prompt or search consumed it, late and out of order. That is why the
-;; first `C-s` after a search often did nothing: it arrived while the
-;; exit redisplay was running, was queued, and nothing ever dispatched
-;; it. `pgtk-drain-queue!` is the missing read: every queued item, oldest
-;; first, through the same two decodes a read uses.
+;; prompt or search consumed it, late and out of order - or for ever, if
+;; no read ever came. `pgtk-drain-queue!` is the missing read: every
+;; queued item, oldest first, through the same two decodes a read uses.
+;; (The `C-s`-for-ever bug was a different one: Return arrives as the
+;; symbol `return` and the search's read did not translate it.)
 (test-equal '((19 115 13) ())
   (let ((d (make pt:<pgtk-display>)))
     (set! (pt:pgtk-queue d)
