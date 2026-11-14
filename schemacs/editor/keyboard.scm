@@ -1282,6 +1282,17 @@
                            (begin
                              (*unread-command-events* (cdr unread))
                              (car unread)))))
+              ;; **`read_key_sequence` clears `Vquit_flag` after every key
+              ;; it reads** (`keyboard.c:11892`). The flag is what the
+              ;; terminal's read turned into `quit_char` above
+              ;; (`keyboard.c:2806`); leaving it set is what made a C-g
+              ;; that aborted isearch fire again at the *next*
+              ;; `maybe-quit` - as a quit condition raised out of the
+              ;; command loop's read, which nothing caught, so the editor
+              ;; exited. A real C-g key (a Gtk frame's) leaves the flag
+              ;; #f and this is a no-op.
+              (when (and (eqv? ev quit-char) (*quit-flag*))
+                (*quit-flag* #f))
               (if (and ev (dispatch-special-event (*current-frame*) ev))
                   (begin
                     (redisplay-frames!)
@@ -1747,6 +1758,16 @@
              ;; same function after it has finished with a key, which is
              ;; why it is a function - see `command-loop-idle!`.
              (command-loop-idle! frame)
+             ;; **The read is inside the error guard too, as it is in
+             ;; Emacs.** `command_loop_1`'s `condition-case` wraps the
+             ;; whole iteration, `read_key_sequence` included; this loop
+             ;; guarded only the command, so a quit raised by the read's
+             ;; own `maybe-quit` - a C-g that arrived between one command
+             ;; and the next read - escaped and exited the editor
+             ;; (measured: SIGINT, then the process gone with a
+             ;; `%quit-condition' throw). The handler reports it and the
+             ;; loop goes on reading, which is what `cmd_error` does.
+             (guard (ex (else (report-command-error! frame ex)))
              (let ((want (read-timeout-or
                           ;; **Nothing to wait for but a key.** The
                           ;; echo area's two clock-driven habits - a
@@ -1787,8 +1808,8 @@
                    (when quit (quit 'eof))))
                 ;; A timed-out read: a timer was due, which is the only
                 ;; reason this read was armed at all. Run it and redraw.
-                (else (command-loop-timers!))))
-               (loop)))))))
+                (else (command-loop-timers!)))))
+             (loop)))))))
 
     (define (recursive-edit frame)
       ;; Enter a nested command loop and return what leaving it produced:

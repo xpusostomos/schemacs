@@ -905,6 +905,14 @@
           (when (do-pending-window-change #f)
             (set! %size-change-pending? #t))
           (cond
+           ;; **A quit wins over a byte that arrived with it.** The C's
+           ;; SIGINT handler longjmps out of the wait
+           ;; (`quit_throw_to_read_char`) without looking at the input
+           ;; queue, so a key that was ready in the same moment is read
+           ;; by the *next* read. Consuming the byte first left the flag
+           ;; set with the key returned, and the next `maybe-quit` raised
+           ;; a quit nobody had asked for.
+           ((*quit-flag*) #f)
            ;; Readable: a byte, or #f at the end of input.
            ((memq %keyboard-fd ready) (tty-read-byte))
            ;; A resize. `read-input-event` answers it as an event and
@@ -1123,16 +1131,30 @@
       ;; cooperative server posts its work to *this* thread, and
       ;; `poll-repl!` runs it between keys.
       ;;--------------------------------------------------------------
-      (if (tty-pushed-bytes?)
-          ;; A byte pushed back by a terminal query is a key the user
-          ;; typed, so it comes before anything the terminal has sent
-          ;; since - `unread-command-events` is read first.
-          ;; Nothing parked to apply: a query byte or nothing, and
-          ;; "nothing" is a timed-out read, not a resize.
-          (tty-read-query-byte 0)
+      (cond
+       ;; **A quit recorded before the wait becomes the C-g event, not a
+       ;; signal.** `read_char`'s interrupted branch answers `quit_char`
+       ;; (`keyboard.c:2806`), and `set_waiting_for_input` throws there
+       ;; *before* blocking when the flag is already set. It wins over a
+       ;; terminal query's parked bytes for the same reason.
+       ((*quit-flag*) quit-char)
+       ((tty-pushed-bytes?)
+        ;; A byte pushed back by a terminal query is a key the user
+        ;; typed, so it comes before anything the terminal has sent
+        ;; since - `unread-command-events` is read first.
+        ;; Nothing parked to apply: a query byte or nothing, and
+        ;; "nothing" is a timed-out read, not a resize.
+        (tty-read-query-byte 0))
+       (else
           (let* ((deadline (and (>= timeout 0) (+ (tty-now-ms) timeout)))
                  (bytes (%read-key-bytes deadline)))
             (cond
+             ;; **A quit recorded *during* the wait is the C-g event.**
+             ;; `%wait-and-read` does not consume a byte when the flag is
+             ;; set, so nothing is lost by answering it first; a byte
+             ;; already parked in `%byte-queue` stays there for the next
+             ;; read.
+             ((*quit-flag*) quit-char)
              (bytes bytes)
              ;; **A resize, and only a resize.** `%wait-and-read` applies
              ;; a parked size change and says whether it applied one; a
@@ -1148,7 +1170,7 @@
              ;; (`keyboard.c:2806`); the flag is left for `read-key-event`,
              ;; which is what clears it.
              ((*quit-flag*) quit-char)
-             (else #f)))))
+             (else #f))))))
 
     ;;----------------------------------------------------------------
     ;; The display interface, for a text terminal

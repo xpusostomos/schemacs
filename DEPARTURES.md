@@ -1632,3 +1632,87 @@ list, which is a departure from the Lisp function: Emacs's
 because its callers are the kill/display paths (`kill-buffer`,
 `window.scm`'s buffer records, the Buffer Menu), and changing what
 "live" means under them wants its own pass and its own battery.
+
+# C-g during a search killed the tty editor
+
+Chris: *"if I hit C-g in the middle of a search the edit dies"* - and
+*"it's only the tty editor that dies on C-g"*. Both true, and the death
+was `exit 1` with `%quit-condition` on the terminal.
+
+## The chain, and the three C lines that are each half of it
+
+1. **A terminal turns C-g into SIGINT.** `init_sys_modes` keeps `ISIG`
+   on (`sysdep.c:1147`: "Enable signals"), so the byte never reaches the
+   read; `handle_interrupt_signal` records the request in `Vquit_flag`.
+2. **The interrupted read answers the C-g *key*, not a quit.**
+   `read_char`'s `sys_setjmp` branch (`keyboard.c:2806`) does
+   `XSETINT (c, quit_char)` and returns it as the event, which is how
+   isearch sees the `C-g` its map binds.
+3. **The flag is cleared after the key is read.** `read_key_sequence`
+   does `Vquit_flag = Qnil;` for every event it reads (`:11892`), and
+   `read_char` does it for the interrupt when `Vinhibit_quit` is set.
+
+This tree had (1) and (2) and not (3): the tty's `read-input-event`
+answered `quit_char` for the flag (`term.scm`), and its comment said
+"the flag is left for `read-key-event`, which is what clears it" - but
+`read-key-event` never did. So isearch aborted correctly, and then the
+*next* `maybe-quit` - at the top of the next read - raised a quit
+condition. That read is the command loop's own, and it was outside the
+loop's `guard`, so the condition reached the top level and the editor
+exited.
+
+Two more details were wrong in the same direction: `%wait-and-read`
+preferred a ready byte to the quit flag (the C's longjmp prefers the
+quit, and the byte is read next time), and `read-input-event` preferred
+pushed-back query bytes and a read byte to the flag.
+
+## Fixed
+
+- `read-key-event` clears `*quit-flag*` when it answers `quit-char`,
+  which is `read_key_sequence`'s line.
+- The tty wait and read answer `quit_char` **before** any byte, so a key
+  that arrived with the signal is not swallowed (`%wait-and-read` returns
+  without consuming it).
+- **The command loop's read is inside the error guard**, as
+  `command_loop_1`'s `condition-case` wraps `read_key_sequence`. A quit
+  raised there is now reported as "Quit" and the loop goes on reading,
+  which is `cmd_error`'s answer; before, it exited the editor.
+
+`tools/pty-check.py`'s `quit-signal` grew the isearch leg: C-s, 8, C-g,
+then a key that only a live editor can insert - and asserts the mode
+line's `**` and that no `%quit-condition` reached the screen. Verified
+failing with the flag-clearing line removed (the editor exits 1).
+
+# isearch copied the rest of the buffer on every keystroke
+
+`text-editor-search-forward` built `(make-buffer-string ed start
+(buffer-z ed))` and searched *that*. On the splash (998 bytes) the copy
+is nothing, which is why the overlay cost was what showed there; on a
+240 KB file it measured **9.3 ms per keystroke at the top of the file**,
+linear in the size of everything after point - and a C-s repeat, a C-r,
+or a failing search all pay it too.
+
+Emacs's `search_buffer` (`search.c`) scans the buffer from point and
+stops at the first match. `text-editor-search-forward`/`-backward` are
+that scan now: read the character at P, and only when it matches the
+pattern's first character compare the rest. Measured on the same file:
+**0.005-0.045 ms**. The matching rule is unchanged - `code-point->char`
+and `%fold`, which is what `string-search-forward` applied to the copy,
+so byte characters and case folding behave exactly as before.
+
+The copy remains the right tool where the range is known and small -
+`looking-at`, `re-search-forward` - and those were not changed.
+
+# The test suite was deleting the developer's compiled files
+
+`tools/run-suites.py` deleted this tree's entries out of
+`~/.cache/guile/ccache` before running, so that a stale `.go` could not
+be loaded. The effect of that is that **the next editor started was
+interpreted**. Measured, one C-s keystroke on the 240 KB file: **25 ms
+compiled, 430 ms interpreted** - and which one you got depended on
+whether a test had been run since the last compile. That is a
+performance bug in the harness, not the editor.
+
+The suites now get `XDG_CACHE_HOME` pointed at a fresh temporary
+directory: nothing cached can be stale, and the developer's cache is
+never touched. `drop_tree_ccache` is deleted with it.

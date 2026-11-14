@@ -16,10 +16,8 @@ with no passes either failed to load or has no tests - both worth knowing.
 
 Exit status is 1 if a suite failed to run or reported a failure.
 """
-import glob
 import os
 import re
-import shutil
 import subprocess
 import tempfile
 import sys
@@ -119,6 +117,19 @@ SUITES = [
 # file. See the note in `run'.
 TEST_CONFIG_HOME = tempfile.mkdtemp(prefix='schemacs-test-config-')
 
+# **An empty CACHE directory, so a suite never runs the developer's
+# compiled files and never deletes them either.** A stale `.go` is a real
+# hazard to a suite (`--no-auto-compile` loads it even when a record
+# changed), and the old answer was to delete this tree's entries out of
+# `~/.cache/guile/ccache` - which also left the *developer's next editor*
+# with no compiled files at all, and an editor running from source is
+# five to thirty times slower. Measured: a C-s keystroke on a 240 KB file
+# is 25 ms compiled and 430 ms interpreted, and which one you get
+# depended on whether a test had been run. Pointing `XDG_CACHE_HOME` at a
+# fresh directory gives the suite the same guarantee - nothing cached to
+# be stale - and leaves the developer's cache alone.
+TEST_CACHE_HOME = tempfile.mkdtemp(prefix='schemacs-test-cache-')
+
 
 # WHERE A SHARED LIBRARY LIVES. `(schemacs repl)' imports
 # `(scheme-utils repl server)', and Guile does NOT search the user's own site
@@ -136,23 +147,6 @@ SHARED_SITE = os.path.join(
 LOAD_PATH_ARGS = ['-L', REPO] + (['-L', SHARED_SITE] if os.path.isdir(SHARED_SITE) else [])
 
 
-def drop_tree_ccache():
-    """Forget this tree's compiled files, and only this tree's.
-
-    **A stale `.go` is loaded by `--no-auto-compile` even when no record
-    changed** (AGENTS.md): it made bisecting meaningless once, and it
-    also hides `module-set!` from procedures the compiler has already
-    resolved - a suite that sets a plain global read them stale and
-    failed only with a warm cache. The cache entries are keyed by the
-    absolute source path, so this removes exactly the ones this tree
-    wrote and leaves every other project's alone.
-    """
-    home = os.environ.get('XDG_CACHE_HOME',
-                          os.path.join(os.path.expanduser('~'), '.cache'))
-    for entry in glob.glob(os.path.join(home, 'guile', 'ccache', '*' + REPO)):
-        shutil.rmtree(entry, ignore_errors=True)
-
-
 def run(path):
     proc = subprocess.run(
         ['guile', '--no-auto-compile'] + LOAD_PATH_ARGS + ['-s', path],
@@ -162,7 +156,10 @@ def run(path):
                  # `$XDG_CONFIG_HOME/schemacs/init.scm', and one that
                  # changes the editor changes what a suite sees. The
                  # author's opens the REPL back door.
-                 XDG_CONFIG_HOME=TEST_CONFIG_HOME))
+                 XDG_CONFIG_HOME=TEST_CONFIG_HOME,
+                 # ...and no compiled files, of this tree's or anyone
+                 # else's: see `TEST_CACHE_HOME`.
+                 XDG_CACHE_HOME=TEST_CACHE_HOME))
     out = proc.stdout + proc.stderr
     passes = sum(int(n) for n in re.findall(
         r'\*\*\* # of expected passes\s*:\s*(\d+)', out))
@@ -180,7 +177,6 @@ def run(path):
 
 
 def main():
-    drop_tree_ccache()
     paths = [a for a in sys.argv[1:] if not a.startswith('-')] or SUITES
     bad = 0
     for p in paths:

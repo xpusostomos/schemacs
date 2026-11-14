@@ -333,7 +333,13 @@ def drive(keys, path, settle=1.5, gap=0.3, term=None, background="0000/0000/0000
             resize(fd, pid, k[1], k[2])
             settle(gap, KEY_MAX)
             continue
-        os.write(fd, k)
+        try:
+            os.write(fd, k)
+        except OSError:
+            # The editor is gone (a crash the check is about). The keys
+            # after this one have nowhere to go; the assertions will say
+            # what happened from the screen collected so far.
+            break
         settle(gap, KEY_MAX)
     # **Wait for the editor to go quiet, not for a fixed time.** The keys
     # have been sent; what the check is about to assert on is whatever
@@ -3533,6 +3539,33 @@ def check_quit_signal():
         elif last.strip() != "Quit":
             problems.append("the echo area kept the prompt behind `Quit': "
                             "%r" % last)
+
+    # **C-g during isearch aborts the search, not the editor.** isearch
+    # reads its own keys, and a SIGINT that arrived while it was reading
+    # used to leave `quit-flag` set: the read answered `quit_char` (so
+    # the search aborted correctly) but nothing cleared the flag, and the
+    # *next* read's `maybe-quit` raised a quit condition out of the
+    # command loop's own read - which nothing caught, so the process
+    # exited (measured, exit 1, with `%quit-condition` on the terminal).
+    # `read_char` and `read_key_sequence` clear the flag
+    # (`keyboard.c:2806`, `:11892`), and the loop's read is inside the
+    # command guard now.
+    path2 = "/tmp/pty-check-quit2.txt"
+    open(path2, "w").write("one 8 two 88\n")
+    out, exited = drive([C_x + C_f, C_a, C_k, path2.encode(), RET,
+                         C_s, WAIT(b"I-search"), b"8", b"\x07", b"x"],
+                        path2, report_exit=True)
+    if exited:
+        problems.append("C-g during isearch killed the editor")
+    else:
+        screen = screen_of(out)
+        if "Backtrace" in screen or "%quit-condition" in screen:
+            problems.append("C-g during isearch raised an uncaught quit: %r"
+                            % screen.split("\n")[-3:])
+        mode_lines = [r for r in screen.split("\n") if "--" in r and " L" in r]
+        if not any("**" in row for row in mode_lines):
+            problems.append("after C-g during isearch the editor did not "
+                            "take the next key: %r" % mode_lines)
     return problems
 
 
