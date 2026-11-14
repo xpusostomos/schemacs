@@ -1382,10 +1382,102 @@ downs (the File menu's 18 entries) then RET must prompt `Find file: `,
 and one up from the top must reach the bottom item, which is Quit, so
 the editor leaves. Both were seen failing with the two lines removed.
 
+## The second half of that bug: a scroll was not "usable input"
+
+Chris, after the `leave = 0` fix: *"it takes 2 down arrows to arrive at
+the top, and when it does, it arrives at the 2nd top one, not the top"*
+- and *"if the menu is too big for the terminal, real emacs scrolls, ours
+sort of scrolls, but it's just a mess"*. Both were one line, and they
+were the same line.
+
+`read_menu_input` answers a status **and** whether the input "moved" the
+menu (`usable_input`, which becomes `sf->mouse_moved`). The caller
+redraws the pane only when it did. In the C `usable_input` starts at 1
+and is cleared in exactly two places: `tty_menu_next_menu`/
+`prev_menu`, and a command that is not a menu command at all. **Every
+scroll, and `tty_menu_ignore`, leave it 1.** The port answered #f for
+all three.
+
+So a scroll changed `first_item` and never repainted: a menu taller than
+the screen scrolled "in the dark" (the mess), and at the bottom the
+first down scrolled the list by one without drawing it, the second
+wrapped, and the *next* down was the first thing to repaint - which put
+the highlight on the second item. Exactly what Chris described.
+
+Fixed in `read-menu-input`'s two scroll arms and the ignore arm.
+
+## The key equivalents were never computed at all
+
+Chris: *"why don't we have the menu showing the key combos like emacs?"*
+Because `parse_menu_item`'s last step was skipped: the note in
+`keyboard.sld` said so ("the key-equivalent computation is not carried")
+and named the reason - `where-is-internal` "exists here only in the
+reduced `keymap-lookup-binding-key` form". That was a placeholder that
+had no business surviving a pass that called itself a port.
+
+The whole chain is ported now, in the C's own decomposition:
+
+| Emacs | here |
+|---|---|
+| `get_keyelt` (`keymap.c:681`) | `get-keyelt` in `keymap.sld` - it was inline in `access-keymap`, and `where_is_internal_1` and `accessible_keymaps_1` both need it |
+| `accessible-keymaps` (`:2010`) | `accessible-keymaps`, breadth-first, grown in place with `set-cdr!` so the order is the C's |
+| `append_key` (`:1456`) | `append-key` - `(vconcat seq (list key))` |
+| `vconcat` (`fns.c:750`) | `vconcat` in `fns.sld`; the primitive was missing outright |
+| `where_is_internal` (`:2496`) and `where_is_internal_1` (`:2787`) | `where-is-internal-walk`, `where-is-internal-1` |
+| `where-is-internal` (`:2588`) | `where-is-internal` |
+| the KEYEQ block (`keyboard.c:9095`) | the same block in `parse-menu-item` |
+
+**Placement**: all of it is `keymap.c`'s, and the DEFUN's default for its
+KEYMAP argument is `current-active-maps`, which is `keyboard.c`'s - in
+this tree `lookup-keymaps`. `keymap.sld` sits under `keyboard.sld`, so
+the DEFUN is there and the two walkers are in `keymap.sld`.
+
+**The one bridge the tree needs and Emacs does not**: Elisp's keymaps
+hold the command *symbol*, so the C's `EQ (binding, definition)`
+compares like with like. This tree's keymaps hold the value
+`define-command` made, while a menu item may still name its command as
+the symbol the C would - `(menu-item "Save" save-buffer)` - which is
+what `dispatch-action` exists for. `where-is-internal` resolves a symbol
+through the obarray with `command-value-of` before searching. Without
+it, every menu item that names a symbol found no key at all, which is
+what the first version did.
+
+**Not carried**, each because the feature it consults does not exist
+here: command remapping (`[remap ...]`, so `remapped` is always false),
+`:advertised-binding`, `where_is_cache` (it exists for the menu bar's
+many calls per redisplay; this tree rebuilds a menu only when its
+`menu_items` change), and `substitute-command-keys` for a `:keys`
+*string* (the string is used as it stands - the same departure
+`help-echo-substitute-command-keys` already carries). A `menu_item`'s
+`:filter` is likewise not applied by `get_keyelt` (`autoload` is #f from
+every caller here).
+
+Measured, the File menu against Emacs 31.1's on the same terminal:
+
+```
+Visit New File...     C-x C-f     Emacs: same
+Open Directory...     C-x d       Emacs: same
+Save                  C-x C-s     Emacs: same
+Save As...            C-x C-w     Emacs: same
+Remove Other Windows  C-x 1       Emacs: same
+New Frame             C-x 5 2     Emacs: same
+Delete Frame          C-x 5 0     Emacs: same
+Quit                  C-x C-c     Emacs: same
+```
+
+and the ones with no key ("Close", "Revert Buffer") have none in either,
+which is `preferred-sequence_p` doing its job - a sequence carrying a
+modifier is not preferred, and `(car found)` is the fallback.
+
+`keymap-tests` 98 (9 new: the empty prefix first, keymaps only, the
+cycle break, `get_keyelt`'s two coercions, `append-key`, `vconcat`), and
+the `tty-menu` pty check asserts the keys beside three items and was
+seen failing with the KEYEQ block removed.
+
 ## Tests
 
 `menu-tests` 16, `menu-bar-tests` 28, `menu-bar-menus-tests` 7,
-`subr-tests`, `keymap-tests` 89, `tty-editor-tests` 304, `pgtk-tests`
+`subr-tests`, `keymap-tests` 98, `tty-editor-tests` 304, `pgtk-tests`
 106, `mouse-tests` 43. The pgtk suite's nine new ones are the popup's
 tree, above. The unit fixtures run with the bar off, as Emacs's own
 tests do.

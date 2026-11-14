@@ -14,6 +14,8 @@
         new-modal-lookup-state modal-lookup-state-type?
         modal-lookup-state-step! modal-lookup-state-key-index
         modal-lookup-state-keymaps)
+  ;; `vconcat` is `fns.c:750`'s, and `append-key` is built on it.
+  (only (schemacs editor fns) vconcat)
   (only (srfi 64) test-begin test-end
         test-assert test-equal test-eq)
   )
@@ -487,5 +489,73 @@
     (set-keymap-parent child parent)
     (and (eq? parent (map-keymap-internal (lambda (event def) #f) child))
          (equal? '((98 cb)) (map-keymap-internal-pairs child)))))
+
+;; -------------------------------------------------------------------------------------------------
+;;
+;; `accessible-keymaps` and `get_keyelt` - `keymap.c:2010`, `:681`
+;;
+;; These two are what `where-is-internal` is built on, and
+;; `where-is-internal` is what makes a menu show "C-x C-f" beside "Visit
+;; New File...". The order of `accessible-keymaps` is not incidental:
+;; "the first key that runs the command" means the first in *this* list.
+;; -------------------------------------------------------------------------------------------------
+
+(test-equal "accessible-keymaps starts with the empty prefix"
+  '#()
+  (car (car (accessible-keymaps (make-sparse-keymap) #f))))
+
+(test-equal "and lists a prefix's map next, shortest first"
+  ;; `C-f` inside the prefix is a *command*, not a keymap, so it makes no
+  ;; entry of its own - `accessible_keymaps_1` only follows keymaps. The
+  ;; command is found by `where_is_internal_1`, which walks the map.
+  '(#() #(24))
+  (let ((top (make-sparse-keymap))
+        (sub (make-sparse-keymap)))
+    (define-key top (kbd "C-x") sub)
+    (define-key sub (kbd "C-f") 'find-file)
+    (map (lambda (entry) (car entry))
+         (accessible-keymaps top #f))))
+
+(test-equal "the hierarchy is reached to any depth"
+  '(#(24) #(24 6))
+  (let ((a (make-sparse-keymap))
+        (b (make-sparse-keymap))
+        (c (make-sparse-keymap)))
+    (define-key a (kbd "C-x") b)
+    (define-key b (kbd "C-f") c)
+    (define-key c (kbd "C-a") 'deep)
+    (map (lambda (entry) (car entry))
+         (cdr (accessible-keymaps a #f)))))
+
+;; A keymap that reaches itself would make the walk endless; the C's
+;; "Look for and break cycles" refuses the second visit.
+(test-equal "a map bound under itself is visited once"
+  1
+  (let ((self (make-sparse-keymap)))
+    (define-key self (kbd "a") self)
+    (length (filter (lambda (entry) (eq? (cdr entry) self))
+                    (accessible-keymaps self #f)))))
+
+(test-equal "get_keyelt unwraps a menu bar item's name"
+  'the-map
+  (get-keyelt (cons "File" 'the-map) #f))
+
+(test-equal "get_keyelt unwraps a menu-item's definition"
+  'save-buffer
+  (get-keyelt '(menu-item "Save" save-buffer :help "Save the buffer") #f))
+
+(test-equal "get_keyelt leaves an ordinary binding alone"
+  'save-buffer
+  (get-keyelt 'save-buffer #f))
+
+;; `append_key` (`keymap.c:1456`) is `(vconcat key_sequence (list key))`,
+;; and `vconcat` is `fns.c:750`'s.
+(test-equal "append-key puts one event on the end"
+  '#(24 6 102)
+  (append-key '#(24 6) 102))
+
+(test-equal "vconcat concatenates lists, vectors and strings"
+  '#(1 2 3 4 5)
+  (vconcat '(1 2) '#(3 4) "\x05"))
 
 (test-end "schemacs_keymap")

@@ -34,7 +34,7 @@
     (scheme base)
     (scheme char)
     (only (guile)
-          string-join logand logior lognot
+          string-join logand logior lognot last-pair
           ;; The bindings themselves. Guile's `hashv' family compares its
           ;; keys with `eqv?' - which is the right comparison for both
           ;; kinds of key an event can be: an integer (`eqv?' on numbers is
@@ -49,6 +49,11 @@
     ;; and `event-convert-list' for the Lucid form `single-key-description'
     ;; converts first. `kbd' is `read-kbd-macro''s own input, and the reader
     ;; `key-description' takes a *string* key through.
+    ;; `append-key` is `(Fvconcat key_sequence (list key))`, and `vconcat`
+    ;; is `fns.c:750`'s - ported in `fns.sld`, which this library can
+    ;; import because `fns.sld` reaches down to `buffer.sld` and takes no
+    ;; keymap from it.
+    (only (schemacs editor fns) vconcat)
     (only (schemacs editor character)
           char-alt char-ctl char-hyper char-meta char-shift char-super
           event-convert-list kbd)
@@ -72,6 +77,9 @@
    keymap-bindings
    keymap-order %set!keymap-order!
    keymap-lookup-binding-key
+   ;; The reverse lookup a menu's key hint is made of, and the
+   ;; two pieces `where-is-internal' is built on.
+   get-keyelt append-key accessible-keymaps
    ;; `map_keymap' and its DEFUN: menu construction is their first caller
    ;; (`keyboard.c''s `menu_bar_items' walks each active map with
    ;; `map_keymap_canonical'), and `define-key-after' (subr.el) reads the
@@ -301,6 +309,134 @@
               (let ((under (keymap-lookup-binding-key def binding)))
                 (if under (cons event under) (loop (cdr events)))))
              (else (loop (cdr events)))))))))
+
+    (define (get-keyelt object autoload)
+      ;; GNU Emacs's `get_keyelt` (`keymap.c:681`): "Given OBJECT which
+      ;; was found in a slot in a keymap, trace indirect definitions to
+      ;; get the actual definition of that slot. ... Also if OBJECT has a
+      ;; menu string as the first element, remove that."
+      ;;
+      ;; **This is a function of its own in the C**, and it used to be
+      ;; inline in `access-keymap` here. Two coercions live in it: a
+      ;; `(STRING . DEFN)` binding - how `menu-bar.el` stores
+      ;; `[menu-bar file]`, the string being the name the bar shows - and
+      ;; a `(menu-item NAME DEF ...)` binding, whose command is DEF. The
+      ;; C's `where_is_internal_1` and `accessible_keymaps_1` both call
+      ;; it directly, which is why it is out here now.
+      ;;
+      ;; AUTOLOAD is the C's flag for applying a `:filter` property
+      ;; through `menu_item_eval_property`; every caller here passes #f,
+      ;; so a filtered item answers the form rather than its result.
+      ;;--------------------------------------------------------------
+      (let loop ((object object))
+        (cond
+         ((not (pair? object)) object)
+         ((eq? (car object) 'menu-item)
+          (if (pair? (cdr object))
+              (let ((rest (cddr object)))
+                (if (pair? rest) (loop (car rest)) rest))
+              object))
+         ((string? (car object)) (loop (cdr object)))
+         (else object))))
+
+    (define (append-key key-sequence key)
+      ;; GNU Emacs's `append_key` (`keymap.c:1456`): "AUTO_LIST1 (key_list,
+      ;; key); return CALLN (Fvconcat, key_sequence, key_list)" - the
+      ;; sequence with one more event on the end.
+      ;;--------------------------------------------------------------
+      (vconcat key-sequence (list key)))
+
+    (define (%accessible-cycle? cmd maps thisseq)
+      ;; `accessible_keymaps_1`'s "Look for and break cycles" loop
+      ;; (`keymap.c:1958`): #t when CMD is already in MAPS under a prefix
+      ;; of THISSEQ - which is a cycle, because that map would reach
+      ;; itself the same way round. `set-keymap-parent` refuses to make
+      ;; one, but a key bound to its own map makes one all the same.
+      ;;--------------------------------------------------------------
+      (let loop ((rest maps))
+        (cond
+         ((null? rest) #f)
+         ((not (eq? (cdr (car rest)) cmd)) (loop (cdr rest)))
+         (else
+          (let ((prefix (car (car rest))))
+            (if (<= (vector-length prefix) (vector-length thisseq))
+                (let scan ((i 0))
+                  (cond ((>= i (vector-length prefix)) #t)
+                        ((eqv? (vector-ref prefix i)
+                               (vector-ref thisseq i))
+                         (scan (+ i 1)))
+                        (else (loop (cdr rest)))))
+                (loop (cdr rest))))))))
+
+    (define (accessible-keymaps keymap prefix)
+      ;; GNU Emacs's `accessible-keymaps` (`keymap.c:2010`): "Find all
+      ;; keymaps accessible via prefix characters from KEYMAP. Returns a
+      ;; list of elements of the form (KEYS . MAP) ... ordered so that the
+      ;; KEYS increase in length."
+      ;;
+      ;; **The breadth-first order is what `where-is-internal` relies
+      ;; on**: "the first key that runs the command" is the first in this
+      ;; list. The C grows the list in place - `tail` is the cons it is
+      ;; standing on and new entries are nconc'd onto its end, except a
+      ;; metized one, which goes straight after `tail` - and that is what
+      ;; this does, with `set-cdr!`, so the answer is the C's list and not
+      ;; merely the same set.
+      ;;--------------------------------------------------------------
+      (let* ((prefix (cond ((vector? prefix) prefix)
+                           ((pair? prefix) (list->vector prefix))
+                           (else '#())))
+             (prefixlen (vector-length prefix))
+             (maps (if (> prefixlen 0)
+                       (let ((tem (keymap-lookup keymap prefix)))
+                         (if (keymap-type? tem)
+                             (list (cons prefix tem))
+                             '()))
+                       (list (cons '#() keymap))))
+             (end (if (null? maps) '() (last-pair maps))))
+        (let loop ((tail maps))
+          (if (null? tail)
+              maps
+              (let* ((entry (car tail))
+                     (thisseq (car entry))
+                     (thismap (cdr entry))
+                     (events (vector->list thisseq))
+                     (last (- (length events) 1))
+                     ;; "Does the current sequence end in the
+                     ;; meta-prefix-char?" - and "Don't metize the last
+                     ;; char of PREFIX."
+                     (is-metized (and (>= last 0)
+                                      (>= last prefixlen)
+                                      (eqv? (list-ref events last) 27))))
+                ;; `map_keymap` rather than the internal one: a parent's
+                ;; bindings are reached through this map, as the C's
+                ;; `map_keymap` reaches them.
+                (map-keymap
+                 (lambda (key cmd)
+                   ;; `cmd = get_keymap (get_keyelt (cmd, 0), 0, 0)`: only
+                   ;; a keymap carries on. A symbol whose function is a
+                   ;; keymap is resolved in the C; this tree's keymaps are
+                   ;; values (`access-keymap`'s note says the same).
+                   (let ((cmd (get-keyelt cmd #f)))
+                     (when (and (keymap-type? cmd)
+                                (not (%accessible-cycle? cmd maps thisseq)))
+                       (if is-metized
+                           ;; "This new sequence is the same length as
+                           ;; thisseq, so stick it in the list right
+                           ;; after this one."
+                           (let* ((tem (vector-copy thisseq))
+                                  (idx (- (vector-length tem) 1)))
+                             (vector-set! tem idx (logior key char-meta))
+                             (set-cdr! tail (cons (cons tem cmd) (cdr tail)))
+                             ;; TAIL may have been the last cons, in which
+                             ;; case the end moved with the insert.
+                             (set! end (last-pair maps)))
+                           (let ((tem (append-key thisseq key)))
+                             (set-cdr! end (list (cons tem cmd)))
+                             (set! end (cdr end))))
+                       #f))
+                   #f)
+                 thismap)
+                (loop (cdr tail)))))))
 
     (define (map-keymap-internal function keymap)
       ;; GNU Emacs's `map_keymap_internal' (`keymap.c:535'): call

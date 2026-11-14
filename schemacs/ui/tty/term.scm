@@ -1794,17 +1794,26 @@
        ((eq? cmd 'tty-menu-prev-menu)
         (values MI-PREV-ITEM x y #f))
        ((eq? cmd 'tty-menu-next-item)
+        ;; **A scroll is USABLE input**, which is the C's
+        ;; `usable_input` staying 1: it is what makes `mouse_moved`
+        ;; true and the caller redraw the pane with the new
+        ;; `first_item`. Answering #f here left a menu taller than the
+        ;; screen scrolling in the dark and, at the bottom, never
+        ;; repainting the wrap.
         (if (< y max-y)
             (values MI-CONTINUE x (+ y 1) #t)
-            (values MI-SCROLL-FORWARD x y #f)))
+            (values MI-SCROLL-FORWARD x y #t)))
        ((eq? cmd 'tty-menu-prev-item)
         (if (> y min-y)
             (values MI-CONTINUE x (- y 1) #t)
-            (values MI-SCROLL-BACK x y #f)))
+            (values MI-SCROLL-BACK x y #t)))
        ((eq? cmd 'tty-menu-select)
         (values MI-ITEM-SELECTED x y #t))
        ((eq? cmd 'tty-menu-ignore)
-        (values MI-CONTINUE x y #f))
+        ;; `usable_input` is 1 here too: the C only clears it for
+        ;; `tty-menu-next-menu`/`prev-menu` and for a command that is
+        ;; not a menu command at all.
+        (values MI-CONTINUE x y #t))
        (else
         ;; "else if (!EQ (cmd, Qtty_menu_ignore)) usable_input = 0;": a
         ;; command of the user's own is ignored and is not a movement.

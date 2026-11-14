@@ -44,7 +44,7 @@
     ;; reporting an error failed - and only a test that makes a command
     ;; signal one could see it, because the error path is not otherwise
     ;; reached.
-    (only (guile) format inexact->exact logior string-index
+    (only (guile) format inexact->exact logior logand string-index
           current-module filter caddr
           ;; `init_signals`: C-g and C-\ arrive as signals, because
           ;; `init_sys_modes` made them the terminal's interrupt and quit
@@ -84,7 +84,8 @@
     (only (schemacs editor keymap)
           *current-keymap*
           *default-keymap*
-          *special-event-map* define-key keymap-parent
+          *special-event-map* define-key keymap-parent keymap-type?
+          keymap-lookup
           ;; Emacs's `key-description', which the undefined-key message is
           ;; built out of (`subr.el:1297') - and `single-key-description',
           ;; which the prefix-argument echo uses.
@@ -116,7 +117,7 @@
     ;; `uarg->integer' is `callint.c''s, in the command library the
     ;; commands' interactive specs come from.
     (only (schemacs editor command) uarg->integer current-prefix-arg
-          *pending-coding-system* command-record-named)
+          *pending-coding-system* command-record-named command-value-of)
     ;; The two variables C-x RET c names for the next command. They are
     ;; `coding.c`'s, and they are bound here because the command loop is
     ;; what has the extent Emacs binds them for.
@@ -161,7 +162,8 @@
     (only (schemacs editor subr)
           kbd ignore *minor-mode-map-alist* keymap-canonicalize)
     (only (schemacs editor character)
-          char-meta event-convert-list)
+          char-meta char-alt char-super char-hyper char-shift char-ctl
+          parse-modifiers-uncached event-convert-list)
     )
 
   (export
@@ -200,6 +202,10 @@
    ;; exported with them.
    *menu-bar-final-items* *overriding-local-map-menu-flag*
    menu-bar-items parse-menu-item menu-separator-name?
+   ;; `keymap.c`'s, in this library for the reason its header gives:
+   ;; its default argument is `current-active-maps`, which is this
+   ;; file's `lookup-keymaps`.
+   where-is-internal
    *enable-disabled-menus-and-buttons*
    *item-properties*
    item-property-item item-property-name item-property-def
@@ -2114,6 +2120,220 @@ With argument, insert ARG copies of the character."
       (guard (e (else #f))
         (eval sexpr (current-module))))
 
+    ;;----------------------------------------------------------------
+    ;; `where-is-internal' - `keymap.c:2496' (`where_is_internal'), its
+    ;; walker (`:2787'), and the DEFUN (`:2588')
+    ;;----------------------------------------------------------------
+    ;;
+    ;; `parse_menu_item`'s last step asks `(where-is-internal DEF nil t
+    ;; nil nil)` for the key sequence that runs DEF, and renders it into
+    ;; ITEM_PROPERTY_KEYEQ - which is the "C-x C-s" a menu shows to the
+    ;; right of "Save". Without it a menu is a list of names with no keys
+    ;; at all.
+    ;;
+    ;; **All of it is `keymap.c`'s, and it lives here.** The DEFUN's
+    ;; default for its KEYMAP argument is `current-active-maps`, which is
+    ;; `keyboard.c`'s; in this tree that is `lookup-keymaps` below, and
+    ;; `keymap.sld` sits under this library. Emacs reaches both across
+    ;; the same boundary through its one obarray.
+    ;;
+    ;; Not carried, each named where it would go: command remapping
+    ;; (`Fcommand_remapping`, `[remap ...]` - so `remapped` is always
+    ;; false and that arm never runs), `:advertised-binding`, and
+    ;; `where_is_cache` (it exists for the menu bar's many calls per
+    ;; redisplay; this tree rebuilds a menu only when its `menu_items`
+    ;; change).
+    ;;--------------------------------------------------------------
+
+    (define *where-is-preferred-modifier* #f)
+    ;; ^ `where_is_preferred_modifier` (`keymap.c:2364`), the parsed
+    ;; `where-is-preferred-modifier` variable: a `firstonly` answer
+    ;; prefers a sequence whose only modifier is this one. nil is Emacs's
+    ;; default and means 0, the C's "no modifier at all".
+
+    (define (preferred-sequence-p sequence)
+      ;; `preferred_sequence_p` (`keymap.c:2371`): "Return 0 if SEQ uses
+      ;; non-preferred modifiers or non-char events. Else, return 2 if SEQ
+      ;; uses the where_is_preferred_modifier, and 1 otherwise."
+      ;;
+      ;; The mask excludes META, so `M-x` counts as unmodified here - the
+      ;; meta bit is part of the character rather than a modifier state
+      ;; as far as this test is concerned.
+      ;;--------------------------------------------------------------
+      (let ((mask (logior char-alt char-super char-hyper char-shift char-ctl))
+            (preferred (or *where-is-preferred-modifier* 0))
+            (events (cond ((vector? sequence) (vector->list sequence))
+                          ((pair? sequence) sequence)
+                          (else '()))))
+        (let loop ((rest events) (result 1))
+          (cond
+           ((null? rest) result)
+           ((not (integer? (car rest))) 0)
+           (else
+            (let ((modifiers (logand (car rest) mask)))
+              (cond ((= modifiers preferred) (loop (cdr rest) 2))
+                    ((not (= modifiers 0)) 0)
+                    (else (loop (cdr rest) result)))))))))
+
+    (define %mouse-events
+      ;; `Vmouse_events` (`keymap.c:3421`): the event types whose keymaps
+      ;; a `firstonly` search will not look inside - "If no menu entries
+      ;; should be returned, skip over the keymaps bound to `menu-bar'
+      ;; and `tool-bar' and other non-ascii prefixes like
+      ;; `C-down-mouse-2'."
+      ;;--------------------------------------------------------------
+      '(menu-bar tab-bar tool-bar tab-line header-line mode-line
+                 mouse-1 mouse-2 mouse-3 mouse-4 mouse-5))
+
+    (define (where-is-internal-1 definition key binding this last last-is-meta
+                                 noindirect)
+      ;; GNU Emacs's `where_is_internal_1` (`keymap.c:2787`): the sequence
+      ;; that reaches BINDING through THIS with KEY on the end, or #f when
+      ;; BINDING is not DEFINITION. The C pushes onto a list; this
+      ;; answers, and the caller conses.
+      ;;--------------------------------------------------------------
+      (let ((binding (if noindirect binding (km:get-keyelt binding #f))))
+        ;; `and`, not `when`: a `when` whose test fails answers the
+        ;; unspecified value, which is *true* in Scheme - and the caller
+        ;; reads the answer as "found". It was cosmetic here for one
+        ;; round because `(when sequence ...)' swallows it, but the value
+        ;; ends up in the sequence list the moment it is not.
+        (and (or (eq? binding definition)
+                 (and (pair? definition) (equal? binding definition)))
+             (if (and (integer? key) last-is-meta)
+                 (let ((sequence (vector-copy this)))
+                   (vector-set! sequence last (logior key char-meta))
+                   sequence)
+                 (km:append-key this key)))))
+
+    (define (where-is-internal-walk definition keymaps noindirect nomenus)
+      ;; GNU Emacs's static `where_is_internal` (`keymap.c:2496`): every
+      ;; sequence that reaches DEFINITION, in `accessible-keymaps`' order.
+      ;;--------------------------------------------------------------
+      (let ((sequences '()))
+        (for-each
+         (lambda (map)
+           (for-each
+            (lambda (entry)
+              (let* ((this (car entry))
+                     (thismap (cdr entry))
+                     (events (vector->list this))
+                     (last (- (length events) 1))
+                     (last-is-meta (and (>= last 0)
+                                        (eqv? (list-ref events last) 27))))
+                (unless (and nomenus
+                             (>= last 0)
+                             (symbol? (list-ref events 0))
+                             ;; **`parse_modifiers`' answer has a
+                             ;; different shape here.** The C's is
+                             ;; `(BASE-EVENT . MODIFIER-BITS)`, which is
+                             ;; what `XCAR (parse_modifiers (tem))` reads;
+                             ;; this tree's `parse-modifiers-uncached`
+                             ;; answers `(MODIFIER-BITS . NAME-STRING)`,
+                             ;; so the base event is the name it gives.
+                             (memq (string->symbol
+                                    (cdr (parse-modifiers-uncached
+                                          (list-ref events 0))))
+                                   %mouse-events))
+                  (km:map-keymap
+                   (lambda (key binding)
+                     (let ((sequence (where-is-internal-1
+                                      definition key binding this last
+                                      last-is-meta noindirect)))
+                       (when sequence
+                         (set! sequences (cons sequence sequences))))
+                     #f)
+                   thismap))))
+            (km:accessible-keymaps map #f)))
+         keymaps)
+        (reverse sequences)))
+
+    (define (%shadow-lookup keymaps key)
+      ;; `shadow_lookup` (`keymap.c:2464`) with `accept_default` nil and
+      ;; `remap` false: the first keymap of KEYMAPS that binds KEY.
+      ;;
+      ;; The C's `FIXNATP (value)` guard - "`key' is too long!" - has no
+      ;; counterpart here: `keymap-lookup` answers the command it found or
+      ;; nil, never a count of what it consumed.
+      ;;--------------------------------------------------------------
+      (let loop ((rest keymaps))
+        (and (pair? rest)
+             (or (keymap-lookup (car rest) key) (loop (cdr rest))))))
+
+    (define (where-is-internal definition keymap firstonly noindirect no-remap)
+      ;; GNU Emacs's `where-is-internal` (`keymap.c:2588`): "Return list
+      ;; of keys that invoke DEFINITION. ... If optional 3rd arg
+      ;; FIRSTONLY is non-nil, return the first key sequence found."
+      ;;--------------------------------------------------------------
+      ;; **A symbol on one side, a value on the other.** Elisp's keymaps
+      ;; hold the command *symbol*, so the C's `EQ (binding, definition)`
+      ;; compares like with like. This tree's keymaps hold the value
+      ;; `define-command` made, while a menu item may still name its
+      ;; command as the symbol the C would - `(menu-item "Save"
+      ;; save-buffer)` - which is what `dispatch-action` exists for.
+      ;; `command-value-of` is that same value, so the search is made for
+      ;; it. Without this no menu item that names a symbol ever finds its
+      ;; key, which is what the first run of this did.
+      (let* ((definition (if (symbol? definition)
+                             (let ((record (command-record-named definition)))
+                               (if record
+                                   (command-value-of record)
+                                   definition))
+                             definition))
+             (nomenus (and firstonly (not (eq? firstonly 'non-ascii))))
+             (keymaps (cond ((and (pair? keymap) (keymap-type? (car keymap)))
+                             keymap)
+                            (keymap (list keymap *default-keymap*))
+                            (else (lookup-keymaps))))
+             (sequences (where-is-internal-walk definition keymaps
+                                                (not (not noindirect)) nomenus)))
+        (let loop ((rest sequences) (found '()))
+          (cond
+           ((null? rest)
+            ;; "firstonly may have been t, but we may have gone all the
+            ;; way through the keymaps without finding an all-ASCII key
+            ;; sequence. So just return the best we could find."
+            ;; `Fcar` of nil is nil in the C, so an empty answer stays
+            ;; #f rather than raising here.
+            (let ((found (reverse found))
+                  (best (lambda (l) (and (pair? l) (car l)))))
+              (cond ((not firstonly) found)
+                    ((or (not *where-is-preferred-modifier*)
+                         (= *where-is-preferred-modifier* 0))
+                     (best found))
+                    (else
+                     (let scan ((b found))
+                       (cond ((null? b) (best found))
+                             ((preferred-sequence-p (car b)) (car b))
+                             (else (scan (cdr b)))))))))
+           (else
+            (let ((sequence (car rest)))
+              (cond
+               ;; "Verify that this key binding is not shadowed by another
+               ;; binding for the same key, before we say it exists."
+               ((not (equal? (%shadow-lookup keymaps sequence) definition))
+                (loop (cdr rest) found))
+               (else
+                ;; "Don't annoy user with strings from a menu such as the
+                ;; entries from the `Edit => Paste from Kill Menu'."
+                (let ((n (vector-length sequence)))
+                  (when (and (> n 0) (string? (vector-ref sequence (- n 1))))
+                    (vector-set! sequence (- n 1) "(any string)")))
+                ;; "It is a true unshadowed match. Record it, unless it's
+                ;; already been seen (as could happen when inheriting
+                ;; keymaps)."
+                (when (and (not (member sequence found))
+                           (not (and (= (vector-length sequence) 1)
+                                     (symbol? (vector-ref sequence 0))
+                                     (get (vector-ref sequence 0)
+                                          'non-key-event))))
+                  (set! found (cons sequence found)))
+                (cond
+                 ((eq? firstonly 'non-ascii) sequence)
+                 ((and firstonly (= 2 (preferred-sequence-p sequence)))
+                  sequence)
+                 (else (loop (cdr rest) found)))))))))))
+
     (define (help-echo-substitute-command-keys string)
       ;; `help_echo_substitute_command_keys' (`keyboard.c'): Emacs runs
       ;; `substitute-command-keys' over a menu item's help string. That
@@ -2144,6 +2364,7 @@ With argument, insert ARG copies of the character."
        (let/ec return
          (let ((item-string (car item))
                (filter #f)
+               (keyhint #f)
                (start item))
            ;; Initialize the optional entries; ENABLE starts true.
            (let loop ((i item-property-def))
@@ -2220,9 +2441,12 @@ With argument, insert ARG copies of the character."
                         ((eq? prop ':key-sequence)
                          (when (or (symbol? value) (string? value)
                                    (vector? value))
-                           ;; `keyhint' is unused while KEYEQ is not
-                           ;; computed; the parse is kept anyway.
-                           #f))
+                           ;; "Be GC protected. Set keyhint to item
+                           ;; instead of tem." The C keeps the *list*
+                           ;; whose car is the value, so that
+                           ;; `XCAR (keyhint)' is the value however the
+                           ;; rest of the property list is built.
+                           (set! keyhint (cdr rest))))
                         ((eq? prop ':keys)
                          (vector-set! *item-properties* item-property-keyeq
                                       (cond ((procedure? value) (value))
@@ -2281,6 +2505,46 @@ With argument, insert ARG copies of the character."
 
            ;; The menu bar does not display key equivalents.
            (when (> inmenubar 0) (return #t))
+
+           ;; "This is a command. See if there is an equivalent key
+           ;; binding." - `keyboard.c:9095`. The answer is the
+           ;; ITEM_PROPERTY_KEYEQ a menu draws to the right of the item's
+           ;; name: `tty_menu_show` right-aligns it, and the toolkit menus
+           ;; do the same.
+           (let* ((keyeq (vector-ref *item-properties* item-property-keyeq))
+                  (def (vector-ref *item-properties* item-property-def)))
+             (if (and (string? keyeq) (not (pair? keyhint)))
+                 ;; `substitute-command-keys` is not ported (see
+                 ;; `help-echo-substitute-command-keys`), so a `:keys`
+                 ;; that is a string is used as it stands.
+                 (vector-set! *item-properties* item-property-keyeq
+                              (string-append "  " keyeq))
+                 (let ((prefix keyeq)
+                       (keys #f))
+                   (when (pair? prefix)
+                     (set! def (car prefix))
+                     (set! prefix (cdr prefix)))
+                   ;; "We have a suggested key. Is it bound to the
+                   ;; command?" The C also accepts an alias of DEF; this
+                   ;; tree has no command aliases, so the test is `eq?'.
+                   (when (and (pair? keyhint) (car keyhint))
+                     (set! keys (car keyhint))
+                     (let ((tem (key-binding keys)))
+                       (unless (and tem (eq? tem def))
+                         (set! keys #f))))
+                   (unless keys
+                     (set! keys (where-is-internal def #f #t #f #f)))
+                   (if keys
+                       (let ((tem (key-description keys)))
+                         (when (pair? prefix)
+                           (if (string? (car prefix))
+                               (set! tem (string-append (car prefix) tem)))
+                           (if (string? (cdr prefix))
+                               (set! tem (string-append tem (cdr prefix)))))
+                         (vector-set! *item-properties* item-property-keyeq
+                                      (string-append "  " tem)))
+                       (vector-set! *item-properties* item-property-keyeq
+                                    #f)))))
 
            ;; Radio buttons and toggle boxes.
            (let ((tem (vector-ref *item-properties* item-property-selected)))

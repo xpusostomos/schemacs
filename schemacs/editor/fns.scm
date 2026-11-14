@@ -59,6 +59,7 @@
 
   (export compare-strings
           concat
+          vconcat
           copy-sequence
           count-lines
           install-fns-textprop!
@@ -252,6 +253,39 @@
                        (%text-property-list piece 0 (string-length piece) #f)
                        to))
                   (loop (cdr pieces) (+ to (string-length piece)))))))))
+
+    (define (vconcat . sequences)
+      ;; GNU Emacs's `vconcat` (`fns.c:750`), which is `concat_to_vector`
+      ;; (`:735`): "Concatenate all the arguments and make the result a
+      ;; vector. The result is a vector whose elements are the elements of
+      ;; all the arguments. Each argument may be a list, vector or
+      ;; string."
+      ;;
+      ;; A string contributes its *characters*, which is what makes
+      ;; `(vconcat "ab")` the key sequence `[?a ?b]` - the C's
+      ;; `concat_to_vector` reads a string with `FETCH_STRING_CHAR_ADVANCE`
+      ;; for exactly that reason.
+      ;;
+      ;; `keymap.c`'s `append_key` is the caller that made this worth
+      ;; having: it builds a key sequence one event at a time.
+      ;;--------------------------------------------------------------
+      (let* ((elements
+              (apply append
+                     (map (lambda (sequence)
+                            (cond ((vector? sequence) (vector->list sequence))
+                                  ((string? sequence)
+                                   (map char->integer
+                                        (string->list sequence)))
+                                  ((pair? sequence) sequence)
+                                  (else '())))
+                          sequences)))
+             (result (make-vector (length elements) #f)))
+        (let loop ((i 0) (rest elements))
+          (if (null? rest)
+              result
+              (begin
+                (vector-set! result i (car rest))
+                (loop (+ i 1) (cdr rest)))))))
 
     (define (copy-sequence arg)
       ;; GNU Emacs's `copy-sequence' (fns.c:761): "Return a copy of a

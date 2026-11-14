@@ -4444,6 +4444,21 @@ def check_tty_menu():
         problems.append("F10 did not drop the File menu down: %r"
                         % screen.split("\n")[-3:])
 
+    # ...and each item carries the keys that run it, which is
+    # `parse_menu_item`'s ITEM_PROPERTY_KEYEQ: `where-is-internal` over
+    # the active maps, `key-description`'d, and right-aligned by
+    # `tty_menu_show` after the item's name. The bar itself has no key
+    # equivalents - the C returns before computing them for `inmenubar >
+    # 0` - so this is the drop-down's own.
+    for label, keys in ((b"Visit New File...", b"C-x C-f"),
+                        (b"Save As...", b"C-x C-w"),
+                        (b"Remove Other Windows", b"C-x 1")):
+        row = [r for r in screen.split("\n") if label.decode() in r]
+        if not row or keys.decode() not in row[0]:
+            problems.append("the File menu's %r carries no %r: %r"
+                            % (label.decode(), keys.decode(),
+                               row[0].strip() if row else None))
+
     screen = screen_of(drive([b"\x1b[21~", b"\x1bOC"], None,
                              config=MENUBAR_CONFIG_HOME))
     if "Visit New File" in screen:

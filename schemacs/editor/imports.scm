@@ -350,6 +350,7 @@
     *menu-bar-final-items*
     *menu-bar-items-function*
     *menu-bar-mode*
+    *menu-bar-open-function*
     *menu-bar-update-hook*
     *menu-state*
     *message-function*
@@ -490,6 +491,7 @@
     abbreviate-file-name
     abort-recursive-edit
     access-keymap
+    accessible-keymaps
     activate-mark
     add-minor-mode
     add-text-properties
@@ -508,6 +510,7 @@
     all-completions
     allocate-buffer
     amalgamating-command?
+    append-key
     apply-command
     apply-modifiers
     apply-partially
@@ -1191,6 +1194,7 @@
     get-buffer-window
     get-char-property
     get-free-disk-space
+    get-keyelt
     get-selection
     get-specified-cursor-type
     get-text-property
@@ -1318,6 +1322,7 @@
     interval-up
     intervals-equal?
     invalidate-buffer-caches
+    invalidate-frame-rows!
     invalidate-region-cache
     isearch
     isearch-backward
@@ -1381,6 +1386,7 @@
     kill-word
     know-region-cache
     lazy-highlight-cleanup
+    left-char
     line-beginning-position
     line-display-offsets
     line-display-rows
@@ -1771,6 +1777,7 @@
     revert-buffer
     revert-buffer--default
     revert-buffer-with-coding-system
+    right-char
     row-equal?
     row-hash
     rows-above
@@ -2197,12 +2204,14 @@
     validate-interval-range
     validate-plist
     validate-region
+    vconcat
     verify-visited-file-modtime
     vertical-motion
     visited-file-modtime
     visual-line-mode
     visual-line-mode-map
     what-cursor-position
+    where-is-internal
     widget-value-button-type
     widget-value-call-data
     widget-value-contents
