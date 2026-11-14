@@ -7343,3 +7343,103 @@ it is a rewrite of `build-row!`, not a change inside it.
   greeting socket (for the banner, which only the first client sees) and
   closes it immediately; the next client may connect before the editor
   has torn that session down. Not caused by this pass and not fixed.
+
+# The search ring, the Gtk queue, and the extended face (2026-11-14)
+
+Chris: *"C-s pressed twice will search on the most recent search value"*,
+*"C-s is broken in gtk ... it works the first time"*, *"if I'm searching
+for 888 ... a line that ends in 888 ... it paints it to the end of the
+line"*, and *"do the next step"* - the row builder's one walk.
+
+## What landed
+
+- **The search ring** (`isearch.el:253-275`, `:1562`, `:1953`, `:3395`,
+  `:639-640`): `C-s C-s` searches the ring's car, `M-n`/`M-p` walk it,
+  `isearch-error` shows `[No previous search string]`, and the strings
+  carry their case folding as a text property. **`M-s` is not history in
+  Emacs** - it is the `isearch-toggle-*` prefix; measured, `C-s M-s C-g`
+  says "M-s C-g is undefined". A repeat searches **from point**, not from
+  `point - pattern length` (`isearch-search-from-point`): the backup is
+  the rule a typed character needs and it made `C-s C-s` re-find the
+  match point had just left.
+- **The Gtk queue is drained.** The outermost command loop of that front
+  end does not read, so a key queued because a command or a redisplay was
+  running had no reader at all: it sat until the next prompt or isearch,
+  or for ever. `pgtk-drain-queue!` dispatches the queue oldest first, as
+  `kbd_buffer` is read. Reproduced with the display queue directly: three
+  queued keys, one idle key - the idle key ran and the three stayed
+  queued. **This was not the `C-s` bug** - a stranded key waits for the
+  next key; Chris's C-s never came back.
+- **`C-s` broken for ever on Gtk: Return is a *symbol*.** `keysym-event`
+  makes Return the symbol `return`, and `function-key-map` (Return -> 13,
+  TAB -> 9, escape -> 27) is applied by `dispatch-key` - which is *below*
+  isearch's own read, so the search never saw RET: it exited through the
+  other-key branch, which puts the key back on
+  `unread-command-events`, and that list is only consumed by a *read* -
+  which this front end's top level has none of. So the `return` stayed,
+  every later search's first read answered it, exited and put it back:
+  an infinite pushback. `C-g` could not help (the stale key is read
+  first), and other commands worked (they do not read). `isearch-read-key`
+  now applies `function-key-translate`, and `pgtk-drain-queue!` drains
+  `*unread-command-events*` before the display queue. Verified by
+  queueing Return as the real keysym: five searches in a row, all
+  starting; before, 1 worked and 2-5 did nothing. `tty-editor-tests` feeds
+  the symbol to a test display and pins both halves.
+  **The reader is `*after-redisplay-hook*`**: the cursor-blink timer
+  repaints from a Gtk source with no read anywhere, and a key pressed
+  during that repaint had no collector either. The hook runs at the end
+  of `redisplay-frames!` and the Gtk front end drains there; the drain is
+  re-entrancy-guarded. Arming an idle/timeout source from `pgtk-enqueue!`
+  does **not** work: measured, it wedged the calling REPL session and the
+  source never ran.
+- **`M-p` in isearch was two bugs.** `(kbd "M-p")` is a *sequence
+  vector*, so `(eqv? key (kbd "M-p"))` was false for ever - the event is
+  `(vector-ref (kbd "M-p") 0)`. And on a terminal `M-p` is ESC and `p`:
+  the search read the ESC itself (below `read_key_sequence`) and its
+  control-key exit ended the search, then the command loop ran an
+  undefined `M-p`. `isearch-read-key` folds the ESC prefix into the meta
+  event, as `read_char` does. Both measured at a pty: `C-s M-p` now walks
+  the ring. **`M-s` is not history in Emacs** - it is the
+  `isearch-toggle-*` prefix.
+- **`extend_face_id`** (`xdisp.c:24429`, `xfaces.c:2527`): the row's
+  padding uses the last glyph's face only when the faces at the row's end
+  say `:extend`; `isearch` does not, `region` does, and a row ending at
+  `point-max` uses the default. Measured on Emacs in a pty:
+  `\e[36m\e[45m888\e[39;49m` then default padding. The one departure left:
+  when `:extend` is true this fills with the last glyph's token, not the
+  merge of the extending faces alone.
+- **The row builder walks the line once** instead of building
+  `line-texts-glyphs` + `line-texts-offsets`: 10.3 MB -> 8.4 MB per 50
+  keystrokes, same wall time (both walk the same two cross-library
+  accessors). `text-cells-width` was dead and is gone.
+- **`faces-tests.scm` had been crashing in its second group for months**
+  and `tools/run-suites.py` scored it green, because "Test suite
+  finished" appears at the end of *each* group. The check now wants an
+  `Entering`/`Leaving` pair for every group. Under the crash: the tests
+  did not bind `*current-buffer*` (the overlay walk needs it - the
+  renderer binds it in `display-window!`); an empty region split a run;
+  three tests were outside any group, which this `srfi 64` cannot run at
+  all after a group has ended; and one expected the symbol `cyan` where a
+  colour is the string `"cyan"`. faces-tests: 16 -> 35 passing.
+
+## Checks
+
+`tools/pty-check.py` gained `isearch-ring` and `isearch-line-end`, each
+seen failing with its fix reverted (and the ring check first "passed"
+against the marker `[[harness: gave up waiting for b'C15']]` - the WAIT
+trap, again: test the marker before the text it contains).
+`pgtk-tests` pins the drain's order and that a deadline sentinel is
+dropped. All 50 suites pass; faces-tests 35, pgtk-tests 108.
+
+## Still open
+
+- The Gtk drain is exercised by a unit test and by hand under `broadway`
+  (the three-queued-keys reproduction). Nothing in the pty battery can
+  click a Gtk window.
+- `isearch-ring-adjust`'s `search-ring-update` nil branch
+  (`isearch-edit-string`) is not carried: the ring always searches.
+- The fill face when `:extend` is true is the last glyph's, not the
+  extending faces' merge.
+- Emacs 29+ makes the region highlight an *overlay* in Lisp; this tree
+  merges the region in `attrs-at-buffer-position`. Only the empty-region
+  case showed, and it is fixed.
