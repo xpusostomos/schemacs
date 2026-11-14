@@ -26,11 +26,6 @@ Here's what works already:
 * eval-expression, eval-region
 * Multiple character set detection and conversion
 * Handling of illegal characters
-* Multiple Framesery-replace, query-replace-regexp 
-* Completions, query-replace have color highlighting like real emacs
-* eval-expression, eval-region
-* Multiple character set detection and conversion
-* Handling of illegal characters
 * Multiple Frames
 * Buffer list
 * Dired
