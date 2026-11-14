@@ -7242,3 +7242,104 @@ glyph matrix per window and diffs it. The skip is therefore blocked on the
 thing this file has named for two years: incremental redraw. Removing the
 `clear-frame-area!` is the first step of that work, not a detail of it.
 Reverted; the fields it added to `<window>` are left in place, unread.
+
+# The isearch scan, and the row's glyphs (2026-11-14)
+
+Chris: *"keep going because it's still dog slow"*, then *"but both are
+still slow"*. This pass is the isearch keystroke and the redisplay's
+allocation. Committed as `607f5a7`.
+
+## Where an isearch keystroke's time goes now
+
+In process (command loop, test display), a 240 KB file of "the quick
+brown fox 888 ..." lines, searching for a pattern that ends in a
+failure - the case every extended isearch pattern hits:
+
+| | before | now |
+|---|---|---|
+| failing forward scan | 92.1 ms | **4.9 ms** |
+| ... with case folding | 93.9 ms | **5.7 ms** |
+| failing backward scan | 89.6 ms | **4.9 ms** |
+| a match on the first line | 0.012 ms | 0.003 ms |
+| four isearch keystrokes (three found, one failing) | 158 ms | **22.9 ms** |
+| one plain self-insert key | 2.3 ms | 2.3 ms |
+| GC over 50 keys | 33 ms / 10.3 MB | unchanged |
+
+In a live tty editor a failing isearch key is ~14 ms: the scan ~8 ms of
+it, render ~0.7 ms, lazy highlight ~0.1 ms, the rest the command loop
+and the terminal.
+
+## What made the scan cheap
+
+`search_buffer` reads through `BUF_BEG_ADDR`/`GPT` macros that the C
+compiler expands *into* the loop. The port called `buffer-text-ref` per
+character - `%at`'s two record reads and the base subtraction - and
+turned every character into a `#\char` to fold it before comparing.
+
+- `buffer-text-store` and `buffer-text-gpt` are exported (they *are*
+  `BEG_ADDR` and `GPT`); the scan hoists them and tests the gap once per
+  character with a fixnum compare.
+- The first-character prefilter compares code points: the needle's first
+  character is converted once (its code point, downcase, upcase, folded
+  form) and the per-character test is integer compares.
+
+`boyer_moore` (`search.c:1746`) is deliberately **not** ported: for a
+repeated-character pattern every character in the pattern has shift 1,
+so the skip table degenerates to this scan, and that is the measured
+workload.
+
+## Two bugs this found
+
+- The first prefilter folded with `char-upcase` alone. `char-upcase` of
+  an uppercase needle is itself, so an uppercase needle ("BETA") never
+  matched the lowercase text it folds against - a case-insensitive
+  search silently found nothing. Both casings are compared now.
+- The search tests inserted only at the end of the buffer, so the gap
+  was never *before* the scan and the after-gap branch of the hoisted
+  access was untested. `engine-tests.scm` has six gap-crossing cases
+  now (`split-searchable` inserts at position 6).
+
+## The redisplay's glyphs
+
+`line-slice-glyphs` made a `<glyph>` record per cell per redisplay and
+`extend-face-to-end-of-line` made a second vector plus up to 80 more per
+row. Emacs's `append_glyph` writes into a pool allocated once. The rows
+now keep their vectors and are written through (`%reset-glyph!`); the
+padding appends into the same storage; blank rows keep theirs. Allocation
+per 24x80 render: **433 KB -> 332 KB**, and a probe holds a slot's glyph
+object across three renders and gets `eq?`.
+
+`disp-table.scm` caches the one-character strings for code points below
+256 - a representation departure (a `CHAR_GLYPH` in the C holds the
+character) worth 2 KB against 1,920 allocations per redisplay.
+
+**The remaining 332 KB is not glyphs**: it is the per-row lists
+`line-texts-glyphs`/`line-texts-offsets` and the face runs. Emacs's
+`display_line` appends glyphs straight from its iterator and builds no
+lists; walking the line into the row in one pass is the next step, and
+it is a rewrite of `build-row!`, not a change inside it.
+
+## The traps this pass, again
+
+- **A stale `.go` makes the editor interpreted, and that is 245 ms a key
+  where the same code compiled is 14 ms.** Two "regressions" this pass
+  were this and nothing else: the source is newer than the `.go` after
+  an edit, the loader takes the source, and the A/B compares compiled
+  against interpreted. Compile after every edit before measuring.
+- **The pty latency harness is load-sensitive**: the same code measured
+  13-16 ms and 27-32 ms per key in two runs. Use the in-process numbers
+  for an A/B; use the pty only for the end-to-end feel.
+- **`with-current-buffer` takes body forms.** The earlier headless
+  isearch benchmark passed it a lambda, so it measured an *empty* buffer
+  and its numbers were noise.
+- **This editor does not echo a lone prefix on a terminal.** A pty check
+  that waited for "C-x" after C-x timed out every time.
+- `pty-check.py`'s `quit-after-prefix` now waits for the "Quit" it
+  asserts on and tests for the WAIT marker's *absence*. Verified: with
+  an impossible wait the marker is in the screen and the check fails.
+- **`back-door` hung twice in one full battery and passed 5/5 alone.**
+  The client was accepted and never greeted - the one-session-at-a-time
+  REPL class this file already records. `check_back_door` opens a raw
+  greeting socket (for the banner, which only the first client sees) and
+  closes it immediately; the next client may connect before the editor
+  has torn that session down. Not caused by this pass and not fixed.
