@@ -97,6 +97,10 @@
    ;; map's order, and `keymap-canonicalize' resolves inheritance for the
    ;; menu walk (`keyboard.c`'s `map_keymap_canonical' calls it).
    define-key-after keymap-canonicalize
+   ;; `subr.el`'s substitution walk, which `tty-menu-navigation-map`
+   ;; (`menu-bar.el`) is built with: it copies a command's bindings from
+   ;; the global map under new names.
+   substitute-key-definition substitute-key-definition-key
    ;; the separator regexp `split-string` defaults to (`subr.el`'s
    ;; `split-string-default-separators`)
    *split-string-default-separators*
@@ -946,6 +950,111 @@
                     (store-in-keymap new (car cell) (cdr cell)))
                   (reverse seen))
         new))
+
+    (define *key-substitution-in-progress* (make-parameter '()))
+    ;; ^ GNU Emacs's `key-substitution-in-progress` (`subr.el:1638'): the
+    ;; maps a substitution walk is already inside, so that a map reached
+    ;; twice - `C-x' appears under two prefixes, and a map can be its own
+    ;; submap somewhere - is not scanned again. Dynamically bound, which
+    ;; is why it is a parameter: the Elisp `let`-binds it around each
+    ;; level of the recursion.
+
+    (define (substitute-key-definition olddef newdef keymap
+                                       oldmap prefix)
+      ;; GNU Emacs's `substitute-key-definition' (`subr.el:1642'):
+      ;; "Replace OLDDEF with NEWDEF for any keys in KEYMAP now defined as
+      ;; OLDDEF. ... Alternatively, if optional fourth argument OLDMAP is
+      ;; specified, we redefine in KEYMAP as NEWDEF those keys that are
+      ;; defined as OLDDEF in OLDMAP."
+      ;;
+      ;; **This is how `tty-menu-navigation-map` is built**
+      ;; (`menu-bar.el:3008'): the terminal's navigation map does not bind
+      ;; keys of its own, it takes the global map's bindings *for those
+      ;; commands* under the names `term.c` interprets (`tty-menu-exit`
+      ;; for `keyboard-quit`, `tty-menu-next-item` for `next-line`, ...).
+      ;; So the terminal's menu accepts whatever the user's own map has
+      ;; bound to next-line, without a second table to keep in step.
+      ;;
+      ;; The four Emacs arguments are all passed explicitly here - the
+      ;; tree's rule for optional arguments - and PREFIX is a *vector* of
+      ;; events, `#()` at the top (Emacs's "").
+      ;;--------------------------------------------------------------
+      (let* ((scan (if oldmap oldmap keymap))
+             ;; Emacs's `(vconcat prefix [nil])`: one slot more than the
+             ;; prefix, and the appended nil is overwritten by the event
+             ;; below, so what is passed on is the prefix *with* this
+             ;; level's event - never a trailing nil.
+             (prefix1 (list->vector
+                       (append (vector->list prefix) (list #f)))))
+        (parameterize ((*key-substitution-in-progress*
+                        (cons scan (*key-substitution-in-progress*))))
+          (map-keymap
+           (lambda (char defn)
+             (vector-set! prefix1 (vector-length prefix) char)
+             (substitute-key-definition-key defn olddef newdef prefix1
+                                            keymap))
+           scan))))
+
+    (define (substitute-key-definition-key defn olddef newdef prefix keymap)
+      ;; GNU Emacs's `substitute-key-definition-key' (`subr.el:1675'):
+      ;; find the actual command name within a binding and, when it is
+      ;; OLDDEF, rebind PREFIX in KEYMAP to NEWDEF - keeping the menu
+      ;; prompt, the menu-item wrapper and the rest of the binding.
+      ;;
+      ;; `define-key` takes a command and this tree's maps hold the
+      ;; *procedure* of a `define-command`, so OLDDEF is that procedure
+      ;; and `eq?` is the comparison Emacs's `eq` makes.
+      ;;--------------------------------------------------------------
+      (let ((menu-item #f)
+            (skipped '()))
+        (if (and (pair? defn) (eq? (car defn) 'menu-item))
+            ;; `(nth 2 DEFN)` - which is nil for a menu item that names no
+            ;; command, as `(menu-item "--")` does.
+            (begin (set! menu-item defn)
+                   (set! defn (and (>= (length defn) 3) (list-ref defn 2))))
+            ;; Skip past a menu prompt - and past the cached
+            ;; key-equivalence data of a menu item, which is the cons in
+            ;; the car.
+            (begin
+              (let loop ()
+                (when (and (pair? defn) (string? (car defn)))
+                  (set! skipped (cons (car defn) skipped))
+                  (set! defn (cdr defn))
+                  (loop)))
+              (when (and (pair? defn) (pair? (car defn)))
+                (set! defn (cdr defn)))))
+        (cond
+         ((or (eq? defn olddef)
+              ;; "Compare with `equal` if definition is a key sequence.
+              ;; That is useful for operating on function-key-map."
+              (and (or (string? defn) (vector? defn))
+                   (equal? defn olddef)))
+          (define-key keymap prefix
+            (if menu-item
+                (let ((copy (list-copy menu-item)))
+                  (list-set! copy 2 newdef)
+                  copy)
+                (if (null? skipped)
+                    newdef
+                    (append (reverse skipped) (list newdef))))))
+         (else
+          ;; Look past a symbol that names a keymap. This tree's keymaps
+          ;; are values rather than symbols, so that step is the identity
+          ;; - named rather than dropped, because Emacs's `indirect-function`
+          ;; is what makes a menu item's `:filter` symbol reachable and
+          ;; nothing here sets one yet.
+          (let ((inner-def defn))
+            (when (and (keymap-type? inner-def)
+                       ;; "Avoid recursively scanning where KEYMAP does
+                       ;; not have a submap."
+                       (let ((elt (keymap-lookup keymap prefix)))
+                         (or (not elt) (number? elt) (keymap-type? elt)))
+                       ;; "Avoid recursively rescanning keymap being
+                       ;; scanned."
+                       (not (memq inner-def
+                                  (*key-substitution-in-progress*))))
+              (substitute-key-definition olddef newdef keymap inner-def
+                                         prefix)))))))
 
     (define (apply-partially function . args)
       ;; GNU Emacs's `apply-partially' (`subr.el:129'): "Return a function

@@ -98,6 +98,12 @@
          *current-frame* *echo-area-buffer* *echo-area-prompt*
          *window-scroll-function*
          *frame-cursor-type* *frame-focus* frame-height frame-width
+         ;; `FRAME_MENU_BAR_LINES (f)` - whether this frame draws a bar -
+         ;; and `f->menu_bar_vector`, where `display_menu_bar` records the
+         ;; column it drew each item at.
+         %frame-menu-bar-lines frame-top-margin
+         frame-menu-bar-items set!frame-menu-bar-items
+         frame-menu-bar-items-used set!frame-menu-bar-items-used
          ;; `FRAME_GARBAGED_P` / `SET_FRAME_GARBAGED` (`frame.h:1173`),
          ;; consumed by `clear-garbaged-frames!`.
          frame-garbaged-p set-frame-garbaged! frame-minibuffer-window
@@ -275,7 +281,7 @@
     ;; 2026-10-14: two `(make-parameter ...)' forms of the same name meant
     ;; the mode line read one and `add-minor-mode' wrote the other, so a
     ;; minor mode registered the Emacs way never reached the mode line.
-    (only (schemacs editor subr) *minor-mode-alist*)
+    (only (schemacs editor subr) *minor-mode-alist* run-hooks)
     ;; `find_newline' (`search.c:675'), which is what the C's
     ;; `scan_newline' is - the line arithmetic `message-dolog' walks the
     ;; log with.
@@ -295,6 +301,16 @@
    ;; The two hooks a menu bar is refreshed through (`xdisp.c`'s
    ;; DEFVARs, run by the front end's `set_frame_menubar`).
    *activate-menubar-hook* *menu-bar-update-hook*
+   ;; `menu_bar_items` as a seam (`keyboard.scm` installs it), the
+   ;; recursion guard, and the terminal's bar: `update_menu_bar` builds
+   ;; the items and `display_menu_bar` draws the row.
+   *menu-bar-items-function* *inhibit-menubar-update*
+   ;; `Vinhibit_redisplay`, bound while a menu is up.
+   *inhibit-redisplay*
+   update-menu-bar display-menu-bar menu-item-width
+   display-tty-menu-item
+   ;; What a menu wrote over, for the redisplay that puts it back.
+   invalidate-frame-rows!
    ;; `render!' and the mode line are what the rest calls. The search
    ;; highlight used to be here as a parameter; it is isearch's overlays
    ;; now, and the display only reads faces.
@@ -3145,6 +3161,15 @@
       (set-windows-or-buffers-changed! #t)
       #f)
 
+    (define *inhibit-redisplay* (make-parameter #f))
+    ;; ^ GNU Emacs's `Vinhibit_redisplay` (`xdisp.c`, DEFVAR_BOOL "A
+    ;; non-nil value means ignore redisplay requests"): "This is set
+    ;; while a menu is active, to avoid messing the screen if some timer
+    ;; calls `sit-for` or a similar function." The tty menu binds it for
+    ;; as long as it is up; `render!` itself does not consult it, which
+    ;; is the C's split - `update_frame_with_menu` is how a menu repaints
+    ;; the frame underneath it.
+
     (define (redisplay-frames!)
       ;; Draw every frame. **GNU Emacs's redisplay is a loop over all of
       ;; them** - `FOR_EACH_FRAME (tail, frame)' (`xdisp.c:14350',
@@ -3161,21 +3186,24 @@
       ;; be painted over the last on a terminal holding several. A GUI
       ;; frame has its own display here, so all of them are drawn.
       ;;--------------------------------------------------------------
-      (let ((selected (*current-frame*)))
-        (let loop ((frames (*frame-list*)))
-          (cond ((null? frames) #f)
-                (else
-                 (let ((f (car frames)))
-                   (when (or (eq? f selected)
-                             (not (eq? (frame-output f)
-                                       (and selected (frame-output selected)))))
-                     (render! f)))
-                 (loop (cdr frames)))))
-        ;; **The flag is cleared once every frame has been drawn**, which
-        ;; is where `redisplay_internal` clears it (`xdisp.c`): it means
-        ;; "something changed since the last redisplay", and after this
-        ;; one nothing has.
-        (set-windows-or-buffers-changed! #f)))
+      (if (*inhibit-redisplay*)
+          #f
+          (let ((selected (*current-frame*)))
+            (let loop ((frames (*frame-list*)))
+              (cond ((null? frames) #f)
+                    (else
+                     (let ((f (car frames)))
+                       (when (or (eq? f selected)
+                                 (not (eq? (frame-output f)
+                                           (and selected
+                                                (frame-output selected)))))
+                         (render! f)))
+                     (loop (cdr frames)))))
+            ;; **The flag is cleared once every frame has been drawn**,
+            ;; which is where `redisplay_internal` clears it (`xdisp.c`):
+            ;; it means "something changed since the last redisplay", and
+            ;; after this one nothing has.
+            (set-windows-or-buffers-changed! #f))))
 
     (define *redisplay-in-progress* (make-parameter #f))
     ;; ^ GNU Emacs's `redisplaying_p` (`xdisp.c:`: "True means we are in
@@ -3365,6 +3393,16 @@
         ;; jumps to the mode line and back on every keystroke.
         (update-begin! (current-display))
         (clear-garbaged-frames! frame windows)
+        ;; **The menu bar is built and drawn before the windows**, which
+        ;; is `redisplay_internal`'s order: `update_menu_bar` runs before
+        ;; any display line is filled "because it can call eval"
+        ;; (`xdisp.c:14421`), and `display_menu_bar` draws the frame's
+        ;; first rows. On a terminal it is a row of text; a window-system
+        ;; frame's bar is its toolkit's and both calls return at once.
+        (update-menu-bar frame)
+        (unless (window-system-display? (current-display))
+          (when (> (%frame-menu-bar-lines frame) 0)
+            (display-menu-bar frame)))
         ;; Only the selected window is scrolled to show its point here:
         ;; it is the one point moves in, and its buffer is the one
         ;; commands act on. A window that is not selected keeps the view
@@ -3840,6 +3878,14 @@
                            (line-height (current-display)))))
         (let loop ((rest (window-list frame)))
           (cond
+           ((< row (frame-top-margin frame))
+            ;; **The menu bar.** GNU Emacs's `make_lispy_position`
+            ;; answers `(FRAME menu-bar (X . Y) TIME)' for a position in
+            ;; the frame's top margin, which is what
+            ;; `menu-bar-open-mouse` and `popup-menu` read. Answering the
+            ;; frame with no area, as this did, made a click on the bar
+            ;; indistinguishable from a click outside every window.
+            (list frame 'menu-bar (cons x y) 0))
            ((null? rest)
             ;; Outside every window: Emacs answers the frame, and the
             ;; position of a frame is the frame.
@@ -3889,6 +3935,187 @@
     ;; before displaying a menu bar, usually to make the menu contents up
     ;; to date. Each function is called with no args and should update
     ;; the frame's menu bar contents."
+
+    (define *menu-bar-items-function* (make-parameter #f))
+    ;; ^ `menu_bar_items' (`keyboard.c:8641'), as a seam.
+    ;;
+    ;; **A departure, and the same one `*record-window-buffer-function*`
+    ;; is.** In Emacs this file calls `menu_bar_items` across files; here
+    ;; the redisplay is `xdisp.scm` and the bar's items are
+    ;; `keyboard.scm`'s, which imports this library - so the edge would
+    ;; be a cycle. `keyboard.scm` installs its own `menu-bar-items` at
+    ;; load time, and nothing else sets it.
+
+    (define *inhibit-menubar-update* (make-parameter #f))
+    ;; ^ GNU Emacs's `inhibit_menubar_update` (`xdisp.c:14406'): "If
+    ;; called recursively during a menu update, do nothing. This can
+    ;; happen when, for instance, an `activate-menubar-hook` causes a
+    ;; redisplay."
+
+    (define (update-menu-bar frame)
+      ;; GNU Emacs's `update_menu_bar` (`xdisp.c:14422'): recompute the
+      ;; frame's menu bar items before the frame is drawn.
+      ;;
+      ;; **The terminal's half only.** A window-system frame's bar is
+      ;; rebuilt by its own backend (`set_frame_menubar`, which this
+      ;; tree's gtk front end does in its `flush-display!`); a terminal's
+      ;; bar is a row of text this redisplay draws, so its items are this
+      ;; redisplay's to build.
+      ;;
+      ;; The hooks run *here* for the same reason `set_frame_menubar` runs
+      ;; them there: they are what makes a bar whose contents change with
+      ;; the buffer - the Buffers menu - current at the moment it is
+      ;; drawn.
+      ;;--------------------------------------------------------------
+      (when (and (not (window-system-display? (current-display)))
+                 (> (%frame-menu-bar-lines frame) 0)
+                 (*menu-bar-items-function*)
+                 (not (*inhibit-menubar-update*)))
+        (parameterize ((*inhibit-menubar-update* #t))
+          (run-hooks (*activate-menubar-hook*))
+          (run-hooks (*menu-bar-update-hook*))
+          (let* ((items ((*menu-bar-items-function*)))
+                 (vector (make-vector (* 4 (length items)) #f)))
+            (let loop ((rest items) (i 0))
+              (unless (null? rest)
+                (let ((quad (car rest)))
+                  (vector-set! vector i (list-ref quad 0))
+                  (vector-set! vector (+ i 1) (list-ref quad 1))
+                  (vector-set! vector (+ i 2) (list-ref quad 2))
+                  (vector-set! vector (+ i 3) 0)
+                  (loop (cdr rest) (+ i 4)))))
+            (set!frame-menu-bar-items frame vector)
+            ;; **The slot count**, not the item count: Emacs's
+            ;; `menu_bar_items_used` is `ASIZE` of the vector and the
+            ;; walk below steps four slots at a time. Storing the item
+            ;; count here made the bar draw one item and stop.
+            (set!frame-menu-bar-items-used frame (* 4 (length items)))))))
+
+    (define (menu-item-width string)
+      ;; GNU Emacs's `menu_item_width` (`menu.c:1027`): the width of a
+      ;; menu item in *cells* - `CHARACTER_WIDTH` per character, so a
+      ;; wide character counts two. The display's `line-display-width` is
+      ;; the same measure, which is why it is used here.
+      ;;--------------------------------------------------------------
+      (line-display-width string))
+
+    (define (invalidate-frame-rows! frame covered)
+      ;; FRAME's screen no longer holds what its glyph matrices say, for
+      ;; the rows in COVERED - a list of `(Y . HEIGHT)` - because the
+      ;; terminal wrote over them.
+      ;;
+      ;; This is the half of `screen_update` that Emacs gets from its
+      ;; *saved glyph matrix*: `restore_desired_matrix` puts the rows
+      ;; back into the desired matrix and `update_frame_with_menu` diffs
+      ;; them against the current one, so only the cells that differ are
+      ;; written. This tree keeps no frame matrix, but the per-window
+      ;; current matrices *are* the screen-behind for the text rows, so
+      ;; the same effect comes from invalidating exactly the rows the
+      ;; menu covered: `update_window` then rewrites those rows and
+      ;; skips every other one. The mode line, the echo area and the menu
+      ;; bar are redrawn by every redisplay anyway.
+      ;;
+      ;; **Row granularity, not cell** - `update_text_area` is still not
+      ;; ported, so a row is this redisplay's smallest unit. That is the
+      ;; existing departure, not a new one.
+      ;;--------------------------------------------------------------
+      (define (row-covered? row)
+        (let loop ((rest covered))
+          (and (pair? rest)
+               (or (and (>= row (car (car rest)))
+                        (< row (+ (car (car rest)) (cdr (car rest)))))
+                   (loop (cdr rest))))))
+      (for-each
+       (lambda (w)
+         ;; A minibuffer window's one row is the echo area, redrawn whole
+         ;; by every redisplay; there is no matrix of its text to spoil.
+         (unless (window-minibuffer-p w)
+           (let ((top (window-top w))
+                 (body (window-body-height w))
+                 (m (window-current-matrix w)))
+             (when (and m (window-buffer w))
+               (let loop ((i 0) (hit #f))
+                 (if (>= i body)
+                     ;; Only a window that lost a row is marked: one that
+                     ;; kept all of its own is left to the skip.
+                     (when hit (mark-window-display-accurate-1 w #f))
+                     (let ((row (glyph-matrix-row-ref m i)))
+                       (when (and row (row-covered? (+ top i)))
+                         ;; `!current_row->enabled_p` is the diff's own
+                         ;; "the screen is not this" test.
+                         (set-glyph-row-enabled! row #f)
+                         (set! hit #t))
+                       (loop (+ i 1) hit))))))))
+       (window-list frame)))
+
+    (define (display-menu-bar frame)
+      ;; GNU Emacs's `display_menu_bar` (`xdisp.c:27756`), for the
+      ;; terminal: the bar is "an ordinary screen line", drawn with the
+      ;; `menu` face, and each item's column is recorded in the vector for
+      ;; `menu-bar-menu-at-x-y`.
+      ;;
+      ;; Each item is followed by one space (the C displays
+      ;; `SCHARS (string) + 1' characters), and the rest of the row is
+      ;; filled out in the menu face - `extend_face_to_end_of_line`.
+      ;;--------------------------------------------------------------
+      (let* ((dsp (current-display))
+             (items (frame-menu-bar-items frame))
+             (used (frame-menu-bar-items-used frame))
+             (width (frame-width frame))
+             (token (face->attribute 'menu))
+             (y (row->pixel-y 0)))
+        (write-run! dsp (list (make-string (max 1 width) #\space)) y 0
+                    token)
+        (let loop ((i 0) (x 0))
+          (when (< i used)
+            (let ((name (vector-ref items (+ i 1))))
+              ;; "Remember where item was displayed."
+              (vector-set! items (+ i 3) x)
+              (let ((text (string-append name " ")))
+                (when (< x width)
+                  (write-run! dsp (list text) y x token))
+                (loop (+ i 4) (+ x (menu-item-width text)))))))))
+
+    (define (display-tty-menu-separator text width)
+      ;; GNU Emacs's `display_tty_menu_separator` (`xdisp.c:27967`): the
+      ;; cells of a separator row - the `--space` blank, the
+      ;; `--double-line` rule of `=`, or a rule of `-`.
+      ;;
+      ;; The C reads `standard-display-table`'s box glyphs for the rule;
+      ;; nothing here sets one, so the characters are the C's own
+      ;; defaults. Answers WIDTH cells: the rule is WIDTH-2 long and is
+      ;; padded to the one cell short of WIDTH that the left space leaves
+      ;; - which is `Fmake_string (width - 1)` then `display_string (...
+      ;; width ...)` in the C.
+      ;;--------------------------------------------------------------
+      (let ((c (cond ((string=? text "--space") #\space)
+                     ((string=? text "--double-line") #\=)
+                     (else #\-))))
+        (string-append " " (make-string (max 0 (- width 2)) c) " ")))
+
+    (define (display-tty-menu-item display text width token x y submenu
+                                   separator?)
+      ;; GNU Emacs's `display_tty_menu_item` (`xdisp.c:28003`): one menu
+      ;; line at row Y, column X, WIDTH cells wide - "pad with a space on
+      ;; the left, display the menu item, pad with spaces to WIDTH", and
+      ;; `" >"` when the item opens a submenu.
+      ;;
+      ;; **Two departures, both because there is no glyph matrix.** The C
+      ;; writes into `f->desired_matrix` and lets `update_frame_with_menu`
+      ;; deliver the result; a terminal here *is* the screen, so the row
+      ;; is written where it goes. And SEPARATOR? is passed in rather
+      ;; than tested here: the predicate is `menu_separator_name_p`
+      ;; (`keyboard.c:8608`) and that library is above this one. The
+      ;; layout is the C's, cell for cell.
+      ;;--------------------------------------------------------------
+      (let* ((line (if separator?
+                       (display-tty-menu-separator text width)
+                       (let* ((pad (max 0 (- width 1 (menu-item-width text)
+                                             (if submenu 2 0)))))
+                         (string-append " " text
+                                        (if submenu " >" "")
+                                        (make-string pad #\space))))))
+        (write-run! display (list line) (row->pixel-y y) x token)))
 
     ;;----------------------------------------------------------------
     ;; The `*Messages*' buffer - `message_dolog' and what feeds it

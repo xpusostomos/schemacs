@@ -48,7 +48,7 @@
           %window-hscroll
           set!%window-hscroll set!%window-min-hscroll
           set!%window-suspend-auto-hscroll?
-          *current-frame* frame-height frame-width
+          *current-frame* frame-height frame-width frame-top-margin
           window-type?
           make<window>
           frame-selected-window frame-windows select-window
@@ -1185,9 +1185,13 @@ windows it was combined with."
       (let ((frame (*current-frame*)))
         (select-window window)
         (record-buffer! (window-buffer window))
-        (set!window-top window 0)
+        ;; **The text area begins below the menu bar**, Emacs's
+        ;; `FRAME_TOP_MARGIN` - the row the bar is drawn in is not the
+        ;; window's to use.
+        (set!window-top window (frame-top-margin frame))
         (set!window-left window 0)
-        (set!window-height window (max 1 (- (frame-height frame) 1)))
+        (set!window-height window (max 1 (- (frame-height frame) 1
+                                            (frame-top-margin frame))))
         (set!window-width window (frame-width frame))
         ;; WINDOW becomes the only window of the frame, so it is no longer
         ;; inside anything and holds nothing: the tree is one leaf.

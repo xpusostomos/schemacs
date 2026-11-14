@@ -187,6 +187,9 @@
    ;; so the command is named `insert-newline' here; see below.
    insert-newline
    place-undo-boundary! previous-line read-only-mode
+   ;; `bindings.el`'s arrow-key commands (there is no `bindings.sld`
+   ;; here; the arrows are bound in this file).
+   right-char left-char
    ;; GNU Emacs's `line-move' and the three variables it reads
    ;; (`simple.el:7811-7866'). `next-line' and `previous-line' are
    ;; `line-move' with a sign, as they are in Emacs.
@@ -2352,15 +2355,50 @@ non-nil."
     (define-key *default-keymap* (kbd "C-@") set-mark-command)
     (define-key *default-keymap* (kbd "C-SPC") set-mark-command)
     (define-key *default-keymap* (kbd "C-x h") mark-whole-buffer)
+    ;; GNU Emacs's `right-char` and `left-char` (`bindings.el:1128`,
+    ;; `:1152`): what the left and right arrow keys run. With no bidi
+    ;; text - `current-bidi-paragraph-direction` is always
+    ;; `left-to-right` here - the bodies degenerate to `forward-char`
+    ;; and `backward-char`, which is all this tree can distinguish; the
+    ;; `visual-order-cursor-movement` branch is a display-order question
+    ;; this redisplay does not have.
+    ;;
+    ;; **They exist so that the terminal's menus can follow the arrows.**
+    ;; `tty-menu-navigation-map` substitutes `right-char` and
+    ;; `left-char` for `tty-menu-next-menu`/`tty-menu-prev-menu`, so the
+    ;; arrow keys move between menu-bar menus exactly when the global
+    ;; map binds them to these commands - which is what GNU Emacs's
+    ;; `bindings.el:1412-1415` does and what this tree had not.
+    (define-command (right-char . rest)
+      "Move point N characters to the right (to the left if N is negative).
+On reaching beginning or end of buffer, stop and signal error.
+Interactively, N is the numeric prefix argument.
+If N is omitted or nil, move point 1 character to the right."
+      (interactive "^p")
+      (forward-char (if (pair? rest) (car rest) #f)))
+
+    (define-command (left-char . rest)
+      "Move point N characters to the left (to the right if N is negative).
+On reaching beginning or end of buffer, stop and signal error.
+Interactively, N is the numeric prefix argument.
+If N is omitted or nil, move point 1 character to the left."
+      (interactive "^p")
+      (backward-char (if (pair? rest) (car rest) #f)))
+
     ;; The named keys a terminal sends for its arrow, home and end keys:
-    ;; GNU Emacs binds these in `global-map' too, and to the same
+    ;; GNU Emacs binds these in `global-map` too, and to the same
     ;; commands as the control keys beside them. Keeping them separate
-    ;; from those control keys is what leaves `M-<up>' free to be
-    ;; `minibuffer-previous-completion' in a minibuffer.
+    ;; from those control keys is what leaves `M-<up>` free to be
+    ;; `minibuffer-previous-completion` in a minibuffer.
     (define-key *default-keymap* (kbd "<up>") previous-line)
     (define-key *default-keymap* (kbd "<down>") next-line)
-    (define-key *default-keymap* (kbd "<left>") backward-char)
-    (define-key *default-keymap* (kbd "<right>") forward-char)
+    ;; **`bindings.el:1412-1415`'s own bindings**: `[left]` is
+    ;; `left-char` and `[right]` is `right-char`, not `backward-char`
+    ;; and `forward-char`. They differ only in a bidi paragraph, which
+    ;; this tree has none of - and they differ for the menu, which is
+    ;; what makes the arrows move between menus.
+    (define-key *default-keymap* (kbd "<left>") left-char)
+    (define-key *default-keymap* (kbd "<right>") right-char)
     (define-key *default-keymap* (kbd "<home>") beginning-of-line)
     (define-key *default-keymap* (kbd "<end>") end-of-line)
     (define-key *default-keymap* (kbd "<delete>") delete-char)

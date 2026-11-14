@@ -41,6 +41,9 @@
            display-cell-size display-selections-supported?
            display-mouse-position display-set-size! line-height
            resume-display! screen-size suspend-display!
+           ;; `window-system-display?` is what tells a toolkit's menu bar
+           ;; from a terminal's: see `frame-top-margin`.
+           window-system-display?
            ;; `SET_FRAME_VISIBLE`'s `redisplay_other_windows`, which
            ;; `suspend-frame` needs when the terminal comes back.
            set-windows-or-buffers-changed!)
@@ -158,6 +161,12 @@
    frame-width
    make-frame-window
    make<frame>
+   ;; `FRAME_TOP_MARGIN (f)` - the rows above the text area - and
+   ;; `FRAME_MENU_BAR_LINES (f)`.
+   frame-top-margin %frame-menu-bar-lines
+   ;; `f->menu_bar_vector` and `f->menu_bar_items_used`.
+   frame-menu-bar-items set!frame-menu-bar-items
+   frame-menu-bar-items-used set!frame-menu-bar-items-used
    ;; Frame parameters - `frame.c`'s `param_alist` and its readers.
    frame-parameters frame-parameter set-frame-parameter
    modify-frame-parameters store-in-alist
@@ -867,7 +876,8 @@
       (make<frame>
        windows selected-window minibuffer-window height width
        message message-timer keymap-state quit-cont output name
-       parameters garbaged new-width new-height new-size-p)
+       parameters garbaged new-width new-height new-size-p
+       menu-bar-items menu-bar-items-used)
       frame-type?
       (windows   frame-windows   set!frame-windows)
       ;; ^ The frame's windows, top to bottom. Emacs's `window-list'.
@@ -989,6 +999,19 @@
       ;; (`dispnew.c:6630`) - so a tty resize is parked here and applied
       ;; by `do-pending-window-change`. -1 in both means "no change
       ;; pending", as it does in the C: a native size is never negative.
+      (menu-bar-items frame-menu-bar-items set!frame-menu-bar-items)
+      (menu-bar-items-used frame-menu-bar-items-used
+                           set!frame-menu-bar-items-used)
+      ;; ^ `f->menu_bar_vector` and `f->menu_bar_items_used`
+      ;; (`frame.h`): the menu bar's items as the redisplay last built
+      ;; them, `[KEY NAME DEFS X KEY NAME DEFS X ...]`, X being the
+      ;; column the item was drawn at. It is a *cache*, and the column is
+      ;; the reason: `display_menu_bar` writes each item's position into
+      ;; this vector as it draws it (`xdisp.c:27843`), and
+      ;; `menu-bar-menu-at-x-y` (`menu.c:1049`) reads it back to turn a
+      ;; click into the item under it. The gtk front end keeps its own
+      ;; copy of the built array on the display; this is the one the
+      ;; terminal's redisplay and the bar's commands share.
       )
 
     (define (window-outdated? window)
@@ -1069,6 +1092,30 @@
       (let ((pair (assq 'menu-bar-lines (frame-parameters-alist frame))))
         (if pair (cdr pair) 1)))
 
+    (define (frame-top-margin frame)
+      ;; GNU Emacs's `FRAME_TOP_MARGIN` (`frame.h:1132`): the rows of the
+      ;; frame above every window - "the menu bar, the tab bar and the
+      ;; tool bar", of which a terminal has the first two. A window's
+      ;; `top_line` is measured from here, not from the frame's own top
+      ;; (`window.c:5021`), which is what makes the menu bar a row the
+      ;; windows do not use.
+      ;;
+      ;; **A toolkit's menu bar is not one of those rows.** A Gtk frame's
+      ;; bar is a widget stacked above the drawing area, so the frame's
+      ;; text area begins below it already - `FRAME_MENU_BAR_LINES` is 0
+      ;; on such a frame, and the `menu-bar-lines` parameter only says
+      ;; whether the widget is showing. A terminal's bar *is* a row of
+      ;; the text area, which is why this is the one place the two
+      ;; differ.
+      ;;--------------------------------------------------------------
+      (let ((display (frame-output frame)))
+        (if (and display (window-system-display? display))
+            0
+            (let ((pair (assq 'tab-bar-lines
+                              (frame-parameters-alist frame))))
+              (+ (%frame-menu-bar-lines frame)
+                 (if pair (cdr pair) 0))))))
+
     (define (frame-parameters . args)
       ;; GNU Emacs's `frame-parameters` (`frame.c:4083`): "Return the
       ;; parameters-alist of frame FRAME."
@@ -1134,6 +1181,16 @@
          frame (store-in-alist (frame-parameters-alist frame) parameter value))
         (when (eq? parameter 'name)
           (set!frame-name frame value))
+        ;; **Turning the bar on or off re-tiles the frame.** GNU Emacs's
+        ;; `x_set_menu_bar_lines` ends in `adjust_frame_size (f, -1, -1, 4,
+        ;; false, Qmenu_bar_lines)`, which is what gives the text area the
+        ;; row back (or takes it) - `FRAME_TOP_MARGIN` changed, and every
+        ;; window's `top_line` is measured from it. Without this,
+        ;; `menu-bar-mode -1` left a blank row at the top and a window one
+        ;; row too short.
+        (when (eq? parameter 'menu-bar-lines)
+          (resize-frame-windows! frame (frame-height frame) (frame-width frame)
+                                 (frame-height frame) (frame-width frame)))
         value))
 
     (define (modify-frame-parameters frame alist)
@@ -1928,9 +1985,18 @@
                                  #t
                                  ;; Nothing is queued for later - -1 is
                                  ;; the C's "no size change pending".
-                                 -1 -1 #f))
+                                 -1 -1 #f
+                                 ;; No menu bar built yet.
+                                 #f 0))
+             ;; **The text area starts below the top margin**, which is
+             ;; what makes the menu bar a row the windows do not use -
+             ;; GNU Emacs's `r->top_line = FRAME_TOP_MARGIN (f)`
+             ;; (`window.c:5021`). The echo row is still the frame's last.
              (window (make-frame-window frame editor
-                                        0 (max 1 (- height 1)) 0 width))
+                                        (frame-top-margin frame)
+                                        (max 1 (- height 1
+                                                  (frame-top-margin frame)))
+                                        0 width))
              ;; **The minibuffer window is the frame's last row**, made
              ;; with the frame as `make_frame` makes it (`frame.c:1237`,
              ;; `fset_minibuffer_window (f, make_minibuffer_window ())`).
@@ -2354,9 +2420,16 @@
       ;; The row above the echo area is the text area: the echo area has
       ;; the frame's last row, as GNU Emacs's minibuffer window does.
       ;;--------------------------------------------------------------
-      (scale-window! (car (frame-windows frame))
-                     0 0 old-width (max 1 (- old-height 1))
-                     0 0 new-width (max 1 (- new-height 1)))
+      ;; **The top margin is the menu bar's.** `resize_frame_windows`
+      ;; gives the root window `new_size = new_height - FRAME_TOP_MARGIN
+      ;; - 1` rows starting at `FRAME_TOP_MARGIN` (`window.c:5050`), so a
+      ;; frame with a bar divides its rows between the bar, the text area
+      ;; and the echo row.
+      (let ((margin (frame-top-margin frame)))
+        (scale-window! (car (frame-windows frame))
+                       0 0 old-width (max 1 (- old-height 1))
+                       margin 0 new-width
+                       (max 1 (- new-height margin 1))))
       ;; **The minibuffer window is the frame's last row, so a resize
       ;; moves it too.** `resize_frame_windows` (`window.c`) sizes the
       ;; root window to `new_height - 1` and leaves `FRAME_MINIBUF_WINDOW`

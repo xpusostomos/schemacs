@@ -49,23 +49,42 @@
     ;; written into.
     (only (schemacs editor keymap)
           make-sparse-keymap define-key keymap-lookup *default-keymap*
-          keymap-bindings %set!keymap-order!)
+          keymap-bindings %set!keymap-order! keymap-type?)
+    ;; `substitute-key-definition` builds `tty-menu-navigation-map`, and
+    ;; `event-end` is `popup-menu-normalize-position`'s.
+    (only (schemacs editor subr)
+          substitute-key-definition event-end posn-x-y)
+    ;; `menu-bar-open` asks which kind of display the frame is on, which
+    ;; is what decides whether the toolkit opens the bar.
+    (only (schemacs editor dispnew) window-system-display?)
+    ;; `popup-menu` is where a menu selection becomes a command.
+    (only (schemacs editor command)
+          run-command command-record-of command-record-named
+          command-interactive-spec command-type?)
     ;; The Buffers menu rebuilds its keymap in place, so the clearing is
     ;; here: `hash-clear!` is Guile's, and the order list is the keymap's
     ;; own export.
     (only (guile) format filter hash-clear!)
+    ;; the debug guard's report, and `display` (not `(scheme base)`'s)
+    (only (scheme write) display)
     (only (schemacs editor character) kbd)
     ;; `menu-bar-final-items` is `keyboard.c`'s variable, which
     ;; `menu-bar.el` sets (`:46`).
     (only (schemacs editor keyboard)
-          *menu-bar-final-items* abort-recursive-edit)
+          *menu-bar-final-items* abort-recursive-edit key-binding)
     ;; `last-command-event` is `keyboard.c`'s variable by the C's file
     ;; list, and `command.scm`'s by this tree's import graph (the command
     ;; loop sets it, and the loop's library is above both).
     (only (schemacs editor command) *last-command-event* define-command)
     ;; The Edit menu's commands.
     (only (schemacs editor simple)
-          kill-region kill-ring-save yank undo undo-redo mark-whole-buffer)
+          kill-region kill-ring-save yank undo undo-redo mark-whole-buffer
+          ;; The commands `tty-menu-navigation-map` substitutes for: the
+          ;; map takes *their* keys and re-binds them to the `tty-menu-*`
+          ;; symbols `term.c` interprets.
+          keyboard-quit next-line previous-line insert-newline
+          right-char left-char)
+    (only (schemacs editor cmds) forward-char backward-char)
     (only (schemacs editor isearch) isearch-forward isearch-backward)
     (only (schemacs editor replace)
           query-replace query-replace-regexp replace-string)
@@ -85,6 +104,11 @@
     (only (schemacs editor fileio) file-name-directory-part)
     (only (schemacs editor frame) make-frame-command delete-frame
           *echo-area-buffer*)
+    ;; `popup-menu`'s "we were given a map for the menu-bar item" lookup
+    ;; reads the buffer's own map too.
+    (only (schemacs editor buffer) buffer-local-keymap)
+    ;; The menu itself - `x-popup-menu` (`menu.c:1433`).
+    (only (schemacs editor menu) x-popup-menu)
     (only (schemacs editor dired) dired)
     ;; The predicates the `:enable` expressions read. They are evaluated
     ;; by `menu-item-eval-property` when the bar is built, in the
@@ -98,12 +122,18 @@
     ;; `frame-or-buffer-changed-p` compares.
     (only (schemacs editor frame) frame-list frame-name)
     ;; The hook that rebuilds the Buffers menu, `xdisp.c`'s.
-    (only (schemacs editor xdisp) *menu-bar-update-hook*)
+    (only (schemacs editor xdisp)
+          *menu-bar-update-hook* menu-item-width posn-at-x-y
+          redisplay-frames!)
     ;; `menu-bar-mode` sets the parameter on every frame, and rewrites
     ;; `default-frame-alist` when it is there.
     (only (schemacs editor frame)
-          *frame-list* set-frame-parameter *default-frame-alist*)
-    (only (schemacs editor command) current-prefix-arg called-interactively?)
+          *frame-list* set-frame-parameter *default-frame-alist*
+          selected-frame frame-live-p mouse-position %frame-menu-bar-lines
+          frame-output
+          frame-menu-bar-items frame-menu-bar-items-used)
+    (only (schemacs editor command)
+          current-prefix-arg called-interactively? uarg->integer)
     (only (schemacs editor subr) assq-delete-all)
     (only (schemacs editor marker) marker-position)
     ;; "Menu Bar mode disabled ..." - `message` is `editfns.c`'s.
@@ -121,7 +151,13 @@
    global-buffers-menu-map menu-bar-update-buffers
    frame-or-buffer-changed-p
    *buffers-menu-max-size* *buffers-menu-buffer-name-length*
-   *buffers-menu-show-directories* *buffers-menu-show-status*)
+   *buffers-menu-show-directories* *buffers-menu-show-status*
+   ;; The terminal's menu machinery - `menu-bar.el:2690-3060`.
+   *menu-bar-open-function*
+   *tty-menu-open-use-tmm* *tty-menu--initial-menu-x*
+   tty-menu-navigation-map *tty-menu-navigation-map*
+   menu-bar-menu-at-x-y popup-menu popup-menu-normalize-position
+   menu-bar-open menu-bar-define-mouse-key)
 
   (begin
 
@@ -791,4 +827,357 @@ created in the future."
      (cons menu-bar-update-buffers (*menu-bar-update-hook*)))
     (menu-bar-update-buffers #t)
 
+
+    ;;----------------------------------------------------------------
+    ;; The terminal's menu bar - `menu-bar.el:2813-3060`
+    ;;----------------------------------------------------------------
+    ;;
+    ;; A terminal has no toolkit, so its menu bar is a row of text and
+    ;; its menus are drawn by `term.c`. What is here is the Lisp half:
+    ;; the navigation map `tty_menu_activate` reads commands through,
+    ;; `popup-menu` (which is what every menu-bar item runs), and
+    ;; `menu-bar-open`, which is F10.
+    ;;--------------------------------------------------------------
+
+    (define *menu-bar-open-function* (make-parameter #f))
+    ;; ^ The window system's `menu-bar-open`, as a seam: GNU Emacs's
+    ;; `menu-bar-open` dispatches on `(framep frame)` to `x-menu-bar-open`,
+    ;; `pgtk-menu-bar-open`, `w32-menu-bar-open` and so on, and each of
+    ;; those lives with its own terminal. A toolkit's front end is a
+    ;; different library here (`ui/gtk'), so it installs its own - the
+    ;; same shape as `*frame-creation-function*`.
+
+    (define *tty-menu-open-use-tmm* #f)
+    ;; ^ GNU Emacs's `tty-menu-open-use-tmm` (`menu-bar.el:2813`), a
+    ;; defcustom: "If non-nil, \\[menu-bar-open] on a TTY will invoke
+    ;; `tmm-menubar'. If nil, it will drop down the menu corresponding to
+    ;; the first (leftmost) menu-bar item."
+    ;;
+    ;; **`tmm-menubar` is not ported**, so with this set the command says
+    ;; so rather than opening nothing. The default is what makes the bar
+    ;; work.
+
+    (define *tty-menu--initial-menu-x* 1)
+    ;; ^ GNU Emacs's `tty-menu--initial-menu-x` (`menu-bar.el:2824`): "X
+    ;; coordinate of the first menu-bar menu dropped by F10."
+
+    (define (menu-bar-define-mouse-key map key def)
+      ;; GNU Emacs's `menu-bar-define-mouse-key` (`menu-bar.el:2990`):
+      ;; "Like `define-key', but add all possible prefixes for the
+      ;; mouse."
+      ;;
+      ;; **Only the bare key here.** The C's extra prefixes are the
+      ;; window areas a TTY can report a mouse position in - `tab-line`,
+      ;; `header-line`, `menu-bar`, `mode-line`, ... - and binding an
+      ;; area-prefixed sequence would mean a key beginning with an area
+      ;; symbol, which the lookup descends into only when the area's own
+      ;; binding is a keymap. No terminal mouse report is ported, so the
+      ;; prefixed spellings could not be reached anyway.
+      ;;--------------------------------------------------------------
+      (define-key map (vector key) def))
+
+    (define (tty-menu-navigation-map)
+      ;; GNU Emacs's `tty-menu-navigation-map` (`menu-bar.el:3008`): the
+      ;; keymap `tty_menu_activate` reads its commands through.
+      ;;
+      ;; **This is `substitute-key-definition`'s one use in the tree.**
+      ;; The map does not bind keys of its own; it takes whatever the
+      ;; user's global map has bound to `next-line`, `keyboard-quit` and
+      ;; the rest and re-binds those *same keys* to the `tty-menu-*`
+      ;; symbols `term.c` interprets. So a user who remaps `next-line`
+      ;; navigates menus with their own key without a second table to
+      ;; keep in step.
+      ;;
+      ;; "The tty-menu-* are just symbols interpreted by term.c, they are
+      ;; not real commands" - and `read-menu-command` answers the binding
+      ;; without running it.
+      ;;--------------------------------------------------------------
+      (let ((map (make-sparse-keymap)))
+        (for-each
+         (lambda (bind)
+           (substitute-key-definition (car bind) (cdr bind)
+                                      map *default-keymap* #()))
+         ;; The C's list, with this tree's command *procedures* where it
+         ;; names symbols - the global map holds the procedures.
+         ;; `menu-bar-open` maps to `tty-menu-exit` as it does there,
+         ;; which is what makes F10 while a menu is up put it down again.
+         (list (cons keyboard-quit 'tty-menu-exit)
+               ;; `keyboard-escape-quit` is not ported; a symbol can
+               ;; never `eq?` a map's procedure, so this entry is the
+               ;; no-op it is in Emacs for a user with no binding for it.
+               (cons 'keyboard-escape-quit 'tty-menu-exit)
+               (cons forward-char 'tty-menu-next-menu)
+               (cons backward-char 'tty-menu-prev-menu)
+               ;; **The arrow keys' commands**, which are what move
+               ;; between menus: `[right]` is `right-char` and `[left]`
+               ;; is `left-char` in `bindings.el:1412-1415`, so these two
+               ;; substitutions are what give the arrows their meaning
+               ;; inside a menu.
+               (cons right-char 'tty-menu-next-menu)
+               (cons left-char 'tty-menu-prev-menu)
+               (cons next-line 'tty-menu-next-item)
+               (cons previous-line 'tty-menu-prev-item)
+               (cons insert-newline 'tty-menu-select)
+               ;; `newline-and-indent` (C-j) is `simple.el`'s and needs
+               ;; `indent-according-to-mode`, which is not ported; a
+               ;; symbol cannot `eq?` a procedure, so the entry does
+               ;; nothing rather than being wrong.
+               (cons 'newline-and-indent 'tty-menu-select)
+               (cons menu-bar-open 'tty-menu-exit)))
+        ;; "The bindings of menu-bar items are so that clicking on the
+        ;; menu bar when a menu is already shown pops down that menu."
+        (define-key map (vector 'menu-bar 't) 'tty-menu-exit)
+        ;; The select keys, by their events: `[?\C-r]`, `[?\C-j]`,
+        ;; `[return]` and `[linefeed]`. RET and C-m are one event (13),
+        ;; LF is 10, and C-r is 18.
+        (for-each (lambda (key) (define-key map (vector key) 'tty-menu-select))
+                  (list 18 13 10))
+        ;; The wheel and the buttons: a terminal with no mouse never
+        ;; makes them, and a terminal that one day reports a mouse needs
+        ;; them - so they are bound as the C binds them.
+        (for-each (lambda (key)
+                    (menu-bar-define-mouse-key map key 'tty-menu-select))
+                  '(mouse-1 drag-mouse-1 mouse-2 drag-mouse-2
+                    mouse-3 drag-mouse-3))
+        (menu-bar-define-mouse-key map 'wheel-down 'tty-menu-next-item)
+        (menu-bar-define-mouse-key map 'wheel-up 'tty-menu-prev-item)
+        (menu-bar-define-mouse-key map 'wheel-left 'tty-menu-prev-menu)
+        (menu-bar-define-mouse-key map 'wheel-right 'tty-menu-next-menu)
+        ;; "The following 6 bindings are for those whose text-mode mouse
+        ;; lack the wheel."
+        (for-each (lambda (key)
+                    (menu-bar-define-mouse-key map key 'tty-menu-next-item))
+                  '(S-mouse-1 S-drag-mouse-1))
+        (for-each (lambda (key)
+                    (menu-bar-define-mouse-key map key 'tty-menu-prev-item))
+                  '(S-mouse-2 S-drag-mouse-2 S-mouse-3 S-drag-mouse-3))
+        ;; "The down-mouse events must be bound to `tty-menu-ignore`, so
+        ;; that only releasing the mouse button pops up the menu."
+        (for-each (lambda (key)
+                    (menu-bar-define-mouse-key map key 'tty-menu-ignore))
+                  '(down-mouse-1 down-mouse-2 down-mouse-3
+                    C-down-mouse-1 C-down-mouse-2 C-down-mouse-3
+                    mouse-movement))
+        map))
+
+    (define (menu-bar-menu-at-x-y x y frame)
+      ;; GNU Emacs's `menu-bar-menu-at-x-y` (`menu.c:1049`): "Return the
+      ;; menu-bar menu on FRAME at pixel coordinates X, Y."
+      ;;
+      ;; **The positions it reads are the ones `display_menu_bar` wrote**
+      ;; into `FRAME_MENU_BAR_ITEMS` as it drew the row
+      ;; (`xdisp.c:27843`) - which is why the redisplay fills them in and
+      ;; this reads them back.
+      ;;--------------------------------------------------------------
+      (let ((frame (or frame (selected-frame))))
+        (if (not (frame-live-p frame))
+            #f
+            (let ((items (frame-menu-bar-items frame))
+                  (used (frame-menu-bar-items-used frame)))
+              (if (or (not items) (< y 0) (>= y (%frame-menu-bar-lines frame)))
+                  #f
+                  ;; "This loop assumes a single menu-bar line".
+                  (let loop ((i 0))
+                    (if (>= i used)
+                        #f
+                        (let ((name (vector-ref items (+ i 1)))
+                              (pos (vector-ref items (+ i 3))))
+                          (if (not name)
+                              #f
+                              (if (and (<= pos x)
+                                       ;; "We use <= so the blank between
+                                       ;; 2 items on a TTY is considered
+                                       ;; part of the previous item."
+                                       (<= x (+ pos
+                                                (menu-item-width name))))
+                                  (vector-ref items i)
+                                  (loop (+ i 4))))))))))))
+
+    (define (popup-menu-normalize-position position)
+      ;; GNU Emacs's `popup-menu-normalize-position` (`menu-bar.el:2788`).
+      ;;--------------------------------------------------------------
+      (cond
+       ((not position)
+        (let ((mp (mouse-position)))
+          (list (list (cadr mp) (cddr mp)) (car mp))))
+       ((and (pair? position) (symbol? (car position)))
+        ;; An event.
+        (popup-menu-normalize-position (event-end position)))
+       (else position)))
+
+    (define (popup-menu menu position prefix from-menu-bar)
+      ;; GNU Emacs's `popup-menu` (`menu-bar.el:2690`): "Popup MENU and
+      ;; call the selected option."
+      ;;
+      ;; **This is what a menu-bar item binds**, so it is where a click
+      ;; on the bar becomes a command: `x-popup-menu` shows the menu and
+      ;; answers the item's key sequence, the sequence is looked up in
+      ;; the map, and the command it names is called. A sequence whose
+      ;; binding is itself a keymap means a deeper menu, and the loop
+      ;; shows that one next - which is how a nested submenu works on a
+      ;; TTY, `tty_menu_show` drawing one menu at a time.
+      ;;--------------------------------------------------------------
+      (let ((map menu)
+            (frame (selected-frame))
+            (event #f)
+            (cmd #f))
+        (if from-menu-bar
+            (let* ((xy (posn-x-y position))
+                   (menu-symbol (menu-bar-menu-at-x-y (car xy) (cdr xy)
+                                                      frame)))
+              (set! position (list menu-symbol
+                                   (list frame '(menu-bar) xy 0))))
+            (set! position (popup-menu-normalize-position position)))
+        (let loop ()
+          (when map
+            (set! event (x-popup-menu position map))
+            (when event
+              (set! cmd
+                    (cond
+                     ;; A menu-bar next/previous: the answer is the
+                     ;; coordinates of the item to drop instead.
+                     ((and from-menu-bar
+                           (pair? event)
+                           (number? (car event))
+                           (number? (cdr event)))
+                      (let ((menu-symbol (menu-bar-menu-at-x-y
+                                          (car event) (cdr event) frame)))
+                        (set! position
+                              (list menu-symbol
+                                    (list frame '(menu-bar) event 0)))
+                        (key-binding (vector 'menu-bar menu-symbol))))
+                     ;; "We were given a list of keymaps. Search them all
+                     ;; in sequence until a first binding is found."
+                     ((and (not (keymap-type? map)) (pair? map))
+                      (let ((mouse-click (list->vector event)))
+                        (let search ((rest map))
+                          (if (null? rest)
+                              #f
+                              (or (keymap-lookup (car rest) mouse-click)
+                                  (search (cdr rest)))))))
+                     (else
+                      ;; "We were given a single keymap."
+                      (keymap-lookup map (list->vector event)))))
+              ;; "Clear out echoing, which perhaps shows a prefix arg."
+              (message "")
+              ;; "Maybe try again but with the submap."
+              (set! map (and (keymap-type? cmd) cmd))
+              ;; "Maybe try again but with the submap" - and with the same
+              ;; POSITION: the C keeps it as it was, which for a menu-bar
+              ;; menu is the constructed `(MENU-SYMBOL (FRAME (menu-bar)
+              ;; XY 0))`. Normalising it again here was wrong twice over:
+              ;; it turned the menu's own position into an event and then
+              ;; into a posn whose car is a frame, which `x-popup-menu`
+              ;; refused.
+              (if map (loop) #f))))
+        ;; "If the user did not cancel by refusing to select, and if the
+        ;; result is a command, run it."
+        ;; "If the user did not cancel by refusing to select, and if the
+        ;; result is a command, run it" (`menu-bar.el:2770`).
+        ;;
+        ;; **A plain procedure is a command here, and Emacs's buffer
+        ;; menu is why.** Its entries are anonymous closures - one per
+        ;; buffer, `(lambda () (interactive) (switch-to-buffer ...))' in
+        ;; the C (`menu-bar-buffer-vector`), and in this tree a closure
+        ;; over the buffer with no command record of its own. The
+        ;; `dispatch-action` path runs such a procedure directly for the
+        ;; same reason; this one did not, so every Buffers entry did
+        ;; nothing when clicked from a terminal menu.
+        (unless map
+          (when cmd
+            (parameterize ((current-prefix-arg prefix)
+                           (*last-command-event*
+                            ;; `(last EVENT)`, which is `(srfi 1)`'s;
+                            ;; the last *event* of the sequence, and a
+                            ;; menu's answer is never empty here.
+                            (and (pair? event) (car (reverse event)))))
+              (cond
+               ((command-type? cmd)
+                (if (command-interactive-spec cmd)
+                    (run-command cmd prefix)
+                    (run-command cmd)))
+               ((symbol? cmd)
+                (let ((record (command-record-named cmd)))
+                  (when record
+                    (if (command-interactive-spec record)
+                        (run-command record prefix)
+                        (run-command record)))))
+               ((procedure? cmd)
+                (let ((record (command-record-of cmd)))
+                  (if record
+                      (if (command-interactive-spec record)
+                          (run-command record prefix)
+                          (run-command record))
+                      ;; A closure with no command record takes no
+                      ;; arguments - it is the tree's `(lambda ()
+                      ;; (interactive) ...)`
+                      (cmd))))))))
+        #f))
+
+    (define-command (menu-bar-open . rest)
+      "Start key navigation of the menu bar in FRAME.
+Optional argument INITIAL-X gives the X coordinate of the first TTY
+menu-bar menu to be dropped down."
+      ;; **Both arguments are optional**, as Emacs's `(&optional frame
+      ;; initial-x)` is: `(menu-bar-open)` from Lisp is an ordinary call,
+      ;; and a fixed two-argument definition made it "Wrong number of
+      ;; arguments". The interactive form still supplies both.
+      (interactive (list #f (uarg->integer 1 (current-prefix-arg))))
+      ;; GNU Emacs's `menu-bar-open` (`menu-bar.el:2829`). On a terminal
+      ;; with a menu bar it drops the menu at INITIAL-X, "one situation
+      ;; where this is important is when this function is invoked by name
+      ;; via M-x, in which case the menu bar includes the Minibuf menu
+      ;; item" - so the bar is brought up to date before it is read.
+      ;;
+      ;; **The dispatch is Emacs's `(eq type 'pgtk) (pgtk-menu-bar-open
+      ;; frame)' and `(eq type 'x) (x-menu-bar-open frame)'**
+      ;; (`menu-bar.el:2859-2866`): a window system's bar belongs to the
+      ;; toolkit, so its own library opens it. `*menu-bar-open-function*`
+      ;; is what it installs.
+      ;;
+      ;; **`tmm-menubar` is the branch not carried**: it is the
+      ;; text-mode menu, a command of its own in tmm.el.
+      ;;--------------------------------------------------------------
+      (let* ((frame (if (pair? rest) (car rest) #f))
+             (initial-x (if (and (pair? rest) (pair? (cdr rest)))
+                            (cadr rest)
+                            1))
+             (frame (or frame (selected-frame)))
+             (display (and frame (frame-output frame))))
+        (cond
+         ((and display (window-system-display? display)
+               (*menu-bar-open-function*))
+          ((*menu-bar-open-function*) frame))
+         ((or *tty-menu-open-use-tmm*
+              (not (> (%frame-menu-bar-lines frame) 0)))
+          (error "tmm-menubar is not ported"))
+         (else
+          (redisplay-frames!)
+          (let* ((x (max initial-x *tty-menu--initial-menu-x*))
+                 (menu (menu-bar-menu-at-x-y x 0 frame)))
+            (popup-menu
+             (or (key-binding (vector 'menu-bar menu))
+                 (let ((local (buffer-local-keymap (current-buffer))))
+                   (and local
+                        (keymap-lookup local (vector 'menu-bar menu)))))
+             (posn-at-x-y x 0 frame)
+             #f
+             #t))))))
+
+    ;; "F10 drops down the menu corresponding to the first (leftmost)
+    ;; menu-bar item" (`menu-bar.el:2866`).
+    (define-key *default-keymap* (kbd "<f10>") menu-bar-open)
+
+    (define *tty-menu-navigation-map* (make-parameter
+                                       (tty-menu-navigation-map)))
+    ;; ^ GNU Emacs's `tty-menu-navigation-map` (`menu-bar.el:3008`), as
+    ;; the value `tty_menu_activate` binds `overriding-terminal-local-map`
+    ;; to for as long as a menu is up (`term.c:4160`,
+    ;; `specbind (Qoverriding_terminal_local_map, Fsymbol_value
+    ;; (Qtty_menu_navigation_map))`).
+    ;;
+    ;; **Built here, after the F10 binding**, because the map is made by
+    ;; *copying* keys the global map has bound, and F10's own binding is
+    ;; one of the keys it copies: built before that line, F10 inside a
+    ;; menu would not pop it down.
     ))

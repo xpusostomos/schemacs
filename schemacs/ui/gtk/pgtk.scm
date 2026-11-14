@@ -45,7 +45,7 @@
           pointer->bytevector null-pointer? make-pointer int void double
           unsigned-int make-c-struct parse-c-struct %null-pointer)
     (only (guile) dynamic-link dynamic-func assq-ref filter
-          u32vector->list current-error-port simple-format exit)
+          u32vector->list current-error-port simple-format exit logand)
     ;; `alist-delete' removes one selection from the ownership record;
     ;; `iota' builds the element offsets the 16- and 32-bit selection
     ;; data rows are read at.
@@ -138,6 +138,7 @@
     (only (gi types) symbol->enum)
     ;; The display interface this implements.
     (only (schemacs editor dispnew)
+          menu-show
           <display> *mouse-event-keys* clear-frame-area! clear-end-of-line!
           ensure-surface! column-width
           current-display
@@ -247,11 +248,23 @@
           ;; and `menu_separator_name_p`, which the widget builder needs
           ;; to know a `"--"` item from a real one.
           menu-bar-items menu-separator-name?)
+    ;; A menu that is cancelled signals quit, exactly as C-g does.
+    (only (schemacs editor command) signal-quit)
+    ;; `menu-bar-open`'s toolkit branch: `pgtk-menu-bar-open`
+    ;; (`term/pgtk-win.el:339`) is installed through this seam.
+    (only (schemacs editor menu-bar) *menu-bar-open-function*)
     ;; The platform-independent half of the menu: `menu_items`, the
     ;; `widget_value` tree, and the click's key sequence.
     (only (schemacs editor menu)
           menu-items menu-items-used menu-items-n-panes
           set!menu-items-n-panes!
+          ;; The slot layout and the two flags the popup reads.
+          menu-items-pane-name menu-items-pane-prefix menu-items-pane-length
+          menu-items-item-name menu-items-item-enable menu-items-item-value
+          menu-items-item-equiv-key menu-items-item-definition
+          menu-items-item-type menu-items-item-selected menu-items-item-help
+          menu-items-item-length
+          MENU-KEYMAPS MENU-FOR-CLICK
           init-menu-items finish-menu-items
           parse-single-submenu digest-single-submenu update-submenu-strings
           find-and-call-menu-selection
@@ -260,13 +273,16 @@
           widget-value-next widget-value-call-data widget-value-button-type
           widget-value-selected? widget-value-enabled? widget-value-help
           set!widget-value-name set!widget-value-contents set!widget-value-next
-          set!widget-value-enabled! set!widget-value-button-type)
+          set!widget-value-enabled! set!widget-value-button-type
+          set!widget-value-selected! set!widget-value-key
+          set!widget-value-call-data)
     ;; A colour *name* means what `term/tty-colors.el' says it means.
     (only (schemacs editor tty-colors) tty-color-standard-values))
 
   (export
    <pgtk-display>
    with-gtk-display
+   pgtk-menu-bar-open
    ;; What opening a display does to the face machinery, so a test can do
    ;; it to a display with no window and then read what it draws - which
    ;; is how the *colour* of a face is checked without an eye on it.
@@ -3108,6 +3124,307 @@
               (menu-shell:append wmenu w)
               (loop (widget-value-next item) (cdr made))))))))
 
+
+    ;;----------------------------------------------------------------
+    ;; Popup menus - `pgtk_menu_show` (`pgtkmenu.c:588`)
+    ;;----------------------------------------------------------------
+    ;;
+    ;; The other half of the menu machinery: a menu that is not part of
+    ;; the bar - `x-popup-menu` from Lisp, `popup-menu`, a major mode's
+    ;; context menu. Emacs builds a `widget_value` tree from
+    ;; `menu_items`, turns it into a `GtkMenu`, pops it up at the given
+    ;; place, and runs its own little event loop until an item is
+    ;; activated or the menu is dismissed. The answer is the selected
+    ;; item's *index* in `menu_items`, which is then walked back to the
+    ;; entry - the key sequence, for a keymap menu - that `popup-menu`
+    ;; looks up and runs.
+    ;;--------------------------------------------------------------
+
+    (define *pgtk-popup-selection* (make-parameter #f))
+    (define *pgtk-popup-active* (make-parameter #f))
+    ;; ^ `pgtkmenu.c`'s `menu_item_selection` and `popup_activated_flag`
+    ;; (`:70`, `:74`). Parameters because that is this tree's spelling of
+    ;; the C's statics.
+
+    ;; `create_and_show_popup_menu`'s anchor gravity, `GDK_GRAVITY_NORTH_WEST`
+    ;; (`gdktypes.h:703`): the rectangle's upper-left corner is where the
+    ;; menu's upper-left corner goes.
+    (define GDK-GRAVITY-NORTH-WEST 1)
+
+    ;; `gtk_main_iteration` and the popup functions are called through
+    ;; `dynamic-func`, the same way the selections at the end of this
+    ;; file are: guile-gi's own `menu:popup-at-*` generics take a
+    ;; `GdkRectangle` it made, and the rectangle here is a C struct.
+    (define gtk-popup-lib (dynamic-link "libgtk-3.so.0"))
+
+    (define (pgtk-popup-fn name ret args)
+      (pointer->procedure ret (dynamic-func name gtk-popup-lib) args))
+
+    (define gtk-main-iteration
+      (pgtk-popup-fn "gtk_main_iteration" int '()))
+    (define gtk-menu-popup-at-pointer
+      (pgtk-popup-fn "gtk_menu_popup_at_pointer" void (list '* '*)))
+    (define gtk-menu-popup-at-rect
+      (pgtk-popup-fn "gtk_menu_popup_at_rect" void
+                     (list '* '* '* int int '*)))
+    (define gtk-widget-get-mapped
+      (pgtk-popup-fn "gtk_widget_get_mapped" int (list '*)))
+    (define gtk-widget-get-window
+      (pgtk-popup-fn "gtk_widget_get_window" '* (list '*)))
+    (define gtk-widget-destroy
+      (pgtk-popup-fn "gtk_widget_destroy" void (list '*)))
+
+    (define (pgtk-widget-pointer w)
+      ;; guile-gi's proxy for a GObject is a `<GFundamental>`, whose
+      ;; `value` slot is the pointer the C functions take - the same slot
+      ;; `(gi oop)`'s own `type-peek-object` reads. Nothing else in
+      ;; guile-gi hands it out, which is why this is here.
+      ;;--------------------------------------------------------------
+      (slot-ref w 'value))
+
+    (define (pgtk-popup-build-tree flags title)
+      ;; `pgtk_menu_show`'s tree loop (`pgtkmenu.c:616-771`): "Create a
+      ;; tree of widget_value objects representing the panes and their
+      ;; items."
+      ;;
+      ;; It is `digest_single_submenu` (`menu.c:619`) with the popup's
+      ;; own rules: a pane becomes a submenu only when it has a name and
+      ;; the menu is *not* a keymap menu, and the title is prepended with
+      ;; two separators beneath it.
+      ;;--------------------------------------------------------------
+      (let* ((items (menu-items))
+             (used (menu-items-used))
+             (root (make-widget-value "menu" #f #t #f))
+             (save-wv #f)
+             (prev-wv #f)
+             (first-pane #t)
+             (submenu-stack '()))
+        (set!widget-value-button-type root 'none)
+        (let loop ((i 0))
+          (when (< i used)
+            (let ((slot (vector-ref items i)))
+              (cond
+               ;; A submenu opens.
+               ((not slot)
+                (set! submenu-stack (cons save-wv submenu-stack))
+                (set! save-wv prev-wv)
+                (set! prev-wv #f)
+                (set! first-pane #t)
+                (loop (+ i 1)))
+               ;; A submenu closes.
+               ((eq? slot 'lambda)
+                (set! prev-wv save-wv)
+                (set! save-wv (car submenu-stack))
+                (set! submenu-stack (cdr submenu-stack))
+                (set! first-pane #f)
+                (loop (+ i 1)))
+               ;; A pane inside a submenu is skipped.
+               ((and (eq? slot #t) (pair? submenu-stack))
+                (loop (+ i menu-items-pane-length)))
+               ;; "Ignore a nil in the item list. It's meaningful only
+               ;; for dialog boxes."
+               ((eq? slot 'quote)
+                (loop (+ i 1)))
+               ;; A new pane.
+               ((eq? slot #t)
+                (let* ((pane-name (vector-ref items (+ i menu-items-pane-name)))
+                       (pane-string (or pane-name "")))
+                  ;; "If there is just one top-level pane, put all its
+                  ;; items directly under the top-level menu."
+                  (when (= 1 (menu-items-n-panes))
+                    (set! pane-string ""))
+                  ;; "If the pane has a meaningful name, make the pane a
+                  ;; top-level menu item with its items as a submenu
+                  ;; beneath it."
+                  (if (and (eqv? 0 (logand flags MENU-KEYMAPS))
+                           (not (string=? pane-string "")))
+                      (let ((wv (make-widget-value pane-string #f #t #f)))
+                        (if save-wv
+                            (set!widget-value-next save-wv wv)
+                            (set!widget-value-contents root wv))
+                        (set!widget-value-button-type wv 'none)
+                        (set! save-wv wv)
+                        (set! prev-wv #f))
+                      (when first-pane
+                        (set! save-wv root)
+                        (set! prev-wv #f)))
+                  (set! first-pane #f)
+                  (loop (+ i menu-items-pane-length))))
+               ;; An item within the current pane.
+               (else
+                (let* ((item-name (vector-ref items (+ i menu-items-item-name)))
+                       (enable (vector-ref items (+ i menu-items-item-enable)))
+                       (descrip (vector-ref items
+                                            (+ i menu-items-item-equiv-key)))
+                       (def (vector-ref items (+ i menu-items-item-definition)))
+                       (type (vector-ref items (+ i menu-items-item-type)))
+                       (selected (vector-ref items
+                                             (+ i menu-items-item-selected)))
+                       (help (vector-ref items (+ i menu-items-item-help)))
+                       (wv (make-widget-value item-name #f (not (not enable))
+                                              (and (string? help) help))))
+                  (if prev-wv
+                      (set!widget-value-next prev-wv wv)
+                      (when save-wv (set!widget-value-contents save-wv wv)))
+                  (when (string? descrip)
+                    (set!widget-value-key wv descrip))
+                  ;; "If this item has a null value, make the call_data
+                  ;; null so that it won't display a box when the mouse
+                  ;; is on it."
+                  (when def
+                    (set!widget-value-call-data wv i))
+                  (set!widget-value-button-type
+                   wv (cond ((not type) 'none)
+                            ((eq? type ':toggle) 'toggle)
+                            ((eq? type ':radio) 'radio)
+                            (else (error "bad button type" type))))
+                  (set!widget-value-selected! wv (not (not selected)))
+                  (set! prev-wv wv)
+                  (loop (+ i menu-items-item-length))))))))
+        ;; "Deal with the title, if it is non-nil."
+        (when title
+          (let ((sep1 (make-widget-value "--" #f #f #f))
+                (sep2 (make-widget-value "--" #f #f #f))
+                (wv-title (make-widget-value title #f #t #f)))
+            (set!widget-value-next sep2 (widget-value-contents root))
+            (set!widget-value-next sep1 sep2)
+            (set!widget-value-button-type wv-title 'none)
+            (set!widget-value-next wv-title sep1)
+            (set!widget-value-contents root wv-title)))
+        root))
+
+    (define (pgtk-popup-deactivate . _)
+      ;; `popup_deactivate_callback` (`pgtkmenu.c:105`): the menu was
+      ;; dismissed - Escape, a click elsewhere - so the loop ends with no
+      ;; selection.
+      ;;--------------------------------------------------------------
+      (*pgtk-popup-active* #f))
+
+    (define (pgtk-popup-selected call-data)
+      ;; `popup_selection_callback` (`pgtkmenu.c:117`): "Treat the
+      ;; pointer as an integer. There's no problem as long as pointers
+      ;; have enough bits to hold small integers."
+      ;;--------------------------------------------------------------
+      (*pgtk-popup-selection* call-data)
+      (*pgtk-popup-active* #f))
+
+    (define (pgtk-create-and-show-popup-menu d tree x y for-click)
+      ;; `create_and_show_popup_menu` (`pgtkmenu.c:528`): build the menu,
+      ;; show it at (X, Y) - or at the pointer when it was a click - and
+      ;; "process events that apply to the menu" until it pops down.
+      ;;--------------------------------------------------------------
+      (let ((menu (pgtk-create-menus tree d pgtk-popup-selected #f #f)))
+        (widget:show-all menu)
+        ;; "The menu is canceled if it is unmapped" - the same
+        ;; `popup_deactivate_callback` the C connects through
+        ;; `xg_create_widget`.
+        (connect menu (make <signal> #:name "deactivate")
+                 (lambda (widget) (pgtk-popup-deactivate) #f))
+        (let ((mp (pgtk-widget-pointer menu)))
+          (if for-click
+              (gtk-menu-popup-at-pointer mp %null-pointer)
+              ;; `gtk_menu_popup_at_rect (menu, window, &rect,
+              ;; NORTH_WEST, NORTH_WEST, last_click_event)` - a one-cell
+              ;; rectangle at (X, Y), which is where Emacs puts it too.
+              (let ((rect (make-c-struct (list int int int int)
+                                         (list x y 1 1))))
+                (gtk-menu-popup-at-rect
+                 mp
+                 (gtk-widget-get-window (pgtk-widget-pointer (pgtk-area d)))
+                 rect GDK-GRAVITY-NORTH-WEST GDK-GRAVITY-NORTH-WEST
+                 %null-pointer)))
+          (when (= 1 (gtk-widget-get-mapped mp))
+            (*pgtk-popup-active* #t)
+            ;; `popup_widget_loop` (`pgtkmenu.c:613`): "Process events in
+            ;; the Gtk event loop until done." This is a *nested* turn of
+            ;; the same loop the editor already runs inside
+            ;; (`gtk_main`), which is what Emacs does here as well.
+            (let loop ()
+              (when (*pgtk-popup-active*)
+                (gtk-main-iteration)
+                (loop))))
+          ;; `pop_down_menu`: the widget and its subtree go.
+          (gtk-widget-destroy mp)
+          #f)))
+
+    (define (pgtk-menu-show d frame x y flags title)
+      ;; `pgtk_menu_show` (`pgtkmenu.c:588`): build, show, and answer the
+      ;; chosen item's entry.
+      ;;--------------------------------------------------------------
+      (if (<= (menu-items-used) menu-items-pane-length)
+          (error "Empty menu")
+          (let ((items (menu-items))
+                (used (menu-items-used)))
+            (*pgtk-popup-selection* #f)
+            (pgtk-create-and-show-popup-menu
+             d (pgtk-popup-build-tree flags title) x y
+             (not (eqv? 0 (logand flags MENU-FOR-CLICK))))
+            (let ((selection (*pgtk-popup-selection*)))
+              (cond
+               ((not selection)
+                ;; "Make Cancel equivalent to C-g" - unless the menu was
+                ;; clicked open, which is `MENU_FOR_CLICK`.
+                (unless (not (eqv? 0 (logand flags MENU-FOR-CLICK)))
+                  (signal-quit))
+                #f)
+               (else
+                ;; "Find the selected item, and its pane, to return the
+                ;; proper value."
+                (let ((prefix #f)
+                      (entry #f)
+                      (subprefix-stack (make-vector (max used 1) #f))
+                      (submenu-depth 0))
+                  (let loop ((i 0))
+                    (if (>= i used)
+                        #f
+                        (let ((slot (vector-ref items i)))
+                          (cond
+                           ((not slot)
+                            (vector-set! subprefix-stack submenu-depth prefix)
+                            (set! submenu-depth (+ submenu-depth 1))
+                            (set! prefix entry)
+                            (loop (+ i 1)))
+                           ((eq? slot 'lambda)
+                            (set! submenu-depth (- submenu-depth 1))
+                            (set! prefix
+                                  (vector-ref subprefix-stack submenu-depth))
+                            (loop (+ i 1)))
+                           ((eq? slot #t)
+                            (set! prefix
+                                  (vector-ref items
+                                              (+ i menu-items-pane-prefix)))
+                            (loop (+ i menu-items-pane-length)))
+                           ((eq? slot 'quote)
+                            (loop (+ i 1)))
+                           (else
+                            (set! entry
+                                  (vector-ref items
+                                              (+ i menu-items-item-value)))
+                            (if (not (= selection i))
+                                (loop (+ i menu-items-item-length))
+                                (if (eqv? 0 (logand flags MENU-KEYMAPS))
+                                    entry
+                                    ;; `entry = list1 (entry)`, then the
+                                    ;; prefix, then the submenu prefixes
+                                    ;; from the deepest up.
+                                    (let ((e (list entry)))
+                                      (when prefix
+                                        (set! e (cons prefix e)))
+                                      (let down ((j (- submenu-depth 1)))
+                                        (when (>= j 0)
+                                          (let ((p (vector-ref
+                                                    subprefix-stack j)))
+                                            (when p
+                                              (set! e (cons p e))))
+                                          (down (- j 1))))
+                                      e)))))))))))))))
+
+    (define-method (menu-show (d <pgtk-display>) frame x y flags title)
+      ;; GNU Emacs's `terminal->menu_show_hook` for a Gtk frame:
+      ;; `pgtk_menu_show` (`pgtkmenu.c:588`).
+      ;;--------------------------------------------------------------
+      (pgtk-menu-show d frame x y flags title))
+
     (define (pgtk-menu-selection! d call-data)
       ;; xmenu.c's `menubar_selection_callback` (`:794`): the clicked
       ;; item's `call_data` is its index in the snapshot the bar was
@@ -3149,6 +3466,39 @@
               (let ((alloc (pgtk-allocation d)))
                 (when alloc
                   (window:resize win (car alloc) (+ (cdr alloc) h)))))))))
+
+    (define (pgtk-menu-bar-open frame)
+      ;; GNU Emacs's `pgtk-menu-bar-open` (`term/pgtk-win.el:339`) in its
+      ;; "the bar is showing" branch: `(accelerate-menu frame)`, which is
+      ;; `x_menu_bar_open_internal` (`xmenu.c:579`) -
+      ;;
+      ;;   set_frame_menubar (f, true);
+      ;;   children = gtk_container_get_children (GTK_CONTAINER (menubar));
+      ;;   g_signal_emit_by_name (children->data, "activate_item");
+      ;;
+      ;; "Start key navigation of the menu bar in FRAME. This initially
+      ;; opens the first menu bar item and you can then navigate with the
+      ;; arrow keys, select a menu entry with the return key or cancel
+      ;; with the escape key."
+      ;;
+      ;; **The toolkit takes over from the signal**: GTK's own menu shell
+      ;; reads the arrows, Return and Escape from here, which is why
+      ;; there is nothing else to do. The bar is rebuilt first for the
+      ;; reason `set_frame_menubar (f, true)` gives: the items have to be
+      ;; current before the first one is opened.
+      ;;--------------------------------------------------------------
+      (let ((d (and frame (frame-output frame))))
+        (when d
+          (pgtk-set-frame-menubar d)
+          (let ((bar (pgtk-menubar d)))
+            (when bar
+              (let ((children (container:get-children bar)))
+                (when (pair? children)
+                  ;; A `<signal>` is applicable: `(gi oop)`'s
+                  ;; `initialize` sets its procedure to `%emit` with the
+                  ;; signal fixed, so this is `g_signal_emit_by_name`.
+                  ((make <signal> #:name "activate-item") (car children))
+                  #t)))))))
 
     (define (pgtk-install-menubar! d items submenus vector)
       ;; Digest the freshly built `menu_items` into a `widget_value` tree
@@ -3499,6 +3849,12 @@
       ;; is loaded when the frame is created, and `x_window' sizes itself
       ;; from `FRAME_COLS' × `FRAME_COLUMN_WIDTH'.
       (pgtk-ensure-font!)
+      ;; **This front end's `menu-bar-open`.** GNU Emacs's `menu-bar-open`
+      ;; asks the *frame's type* which toolkit function to call
+      ;; (`menu-bar.el:2859`); here the front end installs its own before
+      ;; any key can be read, the same way it installs its frame creator
+      ;; and its REPL wake.
+      (*menu-bar-open-function* pgtk-menu-bar-open)
       (let ((d (pgtk-open-window 80 24)))
         (current-display d)
         (initialize-pgtk-faces! d)

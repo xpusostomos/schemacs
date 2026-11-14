@@ -33,11 +33,20 @@
   (import (scheme base)
           ;; `caddr' is not resolved through `(scheme base)' by the
           ;; library compiler, as elsewhere in this tree.
-          (only (guile) caddr)
+          (only (guile) caddr logior lognot logand)
+          (only (scheme write) display)
           (only (schemacs editor keymap)
                 keymap-type? keymap-prompt map-keymap)
-          (only (schemacs editor subr) keymap-canonicalize)
-          (only (schemacs editor frame) display-graphic-p)
+          (only (schemacs editor subr)
+                keymap-canonicalize run-hooks
+                event-start posn-window posn-area posn-x-y nth)
+          (only (schemacs editor frame)
+                display-graphic-p frame? frame-live-p frame-output
+                selected-window window-frame window-left window-top
+                window-type?)
+          ;; The display method that shows the menu, and the quit that
+          ;; cancels it.
+          (only (schemacs editor dispnew) menu-show current-display)
           (only (schemacs editor keyboard)
                 parse-menu-item *item-properties*
                 item-property-name item-property-enable item-property-def
@@ -76,7 +85,11 @@
    menu-items-item-type menu-items-item-selected menu-items-item-help
    menu-items-item-length
    ;; What a click means: the key sequence the selected item stands for.
-   find-and-call-menu-selection)
+   find-and-call-menu-selection
+   ;; `x-popup-menu` and its decoder - `menu.c:1111`, `:1433`.
+   x-popup-menu x-popup-menu-1
+   MENU-KEYMAPS MENU-FOR-CLICK MENU-KBD-NAVIGATION
+   *x-pre-popup-menu-hook*)
 
   (begin
 
@@ -565,4 +578,181 @@
                       (when prefix (emit prefix))
                       (emit entry))))))))))
 
+
+    ;;----------------------------------------------------------------
+    ;; `x-popup-menu` - the menu a position names, shown on its display
+    ;;----------------------------------------------------------------
+    ;;
+    ;; GNU Emacs's `x_popup_menu_1` (`menu.c:1111`) and its DEFUN
+    ;; (`:1433`). The work is three steps, and each is the C's: decode
+    ;; POSITION into a frame and a screen position, parse MENU into
+    ;; `menu_items`, and call the display's `menu_show_hook`.
+    ;;
+    ;; **The menu is `menu_items`, as it is in the C.** `tty_menu_show`
+    ;; reads that array, so the port has to build it here rather than
+    ;; hand the display a tree - see the note on `menu-show` in
+    ;; `dispnew.scm`.
+    ;;--------------------------------------------------------------
+
+    ;; The flags of `enum menu_flags` (`menu.h:27`).
+    (define MENU-KEYMAPS 1)
+    (define MENU-FOR-CLICK 2)
+    (define MENU-KBD-NAVIGATION 4)
+
+    (define *x-pre-popup-menu-hook* (make-parameter '()))
+    ;; ^ GNU Emacs's `x-pre-popup-menu-hook` (`menu.c`): "Normal hook run
+    ;; before a popup menu is displayed for the first time." The C runs
+    ;; it with `run_hook (Qx_pre_popup_menu_hook)` after the items are
+    ;; parsed and before the display.
+
+    (define (menu-position-decode position)
+      ;; The first half of `x_popup_menu_1`: "Decode the first argument:
+      ;; find the window and the coordinates." Answers
+      ;; `(values WINDOW X Y FLAGS)` - WINDOW a window or a frame, X and
+      ;; Y the offsets from its own top left.
+      ;;
+      ;; **The keyboard-navigation flag is set for a menu-bar position.**
+      ;; The C sets it when the position's part-of-window is `menu-bar`
+      ;; and it was not built from the very event that is being handled -
+      ;; which is its way of saying "this was made by hand, by F10, not
+      ;; by a click". With no mouse at all, every menu-bar position is
+      ;; one made by hand, so the test is the part-of-window alone.
+      ;;--------------------------------------------------------------
+      (cond
+       ;; "This is an obsolete call, which wants us to precompute the
+       ;; keybinding equivalents" - nil position.
+       ((not position)
+        (values #f 0 0 0))
+       ;; `t`, or a position naming the menu bar or the tool bar: the
+       ;; current mouse position. There is no mouse, so this is the
+       ;; selected window's top left.
+       ((eq? position #t)
+        (values (selected-window) 0 0 0))
+       ((and (pair? position) (memq (car position)
+                                    '(menu-bar tab-bar tool-bar)))
+        (values (selected-window) 0 0 0))
+       ;; `<(XOFFSET YOFFSET) WINDOW>` - the form
+       ;; `popup-menu-normalize-position` produces. The C's test is
+       ;; `CONSP (Fcar (position))`: a *list* in the car is the offset
+       ;; pair, anything else - a symbol, as a menu's position has - is
+       ;; an event.
+       ((pair? (car position))
+        (values (if (pair? (cdr position)) (cadr position) #f)
+                (car (car position))
+                (cdr (car position))
+                0))
+       (else
+        ;; An event: a click, or the position `popup-menu` builds for a
+        ;; menu-bar item - `(MENU-SYMBOL (FRAME (menu-bar) (X . Y) 0))`.
+        (let* ((start (event-start position))
+               (window (posn-window start))
+               (xy (posn-x-y start))
+               ;; "menuflags |= MENU_FOR_CLICK" - the event path is a
+               ;; click as far as `tty_menu_activate` is concerned, and
+               ;; the flag is what makes *cancelling* such a menu pop it
+               ;; down quietly instead of signalling quit
+               ;; (`term.c:4257`: "Make Cancel equivalent to C-g unless
+               ;; FOR_CLICK"). That includes the position `popup-menu`
+               ;; constructs for F10.
+               (flags (logior MENU-FOR-CLICK
+                              (if (and (eq? (posn-area start) 'menu-bar))
+                                  MENU-KBD-NAVIGATION
+                                  0))))
+          ;; A `touchscreen-begin` event's position is itself; this
+          ;; tree makes none, and a click's position is the `posn-` list.
+          (values window
+                  (if (pair? xy) (car xy) 0)
+                  (if (pair? xy) (cdr xy) 0)
+                  flags)))))
+
+    (define (x-popup-menu-1 position menu)
+      ;; GNU Emacs's `x_popup_menu_1` (`menu.c:1111`).
+      ;;--------------------------------------------------------------
+      (if (not position)
+          #f
+          (call-with-values
+              (lambda () (menu-position-decode position))
+            (lambda (window x y flags)
+              (let* ((frame (cond ((frame? window) window)
+                                  ((window-type? window)
+                                   (window-frame window))
+                                  (else
+                                   (error "Wrong type argument: windowp"
+                                          window))))
+                     ;; "Clicks in the text area ... are relative to the
+                     ;; top-left edge of the text area" (`:1242'). A
+                     ;; terminal's text area begins at the window's own
+                     ;; left and top.
+                     (xpos (if (frame? window) 0 (window-left window)))
+                     (ypos (if (frame? window) 0 (window-top window))))
+                (if (not (frame-live-p frame))
+                    #f
+                    (let* ((xpos (+ xpos x))
+                           (ypos (+ ypos y))
+                           (keymap (and (keymap-type? menu) menu))
+                           (title #f))
+                      ;; "Now parse the lisp menus."
+                      (cond
+                       (keymap
+                        ;; "We were given a keymap. Extract menu info from
+                        ;; the keymap."
+                        (keymap-panes (list keymap))
+                        (let ((prompt (keymap-prompt keymap)))
+                          (when prompt (set! title prompt))
+                          ;; "Make that be the pane title of the first
+                          ;; pane."
+                          (when (and prompt (> (menu-items-n-panes) 0))
+                            (vector-set! (menu-items)
+                                         menu-items-pane-name prompt)))
+                        (set! flags (logior flags MENU-KEYMAPS)))
+                       ((and (pair? menu)
+                             (pair? (car menu))
+                             (keymap-type? (car menu)))
+                        ;; "We were given a list of keymaps." The first
+                        ;; keymap with a prompt supplies the title.
+                        (let ((maps menu))
+                          (for-each (lambda (m)
+                                      (let ((prompt (keymap-prompt m)))
+                                        (when (and (not title) prompt)
+                                          (set! title prompt))))
+                                    maps)
+                          (keymap-panes maps)
+                          (if (and title (> (menu-items-n-panes) 0))
+                              (vector-set! (menu-items)
+                                           menu-items-pane-name title)))
+                        (set! flags (logior flags MENU-KEYMAPS)))
+                       (else
+                        ;; "We were given an old-fashioned menu."
+                        (if (not (pair? menu))
+                            (error "Wrong type argument: consp" menu))
+                        (set! title (car menu))
+                        (if (not (string? title))
+                            (error "Wrong type argument: stringp" title))
+                        (list-of-panes (cdr menu))
+                        (set! flags (logand flags (lognot MENU-KEYMAPS)))))
+                      (run-hooks (*x-pre-popup-menu-hook*))
+                      (dynamic-wind
+                       (lambda () #t)
+                       (lambda ()
+                         (menu-show (or (frame-output frame)
+                                        (current-display))
+                                    frame xpos ypos flags title))
+                       (lambda ()
+                         (unuse-menu-items)
+                         (discard-menu-items))))))))))
+
+    (define (x-popup-menu position menu)
+      ;; GNU Emacs's `x-popup-menu` (`menu.c:1433`): "Pop up a
+      ;; deck-of-cards menu and return user's selection."
+      ;;
+      ;; MENU may be a keymap, a list of keymaps, or the old-fashioned
+      ;; `(TITLE PANE...)` list; see `x-popup-menu-1`. The answer is the
+      ;; `(MENU . EVENT...)` list for a keymap (which `popup-menu` looks
+      ;; up) and the item's own value for the list form, exactly as the
+      ;; C's docstring says.
+      ;;
+      ;; `init_raw_keybuf_count` is not carried: it resets the raw
+      ;; key-sequence buffer that a menu-bar click is recorded from.
+      ;;--------------------------------------------------------------
+      (x-popup-menu-1 position menu))
     ))

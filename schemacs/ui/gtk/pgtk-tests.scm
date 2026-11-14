@@ -79,6 +79,14 @@
 ;; A display, with no window and no Gtk init.
 ;;------------------------------------------------------------------
 
+;; **A `<test-display>` has no menu bar widget.** The pgtk frames these
+;; tests make are a drawing surface with pixels; the toolkit's bar sits
+;; above that surface, outside the area they measure. A terminal's bar is
+;; a *row* of its text area, which is `frame-top-margin`'s one difference
+;; between the two - so the frames here are made with the bar turned off.
+(fr:*default-frame-alist*
+ (cons '(menu-bar-lines . 0) (fr:*default-frame-alist*)))
+
 (define (new-display)
   (let ((d (make pt:<pgtk-display>)))
     (dn:current-display d)

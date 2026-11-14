@@ -1156,3 +1156,187 @@ Until both are done, `C-x C-+` scales the frame (text *and* mode line, in
 both windows), which is a visible departure from Emacs rather than a
 hidden one. `C-x C-M-+` already behaves like Emacs's, because it changes
 the face the frame font is read from.
+
+# Menus on both front ends — the bar, the drop-downs, and what a hack looked like
+# (2026-11-14)
+
+`term.c`'s `tty_menu_*`, `menu.c`'s `x_popup_menu_1`/`x-popup-menu`,
+`xdisp.c`'s `display_menu_bar`/`display_tty_menu_item`, `menu-bar.el`'s
+navigation map/`popup-menu`/`menu-bar-open`, and `pgtkmenu.c`'s
+`pgtk_menu_show` are ported. F10 opens the bar's first menu on both front
+ends, arrows move, RET runs the command, left/right move between
+menu-bar menus, and C-g pops down.
+
+## Where each piece is
+
+| Emacs | here |
+|---|---|
+| `tty_menu_*` (`term.c:3228-4300`) | `ui/tty/term.scm` |
+| `tty-menu-navigation-map`, `popup-menu`, `menu-bar-open`, `menu-bar-menu-at-x-y`, `menu-bar-define-mouse-key` (`menu-bar.el:2690-3060`) | `editor/menu-bar.scm` |
+| `x_popup_menu_1`, `x-popup-menu` (`menu.c:1111`, `:1433`) | `editor/menu.scm` |
+| `display_menu_bar` (`xdisp.c:27756`), `display_tty_menu_item` (`:28003`) | `editor/xdisp.scm` |
+| `read_menu_command` (`keyboard.c:1691`) | `editor/keyboard.scm` |
+| `substitute-key-definition[ -key]` (`subr.el:1642`, `:1675`) | `editor/subr.scm` |
+| `FRAME_TOP_MARGIN` (`frame.h:1132`), `f->menu_bar_vector` | `editor/frame.scm` |
+| `pgtk_menu_show` (`pgtkmenu.c:588`), `create_and_show_popup_menu` (`:528`), `popup_widget_loop` (`:613`) | `ui/gtk/pgtk.scm` |
+| `pgtk-menu-bar-open`/`accelerate-menu` (`term/pgtk-win.el:339`, `xmenu.c:579`) | `ui/gtk/pgtk.scm` |
+
+## The screen is ours, so `screen_update` restores rows, not a matrix
+
+Emacs builds a menu into the frame's desired glyph matrix and stashes the
+current matrix; `screen_update` restores the desired matrix from it and
+`update_frame_with_menu` diffs, rewriting only the cells the menu covered.
+A terminal here *is* the screen, so the rows are written with
+`write-glyphs!`'s primitives and "put it back" is a redisplay.
+
+**Garbaging the frame was the first fix and it was wrong**: it clears the
+whole screen and repaints it, a visible flash and not what Emacs does. The
+restore is now `invalidate-frame-rows!` (`xdisp.scm`): the menu records the
+frame rows each pane writes over, and those rows are marked disabled in
+each overlapping window's *current* matrix (`!current_row->enabled_p`, the
+diff's own test) with the window marked inaccurate so the rebuild runs.
+`update_window` then rewrites exactly those rows and skips every other one.
+Measured: an F10 + C-g cycle costs 3.5 KB and performs **no** screen
+clear; the single `ESC[2J` in the stream is the startup repaint.
+
+**Row granularity, not cell**: `update_text_area` is still not ported, so a
+row is the smallest unit this redisplay diffs. That is the existing
+departure, not a new one.
+
+## `popup-menu` runs a plain procedure, because the buffer menu is one
+
+Emacs's buffer entries are anonymous closures -
+`(lambda () (interactive) (switch-to-buffer ...))` - and `popup-menu` ends
+with `(call-interactively cmd)`. This tree's `dispatch-action` already ran
+a plain procedure, but `popup-menu` required a command record, so every
+Buffers entry did nothing when chosen from a terminal menu. It now runs a
+plain procedure the same way the command loop does. `commandp` has no
+counterpart for an anonymous lambda here, which is the reason the closure
+is run directly rather than being passed through an interactive spec.
+
+## `menu-bar-open`'s two arguments are optional
+
+Emacs's is `(&optional frame initial-x)`; ours was a fixed two-argument
+`define-command`, so `(menu-bar-open)` from Lisp was "Wrong number of
+arguments". It is variadic now, with the interactive form still supplying
+both.
+
+## The GTK half
+
+`menu-bar-open` dispatches on the frame's *display* - Emacs dispatches on
+`(framep frame)` - through `*menu-bar-open-function*`, which the Gtk front
+end installs in `with-gtk-display`. `pgtk-menu-bar-open` is
+`pgtk-menu-bar-open`/`accelerate-menu`: rebuild the bar
+(`set_frame_menubar (f, true)`) and `g_signal_emit_by_name` "activate-item"
+on its first child; GTK then owns the arrows, Return and Escape.
+
+`x-popup-menu` on a Gtk frame is `pgtk_menu_show`: a `widget_value` tree
+built by pgtkmenu.c's own loop (a pane is a submenu only when it has a
+name and the menu is not a keymap menu; the title is prepended with two
+separators), a `GtkMenu` built from it by the existing `create_menus`
+port, `gtk_menu_popup_at_pointer`/`_at_rect`, and `popup_widget_loop` - a
+nested turn of the `gtk_main` the editor already runs inside - until the
+selection or deactivate callback clears the flag. The selected item's
+`call_data` is its index in `menu_items`; the walk back to the entry (with
+the `MENU_KEYMAPS` prefixing) is ported line for line.
+
+**Two FFI calls, and why.** `gtk_main_iteration` and the
+`gtk_menu_popup_at_*` pair are not in the bindings guile-gi generated for
+this typelib - its own `menu:popup-at-*` generics take a `GdkRectangle`
+it made, and the rectangle here is a C struct - so they go through
+`dynamic-func`, as the selections already do. The widget pointer comes
+from the proxy's `value` slot (`<GFundamental>`), which is what
+`(gi oop)`'s own commented-out `type-peek-object` reads.
+
+**The popup's widgets are held, like the bar's.** `pgtk-create-menus`
+holds every widget proxy for the display's life (guile-gi proxies own
+their GObject through a toggle ref). The popup is destroyed after the
+loop (`pop_down_menu`), so its proxies point at destroyed objects; they
+are not dropped from the hold list. Same named departure as the bar's
+rebuild.
+
+## The measurement that says the GTK popup is real
+
+Under `broadway`, a timer calling `(x-popup-menu '((10 . 10) FRAME) MAP)`
+does not return: it is inside `popup_widget_loop`, and a second timer
+fired from inside that loop is what ends the run. Before the port the
+same call answered `#f` at once (`menu-show`'s `<display>` default).
+
+## Deliberately not carried
+
+- **The terminal mouse**: no GPM and no `xterm-mouse-mode`, so
+  `mouse_get_xy`, the mouse branches of `read_menu_input`, and the
+  `S-mouse`/`wheel`/`C-down-mouse` behaviour cannot be reached. The
+  bindings are made as the C makes them anyway.
+- **`tmm-menubar`**: `tty-menu-open-use-tmm` non-nil says it is not
+  ported rather than opening nothing.
+- **`newline-and-indent` (C-j)** and `keyboard-escape-quit`: the missing
+  primitives are `indent-according-to-mode` and the command itself; the
+  navigation map's entries for them are symbols that can never match a
+  procedure, so they are no-ops rather than wrong.
+- **The help echo**: `tty_menu_help_callback` exists and does nothing -
+  there is no `show_help_echo` here - but the pane/item bookkeeping the C
+  does for it is ported.
+- **`x-menu-bar-open-internal`'s X-toolkit (non-GTK) branch**, the
+  Motif/XI2 grab dance: it is the Lucid toolkit's, and this tree has Gtk.
+
+## The window is below the bar
+
+`FRAME_TOP_MARGIN` is menu-bar-lines + tab-bar-lines **for a terminal
+only**. A Gtk frame's bar is a widget stacked above the drawing area, so
+its text area already begins below it and `FRAME_MENU_BAR_LINES` is 0 in
+Emacs - `frame-top-margin` returns 0 for a window-system display and the
+tty rows otherwise. Windows are tiled from the margin (`new-frame-on`,
+`resize-frame-windows!`, `delete-other-windows`), and `set-frame-parameter
+'menu-bar-lines` re-tiles, which is what `menu-bar-mode -1` needs to give
+the row back.
+
+## The arrows
+
+Emacs binds `[left]`/`[right]` to `left-char`/`right-char`
+(`bindings.el:1412-1415`), and `tty-menu-navigation-map` substitutes
+those commands for `tty-menu-prev-menu`/`next-menu`. This tree bound the
+arrows to `backward-char`/`forward-char` and had neither command, so the
+arrows did nothing in a menu. `right-char`/`left-char` are ported
+(`simple.scm`; `bindings.el` has no library here) with the bidi branch
+degenerate - no bidi text, so they are `forward-char`/`backward-char` -
+and the arrows are bound to them.
+
+## The rest of the navigation map
+
+`C-r` selects, `wheel-left`/`wheel-right` move between menus,
+`S-mouse-1`/`S-drag-mouse-1` step forward and the `S-mouse-2`/`3` pair
+step back, `C-down-mouse-1/2/3` ignore, and `mouse-movement` is bound to
+`tty-menu-mouse-movement`, all as `menu-bar.el:3030-3077` has them.
+
+## `MENU_FOR_CLICK`, and the quit that killed the editor
+
+The event path through `x_popup_menu_1` sets `MENU_FOR_CLICK`, which is
+what makes cancelling a menu-bar menu pop it down silently
+(`term.c:4257`); without it every C-g signalled quit. Two more things had
+to be right for C-g in a menu to behave:
+
+- **`read-menu-command` hands a pending quit back as the quit *key***,
+  as `read_char` does (`keyboard.c:2806`), and clears the flag the way
+  `read_char` clears it. Without the clear the flag leaked past the menu
+  and fired as a quit at the next command, which killed the editor.
+- **`read-menu-command` reads with a 100 ms deadline.** Emacs's `pselect`
+  is interrupted by SIGINT (its handlers are installed without
+  `SA_RESTART`); Guile's `select` is restarted across it, so a blocking
+  read never returned and C-g was invisible. The deadline makes the read
+  finite, and `read-key-event`'s `maybe-quit` then runs. This is a poll
+  where Emacs has a signal; it exists only while a menu is open.
+
+## Tests
+
+`menu-tests` 16, `menu-bar-tests` 28, `menu-bar-menus-tests` 7,
+`subr-tests`, `keymap-tests` 89, `tty-editor-tests` 281, `pgtk-tests`,
+`mouse-tests` 43. The unit fixtures run with the bar off, as Emacs's own
+tests do.
+
+`tools/pty-check.py` has a `tty-menu` check, the one that runs with the
+bar *on*: the bar is the first row, F10 drops File, the right arrow
+leaves File for Edit (asserting File's items are *gone* from the composed
+screen), and C-g pops down without "Quit". Every other check has the bar
+off through its init file, because the bar is the frame's first row and
+most checks measure text from row 0.

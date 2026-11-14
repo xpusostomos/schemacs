@@ -104,6 +104,7 @@
     %buffer-modtime
     %buffer-modtime-size
     %for-each-marker
+    %frame-menu-bar-lines
     %kill-buffer
     %mark-marker
     %marker-charpos
@@ -294,9 +295,11 @@
     *indent-tabs-mode*
     *inhibit-file-name-handlers*
     *inhibit-file-name-operation*
+    *inhibit-menubar-update*
     *inhibit-message*
     *inhibit-quit*
     *inhibit-read-only*
+    *inhibit-redisplay*
     *init-file-user*
     *initial-frame-alist*
     *insert-default-directory*
@@ -345,6 +348,7 @@
     *max-eol-check-count*
     *menu-bar-close-window*
     *menu-bar-final-items*
+    *menu-bar-items-function*
     *menu-bar-mode*
     *menu-bar-update-hook*
     *menu-state*
@@ -440,6 +444,9 @@
     *transient-mark-mode*
     *truncate-partial-width-windows*
     *tty-colors*
+    *tty-menu--initial-menu-x*
+    *tty-menu-navigation-map*
+    *tty-menu-open-use-tmm*
     *tty-select-active-regions*
     *tty-slant-table*
     *tty-weight-table*
@@ -451,6 +458,7 @@
     *visual-line-fringe-indicators*
     *window-scroll-function*
     *window-system*
+    *x-pre-popup-menu-hook*
     *x-select-request-type*
     *yank-pop-change-selection*
     <display>
@@ -476,6 +484,9 @@
     Buffer-menu-this-window
     Buffer-menu-toggle-read-only
     Buffer-menu-unmark
+    MENU-FOR-CLICK
+    MENU-KBD-NAVIGATION
+    MENU-KEYMAPS
     abbreviate-file-name
     abort-recursive-edit
     access-keymap
@@ -939,6 +950,7 @@
     display-completion-list
     display-font-families
     display-graphic-p
+    display-menu-bar
     display-mouse-position
     display-pixel-height
     display-pixel-width
@@ -948,6 +960,7 @@
     display-startup-screen
     display-supports-face-attributes-p
     display-text-width
+    display-tty-menu-item
     display-warning
     do-pending-window-change
     downcase
@@ -1146,6 +1159,8 @@
     frame-keymap-state
     frame-list
     frame-live-p
+    frame-menu-bar-items
+    frame-menu-bar-items-used
     frame-message
     frame-message-timer
     frame-minibuffer-window
@@ -1159,6 +1174,7 @@
     frame-quit-cont
     frame-selected-window
     frame-set-background-mode
+    frame-top-margin
     frame-type?
     frame-visible-p
     frame-width
@@ -1330,6 +1346,7 @@
     item-property-type
     just-one-space
     kbd
+    key-binding
     key-description
     key-event->key
     keyboard-coding-system
@@ -1469,14 +1486,18 @@
     matrix-diff-rows
     matrix-mark-current!
     maybe-quit
+    menu-bar-define-mouse-key
     menu-bar-edit-menu
     menu-bar-file-menu
     menu-bar-i-search-menu
     menu-bar-items
+    menu-bar-menu-at-x-y
     menu-bar-mode
+    menu-bar-open
     menu-bar-replace-menu
     menu-bar-separator
     menu-bar-update-buffers
+    menu-item-width
     menu-items
     menu-items-item-definition
     menu-items-item-enable
@@ -1633,6 +1654,8 @@
     pop-to-buffer
     pop-to-buffer-same-window
     pop-to-mark-command
+    popup-menu
+    popup-menu-normalize-position
     pos-visible-in-window-p
     posn-area
     posn-at-x-y
@@ -1695,6 +1718,7 @@
     read-from-minibuffer
     read-input-event
     read-key-event
+    read-menu-command
     read-multiple-choice
     read-multiple-choice--long-answers
     read-number
@@ -1848,6 +1872,8 @@
     set!frame-editor
     set!frame-height
     set!frame-keymap-state
+    set!frame-menu-bar-items
+    set!frame-menu-bar-items-used
     set!frame-message
     set!frame-message-timer
     set!frame-minibuffer-window
@@ -2029,6 +2055,8 @@
     strip-undo-boundaries
     substitute-env-vars
     substitute-in-file-name
+    substitute-key-definition
+    substitute-key-definition-key
     suspend-display!
     suspend-frame
     switch-to-buffer
@@ -2133,6 +2161,7 @@
     tty-color-standard-values
     tty-color-translate
     tty-color-values
+    tty-menu-navigation-map
     tty-modify-color-alist
     tty-register-default-colors
     tty-slant-number
@@ -2158,6 +2187,7 @@
     update-begin!
     update-end!
     update-interval
+    update-menu-bar
     update-prefix!
     update-submenu-strings
     update-window-begin!
@@ -2258,6 +2288,8 @@
     write-file-code-points
     write-glyphs!
     x-get-clipboard
+    x-popup-menu
+    x-popup-menu-1
     xselect--encode-string
     xselect--int-to-cons
     xselect-convert-to-atom

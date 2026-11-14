@@ -59,7 +59,35 @@
     ;; The display interface this implements.
     (schemacs editor dispnew)
     (only (schemacs editor faces) *undefined-face-attribute*)
-    (only (schemacs editor xfaces) attribute-value realize-tty-face)
+    (only (schemacs editor xfaces)
+          attribute-value realize-tty-face merge-face-vectors
+          ;; the realized attributes of a named face, which
+          ;; `tty_menu_activate` derives its four faces from
+          face-realized-attributes)
+    ;; The menu a terminal draws: `menu_items` is `menu.c`'s, and
+    ;; `tty_menu_show` reads it exactly as the C does - it is the built
+    ;; array, not a tree.
+    ;; The navigation map the menu reads its commands through, which
+    ;; `tty_menu_activate` binds as `overriding-terminal-local-map`
+    ;; (`term.c:4160`).
+    (only (schemacs editor menu-bar) *tty-menu-navigation-map*)
+    (only (schemacs editor menu)
+          menu-items menu-items-used menu-items-n-panes
+          menu-items-pane-name menu-items-pane-prefix menu-items-pane-length
+          menu-items-item-name menu-items-item-enable menu-items-item-value
+          menu-items-item-equiv-key menu-items-item-help
+          menu-items-item-length)
+    ;; `display_tty_menu_item` is `xdisp.c`'s (`:28003`) and
+    ;; `tty_menu_activate` calls it, as `term.c` does. `render!` is what
+    ;; puts the screen back when a cascade of panes is dropped, which is
+    ;; the C's `screen_update` - and `*inhibit-redisplay*` is the C's
+    ;; `Vinhibit_redisplay`, bound while a menu is up.
+    (only (schemacs editor xdisp)
+          display-tty-menu-item menu-item-width render! *inhibit-redisplay*
+          ;; What the menu wrote over, so the redisplay can rewrite just
+          ;; those rows - the terminal's stand-in for Emacs's saved
+          ;; current matrix (`restore_desired_matrix`).
+          invalidate-frame-rows!)
     ;; `write-glyphs!` reads the row and the glyphs it is handed, exactly
     ;; as `tty_write_glyphs_1` reads `struct glyph`.
     (only (schemacs editor glyph)
@@ -73,10 +101,20 @@
           xterm--tty-set-selection xterm--tty-get-selection)
     (only (schemacs editor frame) *tty-select-active-regions*
           *frame-list* frame-output change-frame-size
-          do-pending-window-change)
+          do-pending-window-change
+          ;; the frame the menu is laid out in, and the flag that makes
+          ;; the next redisplay repaint what the menu covered
+          frame-width frame-height set-frame-garbaged!
+          ;; `FRAME_MENU_BAR_ITEMS (f)`, which F10's next/prev look up
+          frame-menu-bar-items frame-menu-bar-items-used)
     ;; `init_signals` and the quit flag (`keyboard.c`): C-g and C-\ are the
     ;; terminal's interrupt characters, so they arrive as signals.
-    (only (schemacs editor keyboard) init-signals *quit-flag* quit-char)
+    (only (schemacs editor keyboard)
+          init-signals *quit-flag* quit-char *overriding-terminal-local-map*
+          ;; The menu's reader (`read_menu_command`, `keyboard.c:1691`),
+          ;; the separator test `display_tty_menu_item` asks
+          ;; (`keyboard.c:8608`), and the quit a cancelled menu raises.
+          read-menu-command menu-separator-name? signal-quit)
     (only (schemacs editor faces)
           *display-color-cells* *display-type* *frame-background-mode*
           face-list face-spec-recalc)
@@ -84,7 +122,7 @@
     (only (rnrs io ports) get-bytevector-some put-u8 get-u8)
     (only (rnrs bytevectors) bytevector-length bytevector-u8-ref)
     (only (guile) getenv string-prefix? logior logand ash delq
-          delete last-pair caddr sort
+          delete last-pair caddr sort list-head
           ;; `select` waits on the keyboard descriptor and the back door's
           ;; pipe - the same call GNU Emacs makes as `pselect`
           ;; (`process.c:5830').
@@ -1502,4 +1540,844 @@
       (set-terminal-modes! d))
 
     ;;----------------------------------------------------------------
+
+    ;;----------------------------------------------------------------
+    ;; Menus - `term.c`'s terminal menus (`term.c:3180-4300`)
+    ;;----------------------------------------------------------------
+    ;;
+    ;; GNU Emacs's TTY menu: a deck of panes built from `menu_items`,
+    ;; drawn over the screen, navigated with the commands
+    ;; `tty-menu-navigation-map` binds, and popped down again.
+    ;;
+    ;; **Two departures, both about the screen.** Emacs builds the menu
+    ;; into the frame's *desired glyph matrix* and delivers it with
+    ;; `update_frame_with_menu`, stashing the current matrix so the
+    ;; screen behind the menu can be put back
+    ;; (`save_and_enable_current_matrix`, `screen_update`). A terminal
+    ;; here *is* the screen, with no matrix to stash: the rows are
+    ;; written where they go, and "put the screen back" is a redisplay
+    ;; of the frame (`render!`), which is the same picture the saved
+    ;; matrix would have shown. And a *command* is read by
+    ;; `read_menu_command` (`keyboard.c:1691`), which reads through
+    ;; `tty-menu-navigation-map`; a keymap lives above this library, so
+    ;; `read-menu-command` arrives as a value - the same kind of seam
+    ;; `*window-scroll-function*` is.
+    ;;
+    ;; The navigation commands themselves *are* symbols here, as they
+    ;; are in Emacs ("The tty-menu-* are just symbols interpreted by
+    ;; term.c, they are not real commands", `menu-bar.el:3013'):
+    ;; `read_menu_command` answers the binding without running it, and
+    ;; this file compares it with `tty-menu-exit` and its neighbours.
+    ;;
+    ;; **There is no mouse.** Emacs's `mouse_get_xy` reads the xterm
+    ;; mouse report; this terminal has no mouse reporting (no GPM, and
+    ;; `xterm-mouse-mode` is not ported), so the mouse branches of
+    ;; `read_menu_input` and `tty_menu_activate` are not carried.
+    ;; Everything else - the deck of panes, the scrolling of a menu
+    ;; taller than the screen, and the keyboard navigation between
+    ;; menu-bar items - is the C's.
+    ;;--------------------------------------------------------------
+
+    (define-record-type <tty-menu-item>
+      (make-tty-menu-item text submenu panenumber help)
+      tty-menu-item?
+      (text       tty-menu-item-text)
+      (submenu    tty-menu-item-submenu)
+      (panenumber tty-menu-item-panenumber)
+      (help       tty-menu-item-help))
+    ;; ^ One cell of `struct tty_menu_struct`'s four parallel arrays
+    ;; (`term.c:3209`): TEXT, SUBMENU (a `<tty-menu>` or #f),
+    ;; PANENUMBER - "Also used as enabled flag", so a pane holds its
+    ;; number and a selection holds 1 or 0 - and HELP_TEXT.
+
+    (define-record-type <tty-menu>
+      (make-tty-menu items width panecount)
+      tty-menu?
+      (items     tty-menu-items     set!tty-menu-items)
+      (width     tty-menu-width     set!tty-menu-width)
+      (panecount tty-menu-panecount set!tty-menu-panecount))
+    ;; ^ `struct tty_menu_struct` (`term.c:3209`), with a list of items
+    ;; where the C has four parallel arrays and an allocation count. The
+    ;; C's `tty_menu_make_room` is what keeps those arrays long enough;
+    ;; a list has no such need, so it has no counterpart here.
+
+    (define (tty-menu-create)
+      ;; `tty_menu_create` (`term.c:3227`).
+      ;;--------------------------------------------------------------
+      (make-tty-menu '() 0 0))
+
+    (define (tty-menu-search-pane menu pane)
+      ;; `tty_menu_search_pane` (`term.c:3253`): the submenu whose
+      ;; panenumber is PANE, searching inside the submenus too.
+      ;;--------------------------------------------------------------
+      (let loop ((rest (tty-menu-items menu)))
+        (if (null? rest)
+            #f
+            (let* ((item (car rest))
+                   (sub (tty-menu-item-submenu item)))
+              (cond ((not sub) (loop (cdr rest)))
+                    ((eqv? (tty-menu-item-panenumber item) pane) sub)
+                    (else (or (tty-menu-search-pane sub pane)
+                              (loop (cdr rest)))))))))
+
+    (define (tty-menu-calc-size menu)
+      ;; `tty_menu_calc_size` (`term.c:3273`): "Determine how much screen
+      ;; space a given menu needs." Answers `(values WIDTH HEIGHT)`.
+      ;;
+      ;; The C starts `maxheight` at the menu's own count and raises it to
+      ;; `i + h2` for a pane: a submenu is drawn to the right of its
+      ;; title, so the tallest column is what the deck needs.
+      ;;--------------------------------------------------------------
+      (let loop ((rest (tty-menu-items menu)) (i 0)
+                 (maxwidth (tty-menu-width menu))
+                 (maxheight (length (tty-menu-items menu))))
+        (if (null? rest)
+            (values maxwidth maxheight)
+            (let ((sub (tty-menu-item-submenu (car rest))))
+              (if sub
+                  (call-with-values
+                      (lambda () (tty-menu-calc-size sub))
+                    (lambda (w2 h2)
+                      (loop (cdr rest) (+ i 1)
+                            (max maxwidth w2)
+                            (max maxheight (+ i h2)))))
+                  (loop (cdr rest) (+ i 1) maxwidth maxheight))))))
+
+    (define (tty-menu-add-pane menu text)
+      ;; `tty_menu_add_pane` (`term.c:3369`): "Create a new pane and
+      ;; place it on the outer-most level." Answers its number.
+      ;;--------------------------------------------------------------
+      (let ((pane (tty-menu-create)))
+        (set!tty-menu-panecount menu (+ 1 (tty-menu-panecount menu)))
+        (set!tty-menu-items menu
+                            (append (tty-menu-items menu)
+                                    (list (make-tty-menu-item
+                                           text pane
+                                           (tty-menu-panecount menu) #f))))
+        (set!tty-menu-width menu
+                            (max (tty-menu-width menu) (menu-item-width text)))
+        (tty-menu-panecount menu)))
+
+    (define (tty-menu-add-selection menu pane text enable help)
+      ;; `tty_menu_add_selection` (`term.c:3391`): "Create a new item in
+      ;; a menu pane." Answers whether it was added.
+      ;;--------------------------------------------------------------
+      (let ((m (if (and pane (not (eqv? pane 0)))
+                   (tty-menu-search-pane menu pane)
+                   menu)))
+        (and m
+             (begin
+               (set!tty-menu-items m
+                                   (append (tty-menu-items m)
+                                           (list (make-tty-menu-item
+                                                  text #f
+                                                  (if enable 1 0) help))))
+               (set!tty-menu-width m
+                                   (max (tty-menu-width m)
+                                        (menu-item-width text)))
+               #t))))
+
+    (define (tty-menu-locate menu x y)
+      ;; `tty_menu_locate` (`term.c:3420`): "Decide where the menu would
+      ;; be placed if requested at (X,Y)." Answers
+      ;; `(values ULX ULY WIDTH HEIGHT)`.
+      ;;--------------------------------------------------------------
+      (call-with-values
+          (lambda () (tty-menu-calc-size menu))
+        (lambda (width height)
+          (values (+ x 1) y (+ width 2) height))))
+
+    (define *menu-covered-rows* (make-parameter '()))
+    ;; ^ The frame rows the current menu has written over, as
+    ;; `(Y . HEIGHT)`: what `screen_update` has to put back. Emacs keeps
+    ;; a glyph *matrix* per pane (`state[i].screen_behind`,
+    ;; `save_and_enable_current_matrix`); this is the same bookkeeping
+    ;; at the granularity this redisplay works in - a row.
+
+    ;; The help echo's bookkeeping - `term.c`'s statics (`:3202`): "These
+    ;; hold text of the current and the previous menu help messages", and
+    ;; the pane and item number that generated the last one.
+    (define %menu-help-message #f)
+    (define %prev-menu-help-message #f)
+    (define %menu-help-paneno 0)
+    (define %menu-help-itemno 0)
+
+    (define (tty-menu-display d menu x y pn faces mx my first-item disp-help)
+      ;; `tty_menu_display` (`term.c:3305`): "Display MENU at (X,Y) using
+      ;; FACES, starting with FIRST_ITEM (zero-based)." Answers
+      ;; `(values ROW COL)`, which is where the cursor goes.
+      ;;
+      ;; **The one thing carried over from the mouse is `mousehere`**,
+      ;; and the *keyboard* moves it too: `read_menu_input` walks MY down
+      ;; the items, so the item under (MX, MY) is the selected one
+      ;; whichever device moved it.
+      ;;--------------------------------------------------------------
+      (let* ((count (length (tty-menu-items menu)))
+             (cm (tty-cm %terminal))
+             (max-items (max 0 (min (- count first-item)
+                                    (- (cm-rows cm) 1 y))))
+             (width (tty-menu-width menu)))
+        (set! %menu-help-message #f)
+        ;; What this pane overwrites, for `screen_update`.
+        (when (> max-items 0)
+          (*menu-covered-rows*
+           (cons (cons y max-items) (*menu-covered-rows*))))
+        (let ((row (cm-curY cm))
+              (col (cm-curX cm)))
+          (let loop ((i 0))
+            (when (< i max-items)
+              (let* ((j (+ i first-item))
+                     (item (list-ref (tty-menu-items menu) j))
+                     (sub (tty-menu-item-submenu item))
+                     (max-width (+ width 2 (if sub 2 0)))
+                     (enabled (or sub
+                                  (not (eqv? (tty-menu-item-panenumber item)
+                                             0))))
+                     (mousehere (and (eqv? (+ y i) my)
+                                     (<= x mx) (< mx (+ x max-width))))
+                     (face (vector-ref faces (+ (if enabled 1 0)
+                                                (if mousehere 2 0)))))
+                ;; "Display the menu help string for the i-th menu item
+                ;; even if the menu item is currently disabled" - the C's
+                ;; `enabled + mousehere * 2 >= 2` test.
+                (when (and disp-help mousehere)
+                  (set! %menu-help-message (tty-menu-item-help item))
+                  (set! %menu-help-paneno (- pn 1))
+                  (set! %menu-help-itemno j))
+                ;; "Take note of the coordinates of the active menu item,
+                ;; to display the cursor there."
+                (when mousehere
+                  (set! row (+ y i))
+                  (set! col x))
+                (display-tty-menu-item
+                 d (tty-menu-item-text item) max-width face
+                 x (+ y i) (and sub #t)
+                 (and (not sub)
+                      (menu-separator-name? (tty-menu-item-text item))))
+                (loop (+ i 1)))))
+          (values row col))))
+
+    ;; The `mi_result` enum (`term.c:3527`).
+    (define MI-QUIT-MENU 'quit-menu)
+    (define MI-CONTINUE 'continue)
+    (define MI-ITEM-SELECTED 'item-selected)
+    (define MI-NEXT-ITEM 'next-item)
+    (define MI-PREV-ITEM 'prev-item)
+    (define MI-SCROLL-FORWARD 'scroll-forward)
+    (define MI-SCROLL-BACK 'scroll-back)
+
+    ;; The `TTYM_*` statuses (`term.c:3196`).
+    (define TTYM-FAILURE -1)
+    (define TTYM-SUCCESS 1)
+    (define TTYM-NO-SELECT 2)
+    (define TTYM-IA-SELECT 3)
+    (define TTYM-NEXT 4)
+    (define TTYM-PREV 5)
+
+    (define (read-menu-input cmd x y min-y max-y)
+      ;; `read_menu_input` (`term.c:3535`): "Read user input and return X
+      ;; and Y coordinates where that input puts us." CMD is what
+      ;; `read-menu-command` answered; the answers are
+      ;; `(values STATUS X Y USABLE?)`, USABLE? being the C's
+      ;; `sf->mouse_moved` - what makes the caller do the hit test that
+      ;; finds which pane and item the position names.
+      ;;
+      ;; The C's first-time branch - it sets `mouse_moved` and returns
+      ;; CONTINUE without reading - is the caller's, because the caller
+      ;; is what owns that flag here.
+      ;;--------------------------------------------------------------
+      (cond
+       ((or (eq? cmd #t) (eq? cmd 'tty-menu-exit))
+        (values MI-QUIT-MENU x y #f))
+       ((eq? cmd 'tty-menu-next-menu)
+        (values MI-NEXT-ITEM x y #f))
+       ((eq? cmd 'tty-menu-prev-menu)
+        (values MI-PREV-ITEM x y #f))
+       ((eq? cmd 'tty-menu-next-item)
+        (if (< y max-y)
+            (values MI-CONTINUE x (+ y 1) #t)
+            (values MI-SCROLL-FORWARD x y #f)))
+       ((eq? cmd 'tty-menu-prev-item)
+        (if (> y min-y)
+            (values MI-CONTINUE x (- y 1) #t)
+            (values MI-SCROLL-BACK x y #f)))
+       ((eq? cmd 'tty-menu-select)
+        (values MI-ITEM-SELECTED x y #t))
+       ((eq? cmd 'tty-menu-ignore)
+        (values MI-CONTINUE x y #f))
+       (else
+        ;; "else if (!EQ (cmd, Qtty_menu_ignore)) usable_input = 0;": a
+        ;; command of the user's own is ignored and is not a movement.
+        (values MI-CONTINUE x y #f))))
+
+    (define-record-type <tty-menu-state>
+      (make-tty-menu-state menu pane x y)
+      tty-menu-state?
+      (menu tty-menu-state-menu set!tty-menu-state-menu)
+      (pane tty-menu-state-pane set!tty-menu-state-pane)
+      (x    tty-menu-state-x    set!tty-menu-state-x)
+      (y    tty-menu-state-y    set!tty-menu-state-y))
+    ;; ^ `struct tty_menu_state` (`term.c:3427`) without
+    ;; `screen_behind`: the screen behind the menu is the frame, and
+    ;; putting it back is `render!`.
+
+    (define (screen-update d frame)
+      ;; `screen_update` (`term.c:3512`): "Update the display of frame F
+      ;; from its saved contents."
+      ;;
+      ;; **The saved contents are the frame itself here**, so this is a
+      ;; full redisplay - `render!` rather than `redisplay-frames!`,
+      ;; because the latter is inhibited while a menu is up
+      ;; (`Vinhibit_redisplay`, which this menu binds).
+      ;;
+      ;; **Only the rows the menu covered are rewritten.** The menu's
+      ;; rows were written straight to the screen, so those rows no
+      ;; longer match what the current matrices say; every other row
+      ;; still does. `invalidate-frame-rows!` marks exactly those rows,
+      ;; and `render!`'s ordinary row diff then rewrites exactly them -
+      ;; which is what Emacs's `restore_desired_matrix` +
+      ;; `update_frame_with_menu` achieve from its saved matrix.
+      ;;
+      ;; **Garbaging the frame was wrong here**, though it was the first
+      ;; fix: it clears the whole screen and repaints it, a visible flash
+      ;; and a departure from a redisplay that writes a handful of rows.
+      ;; The menu stays on screen without either, which is what made the
+      ;; first F10-and-right leave File under Edit.
+      ;;--------------------------------------------------------------
+      (invalidate-frame-rows! frame (*menu-covered-rows*))
+      (render! frame))
+
+    (define (tty-menu-faces)
+      ;; `tty_menu_activate`'s four faces (`term.c:3636`): disabled,
+      ;; enabled, selected-disabled, selected-enabled.
+      ;;
+      ;; Each selected pair is `lookup_derived_face (NULL, sf, FACE,
+      ;; BASE, 1)` - the named face's attributes merged *onto* the base -
+      ;; so `tty-menu-selected-face` is merged over the enabled and the
+      ;; disabled one in turn.
+      ;;--------------------------------------------------------------
+      (let* ((enabled-attrs (face-realized-attributes 'tty-menu-enabled-face))
+             (disabled-attrs
+              (face-realized-attributes 'tty-menu-disabled-face))
+             (selected-attrs
+              (face-realized-attributes 'tty-menu-selected-face)))
+        (vector (realize-tty-face disabled-attrs)
+                (realize-tty-face enabled-attrs)
+                (realize-tty-face
+                 (merge-face-vectors selected-attrs disabled-attrs))
+                (realize-tty-face
+                 (merge-face-vectors selected-attrs enabled-attrs)))))
+
+    (define (%tty-menu-deck-setup! d menu states x0 y0 title-faces)
+      ;; The first half of `tty_menu_activate`'s setup (`term.c:3670`):
+      ;; the Buffers kludge, the title row, and the one-pane descent.
+      ;;--------------------------------------------------------------
+      (let ((first (and (pair? (tty-menu-items menu))
+                        (tty-menu-item-text (car (tty-menu-items menu)))))
+            (buffers-1? #f))
+        ;; "Don't let the title for the Buffers popup menu include a
+        ;; digit (which is ugly)." The C edits the *string* in place,
+        ;; shows the menu and puts the character back; here the item is
+        ;; replaced by one whose text is the original with the digit
+        ;; blanked.
+        (when (and first (>= (string-length first) 9)
+                   (string=? (substring first 0 9) "Buffers 1"))
+          (set! buffers-1? #t)
+          (set!tty-menu-items
+           menu
+           (cons (make-tty-menu-item
+                  (string-append (substring first 0 7) " ")
+                  (tty-menu-item-submenu (car (tty-menu-items menu)))
+                  (tty-menu-item-panenumber (car (tty-menu-items menu)))
+                  (tty-menu-item-help (car (tty-menu-items menu))))
+                 (cdr (tty-menu-items menu)))))
+        ;; "Display the menu title. We subtract 1 from x0 and y0 because
+        ;; we want to interpret them as zero-based column and row
+        ;; coordinates."
+        (tty-menu-display d menu (- x0 1) (- y0 1) 1 title-faces
+                          (- x0 1) (- y0 1) 0 #f)
+        (when buffers-1?
+          (set!tty-menu-items
+           menu
+           (cons (make-tty-menu-item
+                  first
+                  (tty-menu-item-submenu (car (tty-menu-items menu)))
+                  (tty-menu-item-panenumber (car (tty-menu-items menu)))
+                  (tty-menu-item-help (car (tty-menu-items menu))))
+                 (cdr (tty-menu-items menu)))))
+        ;; `onepane = menu->count == 1 && menu->submenu[0]`.
+        (let* ((onepane (and (= 1 (length (tty-menu-items menu)))
+                             (tty-menu-item-submenu
+                              (car (tty-menu-items menu)))))
+               (st (car states)))
+          (if onepane
+              (begin
+                (set!tty-menu-width menu (tty-menu-width onepane))
+                (set!tty-menu-state-menu st onepane)
+                (set!tty-menu-state-pane st 1))
+              (set!tty-menu-state-pane st 0))
+          (set!tty-menu-state-x st (- x0 1))
+          (set!tty-menu-state-y st y0))))
+
+    (define (%tty-menu-hit-test! d frame states statecount first-item faces
+                                 x y)
+      ;; The hit test of `tty_menu_activate` (`term.c:3806`): "We hit
+      ;; some part of a menu, so drop extra menus that have been opened",
+      ;; and open the submenu of the item under the position.
+      ;;
+      ;; Answers `(values STATECOUNT STATES PANE SELIDX RESULT)`. STATES
+      ;; is a value rather than an array poked in place, so the caller
+      ;; takes the new stack back.
+      ;;--------------------------------------------------------------
+      (let ((result TTYM-IA-SELECT)
+            (pane 0)
+            (selidx 0))
+        (let walk ((i 0) (rest states))
+          (unless (null? rest)
+            (let* ((s (car rest))
+                   (m (tty-menu-state-menu s))
+                   (sx (tty-menu-state-x s))
+                   (sy (tty-menu-state-y s)))
+              (when (and (<= sx x) (< x (+ sx (tty-menu-width m) 2)))
+                (let ((dy (+ (- y sy) first-item)))
+                  (when (and (>= dy 0) (< dy (length (tty-menu-items m))))
+                    (let ((item (list-ref (tty-menu-items m) dy)))
+                      (unless (tty-menu-item-submenu item)
+                        (set! result
+                              (if (not (eqv? (tty-menu-item-panenumber item)
+                                             0))
+                                  TTYM-SUCCESS
+                                  TTYM-IA-SELECT)))
+                      (set! pane (- (tty-menu-state-pane s) 1))
+                      (set! selidx dy)
+                      ;; "That does not include an open and active
+                      ;; submenu."
+                      (let ((next (and (pair? (cdr rest)) (cadr rest))))
+                        (when (not (and (= i (- statecount 2))
+                                        next
+                                        (eq? (tty-menu-item-submenu item)
+                                             (tty-menu-state-menu next))))
+                          (let drop ()
+                            (when (< i (- statecount 1))
+                              (set! statecount (- statecount 1))
+                              (set! states (list-head states statecount))
+                              (screen-update d frame)
+                              (drop)))))
+                      ;; Open the item's submenu beside this pane.
+                      (when (and (= i (- statecount 1))
+                                 (tty-menu-item-submenu item))
+                        (tty-menu-display d m sx sy
+                                          (tty-menu-state-pane s)
+                                          faces x y first-item #t)
+                        (set! states
+                              (append states
+                                      (list (make-tty-menu-state
+                                             (tty-menu-item-submenu item)
+                                             (tty-menu-item-panenumber item)
+                                             (+ sx (tty-menu-width m) 2)
+                                             y))))
+                        (set! statecount (+ statecount 1))))))))
+              (walk (+ i 1) (cdr rest))))
+        (tty-menu-display d (tty-menu-state-menu (list-ref states
+                                                           (- statecount 1)))
+                          (tty-menu-state-x (list-ref states
+                                                      (- statecount 1)))
+                          (tty-menu-state-y (list-ref states
+                                                      (- statecount 1)))
+                          (tty-menu-state-pane (list-ref states
+                                                         (- statecount 1)))
+                          faces x y first-item #t)
+        (values statecount states pane selidx result)))
+
+    (define (tty-menu-activate d frame menu x0 y0 help-callback
+                               kbd-navigation)
+      ;; `tty_menu_activate` (`term.c:3617`): "Display menu, wait for
+      ;; user's response, and return that response."
+      ;;
+      ;; Answers `(values STATUS PANE SELIDX)`, the C's three output
+      ;; parameters.
+      ;;
+      ;; **The cascade is a stack of states**, as the C's `state[]`
+      ;; array is: each pane opened beside another is a menu at its own
+      ;; (x, y), and the hit test walks them all to find which one the
+      ;; position is in. A one-pane menu - every menu this editor builds
+      ;; today except a deck of keymaps - begins *inside* its one pane,
+      ;; which is the C's `onepane` shortcut.
+      ;;
+      ;; **The loop is a named `let` over the state the C mutates**:
+      ;; `x`, `y`, `first-time`, `states`, `statecount`, `first-item`,
+      ;; `result`, `pane` and `selidx` are the C's locals, and each turn
+      ;; of the loop passes them on. Two of the C's steps are the
+      ;; procedures above - the setup and the hit test - because they
+      ;; are the two places the C's own function is deepest, and neither
+      ;; needs anything the loop holds.
+      ;;--------------------------------------------------------------
+      (let* ((x0 (if (<= x0 0) 1 x0))
+             (y0 (if (<= y0 0) 1 y0))
+             (faces (tty-menu-faces))
+             (title-faces (vector (vector-ref faces 3) (vector-ref faces 3)
+                                  (vector-ref faces 3) (vector-ref faces 3)))
+             (states0 (list (make-tty-menu-state menu 0 0 0)))
+             ;; Whether the body ran to its end: an exception - a quit
+             ;; for a menu that was not clicked open - leaves the menu's
+             ;; rows on the screen and the frame's matrices stale, so the
+             ;; next redisplay has to repaint. See the after thunk.
+             (finished #f))
+        ;; **What the menu covers, and the map it reads through**, for as
+        ;; long as it is up. The list is parameterized here so that the
+        ;; after thunk can put the screen back when the body did not
+        ;; finish - a quit for a menu that was not clicked open.
+        (parameterize ((*menu-covered-rows* '()))
+        (let ((saved-override *overriding-terminal-local-map*))
+          (set! *overriding-terminal-local-map*
+                (list (*tty-menu-navigation-map*)))
+          (dynamic-wind
+         (lambda () #t)
+         (lambda ()
+           (tty-hide-cursor %terminal)
+           ;; **`inhibit-redisplay` for as long as the menu is up**
+           ;; (`term.c:3664`): "to avoid messing the screen if some timer
+           ;; calls sit-for or a similar function."
+           (parameterize ((*inhibit-redisplay* #t))
+             (%tty-menu-deck-setup! d menu states0 x0 y0 title-faces)
+             (let ((st (car states0)))
+               (let loop ((x (tty-menu-state-x st))
+                          (y (tty-menu-state-y st))
+                          (leave #f)
+                          (first-time #t)
+                          (states states0)
+                          (statecount 1)
+                          (first-item 0)
+                          (result TTYM-IA-SELECT)
+                          (pane 0)
+                          (selidx 0))
+                 (if leave
+                     (begin
+                       ;; The menu is down: put the screen back, forget
+                       ;; the states, and give the terminal its cursor.
+                       (screen-update d frame)
+                       (set! finished #t)
+                       (tty-show-cursor %terminal)
+                       (flush-output-port (current-output-port))
+                       (values result pane selidx))
+                     (let* ((root (tty-menu-state-menu (car states)))
+                            (min-y (tty-menu-state-y (car states)))
+                            (max-y (- (min (+ min-y
+                                              (length (tty-menu-items root)))
+                                           (- (frame-height frame) 1))
+                                      1)))
+                       ;; **The first pass does not read**: it is the
+                       ;; C's `first_time`, which sets `mouse_moved` so
+                       ;; the hit test runs against the initial
+                       ;; position - which is what opens the first pane
+                       ;; of a deck.
+                       (call-with-values
+                           (lambda ()
+                             (if first-time
+                                 (values MI-CONTINUE x y #t)
+                                 (read-menu-input (read-menu-command)
+                                                  x y min-y max-y)))
+                         (lambda (status x1 y1 usable)
+                           ;; "if (input_status) { leave = 1; switch
+                           ;; (...) { ... } }" - every status but CONTINUE
+                           ;; ends the loop, and the arms below put it back
+                           ;; for the ones that are navigation.
+                           (unless (eq? status MI-CONTINUE)
+                             (set! leave #t))
+                           (case status
+                             ((quit-menu)
+                              ;; "Remove the last help-echo, so that it
+                              ;; doesn't re-appear after `Quit`."
+                              (set! %prev-menu-help-message #f)
+                              (set! %menu-help-message #f)
+                              (set! result TTYM-NO-SELECT))
+                             ((next-item)
+                              (if kbd-navigation
+                                  (set! result TTYM-NEXT)
+                                  (set! leave #f)))
+                             ((prev-item)
+                              (if kbd-navigation
+                                  (set! result TTYM-PREV)
+                                  (set! leave #f)))
+                             ((scroll-forward)
+                              (if (= (- y1 min-y)
+                                     (- (length (tty-menu-items root))
+                                        1 first-item))
+                                  (begin (set! y1 min-y)
+                                         (set! first-item 0))
+                                  (set! first-item (+ first-item 1))))
+                             ((scroll-back)
+                              (if (= first-item 0)
+                                  (begin
+                                    (set! y1 max-y)
+                                    (set! first-item
+                                          (- (length (tty-menu-items root))
+                                             1 (- y1 min-y))))
+                                  (set! first-item (- first-item 1))))
+                             (else #f))
+                           (if (and usable (not (eq? status MI-QUIT-MENU)))
+                               (call-with-values
+                                   (lambda ()
+                                     (%tty-menu-hit-test!
+                                      d frame states statecount first-item
+                                      faces x1 y1))
+                                 (lambda (sc st p si r)
+                                   (set! statecount sc)
+                                   (set! states st)
+                                   (set! pane p)
+                                   (set! selidx si)
+                                   (set! result r)))
+                               #f)
+                           ;; The help echo, when the item under the
+                           ;; position changed.
+                           (when (and help-callback
+                                      (or %menu-help-message
+                                          %prev-menu-help-message)
+                                      (not (eq? %menu-help-message
+                                                %prev-menu-help-message)))
+                             (help-callback %menu-help-message
+                                            %menu-help-paneno
+                                            %menu-help-itemno)
+                             (set! %prev-menu-help-message
+                                   %menu-help-message))
+                           (tty-hide-cursor %terminal)
+                           (flush-output-port (current-output-port))
+                           (loop x1 y1 leave #f states statecount first-item
+                                 result pane selidx)))))))))
+         (lambda ()
+           ;; The cursor back on whatever happened - the C's
+           ;; `tty_show_cursor` at the end of the function is the same
+           ;; promise, and `record_unwind_protect` is its half.
+           ;;
+           ;; **A menu that did not finish leaves the screen holding its
+           ;; rows**, so the frame is garbaged for the next redisplay to
+           ;; repaint. The normal path has already done so through
+           ;; `screen-update` and set FINISHED.
+           (set! *overriding-terminal-local-map* saved-override)
+           (unless finished
+             (invalidate-frame-rows! frame (*menu-covered-rows*)))
+           (tty-show-cursor %terminal)
+           (flush-output-port (current-output-port))))))))
+    (define (tty-menu-last-menubar-item frame)
+      ;; `tty_menu_last_menubar_item` (`term.c:3941`): "Return the
+      ;; zero-based index of the last menu-bar item on frame F."
+      ;;--------------------------------------------------------------
+      (let ((items (frame-menu-bar-items frame))
+            (used (frame-menu-bar-items-used frame)))
+        (if (not items)
+            -4
+            (let loop ((i 0))
+              (if (< i used)
+                  (if (vector-ref items (+ i 1))
+                      (loop (+ i 4))
+                      (- i 4))
+                  (- i 4))))))
+
+    (define (tty-menu-new-item-coords frame which x)
+      ;; `tty_menu_new_item_coords` (`term.c:3960`): the X and Y of the
+      ;; menu-bar item next to or before the one at X. Answers
+      ;; `(values X Y)`; Y is the bar's row, 0.
+      ;;
+      ;; "We use <= so the blank between 2 items on a TTY is considered
+      ;; part of the previous item."
+      ;;--------------------------------------------------------------
+      (let ((items (frame-menu-bar-items frame))
+            (used (frame-menu-bar-items-used frame))
+            (last-i (tty-menu-last-menubar-item frame)))
+        (let loop ((i 0) (prev-x -1))
+          (if (or (not items) (>= i used))
+              (values x 0)
+              (let ((name (vector-ref items (+ i 1)))
+                    (pos (vector-ref items (+ i 3))))
+                (if (not name)
+                    (values x 0)
+                    (if (and (<= pos x)
+                             (<= x (+ pos (menu-item-width name))))
+                        (cond ((eq? which TTYM-NEXT)
+                               (values (if (< i last-i)
+                                           (vector-ref items (+ i 4 3))
+                                           0)
+                                       0))
+                              ((< prev-x 0)
+                               (values (vector-ref items (+ last-i 3)) 0))
+                              (else (values prev-x 0)))
+                        (loop (+ i 4) pos))))))))
+
+    (define (tty-menu-help-callback help-string pane item)
+      ;; `tty_menu_help_callback` (`term.c:3924`): show HELP-STRING as
+      ;; the help echo.
+      ;;
+      ;; **Not carried**: there is no `show_help_echo` here - the echo
+      ;; area shows one message and has no help-echo channel that a
+      ;; timer clears - so this exists for the shape of the call and
+      ;; does nothing. PANE and ITEM are what the C puts in the
+      ;; `menu-item` object it passes.
+      ;;--------------------------------------------------------------
+      #f)
+
+    (define %tty-menu-pane-prefix #f)
+
+    (define (tty-menu-show d frame x y flags title)
+      ;; `tty_menu_show` (`term.c:4023`): build the menu from
+      ;; `menu_items`, show it, and answer the chosen item's value.
+      ;;
+      ;; **The error name is an exception here.** The C answers nil and
+      ;; writes into `*error_name`, and `x_popup_menu_1` then does
+      ;; `error ("%s", error_name)`. Two of the three messages are
+      ;; unreachable in a Scheme port (`tty_menu_add_pane` cannot fail,
+      ;; and a selection is added to a pane that was just found), so the
+      ;; one that can happen - "Empty menu" - is raised where the C
+      ;; reports it, and the caller needs no error-name channel.
+      ;;--------------------------------------------------------------
+      (let ((used (menu-items-used)))
+        (if (or (= (menu-items-n-panes) 0)
+                (<= used menu-items-pane-length))
+            (error "Empty menu")
+            (let* ((menu (tty-menu-create))
+                   (items (menu-items)))
+              (let pane-loop ((i 0) (maxwidth 0) (lpane TTYM-FAILURE))
+                (unless (>= i used)
+                  (let ((slot (vector-ref items i)))
+                    (cond
+                     ;; A new pane.
+                     ((eq? slot #t)
+                      (let* ((pane-name (vector-ref items
+                                                    (+ i menu-items-pane-name)))
+                             (pane-string (or pane-name ""))
+                             (new-lpane (tty-menu-add-pane menu pane-string)))
+                        ;; "Find the width of the widest item in this
+                        ;; pane."
+                        (let scan ((j (+ i menu-items-pane-length))
+                                   (w 0))
+                          (cond
+                           ((>= j used) (pane-loop (+ i menu-items-pane-length)
+                                                   w new-lpane))
+                           (else
+                            (let ((item (vector-ref items j)))
+                              (cond ((eq? item #t)
+                                     (pane-loop (+ i menu-items-pane-length)
+                                                w new-lpane))
+                                    ((not item) (scan (+ j 1) w))
+                                    (else
+                                     (scan (+ j menu-items-item-length)
+                                           (max w (string-length item)))))))))))
+                     ;; "Ignore a nil in the item list. It's meaningful
+                     ;; only for dialog boxes."
+                     ((eq? slot 'quote)
+                      (pane-loop (+ i 1) maxwidth lpane))
+                     (else
+                      ;; A new item within the current pane.
+                      (let* ((item-name (vector-ref items
+                                                    (+ i menu-items-item-name)))
+                             (enable (vector-ref items
+                                                 (+ i menu-items-item-enable)))
+                             (descrip (vector-ref items
+                                                  (+ i menu-items-item-equiv-key)))
+                             (help (vector-ref items
+                                               (+ i menu-items-item-help)))
+                             (item-data
+                              (if descrip
+                                  (string-append
+                                   item-name
+                                   (make-string
+                                    (max 0 (- maxwidth
+                                              (string-length item-name)))
+                                    #\space)
+                                   descrip)
+                                  item-name)))
+                        (tty-menu-add-selection
+                         menu lpane item-data (not (not enable))
+                         (and (string? help) help))
+                        (pane-loop (+ i menu-items-item-length)
+                                   maxwidth lpane)))))))
+              ;; "All set and ready to fly."
+              (let* ((dispwidth (frame-width frame))
+                     (dispheight (frame-height frame))
+                     (x (max 1 (min x dispwidth)))
+                     (y (max 1 (min y dispheight))))
+                (call-with-values
+                    (lambda () (tty-menu-locate menu x y))
+                  (lambda (ulx uly width height)
+                    (when (> (+ ulx width) dispwidth)
+                      (set! x (- x (- (+ ulx width) dispwidth)))
+                      (set! ulx (- dispwidth width)))
+                    (when (> (+ uly height) dispheight)
+                      (set! y (- y (- (+ uly height) dispheight)))
+                      (set! uly (- dispheight height)))
+                    ;; "Move the menu away of the echo area, to avoid
+                    ;; overwriting the menu with help echo messages or
+                    ;; vice versa." The echo area is one row here, so
+                    ;; the C's two-row fallback is what applies.
+                    (when (> (+ uly height) (- dispheight 2))
+                      (set! y (- y 2))
+                      (set! uly (- uly 2)))
+                    (when (< ulx 0) (set! x (- x ulx)))
+                    (when (< uly 0) (set! y (- y uly)))
+                    ;; **The three status values, not a list.** The C
+                    ;; writes through pointers; `call-with-values` is
+                    ;; where those pointers are here.
+                    (call-with-values
+                        (lambda ()
+                          (tty-menu-activate
+                           d frame menu x y tty-menu-help-callback
+                           (not (eqv? 0 (logand flags 4)))))
+                      (lambda (status pane selidx)
+                      (case status
+                        ((1)                    ; TTYM_SUCCESS
+                         ;; "Find the item number SELIDX in pane number
+                         ;; PANE."
+                         (let walk ((i 0) (pane pane) (selidx selidx))
+                           (cond
+                            ((>= i used) #f)
+                            (else
+                             (let ((slot (vector-ref items i)))
+                               (cond
+                                ((eq? slot #t)
+                                 (when (= pane 0)
+                                   (set! %tty-menu-pane-prefix
+                                         (vector-ref
+                                          items
+                                          (+ i menu-items-pane-prefix))))
+                                 (walk (+ i menu-items-pane-length)
+                                       (- pane 1) selidx))
+                                ((= pane -1)
+                                 (if (= selidx 0)
+                                     (let ((entry (vector-ref
+                                                   items
+                                                   (+ i
+                                                      menu-items-item-value))))
+                                       (if (not (eqv? 0 (logand flags 1)))
+                                           (if %tty-menu-pane-prefix
+                                               (list %tty-menu-pane-prefix
+                                                     entry)
+                                               (list entry))
+                                           entry))
+                                     (walk (+ i menu-items-item-length)
+                                           pane (- selidx 1))))
+                                (else
+                                 (walk (+ i menu-items-item-length)
+                                       pane selidx))))))))
+                        ((4 5)                  ; TTYM_NEXT, TTYM_PREV
+                         (call-with-values
+                             (lambda ()
+                               (tty-menu-new-item-coords frame status x))
+                           (lambda (item-x item-y)
+                             (cons item-x item-y))))
+                        ((2)                    ; TTYM_NO_SELECT
+                         ;; "Make Cancel equivalent to C-g unless
+                         ;; FOR_CLICK." The quit is a non-local exit, and
+                         ;; the `dynamic-wind` above has already put the
+                         ;; cursor and the screen back by the time it
+                         ;; runs.
+                         (when (eqv? 0 (logand flags 2))
+                           (signal-quit))
+                         #f)
+                        (else #f)))))))))))
+
+    (define-method (menu-show (d <tty-display>) frame x y flags title)
+      ;; GNU Emacs's `terminal->menu_show_hook` for a termcap frame:
+      ;; `tty_menu_show` (`term.c:4023`). See it for what this answers
+      ;; and how the menu is drawn.
+      ;;--------------------------------------------------------------
+      (tty-menu-show d frame x y flags title))
     ))

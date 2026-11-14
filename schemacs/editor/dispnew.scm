@@ -542,19 +542,21 @@
               token))))
 
     (define-generic menu-show)
-    ;; Show MENU - a tree of panes and items built from `menu_items` by
-    ;; `(schemacs editor menu)` - at X, Y and answer the chosen item's
-    ;; value, or #f when nothing was chosen. Emacs's
-    ;; `terminal->menu_show_hook` (`termhooks.h`), whose terminal
-    ;; implementation is `tty_menu_show` (`term.c:4023`). A display with
-    ;; no menus - every one but a terminal, which builds its own
-    ;; toolkits' - answers #f.
-    ;; `(menu-show display frame x y flags title tree)`.
+    ;; GNU Emacs's `terminal->menu_show_hook` (`termhooks.h`): show the
+    ;; menu just built into `menu_items` at X, Y, and answer the item the
+    ;; user chose.
     ;;
-    ;; The tree is `(TITLE ITEM ...)' per pane, each ITEM being
-    ;; `#(TEXT VALUE ENABLED HELP SUBMENU)`: SUBMENU is #f or another
-    ;; pane tree, which is `tty_menu_add_pane`/`add_selection`'s shape.
-    (define-method (menu-show (d <display>) frame x y flags title tree)
+    ;; The signature is the C's - `(f, xpos, ypos, menuflags, title,
+    ;; &error_name)` - with the error name as an exception rather than an
+    ;; out-parameter: `(menu-show display frame x y flags title)`.
+    ;;
+    ;; **The menu is read from `menu_items`, as the C reads it.** An
+    ;; earlier draft passed a pane tree instead; that would have been a
+    ;; second representation of what `(schemacs editor menu)` already
+    ;; builds, and `tty_menu_show` would no longer be Emacs's function.
+    ;; The terminal's implementation is in `(schemacs ui tty term)`; every
+    ;; other display builds its menus with a toolkit and answers #f here.
+    (define-method (menu-show (d <display>) frame x y flags title)
       #f)
 
     (define-generic screen-size)

@@ -52,6 +52,7 @@
          (read-input-event display-read-input-event))
  (only (schemacs editor frame)
        *current-frame* *echo-area-buffer* *frame-list* frame? frame-height
+       *default-frame-alist*
        frame-minibuffer-window frame-windows minibuffer-window-active-p
        select-window
        set-window-buffer! window-height window-top
@@ -127,6 +128,12 @@
   ;; Where the pointer is, as the display would answer it.
   ;;--------------------------------------------------------------
   (set! (test-display-pointer d) (cons 0 row)))
+
+;; **The test frames have no menu bar.** A terminal frame shows one by
+;; default and the bar takes the frame's first row; these tests measure
+;; pointer rows from the top of the text. See `tty-editor-tests.scm` for
+;; the same fixture.
+(*default-frame-alist* (cons '(menu-bar-lines . 0) (*default-frame-alist*)))
 
 (define (numbered-frame lines rows cols)
   ;; A frame on a buffer of LINES numbered lines, drawn once so that the

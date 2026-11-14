@@ -52,8 +52,22 @@ TEST_CONFIG_HOME = tempfile.mkdtemp(prefix='schemacs-test-config-')
 # then loads an init file, which is worth having for its own sake. The
 # checks that *are* about the splash pass their own `config=' with no init
 # file in it.
-NO_SPLASH_INIT = ('(import (schemacs editor startup))\n'
-                  '(set! inhibit-startup-screen #t)\n')
+NO_SPLASH_INIT = (
+    '(import (schemacs editor startup))\n'
+    '(import (schemacs editor frame))\n'
+    '(import (schemacs editor menu-bar))\n'
+    '(set! inhibit-startup-screen #t)\n'
+    ';; The frame exists before the init file is read, so the mode has to\n'
+    ';; be turned off on it as well as on the frames to come.\n'
+    '(menu-bar-mode -1)\n'
+    ';; **The menu bar is off for these checks.** A terminal frame draws\n'
+    ';; one - `menu-bar-mode` is on by default - and the bar is the\n'
+    ';; frame\'s first row, which is where a lot of what follows measures\n'
+    ';; text from. Emacs\'s own tests turn it off the same way. The bar\n'
+    ';; has its own check, `tty-menu`, which passes a config without this\n'
+    ';; line. The default alist is set as well as the frame, because the\n'
+    ';; checks that make extra frames would otherwise get a bar back.\n'
+    "(*default-frame-alist* (cons '(menu-bar-lines . 0) (*default-frame-alist*)))\n")
 _CFG = os.path.join(TEST_CONFIG_HOME, 'schemacs')
 os.makedirs(_CFG, exist_ok=True)
 open(os.path.join(_CFG, 'init.scm'), 'w').write(NO_SPLASH_INIT)
@@ -2043,6 +2057,13 @@ NO_SPLASH_CONFIG_HOME = tempfile.mkdtemp(prefix='schemacs-nosplash-config-')
 os.makedirs(os.path.join(NO_SPLASH_CONFIG_HOME, 'schemacs'), exist_ok=True)
 open(os.path.join(NO_SPLASH_CONFIG_HOME, 'schemacs', 'init.scm'), 'w').write(
     NO_SPLASH_INIT)
+
+# And one that leaves the menu bar *on*, for the check that is about it.
+MENUBAR_CONFIG_HOME = tempfile.mkdtemp(prefix='schemacs-menubar-config-')
+os.makedirs(os.path.join(MENUBAR_CONFIG_HOME, 'schemacs'), exist_ok=True)
+open(os.path.join(MENUBAR_CONFIG_HOME, 'schemacs', 'init.scm'), 'w').write(
+    '(import (schemacs editor startup))\n'
+    '(set! inhibit-startup-screen #t)\n')
 
 
 def check_splash():
@@ -4389,6 +4410,56 @@ def check_no_display():
     return problems
 
 
+def check_tty_menu():
+    """The terminal's menu bar and its drop-down menus.
+
+    A terminal frame draws a menu bar as its first row - `display_menu_bar`
+    (`xdisp.c:27756`) - and F10 drops the menu-bar item down
+    (`menu-bar-open`, `menu-bar.el:2829`) as a deck of panes drawn by
+    `tty_menu_show` (`term.c:4023`). This is the one check that runs with
+    the bar *on* (`MENUBAR_CONFIG_HOME`); every other check has it off so
+    that its text rows start at the frame's top.
+
+    Three things are asserted, and the third is the one that cost a bug:
+    the bar is the first row; left and right move between menus (the
+    arrows are `right-char`/`left-char`, which
+    `tty-menu-navigation-map` substitutes); and C-g pops a menu-bar menu
+    down *without* "Quit", because a menu-bar position is a
+    `MENU_FOR_CLICK` and `tty_menu_activate` only signals for a menu that
+    was not clicked open.
+    """
+    problems = []
+
+    rows = screen_of(drive([], None, config=MENUBAR_CONFIG_HOME)).split("\n")
+    if not rows or not rows[0].startswith("File"):
+        problems.append("the menu bar is not the frame's first row: %r"
+                        % (rows[:2],))
+
+    screen = screen_of(drive([b"\x1b[21~"], None,
+                             config=MENUBAR_CONFIG_HOME))
+    if "Visit New File" not in screen:
+        problems.append("F10 did not drop the File menu down: %r"
+                        % screen.split("\n")[-3:])
+
+    screen = screen_of(drive([b"\x1b[21~", b"\x1bOC"], None,
+                             config=MENUBAR_CONFIG_HOME))
+    if "Visit New File" in screen:
+        problems.append("the right arrow did not leave the File menu")
+    if "Select All" not in screen and "Paste" not in screen:
+        problems.append("the right arrow did not move to the Edit menu: %r"
+                        % screen.split("\n")[-3:])
+
+    screen = screen_of(drive([b"\x1b[21~", b"\x07"], None,
+                             config=MENUBAR_CONFIG_HOME))
+    if "Visit New File" in screen:
+        problems.append("C-g did not pop the menu down")
+    if "Quit" in screen.split("\n")[-1]:
+        problems.append("cancelling a menu-bar menu said Quit, which "
+                        "`MENU_FOR_CLICK` exists to prevent")
+
+    return problems
+
+
 CHECKS = {
     "buffer-menu": check_buffer_menu,
     "query-replace": check_query_replace,
@@ -4468,6 +4539,7 @@ CHECKS = {
     "imports": check_imports,
     "load-theme": check_load_theme,
     "completion-scroll": check_completion_scroll,
+    "tty-menu": check_tty_menu,
     "no-display": check_no_display,
 }
 

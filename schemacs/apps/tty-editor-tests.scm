@@ -214,6 +214,14 @@
 
 (current-display *test-display*)
 
+;; **The test frames have no menu bar.** A terminal frame shows one by
+;; default - `menu-bar-mode` is on - and a bar takes a row the tests
+;; below measure text from. Emacs's own tests turn it off the same way,
+;; with `(menu-bar-mode -1)`; the bar has its own tests in
+;; `menu-bar-tests.scm` and the terminal's drawing of it is exercised at
+;; a pty.
+(*default-frame-alist* (cons '(menu-bar-lines . 0) (*default-frame-alist*)))
+
 (define (test-frame ed)
   ;; A frame over a 24x80 screen with one window filling it, showing ED,
   ;; which is what `(new-frame ed)' makes when a terminal is open. These
@@ -4544,6 +4552,10 @@
 ;; of them having been stored - `frame-parameters` computes them, as the C
 ;; does - and a stored value wins.
 (test-equal '("F" 24 1 0 1 x)
+  ;; **With the bar showing**, which is what a frame with no
+  ;; `menu-bar-lines` parameter computes - the rest of this file's frames
+  ;; turn it off to keep row 0 free (see the note at the top).
+  (parameterize ((*default-frame-alist* '()))
   (let ((frame (test-frame (allocate-buffer))))
     (parameterize ((*current-frame* frame))
       (let ((name (frame-parameter frame 'name)))
@@ -4555,7 +4567,7 @@
               (begin (modify-frame-parameters
                       frame (list (cons 'menu-bar-lines 1) (cons 'mine 'x)))
                      (cdr (assq 'menu-bar-lines (frame-parameters frame))))
-              (frame-parameter frame 'mine))))))
+              (frame-parameter frame 'mine)))))))
 
 ;; `define-minor-mode`'s numeric rule, measured on Emacs 31.1: a prefix of
 ;; 1 or more enables, and 0 or a negative one disables.

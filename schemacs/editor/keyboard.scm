@@ -129,7 +129,10 @@
     ;; The region's text, which the update is of.
     (only (schemacs editor editfns) region-beginning region-end)
     ;; `render!' after every key: the loop is what drives the display.
-    (only (schemacs editor xdisp) render! redisplay-frames!)
+    ;; `*menu-bar-items-function*` is the seam the redisplay builds a
+    ;; terminal's menu bar through - see the note on it in `xdisp.scm`.
+    (only (schemacs editor xdisp)
+          render! redisplay-frames! *menu-bar-items-function*)
     ;; The development back door, which the command loop gives its turn
     ;; between keys. A no-op unless `SCHEMACS_REPL' opened it.
     (only (scheme-utils repl server) poll-repl! repl-running? repl-wake)
@@ -211,6 +214,8 @@
    internal-pop-keymap
    internal-push-keymap
    read-key-event
+   read-menu-command
+   key-binding
    read-wait-ms
    recursive-edit
    set-transient-map
@@ -745,6 +750,33 @@
           (let ((got (km:keymap-lookup (car maps) (list event))))
             (or got (loop (cdr maps))))))))
 
+    (define (key-binding key)
+      ;; GNU Emacs's `key-binding' (`keymap.c`): "Return the binding for
+      ;; command KEY in the current keymaps. KEY is a string or vector,
+      ;; that gives the key sequence."
+      ;;
+      ;; **The lookup's answer is coerced, as `access_keymap` coerces
+      ;; it.** A menu-bar item is bound as `(STRING . DEFN)` and an
+      ;; extended one as `(menu-item NAME DEFN ...)`; both are *menu
+      ;; spellings* of the binding, and a caller that is not the menu
+      ;; builder - `popup-menu` looking up `[menu-bar file]` - wants the
+      ;; DEFN. `get_keyelt` (`keymap.c:678`) is that step, and
+      ;; `get_keyelt`'s note in `(schemacs editor menu)` says what
+      ;; happens without it: the clicked item's sequence stops at the
+      ;; first symbol.
+      ;;--------------------------------------------------------------
+      (define (coerce def)
+        (cond
+         ((and (pair? def) (string? (car def))) (cdr def))
+         ((and (pair? def) (eq? (car def) 'menu-item))
+          (and (>= (length def) 3) (list-ref def 2)))
+         (else def)))
+      (let loop ((maps (lookup-keymaps)))
+        (if (null? maps)
+            #f
+            (let ((def (coerce (km:keymap-lookup (car maps) key))))
+              (if def def (loop (cdr maps)))))))
+
     (define (modal-lookup-state-step! state event do-action do-wait-next do-fail-lookup)
       ;; One event of `read_key_sequence''s walk.
       ;;
@@ -1249,6 +1281,72 @@
                     (redisplay-frames!)
                     (loop))
                   ev)))))
+
+    (define (read-menu-command)
+      ;; GNU Emacs's `read_menu_command' (`keyboard.c:1691'): read one key
+      ;; sequence *for a tty menu*, and answer the command it names
+      ;; without running it.
+      ;;
+      ;; **The command is not executed**, which is the whole difference
+      ;; from the command loop: `tty_menu_activate` looks at which of the
+      ;; `tty-menu-*` symbols it got and acts on it itself
+      ;; (`term.c:3630'). A key the navigation map does not bind falls
+      ;; through to the global map - `overriding-terminal-local-map` is
+      ;; searched first, not instead - and the menu ignores whatever
+      ;; command that is.
+      ;;
+      ;; The C binds `echo-keystrokes` to zero around the read so that
+      ;; typing a chord is not echoed while a menu is up. Nothing here
+      ;; echoes a partial chord: the prefix description is a timer armed
+      ;; by `simple.sld`'s `request-prefix-echo!`, which only the command
+      ;; loop's dispatch calls.
+      ;;
+      ;; Answers `#t` when the sequence named nothing - the C's `i == 0 ||
+      ;; i == -1` - which is what makes an unbound *prefix* pop the menu
+      ;; down.
+      ;;--------------------------------------------------------------
+      (let loop ((state (new-modal-lookup-state (lookup-keymaps))))
+        ;; **A pending quit is the quit *key*, as `read_char` makes it**
+        ;; (`keyboard.c:2806`): "if quit is requested, return the quit
+        ;; character". Emacs's `read_menu_command` then looks that key up
+        ;; in the navigation map, where C-g is bound to `tty-menu-exit`.
+        ;; Raising the quit here instead would make C-g a stack unwind
+        ;; rather than a menu command, and `tty_menu_activate` could not
+        ;; decide what a cancelled menu means - which for a menu-bar
+        ;; position is "pop down and say nothing" (`MENU_FOR_CLICK`).
+        ;;
+        ;; `*inhibit-quit*` is what keeps `read-key-event`'s own
+        ;; `maybe-quit` from raising it first; the flag is cleared here,
+        ;; by hand, exactly as `read_char` clears it.
+        (let ((event (if (*quit-flag*)
+                         (begin (*quit-flag* #f) quit-char)
+                         (parameterize ((*inhibit-quit* #t))
+                           (read-key-event 100)))))
+          ;; **`read_char` clears `Vquit_flag` when it answers the quit
+          ;; character** (`keyboard.c:2806`), and this is that half: the
+          ;; flag is what the terminal's read left set, and a menu that
+          ;; consumes the C-g as `tty-menu-exit` must not leave it to
+          ;; fire at the next command as a quit nobody asked for.
+          (when (and (*quit-flag*) (eqv? event quit-char))
+            (*quit-flag* #f))
+          (if (not event)
+              ;; A read that produced nothing: the deadline, which exists
+              ;; here because a *quit* arrives as a signal and this
+              ;; terminal's `select` is restarted across it. GNU Emacs's
+              ;; `pselect` returns EINTR and `read_key_sequence` quits;
+              ;; the flag is looked at by `maybe-quit` at the top of the
+              ;; next read, and a real end of input spins here with the
+              ;; command loop's own behaviour.
+              (loop state)
+              (let ((answer 'more))
+                (modal-lookup-state-step!
+                 state event
+                 (lambda (full-path action) (set! answer action))
+                 (lambda (full-path map) (set! answer 'more))
+                 (lambda (full-path) (set! answer #t)))
+                (if (eq? answer 'more)
+                    (loop state)
+                    answer))))))
 
     (define (sit-for seconds nodisp)
       ;; GNU Emacs's `sit-for' (`subr.el:3836'): "Redisplay, then wait
@@ -2307,5 +2405,10 @@ With argument, insert ARG copies of the character."
         items))
 
     (define-key *default-keymap* (kbd "C-q") quoted-insert)
+
+    ;; The redisplay's seam: `menu_bar_items` is this library's
+    ;; (`keyboard.c:8641`) and `update_menu_bar` is `xdisp.c`'s, which is
+    ;; *below* here - so the redisplay asks for the items through this.
+    (*menu-bar-items-function* menu-bar-items)
 
     ))
