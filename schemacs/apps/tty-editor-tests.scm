@@ -14,7 +14,7 @@
  ;; The literal search is `search.c`'s and lives in `search.scm`.
  (only (schemacs editor search) string-search-forward)
  (only (schemacs editor frame)
-       *current-frame* *echo-area-buffer* *echo-area-prompt* *minibuffer*
+       *current-frame* *echo-area-buffer* *minibuffer*
        frame-height frame-editor frame-message
        frame-message-timer set!frame-message
        frame-selected-window new-frame set!frame-selected-window
@@ -31,12 +31,15 @@
        window-list
        set!window-height set!window-width
        set-window-point! window-body-height window-body-width
-       window-buffer window-edges
+       window-buffer window-edges frame-minibuffer-window
        window-height window-point window-right-border? window-top
        window-width)
  (only (schemacs editor keyboard)
        command-remapping dispatch-key-event dispatch-input-event timer-check!
-       *unread-command-events*)
+       *unread-command-events*
+       ;; The outermost loop, and the quit it has to survive - see
+       ;; "an error in the read does not end the loop" below.
+       event-loop signal-quit)
  ;; The cursor's type, which `xdisp.sld' resolves from the buffer's
  ;; `cursor-type' - the tests below are its rule, not the drawing of it.
  (only (schemacs editor xdisp)
@@ -48,7 +51,10 @@
  ;; all the character events these tests feed ever need (only an extended
  ;; keycode would ask the terminal's terminfo, and none is used here).
  (only (schemacs editor dispnew) current-display key-event->key
-       lookup-face realize-face)
+       lookup-face realize-face
+       ;; The generic the test below extends, so that its method attaches to
+       ;; the display's own and not to a fresh generic of that name.
+       read-input-event)
  (only (schemacs editor test-display) <test-display> test-display-script
        set!test-display-script
        test-display-frames-deleted test-display-cursor)
@@ -60,6 +66,9 @@
  (only (schemacs editor marker) marker-position set-marker)
  (only (schemacs editor buffer) buffer-name major-mode
        with-current-buffer
+       ;; `message-overlay-text` reads the overlay `minibuffer-message`
+       ;; puts at the end of the prompt's buffer.
+       overlays-in overlay-get
        ;; `BVAR (b, mark)` - the slot itself, which is what the mark is
        ;; now that `text-editor-mark`/`set!text-editor-mark` are gone.
        %mark-marker set-point allocate-buffer set!text-editor-buffer-name buffer-pt text-editor-text-props set-buffer-modified-p set!buffer-read-only text-editor-undo-list buffer-beg buffer-z buffer-read-only? set!text-editor-file-name)
@@ -123,6 +132,9 @@
        display-completion-list
        *minibuffer-completing-file-name*
        *minibuffer-message-timeout*
+       ;; The overlay a message during a prompt is drawn from, and the
+       ;; timer that takes it down (`minibuffer.el:848`).
+       *minibuffer--message-timer* minibuffer--message-overlay-pos
        completion--do-completion completion--map-for completion--message
        make<minibuffer>
        minibuffer--bitset minibuffer-complete minibuffer-complete-and-exit
@@ -1513,14 +1525,21 @@
       (run (list C-n C-a C-n))
       (list returned (text-editor-cursor-column ed)))))
 
-;; The minibuffer draws the cursor at the prompt, then what has been
-;; typed up to point - and at the end of it, after the last character.
-(test-equal '(11 14 13 11)
+;; The cursor's column is the buffer's, prompt included: **the prompt is
+;; text in the buffer** (`read_minibuf`, `minibuf.c:858'), so the answer
+;; is `current-column` and not "the prompt's width, plus the input's".
+;; Point after the prompt is column 11 - `Find file: ` is eleven cells -
+;; and the start of the line is column 0.
+(test-equal '(11 14 13 0)
   (let* ((ed (allocate-buffer))
          (mb (make<minibuffer> ed "Find file: " minibuffer-local-map
                               #f minibuffer-history 0 #f)))
-    (with-current-buffer ed (insert "abc"))
-    (set-point ed (buffer-beg ed))
+    (with-current-buffer ed
+      (insert "Find file: ")
+      (let ((beg (buffer-beg ed)) (end (buffer-z ed)))
+        (put-text-property beg end 'field #t ed))
+      (insert "abc"))
+    (set-point ed 12)                   ; after the prompt
     (parameterize ((*minibuffer* mb))
       (let ((at-start (minibuffer-cursor-column)))
         (set-point ed (buffer-z ed))
@@ -2415,7 +2434,12 @@
         (set! (test-display-script *test-display*) (list #\return))
         (type frame C-x #\k)
         (set! shown (buffer-name (frame-editor frame)))
-        (set! names (map buffer-name (buffer-list)))
+        ;; **The echo buffer is in the buffer list**, as Emacs's
+        ;; ` *Echo Area 0*` is - a frame makes one. Its leading space is
+        ;; what marks it internal (and what `list-buffers` skips), so
+        ;; the test looks at the buffers a user would see.
+        (set! names (filter (lambda (n) (not (char=? #\space (string-ref n 0))))
+                            (map buffer-name (buffer-list))))
         (set! message (frame-message frame))))
     (list shown names message)))
 
@@ -2898,6 +2922,40 @@
 
 (test-begin "schemacs_ncurses_editor_minibuffer_dispatch")
 
+(define (with-real-prompt prompt initial evs)
+  ;; `with-minibuffer`, but with the prompt **in the buffer**, as
+  ;; `read_minibuf` puts it (`minibuf.c:858`) - the `field' property and
+  ;; all. `with-minibuffer` above predates that and fabricates a buffer
+  ;; holding only the input, which is why it cannot see the field motion
+  ;; these tests are about.
+  ;;--------------------------------------------------------------
+  (let* ((ed (allocate-buffer))
+         (frame (test-frame ed))
+         (mb-ed (allocate-buffer))
+         (mb (make<minibuffer> mb-ed prompt minibuffer-local-map
+                              #f minibuffer-history 0 #f)))
+    (with-current-buffer ed (insert "abc"))
+    (set-point ed (buffer-beg ed))
+    (with-current-buffer mb-ed
+      (let ((beg (buffer-beg mb-ed)))
+        (insert prompt)
+        (put-text-property beg (buffer-z mb-ed) 'front-sticky #t mb-ed)
+        (put-text-property beg (buffer-z mb-ed) 'rear-nonsticky #t mb-ed)
+        (put-text-property beg (buffer-z mb-ed) 'field #t mb-ed))
+      (when initial (insert initial)))
+    (set-point mb-ed (buffer-z mb-ed))
+    (parameterize ((*current-frame* frame)
+                   (*minibuffer* mb)
+                   (*echo-area-buffer* mb-ed)
+                   (*current-buffer* #f))
+      (set-buffer mb-ed)
+      (set!buffer-local-keymap mb-ed minibuffer-local-map)
+      (for-each (lambda (ev) (dispatch-input-event frame ev)) evs)
+      (list (minibuffer-contents-no-properties)
+            (with-current-buffer ed
+              (buffer-substring-no-properties (point-min) (point-max)))
+            (frame-message frame)))))
+
 (define (with-minibuffer prompt initial evs)
   ;; Run EVS with a minibuffer active over a buffer holding "abc", and
   ;; return (minibuffer-contents buffer-contents echo-message).
@@ -2922,10 +2980,6 @@
                    ;; `select-window' does - and the typing goes there
                    ;; instead of into the prompt.
                    (*current-buffer* #f)
-                   ;; the prompt too: the renderer draws it from
-                   ;; the frame, and a command that runs with the
-                   ;; minibuffer active must not see a stale one
-                   (*echo-area-prompt* prompt)
                    (*search-pattern* #f)
                    (*search-case-fold?* #t)
                    (*kill-ring* '())
@@ -2965,6 +3019,36 @@
   (let ((result (with-minibuffer "> " #f (list #\a C-e C-a (integer->char 11)))))
     (list-ref result 1)))
 
+;;--------------------------------------------------------------------
+;; The prompt is a *field*, and motion stops at its edge
+;;
+;; `read_minibuf` puts the prompt in the buffer with the `field',
+;; `front-sticky' and `rear-nonsticky' properties (`minibuf.c:858'), and
+;; `line-beginning-position`/`line-end-position` hand their answers to
+;; `constrain-to-field` (`editfns.c:717`, `:772`). That is what makes
+;; `C-a` in a prompt land after the prompt instead of at the start of the
+;; line - which is the start of the prompt, where `C-k` then kills it.
+;; Measured on Emacs 31.1: `C-a` on "Find file: axc" leaves point at the
+;; 'a', and `C-k` clears "axc" and nothing else.
+;;--------------------------------------------------------------------
+
+(test-begin "schemacs_ncurses_editor_minibuffer_fields")
+
+;; C-a goes to the end of the prompt, and typing there inserts after it.
+(test-equal '("axc" "abc" "")
+  (with-real-prompt "Find file: " "axc" (list C-a)))
+
+;; ...and C-k from there clears what was typed and leaves the prompt.
+(test-equal '("" "abc" "")
+  (with-real-prompt "Find file: " "axc" (list C-a C-k)))
+
+;; C-e is the end of the input, not the end of the line, and C-b steps
+;; back into the input rather than over the prompt.
+(test-equal '("aXc" "abc" "")
+  (with-real-prompt "Find file: " "ac" (list C-e C-b #\X)))
+
+(test-end "schemacs_ncurses_editor_minibuffer_fields")
+
 (test-end "schemacs_ncurses_editor_minibuffer_dispatch")
 
 ;;--------------------------------------------------------------------
@@ -2980,26 +3064,64 @@
 (define (message-frame)
   (test-frame (allocate-buffer)))
 
+(define (prompt-frame)
+  ;; A frame with a minibuffer being read, for the tests of what the
+  ;; *prompt* puts in the echo area: `minibuffer-message` puts it in an overlay at the end of the
+  ;; prompt's buffer (`minibuffer.el:848`), because the echo area's row is
+  ;; showing the answer being typed. `message-overlay-text` reads it back,
+  ;; which is what the renderer draws.
+  (let* ((ed (allocate-buffer))
+         (frame (test-frame ed))
+         (mb-ed (allocate-buffer)))
+    (with-current-buffer mb-ed
+      (insert "Find file: ")
+      (let ((beg (buffer-beg mb-ed)) (end (buffer-z mb-ed)))
+        (put-text-property beg end 'field #t mb-ed)))
+    (let ((mb (make<minibuffer> mb-ed "Find file: " minibuffer-local-map
+                               #f minibuffer-history 0 #f)))
+      (set-window-buffer! (frame-minibuffer-window frame) mb-ed)
+      (list frame mb))))
+
+(define (message-overlay-text frame)
+  ;; The `after-string` of the overlay `minibuffer-message` put at the end
+  ;; of the prompt's buffer - `(point-max)` and nothing else, which is
+  ;; what `minibuffer--message-overlay-pos` answers with no
+  ;; `minibuffer-message` text property in the buffer. The prompt's
+  ;; buffer is the one the frame's minibuffer window is showing
+  ;; (`set-minibuffer-message` asks the same question).
+  ;;
+  ;; `overlays-in` and not `overlays-at`: Emacs's `overlays-at` leaves
+  ;; out a zero-length overlay at the position ("Zero-length overlays
+  ;; that start and stop at POS are not included in the return value",
+  ;; `buffer.c:3910`), and this overlay is empty by construction.
+  (let ((ed (window-buffer (frame-minibuffer-window frame))))
+    (with-current-buffer ed
+      (let loop ((ovs (overlays-in (- (point-max) 1) (point-max))))
+        (cond ((null? ovs) #f)
+              ((overlay-get (car ovs) 'after-string)
+               (overlay-get (car ovs) 'after-string))
+              (else (loop (cdr ovs))))))))
+
 ;; A message shown while the minibuffer is being read is enclosed in
 ;; `[...]' with a space in front, which is how Emacs marks it as the
 ;; editor talking rather than as part of the answer.
 (test-equal " [No match]"
-  (let ((frame (message-frame)))
-    (parameterize ((*current-frame* frame))
+  (let* ((fm (prompt-frame)) (frame (car fm)))
+    (parameterize ((*current-frame* frame) (*minibuffer* (cadr fm)))
       (minibuffer-message "No match")
-      (frame-message frame))))
+      (message-overlay-text frame))))
 
 ;; ...and a message that is already written that way is not enclosed
 ;; twice: Emacs tests it with the regexp "\\` *\\[.+\\]\\'". Leading
 ;; and trailing spaces count, so " x " is not already enclosed and
 ;; becomes " [ x ]".
 (test-equal '(" [No match]" " [ x ]")
-  (let ((frame (message-frame)))
-    (parameterize ((*current-frame* frame))
+  (let* ((fm (prompt-frame)) (frame (car fm)))
+    (parameterize ((*current-frame* frame) (*minibuffer* (cadr fm)))
       (list (begin (minibuffer-message " [No match]")
-                   (frame-message frame))
+                   (message-overlay-text frame))
             (begin (minibuffer-message " x ")
-                   (frame-message frame))))))
+                   (message-overlay-text frame))))))
 
 ;; A message shown with `minibuffer-message' gets a timeout; one put
 ;; there plainly - by the command loop clearing the echo area, or by an
@@ -3013,38 +3135,44 @@
 ;; (`clear-minibuffer-message', :1050). So the test asks whether one is
 ;; armed, and that it is gone again.
 (test-equal '(#t #f)
-  (let ((frame (message-frame)))
-    (parameterize ((*current-frame* frame)
+  (let* ((fm (prompt-frame)) (frame (car fm)))
+    (parameterize ((*current-frame* frame) (*minibuffer* (cadr fm))
                    (*minibuffer-message-timeout* 2))
       (minibuffer-message "No match")
-      (list (and (frame-message-timer frame) #t)
+      ;; The timer is `minibuffer--message-timer` now, and not the
+      ;; frame's: the message is the overlay's, so the timeout that takes
+      ;; it down is the one armed beside it (`minibuffer.el:853`).
+      (list (and (*minibuffer--message-timer*) #t)
             (begin (set!frame-message frame "plain")
-                   (frame-message-timer frame))))))
+                   (*minibuffer--message-timer*))))))
 
 ;; And the timer really does take the message down, which is what the
 ;; command loop used to do by timing its read. Run it by hand here: two
 ;; seconds is longer than a test can wait, and `timer-check!' is what the
 ;; loop calls to run whatever is ripe.
-(test-equal '(" [No match]" "")
-  (let ((frame (message-frame)))
-    (parameterize ((*current-frame* frame)
+(test-equal (list " [No match]" #f)
+  (let* ((fm (prompt-frame)) (frame (car fm)))
+    (parameterize ((*current-frame* frame) (*minibuffer* (cadr fm))
                    (*minibuffer-message-timeout* 0))
       (minibuffer-message "No match")
-      (list (frame-message frame)
-            (begin (timer-check!) (frame-message frame))))))
+      (list (message-overlay-text frame)
+            ;; **Gone, not empty**: the message is an overlay, so there
+            ;; is no text at all once it is deleted - Emacs's
+            ;; `(current-message)' is nil after `clear_message`.
+            (begin (timer-check!) (message-overlay-text frame))))))
 
 ;; `completion--message' says nothing at all when
 ;; `completion-show-inline-help' is off, which is what a user who has
 ;; turned it off expects.
-(test-equal '(" [No match]" "")
-  (let ((frame (message-frame)))
-    (parameterize ((*current-frame* frame))
+(test-equal (list " [No match]" #f)
+  (let* ((fm (prompt-frame)) (frame (car fm)))
+    (parameterize ((*current-frame* frame) (*minibuffer* (cadr fm)))
       (list (begin (completion--message "No match")
-                   (frame-message frame))
+                   (message-overlay-text frame))
             (begin (set!frame-message frame "")
                    (parameterize ((*completion-show-inline-help* #f))
                      (completion--message "No match"))
-                   (frame-message frame))))))
+                   (message-overlay-text frame))))))
 
 ;; Replacing the minibuffer contents replaces them. They used to be
 ;; *prepended* to, because the deletion ran from the cursor - which the
@@ -4688,3 +4816,75 @@
          (lookup-face b '(:weight bold)))))
 
 (test-end "schemacs_ncurses_editor_minibuffer_buffer")
+
+;;--------------------------------------------------------------------
+;; An error in the *read* does not end the command loop
+;;
+;; GNU Emacs's `command_loop_2` (`keyboard.c:1159`) is
+;;
+;;     do val = internal_condition_case (command_loop_1, handlers, cmd_error);
+;;     while (!NILP (val));
+;;
+;; - the loop is *outside* the error guard, so `cmd_error` reports the
+;; error and the loop reads again. This tree had the loop as the last form
+;; of the guarded body, so the handler's own value - the "Quit" message a
+;; quit makes - *became the value of the iteration* and the loop returned.
+;;
+;; Measured on a terminal: hold Down in Dired and press C-g while the
+;; queued keys are still being read, and the editor exited with status 0
+;; and no message at all. A C-g makes SIGINT the kernel delivers, so the
+;; quit is raised by the read's own `maybe-quit` - inside the guard and
+;; outside the per-command one - which is exactly this shape.
+;;--------------------------------------------------------------------
+
+(define %quit-once #f)
+
+(define-class <quitting-display> (<test-display>))
+
+(define-method (read-input-event (d <quitting-display>) timeout)
+  ;; The first read raises the quit; every later one answers the script,
+  ;; as `(schemacs editor test-display)` does.
+  (if %quit-once
+      (begin (set! %quit-once #f) (signal-quit))
+      (let ((script (test-display-script d)))
+        (if (null? script)
+            #f
+            (begin (set!test-display-script d (cdr script))
+                   (car script))))))
+
+(test-begin "schemacs_tty_editor_error_loop")
+
+;; The key scripted *after* the quit still runs, which is what "the loop
+;; went on" means; and the quit was reported. Without the fix the buffer
+;; is untouched ("abc") because the loop returned the moment the quit was
+;; caught.
+(test-equal "a quit raised by the read is reported and the loop goes on"
+  "aabc"
+  (let* ((ed (allocate-buffer))
+         (frame (test-frame ed))
+         ;; **Not named `display`**: that is `(scheme write)`'s procedure,
+         ;; and a local of that name shadows it for everything in the
+         ;; body - measured, the first version died with "Wrong type to
+         ;; apply: #<<quitting-display>>" from a call that meant the
+         ;; procedure.
+         (qd (make <quitting-display>)))
+    (parameterize ((*current-frame* frame)
+                   (*current-buffer* ed)
+                   (*echo-area-buffer* #f)
+                   (*frame-list* (list frame))
+                   ;; **The empty list, as the other helpers here bind it.**
+                   ;; `*buffer-list*` holds `(name . buffer)` *entries* -
+                   ;; `(buffer-list)` is `(map cdr ...)` - so a list of
+                   ;; bare buffers makes the Buffers menu's update do
+                   ;; `(cdr #<buffer>)`.
+                   (*buffer-list* '())
+                   (current-display qd))
+      (with-current-buffer ed (insert "abc"))
+      (set-point ed 1)
+      (set!test-display-script qd (list #\a))
+      (set! %quit-once #t)
+      (event-loop frame)
+      (with-current-buffer ed
+        (buffer-substring-no-properties (point-min) (point-max))))))
+
+(test-end "schemacs_tty_editor_error_loop")

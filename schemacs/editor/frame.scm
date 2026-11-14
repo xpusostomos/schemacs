@@ -60,6 +60,9 @@
     ;; where they are installed, at the end of this file.
     (only (schemacs editor buffer)
           *current-buffer* other-buffer current-buffer
+          ;; The echo area is a *buffer* now - `echo_buffer[]` in the C -
+          ;; so this library makes it, writes it and shows it.
+          get-buffer-create generate-new-buffer with-current-buffer
           *current-editor-function* *replace-buffer-in-windows-function*
           ;; `FETCH_CHAR` (`buffer.h`) - the raw read of a named
           ;; buffer. It has no Lisp name, and it was the engine's
@@ -81,6 +84,9 @@
     ;; while `editfns.scm' imported back into here.
     (only (schemacs editor editfns)
           *message-function* *current-message-function*
+          ;; `set_message_1` writes the message into the echo buffer with
+          ;; `Finsert` at BEG, and what it replaces is deleted first.
+          buffer-substring-no-properties delete-region insert point-max point-min
           ;; `window.c`'s line walks want a line start, and that is
           ;; `editfns.c`'s arithmetic - which is why this library sits
           ;; above `editfns.scm` and not below it.
@@ -158,7 +164,6 @@
    window-cursor-off?
    *minibuffer*
    *echo-area-buffer*
-   *echo-area-prompt*
    current-editor
    display-selections-p
    *tty-select-active-regions*
@@ -181,6 +186,7 @@
    frame-garbaged-p set-frame-garbaged!
    ;; `FRAME_MINIBUF_WINDOW (f)` and the test that it is being read.
    frame-minibuffer-window set!frame-minibuffer-window
+   frame-echo-buffer
    minibuffer-window-active-p window-minibuffer-p
    make<window>
    frame-editor
@@ -205,6 +211,10 @@
    set-message!
    set!frame-message
    set!frame-message-timer
+   ;; `set-message-function` and `clear-message-function` (`xdisp.c`):
+   ;; the hooks `minibuffer.scm` installs so that a message during a
+   ;; prompt is an overlay rather than the echo area.
+   *set-message-function* *clear-message-function*
    set!frame-quit-cont
    set!frame-selected-window
    set!frame-windows
@@ -907,7 +917,7 @@
 
     (define-record-type <frame>
       (make<frame>
-       windows selected-window minibuffer-window height width
+       windows selected-window minibuffer-window echo-buffer height width
        message message-timer keymap-state quit-cont output name
        parameters garbaged new-width new-height new-size-p
        menu-bar-items menu-bar-items-used)
@@ -916,6 +926,29 @@
       ;; ^ The frame's windows, top to bottom. Emacs's `window-list'.
       (minibuffer-window frame-minibuffer-window
                          set!frame-minibuffer-window)
+      (echo-buffer frame-echo-buffer set!frame-echo-buffer)
+      ;; ^ The buffer the minibuffer window shows when no prompt is being
+      ;; read: GNU Emacs's `echo_buffer[]` (`xdisp.c:12919`), the buffer a
+      ;; message is *written into* so that the row is an ordinary window's
+      ;; row. The C keeps two of them (`" *Echo Area 0*"` and
+      ;; `" *Echo Area 1*"`) and alternates so that a new message is built
+      ;; in a fresh one while the old is still on screen
+      ;; (`with_echo_area_buffer`, `:12936`); this tree keeps one and
+      ;; clears it, because its redisplay is synchronous and there is no
+      ;; moment at which the old message must stay visible.
+      ;;
+      ;; **The message is *also* a string on the frame** (`message`
+      ;; below, the C's `FRAME_MESSAGE_BUF`). Emacs has both: the buffer
+      ;; is what is drawn, and the string is what `current-message`
+      ;; answers. They are written together in `set!frame-message`.
+      ;;
+      ;; **One per frame, where Emacs has two for the whole editor.**
+      ;; The C's pair exist so a new message can be built in a fresh
+      ;; buffer while the old is still on screen, and only the *selected*
+      ;; frame's minibuffer window ever displays them. This tree's
+      ;; messages are per frame already (`set!frame-message` names one),
+      ;; so a shared buffer would show one frame's message on another -
+      ;; which is the bug the two-frame test in `pgtk-tests` pins.
       ;; ^ `f->minibuffer_window` (`frame.h`), read as
       ;; `FRAME_MINIBUF_WINDOW (f)`: **the window the echo area is**.
       ;; GNU Emacs gives every frame one (`make_frame` sets it,
@@ -1324,6 +1357,48 @@
         (when timer (cancel-timer timer))
         (set!frame-message-timer frame #f)))
 
+    (define *set-message-function* (make-parameter #f))
+    ;; ^ GNU Emacs's `set-message-function` (`xdisp.c:13442`): "Function
+    ;; to call to handle `message' messages. It receives one argument,
+    ;; the message string. If it returns non-nil, the message is
+    ;; considered handled and the echo area is not touched. If it
+    ;; returns a string, that string is displayed instead."
+    ;;
+    ;; Emacs's chain is a list of handlers, `set-message-functions`
+    ;; (`minibuffer.el:1010`), walked by `run-hook-wrapped`. The one
+    ;; handler this tree has is `set-minibuffer-message`, installed by
+    ;; `minibuffer.scm` - it is `minibuffer.el`'s, and this library is
+    ;; below it.
+
+    (define *clear-message-function* (make-parameter #f))
+    ;; ^ GNU Emacs's `clear-message-function` (`xdisp.c:13435`), called
+    ;; by `clear_message` (`:13638`) before the echo area is cleared: it
+    ;; removes whatever the set function put on screen. `minibuffer.el`
+    ;; installs `clear-minibuffer-message`.
+
+    (define (frame-echo-buffer-set! frame text)
+      ;; `set_message_1` (`xdisp.c:13624`) - the message as a *buffer*:
+      ;; it inserts TEXT at BEG of the echo buffer and leaves point after
+      ;; it. `with_echo_area_buffer` has already emptied the buffer, which
+      ;; this does directly (`clear_buffer_p` in the C, `:12984`).
+      ;;--------------------------------------------------------------
+      (let ((echo (frame-echo-buffer frame)))
+        (when echo
+          (with-current-buffer echo
+            ;; **Nothing is rewritten when the text is already there.**
+            ;; `set_message_1` always clears and inserts, but the C only
+            ;; calls it when a message is actually being *set*; this
+            ;; tree calls `set!frame-message` with "" at the start of
+            ;; every command, and a needless write raises the buffer's
+            ;; modified tick, which makes `window_outdated` rebuild the
+            ;; echo row on every redisplay - the very cost the row was
+            ;; moved into the matrix to avoid.
+            (unless (string=? text
+                              (buffer-substring-no-properties
+                               (point-min) (point-max)))
+              (delete-region (point-min) (point-max))
+              (insert text))))))
+
     (define (set!frame-message frame text)
       ;; Put TEXT in FRAME's echo area, taking down any timeout the
       ;; message it replaces had. A timeout belongs to the message it
@@ -1331,9 +1406,42 @@
       ;; command loop clearing the echo area, or an error being
       ;; reported - is not meant to inherit the previous one's and
       ;; disappear early.
+      ;;
+      ;; **The text goes into the frame's echo buffer**, which is what
+      ;; `set_message` does (`xdisp.c:13579`): the echo area is a window
+      ;; displaying a buffer, so a message is written and redisplayed
+      ;; like any other text. This replaces the synthetic echo row the
+      ;; renderer used to paint.
+      ;;
+      ;; **`set-message-function` runs first and can take the message
+      ;; away.** Emacs's default handler is `set-minibuffer-message`,
+      ;; which displays a message *at the end of an active minibuffer*
+      ;; as an overlay - because the echo area's row is showing the
+      ;; prompt, and a message must not hide what is being typed.
+      ;; An empty TEXT is `clear_message` (`xdisp.c:13638`): it calls
+      ;; `clear-message-function` and clears the echo area.
       ;;--------------------------------------------------------------
       (frame-cancel-message-timer! frame)
-      (set!frame-message-text frame text))
+      (if (or (not text) (string=? "" text))
+          (begin
+            (when (*clear-message-function*) ((*clear-message-function*) frame))
+            (set!frame-message-text frame "")
+            (frame-echo-buffer-set! frame ""))
+          (if (and (*set-message-function*)
+                   ((*set-message-function*) frame text))
+              ;; Handled: `set_message` does not call
+              ;; `with_echo_area_buffer` at all, so `echo_area_buffer[0]`
+              ;; is untouched and `(current-message)` answers nil. The
+              ;; buffer is emptied anyway, for the reason `read_char`
+              ;; empties it on the next key (`clear_message`): a message
+              ;; that is not the current one must not be left on screen
+              ;; when the prompt it belongs to goes away.
+              (begin
+                (set!frame-message-text frame "")
+                (frame-echo-buffer-set! frame ""))
+              (begin
+                (set!frame-message-text frame text)
+                (frame-echo-buffer-set! frame text)))))
 
     (define (set-message! frame text . args)
       ;; Put TEXT in FRAME's echo area, taking it down again after
@@ -1661,32 +1769,19 @@
     ;; `(schemacs editor minibuffer)'.
 
     (define *echo-area-buffer* (make-parameter #f))
-    ;; ^ The buffer the echo area is showing, or false when it is showing
-    ;; no buffer: GNU Emacs's `echo_area_buffer[0]'. While a minibuffer is
-    ;; being read that buffer is the minibuffer's - Emacs gets there by
-    ;; another route, because the minibuffer's *window* is the selected
-    ;; window while it is read, so `current-buffer' is its buffer and
-    ;; nothing has to say so. This project has no minibuffer window yet,
-    ;; so the buffer that window would be showing is kept here, and
+    ;; ^ The buffer a minibuffer read is putting in the echo area - the
+    ;; frame's minibuffer window - or false when no read is active:
     ;; `read-from-minibuffer' binds it while it reads.
     ;;
-    ;; It is here with the frame's other state because three things need
-    ;; it and none of them may depend on the minibuffer's own code: the
-    ;; display layer draws it (`X-DISPLAY' reads `echo_area_buffer' in GNU
-    ;; Emacs too), and `CURRENT-EDITOR' answers with it, which is what
-    ;; makes every editing command work in the prompt with no code of its
-    ;; own.
-
-    (define *echo-area-prompt* (make-parameter #f))
-    ;; ^ The prompt drawn at the start of the echo area while a minibuffer
-    ;; is being read, or false: what the display layer puts before the
-    ;; buffer's text. GNU Emacs keeps the prompt *in* the buffer as the
-    ;; `minibuffer-prompt' text property, which is why it needs no such
-    ;; variable and why `minibuffer-prompt-end' can tell where the typed
-    ;; text begins. This editor has neither text properties nor a
-    ;; restriction on how far back point may go, so the prompt is beside
-    ;; the buffer rather than in it, and this is where the display layer
-    ;; finds it.
+    ;; **The redisplay no longer reads it.** The echo area is a window
+    ;; now and draws whatever buffer that window shows
+    ;; (`set_window_buffer (minibuf_window, Fcurrent_buffer ())`,
+    ;; `minibuf.c:840`), so there is no separate thing to draw. What is
+    ;; left is the question "is a minibuffer being read?", which is what
+    ;; `minibuffer-window-active-p` and the callers below ask; Emacs
+    ;; answers it with `(> (minibuffer-depth) 0)`, and this parameter is
+    ;; the same fact, kept where libraries below the minibuffer can reach
+    ;; it (a prompt is `(minibufferp)`, which `simple.scm` cannot call).
 
     (define (current-editor)
       ;; Which buffer the *selected window* shows - the window half of GNU
@@ -2029,7 +2124,11 @@
       ;; `wset_frame (rw, frame)' tells the window which frame it is on.
       ;; A window's frame is fixed for its life, so it cannot be filled
       ;; in afterwards - the window has to be built knowing it.
-      (let* ((frame (make<frame> '() #f #f height width
+      (let* (;; `ensure_echo_area_buffers` (`xdisp.c:12919`): the
+             ;; buffer the echo area *is*. It is made before the frame
+             ;; because the frame's minibuffer window shows it.
+             (echo-buffer (generate-new-buffer " *Echo Area 0*"))
+             (frame (make<frame> '() #f #f echo-buffer height width
                                  "" #f #f #f display (%next-frame-name)
                                  ;; "The parameters a frame is made with":
                                  ;; `make-frame` merges `default-frame-alist`
@@ -2058,10 +2157,15 @@
              ;; **The minibuffer window is the frame's last row**, made
              ;; with the frame as `make_frame` makes it (`frame.c:1237`,
              ;; `fset_minibuffer_window (f, make_minibuffer_window ())`).
-             ;; It shows no buffer until a prompt is read, which is what
-             ;; `minibuffer-window-active-p` asks; the row is drawn as
-             ;; the echo area either way.
-             (mini (make-frame-window frame #f
+             ;; **It shows the frame's echo buffer**, which is the
+             ;; buffer `set_message_1` writes a message into: the echo
+             ;; area is an ordinary window displaying an ordinary buffer
+             ;; (`xdisp.c:12919`). A prompt replaces that buffer for the
+             ;; duration of the read (`read_minibuf`'s
+             ;; `set_window_buffer (minibuf_window, Fcurrent_buffer ())`,
+             ;; `minibuf.c:840`) and puts it back on the way out
+             ;; (`minibuffer_unwind`, `:1231`).
+             (mini (make-frame-window frame echo-buffer
                                       (max 0 (- height 1)) 1 0 width)))
         (set!frame-minibuffer-window frame mini)
         (set!frame-windows frame (list window mini))

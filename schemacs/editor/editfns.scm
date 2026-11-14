@@ -33,10 +33,14 @@
     (only (scheme write) display write)
     ;; `current-buffer' and `set-buffer', which `save-excursion' saves
     ;; and restores beside point.
-    (only (guile) cadr call-with-output-string
+    (only (guile) caddr cadddr cadr cdddr call-with-output-string
           exact->inexact string-index)
-    (only (schemacs editor buffer) current-buffer set-buffer
+    (only (schemacs editor buffer) bufferp current-buffer set-buffer
           *inhibit-read-only*
+          ;; `get-pos-property` asks the overlays whether one would cover
+          ;; a character inserted at POSITION.
+          overlay-front-advance overlay-get overlay-rear-advance
+          overlay-start overlay-end overlays-at
           ;; `FETCH_CHAR` (`buffer.h`) - the raw read of a named
           ;; buffer. It has no Lisp name, and it was the engine's
           ;; until 2026-10-13.
@@ -71,7 +75,10 @@
           ;; `structure buffer''s own `mark' slot, which `mark-marker'
           ;; below hands out as the marker it is (`editfns.c:265').
           %mark-marker)
-    (only (schemacs editor textprop) add-text-properties)
+    (only (schemacs editor textprop) add-text-properties
+          get-char-property get-text-property
+          next-single-char-property-change previous-single-char-property-change
+          text-property-stickiness)
     ;; The insertion and the deletion themselves are `insdel.c`'s, in its
     ;; own library - `insert_1_both` and `del_range` are that file's, the
     ;; same way `Finsert` and `Fdelete_region` below are this one's.
@@ -139,6 +146,9 @@ point-marker
    propertize
    delete-and-extract-region
    forward-line
+   *inhibit-field-text-motion*
+   constrain-to-field field-beginning field-end
+   get-pos-property
    delete-region
    eobp
    goto-char
@@ -527,6 +537,208 @@ point-marker
       ;;--------------------------------------------------------------
       (- (buffer-pt ed) (text-editor-get-start-of-line ed)))
 
+    ;;----------------------------------------------------------------
+    ;; Fields - `editfns.c`'s `find_field` and the motion it constrains
+    ;;----------------------------------------------------------------
+
+    (define *inhibit-field-text-motion* (make-parameter #f))
+    ;; ^ GNU Emacs's `inhibit-field-text-motion' (`editfns.c`):
+    ;; "Non-nil means text motion commands don't notice fields."
+    ;; Nil, so `C-a` and `C-e` stop at a field's edge.
+
+    (define (get-pos-property position prop . args)
+      ;; GNU Emacs's `get-pos-property' (`editfns.c:275`): "Return the
+      ;; value of POSITION's property PROP ... the property that a char
+      ;; would inherit if it were inserted at POSITION."
+      ;;
+      ;; It is `get-char-property' with the *stickiness* rules applied:
+      ;; an overlay answers only if it would cover a character inserted
+      ;; here, and a text property answers from the character after
+      ;; POSITION, the one before, or neither, by
+      ;; `text-property-stickiness`.
+      ;;
+      ;; **This is the property `find_field` asks about a boundary**:
+      ;; the minibuffer prompt is `rear-nonsticky`, so at its end the
+      ;; `field` property an insertion would inherit is nil - the prompt
+      ;; is the field *before* that position, and the text typed after
+      ;; it is another field.
+      ;;--------------------------------------------------------------
+      (let ((object (if (pair? args) (car args) (current-buffer))))
+        (let ((overlay-value
+               (and (bufferp object)
+                    (let loop ((ovs (overlays-at position #t)))
+                      (cond ((null? ovs) #f)
+                            ((and (overlay-get (car ovs) prop)
+                                  ;; the C's "will not cover a char
+                                  ;; inserted at point" test
+                                  (let ((start (overlay-start (car ovs)))
+                                        (end (overlay-end (car ovs))))
+                                    (not (or (> start position)
+                                             (< end position)
+                                             (and (= start position)
+                                                  (overlay-front-advance
+                                                   (car ovs)))
+                                             (and (= end position)
+                                                  (not (overlay-rear-advance
+                                                        (car ovs))))))))
+                             (overlay-get (car ovs) prop))
+                            (else (loop (cdr ovs))))))))
+          (if overlay-value
+              overlay-value
+              (let ((stickiness (text-property-stickiness prop position object)))
+                (cond ((> stickiness 0)
+                       (get-text-property position prop object))
+                      ((and (< stickiness 0)
+                            (> position (buffer-beg (current-buffer))))
+                       (get-text-property (- position 1) prop object))
+                      (else #f)))))))
+
+    (define (find-field pos merge-at-boundary beg-limit end-limit)
+      ;; GNU Emacs's `find_field' (`editfns.c:374'): "Find the field
+      ;; surrounding POS in *BEG and *END." Answers the two as values.
+      ;;
+      ;; BEG-LIMIT and END-LIMIT bound the search without changing what
+      ;; counts as a boundary, and MERGE-AT-BOUNDARY makes a POS at the
+      ;; very start of a field belong to the *previous* one - and makes a
+      ;; `boundary'-valued `field' between two fields be skipped, which is
+      ;; how comint joins a prompt to what follows it.
+      ;;--------------------------------------------------------------
+      (let* ((pos (or pos (point)))
+             (after-field (get-char-property pos 'field))
+             (before-field (if (> pos (point-min))
+                               (get-char-property (- pos 1) 'field)
+                               ;; "Using nil here would be a more obvious
+                               ;; choice, but it would fail when the
+                               ;; buffer starts with a non-sticky field."
+                               after-field))
+             (at-field-start #f)
+             (at-field-end #f))
+        (unless merge-at-boundary
+          (let ((field (get-pos-property pos 'field)))
+            (unless (eq? field after-field) (set! at-field-end #t))
+            (unless (eq? field before-field) (set! at-field-start #t))
+            (when (and (not field) at-field-start at-field-end)
+              ;; "If an inserted char would have a nil field while the
+              ;; surrounding text is non-nil, we're probably not looking
+              ;; at a zero-length field, but instead at a non-nil field
+              ;; that's not intended for editing (such as comint's
+              ;; prompts)."
+              (set! at-field-start #f)
+              (set! at-field-end #f))))
+        (let ((beg
+               (if at-field-start
+                   ;; "POS is at the edge of a field, and we should
+                   ;; consider it as the beginning of the following field."
+                   pos
+                   ;; "Find the previous field boundary."
+                   (let ((p (if (and merge-at-boundary (eq? before-field 'boundary))
+                                (previous-single-char-property-change
+                                 pos 'field #f beg-limit)
+                                pos)))
+                     (let ((q (previous-single-char-property-change
+                               p 'field #f beg-limit)))
+                       (or q (point-min))))))
+              (end
+               (if at-field-end
+                   pos
+                   (let ((p (if (and merge-at-boundary (eq? after-field 'boundary))
+                                (next-single-char-property-change
+                                 pos 'field #f end-limit)
+                                pos)))
+                     (or (next-single-char-property-change p 'field #f end-limit)
+                         (point-max))))))
+          (values beg end))))
+
+    (define (field-beginning . args)
+      ;; GNU Emacs's `field-beginning' (`editfns.c`): "Return the
+      ;; beginning of the field surrounding POS." ESCAPE-FROM-EDGE makes a
+      ;; POS at the start of its field answer the *previous* field's
+      ;; beginning; LIMIT caps the answer.
+      ;;--------------------------------------------------------------
+      (let ((pos (if (pair? args) (car args) #f))
+            (escape (if (and (pair? args) (pair? (cdr args))) (cadr args) #f))
+            (limit (if (and (pair? args) (pair? (cdr args)) (pair? (cddr args)))
+                       (caddr args)
+                       #f)))
+        (call-with-values (lambda () (find-field pos escape limit #f))
+          (lambda (beg _end) beg))))
+
+    (define (field-end . args)
+      ;; GNU Emacs's `field-end' (`editfns.c`): "Return the end of the
+      ;; field surrounding POS." The mirror of `field-beginning`.
+      ;;--------------------------------------------------------------
+      (let ((pos (if (pair? args) (car args) #f))
+            (escape (if (and (pair? args) (pair? (cdr args))) (cadr args) #f))
+            (limit (if (and (pair? args) (pair? (cdr args)) (pair? (cddr args)))
+                       (caddr args)
+                       #f)))
+        (call-with-values (lambda () (find-field pos escape #f limit))
+          (lambda (_beg end) end))))
+
+    (define (constrain-to-field new-pos old-pos . args)
+      ;; GNU Emacs's `constrain-to-field' (`editfns.c:551'): "Return the
+      ;; position closest to NEW-POS that is in the same field as
+      ;; OLD-POS." NEW-POS nil means "use and set point".
+      ;;
+      ;; **This is what makes `C-a` a prompt-aware command.** A line
+      ;; motion computes a position and hands it here; if that position
+      ;; is in another field, it is pulled back to the boundary between
+      ;; them. ONLY-IN-LINE (which `line-beginning-position` passes) says
+      ;; a constraint that would move to another *line* is no constraint
+      ;; at all, so a field edge part way along a line does not stop a
+      ;; vertical motion.
+      ;;--------------------------------------------------------------
+      ;; ESCAPE-FROM-EDGE, ONLY-IN-LINE and INHIBIT-CAPTURE-PROPERTY -
+      ;; the first three of the arguments after the two positions
+      (let* ((escape (and (pair? args) (car args)))
+             (only-in-line (and (pair? args) (pair? (cdr args)) (cadr args)))
+             (inhibit-capture (and (pair? args) (pair? (cdr args))
+                                   (pair? (cddr args))
+                                   (caddr args)))
+             (orig-point (and (not new-pos) (point)))
+             (new-pos (or new-pos (point)))
+             (fwd (> new-pos old-pos))
+             (prev-old (- old-pos 1))
+             (prev-new (- new-pos 1))
+             (fielded?
+              (and (not (*inhibit-field-text-motion*))
+                   (not (= new-pos old-pos))
+                   (or (get-char-property new-pos 'field)
+                       (get-char-property old-pos 'field)
+                       (and (> new-pos (point-min))
+                            (get-char-property prev-new 'field))
+                       (and (> old-pos (point-min))
+                            (get-char-property prev-old 'field)))
+                   (or (not inhibit-capture)
+                       (and (not (get-pos-property old-pos inhibit-capture))
+                            (or (<= old-pos (point-min))
+                                (not (get-char-property old-pos inhibit-capture))
+                                (not (get-char-property prev-old
+                                                        inhibit-capture))))))))
+        (if fielded?
+            (let* ((field-bound (if fwd
+                                    (field-end old-pos escape new-pos)
+                                    (field-beginning old-pos escape new-pos)))
+                   (constrain?
+                    (and (if (< field-bound new-pos) fwd (not fwd))
+                         (or (not only-in-line)
+                             ;; the C's ONLY-IN-LINE test: scan from
+                             ;; NEW-POS to FIELD-BOUND and ask whether
+                             ;; any line boundary was crossed
+                             (call-with-values
+                                 (lambda ()
+                                   (find-newline (current-buffer) new-pos
+                                                 (if fwd -1 1) field-bound))
+                               (lambda (_pos counted) (= counted 0)))))))
+              (when constrain? (set! new-pos field-bound))
+              (when (and orig-point (not (= new-pos orig-point)))
+                (goto-char new-pos))
+              new-pos)
+            (begin
+              (when (and orig-point (not (= new-pos orig-point)))
+                (goto-char new-pos))
+              new-pos))))
+
     (define (line-beginning-position . rest)
       ;; GNU Emacs's `line-beginning-position' (`editfns.c:700'), whose
       ;; whole body is
@@ -535,8 +747,11 @@ point-marker
       ;;     return Fconstrain_to_field (make_fixnum (charpos), ...);
       ;;
       ;; - `bol' being `editfns.c:665', which this tree has as the
-      ;; engine's `bol'. The field constraint is not carried: there are
-      ;; no fields here, and `bol' is what every caller wants.
+      ;; engine's `bol'. **The field constraint is carried now**: with
+      ;; the minibuffer's prompt in the buffer (`read_minibuf',
+      ;; `minibuf.c:858`) the prompt *is* a field, and without this
+      ;; `C-a` in a prompt went to the start of the line, which is the
+      ;; start of the prompt - where `C-k` then killed the prompt.
       ;;
       ;; What stood here was `forward-line' and then the line's start. It
       ;; answers the same for the Ns anyone passes and is a *second*
@@ -548,7 +763,21 @@ point-marker
       ;; *back*, which is `bol''s `count - 1' scan.
       ;; The answer is one-based, as every position answer here is.
       ;;--------------------------------------------------------------
-      (bol (current-buffer) (if (pair? rest) (car rest) #f)))
+      (constrain-to-field
+       (bol (current-buffer) (if (pair? rest) (car rest) #f))
+       (point)
+       ;; "(count != 0 ? Qt : Qnil)" - and COUNT is `bol`'s, which is
+       ;; `n - 1` for a number and 0 for a nil N (`editfns.c:665`), so
+       ;; ESCAPE-FROM-EDGE says "the scan crossed a line". **It is not
+       ;; "N is non-zero"**: `(beginning-of-line 1)` is the ordinary key
+       ;; and passes count 0, which is what makes `C-a` in a prompt stop
+       ;; at the end of the prompt - measured on Emacs 31.1,
+       ;; `(line-beginning-position)` at position 12 of a buffer whose
+       ;; prompt is 1..11 answers 12 and not 1.
+       (let ((n (if (pair? rest) (car rest) #f)))
+         (and (number? n) (not (= n 1))))
+       #t
+       #f))
 
     (define (line-end-position . rest)
       ;; GNU Emacs's `line-end-position' (`editfns.c:755'), whose whole
@@ -564,8 +793,16 @@ point-marker
       ;; Measured on Emacs 31.1. Nothing could see it while
       ;; `end-of-line' took no argument at all, which is why giving it one
       ;; is what found this.
+      ;;
+      ;; **Constrained to the field**, which is the C's
+      ;; `Fconstrain_to_field (make_fixnum (eol (n)), make_fixnum (PT),
+      ;; Qnil, Qt, Qnil)' (`editfns.c:772'): `C-e` in a prompt goes to
+      ;; the end of what has been typed, not to the end of the line the
+      ;; prompt is on.
       ;;--------------------------------------------------------------
-      (eol (current-buffer) (if (pair? rest) (car rest) #f)))
+      (constrain-to-field
+       (eol (current-buffer) (if (pair? rest) (car rest) #f))
+       (point) #f #t #f))
 
     (define (buffer-substring beg end)
       ;; GNU Emacs's `buffer-substring' (editfns.c:507), whose whole body

@@ -328,6 +328,24 @@ def drive(keys, path, settle=1.5, gap=0.3, term=None, background="0000/0000/0000
             if k[0] == "exited":
                 exited_early = wait_until(process_has_exited, KEY_MAX)
                 continue
+            if k[0] == "sleep":
+                # **A pause that does not drain.** `nowait` writes are
+                # issued back to back, which is one burst; this leaves the
+                # editor part-way through one, which is where a C-g sent
+                # behind it lands mid-queue. See `check_quit_during_burst`.
+                time.sleep(k[1])
+                continue
+            if k[0] == "nowait":
+                # **Bytes written and *not* waited for.** Every other key
+                # is followed by a settle, which lets the editor catch up;
+                # this one is for a burst that must still be queued when
+                # the next write arrives - what holding a key down looks
+                # like. See `check_quit_during_burst`.
+                try:
+                    os.write(fd, k[1])
+                except OSError:
+                    break
+                continue
             # ("resize" rows cols): make the terminal that size, as a
             # window manager does, and let the editor notice
             resize(fd, pid, k[1], k[2])
@@ -3596,6 +3614,66 @@ def check_terminal_restored():
     return problems
 
 
+def check_quit_during_burst():
+    """C-g behind a burst of keys is reported, and the editor keeps running.
+
+    The terminal turns C-g into SIGINT - `init_sys_modes` makes it VINTR -
+    and the line discipline raises it the moment the byte arrives, so a C-g
+    that lands behind a burst of keys (holding an arrow down) sets
+    `quit-flag` while the keys are still queued. The quit is then raised by
+    the read's own `maybe-quit`, which is *inside* the command loop's error
+    guard.
+
+    GNU Emacs's `command_loop_2` (`keyboard.c:1159`) is
+
+        do val = internal_condition_case (command_loop_1, handlers, cmd_error);
+        while (!NILP (val));
+
+    - the loop is *outside* the guard, so `cmd_error` reports the quit and
+    the loop goes on. This tree had the loop as the last form of the
+    guarded body, so the handler's own value - the "Quit" message - became
+    the value of the iteration and the loop *returned*: measured, holding
+    Down in Dired and pressing C-g exited the editor with status 0 and no
+    message at all.
+
+    The observable is that the editor still answers afterwards: M-x must
+    put its prompt up. A dead editor draws nothing, and `drive` would have
+    had nowhere to send the keys.
+    """
+    import os as _os
+    import re as _re
+
+    d = "/tmp/pty-check-burst"
+    _os.makedirs(d, exist_ok=True)
+    for i in range(30):
+        with open(_os.path.join(d, "f%02d.txt" % i), "w") as out:
+            out.write("%d\n" % i)
+
+    def plain(text):
+        return _re.sub(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\(B|\x1b.", "", text)
+
+    problems = []
+    # **One write, and that is the point.** `drive` settles between list
+    # elements, which lets the editor catch up; the whole burst and the
+    # C-g go down the pty in one write so the C-g is queued behind keys
+    # the editor has not read yet - which is what makes the kernel raise
+    # SIGINT while `quit-flag` is the only thing that records it.
+    first, second = b"\x1bOB" * 250, b"\x1bOB" * 250
+    screen = plain(screen_of(drive([("nowait", first), ("sleep", 0.08),
+                                    ("nowait", second), b"\x07",
+                                    b"\x1b", b"x", WAIT(b"M-x")],
+                                  d,
+                                  settle=2.5, gap=0.4)))
+    if "[[harness: gave up" in screen:
+        problems.append("after a burst of Down keys and C-g the editor did "
+                        "not answer M-x - it is gone (that is "
+                        "`command_loop_2`'s loop being inside the error "
+                        "guard: the handler's `Quit` returned from the loop)")
+    elif "M-x" not in screen:
+        problems.append("M-x after the burst drew no prompt")
+    return problems
+
+
 def check_quit_signal():
     """C-g arrives as a signal, and is still the C-g key.
 
@@ -4655,6 +4733,7 @@ CHECKS = {
     "resize": check_resize,
     "terminal-restored": check_terminal_restored,
     "quit-signal": check_quit_signal,
+    "quit-during-burst": check_quit_during_burst,
     "minibuffer": check_minibuffer,
     "minibuffer-cx-o": check_minibuffer_cx_o,
     "minibuffer-arrows": check_minibuffer_arrows,

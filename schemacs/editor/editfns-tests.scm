@@ -5,17 +5,18 @@
  (only (schemacs editor buffer)
        *current-buffer* *inhibit-read-only* allocate-buffer buffer-name
        buffer-read-only? current-buffer erase-buffer get-buffer
-       get-buffer-create major-mode set-buffer with-current-buffer)
+       get-buffer-create major-mode set-buffer set-point with-current-buffer)
  (only (schemacs editor frame) *current-frame* new-frame)
  (only (schemacs editor editfns)
-       *inhibit-message* *text-quoting-style* buffer-string char-before format
-       format-message
+       *inhibit-field-text-motion* *inhibit-message* *text-quoting-style*
+       buffer-string char-before constrain-to-field field-beginning field-end
+       format format-message get-pos-property point-max point-min
        forward-line goto-char insert insert-and-inherit insert-buffer-substring
        line-beginning-position line-end-position line-number-at-pos message
        point propertize)
  (only (schemacs editor xdisp) *message-log-max*)
  (only (schemacs editor simple) messages-buffer)
- (only (schemacs editor textprop) get-text-property)
+ (only (schemacs editor textprop) get-char-property get-text-property put-text-property)
  (only (ice-9 exceptions) exception-message))
 
 ;; editfns.c's position primitives, and `forward-line' with them.
@@ -450,5 +451,83 @@
       (messages-erase!)
       (parameterize ((*inhibit-message* #t)) (message "hidden"))
       (messages-text))))
+
+;;--------------------------------------------------------------------
+;; Fields: `editfns.c`'s `find_field` and the motion it constrains
+;;
+;; A field is a run of text with one `field' property value, and the two
+;; line positions hand their answers to `constrain-to-field'. That is how
+;; `C-a` in a minibuffer stops at the end of the prompt instead of at the
+;; start of the line - which is the start of the prompt, where `C-k` then
+;; killed it.
+;;
+;; Every expectation is `emacs -Q --batch` on the same buffer: "Find
+;; file: " with `field', `rear-nonsticky' and `front-sticky' over it, and
+;; "abc" inserted after it - which is exactly what `read_minibuf` builds.
+;;------------------------------------------------------------------
+
+(test-begin "schemacs_editor_editfns_fields")
+
+(define (with-prompt thunk)
+  ;; **`*current-buffer*` is bound as well as the frame**, which is the
+  ;; hazard this file's other frame tests already document: a buffer a
+  ;; previous test left pinned is what `(current-buffer)` answers, and the
+  ;; commands under test - `line-beginning-position` among them - ask it.
+  (let ((ed (allocate-buffer)))
+    (parameterize ((*current-frame* (new-frame ed 24 80))
+                   (*current-buffer* ed))
+      (with-current-buffer ed
+        (insert "Find file: ")
+        (put-text-property (point-min) (point-max) 'rear-nonsticky #t)
+        (put-text-property (point-min) (point-max) 'front-sticky #t)
+        (put-text-property (point-min) (point-max) 'field #t)
+        (insert "abc"))
+      (thunk ed))))
+
+;; The prompt is a field and the input is not: an insertion at 12 would
+;; inherit nothing, which is `get-pos-property` asking the stickiness
+;; rules.
+(test-equal '(#t #f #f)
+  (with-prompt
+   (lambda (ed)
+     (list (get-char-property 1 'field ed)
+           (get-char-property 12 'field ed)
+           (get-pos-property 12 'field ed)))))
+
+;; `field-beginning`/`field-end` around a position *after* the field:
+;; without ESCAPE-FROM-EDGE the field being asked about is the one the
+;; insertion at 12 would be in, which begins at 12.
+(test-equal '(12 1 15)
+  (with-prompt
+   (lambda (ed)
+     (list (field-beginning 12 #f 1)
+           (field-beginning 12 #t 1)
+           (field-end 12 #f 15)))))
+
+;; ...and the two line positions, which are what the commands use. The
+;; absent N and N = 1 are the same answer, and N = 0 escapes to the
+;; previous line - past the field, because ONLY-IN-LINE would otherwise
+;; stop it.
+(test-equal '(12 12 15 1 15 12)
+  (with-prompt
+   (lambda (ed)
+     (define (at n) (set-point ed n))
+     (list (begin (at 12) (line-beginning-position))
+           (begin (at 12) (line-beginning-position 1))
+           (begin (at 12) (line-beginning-position 2))
+           (begin (at 12) (line-beginning-position 0))
+           (begin (at 12) (line-end-position))
+           (begin (at 12) (line-end-position 0))))))
+
+;; `constrain-to-field` itself: a position outside the field is pulled
+;; back to the boundary, and the nil NEW-POS form moves point.
+(test-equal '(12 12 12)
+  (with-prompt
+   (lambda (ed)
+     (set-point ed 12)
+     (let ((moved (constrain-to-field #f 12 #f #t #f)))
+       (list moved (point) (constrain-to-field 1 12 #f #t #f))))))
+
+(test-end "schemacs_editor_editfns_fields")
 
 (test-end "schemacs_editor_editfns")

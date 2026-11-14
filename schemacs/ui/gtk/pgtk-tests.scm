@@ -1259,15 +1259,16 @@
              (f1 (fr:new-frame-on d1 ed 24 80))
              (f2 (fr:new-frame-on d2 ed 24 80)))
         (parameterize ((fr:*current-frame* f1))
-          ;; **Both messages are set before either frame is drawn**, and
-          ;; each frame is drawn and photographed on its own. Setting F1's
-          ;; message *after* F2 was drawn is what made this fail inside
-          ;; the suite and pass alone: the transient map of tests before
-          ;; this one can leave `*current-frame*` and the echo area buffer
-          ;; in a state where the second `set!frame-message` clears the
-          ;; buffer the first one draws from, and a frame drawn from a
-          ;; shared echo buffer shows whatever was set last.
-          (fr:set!frame-message f2 "a message for the frame that is not selected")
+          ;; **One message, on one frame.** F2 never gets one, so its
+          ;; echo row must be blank however F1's is drawn - and this is
+          ;; the check for the echo buffer being *the frame's*: with a
+          ;; single shared ` *Echo Area 0*` (which is what
+          ;; `get-buffer-create` gives you, and what this had first) F1's
+          ;; write lands in the buffer F2 draws from and F2 shows F1's
+          ;; message. Emacs's `echo_buffer[]` is global and does not have
+          ;; this problem only because it is displayed on the selected
+          ;; frame alone; this tree's messages are per frame, so the
+          ;; buffers are too.
           (fr:set!frame-message f1 "a message for the selected frame")
           (xd:render! f2)
           (let ((blank (zero? (echo-row-ink (shot-of d2)))))

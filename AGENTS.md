@@ -7578,3 +7578,177 @@ the regression check and was seen failing without the fix.
 cannot notice a change to what *would* be painted there. Anything that
 alters the frame's appearance without altering glyph tokens has to repaint
 those pixels explicitly.
+
+# A quit from the read exited the editor (2026-11-15)
+
+Chris: *"in tty editor, in dired, if I hold arrow down a while then quickly
+hit C-g, the editor dies."*
+
+A C-g is SIGINT, raised when the byte arrives, so behind a burst of keys
+`quit-flag` is set while they are still being read - and the quit is then
+raised by the read's own `maybe-quit`, inside the command loop's error
+guard. **Emacs's `command_loop_2` (`keyboard.c:1159`) puts the loop
+outside the guard**:
+
+```c
+  do val = internal_condition_case (command_loop_1, handlers, cmd_error);
+  while (!NILP (val));
+```
+
+This tree had `(loop)` as the last form *of the guarded body*, so the
+handler's value - the `"Quit"` message - became the iteration's value,
+the loop returned, and the editor exited with status 0 and no message.
+**Any** error raised by the read had the same effect, not just a quit.
+
+Fixed by moving `(loop)` out of the guard; regression tests on both
+sides: `tty-editor-tests`' `<quitting-display>` (a read that raises
+`<quit-condition>`; the key scripted after it must still run - seen
+failing without the fix with `actual-value: abc`), and `pty-check.py`'s
+`quit-during-burst` (500 Downs + C-g, then M-x must prompt).
+
+**Two traps in reproducing it, worth keeping**: a single write of
+burst+C-g is *harmless* (SIGINT is raised before anything is read, so the
+read answers `quit_char` at once), and a settled burst drains the queue
+first. The C-g has to land mid-queue - the pty check does it with two
+`nowait` writes and a `("sleep", 0.08)` between them. Also: a test display
+method must be defined on the **imported generic** (`read-input-event`),
+or `define-method` makes a fresh generic in the test's module and the
+real dispatch never sees it (measured: the test "passed without the fix"
+until the import was added).
+
+# The echo row was redrawn every redisplay (2026-11-15)
+
+A bare `redisplay-frames!` with nothing changed, offscreen Gtk, 810-line
+Dired buffer: **2.1 ms and ~238 KB**. GNU Emacs's echo area is a *window*
+whose row is diffed like any other; this tree drew the row every time -
+the message, a run write, and 80 space glyphs filling it. `render!` briefly
+compared a record (mode, prompt, echo-buffer tick, message, height,
+width) and skipped an unchanged row - a stopgap, now deleted: the echo
+area is a real window and its row goes through the glyph matrix. See the
+handoff for that work below. Measured with the stopgap: 1.40 ms and
+205 KB.
+
+**Dired itself**, for the record: terminal, 800 files, C-n + redisplay
+from the back door, **0.25-0.9 ms per key** in sustained scrolling, same
+order as a text buffer. A 6 ms reading from the same harness was a
+GC-heavy sample: at ~150-200 KB per redisplay the GC lands inside some
+50-key batches, which is what "slow in bursts" feels like. The rest of
+that allocation is `render!`'s fixed path (the frame row lists, the window
+walk, the echo area) rebuilt per redisplay - incremental redraw, still the
+named remaining gap.
+
+# The echo area is a window, not a painted row (2026-11-15)
+
+Chris: *"did I hear you say we draw to the echo area directly whereas
+emacs uses a window?"*, then *"Fix it properly, like emacs"*. He was
+right on both counts; DEPARTURES.md has the C it was measured against.
+
+## What the echo area is now
+
+`FRAME_MINIBUF_WINDOW` is an ordinary window drawn by `render!`'s window
+loop, and it shows an ordinary buffer:
+
+- **no prompt** → the frame's **echo buffer** (` *Echo Area 0*`), which
+  `set!frame-message` writes the message into (`set_message_1`,
+  `xdisp.c:13624`);
+- **a prompt** → the minibuffer buffer, whose text *is the prompt plus
+  what you typed*, with the `field` / `read-only` / `face
+  minibuffer-prompt` properties `read_minibuf` puts there
+  (`minibuf.c:858`). `minibuffer_unwind` (`:1231`) puts the echo buffer
+  back on the way out.
+
+Deleted with it: `render!`'s hand-drawn echo block, the
+`*frame-last-echo-row*` record that made it cheap, the cursor's
+`reading` branch, and **`*echo-area-prompt*`**.
+
+## The three facts that fixed it
+
+1. **The prompt is buffer text**, so `minibuffer-prompt-end` (a scan for
+   the `field` property) and `minibuffer-cursor-column`
+   (`current-line-display-column`, no prompt length added) became the
+   C's answers rather than two spellings of one.
+2. **A message during a prompt is an overlay** `after-string` at the end
+   of the minibuffer buffer (`minibuffer-message`, `minibuffer.el:812`),
+   not the echo area - the row is showing the answer being typed.
+   `set-minibuffer-message` is installed as `set-message-function`, so a
+   plain `message` during a prompt goes there too.
+3. **`read-key`'s prompt is a message** with `cursor-in-echo-area`, which
+   is what `read-char-from-minibuffer` and `read-quoted-char` now use.
+
+`minibuffer-message`'s first argument is spelled **TEXT**, not MESSAGE:
+Scheme is a Lisp-1 and a parameter called MESSAGE hides the `message` it
+calls.
+
+## Gotchas this cost
+
+- **`overlays-at` leaves out a zero-length overlay at POS** - that is
+  Emacs's own docstring (`buffer.c:3910`), not a bug - so the test helper
+  that reads the message overlay has to use `overlays-in`. The renderer
+  already did.
+- **A `set!frame-message` with a non-selected frame** must not land in a
+  shared buffer: ` *Echo Area 0*` is **one per frame** here, because this
+  tree's messages are per frame and Emacs's two are global only because
+  it displays them on the selected frame alone. A shared one shows one
+  frame's message on another - which `pgtk-tests`' two-frame check pins.
+- **`other-buffer` did not skip hidden buffers.** Emacs's
+  `candidate_buffer` tests `BUFFER_HIDDEN_P` (name starts with a space,
+  `buffer.h:1152`). Nothing noticed until a frame made ` *Echo Area 0*`
+  and killing the last visible buffer then showed it.
+- **`*cursor-in-echo-area*` moved to `dispnew.scm`** (`DEFVAR_BOOL`,
+  `dispnew.c:7538`) - the renderer reads it and `window.scm` is above the
+  renderer. `window.scm` re-exports it.
+- The tests that fabricate a minibuffer (`with-minibuffer`,
+  `prompt-frame`) now **insert the prompt** into the buffer, as
+  `read-minibuf` does; a fabricated minibuffer with no prompt in it is no
+  longer a minibuffer this editor can draw.
+
+## The other half of putting the prompt in the buffer (2026-11-15)
+
+`C-a` in a prompt went to position 1 - the start of the *prompt* - and
+`C-k` killed it. Emacs stops at the field boundary, and the field
+machinery was not ported (the old docstring on `line-beginning-position`
+said "there are no fields here"). It is ported now, in `textprop.scm`
+(the stickiness rule and the four property-change walks) and
+`editfns.scm` (`get-pos-property`, `find-field`, `field-beginning`,
+`field-end`, `constrain-to-field`), with `line-beginning-position` and
+`line-end-position` calling it as the C does.
+
+**The trap**: `bol`'s COUNT - which is what ESCAPE-FROM-EDGE comes from -
+is `n - 1` for a number and 0 for a nil N, so it is `(beginning-of-line 1)`
+that passes nil and `(beginning-of-line 0)` that passes t. Written as "N
+is non-zero" the constraint appears not to work at all, because the
+ordinary key is the case that passes nil.
+
+Also worth knowing: `next-property-change`'s Lisp signature is
+`(POSITION &optional OBJECT LIMIT)`, so `next-char-property-change`'s
+`Fnext_property_change (position, Qnil, temp)` puts TEMP in the LIMIT
+slot, not the OBJECT slot. Passing it positionally gave an
+"expecting struct" error three functions away.
+
+## Overlay strings are glyphs now (2026-11-15)
+
+`minibuffer-message` is an overlay `after-string`, and the renderer had
+never drawn one: `build-row!`'s own note said overlay strings were "not
+carried here" because "nothing in this tree can make one yet". That
+stopped being true, and the symptom was every TAB in a prompt saying
+nothing - no `[No match]`, no `[Complete, but not unique]`, no
+`[Sole completion]` - while the overlay itself was there and readable.
+
+`line-slice-glyphs-with-strings` builds them **as glyphs in the row**,
+which is what Emacs does (`get_overlay_strings` pushes the string onto
+the iterator and `append_glyph` puts it in the row), so the diff sees
+them and the matrix carries them. `build-row!` uses it only when
+`row-overlay-strings` says the row has any, because the pool-reusing walk
+is what keeps a keystroke allocation-free.
+
+Two traps from the same pass:
+
+- **`(vector-ref ovs i)` is `'()` for "no strings", not `#f`**, so
+  `(car entry)` on it is "Wrong type argument ... ()". Test with
+  `(pair? entry)`.
+- **`*cursor-in-echo-area*` moved to `dispnew.scm` and `minibuffer.scm`
+  was not importing it.** `read-char-from-minibuffer` raised on its first
+  line, the command loop's guard turned that into "the command did
+  nothing", and the pty check that failed was `save-y-n` - the `C-x C-c`
+  prompt simply never appeared. The missing-import class again; a
+  guarded error reads exactly like a key that is not bound.

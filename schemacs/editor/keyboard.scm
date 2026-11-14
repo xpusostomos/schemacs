@@ -78,7 +78,7 @@
           frame-quit-cont run-pre-command-hook!
           set!frame-keymap-state set!frame-message
           set!frame-quit-cont
-          *echo-area-buffer* *echo-area-prompt*)
+          *echo-area-buffer*)
     ;; The global map the lookup falls back on, and the local map a
     ;; minibuffer or a mode binds to have its own keys.
     (only (schemacs editor keymap)
@@ -1808,8 +1808,8 @@
                    (when quit (quit 'eof))))
                 ;; A timed-out read: a timer was due, which is the only
                 ;; reason this read was armed at all. Run it and redraw.
-                (else (command-loop-timers!)))))
-             (loop)))))))
+                (else (command-loop-timers!))))))
+             (loop))))))
 
     (define (recursive-edit frame)
       ;; Enter a nested command loop and return what leaving it produced:
@@ -1877,11 +1877,21 @@
              (done #f)
              (first #t)
              (code 0))
-        (parameterize ((*echo-area-buffer* (allocate-buffer))
-                       (*echo-area-prompt*
-                        (if prompt (string-append prompt "-") "")))
-          (render! frame)
-          (let loop ()
+        ;; **The prompt is a *message*, which is what Emacs's
+        ;; `(read-event (and prompt (format "%s-" prompt)))` makes of it**
+        ;; - `read_char` echoes a read's prompt into the echo area - and
+        ;; so is the running record of the digits typed, `(setq prompt
+        ;; (message "%s %c" prompt translated))`. It used to be a
+        ;; synthetic echo area (`*echo-area-buffer*` and
+        ;; `*echo-area-prompt*`) painted by the renderer; the echo area
+        ;; is a window drawing the frame's own echo buffer now, so both
+        ;; are messages.
+        ;;
+        ;; `message-log-max` is bound to nil in the C's `let`, so these
+        ;; are `set!frame-message` (display only) and not `message`.
+        (set!frame-message frame (if prompt (string-append prompt "-") ""))
+        (render! frame)
+        (let loop ()
             (if done
                 code
                 ;; The key is the *event*, and the C is a character
@@ -1915,12 +1925,13 @@
                     (set! code (+ (* code radix)
                                   (- code-read (char->integer #\0))))
                     (set! first #f)
-                    (parameterize ((*echo-area-prompt*
-                                    (string-append
-                                     (if prompt prompt "")
-                                     (if first "" " ")
-                                     (string (integer->char code-read)))))
-                      (render! frame))
+                    ;; `(and prompt (setq prompt (message "%s %c" prompt
+                    ;; translated)))` - the digits typed so far.
+                    (when prompt
+                      (set! prompt
+                            (format #f "~a ~a" prompt
+                                    (integer->char code-read)))
+                      (set!frame-message frame prompt))
                     (loop))
                    ;; RET after the first digit terminates and is
                    ;; discarded; before that it is the character
@@ -1946,7 +1957,7 @@
                     ;; a key that is not a character at all (an
                     ;; arrow, a frame resize): ask again, as the C's
                     ;; `(cond ((null translated)))' does
-                    (loop)))))))))
+                    (loop))))))))
 
     (define-command (abort-recursive-edit)
       ;; Leave the innermost recursive edit and signal quit, so the

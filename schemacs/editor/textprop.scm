@@ -47,6 +47,7 @@
     (only (guile) caddr)
     (only (schemacs editor buffer)
           *current-buffer* bufferp current-buffer overlay-get overlays-at
+          next-overlay-change previous-overlay-change
           with-current-buffer
           *get-text-property-function*)
     ;; `modify_text_properties`'s body is `insdel.c`'s
@@ -67,7 +68,15 @@
     ;; `install-intervals-set-text-properties!' is the seam back *up*
     ;; into this library - see the end of the file.
     (only (schemacs editor fns) install-fns-textprop!)
-    (only (schemacs editor intervals) install-intervals-set-text-properties!)
+    (only (schemacs editor intervals)
+          ;; `text-property-default-nonsticky` is `textprop.c`'s in
+          ;; Emacs, but this tree keeps it with the insertion code that
+          ;; reads it (`adjust_intervals_for_insertion`), which is
+          ;; `intervals.scm`'s. Two definitions of it meant two answers
+          ;; to "is this property sticky" - caught by
+          ;; `loadup-tests`' duplicate-export check.
+          *text-property-default-nonsticky*
+          install-intervals-set-text-properties!)
     (prefix (schemacs editor intervals) iv:))
 
   (export
@@ -79,6 +88,12 @@
    remove-text-properties
    set-text-properties
    get-text-property
+   ;; The field machinery (`textprop.c`'s stickiness rule and the walks a
+   ;; field is found with).
+   text-property-stickiness
+   next-property-change previous-property-change
+   next-char-property-change previous-char-property-change
+   next-single-char-property-change previous-single-char-property-change
    interval-of
    interval-has-some-properties-list
    keyword?
@@ -827,6 +842,189 @@
                             (or limit (iv:object-beg-position object))))
                     limit)
                    (else (iv:interval-last-pos previous)))))))))
+    ;;----------------------------------------------------------------
+    ;; Fields, and the property walks that find them
+    ;;
+    ;; A *field* is a run of text whose `field' text property is the
+    ;; same. GNU Emacs uses fields for the minibuffer's prompt, for
+    ;; comint's prompts and for `read-only' regions, and the motion
+    ;; commands stop at their edges: `line-beginning-position' and
+    ;; `line-end-position' hand their answers to `constrain-to-field'
+    ;; (`editfns.c:717', `:772'), which is why `C-a' in a minibuffer
+    ;; goes to the end of the prompt and not to the start of the line.
+    ;;
+    ;; The three pieces are here because they are `textprop.c`'s: the
+    ;; stickiness rule, the walks over a *char* property (text property
+    ;; or overlay), and the two walks over *any* property the first pair
+    ;; is built on.
+    ;;----------------------------------------------------------------
+
+    (define (next-property-change position . args)
+      ;; GNU Emacs's `next-property-change' (`textprop.c:952'): "Return
+      ;; the position of next property change" - of *any* property, which
+      ;; is the walk the char-property pair below is built on.
+      ;;
+      ;; The C compares the whole interval plist; `next-single-property-
+      ;; change` compares one property of it.
+      ;;--------------------------------------------------------------
+      (let* ((object (object-or-current args))
+             (limit (if (and (pair? args) (pair? (cdr args))) (cadr args) #f))
+             (end (or limit (iv:object-end-position object))))
+        (let ((i (interval-of object (min position
+                                          (iv:object-last-position object)))))
+          (if (not i)
+              (or limit end)
+              (let ((here (iv:interval-plist i)))
+                (let loop ((next (iv:next-interval i)))
+                  (cond
+                   ((and next
+                         (equal? here (iv:interval-plist next))
+                         (or (not limit) (< (iv:interval-position next) limit)))
+                    (loop (iv:next-interval next)))
+                   ((or (not next) (>= (iv:interval-position next) end))
+                    (or limit end))
+                   (else (iv:interval-position next)))))))))
+
+    (define (previous-property-change position . args)
+      ;; GNU Emacs's `previous-property-change': the position of the
+      ;; previous change of any property. It starts from the character
+      ;; *before* POSITION, which is why a POSITION that begins an
+      ;; interval steps back one first.
+      ;;--------------------------------------------------------------
+      (let* ((object (object-or-current args))
+             (limit (if (and (pair? args) (pair? (cdr args))) (cadr args) #f)))
+        (let* ((at (interval-of object (min position
+                                            (iv:object-last-position object))))
+               (i (if (and at (= (iv:interval-position at) position))
+                      (iv:previous-interval at)
+                      at)))
+          (if (not i)
+              limit
+              (let ((here (iv:interval-plist i)))
+                (let loop ((previous (iv:previous-interval i)))
+                  (cond
+                   ((and previous
+                         (equal? here (iv:interval-plist previous))
+                         (or (not limit) (> (iv:interval-last-pos previous) limit)))
+                    (loop (iv:previous-interval previous)))
+                   ((or (not previous)
+                        (<= (iv:interval-last-pos previous)
+                            (or limit (iv:object-beg-position object))))
+                    limit)
+                   (else (iv:interval-last-pos previous)))))))))
+
+    (define (next-char-property-change position limit)
+      ;; GNU Emacs's `next-char-property-change` (`textprop.c:718`):
+      ;; "Return the position of next text property or overlay change."
+      ;;
+      ;; The C is three lines: the next overlay change, clipped to LIMIT,
+      ;; and then the next property change up to that point - so a text
+      ;; property change and an overlay boundary are both found, whichever
+      ;; comes first.
+      ;;--------------------------------------------------------------
+      (let ((temp (next-overlay-change position)))
+        (if (and limit (< limit temp)) (set! temp limit))
+        ;; `Fnext_property_change (position, Qnil, temp)` - the OBJECT
+        ;; is nil, so TEMP is the *limit*, which is the third argument
+        (next-property-change position #f temp)))
+
+    (define (previous-char-property-change position limit)
+      ;; GNU Emacs's `previous-char-property-change` (`textprop.c:744`).
+      ;; The C takes the *earlier* of the previous overlay change and
+      ;; LIMIT; a position below `point-min` is clipped to it.
+      ;;--------------------------------------------------------------
+      (let ((temp (previous-overlay-change position)))
+        (if (and limit (> limit temp)) (set! temp limit))
+        ;; `Fprevious_property_change (position, Qnil, temp)`: object
+        ;; nil, limit TEMP
+        (previous-property-change position #f temp)))
+
+    (define (next-single-char-property-change position prop . args)
+      ;; GNU Emacs's `next-single-char-property-change` (`textprop.c:771`):
+      ;; "the position of next text property or overlay change for a
+      ;; specific property."
+      ;;
+      ;; The C walks from change to change of *any* property or overlay
+      ;; and stops at the first where PROP's char-property (overlay
+      ;; first, then text) differs from what it was at POSITION. Overlays
+      ;; matter here and not in `next-single-property-change`, which is
+      ;; what makes this the one a field walk uses.
+      ;;--------------------------------------------------------------
+      (let* ((object (object-or-current args))
+             (limit (if (and (pair? args) (pair? (cdr args))) (cadr args) #f))
+             (zv (iv:object-end-position object))
+             (limit (or limit zv)))
+        (if (>= position limit)
+            ;; "position = limit; if (position > ZV) XSETFASTINT
+            ;; (position, ZV)" - the clamp is on the *limit*
+            (if (> limit zv) zv limit)
+            (let ((initial (get-char-property position prop object)))
+              (let loop ((p position))
+                (let ((next (next-char-property-change p limit)))
+                  (cond ((>= next limit) limit)
+                        ((not (eq? (get-char-property next prop object) initial)) next)
+                        ((>= next zv) next)
+                        (else (loop next)))))))))
+
+    (define (previous-single-char-property-change position prop . args)
+      ;; GNU Emacs's `previous-single-char-property-change`
+      ;; (`textprop.c:858`): the same walk backwards. The value compared
+      ;; against is the char-property of the character *before*
+      ;; POSITION, and the answer is the position where it began.
+      ;;--------------------------------------------------------------
+      (let* ((object (object-or-current args))
+             (limit (if (and (pair? args) (pair? (cdr args))) (cadr args) #f))
+             (limit (or limit (iv:object-beg-position object))))
+        (if (<= position limit)
+            limit
+            (let ((initial (get-char-property (- position 1) prop object)))
+              (let loop ((p position))
+                (let ((prev (previous-char-property-change p limit)))
+                  (cond ((<= prev limit) limit)
+                        ((not (eq? (get-char-property (- prev 1) prop object)
+                                   initial))
+                         prev)
+                        (else (loop prev)))))))))
+
+    (define (text-property-stickiness prop position buffer)
+      ;; GNU Emacs's `text_property_stickiness` (`textprop.c`): 1 if an
+      ;; insertion at POSITION would inherit PROP from the character
+      ;; *after* it, -1 if from the character before, 0 if from neither.
+      ;;
+      ;; Rear-stickiness is the default - a property extends backwards
+      ;; over inserted text unless `rear-nonsticky' says otherwise - and
+      ;; `front-sticky' is what extends it forwards, which is how the
+      ;; minibuffer prompt keeps its `field' off the text typed after it:
+      ;; `read_minibuf` marks the prompt `rear-nonsticky` for exactly
+      ;; this (and `front-sticky`, so its own characters are in it).
+      ;;--------------------------------------------------------------
+      (let* ((prev-pos (- position 1))
+             (default (assq prop (*text-property-default-nonsticky*)))
+             (ignore-previous (<= position (iv:object-beg-position buffer)))
+             ;; "if (ignore_previous_character || (CONSP (defalt) && !NILP (XCDR (defalt))))"
+             (rear-sticky? (not (or ignore-previous
+                                    (and (pair? default) (cdr default)))))
+             (rear-sticky?
+              (and rear-sticky?
+                   (let ((rn (get-text-property prev-pos 'rear-nonsticky buffer)))
+                     (not (if (pair? rn)
+                              (and (memq prop rn) #t)
+                              (and rn #t))))))
+             (front (get-text-property position 'front-sticky buffer))
+             (front-sticky? (or (eq? front #t)
+                                (and (pair? front) (and (memq prop front) #t)))))
+        (cond ((and rear-sticky? (not front-sticky?)) -1)
+              ((and (not rear-sticky?) front-sticky?) 1)
+              ((and (not rear-sticky?) (not front-sticky?)) 0)
+              ;; "the stickiness properties are inconsistent, so we have
+              ;; to disambiguate. Basically, rear-sticky wins, _except_
+              ;; if the property that would be inherited has a value of
+              ;; nil, in which case front-sticky wins."
+              ((or ignore-previous
+                   (not (get-text-property prev-pos prop buffer)))
+               1)
+              (else -1))))
+
     (define (text-property-list object start end prop)
       ;; GNU Emacs's `text_property_list' (textprop.c): the properties of
       ;; OBJECT from START to END as a list of `(START END PLIST)'

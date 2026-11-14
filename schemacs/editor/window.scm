@@ -29,6 +29,9 @@
     (scheme case-lambda)
     (only (schemacs editor command)
           current-prefix-arg define-command uarg->integer)
+    ;; `cursor-in-echo-area` is `dispnew.c`'s and is re-exported here; the
+    ;; redisplay that reads it is above this library, not below.
+    (only (schemacs editor dispnew) *cursor-in-echo-area*)
     (only (schemacs editor marker) build-marker marker-position set-marker)
     ;; `catch`/`throw` is the C's `throw 'found`; Guile's escape
     ;; continuation is `let/ec`.
@@ -155,18 +158,12 @@
     ;; works here: `(schemacs editor minibuffer)' sets it as it loads.
     ;; The prompt it is given is Emacs's own, "Switch to buffer: ".
 
-    (define *cursor-in-echo-area* (make-parameter #f))
-    ;; ^ GNU Emacs's `cursor-in-echo-area', declared `DEFVAR_BOOL' in
-    ;; `dispnew.c' and so false by default: whether to put a cursor in
-    ;; the minibuffer at the end of a message there. False means the echo
-    ;; area shows its message with no cursor, which is what a window
-    ;; whose minibuffer is not being read wants.
-    ;;
-    ;; It is a parameter here rather than a variable, as this tree's
-    ;; single-valued globals are; it is with `internal-show-cursor'
-    ;; because `get_window_cursor_type' reads the two together - when
-    ;; this is true and the window is the echo area's, the cursor's type
-    ;; comes from the echo area rather than from the window.
+    ;; `*cursor-in-echo-area*` is `dispnew.c`'s (`DEFVAR_BOOL` at
+    ;; `:7538`) and lives in `(schemacs editor dispnew)` now: the
+    ;; redisplay reads it in `get_window_cursor_type` (`xdisp.c:34825`),
+    ;; and this library is above the renderer. It is re-exported here
+    ;; from the import above, so every name that reached it through this
+    ;; library still does.
 
     ;;----------------------------------------------------------------
     ;; Windows

@@ -13,11 +13,13 @@
   ;; `(schemacs editor keyboard)' - for the recursive edit - and why it can
   ;; be a leaf now that the command loop is a library of its own.
   ;;
-  ;; The prompt is kept beside the buffer rather than in it: Emacs puts it
-  ;; in the buffer as the `minibuffer-prompt' text property, and this editor
-  ;; has no text properties wired to the display yet. What the display reads
-  ;; is the frame's echo area (`*echo-area-buffer*', `*echo-area-prompt*'),
-  ;; which is where Emacs keeps the same two facts.
+  ;; **The prompt is text in the buffer**, which is where `read_minibuf`
+  ;; puts it (`minibuf.c:858`) - it carries the `field' property that
+  ;; `minibuffer-prompt-end` scans for and the `minibuffer-prompt' face
+  ;; that colours it, so the echo area's row is drawn from the buffer like
+  ;; any other window's. A message shown while the prompt is up is an
+  ;; *overlay* at the end of that buffer (`minibuffer-message`), because
+  ;; the row is showing the answer being typed.
   ;;
   ;; Two definitions that sit under the Completion banner above are *not*
   ;; here, because they are files.el's and ask about saving:
@@ -98,7 +100,10 @@
           delete-window get-buffer-window pop-to-buffer
           quit-window
           split-main-window-below switch-to-buffer-other-window
-          window-live-p window-min-height with-selected-window)
+          window-live-p window-min-height with-selected-window
+          ;; `minibuffer_unwind` puts the minibuffer window's buffer back
+          ;; from `w->prev_buffers`, which `set_window_buffer` filled in.
+          window-prev-buffers set-window-prev-buffers)
     ;; `line-number-at-pos' is `fns.c''s (`fns.c:6688'), re-exported by
     ;; `editfns' so that its readers here do not move: the default
     ;; `goto-line' offers is the line point is on. It is read straight
@@ -124,7 +129,8 @@
     ;; `completion-fitted-height' measures the buffer's display rows
     ;; with - `window-text-pixel-size''s answer, in rows.
     (only (schemacs editor indentc)
-          current-column line-next-start move-to-column window-line-rows-at
+          current-column current-line-display-column
+          line-next-start move-to-column window-line-rows-at
           ;; the completions window's start, which the repeated-TAB
           ;; scroll reads and `scroll-to-cursor!` moves
           window-start)
@@ -147,15 +153,30 @@
        ;; `M-<down>` past the last candidate wraps to the first unless
        ;; this is nil (`next-column-completion`, simple.el:10169).
        *completion-auto-wrap*)
+    ;; `minibuffer-message` is an *overlay* with an `after-string`
+    ;; (`minibuffer.el:836`), which is what draws it after the input
+    ;; instead of over it - and the two message hooks in
+    ;; `(schemacs editor frame)` are this library's, installed below.
+    (only (schemacs editor buffer)
+          make-overlay overlay-put delete-overlay overlays-at)
+    (only (schemacs editor timer) cancel-timer run-at-time)
+    ;; `cursor-in-echo-area` is `dispnew.c`'s; `read-key`'s prompt puts the
+    ;; cursor in the echo area, which is what `read-char-from-minibuffer`
+    ;; reproduces.
+    (only (schemacs editor dispnew) *cursor-in-echo-area*)
+    ;; `minibuffer_unwind` reads the start and point `set_window_buffer`
+    ;; recorded as markers.
+    (only (schemacs editor marker) marker-position)
     (only (schemacs editor frame)
-          *current-frame* *echo-area-buffer* *echo-area-prompt* *minibuffer*
+          *current-frame* *echo-area-buffer* *minibuffer*
+          *set-message-function* *clear-message-function* frame-echo-buffer
           frame-height select-window selected-window set!frame-message
           frame-minibuffer-window set-window-buffer! window-type?
           set-message! set-window-point! window-buffer window-height
           window-list window-width
           ;; the completions window's display, as
           ;; `completion--in-region-1` reads and moves it
-          frame-visible-p set-window-start! window-frame)
+          frame-visible-p set-window-start! window-frame window-point)
     ;; `try-completion' and `all-completions' are `minibuf.c''s and live in
     ;; `(schemacs editor minibuf)'; this library is `minibuffer.el' and uses
     ;; them rather than defining them.
@@ -244,6 +265,10 @@
    *minibuffer-exit-hook*
    *minibuffer-setup-hook*
    *minibuffer-message-timeout*
+   *minibuffer-message-clear-timeout* *minibuffer-message-properties*
+   *minibuffer--message-timer* *minibuffer--message-overlay*
+   minibuffer--message-overlay-pos minibuffer--delete-message-overlay
+   set-minibuffer-message clear-minibuffer-message
    completion--map-for
    completion--insert-strings
    completion--message
@@ -430,8 +455,9 @@ read-number-history
       ;;--------------------------------------------------------------
       (let ((mb (if (pair? args) (car args) (*minibuffer*))))
         (if mb
-            (with-current-buffer (minibuffer-editor mb)
-              (buffer-substring (point-min) (point-max)))
+            (let ((beg (%minibuffer-prompt-end mb)))
+              (with-current-buffer (minibuffer-editor mb)
+                (buffer-substring beg (point-max))))
             #f)))
 
     (define (minibuffer-contents-no-properties . args)
@@ -445,8 +471,9 @@ read-number-history
       ;;--------------------------------------------------------------
       (let ((mb (if (pair? args) (car args) (*minibuffer*))))
         (if mb
-            (with-current-buffer (minibuffer-editor mb)
-              (buffer-substring-no-properties (point-min) (point-max)))
+            (let ((beg (%minibuffer-prompt-end mb)))
+              (with-current-buffer (minibuffer-editor mb)
+                (buffer-substring-no-properties beg (point-max))))
             #f)))
 
     (define (minibuffer-set-contents! mb text)
@@ -462,10 +489,13 @@ read-number-history
       ;; primitive, not of this function - and with `delete-region`, which
       ;; takes both ends, it is gone.
       ;;--------------------------------------------------------------
-      (let ((ed (minibuffer-editor mb)))
+      (let ((ed (minibuffer-editor mb))
+            (beg (%minibuffer-prompt-end mb)))
         (text-editor-undo-disable! ed)
         (with-current-buffer ed
-          (delete-region (point-min) (point-max))
+          ;; from the *prompt's* end: the prompt is in the buffer now, as
+          ;; it is in Emacs's, and it is not part of what is replaced
+          (delete-region beg (point-max))
           (insert text))))
 
     (define (minibuffer-insert! text)
@@ -487,8 +517,39 @@ read-number-history
       ;;--------------------------------------------------------------
       (let ((mb (*minibuffer*)))
         (and mb
-             (+ (string-length (minibuffer-prompt-string mb))
-                (text-editor-cursor-column (minibuffer-editor mb))))))
+             ;; **No prompt length added**: the prompt is in the buffer
+             ;; now, so the buffer column (and the row's own scan) counts
+             ;; it. It used to be `(string-length prompt) + cursor-column`,
+             ;; which is the same answer only while the prompt is plain
+             ;; text of one cell per character.
+             (current-line-display-column
+              (minibuffer-editor mb)
+              (text-editor-cursor-column (minibuffer-editor mb))))))
+
+    (define (%minibuffer-unwind mini state)
+      ;; GNU Emacs's `minibuffer_unwind` (`minibuf.c:1231`): put the
+      ;; minibuffer window back the way it was before the prompt took it.
+      ;;
+      ;; The C pops `w->prev_buffers`, which `set_window_buffer` filled
+      ;; in, and restores that buffer with its start and point. **This
+      ;; captures the same three things before the read instead**, because
+      ;; the unwind here runs *twice*: the command loop's exit
+      ;; continuation is a full continuation, so leaving the recursive
+      ;; edit leaves the `dynamic-wind` and entering it again re-runs the
+      ;; after thunk. Emacs's `record_unwind_protect` runs once, so its
+      ;; pop is safe; a pop here puts back the buffer the first run
+      ;; recorded - the dead prompt - and the row shows the prompt for
+      ;; ever. Setting the same state twice is the same as setting it
+      ;; once, which is what this needs to be.
+      ;;
+      ;; **Without this the window kept the prompt's buffer**, which is
+      ;; why the echo area used to be painted by hand instead of
+      ;; displayed.
+      ;;--------------------------------------------------------------
+      (when (and state mini (window-type? mini))
+        (set-window-buffer! mini (car state))
+        (set-window-start! mini (cadr state))
+        (set-window-point! mini (caddr state))))
 
     (define (read-minibuffer-1 prompt initial keymap history default)
       ;; The body of `read-from-minibuffer'.
@@ -513,6 +574,15 @@ read-number-history
              (entry-window (selected-window))
              (ed (allocate-buffer))
              (text (if (pair? initial) (car initial) initial))
+             ;; **What the minibuffer window was showing, and where**:
+             ;; captured before the prompt takes the window, for
+             ;; `%minibuffer-unwind`'s reason.
+             (mini-state
+              (let ((mini (and frame (frame-minibuffer-window frame))))
+                (and mini (window-buffer mini)
+                     (list (window-buffer mini)
+                           (window-start mini)
+                           (window-point mini)))))
              ;; point, counting from zero into TEXT, or #f for its end
              (at (if (not (pair? initial))
                      #f
@@ -522,11 +592,43 @@ read-number-history
                              (else n))))))
         ;; Emacs disables undo in the minibuffer.
         (text-editor-undo-disable! ed)
-        (when text (with-current-buffer ed (insert text)))
-        (set-point ed
-                                (if at
-                                    (min at (buffer-z ed))
-                                    (buffer-z ed)))
+        ;; **The prompt goes into the buffer**, which is what
+        ;; `read_minibuf` does (`minibuf.c:858`):
+        ;;
+        ;;   Finsert (1, &minibuf_prompt);
+        ;;   Fput_text_property (BEG, PT, Qfront_sticky, Qt, ...);
+        ;;   Fput_text_property (BEG, PT, Qrear_nonsticky, Qt, ...);
+        ;;   Fput_text_property (BEG, PT, Qfield, Qt, ...);
+        ;;   ... every pair of `minibuffer-prompt-properties' ...
+        ;;   minibuf_prompt_width = current_column ();
+        ;;
+        ;; **This was the departure the old note here named**: the prompt
+        ;; was painted by the echo-area code instead, so the row the
+        ;; minibuffer window drew was not the row Emacs draws. Putting it
+        ;; in the buffer is what lets the window draw the whole row
+        ;; through the ordinary glyph-matrix path - the prompt's face is
+        ;; then the `face' text property `faces.el:2931' appends to
+        ;; `minibuffer-prompt-properties', and `minibuffer-prompt-end'
+        ;; finds its end by the `field' property, as `minibuf.c:521` does.
+        (with-current-buffer ed
+          (let ((beg (point-min)))
+            (insert prompt)
+            (let ((end (point-max)))
+              (put-text-property beg end 'front-sticky #t ed)
+              (put-text-property beg end 'rear-nonsticky #t ed)
+              (put-text-property beg end 'field #t ed)
+              ;; `minibuffer-prompt-properties` is `(read-only t)` in the
+              ;; C (`minibuf.c:2698`) with `(face minibuffer-prompt)`
+              ;; appended by `faces.el:2931`.
+              (put-text-property beg end 'read-only #t ed)
+              (put-text-property beg end 'face 'minibuffer-prompt ed))
+            ;; ... and the initial input after it, with point where the
+            ;; caller asked for - the C's `Finsert (initial)` and
+            ;; `Fforward_char (pos)`, with `pos` counted from the end of
+            ;; the initial text
+            (when text (insert text))
+            (set-point ed (if at (+ (- (point-max) (string-length text)) (- at 1))
+                              (point-max)))))
         (let ((mb (make<minibuffer>
                    ed prompt (or keymap minibuffer-local-map) default
                    (or history minibuffer-history) 0 #f)))
@@ -571,7 +673,6 @@ read-number-history
           ;; editor's text to the file it was given.
           (parameterize ((*minibuffer* mb)
                          (*echo-area-buffer* ed)
-                         (*echo-area-prompt* prompt)
                          ;; the window being edited, which the read is
                          ;; about to take the selection from
                          (*minibuffer-selected-window* entry-window)
@@ -648,10 +749,13 @@ read-number-history
                         (set!history-entries
                          h (cons answer (history-entries h)))))
                     answer))))
-             ;; the unwind: the window this prompt began in is the
+             ;; the unwind: the minibuffer window goes back to the buffer
+             ;; it was showing, and the window this prompt began in is the
              ;; selected one again, whatever the prompt's own commands -
              ;; or a click - did to the selection
              (lambda ()
+               (%minibuffer-unwind (and frame (frame-minibuffer-window frame))
+                                   mini-state)
                (when (and entry-window (window-type? entry-window))
                  (select-window entry-window))))))))
 
@@ -715,20 +819,33 @@ read-number-history
                     (or (minibuffer-typed-content mb) "")
                     (list-ref entries (- next 1))))))))
 
+    (define (%minibuffer-prompt-end mb)
+      ;; `minibuffer-prompt-end` for MB, with no current buffer changed.
+      ;;--------------------------------------------------------------
+      (let ((ed (and mb (minibuffer-editor mb))))
+        (if (not ed)
+            #f
+            (with-current-buffer ed
+              ;; The C's walk (`minibuf.c:521`): the first position whose
+              ;; `field' property is not set - the prompt is the run of
+              ;; characters that carries it.
+              (let loop ((p (point-min)))
+                (if (and (< p (point-max)) (get-text-property p 'field ed))
+                    (loop (+ p 1))
+                    p))))))
+
     (define (minibuffer-prompt-end)
       ;; GNU Emacs's `minibuffer-prompt-end' (`minibuf.c:505'): "Return
       ;; the buffer position of the end of the minibuffer prompt. Return
       ;; (point-min) if current buffer is not a minibuffer."
       ;;
-      ;; The C reads the prompt's `field' text property -
-      ;; `read_minibuf' inserts the prompt with
-      ;; `minibuffer-prompt-properties', whose first entry is `field t' -
-      ;; and its own answer when there is no such property is
-      ;; `(point-min)' (`:521'). **This tree paints the prompt instead of
-      ;; inserting it**, the departure named at `read-minibuffer-1`, so
-      ;; the no-property answer is the only one there is.
+      ;; The C reads the prompt's `field' text property, which
+      ;; `read_minibuf' puts there with `minibuffer-prompt-properties' -
+      ;; and this tree now inserts the prompt the same way, so the walk
+      ;; is the same walk. Its answer outside a minibuffer is
+      ;; `(point-min)` (`:521`).
       ;;--------------------------------------------------------------
-      (point-min))
+      (or (%minibuffer-prompt-end (*minibuffer*)) (point-min)))
 
     (define-command (next-line-or-history-element arg)
       ;; GNU Emacs's `next-line-or-history-element' (`simple.el:3136'):
@@ -1108,11 +1225,28 @@ previous element of the minibuffer history in the minibuffer."
       ;; drawn in the echo area.
       ;; C-g abandons the whole command, and a key the question has no
       ;; meaning for (an arrow key, a frame resize) asks it again.
+      ;;
+      ;; **The prompt is a *message***, which is what `read-key' makes of
+      ;; it: "A non-nil PROMPT means to show it as a message"
+      ;; (`simple.el`), with `cursor-in-echo-area` bound so that the
+      ;; cursor goes to the echo area rather than staying in the buffer
+      ;; behind it. It used to be a synthetic echo area - a fresh buffer
+      ;; plus `*echo-area-prompt*` - drawn by the renderer; the echo area
+      ;; is a window now and draws the frame's own echo buffer, so a
+      ;; message is what puts text there.
       ;;--------------------------------------------------------------
       (let ((frame (*current-frame*)))
-        (parameterize ((*echo-area-buffer* (allocate-buffer))
-                       (*echo-area-prompt* prompt))
-          (render! frame)
+        (parameterize ((*cursor-in-echo-area* #t))
+          (set!frame-message frame prompt)
+          ;; `read-key` propertizes the prompt with the
+          ;; `minibuffer-prompt` face; a Scheme string cannot carry
+          ;; properties, so they go on the text in the buffer.
+          (let ((echo (frame-echo-buffer frame)))
+            (when echo
+              (with-current-buffer echo
+                (put-text-property (point-min) (point-max)
+                                   'face 'minibuffer-prompt echo)))
+            (render! frame))
           (let loop ()
             ;; `read-key-event' answers the *key event* already: the
             ;; display's own form was normalised away at the read, so
@@ -1499,9 +1633,10 @@ previous element of the minibuffer history in the minibuffer."
       ;;--------------------------------------------------------------
       (let ((mb (*minibuffer*)))
         (when mb
-          (let ((ed (minibuffer-editor mb)))
+          (let ((ed (minibuffer-editor mb))
+                (beg (%minibuffer-prompt-end mb)))
             (with-current-buffer ed
-              (delete-region (buffer-beg ed) (buffer-z ed))
+              (delete-region beg (point-max))
               (insert completion))))))
 
     (define (completion--do-completion string table predicate point expect-exact)
@@ -2627,10 +2762,19 @@ previous element of the minibuffer history in the minibuffer."
     ;;----------------------------------------------------------------
     ;; Messages in the echo area while the minibuffer is being read
     ;;
-    ;; GNU Emacs's `minibuffer-message' (minibuffer.el:813) and the
-    ;; timer it arms. The echo area itself is drawn by the display
-    ;; layer; what is here is what a message put there *says* and how
-    ;; long it stays.
+    ;; GNU Emacs's `minibuffer-message' (`minibuffer.el:812'), the
+    ;; overlay it draws with, and the two functions `message` is routed
+    ;; through while a prompt is up. The echo area is a window and its
+    ;; buffer is drawn by the display layer; what is here is what a
+    ;; message put there *says* and how long it stays.
+    ;;
+    ;; **Why an overlay.** The echo area's row is showing the prompt -
+    ;; the very text the user is typing into - so a message written into
+    ;; the echo buffer would hide it. `minibuffer.el` puts an
+    ;; `after-string` on an empty overlay at the end of the minibuffer
+    ;; instead, and the row builder draws it after the text. That is the
+    ;; same mechanism Emacs uses, and this tree's renderer already draws
+    ;; overlay strings.
 
     (define *minibuffer-message-timeout*
       ;; GNU Emacs's `minibuffer-message-timeout': how long a message
@@ -2662,27 +2806,174 @@ previous element of the minibuffer history in the minibuffer."
                        #\])))
          (else #f))))
 
-    (define (minibuffer-message message . args)
-      ;; GNU Emacs's `minibuffer-message': show MESSAGE at the end of
-      ;; what has been typed, without hiding it, and take it down again
-      ;; after `minibuffer-message-timeout' seconds or at the next key,
-      ;; whichever comes first. It is enclosed in `[...]' with a space
-      ;; in front, which is Emacs's mark that this is something the
-      ;; editor is saying and not part of the answer - so "No match"
-      ;; reads " [No match]" after the prompt.
-      ;;
-      ;; Called when no minibuffer is being read, it is `message' and
-      ;; the echo area is drawn as usual; the timeout is the same,
-      ;; since the command loop takes messages down between commands
-      ;; either way.
+    (define *minibuffer-message-properties* (make-parameter '()))
+    ;; ^ GNU Emacs's `minibuffer-message-properties`
+    ;; (`minibuffer.el:797`): "Text properties added to the text shown by
+    ;; `minibuffer-message'." Nil by default.
+
+    (define *minibuffer-message-clear-timeout* (make-parameter #f))
+    ;; ^ GNU Emacs's `minibuffer-message-clear-timeout`
+    ;; (`minibuffer.el:864`): how long a message routed through
+    ;; `message` stays while a prompt is up. A number is a timeout; nil,
+    ;; the default, leaves it until the next input event.
+
+    (define *minibuffer--message-overlay* (make-parameter #f))
+    (define *minibuffer--message-timer* (make-parameter #f))
+    ;; ^ `minibuffer--message-overlay` and `minibuffer--message-timer`
+    ;; (`minibuffer.el:799`, `:801`): the text on screen and the timer
+    ;; that takes it down. Both are parameters because Emacs's are
+    ;; ordinary variables that commands `let`-bind - `minibuffer-message`
+    ;; sets them, and `clear-message-function` reads them from outside
+    ;; any lexical scope.
+
+    (define (minibuffer--message-overlay-pos)
+      ;; GNU Emacs's `minibuffer--message-overlay-pos` (`minibuffer.el`):
+      ;; "Return position where minibuffer message functions shall put
+      ;; message overlay." The first position carrying a non-nil
+      ;; `minibuffer-message` text property, or the end of the buffer.
       ;;--------------------------------------------------------------
-      (let ((text (if (and (not (pair? args)) (message-enclosed? message))
-                      message
-                      (string-append " [" message "]"))))
-        (set-message! (*current-frame*)
-                      (if (pair? args) (apply format #f text args) text)
-                      (and (*minibuffer-message-timeout*)
-                           (*minibuffer-message-timeout*)))))
+      (let ((ed (and (*minibuffer*) (minibuffer-editor (*minibuffer*)))))
+        (if (not ed)
+            (point-max)
+            (with-current-buffer ed
+              (let loop ((p (point)))
+                (cond ((= p (point-max)) p)
+                      ((get-text-property p 'minibuffer-message ed) p)
+                      (else (loop (+ p 1)))))))))
+
+    (define (minibuffer--delete-message-overlay)
+      ;; GNU Emacs's `minibuffer--delete-message-overlay`
+      ;; (`minibuffer.el:804`): take the message overlay down and cancel
+      ;; the timer that would have taken it down.
+      ;;--------------------------------------------------------------
+      (let ((overlay (*minibuffer--message-overlay*))
+            (timer (*minibuffer--message-timer*)))
+        (when overlay (delete-overlay overlay))
+        (*minibuffer--message-overlay* #f)
+        (when timer (cancel-timer timer))
+        (*minibuffer--message-timer* #f)))
+
+    (define (%minibuffer-message-enclose message)
+      ;; The `[...]' the two message functions put round a message that
+      ;; is not already written that way (`minibuffer.el:839`, `:915`):
+      ;; "Enclose MESSAGE in [...] if it is not yet enclosed."
+      ;;--------------------------------------------------------------
+      (if (message-enclosed? message)
+          message
+          (string-append " [" message "]")))
+
+    (define (%minibuffer-message-put message timeout)
+      ;; The half the two functions share: put MESSAGE after the text as
+      ;; an overlay's `after-string`, arm TIMEOUT if there is one, and
+      ;; record both so that `minibuffer--delete-message-overlay` can
+      ;; take them down.
+      ;;
+      ;; `priority 1100` is Emacs's (`minibuffer.el:851`): the message
+      ;; must be drawn before any other overlay string at the end of the
+      ;; text, or a long one could be pushed out of the window.
+      ;;--------------------------------------------------------------
+      (minibuffer--delete-message-overlay)
+      (let ((pos (minibuffer--message-overlay-pos))
+            (ed (minibuffer-editor (*minibuffer*))))
+        (let ((overlay (with-current-buffer ed (make-overlay pos pos #f #t #t))))
+          (with-current-buffer ed
+            (overlay-put overlay 'after-string message)
+            (overlay-put overlay 'priority 1100))
+          (*minibuffer--message-overlay* overlay)
+          ;; `(run-at-time (or minibuffer-message-timeout 1000000) nil
+          ;; #'minibuffer--delete-message-overlay)` - always armed, and a
+          ;; timeout of 0 fires at once. `set-minibuffer-message` arms its
+          ;; own only `(when (numberp minibuffer-message-clear-timeout))`,
+          ;; which is the caller's business: TIMEOUT is #f for never.
+          (when (number? timeout)
+            (*minibuffer--message-timer*
+             (run-at-time timeout #f minibuffer--delete-message-overlay))))))
+
+    (define (minibuffer-message text . args)
+      ;; GNU Emacs's `minibuffer-message' (`minibuffer.el:812'): show
+      ;; MESSAGE at the end of what has been typed, without hiding it,
+      ;; and take it down again after `minibuffer-message-timeout'
+      ;; seconds or at the next key, whichever comes first.
+      ;;
+      ;; **The argument is TEXT and not MESSAGE**, which is Emacs's name
+      ;; for it: Scheme is a Lisp-1, so a parameter called MESSAGE would
+      ;; hide the `message` this function *calls* in its first branch -
+      ;; the C's `(apply #'message message args)` - and the string would
+      ;; be applied. Same class as `newline` being spelled
+      ;; `insert-newline` in `simple.scm`.
+      ;;
+      ;; **Called when no minibuffer is being read it is plain
+      ;; `message`** - the echo area is not showing a prompt, so there is
+      ;; nothing to show the text *after*. The C's whole first line:
+      ;;
+      ;;   (if (not (minibufferp (current-buffer) t))
+      ;;       (apply #'message message args)
+      ;;--------------------------------------------------------------
+      (if (not (minibufferp))
+          (apply message (if (pair? args) (apply format #f text args) text) '())
+          ;; Elisp's `if` takes a body on the else side; Scheme's does not,
+          ;; so the C's four statements are one `begin`.
+          (begin
+            (minibuffer--delete-message-overlay)
+            ;; `(message nil)` - "Clear out any old echo-area message to
+            ;; make way for our new thing" (`minibuffer.el:836`).
+            (set!frame-message (*current-frame*) "")
+            (let ((shown (%minibuffer-message-enclose text)))
+              (when (pair? args) (set! shown (apply format #f shown args)))
+              (%minibuffer-message-put
+               shown
+               (or (*minibuffer-message-timeout*) 1000000))))))
+
+    (define (set-minibuffer-message frame message)
+      ;; GNU Emacs's `set-minibuffer-message' (`minibuffer.el:899'): the
+      ;; `set-message-function` that makes `message` work while a prompt
+      ;; is up. It answers true - "the message was handled specially by
+      ;; this function" - when a minibuffer window is live on FRAME's
+      ;; selected frame, so the echo buffer is not touched at all.
+      ;;
+      ;; The docstring is Emacs's: "Temporarily display MESSAGE at the
+      ;; end of the active minibuffer window." The C calls it through
+      ;; `Vset_message_function` (`xdisp.c:13585`), which this tree
+      ;; reaches from `set!frame-message`.
+      ;;--------------------------------------------------------------
+      (let ((mini (and (eq? frame (*current-frame*))
+                       frame
+                       (frame-minibuffer-window frame))))
+        (and mini
+             (window-buffer mini)
+             (*minibuffer*)
+             (not (eq? (window-buffer mini) (frame-echo-buffer frame)))
+             (begin
+               (let ((text (%minibuffer-message-enclose message)))
+                 (%minibuffer-message-put
+                  text (*minibuffer-message-clear-timeout*)))
+               ;; "Return t telling the caller that the message was
+               ;; handled specially by this function."
+               #t))))
+
+    (define (clear-minibuffer-message frame)
+      ;; GNU Emacs's `clear-minibuffer-message' (`minibuffer.el:1045`):
+      ;; "Clear echo-area message when the minibuffer is active." It is
+      ;; `clear-message-function`, so `clear_message` reaches it
+      ;; (`xdisp.c:13644`) - and this tree reaches it from
+      ;; `set!frame-message` with an empty string, which is what the
+      ;; command loop does at the start of every command.
+      ;;--------------------------------------------------------------
+      (minibuffer--delete-message-overlay)
+      #f)
+
+    ;; **`message` is routed through these while a prompt is up.**
+    ;; `minibuffer.el` ends its own definition of them with
+    ;;
+    ;;   (setq set-message-function 'set-message-functions)
+    ;;   (setq clear-message-function 'clear-minibuffer-message)
+    ;;
+    ;; - the first being a list of handlers, of which
+    ;; `set-minibuffer-message` is the only one here. The seam in
+    ;; `(schemacs editor frame)` hands each the frame as well, because
+    ;; that is where this tree's echo area lives.
+    (*set-message-function* set-minibuffer-message)
+    (*clear-message-function* clear-minibuffer-message)
 
     (define (completion--message msg)
       ;; GNU Emacs's `completion--message': the "No match", "Sole

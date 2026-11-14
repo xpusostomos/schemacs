@@ -72,7 +72,7 @@
     (schemacs editor custom)
     (schemacs editor derived)
     (schemacs editor easy-mmode)
-    (schemacs editor window)
+    (except (schemacs editor window)  *cursor-in-echo-area*)
     (schemacs editor warnings)
     (schemacs editor loadup)
     (schemacs editor env)
@@ -173,6 +173,7 @@
     *change-major-mode-hook*
     *char-property-alias-alist*
     *charset-table*
+    *clear-message-function*
     *coding-categories-bound*
     *coding-category-priority*
     *coding-system-for-read*
@@ -248,7 +249,6 @@
     *display-color-cells*
     *display-type*
     *echo-area-buffer*
-    *echo-area-prompt*
     *enable-disabled-menus-and-buttons*
     *enable-multibyte-characters*
     *eval-expression-debug-on-error*
@@ -281,6 +281,7 @@
     *frame-creation-function*
     *frame-cursor-type*
     *frame-focus*
+    *frame-garbage-function*
     *frame-inhibit-implied-resize*
     *frame-list*
     *gap-bytes-dfl*
@@ -296,6 +297,7 @@
     *history-delete-duplicates*
     *history-length*
     *indent-tabs-mode*
+    *inhibit-field-text-motion*
     *inhibit-file-name-handlers*
     *inhibit-file-name-operation*
     *inhibit-menubar-update*
@@ -361,11 +363,15 @@
     *message-log-max*
     *messages-buffer-name*
     *minibuffer*
+    *minibuffer--message-overlay*
+    *minibuffer--message-timer*
     *minibuffer-completing-file-name*
     *minibuffer-completion-confirm*
     *minibuffer-completion-predicate*
     *minibuffer-completion-table*
     *minibuffer-exit-hook*
+    *minibuffer-message-clear-timeout*
+    *minibuffer-message-properties*
     *minibuffer-message-timeout*
     *minibuffer-selected-window*
     *minibuffer-setup-hook*
@@ -424,6 +430,7 @@
     *selection-converter-alist*
     *set-marker-function*
     *set-marker-insertion-type-function*
+    *set-message-function*
     *show-trailing-whitespace*
     *special-event-map*
     *split-string-default-separators*
@@ -677,6 +684,7 @@
     clear-frame-area!
     clear-glyph-matrix
     clear-glyph-matrix-row
+    clear-minibuffer-message
     clear-prefix!
     clear-to-end!
     code-point->char
@@ -746,6 +754,7 @@
     completions-header-string
     concat
     confirm-nonexistent-file-or-buffer
+    constrain-to-field
     copy-file
     copy-interval-parent
     copy-intervals
@@ -1055,6 +1064,8 @@
     face-spec-set-match-display
     facep
     fetch-char
+    field-beginning
+    field-end
     file-attribute-access-time
     file-attribute-device-number
     file-attribute-group-id
@@ -1170,6 +1181,7 @@
     forward-word-position
     frame-char-height
     frame-char-width
+    frame-echo-buffer
     frame-editor
     frame-garbaged-p
     frame-height
@@ -1210,6 +1222,7 @@
     get-char-property
     get-free-disk-space
     get-keyelt
+    get-pos-property
     get-selection
     get-specified-cursor-type
     get-text-property
@@ -1594,6 +1607,8 @@
     messages-buffer
     messages-buffer-mode
     minibuffer--bitset
+    minibuffer--delete-message-overlay
+    minibuffer--message-overlay-pos
     minibuffer-choose-completion
     minibuffer-complete
     minibuffer-complete-and-exit
@@ -1659,6 +1674,7 @@
     new-modal-lookup-state
     new-region-cache
     next-buffer
+    next-char-property-change
     next-frame
     next-history-element
     next-interval
@@ -1666,6 +1682,8 @@
     next-line-or-history-element
     next-logical-line
     next-overlay-change
+    next-property-change
+    next-single-char-property-change
     next-single-property-change
     normal-splash-screen
     not-modified
@@ -1687,11 +1705,13 @@
     other-window
     overlay-buffer
     overlay-end
+    overlay-front-advance
     overlay-get
     overlay-lists
     overlay-priority
     overlay-properties
     overlay-put
+    overlay-rear-advance
     overlay-recenter
     overlay-start
     overlay-strings-at
@@ -1735,6 +1755,7 @@
     prepare-to-modify-buffer
     prepare-to-modify-buffer-1
     previous-buffer
+    previous-char-property-change
     previous-frame
     previous-history-element
     previous-interval
@@ -1742,6 +1763,8 @@
     previous-line-or-history-element
     previous-logical-line
     previous-overlay-change
+    previous-property-change
+    previous-single-char-property-change
     previous-single-property-change
     primitive-undo
     propertize
@@ -2069,6 +2092,7 @@
     set-marker-restricted
     set-match-data
     set-message!
+    set-minibuffer-message
     set-object-intervals
     set-point
     set-selection!
@@ -2188,6 +2212,7 @@
     text-property-any
     text-property-list
     text-property-not-all
+    text-property-stickiness
     text-quoting-style
     text-scale-adjust
     text-scale-decrease

@@ -29,6 +29,9 @@
    windows-or-buffers-changed? set-windows-or-buffers-changed!
    ;; `update_mode_lines` (`xdisp.c`) - its weaker sibling, see below.
    update-mode-lines? set-update-mode-lines!
+   ;; `cursor_in_echo_area` (`dispnew.c:7538`): whether the cursor is
+   ;; drawn in the echo area rather than in the selected window's text.
+   *cursor-in-echo-area*
    write-glyphs!
    draw-box!
    glyphs->text
@@ -141,6 +144,20 @@
 
     (define (set-update-mode-lines! value)
       (set! update-mode-lines (and value #t)))
+
+    (define *cursor-in-echo-area* (make-parameter #f))
+    ;; ^ GNU Emacs's `cursor-in-echo-area', `DEFVAR_BOOL` in
+    ;; `dispnew.c:7538` and so false by default: whether to put a cursor
+    ;; in the echo area - the minibuffer window - rather than in the
+    ;; selected window's text. False means the echo area shows its
+    ;; message with no cursor, which is what a frame whose minibuffer is
+    ;; not being read wants.
+    ;;
+    ;; It is here rather than in `window.scm`, where this tree kept it,
+    ;; because the two readers are the redisplay's:
+    ;; `get_window_cursor_type` (`xdisp.c:34825`) asks it, and
+    ;; `update_frame` honours it. `window.scm` re-exports it so that
+    ;; every name that reached it there still does.
 
     (define-class <display> ()
       ;; The kind of thing a display is. A display answers the generics

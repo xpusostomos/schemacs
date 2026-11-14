@@ -192,6 +192,7 @@
    move-overlay
    next-overlay-change
    overlay-buffer
+   overlay-front-advance overlay-rear-advance
    overlay-end
    overlay-get
    overlay-properties
@@ -930,7 +931,23 @@
             ;; Emacs's `Fother_buffer' creates a buffer rather than fail
             (get-buffer-create *scratch-buffer-name*))
            ((eq? (cdar rest) avoid) (loop (cdr rest)))
+           ;; **A hidden buffer is never a candidate**: `BUFFER_HIDDEN_P
+           ;; (b)` (`buffer.h:1152`) is "its name starts with a space",
+           ;; and `candidate_buffer` (`buffer.c:1748`) tests it before
+           ;; anything else. Emacs's ` *Minibuf-0*`, ` *Echo Area 0*` and
+           ;; the rest are hidden for exactly this reason - a window that
+           ;; has to show *some* buffer must not show one of those.
+           ((%buffer-hidden? (cdar rest)) (loop (cdr rest)))
            (else (cdar rest))))))
+
+    (define (%buffer-hidden? buffer)
+      ;; GNU Emacs's `BUFFER_HIDDEN_P` (`buffer.h:1152`): "Convenient
+      ;; check whether buffer B is hidden (i.e. its name starts with a
+      ;; space)." The C is a macro over the name, not a stored flag.
+      ;;--------------------------------------------------------------
+      (let ((name (buffer-name buffer)))
+        (and (> (string-length name) 0)
+             (char=? (string-ref name 0) #\space))))
     (define (bury-buffer . args)
       ;; Move a buffer to the end of the list, so that `OTHER-BUFFER' will
       ;; not choose it until there is nothing else: GNU Emacs's
@@ -1177,6 +1194,22 @@
              (and buffer
                   (itree-node-begin-of (buffer-overlays-tree buffer)
                                        (overlay-interval overlay))))))
+    (define (overlay-front-advance overlay)
+      ;; GNU Emacs's `OVERLAY_FRONT_ADVANCE_P` (`buffer.h`): whether the
+      ;; overlay's start marker advances when text is inserted there.
+      ;; The C is a macro over `ov->interval->front_advance`, and it is
+      ;; what `get-pos-property` (`editfns.c:275`) and `find_field` ask
+      ;; when deciding whether an overlay would cover a character
+      ;; inserted at a position.
+      ;;--------------------------------------------------------------
+      (itree-node-front-advance (overlay-interval overlay)))
+
+    (define (overlay-rear-advance overlay)
+      ;; GNU Emacs's `OVERLAY_REAR_ADVANCE_P` (`buffer.h`): whether text
+      ;; inserted at the overlay's end is inside it.
+      ;;--------------------------------------------------------------
+      (itree-node-rear-advance (overlay-interval overlay)))
+
     (define (overlay-end overlay)
       ;; GNU Emacs's `overlay-end': "Return the end position of OVERLAY."
       ;;--------------------------------------------------------------

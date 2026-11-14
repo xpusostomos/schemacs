@@ -7,9 +7,10 @@
   ;; and the frame's echo area.
   ;;
   ;; Two things make that true, and both are why this library comes when
-  ;; it does. The echo area's buffer and prompt are read from the frame
-  ;; (`*echo-area-buffer*', `*echo-area-prompt*'), which is where GNU
-  ;; Emacs keeps them, so the renderer has nothing to ask a minibuffer.
+  ;; it does. The echo area is the frame's minibuffer *window*, drawn by
+  ;; the same window loop as every other window - its buffer is the
+  ;; prompt's during a read and the frame's echo buffer otherwise - so the
+  ;; renderer has nothing to ask a minibuffer and paints no row by hand.
   ;; And a search match is nothing this library knows about at all: the
   ;; `isearch' and `lazy-highlight' faces reach it as *overlays* on the
   ;; buffer, through the same `attrs-at-buffer-position' every other face
@@ -38,6 +39,9 @@
     ;; and never touches a terminal itself. `dispnew.sld' defines them,
     ;; and `term.sld' answers them for the curses terminal.
     (only (schemacs editor dispnew)
+         ;; `get_window_cursor_type`'s `cursor_in_echo_area`
+         ;; (`dispnew.c:7538`, read at `xdisp.c:34825`).
+         *cursor-in-echo-area*
           current-display
           ;; `windows_or_buffers_changed` (`xdisp.c`): set by whoever
           ;; changes a face or forces a redisplay, read by the skip below.
@@ -100,7 +104,7 @@
     ;; below. See the note on it there.
     (only (schemacs editor fns) count-lines)
     (only (schemacs editor frame)
-         *current-frame* *echo-area-buffer* *echo-area-prompt*
+         *current-frame* *echo-area-buffer*
          *window-scroll-function*
          *frame-cursor-type* *frame-focus* frame-height frame-width
          ;; `FRAME_MENU_BAR_LINES (f)` - whether this frame draws a bar -
@@ -2406,6 +2410,69 @@
               (loop (+ i 1) (+ col w) rs))))
         (cons vec n)))
 
+    (define (line-slice-glyphs-with-strings ed texts from to line-start ovs width)
+      ;; The `<glyph>`s of one screen row when the row carries overlay
+      ;; strings - GNU Emacs's `display_line` with `it->string` set.
+      ;;
+      ;; OVS is `row-overlay-strings`' vector: per buffer column of the
+      ;; line, the `(before-string . after-string)` overlays there. In
+      ;; Emacs the strings are *glyphs in the row*, pushed onto the
+      ;; iterator by `get_overlay_strings` and appended by `append_glyph`
+      ;; like any other character, so the row diff sees them and the
+      ;; matrix carries them - which is why this builds glyphs rather
+      ;; than drawing.
+      ;;
+      ;; **A second walk, and only for rows that have strings.** The
+      ;; pool-reusing walk in `line-slice-glyphs` is what makes a
+      ;; keystroke allocation-free, and a row with an overlay string is
+      ;; rare enough (the echo row while a message shows) to pay for a
+      ;; fresh vector. The strings' characters advance the screen column
+      ;; as they go, so a tab after one expands from where the string
+      ;; left off.
+      ;;--------------------------------------------------------------
+      (let* ((n (- to from))
+             (specs '())
+             (col 0)
+             (push! (lambda (text token w)
+                      (set! specs (cons (list text token w) specs))
+                      (set! col (+ col w))))
+             (push-string! (lambda (ov+str)
+                             (let* ((ov (car ov+str))
+                                    (text (cdr ov+str))
+                                    (token (face->attribute
+                                            (or (overlay-get ov 'face) 'default))))
+                               (let loop ((i 0))
+                                 (when (< i (string-length text))
+                                   (let ((ch (string (string-ref text i))))
+                                     (push! ch token (max 1 (line-display-width ch)))
+                                     (loop (+ i 1)))))))))
+        (let loop ((i 0))
+          (when (< i n)
+            (let* ((linecol (+ from i))
+                   (entry (and ovs (< linecol (vector-length ovs))
+                               (vector-ref ovs linecol))))
+              ;; an entry is `(HEADS . TAILS)' or the empty list
+              (when (pair? entry) (for-each push-string! (car entry)))
+              (let ((text (texts-glyph texts linecol col))
+                    (w (max 1 (texts-width texts linecol col))))
+                (push! text (face-at-buffer-position ed (+ line-start linecol)) w))
+              (when (pair? entry) (for-each push-string! (cdr entry)))
+              (loop (+ i 1)))))
+        ;; "The entry at LEN is the row's *end*" - the `after-string` of
+        ;; an overlay that ends where the row does.
+        (let ((entry (and ovs (< to (vector-length ovs)) (vector-ref ovs to))))
+          (when (pair? entry) (for-each push-string! (cdr entry))))
+        (let* ((specs (reverse specs))
+               (made (length specs))
+               (vec (make-vector (max made width) #f)))
+          (let loop ((rest specs) (i 0))
+            (when (pair? rest)
+              (let ((spec (car rest)))
+                (vector-set! vec i (make-glyph (car spec) (cadr spec) (caddr spec)
+                                               glyph-type-char #f 0)))
+              (loop (cdr rest) (+ i 1))))
+          (cons vec made))))
+
     (define (extend-fill-token ed end last-token)
       ;; The face the rest of a row is filled with: GNU Emacs's
       ;; `extend_face_id` (`xdisp.c:24429`) -
@@ -2523,23 +2590,26 @@
       ;; a continued one) and the buffer positions it covers. The hash is
       ;; taken once, here, which is what `row_equal_p` compares first.
       ;;
-      ;; **Not carried here: overlay `before-string`/`after-string`.** GNU
-      ;; Emacs delivers those as *glyphs* (`get_overlay_strings` pushes
-      ;; the string onto the iterator and the next `append_glyph` puts it
-      ;; in the row, `xdisp.c:6920`), so they belong in this function and
-      ;; not in a draw path of their own. They are absent because nothing
-      ;; in this tree can make one yet: `buffer.scm` records that
-      ;; `before-string`/`after-string` are not ported. `overlay-strings-at`
-      ;; - a faithful `load_overlay_strings` - is ported and exported, so
-      ;; the day an overlay can carry a string, this is where its glyphs go.
-      ;;
-      ;; The old `draw-line!` drew them, and it was deleted as dead along
-      ;; with the rest of the pre-matrix renderer; keeping a second way to
-      ;; draw a row alive for a feature that cannot occur is how the two
-      ;; renderers came to disagree in the first place.
+      ;; **Overlay `before-string`/`after-string` are glyphs in the row**,
+      ;; which is what GNU Emacs makes of them (`get_overlay_strings`
+      ;; pushes the string onto the iterator and `append_glyph` puts it in
+      ;; the row, `xdisp.c:6920`). They used not to be carried at all,
+      ;; because nothing in this tree could make one; `minibuffer-message`
+      ;; makes one now - the `[No match]` and `[Sole completion]` text
+      ;; after a prompt - so a row that has any is built by
+      ;; `line-slice-glyphs-with-strings`.
       ;;--------------------------------------------------------------
-      (let* ((made (line-slice-glyphs texts from to x0 line-start
-                                      (glyph-row-glyphs row) width))
+      (let* ((ovs (row-overlay-strings ed (+ line-start from) (- to from)))
+             (any-strings?
+              (let loop ((i 0))
+                (cond ((>= i (vector-length ovs)) #f)
+                      ((null? (vector-ref ovs i)) (loop (+ i 1)))
+                      (else #t))))
+             (made (if any-strings?
+                       (line-slice-glyphs-with-strings
+                        ed texts from to line-start ovs width)
+                       (line-slice-glyphs texts from to x0 line-start
+                                          (glyph-row-glyphs row) width)))
              (vec (car made))
              (n (cdr made)))
         (set-glyph-row-glyphs! row vec)
@@ -2675,8 +2745,19 @@
              ;; window beneath - measured with `C-x C-+` on a split frame,
              ;; rows of two sizes and two mode lines drawn on top of each
              ;; other, which is what Chris saw as "a real mess".
+             ;; **A minibuffer window has no mode line, so its text
+             ;; area is the whole of it.** `window_text_bottom_y` is
+             ;; `window_box_height`, which is the window's pixel height
+             ;; less the mode line (`xdisp.c`), and `MINI_WINDOW_P`
+             ;; windows have none. Counting a row for it made a
+             ;; one-row window's limit its own top - measured, the echo
+             ;; area built no row at all (`glyphs: #()`, `enabled: #f`)
+             ;; and the message never reached the screen. It went
+             ;; unnoticed while the echo row was painted by hand.
              (y-limit (row->pixel-y (+ (window-top window)
-                                       (window-height window) -1)))
+                                       (window-height window)
+                                       (if (window-minibuffer-p window)
+                                           0 -1))))
              (desired (window-desired-matrix window)))
         (let loop ((row 0)
                    (y (row->pixel-y (window-top window)))
@@ -3692,217 +3773,76 @@
         ;; `MINI_WINDOW_P` test in `display_mode_lines`: a minibuffer
         ;; window is one row and that row is its text.
         (for-each render-window-mode-line! body)
-        ;; **The echo area is drawn on one frame only.** GNU Emacs's
-        ;; `echo_area_window' is `FRAME_MINIBUF_WINDOW (SELECTED_FRAME ())'
-        ;; (`xdisp.c:13782') and `redisplay_window' draws the message only
-        ;; for a window that *is* that one (`:20526'): "We've already
-        ;; displayed the echo area glyphs in this window" is the answer
-        ;; every other frame's minibuffer window gets. Drawing it on all
-        ;; of them is what put the prompt - and, with it, everything typed
-        ;; into the minibuffer - into every frame at once.
-        (when (eq? frame (*current-frame*))
-          ;; Echo area: the minibuffer when one is active, exactly as GNU
-          ;; Emacs draws it (the minibuffer *is* the echo area while it is
-          ;; being read), otherwise whatever message is pending.
-          (let ((reading (*echo-area-buffer*)))
-            (cond
-             ;; While a minibuffer is being read its line is the prompt and
-             ;; what has been typed, with any pending message appended after
-             ;; it - which is what Emacs's `minibuffer-message' does, and it
-             ;; is where the completion candidates have to go or they would
-             ;; hide the very text being completed.
-             ;;
-             ;; The buffer and its prompt come from the frame, which is
-             ;; where GNU Emacs keeps them too (`echo_area_buffer[0]', and
-             ;; the prompt as text in that buffer). Nothing here knows what
-             ;; a minibuffer is: it draws a buffer that happens to have a
-             ;; prompt beside it, which is what the echo area is.
-             (reading
-              ;; Two writes, because the prompt carries a face and the
-              ;; typed text does not. In GNU Emacs the prompt is text in
-              ;; the minibuffer buffer carrying `minibuffer-prompt-properties'
-              ;; - whose `face' is `minibuffer-prompt' - and the input after
-              ;; it carries nothing, which is what `xdisp.c' draws. Drawing
-              ;; the two as one plain string is why a prompt here had no
-              ;; colour at all.
-              (let* ((prompt (truncate-line (or (*echo-area-prompt*) "") width))
-                     (pwidth (min (line-display-width prompt) width)))
-                (when (> pwidth 0)
-                  (write-run! (current-display)
-                              (list prompt)
-                              (row->pixel-y (- height 1)) 0
-                              (face->attribute 'minibuffer-prompt)))
-                (let* ((typed (truncate-line
-                                   (string-append
-                                 ;; The echo buffer's characters, which
-                                 ;; is `buffer-substring-no-properties'
-                                 ;; over the whole of it - Emacs's
-                                 ;; `echo_area_display' reads the same
-                                 ;; text, through the glyph matrices.
-                                 ;; It was `text-editor-to-string',
-                                 ;; which was that composition under an
-                                 ;; invented name (deleted 2026-10-13).
-                                    (with-current-buffer reading
-                                      (buffer-substring-no-properties
-                                       (point-min) (point-max)))
-                                    (frame-message frame))
-                                   (- width pwidth)))
-                       (twidth (min (line-display-width typed)
-                                    (- width pwidth))))
-                  (write-run! (current-display)
-                              (list typed)
-                              (row->pixel-y (- height 1)) pwidth
-                              ;; The typed text carries no face
-                              ;; property, so it is displayed in the
-                              ;; *default* face - Emacs's echo area is
-                              ;; the minibuffer window, redisplayed like
-                              ;; any other. `#f' here meant the
-                              ;; terminal's own colours, which is the
-                              ;; same thing only until a theme sets the
-                              ;; default face.
-                              (face->attribute 'default))
-                  ;; and the rest of the row, as in the message branch
-                  (fill-line-end-row! (current-display)
-                                      (frame-minibuffer-window frame)
-                                      (- height 1)
-                                      (row->pixel-y (- height 1))
-                                      (+ pwidth twidth)
-                                      (- width (+ pwidth twidth))
-                                      (face->attribute 'default)))))
-             (else
-              (let* ((text (truncate-line (frame-message frame) width))
-                     (tw (min (line-display-width text) width)))
-                (write-run! (current-display)
-                            (list text)
-                            (row->pixel-y (- height 1)) 0
-                            (face->attribute 'default))
-                ;; **The rest of the row is blanked, because a window's
-                ;; glyph row is `window_box_width` cells** - the text and
-                ;; then spaces - and `update_window` diffs the whole of it.
-                ;; Without this a message shorter than what was on the row
-                ;; left the tail of the old one behind: measured, `M-x zzzz
-                ;; RET` drew "No matchzzzz", and a `Quit` after a
-                ;; minibuffer prompt left "/tmp/" after it.
-                (fill-line-end-row! (current-display)
-                                    (frame-minibuffer-window frame)
-                                    (- height 1)
-                                    (row->pixel-y (- height 1))
-                                    tw (- width tw)
-                                    (face->attribute 'default)))))))
         ;; Place the terminal cursor: in the minibuffer while one is
         ;; active (Emacs's `cursor-in-echo-area'), else at the selected
         ;; window's point - the only window whose cursor is drawn, there
         ;; being one cursor on a terminal.
-        ;; The cursor follows the same rule: the echo area's cursor
-        ;; belongs to the frame whose echo area it is, and every other
-        ;; frame draws its own window's cursor as usual.
+        ;; **The cursor is the selected window's, and the echo area
+        ;; needs no branch of its own.** GNU Emacs's
+        ;; `get_window_cursor_type` (`xdisp.c:34825`) asks whether
+        ;; `w == XWINDOW (echo_area_window)`; the echo area gets a cursor
+        ;; only while `cursor-in-echo-area` says so, and otherwise the
+        ;; selected window does. While a prompt is read the minibuffer
+        ;; window **is** the selected window (`read_minibuf`'s
+        ;; `Fselect_window (minibuf_window)`, `minibuf.c:841`), so the
+        ;; ordinary path puts the cursor on the prompt - at point in the
+        ;; input, which is where it belongs. Click into another window
+        ;; and that window is selected, so the cursor goes there and the
+        ;; prompt stays drawn, which is what typing there looks like.
         ;;
-        ;; **The echo area's cursor is the *selected* window's, and only
-        ;; while that is the minibuffer.** GNU Emacs asks
-        ;; `get_window_cursor_type` (`xdisp.c:34825') whether
-        ;; `w == XWINDOW (echo_area_window)`; a window that is not that
-        ;; one gets `*active_cursor = false` and no echo-area cursor at
-        ;; all. This tree has no minibuffer window - the echo area is a
-        ;; row of the frame - so the equivalent question is whether the
-        ;; current buffer is still the prompt's: click into another
-        ;; window and the prompt stays *drawn* (the block above reads
-        ;; `*echo-area-buffer*`) while the cursor goes back to the
-        ;; selected window, which is what typing there looks like.
-        (let* ((echo (and (eq? frame (*current-frame*))
-                          (*echo-area-buffer*)))
-               ;; **`and` answers its *last* test**, so an `eq?` at the
-               ;; end makes `reading` `#t` rather than the buffer - and
-               ;; `(buffer-pt #t)` is "Wrong type argument ... #t". The
-               ;; buffer comes last for that reason.
-               (reading (and echo (eq? (current-buffer) echo) echo)))
-          (if reading
-              ;; At point in the input, where Emacs's `cursor-in-echo-area'
-              ;; leaves it: a message is shown after the input, and it must
-              ;; not drag the cursor along with it - a long one (the
-              ;; completion candidates, say) would pin the cursor to the
-              ;; right edge of the screen whatever point did.
-              (let* ((cursor (get-window-cursor-type
-                              (frame-selected-window frame)))
-                     ;; **The echo area is not a window**, so its cursor is
-                     ;; its buffer's own point - while the frame's windows
-                     ;; are placed by `window-point' above. Emacs keeps the
-                     ;; echo area's point in the minibuffer buffer, which
-                     ;; is the same thing here.
-                     (at (buffer-pt reading))
-                     (glyph (cursor-glyph reading at)))
-                (note-phys-cursor! (current-display)
-                                   (row->pixel-y (- height 1))
-                                   (min (+ (line-display-width
-                                            (or (*echo-area-prompt*) ""))
-                                           (current-line-display-column
-                                            reading
-                                            (text-editor-cursor-column reading)))
-                                        (- width 1))
-                                   (cursor-cells reading at)
-                                   (car glyph)
-                                   (cdr glyph))
-                (draw-window-cursor! (current-display)
-                                     (row->pixel-y (- height 1))
-                                     (min (+ (line-display-width
-                                              (or (*echo-area-prompt*) ""))
-                                             (current-line-display-column
-                                              reading
-                                              (text-editor-cursor-column reading)))
-                                          (- width 1))
-                                     (cursor-cells reading at)
-                                     (car cursor)
-                                     (cadr cursor)
-                                     (car glyph)
-                                     (cdr glyph)))
-              (let ((selected (frame-selected-window frame)))
-                (when selected
-                  (let ((at (cursor-screen-position selected)))
-                    (when at
-                      (let* ((buffer (window-buffer selected))
-                             (cursor (get-window-cursor-type selected))
-                             ;; the glyph under the cursor is the one at
-                             ;; the *window's* point, as Emacs's is (the
-                             ;; glyph row the display iterator stopped on)
-                             (glyph (cursor-glyph buffer
-                                                  (window-point selected))))
-                        (note-phys-cursor!
-                         (current-display)
-                         (window-to-frame-pixel-y
-                          selected
-                          (window-pixel-y
-                           selected
-                           (- (car at) (window-top selected))))
-                         (cdr at)
-                         (cursor-cells buffer (window-point selected))
-                         (car glyph) (cdr glyph))
-                        (draw-window-cursor! (current-display)
-                                             ;; **The cursor's pixel y**,
-                                             ;; which is `w->cursor.y` in
-                                             ;; the C: the sum of the
-                                             ;; heights of the rows above
-                                             ;; it, not its row index -
-                                             ;; once rows differ in height
-                                             ;; those are not the same.
-                                             ;;
-                                             ;; `cursor-screen-position'
-                                             ;; answers a *frame* row (it
-                                             ;; adds `window-top'), and
-                                             ;; `window-pixel-y' walks
-                                             ;; rows inside the window, so
-                                             ;; the window's own top comes
-                                             ;; back off before the walk
-                                             ;; and goes back on with the
-                                             ;; heights in pixels.
-                                             (window-to-frame-pixel-y
-                                              selected
-                                              (window-pixel-y
-                                               selected
-                                               (- (car at) (window-top selected))))
-                                             (cdr at)
-                                             (cursor-cells buffer
-                                                           (window-point selected))
-                                             (car cursor) (cadr cursor)
-                                             (car glyph) (cdr glyph)))))))))
+        ;; **This used to be two branches**, because the echo row was
+        ;; painted by hand and was not a window: the prompt's column had
+        ;; to be composed from the prompt's width and the buffer's
+        ;; column. It is buffer text now, so the row's own scan counts
+        ;; it.
+        (let ((selected (or (and (*cursor-in-echo-area*)
+                                 (frame-minibuffer-window frame))
+                            (frame-selected-window frame))))
+          (when selected
+            (let ((at (cursor-screen-position selected)))
+              (when at
+                (let* ((buffer (window-buffer selected))
+                       (cursor (get-window-cursor-type selected))
+                       ;; the glyph under the cursor is the one at the
+                       ;; *window's* point, as Emacs's is (the glyph row
+                       ;; the display iterator stopped on)
+                       (glyph (cursor-glyph buffer (window-point selected))))
+                  (note-phys-cursor!
+                   (current-display)
+                   (window-to-frame-pixel-y
+                    selected
+                    (window-pixel-y
+                     selected
+                     (- (car at) (window-top selected))))
+                   (cdr at)
+                   (cursor-cells buffer (window-point selected))
+                   (car glyph) (cdr glyph))
+                  (draw-window-cursor! (current-display)
+                                       ;; **The cursor's pixel y**, which
+                                       ;; is `w->cursor.y` in the C: the
+                                       ;; sum of the heights of the rows
+                                       ;; above it, not its row index -
+                                       ;; once rows differ in height those
+                                       ;; are not the same.
+                                       ;;
+                                       ;; `cursor-screen-position`
+                                       ;; answers a *frame* row (it adds
+                                       ;; `window-top'), and
+                                       ;; `window-pixel-y' walks rows
+                                       ;; inside the window, so the
+                                       ;; window's own top comes back off
+                                       ;; before the walk and goes back
+                                       ;; on with the heights in pixels.
+                                       (window-to-frame-pixel-y
+                                        selected
+                                        (window-pixel-y
+                                         selected
+                                         (- (car at) (window-top selected))))
+                                       (cdr at)
+                                       (cursor-cells buffer
+                                                     (window-point selected))
+                                       (car cursor) (cadr cursor)
+                                       (car glyph) (cdr glyph)))))))
         ;; **The display's own cursor is placed once the frame's text is
         ;; written.** GNU Emacs's `update_frame` ends with
         ;; `tty_set_cursor` (`dispnew.c`), which reads the cursor
