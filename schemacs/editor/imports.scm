@@ -144,6 +144,7 @@
     *after-change-functions*
     *after-change-major-mode-hook*
     *after-make-frame-functions*
+    *after-redisplay-hook*
     *amalgamating-count%
     *amalgamating-undo-limit*
     *auto-coding-alist*
@@ -413,6 +414,7 @@
     *search-highlight*
     *search-pattern*
     *search-regs*
+    *search-ring-max*
     *search-upper-case*
     *select-active-regions*
     *select-enable-clipboard*
@@ -1022,6 +1024,7 @@
     expand-file-name
     expand-line-display
     expand-line-glyphs
+    extend-fill-token
     face->attribute
     face-all-attributes
     face-at-buffer-position
@@ -1338,6 +1341,7 @@
     isearch
     isearch-backward
     isearch-dehighlight
+    isearch-error
     isearch-find
     isearch-forward
     isearch-highlight
@@ -1348,7 +1352,9 @@
     isearch-pop-state
     isearch-pop-to-success
     isearch-repeat
+    isearch-ring-adjust1
     isearch-search!
+    isearch-update-ring
     isearch-word-at-point
     iso-charset-table
     item-property-def
@@ -1863,6 +1869,8 @@
     scroll-up-command
     search-backward
     search-forward
+    search-ring
+    search-ring-yank-pointer
     select-enable-clipboard
     select-enable-primary
     select-frame

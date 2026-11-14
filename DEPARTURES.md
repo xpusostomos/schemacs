@@ -1818,3 +1818,166 @@ themselves), and the else branch still makes a fresh string for wide
 characters, tabs and caret notations, whose text depends on the column.
 This is a representation departure - Emacs has no such table - and it is
 2 KB against 1,920 allocations a redisplay.
+
+# The search ring, and why the first C-s after a search did nothing
+
+## `C-s C-s` searches the last search
+
+`search-ring` and `isearch-error` are `isearch.el`'s (`:253`, `:210`),
+with `search-ring-max` a defcustom, `isearch-update-ring` over
+`add-to-history` (propertizing the string with its case folding, which
+comes back out when it is reused), `isearch-ring-adjust1`'s pointer walk,
+and `M-n`/`M-p` (`isearch-ring-advance`/`-retreat`) bound as
+`isearch.el:639-640` bind them. The empty-repeat rule is Emacs's, at
+`isearch-repeat` (`:1953`): "If search string is empty, use last one" -
+so `C-s C-s` searches what the last search ended on, and an empty ring
+says `[No previous search string]`.
+
+**A departure, named**: Emacs's `isearch-ring-adjust` only searches when
+`search-ring-update` is non-nil and otherwise calls `isearch-edit-string`,
+which moves the string into the minibuffer for editing. There is no
+isearch minibuffer edit here, so the ring always searches; that variable
+is not carried.
+
+**`M-s` is not history in Emacs** - it is the `isearch-toggle-*` prefix
+(`isearch.el:630-684`) - so the ring keys are `M-n`/`M-p`. Measured on
+Emacs 31.1 in a pty: `C-s M-s C-g` says "M-s C-g is undefined".
+
+## The repeat searches from point, not from the match's start
+
+`isearch-find` backs up by the pattern's length, which is the rule a
+*typed* character needs: an extended pattern must retry where the current
+match began. A *repeat* has no match to retry, and with the backup
+`C-s C-s` re-found the very match point had just left. `isearch-repeat`'s
+ring branches and `M-n`/`M-p` now call `isearch-search-from-point`, which
+is `isearch-search` launched from `isearch-repeat`'s barrier - from
+point, inclusive. Measured: in "one 111 two 111 three", a search for
+"111" ends at C7, and the old `C-s C-s` stayed there instead of moving to
+the second 111 (C15).
+
+## Gtk stranded every key that arrived while it was busy
+
+The outermost command loop of this front end **does not read**: Gtk hands
+each event straight to `command-loop-key!` (`*dispatch-event*`). But
+`pgtk-enqueue!` queued an event whenever it could not dispatch it then -
+a command running, or a redisplay in progress - and **only a read drains
+the queue**. At the outermost level there is no read, so a key that
+arrived in either window sat in the queue until the next prompt or
+isearch consumed it, late and out of order, or for ever.
+
+That is what "C-s works the first time but not the second" was: the
+second C-s arrives while the redisplay after the first search is
+running, is queued, and is never dispatched. Measured with the display's
+own queue: three keys queued, then one delivered while the editor was
+idle; the idle key ran (self-insert), the three were still queued
+afterwards, and the next key to arrive dispatched itself ahead of them.
+`pgtk-drain-queue!` is the missing read: the queue's items are dispatched
+oldest first, through the same two decodes a read uses, until it empties
+or a command leaves a read outstanding (which then owns the rest). This
+is Emacs's `kbd_buffer` order, and the fix makes the three queued keys
+run first, in order.
+
+**And the drain has to happen when a redisplay ends, not only when the
+next event arrives.** The cursor-blink timer repaints straight from a
+Gtk source (`gtk-main.scm`), with no read anywhere; a key pressed during
+that repaint is queued by the branch above, and until the next key there
+was nothing to collect it. `redisplay-frames!` runs
+`*after-redisplay-hook*` once every frame is drawn (Emacs has no such
+hook because its command loop reads again the moment redisplay returns;
+the terminal front end has no queue, so the hook is `#f` there), and the
+Gtk front end installs the drain there. `pgtk-drain-queue!` guards
+itself against re-entry: the hook can fire inside a dispatch's own
+redisplay, and running a command from inside another command's redisplay
+is what `*redisplay-in-progress*` exists to stop.
+
+*(A first version tried to arm an idle or timeout source from
+`pgtk-enqueue!` instead. Both wedged the REPL session that ran them and
+the source never fired - measured: the client expression timed out while
+the editor kept serving new sessions - so the hook is the mechanism that
+works.)*
+
+# The row is filled only where the face says `:extend`
+
+Chris: *"If I'm searching for 888 in the splash screen when it gets to a
+line that ends in 888 ... it paints it to the end of the line."* Right,
+and it is the departure the row-filling pass left standing: the padding
+used the last glyph's face unconditionally.
+
+GNU Emacs's `extend_face_id` (`xdisp.c:24429`) is
+
+    (it->face_id == default_face->id || it->s != NULL)
+    ? it->face_id
+    : (row->ends_at_zv_p ? default_face->id
+       : face_at_pos (it, LFACE_EXTEND_INDEX));
+
+and `face_at_pos` with the EXTEND filter merges only the faces at the
+position that **specify** `:extend` (`merge_named_face`,
+`xfaces.c:2527`). `isearch` and `lazy-highlight` do not specify it, so a
+match at the end of a line stops at the match; `region` does
+(`faces.el:2559`), so a region reaches the edge. Measured on Emacs 31.1
+in a pty, the match is written as `\e[36m\e[45m888\e[39;49m` - three
+cells, the padding back in the default face - where this port painted
+the highlight to column 80. `extend-fill-token` is that rule, and
+`tools/pty-check.py`'s `isearch-line-end` is the check (it fails with
+the old code).
+
+**Departure still standing**: when the merged `:extend` is true, Emacs's
+fill face is the merge of the *extending* faces alone - a font-locked
+word inside the region fills with the region's background and the
+default foreground. This port fills with the last glyph's token, which
+also carries the font-locked word's colours. The colours differ only
+when two faces overlap at a line's end.
+
+## The region is an overlay in Emacs, and a special case here
+
+GNU Emacs 29+ highlights the active region with an **overlay** made by
+Lisp (`redisplay--highlight-overlay-function`, `simple.el:7300`), so the
+region face is merged like any other overlay's and its `:extend t`
+reaches `extend_face_id` through the normal route. This tree merges the
+region in `attrs-at-buffer-position` instead (there is no
+`pre-redisplay-functions` machinery), which is observable in one place:
+an *empty* region - point equal to mark - must cover no characters, and
+`face-change-limit` split a run at its position anyway. It does not now.
+
+# The row builder builds no lists
+
+`line-slice-glyphs` built two lists per row - `line-texts-glyphs` and
+`line-texts-offsets` - and walked them. Emacs's `display_line` appends
+each glyph as its iterator produces it and builds neither. The walk is
+now one pass: for each column, `texts-glyph`/`texts-width` give the
+string and the width, the runs are consumed in step, and the glyph is
+written into the row's own storage. Allocation for 50 keystrokes on a
+240 KB file: **10.3 MB -> 8.4 MB**. Wall time on a loaded machine was
+the same for both (the two accessors are cross-library calls either
+way); the saving is the garbage.
+
+The dead `text-cells-width`, whose only caller was the old last-glyph
+width, is gone, and `line-texts-offsets`/`line-texts-glyphs` are no
+longer imported here (they remain `indentc`'s, where the hscroll
+arithmetic uses them).
+
+# A suite that crashed in its second group was scored green
+
+`tools/run-suites.py` treated a run as finished if the text "Test suite
+finished" appeared anywhere. `srfi 64` prints that at the end of **each**
+group, so `faces-tests.scm` - whose second group crashed with "Wrong type
+argument ... expecting struct: #f" - was reported green on every run for
+months. The check is now that every `Entering test group` has a `Leaving
+test group`, and `faces-tests` is 35 passing tests where it was 16.
+
+Four things were under the crash, each now fixed:
+
+1. **The tests called the row walk without the buffer current.**
+   `line-face-runs` asks the *current* buffer for overlay changes, as the
+   C does; `display-window!` binds the window's buffer for that reason.
+   In a fresh process the current buffer was `#f`, so
+   `next-overlay-change` raised. The tests bind `*current-buffer*` now
+   (`runs-for`).
+2. **An empty region split a run** - see above.
+3. **Three background-mode tests were outside any group**, and this
+   Guile's `srfi 64` raises "expecting struct: #f" for a test evaluated
+   outside a group once a group has ended (measured with a two-group
+   scratch file). They could never have run; they are in a group now.
+4. **One of them expected the symbol `cyan`** where a colour attribute
+   holds the string `"cyan"` (Emacs's `(face-attribute 'minibuffer-prompt
+   :foreground)` is a string). It had never run, so nobody had seen it.

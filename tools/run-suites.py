@@ -170,9 +170,19 @@ def run(path):
     # inside a test - an error escaping srfi-64's own handler - prints
     # *passes* and no failure count at all, and counting only the summary
     # line reports it green. `faces-tests.scm' did exactly that with four
-    # failing tests in it for as long as anyone looked. The summary's last
-    # line is the tell.
-    finished = '*** Test suite finished' in out
+    # failing tests in it for as long as anyone looked.
+    #
+    # **And "finished" has to mean every group finished.** srfi 64 prints
+    # "Test suite finished" at the end of *each* group, so the old test -
+    # whether that line appears at all - stayed true when the first group
+    # ended and the second one crashed. Measured on this tree:
+    # `faces-tests.scm' crashed in its *second* group for months and was
+    # counted green every run. What a complete run leaves is a `Leaving
+    # test group' for every `Entering test group' - the counts below.
+    entered = out.count('Entering test group')
+    left = out.count('Leaving test group')
+    finished = ('*** Test suite finished' in out
+                and entered == left)
     return passes, failures, finished, out
 
 

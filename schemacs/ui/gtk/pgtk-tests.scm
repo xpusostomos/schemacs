@@ -38,7 +38,10 @@
                ;; loop. A pure function of `menu_items' and the flags,
                ;; which is why it can be tested with no window - see the
                ;; section at the end of this file.
-               pgtk-popup-build-tree)
+               pgtk-popup-build-tree
+               ;; The input queue and its drain: a key that arrives while
+               ;; the editor is busy must not be stranded.
+               pgtk-queue pgtk-drain-queue!)
          pt:)
  (prefix (schemacs editor faces) f:)
  ;; The command this file can test and the terminal suites cannot: it is
@@ -1542,3 +1545,36 @@
 
 
 (test-end "schemacs_editor_pgtk")
+
+(test-begin "schemacs_pgtk_queue")
+
+;; **A key queued while a command or a redisplay was running was never
+;; dispatched.** The outermost loop of this front end does not read - Gtk
+;; hands each event straight to the command loop - so anything that
+;; arrived while the editor was busy sat in the queue until the next
+;; prompt or search consumed it, late and out of order. That is why the
+;; first `C-s` after a search often did nothing: it arrived while the
+;; exit redisplay was running, was queued, and nothing ever dispatched
+;; it. `pgtk-drain-queue!` is the missing read: every queued item, oldest
+;; first, through the same two decodes a read uses.
+(test-equal '((19 115 13) ())
+  (let ((d (make pt:<pgtk-display>)))
+    (set! (pt:pgtk-queue d)
+          (list (cons (quote menu-bar-event) 19)
+                (cons (quote menu-bar-event) 115)
+                (cons (quote menu-bar-event) 13)))
+    (let ((seen '()))
+      (pt:pgtk-drain-queue! d (lambda (ev) (set! seen (cons ev seen))))
+      (list (reverse seen) (pt:pgtk-queue d)))))
+
+;; A deadline sentinel is not a key: it means "the read's deadline
+;; passed", and the drain drops it as the read does.
+(test-equal '((19) ())
+  (let ((d (make pt:<pgtk-display>)))
+    (set! (pt:pgtk-queue d)
+          (list (quote pgtk-deadline) (cons (quote menu-bar-event) 19)))
+    (let ((seen '()))
+      (pt:pgtk-drain-queue! d (lambda (ev) (set! seen (cons ev seen))))
+      (list (reverse seen) (pt:pgtk-queue d)))))
+
+(test-end "schemacs_pgtk_queue")

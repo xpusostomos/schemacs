@@ -30,7 +30,11 @@
   (import
  (only (schemacs editor insdel) *after-change-functions*)
     ;; `kbd' - see `character.sld''s export note for why it is there
-    (only (schemacs editor character) kbd)
+    ;; `char-meta' is needed to fold an ESC prefix: a terminal sends
+    ;; `M-p` as ESC and `p`, and the search reads below
+    ;; `read_key_sequence`, so the folding is its own (see
+    ;; `isearch-read-key`).
+    (only (schemacs editor character) kbd char-meta)
     (scheme base)
     (scheme char)
     (scheme case-lambda)
@@ -49,7 +53,17 @@
     ;; `char-alt' is the event model's, in `character.sld': the lowest
     ;; of the six modifier bits, `lisp.h''s `CHAR_ALT', which is the
     ;; boundary between a plain character event and a modified one.
-    (only (schemacs editor subr) char-alt)
+    (only (schemacs editor subr) char-alt add-to-history)
+    ;; The search ring's strings carry their case folding as a text
+    ;; property - Emacs's `isearch-string-propertize' - so `propertize'
+    ;; (editfns.c) and the two readers are isearch.el's own dependencies.
+    (only (schemacs editor editfns) propertize)
+    (only (schemacs editor textprop) get-text-property text-properties-at)
+    ;; `search-ring-max' is a defcustom, and `define-custom' is how this
+    ;; tree declares one.
+    (only (schemacs editor custom) define-custom)
+    ;; `isearch-update-ring' binds it, as the C does.
+    (only (schemacs editor minibuf) *history-delete-duplicates*)
     ;; `define-key' and the global map: the keys C-s and C-r are stated
     ;; here, beside the commands they run.
     (only (schemacs editor keymap)
@@ -115,6 +129,11 @@
    *search-case-fold?* *search-pattern* isearch isearch-backward isearch-find
    isearch-forward isearch-message isearch-pop-state isearch-pop-to-success
    isearch-repeat isearch-search! isearch-word-at-point
+   ;; The search ring (`isearch.el:253'), and the reason `C-s C-s`
+   ;; searches for the last search: a variable a session can read, as
+   ;; Emacs's is.
+   search-ring search-ring-yank-pointer *search-ring-max*
+   isearch-error isearch-update-ring isearch-ring-adjust1
    minibuffer-lazy-highlight-setup
    ;; the highlighting, which `replace.sld' runs for query-replace
    *search-highlight* *isearch-lazy-highlight* *lazy-highlight-cleanup*
@@ -172,7 +191,14 @@
                         "case-sensitive " "")
                     (if forward? "I-search" "I-search backward")
                     ": "
-                    pattern)))
+                    pattern
+                    ;; `isearch-message`'s tail (`isearch.el`): the reason
+                    ;; the search cannot run, in brackets - "I-search:
+                    ;;  [No previous search string]". Empty searches are
+                    ;; what raise it here.
+                    (if isearch-error
+                        (string-append " [" isearch-error "]")
+                        ""))))
         (string-append (string-upcase (substring text 0 1))
                        (substring text 1))))
 
@@ -210,6 +236,34 @@
         (when found (set-point ed found))
         (and found #t)))
 
+    (define (isearch-search-from-point ed pattern direction case-fold?)
+      ;; The search a *repeat* runs, from point itself - GNU Emacs's
+      ;; `isearch-search` launched from `isearch-repeat`, which searches
+      ;; from the barrier, not from the start of the match being retried.
+      ;;
+      ;; **`isearch-find` backs up by the pattern's length, and that is
+      ;; wrong here.** The backup is the rule a *typed* character needs -
+      ;; extend the pattern and retry it where the current match began -
+      ;; but a repeated search has no match to retry, so from a match's
+      ;; end the backup re-finds that same match: `C-s C-s` for "111"
+      ;; with point after the first one stayed on the first one instead
+      ;; of moving to the second.
+      ;;--------------------------------------------------------------
+      (if (eq? direction 'forward)
+          (text-editor-search-forward ed pattern (buffer-pt ed) case-fold?)
+          (text-editor-search-backward ed pattern (buffer-pt ed) case-fold?)))
+
+    (define (isearch-search-from-point! ed pattern direction case-fold?)
+      ;; `isearch-search-from-point` with `isearch-search!`'s contract:
+      ;; move point to the match and answer whether there was one. The
+      ;; ring commands use this one - passing the *position* on as the
+      ;; search's success flag left point where it was, and the match
+      ;; found but not gone to.
+      ;;--------------------------------------------------------------
+      (let ((found (isearch-search-from-point ed pattern direction case-fold?)))
+        (when found (set-point ed found))
+        (and found #t)))
+
     (define *search-case-fold?*
       ;; Whether the search in progress folds case, GNU Emacs's
       ;; `isearch-case-fold-search'. The renderer needs it as well as the
@@ -231,6 +285,89 @@
       ;; `isearch-no-upper-case-p' to decide the search's folding.
       ;;--------------------------------------------------------------
       (make-parameter #t))
+
+    ;;----------------------------------------------------------------
+    ;; The search ring
+    ;;
+    ;; GNU Emacs's `search-ring' (`isearch.el:253') and the commands over
+    ;; it: `C-s C-s` searches for the ring's car, `M-n`/`M-p` walk the
+    ;; ring, and `isearch-done` puts the string that was searched on it.
+    ;;------------------------------------------------------------------
+
+    (define search-ring '())
+    ;; ^ `(defvar search-ring nil)`: "List of search string sequences."
+    ;; A plain variable and not a parameter: nothing `let`-binds it - the
+    ;; commands set it - and it outlives every search.
+
+    (define search-ring-yank-pointer #f)
+    ;; ^ `(defvar search-ring-yank-pointer nil)`: "Index in
+    ;; `search-ring' of last string reused. It is nil if none yet."
+
+    (define-custom *search-ring-max* 16
+      "Maximum length of search ring before oldest elements are thrown away."
+      :type 'integer)
+
+    (define isearch-error #f)
+    ;; ^ `(defvar isearch-error nil)`: why the search cannot run, shown in
+    ;; brackets after the search string. `C-s C-s` with an empty ring is
+    ;; the one this file raises.
+
+    (define (isearch-string-propertize string case-fold?)
+      ;; GNU Emacs's `isearch-string-propertize' (`isearch.el:1572'):
+      ;; "Add isearch properties to the isearch string." That property
+      ;; is how the folding a search was made with travels with the
+      ;; string into the ring and back out when it is reused.
+      ;;
+      ;; The C also records `isearch-regexp-function'; there is one
+      ;; search mode here, so there is nothing to record.
+      ;;--------------------------------------------------------------
+      (propertize string 'isearch-case-fold-search case-fold?))
+
+    (define (isearch-string-case-fold string)
+      ;; The folding recorded on a ring string, or #f when it carries
+      ;; none - Emacs's `isearch-update-from-string-properties' tests
+      ;; `plist-member' first: a missing property leaves the current
+      ;; folding alone, and nil is a value the property can hold.
+      ;;--------------------------------------------------------------
+      (and (memq 'isearch-case-fold-search (text-properties-at 0 string))
+           (get-text-property 0 'isearch-case-fold-search string)))
+
+    (define (isearch-update-ring string case-fold?)
+      ;; GNU Emacs's `isearch-update-ring': "Add STRING to the beginning
+      ;; of the search ring."
+      ;;
+      ;; The C binds `history-delete-duplicates' to t around
+      ;; `add-to-history' and passes KEEP-ALL: an older copy of the same
+      ;; string is removed, while the empty string and a repeat of the
+      ;; ring's car would still be recorded - the caller has already
+      ;; refused the empty case.
+      ;;--------------------------------------------------------------
+      (parameterize ((*history-delete-duplicates* #t))
+        (set! search-ring
+              (add-to-history search-ring
+                              (isearch-string-propertize string case-fold?)
+                              (*search-ring-max*)
+                              #t))))
+
+    (define (isearch-ring-adjust1 advance)
+      ;; GNU Emacs's `isearch-ring-adjust1' (`isearch.el:3395'): move the
+      ;; ring's yank pointer one step and answer the string it lands on,
+      ;; or #f for an empty ring.
+      ;;
+      ;; Answers `(STRING . FOLD)`, FOLD being the recorded folding or #f
+      ;; when the string carries none, which is what the caller needs to
+      ;; leave its own folding alone.
+      ;;--------------------------------------------------------------
+      (let ((len (length search-ring)))
+        (if (zero? len)
+            #f
+            (let* ((next (modulo (+ (or search-ring-yank-pointer
+                                       (if advance 0 -1))
+                                    (if advance -1 1))
+                                 len))
+                   (string (list-ref search-ring next)))
+              (set! search-ring-yank-pointer next)
+              (cons string (isearch-string-case-fold string))))))
 
     ;;----------------------------------------------------------------
     ;; Highlighting what the search found
@@ -444,6 +581,20 @@
        ((and (< key char-alt) (>= key 32)) (integer->char key))
        (else #f)))
 
+    (define (isearch-done-ring! pattern case-fold?)
+      ;; The tail of GNU Emacs's `isearch-done` (`isearch.el:1531`):
+      ;;
+      ;;   (if (and (> (length isearch-string) 0) (not nopush))
+      ;;       (isearch-update-ring isearch-string isearch-regexp))
+      ;;
+      ;; **The exits that pass NOPUSH** are `isearch-cancel` - C-g on a
+      ;; successful search, which goes back to where the search started -
+      ;; and `isearch-edit-string`. None of the normal exits is either,
+      ;; so each of them records what it searched for.
+      ;;--------------------------------------------------------------
+      (when (< 0 (string-length pattern))
+        (isearch-update-ring pattern case-fold?)))
+
     (define (isearch forward?)
       ;; The incremental search itself: read a key, act on it, search
       ;; again, and keep going until a key ends the search. Returns
@@ -455,6 +606,12 @@
              ;; the one the search is being watched in
              (window (frame-selected-window frame))
              (opoint (buffer-pt ed)))
+        ;; Emacs's `isearch-mode` starts a search with the ring's yank
+        ;; pointer cleared (`isearch.el:1292`), so `C-s C-s` begins at the
+        ;; ring's car however the last search was walked, and with no
+        ;; error outstanding.
+        (set! search-ring-yank-pointer #f)
+        (set! isearch-error #f)
         (let loop ((pattern "")
                    (direction (if forward? 'forward 'backward))
                    (states '())
@@ -510,12 +667,13 @@
           ;; - `M-<', an arrow, a resize - is a symbol or carries
           ;; modifiers, and takes neither an exit nor a printing
           ;; character.
-          (let* ((key (read-key-event (read-wait-ms)))
+          (let* ((key (isearch-read-key))
                  (code (and (integer? key) key))
                  (printable (and key (isearch-printing-char key))))
             (cond
              ;; ---- keys that end the search ----
              ((eqv? code 13)                                 ; isearch-exit
+              (isearch-done-ring! pattern case-fold?)
               (*search-pattern* #f)
               (isearch-dehighlight)
               (lazy-highlight-cleanup #t)
@@ -579,19 +737,53 @@
                                           case-fold? success? wrapped?
                                           'forward)))
                 (loop (car next) 'forward (cadr next) (caddr next)
-                      (cadddr next) case-fold? #t)))
+                      (cadddr next) (list-ref next 4) #t)))
              ((eqv? code 18)                                 ; C-r
               (let ((next (isearch-repeat ed states pattern direction
                                           case-fold? success? wrapped?
                                           'backward)))
                 (loop (car next) 'backward (cadr next) (caddr next)
-                      (cadddr next) case-fold? #t)))
+                      (cadddr next) (list-ref next 4) #t)))
+             ;; isearch-ring-advance / isearch-ring-retreat, `M-n` and
+             ;; `M-p` (`isearch.el:639-640`): walk the search ring.
+             ;;
+             ;; **A departure, named.** Emacs's `isearch-ring-adjust`
+             ;; runs the search only when `search-ring-update` is non-nil
+             ;; and otherwise goes to `isearch-edit-string`, which puts
+             ;; the string into the minibuffer for editing. There is no
+             ;; isearch minibuffer edit here, so the ring always searches
+             ;; - the `search-ring-update` branch - and that variable is
+             ;; not carried.
+             ;; **`(kbd "M-n")` is a *sequence* - a vector of events**,
+             ;; as every `kbd` answer is here, because `define-key` takes
+             ;; one. Comparing the key event with the vector was false
+             ;; for ever, so this branch never ran; the event is the
+             ;; vector's first element.
+             ((memv key (list (vector-ref (kbd "M-n") 0)
+                              (vector-ref (kbd "M-p") 0)))
+              (let ((entry (isearch-ring-adjust1
+                            (eqv? key (vector-ref (kbd "M-n") 0)))))
+                (if (not entry)
+                    (begin
+                      (set! isearch-error "No previous search string")
+                      (loop pattern direction states success? wrapped?
+                            case-fold? #t))
+                    (let* ((string (car entry))
+                           (fold? (if (cdr entry) (cdr entry) case-fold?))
+                           (found (isearch-search-from-point!
+                                   ed string direction fold?)))
+                      (set! isearch-error #f)
+                      (loop string direction
+                            (cons (list pattern (buffer-pt ed) success?)
+                                  states)
+                            found #f fold? #t)))))
              ;; isearch-delete-char, which GNU Emacs binds to `"\177"'
              ;; (`isearch.el:607') - DEL is 127, its own key. `C-h' is
              ;; unbound in `isearch-mode-map' there (`isearch.el:608'
              ;; makes `[backspace]' explicitly undefined too), so it
              ;; falls through to the give-the-key-back branch below.
              ((eqv? code 127)
+              (set! isearch-error #f)
               (if (null? states)
                   (loop pattern direction states success? wrapped?
                         case-fold? #t)
@@ -602,6 +794,7 @@
              ((eqv? code 23)                                 ; C-w
               ;; isearch-yank-word-or-char: the word (or character) at
               ;; point joins the search string
+              (set! isearch-error #f)
               (let ((new (string-append pattern (isearch-word-at-point ed))))
                 (loop new direction
                       (cons (list pattern (buffer-pt ed) success?)
@@ -612,6 +805,7 @@
               ;; `isearch-yank-kill`: "the latest kill joins the search
               ;; string" - Emacs's `(isearch-yank-string (current-kill 0))',
               ;; which also moves the ring's yank pointer.
+              (set! isearch-error #f)
               (let ((new (string-append pattern (current-kill 0))))
                 (loop new direction
                       (cons (list pattern (buffer-pt ed) success?)
@@ -623,6 +817,7 @@
              ;; they do in Emacs's isearch keymap - `isearch-printing-char'
              ;; takes them, and both are control keys in every decoder here.
              (printable
+              (set! isearch-error #f)
               (let* ((new (string-append pattern (string printable)))
                      ;; Emacs's `search-upper-case': an upper-case letter
                      ;; TYPED into the search string turns case folding off;
@@ -642,6 +837,7 @@
              ;; leaving `C-c' as an undefined key. The mark is left alone,
              ;; as it is on this exit.
              ((and code (< code 32))
+              (isearch-done-ring! pattern case-fold?)
               (*search-pattern* #f)
               (isearch-dehighlight)
               (lazy-highlight-cleanup #t)
@@ -671,6 +867,7 @@
              (else
               (if key
                   (begin
+                    (isearch-done-ring! pattern case-fold?)
                     (*search-pattern* #f)
                     (isearch-dehighlight)
                     (lazy-highlight-cleanup #t)
@@ -710,35 +907,98 @@
       ;; direction again moves on to the next match, and when there is
       ;; none the search fails - and only the repeat AFTER that one wraps
       ;; to the far end of the buffer (Emacs's `isearch-wrap-pause' is t:
-      ;; pause first, then wrap). Returns
-      ;; (pattern states success? wrapped?).
+      ;; pause first, then wrap).
+      ;;
+      ;; **A repeat with an empty search string searches the ring's car**,
+      ;; which is how `C-s C-s` searches for the last search's string -
+      ;; GNU Emacs's `isearch-repeat' (`isearch.el:1953'): "If search
+      ;; string is empty, use last one." It happens only when the
+      ;; direction does not change: a C-s that turns a backward search
+      ;; around just turns it.
+      ;;
+      ;; Returns (pattern states success? wrapped? case-fold?) - the
+      ;; folding comes back because a ring string carries the folding it
+      ;; was searched with.
       ;;--------------------------------------------------------------
       (let* ((turning? (not (eq? direction new-direction)))
              (forward? (eq? new-direction 'forward))
-             (here (buffer-pt ed))
-             (found (cond
-                     (turning?
-                      (isearch-find ed pattern new-direction case-fold? #f))
-                     (success?
-                      (isearch-find ed pattern new-direction case-fold? #t))
-                     (else
-                      ;; the search was failing, so this repeat wraps
-                      (set-point
-                       ed (if forward?
-                              (buffer-beg ed)
-                              (buffer-z ed)))
-                      (isearch-find ed pattern new-direction
-                                    case-fold? #f)))))
-        (if found
-            (begin
-              (set-point ed found)
-              (list pattern
-                    (cons (list pattern here success?) states)
-                    #t
-                    ;; the wrap is reported for the search that wrapped,
-                    ;; not for the next match found after it
-                    (if (or turning? success?) #f #t)))
-            (list pattern states #f wrapped?))))
+             (here (buffer-pt ed)))
+        (if (and (not turning?) (equal? pattern ""))
+            (let ((entry (isearch-ring-adjust1 #f)))
+              (if (not entry)
+                  (begin
+                    (set! isearch-error "No previous search string")
+                    (list pattern states #f wrapped? case-fold?))
+                  (let* ((string (car entry))
+                         (fold? (if (cdr entry) (cdr entry) case-fold?))
+                         (found (isearch-search-from-point
+                                 ed string new-direction fold?)))
+                    (set! isearch-error #f)
+                    (if found
+                        (begin
+                          (set-point ed found)
+                          (list string
+                                (cons (list pattern here success?) states)
+                                #t #f fold?))
+                        (list string states #f wrapped? fold?)))))
+            (let ((found (cond
+                          (turning?
+                           (isearch-find ed pattern new-direction
+                                         case-fold? #f))
+                          (success?
+                           (isearch-find ed pattern new-direction
+                                         case-fold? #t))
+                          (else
+                           ;; the search was failing, so this repeat wraps
+                           (set-point
+                            ed (if forward?
+                                   (buffer-beg ed)
+                                   (buffer-z ed)))
+                           (isearch-find ed pattern new-direction
+                                         case-fold? #f)))))
+              (if found
+                  (begin
+                    (set-point ed found)
+                    (list pattern
+                          (cons (list pattern here success?) states)
+                          #t
+                          ;; the wrap is reported for the search that
+                          ;; wrapped, not for the next match found after it
+                          (if (or turning? success?) #f #t)
+                          case-fold?))
+                  (list pattern states #f wrapped? case-fold?))))))
+
+    (define (isearch-read-key)
+      ;; The search's own read of one key - GNU Emacs's `read_char`,
+      ;; which is what isearch reads through, and which folds an ESC
+      ;; prefix into a meta event through the `ESC-prefix` keymap.
+      ;;
+      ;; **The search cannot leave it to the command loop.** `isearch` is
+      ;; a command that reads its own keys, and on a terminal `M-p` is
+      ;; the two events ESC and `p`: the ESC reached the control-key exit
+      ;; below and ended the search, and the command loop then ran `M-p`
+      ;; - "M-p is undefined". Measured at a pty: `C-s M-p` left the
+      ;; search and said that, so the ring was unreachable from a
+      ;; terminal. A window system sends one event with the modifier on
+      ;; it, which is why only the terminal showed this.
+      ;;
+      ;; An ESC followed by a character event is the meta event `kbd`
+      ;; builds (`(kbd "M-p")`, and `M-C-a` too: a control character is
+      ;; its own code). Anything else means the prefix led nowhere: the
+      ;; other key is put back and the ESC itself is the event, as a
+      ;; prefix that leads nowhere is two events in `read_key_sequence`.
+      ;;--------------------------------------------------------------
+      (let ((key (read-key-event (read-wait-ms))))
+        (if (eqv? key 27)
+            (let ((next (read-key-event (read-wait-ms))))
+              (if (and (integer? next) (< next char-alt))
+                  (+ next char-meta)
+                  (begin
+                    (when next
+                      (*unread-command-events*
+                       (cons next (*unread-command-events*))))
+                    27)))
+            key)))
 
     (define (isearch-word-at-point ed)
       ;; The word at point, or the character at point when it is not part

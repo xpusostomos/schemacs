@@ -173,7 +173,6 @@
           line-display-texts buffer-line-texts-at buffer-line-texts
           window-line-start
           texts-glyph texts-width line-texts-width line-texts-column
-          line-texts-offsets line-texts-glyphs line-texts-slice-width
           truncate-line pad-line
           window-full-width? window-truncates-lines? window-wraps?
           string->texts line-display-rows line-texts-rows hscroll-line-slice
@@ -321,6 +320,9 @@
    ;; terminal: `draw-line!' itself needs one
    line-face-runs
    line-end-fill-attribute
+   ;; Exported for the test that pins Emacs's `extend_face_id` rule, the
+   ;; same way `line-end-fill-attribute` is.
+   extend-fill-token
    *mode-line-format*
    ;; `bindings.el''s other mode-line variable, and the construct that
    ;; reads it. A minor mode with a lighter adds itself to the alist.
@@ -337,7 +339,7 @@
    line-display-rows
    line-display-width
    mode-line-string
-   render! redisplay-frames! *redisplay-in-progress*
+   render! redisplay-frames! *redisplay-in-progress* *after-redisplay-hook*
    force-mode-line-update
    scroll-to-cursor!
    window-scroll window-move-screen-lines
@@ -1477,9 +1479,19 @@
                     (if mark
                         (let ((point (buffer-pt ed)))
                           (let ((beg (min mark point)) (end (max mark point)))
-                            (cond ((and (> beg position) (< beg limit)) beg)
-                                  ((and (> end position) (< end limit)) end)
-                                  (else limit))))
+                            (cond
+                             ;; **An empty region covers nothing.** GNU
+                             ;; Emacs 29+ highlights the region with an
+                             ;; *overlay* (`redisplay--highlight-overlay-
+                             ;; function`, `simple.el`), and a zero-length
+                             ;; overlay has no characters - so it splits
+                             ;; no run. Splitting on the point/mark
+                             ;; position anyway gave two runs for a region
+                             ;; that shows nothing.
+                             ((not (< beg end)) limit)
+                             ((and (> beg position) (< beg limit)) beg)
+                             ((and (> end position) (< end limit)) end)
+                             (else limit))))
                         limit))
                   limit))
              (next (min by-property by-overlay by-region)))
@@ -2228,10 +2240,23 @@
       ;; passing the column offset instead asked about position 0, which
       ;; is out of range.
       ;;
-      ;; **One glyph per buffer column**, which is what `append_glyph`
-      ;; does for a character: `line-texts-glyphs` already walks display
-      ;; strings, tabs and wide characters, so each entry is the string
-      ;; that column draws and the glyph's width is its measured width.
+      ;; **One glyph per buffer column, built in one walk**, which is
+      ;; what `append_glyph` does for a character: `texts-glyph` and
+      ;; `texts-width` already know display strings, tabs and wide
+      ;; characters, so each column's string and width come straight from
+      ;; them. This used to build two lists first - `line-texts-glyphs`
+      ;; and `line-texts-offsets` - and walk those; Emacs's `display_line`
+      ;; appends each glyph as it produces it and builds neither, and the
+      ;; lists were ~18% of this redisplay's allocation (measured: 10.3 MB
+      ;; against 8.4 MB for 50 keystrokes).
+      ;;
+      ;; **The walk stays here rather than in `indentc`**, where the two
+      ;; accessors live. Moving it there would make their calls
+      ;; same-library and the two lists disappear *and* keep the calls
+      ;; cheap; but the accessors would then have to write `<glyph>`
+      ;; records, and `indentc` is text layout, not display. Measured on
+      ;; a loaded machine, this walk and the list-building one are the
+      ;; same wall time; the allocation is the difference.
       ;;
       ;; **The face is realized once per RUN, not once per glyph.** That
       ;; is `line-face-runs`' rule and its own note says why: realizing is
@@ -2245,9 +2270,7 @@
       ;; from a face already interned), so consecutive glyphs sharing a
       ;; face share the token the first one paid for.
       ;;--------------------------------------------------------------
-      (let* ((strings (line-texts-glyphs texts from to))
-             (offsets (list->vector (line-texts-offsets texts from to)))
-             (n (length strings))
+      (let* ((n (- to from))
              ;; **The row's own glyph storage, kept across redisplays.**
              ;; `POOL` is what the desired row held - after `assign-row`
              ;; swapped it out of the current matrix, storage nobody else
@@ -2273,35 +2296,73 @@
              ;; is character FROM+I.
              (runs (line-face-runs (current-buffer)
                                    (+ line-start from) (- to from))))
-        (let loop ((i 0) (rest strings) (rs runs))
+        ;; **The walk**: column by column from FROM, carrying the
+        ;; screen column so a tab expands where it is drawn; the runs are
+        ;; consumed in step - the first run still covering column I is
+        ;; this glyph's face.
+        (let loop ((i 0) (col 0) (rs runs))
           (when (< i n)
-            ;; Skip the runs that end at or before this glyph; the
-            ;; first run still covering column I is this glyph's face.
             (let* ((rs (let skip ((rs rs))
                          (if (and (pair? rs) (pair? (cdr rs))
                                   (>= i (cadr (car rs))))
                              (skip (cdr rs))
                              rs)))
+                   (text-index (+ from i))
                    (token (if (pair? rs)
                               (caddr (car rs))
                               (lookup-face (current-display)
                                             (attrs-at-buffer-position
-                                             (current-buffer) (+ line-start from i)))))
-                   (text (car rest))
-                   (next-x (if (< (+ i 1) (vector-length offsets))
-                               (vector-ref offsets (+ i 1))
-                               (+ (vector-ref offsets i) (text-cells-width text))))
-                   (w (max 1 (- next-x (vector-ref offsets i)))))
+                                             (current-buffer)
+                                             (+ line-start text-index)))))
+                   (text (texts-glyph texts text-index col))
+                   (w (max 1 (texts-width texts text-index col))))
               (let ((slot (vector-ref vec i)))
                 (if (glyph? slot)
                     (%reset-glyph! slot text token w)
                     (vector-set! vec i
                                  (make-glyph text token w
                                              glyph-type-char #f 0))))
-              (loop (+ i 1) (cdr rest) rs))))
+              (loop (+ i 1) (+ col w) rs))))
         (cons vec n)))
 
-    (define (extend-face-to-end-of-line row width)
+    (define (extend-fill-token ed end last-token)
+      ;; The face the rest of a row is filled with: GNU Emacs's
+      ;; `extend_face_id` (`xdisp.c:24429`) -
+      ;;
+      ;;   (it->face_id == default_face->id || it->s != NULL)
+      ;;   ? it->face_id
+      ;;   : (it->glyph_row->ends_at_zv_p
+      ;;      ? default_face->id
+      ;;      : face_at_pos (it, LFACE_EXTEND_INDEX));
+      ;;
+      ;; END is the row end's buffer position - the line break, or
+      ;; `point-max' for the buffer's last line - and LAST-TOKEN the token
+      ;; of the row's last glyph.
+      ;;
+      ;; **`:extend` is what a face says about this.** `face_at_pos` with
+      ;; the EXTEND filter merges only the faces at END that *specify*
+      ;; `:extend` (`merge_named_face`, `xfaces.c:2527`), so the `isearch`
+      ;; and `lazy-highlight` faces - neither has it - stop at the match,
+      ;; while `region`, which has `:extend t`, reaches the edge of the
+      ;; screen. This answers the last glyph's token when the merged
+      ;; `:extend` is true and the default token when it is not. Emacs's
+      ;; own fill face is the merge of the extending faces *alone*, which
+      ;; differs from the last glyph's only when a non-extending face
+      ;; covers END too - a font-locked word inside the region - and that
+      ;; difference is named in DEPARTURES.md.
+      ;;--------------------------------------------------------------
+      (let ((default-token (face->attribute 'default)))
+        (cond
+         ((eqv? last-token default-token) last-token)
+         ((>= end (buffer-z ed)) default-token)
+         (else
+          (let ((extend (attribute-value (attrs-at-buffer-position ed end)
+                                         ':extend)))
+            (if (and (not (eq? extend *undefined-face-attribute*)) extend)
+                last-token
+                default-token))))))
+
+    (define (extend-face-to-end-of-line ed row end width)
       ;; GNU Emacs's `extend_face_to_end_of_line` (`xdisp.c:24379`) for a
       ;; *terminal*: fill the rest of the row with space glyphs carrying
       ;; the extended face, so the whole line is painted in one face.
@@ -2321,13 +2382,11 @@
       ;; the text plus spaces to the last column, wrapped in the default
       ;; face's `\e[38;2;…m\e[48;2;…m … \e[39;49m`.
       ;;
-      ;; The face is `it->face_id` in the C - the face of the last glyph
-      ;; on the row (so the region or a face with an `:extend` reaches the
-      ;; edge), and the default face for a row with no glyphs at all.
-      ;; A row that ends at ZV is the exception there (`ends_at_zv_p`),
-      ;; and `build-row!` has no such row (a row past the buffer is
-      ;; blanked by `blank-glyph-row!`), so it is the last glyph's face
-      ;; unconditionally.
+      ;; The face is `extend-fill-token`'s: the last glyph's when the
+      ;; faces at the row's end say `:extend`, the default face when they
+      ;; do not (the `isearch` highlight stops at the match; the region
+      ;; reaches the edge), and the default face for a row with no glyphs
+      ;; at all or one that ends at `point-max`.
       ;;--------------------------------------------------------------
       (let* ((vec (glyph-row-glyphs row))
              (n (glyph-row-used row))
@@ -2350,7 +2409,8 @@
           ;; every row on every keystroke, which was the larger half of
           ;; the redisplay's garbage.
           (let* ((token (if (> n 0)
-                            (glyph-face-id (vector-ref vec (- n 1)))
+                            (extend-fill-token
+                             ed end (glyph-face-id (vector-ref vec (- n 1))))
                             (face->attribute 'default)))
                  (need (+ n pad))
                  (vec (if (>= (vector-length vec) need)
@@ -2373,18 +2433,7 @@
             (set-glyph-row-glyphs! row vec)
             (set-glyph-row-used! row need)))))
 
-    (define (text-cells-width text)
-      ;; A glyph string's width in cells - `text-cells` is the display's,
-      ;; and a row must not ask it, so this is the same sum over the
-      ;; string's characters.
-      ;;--------------------------------------------------------------
-      (let loop ((i 0) (col 0))
-        (if (>= i (string-length text))
-            col
-            (loop (+ i 1)
-                  (+ col (char-display-width (string-ref text i) col))))))
-
-    (define (build-row! row texts from to x0 y width
+    (define (build-row! ed row texts from to x0 y width
                         line-start more? truncated? row-width metrics)
       ;; Fill ROW from one screen row of a line: `display_line`.
       ;;
@@ -2422,7 +2471,7 @@
         ;; glyphs for it: `draw-glyph-row!` paints the remainder with
         ;; `clear-end-of-line!` in the default face.
         (unless (window-system-display? (current-display))
-          (extend-face-to-end-of-line row width))
+          (extend-face-to-end-of-line ed row (+ line-start to) width))
         (set-glyph-row-x! row x0)
         (set-glyph-row-y! row y)
         ;; `compute_line_metrics`: the row is as tall as the tallest face
@@ -2474,7 +2523,7 @@
       ;; row's, because a window system paints the remainder with
       ;; `clear-end-of-line!` at draw time.
       (unless (window-system-display? (current-display))
-        (extend-face-to-end-of-line row width))
+        (extend-face-to-end-of-line ed row (buffer-z ed) width))
       (set-glyph-row-x! row x0)
       (set-glyph-row-y! row y)
       (set-glyph-row-ascent! row (car metrics))
@@ -2611,7 +2660,7 @@
                                                    (> (%window-hscroll window) 0)))
                                              (row-x (if hscrolled? (+ x0 1) x0))
                                              (row-width (if hscrolled? (- width 1) width)))
-                                        (build-row! slot texts (car slice) (cdr slice)
+                                        (build-row! ed slot texts (car slice) (cdr slice)
                                                     row-x yy row-width line-start
                                                     (pair? (cdr rest))
                                                     ;; Cut off at the right
@@ -3270,7 +3319,23 @@
             ;; which is where `redisplay_internal` clears it (`xdisp.c`):
             ;; it means "something changed since the last redisplay", and
             ;; after this one nothing has.
-            (set-windows-or-buffers-changed! #f))))
+            (set-windows-or-buffers-changed! #f)
+            ;; **And now nothing is being drawn**, so a front end may act
+            ;; on what arrived while it was. A Gtk frame queues an input
+            ;; event that comes in while a picture is being painted (the
+            ;; cursor-blink timer repaints straight from a Gtk source),
+            ;; and there is no read of its own to collect it; this is the
+            ;; moment that is over. Emacs has no such hook - its command
+            ;; loop reads the keyboard again the moment redisplay
+            ;; returns - and the terminal front end has no queue to
+            ;; drain, so the hook is #f there and costs one test.
+            (when (*after-redisplay-hook*)
+              ((*after-redisplay-hook*))))))
+
+    (define *after-redisplay-hook* (make-parameter #f))
+    ;; ^ A thunk run after every redisplay has finished, for a front end
+    ;; that owns the main loop and has queued input to dispatch. `#f` for
+    ;; a front end whose read is the wait (the terminal's).
 
     (define *redisplay-in-progress* (make-parameter #f))
     ;; ^ GNU Emacs's `redisplaying_p` (`xdisp.c:`: "True means we are in

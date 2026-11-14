@@ -15,7 +15,7 @@
  (prefix (schemacs editor xfaces) x:)
  
  (only (schemacs editor buffer) set-buffer-local-value! %mark-marker with-current-buffer
- set-point allocate-buffer)
+ set-point allocate-buffer make-overlay overlay-put *current-buffer*)
  ;; the mark is a marker, so it is marker.c's `set-marker` that puts it
  ;; on the buffer's slot - `text-editor-mark`'s write before it, gone.
  (only (schemacs editor marker) set-marker)
@@ -219,6 +219,18 @@
 ;; realizes on the display), so it runs against one, as documented above.
 (dn:current-display (make <test-display>))
 
+(define (runs-for ed line-start len)
+  ;; `line-face-runs' asks the *current* buffer for overlay changes, as
+  ;; the C does, and `display-window!' makes the window's buffer current
+  ;; around the row walk for that reason. A test that hands it a buffer
+  ;; must do the same, or the overlay walk reads whichever buffer happens
+  ;; to be current - `#f' in a fresh process, which raised "Wrong type
+  ;; argument ... expecting struct: #f" from `next-overlay-change'.
+  ;; These tests were failing that way, unnoticed, until the suite check
+  ;; was made to notice a group that never finishes.
+  (parameterize ((*current-buffer* ed))
+    (xd:line-face-runs ed line-start len)))
+
 (define (buffer-with-face text from to face)
   (let ((ed (allocate-buffer)))
     (with-current-buffer ed (insert text))
@@ -237,7 +249,7 @@
 (test-equal '(1 ((0 6 0)))
   (let ((ed (allocate-buffer)))
     (with-current-buffer ed (insert "abcdef"))
-    (let ((runs (xd:line-face-runs ed 1 6)))
+    (let ((runs (runs-for ed 1 6)))
       (list (length runs) runs))))
 
 ;; A face on the middle of a line cuts it into three runs, and each run
@@ -245,11 +257,11 @@
 ;; `put-text-property 2 5' is positions 2, 3 and 4, which of a line
 ;; starting at position 1 are the offsets 1 to 4.
 (test-equal 3
-  (length (xd:line-face-runs (buffer-with-face "abcdefgh" 2 5 'bold) 1
+  (length (runs-for (buffer-with-face "abcdefgh" 2 5 'bold) 1
                              8)))
 
 (test-equal '(#f #t #f)
-  (let ((runs (xd:line-face-runs (buffer-with-face "abcdefgh" 2 5 'bold) 1
+  (let ((runs (runs-for (buffer-with-face "abcdefgh" 2 5 'bold) 1
                                  8)))
     (let loop ((rest runs) (acc '()))
       (if (null? rest)
@@ -259,7 +271,7 @@
 ;; ...and the runs cover the line exactly, with no gap and no overlap.
 (test-equal '((0 1) (1 4) (4 8))
   (map (lambda (run) (list (car run) (cadr run)))
-       (xd:line-face-runs (buffer-with-face "abcdefgh" 2 5 'bold) 1 8)))
+       (runs-for (buffer-with-face "abcdefgh" 2 5 'bold) 1 8)))
 
 ;; The runs are bounded by the *line*, and their positions are buffer
 ;; columns offset by where the line starts - which is what makes the
@@ -273,11 +285,11 @@
 (test-equal '((0 1) (1 2) (2 3))
   (let ((ed (buffer-with-face "abcdefgh" 5 6 'bold)))
     (map (lambda (run) (list (car run) (cadr run)))
-         (xd:line-face-runs ed 4 3))))
+         (runs-for ed 4 3))))
 
 (test-equal #t
   (let* ((ed (buffer-with-face "abcdefgh" 5 6 'bold))
-         (runs (xd:line-face-runs ed 4 3)))
+         (runs (runs-for ed 4 3)))
     (and (not (= (caddr (car runs)) (caddr (cadr runs))))
          (not (= (caddr (cadr runs)) (caddr (caddr runs)))))))
 
@@ -300,7 +312,7 @@
   ;; color palette.
   (with-display
    (lambda ()
-     (xd:line-face-runs (region-buffer text point mark active?) 1
+     (runs-for (region-buffer text point mark active?) 1
                         (string-length text)))
    1 'mono #f))
 
@@ -361,6 +373,13 @@
 ;; the tree's shape for the C's `calln' across a library boundary.
 ;;------------------------------------------------------------------
 
+;; **In a group of its own.** `srfi-64' here raises "Wrong type argument
+;; ... expecting struct: #f" for any test evaluated outside a group once
+;; a group has ended (measured with a two-group file), so these three
+;; top-level tests could never have run after `faces_runs' - and the
+;; crash that used to stop this file before them hid it.
+(test-begin "schemacs_editor_faces_background")
+
 (test-equal "color-dark-p answers the C's table"
   '(#t #f)
   (list (f:color-dark-p '(0.0 0.0 0.0))          ; black
@@ -391,7 +410,12 @@
           (list light dark (mode)))))))
 
 (test-equal "and the prompt's own dark branch answers cyan"
-  'cyan
+  ;; a *string*, which is what a colour attribute holds - Emacs's
+  ;; `(face-attribute 'minibuffer-prompt :foreground)' is "cyan", and the
+  ;; test had expected the symbol, so it could never have passed. It had
+  ;; never run: `srfi-64' here cannot evaluate a test outside a group
+  ;; once a group has ended, and these three were outside one.
+  "cyan"
   (parameterize ((f:*display-color-cells* 256)
                  (f:*display-type* 'color)
                  (f:*frame-background-mode* 'dark)
@@ -402,3 +426,58 @@
      (x:merge-face-ref 'minibuffer-prompt
                        (x:merge-face-ref 'default (x:face-attributes-empty)))
      ':foreground)))
+
+(test-end "schemacs_editor_faces_background")
+
+(test-begin "schemacs_editor_faces_extend")
+
+;;--------------------------------------------------------------------
+;; The face the rest of a row is filled with: Emacs's `extend_face_id`
+;; (`xdisp.c:24429`) is the last glyph's face only when the faces at the
+;; row's end say `:extend` (`merge_named_face`, `xfaces.c:2527`). The
+;; `isearch` face does not say it, so a search match at the end of a
+;; line stops at the match; `region` says it, so it reaches the edge -
+;; and `tools/pty-check.py`'s `region-highlight` and `isearch-highlight`
+;; are where that is pinned end to end. Measured on Emacs 31.1 in a
+;; pty, the search match is written as `\e[36m\e[45m888\e[39;49m` -
+;; three cells, the padding back in the default face - where this port
+;; painted the highlight to column 80.
+;;--------------------------------------------------------------------
+
+(define (extend-token ed end last-token)
+  (with-display
+   (lambda ()
+     (parameterize ((*current-buffer* ed))
+       (list (xd:extend-fill-token ed end last-token)
+             (xd:face->attribute 'default))))
+   1 'mono #f))
+
+;; An isearch match over the "888" of "abc 888\nxx" does not reach the
+;; line's end: the newline at 9 has no extending face, so the fill is the
+;; default face.
+(test-equal '(#t #t)
+  (let ((ed (allocate-buffer)))
+    (with-current-buffer ed (insert "abc 888\nxx"))
+    (let ((ov (make-overlay 5 8 ed)))
+      (overlay-put ov 'face 'isearch)
+      (let* ((match (parameterize ((*current-buffer* ed))
+                      (xd:face-at-buffer-position ed 5)))
+             (tokens (extend-token ed 9 match))
+             (fill (car tokens))
+             (default (cadr tokens)))
+        ;; the match itself is *not* the default face - the highlight is
+        ;; drawn - and the fill is
+        (list (not (= match default)) (= fill default))))))
+
+;; A final line with no newline never extends (Emacs's `ends_at_zv_p`).
+(test-equal #t
+  (let ((ed (allocate-buffer)))
+    (with-current-buffer ed (insert "abc 888"))
+    (let ((ov (make-overlay 5 8 ed)))
+      (overlay-put ov 'face 'isearch)
+      (let* ((match (parameterize ((*current-buffer* ed))
+                      (xd:face-at-buffer-position ed 5)))
+             (tokens (extend-token ed 8 match)))
+        (= (car tokens) (cadr tokens))))))
+
+(test-end "schemacs_editor_faces_extend")

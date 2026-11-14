@@ -208,7 +208,7 @@
     ;; A mouse event needs the *position* it happened at, which is the
     ;; redisplay's own walk - see `posn-at-x-y'.
     (only (schemacs editor xdisp) posn-at-x-y remember-mouse-glyph track-mouse
-          *redisplay-in-progress*
+          *redisplay-in-progress* *after-redisplay-hook*
           ;; The two hooks `set_frame_menubar` runs before it recomputes
           ;; the bar.
           *activate-menubar-hook* *menu-bar-update-hook*)
@@ -307,6 +307,9 @@
    ;; the other to the command loop as its `frame-quit-cont'.
    pgtk-main pgtk-main-quit
    pgtk-enqueue!
+   ;; The queue itself, and the drain that dispatches it, for the test
+   ;; that pins a queued key being delivered rather than stranded.
+   pgtk-queue pgtk-drain-queue!
    ;; The current frame written to a PNG: how a windowed editor is
    ;; checked without a pair of eyes on it.
    pgtk-write-screenshot!
@@ -1152,10 +1155,11 @@
       ;; are two ways and which one applies changes during the editor's
       ;; life:
       ;;
-      ;; - **Gtk owns the loop and the editor is waiting for input**: hand
-      ;;   it straight to the command loop, which runs one command and
-      ;;   returns, so control goes back to `gtk_main`. That is what makes
-      ;;   the loop absorbing input Gtk's own.
+      ;; - **Gtk owns the loop and the editor is waiting for input**: put
+      ;;   the event on the queue and drain the queue, which runs the
+      ;;   waiting commands and returns, so control goes back to
+      ;;   `gtk_main`. That is what makes the loop absorbing input Gtk's
+      ;;   own.
       ;; - **A read is outstanding** - a minibuffer prompt, an isearch -
       ;;   or a command is still running: queue it and wake the read. A
       ;;   nested read is waiting for a key of its own and is the only
@@ -1176,33 +1180,85 @@
                  (command-loop-ready?)
                  (null? *pgtk-running*)
                  (not (*redisplay-in-progress*)))
-            ;; Hand it over - through the *same two decodes a read uses*.
-            ;; `pgtk-item->event' is this display's own form of the event
-            ;; and `key-event->key' is the *key event* the command loop
-            ;; speaks - which is `read-key-event`'s one call, and the
-            ;; reason it exists. Handing `dispatch-key` the first without
-            ;; the second is what sent `-1` - the resize code - to the
-            ;; keymap as if it were a key, which is not a key and has no
-            ;; binding.
-            (let* ((raw (pgtk-item->event d ev))
-                   (event (and raw
-                               (not (eq? raw *pgtk-skip*))
-                               (key-event->key d raw))))
-              ;; **The event's own value goes with the key here too.** This
-              ;; path dispatches straight from the signal handler and never
-              ;; goes through `read-key-event', so a mouse click handed
-              ;; over here arrived at the command as `(down-mouse-1
-              ;; (FRAME))' - the shape for a frame event - and
-              ;; `posn-set-point' then selected the window the editor was
-              ;; already in: a click that did nothing at all, with no
-              ;; error, because selecting the window you are in is not an
-              ;; error. The read path and `dispatch-input-event' both set
-              ;; this; this one did not.
-              (*last-read-event* raw)
-              (when event (dispatch event)))
+            ;; **The event joins the queue and the queue is drained**, not
+            ;; handed over on its own. A key that arrived while a command
+            ;; or a redisplay was running was queued by the branch below,
+            ;; and *nothing reads the queue at the outermost level* - the
+            ;; front end's command loop has no read of its own - so it
+            ;; would sit there until the next prompt or search consumed
+            ;; it, late and out of order. That is why the `C-s` after a
+            ;; search could do nothing: it arrived while the exit
+            ;; redisplay was running, was queued, and was never
+            ;; dispatched. Draining dispatches the oldest event first, as
+            ;; Emacs's command loop reads `kbd_buffer` in order.
             (begin
               (set! (pgtk-queue d) (append (pgtk-queue d) (list ev)))
+              (pgtk-drain-queue! d dispatch))
+            (begin
+              (set! (pgtk-queue d) (append (pgtk-queue d) (list ev)))
+              ;; **Nothing may be left with no reader.** A key queued
+              ;; here - a command running, or a redisplay - is collected
+              ;; by one of two readers: the read that waits for the next
+              ;; key (a prompt, an isearch), or the redisplay itself,
+              ;; through `*after-redisplay-hook*` (see the drain below).
+              ;; The cursor-blink timer repaints straight from a Gtk
+              ;; source with no read anywhere, and a key pressed during
+              ;; that repaint was queued and stranded until the next key
+              ;; - the "first C-s after a search did nothing" case - so
+              ;; the redisplay is the reader for it.
               (pgtk-wake!)))))
+
+    (define *draining* #f)
+    ;; ^ Whether `pgtk-drain-queue!` is already dispatching. The
+    ;; after-redisplay hook can fire inside a dispatch (a command's own
+    ;; redisplay), and dispatching a command from inside another
+    ;; command's redisplay is what `*redisplay-in-progress*` exists to
+    ;; stop; the outer drain loop picks up whatever the inner one would
+    ;; have.
+
+    (define (pgtk-drain-queue! d dispatch)
+      ;; Dispatch the events waiting in the queues, oldest first.
+      ;;
+      ;; **Every event goes through the two decodes a read uses**:
+      ;; `pgtk-item->event' is this display's own form of the event and
+      ;; `key-event->key' is the *key event* the command loop speaks - the
+      ;; pair `read-key-event` calls, and the reason it exists. Handing
+      ;; `dispatch-key` the first without the second is what sent `-1` -
+      ;; the resize code - to the keymap as if it were a key, which is not
+      ;; a key and has no binding.
+      ;;
+      ;; **The event's own value goes with the key here too.** This path
+      ;; never goes through `read-key-event`, so a mouse click handled here
+      ;; arrived at the command as `(down-mouse-1 (FRAME))' - the shape for
+      ;; a frame event - and `posn-set-point' then selected the window the
+      ;; editor was already in: a click that did nothing at all, with no
+      ;; error, because selecting the window you are in is not an error.
+      ;; The read path and `dispatch-input-event' both set this; this one
+      ;; did not.
+      ;;
+      ;; The loop stops when the queues are empty, or when a command has
+      ;; left a read outstanding (`*pgtk-running*` non-empty): that read
+      ;; is the thing waiting for the remaining events, and it is where
+      ;; Emacs's `read_char` would be. `*pgtk-skip*` - a modifier key
+      ;; press - and the deadline sentinel (`#f`) are dropped, as the read
+      ;; drops them.
+      ;;--------------------------------------------------------------
+      (unless *draining*
+        (set! *draining* #t)
+        (dynamic-wind
+         (lambda () #t)
+         (lambda ()
+           (let loop ()
+             (let ((found (%pgtk-next-queued d)))
+               (when found
+                 (let ((raw (pgtk-take-queued d found)))
+                   (unless (eq? raw *pgtk-skip*)
+                     (*last-read-event* raw)
+                     (let ((event (and raw (key-event->key d raw))))
+                       (when event (dispatch event)))))
+                 (when (and (command-loop-ready?) (null? *pgtk-running*))
+                   (loop))))))
+         (lambda () (set! *draining* #f)))))
 
     (define (pgtk-wake!)
       ;; Wake the read that is waiting, if one is. "A wake with nobody
@@ -3864,6 +3920,21 @@
       (let ((d (pgtk-open-window 80 24)))
         (current-display d)
         (initialize-pgtk-faces! d)
+        ;; **The input queue's second reader.** A key that arrives while
+        ;; a redisplay is running is queued, and this front end's
+        ;; outermost loop has no read to collect it; the redisplay
+        ;; dispatches whatever arrived as soon as it has finished
+        ;; (`*after-redisplay-hook*`, which `redisplay-frames!` runs).
+        ;; Without it a key pressed during the cursor-blink repaint - or
+        ;; during the redisplay after a search exits - sat in the queue
+        ;; until the next key, which is why the first `C-s` after a
+        ;; search often did nothing.
+        (parameterize ((*after-redisplay-hook*
+                       (lambda ()
+                         (let ((dispatch (*dispatch-event*)))
+                           (when (and dispatch (null? *pgtk-running*))
+                             (pgtk-drain-queue! (current-display)
+                                                dispatch))))))
         (dynamic-wind
          (lambda () #t)
          thunk
@@ -3871,7 +3942,7 @@
            (pgtk-close-window! d)
            ;; Clear the editor's display only when this was the last
            ;; window: with a second one open the editor still has one.
-           (unless (pair? (*pgtk-displays*)) (current-display #f))))))
+           (unless (pair? (*pgtk-displays*)) (current-display #f)))))))
 
     ;;----------------------------------------------------------------
     ;; The selections

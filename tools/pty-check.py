@@ -866,6 +866,90 @@ def check_isearch_highlight():
     return []
 
 
+def check_isearch_ring():
+    """C-s C-s searches for the last search's string.
+
+    GNU Emacs's `isearch-repeat` (`isearch.el:1953'): with an empty search
+    string, "use last one" - the head of `search-ring', which
+    `isearch-done` fills when a search exits. This tree had no ring, so a
+    second C-s in a fresh search did nothing at all: the search stayed
+    empty and said "failing I-search".
+
+    The file has the pattern twice, so the second search must land on the
+    *second* occurrence: the mode line's column is what tells them apart
+    (C15, not C7).
+    """
+    path = "/tmp/pty-check-ring.txt"
+    open(path, "w").write("one 111 two 111 three\n")
+    out = drive([C_s, b"1", b"1", b"1", WAIT(b"I-search: 111"), RET,
+                 C_s, C_s, WAIT(b"C15"), RET], path)
+    # **The give-up marker contains the text that was waited for** - it
+    # reads "[[harness: gave up waiting for b'C15']]" - so the marker
+    # itself has to be tested first, or this passes on a timeout. (It did:
+    # the ring-less tree "passed" because the marker held the string.)
+    if "gave up waiting" in out:
+        return ["C-s C-s did not search for the last search's string: the " + \
+                "point never reached the second 111 (screen %r)" % out[-300:]]
+    if "[No previous search string]" in out:
+        return ["the ring was empty after a search: C-s C-s said " + \
+                "\"[No previous search string]\""]
+    # **M-p too, and as a *terminal* sends it**: ESC followed by `p`.
+    # The search reads its own keys, below `read_key_sequence`, so it has
+    # to fold the ESC prefix itself (`isearch-read-key`); before that the
+    # ESC took the control-key exit and `M-p` ran undefined in the command
+    # loop. `M-n`/`M-p` also compared the event with `(kbd "M-p")` - a
+    # *vector* of events - which never matched.
+    out = drive([C_s, b"1", b"1", b"1", WAIT(b"I-search: 111"), RET,
+                 C_s, b"\x1b", b"p", WAIT(b"C15"), RET], path)
+    if "gave up waiting" in out:
+        return ["C-s M-p did not walk the search ring (screen %r)"
+                % out[-300:]]
+    if "is undefined" in out:
+        return ["C-s M-p ended the search and ran an undefined M-p: the " + \
+                "ESC prefix is not being folded into a meta event"]
+    return []
+
+
+def check_isearch_line_end():
+    """A search match at the end of a line is painted over the match only.
+
+    GNU Emacs's `extend_face_id` (`xdisp.c:24429') fills the rest of the
+    row with the last glyph's face only when the faces at the row's end
+    say `:extend` (`merge_named_face`, `xfaces.c:2527'). `isearch` has no
+    `:extend`, so the highlight stops at the match and the padding is back
+    in the default face; this port carried the last glyph's face to the
+    edge of the screen, painting the rest of the line in the search
+    colour.
+
+    Asserted as a *structure*, not a palette: after some occurrence of
+    the matched text there is a face reset before the next space. When the
+    highlight ran to the edge there was none - the row was one run.
+    """
+    path = "/tmp/pty-check-line-end.txt"
+    open(path, "w").write("aaa 888\n")
+    out = drive([C_s, b"8", b"8", b"8", WAIT(b"I-search: 888")], path)
+    if "gave up waiting" in out:
+        return ["the search never started (screen %r)" % out[-300:]]
+    at = out.find("888")
+    while at >= 0:
+        rest = out[at + 3:]
+        saw_reset = False
+        while rest.startswith("\x1b["):
+            end = rest.find("m")
+            if end < 0:
+                break
+            code = rest[2:end]
+            if code in ("0", "", "39;49") or "49" in code:
+                saw_reset = True
+            rest = rest[end + 1:]
+        if saw_reset and rest.startswith(" "):
+            return []
+        at = out.find("888", at + 1)
+    return ["a search match at the end of a line is painted to the end of " + \
+            "the line: no face reset follows the match (screen %r)"
+            % out[-300:]]
+
+
 def check_isearch_multiline():
     """A match with a line break in it is highlighted.
 
@@ -4597,6 +4681,8 @@ CHECKS = {
     "m-x": check_m_x,
     "cd": check_cd,
     "isearch-highlight": check_isearch_highlight,
+    "isearch-ring": check_isearch_ring,
+    "isearch-line-end": check_isearch_line_end,
     "isearch-multiline": check_isearch_multiline,
     "isearch-scroll": check_isearch_scroll,
     "isearch-highlight-row": check_isearch_highlight_row,
