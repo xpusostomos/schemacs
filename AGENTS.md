@@ -7553,3 +7553,28 @@ change, shift the ones below, rebuild what differs. It needs
 `end_unchanged` bookkeeping (only `beg_unchanged` is carried today),
 `row_containing_pos`, the matrix row shift and the `GIVE_UP` conditions.
 Not started here rather than half-done.
+
+# A retheme left the blank rows their old colour (2026-11-15)
+
+Chris, retheming through omarchy: *"blank lines don't get rethemed, they
+stay the old color... until I redraw, anyway."*
+
+GNU Emacs's `realize_face` garbages the frame when it replaces a face's
+realization (`xfaces.c:6252`); this tree's `set-face-attribute` only set
+`windows_or_buffers_changed`. **A window-system frame's blank row carries no
+glyphs** - `build-blank-row!` fills them on a terminal and the GUI paints
+the remainder at draw time - so the row diff finds it equal and skips it,
+and the old background stays on the surface. Text rows redraw (their face
+tokens changed) and their tails are repainted with the new default, which
+is exactly "blank lines only".
+
+Fixed with `*frame-garbage-function*` in `faces.scm`, called from
+`set-face-attribute` and installed by `frame.scm` (the seam pattern again,
+because faces is below `<frame>`). Measured before/after on an offscreen
+Gtk frame and through `load-theme` (wombat, tsdh-light). `pgtk-tests` has
+the regression check and was seen failing without the fix.
+
+**The general rule this is an instance of**: a row that carries no glyphs
+cannot notice a change to what *would* be painted there. Anything that
+alters the frame's appearance without altering glyph tokens has to repaint
+those pixels explicitly.

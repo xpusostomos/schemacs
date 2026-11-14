@@ -110,6 +110,7 @@
     (only (schemacs editor faces)
           *window-system* *display-color-cells* *display-type*
           *frame-background-mode* *frame-background-mode-function*
+          *frame-garbage-function*
           color-dark-p face-list face-attribute set-face-attribute
           face-override-spec face-spec-recalc)
     ;; A colour *name*'s RGB - `tty-colors.el''s table, which is what a
@@ -1966,6 +1967,20 @@
       (unless (*inhibit-frame-set-background-mode*)
         (frame-set-background-mode frame)))
     (*frame-background-mode-function* %frame-background-mode-hook)
+
+    (define (%frame-garbage-hook frame)
+      ;; The seam `faces.scm`'s `set-face-attribute' reaches for: GNU
+      ;; Emacs's `SET_FRAME_GARBAGED (cache->f)` in `realize_face`
+      ;; (`xfaces.c:6252`), which the face cache does for itself and this
+      ;; tree has to say here - the face attributes ARE the realization
+      ;; input, so a write to one is the event. FRAME is the frame the
+      ;; change named, `#f` for all of them (`set-face-attribute` with a
+      ;; nil FRAME, which is every theme).
+      ;;--------------------------------------------------------------
+      (for-each (lambda (f) (set-frame-garbaged! f #t))
+                (if frame (list frame) (*frame-list*))))
+
+    (*frame-garbage-function* %frame-garbage-hook)
 
     (define *frame-list* (make-parameter '()))
     ;; ^ GNU Emacs's `Vframe_list' (`frame.c:284'): every live frame, most

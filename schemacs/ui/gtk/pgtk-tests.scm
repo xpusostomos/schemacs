@@ -323,6 +323,48 @@
 (test-equal white (cell-pixel 6))
 
 ;;------------------------------------------------------------------
+;; A face change repaints the *blank* rows as well
+;;
+;; GNU Emacs's `realize_face` ends its "remove the former face" branch
+;; with `SET_FRAME_GARBAGED (cache->f)` (`xfaces.c:6252`), because
+;; replacing a face's realization leaves every pixel of the old one
+;; stale - and some of those pixels are under no glyph at all. A blank
+;; row on a window-system frame is exactly that: `build-blank-row!`
+;; fills glyphs on a terminal and lets the backend paint the remainder
+;; here, so the diff finds the row equal to what was drawn and skips it.
+;;
+;; Measured before the fix, on this offscreen frame: after setting
+;; `default`'s background black, a pixel in the text row read (0 0 0)
+;; and one in a blank row still read (255 255 255) - the old colour.
+;;------------------------------------------------------------------
+
+(define (retheme-blank-row)
+  ;; The pixel 5 cells into the row below the one line of text, before
+  ;; and after the default face's background changes.
+  (let* ((d (new-display))
+         (ed (allocate-buffer))
+         (was (f:face-attribute 'default ':background)))
+    (with-current-buffer ed (insert "hello\n"))
+    (let ((frame (fr:new-frame ed 24 80)))
+      (parameterize ((fr:*current-frame* frame))
+        (xd:render! frame))
+      (let ((before (shot-of d)))
+        (f:set-face-attribute 'default #f ':background "black")
+        (parameterize ((fr:*current-frame* frame))
+          (xd:render! frame))
+        (let ((after (shot-of d))
+              (y (* 10 cell-h)))
+          ;; put the face back, so the checks below see the light frame
+          (f:set-face-attribute 'default #f ':background was)
+          (list (before 5 y) (after 5 y)))))))
+
+(let ((shot (retheme-blank-row)))
+  (test-equal "a blank row is drawn in the default face's background"
+              white (car shot))
+  (test-equal "and a change to that face reaches it"
+              '(0 0 0) (cadr shot)))
+
+;;------------------------------------------------------------------
 ;; The `:box` face attribute is drawn - on a window system only
 ;;
 ;; GNU Emacs draws a face's `:box` around its glyph run in the

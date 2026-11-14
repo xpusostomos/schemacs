@@ -97,6 +97,8 @@
    *face-attributes*
    color-dark-p
    *frame-background-mode-function*
+   ;; `realize_face`'s `SET_FRAME_GARBAGED` (`xfaces.c:6252`) - see below.
+   *frame-garbage-function*
    *frame-background-mode*
    *undefined-face-attribute*
    *window-system*
@@ -540,6 +542,26 @@
           (loop (cddr rest) (cons value (cons key acc)) #t))
          (else (loop (cddr rest) (cons (cadr rest) (cons (car rest) acc)) found)))))
 
+    (define *frame-garbage-function* (make-parameter #f))
+    ;; ^ GNU Emacs's `realize_face` ends its "remove the former face"
+    ;; branch with `SET_FRAME_GARBAGED (cache->f)` (`xfaces.c:6252`):
+    ;; replacing a face's realization means **every pixel the old one put
+    ;; on the screen is stale**, and some of those pixels are under no
+    ;; glyph at all. The C reaches the frame through the face cache; this
+    ;; library is below `frame.scm`, so the call goes through this seam as
+    ;; `frame-set-background-mode` does. FRAME is the frame the change was
+    ;; made for, `#f` for every frame - which is Emacs's `FRAME = nil`.
+    ;;
+    ;; **Without it a retheme left every blank row its old colour.** A
+    ;; window-system frame's blank row carries no glyphs (the backend
+    ;; paints the remainder at draw time - see `build-blank-row!`), so
+    ;; `row_equal_p` finds it equal to what was drawn, skips it, and the
+    ;; old background stays on the surface. Measured on an offscreen Gtk
+    ;; frame: after setting `default`'s background black, a pixel in a
+    ;; text row read (0 0 0) and one in a blank row read (255 255 255) -
+    ;; the old white - until the frame was garbaged, after which both read
+    ;; the new colour. Emacs never sees it because it garbages here.
+
     (define *frame-background-mode-function* (make-parameter #f))
     ;; ^ The seam `Fset_face_attribute''s background-colour branch is
     ;; (`xfaces.c:3902'): "Changing the background color might change
@@ -554,8 +576,10 @@
 
     (define (set-face-attribute face frame . args)
       ;; GNU Emacs's `set-face-attribute': set attributes of FACE. ARGS is
-      ;; the plist, as it is in Elisp; FRAME is accepted and not consulted
-      ;; (one frame here - see the header).
+      ;; the plist, as it is in Elisp; FRAME is the frame the change is
+      ;; made for - `#f` for all of them - and it is consulted only when
+      ;; the frames are told to repaint, below. The attributes themselves
+      ;; are one set here (see the header).
       ;;
       ;; **A background change on `default' recomputes the background
       ;; mode**, which is the C's branch - the face-spec branches
@@ -578,8 +602,14 @@
         (when (and background-changed (*frame-background-mode-function*))
           ((*frame-background-mode-function*) #f))
         ;; "The face changed, so no cached glyph matrix can be trusted" -
-        ;; `xfaces.c:801`.
-        (set-windows-or-buffers-changed! #t))
+        ;; `xfaces.c:801` - **and the frame is repainted**, which is
+        ;; `realize_face`'s `SET_FRAME_GARBAGED` (`:6252`). The two are
+        ;; not the same thing: the flag rebuilds every window's rows, and
+        ;; the garbage repaints the pixels no row of ours covers - a
+        ;; window-system frame's blank rows among them.
+        (set-windows-or-buffers-changed! #t)
+        (when (*frame-garbage-function*)
+          ((*frame-garbage-function*) frame)))
       face)
 
     (define (face-spec-set-2 face face-attrs)

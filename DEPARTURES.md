@@ -2146,3 +2146,64 @@ own: it needs `beg_unchanged`/`end_unchanged` bookkeeping kept up to date
 (only `beg_unchanged` is carried), `row_containing_pos`, the matrix row
 shift, and the `GIVE_UP` conditions that decide when it cannot be used. It
 was not started here rather than half-done.
+
+# A retheme left the blank rows their old colour (2026-11-15)
+
+Chris: *"when I retheme schemacs via omarchy, blank lines don't get
+rethemed, they stay the old color... until I redraw, anyway."*
+
+## The departure
+
+GNU Emacs's `realize_face` ends its "remove the former face" branch with
+
+```c
+      free_realized_face (cache->f, former_face);
+      SET_FRAME_GARBAGED (cache->f);          /* xfaces.c:6252 */
+```
+
+- replacing a face's realization means **every pixel the old one put on
+the screen is stale**. `set-face-attribute` sets
+`windows_or_buffers_changed` too (`xfaces.c:801`), and that is all this
+tree did.
+
+**Why only the blank rows showed it.** On a window-system frame a blank row
+carries *no glyphs*: `build-blank-row!` fills them on a terminal only, and
+the GUI row's remainder is painted by `clear-end-of-line-row!` at draw
+time. So an unchanged blank row compares equal in the window's row diff and
+is skipped, and its old background pixels stay on the surface. A text row
+*is* redrawn (its glyphs' face tokens change), and its tail is repainted
+with the new default - so text lines retheme and blank lines do not.
+
+Measured offscreen on a Gtk display, one line of text in a 24x80 frame:
+
+| | text row, past the text | blank row 10 |
+|---|---|---|
+| before the fix, after `default`'s background := black | `(0 0 0)` | **`(255 255 255)`** |
+| after the fix | `(0 0 0)` | `(0 0 0)` |
+
+and through the real `load-theme` path (which is what omarchy drives):
+`wombat` gives `(36 36 36)` on both, `tsdh-light` puts both back to
+`(255 255 255)`.
+
+## The fix
+
+`faces.scm` gained `*frame-garbage-function*` and `set-face-attribute`
+calls it after the attribute write. The seam exists because `faces.scm` is
+below the library that owns `<frame>`, the same arrangement
+`*frame-background-mode-function*` already has; `frame.scm` installs it and
+garbages every frame (or the one named), which is `SET_FRAME_GARBAGED` with
+`FRAME = nil`.
+
+**Placement departure**: Emacs garbages at *realization* time, when the face
+cache replaces a realized face. This tree has no per-face realized cache -
+a display token is interned from the attributes on demand (`realize-face`
+in the Gtk backend) - so the event "the former realization is replaced" is
+the attribute write itself. Same moment from the user's side, one hop
+earlier in the code.
+
+## Test
+
+`pgtk-tests`' *"a face change repaints the blank rows as well"* renders a
+one-line buffer, reads a pixel in a blank row, sets `default`'s background
+to black, renders again and reads it again. Seen failing without the fix
+(`actual-value: (255 255 255)`) and passing with it.
