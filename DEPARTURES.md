@@ -1262,6 +1262,35 @@ does not return: it is inside `popup_widget_loop`, and a second timer
 fired from inside that loop is what ends the run. Before the port the
 same call answered `#f` at once (`menu-show`'s `<display>` default).
 
+**The walk back from the index to the entry is measured too**, because
+that is the half a screenshot cannot see. `popup_selection_callback`
+sets `menu_item_selection` to the clicked item's index; a timer running
+inside `popup_widget_loop` sets the same variable and clears
+`popup_activated_flag`, which is the whole of what the callback does,
+and the menu then answers. Measured on a keymap menu of two items
+(`define-key` prepends, so the array holds them in reverse definition
+order - `menu_items` itself was dumped to check that):
+
+| index chosen | `menu_items` at that index | answer |
+|---|---|---|
+| 3 | `Banana`, key `#(98)` | `(98)` |
+| 11 | `Apple`, key `#(97)` | `(97)` |
+
+So the answer is the item's key sequence as a proper list - which is
+`entry = list1 (AREF (...))` and then `Fcons (prefix, entry)` - and
+`popup-menu`'s `(list->vector event)` looks it up. An index off by one
+would answer the other item's key; a wrong list shape would fail the
+lookup rather than answer wrongly.
+
+The *tree building* is a pure function of `menu_items` and the flags,
+so it is a unit test rather than a broadway run:
+`pgtk-tests.scm` pins the pane-is-a-submenu rule (`pgtkmenu.c:659`),
+the lone-pane flattening (`:653`), the title's two separators
+(`:745-760`), the `call_data` index (3 for a one-pane list's first item,
+14 for the second pane's, from 3-slot panes and 8-slot items), and that
+a bare string in the old list form is a *disabled* item rather than a
+missing one (`list_of_items`, `menu.c:470`).
+
 ## Deliberately not carried
 
 - **The terminal mouse**: no GPM and no `xterm-mouse-mode`, so
@@ -1330,8 +1359,9 @@ to be right for C-g in a menu to behave:
 ## Tests
 
 `menu-tests` 16, `menu-bar-tests` 28, `menu-bar-menus-tests` 7,
-`subr-tests`, `keymap-tests` 89, `tty-editor-tests` 281, `pgtk-tests`,
-`mouse-tests` 43. The unit fixtures run with the bar off, as Emacs's own
+`subr-tests`, `keymap-tests` 89, `tty-editor-tests` 304, `pgtk-tests`
+106, `mouse-tests` 43. The pgtk suite's nine new ones are the popup's
+tree, above. The unit fixtures run with the bar off, as Emacs's own
 tests do.
 
 `tools/pty-check.py` has a `tty-menu` check, the one that runs with the

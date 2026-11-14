@@ -33,7 +33,12 @@
                ;; needs no window and no clipboard: the record is the
                ;; display's own and the converters are `select.sld`'s.
                pgtk-selections pgtk-get-local-selection
-               pgtk-get-selection-internal selection-data-to-lisp-data)
+               pgtk-get-selection-internal selection-data-to-lisp-data
+               ;; The popup's `widget_value' tree - `pgtk_menu_show`'s
+               ;; loop. A pure function of `menu_items' and the flags,
+               ;; which is why it can be tested with no window - see the
+               ;; section at the end of this file.
+               pgtk-popup-build-tree)
          pt:)
  (prefix (schemacs editor faces) f:)
  ;; The command this file can test and the terminal suites cannot: it is
@@ -67,7 +72,15 @@
  ;; `tsdh-dark`'s mode-line names no foreground - the case below.
  (only (schemacs editor theme) load-theme disable-theme)
  (only (schemacs editor keyboard) dispatch-input-event)
- 
+ ;; The `menu_items` array the popup's tree is built from, and the
+ ;; `widget_value` accessors the checks below read it back with.
+ (prefix (only (schemacs editor menu)
+               list-of-panes MENU-KEYMAPS
+               widget-value-name widget-value-enabled? widget-value-contents
+               widget-value-next widget-value-call-data
+               widget-value-button-type)
+         menu:)
+
  (only (cairo) cairo-image-surface-create-from-png cairo-image-surface-get-data
        cairo-image-surface-get-stride))
 
@@ -1404,5 +1417,128 @@
   (pt:selection-data-to-lisp-data #vu8(99 97 102 195 169) 5 "UTF8_STRING" 8))
 (test-equal "the NULL type answers nothing"
   #f (pt:selection-data-to-lisp-data #vu8() 0 "NULL" 32))
+
+;;------------------------------------------------------------------
+;; The popup's tree - `pgtk_popup_build_tree` (`pgtkmenu.c:616-771`)
+;;
+;; `pgtk_menu_show` is in three parts: build a `widget_value' tree from
+;; `menu_items`, turn it into a `GtkMenu` and run a loop until it pops
+;; down, then walk the array back from the selected index to the entry.
+;; The middle part needs a window; the *first* is a pure function of the
+;; array and the flags, and it is where the three rules live that a
+;; reader would not guess:
+;;
+;;   * a pane is a submenu only when it has a name *and* the menu is not
+;;     a keymap menu - `!(menuflags & MENU_KEYMAPS) && *pane_string`;
+;;   * a lone top-level pane is flattened whatever the flags say
+;;     (`menu_items_n_panes == 1`), because one submenu is noise;
+;;   * the title is prepended with **two** separators beneath it, which
+;;     is what draws the rule under a dialog's heading.
+;;
+;; Every number and every shape below comes from that C loop.
+;;--------------------------------------------------------------
+
+(define (menu-names wv)
+  ;; The NAME of WV and of everything its `next' reaches, in order.
+  (let loop ((w wv) (out '()))
+    (if (not w)
+        (reverse out)
+        (loop (menu:widget-value-next w)
+              (cons (menu:widget-value-name w) out)))))
+
+(define (pane-names wv)
+  ;; Each pane's NAME paired with the names of the items under it - the
+  ;; shape the two rules above disagree about.
+  (let loop ((pane wv) (out '()))
+    (if (not pane)
+        (reverse out)
+        (loop (menu:widget-value-next pane)
+              (cons (list (menu:widget-value-name pane)
+                          (menu-names (menu:widget-value-contents pane)))
+                    out)))))
+
+(test-equal "an old-fashioned menu's named panes become submenus"
+  '(("P1" ("One")) ("P2" ("Two")))
+  (begin
+    (menu:list-of-panes '(("P1" ("One" . one)) ("P2" ("Two" . two))))
+    (pane-names (menu:widget-value-contents (pt:pgtk-popup-build-tree 0 #f)))))
+
+(test-equal "a keymap menu puts every pane's items directly under the menu"
+  '("One" "Two")
+  (begin
+    (menu:list-of-panes '(("P1" ("One" . one)) ("P2" ("Two" . two))))
+    (menu-names (menu:widget-value-contents
+                 (pt:pgtk-popup-build-tree menu:MENU-KEYMAPS #f)))))
+
+(test-equal "one top-level pane is flattened whatever the flags say"
+  '(("Only") ("Only"))
+  (begin
+    (menu:list-of-panes '(("Solo" ("Only" . only))))
+    (let ((plain (menu-names (menu:widget-value-contents
+                              (pt:pgtk-popup-build-tree 0 #f)))))
+      (menu:list-of-panes '(("Solo" ("Only" . only))))
+      (list plain
+            (menu-names (menu:widget-value-contents
+                         (pt:pgtk-popup-build-tree menu:MENU-KEYMAPS #f)))))))
+
+(test-equal "the tree's root is the `menu' pseudo-item"
+  '("menu" #t)
+  (begin
+    (menu:list-of-panes '(("Solo" ("Only" . only))))
+    (let ((root (pt:pgtk-popup-build-tree 0 #f)))
+      (list (menu:widget-value-name root) (menu:widget-value-enabled? root)))))
+
+(test-equal "a title is prepended above two separators"
+  '("A Title" "--" "--" "Only")
+  (begin
+    (menu:list-of-panes '(("Solo" ("Only" . only))))
+    (menu-names (menu:widget-value-contents
+                 (pt:pgtk-popup-build-tree 0 "A Title")))))
+
+(test-equal "the title itself is an unselectable plain item"
+  '(#t none)
+  (begin
+    (menu:list-of-panes '(("Solo" ("Only" . only))))
+    (let ((title (menu:widget-value-contents
+                  (pt:pgtk-popup-build-tree 0 "A Title"))))
+      (list (menu:widget-value-enabled? title)
+            (menu:widget-value-button-type title)))))
+
+;; The selection callback hands back an index into `menu_items', and the
+;; walk-back compares it against the slot it is standing on - so the
+;; index has to be the item's own, panes counted. A pane is 3 slots and
+;; an item 8 (`keyboard.h:358`), so a one-pane old-fashioned list puts
+;; its first item at 3 and a two-pane one puts the second pane's first
+;; item at 3 + 8 + 3 = 14.
+(test-equal "an item's call_data is its index in the menu_items array"
+  3
+  (begin
+    (menu:list-of-panes '(("Solo" ("Only" . only))))
+    (menu:widget-value-call-data
+     (menu:widget-value-contents (pt:pgtk-popup-build-tree 0 #f)))))
+
+(test-equal "the index counts the panes and items before it"
+  14
+  (begin
+    (menu:list-of-panes '(("P1" ("One" . one)) ("P2" ("Two" . two))))
+    (menu:widget-value-call-data
+     (menu:widget-value-contents
+      (menu:widget-value-next
+       (menu:widget-value-contents (pt:pgtk-popup-build-tree 0 #f)))))))
+
+;; A bare string in the old list form is a disabled label - Emacs's
+;; `list_of_items` pushes it with ENABLE nil (`menu.c:470`) - and the
+;; tree keeps that as `enabled` false rather than dropping it. The pane
+;; is the flattening case above, so its two items sit directly under the
+;; root.
+(test-equal "a bare string is a disabled item, not a missing one"
+  '(#f #t)
+  (begin
+    (menu:list-of-panes '(("Solo" "Label" ("Live" . live))))
+    (let ((first (menu:widget-value-contents
+                  (pt:pgtk-popup-build-tree 0 #f))))
+      (list (menu:widget-value-enabled? first)
+            (menu:widget-value-enabled? (menu:widget-value-next first))))))
+
 
 (test-end "schemacs_editor_pgtk")

@@ -328,6 +328,12 @@
    ;; to ask rather than assume it - the cell changes when the `default'
    ;; face's height does.
    pgtk-cell-size
+   ;; The popup's tree, exported for the same reason: it is a pure
+   ;; function of `menu_items' and the flags - the pane-is-a-submenu rule,
+   ;; the title's two separators, and the `call_data' index the selection
+   ;; walk-back compares against - and all three are worth a test that
+   ;; needs no window. Nothing in the editor calls it by name.
+   pgtk-popup-build-tree
    )
 
   (begin
