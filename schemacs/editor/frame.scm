@@ -46,7 +46,11 @@
            window-system-display?
            ;; `SET_FRAME_VISIBLE`'s `redisplay_other_windows`, which
            ;; `suspend-frame` needs when the terminal comes back.
-           set-windows-or-buffers-changed!)
+           set-windows-or-buffers-changed!
+           ;; `wset_update_mode_line`'s weaker half (`xdisp.c:775`), which
+           ;; the frame's menu bar is recomputed from - see the note on
+           ;; `update-mode-lines` in dispnew.
+           set-update-mode-lines!)
     (only (schemacs editor marker) build-marker marker-position set-marker make-marker)
     
     ;; `*current-buffer*' is the C global `current_buffer', which this
@@ -230,6 +234,9 @@
    %window-base-line-number set!%window-base-line-number
    %window-base-line-pos set!%window-base-line-pos
    set-window-start!
+   ;; the pair `set-window-start!` is, without the mode-line flag - what
+   ;; the redisplay's own scrolling writes (see its definition).
+   %window-start-set!
    set-window-buffer!
    window-start-at-line-beg
    window-base-line-number
@@ -681,17 +688,18 @@
             (+ (window-left window) (window-width window))
             (+ (window-top window) (window-height window))))
 
-    (define (set-window-start! window position)
-      ;; Make WINDOW's display begin at buffer position POSITION - GNU
-      ;; Emacs's `set-window-start' (`window.c'), whose body is
+    (define (%window-start-set! window position)
+      ;; The two lines that move `w->start' and record whether it begins a
+      ;; line - `set-window-start!`'s body without the mode-line flag.
       ;;
-      ;;     set_marker_restricted (w->start, pos, w->contents);
-      ;;     w->start_at_line_beg = (pos == BEGV || FETCH_BYTE (pos - 1) == '\n');
-      ;;
-      ;; The C sets the two together at *every* site that touches
-      ;; `start', so they cannot disagree, and this is that pair. The
-      ;; character before the start is a line break exactly when the
-      ;; start begins a line.
+      ;; **The redisplay writes `w->start' with this and not with
+      ;; `set-window-start!`.** `redisplay_window` moves the start itself
+      ;; (`SET_TEXT_POS_FROM_MARKER`/`set_marker_both (w->start, ...)` on
+      ;; its recentring paths); `Fset_window_start` is what sets
+      ;; `w->update_mode_line`, and the C does not run that when *it* is
+      ;; the one scrolling. Measured the other way round on Gtk: the
+      ;; recentring `C-n` at the bottom of a window re-parsed the frame's
+      ;; menu bar on every scroll, which is 2.6 ms of the keystroke.
       ;;--------------------------------------------------------------
       (let ((buffer (window-buffer window)))
         ;; `set_marker_restricted` makes the marker if the window has
@@ -710,6 +718,24 @@
              (let ((before (fetch-char buffer (- position 1))))
                (and (char? before) (char=? #\newline before)))))
         position))
+
+    (define (set-window-start! window position)
+      ;; Make WINDOW's display begin at buffer position POSITION - GNU
+      ;; Emacs's `set-window-start' (`window.c`), whose body is
+      ;;
+      ;;     set_marker_restricted (w->start, pos, w->contents);
+      ;;     w->start_at_line_beg = (pos == BEGV || FETCH_BYTE (pos - 1) == '\n');
+      ;;
+      ;; The C sets the two together at *every* site that touches
+      ;; `start', so they cannot disagree, and `%window-start-set!` is that
+      ;; pair. What the DEFUN adds, and the redisplay's own writes do
+      ;; not (`window.c:1969`), is `wset_update_mode_line (w)` - the mode
+      ;; line shows point's line and the frame's menu bar is the current
+      ;; buffer's, and both are recomputed because of it.
+      ;;--------------------------------------------------------------
+      (%window-start-set! window position)
+      (set-update-mode-lines! #t)
+      position)
 
     (define *window-scroll-function*
       ;; GNU Emacs's `scroll-up-command` (`simple.el:5175`) is
@@ -808,6 +834,12 @@
         ;; window".
         (unless (eq? old buffer)
           (set-frame-garbaged! (window-frame window) #t))
+        ;; **`wset_update_mode_line (w)`** (`window.c:4387`), which the C
+        ;; runs whether or not the buffer changed: the mode line names the
+        ;; buffer, and the frame's menu bar is built from the current
+        ;; buffer's keymaps (`window.c:4387`'s line is the one that makes
+        ;; `C-x b` show the new buffer's menus).
+        (set-update-mode-lines! #t)
         window))
 
     (define (window-start-at-line-beg window)
@@ -1190,7 +1222,18 @@
         ;; row too short.
         (when (eq? parameter 'menu-bar-lines)
           (resize-frame-windows! frame (frame-height frame) (frame-width frame)
-                                 (frame-height frame) (frame-width frame)))
+                                 (frame-height frame) (frame-width frame))
+          ;; **And the bar has to be told.** `x_set_menu_bar_lines` is a
+          ;; frame *parameter handler* in the C, run by
+          ;; `x_set_frame_parameters` while the parameter is being set -
+          ;; and the `adjust_frame_size` it ends with marks the frame for
+          ;; redisplay. The front end recomputes the bar only when the
+          ;; redisplay flags say so (`xdisp.c:14449`), so a parameter
+          ;; changed here that did not raise one would leave the bar as
+          ;; it was: measured, `(menu-bar-mode 1)` after
+          ;; `(menu-bar-mode -1)` left it down, because "hidden" is also
+          ;; the state of a bar with no items.
+          (set-update-mode-lines! #t))
         value))
 
     (define (modify-frame-parameters frame alist)
@@ -2901,6 +2944,15 @@
         ;; `BUFFERP (w->contents)' before it does anything with it
         (let ((buffer (current-editor)))
           (when buffer (*current-buffer* buffer)))
+        ;; **The menu bar is the current buffer's, so selecting a window
+        ;; has to say so.** The C's `select_window` reaches the same place
+        ;; by a stronger route - `redisplay_other_windows ()` (`window.c`)
+        ;; sets `windows_or_buffers_changed`, so *every* window is
+        ;; rebuilt. Here only the cheap half is needed: the mode lines are
+        ;; compared by content and face when they are drawn, so selection
+        ;; costs them nothing extra, and the bar is the only reader of
+        ;; this.
+        (set-update-mode-lines! #t)
         window))
 
     (define-command (recenter arg)

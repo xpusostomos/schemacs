@@ -158,7 +158,16 @@
           ;; `write-glyphs!` takes (`define-generic`d beside it)
           cursor-to! raw-cursor-to! clear-to-end! clear-frame!
           window-system-display?
-          update-begin! update-end! set-terminal-modes! reset-terminal-modes!)
+          update-begin! update-end! set-terminal-modes! reset-terminal-modes!
+          ;; **Whether the menu bar has to be recomputed at all.** GNU
+          ;; Emacs's `set_frame_menubar` is reached from `redisplay_window`
+          ;; only when `update_mode_line` says so (`xdisp.c:21522`), and
+          ;; the hooks and the `menu_items` parse below are its expensive
+          ;; half - and they were running on every redisplay, 2.6 ms of
+          ;; `flush-display!`'s 7.1 ms per keystroke. See the guard below.
+          ;; on every redisplay. Both flags are `xdisp.c`'s and live in
+          ;; dispnew for the reason its note gives.
+          windows-or-buffers-changed? update-mode-lines?)
     ;; A glyph and a glyph row, which `write-glyphs!` now reads: the
     ;; pixel y is the row's, and each glyph carries its own face.
     (only (schemacs editor glyph)
@@ -2635,7 +2644,7 @@
       ;;--------------------------------------------------------------
       (pgtk-set-frame-menubar d)
       (let ((area (pgtk-area d)))
-        (when area (widget:queue-draw area))))
+        (when area (gtk-widget-queue-draw (pgtk-widget-pointer area)))))
 
     (define (pgtk-write-screenshot! d path)
       ;; Write what the display is showing to PATH as a PNG.
@@ -3283,6 +3292,17 @@
       (pgtk-popup-fn "gtk_widget_get_window" '* (list '*)))
     (define gtk-widget-destroy
       (pgtk-popup-fn "gtk_widget_destroy" void (list '*)))
+    ;; **`widget:queue-draw` through the C function instead of the
+    ;; binding.** It is the last call of every redisplay (`flush-display!`)
+    ;; and guile-gi's route to it costs 3.6 ms per call on this machine -
+    ;; measured in a live window, against 0.0003 ms for the C function
+    ;; itself - so a keystroke paid 3.6 ms to ask for one repaint. Nothing
+    ;; about the call is a marshalling problem: it takes the widget and
+    ;; returns void, and the pointer `pgtk-widget-pointer' hands over is
+    ;; the same one guile-gi's proxy holds. See `pgtk-set-frame-menubar`
+    ;; for the other half of that keystroke.
+    (define gtk-widget-queue-draw
+      (pgtk-popup-fn "gtk_widget_queue_draw" void (list '*)))
 
     (define (pgtk-widget-pointer w)
       ;; guile-gi's proxy for a GObject is a `<GFundamental>`, whose
@@ -3696,29 +3716,51 @@
       ;;
       ;; `redisplay_window` decides *whether* to do the work at all from
       ;; `windows_or_buffers_changed` and `update_mode_lines`
-      ;; (`xdisp.c:14443`), neither of which this redisplay has; doing it
-      ;; every redisplay and comparing afterwards is the same decision
-      ;; made from the result.
+      ;; (`xdisp.c:14443`). **That guard exists here now** -
+      ;; `update-mode-lines?` is Emacs's `update_mode_lines` and
+      ;; `windows-or-buffers-changed?` its `windows_or_buffers_changed`
+      ;; - and the comment above it is corrected by it: comparing
+      ;; afterwards gives the same *answer*, but only after the parse.
+      ;; Emacs reaches this function only for a window whose
+      ;; `update_mode_line` is set (`xdisp.c:21522`,
+      ;; "When we reach a frame's selected window, redo the frame's menu
+      ;; bar"), so a `C-n` never does it.
       ;;--------------------------------------------------------------
       (let ((bar (pgtk-menubar d)))
         (when bar
-          ;; **The bar is themed with the mode line's colours, every
-          ;; redisplay, until they stop changing** - a theme is loaded by
-          ;; a command, and this is the only place the bar is looked at.
-          ;; See "The menu bar's theme" above.
-          (pgtk-theme-menubar! d)
           ;; **`menu-bar-lines` turns the bar off**, which is what
           ;; `menu-bar-mode` sets on every frame
           ;; (`(set-frame-parameter frame 'menu-bar-lines val)`). The C's `x_set_menu_bar_lines` hides
           ;; the widget and leaves the display to redraw; this takes the
           ;; bar down once and forgets the built items, so turning it
-          ;; back on rebuilds from scratch.
+          ;; back on rebuilds from scratch. The parameter is read before
+          ;; the guard below because it is cheap and because turning the
+          ;; bar off does not go through the redisplay flags.
           (let ((frame (pgtk-frame-for d)))
             (if (and frame (eqv? 0 (frame-parameter frame 'menu-bar-lines)))
                 ;; Off: take it down and stop - the hooks and the rebuild
                 ;; below would put it straight back.
                 (pgtk-hide-menubar! d)
+                ;; **Nothing that can change the bar is known to have
+                ;; happened.** Two states count as already correct: the
+                ;; bar has been built and its widgets are installed, or
+                ;; there are no items and the bar is down. A bar that has
+                ;; never been built (vector #f and not hidden) falls
+                ;; through to the work below, which is what makes the
+                ;; first redisplay draw it.
+                (if (and (or (pgtk-menubar-hidden? d)
+                             (pgtk-menubar-vector d))
+                         (not (or (windows-or-buffers-changed?)
+                                  (update-mode-lines?))))
+                    #f
                 (begin
+          ;; **The bar is themed with the mode line's colours, until they
+          ;; stop changing** - a theme is loaded by a command, and this is
+          ;; the only place the bar is looked at. See "The menu bar's
+          ;; theme" above. It is inside the guard because a theme load
+          ;; sets `windows-or-buffers-changed?` (`set-face-attribute`
+          ;; does), and that is exactly when the colours can differ.
+          (pgtk-theme-menubar! d)
           ;; **The two hooks, as `set_frame_menubar` runs them**
           ;; (`xmenu.c:994-1000`): the Lucid hook first, which lets a
           ;; package set the bar wholesale, then `menu-bar-update-hook`,
@@ -3768,7 +3810,7 @@
               (unless (and old
                            (> (vector-length vector) 0)
                            (equal? vector old))
-                (pgtk-install-menubar! d items (reverse submenus) vector)))))))))))))
+                (pgtk-install-menubar! d items (reverse submenus) vector))))))))))))))
 
     (define (pgtk-title-frame! frame)
       ;; Give FRAME's window the frame's name as its title. GNU Emacs's

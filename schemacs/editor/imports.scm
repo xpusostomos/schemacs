@@ -131,6 +131,7 @@
     %window-prev-buffers
     %window-start
     %window-start-at-line-beg
+    %window-start-set!
     %window-suspend-auto-hscroll?
     *Buffer-menu-del-char*
     *Buffer-menu-marker-char*
@@ -2075,6 +2076,7 @@
     set-terminal-modes!
     set-text-properties
     set-transient-map
+    set-update-mode-lines!
     set-visited-file-modtime
     set-visited-file-name
     set-window-buffer!
@@ -2265,6 +2267,7 @@
     update-end!
     update-interval
     update-menu-bar
+    update-mode-lines?
     update-prefix!
     update-submenu-strings
     update-window-begin!

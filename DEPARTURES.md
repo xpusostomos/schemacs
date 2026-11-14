@@ -2037,3 +2037,112 @@ symbol `return`, and the search must exit through the RET branch
 ("Mark saved where search started") with `*unread-command-events*`
 empty. Without the translation the test sees `(() (return))` - the
 other-key exit and the stale key - which is the bug exactly.
+
+# The keystroke was two guile-gi crossings (2026-11-15)
+
+Chris had said the editor was "dog slow" in Gtk. This pass measured where a
+keystroke goes on a *live* window (a Broadway display and a real one agree),
+with a 240 KB file of 20,000-character wrapped lines, by driving
+`dispatch-input-event` and `redisplay-frames!` from the back door:
+
+| key | before | after |
+|---|---|---|
+| `C-n` | **10.30 ms** | **3.19 ms** |
+| `C-f` | **9.85 ms** | **2.84 ms** |
+| self-insert `a` | **38.50 ms** | **5.12 ms** |
+
+Every number is the mean of 50 keys, measured A/B on the same tree by
+stashing this pass's changes and compiling both sides.
+
+## What the time was
+
+`flush-display!` - the last statement of every redisplay - cost **7.1 ms per
+call**. It is two guile-gi crossings:
+
+- `widget:queue-draw` (`gtk_widget_queue_draw`): **3.6 ms per call.**
+  The C function, called through `dynamic-func` on the pointer the proxy
+  already holds, costs **0.0003 ms** - four orders of magnitude. The pointer
+  is the one `pgtk-widget-pointer` has been handing to `gtk_widget_destroy`
+  and the popup functions all along, so `flush-display!` calls the C
+  function now. Nothing about the call is a marshalling problem: it takes
+  the widget and returns `void`.
+
+- `pgtk-set-frame-menubar`: **3.0 ms per call**, of which 2.6 ms was the
+  `menu_items` parse (`init-menu-items` / `parse-single-submenu` /
+  `finish-menu-items` over three menus) - and it ran on *every* redisplay.
+  GNU Emacs reaches `set_frame_menubar` only when the display's
+  `update_mode_line` says so (`xdisp.c:21522`) and guards `update_menu_bar`
+  with `windows_or_buffers_changed || update_mode_lines ||
+  window_buffer_changed (w)` (`:14449`). This tree had collapsed the two
+  flags into `windows-or-buffers-changed?` and never set it on a buffer or
+  window switch, so the guard could not be ported without the flag.
+
+## `update_mode_lines`, ported
+
+`(schemacs editor dispnew)` now has Emacs's `update_mode_lines`
+(`xdisp.c:775`) beside `windows_or_buffers_changed`, reader and setter, and
+for the same layering reason. It is the *cheap* flag: a mode line, a frame
+title and a menu bar can change because of it, where the strong one says no
+glyph matrix may be trusted. `redisplay-frames!` clears both together,
+which is `xdisp.c:18166`.
+
+Set where Emacs sets one of the two:
+
+- `set-window-buffer!` (`wset_update_mode_line`, `window.c:4387`) - this is
+  what makes `C-x b` show the new buffer's menus;
+- `select-window` - Emacs gets there by a stronger route,
+  `redisplay_other_windows()` setting `windows_or_buffers_changed`; this
+  tree needs only the cheap half, the mode lines being compared by content
+  and face when they are drawn;
+- `set-frame-parameter` for `menu-bar-lines` - Emacs's `x_set_menu_bar_lines`
+  is a frame *parameter handler*, and without this `(menu-bar-mode 1)` after
+  `(menu-bar-mode -1)` left the bar down (measured; "hidden" is also the
+  state of a bar with no items);
+- `force-mode-line-update`, whose docstring says it "also forces
+  recomputation of the menu bar menus" (`buffer.c:1543`).
+
+## `set-window-start!` was two functions
+
+`Fset_window_start` (`window.c:1969`) is the marker pair **plus**
+`wset_update_mode_line`. The redisplay's own scrolling writes `w->start`
+directly and sets neither. This tree had one function used by both, and
+folding the flag into it made every recentring `C-n` re-parse the menu bar.
+It is now `set-window-start!` (the DEFUN: pair + flag) and
+`%window-start-set!` (the pair), and `scroll-to-cursor!` /
+`window-move-screen-lines` use the second - which is what the C's
+`redisplay_window` does.
+
+## The cursor's row from the glyph matrix
+
+Moving point cost 1.3 ms more than not moving it, because
+`cursor-screen-position` asked `rows-above` how many screen rows were above
+the cursor, and that **lays out every line between the window start and the
+cursor** (`line-display-texts` + `line-texts-rows` per line). GNU Emacs asks
+the glyph matrix the same question: `try_cursor_movement` steps through
+`w->current_matrix` comparing each row's `start` charpos
+(`xdisp.c:19961`), and a row *carries* the position it was laid out from.
+
+`rows-above-in-window` is that walk over this tree's rows (which have had
+`start`/`end` since the glyph matrix landed). It answers `#f` when the
+matrix is not what the screen holds, and `cursor-screen-position` falls back
+to counting lines - so the change can only ever be a speed-up.
+
+## Verified
+
+All 50 suites pass, and `tools/pty-check.py` is **82/82** - a full green
+battery, where the previous two runs were 80/82 and 61/62 with the
+load-sensitive flakes this file has a section about. The checks that would
+catch a redisplay regression (`scroll`, `hscroll`, `recenter`, `split`,
+`wide-columns`, `isearch-scroll`, `redisplay`) all pass.
+
+## What is still slow, and what it needs
+
+A self-insert is 5.1 ms: the insert is 0.004 ms and the redisplay is the
+rest, because **an edit invalidates the window and every row is rebuilt**.
+GNU Emacs' `try_window_id` (`xdisp.c:22603`, ~790 lines) reuses the rows
+above the change, shifts the ones below when a line count changed, and
+rebuilds only what differs. That is the next step and it is a port of its
+own: it needs `beg_unchanged`/`end_unchanged` bookkeeping kept up to date
+(only `beg_unchanged` is carried), `row_containing_pos`, the matrix row
+shift, and the `GIVE_UP` conditions that decide when it cannot be used. It
+was not started here rather than half-done.

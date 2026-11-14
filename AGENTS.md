@@ -7452,3 +7452,104 @@ Quit"; "the completions window outlived the minibuffer"). Both pass
 **3/3** when run alone, and neither touches anything this pass changed -
 the battery's documented load/order flake class, not a regression.
 `isearch-ring` (C-s C-s and C-s ESC p) and `isearch-line-end` pass.
+
+# The keystroke was two guile-gi crossings (2026-11-15)
+
+Chris: *"still dog slow"*. This pass measured **where** a Gtk keystroke goes
+on a live window, and the answer was not the redisplay at all.
+
+## The numbers, A/B on the same tree
+
+Driving `dispatch-input-event` + `redisplay-frames!` from the back door -
+which is the command and the redisplay a real key runs - 50 keys each,
+240 KB file of 20,000-character wrapped lines:
+
+| key | before | after |
+|---|---|---|
+| `C-n` | **10.30 ms** | **3.19 ms** |
+| `C-f` | **9.85 ms** | **2.84 ms** |
+| self-insert `a` | **38.50 ms** | **5.12 ms** |
+
+"before" is the same tree with this pass stashed and compiled - not a
+remembered number. The insert figures are why typing felt different from
+moving: a full window rebuild of long wrapped lines was ~31 ms of it.
+
+## What it was
+
+`flush-display!` - the last statement of every redisplay - cost **7.1 ms**:
+
+- `widget:queue-draw` (`gtk_widget_queue_draw`): **3.6 ms per call**. The C
+  function through `dynamic-func`, on the pointer `pgtk-widget-pointer`
+  already gives the popup and clip/board code, is **0.0003 ms** - four
+  orders of magnitude. `flush-display!` calls it directly now.
+- `pgtk-set-frame-menubar`: **3.0 ms**, 2.6 of it the `menu_items` parse,
+  and it ran on **every** redisplay. Emacs reaches `set_frame_menubar` only
+  when the display's `update_mode_line` says so (`xdisp.c:21522`).
+
+**guile-gi calls on this machine cost ~3.5 ms each** - measured on the
+method procedure itself, so it is the C wrapper and not GOOPS dispatch.
+Anything per-keystroke that crosses guile-gi is a frame-rate bug; the fix is
+`dynamic-func` on the pointer, the way pango and cairo already do.
+
+## `update_mode_lines`, ported
+
+dispnew has `update-mode-lines?`/`set-update-mode-lines!` beside
+`windows-or-buffers-changed?`, because the two are **not** interchangeable:
+the strong flag says no glyph matrix can be trusted (rebuild everything),
+the weak one says only the mode line, frame title and menu bar have to be
+recomputed. Set by `set-window-buffer!` (`window.c:4387`), `select-window`,
+`set-frame-parameter` for `menu-bar-lines` (Emacs's parameter handler) and
+`force-mode-line-update`; cleared with the other at `xdisp.c:18166`'s place.
+Both menu-bar paths - Gtk's and the terminal's - now guard on it.
+
+**`set-window-start!` is two functions now.** The DEFUN's body is the marker
+pair plus `wset_update_mode_line` (`window.c:1969`), and the redisplay's
+own scrolling writes `w->start` without it. `%window-start-set!` is the pair
+and `scroll-to-cursor!`/`window-move-screen-lines` use it - before, every
+recentring `C-n` re-parsed the menu bar.
+
+## The cursor's row, from the matrix
+
+`cursor-screen-position` asked `rows-above`, which **lays out every line
+between the window start and the cursor** to count rows. Emacs asks
+`w->current_matrix` (`try_cursor_movement`, `xdisp.c:19961`), whose rows
+carry their start positions. `rows-above-in-window` is that walk; it answers
+`#f` when the matrix is not what the screen holds, and the caller falls back
+to counting lines, so it can only be a speed-up.
+
+## Verified
+
+- All 50 suites pass; `loadup-tests` 16 (the new exports are in the
+  generated `imports.scm` - regenerate with `tools/gen-imports.scm` after
+  adding one).
+- Live, through the back door: the bar is built at startup (339 slots),
+  `(menu-bar-mode -1)` hides it and `(menu-bar-mode 1)` **rebuilds** it,
+  `set-face-attribute` on `mode-line` re-themes it, and
+  `update-mode-lines?` goes `#f -> #t` on `select-window` and back to `#f`
+  after `redisplay-frames!`.
+- `tools/pty-check.py`: **82/82**, exit 0 - the first full green battery
+  this tree has had (the last two were 80/82 and 61/62, both with the
+  documented load flakes). Faster keys means the checks finish inside their
+  own settle windows, so the flakes those notes blame on load are gone with
+  the same change.
+
+## Not carried from `bset_update_mode_line`
+
+Emacs also raises the flag from `rename-buffer` (`buffer.c:1732`),
+`reset_buffer_local_variables` (`buffer.c:3078` - so
+`kill-all-local-variables`, i.e. every major-mode change) and
+`set-buffer-multibyte` (`:3078` region). None is ported: the mode line is
+*content-compared* when it is drawn, so a name or mode change shows without
+the flag, and nothing in this tree's major modes installs a `[menu-bar]`
+entry of its own yet - the one thing that would need it. Add them to
+`(schemacs editor buffer)` when a mode does.
+
+## Still slow, and what it needs
+
+A self-insert is 5.1 ms, of which the insert is 0.004 ms: an edit
+invalidates the window and **every row is rebuilt**. That is
+`try_window_id` (`xdisp.c:22603`, ~790 lines) - reuse the rows above the
+change, shift the ones below, rebuild what differs. It needs
+`end_unchanged` bookkeeping (only `beg_unchanged` is carried today),
+`row_containing_pos`, the matrix row shift and the `GIVE_UP` conditions.
+Not started here rather than half-done.

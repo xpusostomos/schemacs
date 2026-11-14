@@ -42,6 +42,11 @@
           ;; `windows_or_buffers_changed` (`xdisp.c`): set by whoever
           ;; changes a face or forces a redisplay, read by the skip below.
           windows-or-buffers-changed? set-windows-or-buffers-changed!
+          ;; `update_mode_lines` (`xdisp.c:775`): the cheaper flag, which
+          ;; says only that the mode lines and the frame's menu bar have
+          ;; to be recomputed. Set by a window or buffer switch; cleared
+          ;; with the other one at the end of `redisplay-frames!`.
+          update-mode-lines? set-update-mode-lines!
           write-glyphs! draw-box! face-metrics display-cell-size clear-frame-area!
           clear-end-of-line! ensure-surface!
           update-window-begin! update-window-end!
@@ -132,6 +137,8 @@
          ;; display begins, where its last glyph was, and the line-number
          ;; cache `%l' counts from
          %window-start set-window-start!
+         ;; the redisplay's own write of `w->start` - see frame.scm
+         %window-start-set!
          %window-end-pos %window-end-valid?
          set!%window-end-pos set!%window-end-vpos set!%window-end-valid?
          %window-base-line-number %window-base-line-pos
@@ -265,6 +272,8 @@
           row-hash)
     (only (schemacs editor matrix)
           glyph-matrix-row-ref glyph-matrix-height glyph-matrix-width
+          ;; the row vector, which `rows-above-in-window` walks
+          glyph-matrix-rows
           ensure-window-matrices! window-current-matrix window-desired-matrix
           matrix-diff-rows matrix-mark-current! clear-glyph-matrix)
 
@@ -442,7 +451,7 @@
       ;;--------------------------------------------------------------
       (let loop ((back (quotient vheight 2)) (rows 0) (pos cursor-start))
         (if (or (<= back 0) (= pos (buffer-beg ed)))
-            (set-window-start!
+            (%window-start-set!
              window (if (>= rows vheight) cursor-start pos))
             (let* ((above (text-editor-get-start-of-line ed (- pos 1)))
                    (tall (window-line-rows-at window above)))
@@ -507,7 +516,7 @@
         (cond
          ((= new old) (if (> n 0) 'end 'beginning))
          (else
-          (set-window-start! window new)
+          (%window-start-set! window new)
           (let ((point (buffer-pt ed))
                 (bottom (window-move-screen-lines window new vheight)))
             (when (or (< point new) (>= point bottom))
@@ -573,34 +582,57 @@
       (let* ((ed (window-buffer window))
              (vheight (window-body-height window))
              (pt (window-point window))
-             (cursor-start (text-editor-get-start-of-line ed pt))
              (start (window-start window)))
-        (cond
-         ((< cursor-start start)
-          ;; point's line begins above the window, so point is not visible
-          (recenter-window-on-cursor! window ed cursor-start vheight))
-         (else
-          ;; walk down from the start to the cursor's line, counting rows
-          (let loop ((pos start) (used 0))
-            (cond
-             ((>= used vheight)
-              ;; the cursor's line has fallen off the bottom
-              (recenter-window-on-cursor! window ed cursor-start vheight))
-             ((= pos cursor-start)
-              ;; the cursor's line: visible only if its own row is
-              (let ((k (rows-row-of-column
-                        (window-line-slices-at window pos)
-                        (- pt cursor-start))))
-                (when (>= (+ used k) vheight)
-                  ;; its row is below the window, so point is not visible
-                  (recenter-window-on-cursor! window ed cursor-start vheight))))
-             (else
-              (let ((next (line-next-start ed pos)))
-                ;; visible as it stands, or the walk ran past the end of
-                ;; the buffer, where there is nothing below to draw
-                (if next
-                    (loop next (+ used (window-line-rows-at window pos)))
-                    #t)))))))))
+        ;; **The matrix drawn last time already answers it, when it is
+        ;; still valid.** GNU Emacs's `try_cursor_movement`
+        ;; (`xdisp.c:20700`) is this check: while point stays inside the
+        ;; window's recorded text and nothing about the window has
+        ;; changed, the cursor's row is on the screen because it was on
+        ;; the screen a moment ago - no layout needed. Without it every
+        ;; redisplay laid the window's lines out from its start to point
+        ;; to count the rows, which on Gtk measured 1.5 ms and 325 KB of
+        ;; garbage per keystroke *even when nothing had changed* (the
+        ;; cursor-blink repaint paid it too). `(< pt end)` and not `<=`:
+        ;; a position equal to the recorded end belongs to the row after
+        ;; the last one drawn, which is the case that must scroll - and
+        ;; it is rare enough to leave to the walk.
+        (if (and (window-matrix-valid? window)
+                 (<= start pt)
+                 (< pt (window-end window)))
+            #t
+            (let ((cursor-start (text-editor-get-start-of-line ed pt)))
+              (cond
+               ((< cursor-start start)
+                ;; point's line begins above the window, so point is not
+                ;; visible
+                (recenter-window-on-cursor! window ed cursor-start vheight))
+               (else
+                ;; walk down from the start to the cursor's line, counting
+                ;; rows
+                (let loop ((pos start) (used 0))
+                  (cond
+                   ((>= used vheight)
+                    ;; the cursor's line has fallen off the bottom
+                    (recenter-window-on-cursor! window ed cursor-start
+                                                vheight))
+                   ((= pos cursor-start)
+                    ;; the cursor's line: visible only if its own row is
+                    (let ((k (rows-row-of-column
+                              (window-line-slices-at window pos)
+                              (- pt cursor-start))))
+                      (when (>= (+ used k) vheight)
+                        ;; its row is below the window, so point is not
+                        ;; visible
+                        (recenter-window-on-cursor! window ed cursor-start
+                                                    vheight))))
+                   (else
+                    (let ((next (line-next-start ed pos)))
+                      ;; visible as it stands, or the walk ran past the end
+                      ;; of the buffer, where there is nothing below to draw
+                      (if next
+                          (loop next
+                                (+ used (window-line-rows-at window pos)))
+                          #t)))))))))))
 
     (define (hscroll-window! window)
       ;; Auto hscrolling: bring WINDOW's point back into the window's
@@ -655,6 +687,19 @@
           ;; changed, no more suspend auto hscrolling" (`xdisp.c:16756')
           (set!%window-suspend-auto-hscroll? window #f))
         (set!%window-old-point window point)
+        ;; **Nothing to decide when the window cannot be hscrolled.**
+        ;; The two triggers below are "already hscrolled and the cursor
+        ;; is in the left margin" and "the row is truncated at the right
+        ;; edge and the cursor is in that margin". In a *wrapping*
+        ;; window (`truncate-lines` off, the default) the second cannot
+        ;; apply, and with `hscroll` 0 the first cannot either - so the
+        ;; whole computation is skipped, and with it a layout of the
+        ;; cursor's line on every redisplay. Measured on Gtk: the
+        ;; cursor-line walk (`buffer-line-texts-at` and `scan_for_column`)
+        ;; was ~1 ms and most of the allocation of a keystroke that had
+        ;; changed nothing at all.
+        (when (and (buffer-auto-hscroll-mode ed)
+                   (or (> h 0) (not (window-wraps? window))))
         ;; The column is the *window's* point's, as the C's is
         ;; (`xdisp.c:16809' reads `marker_position (w->pointm)' for a
         ;; window that is not the selected one) - the buffer's own
@@ -681,13 +726,12 @@
                 (quotient width 2))
                (new-h (max (max 0 (- point-x wanted))
                            (%window-min-hscroll window))))
-          (when (and (buffer-auto-hscroll-mode ed)
-                     (not (%window-suspend-auto-hscroll? window))
+          (when (and (not (%window-suspend-auto-hscroll? window))
                      (or (and (> h 0) (<= cursor-x margin))
                          (and truncated-right?
                               (>= cursor-x (- width margin))))
                      (not (= new-h h)))
-            (set!%window-hscroll window new-h)))))
+            (set!%window-hscroll window new-h))))))
 
     (define *mode-line-window* (make-parameter #f))
 
@@ -2043,6 +2087,39 @@
       ;;--------------------------------------------------------------
       (+ y (row->pixel-y (window-top window))))
 
+    (define (rows-above-in-window window line-start)
+      ;; How many rows of WINDOW are above the line beginning at
+      ;; LINE-START, answered from the glyph matrix instead of the buffer -
+      ;; `rows-above`'s question, asked the way GNU Emacs asks it.
+      ;;
+      ;; **This is `try_cursor_movement`'s walk.** Emacs finds the row the
+      ;; cursor is on by stepping through `w->current_matrix` and comparing
+      ;; each row's `start` (`xdisp.c:19961`, `MATRIX_ROW_START_CHARPOS`),
+      ;; and the matrix is exactly why that is cheap: a row *carries* the
+      ;; position it was laid out from, so finding one costs a comparison
+      ;; and not the layout of every line above it. `rows-above` lays out
+      ;; each of those lines (`line-display-texts`, `line-texts-rows`) to
+      ;; learn what the matrix already says - measured on a window of long
+      ;; wrapped lines, 1.3 ms of a 2.8 ms keystroke.
+      ;;
+      ;; `#f` when the matrix cannot answer: it is not what the screen
+      ;; holds (the window was not drawn this redisplay and something has
+      ;; changed), or the line is not among its rows. The caller then falls
+      ;; back to counting lines, which is always right and only slower.
+      ;;------------------------------------------------------------------
+      (and (window-matrix-valid? window)
+           (let ((current (window-current-matrix window)))
+             (and current
+                  (let ((rows (glyph-matrix-rows current)))
+                    (let loop ((i 0))
+                      (cond ((>= i (vector-length rows)) #f)
+                            ((not (vector-ref rows i)) #f)
+                            ((= (glyph-row-start (vector-ref rows i)) line-start)
+                             i)
+                            ((> (glyph-row-start (vector-ref rows i)) line-start)
+                             #f)
+                            (else (loop (+ i 1))))))))))
+
     (define (cursor-screen-position window)
       ;; Where on the screen WINDOW's point belongs, as a pair, or #f
       ;; when it is scrolled out of view. In frame coordinates: the
@@ -2075,8 +2152,12 @@
              ;; The cursor's own row is not its line's row: a wrapped
              ;; line is several rows tall, so the rows above the cursor's
              ;; line have to be counted too - and within its line, the
-             ;; rows before the one the cursor's column falls on.
-             (screen-row (+ (rows-above window line-start)
+             ;; rows before the one the cursor's column falls on. The
+             ;; count above comes from the glyph matrix when it can answer
+             ;; (see `rows-above-in-window`), which is what makes moving
+             ;; point cost a cursor rather than a window.
+             (screen-row (+ (or (rows-above-in-window window line-start)
+                                (rows-above window line-start))
                             (rows-row-of-column rows column)))
              ;; The column within its *row*: a continuation row starts at
              ;; screen column zero, so the cursor's display column is
@@ -3275,6 +3356,11 @@
       ;; otherwise have been skipped.
       ;;--------------------------------------------------------------
       (set-windows-or-buffers-changed! #t)
+      ;; "This function also forces recomputation of the menu bar menus
+      ;; and the frame title" (`buffer.c:1543`) - and in the C that half
+      ;; is `update_mode_lines` (`:1549`), which is also the flag the menu
+      ;; bar itself reads.
+      (set-update-mode-lines! #t)
       #f)
 
     (define *inhibit-redisplay* (make-parameter #f))
@@ -3320,6 +3406,9 @@
             ;; it means "something changed since the last redisplay", and
             ;; after this one nothing has.
             (set-windows-or-buffers-changed! #f)
+            ;; "update_mode_lines = 0; windows_or_buffers_changed = 0"
+            ;; (`xdisp.c:18166`), the two of them together.
+            (set-update-mode-lines! #f)
             ;; **And now nothing is being drawn**, so a front end may act
             ;; on what arrived while it was. A Gtk frame queues an input
             ;; event that comes in while a picture is being painted (the
@@ -4098,11 +4187,21 @@
       ;; them there: they are what makes a bar whose contents change with
       ;; the buffer - the Buffers menu - current at the moment it is
       ;; drawn.
+      ;;
+      ;; **And for the reason `set_frame_menubar` runs them only sometimes
+      ;; too.** `redisplay_window` reaches that function for a window whose
+      ;; `update_mode_line` is set (`xdisp.c:21522`), and `update_menu_bar`
+      ;; has the same guard of its own (`xdisp.c:14449`); the hooks and the
+      ;; item read are the expensive part of this function. A bar that has
+      ;; never been built falls through, so the first redisplay draws it.
       ;;--------------------------------------------------------------
       (when (and (not (window-system-display? (current-display)))
                  (> (%frame-menu-bar-lines frame) 0)
                  (*menu-bar-items-function*)
-                 (not (*inhibit-menubar-update*)))
+                 (not (*inhibit-menubar-update*))
+                 (or (windows-or-buffers-changed?)
+                     (update-mode-lines?)
+                     (= 0 (frame-menu-bar-items-used frame))))
         (parameterize ((*inhibit-menubar-update* #t))
           (run-hooks (*activate-menubar-hook*))
           (run-hooks (*menu-bar-update-hook*))

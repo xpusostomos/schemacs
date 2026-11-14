@@ -27,6 +27,8 @@
    current-display
    ;; `windows_or_buffers_changed` (`xdisp.c`) - see the note below.
    windows-or-buffers-changed? set-windows-or-buffers-changed!
+   ;; `update_mode_lines` (`xdisp.c`) - its weaker sibling, see below.
+   update-mode-lines? set-update-mode-lines!
    write-glyphs!
    draw-box!
    glyphs->text
@@ -101,6 +103,44 @@
 
     (define (set-windows-or-buffers-changed! value)
       (set! windows-or-buffers-changed (and value #t)))
+
+    ;;----------------------------------------------------------------
+    ;; The weaker of the two redisplay flags
+    ;;
+    ;; GNU Emacs's `update_mode_lines` (`xdisp.c:775`): "If this is
+    ;; non-zero, the mode line needs to be updated for all windows." It is
+    ;; what `bset_update_mode_line` (`xdisp.c:902`) sets on a buffer that
+    ;; is shown somewhere, and it is read by two things that are more
+    ;; expensive than a mode line:
+    ;;
+    ;;   * `redisplay_window` folds it into its local `update_mode_line`
+    ;;     (`xdisp.c:20537`), which is what makes the *frame's menu bar* be
+    ;;     recomputed (`:21522` - "When we reach a frame's selected window,
+    ;;     redo the frame's menu bar");
+    ;;   * and `update_menu_bar`'s own guard reads it beside
+    ;;     `windows_or_buffers_changed` (`xdisp.c:14449`).
+    ;;
+    ;; **The two flags are not interchangeable, and that is the whole
+    ;; reason this one exists.** `windows_or_buffers_changed` says no
+    ;; cached glyph matrix can be trusted, so the redisplay rebuilds every
+    ;; window; `update_mode_lines` says only that the *cheap* parts of a
+    ;; redisplay - the mode line, the frame title, the menu bar - have to
+    ;; be recomputed. A window switch sets this one and not the other in
+    ;; Emacs, and folding it into the strong flag here (as
+    ;; `force-mode-line-update` does, deliberately) made every `set-window-
+    ;; start` a full repaint. Measured on Gtk before it existed: the menu
+    ;; bar's item parse ran on every keystroke - 2.6 ms of the 7.1 ms that
+    ;; `flush-display!` cost, on a keystroke that measured 9.9 ms.
+    ;;------------------------------------------------------------------
+    (define update-mode-lines #f)
+
+    (define (update-mode-lines?)
+      ;; The reader, for the reason `windows-or-buffers-changed?` has one.
+      ;;--------------------------------------------------------------
+      update-mode-lines)
+
+    (define (set-update-mode-lines! value)
+      (set! update-mode-lines (and value #t)))
 
     (define-class <display> ()
       ;; The kind of thing a display is. A display answers the generics
