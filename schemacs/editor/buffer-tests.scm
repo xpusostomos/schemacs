@@ -1,6 +1,6 @@
 (import
  (only (schemacs editor buffer) allocate-buffer)
- (only (schemacs editor editfns) insert)
+ (only (schemacs editor editfns) insert delete-region)
  (scheme base)
  (scheme char)
  (only (srfi 64) test-assert test-equal test-begin test-end)
@@ -289,8 +289,13 @@
 
 ;; and inserting at its end, with the default `rear-advance' nil, does
 ;; not extend it: the text goes *after* the overlay.
+;;
+;; **The 0 is clipped to 1**, as Emacs clips it (`make-overlay`:
+;; "obeg = clip_to_bounds (BUF_BEG (b), XFIXNUM (beg), BUF_Z (b))").
+;; Emacs 31.1 answers (1 5) for this buffer and these arguments; before
+;; the clip was ported this tree kept the 0 - a departure, not a test.
 (test-equal "an overlay does not swallow text inserted at its end"
-  '(0 5)
+  '(1 5)
   (with-buffers
    (lambda ()
      (let ((b (get-buffer-create "ov.txt")))
@@ -313,9 +318,12 @@
            (list (overlay-get o 'face) (overlay-properties o))))))))
 
 ;; `overlays-at' answers the overlays containing the character at POS -
-;; and a zero-length overlay at POS is *not* one of them.
+;; and a zero-length overlay at POS is *not* one of them. The overlay is
+;; 0..5 and is clipped to 1..5, so position 0 - which is before the
+;; buffer's first position - contains nothing; Emacs 31.1 answers
+;; `(0 1 0)' for this buffer and these arguments.
 (test-equal "overlays-at, and an empty overlay is not at its own point"
-  '(1 1 0)
+  '(0 1 0)
   (with-buffers
    (lambda ()
      (let ((b (get-buffer-create "ov.txt")))
@@ -323,8 +331,8 @@
          (with-current-buffer b (insert "hello world"))
          (make-overlay 0 5)
          (make-overlay 8 8)
-         (list (length (overlays-at 0))     ; the ranged overlay
-               (length (overlays-at 3))     ; still the ranged one
+         (list (length (overlays-at 0))     ; before the first position
+               (length (overlays-at 3))     ; the ranged one
                (length (overlays-at 8)))))))) ; the empty one is not
 
 (test-equal "overlays-in answers the ones overlapping a region"
@@ -338,8 +346,12 @@
          (list (length (overlays-in 3 8))
                (length (overlays-in 6 9))))))))
 
+;; The overlay is 1..5 after clipping, so the boundary before position 3
+;; is its *start*, 1 - and when there is no boundary at all the answer
+;; is `BEGV`, which is 1 here (`previous_overlay_change` starts `prev` at
+;; `BEGV`, not at 0). Emacs 31.1 answers (5 1).
 (test-equal "next- and previous-overlay-change"
-  '(5 0)
+  '(5 1)
   (with-buffers
    (lambda ()
      (let ((b (get-buffer-create "ov.txt")))
@@ -374,6 +386,66 @@
          (overlay-put (make-overlay 2 5) 'priority 2)
          (map (lambda (o) (overlay-get o 'priority))
               (overlays-at 3 #t)))))))
+
+;; A deletion contracts an overlay into the deleted range, which is
+;; `itree_delete_gap`: an end after POS moves back by the deleted length,
+;; clipped at POS. The four answers are `emacs -Q --batch`'s on the same
+;; buffer and text.
+(test-equal "a deletion contracts an overlay, as itree_delete_gap says"
+  '((3 6) (3 8) (1 1) (1 10))
+  (with-buffers
+   (lambda ()
+     (let ((b (get-buffer-create "ov.txt")))
+       (parameterize ((*current-buffer* b))
+         (with-current-buffer b (insert "abcdefghij"))
+         (let ((o (make-overlay 3 8)))
+           (delete-region 4 6)
+           (let ((middle (list (overlay-start o) (overlay-end o))))
+             (erase-buffer)
+             (with-current-buffer b (insert "abcdefghij"))
+             (move-overlay o 3 8)
+             (delete-region 8 9)
+             (let ((at-end (list (overlay-start o) (overlay-end o))))
+               (erase-buffer)
+               (with-current-buffer b (insert "abcdefghij"))
+               (move-overlay o 3 8)
+               (delete-region 1 11)
+               (let ((all (list (overlay-start o) (overlay-end o))))
+                 (erase-buffer)
+                 (with-current-buffer b (insert "abcdefghij"))
+                 (move-overlay o 1 11)
+                 (delete-region 5 6)
+                 (list middle at-end all
+                       (list (overlay-start o) (overlay-end o))))))))))))
+
+;; `evaporate` is the one property the tree itself does not know about:
+;; `adjust_overlays_for_delete` deletes an empty overlay at the deletion
+;; point afterwards. Emacs answers nil for all three of these.
+(test-equal "an evaporating overlay dies when the deletion reaches it"
+  '(#f #f #f)
+  (with-buffers
+   (lambda ()
+     (let ((b (get-buffer-create "ov.txt")))
+       (parameterize ((*current-buffer* b))
+         (with-current-buffer b (insert "abcdefghij"))
+         (let ((o (make-overlay 5 5)))
+           (overlay-put o 'evaporate #t)
+           (delete-region 4 6)
+           (list (overlay-start o) (overlay-end o) (overlay-buffer o))))))))
+
+;; ...and a *move* to an empty range does it too, which is the second
+;; half of `move-overlay` (`buffer.c:3804`).
+(test-equal "an evaporating overlay dies when moved to an empty range"
+  '(#f #f)
+  (with-buffers
+   (lambda ()
+     (let ((b (get-buffer-create "ov.txt")))
+       (parameterize ((*current-buffer* b))
+         (with-current-buffer b (insert "hello"))
+         (let ((o (make-overlay 1 3)))
+           (overlay-put o 'evaporate #t)
+           (move-overlay o 2 2)
+           (list (overlay-start o) (overlay-buffer o))))))))
 
 ;; `get-char-property' reads the overlay *and* the text property, and the
 ;; overlay with the highest priority wins - which is the seam the

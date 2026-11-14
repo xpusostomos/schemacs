@@ -80,6 +80,19 @@
           buffer-text-beg-unchanged set!buffer-text-beg-unchanged
           set!buffer-text-overlay-modiff
           set!buffer-text-modiff  set!buffer-text-chars-modiff)
+    ;; The overlays' interval tree - GNU Emacs's `itree.c', which
+    ;; `buffer.h:718' includes for `struct buffer''s `overlays' field.
+    ;; It is a leaf library, so this import has no cycle.
+    (only (schemacs editor itree)
+          make<itree-node> itree-node-init make<itree-iterator>
+          itree-node-begin itree-node-end itree-node-data
+          set!itree-node-parent set!itree-node-left set!itree-node-right
+          itree-node-front-advance itree-node-rear-advance
+          itree-node-begin-of itree-node-end-of itree-node-set-region
+          itree-create itree-empty-p itree-clear
+          itree-insert itree-remove itree-insert-gap itree-delete-gap
+          itree-iterator-start itree-iterator-next itree-iterator-narrow
+          *ptrdiff-min* *ptrdiff-max*)
     (scheme case-lambda))
   (cond-expand
    ;; The record's pretty-printer below is Guile's.
@@ -170,8 +183,10 @@
    *change-major-mode-hook*
    *inhibit-read-only*
    ;; the whole list, which the redisplay asks before it takes its
-   ;; no-properties shortcut
-   buffer-overlays
+   ;; no-properties shortcut. `buffer-overlays' is this tree's helper;
+   ;; `overlay-lists' is Emacs's DEFUN of the same information.
+   buffer-overlays  overlay-lists  overlay-recenter
+   delete-all-overlays
    delete-overlay
    make-overlay
    move-overlay
@@ -187,6 +202,11 @@
    overlays-at
    overlays-in
    previous-overlay-change
+   ;; `buffer.c`'s two, which `insdel.c' calls on every insertion and
+   ;; deletion: they are the tree's `itree_insert_gap'/'itree_delete_gap'
+   ;; over the current buffer's overlays, and the evaporate rule.
+   adjust-overlays-for-insert
+   adjust-overlays-for-delete
    kill-all-local-variables
    major-mode
    mode-name
@@ -369,14 +389,16 @@
       ;; `frame.sld' installs.
       ;;--------------------------------------------------------------
       (make-parameter (lambda (buffer) #f)))
-    ;; `marker.scm`'s operations an overlay and the buffer's own mark
-    ;; need. An overlay's ends are markers, so `make-overlay` has to make
-    ;; them, point them, and set their insertion types; and
-    ;; `allocate_buffer` makes the buffer's mark with the constructor
+    ;; `marker.scm`'s operations the buffer's own mark needs.
+    ;; `allocate_buffer` makes that mark with the constructor
     ;; (`buffer.c:672`). `marker.scm` is built on *this* library - a
     ;; marker is added to a buffer's chain, and that chain is a field of
     ;; the record below - so it cannot be imported here, and these arrive
     ;; the way the two above do.
+    ;;
+    ;; An overlay's ends are *not* markers, and have not been since the
+    ;; overlay rewrite: they are an `itree_node`'s begin and end (see the
+    ;; Overlays section), so none of this is needed by `make-overlay`.
     ;;
     ;; The shapes are Emacs's own: `build-marker` takes the buffer and a
     ;; position because that is what the C passes when it has a buffer in
@@ -943,7 +965,7 @@
       ;; What is *not* here, with what Emacs does about it: running
       ;; `kill-buffer-hook' (a buffer-local variable, and buffer-local
       ;; variables are only the slot mechanism so far), killing the
-      ;; buffer's process and its overlays (neither exists here), and
+      ;; buffer's process (there are no processes), and
       ;; `kill-buffer-query-functions'' `buffer-offer-save' branch (the
       ;; saving question is `files.el''s, which asks it its own way).
       ;;--------------------------------------------------------------
@@ -997,6 +1019,13 @@
                 ;; the dying buffer back. It is the window code's
                 ;; function, so it arrives through the seam above.
                 ((*replace-buffer-in-windows-function*) buffer)
+                ;; "delete_all_overlays (b); free_buffer_overlays (b);"
+                ;; (`buffer.c:2153'): every overlay the buffer had is
+                ;; taken out of the tree and left in no buffer, so the
+                ;; overlay objects a caller still holds answer nil for
+                ;; their buffer, their start and their end.
+                (delete-all-overlays buffer)
+                (set!buffer-overlays-tree buffer #f)
                 (hashq-remove! buffer-slots-table buffer)
                 ;; Emacs sets the killed buffer's `name' to nil and keeps
                 ;; the old one in `last_name'. That nil *is* why
@@ -1022,28 +1051,43 @@
     ;; GNU Emacs's `buffer.c''s other half. An overlay is a *range of the
     ;; buffer* with properties on it, as against a text property, which is
     ;; on the characters: an overlay is an object you make, move and
-    ;; delete; its two ends are markers, so it follows the text as it is
-    ;; edited rather than being torn by it; and when several cover one
-    ;; character the one with the highest `priority' wins.
+    ;; delete; and when several cover one character the one with the
+    ;; highest `priority' wins.
     ;;
-    ;; The C keeps them in an interval tree per buffer, for the
-    ;; redisplay's sake. What is kept here is a plain list in order by
-    ;; start: the lookups are over a windowful of rows rather than a whole
-    ;; file, and the tree is an optimisation this tree's shape does not
-    ;; need yet.
+    ;; **Its two ends are an interval-tree node, as they are in Emacs
+    ;; 29.1 and later**, not a pair of markers. `struct Lisp_Overlay'
+    ;; (`lisp.h') holds `interval' - an `itree_node' whose BEGIN and END
+    ;; are the ends, and whose `front_advance' and `rear_advance' flags
+    ;; say which side text inserted at an end belongs to - and the
+    ;; buffer's `overlays' field is the tree those nodes live in
+    ;; (`buffer.h:718'). Text does not move them by walking them:
+    ;; `insdel.c' calls `adjust_overlays_for_insert'/`_delete', which are
+    ;; the tree's `itree_insert_gap'/`itree_delete_gap' - one offset on a
+    ;; subtree, O(log n).
+    ;;
+    ;; **What this replaced, and why it mattered.** The overlays used to
+    ;; be a plain list per buffer in order by start, with the two ends
+    ;; being markers. Every `make-overlay' was a linear insertion-sort,
+    ;; every `delete-overlay' another walk, and every `overlays-at' a
+    ;; walk of the whole list - and isearch's lazy highlight makes one
+    ;; overlay per match on *every* keystroke, so a screenful of matches
+    ;; was quadratic in both directions. That was the pre-29.1 Emacs
+    ;; model, which Emacs replaced for exactly this reason
+    ;; (`etc/NEWS.29': "speed up all the operations that involve
+    ;; overlays, especially when there are lots of them in a buffer").
     ;;
     ;; Positions are the *engine's*, one-based - what `build-marker' takes
     ;; and what `(schemacs editor textprop)' reads. `get-char-property' is
     ;; the seam the two meet at, and says so in its own comment.
     ;;
-    ;; Not ported: `before-string' and `after-string', the properties that
-    ;; put text on the screen which is not in the buffer (`xdisp.c''s
-    ;; `load_overlay_strings'); `evaporate'; `overlay-recenter'; the
-    ;; modification hooks; and the `window' property, which limits an
-    ;; overlay to one window.
+    ;; Not ported, each because the property it serves is not here:
+    ;; the modification hooks (`buffer.c''s `report_overlay_modification')
+    ;; and the `window' property, which limits an overlay to one window.
+    ;; `before-string'/`after-string' are not carried by `overlay_strings'
+    ;; either - `xdisp.scm' reads the two properties itself where it needs
+    ;; them - and there is no indirect-buffer branch, there being no
+    ;; indirect buffers.
     ;;------------------------------------------------------------------
-    (define buffer-overlays-table (make-weak-key-hash-table))
-    ;; ^ each buffer's overlays, as a list in order by start
     ;; `*inhibit-read-only*' is GNU Emacs's `inhibit-read-only'
     ;; (`buffer.c':5885), which is where Emacs defines it - but it is
     ;; *read* by `insdel.c', on every insertion and deletion, and that is
@@ -1067,54 +1111,80 @@
       ;; nothing current is exactly that case.
       ;;--------------------------------------------------------------
       (guard (e (#t #f)) (current-buffer)))
+    (define (buffer-has-overlays? buffer)
+      ;; GNU Emacs's `buffer_has_overlays' (`buffer.h:1352'): "Non-zero
+      ;; if current buffer has overlays." The tree exists only once an
+      ;; overlay has been made (`add_buffer_overlay').
+      ;;--------------------------------------------------------------
+      (and buffer (not (itree-empty-p (buffer-overlays-tree buffer)))))
     (define (buffer-overlays buffer)
+      ;; Every overlay of BUFFER, in ascending order by start - this
+      ;; tree's helper, which the redisplay asks before it takes its
+      ;; no-properties shortcut. GNU Emacs's `overlay-lists' below is the
+      ;; Lisp door onto the same information.
+      ;;
       ;; A buffer with no overlays has none, and *no buffer at all* has
       ;; none either - the redisplay asks this for a position in a buffer
       ;; there may not be one of, which is what a test that draws a line
       ;; with no current buffer does.
       ;;--------------------------------------------------------------
-      (if buffer
-          (hashq-ref buffer-overlays-table buffer '())
-          '()))
-    (define (set!buffer-overlays! buffer overlays)
-      (hashq-set! buffer-overlays-table buffer overlays))
+      (if (not (buffer-has-overlays? buffer))
+          '()
+          (let ((iter (itree-iterator-start
+                       (make<itree-iterator> #f 0 0 0 'ascending)
+                       (buffer-overlays-tree buffer)
+                       *ptrdiff-min* *ptrdiff-max* 'ascending)))
+            (let loop ((node (itree-iterator-next iter)) (acc '()))
+              (if node
+                  (loop (itree-iterator-next iter)
+                        (cons (itree-node-data node) acc))
+                  (reverse acc))))))
     (define-record-type <overlay-type>
-      (make<overlay> buffer start end plist)
+      (make<overlay> buffer interval plist)
       overlayp
-      (buffer overlay-buffer %set-overlay-buffer!)
-      (start  overlay-start-marker)
-      (end    overlay-end-marker)
-      (plist  overlay-properties set!overlay-properties!))
-    (define (%make-overlay-boundary buffer position advance)
-      ;; One end of an overlay: a marker at POSITION in BUFFER whose
-      ;; insertion type is ADVANCE - so that text inserted exactly at the
-      ;; end is inside the overlay for a rear advance and outside it for a
-      ;; front one, which is what Front-Advance and Rear-Advance mean.
+      (buffer   overlay-buffer     %set-overlay-buffer!)
+      ;; ^ `struct Lisp_Overlay''s `buffer', which is what says whether
+      ;; the overlay is in a buffer at all: `OVERLAY_BUFFER' is nil for a
+      ;; deleted one.
+      (interval overlay-interval   %set-overlay-interval!)
+      ;; ^ `struct Lisp_Overlay''s `interval': the `itree_node' holding
+      ;; the begin, the end and the two advance flags. It is the node's
+      ;; `data' that points back here (`build-overlay').
+      (plist    overlay-properties set!overlay-properties!))
+    (define (build-overlay front-advance rear-advance plist)
+      ;; `build_overlay' (`alloc.c:3630'): "Return a new (deleted)
+      ;; overlay with PLIST."
       ;;
-      ;; **Two calls, where GNU Emacs 31 makes one.** Its `build_overlay`
-      ;; (`buffer.c:697`) puts the two flags on the overlay's interval-tree
-      ;; node and does not make markers at all - the tree holds the
-      ;; positions. This tree's overlays are still the older model, a pair
-      ;; of markers, so the flags are the markers' insertion types and
-      ;; setting them is a second call (`set-marker-insertion-type`,
-      ;; `marker.c:784`). `build-marker` is part of it either way: it
-      ;; takes the buffer, which `copy-marker` cannot.
+      ;; The node and the overlay point at each other: the node's `data'
+      ;; is the overlay (`itree_node_init (node, front_advance,
+      ;; rear_advance, overlay)') and the overlay's `interval' is the
+      ;; node - the same pair `struct Lisp_Overlay' has.
       ;;--------------------------------------------------------------
-      (let ((marker ((*build-marker-function*) buffer position)))
-        ((*set-marker-insertion-type-function*) marker advance)
-        marker))
+      (let* ((overlay (make<overlay> #f #f plist))
+             (node (make<itree-node> #f #f #f 0 0 0 0 0 #f #f #f #f)))
+        (itree-node-init node front-advance rear-advance overlay)
+        (%set-overlay-interval! overlay node)
+        overlay))
     (define (overlay-start overlay)
       ;; GNU Emacs's `overlay-start': "Return the start position of
-      ;; OVERLAY." A deleted overlay's markers point nowhere, and its
-      ;; start is nil, as the C's is.
+      ;; OVERLAY." That is `OVERLAY_START' (`buffer.h:1495'), which is
+      ;; `itree_node_begin (ov->buffer->overlays, ov->interval)' - the
+      ;; validating read, because the node may be dirty. A deleted
+      ;; overlay is in no buffer and its start is nil, as the C's is.
       ;;--------------------------------------------------------------
       (and (overlayp overlay)
-           ((*marker-position-function*) (overlay-start-marker overlay))))
+           (let ((buffer (overlay-buffer overlay)))
+             (and buffer
+                  (itree-node-begin-of (buffer-overlays-tree buffer)
+                                       (overlay-interval overlay))))))
     (define (overlay-end overlay)
       ;; GNU Emacs's `overlay-end': "Return the end position of OVERLAY."
       ;;--------------------------------------------------------------
       (and (overlayp overlay)
-           ((*marker-position-function*) (overlay-end-marker overlay))))
+           (let ((buffer (overlay-buffer overlay)))
+             (and buffer
+                  (itree-node-end-of (buffer-overlays-tree buffer)
+                                     (overlay-interval overlay))))))
     (define (overlay-get overlay prop)
       ;; GNU Emacs's `overlay-get': "Get the property of overlay OVERLAY
       ;; with property name PROP."
@@ -1180,9 +1250,20 @@
         ;; list is what the redisplay reads, so a changed plist is a
         ;; changed display even though the text and the range are
         ;; untouched.
-        (when (and changed (overlay-buffer overlay))
-          (modify-overlay (overlay-buffer overlay)
-                          (overlay-start overlay) (overlay-end overlay)))
+        (let ((buffer (overlay-buffer overlay)))
+          (when (and changed buffer)
+            (modify-overlay buffer
+                            (overlay-start overlay) (overlay-end overlay)))
+          ;; "if (EQ (prop, Qevaporate) && ! NILP (value) && (OVERLAY_START
+          ;; (overlay) == OVERLAY_END (overlay))) Fdelete_overlay (overlay);"
+          ;; (`buffer.c:4107') - an empty overlay that asks to evaporate
+          ;; has no text to sit on, so setting the property that says so
+          ;; is what removes it.
+          (when (and buffer
+                     (eq? prop 'evaporate)
+                     value
+                     (= (overlay-start overlay) (overlay-end overlay)))
+            (delete-overlay overlay)))
         value))
     (define (overlay-priority overlay)
       ;; The C's `make_sortvec_item' (buffer.c:3304): the `priority'
@@ -1194,187 +1275,429 @@
               ((integer? p) p)
               ((pair? p) (if (integer? (car p)) (car p) 0))
               (else 0))))
-    (define (add-buffer-overlay! buffer overlay)
-      ;; Put OVERLAY into BUFFER's list, in order by start.
+    (define (add-buffer-overlay! buffer overlay begin end)
+      ;; `add_buffer_overlay' (`buffer.c:684'): "if (! b->overlays)
+      ;; b->overlays = itree_create (); ov->buffer = b;
+      ;; itree_insert (b->overlays, ov->interval, begin, end);"
+      ;;
+      ;; The tree is made on the first overlay, as the C makes it.
       ;;--------------------------------------------------------------
-      (let loop ((l (buffer-overlays buffer)) (acc '()))
-        (cond ((null? l)
-               (set!buffer-overlays! buffer (reverse (cons overlay acc))))
-              ((< (overlay-start overlay) (overlay-start (car l)))
-               (set!buffer-overlays!
-                buffer (append (reverse acc) (cons overlay l))))
-              (else (loop (cdr l) (cons (car l) acc))))))
+      (unless (buffer-overlays-tree buffer)
+        (set!buffer-overlays-tree buffer (itree-create)))
+      (%set-overlay-buffer! overlay buffer)
+      (itree-insert (buffer-overlays-tree buffer)
+                    (overlay-interval overlay) begin end))
+
+    (define (remove-buffer-overlay buffer overlay)
+      ;; `remove_buffer_overlay' (`buffer.c:967'): "itree_remove
+      ;; (ov->buffer->overlays, ov->interval); ov->buffer = NULL;".
+      ;;--------------------------------------------------------------
+      (itree-remove (buffer-overlays-tree buffer) (overlay-interval overlay))
+      (%set-overlay-buffer! overlay #f))
+
+    (define (drop-overlay overlay)
+      ;; `drop_overlay' (`buffer.c:979'): "Mark OV as no longer associated
+      ;; with its buffer." "if (! ov->buffer) return; if (!NILP
+      ;; (ov->plist)) modify_overlay (ov->buffer, overlay_start (ov),
+      ;; overlay_end (ov)); remove_buffer_overlay (ov->buffer, ov);"
+      ;;--------------------------------------------------------------
+      (let ((buffer (overlay-buffer overlay)))
+        (when buffer
+          (when (pair? (overlay-properties overlay))
+            (modify-overlay buffer (overlay-start overlay) (overlay-end overlay)))
+          (remove-buffer-overlay buffer overlay))))
+
+    (define (delete-all-overlays buffer)
+      ;; `delete_all_overlays' (`buffer.c:992'): "Delete all overlays of B
+      ;; and reset its overlay tree."
+      ;;
+      ;; "The general rule is that the tree cannot be modified from
+      ;; within ITREE_FOREACH, but here we bend this rule a little
+      ;; because we know that the POST_ORDER iterator will not need to
+      ;; look at `node` again."
+      ;;--------------------------------------------------------------
+      (let ((tree (buffer-overlays-tree buffer)))
+        (when tree
+          (when (not (itree-empty-p tree))
+            (let ((iter (itree-iterator-start
+                         (make<itree-iterator> #f 0 0 0 'post-order)
+                         tree *ptrdiff-min* *ptrdiff-max* 'post-order)))
+              (let loop ((node (itree-iterator-next iter)))
+                (when node
+                  (modify-overlay buffer
+                                  (itree-node-begin node)
+                                  (itree-node-end node))
+                  (%set-overlay-buffer! (itree-node-data node) #f)
+                  (set!itree-node-parent node #f)
+                  (set!itree-node-left node #f)
+                  (set!itree-node-right node #f)
+                  (loop (itree-iterator-next iter))))))
+          (itree-clear tree))))
+
     (define (make-overlay beg end . rest)
-      ;; GNU Emacs's `make-overlay' (buffer.c:3635): "Create a new overlay
-      ;; with range BEG to END in BUFFER and return it. If omitted, BUFFER
-      ;; defaults to the current buffer."
+      ;; GNU Emacs's `make-overlay' (`buffer.c:3647'): "Create a new
+      ;; overlay with range BEG to END in BUFFER and return it. If
+      ;; omitted, BUFFER defaults to the current buffer."
       ;;
       ;; "The fourth arg FRONT-ADVANCE, if non-nil, makes the marker for
       ;; the front of the overlay advance when text is inserted there
       ;; (which means the text *is not* included in the overlay). The
       ;; fifth arg REAR-ADVANCE ... (which means the text *is*
-      ;; included)." Those are the markers' insertion types here, which
-      ;; is what the C's interval-tree node keeps for the same purpose.
+      ;; included)." Those are the node's two flags.
+      ;;
+      ;; **The range is clipped to the buffer**, as the C clips it:
+      ;; "obeg = clip_to_bounds (BUF_BEG (b), XFIXNUM (beg), BUF_Z (b));
+      ;; oend = clip_to_bounds (obeg, XFIXNUM (end), BUF_Z (b));". The
+      ;; old version kept whatever was passed, so `(make-overlay 0 5)'
+      ;; on a buffer whose first position is 1 made an overlay that began
+      ;; outside the text - a departure Emacs does not have.
+      ;;
+      ;; Not carried: a MARKER as BEG or END ("Marker points into wrong
+      ;; buffer"). Every caller here passes an integer; the coercion is
+      ;; the `CHECK_FIXNUM_COERCE_MARKER' pair above the clip.
       ;;--------------------------------------------------------------
       (let* ((buffer (if (pair? rest) (or (car rest) (current-buffer))
                          (current-buffer)))
              (front-advance (and (pair? rest) (pair? (cdr rest)) (cadr rest)))
              (rear-advance (and (pair? rest) (pair? (cdr rest))
-                                (pair? (cddr rest)) (caddr rest)))
-             ;; "if BEG is greater than END, swap them"
-             (b (min beg end))
-             (e (max beg end))
-             (overlay (make<overlay> buffer
-                                    (%make-overlay-boundary buffer b front-advance)
-                                    (%make-overlay-boundary buffer e rear-advance)
-                                    '())))
-        (add-buffer-overlay! buffer overlay)
-        overlay))
+                                (pair? (cddr rest)) (caddr rest))))
+        ;; "if (! BUFFER_LIVE_P (b)) error ("Attempt to create overlay in
+        ;; a dead buffer");" - and `BUFFER_LIVE_P` (`buffer.h:1143`) is
+        ;; "the name is non-nil", not "it is in the buffer list".
+        (unless (buffer-name buffer)
+          (error "Attempt to create overlay in a dead buffer"))
+        ;; "if BEG is greater than END, swap them"
+        (let* ((b (min beg end))
+               (e (max beg end))
+               (obeg (min (max b (buffer-beg buffer)) (buffer-z buffer)))
+               (oend (min (max e obeg) (buffer-z buffer)))
+               (overlay (build-overlay front-advance rear-advance '())))
+          ;; "We don't need to redisplay the region covered by the
+          ;; overlay, because the overlay has no properties at the
+          ;; moment."
+          (add-buffer-overlay! buffer overlay obeg oend)
+          overlay)))
+
     (define (delete-overlay overlay)
-      ;; GNU Emacs's `delete-overlay' (buffer.c:3806): "Delete the overlay
-      ;; OVERLAY from its buffer." Its markers are detached, so it follows
-      ;; nothing from here on and `overlay-start' answers nil.
+      ;; GNU Emacs's `delete-overlay' (`buffer.c:3818'): "Delete the
+      ;; overlay OVERLAY from its buffer."
+      ;;
+      ;; `Fdelete_overlay' is `drop_overlay' plus the before/after-string
+      ;; redisplay note, which this tree has no display optimizations to
+      ;; turn off. A deleted overlay is in no buffer, so `overlay-start'
+      ;; answers nil from here on.
       ;;--------------------------------------------------------------
-      (let ((buffer (overlay-buffer overlay)))
-        (when buffer
-          ;; "if (!NILP (ov->plist)) modify_overlay (...)" - `drop_overlay`
-          ;; (`buffer.c:977'), which is `Fdelete_overlay`'s first act: an
-          ;; overlay with no properties was never drawn, so there is
-          ;; nothing to take off the screen.
-          (let ((start (overlay-start overlay))
-                (end (overlay-end overlay))
-                (plist (overlay-properties overlay)))
-            (set!buffer-overlays!
-             buffer
-             (let loop ((l (buffer-overlays buffer)))
-               (cond ((null? l) '())
-                     ((eq? (car l) overlay) (cdr l))
-                     (else (cons (car l) (loop (cdr l)))))))
-            ((*set-marker-function*) (overlay-start-marker overlay) #f)
-            ((*set-marker-function*) (overlay-end-marker overlay) #f)
-            (%set-overlay-buffer! overlay #f)
-            (when plist
-              (modify-overlay buffer start end)))))
+      (when (overlay-buffer overlay)
+        (drop-overlay overlay))
       #f)
+
     (define (move-overlay overlay beg end . rest)
-      ;; GNU Emacs's `move-overlay': "Move OVERLAY to span the region from
-      ;; BEG to END." An overlay moved to another buffer is taken out of
-      ;; the one it was in and put into the other, which is what the C
-      ;; does for the same reason: the two ends are markers, and a marker
-      ;; belongs to one buffer.
+      ;; GNU Emacs's `move-overlay' (`buffer.c:3717'): "Move OVERLAY to
+      ;; span the region from BEG to END. If BUFFER is omitted, leave
+      ;; OVERLAY in the same buffer it inhabits now. If BUFFER is
+      ;; omitted, and OVERLAY is in no buffer, put it in the current
+      ;; buffer."
       ;;--------------------------------------------------------------
-      (let ((buffer (if (pair? rest) (or (car rest) (overlay-buffer overlay))
-                        (overlay-buffer overlay))))
-        ;; "If the overlay has changed buffers, do a thorough redisplay"
-        ;; (`buffer.c:3768'): where it was, and where it is going. The
-        ;; old range is read before the markers move.
-        (let ((old-buffer (overlay-buffer overlay))
-              (o-beg (overlay-start overlay))
-              (o-end (overlay-end overlay))
-              (n-beg (min beg end))
-              (n-end (max beg end)))
-          (unless (eq? buffer (overlay-buffer overlay))
-            (delete-overlay overlay)
-            (%set-overlay-buffer! overlay buffer))
-          ((*set-marker-function*) (overlay-start-marker overlay) (min beg end) buffer)
-          ((*set-marker-function*) (overlay-end-marker overlay) (max beg end) buffer)
-          ;; the list is kept in order by start, and this may have moved it
-          (when (overlay-buffer overlay)
-            (let ((ovs (let loop ((l (buffer-overlays buffer)))
-                         (cond ((null? l) '())
-                               ((eq? (car l) overlay) (loop (cdr l)))
-                               (else (cons (car l) (loop (cdr l))))))))
-              (set!buffer-overlays! buffer ovs)
-              (add-buffer-overlay! buffer overlay)))
-          ;; The C's redisplay rule (`buffer.c:3767'): a propertyless
-          ;; overlay is not drawn, so nothing has to be repainted; one that
-          ;; changed buffer leaves two ranges to repaint; and otherwise it
-          ;; is the range the overlay has *left*, or newly enclosed.
+      (let* ((buffer (if (pair? rest) (or (car rest) (overlay-buffer overlay))
+                         (overlay-buffer overlay)))
+             (buffer (or buffer (current-buffer))))
+        (unless (buffer-name buffer)
+          (error "Attempt to move overlay to a dead buffer"))
+        ;; "if BEG is greater than END, swap them", then clip both ends:
+        ;; "n_beg = clip_to_bounds (BUF_BEG (b), XFIXNUM (beg), BUF_Z
+        ;; (b)); n_end = clip_to_bounds (n_beg, XFIXNUM (end), BUF_Z
+        ;; (b));".
+        (let* ((b (min beg end))
+               (e (max beg end))
+               (n-beg (min (max b (buffer-beg buffer)) (buffer-z buffer)))
+               (n-end (min (max e n-beg) (buffer-z buffer)))
+               (old-buffer (overlay-buffer overlay))
+               (o-beg (and old-buffer (overlay-start overlay)))
+               (o-end (and old-buffer (overlay-end overlay))))
+          (if (not (eq? buffer old-buffer))
+              (begin
+                (when old-buffer
+                  (remove-buffer-overlay old-buffer overlay))
+                (add-buffer-overlay! buffer overlay n-beg n-end))
+              (itree-node-set-region (buffer-overlays-tree buffer)
+                                     (overlay-interval overlay)
+                                     n-beg n-end))
+          ;; "If the overlay has changed buffers, do a thorough
+          ;; redisplay" (`buffer.c:3779'): where it was, and where it is
+          ;; going. Otherwise it is the range the overlay has just left,
+          ;; or just enclosed.
           (let ((plist (overlay-properties overlay)))
             (cond
-             ((null? plist) #f)
+             ((null? plist) #f) ; no props, so it does not affect display
              ((not (eq? buffer old-buffer))
               (when old-buffer (modify-overlay old-buffer o-beg o-end))
               (modify-overlay buffer n-beg n-end))
              ((= o-beg n-beg) (modify-overlay buffer o-end n-end))
              ((= o-end n-end) (modify-overlay buffer o-beg n-beg))
              (else (modify-overlay buffer
-                                   (min o-beg n-beg) (max o-end n-end)))))))
-      overlay)
+                                   (min o-beg n-beg) (max o-end n-end)))))
+          ;; "Delete the overlay if it is empty after clipping and has
+          ;; the evaporate property." The C's `drop_overlay' rather than
+          ;; `Fdelete_overlay', and for the reason its comment gives: the
+          ;; overlay is not consistently in its buffer at this point, and
+          ;; most of the work is done already.
+          (when (and (= n-beg n-end)
+                     (overlay-get overlay 'evaporate))
+            (drop-overlay overlay))
+          overlay)))
+    (define (overlays-in-1 buffer beg end empty trailing)
+      ;; `overlays_in' (`buffer.c:3111'): the walk both `overlays-at' and
+      ;; `overlays-in' are built on. Answers `(values OVERLAYS NEXT)',
+      ;; NEXT being "the next position after POS where an overlay
+      ;; starts" - the C's `*next_ptr', which `overlays-at' passes NULL
+      ;; for and this answers anyway.
+      ;;
+      ;; BUFFER is the C's `current_buffer'; it is a parameter here
+      ;; because the redisplay asks when there may be no current buffer
+      ;; (see `overlay-current-buffer').
+      ;;--------------------------------------------------------------
+      (let* ((z (buffer-z buffer))
+             (next z)
+             ;; "Extend the search range if overlays beginning at Z are
+             ;; wanted."
+             (search-end (if (and (>= end z) (or empty trailing))
+                             (+ z 1)
+                             z))
+             (result '()))
+        (when (buffer-has-overlays? buffer)
+          (let ((iter (itree-iterator-start
+                       (make<itree-iterator> #f 0 0 0 'ascending)
+                       (buffer-overlays-tree buffer)
+                       beg search-end 'ascending)))
+            (let loop ((node (itree-iterator-next iter)))
+              (when node
+                (let ((nbeg (itree-node-begin node))
+                      (nend (itree-node-end node)))
+                  (cond
+                   ((> nbeg end)
+                    ;; "next = min (next, node->begin); break;"
+                    (set! next (min next nbeg)))
+                   ((= nbeg end)
+                    (set! next nbeg)
+                    (cond
+                     ;; "if ((! empty || end < Z) && beg < end) break;"
+                     ((and (or (not empty) (< end z)) (< beg end)) #f)
+                     ;; "if (empty && node->begin != node->end) continue;"
+                     ((and empty (not (= nbeg nend)))
+                      (loop (itree-iterator-next iter)))
+                     ;; "if (! empty && node->begin == node->end) continue;"
+                     ((and (not empty) (= nbeg nend))
+                      (loop (itree-iterator-next iter)))
+                     (else
+                      (set! result (cons (itree-node-data node) result))
+                      (loop (itree-iterator-next iter)))))
+                   ((and (not empty) (= nbeg nend))
+                    (loop (itree-iterator-next iter)))
+                   (else
+                    (set! result (cons (itree-node-data node) result))
+                    (loop (itree-iterator-next iter)))))))))
+        (values (reverse result) (if next next z))))
+
     (define (overlays-at pos . rest)
-      ;; GNU Emacs's `overlays-at' (buffer.c:3898): "Return a list of the
-      ;; overlays that contain the character at POS. If SORTED is
-      ;; non-nil, then sort them by decreasing priority. Zero-length
-      ;; ... overlays that start and stop at POS are not included."
+      ;; GNU Emacs's `overlays-at' (`buffer.c:3910'): "Return a list of
+      ;; the overlays that contain the character at POS. If SORTED is
+      ;; non-nil, then sort them by decreasing priority.
+      ;;
+      ;; Zero-length (a.k.a. "empty") overlays that start and stop at POS
+      ;; are not included in the return value. Use `overlays-in' if empty
+      ;; overlays are of interest."
+      ;;
+      ;; `overlays_at' is `overlays_in (pos, pos + 1, extend, ...,
+      ;; false, true, next)'.
       ;;--------------------------------------------------------------
-      (let ((found (let loop ((l (buffer-overlays (overlay-current-buffer))) (acc '()))
-                     (cond ((null? l) (reverse acc))
-                           ((and (<= (overlay-start (car l)) pos)
-                                 (< pos (overlay-end (car l))))
-                            (loop (cdr l) (cons (car l) acc)))
-                           (else (loop (cdr l) acc))))))
-        (if (and (pair? rest) (car rest))
-            ;; "the list should be in decreasing order of priority ...
-            ;; because sort_overlays sorts in the increasing order"
-            (reverse (sort found (lambda (a b)
-                                   (< (overlay-priority a)
-                                      (overlay-priority b)))))
-            found)))
+      (let ((buffer (overlay-current-buffer)))
+        (if (not (buffer-has-overlays? buffer))
+            '()
+            (let ((found (call-with-values
+                             (lambda ()
+                               (overlays-in-1 buffer pos (+ pos 1) #f #t))
+                           (lambda (overlays next) overlays))))
+              (if (and (pair? rest) (car rest))
+                  ;; "the list should be in decreasing order of priority,
+                  ;; so we reverse the list, because sort_overlays sorts
+                  ;; in the increasing order of priority."
+                  (reverse (sort found
+                                 (lambda (a b)
+                                   (< (%compare-overlays (%sortvec-item a)
+                                                        (%sortvec-item b))
+                                      0))))
+                  found)))))
+
+    (define (%sortvec-item overlay)
+      ;; `make_sortvec_item' (`buffer.c:3315'): "This overlay is good and
+      ;; counts: put it into sortvec."
+      ;;
+      ;; The item is `(OVERLAY BEG END PRIORITY SPRIORITY)' - the C's
+      ;; `struct sortvec' without the window, there being no
+      ;; window-specific overlays here.
+      ;;--------------------------------------------------------------
+      (let ((tem (overlay-get overlay 'priority)))
+        (cond
+         ((not tem)
+          (list overlay (overlay-start overlay) (overlay-end overlay) 0 0))
+         ((integer? tem)
+          (list overlay (overlay-start overlay) (overlay-end overlay) tem 0))
+         ((pair? tem)
+          (list overlay (overlay-start overlay) (overlay-end overlay)
+                (if (integer? (car tem)) (car tem) 0)
+                (if (integer? (cdr tem)) (cdr tem) 0)))
+         (else
+          (list overlay (overlay-start overlay) (overlay-end overlay) 0 0)))))
+
+    (define (%compare-overlays s1 s2)
+      ;; `compare_overlays' (`buffer.c:3287'): "Return 1 if s1 should take
+      ;; precedence, -1 if v2 should take precedence, and 0 if they're
+      ;; equal." `sort_overlays' sorts in the increasing order of this.
+      ;;
+      ;; The C's last case breaks a tie by object address, to keep qsort
+      ;; from being non-deterministic (bug#6830). Guile's `sort' is
+      ;; stable, so equal items keep the order the tree handed them over
+      ;; and the answer is deterministic without an invented ordering.
+      ;;--------------------------------------------------------------
+      (let ((p1 (list-ref s1 3)) (p2 (list-ref s2 3))
+            (b1 (list-ref s1 1)) (b2 (list-ref s2 1))
+            (e1 (list-ref s1 2)) (e2 (list-ref s2 2))
+            (sp1 (list-ref s1 4)) (sp2 (list-ref s2 4)))
+        (cond
+         ((not (= p1 p2)) (if (< p1 p2) -1 1))
+         ((< b1 b2) (if (and (< e1 e2) (> sp1 sp2)) 1 -1))
+         ((> b1 b2) (if (and (> e1 e2) (< sp1 sp2)) -1 1))
+         ((not (= e1 e2)) (if (< e2 e1) -1 1))
+         ((not (= sp1 sp2)) (if (< sp1 sp2) -1 1))
+         (else 0))))
+
     (define (overlays-in beg end)
-      ;; GNU Emacs's `overlays-in' (buffer.c:3944): "Return a list of the
-      ;; overlays that overlap the region BEG ... END. Overlap means that
-      ;; at least one character between BEG and END is contained within
-      ;; the overlay." Empty overlays at a point in the range count too.
+      ;; GNU Emacs's `overlays-in' (`buffer.c:3956'): "Return a list of
+      ;; the overlays that overlap the region BEG ... END. ... Empty
+      ;; overlays do not contain any characters, so they are included in
+      ;; the result if they are located at BEG, between BEG and END, or
+      ;; at END provided END denotes the position at the end of the
+      ;; buffer."
+      ;;
+      ;; `overlays_in (beg, end, 1, ..., true, false, NULL)' - EXTEND is
+      ;; the C's vector-growth flag, which a list does not need.
       ;;--------------------------------------------------------------
-      (let loop ((l (buffer-overlays (overlay-current-buffer))) (acc '()))
-        (cond ((null? l) (reverse acc))
-              ((and (< (overlay-start (car l)) end)
-                    (< beg (overlay-end (car l))))
-               (loop (cdr l) (cons (car l) acc)))
-              (else (loop (cdr l) acc)))))
+      (let ((buffer (overlay-current-buffer)))
+        (if (not (buffer-has-overlays? buffer))
+            '()
+            (call-with-values
+                (lambda () (overlays-in-1 buffer beg end #t #f))
+              (lambda (overlays next) overlays)))))
+
     (define (next-overlay-change pos)
-      ;; GNU Emacs's `next-overlay-change' (buffer.c:3987): "Return the
-      ;; next position after POS where an overlay starts or ends. If there
-      ;; are no overlay boundaries from POS to (point-max), the value is
-      ;; (point-max)."
+      ;; GNU Emacs's `next_overlay_change' (`buffer.c:3181'): "Return the
+      ;; next position after POS where an overlay starts or ends."
       ;;--------------------------------------------------------------
       (let ((buffer (current-buffer)))
-        (let loop ((l (buffer-overlays buffer)) (best #f))
-          (cond ((null? l)
-                 (or best (buffer-z buffer)))
-                (else
-                 (let ((s (overlay-start (car l)))
-                       (e (overlay-end (car l))))
-                   (loop (cdr l)
-                         (fold-best best
-                                    (if (> s pos) s #f)
-                                    (if (> e pos) e #f)))))))))
-    (define (fold-best best . candidates)
-      ;; the smallest of BEST and the CANDIDATES that are numbers, #f for
-      ;; none - the "next" of `next-overlay-change'
-      ;;--------------------------------------------------------------
-      (let loop ((rest candidates) (best best))
-        (cond ((null? rest) best)
-              ((not (car rest)) (loop (cdr rest) best))
-              ((or (not best) (< (car rest) best)) (loop (cdr rest) (car rest)))
-              (else (loop (cdr rest) best)))))
+        (if (not (buffer-has-overlays? buffer))
+            (buffer-z buffer)
+            (let ((next (buffer-z buffer)))
+              (let ((iter (itree-iterator-start
+                           (make<itree-iterator> #f 0 0 0 'ascending)
+                           (buffer-overlays-tree buffer)
+                           pos next 'ascending)))
+                (let loop ((node (itree-iterator-next iter)))
+                  (when node
+                    (let ((nbeg (itree-node-begin node))
+                          (nend (itree-node-end node)))
+                      (cond
+                       ((> nbeg pos)
+                        ;; "If we reach this branch, node->begin must be
+                        ;; the least upper bound of pos, because the
+                        ;; search is limited to [pos,next)."
+                        (set! next nbeg))
+                       (else
+                        (when (and (< nbeg nend) (< nend next))
+                          (set! next nend)
+                          (itree-iterator-narrow iter pos next))
+                        (loop (itree-iterator-next iter))))))))
+              next))))
+
     (define (previous-overlay-change pos)
-      ;; GNU Emacs's `previous-overlay-change': "Return the previous
-      ;; position before POS where an overlay starts or ends. If there are
-      ;; no overlay boundaries from (point-min) to POS, the value is
-      ;; (point-min)."
+      ;; GNU Emacs's `previous_overlay_change' (`buffer.c:3207'): "Return
+      ;; the previous position before POS where an overlay starts or
+      ;; ends."
       ;;--------------------------------------------------------------
-      (let loop ((l (buffer-overlays (overlay-current-buffer))) (best #f))
-        (cond ((null? l) (or best 0))
-              (else
-               (let ((s (overlay-start (car l)))
-                     (e (overlay-end (car l))))
-                 (loop (cdr l)
-                       (let ((s (if (< s pos) s #f))
-                             (e (if (< e pos) e #f)))
-                         (cond ((not s) (or e best))
-                               ((not e) (or best s))
-                               (else (max s e (or best 0)))))))))))
+      (let ((buffer (current-buffer)))
+        (if (not (buffer-has-overlays? buffer))
+            (buffer-beg buffer)
+            (let ((prev (buffer-beg buffer)))
+              (let ((iter (itree-iterator-start
+                           (make<itree-iterator> #f 0 0 0 'descending)
+                           (buffer-overlays-tree buffer)
+                           prev pos 'descending)))
+                (let loop ((node (itree-iterator-next iter)))
+                  (when node
+                    (if (< (itree-node-end node) pos)
+                        (set! prev (itree-node-end node))
+                        (set! prev (max prev (itree-node-begin node))))
+                    (itree-iterator-narrow iter prev pos)
+                    (loop (itree-iterator-next iter)))))
+              prev))))
+
+    (define (overlay-lists)
+      ;; GNU Emacs's `overlay-lists' (`buffer.c:4033'): "Return a list
+      ;; giving all the overlays of the current buffer. For backward
+      ;; compatibility, the value is actually a list that holds another
+      ;; list; the overlays are in the inner list."
+      ;;
+      ;; The C iterates DESCENDING and conses, which leaves the inner
+      ;; list ascending; `buffer-overlays' is already that.
+      ;;--------------------------------------------------------------
+      (list (buffer-overlays (overlay-current-buffer))))
+
+    (define (overlay-recenter pos)
+      ;; GNU Emacs's `overlay-recenter' (`buffer.c:4051'): "Since Emacs
+      ;; 29.1, this function is a no-op, because the implementation of
+      ;; overlays changed and their lookup is now fast regardless of
+      ;; their position in the buffer."
+      ;;
+      ;; It stays because ported Lisp calls it - `simple.el:1431' and
+      ;; `subr.el:4514' still do, vestigially.
+      ;;--------------------------------------------------------------
+      #f)
+
+    (define (adjust-overlays-for-insert pos length before-markers)
+      ;; `adjust_overlays_for_insert' (`buffer.c:3576'): "itree_insert_gap
+      ;; (current_buffer->overlays, pos, length, before_markers)". The
+      ;; C's other branch handles indirect buffers; there are none here.
+      ;;--------------------------------------------------------------
+      (itree-insert-gap (buffer-overlays-tree (current-buffer))
+                        pos length before-markers))
+
+    (define (adjust-overlays-for-delete pos length)
+      ;; `adjust_overlays_for_delete' (`buffer.c:3622') and its
+      ;; `-in-buffer' half (`:3595'): contract the tree, then delete every
+      ;; empty overlay at POS whose `evaporate' property is set.
+      ;;
+      ;; "Ideally, the evaporate check would be done directly within
+      ;; `itree_delete_gap`, but that code isn't supposed to know about
+      ;; overlays, only about `itree_node`s, so it would break an
+      ;; abstraction boundary."
+      ;;--------------------------------------------------------------
+      (let ((buffer (current-buffer)))
+        (let ((tree (buffer-overlays-tree buffer)))
+          (itree-delete-gap tree pos length)
+          (when (and tree (not (itree-empty-p tree)))
+            (let ((hit-list '()))
+              (let ((iter (itree-iterator-start
+                           (make<itree-iterator> #f 0 0 0 'ascending)
+                           tree pos pos 'ascending)))
+                (let loop ((node (itree-iterator-next iter)))
+                  (when node
+                    (when (and (= (itree-node-end node) pos)
+                               (= (itree-node-begin node) pos)
+                               (overlay-get (itree-node-data node)
+                                            'evaporate))
+                      (set! hit-list
+                            (cons (itree-node-data node) hit-list)))
+                    (loop (itree-iterator-next iter)))))
+              (for-each delete-overlay hit-list))))))
     (define buffer-slots-table
       ;; The table of side slots. One table rather than a slot per fact,
       ;; so that a buffer-local variable can be any name a ported Elisp
@@ -1729,6 +2052,7 @@
        text  newline-cache  point
        textprops  undo
        save-modiff  modtime  modtime-size  cache-long-scans  read-only  mark  markers
+       overlays
        name  file-name
        )
       bufferp
@@ -1871,6 +2195,20 @@
       ;; It holds them weakly, so a marker that nothing else refers to
       ;; is collected and drops out of the chain by itself - see the
       ;; "Markers" section below for why.
+      (overlays   buffer-overlays-tree set!buffer-overlays-tree)
+      ;; ^ GNU Emacs's `struct buffer''s `overlays' field
+      ;; (`buffer.h:718') - "the interval tree containing this buffer's
+      ;; overlays". False until the first overlay is made, which is the
+      ;; C's `add_buffer_overlay': "if (! b->overlays) b->overlays =
+      ;; itree_create ();".
+      ;;
+      ;; **It is a field of the record now, and it used to be a list in
+      ;; a weak table beside the record.** The list was the pre-29.1
+      ;; shape Emacs used - a walk per lookup, and an insertion-sort per
+      ;; `make-overlay' - and it made isearch's lazy highlight quadratic
+      ;; in the number of matches on screen. `(schemacs editor itree)'
+      ;; is the structure that replaced it, and `buffer.h' keeps it on
+      ;; the buffer, so this record does too.
       (read-only  text-editor-read-only-flag set!text-editor-read-only-flag)
       ;; ^ Whether the buffer refuses to be changed, GNU Emacs's
       ;; `buffer-read-only'. The insert and delete procedures signal an
@@ -1936,10 +2274,12 @@
          ;; `(make_timespec (0, UNKNOWN_MODTIME_NSECS))' and -1. Long
          ;; scans are cached and the buffer is writable.
          1 (cons 0 -2) -1 #t #f
-         ;; The mark, pointing nowhere until it is set, and an empty
-         ;; marker chain.
+         ;; The mark, pointing nowhere until it is set, an empty
+         ;; marker chain, and no overlays - `b->overlays' is NULL until
+         ;; the first `make-overlay', as `allocate_buffer' leaves it.
          ((*make-marker-function*))
          (make-weak-key-hash-table)
+         #f
          ;; Named as `generate-new-buffer' names a buffer it makes, and
          ;; visiting no file.
          "Untitled" #f

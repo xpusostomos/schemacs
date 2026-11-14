@@ -43,6 +43,7 @@
     (except (schemacs editor xdisp)  *truncate-partial-width-windows* line-display-rows window-line-rows window-line-slices window-start window-truncates-lines? vertical-motion)
     (schemacs editor minibuffer)
     (schemacs editor pages)
+    (schemacs editor itree)
     (schemacs editor keyboard)
     (schemacs editor isearch)
     (schemacs editor disp-table)
@@ -386,6 +387,8 @@
     *prefix-cu*
     *prefix-digits*
     *prefix-negative*
+    *ptrdiff-max*
+    *ptrdiff-min*
     *query-replace-defaults*
     *query-replace-from-to-separator*
     *query-replace-history*
@@ -467,6 +470,9 @@
     <glyph-row>
     <glyph>
     <interval>
+    <itree-iterator>
+    <itree-node>
+    <itree-tree>
     <marker>
     <quit-condition>
     <test-display>
@@ -506,6 +512,8 @@
     adjust-markers-for-delete
     adjust-markers-for-insert
     adjust-markers-for-replace
+    adjust-overlays-for-delete
+    adjust-overlays-for-insert
     adjust-point
     all-completions
     allocate-buffer
@@ -821,6 +829,7 @@
     del-range-1
     del-range-2
     delay-mode-hooks
+    delete-all-overlays
     delete-all-space
     delete-and-extract-region
     delete-blank-lines
@@ -1349,6 +1358,43 @@
     item-property-name
     item-property-selected
     item-property-type
+    itree-check-tree
+    itree-clear
+    itree-contains
+    itree-create
+    itree-delete-gap
+    itree-destroy
+    itree-empty-p
+    itree-insert
+    itree-insert-gap
+    itree-iterator-narrow
+    itree-iterator-next
+    itree-iterator-start
+    itree-iterator?
+    itree-max-height
+    itree-node-begin
+    itree-node-begin-of
+    itree-node-data
+    itree-node-end
+    itree-node-end-of
+    itree-node-front-advance
+    itree-node-init
+    itree-node-left
+    itree-node-limit
+    itree-node-offset
+    itree-node-otick
+    itree-node-parent
+    itree-node-rear-advance
+    itree-node-red
+    itree-node-right
+    itree-node-set-region
+    itree-node?
+    itree-remove
+    itree-size
+    itree-tree-otick
+    itree-tree-root
+    itree-tree-size
+    itree-tree?
     just-one-space
     kbd
     key-binding
@@ -1465,6 +1511,9 @@
     make<frame>
     make<history>
     make<interval>
+    make<itree-iterator>
+    make<itree-node>
+    make<itree-tree>
     make<marker>
     make<minibuffer>
     make<window>
@@ -1630,9 +1679,11 @@
     overlay-buffer
     overlay-end
     overlay-get
+    overlay-lists
     overlay-priority
     overlay-properties
     overlay-put
+    overlay-recenter
     overlay-start
     overlay-strings-at
     overlayp
@@ -1895,6 +1946,15 @@
     set!interval-right
     set!interval-total-length
     set!interval-up
+    set!itree-node-begin
+    set!itree-node-end
+    set!itree-node-left
+    set!itree-node-limit
+    set!itree-node-offset
+    set!itree-node-otick
+    set!itree-node-parent
+    set!itree-node-red
+    set!itree-node-right
     set!major-mode
     set!mark-active
     set!mark-ring

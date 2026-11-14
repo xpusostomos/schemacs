@@ -175,6 +175,7 @@
         (schemacs editor mule-cmds)
         (schemacs editor pages)
         (schemacs editor paragraphs)
+        (schemacs editor itree)
         (schemacs editor region-cache)
         (schemacs editor replace)
         (schemacs editor rmc)

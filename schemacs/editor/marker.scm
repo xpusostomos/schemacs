@@ -3,8 +3,10 @@
   ;; follow the text. Insert or delete anywhere and a marker goes on
   ;; pointing at the same character, because its index is adjusted by the
   ;; change - which is what makes it different from a plain integer, and
-  ;; why the mark, a window's point and an overlay's bounds are markers
-  ;; while `region-beginning' answers an integer.
+  ;; why the mark and a window's point are markers while
+  ;; `region-beginning' answers an integer. An overlay's bounds are not:
+  ;; they live in the buffer's interval tree (`buffer.h:718'), as they
+  ;; have since Emacs 29.1.
   ;;
   ;; **Two of the functions are not marker.c's.** `make-marker' and
   ;; `build-marker' are `alloc.c`'s (`:3782', `:3801') - they are the

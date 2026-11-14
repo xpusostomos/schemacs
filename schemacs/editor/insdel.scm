@@ -52,10 +52,12 @@
   ;;     does around a change, which this tree does from the
   ;;     `*text-property-offset-function*` seam and from
   ;;     `after-change-functions`.
-  ;;   * `adjust_overlays_for_insert`/`_delete`, `buffer_has_overlays`,
-  ;;     `report_overlay_modification` (buffer.c) - overlays here are a
-  ;;     plain list of markers, so there is nothing to adjust and nothing
-  ;;     to report.
+  ;;   * `report_overlay_modification` (buffer.c) - the overlay
+  ;;     modification hooks, which this tree does not carry.
+  ;;     `adjust_overlays_for_insert`/`_delete` ARE called, at the foot of
+  ;;     the three marker functions below, because an overlay's ends are
+  ;;     now an interval tree's node and the marker walk does not move
+  ;;     them.
   ;;   * `bset_redisplay`, `bset_point_before_scroll` (xdisp.c);
   ;;     `update_compositions` (syntax.c); `enlarge_buffer_text` (alloc.c);
   ;;     `pdumper_object_p`, `internal_catch_all`, `run_hook`,
@@ -137,9 +139,8 @@
   ;; `count_combining_*`) which exist only because Emacs's buffer holds
   ;; bytes, `buffer_overflow`, the pdumper COW check, the tty text
   ;; conversion, `update_compositions` (syntax.c), `run_undoable_change`
-  ;; (undo.c), `adjust_overlays_for_insert`/`_delete` (overlays are
-  ;; markers here), and `record_marker_adjustments`, which is why undoing
-  ;; a deletion does not put the markers inside it back.
+  ;; (undo.c), and `record_marker_adjustments`, which is why undoing a
+  ;; deletion does not put the markers inside it back.
   ;;------------------------------------------------------------------
   (import
     (scheme base)
@@ -176,7 +177,12 @@
           ;; through the slot accessor; there is no seam to install and no
           ;; named accessor to ask keyboard.scm for.
           set-buffer-local-value!
-          %text-editor-incr-modiff!)
+          %text-editor-incr-modiff!
+          ;; `buffer.c`'s overlay adjustment, which `insdel.c` calls at
+          ;; the end of each of the three marker functions below - the
+          ;; tree's `itree_insert_gap'/`itree_delete_gap' under the C's
+          ;; names.
+          adjust-overlays-for-insert  adjust-overlays-for-delete)
     (only (schemacs editor marker)
           %for-each-marker %marker-charpos set!%marker-charpos
           marker-insertion-type)
@@ -400,7 +406,13 @@
        (lambda (marker)
          (let ((charpos (%marker-charpos marker)))
            (cond ((> charpos to) (set!%marker-charpos marker (- charpos (- to from))))
-                 ((> charpos from) (set!%marker-charpos marker from)))))))
+                 ((> charpos from) (set!%marker-charpos marker from))))))
+      ;; "adjust_overlays_for_delete (from, to - from);" - the C's last
+      ;; line, and the whole of the overlays' adjustment for a deletion:
+      ;; one `itree_delete_gap', not a walk. An overlay's ends are not
+      ;; markers (they have not been since Emacs 29.1), so the loop above
+      ;; did not move them.
+      (adjust-overlays-for-delete from (- to from)))
 
     (define (adjust-markers-for-insert from to before-markers)
       ;; GNU Emacs's `adjust_markers_for_insert` (`insdel.c:288`):
@@ -424,7 +436,12 @@
                          (or (marker-insertion-type marker) before-markers))
                     (set!%marker-charpos marker to))
                    ((> charpos from)
-                    (set!%marker-charpos marker (+ charpos nchars)))))))))
+                    (set!%marker-charpos marker (+ charpos nchars)))))))
+        ;; "adjust_overlays_for_insert (from, to - from, before_markers);"
+        ;; - the C's last line. The two advance flags are on the tree's
+        ;; nodes now, so this one call is what decides which side of an
+        ;; overlay text inserted at its end lands on.
+        (adjust-overlays-for-insert from nchars before-markers)))
 
     (define (adjust-markers-for-replace from old-chars new-chars)
       ;; GNU Emacs's `adjust_markers_for_replace` (`insdel.c:342`):
@@ -441,9 +458,10 @@
       ;; A pure insertion is delegated, as the C delegates it, so that
       ;; the loop below need not know about insertion types.
       ;;
-      ;; Not carried: `adjust_overlays_for_insert`/`_delete` at the end
-      ;; (`buffer.c`). Ours are markers, and the marker walk above has
-      ;; already moved them.
+      ;; **The overlays are adjusted *after* the markers and in the C's
+      ;; order** (`insdel.c:381'): the insert-gap comes first, at the
+      ;; *end* of the replaced text, and the delete-gap second, at its
+      ;; beginning. The two calls look reversed and are the C's.
       ;;--------------------------------------------------------------
       (if (= old-chars 0)
           (adjust-markers-for-insert from (+ from new-chars) #f)
@@ -462,7 +480,11 @@
                  (cond ((>= charpos prev-to)
                         (set!%marker-charpos marker (+ charpos diff)))
                        ((> charpos from)
-                        (set!%marker-charpos marker from)))))))))
+                        (set!%marker-charpos marker from))))))
+            ;; "adjust_overlays_for_insert (from + old_chars, new_chars,
+            ;; true); adjust_overlays_for_delete (from, old_chars);"
+            (adjust-overlays-for-insert (+ from old-chars) new-chars #t)
+            (adjust-overlays-for-delete from old-chars))))
 
     (define (adjust-point nchars)
       ;; GNU Emacs's `adjust_point` (`insdel.c:328'): "Move point for an

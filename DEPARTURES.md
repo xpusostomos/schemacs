@@ -1488,3 +1488,147 @@ leaves File for Edit (asserting File's items are *gone* from the composed
 screen), and C-g pops down without "Quit". Every other check has the bar
 off through its init file, because the bar is the frame's first row and
 most checks measure text from row 0.
+
+# The overlays are an interval tree, as Emacs 29.1 made them
+
+This is the fix for the `C-s` slowness, and it is Emacs's own fix rather
+than a new one: `src/itree.c` and `src/itree.h` are ported into
+`schemacs/editor/itree.scm`, and `buffer.c`'s overlay half is rewritten
+onto them.
+
+## What was wrong
+
+The overlays were a **plain list per buffer, in order by start**, with
+the two ends of an overlay being markers. `make-overlay` inserted into
+the list with a linear walk, `delete-overlay` removed with another,
+and `overlays-at` walked the whole list - and isearch's lazy highlight
+makes one overlay per match on *every* keystroke. The splash buffer is
+998 bytes and holds 270 `8`s, so each `C-s 8` was ~36,000 list
+rebuilds for the 270 insertions plus a walk of all 270 for every face
+run the redisplay drew.
+
+That is the model GNU Emacs used *before 29.1*. Emacs replaced it, and
+`etc/NEWS.29` says why in one line: "speed up all the operations that
+involve overlays, especially when there are lots of them in a buffer."
+The structure that replaced it is what is ported here.
+
+## Measured
+
+One keystroke's worth of work, with the 270 matches the splash buffer
+really has, on the compiled tree - the new path and a reconstruction of
+the old list algorithm (`HEAD`'s `add-buffer-overlay!` and
+`overlays-at`) in the same process, so both see the same clock:
+
+| | old list | interval tree |
+|---|---|---|
+| make 270 overlays (and give each its two properties) | 11-13 ms | **0.71-0.74 ms** |
+| `overlays-at` at each of the 270 positions | 22.7 ms | **0.27 ms** |
+| delete 270 overlays | another O(n) walk per overlay | **0.6-1.1 ms** |
+
+and the renderer's half: `render!` on the splash is ~1-2 ms whether
+there are 0, 100 or 270 overlays, where before each face run walked the
+whole list. So the keystroke cost went from tens of milliseconds, most
+of it in the overlay structure, to about 2 ms plus the draw.
+
+**The old numbers are a reconstruction, not a checkout.** The list
+functions were copied into the benchmark from `git show
+HEAD:schemacs/editor/buffer.scm`; the tree was not reverted to measure
+it, because the same algorithm is a dozen lines and identical either
+way.
+
+## What landed
+
+`itree.scm` is `itree.c` function for function, with the C's comments
+that state the algorithms kept beside them:
+
+| `src/itree.c` | here |
+|---|---|
+| `struct itree_node`, `struct itree_tree`, `struct itree_iterator` | the three records, same fields |
+| `itree_insert_node`, `itree_insert_fix`, the two rotations | same names, `-` for `_` |
+| `itree_remove`, `itree_remove_fix`, `itree_replace_child`, `itree_transplant` | same |
+| `itree_insert_gap`, `itree_delete_gap` | same, including the `saved` stack and the `before_markers` flag |
+| `itree_iterator_start/next/narrow`, `itree_iter_next_in_subtree` | same, with the four orders as symbols |
+| `check_subtree`, `check_tree` | `itree-check-tree`, exported for the tests - the C runs it only under `--enable-checking=overlays` |
+
+`buffer.scm` is `buffer.c`'s overlay section onto it: `<overlay-type>` is
+`struct Lisp_Overlay` (`buffer`, `interval`, `plist`), the `<buffer>`
+record gained the `overlays` field (`buffer.h:718`), and `make-overlay`,
+`move-overlay`, `delete-overlay`, `delete-all-overlays`,
+`overlays-at`, `overlays-in`, `next-overlay-change`,
+`previous-overlay-change`, `overlay-lists` and `overlay-recenter` are
+the C's. `insdel.scm` calls `adjust_overlays_for_insert` and
+`adjust_overlays_for_delete` at the end of its three marker functions,
+where `insdel.c` calls them.
+
+## Departures this fixed, not introduced
+
+- **`make-overlay` now clips to the buffer.** The old version kept
+  whatever was passed, so `(make-overlay 0 5)` on a buffer whose first
+  position is 1 made an overlay starting outside the text. Emacs:
+  `obeg = clip_to_bounds (BUF_BEG (b), XFIXNUM (beg), BUF_Z (b))`.
+  Three `buffer-tests` cases had encoded the old answer; they are
+  Emacs 31.1's answers now.
+- **`previous-overlay-change` starts at `BEGV`**, not 0.
+- **`overlays-in` includes empty overlays** as `overlays_in` says:
+  at BEG, between BEG and END, or at END when END is `point-max`.
+- **`evaporate` is implemented** in `overlay-put` and `move-overlay`,
+  which it was not at all.
+- **`overlay-lists` and `overlay-recenter` exist**; the latter is the
+  no-op Emacs 29.1 made it, kept because ported Lisp still calls it
+  (`simple.el:1431`, `subr.el:4514`).
+- **`overlay-put`'s ordering when the property is `evaporate`**: the C
+  checks after `modify_overlay`, and so does this.
+
+## Departures that remain, each named at its site
+
+- **The overlay modification hooks** (`buffer.c`'s
+  `report_overlay_modification`, the `modification-hooks`,
+  `insert-in-front-hooks` and `insert-behind-hooks` properties) are not
+  carried - they were not before either.
+- **The `window` property** is not carried, and `overlays-at`'s SORTED
+  argument does not filter by window; there are no window-specific
+  overlays here.
+- **A marker as BEG or END** to `make-overlay`/`move-overlay` is not
+  carried: every caller passes an integer.
+- **There are no indirect buffers**, so the C's indirection branch of
+  `adjust_overlays_for_insert`/`_delete` has no counterpart.
+- **`itree_stack_destroy`** is Guile's collector; the stack itself is
+  ported because `itree_insert_gap` indexes `saved->nodes[i]`.
+- **`eassert` is not carried** into the running code (Emacs compiles its
+  own out by default); `itree-check-tree` is where that class lives.
+
+## Tests
+
+- `schemacs/editor/itree-tests.scm` (new, 37): the C's
+  `test/manual/noverlay/itree-tests.c` cases - the insert rotations,
+  the eleven gap-insert and eight gap-delete cases with every
+  combination of the advance flags, `itree-node-set-region`, the four
+  iterator orders - plus a **randomised model test**: 400 operations of
+  insert/remove/insert-gap/delete-gap against an independent
+  list-of-intervals model, with `itree-check-tree` after every
+  operation. The model's gap rules are written out independently of
+  `itree.c`, so a shared misreading shows up as a mismatch.
+- `buffer-tests.scm` 28: the three cases that had encoded the
+  unclipped answers are Emacs 31.1's.
+- The pty battery covers what the Lisp-level tests cannot: isearch's
+  overlays, the region highlight, dired's `dired-remove-entry` (a
+  `delete-overlay` caller), the Buffer Menu's marks, and the whole
+  editor starting.
+
+## Found on the way: `buffer-live-p` is the name, not the list
+
+The C's `make-overlay` and `move-overlay` ask `BUFFER_LIVE_P (b)`
+(`buffer.h:1143`), which is `!NILP (BVAR (b, name))` - the buffer has a
+name. This tree's `buffer-live-p` instead answers "is it in
+`*buffer-list*`", and the two are not the same thing: a buffer made by
+`allocate-buffer` directly (as `buffer-tests` and the benchmark harness
+do) has a name and behaves like a live buffer, but is not in the list
+until `get-buffer-create` registers it.
+
+The two overlay functions now test the **name**, which is the C's rule,
+so they are right either way. `buffer-live-p` itself still tests the
+list, which is a departure from the Lisp function: Emacs's
+`Fbuffer_live_p` is the same `BUFFER_LIVE_P`. It is not fixed here
+because its callers are the kill/display paths (`kill-buffer`,
+`window.scm`'s buffer records, the Buffer Menu), and changing what
+"live" means under them wants its own pass and its own battery.
