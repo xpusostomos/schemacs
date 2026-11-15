@@ -7815,3 +7815,119 @@ cache held a compiled copy of that one library.
 
 This also explains an earlier phantom: the suites went green and red on
 the same tree with different cache states.
+
+# The syntax engine, and font-lock's syntactic pass (2026-11-15)
+
+Chris chose "engine only first": port the syntax machinery and the
+syntactic pass, with the faces, and wire it into what already has
+font-lock defaults - no programming modes yet. The engine is what the
+next pass (prog-mode, emacs-lisp-mode, scheme-mode, auto-mode-alist)
+stands on.
+
+## What landed
+
+- **`schemacs/editor/chartab.scm`** (NEW) - `src/chartab.c`, which is a
+  file of its own in Emacs 31. The four-level 64/16/32/128 tree over
+  characters 0..`MAX-CHAR`, with Emacs's `ascii` cache, the split of a
+  slot into a sub-table on a write, parent inheritance, defaults, extra
+  slots, `copy-char-table` and `optimize-char-table`. `chartab-tests`
+  (24) pins every case against Emacs's own answers.
+- **`schemacs/editor/syntax.scm`** - the whole of `syntax.c` this pass
+  needs, plus the `syntax.el` half, under one library because the two
+  Emacs files' names would collide here:
+  - the syntax descriptor (low 8 bits a class, high bits the comment
+    flags) and the standard syntax table (`init_syntax_once`,
+    character for character);
+  - `syntax-table-p`, `syntax-table`, `standard-syntax-table`,
+    `copy-syntax-table`, `set-syntax-table`, `char-syntax`,
+    `syntax-class-to-char`, `matching-paren`, `string-to-syntax`,
+    `modify-syntax-entry`;
+  - `scan_words`, and with it the **end of mg's `inword`**: the word
+    motions are `SYNTAX (c) == Sword` now, so `forward-word` in a
+    fundamental buffer stops at `_` as Emacs's does;
+  - `char_quoted`, `forw_comment`, `scan_sexps_forward` and
+    `parse-partial-sexp`, with the level stack, the two-character
+    comment constructs, fences and `commentstop` all as the C has them;
+  - `with-syntax-table`, `syntax-ppss` (with the cache and the
+    statistics vector), `syntax-ppss-flush-cache`,
+    `syntax-ppss-toplevel-pos`, `syntax-ppss-context`,
+    `syntax-propertize` (the function; the `syntax-propertize-rules`
+    macro is not carried).
+- **`schemacs/editor/font-lock.scm`** - the syntactic pass:
+  `font-lock-fontify-syntactically-region`, the default
+  `font-lock-default-fontify-syntactically` (the loop Emacs writes
+  around `parse-partial-sexp` with `commentstop` `syntax-table`),
+  `font-lock-keywords-only`, `font-lock-syntax-table`,
+  `font-lock-syntactic-face-function`, and
+  `font-lock-default-fontify-region` wrapping its whole body in
+  `with-syntax-table` and calling the syntactic pass before the
+  keywords, as `font-lock.el:1202-1230` does. The
+  `font-lock-*-face` deffaces were already in the file.
+- `loadup.scm`'s `%editor-libraries` and the generated `imports.scm`
+  carry `(schemacs editor chartab)`; `chartab-tests` and
+  `syntax-tests` are in `tools/run-suites.py`.
+
+## Verified against Emacs, not reasoned about
+
+Every expectation in `syntax-tests.scm` (51) is Emacs 31.1's own
+answer on the same buffer, measured with `emacs -Q --batch` first:
+`char-syntax` for letters, `_`, `-`, space, parens, quotes, backslash,
+newline, a control character and a multibyte character;
+`string-to-syntax` for `w`, `(]`, `"`, `<` and `. 12`; `matching-paren`;
+the word-motion positions (4, 8, 11, back 10); the full
+`parse-partial-sexp` state table for a buffer holding a string and, with
+`;`/newline installed as comment delimiters, for a comment and for a
+C-style `/* */`; the `commentstop` `syntax-table` stop positions; and
+the faces the syntactic pass leaves at every position of
+`a ; foo\nb "s" c` - which match Emacs's `get-text-property` answers one
+for one.
+
+## The two bugs that mattered, both Elisp/Scheme seams
+
+1. **`(or commentstop boundary-stop)` with the C's integer `commentstop`.**
+   Emacs's `if (commentstop || boundary_stop)` tests an int; in Scheme
+   **0 is true**, so every ordinary parse (commentstop 0) stopped dead at
+   the first comment starter and no comment was ever scanned. The
+   `'syntax-table` path worked by accident, which is why the first
+   probes passed. Test the number: `(not (= commentstop 0))`.
+2. **`nofence` was only set on the two entry paths.** The C sets it at
+   `startinstring:` every time; a string opened *during* a scan kept the
+   old value, so its closing quote was never recognised and the rest of
+   the buffer was "inside a string". `state->instring` and `nofence` are
+   one fact and are now set together.
+
+## A property of Emacs worth knowing, found by the tests
+
+**A buffer's syntax table starts as the standard table *object*.** A
+`modify-syntax-entry` with no table argument in such a buffer writes into
+the global standard table, and every buffer after it sees the change -
+Emacs's behaviour, not a bug (`reset_buffer_local_variables` installs the
+same object; modes always `make-syntax-table` first). Two test groups
+that each modified `;` interfered until each installed
+`(copy-syntax-table (standard-syntax-table))` first. The same fact means
+`syntax-tests.scm`'s groups must not assume a pristine standard table.
+
+## Not carried, and what each would take
+
+- `forward-comment`, `scan-lists`, `scan-sexps`, `back_comment`,
+  `find_defun_start` - the scanning half that `forward-sexp` and
+  `comment-dwim` use; the syntactic pass does not need them.
+- `skip-syntax-forward`/`-backward`.
+- `syntax-propertize-rules` (the macro) and `syntax-propertize`'s
+  `syntax-multiline` extension; a mode can supply its own
+  `syntax-propertize-function`.
+- The delimiter-face branch of the syntactic pass: it needs
+  `comment-start-skip`/`comment-end-skip`, which are newcomment.el's.
+- `word_boundary_p` answers false always (no `char-script-table`).
+- **The modes themselves** - `prog-mode`, `emacs-lisp-mode`,
+  `scheme-mode`, `auto-mode-alist`/`set-auto-mode`, and
+  `global-font-lock-mode`. Until they land, nothing but a mode that sets
+  `font-lock-defaults` by hand (dired, which sets keywords-only) uses the
+  new pass; `syntax-tests.scm` drives it directly.
+
+## Next
+
+The mode pass, bottom up: `prog-mode` (prog-mode.el), then
+`lisp-mode.el`/`elisp-mode.el` and `scheme.el`'s keyword tables, then
+`auto-mode-alist` with `set-auto-mode` so `C-x C-f x.scm` picks the mode
+and the colours appear. `c-mode` (cc-mode) remains its own project.

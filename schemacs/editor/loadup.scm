@@ -132,6 +132,7 @@
         (schemacs editor character)
         (schemacs editor characters)
         (schemacs editor charset)
+        (schemacs editor chartab)
         (schemacs editor cmds)
         (schemacs editor coding)
         (schemacs editor command)

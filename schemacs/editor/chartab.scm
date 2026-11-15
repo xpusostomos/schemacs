@@ -53,7 +53,7 @@
 
   (export
    ;; the C's DEFUNs
-   make-char-table char-table-p char-table-subtype
+   make-char-table char-table-p char-table-subtype char-table?
    char-table-parent set-char-table-parent
    char-table-extra-slot set-char-table-extra-slot
    char-table-range set-char-table-range
@@ -61,6 +61,7 @@
    ;; the C's internal functions, which `syntax.sld' is the caller of
    char-table-ref char-table-set
    char-table-ref-and-range char-table-set-range
+   copy-char-table
    ;; the tree's own names, for code that has to walk it
    char-table-default
    ;; constants
@@ -468,6 +469,52 @@
           (char-table-set-range char-table from to value)))
        (else (error "Invalid RANGE argument to `set-char-table-range'")))
       value)
+
+    (define (copy-sub-char-table table)
+      ;; `copy_sub_char_table' (`chartab.c:166').
+      ;;--------------------------------------------------------------
+      (let ((copy (make-sub-char-table
+                   (sub-char-table-depth table)
+                   (sub-char-table-min-char table)
+                   #f)))
+        (let loop ((i 0))
+          (when (< i (vector-length (sub-char-table-contents table)))
+            (let ((val (vector-ref (sub-char-table-contents table) i)))
+              (vector-set! (sub-char-table-contents copy) i
+                           (if (sub-char-table? val)
+                               (copy-sub-char-table val)
+                               val)))
+            (loop (+ i 1))))
+        copy))
+
+    (define (copy-char-table table)
+      ;; `copy_char_table' (`chartab.c:186'): the default, parent and
+      ;; purpose are shared; the contents - sub-tables included - are
+      ;; copied.  The `ascii' cache is recomputed, as the C recomputes
+      ;; it with `set_char_table_ascii (copy, char_table_ascii (copy))'.
+      ;;--------------------------------------------------------------
+      (let ((copy (%make-char-table (%char-table-parent table)
+                                    (%char-table-purpose table)
+                                    #f
+                                    (%char-table-default table)
+                                    (make-vector 64 #f)
+                                    (let ((extras (%char-table-extras table)))
+                                      (let ((v (make-vector (vector-length extras) #f)))
+                                        (let loop ((i 0))
+                                          (when (< i (vector-length extras))
+                                            (vector-set! v i (vector-ref extras i))
+                                            (loop (+ i 1))))
+                                        v)))))
+        (let loop ((i 0))
+          (when (< i 64)
+            (let ((val (vector-ref (%char-table-contents table) i)))
+              (vector-set! (%char-table-contents copy) i
+                           (if (sub-char-table? val)
+                               (copy-sub-char-table val)
+                               val)))
+            (loop (+ i 1))))
+        (set!%char-table-ascii! copy (char-table-ascii copy))
+        copy))
 
     (define (optimize-sub-char-table table test)
       ;; `optimize_sub_char_table' (`chartab.c:643'): a slot whose whole

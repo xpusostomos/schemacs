@@ -85,6 +85,7 @@
     (schemacs editor cmds)
     (schemacs editor keymap)
     (schemacs editor theme)
+    (schemacs editor chartab)
     (schemacs editor data)
     (schemacs editor menu-bar)
     (except (schemacs editor simple)  backward-char beginning-of-line delete-char end-of-line forward-char self-insert-command self-insert-tab)
@@ -182,6 +183,8 @@
     *coding-system-table*
     *color-name-rgb-alist*
     *command-table*
+    *comment-end-can-be-escaped*
+    *comment-use-syntax-ppss*
     *completion-auto-help*
     *completion-auto-wrap*
     *completion-ignore-case*
@@ -264,18 +267,24 @@
     *file-name-handler-alist*
     *find-directory-functions*
     *find-file-run-dired*
+    *font-lock-comment-end-skip*
+    *font-lock-comment-start-skip*
     *font-lock-defaults*
     *font-lock-extra-managed-props*
     *font-lock-fontified*
     *font-lock-fontify-region-function*
+    *font-lock-fontify-syntactically-function*
     *font-lock-function*
     *font-lock-keywords*
     *font-lock-keywords-case-fold-search*
+    *font-lock-keywords-only*
     *font-lock-maximum-decoration*
     *font-lock-mode*
     *font-lock-multiline*
     *font-lock-set-defaults*
     *font-lock-support-mode*
+    *font-lock-syntactic-face-function*
+    *font-lock-syntax-table*
     *font-lock-unfontify-region-function*
     *frame-background-mode*
     *frame-background-mode-function*
@@ -386,11 +395,14 @@
     *mouse-scroll-delay*
     *mouse-scroll-min-lines*
     *next-selection-coding-system*
+    *open-paren-in-column-0-is-defun-start*
     *overriding-local-map-menu-flag*
     *overriding-terminal-local-map*
     *overwrite-mode-binary*
     *overwrite-mode-textual*
     *page-delimiter*
+    *parse-sexp-ignore-comments*
+    *parse-sexp-lookup-properties*
     *pending-coding-system*
     *pending-undo-list*
     *point-before-last-command-or-undo*
@@ -442,6 +454,12 @@
     *switch-to-prev-buffer-skip*
     *switch-to-prev-buffer-skip-regexp*
     *switch-to-visible-buffer*
+    *syntax-begin-function*
+    *syntax-ppss-max-span*
+    *syntax-ppss-table*
+    *syntax-propertize-chunk-size*
+    *syntax-propertize-extend-region-functions*
+    *syntax-propertize-function*
     *system-time-locale*
     *tab-width*
     *tabulated-list-entries*
@@ -476,6 +494,7 @@
     *visual-line-fringe-indicators*
     *window-scroll-function*
     *window-system*
+    *words-include-escapes*
     *x-pre-popup-menu-hook*
     *x-select-request-type*
     *yank-pop-change-selection*
@@ -664,6 +683,18 @@
     char-meta
     char-shift
     char-super
+    char-syntax
+    char-table-default
+    char-table-extra-slot
+    char-table-p
+    char-table-parent
+    char-table-range
+    char-table-ref
+    char-table-ref-and-range
+    char-table-set
+    char-table-set-range
+    char-table-subtype
+    char-table?
     char-to-byte-safe
     char-to-byte8
     char-width
@@ -759,6 +790,7 @@
     concat
     confirm-nonexistent-file-or-buffer
     constrain-to-field
+    copy-char-table
     copy-file
     copy-interval-parent
     copy-intervals
@@ -767,6 +799,7 @@
     copy-properties
     copy-region-as-kill
     copy-sequence
+    copy-syntax-table
     count-lines
     create-file-buffer
     create-root-interval
@@ -1145,6 +1178,7 @@
     font-lock-compile-keywords
     font-lock-default-fontify-buffer
     font-lock-default-fontify-region
+    font-lock-default-fontify-syntactically
     font-lock-default-function
     font-lock-default-unfontify-buffer
     font-lock-default-unfontify-region
@@ -1159,6 +1193,7 @@
     font-lock-fontify-buffer
     font-lock-fontify-keywords-region
     font-lock-fontify-region
+    font-lock-fontify-syntactically-region
     font-lock-initial-fontify
     font-lock-keywords
     font-lock-mode
@@ -1215,6 +1250,7 @@
     frame-width
     frame-windows
     frame?
+    funcall-interactively
     function-key-name
     function-key-offset
     function-key-translate
@@ -1517,6 +1553,7 @@
     ls-lisp-version-lessp
     major-mode
     make-buffer-string
+    make-char-table
     make-coding-system
     make-ctrl-char
     make-directory
@@ -1566,8 +1603,10 @@
     match-end
     match-string
     match-substitute-replacement
+    matching-paren
     matrix-diff-rows
     matrix-mark-current!
+    max-char
     maybe-quit
     menu-bar-define-mouse-key
     menu-bar-edit-menu
@@ -1655,6 +1694,7 @@
     mode-line-string
     mode-name
     modify-frame-parameters
+    modify-syntax-entry
     modify-text
     modify-text-properties
     mouse--drag-set-mark-and-point
@@ -1706,6 +1746,7 @@
     open-line
     open-line-command
     open-user-environment!
+    optimize-char-table
     other-buffer
     other-frame
     other-window
@@ -1730,6 +1771,7 @@
     parse-colon-path
     parse-menu-item
     parse-modifiers-uncached
+    parse-partial-sexp
     parse-single-submenu
     parse-solitary-modifier
     pending-uarg
@@ -1891,6 +1933,10 @@
     save-some-buffers
     scan-for-column
     scan-newline-from-point
+    scharquote
+    sclose
+    scomment
+    scomment-fence
     screen-size
     scroll-down-command
     scroll-left
@@ -1913,9 +1959,11 @@
     self-insert-command
     self-insert-layer
     self-insert-tab
+    sendcomment
     seq-filter
     seq-find
     seq-remove
+    sescape
     set!%buffer-modtime
     set!%buffer-modtime-size
     set!%mark-marker
@@ -2056,6 +2104,9 @@
     set-buffer-file-coding-system
     set-buffer-local-value!
     set-buffer-modified-p
+    set-char-table-extra-slot
+    set-char-table-parent
+    set-char-table-range
     set-face-attribute
     set-file-modes
     set-fill-column
@@ -2102,6 +2153,7 @@
     set-object-intervals
     set-point
     set-selection!
+    set-syntax-table
     set-terminal-cursor!
     set-terminal-modes!
     set-text-properties
@@ -2130,9 +2182,13 @@
     single-key-description
     single-keymap-panes
     single-menu-item
+    sinherit
     sit-for
     skip-chars-backward
     skip-chars-forward
+    smath
+    smax
+    sopen
     special-mode
     special-mode-hook
     special-mode-map
@@ -2145,6 +2201,12 @@
     split-window
     split-window-below
     split-window-right
+    spunct
+    squote
+    sstring
+    sstring-fence
+    ssymbol
+    standard-syntax-table
     status-string
     store-in-alist
     store-in-keymap
@@ -2158,6 +2220,7 @@
     string-prefix-p
     string-replace
     string-search-forward
+    string-to-syntax
     string-trim
     string-trim-left
     string-trim-right
@@ -2169,11 +2232,24 @@
     substitute-key-definition-key
     suspend-display!
     suspend-frame
+    swhitespace
     switch-to-buffer
     switch-to-buffer-other-window
     switch-to-next-buffer
     switch-to-prev-buffer
+    sword
     sync-frame-size!
+    syntax-class-to-char
+    syntax-ppss
+    syntax-ppss-context
+    syntax-ppss-depth
+    syntax-ppss-flush-cache
+    syntax-ppss-toplevel-pos
+    syntax-propertize
+    syntax-propertize-multiline
+    syntax-propertize-wholelines
+    syntax-table
+    syntax-table-p
     system-type
     tabulated-list-delete-entry
     tabulated-list-entries
@@ -2393,6 +2469,7 @@
     with-selected-frame
     with-selected-window
     with-silent-modifications
+    with-syntax-table
     with-temp-buffer
     with-temp-file
     word-char?

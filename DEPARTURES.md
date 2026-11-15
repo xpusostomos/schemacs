@@ -2609,3 +2609,48 @@ the defining library (`(set! x x)`), which marks the binding mutable.
 **The rest of the tree has not been swept**, and that is worth doing: the
 symptom is a setting that works in a fresh checkout and does nothing
 after `guile -c "(compile-file ...)"`.
+
+# The syntax engine and the syntactic pass (2026-11-15)
+
+Where `(schemacs editor syntax)` and font-lock's syntactic half depart
+from `syntax.c`/`syntax.el`/`font-lock.el`, and whether each should be
+fixed.
+
+1. **`char-syntax` answers a character, not the integer Emacs prints**
+   (119 for `a`). This is this tree's spelling of a character, and
+   `matching-paren` answers an integer like the C's. Consistent with
+   `char-after`'s answer everywhere else. *No fix needed; a caller
+   comparing with `char=?` is the tree's spelling of `eq ?w`.*
+2. **Byte positions are gone.** The scanner has no `from_byte`
+   parameters. *By design - the store has no bytes.*
+3. **The `syntax-table` property is read with `get-text-property`, with a
+   one-interval cache**, not `gl_state`'s interval walk. Same answers;
+   `%prop-at` rebuilds the cache at each `SETUP_SYNTAX_TABLE`, as the C
+   invalidates its own. *Keep.*
+4. **`word_boundary_p` always false** - it compares
+   `char-script-table`, which this tree has not got, so two characters
+   of different scripts that Emacs splits into two words are one word
+   here. *Fix when a Unicode script table exists; nothing here produces
+   the case yet.*
+5. **`back_comment`, `find_defun_start`, `forward-comment`,
+   `scan-lists`, `scan-sexps` are not ported.** They are the half that
+   `forward-sexp` and `comment-dwim` stand on; the syntactic pass does
+   not call them. *Port with the sexp commands.*
+6. **`syntax-propertize-rules` (the macro) is not carried**, and
+   `syntax-propertize` calls the mode's function over the extended
+   region without the `syntax-multiline` walk. *Port with the first mode
+   that needs it (lisp-mode's `#;` and `#|` will).*
+7. **The delimiter-face branch is skipped**: `font-lock-comment-start-skip`
+   and `-end-skip` are false and `comment-start-skip` is not ported
+   (newcomment.el), so a comment gets one face from its first character
+   and `font-lock-comment-delimiter-face` is unused. *Port with
+   newcomment.el.*
+8. **`syntax-ppss`'s near-position heuristic uses a fixed 2000-character
+   span** where the C reads its statistics ratio; the stats vector is
+   kept but not consulted. Performance only, and the cache is the same.
+   *Keep unless a profile says otherwise.*
+9. **`font-lock-syntactic-keywords`** (the pre-syntax-propertize
+   mechanism) is still not carried; the syntactic pass runs
+   `syntax-propertize` and `syntax-table` properties only.
+10. **`font-lock-defaults`' SYNTAX-ALIST** (fourth element) is not read.
+    No mode in this tree sets it; *port with the first that does.*

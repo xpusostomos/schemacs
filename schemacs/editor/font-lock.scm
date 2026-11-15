@@ -94,6 +94,11 @@
     
     ;; the markers, from marker.c's own library
     (only (schemacs editor marker) marker-position set-marker)
+    ;; the syntactic half: `parse-partial-sexp' and `syntax-ppss' are
+    ;; `syntax.c' and `syntax.el' and live in `(schemacs editor syntax)'
+    (only (schemacs editor syntax)
+          parse-partial-sexp syntax-ppss syntax-table syntax-propertize
+          with-syntax-table)
     ;; the faces above are `defface''d here, as font-lock.el deffaces them
     (only (schemacs editor faces) defface))
 
@@ -103,7 +108,13 @@
    *font-lock-fontify-region-function*
    *font-lock-fontified*
    *font-lock-keywords*
+   *font-lock-keywords-only*
    *font-lock-keywords-case-fold-search*
+   *font-lock-syntax-table*
+   *font-lock-syntactic-face-function*
+   *font-lock-fontify-syntactically-function*
+   *font-lock-comment-start-skip*
+   *font-lock-comment-end-skip*
    *font-lock-maximum-decoration*
    *font-lock-mode*
    *font-lock-multiline*
@@ -130,6 +141,8 @@
    font-lock-fontify-anchored-keywords
    font-lock-fontify-buffer
    font-lock-fontify-keywords-region
+   font-lock-fontify-syntactically-region
+   font-lock-default-fontify-syntactically
    font-lock-fontified
    font-lock-fontify-region
    font-lock-initial-fontify
@@ -371,6 +384,40 @@
     (define *font-lock-keywords-case-fold-search* (make-parameter #f))
     ;; ^ GNU Emacs's `font-lock-keywords-case-fold-search': "Non-nil
     ;; means the `font-lock-keywords' are case-insensitive."
+
+    (define *font-lock-keywords-only* (make-parameter #f))
+    ;; ^ GNU Emacs's `font-lock-keywords-only', the second element of
+    ;; `font-lock-defaults': "Non-nil means Font Lock should not fontify
+    ;; comments or strings." Dired sets it, because its keywords do the
+    ;; whole job and the syntactic pass would paint its listing.
+
+    (define *font-lock-syntax-table* (make-parameter #f))
+    ;; ^ GNU Emacs's `font-lock-syntax-table', the fifth element of
+    ;; `font-lock-defaults': "Non-nil means use this syntax table for
+    ;; fontifying."  When false the buffer's own table is used.
+
+    (define *font-lock-syntactic-face-function*
+      (make-parameter (lambda (state)
+                        (if (list-ref state 3)
+                            'font-lock-string-face
+                            'font-lock-comment-face))))
+    ;; ^ GNU Emacs's `font-lock-syntactic-face-function': "Function to
+    ;; determine which face to use when fontifying syntactically."
+
+    (define *font-lock-fontify-syntactically-function* (make-parameter #f))
+    ;; ^ GNU Emacs's `font-lock-fontify-syntactically-function', filled
+    ;; by `font-lock-set-defaults' with
+    ;; `font-lock-default-fontify-syntactically'.
+
+    (define *font-lock-comment-start-skip* (make-parameter #f))
+    (define *font-lock-comment-end-skip* (make-parameter #f))
+    ;; ^ GNU Emacs's `font-lock-comment-start-skip' and `-end-skip'. The
+    ;; delimiter-face branch of the syntactic pass reads them, and
+    ;; `comment-start-skip' with them; **newcomment.el is not ported**,
+    ;; so both are false and that branch is skipped - a comment gets
+    ;; `font-lock-comment-face' from its first character, and
+    ;; `font-lock-comment-delimiter-face' is not used until a mode sets
+    ;; these.
 
     (define *font-lock-set-defaults* (make-parameter #f))
     ;; ^ GNU Emacs's `font-lock-set-defaults', a `defvar-local' as well:
@@ -913,6 +960,57 @@
             (*font-lock-end* new-end)))
         changed))
 
+    ;;----------------------------------------------------------------
+    ;; The syntactic pass - `font-lock.el:1577-1629'.  It is the half
+    ;; that paints comments and strings, from the syntax table rather
+    ;; than from the mode's regexps, and it is what makes the parser in
+    ;; `(schemacs editor syntax)' a font-lock dependency.
+    ;;------------------------------------------------------------------
+
+    (define (font-lock-fontify-syntactically-region beg end . rest)
+      ;; GNU Emacs's `font-lock-fontify-syntactically-region'
+      ;; (font-lock.el:1577): "Syntactically fontify the text between BEG
+      ;; and END. ... This works by calling
+      ;; `font-lock-fontify-syntactically-function'."
+      ;;--------------------------------------------------------------
+      ((*font-lock-fontify-syntactically-function*) beg end
+                                                    (if (pair? rest) (car rest) #f)))
+
+    (define (font-lock-default-fontify-syntactically start end . rest)
+      ;; GNU Emacs's `font-lock-default-fontify-syntactically'
+      ;; (font-lock.el:1583): "Put proper face on each string and comment
+      ;; between START and END. START should be at the beginning of a
+      ;; line."
+      ;;
+      ;; The C's `(or syntax-ppss-table (syntax-table))' is
+      ;; `font-lock-syntax-table' here: this tree has no
+      ;; `syntax-ppss-table', and the table the pass *should* use is the
+      ;; one the mode named for it.
+      ;;
+      ;; The delimiter-face branch - `font-lock-comment-start-skip' and
+      ;; `comment-start-skip' - is not carried, and the two variables it
+      ;; reads are false; see their definition.
+      ;;--------------------------------------------------------------
+      (syntax-propertize end)
+      (with-syntax-table (or (*font-lock-syntax-table*) (syntax-table))
+        (lambda ()
+          (let ((state (syntax-ppss start)))
+            (let loop ((state state))
+              (if (or (list-ref state 3) (list-ref state 4))
+                  (let* ((face ((*font-lock-syntactic-face-function*) state))
+                         (beg (max (list-ref state 8) start))
+                         (state (parse-partial-sexp (point) end #f #f state
+                                                    'syntax-table)))
+                    (when face (put-text-property beg (point) 'face face))
+                    (if (< (point) end)
+                        (loop (parse-partial-sexp (point) end #f #f state
+                                                  'syntax-table))
+                        state))
+                  (if (< (point) end)
+                      (loop (parse-partial-sexp (point) end #f #f state
+                                                'syntax-table))
+                      state)))))))
+
     (define (font-lock-default-fontify-region beg end . args)
       ;; GNU Emacs's `font-lock-default-fontify-region'
       ;; (font-lock.el:1190): "Fontify the text between BEG and END. ...
@@ -928,22 +1026,29 @@
       ;; The C's answer is `(jit-lock-bounds BEG . END)', which is
       ;; jit-lock's bookkeeping and belongs with jit-lock.
       ;;--------------------------------------------------------------
-      (let ((end (if (> end (point-max)) (point-max) end)))
+      (let ((end (if (> end (point-max)) (point-max) end))
+            (loudly (if (pair? args) (car args) #f)))
         (with-silent-modifications
-         (parameterize ((*font-lock-beg* beg)
-                        (*font-lock-end* end))
-           ;; "If there's been a change, we should go through the list
-           ;; again since this new position may warrant a different answer
-           ;; from one of the fun we've already seen."
-           (let loop ((funs (*font-lock-extend-region-functions*)))
-             (when (pair? funs)
-               (if ((car funs))
-                   (loop (*font-lock-extend-region-functions*))
-                   (loop (cdr funs)))))
-           (let ((beg (*font-lock-beg*))
-                 (end (*font-lock-end*)))
-             (font-lock-unfontify-region beg end)
-             (font-lock-fontify-keywords-region beg end))))
+         ;; "Use the fontification syntax table, if any." (`:1202')
+         (with-syntax-table (or (*font-lock-syntax-table*) (syntax-table))
+          (lambda ()
+            (parameterize ((*font-lock-beg* beg)
+                           (*font-lock-end* end))
+              ;; "If there's been a change, we should go through the list
+              ;; again since this new position may warrant a different
+              ;; answer from one of the fun we've already seen."
+              (let loop ((funs (*font-lock-extend-region-functions*)))
+                (when (pair? funs)
+                  (if ((car funs))
+                      (loop (*font-lock-extend-region-functions*))
+                      (loop (cdr funs)))))
+              (let ((beg (*font-lock-beg*))
+                    (end (*font-lock-end*)))
+                (font-lock-unfontify-region beg end)
+                ;; "unless font-lock-keywords-only" (`:1228')
+                (unless (*font-lock-keywords-only*)
+                  (font-lock-fontify-syntactically-region beg end loudly))
+                (font-lock-fontify-keywords-region beg end loudly))))))
         #f))
 
     (define (font-lock-fontify-region beg end . args)
@@ -1120,8 +1225,9 @@
       ;; fontification variables from `font-lock-defaults'."
       ;;
       ;; `font-lock-defaults' is `(KEYWORDS [KEYWORDS-ONLY [CASE-FOLD
-      ;; [SYNTAX-ALIST ...]]])'; the first and the third are read here,
-      ;; and the second is the syntactic half, which is not ported.
+      ;; [SYNTAX-ALIST ...]]])'; the first three are read here. The
+      ;; fourth, SYNTAX-ALIST, modifies the syntax table's entries, and
+      ;; is not carried - no mode in this tree sets it.
       ;;
       ;; What the C does that is *not* here is named in the library
       ;; comment; the largest piece is the
@@ -1131,6 +1237,9 @@
       ;;--------------------------------------------------------------
       (let* ((defaults (font-lock-defaults))
              (keywords (if (pair? defaults) (car defaults) #f))
+             (keywords-only (if (and (pair? defaults) (pair? (cdr defaults)))
+                                (list-ref defaults 1)
+                                #f))
              (case-fold (if (and (pair? defaults)
                                  (pair? (cdr defaults))
                                  (pair? (cddr defaults)))
@@ -1143,6 +1252,9 @@
              (font-lock-eval-keywords keywords)
              (font-lock-value-in-major-mode (*font-lock-maximum-decoration*)))))
           (*font-lock-keywords-case-fold-search* case-fold)
+          (*font-lock-keywords-only* (and keywords-only #t))
+          (*font-lock-fontify-syntactically-function*
+           font-lock-default-fontify-syntactically)
           (*font-lock-fontify-region-function* font-lock-default-fontify-region)
           (*font-lock-unfontify-region-function* font-lock-default-unfontify-region)
           (*font-lock-extend-region-functions*

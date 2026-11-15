@@ -25,6 +25,8 @@ import sys
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SUITES = [
     'schemacs/editor/character-tests.scm',
+    'schemacs/editor/chartab-tests.scm',
+    'schemacs/editor/syntax-tests.scm',
     'schemacs/editor/buffer-tests.scm',
     'schemacs/editor/buffer-text-tests.scm',
     'schemacs/editor/region-cache-tests.scm',
