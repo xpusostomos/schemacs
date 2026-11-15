@@ -3,8 +3,12 @@
  (scheme char)
  (only (srfi 64) test-assert test-equal test-begin test-end)
  (only (guile) setvbuf)
- (only (schemacs editor frame) *current-frame* new-frame selected-window
-       window-parameter window-list)
+ (only (oop goops) make)
+ (only (schemacs editor test-display) <test-display>)
+ (only (schemacs editor dispnew) current-display)
+ (only (schemacs editor frame) *current-frame* *default-frame-alist*
+       new-frame selected-window set-window-buffer! window-list
+       window-parameter)
  (only (schemacs editor buffer)
        allocate-buffer buffer-local-value buffer-name current-buffer
        get-buffer-create set-buffer set-buffer-local-value!
@@ -12,7 +16,9 @@
  (only (schemacs editor window) switch-to-buffer)
  (only (schemacs editor editfns) insert)
  (only (schemacs editor textprop) get-text-property)
- (only (schemacs editor subr) *after-change-major-mode-hook* run-hooks)
+ (only (schemacs editor subr) *after-change-major-mode-hook* run-hooks
+       posn-area posn-point posn-string)
+ (only (schemacs editor xdisp) posn-at-x-y render!)
  (only (schemacs editor tab-line)
        tab-line-mode tab-line-mode-variable global-tab-line-mode
        global-tab-line-mode-variable tab-line-format
@@ -36,6 +42,10 @@
 ;; is an answer.
 
 (*current-frame* (new-frame (allocate-buffer) 24 80))
+
+;; A display object, so that a position's *row* can be measured - `one
+;; cell is one row'. Nothing is opened; the stub answers the generics.
+(current-display (make <test-display>))
 
 (define (fresh name text)
   ;; A buffer called NAME, shown in the selected window, holding TEXT.
@@ -252,3 +262,48 @@
             (tab-line-tabs-non-excluded (list tab-two)))
 
 (test-end "schemacs_editor_tab_line_global")
+
+;;----------------------------------------------------------------
+;; The position list a click on the tab line carries
+;;----------------------------------------------------------------
+;;
+;; `posn-at-x-y` is what turns a screen coordinate into the
+;; `(WINDOW AREA (X . Y) TIME OBJECT)` a mouse event carries, and the
+;; tab line's answer has to name `tab-line` and the *string* drawn there -
+;; that string's `keymap` property is how a click reaches
+;; `tab-line-select-tab`. The scratch display below is
+;; `(schemacs editor test-display)`'s stub, so this needs no front end.
+
+(test-begin "schemacs_editor_tab_line_posn")
+
+;; **The test frame has no menu bar**: a terminal frame shows one by
+;; default and the bar takes the frame's first row, which is the row this
+;; group measures. The same fixture `mouse-tests.scm` uses.
+(*default-frame-alist* (cons '(menu-bar-lines . 0) (*default-frame-alist*)))
+
+(define tab-posn-frame
+  (new-frame (get-buffer-create "tab-posn") 24 80))
+
+;; The buffer the frame shows is the one with the format on it.
+(set-window-buffer! (car (window-list tab-posn-frame))
+                    (get-buffer-create "tab-posn"))
+(with-current-buffer
+    (get-buffer-create "tab-posn")
+  (insert "body\n")
+  (tab-line-mode 1))
+
+(render! tab-posn-frame)
+
+(test-equal "a click on the tab row is in the tab-line area"
+            'tab-line
+            (posn-area (posn-at-x-y 5 0 tab-posn-frame)))
+
+(test-assert "and it carries the string drawn there"
+             (let ((string (posn-string (posn-at-x-y 1 0 tab-posn-frame))))
+               (and string (string? (car string)))))
+
+(test-equal "the row below it is the text"
+            1
+            (posn-point (posn-at-x-y 0 1 tab-posn-frame)))
+
+(test-end "schemacs_editor_tab_line_posn")

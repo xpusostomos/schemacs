@@ -8861,13 +8861,23 @@ datum))`, which is what `define-minor-mode` already did and what
 
 ## Still to do on the tab line
 
-1. **The mouse path.** A tab cannot be clicked yet: `posn-at-x-y` knows
-   `'mode-line` but not `'tab-line`, and nothing looks up a *string's*
-   `keymap` property when an event is dispatched. The commands, the
-   keymaps and the `keymap` property on the string are all in place -
-   the missing piece is `make_lispy_position`'s tab-line area and
-   `read_key_sequence`'s "the click landed on a string with a keymap"
-   branch.
+1. **The mouse path, half done.** `posn-at-x-y` now answers the
+   `tab-line` area with the string drawn there in the object slot -
+   `(WINDOW tab-line (X . Y) TIME (STRING . POS))`, which is the shape
+   `posn-string` reads - so a click's position says which tab it landed
+   on. `tab-line-tests.scm`'s `posn` group pins it, three tests on a
+   stub display.
+
+   **What is still missing is the dispatch**: GNU Emacs's
+   `make_lispy_event` prefixes a click whose position has a *symbol*
+   area with that symbol, so the key looked up is
+   `[tab-line down-mouse-1]` and not `[down-mouse-1]`; and
+   `current_active_maps` (`keymap.c:1649`) then takes the `keymap` text
+   property of the posn's string as one of the active maps. Neither is
+   in this tree: `dispatch-key` sees `(down-mouse-1 POSN)` and
+   `lookup-keymaps` never looks at `*last-read-event*`. Without them a
+   click on a tab runs `mouse-drag-region` and moves point, exactly as
+   the tree did before the tab line existed.
 2. **`tools/pty-check.py`** has not been run on this tree.
 3. Named, not carried (all in `tab-line.scm`'s header): the buffer menu
    behind `tab-line-new-tab-choice`'s `t`, the two context menus,

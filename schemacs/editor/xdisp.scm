@@ -4269,7 +4269,28 @@
                    (width (window-width w)))
               (if (and (>= row top) (< row (+ top height))
                        (>= column left) (< column (+ left width)))
-                  (if (and (= row (+ top height -1))
+                  (cond
+                   ;; **The tab line.** GNU Emacs's `coordinates_in_window`
+                   ;; tests `WINDOW_WANTS_TAB_LINE_P` before the mode line
+                   ;; and answers `(WINDOW tab-line (X . Y) TIME OBJECT)`,
+                   ;; where OBJECT is the string drawn there and the
+                   ;; character in it - the same `posn-string` shape a click
+                   ;; on a display string gives, and the reason a tab can be
+                   ;; clicked at all: `current_active_maps` reads the
+                   ;; string's `keymap' property from it.
+                   ;;
+                   ;; The string is the one the last redisplay drew
+                   ;; (`window-last-tab-line`, this renderer's record of it),
+                   ;; so the answer agrees with what is on the screen.
+                   ((and (= row top) (> (window-tab-line-height w) 0))
+                    (let* ((record (window-last-tab-line w))
+                           (line (and record (car record)))
+                           (pos (- column left)))
+                      (if (and line (string? line)
+                               (>= pos 0) (< pos (string-length line)))
+                          (list w 'tab-line (cons x y) 0 (cons line pos))
+                          (list w 'tab-line (cons x y) 0))))
+                   ((and (= row (+ top height -1))
                            ;; **A minibuffer window has no mode line**, so
                            ;; its one row is text - GNU Emacs's
                            ;; `coordinates_in_window` asks
@@ -4280,10 +4301,11 @@
                            ;; the prompt was selected but point never moved
                            ;; in it.
                            (not (window-minibuffer-p w)))
-                      (list w 'mode-line (cons x y) 0)
-                      (list w (buffer-posn-from-coords
-                               w (- row top) (- column left))
-                            (cons x y) 0))
+                    (list w 'mode-line (cons x y) 0))
+                   (else
+                    (list w (buffer-posn-from-coords
+                             w (- row (window-body-top w)) (- column left))
+                          (cons x y) 0)))
                   (loop (cdr rest)))))))))
 
     ;;----------------------------------------------------------------
