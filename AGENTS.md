@@ -8423,3 +8423,78 @@ follows it with `(forward-sexp 1)`.
 editor was**: it sent the literal text `C-s` instead of control-S, and it
 pressed `M-)` from point 1, where Emacs signals "Unbalanced parentheses"
 too. Both are cheap mistakes to make when the harness speaks bytes.
+
+# The colourising pass: `lisp-el-font-lock-keywords-2` in full (2026-11-15)
+
+Chris: *"when you finish that keep working on the colorise mode for lisp and
+elisp."* The level-2 keyword tables are now Emacs's whole list, and the
+faces they produce match Emacs 31.1 **run for run** on 22 of 24 files
+under `lisp/emacs-lisp/` (the harness is `/tmp/faces.el` and
+`/tmp/ours-faces.scm`: `get-text-property`/`next-single-property-change`
+over the whole buffer on both sides). DEPARTURES.md has the C each fix was
+measured against.
+
+## What landed in `lisp-mode.scm`
+
+- `%lisp-el-special-forms-and-macros` (311 symbols), `lisp--el-funcall-position-p`,
+  `lisp--el-match-keyword`, `lisp-mode--search-key`, `elisp--font-lock-backslash`,
+  `lisp--match-hidden-arg`, `lisp--match-confusable-symbol-character`, and the
+  doc-string cluster (`lisp-doc-string-elt-property`, `cl--defmethod-doc-pos`,
+  the 64-entry table, `lisp-string-in-doc-position-p`,
+  `lisp-string-after-doc-keyword-p`, `lisp-font-lock-syntactic-face-function`),
+  plus the level-2 entries that use them.
+- `font-lock-syntactic-face-function` and `font-lock-extra-managed-props` in
+  `lisp-mode-variables`' `font-lock-defaults`, and the keymap parents
+  (`lisp-mode-shared-map` <- `prog-mode-map`) that made `C-M-q`/`M-)` reach
+  their commands.
+- `font-lock.scm`: the syntactic pass's **comment-delimiter branch**
+  (`font-lock.el:1612-1627`), and the alist→buffer-local mapping that had
+  made every `font-lock-defaults` entry land under a symbol key the
+  renderer never read (`%font-lock-alist-variables`).
+
+## Five engine fixes underneath, four in `search.c`'s territory
+
+1. **`\_<`/`\_>` are assertions now.** The old translation used glibc's word
+   boundary, so `&optional` and `:keyword` never matched (`Ssymbol`, not
+   `Sword`). The ERE gets an empty group and the search checks the syntax
+   table after the match, retrying from the next position.
+2. **One Emacs group may be several glibc groups** (`\(?1:` in two
+   alternatives): the mapping holds a list. Found as font-lock's "No match
+   %s in highlight" on `easy-mmode.el`.
+3. **`internal--syntax-propertize`'s `save-match-data`** is a seam
+   (`*internal-syntax-propertize-function*`), because `save-match-data` is
+   `search`'s and `syntax` is below it. Without it the mode's propertize
+   function clobbers the match data of the match being attempted.
+4. **`%char-table-runs` resolves parents**: `char_table_ref_and_range` sees
+   only a table's own values, and syntax tables always inherit from the
+   standard table.
+5. **`characters.scm` gained `standard-syntax-runs`** - Emacs 31.1's own
+   answers for every Unicode block's syntax above ASCII (234 runs, script
+   emitted). Without it every character above ASCII was `word`.
+
+## Method notes
+
+- **The differential is the tool.** `emacs -Q --batch` on one side,
+  this tree on the other, `diff` the face runs. It found the delimiter face,
+  the `(last x 2)` bug, the numbered-group mapping and the missing Unicode
+  syntax in one afternoon; none of them would have been found by reading.
+- **A test that asserts on the thing you waited for is hollow** - and the
+  same is true of a face comparison written carelessly: the first oracle
+  printed `(1+ pos)` for starts and `next` for ends, and every line looked
+  off by one until the oracle was fixed, not the editor.
+- `%ere-class-runs-text` **enumerates** code points: glibc reads a bracket
+  range in collation order, and `[\x7f-\xa0]`/`[←-ⱏ]` are "Invalid range
+  end". The non-word runs of a syntax table are 2344 characters, so this
+  costs 7 ms once per (table . class).
+
+## Still open
+
+- **A class body must not escape anything.** `%ere-class-escape` wrote `^`
+  as `\^`, and glibc gives backslash no meaning inside a bracket
+  expression, so every class silently gained a backslash member - which
+  is what made `check-declare.el` and `cl-print.el` differ. The three
+  special characters are *placed* now (`]` first, `^` not first, `-`
+  last). With that the differential is 24/24 files exact.
+- `lisp-mode-syntax-propertize`'s `|…|` rule, `elisp-fontify-symbols`, the
+  `syntax-propertize-rules` macro, and `cl-indent.el`/`scheme-indent-function`
+  are still not ported (unchanged from the indentation pass).

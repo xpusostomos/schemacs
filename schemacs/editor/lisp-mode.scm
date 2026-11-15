@@ -54,9 +54,9 @@
     ;; subr.el's; the scanner the indentation engine runs
     (only (schemacs editor syntax)
           modify-syntax-entry set-syntax-table parse-partial-sexp syntax-ppss
-          skip-chars-forward skip-chars-backward skip-syntax-backward
+          skip-chars-forward skip-chars-backward skip-syntax-forward skip-syntax-backward
           backward-prefix-chars char-syntax *parse-sexp-ignore-comments*
-          scan-error?)
+          forward-comment scan-error?)
     (only (schemacs editor indent) indent-line-to)
     (only (schemacs editor newcomment) indent-for-comment comment-indent-default)
     (only (schemacs editor lisp)
@@ -68,10 +68,11 @@
     (only (schemacs editor editfns)
           bolp eobp eolp point point-max line-beginning-position
           line-end-position forward-line goto-char preceding-char
-          char-after buffer-substring save-excursion)
+          char-after char-before buffer-substring save-excursion point-min)
     (only (schemacs editor marker) copy-marker markerp marker-position set-marker)
     (only (schemacs editor indentc) current-column)
-    (only (schemacs editor search) looking-at)
+    (only (schemacs editor search) looking-at re-search-forward
+          match-beginning match-end save-match-data)
     (only (scheme read) read)
     (only (guile) open-input-string last-pair)
     (only (schemacs editor subr) make-syntax-table)
@@ -85,13 +86,18 @@
     ;; the `lisp-define-type' property the definition keyword's face
     ;; function reads
     (only (schemacs editor intervals) get put)
+    (only (schemacs editor textprop) get-text-property)
     (only (schemacs editor search) match-string)
     (only (schemacs editor custom) define-custom))
 
   (export lisp-data-mode lisp-data-mode-syntax-table
           lisp-mode lisp-mode-syntax-table lisp-mode-map lisp-mode-hook
           lisp-mode-shared-map lisp-mode-variables
-          lisp-mode-autoload-regexp lisp-mode-symbol-regexp
+          lisp-mode-autoload-regexp lisp-doc-string-elt-property
+   lisp--el-funcall-position-p lisp--el-match-keyword
+   %lisp-el-special-forms-and-macros
+   lisp-string-in-doc-position-p lisp-string-after-doc-keyword-p
+   lisp-font-lock-syntactic-face-function cl--defmethod-doc-pos lisp-mode-symbol-regexp
           lisp-el-font-lock-keywords lisp-el-font-lock-keywords-1
           lisp-el-font-lock-keywords-2
           lisp-cl-font-lock-keywords lisp-cl-font-lock-keywords-1
@@ -212,6 +218,276 @@
               '("cl-defstruct" "cl-deftype" "defclass" "defgroup"
                 "defpackage" "defstruct" "deftheme" "deftype"))
 
+
+    ;; ---------------------------------------------------------------
+    ;; `lisp--el-match-keyword' (`lisp-mode.el:293'), the entry that
+    ;; colours `if', `let', `when' and the rest of the special forms and
+    ;; macros inside a call position. It asks `special-form-p' and
+    ;; `macrop' - "is this symbol a special form or a macro in Emacs" -
+    ;; which this tree cannot ask, having no Elisp obarray; the answer is
+    ;; **transcribed** from a fresh Emacs 31.1 with `emacs-lisp-mode'
+    ;; loaded, the same method as the `lisp-indent-function' table.
+    ;;--------------------------------------------------------------
+    (define %lisp-el-special-forms-and-macros
+      (list
+      '|1value| '|`| 'add-function 'allout-mode-p 'and 'and-let*
+      'atomic-change-group 'backquote 'backquote-list* 'backquote-list*-macro
+      'benchmark-progn 'benchmark-run 'benchmark-run-compiled 'bind*
+      'bind-and* 'bind-key 'bind-key* 'bind-keys 'bind-keys*
+      'bound-and-true-p 'buffer-local-set-state 'catch 'charset-long-name
+      'charset-short-name 'check-ccl-program 'cl--define-built-in-type
+      'cl--generic 'cl-assert 'cl-block 'cl-callf 'cl-callf2 'cl-case
+      'cl-check-type 'cl-decf 'cl-declaim 'cl-declare 'cl-defgeneric
+      'cl-define-compiler-macro 'cl-defmacro 'cl-defmethod 'cl-defstruct
+      'cl-defsubst 'cl-deftype 'cl-defun 'cl-destructuring-bind 'cl-do
+      'cl-do* 'cl-do-all-symbols 'cl-do-symbols 'cl-dolist 'cl-dotimes
+      'cl-ecase 'cl-etypecase 'cl-eval-when 'cl-flet 'cl-flet* 'cl-function
+      'cl-generic-current-method-specializers
+      'cl-generic-define-context-rewriter 'cl-generic-define-generalizer
+      'cl-incf 'cl-iter-defun 'cl-labels 'cl-letf 'cl-letf*
+      'cl-load-time-value 'cl-locally 'cl-loop 'cl-macrolet
+      'cl-multiple-value-bind 'cl-multiple-value-setq 'cl-once-only 'cl-prog
+      'cl-prog* 'cl-progv 'cl-psetf 'cl-psetq 'cl-pushnew 'cl-remf 'cl-return
+      'cl-return-from 'cl-rotatef 'cl-shiftf 'cl-symbol-macrolet 'cl-tagbody
+      'cl-the 'cl-typecase 'cl-with-accessors 'cl-with-gensyms
+      'combine-after-change-calls 'combine-change-calls
+      'comment-with-narrowing 'cond 'cond* 'condition-case
+      'condition-case-unless-debug 'connection-local-p
+      'connection-local-value 'decf 'declare 'declare-ccl-program
+      'declare-function 'def-edebug-spec 'defadvice 'defclass 'defconst
+      'defcustom 'defface 'defgroup 'defimage 'define-advice
+      'define-alternatives 'define-ccl-program 'define-derived-mode
+      'define-generic-mode 'define-global-minor-mode
+      'define-globalized-minor-mode 'define-ibuffer-column
+      'define-ibuffer-filter 'define-ibuffer-op 'define-ibuffer-sorter
+      'define-icon 'define-inline 'define-minor-mode
+      'define-obsolete-face-alias 'define-obsolete-function-alias
+      'define-obsolete-variable-alias 'define-short-documentation-group
+      'define-skeleton 'define-treesit-generic-mode 'define-widget-keywords
+      'defmacro 'defmath 'defsubst 'deftheme 'defun 'defvar 'defvar-keymap
+      'defvar-local 'degrees-to-radians 'delay-mode-hooks 'dlet 'dolist
+      'dolist-with-progress-reporter 'dont-compile 'dotimes
+      'dotimes-with-progress-reporter 'easy-menu-define
+      'easy-mmode-define-global-mode 'easy-mmode-define-minor-mode
+      'easy-mmode-defmap 'easy-mmode-defsyntax
+      'eldoc--documentation-strategy-defcustom 'ert-deftest
+      'ert-font-lock-deftest 'ert-font-lock-deftest-file 'eval-and-compile
+      'eval-when-compile 'face-attribute-specified-or 'faceup-defexplainer
+      'flymake-log 'function 'gv-define-expander 'gv-define-setter
+      'gv-define-simple-setter 'gv-letplace 'gv-ref 'handler-bind 'if 'if-let
+      'if-let* 'ignore-error 'ignore-errors 'incf 'inhibit-auto-revert
+      'inline 'interactive 'isearch-define-mode-toggle 'lambda
+      'lazy-completion-table 'let 'let* 'let-alist 'let-when-compile 'letrec
+      'macroexp--accumulate 'macroexp--with-extended-form-stack
+      'macroexp-let2 'macroexp-let2* 'macroexp-preserve-posification 'match*
+      'menu-bar-make-mm-toggle 'menu-bar-make-toggle
+      'menu-bar-make-toggle-command 'minibuffer-with-setup-hook
+      'mwheel--is-dir-p 'named-let 'noreturn 'oclosure--define-functions
+      'oclosure--lambda 'oclosure-define 'oclosure-lambda 'or
+      'org-batch-agenda 'org-batch-agenda-csv 'org-batch-store-agenda-views
+      'pcase 'pcase* 'pcase-defmacro 'pcase-dolist 'pcase-exhaustive
+      'pcase-lambda 'pcase-let 'pcase-let* 'pcase-setq 'pop 'prog1 'prog2
+      'progn 'push 'quail-define-rules 'quote 'radians-to-degrees
+      'remove-function 'replace--push-stack 'report-errors
+      'robin-define-package 'rx 'rx-define 'rx-let 'rx-let-eval
+      'save-current-buffer 'save-excursion 'save-mark-and-excursion
+      'save-match-data 'save-restriction 'save-selected-window
+      'save-window-excursion 'seq-doseq 'seq-let 'seq-setq 'setf 'setopt
+      'setopt-local 'setq 'setq-connection-local 'setq-default 'setq-local
+      'static-if 'static-unless 'static-when
+      'subr--with-wrapper-hook-no-warnings
+      'syntax-propertize-precompile-rules 'syntax-propertize-rules
+      'track-mouse 'tramp-archive-autoload-file-name-regexp 'unbind-key
+      'unless 'unwind-protect 'use-package 'vc-call 'vc-error-occurred 'when
+      'when-let 'when-let* 'while 'while-let 'while-no-input
+      'with-auto-compression-mode 'with-case-table 'with-category-table
+      'with-coding-priority 'with-connection-local-application-variables
+      'with-connection-local-variables 'with-current-buffer
+      'with-current-buffer-window 'with-delayed-message 'with-demoted-errors
+      'with-displayed-buffer-window 'with-environment-variables
+      'with-eval-after-load 'with-existing-directory 'with-file-modes
+      'with-help-window 'with-isearch-suspended 'with-local-quit
+      'with-locale-environment 'with-memoization
+      'with-minibuffer-completions-window 'with-minibuffer-selected-window
+      'with-mutex 'with-output-to-string 'with-output-to-temp-buffer
+      'with-restriction 'with-selected-frame 'with-selected-window
+      'with-silent-modifications 'with-suppressed-warnings 'with-syntax-table
+      'with-system-sleep-block 'with-temp-buffer 'with-temp-buffer-window
+      'with-temp-file 'with-temp-message 'with-timeout 'with-undo-amalgamate
+      'with-window-non-dedicated 'with-work-buffer 'with-wrapper-hook
+      'without-remote-files 'without-restriction))
+
+    (define (lisp--el-funcall-position-p pos)
+      ;; "Heuristically determine whether POS is an evaluated position."
+      ;; (`lisp-mode.el:244').
+      ;;--------------------------------------------------------------
+      (save-match-data
+        (save-excursion
+          (guard (e (#t #f))
+            (goto-char pos)
+            ;; "'(lambda ..) is not a funcall position, but #'(lambda
+            ;; ...) is."
+            (if (char=? (char-before) #\')
+                (char=? (char-before (- (point) 1)) #\#)
+                (let* ((ppss (syntax-ppss))
+                       (paren-posns (list-ref ppss 9))
+                       (parent
+                        (when (pair? paren-posns)
+                          (goto-char (car (last-pair paren-posns))) ;(up-list -1)
+                          (cond
+                           ((guard (e (#t #f))
+                              (and (char=? (char-after (point)) #\()
+                                   (begin
+                                     ;; Elisp's `(car (last paren-posns 2))'
+                                     ;; - the *second-to-last* opener, which
+                                     ;; is the form the enclosing paren
+                                     ;; belongs to. `(car (last (cdr ...)))'
+                                     ;; takes the enclosing paren itself,
+                                     ;; and the `let' test then never fires:
+                                     ;; `(interactive t)' in a `let*'
+                                     ;; binding list was coloured a keyword
+                                     ;; where Emacs leaves it plain.
+                                     (when (pair? (cdr paren-posns))
+                                       (goto-char (car (list-tail
+                                                        paren-posns
+                                                        (- (length paren-posns) 2)))))
+                                     (looking-at "(\\_<let\\*?\\_>"))))
+                            (goto-char (match-end 0))
+                            'let)
+                           ((looking-at "(\\(?1:\\(?:\\w\\|\\s_\\)+\\)\\_>")
+                            (let ((sym (string->symbol (match-string 1))))
+                              (goto-char (match-end 1))
+                              sym))))))
+                  (cond ((eq? parent 'declare) #f)
+                        ((eq? parent 'let)
+                         (forward-sexp 1)
+                         (>= pos (point)))
+                        ((memq parent '(defun defmacro cl-defmethod cl-defun))
+                         (forward-sexp 2)
+                         (>= pos (point)))
+                        ((eq? parent 'condition-case)
+                         ;; "If (cdr paren-posns), then we're in the BODY
+                         ;; of HANDLERS."
+                         (or (pair? (cdr paren-posns))
+                             (begin
+                               (forward-sexp 1)
+                               ;; "If we're in the second form, then
+                               ;; we're in a funcall position."
+                               (and (< (point) pos)
+                                    (< pos (begin (forward-sexp 1) (point)))))))
+                        (else #t))))))))
+
+    (define help-uni-confusables-regexp "[‘’‛“”‟〞＂＇]")
+    ;; ^ GNU Emacs's `help-uni-confusables-regexp' (subr.el), transcribed.
+
+    (define (lisp--match-hidden-arg limit)
+      ;; "Match a hidden argument: one that starts a line without
+      ;; anything before it on that line, which reads as if it belonged
+      ;; to the previous form." (`lisp-mode.el:219').
+      ;;--------------------------------------------------------------
+      (let ((res #f))
+        (forward-line 0)
+        ;; `(while (let ((ppss ...)) ...) BODY)' with an empty BODY: the
+        ;; value of the `let' is the loop's test.
+        (let loop ()
+          (when (let ((ppss (parse-partial-sexp (point) (line-end-position) -1)))
+                  (skip-syntax-forward " )")
+                  (if (or (>= (car ppss) 0)
+                          (eolp)
+                          (looking-at ";")
+                          (list-ref (syntax-ppss) 8)) ; "Within a string or comment."
+                      (begin
+                        (forward-line 1)
+                        (< (point) limit))
+                      (begin
+                        (looking-at ".*")      ; "Set the match-data."
+                        (forward-line 1)
+                        (set! res (point))
+                        #f)))
+            (loop)))
+        res))
+
+    (define (lisp-mode--search-key char bound)
+      ;; "Search for CHAR followed by a symbol constituent ... and check
+      ;; that it is not escaped or preceded by whitespace."
+      ;; (`lisp-mode.el:356').
+      ;;--------------------------------------------------------------
+      (call/cc
+       (lambda (found)
+         (let loop ()
+           (when (re-search-forward
+                  (string-append "\\_<" char lisp-mode-symbol-regexp "\\_>")
+                  bound #t)
+             ;; The C's `while' body is the `when'; the test runs again
+             ;; after it.
+             (when (or (< (match-beginning 0) (+ (point-min) 2))
+                       ;; "A quoted white space before the &/: means that
+                       ;; this is not the start of a :keyword or an
+                       ;; &option."
+                       (not (char=? (char-after (- (match-beginning 0) 2))
+                                    #\\))
+                       (not (memv (char-after (- (match-beginning 0) 1))
+                                  (list #\space #\newline #\tab))))
+               (found #t))
+             (loop)))
+         #f)))
+
+    (define (elisp--font-lock-backslash)
+      ;; "Fontify a `\\' that has no effect (typically in need of
+      ;; doubling)." (`lisp-mode.el:310').
+      ;;--------------------------------------------------------------
+      (let* ((beg0 (match-beginning 0))
+             (end0 (match-end 0))
+             (ppss (save-excursion (syntax-ppss beg0))))
+        (and (list-ref ppss 3)                ; "Inside a string."
+             (not (list-ref ppss 5))          ; "The \ is not itself \-escaped."
+             ;; "Don't highlight the \( introduced because of
+             ;; `open-paren-in-column-0-is-defun-start'."
+             (not (char=? #\newline (char-before beg0)))
+             (guard (e (#t #f))
+               (equal? (let ((str (buffer-substring beg0 end0)))
+                         (read (open-input-string (string-append "\"" str "\""))))
+                       (buffer-substring (+ 1 beg0) end0)))
+             '(face font-lock-warning-face
+                    help-echo "This \\ has no effect"))))
+
+    (define (lisp--match-confusable-symbol-character limit)
+      ;; "Match a confusable character within a Lisp symbol."
+      ;; (`lisp-mode.el:343').
+      ;;--------------------------------------------------------------
+      (call/cc
+       (lambda (matched)
+         (let loop ()
+           (if (re-search-forward help-uni-confusables-regexp limit #t)
+               ;; "Skip confusables which are backslash escaped, or
+               ;; inside strings or comments."
+               (save-match-data
+                 (unless (or (char=? (char-before (match-beginning 0)) #\\)
+                             (list-ref (syntax-ppss) 8))
+                   (matched #t)))
+               (matched #f))
+           (loop)))))
+
+    (define (lisp--el-match-keyword limit)
+      ;; (`lisp-mode.el:293'): font-lock's matcher for the Elisp
+      ;; keywords. The C's `(catch 'found (while ... (throw 'found t)))'
+      ;; is the `call/cc' escape.
+      ;;--------------------------------------------------------------
+      (call/cc
+       (lambda (found)
+         (let loop ()
+           (when (re-search-forward
+                  (string-append "(\\(" lisp-mode-symbol-regexp "\\)\\_>")
+                  limit #t)
+             (let ((sym (string->symbol (match-string 1))))
+               (when (and (or (memq sym %lisp-el-special-forms-and-macros)
+                              (get sym 'font-lock-keyword))
+                          (not (get sym 'no-font-lock-keyword))
+                          (lisp--el-funcall-position-p (match-beginning 0)))
+                 (found #t)))
+             (loop)))
+         #f)))
+
     ;;----------------------------------------------------------------
     ;; The keyword tables
     ;;------------------------------------------------------------------
@@ -250,9 +526,15 @@
        (list
         ;; "Regexp negated char group."
         (list "\\[\\(\\^\\)" (list 1 'font-lock-negation-char-face 'prepend))
-        ;; "Erroneous structures."
+        ;; "Erroneous structures." **Before** the control structures, as
+        ;; the C has them: a face already set is not overwritten unless
+        ;; the highlight says so, so `(cl-assert ...)' keeps the warning
+        ;; face and only its first face wins.
         (list "(\\(cl-\\(?:assert\\|check-type\\)\\|error\\|signal\\|user-error\\|warn\\)\\_>"
               (list 1 'font-lock-warning-face))
+        ;; "Control structures. Common Lisp forms." - the function
+        ;; matcher, `(lisp--el-match-keyword . 1)' in the C.
+        (cons lisp--el-match-keyword 1)
         ;; "Exit/Feature symbols as constants."
         (list "(\\(catch\\|throw\\|featurep\\|provide\\|require\\)\\_>[ \t']*\\(\\(?:\\w\\|\\s_\\|\\\\.\\)+\\)?"
               (list 1 'font-lock-keyword-face)
@@ -267,7 +549,49 @@
         (list "[`‘']\\(\\(?:\\w\\|\\s_\\|\\\\.\\)+\\)['’]"
               (list 1 'font-lock-constant-face 'prepend))
         ;; "\\\\= tends to be an escape in doc strings."
-        (list "\\\\\\\\=" (list 0 'font-lock-builtin-face 'prepend)))))
+        (list "\\\\\\\\=" (list 0 'font-lock-builtin-face 'prepend))
+        ;; "Ineffective backslashes (typically in need of doubling)."
+        (list "\\(\\\\\\)\\([^\"\\]\\)"
+              ;; The C holds the *form* `(elisp--font-lock-backslash)';
+              ;; here the procedure itself goes in the face slot, which
+              ;; the highlighter calls (as level-1's `lisp--define-face'
+              ;; already does).
+              (list 1 elisp--font-lock-backslash 'prepend))
+        ;; "Constant values."
+        (cons (lambda (bound) (lisp-mode--search-key ":" bound))
+              (list (list 0 'font-lock-builtin-face)))
+        ;; "Elisp and Common Lisp `&' keywords as types."
+        (cons (lambda (bound) (lisp-mode--search-key "&" bound))
+              (list (list 0 'font-lock-type-face)))
+        ;; "Elisp regexp grouping constructs" - the highlights are
+        ;; `(1 font-lock-regexp-grouping-backslash prepend)' and
+        ;; `(3 font-lock-regexp-grouping-construct prepend)'.
+        (cons (lambda (bound)
+                ;; "The following loop is needed to continue searching
+                ;; after matches that do not occur in strings."
+                (call/cc
+                 (lambda (found)
+                   (let loop ()
+                     (when (re-search-forward
+                            "\\(\\\\\\\\\\)\\(?:\\(\\\\\\\\\\)\\|\\((\\(?:\\?[0-9]*:\\)?\\|[|)]\\)\\)"
+                            bound #t)
+                       (unless (match-beginning 2)
+                         (let ((face (get-text-property (- (point) 1) 'face)))
+                           (when (or (and (pair? face)
+                                          (memq 'font-lock-string-face face))
+                                     (eq? 'font-lock-string-face face))
+                             (found #t))))
+                       (loop)))
+                   #f)))
+              (list (list 1 'font-lock-regexp-grouping-backslash 'prepend)
+                    (list 3 'font-lock-regexp-grouping-construct 'prepend)))
+        (cons lisp--match-hidden-arg
+              (list (list 0 '(face font-lock-warning-face
+                                   help-echo "Easy to misread; consider moving the element to the next line")
+                          'prepend)))
+        (cons lisp--match-confusable-symbol-character
+              (list (list 0 '(face font-lock-warning-face
+                                   help-echo "Confusable character")))))))
 
     (define lisp-cl-font-lock-keywords-2
       ;; GNU Emacs's `lisp-cl-font-lock-keywords-2' (lisp-mode.el:578).
@@ -292,7 +616,167 @@
 
     (define lisp-el-font-lock-keywords lisp-el-font-lock-keywords-1)
 
+
     (define lisp-cl-font-lock-keywords lisp-cl-font-lock-keywords-1)
+
+    ;; ---------------------------------------------------------------
+    ;; Docstrings: `lisp-doc-string-elt-property' and its table
+    ;; (`lisp-mode.el:203-216'), `lisp-string-in-doc-position-p'
+    ;; (`:635'), `lisp-string-after-doc-keyword-p' (`:670') and
+    ;; `lisp-font-lock-syntactic-face-function' (`:672') - the function
+    ;; that gives a docstring `font-lock-doc-face' instead of the
+    ;; string face.
+    ;; ---------------------------------------------------------------
+    (define lisp-doc-string-elt-property 'doc-string-elt)
+
+    (define (cl--defmethod-doc-pos)
+      ;; "Return the index of the docstring for a `cl-defmethod'.
+      ;; Presumes point is at the end of the `cl-defmethod' symbol."
+      ;; (`cl-generic.el:533').
+      ;;--------------------------------------------------------------
+      (save-excursion
+        (let ((n 2))
+          (let loop ()
+            (when (and (guard (e (#t #f)) (forward-sexp 1) #t)
+                       (not (char=? (char-before) #\))))
+              (set! n (+ n 1))
+              (loop)))
+          n)))
+
+    (for-each
+     (lambda (e) (put (car e) lisp-doc-string-elt-property (cdr e)))
+     (list
+      (cons 'autoload 3)
+      (cons 'cl--define-built-in-type 3)
+      (cons 'cl-defgeneric 3)
+      (cons 'cl-defmacro 3)
+      ;; The C's value is the *symbol* `cl--defmethod-doc-pos', which
+      ;; `functionp' recognises as callable; there is no obarray here, so
+      ;; the procedure itself goes in the table - the same spelling the
+      ;; font-lock keyword tables use for their matchers.
+      (cons 'cl-defmethod cl--defmethod-doc-pos)
+      (cons 'cl-defstruct 2)
+      (cons 'cl-defsubst 3)
+      (cons 'cl-deftype 3)
+      (cons 'cl-defun 3)
+      (cons 'cl-iter-defun 3)
+      (cons 'defadvice 3)
+      (cons 'defalias 3)
+      (cons 'defclass 4)
+      (cons 'defconst 3)
+      (cons 'defconstant 3)
+      (cons 'defcustom 3)
+      (cons 'defface 3)
+      (cons 'defgroup 3)
+      (cons 'defimage 3)
+      (cons 'define-abbrev-table 3)
+      (cons 'define-advice 3)
+      (cons 'define-category 2)
+      (cons 'define-ccl-program 3)
+      (cons 'define-compilation-mode 3)
+      (cons 'define-compiler-macro 3)
+      (cons 'define-completion-category 3)
+      (cons 'define-derived-mode 4)
+      (cons 'define-generic-mode 7)
+      (cons 'define-globalized-minor-mode 2)
+      (cons 'define-ibuffer-filter 2)
+      (cons 'define-ibuffer-op 3)
+      (cons 'define-ibuffer-sorter 2)
+      (cons 'define-icon 4)
+      (cons 'define-inline 3)
+      (cons 'define-minor-mode 2)
+      (cons 'define-obsolete-function-alias 4)
+      (cons 'define-obsolete-variable-alias 4)
+      (cons 'define-overloadable-function 3)
+      (cons 'define-setf-expander 3)
+      (cons 'define-skeleton 2)
+      (cons 'define-treesit-generic-mode 2)
+      (cons 'define-widget 3)
+      (cons 'defmacro 3)
+      (cons 'defmath 3)
+      (cons 'defmethod 3)
+      (cons 'defparameter 3)
+      (cons 'defstruct 2)
+      (cons 'defsubst 3)
+      (cons 'deftheme 2)
+      (cons 'deftype 3)
+      (cons 'defun 3)
+      (cons 'defvar 3)
+      (cons 'defvar-local 3)
+      (cons 'defvaralias 3)
+      (cons 'easy-menu-define 3)
+      (cons 'easy-mmode-defmap 3)
+      (cons 'easy-mmode-defsyntax 3)
+      (cons 'ert-deftest 3)
+      (cons 'ert-font-lock-deftest 2)
+      (cons 'ert-font-lock-deftest-file 2)
+      (cons 'lambda 2)
+      (cons 'oclosure-define 2)
+      (cons 'pcase-defmacro 3)
+      (cons 'pcase-lambda 2)))
+
+    (define (lisp-string-in-doc-position-p listbeg startpos)
+      ;; "Return non-nil if a doc string may occur at STARTPOS inside a
+      ;; list. LISTBEG is the position of the start of the innermost
+      ;; list containing STARTPOS." (`lisp-mode.el:635').
+      ;;--------------------------------------------------------------
+      (let* ((firstsym
+              (and listbeg
+                   (save-excursion
+                     (goto-char listbeg)
+                     (and (looking-at
+                           (string-append "([ \t\n]*\\("
+                                          lisp-mode-symbol-regexp "\\)"))
+                          (match-string 1)))))
+             (docelt (and firstsym
+                          (get (string->symbol firstsym)
+                               lisp-doc-string-elt-property))))
+        (and docelt
+             (save-excursion
+               (when (procedure? docelt)
+                 (goto-char (match-end 1))
+                 (set! docelt (docelt)))
+               (goto-char listbeg)
+               (forward-char 1)
+               (guard (e (#t #f))
+                 (let loop ()
+                   (when (and (> docelt 0) (< (point) startpos))
+                     (forward-sexp 1)
+                     (set! docelt (- docelt 1))
+                     (loop))))
+               (and (= docelt 0) (<= (point) startpos)
+                    (begin (forward-comment (point-max)) #t)
+                    (= (point) startpos))))))
+
+    (define (lisp-string-after-doc-keyword-p listbeg startpos)
+      ;; "Return non-nil if `:documentation' symbol ends at STARTPOS
+      ;; inside a list. `:doc' can also be used." (`lisp-mode.el:670').
+      ;;--------------------------------------------------------------
+      (and listbeg
+           (save-excursion
+             (goto-char startpos)
+             (guard (e (#t #f))
+               (backward-sexp 1)
+               (and (looking-at ":documentation\\_>\\|:doc\\_>") #t)))))
+
+    (define (lisp-font-lock-syntactic-face-function state)
+      ;; "Return syntactic face function for the position represented by
+      ;; STATE." (`lisp-mode.el:672'): a docstring gets
+      ;; `font-lock-doc-face', any other string `font-lock-string-face',
+      ;; a comment `font-lock-comment-face'.
+      ;;--------------------------------------------------------------
+      (if (list-ref state 3)
+          ;; "This might be a (doc)string or a |...| symbol."
+          (let ((startpos (list-ref state 8)))
+            (if (char=? (char-after startpos) #\|)
+                ;; "This is not a string, but a |...| symbol."
+                #f
+                (let ((listbeg (list-ref state 1)))
+                  (if (or (lisp-string-in-doc-position-p listbeg startpos)
+                          (lisp-string-after-doc-keyword-p listbeg startpos))
+                      'font-lock-doc-face
+                      'font-lock-string-face))))
+          'font-lock-comment-face))
 
     ;; "a symbol (a variable ... whose value is the keywords)": the
     ;; `font-lock-defaults' list names these six by symbol, and this is
@@ -368,7 +852,13 @@
           (cons 'font-lock-extra-managed-props
                 (if elisp
                     '(help-echo cursor-sensor-functions mouse-face)
-                    '(help-echo)))))
+                    '(help-echo)))
+          ;; "`font-lock-syntactic-face-function' . lisp-font-lock-
+          ;; syntactic-face-function" - the docstring face. The C stores
+          ;; the *symbol*; a symbol is not callable here, so the
+          ;; procedure goes in.
+          (cons 'font-lock-syntactic-face-function
+                lisp-font-lock-syntactic-face-function)))
         ;; "Adaptive fill mode gets in the way of auto-fill" and the
         ;; rest of the C's variables are stored above; the function
         ;; returns unspecified in Emacs and #t here.

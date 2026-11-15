@@ -79,7 +79,11 @@
           line-end-position point point-marker point-max point-min
           save-excursion)
     (only (schemacs editor search)
-          match-beginning match-end re-search-forward save-match-data)
+          match-beginning match-end re-search-forward save-match-data
+          looking-at looking-back)
+    ;; the comment delimiters the syntactic pass paints with
+    ;; `font-lock-comment-delimiter-face' (`newcomment.el'''s)
+    (only (schemacs editor newcomment) comment-start-skip comment-end-skip)
     ;; `font-lock-mode''s buffer, and the `defvar-local' variables it
     ;; keeps on it
     (only (schemacs editor buffer)
@@ -486,6 +490,20 @@
     ;; font-lock-extend-region-multiline)'. The wholelines half needs
     ;; `syntax-propertize-wholelines' and is not ported, so the default
     ;; here is the multiline half alone.
+
+    (define %font-lock-alist-variables
+      ;; The `font-lock-defaults' alist names its variables as symbols;
+      ;; the ones that also exist here as parameters are listed, so the
+      ;; walk below can store where `font-lock-buffer-local' reads.
+      (list (cons 'font-lock-keywords-only *font-lock-keywords-only*)
+            (cons 'font-lock-keywords-case-fold-search
+                  *font-lock-keywords-case-fold-search*)
+            (cons 'font-lock-syntax-table *font-lock-syntax-table*)
+            (cons 'font-lock-syntactic-face-function
+                  *font-lock-syntactic-face-function*)
+            (cons 'font-lock-multiline *font-lock-multiline*)
+            (cons 'font-lock-comment-start-skip *font-lock-comment-start-skip*)
+            (cons 'font-lock-comment-end-skip *font-lock-comment-end-skip*)))
 
     (define (font-lock-buffer-local param)
       ;; a buffer-local variable, read the way dired.sld reads its own
@@ -1021,9 +1039,10 @@
       ;; `syntax-ppss-table', and the table the pass *should* use is the
       ;; one the mode named for it.
       ;;
-      ;; The delimiter-face branch - `font-lock-comment-start-skip' and
-      ;; `comment-start-skip' - is not carried, and the two variables it
-      ;; reads are false; see their definition.
+      ;; The delimiter-face branch reads `font-lock-comment-start-skip'
+      ;; and `-end-skip' first and `comment-start-skip'/`comment-end-skip'
+      ;; - newcomment.el's, which the indentation pass brought - after
+      ;; them, exactly as the C does.
       ;;--------------------------------------------------------------
       (syntax-propertize end)
       (with-syntax-table (or (font-lock-syntax-table) (syntax-table))
@@ -1036,6 +1055,23 @@
                          (state (parse-partial-sexp (point) end #f #f state
                                                     'syntax-table)))
                     (when face (put-text-property beg (point) 'face face))
+                    ;; "Find the comment delimiters and use
+                    ;; `font-lock-comment-delimiter-face' for them."
+                    ;; Only a comment gets them, not a doc-string.
+                    (when (and face (eq? face 'font-lock-comment-face)
+                               (or (*font-lock-comment-start-skip*)
+                                   (comment-start-skip)))
+                      (save-excursion
+                        (goto-char beg)
+                        (if (looking-at (or (*font-lock-comment-start-skip*)
+                                            (comment-start-skip)))
+                            (put-text-property beg (match-end 0) 'face
+                                               'font-lock-comment-delimiter-face)))
+                      (if (looking-back (or (*font-lock-comment-end-skip*)
+                                            (comment-end-skip))
+                                        (line-beginning-position) #t)
+                          (put-text-property (match-beginning 0) (point) 'face
+                                             'font-lock-comment-delimiter-face)))
                     (if (< (point) end)
                         (loop (parse-partial-sexp (point) end #f #f state
                                                   'syntax-table))
@@ -1402,8 +1438,20 @@
                                  ((= n 0) l)
                                  (else (skip (cdr l) (- n 1)))))))
           (when (pair? vars)
-            (set-buffer-local-value! (current-buffer)
-                                     (car (car vars)) (cdr (car vars)))
+            ;; **Keyed the way the accessor reads it.** The alist is
+            ;; Elisp data and names its variables by *symbol*; this
+            ;; library's own state is keyed by *parameter object* (see
+            ;; `font-lock-buffer-local`), and Emacs has one namespace
+            ;; where this tree has two. Without the mapping a mode's
+            ;; `font-lock-syntactic-face-function' - or its
+            ;; `font-lock-keywords-only' - was stored where nothing
+            ;; looked: measured, the docstring face never appeared.
+            (let* ((name (car (car vars)))
+                   (val (cdr (car vars)))
+                   (param (let ((cell (assq name %font-lock-alist-variables)))
+                            (and cell (cdr cell)))))
+              (set-buffer-local-value! (current-buffer)
+                                       (or param name) val))
             (loop (cdr vars))))
         ;; "Set up `font-lock-keywords' last because its value might
         ;; depend on other settings."

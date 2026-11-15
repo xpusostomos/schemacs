@@ -110,8 +110,11 @@
      'font-lock-keyword-face (face-at b 3))
    (test-equal "`foo' is the function name"
      'font-lock-function-name-face (face-at b 11))
-   (test-equal "the comment's `;' is the comment face"
-     'font-lock-comment-face (face-at b 18))
+   ;; The delimiter gets its own face, as `font-lock.el:1612-1627' says
+   ;; - the syntactic pass painted the whole comment with the comment
+   ;; face until the delimiter branch was ported (2026-11-15).
+   (test-equal "the comment's `;' is the delimiter face"
+     'font-lock-comment-delimiter-face (face-at b 18))
    (test-equal "... and the comment's text too"
      'font-lock-comment-face (face-at b 20))
    (test-equal "the string is the string face"
@@ -120,8 +123,11 @@
      #f (face-at b 13))))
 
 ;; measured on `"(defun foo (x) \"doc\" x)\n"' in `emacs-lisp-mode':
-;; `defun' keyword, `foo' function name, and (in Emacs) the docstring's
-;; `font-lock-doc-face' where this tree has the string face.
+;; `defun' keyword, `foo' function name, and the docstring's
+;; `font-lock-doc-face' - `lisp-font-lock-syntactic-face-function'. It
+;; was the string face here until 2026-11-15, because the semantic face
+;; function never reached the fontifier (the defaults alist is keyed by
+;; symbol and the accessor read by parameter object).
 (with-buffer
  (lambda (b)
    (insert "(defun foo (x) \"doc\" x)\n")
@@ -133,8 +139,8 @@
      'font-lock-keyword-face (face-at b 3))
    (test-equal "`foo' is the function name"
      'font-lock-function-name-face (face-at b 9))
-   (test-equal "the docstring is a string here"
-     'font-lock-string-face (face-at b 20))))
+   (test-equal "the docstring gets the doc face, as Emacs gives it"
+     'font-lock-doc-face (face-at b 20))))
 
 ;; the same shape in `lisp-mode' (Common Lisp keywords)
 (with-buffer

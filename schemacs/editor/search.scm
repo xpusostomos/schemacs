@@ -75,7 +75,9 @@
           *case-fold-search* current-buffer with-current-buffer
           text-editor-text
           %text-editor-newline-cache set!%text-editor-newline-cache
-          text-editor-cache-long-scans set-point bufferp buffer-beg buffer-z buffer-pt)
+          text-editor-cache-long-scans set-point bufferp buffer-beg buffer-z buffer-pt
+          ;; `FETCH_CHAR` for the `\_<'/`\_>' assertion's `SYNTAX (c)'
+          fetch-char)
     ;; The raw character store: `buffer.h`'s macros, which the scans below
     ;; read character by character as `find_newline` does with
     ;; `FETCH_CHAR`.
@@ -95,7 +97,15 @@
     ;; translation reads the table too.
     (only (schemacs editor syntax)
           syntax-table standard-syntax-table with-syntax-table char-syntax
-          string-to-syntax syntax-class-to-char)
+          string-to-syntax syntax-class-to-char
+          ;; the `\_<'/`\_>' assertions read the table at a position
+          %setup-syntax-table %class-in sword ssymbol
+          ;; and the propertize hook installs this library's
+          ;; `save-match-data' - see `%current-assertions'
+          *internal-syntax-propertize-function*)
+    ;; Walking a syntax table's runs for `\sC' and `\w' above ASCII:
+    ;; `char_table_ref_and_range' (`chartab.c:320'), the C's own walk.
+    (only (schemacs editor chartab) char-table-ref-and-range char-table-parent)
     ;; The line-break cache: `region-cache.c`, which is the buffer's
     ;; `newline_cache` there. It is what makes searching a buffer with
     ;; very long lines affordable - a stretch already searched and found
@@ -633,19 +643,165 @@
                      (loop (+ c 1) (if (zero? c) acc (cons c acc))))
                     (else (loop (+ c 1) acc))))))))
 
-    (define (%ere-class-escape c)
-      ;; The code point C as one member of a bracket expression, escaped
-      ;; where glibc reads it as something else.
+    (define (%char-table-runs table from to)
+      ;; The runs of code points FROM..TO over which TABLE's *inherited*
+      ;; value is constant: ascending `(START END VALUE)'.
       ;;
-      ;; `]' and `-' are not handled here: `]' anywhere but first closes
-      ;; the class, and a `-' that is not last is a range operator (and
-      ;; `\-' is not an escape glibc honours - `[a\-c]' is the range
-      ;; `\'..`c', measured). `%ere-class-body' puts both where POSIX
-      ;; makes them literal.
+      ;; `char_table_ref_and_range' (`chartab.c:320') narrows to a run of
+      ;; the table's **own** values and does not consult the parent - its
+      ;; own comment says so - and a syntax table is always inherited:
+      ;; `copy-syntax-table' clears the default and sets the standard
+      ;; table as the parent, which is the C's own line ("Only the
+      ;; standard syntax table should have a default element"). So a
+      ;; region the child does not set answers from the parent, and the
+      ;; walk has to descend into it rather than read the child's nil as
+      ;; a value. Without this every character above ASCII of every mode
+      ;; was one run of the *standard* table's default, and `\w' matched
+      ;; punctuation (`checkdoc.el''s `‘' came out word syntax).
       ;;--------------------------------------------------------------
-      (cond ((= c 92) "\\\\")
-            ((= c 94) "\\^")
-            (else (string (integer->char c)))))
+      (let loop ((c from) (acc '()))
+        (if (> c to)
+            (reverse acc)
+            (let ((f (list c)) (t (list to)))
+              (let ((val (char-table-ref-and-range table c f t)))
+                (let ((start (max from (car f)))
+                      (end (min (car t) to)))
+                  (cond
+                   ((or (not val) (null? val))
+                    ;; the child says nothing here: the parent answers
+                    (let ((p (char-table-parent table)))
+                      (if p
+                          (loop (+ end 1)
+                                (append (reverse (%char-table-runs p start end))
+                                        acc))
+                          (loop (+ end 1) (cons (list start end val) acc)))))
+                   (else (loop (+ end 1) (cons (list start end val) acc))))))))))
+
+    (define (%syntax-class-runs table class-char)
+      ;; The runs of code points **above ASCII**, in TABLE, split by
+      ;; whether their syntax class is the one CLASS-CHAR designates:
+      ;; two answers, the matching runs and the ones that are not, each
+      ;; ascending inclusive `(START . END)' pairs.
+      ;;
+      ;; `%syntax-class-members' enumerates the ASCII ones because there
+      ;; are 128 of them; above ASCII an enumeration is the whole
+      ;; character space, so the walk is over the *runs*
+      ;; `%char-table-runs' answers and each run is one range in a
+      ;; bracket expression. The walk stops at `#x10FFFF', the largest
+      ;; character a Guile string can hold (`max-char' is `#x3FFFFF' and
+      ;; `integer->char' refuses beyond it).
+      ;;--------------------------------------------------------------
+      (let ((class (if (%syntax-designator-class class-char)
+                       (syntax-class-to-char
+                        (%syntax-designator-class class-char))
+                       class-char))
+            (top #x10FFFF))
+        (with-syntax-table table
+          (lambda ()
+            (let loop ((rs (%char-table-runs table 128 top)) (yes '()) (no '()))
+              (cond
+               ((null? rs) (values (reverse yes) (reverse no)))
+               (else
+                (let ((start (car (car rs))) (end (cadr (car rs))))
+                  (if (char=? (char-syntax (integer->char start)) class)
+                      (loop (cdr rs)
+                            (if (and (pair? yes) (= start (+ (cdr (car yes)) 1)))
+                                (cons (cons (car (car yes)) end) (cdr yes))
+                                (cons (cons start end) yes))
+                            no)
+                      (loop (cdr rs) yes
+                            (if (and (pair? no) (= start (+ (cdr (car no)) 1)))
+                                (cons (cons (car (car no)) end) (cdr no))
+                                (cons (cons start end) no))))))))))))
+
+    (define (%runs-length runs)
+      ;; The number of code points in RUNS.
+      ;;--------------------------------------------------------------
+      (let loop ((rs runs) (n 0))
+        (if (null? rs) n
+            (loop (cdr rs) (+ n 1 (- (cdr (car rs)) (car (car rs))))))))
+
+    (define (%ere-class-runs-text runs)
+      ;; RUNS, ascending inclusive `(START . END)' pairs above ASCII,
+      ;; as the body of a bracket expression - **one code point at a
+      ;; time**, not as `START-END'.
+      ;;
+      ;; A range in a glibc bracket expression is read in the *locale's
+      ;; collation*, not in code-point order - `%ere-class-text''s
+      ;; comment has the measurement for ASCII - and for the multibyte
+      ;; blocks it fails outright: `\x7f-\xa0' and `←-ⱏ' are both
+      ;; "Invalid range end" here. The data this is fed is small (the
+      ;; non-`word' runs of a syntax table are 2344 code points in all,
+      ;; measured on Emacs 31.1's standard table), so enumerating it is
+      ;; what fits and what is right.
+      ;;--------------------------------------------------------------
+      (let loop ((rs runs) (acc '()))
+        (cond ((null? rs) (apply string-append (reverse acc)))
+              (else
+               (let ((start (car (car rs))) (end (cdr (car rs))))
+                 (loop (cdr rs)
+                       (let inner ((c end) (a acc))
+                         (if (< c start)
+                             a
+                             (inner (- c 1)
+                                    (cons (string (integer->char c)) a))))))))))
+
+    (define (%ere-class-join ascii-text range-text)
+      ;; The ASCII members' body and the runs' body, joined so that the
+      ;; two characters POSIX gives a special place keep it: `]' must be
+      ;; first in the whole bracket expression (it is, `%ere-class-body'
+      ;; puts it there) and `-' must be last - which it is not if the
+      ;; runs are simply appended, and glibc then reads `-¤' as a range,
+      ;; measured: "Invalid range end".
+      ;;--------------------------------------------------------------
+      (let ((n (string-length ascii-text)))
+        (if (and (> n 0) (char=? (string-ref ascii-text (- n 1)) #\-))
+            (string-append (substring ascii-text 0 (- n 1)) range-text "-")
+            (string-append ascii-text range-text))))
+
+    (define (%syntax-class-entry table class-char)
+      ;; TABLE's CLASS-CHAR named as a bracket expression's body, as
+      ;; `(COMPLEMENT? . BODY)': BODY is the text and COMPLEMENT? says
+      ;; that the set BODY names is the *complement* of the class.
+      ;;
+      ;; **The smaller of the two is named**, because a syntax table is
+      ;; mostly its default: `\w' has every character above ASCII, and
+      ;; naming that positively asks glibc for the range
+      ;; `\x80-\U10ffff', which its collation refuses - measured,
+      ;; "Invalid collation character" - while its complement is the
+      ;; handful of ASCII characters that are not word constituents.
+      ;;--------------------------------------------------------------
+      (call-with-values (lambda () (%syntax-class-runs table class-char))
+        (lambda (yes no)
+          (let* ((ascii-yes (%syntax-class-members table class-char))
+                 (ascii-no (let loop ((c 1) (acc '()))
+                             (cond ((>= c 128) (reverse acc))
+                                   ((memv c ascii-yes) (loop (+ c 1) acc))
+                                   (else (loop (+ c 1) (cons c acc))))))
+                 (yes-count (+ (length ascii-yes) (%runs-length yes)))
+                 (no-count (+ (length ascii-no) (%runs-length no))))
+            (cond
+             ((and (null? ascii-yes) (null? yes))
+              ;; the class is empty; `%syntax-class-ere' spells it
+              (cons #f ""))
+             ((<= yes-count no-count)
+              (cons #f (%ere-class-join (%ere-class-body ascii-yes)
+                                        (%ere-class-runs-text yes))))
+             (else
+              (cons #t (%ere-class-join (%ere-class-body ascii-no)
+                                        (%ere-class-runs-text no)))))))))
+
+    (define (%ere-class-escape c)
+      ;; The code point C as one member of a bracket expression.
+      ;;
+      ;; **Nothing is escaped**, because POSIX gives backslash no special
+      ;; meaning *inside* a bracket expression and glibc does not add one:
+      ;; `[\\]' is the two characters `\' and `\', and `\^' is `\'
+      ;; *and* `^' - measured. So the three characters that do have a
+      ;; meaning there are placed rather than escaped: `]' first, `^'
+      ;; anywhere but first, `-' last (`%ere-class-body').
+      ;;--------------------------------------------------------------
+      (string (integer->char c)))
 
     (define (%ere-class-text members)
       ;; MEMBERS, ascending code points, as the body of a bracket
@@ -666,16 +822,19 @@
     (define (%ere-class-body members)
       ;; MEMBERS as a bracket expression's body, in the positions POSIX
       ;; gives each character a literal meaning in: "`]' as the first
-      ;; character stands for itself", and a `-' last is not a range.
+      ;; character stands for itself", `^' anywhere but first, and a `-'
+      ;; last is not a range operator.
       ;;--------------------------------------------------------------
-      (let loop ((rest members) (close? #f) (dash? #f) (rest2 '()))
+      (let loop ((rest members) (close? #f) (caret? #f) (dash? #f) (rest2 '()))
         (cond ((null? rest)
                (string-append (if close? "]" "")
                               (%ere-class-text (reverse rest2))
+                              (if caret? "^" "")
                               (if dash? "-" "")))
-              ((= (car rest) 93) (loop (cdr rest) #t dash? rest2))
-              ((= (car rest) 45) (loop (cdr rest) close? #t rest2))
-              (else (loop (cdr rest) close? dash? (cons (car rest) rest2))))))
+              ((= (car rest) 93) (loop (cdr rest) #t caret? dash? rest2))
+              ((= (car rest) 94) (loop (cdr rest) close? #t dash? rest2))
+              ((= (car rest) 45) (loop (cdr rest) close? caret? #t rest2))
+              (else (loop (cdr rest) close? caret? dash? (cons (car rest) rest2))))))
 
     (define (%syntax-class-ere table class-char negated?)
       ;; TABLE's CLASS-CHAR as an ERE bracket expression, or its
@@ -683,22 +842,31 @@
       ;;--------------------------------------------------------------
       (let* ((key (cons table class-char))
              (hit (assoc key %syntax-class-cache))
-             (body (if hit
-                       (cdr hit)
-                       (let ((text (%ere-class-body
-                                    (%syntax-class-members table class-char))))
-                         (set! %syntax-class-cache
-                               (cons (cons key text) %syntax-class-cache))
-                         text))))
+             (entry (if hit
+                        (cdr hit)
+                        (let ((e (%syntax-class-entry table class-char)))
+                          (set! %syntax-class-cache
+                                (cons (cons key e) %syntax-class-cache))
+                          e)))
+             ;; `(COMPLEMENT? . BODY)': BODY names the class, or its
+             ;; complement - see `%syntax-class-entry'.
+             (complement? (car entry))
+             (body (cdr entry)))
         (cond
-         ;; A class no ASCII character has. Negated, that is every
-         ;; character, and `[[:print:][:cntrl:]]' is the locale's every
-         ;; character; plain, `[^[:print:][:cntrl:]]' is the empty one -
-         ;; a bracket expression rather than `regexp-unmatchable', so it
+         ;; The body is empty, so the set it names is empty; the other
+         ;; extreme is written as the locale's every character.
+         ;; `[[:print:][:cntrl:]]' is that set; the brackets are still
+         ;; brackets rather than `regexp-unmatchable', so the expression
          ;; can be quantified (`\s-+' has to compile).
          ((string=? body "")
-          (if negated? "[[:print:][:cntrl:]]" "[^[:print:][:cntrl:]]"))
-         (else (string-append "[" (if negated? "^" "") body "]")))))
+          (if (eq? complement? negated?)
+              ;; the class itself is the one written, and it is empty
+              (if negated? "[[:print:][:cntrl:]]" "[^[:print:][:cntrl:]]")
+              ;; the class is every character, and its complement is what
+              ;; is written
+              (if negated? "[^[:print:][:cntrl:]]" "[[:print:][:cntrl:]]")))
+         (else (string-append "[" (if (eq? complement? negated?) "" "^")
+                              body "]")))))
 
     (define (%numbered-group-end pattern j)
       ;; The index just past the `:' of a `(?N:' beginning at J, where J
@@ -738,19 +906,43 @@
       ;; group `\(?:...\)' has no number in Emacs and needs a group
       ;; here. `mapping' records which glibc group holds which Emacs
       ;; group, and `%string-match-into-regs' renumbers through it.
+      ;;
+      ;; **One Emacs group may be several glibc groups.** `\(?N:' is how
+      ;; a Lisp keyword regexp shares a group number between the
+      ;; alternatives of a `\|' - `\(?1:a\)\|\(?1:b\)' is Emacs group 1
+      ;; either way - and glibc cannot make two groups one register. The
+      ;; mapping therefore holds a *list* per Emacs group, and the one
+      ;; that matched is the register's value. Found through font-lock's
+      ;; "No match 1 in highlight" on `easy-mmode.el'.
       (let ((next-group 1)
             (glibc-groups 0)
-            (mapping '()))
+            (mapping '())
+            ;; The `\_<'/`\_>' assertions: `(GLIBC-GROUP . KIND)' for each,
+            ;; checked against the syntax table after the match - see
+            ;; `%assertions-hold-buffer?'.
+            (assertions '()))
         (define (group-mapping)
-          ;; Entry I is the glibc group that holds Emacs group I.
+          ;; Entry I is the glibc group, or the list of them, that holds
+          ;; Emacs group I.
           ;;----------------------------------------------------------
           (let ((v (make-vector next-group 0)))
             (vector-set! v 0 0)
-            (for-each (lambda (p) (vector-set! v (car p) (cdr p))) mapping)
+            (for-each
+             (lambda (p)
+               (let ((n (car p)) (g (cdr p)))
+                 (vector-set! v n
+                              (if (eqv? 0 (vector-ref v n))
+                                  g
+                                  (let ((old (vector-ref v n)))
+                                    (if (list? old)
+                                        (append old (list g))
+                                        (list old g)))))))
+             mapping)
             v))
       (let loop ((i 0) (acc '()))
         (if (>= i (string-length pattern))
-            (values (list->string (reverse acc)) (group-mapping))
+            (values (list->string (reverse acc)) (group-mapping)
+                    (reverse assertions))
             (let ((c (string-ref pattern i)))
               (cond
                ;; a bracket expression: copied to its `]', with one
@@ -881,22 +1073,29 @@
                                              (string-ref pattern (+ i 2))
                                              (char=? c2 #\S))))
                                           acc))))
-                       ;; `\_<' and `\_>': the *symbol* boundary.
-                       ;; **A named departure**: glibc has the *word*
-                       ;; boundary `\<'/`\>' and no zero-width test of
-                       ;; the syntax table's symbol class, so the word
-                       ;; one stands in. The two agree wherever the
-                       ;; symbol's own edge is a word constituent, which
-                       ;; is every def keyword the Lisp keyword tables
-                       ;; test (`defun\_>', `define\_>'); they differ for
-                       ;; a symbol whose last character is a symbol
-                       ;; -syntax punctuation (`foo?\_>').
+                       ;; `\_<' and `\_>': the *symbol* boundary. It is a
+                       ;; zero-width test of the buffer's syntax table, and
+                       ;; no regexp substrate can make one - glibc has the
+                       ;; *word* boundary `\<'/`\>' and nothing aware of
+                       ;; `SYNTAX (c)'. So the ERE gets an **empty group**
+                       ;; where the boundary goes, and the match is checked
+                       ;; against the syntax table afterwards; a match whose
+                       ;; assertion fails is refused and the search asks
+                       ;; again from the next position - which is what the
+                       ;; C's backtracking does, one layer up. The group is
+                       ;; glibc's alone: `\_<' takes no Emacs group number,
+                       ;; so `mapping' is not told about it.
                        ((and (char=? c2 #\_)
                              (< (+ i 2) (string-length pattern))
                              (memv (string-ref pattern (+ i 2)) '(#\< #\>)))
-                        (loop (+ i 3)
-                              (cons (string-ref pattern (+ i 2))
-                                    (cons #\\ acc))))
+                        (set! glibc-groups (+ glibc-groups 1))
+                        (set! assertions
+                              (cons (cons glibc-groups
+                                          (if (char=? (string-ref pattern (+ i 2)) #\<)
+                                              'symbeg
+                                              'symend))
+                                    assertions))
+                        (loop (+ i 3) (cons #\) (cons #\( acc))))
                        ((%pass-through-escape c2)
                         (loop (+ i 2) (cons c2 (cons #\\ acc))))
                        ((%untranslated-escape c2)
@@ -932,6 +1131,34 @@
     ;; the match about to be read belongs to - see
     ;; `%string-match-into-regs'.
 
+    (define %current-assertions '())
+    ;; ^ The `\_<'/`\_>' assertions of the pattern compiled last
+    ;; (`(GLIBC-GROUP . symbeg-or-symend)'), which the match about to be
+    ;; read must satisfy before it is a match at all.
+
+    (*internal-syntax-propertize-function*
+     (lambda (thunk)
+       ;; `internal--syntax-propertize''s `save-match-data'
+       ;; (`syntax.el:481'), installed from here because
+       ;; `save-match-data' is this library's and `(schemacs editor
+       ;; syntax)' is below it. This runs *from inside a regexp match*:
+       ;; the mode's propertize function runs searches of its own, and
+       ;; without the save they overwrite the match data of the match
+       ;; being attempted - font-lock reported "No match %s in
+       ;; highlight" on a file whose `syntax-propertize-function' had not
+       ;; run yet. The compile-time globals are saved with it, for the
+       ;; same reason: a nested search compiles patterns too.
+       ;;--------------------------------------------------------------
+       (save-match-data
+         (let ((map %current-group-map)
+               (assertions %current-assertions))
+           (dynamic-wind
+             (lambda () #f)
+             thunk
+             (lambda ()
+               (set! %current-group-map map)
+               (set! %current-assertions assertions)))))))
+
     (define (%compile-emacs-regexp pattern icase?)
       ;; Compile PATTERN as an Emacs pattern: through `%emacs-ere',
     ;; with a cache standing for `regexp_cache'.
@@ -946,6 +1173,7 @@
          ((let ((hit (%regexp-cache-lookup key)))
             (and hit
                  (begin (set! %current-group-map (car (cddr hit)))
+                        (set! %current-assertions (car (cdddr hit)))
                         (cadr hit)))))
          (else
           ;; `regexp/newline' is what makes `^' and `$' mean what they
@@ -973,13 +1201,15 @@
           ;; `abbreviate-file-name', which binds `case-fold-search' to
           ;; `file-name-case-insensitive-p' (nil here) and whose own
           ;; pattern is `\\(/\\|\\'\\)'.
-          (let-values (((translated map) (%translate-emacs-regexp pattern table)))
+          (let-values (((translated map assertions)
+                        (%translate-emacs-regexp pattern table)))
           (let ((rx (make-regexp translated
                                  (logior (if icase? regexp/icase 0)
                                          regexp/newline))))
             (set! %current-group-map map)
+            (set! %current-assertions assertions)
             (set! %regexp-cache
-                  (cons (list key rx map)
+                  (cons (list key rx map assertions)
                         (let trim ((l %regexp-cache) (n 0))
                           (cond ((>= n 16) '())
                                 ((null? l) '())
@@ -1013,13 +1243,18 @@
         (let loop ((i 0))
           (when (< i ours)
             (let* ((g (if map (vector-ref map i) i))
-                   (s (and (< g glibc-groups) (match:start match g)))
-                   (e (and s (match:end match g))))
-              ;; a subexpression that did not match answers #f for
-              ;; both (`(-1 . -1)' in ice-9/regex.scm)
-              (if s
-                  (list-set! regs i (cons s e))
-                  #f))
+                   ;; One Emacs group may be several glibc groups when the
+                   ;; pattern spells `\(?N:' in more than one alternative;
+                   ;; the one that matched is the register.
+                   (found (let scan ((gs (if (list? g) g (list g))))
+                            (cond ((null? gs) #f)
+                                  ((< (car gs) glibc-groups)
+                                   (let ((s (match:start match (car gs))))
+                                     (if s
+                                         (cons s (match:end match (car gs)))
+                                         (scan (cdr gs)))))
+                                  (else (scan (cdr gs)))))))
+              (if found (list-set! regs i found) #f))
             (loop (+ i 1))))
         (*search-regs* regs)))
 
@@ -1044,6 +1279,91 @@
                (not (char=? #\newline (string-ref text (- start 1)))))
           regexp/notbol
           0))
+
+    ;;----------------------------------------------------------------
+    ;; The `\_<' and `\_>' assertions (`regex-emacs.c:5508', `:5549')
+    ;;----------------------------------------------------------------
+
+    (define (%symbol-char-at ed pos)
+      ;; `SYNTAX (c)' at POS tested as the symbol boundary tests it:
+      ;; `Sword' or `Ssymbol'. Read through the syntax-table property, as
+      ;; every `SYNTAX (c)' is.
+      ;;--------------------------------------------------------------
+      (memv (%class-in ed pos (char->integer (fetch-char ed pos)))
+            (list sword ssymbol)))
+
+    (define (%assertions-hold-buffer? match base)
+      ;; Whether the `\_<'/`\_>' assertions of the pattern compiled last
+      ;; hold at MATCH's positions. The C tests them inside its matcher;
+      ;; this engine cannot, so the match is refused and the search asks
+      ;; again - `%re-search-forward-1' does that, which is the C's
+      ;; backtracking one layer up.
+      ;;
+      ;; "Case 2: S2 is neither Sword nor Ssymbol" / "Case 3: ... S1 is
+      ;; Sword or Ssymbol" (`regex-emacs.c:5508'): a symbol begins where
+      ;; a symbol constituent follows a non-constituent, and ends where
+      ;; one is followed by a non-constituent.
+      ;;--------------------------------------------------------------
+      (or (null? %current-assertions)
+          (let ((ed (current-buffer)))
+            (%setup-syntax-table)
+            (let loop ((l %current-assertions))
+              (cond
+               ((null? l) #t)
+               (else
+                (let ((pos0 (match:start match (caar l))))
+                 ;; An assertion in an alternative that did not match has
+                 ;; no position (`match:start' answers #f); the C never
+                 ;; reached it, so there is nothing to test.
+                 (if (not pos0)
+                     (loop (cdr l))
+                     (let ((pos (+ base pos0)))
+                  (if (case (cdar l)
+                        ((symbeg)
+                         (and (< pos (buffer-z ed))
+                              (%symbol-char-at ed pos)
+                              (or (= pos (buffer-beg ed))
+                                  (not (%symbol-char-at ed (- pos 1))))))
+                        ((symend)
+                         (and (> pos (buffer-beg ed))
+                              (%symbol-char-at ed (- pos 1))
+                              (or (>= pos (buffer-z ed))
+                                  (not (%symbol-char-at ed pos)))))
+                        (else #f))
+                      (loop (cdr l))
+                      #f))))))))))
+
+    (define (%string-symbol-char? string i)
+      ;; The same test on a string: Emacs reads the *current buffer's*
+      ;; syntax table for a string search, and a string has no
+      ;; text properties, so `char-syntax' is the whole of it.
+      ;;--------------------------------------------------------------
+      (memv (char-syntax (string-ref string i)) (list #\w #\_)))
+
+    (define (%assertions-hold-string? match string)
+      (or (null? %current-assertions)
+          (let ((n (string-length string)))
+            (let loop ((l %current-assertions))
+              (cond
+               ((null? l) #t)
+               (else
+                (let ((pos (match:start match (caar l))))
+                 (if (not pos)
+                     (loop (cdr l))
+                  (if (case (cdar l)
+                        ((symbeg)
+                         (and (< pos n)
+                              (%string-symbol-char? string pos)
+                              (or (= pos 0)
+                                  (not (%string-symbol-char? string (- pos 1))))))
+                        ((symend)
+                         (and (> pos 0)
+                              (%string-symbol-char? string (- pos 1))
+                              (or (= pos n)
+                                  (not (%string-symbol-char? string pos)))))
+                        (else #f))
+                      (loop (cdr l))
+                      #f)))))))))
 
     (define (string-match pattern string . args)
       ;; GNU Emacs's `string-match' (search.c:442): "Return index of
@@ -1072,16 +1392,23 @@
                            (error "Args out of range: ~a, ~a" string start))
                           (else start)))
              (icase? (*case-fold-search*)))
-        (let ((m (regexp-exec (%compile-emacs-regexp pattern icase?)
-                              string start
-                              (%bol-flags string start))))
-          (cond
-           ((not m) #f)
-           (inhibit (match:start m 0))
-           (else
-            (%string-match-into-regs m)
-            (*last-thing-searched* 'string)
-            (match:start m 0))))))
+        (let scan ((start start))
+          (let ((m (regexp-exec (%compile-emacs-regexp pattern icase?)
+                                string start
+                                (%bol-flags string start))))
+            (cond
+             ((not m) #f)
+             ;; A `\_<' or `\_>' that does not hold here is not a match;
+             ;; ask again from the next character, as the C's matcher
+             ;; backtracks.
+             ((not (%assertions-hold-string? m string))
+              (let ((next (+ (match:start m 0) 1)))
+                (if (> next len) #f (scan next))))
+             (inhibit (match:start m 0))
+             (else
+              (%string-match-into-regs m)
+              (*last-thing-searched* 'string)
+              (match:start m 0)))))))
 
     (define (string-match-p regexp string . rest)
       ;; GNU Emacs's `string-match-p' (subr.el:5946): "Same as
@@ -1147,6 +1474,9 @@
                ;; "right at the start of a match": a match further along
                ;; is not one at point, and answers the C's `-1' / nil.
                ((or (not m) (not (= (match:start m 0) here))) #f)
+               ;; A `\_<' or `\_>' that does not hold here is not a
+               ;; match at point.
+               ((not (%assertions-hold-buffer? m base)) #f)
                ;; A match ending at the window's edge may have matched
                ;; `$' or `\b' against the edge rather than the buffer;
                ;; widen and ask again.
@@ -1754,32 +2084,43 @@
                    (span %search-chunk))
           (let* ((base (max (buffer-beg (current-buffer)) (- (min at limit) 1)))
                  (whole (%search-window (current-buffer) base wend))
-                 (here (- (min at limit) base))
-                 (m (regexp-exec regexp whole here (%bol-flags whole here))))
-            (cond
-             ((not m)
-              (if (>= wend cap)
-                  #f
-                  (find (min cap (+ wend span)) (* 2 span))))
-             (else
-              (let ((s (+ (match:start m 0) base))
-                    (e (+ (match:end m 0) base)))
-                (cond
-                 ;; **A match that runs past the bound is refused, and the
-                 ;; search answers nil** - Emacs would take a shorter
-                 ;; match at the same start if the pattern has one, and
-                 ;; this cannot ask for it without truncating the text at
-                 ;; the bound, which would make `$' and `\b' match an end
-                 ;; of string the buffer has not got (measured: it
-                 ;; fabricated two `$' matches in a 500-case corpus).
-                 ;; Left as it is, and named in DEPARTURES.md.
-                 ((> e limit) #f)
-                 ;; A match ending at the window's own edge may have
-                 ;; matched `$' (or a `\b') against the edge rather than
-                 ;; against the buffer; widen and ask again.
-                 ((and (= e wend) (< wend cap))
-                  (find (min cap (+ wend span)) (* 2 span)))
-                 (else (list m s e base))))))))))
+                 (here (- (min at limit) base)))
+          (let scan ((start here))
+            (let ((m (regexp-exec regexp whole start (%bol-flags whole start))))
+              (cond
+               ((not m)
+                (if (>= wend cap)
+                    #f
+                    (find (min cap (+ wend span)) (* 2 span))))
+               (else
+                (let ((s (+ (match:start m 0) base))
+                      (e (+ (match:end m 0) base)))
+                  (cond
+                   ;; **A match that runs past the bound is refused, and the
+                   ;; search answers nil** - Emacs would take a shorter
+                   ;; match at the same start if the pattern has one, and
+                   ;; this cannot ask for it without truncating the text at
+                   ;; the bound, which would make `$' and `\b' match an end
+                   ;; of string the buffer has not got (measured: it
+                   ;; fabricated two `$' matches in a 500-case corpus).
+                   ;; Left as it is, and named in DEPARTURES.md.
+                   ((> e limit) #f)
+                   ;; A match ending at the window's own edge may have
+                   ;; matched `$' (or a `\b') against the edge rather than
+                   ;; against the buffer; widen and ask again.
+                   ((and (= e wend) (< wend cap))
+                    (find (min cap (+ wend span)) (* 2 span)))
+                   ;; A `\_<' or `\_>' that does not hold here is not a
+                   ;; match; the C's matcher backtracks and tries the next
+                   ;; start, and so does this.
+                   ((not (%assertions-hold-buffer? m base))
+                    (let ((next (+ (match:start m 0) 1)))
+                      (if (> next (string-length whole))
+                          (if (>= wend cap)
+                              #f
+                              (find (min cap (+ wend span)) (* 2 span)))
+                          (scan next))))
+                   (else (list m s e base))))))))))))
 
     (define (%re-search-backward-1 regexp at limit)
       ;; `re_search_2' with a negative `range': walk the start position
@@ -1813,7 +2154,8 @@
                 (cond
                  ((and m
                        (= (+ (match:start m 0) base) s)
-                       (<= (+ (match:end m 0) base) at))
+                       (<= (+ (match:end m 0) base) at)
+                       (%assertions-hold-buffer? m base))
                   (list m s (+ (match:end m 0) base) base))
                  ((and m (= (+ (match:start m 0) base) s))
                   ;; The longest match here runs past point; the C
@@ -1824,7 +2166,8 @@
                                           (%bol-flags tshort here))))
                     (if (and tm
                              (= (+ (match:start tm 0) base) s)
-                             (<= (+ (match:end tm 0) base) at))
+                             (<= (+ (match:end tm 0) base) at)
+                             (%assertions-hold-buffer? tm base))
                         (list tm s (+ (match:end tm 0) base) base)
                         (try (- s 1)))))
                  (else (try (- s 1)))))))))))

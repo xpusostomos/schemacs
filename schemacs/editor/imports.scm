@@ -112,15 +112,18 @@
     %blank-line?
     %buffer-modtime
     %buffer-modtime-size
+    %class-in
     %for-each-marker
     %frame-menu-bar-lines
     %kill-buffer
+    %lisp-el-special-forms-and-macros
     %mark-marker
     %marker-charpos
     %nonexistent-modtime-nsecs
     %row-beginning
     %row-of-position
     %set!keymap-order!
+    %setup-syntax-table
     %text-editor-incr-modiff!
     %text-editor-newline-cache
     %transpose-subr
@@ -348,6 +351,7 @@
     *initial-major-mode*
     *insert-default-directory*
     *insert-directory-program*
+    *internal-syntax-propertize-function*
     *interpreter-mode-alist*
     *interprogram-cut-function*
     *interprogram-paste-function*
@@ -769,6 +773,7 @@
     check-coding-system
     check-face
     choose-completion
+    cl--defmethod-doc-pos
     clear-end-of-line!
     clear-frame!
     clear-frame-area!
@@ -1630,6 +1635,8 @@
     line-texts-slice-width
     line-texts-width
     lisp--define-face
+    lisp--el-funcall-position-p
+    lisp--el-match-keyword
     lisp--local-defform-body-p
     lisp-body-indent
     lisp-cl-font-lock-keywords
@@ -1638,9 +1645,11 @@
     lisp-comment-indent
     lisp-data-mode
     lisp-data-mode-syntax-table
+    lisp-doc-string-elt-property
     lisp-el-font-lock-keywords
     lisp-el-font-lock-keywords-1
     lisp-el-font-lock-keywords-2
+    lisp-font-lock-syntactic-face-function
     lisp-indent-calc-next
     lisp-indent-defform
     lisp-indent-function
@@ -1662,6 +1671,8 @@
     lisp-mode-syntax-table
     lisp-mode-variables
     lisp-ppss
+    lisp-string-after-doc-keyword-p
+    lisp-string-in-doc-position-p
     lisp-time-arguments
     list-buffers
     list-buffers--refresh
@@ -2390,6 +2401,7 @@
     sstring
     sstring-fence
     ssymbol
+    standard-syntax-runs
     standard-syntax-table
     status-string
     store-in-alist
@@ -2431,6 +2443,7 @@
     syntax-ppss-flush-cache
     syntax-ppss-toplevel-pos
     syntax-propertize
+    syntax-propertize-chunks
     syntax-propertize-multiline
     syntax-propertize-wholelines
     syntax-table

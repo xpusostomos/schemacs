@@ -17,6 +17,7 @@
  ;; library that holds undo.c until `undo.scm` exists.
  (only (schemacs editor simple) primitive-undo)
  (only (srfi 64) test-assert test-equal test-begin test-end test-error)
+ (only (schemacs editor syntax) with-syntax-table copy-syntax-table standard-syntax-table modify-syntax-entry)
  )
 
 ;; The search.c layer's tests: the match data's conventions (one-based
@@ -508,5 +509,59 @@
 (test-equal "... and the same for a repeated character"
   (list 3 3) (search-in "aaa" 4
                         (lambda () (list (re-search-backward "a+" 1 #t) (point)))))
+
+
+;; ---------------------------------------------------------------------
+;; `\_<' and `\_>': the *symbol* boundary (`regex-emacs.c:5508'), which
+;; the ERE cannot say - the empty group plus the syntax-table check after
+;; the match. `&' and `:' are `Ssymbol' in a Lisp mode, not `Sword' -
+;; which is why the old word-boundary stand-in never matched them - so
+;; the tests run under a table that says so. Every expectation is Emacs
+;; 31.1's, measured with `emacs -Q --batch' in `emacs-lisp-mode'.
+;; ---------------------------------------------------------------------
+(define (lisp-syntax-table)
+  ;; A Lisp mode's table for the characters these tests use: `&', `:' and
+  ;; `?' are symbol constituents there (measured: all three are 95).
+  (let ((table (copy-syntax-table (standard-syntax-table))))
+    (modify-syntax-entry (integer->char 38) "_" table)   ; &
+    (modify-syntax-entry (integer->char 58) "_" table)   ; :
+    (modify-syntax-entry (integer->char 63) "_" table)   ; ?
+    table))
+
+(define (symbol-match pattern string)
+  (with-syntax-table (lisp-syntax-table) (lambda () (string-match pattern string))))
+
+(test-equal "a symbol that starts with & is a symbol start"
+  2 (symbol-match "\\_<&[a-z]+\\_>" "x &optional y"))
+
+(test-equal "a keyword's colon is a symbol start too"
+  2 (symbol-match "\\_<:[a-z]+\\_>" "  :keyword  "))
+
+(test-equal "... but not in the middle of a symbol"
+  #f (symbol-match "\\_<foo\\_>" "xfoobar"))
+
+(test-equal "... and the symbol end test"
+  #f (symbol-match "a\\_>" "a?"))
+
+(test-equal "... unless the next character is not a symbol"
+  0 (symbol-match "a\\_>" "a "))
+
+;; An assertion in an alternative that did not match has no position;
+;; testing #f as one raised "Wrong type argument" (the `:doc' entry of
+;; the Lisp keyword tables, `checkdoc.el').
+(test-equal "an assertion in the other alternative is not tested"
+  0 (symbol-match ":documentation\\_>\\|:doc\\_>" ":doc "))
+
+;; One Emacs group may be several glibc groups: `\(?1:' in two
+;; alternatives is Emacs group 1 either way (`easy-mmode.el').
+(test-equal "a numbered group shared by two alternatives binds either"
+  (list 0 2)
+  (let ((start (symbol-match "\\(?1:ab\\)\\|\\(?1:cd\\)" "cd")))
+    (list start (match-end 1))))
+
+(test-equal "... and the other alternative too"
+  (list 0 2)
+  (let ((start (symbol-match "\\(?1:ab\\)\\|\\(?1:cd\\)" "ab")))
+    (list start (match-end 1))))
 
 (test-end)

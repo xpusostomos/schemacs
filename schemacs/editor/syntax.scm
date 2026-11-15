@@ -60,6 +60,9 @@
     (scheme base)
     (scheme char)
     (only (guile) ash logand logior)
+    ;; The Unicode blocks' syntax, `characters.el'''s half of the
+    ;; standard table - see `%standard-syntax-table'.
+    (only (schemacs editor characters) standard-syntax-runs)
 
     (only (schemacs editor buffer) current-buffer
           fetch-char set-point buffer-pt buffer-beg buffer-z
@@ -97,6 +100,10 @@
    ;; the list scan and its motions
    scan-lists scan-sexps backward-prefix-chars forward-comment
    *forward-comment-function*
+   ;; `SYNTAX (c)' at a position - the C's reader, which `search.c''s
+   ;; `\_<' and `\_>' need (they are zero-width tests only a syntax
+   ;; table can make, so `(schemacs editor search)' checks them itself).
+   %setup-syntax-table %class-in
    <scan-error> make-scan-error scan-error? scan-error-message
    scan-error-start scan-error-end
    scan-error-string
@@ -117,6 +124,7 @@
    *syntax-propertize-chunk-size*
    *syntax-propertize-extend-region-functions*
    *syntax-ppss-max-span*
+   syntax-propertize-chunks *internal-syntax-propertize-function*
    )
 
   (begin
@@ -248,6 +256,32 @@
                   (string->list ".,;:?!#@~^'`"))
         ;; "All multibyte characters have syntax `word' by default."
         (char-table-set-range table 128 #x3FFFFF word)
+        ;; ...and then `characters.el' walks the Unicode blocks:
+        ;; punctuation to `.', arrows and mathematical operators to `_',
+        ;; the CJK bracket pairs to `('/`)'. That is what makes `‘'
+        ;; punctuation and `\u2192' a symbol in a real Emacs, and without
+        ;; it every character above ASCII was `word' - see
+        ;; `(schemacs editor characters)'.
+        (for-each
+         (lambda (run)
+           (let* ((start (car run))
+                  (end (cadr run))
+                  (class (list-ref run 2))
+                  (pair (and (> (length run) 3) (list-ref run 3)))
+                  (entry (cond ((eq? class 'space) space)
+                               ((eq? class 'dot) punct)
+                               ((eq? class 'underscore) symbol)
+                               ((eq? class 'open)
+                                (if pair
+                                    (cons sopen pair)
+                                    (vector-ref %syntax-code-objects sopen)))
+                               ((eq? class 'close)
+                                (if pair
+                                    (cons sclose pair)
+                                    (vector-ref %syntax-code-objects sclose)))
+                               (else word))))
+             (char-table-set-range table start end entry)))
+         standard-syntax-runs)
         table))
 
     (define *standard-syntax-table* (%standard-syntax-table))
@@ -453,6 +487,30 @@
     ;; be the same check at ten times the cost. `%setup-syntax-table`
     ;; re-reads it from the buffer, and `syntax-propertize` keeps it.
 
+    (define *internal-syntax-propertize-function* (make-parameter #f))
+    ;; ^ How `internal--syntax-propertize' (`syntax.el:481') runs: a
+    ;; procedure of one thunk that preserves the match data around it.
+    ;; Emacs spells that `save-match-data', and **`save-match-data' is
+    ;; the search library's, which is *above* this one** - so the save is
+    ;; a seam and `(schemacs editor search)' installs it. Without it (a
+    ;; scan outside any search) the identity is right.
+
+    (define (%internal-syntax-propertize charpos)
+      ;; `internal--syntax-propertize' (`syntax.el:481'), "called
+      ;; directly from C" by `parse_sexp_propertize'. The `save-match-data'
+      ;; is what makes propertizing safe *from inside a regexp match*:
+      ;; the mode's function runs searches of its own, and without the
+      ;; save they overwrite the match data of the match being attempted -
+      ;; which showed up as font-lock's "No match %s in highlight" on a
+      ;; file whose propertize function had not run yet.
+      ;;--------------------------------------------------------------
+      (let ((thunk (lambda ()
+                     (syntax-propertize
+                      (min (+ syntax-propertize-chunks charpos) (%point-max))))))
+        (if (*internal-syntax-propertize-function*)
+            ((*internal-syntax-propertize-function*) thunk)
+            (thunk))))
+
     (define (%parse-sexp-propertize charpos)
       ;; `parse_sexp_propertize' (`syntax.c:480'): "Ensure that the
       ;; `syntax-table' properties are applied up to CHARPOS, then set
@@ -465,7 +523,7 @@
         (if (and (<= %syntax-propertize-done charpos)
                  (< %syntax-propertize-done zv))
             (begin
-              (syntax-propertize (min zv (+ 1 charpos)))
+              (%internal-syntax-propertize (min zv (+ 1 charpos)))
               (%setup-syntax-table))
             (when (> (vector-ref %gl-state %gl-e-property)
                      %syntax-propertize-done)
@@ -2270,6 +2328,15 @@
     ;; `syntax-propertize-function` (`syntax.el:391`) is a
     ;; `defvar-local`; it is read with `buffer-local-value` above, and
     ;; no parameter of that name exists.
+    (define syntax-propertize-chunks
+      ;; "We're not sure how far we'll go.  In my tests, using chunks of
+      ;; 2000 brings the overhead to something negligible.  Passing
+      ;; `charpos' directly also works (basically works line-by-line) but
+      ;; results in an overhead which I thought was a bit too high."
+      ;; (`syntax.el:473'). Read, never `let'-bound, so a plain variable.
+      ;;--------------------------------------------------------------
+      2000)
+
     (define *syntax-propertize-chunk-size* (make-parameter 500))
     (define *syntax-propertize-extend-region-functions* (make-parameter '()))
 

@@ -70,8 +70,12 @@
   #\space (char-syntax #\newline))
 (test-equal "a control character is punctuation"
   #\. (char-syntax (integer->char 1)))
-(test-equal "a multibyte character is word by default"
-  #\w (char-syntax (integer->char #x20ac)))
+;; It used to be `€' here, expecting `w' - which is what this tree gave
+;; every character above ASCII before `characters.scm''s runs landed.
+;; Emacs says `€' is a *symbol* (95) and gives `word' to the code points
+;; its Unicode data does not name; the default is tested on one of those.
+(test-equal "an unnamed multibyte character is word by default"
+  #\w (char-syntax (integer->char 9999)))
 
 ;; ------------------------------------------------------------------
 ;; `string-to-syntax'
@@ -330,5 +334,28 @@
      (list (guard (e (#t (if (quit-condition? e) 'quit 'other)))
              (scan-sexps 1 1))
            (*quit-flag*)))))
+
+
+;; ---------------------------------------------------------------------
+;; The characters above ASCII: `characters.scm' carries Emacs 31.1's own
+;; answers (`standard-syntax-runs'), because `init_syntax_once' gives
+;; them all `word' and `characters.el' then walks the Unicode blocks.
+;; Without the runs every one of these was `word', and the font-lock
+;; entries that match the typographic quotes matched inside strings.
+;; Measured on `emacs -Q --batch' with `(char-syntax CH)': 46, 95, 95,
+;; 46, 119, 119.
+;; ---------------------------------------------------------------------
+(test-equal "the typographic quotes are punctuation"
+  #\. (char-syntax (integer->char #x2018)))
+(test-equal "... the closing one too"
+  #\. (char-syntax (integer->char #x2019)))
+(test-equal "an arrow is a symbol"
+  #\_ (char-syntax (integer->char #x2192)))
+(test-equal "so is a currency sign"
+  #\_ (char-syntax (integer->char #x20AC)))
+(test-equal "a Cyrillic letter is still a word constituent"
+  #\w (char-syntax (integer->char #x0430)))
+(test-equal "and an unassigned code point keeps the default"
+  #\w (char-syntax (integer->char 9999)))
 
 (test-end "schemacs_editor_syntax")

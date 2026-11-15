@@ -3364,3 +3364,156 @@ preloaded). Emacs's `indent-region-line-by-line` gives 13 as well, so it
 is not the fast path's cache. Ours answers what `calculate-lisp-indent`
 answers, which is the function the engine is defined by. Emacs's two
 paths disagree here and the port follows the documented one.
+
+# The colourising pass: `\_<' in the engine, and the syntax table's Unicode blocks
+# (2026-11-15)
+
+`lisp-el-font-lock-keywords-2` is now the whole of Emacs's list, and its
+faces match Emacs's run for run on 22 of 24 files under
+`lisp/emacs-lisp/`. Five engine departures came out of it, four of them
+in `search.c`'s territory.
+
+## `\_<` and `\_>` are assertions now, not `\<`/`\>`
+
+`symbeg`/`symend` (`regex-emacs.c:5508`, `:5549`) are zero-width tests of
+the **syntax table** - the char at the position must be `Sword` or
+`Ssymbol`, and the char before must not be - and no regexp substrate can
+make one. The old translation replaced them with glibc's *word* boundary,
+which is a different test: `&optional` and `:keyword` are `Ssymbol`, not
+`Sword`, so `\<&` never matched, and both of those font-lock entries
+(`lisp-mode--search-key`) silently did nothing.
+
+The ERE now gets an **empty group** `\(\)` where the assertion goes, and
+`%translate-emacs-regexp` records `(GLIBC-GROUP . symbeg-or-symend)`; each
+search checks the assertions against the buffer's (or the current
+buffer's table, for a string) syntax after a match, refuses the match and
+**asks again from the next position** - which is what the C's
+backtracking does, one layer up. `looking-at` and `string-match` do the
+same. An assertion in an alternative that did not match has no position
+and is skipped.
+
+Two named limits: a pattern whose assertion is not at a fixed place under
+glibc's leftmost-LONGEST parse may refuse a match the C's leftmost-FIRST
+parse would have taken; and the retry restarts one character later, which
+cannot reconsider alternative parses at the same start.
+
+## One Emacs group may be several glibc groups
+
+`\(?N:` is how a Lisp keyword regexp shares a group number between the
+alternatives of a `\|`: `\(?1:a\)\|\(?1:b\)` is Emacs group 1 either way,
+and glibc cannot make two groups one register. The mapping used to keep
+the *last* one, so a match on the other alternative answered no group 1 -
+font-lock's "No match %s in highlight" on `easy-mmode.el`. The mapping
+now holds a list per Emacs group and the first that participated is the
+register.
+
+## `internal--syntax-propertize`'s `save-match-data`
+
+The C calls the mode's propertize function **from inside a regexp match**
+(`UPDATE_SYNTAX_TABLE` -> `parse_sexp_propertize`), and Emacs keeps that
+safe with `(save-match-data (syntax-propertize ...))`
+(`syntax.el:481`). The port called `syntax-propertize` bare, so the
+function's own searches overwrote the match data of the match in flight -
+the same "No match %s in highlight", and the same file. `save-match-data`
+is `search.c`'s and `(schemacs editor syntax)` is *below* that library,
+so the save is a seam: `*internal-syntax-propertize-function*`, installed
+by `(schemacs editor search)`, which also saves `%current-group-map` and
+`%current-assertions` - a nested search compiles patterns too.
+
+A `syntax-propertize-chunks` (`syntax.el:473`, 2000) came with it.
+
+## Getting there bit again: the first failure was arithmetic on `#f`
+
+`(match:start m GROUP)` answers `#f` for a group that did not participate.
+The assertion check did `(+ base #f)` on it, which raises three frames
+from the cause.
+
+## `%syntax-class-runs` must resolve parents
+
+`char_table_ref_and_range` (`chartab.c:320`) narrows to a run of the
+table's **own** values and does not consult the parent - its own comment
+says so - and a syntax table is *always* inherited: `copy-syntax-table`
+clears the default and sets the standard table as the parent, the C's own
+line. So every character above ASCII was one run classified by the class
+at its first position, i.e. word. `%char-table-runs` descends into the
+parent where the child answers nil.
+
+## The standard syntax table had none of `characters.el`
+
+`init_syntax_once` gives every multibyte character `word` and stops;
+`characters.el` then walks the Unicode blocks - general punctuation to
+`.`, arrows and mathematical operators to `_`, the CJK bracket pairs to
+`(`/`)` - and *that* is what makes `‘` punctuation and `→` a symbol in a
+real Emacs. None of it was here, so every character above ASCII was word
+syntax, and the keyword entries that match `` `word' `` and the
+typographic quotes matched inside strings where Emacs matches nothing
+(`checkdoc.el`, `chart.el`, `cl-print.el`).
+
+`schemacs/editor/characters.scm` - the existing char-width library, which
+is `characters.el`'s other half - now also carries
+`standard-syntax-runs`: **Emacs 31.1's own answers**, 234 runs emitted by
+a script that walked the standard table from `#x80` to `#x10FFFF` and kept
+the runs that are not `word` (the method the charset registry and the
+xterm decode map were transcribed by). `%standard-syntax-table` applies
+them; `map-charset-chars` is not ported and is not needed, because the
+answers are data.
+
+## Bracket classes above ASCII are enumerated, not ranged
+
+A range in a glibc bracket expression is read in the locale's
+**collation**, not in code-point order. Measured here: `[\x7f-\xa0]` and
+`[←-ⱏ]` are both "Invalid range end". The non-`word` runs of a syntax
+table are 2344 code points in all, so `%ere-class-runs-text` enumerates
+them one at a time. It also has to place the ASCII part's trailing `-`
+*after* the enumeration (`%ere-class-join`), or glibc reads `-¤` as a
+range.
+
+## The syntactic pass's delimiter-face branch, ported
+
+`font-lock.el:1612-1627` paints the comment's opening delimiter with
+`font-lock-comment-delimiter-face` using `font-lock-comment-start-skip`
+or `comment-start-skip`, and its closing one with `comment-end-skip` -
+only when the face is exactly `font-lock-comment-face`, so a doc string
+keeps `font-lock-doc-face` throughout. The port had it named as "not
+carried" because newcomment.el was not ported; it is, so it is.
+
+## Three transcription bugs in the Lisp keyword tables
+
+* **`lisp--el-funcall-position-p` used `(car (last (cdr paren-posns)))`**
+  where the C has `(car (last paren-posns 2))` - the *second-to-last*
+  opener, the form the enclosing paren belongs to. Ours took the
+  enclosing paren itself, so the `let` test never fired and
+  `(interactive t)` in a `let*` binding list was coloured a keyword.
+* **The "Erroneous structures" entry came after "Control structures"**;
+  the C has it before. A face already set is not overwritten without an
+  override, so `(cl-assert ...)` must keep the warning face.
+* **`cl-defmethod`'s `doc-string-elt` held the symbol
+  `cl--defmethod-doc-pos`**; there is no obarray here, so `functionp` was
+  false and the numeric compare raised. The table holds the procedure,
+  the same spelling the keyword tables use for their matchers.
+
+## The last two files, and the spurious backslash
+
+`check-declare.el` and `cl-print.el` differed by a `` `...' `` span our
+engine matched inside a string where Emacs's matched nothing; the span
+ended at a backslash-escaped quote. The cause was `%ere-class-escape`:
+it wrote `^` as `\^`, and **glibc gives backslash no meaning inside a
+bracket expression**, so that is the two characters `\` *and* `^` -
+every class silently gained a backslash member, and the symbol class
+therefore accepted `\'` as a symbol character. Measured, `[\^]` matches
+both. `%ere-class-body` now places `^` anywhere but first instead of
+escaping it, and nothing is escaped in a bracket at all.
+
+With that, the face-run differential is **24 of 24 files under
+`lisp/emacs-lisp/` exact**.
+
+## `scheme-mode`: `define-library`'s second half
+
+`(define-library ...)` comes out `define` keyword-face, `-library`
+function-name; Emacs paints 2..16 all keyword-face. Emacs's
+`scheme-font-lock-keywords-1` matches only `(define` there (its second
+group is unset), so the rest of the run comes from a level-2 entry this
+pass did not chase - scheme-mode was the *previous* pass's subject and
+its face runs were not part of this differential. Named rather than
+guessed at: the harness is `/tmp/faces-scheme.el` and
+`/tmp/ours-scheme.scm`, and it is a two-line reproduction.
