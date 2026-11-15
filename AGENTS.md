@@ -8941,17 +8941,22 @@ now and does the same, reading the property through
 
 ## Still to do on the tab line
 
-0. **The scroll arrows do not appear.** `tab-line-auto-hscroll` decides
-   whether the tabs fit by `(> (vertical-motion 1) 0)` in a scratch
-   buffer - Emacs's own test - and our `vertical-motion` answers 0 for a
-   single long line, because it counts *buffer* lines and Emacs counts
-   *screen* lines (`indent.c`'s `move_it_vertically`). Measured
-   headlessly: `(tab-line-auto-hscroll (list (make-string 200 #a)) #f)`
-   answers `(#f #f)` where Emacs answers show-arrows. So a tab line wider
-   than its window is truncated by `mode-line-truncate` with no `<`/`>`
-   buttons, and `tab-line-hscroll` is reachable only from Lisp. Closing
-   it is `vertical-motion`'s screen-line counting, which is
-   `indent.c`'s and a piece of work on its own.
+0. **The scroll arrows work, and `vertical-motion` measures the current
+   buffer now.** `tab-line-auto-hscroll` decides whether the tabs fit by
+   `(> (vertical-motion 1) 0)` measured in a scratch buffer no window
+   shows, and our `vertical-motion` read its text from
+   `(window-buffer window)` while taking the width from the same window -
+   so it measured the *shown* buffer's lines and answered "the tabs
+   wrapped" for every tab line. The C does the other thing: the iterator
+   takes width, wrapping and hscroll from `w` and characters from
+   `current_buffer`. `buffer-line-texts-at`, `window-line-slices-at`,
+   `%window-line-slices`, `window-truncates-lines?` and
+   `%row-of-position` take an optional buffer now (the window's, by
+   default) and `vertical-motion` passes the current one - falling back
+   to the window's when there is none, which a test can produce and a
+   live editor cannot. Measured: `(tab-line-auto-hscroll (list
+   (make-string 200 #a)) #f)` is `(#t #f)` where it was `(#f #f)`, and a
+   tab line whose tabs fit no longer shows a stray `>` button.
 
 1. **The mouse path is done** - see "The click dispatch" above.
    `posn-at-x-y` answers the `tab-line` area with the string drawn

@@ -3872,6 +3872,23 @@ and `seq-copy`, and each is written over lists. `cl-position` and
   lookup - `lookup-keymaps` reads the current buffer's map. Neither is
   reachable from a tab click.
 
+### `vertical-motion` reads the current buffer, and now says so
+
+- **Emacs**: `vertical-motion` has no buffer argument. Its iterator takes
+  the width, the wrapping and the hscroll from the window and the
+  *characters* from `current_buffer`, which is why
+  `tab-line-auto-hscroll` can measure a tab line in a scratch buffer no
+  window shows.
+- **Here**: the row helpers were window-first - `buffer-line-texts-at`
+  read `(window-buffer window)` - so `vertical-motion` measured the shown
+  buffer's lines whatever the current buffer was. `tab-line-auto-hscroll`
+  therefore answered "the tabs wrapped" for every tab line: a stray `>`
+  button on a row whose tabs fit, and no way to reach the ones that did
+  not. The helpers take an optional buffer now (defaulting to the
+  window's) and `vertical-motion` passes the current one. The fallback to
+  the window's buffer when there is *no* current buffer is this tree's:
+  a live editor always has one, a test may not.
+
 ### Named, not carried, in `tab-line.scm`'s header
 
 The buffer menu behind `tab-line-new-tab-choice`'s `t` (`mouse-buffer-menu`

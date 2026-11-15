@@ -394,14 +394,19 @@
                                 (fetch-char ed (+ line-start i)))
                             acc)))))))
 
-    (define (buffer-line-texts-at window line-start)
+    (define (buffer-line-texts-at window line-start . args)
       ;; The texts of the line beginning at buffer position LINE-START in
       ;; WINDOW. This is the form everything in this file uses: a walk
       ;; that is stepping through a window's lines has the position
       ;; already, and asking for the line by *number* instead means
       ;; scanning from the beginning of the buffer for every row.
       ;;--------------------------------------------------------------
-      (line-display-texts (window-buffer window) line-start))
+      ;; **The buffer is optional and means the current one when it is
+      ;; given as such** (`vertical-motion` measures a buffer that the
+      ;; window need not be showing - Emacs's `tab-line-auto-hscroll` is
+      ;; the caller that does). Default: the window's own.
+      (line-display-texts (if (pair? args) (car args) (window-buffer window))
+                          line-start))
 
     (define (buffer-line-texts window line-index)
       ;; The texts of LINE-INDEX's line in WINDOW, or #f when the buffer
@@ -554,7 +559,7 @@
         (and frame
              (= (window-width window) (frame-width frame)))))
 
-    (define (window-truncates-lines? window)
+    (define (window-truncates-lines? window . args)
       ;; Whether WINDOW cuts long lines off instead of continuing them:
       ;; the `it->line_wrap' test at the top of GNU Emacs's
       ;; `init_iterator' (`xdisp.c':3414), which asks four things.
@@ -575,7 +580,8 @@
       ;; and it wraps when all four hold, at a word when `word-wrap' is
       ;; set and at the edge otherwise.
       ;;--------------------------------------------------------------
-      (let ((ptw (buffer-local-value (window-buffer window)
+      (let ((ptw (buffer-local-value (if (pair? args) (car args)
+                                         (window-buffer window))
                                      'truncate-partial-width-windows
                                      (*truncate-partial-width-windows*)))
             (cols (window-width window)))
@@ -584,7 +590,8 @@
                           (not ptw)
                           (and (exact-integer? ptw) (<= ptw cols)))
                       (not (buffer-truncate-lines
-                            (window-buffer window))))))))
+                            (if (pair? args) (car args)
+                                (window-buffer window)))))))))
 
     (define (string->texts str)
       ;; STR's characters as a texts vector - what `line-display-texts'
@@ -708,10 +715,10 @@
             (cons start i))
            (else (loop (+ i 1) start))))))
 
-    (define (window-wraps? window)
+    (define (window-wraps? window . args)
       ;; Whether WINDOW lays a long line out over several screen rows.
       ;;--------------------------------------------------------------
-      (not (window-truncates-lines? window)))
+      (not (apply window-truncates-lines? window args)))
 
     (define (window-line-rows-at window line-start)
       ;; How many screen rows the line beginning at LINE-START takes in
@@ -742,13 +749,13 @@
                                       (buffer-word-wrap
                                        (window-buffer window)))))))
 
-    (define (window-line-slices-at window line-start)
+    (define (window-line-slices-at window line-start . args)
       ;; The `(FIRST . LAST)' buffer columns of each screen row the line
       ;; beginning at LINE-START takes in WINDOW - the rows to draw, in
       ;; order.
       ;;--------------------------------------------------------------
-      (let ((texts (buffer-line-texts-at window line-start)))
-        (if texts (%window-line-slices window texts) '())))
+      (let ((texts (apply buffer-line-texts-at window line-start args)))
+        (if texts (apply %window-line-slices window texts args) '())))
 
     (define (window-line-slices window line-index)
       ;; `window-line-slices-at' for a caller with a line number and no
@@ -757,7 +764,7 @@
       (let ((texts (buffer-line-texts window line-index)))
         (if texts (%window-line-slices window texts) '())))
 
-    (define (%window-line-slices window texts)
+    (define (%window-line-slices window texts . args)
       ;; `window-line-slices' over texts already in hand. The row walk
       ;; computes them itself, beside the line's buffer position, so that
       ;; a line with a `display' property is walked for it once.
@@ -768,9 +775,10 @@
             (else
              (line-texts-rows texts
                               (window-body-width window)
-                              (window-wraps? window)
+                              (apply window-wraps? window args)
                               (buffer-word-wrap
-                               (window-buffer window))))))
+                               (if (pair? args) (car args)
+                                   (window-buffer window)))))))
 
     (define (rows-above window line-start)
       ;; How many screen rows the lines between WINDOW's top and the line
@@ -797,7 +805,7 @@
               ((< column (cdr (car rest))) k)
               (else (loop (cdr rest) (+ k 1))))))
 
-    (define (%row-of-position window line-start column)
+    (define (%row-of-position window line-start column . args)
       ;; Which screen row of the line beginning at LINE-START the buffer
       ;; column COLUMN is drawn on.
       ;;
@@ -808,7 +816,8 @@
       ;; `rows-row-of-column' answers 0 there, which is where the cursor
       ;; never is at the callers it was written for.
       ;;--------------------------------------------------------------
-      (let loop ((rest (window-line-slices-at window line-start)) (k 0))
+      (let loop ((rest (apply window-line-slices-at window line-start args))
+                 (k 0))
         (cond ((null? rest) (max 0 (- k 1)))
               ((< column (cdr (car rest))) k)
               (else (loop (cdr rest) (+ k 1))))))
@@ -870,11 +879,22 @@
       (let* ((goal (and (pair? lines) (car lines)))
              (lines (if (pair? lines) (cdr lines) lines))
              (window (or (and (pair? rest) (car rest)) (selected-window)))
-             (ed (window-buffer window))
+             ;; **The buffer moved over is the *current* one**, and the
+             ;; window is only its geometry - which is what the C does:
+             ;; the iterator takes its width, wrapping and hscroll from
+             ;; `w` and its characters from `current_buffer`. Reading the
+             ;; text from the window's buffer instead is what made
+             ;; `tab-line-auto-hscroll` - which measures in a scratch
+             ;; buffer no window shows - see the *shown* buffer's lines
+             ;; and answer "the tabs wrapped" every time.
+             ;; ...and there is never no current buffer in a live editor
+             ;; (Emacs has no such state), so the fallback is for a caller
+             ;; that holds only a window - a test.
+             (ed (or (current-buffer) (window-buffer window)))
              (pt (buffer-pt ed))
              (line-start (text-editor-get-start-of-line ed pt))
-             (slices (window-line-slices-at window line-start))
-             (k (%row-of-position window line-start (- pt line-start)))
+             (slices (window-line-slices-at window line-start ed))
+             (k (%row-of-position window line-start (- pt line-start) ed))
              (left (abs lines))
              (down? (>= lines 0))
              (answer
@@ -891,7 +911,7 @@
                       (loop line row-slices (+ k 1) (- left 1) (+ moved 1))
                       (let ((next (line-next-start ed line)))
                         (if next
-                            (loop next (window-line-slices-at window next)
+                            (loop next (window-line-slices-at window next ed)
                                   0 (- left 1) (+ moved 1))
                             ;; the end of the buffer: the C's walk stops
                             ;; at ZV and says how far it got
@@ -903,7 +923,7 @@
                   (list (buffer-beg ed) moved))
                  (else
                   (let* ((prev (text-editor-get-start-of-line ed (- line 1)))
-                         (prev-slices (window-line-slices-at window prev)))
+                         (prev-slices (window-line-slices-at window prev ed)))
                     (loop prev prev-slices
                           (max 0 (- (length prev-slices) 1))
                           (- left 1) (+ moved 1))))))))

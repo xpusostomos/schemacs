@@ -2240,6 +2240,16 @@ os.makedirs(os.path.join(NO_SPLASH_CONFIG_HOME, 'schemacs'), exist_ok=True)
 open(os.path.join(NO_SPLASH_CONFIG_HOME, 'schemacs', 'init.scm'), 'w').write(
     NO_SPLASH_INIT)
 
+# And one that turns the tab line on in every buffer, for the check that
+# is about it. `global-tab-line-mode` is the whole of what a user does:
+# `tab-line-mode` in each buffer, and the redisplay draws the row.
+TAB_LINE_CONFIG_HOME = tempfile.mkdtemp(prefix='schemacs-tabline-config-')
+os.makedirs(os.path.join(TAB_LINE_CONFIG_HOME, 'schemacs'), exist_ok=True)
+open(os.path.join(TAB_LINE_CONFIG_HOME, 'schemacs', 'init.scm'), 'w').write(
+    '(import (schemacs editor startup))\n'
+    '(set! inhibit-startup-screen #t)\n'
+    '(global-tab-line-mode 1)\n')
+
 # And one that leaves the menu bar *on*, for the check that is about it.
 MENUBAR_CONFIG_HOME = tempfile.mkdtemp(prefix='schemacs-menubar-config-')
 os.makedirs(os.path.join(MENUBAR_CONFIG_HOME, 'schemacs'), exist_ok=True)
@@ -4693,6 +4703,60 @@ def check_isearch_mark():
     return problems
 
 
+def check_tab_line():
+    """The tab line, on a terminal.
+
+    `global-tab-line-mode` turns `tab-line-mode` on in every buffer, and
+    the redisplay draws a row above each window's text -
+    `window_wants_tab_line` (`window.c:6101`) and
+    `render-window-tab-line!`. This is the one check that runs with the
+    mode on (`TAB_LINE_CONFIG_HOME`); every other check has it off, so
+    their text rows start at the frame's top.
+
+    Three things: the row sits directly above the window's text (below
+    the menu bar, which a terminal frame draws on row 0) and names the
+    buffer the window shows; switching buffer *adds* a tab rather than
+    replacing the row; and a tab line whose tabs fit shows **no scroll
+    arrows** - `tab-line-auto-hscroll` decides that with
+    `(vertical-motion 1)` in a scratch buffer, so an arrow here means
+    `vertical-motion` measured the wrong buffer.
+    """
+    problems = []
+
+    def tab_row(rows):
+        # The tab line is the row among the top few that carries the
+        # buffer's name and the `|` separators a terminal uses.
+        for i, row in enumerate(rows[:3]):
+            if "pty-check-tab.txt" in row and "|" in row:
+                return i, row
+        return None, None
+
+    path = "/tmp/pty-check-tab.txt"
+    open(path, "w").write("the file\n")
+    rows = screen_of(drive([], path, config=TAB_LINE_CONFIG_HOME)).split("\n")
+    at, row = tab_row(rows)
+    if at is None:
+        problems.append("no tab line above the text: %r" % (rows[:3],))
+    else:
+        if "the file" not in rows[at + 1]:
+            problems.append("the tab line is not directly above the text: %r"
+                            % (rows[at:at + 2],))
+        if "|>" in row or "> |" in row:
+            problems.append("a tab line whose tabs fit shows a scroll arrow: "
+                            "%r" % (row,))
+
+    screen = screen_of(drive([b"\x18b", b"*scratch*\r"], path,
+                             config=TAB_LINE_CONFIG_HOME))
+    rows = screen.split("\n")
+    at, row = tab_row(rows)
+    if at is None or "*scratch*" not in row:
+        problems.append("the new buffer's tab is not in the tab line: %r"
+                        % (rows[:3],))
+    elif "pty-check-tab.txt" not in row:
+        problems.append("the old tab went away instead of staying: %r" % (row,))
+    return problems
+
+
 def check_no_display():
     """`se -w' with no display says so and exits 1, instead of crashing.
 
@@ -4906,6 +4970,7 @@ CHECKS = {
     "load-theme": check_load_theme,
     "completion-scroll": check_completion_scroll,
     "tty-menu": check_tty_menu,
+    "tab-line": check_tab_line,
     "no-display": check_no_display,
 }
 
