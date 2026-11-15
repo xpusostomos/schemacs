@@ -438,7 +438,12 @@
           #t
           (let loop ((conjuncts display) (match #t))
             (cond
-             ((or (not match) (null? conjuncts)) match)
+             ;; A nil DISPLAY matches every display and specifies
+             ;; nothing: Emacs's `(while (and conjuncts match) ...)'
+             ;; never runs for it. Nil is `#f` as well as `'()` here, so
+             ;; the test is `pair?` - an entry of `(TAB-LINE-TAB (#f))`
+             ;; in a generated theme is exactly this case.
+             ((or (not match) (not (pair? conjuncts))) match)
              (else
               (let* ((conjunct (car conjuncts))
                      (req (car conjunct))
@@ -482,8 +487,10 @@
                   (else no-match)))
            (else
             (let* ((entry (car tail))
-                   (display (car entry))
-                   (attrs (cdr entry))
+                   ;; "`(car nil)` is nil" - an entry that is not a pair is
+                   ;; Elisp's nil entry, which matches and sets nothing.
+                   (display (if (pair? entry) (car entry) #f))
+                   (attrs (if (pair? entry) (cdr entry) '()))
                    ;; An old-style entry is `(DISPLAY ATTRS)' with the
                    ;; attributes as one list; a new-style one is
                    ;; `(DISPLAY ATTR VALUE ...)'.
