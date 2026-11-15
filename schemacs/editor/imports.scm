@@ -1422,6 +1422,7 @@
     global-buffers-menu-map
     global-font-lock-mode
     global-tab-line-mode
+    global-tab-line-mode-variable
     global-text-scale-adjust
     global-text-scale-adjust--default-height
     global-text-scale-adjust--increment-factor
@@ -2586,6 +2587,7 @@
     tab-line-mode
     tab-line-mode--turn-on
     tab-line-mode-map
+    tab-line-mode-variable
     tab-line-mouse-move-tab
     tab-line-move-tab-backward
     tab-line-move-tab-forward
@@ -2614,6 +2616,7 @@
     tab-line-tabs-buffer-group-name
     tab-line-tabs-buffer-group-sort-by-name
     tab-line-tabs-buffer-groups
+    tab-line-tabs-buffer-groups-alist
     tab-line-tabs-buffer-list
     tab-line-tabs-buffer-list-function
     tab-line-tabs-fixed-window-buffers
