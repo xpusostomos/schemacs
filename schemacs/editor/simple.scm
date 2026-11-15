@@ -230,7 +230,7 @@ prefix-argument-description
 just-one-space delete-horizontal-space delete-blank-lines
    *kill-whole-line*
    delete-all-space delete-leading-space delete-trailing-space
-   transpose-chars transpose-words fixup-whitespace
+   transpose-chars transpose-words %transpose-subr fixup-whitespace
    prefix-echo-pending? request-prefix-echo! show-prefix-echo!
    primitive-undo strip-undo-boundaries undo undo-redo update-prefix!
    word-char? word-run-end word-run-start yank
@@ -2887,53 +2887,46 @@ If N is omitted or nil, move point 1 character to the left."
                  (+ (car pos2) (- len2 len1) len1)
                  (+ (car pos2) (- len2 len1) len1 len2)))))))
 
-    (define (%transpose-subr mover arg)
+    (define (%transpose-subr mover arg . rest)
       ;; GNU Emacs's `transpose-subr' (simple.el:8885): "Subroutine to
-      ;; do the work of transposing objects." MOVER moves by one unit,
-      ;; and its positions are the cons the ordinary (non-special)
-      ;; callers make of going over and coming back. The ARG zero case
-      ;; exchanges with the mark's object, and what it is not ported
-      ;; for - `(or (mark) (error ...))' - is the same error.
+      ;; do the work of transposing objects."
+      ;;
+      ;; MOVER moves by one unit, and the ordinary (non-SPECIAL) callers
+      ;; make of going over and coming back the cons of positions. With
+      ;; SPECIAL, "MOVER is ... a function calculating a cons of buffer
+      ;; positions" - it answers the cons itself and point is not
+      ;; touched.
       ;;--------------------------------------------------------------
-      (let ((aux
-             (lambda (x)
-               ;; Emacs's: `(cons (begin (funcall mover x) (point))
-               ;; (begin (funcall mover (- x)) (point)))' - the second
-               ;; mover runs from where the first left point, and the
-               ;; two together net point back to where it was.
-               (let ((ed (current-buffer)))
-                 (mover x)
-                 (let ((here (buffer-pt ed)))
-                   (mover (- x))
-                   (cons here (buffer-pt ed)))))))
+      (let* ((special (if (pair? rest) (car rest) #f))
+             (plain
+              (lambda (x)
+                (cons (begin (mover x) (point))
+                      (begin (mover (- x)) (point)))))
+             (aux (if special mover plain)))
         (cond
          ((= arg 0)
-          ;; Emacs's arg-zero case (simple.el:8897): the transposition
-          ;; inside `save-excursion' - point back where it started when
-          ;; it is done - and then `exchange-point-and-mark', which puts
-          ;; point where the mark was.
+          ;; Emacs's arg-zero case: the transposition inside
+          ;; `save-excursion' - point back where it started when it is
+          ;; done - and then `exchange-point-and-mark', which puts point
+          ;; where the mark was.
           (save-excursion
             (let ((pos1 (aux 1)))
-              (if (not (mark #t))
-                  (error "No mark set in this buffer")
-                  (begin
-                    (set-point (current-buffer) (mark #t))
-                    (let ((pos2 (aux 1)))
-                      (%transpose-subr-1 pos1 pos2))))))
+              (goto-char (or (mark #t) (error "No mark set in this buffer")))
+              (let ((pos2 (aux 1)))
+                (%transpose-subr-1 pos1 pos2))))
           (exchange-point-and-mark #f))
          ((> arg 0)
           (let* ((pos1 (aux -1))
                  (pos2 (aux arg)))
             (%transpose-subr-1 pos1 pos2)
-            (set-point (current-buffer) (car pos2))))
+            (goto-char (car pos2))))
          (else
           (let* ((pos1 (aux -1))
-                 (ed (current-buffer)))
-            (set-point ed (car pos1))
-            (let ((pos2 (aux arg)))
-              (%transpose-subr-1 pos1 pos2)
-              (set-point
-               ed (+ (car pos2) (- (cdr pos1) (car pos1))))))))))
+                 (pos2 #f))
+            (goto-char (car pos1))
+            (set! pos2 (aux arg))
+            (%transpose-subr-1 pos1 pos2)
+            (goto-char (+ (car pos2) (- (cdr pos1) (car pos1)))))))))
 
     (define-command (transpose-chars arg)
       ;; GNU Emacs's `transpose-chars' (simple.el:8787): "Interchange

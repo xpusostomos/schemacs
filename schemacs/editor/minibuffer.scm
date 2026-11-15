@@ -295,6 +295,7 @@ read-number-history
    goto-line-history
    ;; `eval-expression' and its variables, from `simple.el'
    eval-expression eval-expression-print-format read--expression
+   eval-expression-get-print-arguments
    read--expression-map read--expression-try-read
    debugger-quit debugger-mode-map
    *eval-expression-print-maximum-character* *eval-expression-debug-on-error*
@@ -3794,6 +3795,19 @@ Just \\[universal-argument] as argument means to use the current column."
       ;; how the first version of this answered "Unbound variable: +".
       ;;--------------------------------------------------------------
       (open-user-environment!))
+
+    (define (eval-expression-get-print-arguments prefix-argument)
+      ;; GNU Emacs's `eval-expression-get-print-arguments'
+      ;; (`simple.el'): "Get arguments for commands that print an
+      ;; expression result. Returns a list (INSERT-VALUE NO-TRUNCATE
+      ;; CHAR-PRINT-LIMIT) based on PREFIX-ARGUMENT."
+      ;;--------------------------------------------------------------
+      (let ((num (uarg->integer 1 prefix-argument)))
+        (list (not (memv prefix-argument (list '- #f)))
+              (= num 0)
+              (cond ((not (memv prefix-argument (list 0 -1 '- #f))) #f)
+                    ((= num -1) 2305843009213693951)  ; most-positive-fixnum
+                    (else (*eval-expression-print-maximum-character*))))))
 
     (define (%eval-expression-value->string value)
       (call-with-port (open-output-string)

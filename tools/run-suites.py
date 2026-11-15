@@ -37,6 +37,7 @@ SUITES = [
     'schemacs/editor/dired-mode-tests.scm',
     'schemacs/editor/font-lock-tests.scm',
     'schemacs/editor/lisp-mode-tests.scm',
+    'schemacs/editor/lisp-tests.scm',
     'schemacs/editor/marker-tests.scm',
     'schemacs/editor/editfns-tests.scm',
     'schemacs/editor/env-tests.scm',

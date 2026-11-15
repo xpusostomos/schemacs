@@ -165,6 +165,7 @@
         (schemacs editor isearch)
         (schemacs editor keyboard)
         (schemacs editor keymap)
+        (schemacs editor lisp)
         (schemacs editor lisp-mode)
         (schemacs editor ls-lisp)
         (schemacs editor marker)

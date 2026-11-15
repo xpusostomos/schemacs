@@ -87,6 +87,15 @@
    ;; skip-chars
    skip-chars-forward
    skip-chars-backward
+   ;; skip-syntax
+   skip-syntax-forward
+   skip-syntax-backward
+   ;; the list scan and its motions
+   scan-lists scan-sexps backward-prefix-chars forward-comment
+   *forward-comment-function*
+   <scan-error> make-scan-error scan-error? scan-error-message
+   scan-error-start scan-error-end
+   scan-error-string
    ;; word motion - the old names, now over the syntax table
    word-char?
    forward-word-position backward-word-position
@@ -94,6 +103,7 @@
    ;; syntax.el
    with-syntax-table syntax-ppss syntax-ppss-depth syntax-ppss-context
    syntax-ppss-toplevel-pos syntax-ppss-flush-cache syntax-propertize
+   ppss-comment-or-string-start
    syntax-propertize-wholelines syntax-propertize-multiline
    ;; the variables
    *parse-sexp-lookup-properties* *parse-sexp-ignore-comments*
@@ -516,37 +526,154 @@
               (if (= prev pos) prev (loop (+ 1 i) prev))))))
 
     ;; ---------------------------------------------------------------
-    ;; `skip-chars-forward' / `skip-chars-backward' (`syntax.c:1618').
+    ;; `skip-chars-forward' / `skip-chars-backward' (`syntax.c:1618')
+    ;; over `skip_chars' (`:1660').
+    ;;
+    ;; The C builds a `fastmap' over ASCII and a `char_ranges' vector
+    ;; over the rest, then walks. This is the same test one character at
+    ;; a time - the maps are an optimisation, and the answers are the
+    ;; same.
     ;; ---------------------------------------------------------------
-    (define (skip-chars-forward set . rest)
+    (define (%wctype-member? name c)
+      ;; `[:NAME:]' in a skip set - `re_wctype_parse' and
+      ;; `re_iswctype' (`regex-emacs.c'). ASCII answers are the C's
+      ;; macros; the rest are Guile's character predicates, which is
+      ;; this tree's answer for the wide-character tables.
+      ;;--------------------------------------------------------------
+      (define (ascii lo hi) (and (>= c lo) (<= c hi)))
+      (define (wide pred) (and (<= c #x10FFFF) (pred (integer->char c))))
+      (case name
+        ((alnum) (or (ascii (char->integer #\0) (char->integer #\9))
+                     (ascii (char->integer #\A) (char->integer #\Z))
+                     (ascii (char->integer #\a) (char->integer #\z))
+                     (wide char-alphabetic?)))
+        ((alpha) (or (ascii (char->integer #\A) (char->integer #\Z))
+                     (ascii (char->integer #\a) (char->integer #\z))
+                     (wide char-alphabetic?)))
+        ((blank) (or (= c 32) (= c 9) (wide char-whitespace?)))
+        ((cntrl) (or (and (>= c 0) (< c 32)) (= c 127)))
+        ((digit) (or (ascii (char->integer #\0) (char->integer #\9))
+                     (wide char-numeric?)))
+        ((graph) (and (> c 32) (< c 127)))
+        ((lower) (or (ascii (char->integer #\a) (char->integer #\z))
+                     (wide char-lower-case?)))
+        ((print) (and (>= c 32) (< c 127)))
+        ((punct) (and (> c 32) (< c 127)
+                      (not (ascii (char->integer #\0) (char->integer #\9)))
+                      (not (ascii (char->integer #\A) (char->integer #\Z)))
+                      (not (ascii (char->integer #\a) (char->integer #\z)))))
+        ((space) (or (= c 32) (= c 9) (= c 10) (= c 13) (= c 12) (= c 11)
+                     (wide char-whitespace?)))
+        ((upper) (or (ascii (char->integer #\A) (char->integer #\Z))
+                     (wide char-upper-case?)))
+        ((xdigit) (or (ascii (char->integer #\0) (char->integer #\9))
+                      (ascii (char->integer #\A) (char->integer #\F))
+                      (ascii (char->integer #\a) (char->integer #\f))))
+        ((ascii) (< c 128))
+        ((nonascii) (>= c 128))
+        ((unibyte) (<= c #xFF))
+        ((multibyte) (> c #xFF))
+        ((word) (or (ascii (char->integer #\0) (char->integer #\9))
+                    (ascii (char->integer #\A) (char->integer #\Z))
+                    (ascii (char->integer #\a) (char->integer #\z))
+                    (= c (char->integer #\_))
+                    (wide char-alphabetic?)))
+        (else #f)))
+
+    (define (%skip-chars-set set)
+      ;; The C's `fastmap' and `char_ranges': the set as ranges and
+      ;; named classes, with the `^' negation.
+      ;;--------------------------------------------------------------
+      (let* ((n (string-length set))
+             (negate (and (> n 0) (char=? (string-ref set 0) #\^)))
+             (items '()))
+        (let loop ((i (if negate 1 0)) (pending #f) (lo #f))
+          ;; PENDING is the character that could start a range; LO is
+          ;; where a "-" range would begin.
+          (define (emit c)
+            ;; A one-character range, as integers - the member test
+            ;; compares code points.
+            (set! items (cons (cons (char->integer c) (char->integer c))
+                              items)))
+          (if (>= i n)
+              (begin
+                (when pending (emit pending))
+                (set! items (reverse items))
+                (values negate items))
+              (let ((ch (string-ref set i)))
+                (cond
+                 ((and (char=? ch #\[) (< (+ i 1) n)
+                       (char=? (string-ref set (+ i 1)) #\:))
+                  (let scan ((j (+ i 2)))
+                    (cond
+                     ((>= (+ j 1) n) (loop (+ i 1) pending lo))
+                     ((and (char=? (string-ref set j) #\:)
+                           (char=? (string-ref set (+ j 1)) #\]))
+                      (let ((name (string->symbol
+                                   (substring set (+ i 2) j))))
+                        (set! items (cons name items))
+                        (loop (+ j 2) pending lo)))
+                     (else (scan (+ j 1))))))
+                 ((char=? ch #\\)
+                  (if (< (+ i 1) n)
+                      (begin (set! items (cons (cons (char->integer (string-ref set (+ i 1)))
+                                                     (char->integer (string-ref set (+ i 1)))) items))
+                             (loop (+ i 2) #f lo))
+                      (loop (+ i 1) pending lo)))
+                 ((and (char=? ch #\-) pending (< (+ i 1) n))
+                  (let ((hi (string-ref set (+ i 1))))
+                    (set! items (cons (cons (char->integer pending)
+                                            (char->integer hi)) items))
+                    (loop (+ i 2) #f #f)))
+                 (else
+                  (when pending (emit pending))
+                  (loop (+ i 1) ch lo))))))))
+
+    (define (%skip-chars-member? c items)
+      (let loop ((rest items))
+        (cond ((null? rest) #f)
+              ((symbol? (car rest))
+               (or (%wctype-member? (car rest) c) (loop (cdr rest))))
+              ((and (>= c (car (car rest))) (<= c (cdr (car rest)))) #t)
+              (else (loop (cdr rest))))))
+
+    (define (%skip-chars forwardp set lim)
       (let* ((ed (current-buffer))
-             (bound (if (pair? rest) (car rest) #f))
-             (lim (min (or bound (buffer-z ed)) (buffer-z ed)))
-             (members (string->list set)))
-        (let loop ((pos (buffer-pt ed)) (moved 0))
-          (if (>= pos lim)
-              moved
-              (let ((c (fetch-char ed pos)))
-                (if (and c (memv c members))
-                    (begin
-                      (set-point ed (+ pos 1))
-                      (loop (+ pos 1) (+ moved 1)))
-                    moved))))))
+             (beg (buffer-beg ed))
+             (end (buffer-z ed))
+             (limit (min (max (cond ((not lim) (if forwardp end beg))
+                                    ((integer? lim) lim)
+                                    (else (error "Wrong type argument: integer-or-marker-p"
+                                                 lim)))
+                              beg)
+                         end))
+             (start (buffer-pt ed)))
+        (call-with-values (lambda () (%skip-chars-set set))
+          (lambda (negate items)
+            (if (if forwardp (>= start limit) (<= start limit))
+                (begin (set-point ed start) 0)
+                (let loop ((pos start))
+                  (let* ((p (if forwardp pos (- pos 1)))
+                         (inside? (%skip-chars-member?
+                                   (char->integer (fetch-char ed p)) items)))
+                    (if (if negate (not inside?) inside?)
+                        (let ((next (if forwardp (+ pos 1) (- pos 1))))
+                          (if (if forwardp (>= next limit) (<= next limit))
+                              (begin (set-point ed next) (- next start))
+                              (loop next)))
+                        (begin (set-point ed pos) (- pos start))))))))))
+
+    (define (skip-chars-forward set . rest)
+      ;; GNU Emacs's `skip-chars-forward' (`syntax.c:1618'): "Move point
+      ;; forward across chars in specified CHAR-SET."
+      ;;--------------------------------------------------------------
+      (%skip-chars #t set (if (pair? rest) (car rest) #f)))
 
     (define (skip-chars-backward set . rest)
-      (let* ((ed (current-buffer))
-             (bound (if (pair? rest) (car rest) #f))
-             (lim (max (or bound (buffer-beg ed)) (buffer-beg ed)))
-             (members (string->list set)))
-        (let loop ((pos (buffer-pt ed)) (moved 0))
-          (if (<= pos lim)
-              moved
-              (let ((c (fetch-char ed (- pos 1))))
-                (if (and c (memv c members))
-                    (begin
-                      (set-point ed (- pos 1))
-                      (loop (- pos 1) (+ moved 1)))
-                    moved))))))
+      ;; GNU Emacs's `skip-chars-backward' (`syntax.c:1630'): "Move
+      ;; point backward across chars in specified CHAR-SET."
+      ;;--------------------------------------------------------------
+      (%skip-chars #f set (if (pair? rest) (car rest) #f)))
 
     ;; ---------------------------------------------------------------
     ;; `char_quoted' (`syntax.c:533').
@@ -562,6 +689,218 @@
                 (if (memv code (list sescape scharquote))
                     (loop p (not quoted))
                     quoted))))))
+
+    ;; ---------------------------------------------------------------
+    ;; `find_defun_start' (`syntax.c:585'), `prev_char_comend_first'
+    ;; (`:679') and `back_comment' (`:695') - the backward half of the
+    ;; comment machinery `scan_lists' below scans with.
+    ;; ---------------------------------------------------------------
+    (define (%prev-char-comend-first? ed pos)
+      ;; `prev_char_comend_first' (`syntax.c:679'): "Return the
+      ;; SYNTAX_COMEND_FIRST of the character before POS".
+      ;;--------------------------------------------------------------
+      (let ((p (- pos 1)))
+        (and (>= p (buffer-beg ed))
+             (%comend-first? (%code-in ed p
+                                       (char->integer (fetch-char ed p)))))))
+
+    (define (%find-defun-start pos)
+      ;; `find_defun_start' (`syntax.c:585'): "Return a defun-start
+      ;; position before POS and not too far before."
+      ;;
+      ;; The C caches the answer for a thousand characters; that is an
+      ;; optimisation only, and is not carried.
+      ;;--------------------------------------------------------------
+      (let* ((ed (current-buffer))
+             (beg (buffer-beg ed))
+             ;; `scan_newline' (`search.c') with count -1: the C backs up
+             ;; to the start of the line, and walks one line at a time
+             ;; after that. That scan is `search.c''s, and `search.scm'
+             ;; imports this library - so the one-line walk is here.
+             (line-start
+              (lambda (p)
+                (let loop ((q p))
+                  (if (or (<= q beg)
+                          (= (char->integer (fetch-char ed (- q 1))) 10))
+                      q
+                      (loop (- q 1)))))))
+        (if (*comment-use-syntax-ppss*)
+            (let ((boc (list-ref (syntax-ppss pos) 8)))
+              (if (integer? boc) boc pos))
+            (if (not (*open-paren-in-column-0-is-defun-start*))
+                beg
+                (let loop ((p (line-start pos)))
+                  (cond
+                   ((<= p beg) p)
+                   ((= (%class-in ed p (char->integer (fetch-char ed p)))
+                       sopen)
+                    p)
+                   (else (loop (line-start (- p 1))))))))))
+
+    (define (%back-comment start stop comnested comstyle)
+      ;; `back_comment' (`syntax.c:695'): "Check whether charpos FROM is
+      ;; at the end of a comment." Answers `(FOUND? . BEGIN)'.
+      ;;
+      ;; The C's `lossage' arm - two kinds of string delimiter mixed up,
+      ;; so the backward walk cannot tell a comment-starter from text in a
+      ;; string - decodes forward from `find_defun_start' with
+      ;; `scan_sexps_forward', which is this file's
+      ;; `%scan-sexps-forward' over the C's own state record.
+      ;;--------------------------------------------------------------
+      (let* ((ed (current-buffer))
+             (beg (buffer-beg ed))
+             (comment-end start)
+             (string-style -1)
+             (string-lossage #f)
+             (comment-lossage #f)
+             (comstart-pos 0)
+             (defun-start 0)
+             (nesting 1)
+             (escape? (*comment-end-can-be-escaped*))
+             (from start)
+             (syntax 0)
+             (outcome #f))
+        (define (cp p) (char->integer (fetch-char ed p)))
+        (define (post at) (cons (not (= at comment-end)) at))
+
+        ;; The C's backward walk.
+        (let walk ()
+          (cond
+           (outcome #f)
+           ((= from stop)
+            (set! from (if (= comstart-pos 0) comment-end comstart-pos))
+            (set! outcome 'finished))
+           (else
+            (set! from (- from 1))
+            (let* ((prev-syntax syntax)
+                   (c (cp from))
+                   (syn (%code-in ed from c))
+                   (code (logand syn #xff))
+                   (com2start (and (%comstart-first? syn)
+                                   (%comstart-second? prev-syntax)
+                                   (= comstyle (%comment-style prev-syntax syn))
+                                   (eq? (or (%nested? prev-syntax) (%nested? syn))
+                                        comnested)))
+                   (com2end (and (%comend-first? syn)
+                                 (%comend-second? prev-syntax)))
+                   (comstart (or com2start (= code scomment))))
+              (set! syntax syn)
+              (cond
+               ;; "If a 2-char comment sequence partly overlaps with
+               ;; another, we don't try to be clever."
+               ((and (> from stop) (or com2end comstart)
+                     (let* ((next (- from 1))
+                            (next-syn (%code-in ed next (cp next))))
+                       (or (and (or comstart comnested)
+                                (%comend-second? syn)
+                                (%comend-first? next-syn))
+                           (and (or com2end comnested)
+                                (%comstart-second? syn)
+                                (= comstyle (%comment-style syn prev-syntax))
+                                (%comstart-first? next-syn)))))
+                (set! outcome 'lossage))
+               (else
+                ;; "The first time we see one, we need to consider it as
+                ;; a comment starter, and the subsequent times as a
+                ;; comment ender."
+                (when (and com2start (= comstart-pos 0))
+                  (set! com2end #f))
+                (let ((code (cond (com2end sendcomment)
+                                  (com2start scomment)
+                                  (else code))))
+                  (cond
+                   ;; "Ignore comment starters of a different style."
+                   ((and (= code scomment)
+                         (or (not (= comstyle (%comment-style syn 0)))
+                             (not (eq? (%nested? syn) comnested))))
+                    (walk))
+                   ;; "Ignore escaped characters, except comment-enders
+                   ;; which cannot be escaped."
+                   ((and (or escape? (not (= code sendcomment)))
+                         (%char-quoted ed from))
+                    (walk))
+                   (else
+                    ;; The C switches on the enum; the classes are
+                    ;; values here, so the dispatch is a `cond'.
+                    (cond
+                     ((or (= code sstring-fence) (= code scomment-fence)
+                          (= code sstring))
+                      (let ((c (cond ((= code sstring-fence) %st-string-style)
+                                     ((= code scomment-fence) %st-comment-style)
+                                     (else c))))
+                        (cond ((= string-style -1) (set! string-style c))
+                              ((= string-style c) (set! string-style -1))
+                              (else (set! string-lossage #t))))
+                      (walk))
+                     ((= code scomment)
+                      (cond
+                       ((or (not (= string-style -1)) comment-lossage
+                            string-lossage)
+                        (set! outcome 'lossage))
+                       ((not comnested)
+                        (set! comstart-pos from)
+                        (walk))
+                       (else
+                        (set! nesting (- nesting 1))
+                        (if (<= nesting 0)
+                            (set! outcome 'found)
+                            (walk)))))
+                     ((= code sendcomment)
+                      (if (and (= (%comment-style syn 0) comstyle)
+                               (eq? (or (and com2end (%nested? prev-syntax))
+                                        (%nested? syn))
+                                    comnested))
+                          ;; "This is the same style of comment ender as
+                          ;; ours."
+                          (if comnested
+                              (set! nesting (+ nesting 1))
+                              (set! from stop))
+                          ;; "We're mixing comment styles here."
+                          (when (or (not (= comstart-pos 0)) (not (= c 10)))
+                            (set! comment-lossage #t)))
+                      (walk))
+                     ((= code sopen)
+                      ;; "Assume a defun-start point is outside of
+                      ;; strings."
+                      (when (and (*open-paren-in-column-0-is-defun-start*)
+                                 (not (*comment-use-syntax-ppss*))
+                                 (or (= from stop)
+                                     (= (cp (- from 1)) 10)))
+                        (set! defun-start from)
+                        (set! from stop))
+                      (walk))
+                     (else (walk))))))))))))
+
+        (cond
+         ((or (eq? outcome 'found) (eq? outcome 'finished))
+          (post from))
+         (else
+          ;; the C's `lossage'
+          (let* ((ds (if (= defun-start 0)
+                         (%find-defun-start comment-end)
+                         defun-start))
+                 (adjusted (if (= defun-start 0) (> ds beg) #t)))
+            (let loop ((ds ds) (adjusted adjusted))
+              (let* ((state (%internalize-parse-state #f))
+                     (state (begin (set!state-location! state ds) state))
+                     (ignored (%scan-sexps-forward state comment-end -1000000
+                                                   #f 0))
+                     (next-ds comment-end)
+                     (next-adjusted adjusted))
+                (if (and (= (state-incomment state) (if comnested 1 -1))
+                         (= (state-comstyle state) comstyle))
+                    (set! from (state-comstr-start state))
+                    (begin
+                      (set! from comment-end)
+                      ;; "If comment_end is inside some other comment,
+                      ;; maybe ours is nested, so we need to try again
+                      ;; from within the surrounding comment."
+                      (when (not (= (state-incomment state) 0))
+                        (set! next-ds (+ (state-comstr-start state) 2)))))
+                (if (< next-ds comment-end)
+                    (loop next-ds next-adjusted)
+                    (post from)))))))))
+
 
     ;; ---------------------------------------------------------------
     ;; `forw_comment' (`syntax.c:2311').
@@ -638,6 +977,643 @@
                                 (or (%nested? syntax) (%nested? other)))))
                     (loop (+ from 1) smax smax (+ nesting 1) #t))
                    (else (loop from syntax syntax nesting #t))))))))))))
+
+    ;; ---------------------------------------------------------------
+    ;; `syntax_multibyte' (`syntax.c:2644') and the ignore-comments test.
+    ;; ---------------------------------------------------------------
+    (define (%syntax-multibyte ed pos c multibyte-symbol)
+      ;; `syntax_multibyte' (`syntax.c:2644'): "Return syntax code of
+      ;; character C if C is an ASCII character or if MULTIBYTE_SYMBOL_P
+      ;; is false. Otherwise, return Ssymbol."
+      ;;--------------------------------------------------------------
+      (if (and multibyte-symbol (> c 127))
+          ssymbol
+          (%class-in ed pos c)))
+
+    (define (%parse-sexp-ignore-comments?)
+      ;; `parse_sexp_ignore_comments' (`syntax.c:139'), the buffer-local
+      ;; the scans read.
+      ;;--------------------------------------------------------------
+      (buffer-local-value (current-buffer) 'parse-sexp-ignore-comments #f))
+
+    ;; ---------------------------------------------------------------
+    ;; `scan-error' - `xsignal3 (Qscan_error, ...)'.
+    ;;
+    ;; Emacs's condition carries three data fields, and
+    ;; `error-message-string' renders them as `Scan error: "MSG", START,
+    ;; END' (measured on Emacs 31.1). This tree's conditions are Guile
+    ;; error objects with a message string, so a scan error is a record
+    ;; of its own and the reporter and `error-message-string' know it -
+    ;; the same shape `<quit-condition>' took.
+    ;; ---------------------------------------------------------------
+    (define-record-type <scan-error>
+      (make-scan-error message start end) scan-error?
+      (message scan-error-message)
+      (start scan-error-start)
+      (end scan-error-end))
+
+    (define (%scan-lists-error msg start end)
+      ;; What the C's `xsignal3 (Qscan_error, MSG, START, END)' signals:
+      ;; the raw message and the two positions, as the C's data is.
+      ;;--------------------------------------------------------------
+      (raise (make-scan-error msg start end)))
+
+    (define (scan-error-string err)
+      ;; What `error-message-string' renders for a scan error - measured
+      ;; on Emacs 31.1, which says `Scan error: "Unbalanced parentheses",
+      ;; 1, 5' for that signal.
+      ;;--------------------------------------------------------------
+      (string-append "Scan error: \"" (scan-error-message err) "\", "
+                     (number->string (scan-error-start err)) ", "
+                     (number->string (scan-error-end err))))
+
+    (define (%scan-lists from0 count depth sexpflag)
+      ;; `scan_lists' (`syntax.c:2660'): "Scan from character number FROM
+      ;; by COUNT lists. Scan forward if COUNT is positive, backward if
+      ;; COUNT is negative. Return the character number of the position
+      ;; thus found."
+      ;;
+      ;; Answers #f - Elisp's nil - when the buffer ran out between
+      ;; objects, and signals "Unbalanced parentheses" when it ran out
+      ;; inside one.
+      ;;--------------------------------------------------------------
+      (let* ((ed (current-buffer))
+             (beg (buffer-beg ed))
+             (zv (buffer-z ed))
+             (stop (if (> count 0) zv beg))
+             (min-depth (if (> depth 0) 0 depth))
+             (multibyte-symbol
+              (and sexpflag
+                   (buffer-local-value (current-buffer)
+                                       'multibyte-syntax-as-symbol #f)))
+             (last-good from0)
+             (ignore (%parse-sexp-ignore-comments?)))
+        (define (cp p) (char->integer (fetch-char ed p)))
+        (define (class-at p) (%syntax-multibyte ed p (cp p) multibyte-symbol))
+
+        (%setup-syntax-table)
+        (let ((from (max beg (min from0 zv)))
+              (mathexit #f)
+              (comstyle 0)
+              (comnested #f)
+              (code 0)
+              (c 0)
+              (stringterm 0))
+          (define (lose) (%scan-lists-error "Unbalanced parentheses" last-good from))
+          (define (lose-early)
+            (%scan-lists-error "Containing expression ends prematurely"
+                               last-good from))
+          (if (= count 0)
+              from
+              (let loop ((mode (if (> count 0) 'f-top 'b-top)))
+                (case mode
+
+                  ;; -------------------------------------------------
+                  ;; The forward scan: the top of `while (from < stop)'.
+                  ;; -------------------------------------------------
+                  ((f-top)
+                   (if (>= from stop)
+                       (loop 'f-end)
+                       (let* ((c0 (cp from))
+                              (syn (%code-in ed from c0))
+                              (syn-code (%syntax-multibyte ed from c0
+                                                           multibyte-symbol))
+                              (comstart-first (%comstart-first? syn))
+                              (prefix (%prefix-flag? syn)))
+                         (set! c c0)
+                         (set! code syn-code)
+                         (set! comnested (%nested? syn))
+                         (set! comstyle (%comment-style syn 0))
+                         (when (= depth min-depth) (set! last-good from))
+                         (set! from (+ from 1))
+                         (when (and (< from stop) comstart-first)
+                           (set! c (cp from))
+                           (let ((other (%code-in ed from c)))
+                             (when (and (%comstart-second? other) ignore)
+                               (set! code scomment)
+                               (set! comstyle (%comment-style other syn))
+                               (set! comnested (or (%nested? other) comnested))
+                               (set! from (+ from 1)))))
+                         (if prefix
+                             (loop 'f-top)
+                             ;; The C switches on the enum; the classes
+                             ;; are *values* here, so the dispatch is a
+                             ;; `cond' and not a `case' - a `case' would
+                             ;; compare the number with the symbol.
+                             (cond
+                               ((or (= code sescape) (= code scharquote))
+                                (if (= from stop)
+                                    (lose)
+                                    (begin
+                                      (set! from (+ from 1))
+                                      (loop (if (or (> depth 0) (not sexpflag))
+                                                'f-top
+                                                'f-word)))))
+                               ((or (= code sword) (= code ssymbol))
+                                (loop (if (or (> depth 0) (not sexpflag))
+                                          'f-top
+                                          'f-word)))
+                               ((= code scomment-fence)
+                                (loop 'f-comment-fence))
+                               ((= code scomment) (loop 'f-comment))
+                               ((= code smath)
+                                (if (not sexpflag)
+                                    (loop 'f-top)
+                                    (begin
+                                      (when (and (not (= from stop))
+                                                 (= c (cp from)))
+                                        (set! from (+ from 1)))
+                                      (if mathexit
+                                          (begin (set! mathexit #f)
+                                                 (loop 'f-close1))
+                                          (begin (set! mathexit #t)
+                                                 (loop 'f-open))))))
+                               ((= code sopen) (loop 'f-open))
+                               ((= code sclose) (loop 'f-close1))
+                               ((or (= code sstring) (= code sstring-fence))
+                                (set! stringterm (cp (- from 1)))
+                                (loop 'f-string))
+                               (else (loop 'f-top)))))))
+
+                  ;; the word loop, which ends the object at `done'
+                  ((f-word)
+                   (if (>= from stop)
+                       (loop 'f-done)
+                       (let ((c1-code (class-at from)))
+                         (cond
+                          ((memv c1-code (list scharquote sescape))
+                           (set! from (+ from 1))
+                           (if (= from stop) (lose) (loop 'f-word)))
+                          ((memv c1-code (list sword ssymbol squote))
+                           (set! from (+ from 1))
+                           (loop 'f-word))
+                          (else (loop 'f-done))))))
+
+                  ((f-string)
+                   (if (>= from stop)
+                       (lose)
+                       (let ((c1 (cp from))
+                             (c1-code (class-at from)))
+                         (if (if (= code sstring)
+                                 (and (= c1 stringterm) (= c1-code sstring))
+                                 (= c1-code sstring-fence))
+                             (begin
+                               (set! from (+ from 1))
+                               (loop (if (and (= depth 0) sexpflag)
+                                         'f-done
+                                         'f-top)))
+                             (begin
+                               (when (memv c1-code (list scharquote sescape))
+                                 (set! from (+ from 1)))
+                               (set! from (+ from 1))
+                               (loop 'f-string))))))
+
+                  ((f-comment-fence)
+                   (set! comstyle %st-comment-style)
+                   (loop 'f-comment))
+
+                  ((f-comment)
+                   (if (not ignore)
+                       (loop 'f-top)
+                       ;; `forw_comment''s NESTING is an EMACS_INT: the
+                       ;; C passes `comnested', a bool, and its `nesting
+                       ;; <= 0' turns that into -1 or 1.
+                       (let-values (((found at incomment last)
+                                     (%forw-comment ed from stop
+                                                    (if comnested 1 0)
+                                                    comstyle 0)))
+                         (set! from at)
+                         (cond ((not found)
+                                (if (= depth 0) (loop 'f-done) (lose)))
+                               (else (set! from (+ from 1))
+                                     (loop 'f-top))))))
+
+                  ((f-open)
+                   (set! depth (+ depth 1))
+                   (loop (if (= depth 0) 'f-done 'f-top)))
+
+                  ((f-close1)
+                   (set! depth (- depth 1))
+                   (if (= depth 0)
+                       (loop 'f-done)
+                       (begin
+                         (when (< depth min-depth) (lose-early))
+                         (loop 'f-top))))
+
+                  ((f-done)
+                   ;; The C's `done: count--;' ends the `while (count >
+                   ;; 0)' loop, and the `while (count < 0)' loop that
+                   ;; follows is entered only when COUNT is still
+                   ;; negative - which it cannot now be.
+                   (set! count (- count 1))
+                   (loop (if (> count 0) 'f-top 'finish)))
+
+                  ((f-end)
+                   ;; "Reached end of buffer. Error if within object,
+                   ;; return nil if between."
+                   (if (not (= depth 0)) (lose) #f))
+
+                  ;; -------------------------------------------------
+                  ;; The backward scan: the top of `while (from > stop)'.
+                  ;; -------------------------------------------------
+                  ((b-top)
+                   (if (<= from stop)
+                       (loop 'b-end)
+                       (begin
+                         (set! from (- from 1))
+                         (let* ((c0 (cp from))
+                                (syn (%code-in ed from c0))
+                                (syn-code (%syntax-multibyte ed from c0
+                                                             multibyte-symbol)))
+                           (set! c c0)
+                           (set! code syn-code)
+                           (when (= depth min-depth) (set! last-good from))
+                           (set! comstyle 0)
+                           (set! comnested (%nested? syn))
+                           (when (= code sendcomment)
+                             (set! comstyle (%comment-style syn 0)))
+                           (when (and (> from stop) (%comend-second? syn)
+                                      (%prev-char-comend-first? ed from) ignore)
+                             ;; "We must record the comment style
+                             ;; encountered so that later, we can match
+                             ;; only the proper comment begin sequence
+                             ;; of the same style."
+                             (set! from (- from 1))
+                             (set! code sendcomment)
+                             (let* ((c2 (cp from))
+                                    (other (%code-in ed from c2)))
+                               (set! comstyle (%comment-style other syn))
+                               (set! comnested (or (%nested? other) comnested))))
+                           ;; "Quoting turns anything except a
+                           ;; comment-ender into a word character. Note
+                           ;; that this cannot be true if we decremented
+                           ;; FROM in the if-statement above."
+                           (cond
+                            ((and (not (= code sendcomment))
+                                  (%char-quoted ed from))
+                             (set! from (- from 1))
+                             (set! code sword)
+                             (loop 'b-dispatch))
+                            ((%prefix-flag? syn) (loop 'b-top))
+                            (else (loop 'b-dispatch)))))))
+
+                  ((b-dispatch)
+                   (cond
+                     ((or (= code sword) (= code ssymbol)
+                          (= code sescape) (= code scharquote))
+                      (loop (if (or (> depth 0) (not sexpflag))
+                                'b-top
+                                'b-word)))
+                     ((= code smath)
+                      (if (not sexpflag)
+                          (loop 'b-top)
+                          (begin
+                            (when (> from beg)
+                              (when (and (not (= from stop))
+                                         (= c (cp (- from 1))))
+                                (set! from (- from 1))))
+                            (if mathexit
+                                (begin (set! mathexit #f) (loop 'b-open2))
+                                (begin (set! mathexit #t) (loop 'b-close))))))
+                     ((= code sclose) (loop 'b-close))
+                     ((= code sopen) (loop 'b-open2))
+                     ((= code sendcomment)
+                      (if (not ignore)
+                          (loop 'b-top)
+                          (let ((found (%back-comment from stop comnested
+                                                      comstyle)))
+                            ;; "FIXME: if !found, it really wasn't a
+                            ;; comment-end ... we don't bother."
+                            (when (car found) (set! from (cdr found)))
+                            (loop 'b-top))))
+                     ((or (= code scomment-fence) (= code sstring-fence))
+                      (loop 'b-fence))
+                     ((= code sstring)
+                      (set! stringterm (cp from))
+                      (loop 'b-string))
+                     (else (loop 'b-top))))
+
+                  ((b-word)
+                   (if (<= from stop)
+                       (loop 'b-done2)
+                       (let ((c1-code (class-at (- from 1))))
+                         ;; "Don't allow comment-end to be quoted."
+                         (cond
+                          ((= c1-code sendcomment) (loop 'b-done2))
+                          ((%char-quoted ed (- from 1))
+                           (set! from (- from 1))
+                           (loop 'b-word))
+                          ((memv c1-code (list sword ssymbol squote))
+                           (set! from (- from 1))
+                           (loop 'b-word))
+                          (else (loop 'b-done2))))))
+
+                  ((b-close)
+                   (set! depth (+ depth 1))
+                   (loop (if (= depth 0) 'b-done2 'b-top)))
+
+                  ((b-open2)
+                   (set! depth (- depth 1))
+                   (if (= depth 0)
+                       (loop 'b-done2)
+                       (begin
+                         (when (< depth min-depth) (lose-early))
+                         (loop 'b-top))))
+
+                  ((b-fence)
+                   (if (= from stop)
+                       (lose)
+                       (begin
+                         (set! from (- from 1))
+                         (if (and (not (%char-quoted ed from))
+                                  (= (class-at from) code))
+                             (loop (if (and (= code sstring-fence)
+                                            (= depth 0) sexpflag)
+                                       'b-done2
+                                       'b-top))
+                             (loop 'b-fence)))))
+
+                  ((b-string)
+                   (if (= from stop)
+                       (lose)
+                       (begin
+                         (set! from (- from 1))
+                         (if (and (not (%char-quoted ed from))
+                                  (= (cp from) stringterm)
+                                  (= (class-at from) sstring))
+                             (loop (if (and (= depth 0) sexpflag)
+                                       'b-done2
+                                       'b-top))
+                             (loop 'b-string)))))
+
+                  ((b-done2)
+                   (set! count (+ count 1))
+                   (loop (if (< count 0) 'b-top 'finish)))
+
+                  ((b-end)
+                   ;; "Reached start of buffer. Error if within object,
+                   ;; return nil if between."
+                   (if (not (= depth 0)) (lose) #f))
+
+                  ((finish) from)
+
+                  (else (error "scan-lists: bad mode"))))))))
+
+    ;; ---------------------------------------------------------------
+    ;; The DEFUNs built on the scan: `scan-lists' (`syntax.c:3054'),
+    ;; `scan-sexps' (`:3079'), `backward-prefix-chars' (`:3096'),
+    ;; `skip-syntax-forward'/`-backward' (`:1642', `:1653' over
+    ;; `skip_syntaxes', `:2120') and `forward-comment' (`:2436').
+    ;; ---------------------------------------------------------------
+    (define (scan-lists from count depth)
+      ;; GNU Emacs's `scan-lists' (`syntax.c:3054'): "Scan from character
+      ;; number FROM by COUNT lists. ... If DEPTH is nonzero, treat that
+      ;; as the nesting depth of the starting point".
+      ;;--------------------------------------------------------------
+      (if (not (integer? from)) (error "Wrong type argument: fixnump" from))
+      (if (not (integer? count)) (error "Wrong type argument: fixnump" count))
+      (if (not (integer? depth)) (error "Wrong type argument: fixnump" depth))
+      (%scan-lists from count depth #f))
+
+    (define (scan-sexps from count)
+      ;; GNU Emacs's `scan-sexps' (`syntax.c:3079'): "Scan from character
+      ;; number FROM by COUNT balanced expressions."
+      ;;--------------------------------------------------------------
+      (if (not (integer? from)) (error "Wrong type argument: fixnump" from))
+      (if (not (integer? count)) (error "Wrong type argument: fixnump" count))
+      (%scan-lists from count 0 #t))
+
+    (define (backward-prefix-chars)
+      ;; GNU Emacs's `backward-prefix-chars' (`syntax.c:3096'): "Move
+      ;; point backward over any number of chars with prefix syntax. This
+      ;; includes chars with expression prefix syntax class (') and those
+      ;; with the prefix syntax flag (p)."
+      ;;--------------------------------------------------------------
+      (let* ((ed (current-buffer))
+             (beg (buffer-beg ed))
+             (pos (buffer-pt ed))
+             (opoint pos))
+        (if (<= pos beg)
+            (begin (set-point ed opoint) #f)
+            (begin
+              (%setup-syntax-table)
+              (set! pos (- pos 1))
+              (let loop ()
+                (let ((c (and (>= pos beg) (fetch-char ed pos))))
+                  (when (and c
+                             (not (%char-quoted ed pos))
+                             (let ((syn (%code-in ed pos (char->integer c))))
+                               (or (= (logand syn #xff) squote)
+                                   (%prefix-flag? syn))))
+                    (set! opoint pos)
+                    (when (> pos beg)
+                      (set! pos (- pos 1))
+                      (loop)))))
+              (set-point ed opoint)
+              #f))))
+
+    (define (%skip-syntaxes forwardp string lim)
+      ;; `skip_syntaxes' (`syntax.c:2120'). The C's `fastmap' is a
+      ;; membership test on the classes the string names; the answer is
+      ;; what `skip-syntax-forward'/`-backward' return, the distance
+      ;; travelled.
+      ;;--------------------------------------------------------------
+      (let* ((ed (current-buffer))
+             (beg (buffer-beg ed))
+             (end (buffer-z ed))
+             (negate (and (> (string-length string) 0)
+                          (char=? (string-ref string 0) #\^)))
+             (codes (let loop ((i (if negate 1 0)) (acc '()))
+                      (if (>= i (string-length string))
+                          acc
+                          (let ((c (%spec-code (string-ref string i))))
+                            (loop (+ i 1) (if c (cons c acc) acc))))))
+             (lim (cond ((not lim) (if forwardp end beg))
+                        ((integer? lim) lim)
+                        (else (error "Wrong type argument: integer-or-marker-p"
+                                     lim))))
+             (limit (min (max lim beg) end))
+             (start (buffer-pt ed)))
+        (if (if forwardp (>= start limit) (<= start limit))
+            (begin (set-point ed start) 0)
+            (begin
+              (%setup-syntax-table)
+              (let loop ((pos start))
+                (let ((code (%class-in ed (if forwardp pos (- pos 1))
+                                       (char->integer
+                                        (fetch-char ed (if forwardp pos
+                                                           (- pos 1)))))))
+                  (if (if negate (not (memv code codes)) (memv code codes))
+                      (let ((next (if forwardp (+ pos 1) (- pos 1))))
+                        (if (if forwardp (>= next limit) (<= next limit))
+                            (begin (set-point ed next) (- next start))
+                            (loop next)))
+                      (begin (set-point ed pos) (- pos start)))))))))
+
+    (define (skip-syntax-forward string . rest)
+      ;; GNU Emacs's `skip-syntax-forward' (`syntax.c:1642'): "Move point
+      ;; forward across chars in specified syntax classes."
+      ;;--------------------------------------------------------------
+      (%skip-syntaxes #t string (if (pair? rest) (car rest) #f)))
+
+    (define (skip-syntax-backward string . rest)
+      ;; GNU Emacs's `skip-syntax-backward' (`syntax.c:1653'): "Move
+      ;; point backward across chars in specified syntax classes."
+      ;;--------------------------------------------------------------
+      (%skip-syntaxes #f string (if (pair? rest) (car rest) #f)))
+
+    (define *forward-comment-function* (make-parameter #f))
+
+    (define (forward-comment count)
+      ;; GNU Emacs's `forward-comment' (`syntax.c:2436'): "Move forward
+      ;; across up to COUNT comments. If COUNT is negative, move
+      ;; backward. Stop scanning if we find something other than a
+      ;; comment or whitespace. Set point to where scanning stops."
+      ;;--------------------------------------------------------------
+      (if (*forward-comment-function*)
+          ((*forward-comment-function*) count)
+          (let* ((ed (current-buffer))
+                 (stop (if (> count 0) (buffer-z ed) (buffer-beg ed)))
+                 (from (buffer-pt ed))
+                 (count1 count))
+            (define (cp p) (char->integer (fetch-char ed p)))
+            (define (finish at val) (set-point ed at) val)
+            (define (done) (set-point ed from) #t)
+            (%setup-syntax-table)
+
+            (define (forward)
+              (if (<= count1 0)
+                  (done)
+                  (let ((comstyle 0) (comnested #f) (code 0) (c 0))
+                    (define (skip)
+                      (if (= from stop)
+                          (finish from #f)
+                          (let* ((c0 (cp from))
+                                 (syn (%code-in ed from c0))
+                                 (comstart-first (%comstart-first? syn)))
+                            (set! c c0)
+                            (set! code (logand syn #xff))
+                            (set! comnested (%nested? syn))
+                            (set! comstyle (%comment-style syn 0))
+                            (set! from (+ from 1))
+                            (when (and (< from stop) comstart-first)
+                              (set! c (cp from))
+                              (let ((other (%code-in ed from c)))
+                                (when (%comstart-second? other)
+                                  (set! code scomment)
+                                  (set! comstyle (%comment-style other syn))
+                                  (set! comnested (or (%nested? other)
+                                                      comnested))
+                                  (set! from (+ from 1)))))
+                            (if (or (= code swhitespace)
+                                    (and (= code sendcomment) (= c 10)))
+                                (skip)
+                                (cond
+                                 ((= code scomment-fence)
+                                  (set! comstyle %st-comment-style)
+                                  (after-comment))
+                                 ((not (= code scomment))
+                                  (set! from (- from 1))
+                                  (finish from #f))
+                                 (else (after-comment)))))))
+                    (define (after-comment)
+                      (let-values (((found at incomment last)
+                                    (%forw-comment ed from stop
+                                                   (if comnested 1 0)
+                                                   comstyle 0)))
+                        (set! from at)
+                        (if (not found)
+                            (finish from #f)
+                            (begin
+                              (set! from (+ from 1))
+                              (set! count1 (- count1 1))
+                              (forward)))))
+                    (skip))))
+
+            (define (backward)
+              (if (>= count1 0)
+                  (done)
+                  (let ((c 0) (orig-code 0) (code 0) (comstyle 0)
+                        (comnested #f) (quoted #f))
+                    (define (scan)
+                      (if (<= from stop)
+                          (finish (buffer-beg ed) #f)
+                          (begin
+                            (set! from (- from 1))
+                            (set! quoted (%char-quoted ed from))
+                            (let* ((c0 (cp from))
+                                   (syn (%code-in ed from c0)))
+                              (set! c c0)
+                              (set! code (logand syn #xff))
+                              (set! orig-code code)
+                              (set! comstyle 0)
+                              (set! comnested (%nested? syn))
+                              (when (= code sendcomment)
+                                (set! comstyle (%comment-style syn 0)))
+                              (when (and (> from stop) (%comend-second? syn)
+                                         (%prev-char-comend-first? ed from)
+                                         (not (%char-quoted ed (- from 1))))
+                                ;; "We must record the comment style
+                                ;; encountered so that later, we can match
+                                ;; only the proper comment begin sequence
+                                ;; of the same style."
+                                (set! from (- from 1))
+                                (set! code sendcomment)
+                                (let* ((c1 (cp from))
+                                       (other (%code-in ed from c1)))
+                                  (set! comstyle (%comment-style other syn))
+                                  (set! comnested (or (%nested? other)
+                                                      comnested))))
+                              (cond
+                               ((= orig-code scomment-fence) (fence))
+                               ((= orig-code sendcomment) (comment-arm))
+                               ((or (not (= orig-code swhitespace)) quoted)
+                                (leave))
+                               (else (scan)))))))
+                    (define (fence)
+                      ;; "Skip until first preceding unquoted comment_fence."
+                      (let ((ini from))
+                        (let scan ((fence-found #f))
+                          (cond
+                           (fence-found
+                            (set! count1 (+ count1 1))
+                            (backward))
+                           ((<= from stop) (begin (set! from ini) (leave)))
+                           (else
+                            (set! from (- from 1))
+                            (let ((c0 (cp from)))
+                              (if (and (= (logand (%code-in ed from c0) #xff)
+                                          scomment-fence)
+                                       (not (%char-quoted ed from)))
+                                  (scan #t)
+                                  (scan #f))))))))
+                    (define (comment-arm)
+                      (let ((found (and (or (not quoted)
+                                            (not (*comment-end-can-be-escaped*)))
+                                        (%back-comment from stop comnested
+                                                       comstyle))))
+                        (cond
+                         ((not (car found))
+                          (if (= c 10)
+                              ;; "This end-of-line is not an
+                              ;; end-of-comment. Treat it like a
+                              ;; whitespace."
+                              (scan)
+                              (begin
+                                ;; "It was a two-char Sendcomment."
+                                (when (not (= orig-code code))
+                                  (set! from (+ from 1)))
+                                (leave))))
+                         (else
+                          (set! from (cdr found))
+                          (set! count1 (+ count1 1))
+                          (backward)))))
+                    (define (leave)
+                      (set! from (+ from 1))
+                      (finish from #f))
+                    (scan))))
+
+            (if (> count 0) (forward) (backward)))))
 
     ;; ---------------------------------------------------------------
     ;; `scan_sexps_forward' (`syntax.c:3178').
@@ -1098,6 +2074,13 @@
                                      result))))))
                     (set-car! cell (cons pos ppss))
                     ppss)))))))))
+
+    (define (ppss-comment-or-string-start ppss)
+      ;; GNU Emacs's `ppss-comment-or-string-start' (`syntax.el'): "The
+      ;; start position of the comment or string that PPSS says point is
+      ;; in, or nil."
+      ;;--------------------------------------------------------------
+      (list-ref ppss 8))
 
     (define (syntax-ppss-depth ppss)
       ;; `syntax-ppss-depth' (`syntax.el:487').

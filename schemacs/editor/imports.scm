@@ -55,12 +55,12 @@
     (schemacs editor test-display)
     (schemacs editor buff-menu)
     (schemacs editor textprop)
-    (schemacs editor subr)
     (schemacs editor xfaces)
     (schemacs editor editfns)
+    (schemacs editor lisp)
     (schemacs editor callproc)
     (schemacs editor casefiddle)
-    (except (schemacs editor character)  char-alt char-super char-hyper char-shift char-ctl char-meta parse-solitary-modifier make-ctrl-char parse-modifiers-uncached event-symbol-elements event-modifiers event-basic-type apply-modifiers event-convert-list kbd *tab-width*)
+    (except (schemacs editor character)  *tab-width*)
     (schemacs editor characters)
     (schemacs editor charset)
     (schemacs editor faces)
@@ -105,6 +105,7 @@
     (schemacs editor tabulated-list)
     (schemacs editor text-mode)
     (schemacs editor tty-colors)
+    (except (schemacs editor subr)  char-alt char-super char-hyper char-shift char-ctl char-meta parse-solitary-modifier make-ctrl-char parse-modifiers-uncached event-symbol-elements event-modifiers event-basic-type apply-modifiers event-convert-list kbd)
     )
   (export
     %blank-line?
@@ -121,6 +122,7 @@
     %set!keymap-order!
     %text-editor-incr-modiff!
     %text-editor-newline-cache
+    %transpose-subr
     %unknown-modtime-nsecs
     %window-base-line-number
     %window-base-line-pos
@@ -161,6 +163,7 @@
     *auto-mode-interpreter-regexp*
     *before-change-functions*
     *before-make-frame-hook*
+    *beginning-of-defun-function*
     *blink-cursor-blinks*
     *blink-cursor-delay*
     *blink-cursor-interval*
@@ -224,6 +227,7 @@
     *default-frame-alist*
     *default-keymap*
     *default-text-properties*
+    *defun-prompt-regexp*
     *del-range-function*
     *delay-mode-hooks*
     *delayed-after-hook-functions*
@@ -259,11 +263,14 @@
     *dispatch-event*
     *display-color-cells*
     *display-type*
+    *down-list-function*
     *echo-area-buffer*
     *echo-buffers*
     *enable-disabled-menus-and-buttons*
     *enable-local-variables*
     *enable-multibyte-characters*
+    *end-of-defun-function*
+    *end-of-defun-moves-to-eol*
     *eval-expression-debug-on-error*
     *eval-expression-print-maximum-character*
     *exchange-point-and-mark-highlight-region*
@@ -298,6 +305,9 @@
     *font-lock-syntactic-face-function*
     *font-lock-syntax-table*
     *font-lock-unfontify-region-function*
+    *forward-comment-function*
+    *forward-list-function*
+    *forward-sexp-function*
     *frame-background-mode*
     *frame-background-mode-function*
     *frame-creation-function*
@@ -425,6 +435,7 @@
     *overwrite-mode-binary*
     *overwrite-mode-textual*
     *page-delimiter*
+    *parens-require-spaces*
     *parse-sexp-ignore-comments*
     *parse-sexp-lookup-properties*
     *pending-coding-system*
@@ -503,6 +514,7 @@
     *timer-wake*
     *track-eol*
     *transient-mark-mode*
+    *transpose-sexps-function*
     *truncate-partial-width-windows*
     *tty-colors*
     *tty-menu--initial-menu-x*
@@ -514,6 +526,7 @@
     *undefined-face-attribute*
     *undo-limit*
     *unread-command-events*
+    *up-list-function*
     *update-search-regs-function*
     *use-empty-active-region*
     *visual-line-fringe-indicators*
@@ -533,6 +546,7 @@
     <itree-tree>
     <marker>
     <quit-condition>
+    <scan-error>
     <test-display>
     <widget-value>
     Buffer-menu-beginning
@@ -592,9 +606,14 @@
     backward-char
     backward-delete-char
     backward-kill-paragraph
+    backward-kill-sexp
     backward-kill-word
+    backward-list
     backward-page
     backward-paragraph
+    backward-prefix-chars
+    backward-sexp
+    backward-up-list
     backward-word
     backward-word-position
     balance-an-interval
@@ -602,6 +621,10 @@
     balance-possible-root-interval
     barf-if-buffer-read-only
     beginning-of-buffer
+    beginning-of-defun
+    beginning-of-defun--in-emptyish-line-p
+    beginning-of-defun-comments
+    beginning-of-defun-raw
     beginning-of-line
     beginning-of-visual-line
     binary-overwrite-mode
@@ -623,6 +646,7 @@
     buffer-cursor-in-non-selected-windows
     buffer-cursor-type
     buffer-default-directory
+    buffer-end
     buffer-ends-with-newline?
     buffer-file-coding-system
     buffer-file-name
@@ -1053,6 +1077,8 @@
     display-tty-menu-item
     display-warning
     do-pending-window-change
+    down-list
+    down-list-default-function
     downcase
     downcase-region
     downcase-word
@@ -1063,6 +1089,7 @@
     echo-area-message-buffer
     editor-excluded-libraries
     editor-libraries
+    elisp--preceding-sexp
     emacs-lisp-mode
     emacs-lisp-mode-hook
     emacs-lisp-mode-map
@@ -1071,6 +1098,7 @@
     encode-coding-string
     encode-eol
     end-of-buffer
+    end-of-defun
     end-of-line
     end-of-visual-line
     ensure-final-newline-on-save!
@@ -1084,8 +1112,12 @@
     erase-buffer
     erase-window-cursor!
     error-message-string
+    eval-defun
     eval-expression
+    eval-expression-get-print-arguments
     eval-expression-print-format
+    eval-last-sexp
+    eval-print-last-sexp
     eval-region
     event-basic-type
     event-convert-list
@@ -1248,9 +1280,14 @@
     format-prompt
     format-time-string
     forward-char
+    forward-comment
     forward-line
+    forward-list
+    forward-list-default-function
     forward-page
     forward-paragraph
+    forward-sexp
+    forward-sexp-default-function
     forward-word
     forward-word-position
     frame-char-height
@@ -1386,6 +1423,9 @@
     insert-from-string
     insert-from-string-1
     insert-newline
+    insert-pair
+    insert-pair-alist
+    insert-parentheses
     install-fns-textprop!
     install-intervals-set-text-properties!
     install-ls-lisp-files!
@@ -1526,6 +1566,7 @@
     kill-range
     kill-region
     kill-ring-save
+    kill-sexp
     kill-this-buffer
     kill-this-buffer-enabled-p
     kill-visual-line
@@ -1627,6 +1668,7 @@
     make-marker
     make-menu-state
     make-overlay
+    make-scan-error
     make-sparse-keymap
     make-syntax-table
     make-widget-value
@@ -1645,9 +1687,11 @@
     map-tty-color
     mark
     mark-active
+    mark-defun
     mark-marker
     mark-paragraph
     mark-ring
+    mark-sexp
     mark-whole-buffer
     marker-buffer
     marker-insertion-type
@@ -1856,6 +1900,7 @@
     posn-set-point
     posn-window
     posn-x-y
+    ppss-comment-or-string-start
     preceding-char
     prefix-argument-description
     prefix-echo-pending?
@@ -1996,8 +2041,15 @@
     save-excursion
     save-match-data
     save-some-buffers
+    scan-error-end
+    scan-error-message
+    scan-error-start
+    scan-error-string
+    scan-error?
     scan-for-column
+    scan-lists
     scan-newline-from-point
+    scan-sexps
     scharquote
     scheme-font-lock-keywords
     scheme-font-lock-keywords-1
@@ -2265,6 +2317,8 @@
     sit-for
     skip-chars-backward
     skip-chars-forward
+    skip-syntax-backward
+    skip-syntax-forward
     smath
     smax
     sopen
@@ -2418,6 +2472,8 @@
     track-mouse
     transient-mark-mode
     transpose-chars
+    transpose-sexps
+    transpose-sexps-default-function
     transpose-words
     truncate-line
     try-completion
@@ -2454,6 +2510,8 @@
     universal-coding-system-argument
     unrecord-window-buffer
     unuse-menu-items
+    up-list
+    up-list-default-function
     upcase
     upcase-initials
     upcase-region
@@ -2469,6 +2527,7 @@
     update-window-end!
     use-local-map
     use-region-p
+    user-error
     validate-interval-range
     validate-plist
     validate-region

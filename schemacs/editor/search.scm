@@ -1649,7 +1649,9 @@
                        (cadddr args)
                        (*case-fold-search*)))
              (limit (or bound (buffer-z ed))))
-        (let loop ((left (max 1 count)) (from (buffer-pt ed)))
+        (if (< count 0)
+            (search-backward string bound noerror (- count) fold)
+            (let loop ((left (max 1 count)) (from (buffer-pt ed)))
           (let ((found (text-editor-search-forward
                         ed string (min from limit) fold)))
             (cond
@@ -1668,7 +1670,7 @@
               ;; the one they used to, when positions were zero-based.
               (%set-search-regs (- found (string-length string))
                                 (string-length string))
-              found))))))
+              found)))))))
 
     (define (search-backward string . args)
       ;; GNU Emacs's `search-backward' (search.c:2206): the backward
@@ -1687,7 +1689,9 @@
                        (cadddr args)
                        (*case-fold-search*)))
              (limit (or bound (buffer-beg ed))))
-        (let loop ((left (max 1 count)) (from (buffer-pt ed)))
+        (if (< count 0)
+            (search-forward string bound noerror (- count) fold)
+            (let loop ((left (max 1 count)) (from (buffer-pt ed)))
           (let ((found (text-editor-search-backward
                         ed string (max from limit) fold)))
             (cond
@@ -1701,7 +1705,7 @@
               ;; search leaves point
               (set-point ed found)
               (%set-search-regs found (string-length string))
-              found))))))
+              found)))))))
 
     (define (%search-window-text ed at limit backward)
       ;; The stretch of the buffer the search from AT can reach, and AT's
@@ -1760,11 +1764,21 @@
       ;; the whole buffer; positions are the buffer's, and the window's
       ;; offsets are added and subtracted at the two ends of the search.
       ;;--------------------------------------------------------------
-      (let* ((ed (current-buffer))
+      ;; `search_command' (`search.c:1033'): "n = direction; if (!NILP
+      ;; (count)) n *= XFIXNUM (count);" - **a negative COUNT flips the
+      ;; direction**, so `(re-search-backward RE nil nil -1)' searches
+      ;; *forward*. Measured on Emacs 31.1; `beginning-of-defun-raw'
+      ;; depends on it.
+      (let* ((n (* (if count count 1) (if backward -1 1)))
+             (backward (< n 0))
+             (count (abs n))
+             (ed (current-buffer))
              (limit (or bound
                         (if backward (buffer-beg ed)
                                      (buffer-z ed))))
              (from (buffer-pt ed)))
+        (when (and bound (if (> n 0) (< bound from) (> bound from)))
+          (error "Invalid search bound (wrong side of point)"))
         (let loop ((left (max 1 count)) (at from))
           (let* ((window (%search-window-text ed at limit backward))
                  (whole (car window))
@@ -1809,7 +1823,16 @@
                               (try (- s 1)))))))))))
             (cond
              ((not found)
-              (if noerror #f (error "Search failed" regexp)))
+              ;; `search_command' (`search.c'): "If NOERROR is neither
+              ;; nil nor t ... just move point to the limit" - the
+              ;; `move' sentinel, which `beginning-of-defun-raw' passes.
+              (if (not noerror)
+                  (error "Search failed" regexp)
+                  (begin
+                    (when (not (eq? noerror #t))
+                      (set-point ed (or bound (if backward (buffer-beg ed)
+                                                  (buffer-z ed)))))
+                    #f)))
              ((> left 1) (loop (- left 1) (if backward (cadr found)
                                               (caddr found))))
              (else

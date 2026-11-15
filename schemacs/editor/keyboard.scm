@@ -55,6 +55,11 @@
     ;; `intervals.scm`'s - it must live below `search.scm`, which
     ;; calls it and cannot import `editfns.scm` (2026-10-13).
     (only (schemacs editor intervals) make-buffer-string get)
+
+    ;; `xsignal3 (Qscan_error, ...)' - the condition `scan-lists' and the
+    ;; motions signal, which the reporter below names rather than
+    ;; printing "error".
+    (only (schemacs editor syntax) scan-error? scan-error-string)
     
     (only (schemacs editor command)
           ;; The quit condition and its flag, which `keyboard-quit`
@@ -571,6 +576,7 @@
        "%s"
        (cond
         ((quit-condition? ex) "Quit")
+        ((scan-error? ex) (scan-error-string ex))
         ((error-object? ex)
          (let ((message (error-object-message ex))
                (irritants (error-object-irritants ex)))

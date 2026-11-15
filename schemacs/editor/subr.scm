@@ -66,7 +66,8 @@
     ;; is not a cycle.
     (only (schemacs editor chartab)
           make-char-table set-char-table-parent)
-    (only (schemacs editor syntax) standard-syntax-table)
+    (only (schemacs editor syntax)
+          standard-syntax-table scan-error? scan-error-string)
     (only (schemacs editor search)
           string-match string-match-p match-beginning match-end match-string
           replace-match match-data--translate save-match-data)
@@ -88,6 +89,7 @@
     )
 
   (export
+   user-error
    assoc-delete-all assq-delete-all delq
    add-to-history add-to-list
    ;; string/list helpers `subr.el`'s, for the external packages and
@@ -481,6 +483,14 @@
       ;;--------------------------------------------------------------
       (string->symbol name))
 
+    (define (user-error fmt . args)
+      ;; GNU Emacs's `user-error' (`subr.el'): "Signal an error of type
+      ;; `user-error'." This tree has one condition type for errors, so
+      ;; the condition is `error''s; the echo-area text is the same, and
+      ;; nothing here catches the two apart.
+      ;;--------------------------------------------------------------
+      (if (null? args) (error fmt) (apply error fmt args)))
+
     (define (error-message-string err)
       ;; GNU Emacs's `error-message-string` (`print.c:1037`): "Return a
       ;; string describing an error." A Guile condition carries a *format
@@ -495,6 +505,9 @@
                          (lambda () (error-object-irritants err))
                          (lambda a '()))))
         (cond
+         ;; `xsignal3 (Qscan_error, ...)' - `syntax.scm''s record; its
+         ;; message is already the rendered text.
+         ((scan-error? err) (scan-error-string err))
          ((not (string? message)) (format #f "~a" err))
          ((and (pair? irritants) (string-index message #\~))
           (catch #t
