@@ -104,7 +104,7 @@
     ;; below. See the note on it there.
     (only (schemacs editor fns) count-lines)
     (only (schemacs editor frame)
-         *current-frame* *echo-area-buffer*
+         *current-frame* *echo-area-buffer* *minibuffer*
          *window-scroll-function*
          *frame-cursor-type* *frame-focus* frame-height frame-width
          ;; `FRAME_MENU_BAR_LINES (f)` - whether this frame draws a bar -
@@ -116,6 +116,11 @@
          ;; `FRAME_GARBAGED_P` / `SET_FRAME_GARBAGED` (`frame.h:1173`),
          ;; consumed by `clear-garbaged-frames!`.
          frame-garbaged-p set-frame-garbaged! frame-minibuffer-window
+         ;; The echo area's buffers are global and `set_message` rotates
+         ;; them (`frame.scm`); the renderer displays the current one and
+         ;; resizes the window it is in.
+         echo-area-message-buffer *resize-mini-windows* *max-mini-window-height*
+         grow-mini-window shrink-mini-window
          window-minibuffer-p
          frame-message frame-selected-window
          ;; `render!' binds the display from the frame it was handed: the
@@ -128,7 +133,7 @@
          ;; the cursor type is resolved against
          window-cursor-off?
          sync-frame-size! window-body-height
-         window-body-width window-buffer window-height window-left
+         window-body-width window-buffer set!window-buffer window-height window-left
          window-list
          ;; `WINDOW_XFRAME (w)': the frame a window is on, which is what
          ;; the drawing of a window asks when the frame being drawn is
@@ -140,7 +145,7 @@
          ;; `w->start' and everything stored beside it: where the window's
          ;; display begins, where its last glyph was, and the line-number
          ;; cache `%l' counts from
-         %window-start set-window-start!
+         %window-start set-window-start! set-window-point!
          ;; the redisplay's own write of `w->start` - see frame.scm
          %window-start-set!
          %window-end-pos %window-end-valid?
@@ -3611,6 +3616,70 @@
         (mark-window-display-accurate windows #f)
         (set-frame-garbaged! frame #f)))
 
+    (define (echo-area-text-rows window)
+      ;; How many screen rows the text in WINDOW takes at the window's
+      ;; width - what `resize_mini_window` measures in pixels
+      ;; (`move_it_to (&it, ZV, ...)`, `xdisp.c:13360`) and what this
+      ;; renderer measures in rows. An empty buffer is one row.
+      ;;--------------------------------------------------------------
+      (let ((ed (window-buffer window)))
+        (if (not ed)
+            1
+            (with-current-buffer ed
+              (let loop ((pos (point-min)) (rows 0))
+                (if (>= pos (point-max))
+                    (max 1 rows)
+                    (let ((next (line-next-start ed pos)))
+                      (loop (or next (point-max))
+                            (+ rows (window-line-rows-at window pos))))))))))
+
+    (define (resize-mini-window! window exact-p)
+      ;; GNU Emacs's `resize_mini_window` (`xdisp.c:13310`): give the
+      ;; minibuffer window the rows its text needs, within
+      ;; `max-mini-window-height`, and take them from the window above.
+      ;;
+      ;; EXACT-P is the C's: `grow-only` shrinks the window back only when
+      ;; EXACT-P or when the echo area is empty ("they return to their
+      ;; normal size when the minibuffer is closed, or the echo area
+      ;; becomes empty", `resize-mini-windows`).
+      ;;--------------------------------------------------------------
+      (and (window-minibuffer-p window)
+           (let ((mode (*resize-mini-windows*)))
+             (and mode
+                  (let* ((frame (window-frame window))
+                         (old (window-height window))
+                         (frame-rows (frame-height frame))
+                         (max-spec (*max-mini-window-height*))
+                         (max-rows
+                          (cond ((and (number? max-spec) (integer? max-spec))
+                                 max-spec)
+                                ((number? max-spec)
+                                 (inexact->exact (floor (* max-spec frame-rows))))
+                                ;; "max_height = windows_height / 4"
+                                (else (quotient frame-rows 4))))
+                         ;; "Correct that max. height if it's bogus."
+                         (max-rows (max 1 (min max-rows frame-rows)))
+                         (height (max 1 (min (echo-area-text-rows window) max-rows))))
+                    (cond ((eq? mode 'grow-only)
+                           ;; "Let it grow only, until we display an
+                           ;; empty message, in which case the window
+                           ;; shrinks again."
+                           (cond ((> height old)
+                                  (grow-mini-window window (- height old)))
+                                 ((and (< height old)
+                                       ;; "BEGV == ZV" of the *echo
+                                       ;; buffer*, not of whatever
+                                       ;; buffer happens to be current
+                                       (or exact-p
+                                           (with-current-buffer
+                                               (window-buffer window)
+                                             (= (point-min) (point-max)))))
+                                  (shrink-mini-window window))))
+                          ;; "Always resize to exact size needed."
+                          ((not (= height old))
+                           (grow-mini-window window (- height old))))
+                    (not (= old (window-height window))))))))
+
     (define (render! frame)
       ;; Draw every window, then the echo area, then place the terminal
       ;; cursor at the selected window's point. Each window has its own
@@ -3744,9 +3813,46 @@
         ;;
         ;; A window that is *not* fresh is rebuilt and then diffed, which
         ;; is `try_window` and `update_window`.
-        ;; One window at a time, build then draw, which is
-        ;; `redisplay_window`'s own order.
-        (for-each (lambda (w)
+        ;; **The echo area, before the window loop**, which is where
+        ;; `redisplay_internal` puts `echo_area_display` (`xdisp.c:14425`):
+        ;; the selected frame's minibuffer window displays the *echo
+        ;; buffer* while there is a current message, and its own buffer
+        ;; (` *Minibuf-0*`, or the prompt's) otherwise.
+        ;;
+        ;; The buffer is swapped in for the display and put back
+        ;; afterwards, which is exactly `with_echo_area_buffer`'s
+        ;; `wset_buffer` (`xdisp.c:12984`) - the window's own buffer is
+        ;; never the echo buffer. Emacs reaches the same place through
+        ;; `display_echo_area`, which also resizes the window first: a
+        ;; message longer than the frame is wider than one row, and
+        ;; `resize_mini_window` gives it the rows it needs from the
+        ;; window above.
+        ;; "`if (!NILP (echo_area_buffer[0]) || minibuf_level == 0)`"
+        ;; (`xdisp.c:13783`) - **the echo area is displayed with no
+        ;; message too**, which is what lets a grown minibuffer window
+        ;; shrink back ("they return to their normal size ... when the
+        ;; echo area becomes empty", `resize-mini-windows`). During a
+        ;; read with no message it is left alone, because its row is the
+        ;; prompt's.
+        (let* ((mini (frame-minibuffer-window frame))
+               (echo (and mini
+                          (eq? frame (*current-frame*))
+                          (echo-area-message-buffer)))
+               (display-echo? (and mini (eq? frame (*current-frame*))
+                                   (or echo (not (*minibuffer*)))))
+               (saved (and echo
+                           (list (window-buffer mini)
+                                 (window-point mini)
+                                 (marker-position (%window-start mini))))))
+          (when display-echo?
+            (when echo
+              (set!window-buffer mini echo)
+              (set-window-point! mini 1)
+              (%window-start-set! mini 1))
+            (resize-mini-window! mini #f))
+          ;; One window at a time, build then draw, which is
+          ;; `redisplay_window`'s own order.
+          (for-each (lambda (w)
                     ;; A window with no buffer is never fresh - there is
                     ;; nothing to be fresh *about* - and `window-outdated?`
                     ;; has no buffer to ask either.
@@ -3768,7 +3874,13 @@
                           (let ((m (window-current-matrix w)))
                             (when m (clear-glyph-matrix m))))
                       (update-window! w)))
-                  windows)
+                    windows)
+          ;; ...and the minibuffer window's own buffer back, with the
+          ;; start and point it had.
+          (when saved
+            (set!window-buffer mini (car saved))
+            (set-window-point! mini (cadr saved))
+            (%window-start-set! mini (caddr saved))))
         ;; **No mode line for the minibuffer window**, which is Emacs's
         ;; `MINI_WINDOW_P` test in `display_mode_lines`: a minibuffer
         ;; window is one row and that row is its text.

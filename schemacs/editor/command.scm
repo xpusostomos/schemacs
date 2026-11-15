@@ -23,7 +23,7 @@
    current-prefix-arg
    *pending-coding-system*
    *called-interactively*
-   called-interactively?
+   called-interactively? funcall-interactively
    uarg->integer
    run-command apply-command show-command
    define-command *command-table* command? command-record-of command-value-of
@@ -271,32 +271,58 @@
     ;;------------------------------------------------------------------
 
     (define *called-interactively* (make-parameter #f))
-    ;; ^ Whether the command now running was reached through
-    ;; `interactive-proc' below - GNU Emacs's `called-interactively-p'
-    ;; (`eval.c:470'), which asks whether a `call-interactively' frame is
-    ;; on the stack. `define-minor-mode`'s generated command reads it to
-    ;; decide whether to echo the "enabled"/"disabled" message: a mode
-    ;; switched on by a program must stay quiet, as `(message ...)' is
-    ;; inside `(if (called-interactively-p 'any) ...)' there.
+    ;; ^ **The command procedure `interactive-proc` is invoking**, or #f
+    ;; when nothing is - GNU Emacs's `called-interactively-p`
+    ;; (`subr.el:6878`), which "return[s] t if the containing function was
+    ;; called by `call-interactively`".
     ;;
-    ;; `'any' and not the other kind: Emacs's `'any' counts a
-    ;; `call-interactively' anywhere up the stack, not only the innermost
-    ;; one, which is what a dynamically bound flag gives.
+    ;; The C asks the *stack*: `(backtrace-frame i ...)` walks out until it
+    ;; finds the frame that called the function the question is asked in,
+    ;; and answers t only if that frame is `funcall-interactively`
+    ;; (`:6944`). So a command that calls *another* command - which is what
+    ;; every minor mode's `(MODE #t)` is - gets nil there, and the mode
+    ;; stays quiet.
+    ;;
+    ;; **A Scheme binding here cannot ask what function it is in**, and
+    ;; this Guile's frames do not carry it either (`frame-procedure` is
+    ;; not in this version, and `frame-procedure-name` answers #f for the
+    ;; unnamed frame `apply` makes). So the parameter holds the command,
+    ;; and the question is *which* command: `(called-interactively? MODE)`
+    ;; is Emacs's answer exactly - it is true only while MODE is the
+    ;; command being invoked - and the no-argument form is the
+    ;; approximation "some command is running". `define-minor-mode` and
+    ;; `menu-bar-mode` both pass their own procedure, so nothing a user
+    ;; sees depends on the approximation.
 
-    (define (called-interactively?)
-      ;; GNU Emacs's `called-interactively-p': "Return t if the function
+    (define (called-interactively? . args)
+      ;; GNU Emacs's `called-interactively-p`: "Return t if the function
       ;; it is called from was called with `call-interactively' and thus
-      ;; can have been passed an `interactive' specification."  The
-      ;; KIND argument (`'interactive', `'any', `'command') is not
-      ;; carried; every caller here wants `'any'.
+      ;; can have been passed an `interactive' specification."
+      ;;
+      ;; PROC - this tree's addition - names the function the question is
+      ;; asked from, which is the only way a Scheme library can pose the
+      ;; C's question; with no PROC the answer is "a command is running".
+      ;; Emacs's KIND argument (`'interactive', `'any') is not carried.
       ;;--------------------------------------------------------------
-      (*called-interactively*))
+      (let ((running (*called-interactively*)))
+        (if (pair? args)
+            (and running (eq? running (car args)))
+            (and running #t))))
 
     (define *command-table* (make-parameter '()))
     ;; ^ The command obarray: GNU Emacs's `command-obarray', an alist of
     ;; (NAME . COMMAND-RECORD) - the record that `M-x' and the
     ;; description commands will read, ordered most-recently-defined
     ;; first.
+
+    (define (funcall-interactively command args)
+      ;; GNU Emacs's `funcall-interactively` (`callint.c`): "Call
+      ;; FUNCTION with ARGS. ... Unlike `funcall`, it marks the call as
+      ;; interactive", which is the frame `called-interactively-p` looks
+      ;; for. It is also the one place a command's arguments are applied,
+      ;; so `interactive-proc`'s branches all come through it.
+      ;;--------------------------------------------------------------
+      (apply command args))
 
     (define (interactive-proc spec command module)
       ;; The command's interactive entry: a procedure that reads what a
@@ -317,8 +343,8 @@
       ;;--------------------------------------------------------------
       (cond
        ((not spec) (lambda ()
-                     (parameterize ((*called-interactively* #t))
-                       (command))))
+                     (parameterize ((*called-interactively* command))
+                       (funcall-interactively command '()))))
        ;; an expression - a list - is recognised before the strings, so
        ;; that testing a form for `"p"' does not compare a list
        ((pair? spec)
@@ -329,19 +355,21 @@
           ;; ...)', can read it for an argument (`split-window-below'
           ;; does).
           (parameterize ((current-prefix-arg uarg)
-                         (*called-interactively* #t))
-            (apply command (eval spec module)))))
+                         (*called-interactively* command))
+            (funcall-interactively command (eval spec module)))))
        ;; The invoking event, which the command loop has bound - Emacs's
        ;; `args[i] = AREF (keys, next_event)' (`callint.c:608').
        ((string=? spec "e") (lambda (uarg)
-                              (parameterize ((*called-interactively* #t))
-                                (command (*last-command-event*)))))
+                              (parameterize ((*called-interactively* command))
+                                (funcall-interactively
+                                 command (list (*last-command-event*))))))
        ((string=? spec "p") (lambda (uarg)
-                              (parameterize ((*called-interactively* #t))
-                                (command (uarg->integer 1 uarg)))))
+                              (parameterize ((*called-interactively* command))
+                                (funcall-interactively
+                                 command (list (uarg->integer 1 uarg))))))
        ((string=? spec "P") (lambda (uarg)
-                              (parameterize ((*called-interactively* #t))
-                                (command uarg))))
+                              (parameterize ((*called-interactively* command))
+                                (funcall-interactively command (list uarg)))))
        ;; **`^' is a marker, not an argument code.** `callint.c` reads it
        ;; as "this command shifts the mark" (`shift-select-mode`) and then
        ;; goes on with the rest of the string - `"^p"` is `"p"` with that

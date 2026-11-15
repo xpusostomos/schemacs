@@ -2111,8 +2111,19 @@ With argument, insert ARG copies of the character."
     ;; (`keyboard.c:14342'): "If non-nil, then the menus and buttons of
     ;; type `:enable' are enabled even when their :enable is nil." A
     ;; plain variable, being `setq'ed.
+    ;;
+    ;; **The self-assignment is not a typo.** Guile's compiler treats a
+    ;; top-level definition that the module never assigns as a
+    ;; *constant* and folds the reads, so a `module-set!` from outside -
+    ;; a user's `setq`, or a test - is invisible: measured, a compiled
+    ;; `keyboard.scm` answered #f here after `module-set!` had set it to
+    ;; #t, and the menu tests failed only when the cache held a compiled
+    ;; copy. Assigning it in the file marks it mutable.
+    (set! *enable-disabled-menus-and-buttons* *enable-disabled-menus-and-buttons*)
 
     (define *menu-bar-final-items* '())
+    ;; the same self-assignment, for the same reason
+    (set! *menu-bar-final-items* *menu-bar-final-items*)
     ;; ^ `(defvar menu-bar-final-items nil)' (`keyboard.c:14110'): "List
     ;; of menu bar items to move to the end of the menu bar." `menu-bar.el'
     ;; sets it to `(help-menu)'. A plain variable.
@@ -2124,6 +2135,11 @@ With argument, insert ARG copies of the character."
     ;; reflect the buffer's local map and the minor mode maps regardless
     ;; of `overriding-local-map'." **Nil is the C's default**, so an
     ;; overriding map puts no items in the bar unless it is set.
+    ;;
+    ;; The self-assignment is `*enable-disabled-menus-and-buttons*`'s
+    ;; reason: without it Guile folds the reads to the constant, and a
+    ;; `setq` from another module is invisible in a compiled build.
+    (set! *overriding-local-map-menu-flag* *overriding-local-map-menu-flag*)
 
     ;; `item_properties''s slots - the C's `enum item_property_idx'.
     (define item-property-item 0)

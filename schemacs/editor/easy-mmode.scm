@@ -320,7 +320,17 @@
                                    ;; "Avoid overwriting a message shown by
                                    ;; the body, but do overwrite previous
                                    ;; messages."
-                                   (when (called-interactively?)
+                                   ;; **The mode's own command**, so
+                                   ;; that a mode switched on by another
+                                   ;; command - `dired-mode` turning on
+                                   ;; `font-lock-mode` - stays quiet.
+                                   ;; Emacs gets the same answer from the
+                                   ;; stack (`called-interactively-p`
+                                   ;; walks it for the frame that called
+                                   ;; *this* function); a Scheme binding
+                                   ;; cannot, so the question names the
+                                   ;; function.
+                                   (when (called-interactively? #,mode-id)
                                      (unless (and (current-message)
                                                   (not (equal? last-message
                                                                (current-message))))

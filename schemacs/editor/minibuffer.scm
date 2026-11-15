@@ -169,7 +169,8 @@
     (only (schemacs editor marker) marker-position)
     (only (schemacs editor frame)
           *current-frame* *echo-area-buffer* *minibuffer*
-          *set-message-function* *clear-message-function* frame-echo-buffer
+          *set-message-function* *clear-message-function* *minibuf-0*
+          echo-area-message-buffer
           frame-height select-window selected-window set!frame-message
           frame-minibuffer-window set-window-buffer! window-type?
           set-message! set-window-point! window-buffer window-height
@@ -1240,8 +1241,9 @@ previous element of the minibuffer history in the minibuffer."
           (set!frame-message frame prompt)
           ;; `read-key` propertizes the prompt with the
           ;; `minibuffer-prompt` face; a Scheme string cannot carry
-          ;; properties, so they go on the text in the buffer.
-          (let ((echo (frame-echo-buffer frame)))
+          ;; properties, so they go on the text in the buffer - which
+          ;; is the echo buffer `set!frame-message` has just filled.
+          (let ((echo (echo-area-message-buffer)))
             (when echo
               (with-current-buffer echo
                 (put-text-property (point-min) (point-max)
@@ -2942,7 +2944,9 @@ previous element of the minibuffer history in the minibuffer."
         (and mini
              (window-buffer mini)
              (*minibuffer*)
-             (not (eq? (window-buffer mini) (frame-echo-buffer frame)))
+             ;; "the active minibuffer" is one whose window is not
+             ;; showing the empty ` *Minibuf-0*'
+             (not (eq? (window-buffer mini) (*minibuf-0*)))
              (begin
                (let ((text (%minibuffer-message-enclose message)))
                  (%minibuffer-message-put

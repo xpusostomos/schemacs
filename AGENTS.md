@@ -6,7 +6,8 @@ up a gtk window with a couple of GtkTextAreas, but didn't actually do anything.
 We are reimplementing emacs in guile scheme. The general plan is to plan new features,
 translate real emacs source code into scheme, and put that ported code into
 files with the same name as in emacs. e.g. intervals.c in emacs became intervals.sld
-in this project. Each function in emacs should be ported with the same name to the 
+in this project. Also, each function in the same file should be kept in the same
+order as emacs. Each function in emacs should be ported with the same name to the 
 same file here, generally with the same parameters too. 
 We are working on exact emacs replication, right down to the
 exact functionality, messages, layout, everything. So it's important that you
@@ -7752,3 +7753,65 @@ Two traps from the same pass:
   nothing", and the pty check that failed was `save-y-n` - the `C-x C-c`
   prompt simply never appeared. The missing-import class again; a
   guarded error reads exactly like a key that is not bound.
+
+## The two echo-area departures, and `called-interactively-p`
+
+**The echo buffers are global now**, as Emacs's `echo_buffer[2]` are, and
+they alternate (`with_echo_area_buffer` with WHICH = -1). The renderer
+*swaps* the current one into the selected frame's minibuffer window for
+the display and puts the window's own buffer back afterwards - which is
+`with_echo_area_buffer`'s `wset_buffer`, and why a frame that is not
+selected shows ` *Minibuf-0*` and nothing else. ` *Minibuf-0*` exists
+now, made in `frame.scm` because a frame's minibuffer window needs it at
+`new-frame-on` time and `minibuf.c`'s file is above that library.
+
+**The minibuffer window grows**: `resize_mini_window`,
+`grow_mini_window`/`shrink_mini_window`, `resize-mini-windows`
+(`grow-only`) and `max-mini-window-height` (0.25) are ported. The text is
+measured in rows, not pixels.
+
+**`<frame>` lost its `echo-buffer` field.** That is a record change: clear
+`~/.cache/guile/ccache` before believing any test result, or every library
+compiled against the old layout reads the wrong slots - which showed up as
+`(window-width w)` answering `""` and twenty unrelated test failures.
+
+**`called-interactively-p` was one dynamic flag for the whole command**,
+so `(font-lock-mode #t)` inside `dired-mode` echoed "Font-Lock mode
+enabled" - which Emacs does not do, because it asks the *stack* whether
+the function containing the call was the one `call-interactively` invoked.
+There is no `frame-procedure` in this Guile, so the parameter holds the
+command procedure and `(called-interactively? CMD)` is the exact answer;
+`define-minor-mode` and `menu-bar-mode` pass their own commands.
+
+## A compiled library folds its own `defvar`s (2026-11-15)
+
+`menu-bar-tests` failed with three tests and passed with the same sources
+when `keyboard.scm` happened to be *interpreted*. Measured:
+
+    keyword.scm compiled:   (module-set! ... '*enable-disabled-menus-and-buttons* #t)
+                            -> the variable reads #t, and `parse-menu-item`
+                               still takes the #f branch
+    keyboard.scm interpreted: -> the #t branch
+
+**Guile's compiler treats a top-level definition that the module never
+assigns as a constant and folds its reads**, so a `setq` (or
+`module-set!`) from *another* module is invisible in a compiled build.
+That is the same shape as the tree's own "a parameter is set by calling
+it" rule, one level lower: a `defvar` meant to be `setq`-ed by a user's
+init file is not a constant, but the compiler has no way to know.
+
+The cure used here is one assignment in the defining library, which marks
+it mutable:
+
+    (define *enable-disabled-menus-and-buttons* #f)
+    (set! *enable-disabled-menus-and-buttons* *enable-disabled-menus-and-buttons*)
+
+Applied to the three variables the menu tests move
+(`*enable-disabled-menus-and-buttons*`, `*menu-bar-final-items*`,
+`*overriding-local-map-menu-flag*`). **Any other `defvar` that a user is
+meant to `setq` needs the same**, or it only works in an un-compiled
+tree - which is how this hid: the suites' answer depended on whether the
+cache held a compiled copy of that one library.
+
+This also explains an earlier phantom: the suites went green and red on
+the same tree with different cache states.

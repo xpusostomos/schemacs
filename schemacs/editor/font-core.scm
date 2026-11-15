@@ -44,6 +44,8 @@
     (only (schemacs editor command) current-prefix-arg define-command)
     (only (schemacs editor buffer) buffer-name)
     (only (schemacs editor frame) *current-frame* set!frame-message)
+    ;; `font-lock-mode` is a `define-minor-mode`, which is `easy-mmode.el`'s.
+    (only (schemacs editor easy-mmode) define-minor-mode)
     (only (schemacs editor font-lock)
           font-lock-initial-fontify
           font-lock-mode-internal
@@ -83,45 +85,36 @@
       ;;--------------------------------------------------------------
       (font-lock-mode -1))
 
-    (define-command (font-lock-mode arg)
-      ;; GNU Emacs's `font-lock-mode' (font-core.el:83): "Toggle syntax
-      ;; highlighting in this buffer (Font Lock mode). ... When you turn
-      ;; Font Lock mode on/off the buffer is fontified/defontified."
-      ;;
-      ;; A `define-minor-mode` in Emacs and a command toggling a variable
-      ;; here, as `blink-cursor-mode` is: what `define-minor-mode` would
-      ;; give it - the lighter in the mode line, the customize group,
-      ;; `font-lock-mode-hook` - is named rather than faked. Its
-      ;; `:after-hook (font-lock-initial-fontify)` is the one part that
-      ;; *is* done, and it is the part that matters: it is what fontifies
-      ;; the buffer the moment the mode comes on, rather than waiting for
-      ;; the first edit.
-      ;;
-      ;; The C's `(when (or noninteractive (eq (aref (buffer-name) 0) ?\s))
-      ;; (setq font-lock-mode nil))` is the name test alone here - see
-      ;; the library comment.
-      ;;--------------------------------------------------------------
-      "Toggle syntax highlighting in this buffer (Font Lock mode)."
-      (interactive (list (current-prefix-arg)))
-      (let ((on? (cond ((not arg) (not (font-lock-mode-on?)))
-                       ((pair? arg) #t)
-                       ((number? arg) (> arg 0))
-                       (else #t))))
-        ;; "Don't turn on Font Lock mode if ... the buffer is invisible
-        ;; (the name starts with a space)."
-        (when (and on? (char=? (string-ref (buffer-name) 0) #\space))
-          (set! on? #f))
-        (set!font-lock-mode! on?)
-        ((*font-lock-function*) on?)
-        ;; the `:after-hook'
-        (when on? (font-lock-initial-fontify))
-        ;; "Emacs's `define-minor-mode' would echo this; the mode line
-        ;; lighter it would also add is not implemented" - the words
-        ;; `blink-cursor-mode' uses.
-        (set!frame-message (*current-frame*)
-                           (if on?
-                               "Font-Lock mode enabled"
-                               "Font-Lock mode disabled"))))
+    ;; **A `define-minor-mode`, as it is in Emacs** (`font-core.el:83`).
+    ;; It used to be a hand-written command that echoed "Font-Lock mode
+    ;; enabled" on *every* call, which is how opening a directory came to
+    ;; say it: `dired-mode` ends with `(font-lock-mode #t)` and that is
+    ;; not an interactive call, so Emacs's generated command - which
+    ;; asks `called-interactively-p` - says nothing. The lighter, the
+    ;; hook and the toggle rule now come from the macro rather than being
+    ;; named as missing.
+    ;;
+    ;; Not carried, both because they need primitives this tree has not
+    ;; got: `noninteractive` (the C's `(or noninteractive ...)` guard,
+    ;; so only the invisible-name test is left) and the
+    ;; `change-major-mode-hook` add/remove at the end of the body, which
+    ;; is `add-hook`/`remove-hook` - there are none here.
+    (define-minor-mode font-lock-mode
+      "Toggle syntax highlighting in this buffer (Font Lock mode).
+
+When Font Lock mode is enabled, text is fontified as you type it."
+      :lighter " FL"
+      :variable
+      (lambda () (font-lock-mode-on?))
+      (lambda (value) (set!font-lock-mode! (and value #t)))
+      :after-hook (font-lock-initial-fontify)
+      ;; "(when (or noninteractive (eq (aref (buffer-name) 0) ?\s))
+      ;;    (setq font-lock-mode nil))" - "Don't turn on Font Lock mode
+      ;; if ... the buffer is invisible (the name starts with a space)."
+      (when (char=? (string-ref (buffer-name) 0) #\space)
+        (set!font-lock-mode! #f))
+      ;; "(funcall font-lock-function font-lock-mode)"
+      ((*font-lock-function*) (font-lock-mode-on?)))
 
     (define (turn-on-font-lock)
       ;; GNU Emacs's `turn-on-font-lock' (font-core.el:190): "Turn on

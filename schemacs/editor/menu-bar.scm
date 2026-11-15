@@ -789,7 +789,7 @@ created in the future."
         ;; through `run-with-idle-timer` so the minor mode's own message
         ;; does not overwrite it. There is no minor mode message here, so
         ;; it is said at once.
-        (when (and (not value) (called-interactively?))
+        (when (and (not value) (called-interactively? menu-bar-mode))
           (message "Menu Bar mode disabled.  Use \\[menu-bar-mode] to make the menu bar appear."))
         value))
 

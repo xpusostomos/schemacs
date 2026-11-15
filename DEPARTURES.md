@@ -2401,21 +2401,23 @@ re-exports it.
 
 ## Departures that remain, and whether to fix them
 
-1. **One echo buffer per frame**, where Emacs has two global ones. The
-   C's pair exist so a new message can be built in a fresh buffer while
-   the old is still on screen; only the *selected* frame's minibuffer
-   window ever displays them. This tree's messages are per frame already
-   (`set!frame-message` names one), so a shared buffer showed one frame's
-   message on another - which the two-frame test in `pgtk-tests` pins.
-   The name is ` *Echo Area 0*`, then ` *Echo Area 0*<2>` for the second
-   frame. **Not worth changing** unless frame messages become global.
-2. **`clear-message-function` is reached from `set!frame-message` with an
+1. ~~**One echo buffer per frame**, where Emacs has two global ones.~~
+   **Fixed**: the two ` *Echo Area 0*`/` *Echo Area 1*` buffers are
+   global and alternate, as the C's do (`with_echo_area_buffer`, WHICH =
+   -1), and the renderer swaps the current one into the *selected*
+   frame's minibuffer window for the display - `with_echo_area_buffer`'s
+   `wset_buffer` - so a frame that is not selected shows its own
+   ` *Minibuf-0*`, which is what Emacs's `redisplay_window` does with
+   every mini window that is not `echo_area_window`.
+2. ~~**The minibuffer window does not grow.**~~ **Fixed**:
+   `resize_mini_window` (`xdisp.c:13310`), `grow_mini_window` /
+   `shrink_mini_window` (`window.c:5901`, `:5943`), `resize-mini-windows`
+   (`grow-only`) and `max-mini-window-height` (0.25) are ported. The text
+   is measured in *rows* rather than pixels, so the resize quantises to
+   the frame's grid - which is what a tty frame does anyway.
+3. **`clear-message-function` is reached from `set!frame-message` with an
    empty string**, which this tree uses for `(message nil)`. Emacs has a
    separate `clear_message`. The observable is the same.
-3. **The minibuffer window does not grow.** `resize_mini_window`
-   (`xdisp.c`) makes the echo area taller for a multi-line message or a
-   long completion message; here it is always one row, so a message longer
-   than the frame is clipped. Not new, and not attempted here.
 4. **`cursor-in-echo-area` is read by the cursor placement only.** Emacs
    also uses it in `update_frame` and in `read_char`'s echo handling.
 5. `minibuffer-message`'s `(put-text-property 0 1 'cursor t message)` -
@@ -2538,3 +2540,72 @@ pool-reusing walk, so the keystroke path is unchanged.
 The strings' characters advance the screen column as they are appended,
 so a tab after one expands from where the string left off, as it does in
 the C.
+
+# `called-interactively-p` asked the wrong question (2026-11-15)
+
+Chris, opening a directory: *"I get a minibuffer message 'font lock mode
+enabled'. That's odd you don't get that in emacs."*
+
+`dired-mode` ends with `(when (font-lock-defaults) (font-lock-mode #t))`
+(`dired.scm:1387`), and `font-lock-mode` is a `define-minor-mode` whose
+generated command echoes "Font-Lock mode enabled" when
+`(called-interactively-p 'any)` says it was reached from a key. In GNU
+Emacs that call is **not** interactive and stays quiet. Here it was
+interactive, because `called-interactively-p` was
+`(*called-interactively*)` - one dynamic flag bound around the whole
+command - so everything a command calls, however deep, counted.
+
+Emacs asks the *stack*: `(backtrace-frame i ...)` walks outward and
+answers t only if the frame that called **the function the question is
+asked in** is `funcall-interactively` (`subr.el:6944`). A Scheme binding
+cannot ask what function it is in, and this Guile has no
+`frame-procedure` (`(system vm frames)` does not exist in 3.0.11, and
+`frame-procedure-name` answers #f for the unnamed frame `apply` makes).
+So the parameter holds **the command procedure being invoked**, and:
+
+- `(called-interactively? CMD)` - the exact answer, true only while CMD
+  is the command being run. `define-minor-mode` emits it with the mode's
+  own command, and `menu-bar-mode` with its own;
+- `(called-interactively?)` - "some command is running", the old
+  approximation, kept for callers that cannot name themselves. Nothing a
+  user sees depends on it.
+
+`interactive-proc`'s branches now all call the command through a new
+`funcall-interactively` (`callint.c`), which is the frame the C looks
+for, so the shape is the C's even though the test is not.
+
+## ...and `font-lock-mode` was a hand-written mode
+
+The message came from `font-core.scm`, which had `font-lock-mode` as a
+hand-written `define-command` ending in
+
+    (set!frame-message (*current-frame*)
+                       (if on? "Font-Lock mode enabled" "Font-Lock mode disabled"))
+
+- it echoed on **every** call, so the `called-interactively-p` fix alone
+would not have silenced it. In Emacs it is a `define-minor-mode`
+(`font-core.el:83`), and it is one here now: the same `:after-hook
+(font-lock-initial-fontify)`, the `" FL"` lighter, and the generated
+message. Not carried, both for want of primitives: `noninteractive` (the
+`(or noninteractive ...)` half of the name test) and the
+`change-major-mode-hook` add/remove, which needs `add-hook`/`remove-hook`.
+
+## A compiled library folds its own `defvar`s
+
+Found while checking the menu-bar suites: three `menu-bar-tests` failed on
+a tree whose sources had not changed, and passed when `keyboard.scm`
+happened to be interpreted. Measured - `module-set!` on
+`*enable-disabled-menus-and-buttons*` reads back #t, and a compiled
+`parse-menu-item` still takes the #f branch.
+
+Guile's compiler treats a top-level binding that its module never assigns
+as a **constant** and folds the reads, so a `setq` from another module -
+a user's init file, or a test - is invisible in a compiled build. Every
+variable this tree keeps as a plain `define` *because Emacs's is a
+`defvar` somebody `setq`s* is in that class.
+
+Fixed for the three variables the menu code exposes, by one assignment in
+the defining library (`(set! x x)`), which marks the binding mutable.
+**The rest of the tree has not been swept**, and that is worth doing: the
+symptom is a setting that works in a fresh checkout and does nothing
+after `guile -c "(compile-file ...)"`.

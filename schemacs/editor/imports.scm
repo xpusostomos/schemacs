@@ -249,6 +249,7 @@
     *display-color-cells*
     *display-type*
     *echo-area-buffer*
+    *echo-buffers*
     *enable-disabled-menus-and-buttons*
     *enable-multibyte-characters*
     *eval-expression-debug-on-error*
@@ -351,6 +352,7 @@
     *max-5-byte-char*
     *max-char*
     *max-eol-check-count*
+    *max-mini-window-height*
     *menu-bar-close-window*
     *menu-bar-final-items*
     *menu-bar-items-function*
@@ -362,6 +364,7 @@
     *message-log-function*
     *message-log-max*
     *messages-buffer-name*
+    *minibuf-0*
     *minibuffer*
     *minibuffer--message-overlay*
     *minibuffer--message-timer*
@@ -413,6 +416,7 @@
     *redisplay-in-progress*
     *replace-buffer-in-windows-function*
     *require-final-newline*
+    *resize-mini-windows*
     *run-hooks-function*
     *save-silently*
     *saved-region-selection*
@@ -995,6 +999,8 @@
     draw-box!
     draw-window-cursor!
     easy-mmode-pretty-mode-name
+    echo-area-last-buffer
+    echo-area-message-buffer
     editor-excluded-libraries
     editor-libraries
     enable-theme
@@ -1181,7 +1187,6 @@
     forward-word-position
     frame-char-height
     frame-char-width
-    frame-echo-buffer
     frame-editor
     frame-garbaged-p
     frame-height
@@ -1274,6 +1279,7 @@
     goto-line-history
     goto-line-read-args
     graft-intervals-into-buffer
+    grow-mini-window
     gui--last-selected-text-clipboard
     gui--last-selected-text-primary
     gui-backend-get-selection
@@ -2117,6 +2123,7 @@
     show-command
     show-prefix-echo!
     show-text-editor
+    shrink-mini-window
     signal-after-change
     signal-before-change
     signal-quit
