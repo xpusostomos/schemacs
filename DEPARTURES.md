@@ -2903,3 +2903,42 @@ the global's values and a `.txt` file for the mode's).
   symbols.
 * **`setq-local`** is a procedure taking `(NAME VALUE)`, not a macro -
   the buffer-local store is keyed by a plain symbol either way.
+
+## The scanner and the sexp commands (2026-11-15)
+
+* **`scan-error` is a record, not a condition type.** The C's
+  `xsignal3 (Qscan_error, MSG, START, END)` carries three data fields and
+  `condition-case` matches on the symbol; this tree's errors are Guile
+  error objects, so `<scan-error>` is a record and `error-message-string`
+  and the command loop's reporter both know it. `guard` + `scan-error?` is
+  the port of `(condition-case _ ... (scan-error ...))`.
+* **`user-error` is an alias for `error`.** Emacs gives it its own
+  condition type (`subr.el`); nothing here catches the two apart, and the
+  echo-area text is the same.
+* **`skip_chars`' `fastmap`/`char_ranges` are not carried** — the
+  membership test one character at a time is the same test, and the maps
+  are an optimisation. The `[:class:]` vocabulary is `re_wctype_parse`'s,
+  with Guile's character predicates standing in for the wide-character
+  tables (`iswalpha` and its like).
+* **No narrowing** in `beginning-of-defun-raw` (the C's
+  `save-restriction`/`widen`) or in `up-list-default-function` (the
+  `narrow-to-region` arm `no-syntax-crossing` uses).
+* **`beginning-of-defun-raw`'s `wrong-number-of-arguments` fallback
+  catches every error**, because this tree has one error condition type.
+* **`beginning-of-defun`'s `this-command`/`last-command` test is against
+  the command *procedures*** (`*this-command*`), not symbols: a command is
+  its procedure here. `mark-defun-back` therefore cannot exist.
+* **`transpose-sexps` lives in `lisp.scm`, not `simple.scm`** where Emacs
+  has it: it needs `forward-sexp`, and `lisp.scm` is the library above
+  `simple.scm` that holds it.
+* **`eval-last-sexp` and `eval-defun` evaluate Scheme**, the departure
+  `eval-expression` and `eval-region` already carry. `elisp--preceding-sexp`
+  is `forward-sexp -1` plus `read`: the Emacs reader's quote stripping,
+  `?\e`, `#s` and `#N=` have nothing to skip here. `elisp--eval-defun-1`,
+  `eval-sexp-add-defvars` and `lexical-binding` exist to re-run a
+  `defvar`/`defcustom`/`defface` initializer and Scheme has no such thing.
+* **`eval-print-last-sexp` inserts its newlines with `insert`** where the
+  C binds `standard-output` to the buffer and calls `terpri`: this tree has
+  no `standard-output`, and the buffer is where they would have gone.
+* **`eval-last-sexp`'s `last-sexp-setup-props`** (the text properties that
+  make the echoed value clickable) is not carried.
