@@ -8072,3 +8072,81 @@ green with it.
 `text-mode` is in (`.txt` files), and `global-font-lock-mode` is turned
 on in `startup.sld`'s boot, where Emacs's `:init-value` would have put
 it.
+
+# The sexp, list and defun commands (2026-11-15)
+
+Chris's list of motions, less the three indentation commands. Everything
+below is `39cdccd`, and **every expectation in `lisp-tests.scm` is Emacs
+31.1's own answer**, measured with `emacs -Q --batch` on the same text.
+
+## What landed, and where
+
+| Emacs | here |
+|---|---|
+| `syntax.c:2660` `scan_lists` | `syntax.scm` `%scan-lists` |
+| `syntax.c:695` `back_comment` | `syntax.scm` `%back-comment` |
+| `syntax.c:585` `find_defun_start` | `syntax.scm` `%find-defun-start` |
+| `syntax.c:3096` `backward-prefix-chars` | `backward-prefix-chars` |
+| `syntax.c:1660` `skip_chars` | `%skip-chars` (ranges and `[:class:]`) |
+| `syntax.c:2436` `forward_comment` | `forward-comment` |
+| `lisp.el` | **`lisp.scm`** (new) - forward-sexp, backward-sexp, mark-sexp, forward-list, backward-list, down-list, up-list, backward-up-list, kill-sexp, backward-kill-sexp, beginning-of-defun (+ `-raw`, `-comments`), end-of-defun, mark-defun, insert-pair, insert-parentheses, transpose-sexps |
+| `elisp-mode.el` eval commands | `elisp-mode.scm` `eval-last-sexp`, `eval-print-last-sexp`, `eval-defun` |
+
+Both defun commands are **lisp.el's in Emacs 31**, not `editfns.c`'s as
+they were in older versions - so `lisp.scm` is where they went.
+
+## Four things worth knowing before the next pass
+
+1. **The syntax classes are *values* here, not enum constants.** A `case`
+   over them compares the number against the *symbol* and silently takes
+   the `else` branch: the first `%scan-lists` walked a whole buffer one
+   character at a time and never opened a list. Every dispatch on a
+   class is a `cond` with `=`/`memv`. This bit twice - `%scan-lists` and
+   `%back-comment` both.
+
+2. **`scan-error` is a condition record now** (`<scan-error>`, with the
+   raw message and the two positions, as `xsignal3`'s data is).
+   `error-message-string` and keyboard's reporter both know it and render
+   `Scan error: "Unbalanced parentheses", 1, 5`, which is what Emacs
+   prints. `condition-case (scan-error ...)` becomes `guard` +
+   `scan-error?`, which is how `forward-sexp` says "No next sexp".
+
+3. **`re-search-backward` with a negative COUNT searches forward.** The C
+   is `n = direction * count` (`search_command`, `search.c:1040`), and
+   `beginning-of-defun-raw` passes `-arg` for its forward direction.
+   Ours ignored the sign, which left `(end-of-defun 2)` stopping one
+   defun short.
+
+4. **`skip-chars-forward`/`-backward` were a membership test** -
+   `(memv c (string->list set))` - so no ranges and no `[:space:]`.
+   `mark-defun` ends with `(skip-chars-backward "[:space:]\n")`.
+   `%skip-chars` now parses ranges, backslash escapes, leading `^` and
+   the `[:class:]` vocabulary; the C's `fastmap`/`char_ranges` are an
+   optimisation and the membership test is the same test.
+
+## Deliberately not carried
+
+* **`defun-prompt-regexp`'s non-nil path is carried but never taken** —
+  nothing here sets it — and `beginning-of-defun-raw`'s
+  `wrong-number-of-arguments` fallback catches *every* error, because
+  this tree has one error condition type.
+* **No narrowing**: `up-list-default-function`'s `narrow-to-region` arm
+  and `beginning-of-defun-raw`'s `save-restriction`/`widen` have nothing
+  to do here. `no-syntax-crossing` still behaves, via the error arm.
+* `delete-pair`, `kill-backward-up-list` (`thing-at-point`),
+  `mark-defun-back` (no command symbols), `eval-sexp-add-defvars`,
+  `elisp--eval-defun-1` (Scheme has no `defvar`), `lexical-binding`,
+  `macroexpand-all`, and the print truncation variables.
+* **`elisp--preceding-sexp`'s Emacs-reader syntax** — the quote
+  stripping, `?\e`, `#s`, `#N=` — because the reader is Scheme's, the
+  same departure `eval-expression` carries.
+
+## Still to do
+
+`indent-sexp` (lisp-mode.el), `indent-region` (indent.el) and
+`move-past-close-and-reindent` (lisp.el) all rest on
+**`calculate-lisp-indent`** and `lisp-indent-line`, the Lisp indentation
+engine: `parse-partial-sexp` (ported) plus `lisp-indent-function`, the
+`common-lisp-indent-function` specform table (cl-indent.el), and
+indent.el's `indent-line-to`/`indent-according-to-mode`. That is a pass
+of its own and was not started.
