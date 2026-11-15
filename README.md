@@ -81,7 +81,10 @@ project there.
   and installed in a directory path that is listed in the `%load-path`
   (Note, last I checked the Arch AUR guile-cairo is too old and won't work.
   Suggesting downloading and sudo make install)
-  
+
+- [Scheme Utils](https://github.com/xpusostomos/scheme-utils) should be
+built and installed locally.
+
 ## How to install
 
 `make install-local` to install in your local directory.
