@@ -9168,3 +9168,18 @@ Two bugs of the port, both the same shape as ones this file already has:
 Tests: `tab-bar-tests.scm` 15 -> 22 (history mode adds the hook, a split
 is recorded and undone, forward redoes it, the buttons appear only with
 the mode on; group assignment, clearing, and the grouped format).
+
+### The rest of the tab commands (2026-11-16, third pass)
+
+`tab-bar-duplicate-tab`, `tab-bar-move-tab-backward`,
+`tab-bar-switch-to-tab` (`C-x t RET`), `tab-bar-close-tab-by-name`,
+`tab-bar-rename-tab-by-name` and `tab-bar-move-tab-to-group`, with the
+aliases `tab-duplicate`, `tab-switch`, `tab-close-by-name`,
+`tab-rename-by-name` and `tab-move-backward`, and `C-x t n` bound to
+duplicate.
+
+**`tab-bar-move-tab-to-group` is the default value of
+`tab-bar-tab-post-change-group-functions`**, which the group pass had
+left as `'()` - so grouping a tab now *moves* it next to its group, as
+Emacs's does. That changes the order the tests see, and three of them
+were written for the old order; they now say why.

@@ -154,6 +154,9 @@
    tab-bar-format-history
    ;; tab groups - `tab-bar.el:1084`
    tab-bar-change-tab-group tab-bar-close-group-tabs
+   tab-bar-duplicate-tab tab-bar-move-tab-backward tab-bar-switch-to-tab
+   tab-bar-close-tab-by-name tab-bar-rename-tab-by-name
+   tab-bar-move-tab-to-group
    tab-bar-tab-group-default tab-bar-tab-group-format-default
    tab-bar-tab-group-face-default tab-bar--format-tab-group
    *tab-bar-tab-group-function* *tab-bar-tab-group-format-function*
@@ -1711,6 +1714,113 @@ If GROUP-NAME is the empty string, then remove the tab from any group."
               (else (loop (cdr rest) (cons (car rest) acc))))))
 
     ;;--------------------------------------------------------------
+    ;; The rest of the tab commands - `tab-bar.el:1849`-`:1910` and
+    ;; `:2402`-`:2436`
+    ;;--------------------------------------------------------------
+
+    (define-command (tab-bar-duplicate-tab arg from-number)
+      "Clone the current tab to ARG positions to the right.
+ARG and FROM-NUMBER have the same meaning as in `tab-bar-new-tab'."
+      (interactive (list (current-prefix-arg) #f))
+      (parameterize ((*tab-bar-new-tab-choice* 'clone)
+                     (*tab-bar-new-tab-group* #t))
+        (tab-bar-new-tab arg from-number)))
+
+    (define-command (tab-bar-move-tab-backward arg)
+      "Move the current tab ARG positions to the left.
+Like `tab-bar-move-tab', but moves in the opposite direction."
+      (interactive (list (uarg->integer 1 (current-prefix-arg))))
+      (tab-bar-move-tab (- (or arg 1))))
+
+    (define-command (tab-bar-switch-to-tab name)
+      "Switch to the tab by NAME.
+Default values are tab names sorted by recency, so you can use
+\\<minibuffer-local-map>\\[next-history-element]
+to get the name of the most recently visited tab, the second
+most recent, and so on.
+When the tab with that NAME doesn't exist, create a new tab
+and rename it to NAME."
+      (interactive
+       (let* ((recent-tabs (map (lambda (tab) (tab-bar--alist-get 'name tab))
+                                (tab-bar--tabs-recent))))
+         (list (read-from-minibuffer
+                (format-prompt "Switch to tab by name" (car recent-tabs))
+                #f #f #f (car recent-tabs)))))
+      (let ((tab-index (tab-bar--tab-index-by-name name)))
+        (if tab-index
+            (tab-bar-select-tab-internal (1+ tab-index))
+            (begin
+              (tab-bar-new-tab-to #f)
+              (tab-bar-rename-tab name #f)))))
+
+    (define-command (tab-bar-close-tab-by-name name)
+      "Close the tab given its NAME.
+Interactively, prompt for NAME."
+      (interactive
+       (list (read-from-minibuffer
+              "Close tab by name: " #f #f #f
+              (tab-bar--alist-get 'name (tab-bar--current-tab-find)))))
+      (tab-bar-close-tab (1+ (tab-bar--tab-index-by-name name)) #f))
+
+    (define-command (tab-bar-rename-tab-by-name tab-name new-name)
+      "Rename the tab named TAB-NAME to NEW-NAME.
+If NEW-NAME is the empty string, then use the automatic name
+function `tab-bar-tab-name-function'."
+      (interactive
+       (let ((tab-name (read-from-minibuffer
+                        "Rename tab by name: " #f #f #f
+                        (tab-bar--alist-get 'name (tab-bar--current-tab-find)))))
+         (list tab-name
+               (read-from-minibuffer
+                "New name for tab (leave blank for automatic naming): "
+                #f #f #f tab-name))))
+      (tab-bar-rename-tab new-name (1+ (tab-bar--tab-index-by-name tab-name))))
+
+    (define (tab-bar-move-tab-to-group . args)
+      ;; "Relocate TAB (by default, the current tab) closer to its
+      ;; group."
+      ;;
+      ;; The C's two `seq-position` calls are the group's first tab and
+      ;; its length; the arithmetic after them is Emacs's.
+      ;;--------------------------------------------------------------
+      (let* ((tabs ((*tab-bar-tabs-function*)))
+             (tab (or (and (pair? args) (car args))
+                      (tab-bar--current-tab-find tabs)))
+             (tab-index (tab-bar--tab-index tab))
+             (group (tab-bar--alist-get 'group tab))
+             (beg (seq-position tabs group
+                                (lambda (tb gr)
+                                  (and (not (eq? tb tab))
+                                       (equal? (tab-bar--alist-get 'group tb)
+                                               gr)))))
+             (len (and beg
+                       (seq-position (list-tail tabs beg) group
+                                     (lambda (tb gr)
+                                       (not (equal? (tab-bar--alist-get 'group tb)
+                                                    gr))))))
+             (pos (if beg
+                      (cond
+                       ;; "Don't move tab when it's already inside group
+                       ;; bounds"
+                       ((and len (>= tab-index beg) (<= tab-index (+ beg len)))
+                        #f)
+                       ;; "Move tab from the right to the group end"
+                       ((and len (> tab-index (+ beg len))) (+ beg len 1))
+                       ;; "Move tab from the left to the group beginning"
+                       ((< tab-index beg) beg))
+                      ;; "Move tab with a new group to the end"
+                      -1)))
+        (when pos
+          (tab-bar-move-tab-to pos (1+ tab-index)))))
+
+    ;; "List of functions to call after changing a tab group. ... By
+    ;; default it enables the function `tab-bar-move-tab-to-group' that
+    ;; moves the tab closer to its group." The C's value names the
+    ;; function before it is defined; the parameter is set here, after.
+    (*tab-bar-tab-post-change-group-functions*
+     (list tab-bar-move-tab-to-group))
+
+    ;;--------------------------------------------------------------
     ;; Tab history mode - `tab-bar.el:2566`
     ;;
     ;; **The one departure of this section is how a change is noticed.**
@@ -1933,6 +2043,12 @@ and can restore them."
     (define tab-close-group tab-bar-close-group-tabs)
     (define tab-new tab-bar-new-tab)
     (define tab-new-to tab-bar-new-tab-to)
+    (define tab-duplicate tab-bar-duplicate-tab)
+    (define tab-switch tab-bar-switch-to-tab)
+    (define tab-select-tab-by-name tab-bar-switch-to-tab)
+    (define tab-close-by-name tab-bar-close-tab-by-name)
+    (define tab-rename-by-name tab-bar-rename-tab-by-name)
+    (define tab-move-backward tab-bar-move-tab-backward)
 
     (define-key *default-keymap* (kbd "C-x t 2") tab-new)
     (define-key *default-keymap* (kbd "C-x t 0") tab-close)
@@ -1944,6 +2060,8 @@ and can restore them."
     (define-key *default-keymap* (kbd "C-x t M") tab-move-to)
     (define-key *default-keymap* (kbd "C-x t r") tab-rename)
     (define-key *default-keymap* (kbd "C-x t G") tab-group)
+    (define-key *default-keymap* (kbd "C-x t RET") tab-switch)
+    (define-key *default-keymap* (kbd "C-x t n") tab-duplicate)
 
     ;; `global-set-key [tab-bar] ...` - the filter is applied by
     ;; `update-tab-bar`, not by the lookup; see this file's header.

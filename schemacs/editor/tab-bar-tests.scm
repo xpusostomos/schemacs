@@ -22,6 +22,8 @@
        tab-bar-history-back tab-bar-history-forward
        tab-bar--history-pre-change tab-bar-format-history
        tab-bar-change-tab-group tab-bar-format-tabs-groups
+       tab-bar-duplicate-tab tab-bar-switch-to-tab tab-bar-close-tab-by-name
+       tab-bar-rename-tab-by-name
        tab-bar-tab-group-default *tab-bar-show-inactive-group-tabs*)
  (only (schemacs editor buffer)
        get-buffer-create buffer-name current-buffer)
@@ -257,17 +259,20 @@
 ;; **Tab groups** - `C-x t G` puts a tab in a named group, and
 ;; `tab-bar-format-tabs-groups` shows one label per group with only the
 ;; current group's tabs beside it.
-(test-equal '("work" "work" #f)
+(test-equal '(#f "work" "work")
   (let ((frame (fresh-frame)))
     (parameterize ((*current-frame* frame) (*current-buffer* #f))
       (tab-bar-new-tab #f #f)
       (tab-bar-new-tab #f #f)
       (tab-bar-change-tab-group "work" 1)
       (tab-bar-change-tab-group "work" 2)
+      ;; **The default hook moves each tab to its group**, so the order
+      ;; is no longer the creation order: the ungrouped current tab is
+      ;; first and the two "work" tabs follow it.
       (map tab-bar-tab-group-default (tab-bar-tabs)))))
 
 ;; An empty name takes the tab out of its group.
-(test-equal '("work" #f #f)
+(test-equal '(#f #f "work")
   (let ((frame (fresh-frame)))
     (parameterize ((*current-frame* frame) (*current-buffer* #f))
       (tab-bar-new-tab #f #f)
@@ -277,10 +282,13 @@
       (tab-bar-change-tab-group "" 2)
       (map tab-bar-tab-group-default (tab-bar-tabs)))))
 
-;; The grouped format: the current tab, which has no group, and the first
-;; tab of the "work" group behind a label - the second "work" tab is
-;; hidden while `tab-bar-show-inactive-group-tabs` is nil.
-(test-equal '(sep-1 group-1 sep-3 current-tab)
+;; The grouped format, after the default hook has moved the tabs into
+;; their group: the ungrouped tab, then the current group's label and its
+;; two tabs. The label is emitted before the first tab of the current
+;; group (`tab-bar--format-tab-group`), and the second tab of that group
+;; needs no label of its own.
+(test-equal '(sep-1 tab-1 sep-2 current-group sep-2 current-tab
+              sep-3 tab-3)
   (let ((frame (fresh-frame)))
     (parameterize ((*current-frame* frame) (*current-buffer* #f))
       (tab-bar-new-tab #f #f)
@@ -289,5 +297,27 @@
       (tab-bar-change-tab-group "work" 2)
       (*tab-bar-show-inactive-group-tabs* #f)
       (map (lambda (item) (car item)) (tab-bar-format-tabs-groups)))))
+
+;; The remaining commands: duplicate adds a tab, switch-to-tab by name
+;; creates and renames one that does not exist, and close-tab-by-name
+;; removes one by its name.
+(test-equal '(3 4 "made")
+  (let ((frame (fresh-frame)))
+    (parameterize ((*current-frame* frame) (*current-buffer* #f))
+      (tab-bar-new-tab #f #f)
+      (tab-bar-duplicate-tab #f #f)
+      (let ((after-dup (length (tab-bar-tabs))))
+        (tab-bar-switch-to-tab "made")
+        (list after-dup
+              (length (tab-bar-tabs))
+              (cdr (assq 'name (cdr (car (last-pair (tab-bar-tabs)))))))))))
+
+(test-equal 1
+  (let ((frame (fresh-frame)))
+    (parameterize ((*current-frame* frame) (*current-buffer* #f))
+      (tab-bar-new-tab #f #f)
+      (tab-bar-rename-tab-by-name "tab-one" "gone")
+      (tab-bar-close-tab-by-name "gone")
+      (length (tab-bar-tabs)))))
 
 (test-end "schemacs_editor_tab_bar")

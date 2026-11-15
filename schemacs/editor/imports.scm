@@ -2634,7 +2634,9 @@
     tab-bar-close-group-tabs
     tab-bar-close-other-tabs
     tab-bar-close-tab
+    tab-bar-close-tab-by-name
     tab-bar-closed-tabs
+    tab-bar-duplicate-tab
     tab-bar-format-add-tab
     tab-bar-format-history
     tab-bar-format-list
@@ -2657,17 +2659,21 @@
     tab-bar-mouse-close-tab
     tab-bar-mouse-down-1
     tab-bar-move-tab
+    tab-bar-move-tab-backward
     tab-bar-move-tab-to
+    tab-bar-move-tab-to-group
     tab-bar-new-button
     tab-bar-new-tab
     tab-bar-new-tab-to
     tab-bar-rename-tab
+    tab-bar-rename-tab-by-name
     tab-bar-select-tab
     tab-bar-separator
     tab-bar-switch-to-last-tab
     tab-bar-switch-to-next-tab
     tab-bar-switch-to-prev-tab
     tab-bar-switch-to-recent-tab
+    tab-bar-switch-to-tab
     tab-bar-tab-face-default
     tab-bar-tab-group-default
     tab-bar-tab-group-face-default
