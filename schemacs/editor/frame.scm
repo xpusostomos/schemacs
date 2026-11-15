@@ -177,11 +177,13 @@
    make-frame-window
    make<frame>
    ;; `FRAME_TOP_MARGIN (f)` - the rows above the text area - and
-   ;; `FRAME_MENU_BAR_LINES (f)`.
-   frame-top-margin %frame-menu-bar-lines
+   ;; `FRAME_MENU_BAR_LINES (f)` / `FRAME_TAB_BAR_LINES (f)`.
+   frame-top-margin %frame-menu-bar-lines %frame-tab-bar-lines
    ;; `f->menu_bar_vector` and `f->menu_bar_items_used`.
    frame-menu-bar-items set!frame-menu-bar-items
    frame-menu-bar-items-used set!frame-menu-bar-items-used
+   frame-tab-bar-items set!frame-tab-bar-items
+   frame-tab-bar-items-used set!frame-tab-bar-items-used
    ;; Frame parameters - `frame.c`'s `param_alist` and its readers.
    frame-parameters frame-parameter set-frame-parameter
    modify-frame-parameters store-in-alist
@@ -1063,7 +1065,8 @@
        windows selected-window minibuffer-window height width
        message message-timer keymap-state quit-cont output name
        parameters garbaged new-width new-height new-size-p
-       menu-bar-items menu-bar-items-used)
+       menu-bar-items menu-bar-items-used
+       tab-bar-items tab-bar-items-used)
       frame-type?
       (windows   frame-windows   set!frame-windows)
       ;; ^ The frame's windows, top to bottom. Emacs's `window-list'.
@@ -1177,6 +1180,11 @@
       (menu-bar-items frame-menu-bar-items set!frame-menu-bar-items)
       (menu-bar-items-used frame-menu-bar-items-used
                            set!frame-menu-bar-items-used)
+      ;; `f->tab_bar_items` and `f->n_tab_bar_items` (`frame.h`): the
+      ;; tab bar's parsed items, exactly as the menu bar's are its own.
+      (tab-bar-items frame-tab-bar-items set!frame-tab-bar-items)
+      (tab-bar-items-used frame-tab-bar-items-used
+                          set!frame-tab-bar-items-used)
       ;; ^ `f->menu_bar_vector` and `f->menu_bar_items_used`
       ;; (`frame.h`): the menu bar's items as the redisplay last built
       ;; them, `[KEY NAME DEFS X KEY NAME DEFS X ...]`, X being the
@@ -1267,6 +1275,16 @@
       (let ((pair (assq 'menu-bar-lines (frame-parameters-alist frame))))
         (if pair (cdr pair) 1)))
 
+    (define (%frame-tab-bar-lines frame)
+      ;; `FRAME_TAB_BAR_LINES` (`frame.h`), which a toolkit backend sets
+      ;; from the `tab-bar-lines` frame parameter. **A frame with no such
+      ;; parameter has no tab bar**: unlike the menu bar, whose absence
+      ;; means "on", the tab bar is created only by `tab-bar-mode`, which
+      ;; puts the parameter on every frame (`tab-bar--update-tab-bar-lines`).
+      ;;--------------------------------------------------------------
+      (let ((pair (assq 'tab-bar-lines (frame-parameters-alist frame))))
+        (or (and pair (cdr pair)) 0)))
+
     (define (frame-top-margin frame)
       ;; GNU Emacs's `FRAME_TOP_MARGIN` (`frame.h:1132`): the rows of the
       ;; frame above every window - "the menu bar, the tab bar and the
@@ -1286,10 +1304,8 @@
       (let ((display (frame-output frame)))
         (if (and display (window-system-display? display))
             0
-            (let ((pair (assq 'tab-bar-lines
-                              (frame-parameters-alist frame))))
-              (+ (%frame-menu-bar-lines frame)
-                 (if pair (cdr pair) 0))))))
+            (+ (%frame-menu-bar-lines frame)
+               (%frame-tab-bar-lines frame)))))
 
     (define (frame-parameters . args)
       ;; GNU Emacs's `frame-parameters` (`frame.c:4083`): "Return the
@@ -2393,8 +2409,8 @@
                                  ;; Nothing is queued for later - -1 is
                                  ;; the C's "no size change pending".
                                  -1 -1 #f
-                                 ;; No menu bar built yet.
-                                 #f 0))
+                                 ;; No menu bar or tab bar built yet.
+                                 #f 0 #f 0))
              ;; **The text area starts below the top margin**, which is
              ;; what makes the menu bar a row the windows do not use -
              ;; GNU Emacs's `r->top_line = FRAME_TOP_MARGIN (f)`

@@ -32,9 +32,16 @@
     ;; `cursor-in-echo-area` is `dispnew.c`'s and is re-exported here; the
     ;; redisplay that reads it is above this library, not below.
     (only (schemacs editor dispnew) *cursor-in-echo-area*)
-    (only (schemacs editor marker) build-marker marker-position set-marker)
+    (only (schemacs editor marker) build-marker copy-marker marker-position
+          set-marker)
     ;; `catch`/`throw` is the C's `throw 'found`; Guile's escape
     ;; continuation is `let/ec`.
+    (only (ice-9 control) let/ec)
+    ;; The saved vector's parent/prev indices are looked up in a hash
+    ;; table of window to index, as the C's `temslot` is a number in the
+    ;; window and the lookup there is free. Guile's hash tables are not
+    ;; `(scheme base)`'s.
+    (only (guile) make-hash-table hashq-ref hashq-set!)
     (only (ice-9 control) let/ec)
     ;; `switch-to-prev-buffer-skip-regexp` is matched against a buffer
     ;; name: `search.c`'s `string-match`.
@@ -49,8 +56,8 @@
           ;; the window's own hscroll state, which `set-window-hscroll!'
           ;; and the scroll commands maintain
           %window-hscroll
-          set!%window-hscroll set!%window-min-hscroll
-          set!%window-suspend-auto-hscroll?
+          set!%window-hscroll %window-min-hscroll set!%window-min-hscroll
+          %window-suspend-auto-hscroll? set!%window-suspend-auto-hscroll?
           *current-frame* frame-height frame-width frame-top-margin
           frame-minibuffer-window
           window-type?
@@ -64,14 +71,26 @@
           window-edges window-frame window-height window-left window-list
           window-parent
           window-body-width window-top window-width
-          %window-start
-          %window-start-at-line-beg
+          window-internal?
+          %window-start set!%window-start
+          %window-start-at-line-beg set!%window-start-at-line-beg
           set-window-start! set-window-point! window-point
           ;; The buffer history, and the seam `set-window-buffer!` records
           ;; through.
           %window-prev-buffers set!%window-prev-buffers
           %window-next-buffers set!%window-next-buffers
-          *record-window-buffer-function*)
+          *record-window-buffer-function*
+          ;; `current-window-configuration`/`set-window-configuration`
+          ;; are window.c's and live in this library; these are what they
+          ;; read and write.
+          %window-point set!%window-point
+          set!window-buffer set!frame-selected-window
+          window-parameters set-window-parameter
+          window-minibuffer-p *minibuffer*
+          frame-list frame-live-p select-frame
+          ;; `window-persistent-parameters` - which is window.c's
+          ;; variable, and what `current-window-configuration` saves.
+          *window-persistent-parameters*)
     ;; `display-buffer' puts what it shows in the buffer list's
     ;; most-recently-used order, which is Emacs's `record_buffer';
     ;; `pop-to-buffer' makes a buffer current by name when a string is
@@ -117,6 +136,10 @@
    switch-to-buffer
    switch-to-buffer-other-window
    window-normalize-buffer-to-switch-to
+   ;; Window configurations - `window.c`'s, restored and recorded here.
+   current-window-configuration set-window-configuration
+   window-configuration-p window-configuration-frame
+   *window-restore-killed-buffer-windows*
    ;; A window's buffer history - `window.el`'s.
    window-prev-buffers set-window-prev-buffers
    window-next-buffers set-window-next-buffers
@@ -1094,6 +1117,447 @@ minibuffer window or is dedicated to its buffer."
     ;; commands as this library states its other keys.
     (define-key *default-keymap* (kbd "C-x <right>") next-buffer)
     (define-key *default-keymap* (kbd "C-x <left>") previous-buffer)
+
+    ;;----------------------------------------------------------------
+    ;; Window configurations
+    ;;
+    ;; GNU Emacs's `Fcurrent_window_configuration' (`window.c:8395') and
+    ;; `Fset_window_configuration' (`:7661'), with `save_window_save'
+    ;; (`:8263') beneath the first.
+    ;;
+    ;; **They are window.c's and live in this library, which is
+    ;; window.el's.** Restoring a configuration has to ask whether a
+    ;; buffer is still alive and, when it is not, find another one - and
+    ;; `(schemacs editor frame)', which is window.c's half in this tree,
+    ;; is *below* the library that owns buffers (`buffer.scm` imports
+    ;; `frame.scm`). The seam pattern the tree uses elsewhere
+    ;; (`*record-window-buffer-function*`, just above) could carry a
+    ;; `buffer-live-p` down, but these two procedures are all of
+    ;; window.c that would ask.
+    ;;
+    ;; The saved shape is the C's: one flat vector of saved windows in
+    ;; the pre-order `save_window_save` walks, each holding **the window
+    ;; object itself** and its parent's and previous sibling's *indices
+    ;; into that vector* - which is what `wset_temslot` and `p->parent`
+    ;; are in the C. Because the vector holds the objects, restoring a
+    ;; configuration puts back windows that were deleted since - Emacs's
+    ;; own "Kludge Alert! Mark all windows now on frame as `deleted'.
+    ;; Restoring the new configuration `undeletes' any that are in it"
+    ;; (`window.c:7810') - and their buffer history, which travels in
+    ;; the object.
+    ;;
+    ;; Not carried, each because the window record has no such field:
+    ;; the pixel geometry and the three `normal_*' fractions,
+    ;; `dedicated', `combination_limit', the display table, the margins,
+    ;; fringes and scroll bars, and `old_pointm'. The *function* arm of
+    ;; `window-restore-killed-buffer-windows` is not carried either (the
+    ;; two values that decide it, nil and t, are), and neither is the
+    ;; frame resize the C ends with - `adjust_frame_size (f, -1, -1, 4,
+    ;; ...)` asks for none.
+    ;;----------------------------------------------------------------
+
+    (define *window-restore-killed-buffer-windows*
+      ;; GNU Emacs's `window-restore-killed-buffer-windows`
+      ;; (`syms_of_window`): "Control restoring windows whose buffer was
+      ;; killed. ... - t means to restore the window and show some other
+      ;; buffer in it. - `delete' means to try to delete the window. -
+      ;; `dedicated' means to try to delete the window if and only if it
+      ;; is dedicated to its buffer. - nil, the default, which means that
+      ;; `set-window-configuration' will try to delete the window if and
+      ;; only if it is dedicated to its buffer".
+      ;;
+      ;; A parameter because a ported caller `let`-binds it - tab-bar's
+      ;; `tab-bar-select-tab` binds it around the restore - which is the
+      ;; test AGENTS.md gives for the two. `delete` and `dedicated` are
+      ;; carried as values but delete nothing here: this tree has no
+      ;; `dedicated' field, so a window is never dedicated and the two
+      ;; arms reduce to nil's. Named here rather than silently accepted.
+      ;;--------------------------------------------------------------
+      (make-parameter #f))
+
+    (define-record-type <window-configuration>
+      (make<window-configuration> frame saved selected-window current-buffer
+                                  saved-frame)
+      window-configuration?
+      ;; `window-configuration-frame` (`window.c:7647'): "Return the
+      ;; frame that CONFIG ... is about."
+      (frame window-configuration-frame)
+      ;; The flat saved vector - `data->saved_windows`.
+      (saved window-configuration-saved-windows)
+      ;; `data->current_window`: `FRAME_SELECTED_WINDOW (f)' when the
+      ;; configuration was recorded.
+      (selected-window window-configuration-selected-window)
+      ;; `data->f_current_buffer`.
+      (current-buffer window-configuration-current-buffer)
+      ;; `data->selected_frame`, which is not necessarily `frame`.
+      (saved-frame window-configuration-saved-frame))
+
+    (define (window-configuration-p object)
+      ;; GNU Emacs's `window-configuration-p` (`window.c:7640'): "Return
+      ;; t if OBJECT is a window-configuration object." The record's own
+      ;; predicate - `window-configuration?` - is the `-?` spelling the
+      ;; record type gives; this is the name Emacs's callers use.
+      ;;--------------------------------------------------------------
+      (window-configuration? object))
+
+    (define-record-type <saved-window>
+      (make<saved-window> window buffer start point start-at-line-beg
+                          top height left width hscroll min-hscroll
+                          suspend-auto-hscroll? parameters parent prev)
+      saved-window?
+      (window saved-window-window)
+      (buffer saved-window-buffer)
+      (start saved-window-start)
+      (point saved-window-point)
+      (start-at-line-beg saved-window-start-at-line-beg)
+      (top saved-window-top)
+      (height saved-window-height)
+      (left saved-window-left)
+      (width saved-window-width)
+      (hscroll saved-window-hscroll)
+      (min-hscroll saved-window-min-hscroll)
+      (suspend-auto-hscroll? saved-window-suspend-auto-hscroll?)
+      (parameters saved-window-parameters)
+      ;; Indices into the saved vector, as `p->parent`/`p->prev` are.
+      (parent saved-window-parent)
+      (prev saved-window-prev))
+
+    (define (%window-tree-order frame)
+      ;; `save_window_save`'s walk: a window, then its children, then its
+      ;; siblings. Answers two values: the flat pre-order list, and a
+      ;; table from each window to its previous sibling (or #f).
+      ;;--------------------------------------------------------------
+      (let ((order '())
+            (prev-of (make-hash-table)))
+        (define (walk w prev)
+          (hashq-set! prev-of w prev)
+          (set! order (cons w order))
+          (let loop ((kids (window-children w)) (p #f))
+            (unless (null? kids)
+              (walk (car kids) p)
+              (loop (cdr kids) (car kids)))))
+        (let loop ((wins (frame-windows frame)) (p #f))
+          (unless (null? wins)
+            (walk (car wins) p)
+            (loop (cdr wins) (car wins))))
+        (values (reverse order) prev-of)))
+
+    (define (%saved-window-parameters w)
+      ;; `save_window_save`'s walk over `window-persistent-parameters`:
+      ;; "Save values for persistent window parameters." The variable is
+      ;; `((PARAM . SAVE?) ...)` and a parameter whose SAVE? is nil is
+      ;; skipped; a parameter the window has no value for is saved as
+      ;; nil, and one it has is saved with its value. The C pushes onto
+      ;; the front, so the saved order is the reverse of the variable's.
+      ;;
+      ;; The C's cycle *detection* on the variable is not carried - its
+      ;; answer is to reset the variable to nil, which `set!` cannot do
+      ;; to another library's parameter from here anyway.
+      ;;--------------------------------------------------------------
+      (let loop ((pers (*window-persistent-parameters*)) (acc '()))
+        (cond ((null? pers) acc)
+              ((and (pair? (car pers)) (cdr (car pers)))
+               (let ((par (assq (car (car pers)) (window-parameters w))))
+                 (loop (cdr pers)
+                       (cons (cons (car (car pers)) (and par (cdr par)))
+                             acc))))
+              (else (loop (cdr pers) acc)))))
+
+    (define (current-window-configuration . args)
+      ;; "Return an object representing the current window configuration
+      ;; of FRAME. If FRAME is nil or omitted, use the selected frame.
+      ;; This describes the number of windows, their sizes and current
+      ;; buffers, and for each displayed buffer, where display starts,
+      ;; and the position of point. An exception is made for point in
+      ;; the current buffer: its value is -not- saved."
+      ;;--------------------------------------------------------------
+      (let ((frame (or (and (pair? args) (car args)) (*current-frame*))))
+        (call-with-values (lambda () (%window-tree-order frame))
+          (lambda (order prev-of)
+            (let* ((n (length order))
+                   (windows (list->vector order))
+                   (index (make-hash-table))
+                   (saved (make-vector n)))
+              (let loop ((i 0))
+                (unless (= i n)
+                  (hashq-set! index (vector-ref windows i) i)
+                  (loop (+ i 1))))
+              (let loop ((i 0))
+                (unless (= i n)
+                  (let* ((w (vector-ref windows i))
+                         (buf (window-buffer w))
+                         ;; "If w is the selected window, then get the
+                         ;; value of point from the buffer; pointm is
+                         ;; garbage in the selected window."
+                         (point (cond ((not buf) #f)
+                                      ((eq? w (selected-window))
+                                       (build-marker buf (buffer-pt buf)))
+                                      ((%window-point w)
+                                       (copy-marker (%window-point w)))
+                                      (else #f)))
+                         (start (and buf (%window-start w)
+                                     (copy-marker (%window-start w))))
+                         (parent (window-parent w))
+                         (prev (hashq-ref prev-of w)))
+                    (vector-set! saved i
+                                 (make<saved-window>
+                                  w buf start point
+                                  (%window-start-at-line-beg w)
+                                  (window-top w) (window-height w)
+                                  (window-left w) (window-width w)
+                                  (%window-hscroll w) (%window-min-hscroll w)
+                                  (%window-suspend-auto-hscroll? w)
+                                  (%saved-window-parameters w)
+                                  (and parent (hashq-ref index parent))
+                                  (and prev (hashq-ref index prev))))
+                    (loop (+ i 1)))))
+              (make<window-configuration> frame saved
+                                          (frame-selected-window frame)
+                                          (current-buffer)
+                                          (*current-frame*)))))))
+
+    (define (%restore-window-marker! window buffer get set position)
+      ;; Write MARKER at POSITION in BUFFER, making the marker if the
+      ;; window has none yet - the C's `set_marker_restricted` on
+      ;; `w->start`/`w->pointm`, whose markers exist from `make_window`
+      ;; and here are made lazily.
+      ;;--------------------------------------------------------------
+      (let ((marker (get window)))
+        (cond (marker (set-marker marker (and position (marker-position position))
+                                  buffer))
+              ((not position) #f)
+              (else (set window (build-marker buffer (marker-position position)))))))
+
+    (define (set-window-configuration configuration . args)
+      ;; "Set the configuration of windows and buffers as specified by
+      ;; CONFIGURATION. ... Normally, this function selects the frame of
+      ;; the CONFIGURATION, but if DONT-SET-FRAME is non-nil, it leaves
+      ;; selected the frame which was current at the start of the
+      ;; function. If DONT-SET-MINIWINDOW is non-nil, the mini-window of
+      ;; the frame doesn't get set to the corresponding element of
+      ;; CONFIGURATION. ... If CONFIGURATION was made from a frame that
+      ;; is now deleted, only frame-independent values can be restored.
+      ;; In this case, the return value is nil. Otherwise the value is
+      ;; t."
+      ;;
+      ;; `window-restore-killed-buffer-windows` is read from this
+      ;; library's parameter, not Emacs's variable - see its note.
+      ;;--------------------------------------------------------------
+      (unless (window-configuration? configuration)
+        (error "Wrong type argument: window-configuration-p" configuration))
+      (let* ((dont-set-frame (and (pair? args) (car args) #t))
+             (dont-set-miniwindow
+              (and (pair? args) (pair? (cdr args)) (cadr args) #t))
+             (frame (window-configuration-frame configuration))
+             (saved (window-configuration-saved-windows configuration))
+             (n (vector-length saved))
+             (recorded (window-configuration-selected-window configuration))
+             (new-current-buffer
+              (let ((b (window-configuration-current-buffer configuration)))
+                (and b (buffer-live-p b) b)))
+             ;; The C's `old_point`: a point to restore at the end for a
+             ;; buffer that the selected window does not show. Its
+             ;; long comment on the three-way choice is the reason all
+             ;; three arms are here.
+             (old-point
+              (cond
+               ((not new-current-buffer) -1)
+               ((eq? new-current-buffer (current-buffer))
+                (if (and recorded
+                         (eq? (window-buffer recorded) new-current-buffer)
+                         (selected-window)
+                         (eq? (window-buffer (selected-window))
+                              new-current-buffer)
+                         (not (eq? (selected-window) recorded)))
+                    (or (and (%window-point recorded)
+                             (marker-position (%window-point recorded)))
+                        -1)
+                    (buffer-pt new-current-buffer)))
+               (else
+                (if (and recorded
+                         (eq? (window-buffer recorded) new-current-buffer)
+                         (not (eq? (selected-window) recorded)))
+                    (or (and (%window-point recorded)
+                             (marker-position (%window-point recorded)))
+                        -1)
+                    (buffer-pt new-current-buffer))))))
+        (when (frame-live-p frame)
+          ;; "If a window we restore gets another buffer, record the
+          ;; window's old buffer" - the C's first loop, which runs
+          ;; before the tree is torn down.
+          (let loop ((k 0))
+            (unless (= k n)
+              (let* ((p (vector-ref saved k))
+                     (w (saved-window-window p))
+                     (old (window-buffer w))
+                     (new (saved-window-buffer p)))
+                (when (and old
+                           (not (eq? old new))
+                           new
+                           (buffer-live-p new)
+                           (not (eq? new (*minibuffer*))))
+                  ((*record-window-buffer-function*) w)))
+              (loop (+ k 1))))
+          ;; "Swap out" point from the selected window's buffer into the
+          ;; window itself, before the tree is restored.
+          (let ((sw (selected-window)))
+            (when (and sw (window-buffer sw) (%window-point sw))
+              (set-marker (%window-point sw)
+                          (buffer-pt (window-buffer sw))
+                          (window-buffer sw))))
+          ;; Rebuild the window tree from the saved vector. The windows
+          ;; that were on the frame and are not in the configuration are
+          ;; left detached - the C's "delete_all_child_windows", which
+          ;; only *marks* them deleted because the saved vector still
+          ;; names the ones it will undelete.
+          (let ((old-windows
+                 (let walk ((ws (frame-windows frame)) (acc '()))
+                   (cond ((null? ws) acc)
+                         ((window-internal? (car ws))
+                          (walk (window-children (car ws))
+                                (walk (cdr ws) (cons (car ws) acc))))
+                         (else (walk (cdr ws) (cons (car ws) acc))))))
+                (saved-index (make-hash-table))
+                (children (make-hash-table))
+                (roots '()))
+            (let loop ((k 0))
+              (unless (= k n)
+                (hashq-set! saved-index (saved-window-window (vector-ref saved k)) k)
+                (loop (+ k 1))))
+            (let loop ((k 0))
+              (unless (= k n)
+                (let* ((p (vector-ref saved k))
+                       (w (saved-window-window p))
+                       (pi (saved-window-parent p))
+                       (parent (and pi
+                                    (saved-window-window (vector-ref saved pi)))))
+                  (set!window-parent w parent)
+                  (when (not parent)
+                    (set! roots (append roots (list w))))
+                  ;; The vector is in the C's sibling order, so
+                  ;; appending each window as it is met puts a parent's
+                  ;; children in their own order.
+                  (when parent
+                    (hashq-set! children parent
+                               (append (or (hashq-ref children parent) '())
+                                       (list w))))
+                  (loop (+ k 1)))))
+            (let loop ((k 0))
+              (unless (= k n)
+                (let ((w (saved-window-window (vector-ref saved k))))
+                  (set!window-children w (or (hashq-ref children w) '())))
+                (loop (+ k 1))))
+            (for-each (lambda (w)
+                        (unless (hashq-ref saved-index w)
+                          (set!window-parent w #f)
+                          (set!window-children w '())))
+                      old-windows)
+            (set!frame-windows frame roots))
+          ;; Restore each saved window's own state.
+          (let loop ((k 0))
+            (unless (= k n)
+              (let* ((p (vector-ref saved k))
+                     (w (saved-window-window p))
+                     (buf (saved-window-buffer p)))
+                (set!window-top w (saved-window-top p))
+                (set!window-height w (saved-window-height p))
+                (set!window-left w (saved-window-left p))
+                (set!window-width w (saved-window-width p))
+                (set!%window-hscroll w (saved-window-hscroll p))
+                (set!%window-min-hscroll w (saved-window-min-hscroll p))
+                (set!%window-suspend-auto-hscroll?
+                 w (saved-window-suspend-auto-hscroll? p))
+                ;; "Restore any window parameters that have been saved.
+                ;; Parameters that have not been saved are left alone."
+                (for-each
+                 (lambda (pers)
+                   (when (pair? pers)
+                     (if (cdr pers)
+                         (set-window-parameter w (car pers) (cdr pers))
+                         (let ((par (assq (car pers) (window-parameters w))))
+                           (when (and par (cdr par))
+                             (set-cdr! par #f))))))
+                 (saved-window-parameters p))
+                (cond
+                 ;; "If saved buffer is alive, install it, unless it's a
+                 ;; minibuffer we explicitly prohibit."
+                 ((and (not (window-internal? w))
+                       buf (buffer-live-p buf)
+                       (or (not dont-set-miniwindow)
+                           (not (window-minibuffer-p w))))
+                  (unless (eq? (window-buffer w) buf)
+                    (set!window-buffer w buf))
+                  (set!%window-start-at-line-beg
+                   w (saved-window-start-at-line-beg p))
+                  (%restore-window-marker! w buf %window-start
+                                           set!%window-start
+                                           (saved-window-start p))
+                  (%restore-window-marker! w buf %window-point
+                                           set!%window-point
+                                           (saved-window-point p))
+                  ;; "As documented in Fcurrent_window_configuration,
+                  ;; don't restore the location of point in the buffer
+                  ;; which was current when the window configuration was
+                  ;; recorded."
+                  (when (and (not (eq? buf new-current-buffer))
+                             (eq? buf (current-buffer)))
+                    (goto-char (marker-position (%window-point w)))))
+                 ((window-internal? w) #f)
+                 ;; "Keep window's old buffer; make sure the markers are
+                 ;; real."
+                 ((let ((cur (window-buffer w)))
+                    (and cur (buffer-live-p cur)))
+                  (let ((cur (window-buffer w)))
+                    (unless (%window-start w)
+                      (set!%window-start w (build-marker cur 1)))
+                    (unless (%window-point w)
+                      (set!%window-point w (build-marker cur (buffer-pt cur))))
+                    (set!%window-start-at-line-beg w #t)))
+                 ;; "Leaf window has no live buffer, get one."
+                 (else
+                  (let ((other (or (other-buffer (current-buffer))
+                                   (get-buffer-create *scratch-buffer-name*))))
+                    (set!window-buffer w other)
+                    (set!%window-start w (build-marker other 1))
+                    (set!%window-point w (build-marker other 1))
+                    (set!%window-start-at-line-beg w #t))))
+                (loop (+ k 1)))))
+          ;; "Arrange *not* to restore point in the buffer that was
+          ;; current when the window configuration was saved." The C
+          ;; writes `old_point` into the recorded window's pointm
+          ;; *before* selecting it, because `select_window` is what
+          ;; hands that marker to the buffer.
+          (when (and recorded new-current-buffer
+                     (eq? (window-buffer recorded) new-current-buffer)
+                     (%window-point recorded))
+            (set-marker (%window-point recorded) (max 1 old-point)
+                        new-current-buffer))
+          ;; "select_window (data->current_window, Qt, true)": select the
+          ;; window the configuration was recorded with. Emacs's
+          ;; `select_window` also selects the frame the window is on;
+          ;; here that is `select-frame`'s job below, and when the
+          ;; configuration is of *another* frame only that frame's slot
+          ;; is written - our `select-window` reads `(*current-frame*)`,
+          ;; and pointing it at another frame's window would put that
+          ;; window in the wrong frame's slot.
+          (cond ((not recorded) #f)
+                ((eq? frame (*current-frame*)) (select-window recorded))
+                (else (set!frame-selected-window frame recorded)))
+          ;; "do_switch_frame (NILP (dont_set_frame) ? data->selected_frame
+          ;; : old_frame)".
+          (let ((saved-frame (window-configuration-saved-frame configuration)))
+            (when (and (not dont-set-frame)
+                       saved-frame
+                       (frame-live-p saved-frame))
+              (select-frame saved-frame)))
+          ;; "If the new current buffer doesn't appear in the selected
+          ;; window, go to its old point."
+          (when new-current-buffer
+            (set-buffer new-current-buffer)
+            (unless (eq? (window-buffer (selected-window))
+                         new-current-buffer)
+              (goto-char (max 1 old-point)))))
+        (and (frame-live-p frame) #t)))
 
     (define (switch-to-buffer-other-window buffer-or-name . args)
       ;; Select BUFFER-OR-NAME in another window: GNU Emacs's

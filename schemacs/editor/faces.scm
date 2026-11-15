@@ -919,6 +919,40 @@ This inherits from the `mode-line` face.")
     ;; face is a text property on the string `tab-line-format' builds,
     ;; and `draw-mode-line!` draws runs of them.
     ;;--------------------------------------------------------------
+    ;; The tab bar's faces. `tab-bar' is `faces.el:3018`'s, and the five
+    ;; `tab-bar-tab-*`/`tab-bar-tab-highlight` faces are `tab-bar.el`'s
+    ;; - which is where `tab-line.el`'s nine live too, so they are read
+    ;; here for the same reason: a face must exist before any frame
+    ;; draws it.
+    ;;--------------------------------------------------------------
+    (defface 'tab-bar
+          '((((class color) (min-colors 88) (background light)) :inherit variable-pitch :background "grey85" :foreground "black") (((class color) (min-colors 88) (background dark)) :inherit variable-pitch :background "grey20" :foreground "white") (((class mono)) :background "grey") (#t :inverse-video #t))
+          "Tab bar face.")
+
+    (defface 'tab-bar-tab
+          '((default :inherit tab-bar) (((class color) (min-colors 88) (background light)) :box (:line-width 1 :style released-button)) (((class color) (min-colors 88) (background dark)) :box (:line-width 1 :style released-button) :background "grey40" :foreground "white") (#t :inverse-video nil))
+          "Tab bar face for selected tab.")
+
+    (defface 'tab-bar-tab-inactive
+          '((default :inherit tab-bar-tab) (((class color) (min-colors 88) (background light)) :background "grey75") (((class color) (min-colors 88) (background dark)) :background "grey20") (#t :inverse-video #t))
+          "Tab bar face for non-selected tab.")
+
+    (defface 'tab-bar-tab-group-current
+          '((#t :inherit tab-bar-tab :box #f :weight bold))
+          "Tab bar face for current group tab.")
+
+    (defface 'tab-bar-tab-group-inactive
+          '((#t :inherit (shadow tab-bar-tab-inactive)))
+          "Tab bar face for inactive group tab.")
+
+    (defface 'tab-bar-tab-ungrouped
+          '((#t :inherit (shadow tab-bar-tab-inactive)))
+          "Tab bar face for ungrouped tab when tab groups are used.")
+
+    (defface 'tab-bar-tab-highlight
+          '((((class color) (min-colors 88) (background light)) :box (:line-width 1 :style released-button) :background "grey85" :foreground "black") (((class color) (min-colors 88) (background dark)) :box (:line-width 1 :style released-button) :background "grey40" :foreground "white") (#t :inverse-video nil))
+          "Tab bar face for highlighting.")
+
     (defface 'tab-line
           '((((class color) (min-colors 88) (background light)) :inherit variable-pitch :height 0.9 :background "grey85" :foreground "black") (((class color) (min-colors 88) (background dark)) :inherit variable-pitch :height 0.9 :background "grey20" :foreground "white") (((class mono)) :background "grey") (#t :inverse-video #t))
           "Basic tab line face.")

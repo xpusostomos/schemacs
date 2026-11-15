@@ -45,7 +45,15 @@
 ;; `keymap` properties, the fixed ordering) and off a real Emacs where it
 ;; is an answer.
 
-(*current-frame* (new-frame (allocate-buffer) 24 80))
+;; **The frame is built on the first tab's buffer.** A frame given a
+;; bare `allocate-buffer` shows a buffer that is live (it has a name) and
+;; that `switch-to-buffer` therefore records in the window's buffer
+;; history - so the first `fresh` would leave an `Untitled` tab at the
+;; front, exactly as GNU Emacs leaves the buffer you switched away from.
+(define tab-buffer (get-buffer-create "tab-one"))
+(with-current-buffer tab-buffer (insert "one"))
+
+(*current-frame* (new-frame tab-buffer 24 80))
 
 ;; A display object, so that a position's *row* can be measured - `one
 ;; cell is one row'. Nothing is opened; the stub answers the generics.
@@ -67,8 +75,6 @@
 ;;----------------------------------------------------------------
 
 (test-begin "schemacs_editor_tab_line_mode")
-
-(define tab-buffer (fresh "tab-one" "one"))
 
 (test-equal "the mode is off to begin with" #f (tab-line-mode-variable))
 

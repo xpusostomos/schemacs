@@ -343,13 +343,22 @@
       (map cdr (*buffer-list*)))
     (define (buffer-live-p thing)
       ;; Whether THING is a buffer that still exists: GNU Emacs's
-      ;; `buffer-live-p'. A buffer is live while it is in the list.
+      ;; `buffer-live-p' (`buffer.c:...'), whose whole test is
+      ;; `BUFFERP (object) && BUFFER_LIVE_P (XBUFFER (object))' and
+      ;; whose `BUFFER_LIVE_P (b)' is `!NILP (BVAR (b, name))' - "a
+      ;; buffer is live while it has a name". Killing one clears the
+      ;; name (`%kill-buffer', the C's `bset_name (b, Qnil)').
+      ;;
+      ;; **It was a walk of `*buffer-list*'**, which is a different set:
+      ;; a buffer made by `allocate-buffer' (the C's
+      ;; `allocate_buffer') is live and named and is not in the list
+      ;; until something puts it there. `set-window-configuration` asks
+      ;; this of exactly such a buffer - one a frame was built over - and
+      ;; answered no, so every restore took the "buffer is dead" branch
+      ;; and threw the window's saved buffer away.
       ;;--------------------------------------------------------------
       (and (bufferp thing)
-           (let loop ((rest (*buffer-list*)))
-             (cond ((null? rest) #f)
-                   ((eq? (cdar rest) thing) #t)
-                   (else (loop (cdr rest)))))))
+           (and (buffer-name thing) #t)))
     ;;----------------------------------------------------------------
     ;; The current buffer, and the two seams to the window code
     ;;------------------------------------------------------------------

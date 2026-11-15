@@ -92,7 +92,7 @@
     (schemacs editor theme)
     (schemacs editor chartab)
     (schemacs editor data)
-    (except (schemacs editor menu-bar)  *tty-menu-open-use-tmm* *tty-menu-open-use-tmm*)
+    (except (schemacs editor menu-bar)  *tty-menu-open-use-tmm*)
     (except (schemacs editor simple)  backward-char beginning-of-line delete-char end-of-line forward-char self-insert-command self-insert-tab)
     (schemacs editor mule-cmds)
     (schemacs editor buffer-text)
@@ -105,6 +105,7 @@
     (schemacs editor select)
     (schemacs editor seq)
     (except (schemacs editor syntax)  word-char? forward-word-position backward-word-position word-run-end word-run-start)
+    (schemacs editor tab-bar)
     (schemacs editor tab-line)
     (schemacs editor tabulated-list)
     (schemacs editor text-mode)
@@ -119,6 +120,7 @@
     %class-in
     %for-each-marker
     %frame-menu-bar-lines
+    %frame-tab-bar-lines
     %kill-buffer
     %lisp-el-special-forms-and-macros
     %mark-marker
@@ -528,6 +530,30 @@
     *syntax-propertize-chunk-size*
     *syntax-propertize-extend-region-functions*
     *system-time-locale*
+    *tab-bar-auto-width*
+    *tab-bar-close-button-show*
+    *tab-bar-close-last-tab-choice*
+    *tab-bar-close-tab-select*
+    *tab-bar-define-keys*
+    *tab-bar-format*
+    *tab-bar-items-function*
+    *tab-bar-keymap-function*
+    *tab-bar-new-button-show*
+    *tab-bar-new-tab-choice*
+    *tab-bar-new-tab-group*
+    *tab-bar-new-tab-to*
+    *tab-bar-post-undo-close-tab-functions*
+    *tab-bar-select-tab-modifiers*
+    *tab-bar-show*
+    *tab-bar-tab-format-functions*
+    *tab-bar-tab-hints*
+    *tab-bar-tab-name-ellipsis*
+    *tab-bar-tab-name-format-function*
+    *tab-bar-tab-name-function*
+    *tab-bar-tab-name-truncated-max*
+    *tab-bar-tab-pre-close-functions*
+    *tab-bar-tab-prevent-close-functions*
+    *tab-bar-tabs-function*
     *tab-line-auto-hscroll*
     *tab-line-close-button-show*
     *tab-line-close-modified-button-show*
@@ -582,6 +608,7 @@
     *use-empty-active-region*
     *visual-line-fringe-indicators*
     *window-persistent-parameters*
+    *window-restore-killed-buffer-windows*
     *window-scroll-function*
     *window-system*
     *words-include-escapes*
@@ -946,6 +973,7 @@
     current-prefix-arg
     current-time
     current-time-string
+    current-window-configuration
     cursor-screen-position
     cursor-to!
     custom--bound?
@@ -1403,6 +1431,8 @@
     frame-quit-cont
     frame-selected-window
     frame-set-background-mode
+    frame-tab-bar-items
+    frame-tab-bar-items-used
     frame-top-margin
     frame-type?
     frame-visible-p
@@ -2330,6 +2360,8 @@
     set!frame-minibuffer-window
     set!frame-quit-cont
     set!frame-selected-window
+    set!frame-tab-bar-items
+    set!frame-tab-bar-items-used
     set!frame-width
     set!frame-windows
     set!history-entries
@@ -2477,6 +2509,7 @@
     set-visited-file-name
     set-window-buffer!
     set-window-buffer-start-and-point
+    set-window-configuration
     set-window-current-matrix!
     set-window-desired-matrix!
     set-window-hscroll!
@@ -2574,6 +2607,65 @@
     syntax-table
     syntax-table-p
     system-type
+    tab-bar--current-tab
+    tab-bar--current-tab-find
+    tab-bar--current-tab-index
+    tab-bar--current-tab-make
+    tab-bar--event-to-item
+    tab-bar--format-tab
+    tab-bar--key-to-number
+    tab-bar--tab
+    tab-bar--tab-bar-lines-for-frame
+    tab-bar--tab-index
+    tab-bar--tab-index-by-name
+    tab-bar--tabs-recent
+    tab-bar--update-tab-bar-lines
+    tab-bar-back-button
+    tab-bar-close-button
+    tab-bar-close-other-tabs
+    tab-bar-close-tab
+    tab-bar-closed-tabs
+    tab-bar-format-add-tab
+    tab-bar-format-history
+    tab-bar-format-list
+    tab-bar-format-tabs
+    tab-bar-forward-button
+    tab-bar-items
+    tab-bar-make-keymap
+    tab-bar-make-keymap-1
+    tab-bar-map
+    tab-bar-mode
+    tab-bar-mode-map
+    tab-bar-mode-variable
+    tab-bar-mouse-1
+    tab-bar-mouse-close-tab
+    tab-bar-mouse-down-1
+    tab-bar-move-tab
+    tab-bar-move-tab-to
+    tab-bar-new-button
+    tab-bar-new-tab
+    tab-bar-new-tab-to
+    tab-bar-rename-tab
+    tab-bar-select-tab
+    tab-bar-separator
+    tab-bar-switch-to-last-tab
+    tab-bar-switch-to-next-tab
+    tab-bar-switch-to-prev-tab
+    tab-bar-switch-to-recent-tab
+    tab-bar-tab-face-default
+    tab-bar-tab-name-all
+    tab-bar-tab-name-current
+    tab-bar-tab-name-current-with-count
+    tab-bar-tab-name-format-close-button
+    tab-bar-tab-name-format-default
+    tab-bar-tab-name-format-face
+    tab-bar-tab-name-format-hints
+    tab-bar-tab-name-format-mouse-face
+    tab-bar-tab-name-format-truncated
+    tab-bar-tab-name-truncated
+    tab-bar-tabs
+    tab-bar-tabs-set
+    tab-bar-undo-close-tab
     tab-line--current-tab
     tab-line--define-keys
     tab-line--get-tab-property
@@ -2724,6 +2816,7 @@
     timer-reschedule!
     timer-ripe?
     timer?
+    toggle-frame-tab-bar
     track-mouse
     transient-mark-mode
     transpose-chars
@@ -2819,6 +2912,8 @@
     window-body-width
     window-buffer
     window-children
+    window-configuration-frame
+    window-configuration-p
     window-current-matrix
     window-cursor-off?
     window-desired-matrix

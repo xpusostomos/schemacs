@@ -161,7 +161,6 @@
    *tty-menu-open-use-tmm* *tty-menu--initial-menu-x*
    tty-menu-navigation-map *tty-menu-navigation-map*
    menu-bar-menu-at-x-y popup-menu popup-menu-normalize-position
-   *tty-menu-open-use-tmm*
    menu-bar-open menu-bar-define-mouse-key)
 
   (begin
@@ -852,15 +851,16 @@ created in the future."
     ;; different library here (`ui/gtk'), so it installs its own - the
     ;; same shape as `*frame-creation-function*`.
 
-    (define *tty-menu-open-use-tmm* #f)
-    ;; ^ GNU Emacs's `tty-menu-open-use-tmm` (`menu-bar.el:2813`), a
-    ;; defcustom: "If non-nil, \\[menu-bar-open] on a TTY will invoke
-    ;; `tmm-menubar'. If nil, it will drop down the menu corresponding to
-    ;; the first (leftmost) menu-bar item."
+    ;; **`tty-menu-open-use-tmm` is `frame.scm`'s definition**, imported
+    ;; above and re-exported: `display-popup-menus-p` reads it, and that
+    ;; is below this library. Defining it here as well made a duplicate
+    ;; binding - and the generated `imports.scm` excepted the name twice,
+    ;; which `except` refuses.
     ;;
-    ;; **`tmm-menubar` is not ported**, so with this set the command says
-    ;; so rather than opening nothing. The default is what makes the bar
-    ;; work.
+    ;; "If non-nil, \\[menu-bar-open] on a TTY will invoke `tmm-menubar'.
+    ;; If nil, it will drop down the menu corresponding to the first
+    ;; (leftmost) menu-bar item." **`tmm-menubar` is not ported**, so with
+    ;; this set the command says so rather than opening nothing.
 
     (define *tty-menu--initial-menu-x* 1)
     ;; ^ GNU Emacs's `tty-menu--initial-menu-x` (`menu-bar.el:2824`): "X

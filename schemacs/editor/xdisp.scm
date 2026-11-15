@@ -112,9 +112,11 @@
          ;; `FRAME_MENU_BAR_LINES (f)` - whether this frame draws a bar -
          ;; and `f->menu_bar_vector`, where `display_menu_bar` records the
          ;; column it drew each item at.
-         %frame-menu-bar-lines frame-top-margin
+         %frame-menu-bar-lines %frame-tab-bar-lines frame-top-margin
          frame-menu-bar-items set!frame-menu-bar-items
          frame-menu-bar-items-used set!frame-menu-bar-items-used
+         frame-tab-bar-items set!frame-tab-bar-items
+         frame-tab-bar-items-used set!frame-tab-bar-items-used
          ;; `FRAME_GARBAGED_P` / `SET_FRAME_GARBAGED` (`frame.h:1173`),
          ;; consumed by `clear-garbaged-frames!`.
          frame-garbaged-p set-frame-garbaged! frame-minibuffer-window
@@ -329,6 +331,7 @@
    ;; recursion guard, and the terminal's bar: `update_menu_bar` builds
    ;; the items and `display_menu_bar` draws the row.
    *menu-bar-items-function* *inhibit-menubar-update*
+   *tab-bar-items-function* *tab-bar-keymap-function*
    ;; `Vinhibit_redisplay`, bound while a menu is up.
    *inhibit-redisplay*
    update-menu-bar display-menu-bar menu-item-width
@@ -3909,9 +3912,15 @@
         ;; first rows. On a terminal it is a row of text; a window-system
         ;; frame's bar is its toolkit's and both calls return at once.
         (update-menu-bar frame)
+        (update-tab-bar frame)
         (unless (window-system-display? (current-display))
           (when (> (%frame-menu-bar-lines frame) 0)
-            (display-menu-bar frame)))
+            (display-menu-bar frame))
+          ;; The tab bar is drawn *below* the menu bar - the C's
+          ;; `display_tab_bar` starts its iterator one row down when the
+          ;; menu bar has a row (`xdisp.c:14717`).
+          (when (> (%frame-tab-bar-lines frame) 0)
+            (display-tab-bar frame)))
         ;; Only the selected window is scrolled to show its point here:
         ;; it is the one point moves in, and its buffer is the one
         ;; commands act on. A window that is not selected keeps the view
@@ -4306,13 +4315,19 @@
         (let loop ((rest (window-list frame)))
           (cond
            ((< row (frame-top-margin frame))
-            ;; **The menu bar.** GNU Emacs's `make_lispy_position`
-            ;; answers `(FRAME menu-bar (X . Y) TIME)' for a position in
-            ;; the frame's top margin, which is what
-            ;; `menu-bar-open-mouse` and `popup-menu` read. Answering the
-            ;; frame with no area, as this did, made a click on the bar
-            ;; indistinguishable from a click outside every window.
-            (list frame 'menu-bar (cons x y) 0))
+            ;; **The menu bar and the tab bar.** GNU Emacs's
+            ;; `make_lispy_position` answers `(FRAME menu-bar (X . Y)
+            ;; TIME)' for a position in the frame's top margin, which is
+            ;; what `menu-bar-open-mouse` and `popup-menu` read - and
+            ;; `tab-bar` for the rows the tab bar occupies, which is what
+            ;; `tab-bar--event-to-item` reads. **The tab bar's rows are
+            ;; below the menu bar's** - `display_tab_bar` starts its
+            ;; iterator at `FRAME_MENU_BAR_LINES` (`xdisp.c:14717`).
+            (list frame
+                  (if (< row (%frame-menu-bar-lines frame))
+                      'menu-bar
+                      'tab-bar)
+                  (cons x y) 0))
            ((null? rest)
             ;; Outside every window: Emacs answers the frame, and the
             ;; position of a frame is the frame.
@@ -4386,6 +4401,16 @@
     ;; the frame's menu bar contents."
 
     (define *menu-bar-items-function* (make-parameter #f))
+
+    (define *tab-bar-items-function* (make-parameter #f))
+    ;; ^ `tab_bar_items` is `keyboard.c`'s, in the library above this
+    ;; one, so the redisplay asks for the tab bar's items through a seam
+    ;; as it does for the menu bar's.
+
+    (define *tab-bar-keymap-function* (make-parameter #f))
+    ;; ^ `tab-bar-make-keymap` (`tab-bar.el`) is what the C reaches
+    ;; through the `[tab-bar]' binding's `:filter`, and that library is
+    ;; above this one too.
     ;; ^ `menu_bar_items' (`keyboard.c:8641'), as a seam.
     ;;
     ;; **A departure, and the same one `*record-window-buffer-function*`
@@ -4449,6 +4474,78 @@
             ;; walk below steps four slots at a time. Storing the item
             ;; count here made the bar draw one item and stop.
             (set!frame-menu-bar-items-used frame (* 4 (length items)))))))
+
+    (define (update-tab-bar frame)
+      ;; GNU Emacs's `update_tab_bar` (`xdisp.c:14291`): recompute the
+      ;; frame's tab bar items before the frame is drawn.
+      ;;
+      ;; **The terminal's half only**, for the reason `update-menu-bar`
+      ;; gives: a window-system frame's tab bar is its toolkit's.
+      ;;
+      ;; **The keymap is rebuilt first.** The C reaches the tab bar's
+      ;; keymap through `[tab-bar]`'s `:filter` (`get_keyelt`'s
+      ;; `menu_item_eval_property` arm), and this tree's keymap lookup
+      ;; does not apply filters - the evaluating function is
+      ;; `keyboard.c`'s and `keymap.scm` is below it. The filter's work
+      ;; is done here instead: `tab-bar-make-keymap` is asked for the
+      ;; current keymap and the walk below then finds it as it finds any
+      ;; other binding. A named departure, and the observable result is
+      ;; the C's.
+      ;;--------------------------------------------------------------
+      (when (and (not (window-system-display? (current-display)))
+                 (> (%frame-tab-bar-lines frame) 0)
+                 (*tab-bar-items-function*)
+                 (or (windows-or-buffers-changed?)
+                     (update-mode-lines?)
+                     (= 0 (frame-tab-bar-items-used frame))))
+        (let* ((items ((*tab-bar-items-function*)))
+               ;; `TAB_BAR_ITEM_NSLOTS` is 6 - KEY, ENABLED, SELECTED,
+               ;; CAPTION, BINDING, HELP (`dispextern.h:3408`) - where the
+               ;; menu bar's item has 5.
+               (vector (make-vector (* 6 (length items)) #f)))
+          (let loop ((rest items) (i 0))
+            (unless (null? rest)
+              (let ((quad (car rest)))
+                (vector-set! vector i (list-ref quad 0))
+                (vector-set! vector (+ i 1) (list-ref quad 1))
+                (vector-set! vector (+ i 2) (list-ref quad 2))
+                (vector-set! vector (+ i 3) (list-ref quad 3))
+                (vector-set! vector (+ i 4) (list-ref quad 4))
+                (vector-set! vector (+ i 5) (list-ref quad 5))
+                (loop (cdr rest) (+ i 6)))))
+          (set!frame-tab-bar-items frame vector)
+          (set!frame-tab-bar-items-used frame (* 6 (length items))))))
+
+    (define (display-tab-bar frame)
+      ;; GNU Emacs's `display_tab_bar` (`xdisp.c:14696`) for a terminal:
+      ;; "an ordinary screen line" drawn *below* the menu bar - the C's
+      ;; iterator starts at `(FRAME_MENU_BAR_LINES (f) > 0 ? 1 : 0)`
+      ;; (`:14717`) - with the `tab-bar` face, each item's caption laid
+      ;; out left to right and its starting column recorded for the
+      ;; click (`make_lispy_event`'s tty tab-bar branch reads the same
+      ;; slots `display-menu-bar` records).
+      ;;
+      ;; The captions are strings with `face` properties of their own
+      ;; (`tab-bar-tab` for the current tab, `tab-bar-tab-inactive` for
+      ;; the rest), which `draw-mode-line!` draws run by run - the same
+      ;; drawer the mode line and the tab line use.
+      ;;--------------------------------------------------------------
+      (let* ((dsp (current-display))
+             (items (frame-tab-bar-items frame))
+             (used (frame-tab-bar-items-used frame))
+             (width (frame-width frame))
+             (y (row->pixel-y (%frame-menu-bar-lines frame)))
+             (text
+              (let loop ((i 0) (x 0) (acc ""))
+                (if (>= i used)
+                    acc
+                    (let ((name (vector-ref items (+ i 3))))
+                      (loop (+ i 6) (+ x (menu-item-width name))
+                            (string-append acc name)))))))
+        (draw-mode-line! (string-append
+                          text (make-string (max 0 (- width (string-length text)))
+                                            #\space))
+                         'tab-bar y 0)))
 
     (define (menu-item-width string)
       ;; GNU Emacs's `menu_item_width` (`menu.c:1027`): the width of a

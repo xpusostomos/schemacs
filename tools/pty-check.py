@@ -2250,6 +2250,13 @@ open(os.path.join(TAB_LINE_CONFIG_HOME, 'schemacs', 'init.scm'), 'w').write(
     '(set! inhibit-startup-screen #t)\n'
     '(global-tab-line-mode 1)\n')
 
+TAB_BAR_CONFIG_HOME = tempfile.mkdtemp(prefix='schemacs-tabbar-config-')
+os.makedirs(os.path.join(TAB_BAR_CONFIG_HOME, 'schemacs'), exist_ok=True)
+open(os.path.join(TAB_BAR_CONFIG_HOME, 'schemacs', 'init.scm'), 'w').write(
+    '(import (schemacs editor startup))\n'
+    '(set! inhibit-startup-screen #t)\n'
+    '(tab-bar-mode 1)\n')
+
 # And one that leaves the menu bar *on*, for the check that is about it.
 MENUBAR_CONFIG_HOME = tempfile.mkdtemp(prefix='schemacs-menubar-config-')
 os.makedirs(os.path.join(MENUBAR_CONFIG_HOME, 'schemacs'), exist_ok=True)
@@ -4757,6 +4764,56 @@ def check_tab_line():
     return problems
 
 
+def check_tab_bar():
+    """The tab bar, on a terminal - `tab-bar.el`.
+
+    `tab-bar-mode` puts `tab-bar-lines` on every frame, which reserves a
+    row above the text (`FRAME_TAB_BAR_LINES`); `update-tab-bar` builds
+    the items from `tab-bar-format` and `display-tab-bar` draws them
+    under the menu bar. This check runs with the mode on only
+    (`TAB_BAR_CONFIG_HOME`).
+
+    Two things: the bar names the frame's one tab and sits directly
+    above the text, and `C-x t 2` adds a tab rather than replacing the
+    row - the new tab's name follows the buffer it was made on, and the
+    old tab keeps the name it had.
+    """
+    problems = []
+
+    def bar_row(rows):
+        for i, row in enumerate(rows[:3]):
+            if "pty-check-bar.txt" in row and "|" in row:
+                return i, row
+        return None, None
+
+    path = "/tmp/pty-check-bar.txt"
+    open(path, "w").write("the file\n")
+    rows = screen_of(drive([], path, config=TAB_BAR_CONFIG_HOME)).split("\n")
+    at, row = bar_row(rows)
+    if at is None:
+        problems.append("no tab bar above the text: %r" % (rows[:3],))
+    else:
+        if "the file" not in rows[at + 1]:
+            problems.append("the tab bar is not directly above the text: %r"
+                            % (rows[at:at + 2],))
+        if "+" not in row:
+            problems.append("the tab bar has no \"+\" button: %r" % (row,))
+
+    # C-x t 2 makes a second tab; C-x b *scratch* renames the current one.
+    screen = screen_of(drive([b"\x18t2", b"\x18b", b"*scratch*\r", b"C-x"],
+                             path, config=TAB_BAR_CONFIG_HOME))
+    rows = screen.split("\n")
+    at, row = bar_row(rows)
+    if at is None:
+        problems.append("the tab bar went away after adding a tab: %r"
+                        % (rows[:3],))
+    elif "*scratch*" not in row:
+        problems.append("the new tab is not in the tab bar: %r" % (row,))
+    elif "pty-check-bar.txt" not in row:
+        problems.append("the old tab went away instead of staying: %r" % (row,))
+    return problems
+
+
 def check_no_display():
     """`se -w' with no display says so and exits 1, instead of crashing.
 
@@ -4971,6 +5028,7 @@ CHECKS = {
     "completion-scroll": check_completion_scroll,
     "tty-menu": check_tty_menu,
     "tab-line": check_tab_line,
+    "tab-bar": check_tab_bar,
     "no-display": check_no_display,
 }
 

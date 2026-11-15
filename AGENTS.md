@@ -8982,3 +8982,132 @@ now and does the same, reading the property through
    hand-written copy this file complained about; `font-core.scm`'s
    `(let ((*inhibit-quit* #t)) ...)` was a `let` over a parameter's name
    and rebound nothing - it is `parameterize` with Emacs's nil.
+
+# Window configurations, and the tab bar (2026-11-16)
+
+`tab-bar.el` has been asked for since the tab line landed, and it stands
+on one thing this tree did not have: **`current-window-configuration` and
+`set-window-configuration`**. A tab is a named persistent window
+configuration, so those two came first, bottom up.
+
+## Window configurations - `window.c` in `(schemacs editor window)`
+
+`<window-configuration>` holds what the C's `struct save_window_data`
+holds - the frame, the flat vector of saved windows, the frame's selected
+window, the current buffer, the selected frame - and each `<saved-window>`
+holds what `struct saved_window` does: **the window object itself**, its
+buffer, point and start as *copies* of the markers, its geometry, its
+hscroll state, its persistent window parameters, and its parent's and
+previous sibling's **indices into the vector** (`wset_temslot`).
+
+Because the vector holds the objects, restoring a configuration puts back
+windows that were deleted since - the C's own "Kludge Alert! Mark all
+windows now on frame as `deleted`. Restoring the new configuration
+`undeletes` any that are in it" - and their buffer history, which travels
+in the object.
+
+Three things had to be copied rather than guessed, and all three are the
+C's:
+
+- **`old_point`.** "An exception is made for point in the current buffer:
+  its value is -not- saved" is implemented by the C's three-way choice,
+  and then by writing `old_point` into the recorded window's `pointm`
+  *before* `select_window` hands that marker to the buffer. Leaving the
+  write-back out made `C-x 1` followed by a restore jump to the point the
+  configuration had recorded, which is exactly what the exception exists
+  to prevent.
+- **The stride.** `TAB_BAR_ITEM_NSLOTS` is **6**, not the menu bar's 5.
+- **`window-restore-killed-buffer-windows`**, whose default nil "will try
+  to delete the window if and only if it is dedicated to its buffer" -
+  and no window here is dedicated, so a killed buffer's window is kept
+  and shows another buffer.
+
+`buffer-live-p` was **wrong** and this work is what found it: it was a
+walk of `*buffer-list*`, where Emacs's `BUFFER_LIVE_P` is "has a name"
+(`!NILP (BVAR (b, name))`). A buffer made by `allocate-buffer` - which is
+what every test and the startup frame are built on - is live and named
+and *not* in the list, so every restore took the "buffer is dead" branch.
+
+## The tab bar
+
+| Emacs | here |
+|---|---|
+| `FRAME_TAB_BAR_LINES` (`frame.h`) | `%frame-tab-bar-lines` (`frame.scm`) |
+| `tab_bar_items` (`keyboard.c:9751`) | `tab-bar-items` (`keyboard.scm`) |
+| `parse_tab_bar_item` (`keyboard.c:9876`) | `parse-tab-bar-item` (`keyboard.scm`) |
+| `update_tab_bar` (`xdisp.c:14291`), `display_tab_bar` (`:14696`) | `update-tab-bar`, `display-tab-bar` (`xdisp.scm`) |
+| `tab-bar.el` (1,461 lines of Lisp half) | `tab-bar.scm` (new) |
+| `faces.el`'s `tab-bar` and `tab-bar.el`'s six faces | `faces.scm` |
+
+**The layout is the C's**: the tab bar's row is *below* the menu bar's
+(`display_tab_bar` starts its iterator at `FRAME_MENU_BAR_LINES`,
+`xdisp.c:14717`), and `frame-top-margin` is both counts.
+
+**`parse_tab_bar_item` is not `parse_menu_item`**, and that is the bug
+that took the longest: a tab's item carries a *nil binding* - the click
+finds its tab by the item's KEY - and `parse_menu_item` refuses a nil
+definition in a menu bar. Reusing it dropped every tab but the current
+one, and the bar showed one tab and a "+". The C has a second parser for
+exactly this reason, and it is ported.
+
+**The `:filter` is applied by `tab-bar-items`.** Emacs binds `[tab-bar]`
+to `(menu-item "tab bar" MAP :filter tab-bar-make-keymap)`, and
+`get_keyelt`'s `menu_item_eval_property` arm calls the filter at each
+lookup. That evaluator is `keyboard.c`'s and `keymap.scm` is below it, so
+`tab-bar-items` calls `tab-bar-make-keymap` itself before it walks the
+maps - the filter's work, one level up.
+
+## What is not carried, and what each waits for
+
+Each is in `tab-bar.scm`'s header with the same list, which is the
+accounting this file asks for rather than a "faithful subset":
+
+- the tab's **window state** (`ws` is nil; `window-state-get`/`put` are
+  not ported). Live tabs use `wc`, which is the branch Emacs takes for
+  tabs of the same session.
+- **tab groups** (`tab-bar-tab-group-*`, `tab-bar-format-tabs-groups`).
+- **`tab-bar-history-mode`** and its back/forward buttons: it records a
+  configuration before every command, which needs `pre-command-hook`
+  bookkeeping the tab line does not have.
+- **`tab-bar-auto-width`**: a `display` space specification measured in
+  pixels, where this renderer draws cells. The variable is carried so a
+  user setting it sees no error.
+- **touch, drag and detach** (`tab-bar-mouse-move-tab`,
+  `tab-bar-detach-tab` needs a frame built from a configuration).
+- `tab-bar-format-align-right`/`-global`, `tab-bar-menu-bar`,
+  `tab-bar-rename-tab-by-name`, `frameset-*` persistence.
+- **The Gtk tab bar is not drawn**: `display-tab-bar` is the terminal's
+  row, as `display-menu-bar` is. A Gtk frame's tab bar would be a widget,
+  as its menu bar is.
+
+## The Lisp-1 traps this pass hit, all four of them
+
+1. **A parameter that shadows the procedure it needs**:
+   `(define (props props ...) ... (props (cddr props) ...))` applied the
+   *list*. That is `parse-tab-bar-item`'s `walk-props`, renamed.
+2. **A parameter named `list`**: `(let loop ((rest list) ...) ... (list
+   value))` calls the sequence. `tab-bar--insert-at` takes `lst`.
+3. **Two names, one meaning**: Emacs has a variable *and* a function
+   called `tab-bar-separator`; the second `define` replaced the first and
+   `(tab-bar-separator)` applied `#f`. The variable is
+   `tab-bar-separator-string` here, as `mule-util.scm` spells
+   `truncate-string-ellipsis-string`.
+4. **`run-hook-with-args` takes the list, not the parameter** - six call
+   sites passed `*tab-bar-tab-...-functions*` and the hook called the
+   *parameter* with the hook's arguments.
+
+## Tests
+
+- `window-config-tests.scm` (9): the layout, the selected window, per
+  window points (measured against Emacs 31.1, which answers `(1 2)` where
+  the obvious expectation is `(3 2)` - the selected window shows the
+  buffer that was current when the configuration was recorded), starts,
+  an undeleted window, `window-configuration-p`, a killed buffer, and
+  `dont-set-frame`.
+- `tab-bar-tests.scm` (15): the mode and its frame parameter, the one
+  starting tab, new/select/close/rename/close-other, the sole-tab error,
+  the format's items, the six-slot parse, a real click through
+  `posn-at-x-y` + `tab-bar-mouse-down-1`, and the text area moving down a
+  row.
+- `tools/pty-check.py` gained **`tab-bar`**, which drives `C-x t 2` and
+  `C-x b` on a terminal and reads the bar's row.

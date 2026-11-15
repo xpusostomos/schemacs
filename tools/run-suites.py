@@ -53,6 +53,11 @@ SUITES = [
     # truncated tab name stands on.
     'schemacs/editor/mule-util-tests.scm',
     'schemacs/editor/cmds-tests.scm',
+    # `window.c`'s `current-window-configuration` and
+    # `set-window-configuration`, which the tab bar is built on.
+    'schemacs/editor/window-config-tests.scm',
+    # `tab-bar.el` - the frame's tabs, each a window configuration.
+    'schemacs/editor/tab-bar-tests.scm',
     'schemacs/editor/custom-tests.scm',
     # `easy-mmode.el`'s two macros: `define-minor-mode` with `:global`, and
     # `define-globalized-minor-mode` under it - plus the `default-value`

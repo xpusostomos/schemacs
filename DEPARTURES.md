@@ -3916,3 +3916,64 @@ which creates a new local variable and rebinds nothing - so the C's
   drives (`elisp-scope.el`, **2,868 lines**). Both are off by default
   (`elisp-fontify-semantically` is `nil`), so no default session sees
   them.
+
+# The tab bar's departure: `get_keyelt`'s `:filter` (2026-11-16)
+
+GNU Emacs binds the tab bar's keymap as a *filtered* menu item:
+
+```elisp
+(global-set-key [tab-bar]
+                `(menu-item "tab bar" ,(make-sparse-keymap)
+                            :filter tab-bar-make-keymap))
+```
+
+and `get_keyelt` (`keymap.c:700`) applies `:filter` on every lookup:
+
+```c
+	      /* If there's a `:filter FILTER', apply FILTER to the
+		 menu-item's definition to get the real definition to
+		 use.  */
+	      for (; CONSP (tem) && CONSP (XCDR (tem)); tem = XCDR (tem))
+		if (EQ (XCAR (tem), QCfilter) && autoload)
+		  {
+		    Lisp_Object filter = XCAR (XCDR (tem));
+		    filter = list2 (filter, list2 (Qquote, object));
+		    object = menu_item_eval_property (filter);
+		    break;
+		  }
+```
+
+`menu_item_eval_property` is `keyboard.c`'s, and `keymap.scm` is below
+`keyboard.scm` in this tree's import graph, so `get-keyelt` cannot call
+it: its `autoload` parameter is documented and never set. `tab-bar-items`
+does the filter's work itself - it calls `tab-bar-make-keymap` before it
+walks the maps - so the *observable* result is the C's and the departure
+is where the call happens, not what it produces. The same shape as
+`locate-file-internal` in `fileio.scm` and `read-buffer-to-switch` in
+`minibuffer.scm`.
+
+# `window-set-configuration`'s frame resize (2026-11-16)
+
+`Fset_window_configuration` ends with
+
+```c
+      f->can_set_window_size = true;
+      adjust_frame_size (f, -1, -1, 4, false, Qset_window_configuration);
+```
+
+which asks for *no* change to the frame's size - `-1`/`-1` - and only
+re-lays the windows out. This tree's `set-window-configuration` restores
+the geometry it saved and does not call `resize-frame-windows!`, because
+the saved rectangles are the ones the configuration was recorded with and
+the frame cannot change size in this editor except by a terminal resize,
+which re-runs the layout anyway.
+
+# `parse_tab_bar_item`'s `:enable` (2026-11-16)
+
+The C evaluates an `:enable` form on every parse and skips a disabled item
+**only in a menu bar** (`if (inmenubar && NILP (tem)) return 0;`). For the
+tab bar it stores the evaluated value in `TAB_BAR_ITEM_ENABLED_P` and
+keeps the item; `display_tab_bar` draws every item it is given, enabled or
+not. This port stores the value the same way and draws every item, so an
+`:enable` in a tab's item has no visible effect - which is also what
+Emacs's terminal tab bar does, since `display_tab_bar` never asks.

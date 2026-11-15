@@ -59,6 +59,9 @@
     (only (schemacs editor mule-cmds))
     ;; `dired.el': C-x d binds at load, the same reason again.
     (only (schemacs editor dired))
+    ;; `tab-bar.el`: `C-x t ...` and the `[tab-bar]` binding are made
+    ;; when it is loaded, the same reason as every line above.
+    (only (schemacs editor tab-bar))
     ;; `face-remap.el': C-x C-M-+ and the three beside it, and the command
     ;; they call. Same reason as every line above - a binding is made by
     ;; the library that owns the command, so the front end has to load it.

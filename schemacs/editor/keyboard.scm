@@ -143,7 +143,8 @@
     ;; `*menu-bar-items-function*` is the seam the redisplay builds a
     ;; terminal's menu bar through - see the note on it in `xdisp.scm`.
     (only (schemacs editor xdisp)
-          render! redisplay-frames! *menu-bar-items-function*)
+          render! redisplay-frames! *menu-bar-items-function*
+          *tab-bar-items-function* *tab-bar-keymap-function*)
     ;; The development back door, which the command loop gives its turn
     ;; between keys. A no-op unless `SCHEMACS_REPL' opened it.
     (only (scheme-utils repl server) poll-repl! repl-running? repl-wake)
@@ -217,6 +218,7 @@
    ;; exported with them.
    *menu-bar-final-items* *overriding-local-map-menu-flag*
    menu-bar-items parse-menu-item menu-separator-name?
+   tab-bar-items
    ;; `keymap.c`'s, in this library for the reason its header gives:
    ;; its default argument is `current-active-maps`, which is this
    ;; file's `lookup-keymaps`.
@@ -2771,11 +2773,154 @@ With argument, insert ARG copies of the character."
          *menu-bar-final-items*)
         items))
 
+    (define (parse-tab-bar-item key item)
+      ;; GNU Emacs's `parse_tab_bar_item` (`keyboard.c:9876`): one tab
+      ;; bar item's six slots, or #f when the binding is not one.
+      ;;
+      ;; **It is NOT `parse_menu_item`**, and the difference matters: a
+      ;; tab's item carries a nil *binding* - the click finds its tab by
+      ;; the item's KEY - and `parse_menu_item` refuses a nil definition
+      ;; in a menu bar ("If we got no definition, this item is just
+      ;; unselectable text which is OK in a submenu but not in the
+      ;; menubar", `keyboard.c:9612`). Reusing it here dropped every tab
+      ;; but the current one.
+      ;;
+      ;; The C's slots, in order: KEY, ENABLED, SELECTED, CAPTION,
+      ;; BINDING, HELP (`dispextern.h:3408`).
+      ;;--------------------------------------------------------------
+      (define (walk-props rest enabled selected help filter)
+        ;; "Process the rest of the properties." **WALK-PROPS and not
+        ;; PROPS**: a parameter named `props` hides the procedure that
+        ;; recurses, and the call applies the list.
+        (cond
+         ((and (pair? rest) (pair? (cdr rest)))
+          (let ((k (car rest)) (v (cadr rest)))
+            (cond ((eq? k ':enable)
+                   (walk-props (cddr rest) v selected help filter))
+                  ((eq? k ':help)
+                   (walk-props (cddr rest) enabled selected v filter))
+                  ((eq? k ':filter)
+                   (walk-props (cddr rest) enabled selected help v))
+                  ((eq? k ':button)
+                   (walk-props (cddr rest) enabled
+                               (if (and (pair? v) (memq (car v) '(toggle radio)))
+                                   (cdr v)
+                                   selected)
+                               help filter))
+                  (else
+                   (walk-props (cddr rest) enabled selected help filter)))))
+         (else (list enabled selected help filter))))
+      (cond
+       ((not (pair? item)) #f)
+       ;; "As an exception, allow old-style menu separators."
+       ((string? (car item)) (list key #t #f (car item) #f #f))
+       ((not (eq? (car item) 'menu-item)) #f)
+       ((not (pair? (cdr item))) #f)
+       (else
+        (let* ((caption (cadr item))
+               (rest (cddr item)))
+          (cond
+           ((not (string? caption)) #f)
+           ;; "If the rest following the caption is not a list, the menu
+           ;; item is either a separator, or invalid."
+           ((not (pair? rest))
+            (if (menu-separator-name? caption)
+                (list key #f #f #f #f #f)
+                #f))
+           (else
+            (let* ((binding (car rest))
+                   (tail (cdr rest))
+                   ;; "Ignore cached key binding, if any."
+                   (tail (if (and (pair? tail) (pair? (car tail)))
+                             (cdr tail)
+                             tail))
+                   (pb (walk-props tail #t #f #f #f))
+                   (enabled (list-ref pb 0))
+                   (selected (list-ref pb 1))
+                   (help (list-ref pb 2))
+                   (filter (list-ref pb 3))
+                   (binding (if filter
+                                (menu-item-eval-property
+                                 (list filter (list 'quote binding)))
+                                binding)))
+              ;; "See if the binding is a keymap. Give up if it is."
+              (cond
+               ((km:keymap-type? binding) #f)
+               (else
+                (list key
+                      (if (eq? enabled #t) #t
+                          (menu-item-eval-property enabled))
+                      (if selected (menu-item-eval-property selected) #f)
+                      caption binding help))))))))))
+
+    (define (tab-bar-collect-items keymap items)
+      ;; One map's `[tab-bar]' submap walked into ITEMS - the C's
+      ;; `process_tab_bar_item` with `map_keymap` over it. A key appears
+      ;; once per map, so an item replaces any earlier one of the same
+      ;; key rather than joining it (a tab is identified by its key).
+      ;;--------------------------------------------------------------
+      (km:map-keymap
+       (lambda (key item)
+         (cond ((eq? item 'undefined)
+                (set! items
+                      (filter (lambda (quad) (not (eq? (car quad) key))) items)))
+               (else
+                (let ((parsed (parse-tab-bar-item key item)))
+                  (when parsed
+                    (set! items
+                          (append (filter (lambda (quad)
+                                            (not (eq? (car quad) key)))
+                                          items)
+                                  (list parsed))))))))
+       keymap)
+      items)
+
+    (define (tab-bar-items)
+      ;; GNU Emacs's `tab_bar_items` (`keyboard.c:9751`): the
+      ;; `[tab-bar]' bindings of every active keymap, in precedence
+      ;; order, as six-slot items - `(KEY ENABLED SELECTED CAPTION
+      ;; BINDING HELP)`, the C's `TAB_BAR_ITEM_*` enum.
+      ;;
+      ;; **This is `menu-bar-items' with one key changed**, which is what
+      ;; the C's is: the same reverse walk over the active maps and the
+      ;; same `map-keymap' over each map's `[tab-bar]' submap. The C's
+      ;; differences are that the prefix key is `Qtab_bar' rather than
+      ;; `Qmenu_bar', that there is no `tab-bar-final-items' pass, and
+      ;; that the parser is `parse-tab-bar-item` above.
+      ;;--------------------------------------------------------------
+      ;; **The keymap is rebuilt first.** The C reaches it through
+      ;; `[tab-bar]`'s `:filter` (`get_keyelt`'s `menu_item_eval_property`
+      ;; arm), and this tree's keymap lookup does not apply filters - the
+      ;; evaluating function is this library's and `keymap.scm` is below
+      ;; it. The filter's work is done here instead, so every reader of
+      ;; the items sees the current tabs, not the ones of the last
+      ;; redisplay.
+      (when (*tab-bar-keymap-function*)
+        ((*tab-bar-keymap-function*)))
+      (let ((maps (reverse
+                   (if *overriding-local-map-menu-flag*
+                       (lookup-keymaps)
+                       (filter (lambda (map)
+                                 (not (memq map
+                                            (or *overriding-terminal-local-map*
+                                                '()))))
+                               (lookup-keymaps))))))
+        (let loop ((rest maps) (items '()))
+          (cond ((null? rest) items)
+                (else
+                 (let ((def (km:keymap-lookup (car rest) 'tab-bar)))
+                   (loop (cdr rest)
+                         (if (km:keymap-type? def)
+                             (tab-bar-collect-items
+                              (keymap-canonicalize def) items)
+                             items))))))))
+
     (define-key *default-keymap* (kbd "C-q") quoted-insert)
 
     ;; The redisplay's seam: `menu_bar_items` is this library's
     ;; (`keyboard.c:8641`) and `update_menu_bar` is `xdisp.c`'s, which is
     ;; *below* here - so the redisplay asks for the items through this.
     (*menu-bar-items-function* menu-bar-items)
+    (*tab-bar-items-function* tab-bar-items)
 
     ))
