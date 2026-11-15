@@ -106,6 +106,9 @@
     ;; Walking a syntax table's runs for `\sC' and `\w' above ASCII:
     ;; `char_table_ref_and_range' (`chartab.c:320'), the C's own walk.
     (only (schemacs editor chartab) char-table-ref-and-range char-table-parent)
+    ;; `syntax-propertize-rules' writes the `syntax-table' property
+    ;; (`put-text-property'); its `subregexp-context-p' is below.
+    (only (schemacs editor textprop) put-text-property)
     ;; The line-break cache: `region-cache.c`, which is the buffer's
     ;; `newline_cache` there. It is what makes searching a buffer with
     ;; very long lines affordable - a stretch already searched and found
@@ -172,6 +175,10 @@
    find-newline
    scan-newline-from-point
    find-before-next-newline
+   ;; `syntax.el`'s rules engine and the two `subr.el`/`regexp-opt.el`
+   ;; helpers it needs - see the placement note beside them
+   syntax-propertize-rules syntax-propertize-precompile-rules
+   subregexp-context-p regexp-opt-depth
    )
 
   (begin
@@ -452,8 +459,7 @@
       ;; table calls *symbol* syntax. `%syntax-class-ere' translates
       ;; them from the table instead, as `regex-emacs.c' reads it.
       ;;--------------------------------------------------------------
-      (memv c (list #\b #\B #\< #\>
-                    #\1 #\2 #\3 #\4 #\5 #\6 #\7 #\8 #\9
+      (memv c (list #\1 #\2 #\3 #\4 #\5 #\6 #\7 #\8 #\9
                     ;; the string beginning and end: glibc's too, as `\<'
                     ;; is, and they keep that meaning when `^' and `$'
                     ;; are asked for the line's
@@ -1096,6 +1102,25 @@
                                               'symend))
                                     assertions))
                         (loop (+ i 3) (cons #\) (cons #\( acc))))
+                       ;; `\<', `\>', `\b' and `\B' are the *syntax
+                       ;; table's* word class (`regex-emacs.c:5424',
+                       ;; `:5465', `:5379'), and glibc's word class is
+                       ;; the locale's - so the two disagree wherever a
+                       ;; table says `$' or `%' or, in scheme-mode's
+                       ;; font-lock table, `-' is a word constituent.
+                       ;; They are assertions like `\_<' - see
+                       ;; `%assertions-hold-buffer?'.
+                       ((memv c2 '(#\< #\> #\b #\B))
+                        (set! glibc-groups (+ glibc-groups 1))
+                        (set! assertions
+                              (cons (cons glibc-groups
+                                          (case c2
+                                            ((#\<) 'wordbeg)
+                                            ((#\>) 'wordend)
+                                            ((#\b) 'wordbound)
+                                            (else 'notwordbound)))
+                                    assertions))
+                        (loop (+ i 2) (cons #\) (cons #\( acc))))
                        ((%pass-through-escape c2)
                         (loop (+ i 2) (cons c2 (cons #\\ acc))))
                        ((%untranslated-escape c2)
@@ -1292,6 +1317,15 @@
       (memv (%class-in ed pos (char->integer (fetch-char ed pos)))
             (list sword ssymbol)))
 
+    (define (%word-char-at ed pos)
+      ;; `SYNTAX (c)' at POS tested as the *word* boundary tests it:
+      ;; `Sword' alone, where the symbol boundary accepts `Ssymbol' as
+      ;; well. (`WORD_BOUNDARY_P', which the C also consults, is `#f'
+      ;; here - see `%word-boundary?'.)
+      ;;--------------------------------------------------------------
+      (memv (%class-in ed pos (char->integer (fetch-char ed pos)))
+            (list sword)))
+
     (define (%assertions-hold-buffer? match base)
       ;; Whether the `\_<'/`\_>' assertions of the pattern compiled last
       ;; hold at MATCH's positions. The C tests them inside its matcher;
@@ -1329,6 +1363,33 @@
                               (%symbol-char-at ed (- pos 1))
                               (or (>= pos (buffer-z ed))
                                   (not (%symbol-char-at ed pos)))))
+                        ;; "Case 1: D is at the end of string"; "Case 2:
+                        ;; S2 is not Sword"; "Case 3: ... S1 is Sword"
+                        ;; (`regex-emacs.c:5424').
+                        ((wordbeg)
+                         (and (< pos (buffer-z ed))
+                              (%word-char-at ed pos)
+                              (or (= pos (buffer-beg ed))
+                                  (not (%word-char-at ed (- pos 1))))))
+                        ((wordend)
+                         (and (> pos (buffer-beg ed))
+                              (%word-char-at ed (- pos 1))
+                              (or (>= pos (buffer-z ed))
+                                  (not (%word-char-at ed pos)))))
+                        ;; `wordbound' (`regex-emacs.c:5379'): "Case 1:
+                        ;; D is at the beginning or the end of string" is
+                        ;; a boundary; otherwise it is where exactly one
+                        ;; side is `Sword'.
+                        ((wordbound)
+                         (or (= pos (buffer-beg ed))
+                             (>= pos (buffer-z ed))
+                             (not (eq? (and (%word-char-at ed (- pos 1)) #t)
+                                       (and (%word-char-at ed pos) #t)))))
+                        ((notwordbound)
+                         (and (> pos (buffer-beg ed))
+                              (< pos (buffer-z ed))
+                              (eq? (and (%word-char-at ed (- pos 1)) #t)
+                                   (and (%word-char-at ed pos) #t))))
                         (else #f))
                       (loop (cdr l))
                       #f))))))))))
@@ -1339,6 +1400,12 @@
       ;; text properties, so `char-syntax' is the whole of it.
       ;;--------------------------------------------------------------
       (memv (char-syntax (string-ref string i)) (list #\w #\_)))
+
+    (define (%string-word-char? string i)
+      ;; The word test on a string, as `%string-symbol-char?' is the
+      ;; symbol one.
+      ;;--------------------------------------------------------------
+      (char=? (char-syntax (string-ref string i)) #\w))
 
     (define (%assertions-hold-string? match string)
       (or (null? %current-assertions)
@@ -1361,6 +1428,24 @@
                               (%string-symbol-char? string (- pos 1))
                               (or (= pos n)
                                   (not (%string-symbol-char? string pos)))))
+                        ((wordbeg)
+                         (and (< pos n)
+                              (%string-word-char? string pos)
+                              (or (= pos 0)
+                                  (not (%string-word-char? string (- pos 1))))))
+                        ((wordend)
+                         (and (> pos 0)
+                              (%string-word-char? string (- pos 1))
+                              (or (= pos n)
+                                  (not (%string-word-char? string pos)))))
+                        ((wordbound)
+                         (or (= pos 0) (= pos n)
+                             (not (eq? (%string-word-char? string (- pos 1))
+                                       (%string-word-char? string pos)))))
+                        ((notwordbound)
+                         (and (> pos 0) (< pos n)
+                              (eq? (%string-word-char? string (- pos 1))
+                                   (%string-word-char? string pos))))
                         (else #f))
                       (loop (cdr l))
                       #f)))))))))
@@ -2610,5 +2695,320 @@
                          #t)))
             (match-data--translate (- (match-beginning 0)))
             (replace-match replacement fixedcase literal string))))
-    )))
+    )
 
+    ;;----------------------------------------------------------------
+    ;; `syntax-propertize-rules' (`syntax.el:223')
+    ;;------------------------------------------------------------------
+    ;; Emacs's macro compiles its RULES into **one scan**: the rule
+    ;; regexps are joined with `\|' and the groups tell the generated
+    ;; code which rule matched. This is that engine, as a procedure.
+    ;;
+    ;; **A departure in *form*: the macro is a procedure here.** The C's
+    ;; macro `eval's each rule's REGEXP expression at macro-expansion
+    ;; time; Scheme has no such step, so a rule's REGEXP is a *string*
+    ;; the caller has already built (`regexp-opt', or a literal), and
+    ;; the actions - Elisp expressions in the C - are procedures of no
+    ;; arguments returning a syntax entry or `#f'. An action may also be
+    ;; a descriptor string, or a list `(prog1 X Y ...)', which is the
+    ;; C's special form of that name: X's value is applied as the
+    ;; property and the Ys are run after it.
+    ;;
+    ;; The engine bodies below are the C's: the offset accounting, the
+    ;; group-0 wrapping, `syntax-propertize--shift-groups-and-backrefs'
+    ;; and the match-data shift an action that is code needs.
+
+        (define (%sp-any pred list)
+      ;; cl-lib's `any', the walk the C's `(or ...)' expands to.
+      ;;--------------------------------------------------------------
+      (let loop ((l list))
+        (cond ((null? l) #f)
+              ((pred (car l)) #t)
+              (else (loop (cdr l))))))
+
+    (define (%shift-match-data offset)
+      ;; "Keep match 0 as is, but shift everything else"
+      ;; (`syntax.el:270'): `(let ((md (match-data 'ints)))
+      ;; (setcdr (cdr md) (nthcdr (* (1+ OFFSET) 2) md)) (set-match-data md))'.
+      ;;
+      ;; **The list may be SHORTER than that offset.** `match-data'
+      ;; elides trailing registers that did not match - `(match-data)'
+      ;; for `\(a\)\(b\)?' on "a" is `(0 1 0 1)', measured - so a
+      ;; rule whose groups did not participate hands a short list, and
+      ;; `nthcdr' off its end is the empty list, not an error.
+      ;;--------------------------------------------------------------
+      (let* ((md (match-data))
+             (cut (* (+ 1 offset) 2)))
+        (when (pair? (cdr md))
+          (set-cdr! (cdr md)
+                    (if (>= cut (length md)) '() (list-tail md cut))))
+        (set-match-data md)))
+
+    ;;----------------------------------------------------------------
+    ;; `subregexp-context-p' and `regexp-opt-depth'
+    ;;------------------------------------------------------------------
+    ;; Both serve `regexp-opt.el''s callers: the depth is what
+    ;; `syntax-propertize-rules' asks each rule's regexp for, to know
+    ;; where the next rule's groups begin.
+    ;;
+    ;; **A placement departure.** `subregexp-context-p' is `subr.el''s
+    ;; and `regexp-opt-depth' is `regexp-opt.el''s, but both are
+    ;; `string-match' clients, and `(schemacs regexp-opt)' already
+    ;; imports *this* library for `regexp-quote' - importing it back
+    ;; would be a cycle. They live here, as `locate-file-internal' lives
+    ;; in fileio.sld.
+
+    (define (subregexp-context-p regexp pos . rest)
+      ;; GNU Emacs's `subregexp-context-p' (`subr.el'): "Return non-nil
+      ;; if POS is in a normal subregexp context in REGEXP. A subregexp
+      ;; context is one where a sub-regexp can appear. A non-subregexp
+      ;; context is for example within brackets, or within a repetition
+      ;; bounds operator `\\={...\\}', or right after a `\\'. If
+      ;; START is non-nil, it should be a position in REGEXP, smaller
+      ;; than POS, and known to be in a subregexp context."
+      ;;
+      ;; **A departure in *implementation*, not in meaning.** Emacs
+      ;; reuses its regexp parser here: it matches the prefix against
+      ;; the empty string and treats "Unmatched [ or [^", "Unmatched
+      ;; \\{" and "Trailing backslash" as the non-context answers.
+      ;; This engine's parser words two of those differently ("Invalid
+      ;; regular expression" for the unclosed bracket), so the state is
+      ;; scanned directly - the same three situations, decided rather
+      ;; than diagnosed by message.
+      ;;--------------------------------------------------------------
+      (let ((start (if (pair? rest) (or (car rest) 0) 0))
+            (len (string-length regexp)))
+        (let loop ((i start))
+          (cond
+           ((>= i pos) #t)
+           ;; "right after a `\\'": the escape and its character are
+           ;; both skipped; an escape that would swallow POS is not a
+           ;; context.
+           ((char=? (string-ref regexp i) #\\)
+            (if (>= (+ i 1) pos) #f (loop (+ i 2))))
+           ((char=? (string-ref regexp i) #\[)
+            ;; "within brackets": runs to its closing `]', where a
+            ;; leading `]' (after an optional `^') is a member.
+            (let scan ((j (+ i 1)) (first? #t))
+              (cond ((>= j pos) #f)
+                    ((and (char=? (string-ref regexp j) #\\)
+                          (< (+ j 1) len))
+                     (scan (+ j 2) #f))
+                    ((and first? (char=? (string-ref regexp j) #\^))
+                     (scan (+ j 1) #t))
+                    ((and first? (char=? (string-ref regexp j) #\]))
+                     (scan (+ j 1) #f))
+                    ((char=? (string-ref regexp j) #\])
+                     (loop (+ j 1)))
+                    (else (scan (+ j 1) #f)))))
+           ((and (char=? (string-ref regexp i) #\\)
+                 (< (+ i 2) len)
+                 (char=? (string-ref regexp (+ i 1)) #\{))
+            ;; "within a repetition bounds operator `\\{...\\}'"
+            (let scan ((j (+ i 2)))
+              (cond ((>= j pos) #f)
+                    ((and (char=? (string-ref regexp j) #\\)
+                          (< (+ j 1) len)
+                          (char=? (string-ref regexp (+ j 1)) #\}))
+                     (loop (+ j 2)))
+                    (else (scan (+ j 1))))))
+           (else (loop (+ i 1)))))))
+
+    (define (regexp-opt-depth regexp)
+      ;; GNU Emacs's `regexp-opt-depth' (`regexp-opt.el'): "Return the
+      ;; depth of REGEXP. This means the number of non-shy regexp
+      ;; grouping constructs (parenthesized expressions) in REGEXP."
+      ;;
+      ;; The C validates the pattern with `(string-match regexp "")' and
+      ;; then searches for `\\(\\(\\?[0-9]*:\\)?' over it; this
+      ;; library sits below the search library, so the same two things
+      ;; are done by a scan: a `\(' is a group unless `?[0-9]*:' follows
+      ;; it, and the pattern's balance is checked on the way.
+      ;;--------------------------------------------------------------
+      (let ((len (string-length regexp)))
+        (let loop ((i 0) (count 0) (open 0))
+          (cond
+           ((>= i len) count)
+           ((char=? (string-ref regexp i) #\\)
+            (cond
+             ((>= (+ i 1) len) count)  ; a trailing backslash: nothing to count
+             ;; `\(' - a group unless the shy/numbered marker follows
+             ((char=? (string-ref regexp (+ i 1)) #\()
+              (let shy ((j (+ i 2)))
+                (cond
+                 ((and (< j len) (char=? (string-ref regexp j) #\?))
+                  ;; `?', then digits, then `:'
+                  (let digits ((k (+ j 1)))
+                    (cond ((and (< k len)
+                                (char>=? (string-ref regexp k) #\0)
+                                (char<=? (string-ref regexp k) #\9))
+                           (digits (+ k 1)))
+                          ((and (< k len) (char=? (string-ref regexp k) #\:))
+                           (loop (+ k 1) count open))
+                          (else (loop (+ i 2) (+ count 1) (+ open 1))))))
+                 (else (loop (+ i 2) (+ count 1) (+ open 1))))))
+             ;; `\)' closes one
+             ((char=? (string-ref regexp (+ i 1)) #\))
+              (if (> open 0) (loop (+ i 2) count (- open 1)) (loop (+ i 2) count open)))
+             (else (loop (+ i 2) count open))))
+           (else (loop (+ i 1) count open))))))
+
+    (define (syntax-propertize-precompile-rules rules)
+      ;; `syntax-propertize-precompile-rules' (`syntax.el:207'): "Return
+      ;; a precompiled form of RULES to pass to `syntax-propertize-rules'."
+      ;; In the C it is `(quote ,rules)'; there is nothing to precompile
+      ;; in either implementation, so this answers the rules.
+      ;;--------------------------------------------------------------
+      rules)
+
+    (define (%shift-groups-and-backrefs re n)
+      ;; "Shift the group numbers and back-references in RE by N"
+      ;; (`syntax.el:238'). `\(?3:' becomes `\(?5:' at N = 2, and a
+      ;; `\2' back reference becomes `\4' - but only where a
+      ;; sub-regexp can appear (`subregexp-context-p'), never in a
+      ;; bracket expression or a repetition bound.
+      ;;--------------------------------------------------------------
+      (let* ((len (string-length re))
+             (out (open-output-string)))
+        (let loop ((i 0))
+          (if (>= i len)
+              (get-output-string out)
+              (let ((c (string-ref re i)))
+                (cond
+                 ;; `\(?N:' - an explicitly numbered group
+                 ((and (char=? c #\\)
+                       (< (+ i 2) len)
+                       (char=? (string-ref re (+ i 1)) #\()
+                       (char=? (string-ref re (+ i 2)) #\?))
+                  (let digits ((k (+ i 3)))
+                    (cond
+                     ((and (< k len)
+                           (char>=? (string-ref re k) #\0)
+                           (char<=? (string-ref re k) #\9))
+                      (digits (+ k 1)))
+                     ((and (> k (+ i 3)) (< k len) (char=? (string-ref re k) #\:))
+                      (write-string (substring re i (+ i 3)) out)
+                      (write-string (number->string
+                                     (+ n (string->number (substring re (+ i 3) k))))
+                                    out)
+                      (write-string ":" out)
+                      (loop (+ k 1)))
+                     (else (write-char c out) (loop (+ i 1))))))
+                 ;; `\N' - a back reference, shifted where a sub-regexp
+                 ;; may appear
+                 ((and (char=? c #\\)
+                       (< (+ i 1) len)
+                       (char>=? (string-ref re (+ i 1)) #\1)
+                       (char<=? (string-ref re (+ i 1)) #\9)
+                       (subregexp-context-p re i))
+                  (write-char #\\ out)
+                  (write-string (number->string
+                                 (+ n (string->number
+                                       (string (string-ref re (+ i 1))))))
+                                out)
+                  (loop (+ i 2)))
+                 (else (write-char c out) (loop (+ i 1)))))))))
+
+    (define (%action-apply! action start end)
+      ;; One HIGHLIGHT's action (`syntax.el:250-290'): a descriptor
+      ;; string, a procedure, or the `(prog1 X Y ...)' form.
+      ;;--------------------------------------------------------------
+      (define (apply-value! val)
+        (when val (put-text-property start end 'syntax-table val)))
+      (cond
+       ((string? action) (apply-value! (string-to-syntax action)))
+       ((procedure? action) (apply-value! (action)))
+       ((and (pair? action) (eq? (car action) 'ignore))
+        (for-each (lambda (thunk) (when (procedure? thunk) (thunk))) (cdr action)))
+       ((and (pair? action) (eq? (car action) 'prog1))
+        (let ((first (car (cdr action))))
+          (apply-value! (if (string? first) (string-to-syntax first) (first))))
+        (for-each (lambda (thunk) (when (procedure? thunk) (thunk)))
+                  (cdr (cdr action))))
+       (else #f)))
+
+    (define %last-combined #f)
+    (define (syntax-propertize-rules rules)
+      ;; "Make a function that applies RULES for use in
+      ;; `syntax-propertize-function'. The function will scan the
+      ;; buffer, applying the rules where they match. The buffer is
+      ;; scanned a single time, like \"lex\" would, rather than once per
+      ;; rule."
+      ;;--------------------------------------------------------------
+      (let* ((n (length rules))
+             (offset 0)
+             (parts '())
+             (branches '()))
+        (for-each
+         (lambda (rule)
+           (let* ((orig-re (car rule))
+                  (cases (cdr rule))
+                  (zero (assq 0 cases))
+                  ;; "If there's more than 1 rule, and the rule want[s] to
+                  ;; apply highlight to match 0, create an extra group to
+                  ;; be able to tell when *this* match 0 has succeeded."
+                  (wrap? (and zero (> n 1)))
+                  ;; **`offset' is the OUTER variable**, as the C's
+                  ;; `(incf offset)' is: the next rule's groups start
+                  ;; after this one's, so the increments have to stick.
+                  (_ (when wrap? (set! offset (+ offset 1))))
+                  (offset offset)
+                  (re (if wrap? (string-append "\\(" orig-re "\\)") orig-re))
+                  (re (%shift-groups-and-backrefs re offset))
+                  ;; "If some of the subgroup rules include Elisp code,
+                  ;; then we need to set the match-data so it's
+                  ;; consistent with what the code expects."
+                  (shift? (and (> offset 0)
+                               (%sp-any (lambda (case) (not (string? (cadr case))))
+                                        cases)))
+                  (code-offset (if shift? 0 offset))
+                  (condition
+                   (cond
+                    (zero (if (zero? offset)
+                              (lambda () #t)
+                              (lambda () (match-beginning offset))))
+                    ((null? (cdr cases))
+                     (let ((g (+ code-offset (car (car cases)))))
+                       (lambda () (match-beginning g))))
+                    (else
+                     (lambda ()
+                       (%sp-any (lambda (case)
+                                  (match-beginning (+ code-offset (car case))))
+                                cases)))))
+                  (code
+                   (lambda ()
+                     (when shift? (%shift-match-data offset))
+                     (for-each
+                      (lambda (case)
+                        (let ((g (+ code-offset (car case)))
+                              (action (cadr case)))
+                          ;; "If NUMBER did match"
+                          (when (match-beginning g)
+                            (%action-apply! action
+                                            (match-beginning g)
+                                            (match-end g)))))
+                      cases))))
+             (set! parts (cons re parts))
+             (set! branches (cons (cons condition code) branches))
+             (set! offset (+ offset (regexp-opt-depth orig-re)))))
+         rules)
+        (let ((combined
+               (let join ((ps (reverse parts)) (acc ""))
+                 (cond ((null? ps) acc)
+                       ((string=? acc "") (join (cdr ps) (car ps)))
+                       (else (join (cdr ps)
+                                   (string-append acc "\\|" (car ps))))))))
+          (set! %last-combined combined)
+          (lambda (start end)
+            (set-point (current-buffer) start)
+            (let loop ()
+              (when (and (< (buffer-pt (current-buffer)) end)
+                         (re-search-forward combined end #t))
+                (let inner ((bs (reverse branches)))
+                  (when (pair? bs)
+                    (if ((car (car bs)))
+                        ((cdr (car bs)))
+                        (inner (cdr bs)))))
+                (loop)))))))
+
+    ))

@@ -12,14 +12,10 @@
   ;;   * `scheme-syntax-propertize' and its rules - `syntax-propertize-
   ;;     rules', the macro, is not ported. `#;' datum comments and
   ;;     `#|...|#' block comments therefore parse by the table alone.
-  ;;   * `scheme-indent-function', `scheme-let-indent' and the
-  ;;     `scheme-indent-function' properties - `lisp-indent-line' and
-  ;;     `calculate-lisp-indent' are lisp-mode's, and are not ported.
   ;;   * `scheme-mode-line-process', `run-scheme' and the inferior
   ;;     process half (`cmuscheme.el').
-  ;;   * `scheme-imenu-generic-expression' and the imenu variables, and
-  ;;     `lisp-doc-string-elt-property' - imenu and the doc-string face
-  ;;     are not ported.
+  ;;   * `scheme-imenu-generic-expression' and the imenu variables -
+  ;;     imenu is not ported.
 
   (import
     (scheme base)
@@ -34,13 +30,34 @@
     (only (schemacs editor font-lock) set!font-lock-defaults!
           font-lock-register-keyword-variable!)
     (only (schemacs regexp-opt) regexp-opt)
-    (only (schemacs editor search) match-beginning)
-    (only (schemacs editor lisp-mode) lisp-indent-line))
+    (only (schemacs editor search)
+          match-beginning match-end looking-at string-match
+          re-search-forward syntax-propertize-rules)
+    (only (schemacs editor lisp-mode)
+          lisp-indent-line lisp-indent-function lisp-indent-specform
+          lisp-indent-defform *calculate-lisp-indent-last-sexp*)
+    (only (schemacs editor syntax)
+          parse-partial-sexp skip-chars-forward skip-chars-backward
+          forward-comment backward-prefix-chars syntax-ppss string-to-syntax)
+    (only (schemacs editor lisp) forward-sexp)
+    (only (schemacs editor editfns)
+          goto-char point point-max buffer-substring forward-line char-after
+          save-excursion)
+    ;; `beginning-of-line' is the *command* (`cmds.c'), as it is in
+    ;; lisp-mode's own import
+    (only (schemacs editor cmds) beginning-of-line backward-char)
+    (only (schemacs editor indentc) current-column)
+    (only (schemacs editor intervals) get put)
+    (only (schemacs editor textprop) put-text-property get-text-property)
+    (only (schemacs editor custom) define-custom))
 
   (export scheme-mode scheme-mode-map scheme-mode-hook scheme-mode-hook
           scheme-mode-syntax-table scheme-mode-variables
           scheme-font-lock-keywords
-          scheme-font-lock-keywords-1 scheme-font-lock-keywords-2)
+          scheme-font-lock-keywords-1 scheme-font-lock-keywords-2
+          scheme-indent-function scheme-let-indent *scheme-mit-dialect*
+          scheme-syntax-propertize scheme-syntax-propertize-sexp-comment
+          scheme-syntax-propertize-regexp)
 
   (begin
 
@@ -174,6 +191,303 @@
 
     (define scheme-font-lock-keywords scheme-font-lock-keywords-1)
 
+    ;;----------------------------------------------------------------
+    ;; The indentation (`scheme.el:562-760')
+    ;;------------------------------------------------------------------
+    ;; `scheme-indent-function' is "Scheme mode function for the value of
+    ;; the variable `lisp-indent-function'", and the `put' table below is
+    ;; what it consults: "for forms with no `scheme-indent-function'
+    ;; property the 2nd and subsequent lines will be indented with one
+    ;; space; if the value of the property is zero ... two spaces; if the
+    ;; value is a positive integer N, the first N lines ... four spaces
+    ;; and the rest two; if the value is `defun', like for `defun'; if a
+    ;; function, it is called."
+
+    ;;----------------------------------------------------------------
+    ;; `scheme-syntax-propertize' (`scheme.el:684-760')
+    ;;------------------------------------------------------------------
+    ;; `#;' datum comments and `#|...|#' block comments are not syntax
+    ;; the table can say, so the mode propertizes them: `#;' is given a
+    ;; comment-open syntax and the end of the commented sexp a
+    ;; comment-close one, and a `#/.../' regexp's closing `/` becomes a
+    ;; string delimiter.
+    ;;
+    ;; **`save-restriction' and `narrow-to-region' are not ported**
+    ;; (there is no narrowing in this tree), so where the C narrows to
+    ;; END around `forward-sexp' the port looks at where that sexp
+    ;; landed: one that runs past END is the C's `scan-error' at the
+    ;; narrowing, and takes the same branch.
+    (define (scheme-syntax-propertize-sexp-comment end)
+      ;; The C's `while' has a recursion inside its body - a nested `#;'
+      ;; restarts the whole scan after marking itself - so a continued
+      ;; iteration is `iterate', and **every** exit from it writes the
+      ;; closing marker for that iteration's FOUND, which is what the C's
+      ;; `(when found ...)' after the `while' does.
+      ;;--------------------------------------------------------------
+      (let ((state (syntax-ppss))
+            (checked (point)))
+        (when (eqv? 2 (list-ref state 7))
+          ;; "It's a sexp-comment. Tell parse-partial-sexp where it ends."
+          (let loop ((startpos (+ 2 (list-ref state 8))))
+            (define (iterate)
+              (let ((found (guard (e (#t (goto-char end) #f))
+                             (goto-char startpos)
+                             (forward-sexp 1)
+                             (let ((p (point)))
+                               (if (> p end)
+                                   (begin (goto-char end) #f)
+                                   p)))))
+                (let ((limit (min end (or found end))))
+                  (if (< checked limit)
+                      (begin
+                        (goto-char checked)
+                        ;; "Skip those #; inside comments and strings."
+                        (let scan ()
+                          (cond ((not (re-search-forward "\\\\(#\\\\);" limit #t))
+                                 (goto-char limit))  ; the C's `'move'
+                                ((list-ref (save-excursion
+                                             (parse-partial-sexp
+                                              startpos (match-beginning 0)))
+                                           8)
+                                 (scan))
+                                (else #f)))
+                        (set! checked (point))
+                        (if (< (point) limit)
+                            (begin
+                              (put-text-property (match-beginning 1)
+                                                 (match-end 1)
+                                                 'syntax-table
+                                                 (string-to-syntax "< cn"))
+                              ;; "Try the `forward-sexp' with the new text
+                              ;; state."
+                              (loop (point))
+                              (iterate))
+                            (when found
+                              (goto-char found)
+                              (put-text-property (- found 1) found
+                                                 'syntax-table
+                                                 (string-to-syntax "> cn")))))
+                      (when found
+                        (goto-char found)
+                        (put-text-property (- found 1) found
+                                           'syntax-table
+                                           (string-to-syntax "> cn")))))))
+             (iterate)))))
+
+    (define (scheme-syntax-propertize-regexp end)
+      (let* ((state (syntax-ppss))
+             (within-str (list-ref state 3))
+             (start-delim-pos (list-ref state 8)))
+        (when (and within-str
+                   (char=? #\# (char-after start-delim-pos)))
+          ;; The same `'move' as above: a failed search goes to END.
+          (let scan ()
+            (cond ((not (re-search-forward "/" end #t)) (goto-char end))
+                  ((eqv? -1 (modulo (save-excursion
+                                      (backward-char)
+                                      (skip-chars-backward "\\\\"))
+                                    2))
+                   (scan))
+                  (else #f)))
+          (when (< (point) end)
+            (put-text-property (match-beginning 0) (match-end 0)
+                               'syntax-table (string-to-syntax "|"))))))
+
+    (define (scheme-syntax-propertize beg end)
+      ;; "Add syntax-table properties to Scheme code between BEG and END.
+      ;; Used as the value of `syntax-propertize-function' in
+      ;; `scheme-mode'."
+      ;;--------------------------------------------------------------
+      (goto-char beg)
+      (scheme-syntax-propertize-sexp-comment end)
+      (scheme-syntax-propertize-regexp end)
+      ((syntax-propertize-rules
+        (list
+         (list "\\(#\\);"
+               (list 1 (list 'prog1 "< cn"
+                             (lambda () (scheme-syntax-propertize-sexp-comment end)))))
+         (list "\\(#\\)/"
+               (list 1 (lambda ()
+                         (if (list-ref (save-excursion
+                                         (syntax-ppss (match-beginning 0)))
+                                       8)
+                             #f
+                             (begin
+                               (put-text-property (match-beginning 1)
+                                                  (match-end 1)
+                                                  'syntax-table
+                                                  (string-to-syntax "|"))
+                               (scheme-syntax-propertize-regexp end)
+                               #f)))))))
+       (point) end)
+      )
+
+    (define *scheme-mit-dialect* (make-parameter #t))
+    ;; ^ GNU Emacs's `scheme-mit-dialect' (`scheme.el:262'), "If non-nil,
+    ;; scheme mode is specialized for MIT Scheme" - the default is `t',
+    ;; and the table below is what that gates.
+
+    (define (scheme-indent-function indent-point state)
+      ;; "This behaves like the function `lisp-indent-function', except
+      ;; that: i) it checks for a non-nil value of the property
+      ;; `scheme-indent-function' (or the deprecated `scheme-indent-hook')
+      ;; ... ii) if that property specifies a function, it is called with
+      ;; three arguments (not two), the third argument being the default
+      ;; (i.e., current) indentation."
+      ;;--------------------------------------------------------------
+      (let ((normal-indent (current-column)))
+        (goto-char (+ 1 (list-ref state 1)))
+        (parse-partial-sexp (point) *calculate-lisp-indent-last-sexp* 0 #t)
+        (if (and (list-ref state 2)
+                 (not (looking-at "\\sw\\|\\s_")))
+            ;; "car of form doesn't seem to be a symbol"
+            (begin
+              (if (not (> (save-excursion (forward-line 1) (point))
+                          *calculate-lisp-indent-last-sexp*))
+                  (begin (goto-char *calculate-lisp-indent-last-sexp*)
+                         (beginning-of-line)
+                         (parse-partial-sexp (point)
+                                             *calculate-lisp-indent-last-sexp*
+                                             0 #t)))
+              ;; "Indent under the list or under the first sexp on the
+              ;; same line as calculate-lisp-indent-last-sexp."
+              (backward-prefix-chars)
+              (current-column))
+            (let ((function (buffer-substring
+                             (point) (begin (forward-sexp 1) (point)))))
+              (let ((method (or (get (string->symbol function)
+                                     'scheme-indent-function)
+                                (get (string->symbol function)
+                                     'scheme-indent-hook))))
+                (cond ((or (eq? method 'defun)
+                           (and (not method)
+                                (> (string-length function) 3)
+                                (string-match "\\`def" function)))
+                       (lisp-indent-defform state indent-point))
+                      ((integer? method)
+                       (lisp-indent-specform method state
+                                             indent-point normal-indent))
+                      (else (if method
+                                (method state indent-point normal-indent)
+                                #f))))))))
+
+    (define (scheme-let-indent state indent-point normal-indent)
+      ;; "Let is different in Scheme" (`scheme.el:626').
+      ;;--------------------------------------------------------------
+      (skip-chars-forward " \t")
+      (if (looking-at "[-a-zA-Z0-9+*/?!@$%^&_:~]")
+          (lisp-indent-specform 2 state indent-point normal-indent)
+          (lisp-indent-specform 1 state indent-point normal-indent)))
+
+    (for-each
+     (lambda (entry)
+       (put (car entry) 'scheme-indent-function
+            (if (pair? (cdr entry)) (cdr entry) (cdr entry))))
+     ;; `(put 'begin 'scheme-indent-function 0)' and its siblings, in the
+     ;; C's order. A procedure's value is the procedure itself, since a
+     ;; symbol is not callable here.
+     (list
+      (cons 'element 1) (cons 'mode 1) (cons 'with-mode 1) (cons 'make 1)
+      (cons 'style 1) (cons 'root 1) (cons 'λ 1)
+      (cons 'begin 0)
+      (cons 'case 1)
+      (cons 'delay 0)
+      (cons 'do 2)
+      (cons 'lambda 1)
+      (cons 'let scheme-let-indent)
+      (cons 'let* 1)
+      (cons 'letrec 1)
+      (cons 'let-values 1)
+      (cons 'let*-values 1)
+      (cons 'and-let* 1)
+      (cons 'sequence 0)
+      (cons 'let-syntax 1)
+      (cons 'letrec-syntax 1)
+      (cons 'syntax-rules 'defun)
+      (cons 'syntax-case 2)
+      (cons 'with-syntax 1)
+      (cons 'library 1)
+      (cons 'eval-when 1)
+      (cons 'call-with-input-file 1)
+      (cons 'call-with-port 1)
+      (cons 'with-input-from-file 1)
+      (cons 'with-input-from-port 1)
+      (cons 'call-with-output-file 1)
+      (cons 'with-output-to-file 1)
+      (cons 'with-output-to-port 1)
+      (cons 'call-with-values 1)
+      (cons 'dynamic-wind 3)
+      (cons 'when 1)
+      (cons 'unless 1)
+      (cons 'letrec* 1)
+      (cons 'parameterize 1)
+      (cons 'define-values 1)
+      (cons 'define-record-type 1)
+      (cons 'define-library 1)
+      (cons 'guard 1)
+      (cons 'receive 2)
+      (cons 'test-group 1)
+      (cons 'test-group-with-cleanup 1)
+      (cons 'match 1)
+      (cons 'match-lambda 0)
+      (cons 'match-lambda* 0)
+      (cons 'match-let scheme-let-indent)
+      (cons 'match-let* 1)
+      (cons 'match-letrec 1)
+      (cons 'opt-lambda 1)
+      (cons 'opt*-lambda 1)
+      (cons 'let-optionals 2)
+      (cons 'let-optionals* 2)
+      (cons 'check-case 1)
+      (cons 'lambda-checked 1)))
+
+    ;; "MIT Scheme specific indentation" (`scheme.el:715'), which the C
+    ;; runs only when `scheme-mit-dialect' is non-nil - and it defaults
+    ;; to t.
+    (when (*scheme-mit-dialect*)
+      (for-each
+       (lambda (entry) (put (car entry) 'scheme-indent-function (cdr entry)))
+       (list
+        (cons 'fluid-let 1) (cons 'in-package 1) (cons 'local-declare 1)
+        (cons 'macro 1) (cons 'make-environment 0) (cons 'named-lambda 1)
+        (cons 'using-syntax 1)
+        (cons 'with-input-from-string 1) (cons 'with-output-to-string 0)
+        (cons 'with-values 1)
+        (cons 'syntax-table-define 2)
+        (cons 'list-transform-positive 1) (cons 'list-transform-negative 1)
+        (cons 'list-search-positive 1) (cons 'list-search-negative 1)
+        (cons 'access-components 1) (cons 'assignment-components 1)
+        (cons 'combination-components 1) (cons 'comment-components 1)
+        (cons 'conditional-components 1) (cons 'disjunction-components 1)
+        (cons 'declaration-components 1) (cons 'definition-components 1)
+        (cons 'delay-components 1) (cons 'in-package-components 1)
+        (cons 'lambda-components 1) (cons 'lambda-components* 1)
+        (cons 'lambda-components** 1) (cons 'open-block-components 1)
+        (cons 'pathname-components 1) (cons 'procedure-components 1)
+        (cons 'sequence-components 1) (cons 'unassigned?-components 1)
+        (cons 'unbound?-components 1) (cons 'variable-components 1))))
+
+    ;; "Docstring's pos in a `define' depends on whether it's a var or
+    ;; fun def" (`scheme.el:399-411'): the `define' entry is a *function*
+    ;; of point, so it is called the way `lisp-string-in-doc-position-p'
+    ;; calls one.
+    (define (scheme--define-doc-string-elt)
+      (forward-comment (point-max))
+      (if (char=? (char-after (point)) #\() 2 0))
+
+    (for-each
+     (lambda (entry) (put (car entry) 'scheme-doc-string-elt (cdr entry)))
+     (list
+      (cons 'lambda 2)
+      (cons 'lambda* 2)
+      (cons 'define scheme--define-doc-string-elt)
+      (cons 'define* 2)
+      (cons 'case-lambda 1)
+      (cons 'case-lambda* 1)
+      (cons 'define-syntax-rule 2)
+      (cons 'syntax-rules 2)
+      (cons 'case-lambda-checked 1)))
+
     ;; the three names `font-lock-defaults' uses
     (for-each (lambda (pair)
                 (font-lock-register-keyword-variable! (car pair) (cdr pair)))
@@ -210,13 +524,12 @@
       (setq-local 'comment-start-skip ";+[ \t]*")
       (setq-local 'comment-use-syntax #t)
       (setq-local 'comment-column 40)
-      ;; `(setq-local lisp-indent-function #'scheme-indent-function)'
-      ;; (`scheme.el:...') is not carried - `scheme-indent-function'
-      ;; and its `lisp-indent-function' properties are this library's
-      ;; named departure - so the variable keeps its default and Scheme
-      ;; forms indent as ordinary function calls. Storing the symbol
-      ;; (which is what a literal port does) would raise "Wrong type to
-      ;; apply" on the first indent instead.
+      (setq-local 'lisp-indent-function scheme-indent-function)
+      ;; "Docstring's pos in a `define' depends on whether it's a var or
+      ;; fun def" - `scheme-doc-string-elt' is the property this mode's
+      ;; doc strings are read from (`scheme.el:399-411').
+      (setq-local 'lisp-doc-string-elt-property 'scheme-doc-string-elt)
+      (setq-local 'syntax-propertize-function scheme-syntax-propertize)
       (setq-local 'imenu-case-fold-search #t)
       (set!font-lock-defaults!
        (list

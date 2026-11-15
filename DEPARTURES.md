@@ -3517,3 +3517,107 @@ pass did not chase - scheme-mode was the *previous* pass's subject and
 its face runs were not part of this differential. Named rather than
 guessed at: the harness is `/tmp/faces-scheme.el` and
 `/tmp/ours-scheme.scm`, and it is a two-line reproduction.
+
+# The departures this round of "fix those departures" closed
+# (2026-11-16)
+
+## `\<`, `\>`, `\b` and `\B` were glibc's word class, not the table's
+
+`%pass-through-escape` handed all four to glibc, whose word class is the
+locale's `[[:alnum:]_]`. Emacs's are `SYNTAX (c) == Sword` tests
+(`regex-emacs.c:5379`, `:5424`, `:5465`), and the two disagree wherever
+a table says `$` or `%` is a word constituent - and in **scheme-mode's
+font-lock table**, where `+-*/.<>=!?$%_&~^:` are `w` for fontification.
+That is why `(define-library ...)` painted `define` keyword and
+`-library` function-name: our `\>` held after `define` where Emacs's did
+not, so the level-1 entry matched a form Emacs leaves to the
+control-structures entry. All four are assertions now, like `\_<`, with
+the C's edge cases (`\b` at the buffer's ends is a boundary; `\B` there
+is not).
+
+## `syntax-propertize-rules` (`syntax.el:223`) - the engine, not the scan
+
+The macro compiles its rules into **one scan**: the regexps are joined
+with `\|` and the groups say which rule matched. Ported, as a
+**procedure** (Scheme has no macro-expansion-time `eval`, so a rule's
+REGEXP is a string and an ACTION is a procedure of no arguments); the
+engine's offset accounting, group-0 wrapping,
+`syntax-propertize--shift-groups-and-backrefs` and the match-data shift
+for code actions are the C's.
+
+Two bugs found in the porting: `offset` was rebound in a `let*` instead
+of `set!`-ed, so every rule after the first saw offset 0 and the
+`\(?1:` groups of rule 4 collided with the wrapper groups; and
+`%shift-match-data` used `list-tail` on a list that `match-data`
+legitimately shortens (it elides registers that did not match -
+`(match-data)` for `\(a\)\(b\)?' on "a" is `(0 1 0 1)` there too).
+
+**Placement**: the engine is in `(schemacs editor search)`, not
+`syntax.scm`, because the scan needs `re-search-forward`,
+`match-beginning` and `set-match-data`, and `syntax.scm` is below that
+library. `subregexp-context-p` (`subr.el`) and `regexp-opt-depth`
+(`regexp-opt.el`) moved with it - `(schemacs regexp-opt)` already
+imports `search`, so importing it back would be a cycle; they live there
+as `locate-file-internal` lives in `fileio`.
+
+`regexp-opt-depth` is a scanner rather than the C's
+`(string-match regexp "")` + `subregexp-context-p` pair (that library is
+below `string-match`); checked against Emacs on thirteen patterns,
+identical answers. `subregexp-context-p` is a scanner too, for the
+reason its comment gives: our engine words two of the three
+"non-context" parse errors differently, so the state is decided rather
+than diagnosed.
+
+Wired: `elisp-mode-syntax-propertize` is Emacs's four rules now (it was
+a hand-written single alternation) and `lisp-mode-syntax-propertize` is
+new, from `lisp-mode.el:106`.
+
+## `scheme-indent-function`, and the table behind it
+
+`scheme.el:562-760` is ported: the two functions and all 59
+`scheme-indent-function` properties (including the MIT-dialect block,
+which is gated on `scheme-mit-dialect` - default `t`), plus the nine
+`scheme-doc-string-elt` properties. `lisp-doc-string-elt-property` is a
+`defvar-local` in Emacs and was a plain variable here; it is read per
+buffer now, so `scheme-mode` can name its own property.
+
+Measured against `emacs -Q --batch`: `let` body 2, `lambda` body 2,
+`define` body 2, `if` continuation 4, `begin` body 2, and `do`'s body
+line answering **the pair `(4 1)`** - which is what
+`lisp-indent-specform` answers there.
+
+## `scheme-syntax-propertize`, and the narrowing it needs
+
+`scheme.el:684-760` is ported - `#;` datum comments get a comment
+delimiter pair around the commented sexp, `#/.../` gets a string end.
+**`save-restriction`/`narrow-to-region` are not ported**, so the C's
+narrowed `forward-sexp` is emulated by checking where the sexp landed: a
+sexp that runs past END is the C's `scan-error`.
+
+One real scanner bug came out of driving it: `%forw-comment` used
+`(set! nesting (- nesting 1))` **in value position**. `set!` answers
+*specified-or-unspecified* and here answered the unspecified value,
+so a nested `#|` comment made the nesting count `#<unspecified>` and
+`=` raised. It reads the new count through a `let` now.
+
+Two residual differences, both measured and both on the record:
+
+- A `#;` **inside a commented sexp** gets `< cn` but not the matching
+  `> cn` markers Emacs puts on the inner one, and ours writes a `> cn`
+  further along. The restart recursion (`(loop (point))` inside the
+  C's `while`, then continue) is ported; where it goes wrong is not
+  diagnosed.
+- Scheme indentation on two of the tree's own test files now differs
+  from Emacs's `indent-region` by a few levels - in the same place
+  `calculate-lisp-indent` and `indent-region` **disagree with each
+  other in Emacs itself** (the `icons.el` finding from the indentation
+  pass). Ours answers what `calculate-lisp-indent` answers.
+
+## Still not ported
+
+- `common-lisp-indent-function` and `cl-indent.el`'s property table
+  (~880 lines: ~300 of algorithm, 11 defcustoms, ~600 of `put` data).
+- `elisp-fontify-symbols` and the semantic-highlighting engine it
+  drives (`elisp-scope.el`, **2,868 lines**). Both are off by default
+  (`elisp-fontify-semantically` is `nil`), so no default session sees
+  them.

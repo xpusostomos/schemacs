@@ -8498,3 +8498,65 @@ measured against.
 - `lisp-mode-syntax-propertize`'s `|…|` rule, `elisp-fontify-symbols`, the
   `syntax-propertize-rules` macro, and `cl-indent.el`/`scheme-indent-function`
   are still not ported (unchanged from the indentation pass).
+
+# Closing the colourising pass's departures (2026-11-16)
+
+The four items the previous handoff named, worked in order of size.
+
+## `\<`, `\>`, `\b`, `\B` are assertions now
+
+They were glibc's word boundary; Emacs's are `Sword` tests of the syntax
+table, and scheme-mode's *font-lock* table makes `-` a word constituent
+- which is exactly why `define-library` painted `define` as a keyword
+and `-library` as a function name. That was the "scheme-mode departure"
+and it was the same bug as `\_<`.
+
+## `syntax-propertize-rules`: engine in `search.scm`
+
+Ported as a **procedure** (no expansion-time `eval` in Scheme): rule
+REGEXPs are strings, actions are thunks or `(prog1 STRING THUNK...)`.
+The C's offset accounting, group-0 wrapping, group/backref shifting and
+match-data shift are ported. `elisp-mode-syntax-propertize` is Emacs's
+four rules again; `lisp-mode-syntax-propertize` is new.
+
+Two traps worth remembering: **`offset` must be `set!`-ed**, not rebound
+in the `let*` (or every rule after the first uses 0 and numbered groups
+collide with the wrappers); and **`match-data` elides non-matching
+trailing registers**, so a shift must tolerate a short list.
+
+`subregexp-context-p` and `regexp-opt-depth` moved into `search.scm`
+with it - `(schemacs regexp-opt)` imports `search` (for `regexp-quote`),
+so it cannot be imported back.
+
+## `scheme-indent-function`, its table, and `scheme-syntax-propertize`
+
+The indentation is `scheme.el:562-760` whole, including the
+MIT-dialect block (default on) and the nine `scheme-doc-string-elt`
+properties. `lisp-doc-string-elt-property` became per-buffer, as Emacs's
+`defvar-local` is.
+
+`scheme-syntax-propertize` needed narrowing, which this tree does not
+have; the port checks where `forward-sexp` landed instead. Driving it
+found a genuine scanner bug: `%forw-comment` used `set!` **in value
+position**, where Scheme answers the unspecified value - a nested `#|`
+comment made the nesting count `#<unspecified>`.
+
+**A stray `set!` in value position is the same class as `when` in value
+position**; both are listed in the earlier handoffs and both cost an
+afternoon.
+
+## Verification
+
+- All suites pass (55 now, with `scheme-tests.scm` new).
+- Face-run differential: 24/24 elisp files exact.
+- Scheme indent differential over the tree's own `.scm` files: exact
+  except where Emacs's `indent-region` disagrees with its own
+  `calculate-lisp-indent`, plus a nested-`#;` marker case.
+- `tools/pty-check.py` to be run.
+
+## Still open (and their true size)
+
+- `common-lisp-indent-function` / `cl-indent.el`: **882 lines**, ~300
+  algorithm and ~600 of `put` data.
+- `elisp-fontify-symbols` / `elisp-scope.el`: **2,868 lines**; off by
+  default (`elisp-fontify-semantically` = nil).

@@ -183,6 +183,7 @@
     *build-marker-function*
     *byte-count-to-string-function*
     *calculate-lisp-indent-function*
+    *calculate-lisp-indent-last-sexp*
     *called-interactively*
     *case-fold-search*
     *case-replace*
@@ -475,6 +476,7 @@
     *run-hooks-function*
     *save-silently*
     *saved-region-selection*
+    *scheme-mit-dialect*
     *scratch-buffer-name*
     *search-case-fold?*
     *search-highlight*
@@ -2044,6 +2046,7 @@
     record-window-buffer
     recursive-edit
     redisplay-frames!
+    regexp-opt-depth
     regexp-quote
     regexp-unmatchable
     region-active-p
@@ -2116,11 +2119,16 @@
     scheme-font-lock-keywords
     scheme-font-lock-keywords-1
     scheme-font-lock-keywords-2
+    scheme-indent-function
+    scheme-let-indent
     scheme-mode
     scheme-mode-hook
     scheme-mode-map
     scheme-mode-syntax-table
     scheme-mode-variables
+    scheme-syntax-propertize
+    scheme-syntax-propertize-regexp
+    scheme-syntax-propertize-sexp-comment
     sclose
     scomment
     scomment-fence
@@ -2423,6 +2431,7 @@
     string-trim-right
     string-width
     strip-undo-boundaries
+    subregexp-context-p
     substitute-env-vars
     substitute-in-file-name
     substitute-key-definition
@@ -2445,6 +2454,8 @@
     syntax-propertize
     syntax-propertize-chunks
     syntax-propertize-multiline
+    syntax-propertize-precompile-rules
+    syntax-propertize-rules
     syntax-propertize-wholelines
     syntax-table
     syntax-table-p

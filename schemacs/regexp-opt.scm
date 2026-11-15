@@ -278,5 +278,4 @@
                 ((string=? all "^-") "[-^]")
                 (else (string-append "[" all "]"))))))
 
-
     ))

@@ -56,7 +56,8 @@
           modify-syntax-entry set-syntax-table parse-partial-sexp syntax-ppss
           skip-chars-forward skip-chars-backward skip-syntax-forward skip-syntax-backward
           backward-prefix-chars char-syntax *parse-sexp-ignore-comments*
-          forward-comment scan-error?)
+          forward-comment scan-error? string-to-syntax
+          ppss-comment-or-string-start)
     (only (schemacs editor indent) indent-line-to)
     (only (schemacs editor newcomment) indent-for-comment comment-indent-default)
     (only (schemacs editor lisp)
@@ -72,7 +73,7 @@
     (only (schemacs editor marker) copy-marker markerp marker-position set-marker)
     (only (schemacs editor indentc) current-column)
     (only (schemacs editor search) looking-at re-search-forward
-          match-beginning match-end save-match-data)
+          match-beginning match-end save-match-data syntax-propertize-rules)
     (only (scheme read) read)
     (only (guile) open-input-string last-pair)
     (only (schemacs editor subr) make-syntax-table)
@@ -109,7 +110,14 @@
           calculate-lisp-indent lisp-indent-function lisp-indent-specform
           lisp--local-defform-body-p
           lisp-indent-defform lisp-body-indent lisp-indent-offset
-          lisp-comment-indent indent-sexp)
+          lisp-comment-indent indent-sexp
+          ;; the state `calculate-lisp-indent' leaves for the
+          ;; `lisp-indent-function' variable's value to read
+          *calculate-lisp-indent-last-sexp*
+          ;; `lisp-doc-string-elt-property' is a `defvar-local' here - a
+          ;; mode says which property it uses (scheme-mode's is
+          ;; `scheme-doc-string-elt')
+          lisp-doc-string-elt-property)
 
   (begin
 
@@ -627,7 +635,15 @@
     ;; that gives a docstring `font-lock-doc-face' instead of the
     ;; string face.
     ;; ---------------------------------------------------------------
-    (define lisp-doc-string-elt-property 'doc-string-elt)
+    (define lisp-doc-string-elt-property-variable 'doc-string-elt)
+    ;; ^ GNU Emacs's `lisp-doc-string-elt-property' (`lisp-mode.el:610')
+    ;; is a `defvar-local': "Property to use to determine the position of
+    ;; docstrings." A mode may name its own, and `scheme-mode' does
+    ;; (`scheme-doc-string-elt') - so the value is read per buffer.
+
+    (define (lisp-doc-string-elt-property)
+      (buffer-local-value (current-buffer) 'lisp-doc-string-elt-property
+                          lisp-doc-string-elt-property-variable))
 
     (define (cl--defmethod-doc-pos)
       ;; "Return the index of the docstring for a `cl-defmethod'.
@@ -644,7 +660,7 @@
           n)))
 
     (for-each
-     (lambda (e) (put (car e) lisp-doc-string-elt-property (cdr e)))
+     (lambda (e) (put (car e) (lisp-doc-string-elt-property) (cdr e)))
      (list
       (cons 'autoload 3)
       (cons 'cl--define-built-in-type 3)
@@ -730,7 +746,7 @@
                           (match-string 1)))))
              (docelt (and firstsym
                           (get (string->symbol firstsym)
-                               lisp-doc-string-elt-property))))
+                               (lisp-doc-string-elt-property)))))
         (and docelt
              (save-excursion
                (when (procedure? docelt)
@@ -1851,6 +1867,37 @@ ENDPOS is encountered."
       "Major mode for buffers holding data written in Lisp syntax."
       (lisp-mode-variables #f #t #f))
 
+    (define lisp-mode-syntax-propertize-rules
+      ;; "`syntax-propertize' rules for Common Lisp code."
+      ;; (`lisp-mode.el:88-104'), the C's `(syntax-propertize-precompile-
+      ;; rules ...)' - which is the rules themselves here.
+      ;;
+      ;;   - "Give entire multiple escape sections symbol syntax. Without
+      ;;     this, `forward-sexp' and co. treat `symbols| like |this' as
+      ;;     three expressions."
+      ;;   - "Give numeric args and the sub character in dispatch macros
+      ;;     prefix syntax."
+      ;;--------------------------------------------------------------
+      (list
+       (list "|\\(?:\\\\|\\|[^|]\\)+|"
+             (list 0 (lambda ()
+                       (if (ppss-comment-or-string-start (syntax-ppss))
+                           #f
+                           (string-to-syntax "_")))))
+       (list "#\\(?1:[0-9]*[*+.:=ACPSacps-]\\)\\|#\\(?1:[0-9]+\\)(\\|,\\(?1:[.@]\\)"
+             (list 1 (lambda ()
+                       (if (ppss-comment-or-string-start (syntax-ppss))
+                           #f
+                           (string-to-syntax "'")))))))
+
+    (define (lisp-mode-syntax-propertize start end)
+      ;; "Add syntax-table properties to Common Lisp code between START
+      ;; and END. Used as the value of `syntax-propertize-function' in
+      ;; `lisp-mode'."
+      ;;--------------------------------------------------------------
+      ((syntax-propertize-rules lisp-mode-syntax-propertize-rules)
+       start end))
+
     (define-derived-mode (lisp-mode lisp-data-mode "Lisp" lisp-mode-map
                                     lisp-mode-hook lisp-mode-syntax-table)
       "Major mode for editing programs in Common Lisp and other similar
@@ -1863,6 +1910,7 @@ Lisps."
       (setq-local 'comment-start-skip
                   "\\(\\(^\\|[^\\\n]\\)\\(\\\\\\\\\\)*\\)\\(;+\\|#|\\) *")
       (setq-local 'comment-end-skip "[ \t]*\\(\\s>\\||#\\)")
-      (setq-local 'font-lock-comment-end-skip "|#"))
+      (setq-local 'font-lock-comment-end-skip "|#")
+      (setq-local 'syntax-propertize-function lisp-mode-syntax-propertize))
 
     ))

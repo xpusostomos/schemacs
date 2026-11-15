@@ -1241,7 +1241,16 @@
                ((and (= code sendcomment)
                      (= (%comment-style syntax 0) style)
                      (if (%nested? syntax)
-                         (and (> nesting 0) (= (set! nesting (- nesting 1)) 0))
+                         ;; **Not `(set! nesting (1- nesting))' in
+                         ;; value position**: `set!' answers the
+                         ;; *unspecified* value here (and the old one
+                         ;; elsewhere), where Elisp's `setq' answers the
+                         ;; new one. A `#|' comment nested once in
+                         ;; Scheme code read `#<unspecified>' as the
+                         ;; nesting count and died in `='.
+                         (let ((new (- nesting 1)))
+                           (set! nesting new)
+                           (and (> new -1) (= new 0)))
                          (< nesting 0))
                      (not (and escape
                                (memv (logand prev #xff) (list sescape scharquote)))))

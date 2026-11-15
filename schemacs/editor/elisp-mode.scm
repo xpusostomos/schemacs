@@ -29,10 +29,13 @@
     (only (guile) caddr)
     (prefix (schemacs editor keymap) km:)
     (only (schemacs editor derived) define-derived-mode)
-    (only (schemacs editor buffer) current-buffer set-buffer-local-value!)
+    (only (schemacs editor buffer)
+          current-buffer set-buffer-local-value! set-point buffer-pt)
     (only (schemacs editor syntax) modify-syntax-entry string-to-syntax
           syntax-ppss)
-    (only (schemacs editor search) re-search-forward match-beginning match-end)
+    (only (schemacs editor search)
+          re-search-forward match-beginning match-end
+          syntax-propertize-rules)
     (only (schemacs editor buffer) *case-fold-search*)
     (only (schemacs editor textprop) put-text-property)
     (only (schemacs editor subr) make-syntax-table)
@@ -91,19 +94,11 @@
       ;; and END. Used as the value of `syntax-propertize-function' in
       ;; `emacs-lisp-mode'."
       ;;
-      ;; The C is one call to `(syntax-propertize-rules ...)', the macro
-      ;; that compiles its rules into a **single scan**. **The macro is
-      ;; not ported** (`syntax.scm`'s header says why: it needs
-      ;; `regexp-opt-depth`, `subregexp-context-p` and match-data
-      ;; shifting), so the four rules are written out here as one
-      ;; alternation - one scan, which is what the macro produces and
-      ;; what the rules need. Four separate scans were tried first and
-      ;; cost 35 s on a 170 KB file: each restart jumped `syntax-ppss`
-      ;; backwards, throwing away the parse cache the rules read on
-      ;; every match.
+      ;; The C is one call to `(syntax-propertize-rules ...)', whose
+      ;; rules are the four below; the engine (`syntax.el') lives in
+      ;; `(schemacs editor search)' - see its placement note - and gives
+      ;; the **single scan** the rules need.
       ;;
-      ;; The groups are the rules, in the C's order: 1 `##', 2 `,@',
-      ;; 3 `?\N{...}', and 4/5/6 the three reader forms after a `#'.
       ;; Each action refuses to fire inside a string or comment, which
       ;; is what `(nth 8 (syntax-ppss))` answers - at point for the
       ;; first three (the C's `(unless (nth 8 (syntax-ppss)) ...)`,
@@ -111,38 +106,39 @@
       ;; last (`(save-excursion (nth 8 (syntax-ppss (match-beginning
       ;; 0))))`).
       ;;--------------------------------------------------------------
-      (goto-char start)
+      (set-point (current-buffer) start)
       (parameterize ((*case-fold-search* #f))
-        (let loop ()
-          (when (re-search-forward
-                 "\\(##\\)\\|\\(,@\\)\\|\\(\\\\?\\\\\\\\N{[-A-Za-z0-9 ]\\\\{,100\\\\}}\\)\\|#\\(?:\\(&[0-9]+\\)\"\\|\\(s\\)(\\|\\(\\^+\\)\\[\\)"
-                 end #t)
-            (cond
-             ((match-beginning 1)               ; "Empty symbol."
-              (unless (list-ref (syntax-ppss) 8)
-                (put-text-property (match-beginning 1) (match-end 1)
-                                   'syntax-table (string-to-syntax "_"))))
-             ((match-beginning 2)               ; ",@" - "Prevent the @
-                                                ; from becoming part of a
-                                                ; following symbol."
-              (unless (list-ref (syntax-ppss) 8)
-                (put-text-property (match-beginning 2) (match-end 2)
-                                   'syntax-table (string-to-syntax "'"))))
-             ((match-beginning 3)               ; "Unicode character names."
-              (unless (list-ref (syntax-ppss) 8)
-                (put-text-property (match-beginning 3) (match-end 3)
-                                   'syntax-table (string-to-syntax "_"))))
-             (else
-              ;; Bool-vector (`#&N"'), record (`#s(') and char-table
-              ;; (`#^^['): the part after the `#' gets quote syntax.
-              (let ((g (cond ((match-beginning 4) 4)
-                             ((match-beginning 5) 5)
-                             (else 6))))
-                (unless (save-excursion
-                          (list-ref (syntax-ppss (match-beginning 0)) 8))
-                  (put-text-property (match-beginning g) (match-end g)
-                                     'syntax-table (string-to-syntax "'"))))))
-            (loop))))
+        ((syntax-propertize-rules
+          (list
+           ;; "Empty symbol."
+           (list "##"
+                 (list 0 (lambda ()
+                           (if (list-ref (syntax-ppss) 8)
+                               #f
+                               (string-to-syntax "_")))))
+           ;; "Prevent the @ from becoming part of a following symbol."
+           (list ",@"
+                 (list 0 (lambda ()
+                           (if (list-ref (syntax-ppss) 8)
+                               #f
+                               (string-to-syntax "'")))))
+           ;; "Unicode character names. (The longest name is 88
+           ;; characters long.)"
+           (list "\\?\\\\N{[-A-Za-z0-9 ]\\{,100\\}}"
+                 (list 0 (lambda ()
+                           (if (list-ref (syntax-ppss) 8)
+                               #f
+                               (string-to-syntax "_")))))
+           ;; "Bool-vector (`#&N"'), record (`#s(') and char-table
+           ;; (`#^^['): the part after the `#' gets quote syntax."
+           (list "#\\(?:\\(?1:&[0-9]+\\)\"\\|\\(?1:s\\)(\\|\\(?1:\\^+\\)\\[\\)"
+                 (list 1 (lambda ()
+                           (if (save-excursion
+                                 (list-ref (syntax-ppss (match-beginning 0)) 8))
+                               #f
+                               (string-to-syntax "'")))))))
+         (buffer-pt (current-buffer))
+         end))
       #f)
 
     (define emacs-lisp-mode-hook '())
