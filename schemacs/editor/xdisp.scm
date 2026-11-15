@@ -132,7 +132,9 @@
          ;; `w->cursor_off_p', which `internal-show-cursor' turns off and
          ;; the cursor type is resolved against
          window-cursor-off?
-         sync-frame-size! window-body-height
+         sync-frame-size! window-body-height window-body-top window-wants-tab-line
+         window-tab-line-height window-parameter window-last-tab-line
+         set!window-last-tab-line
          window-body-width window-buffer set!window-buffer window-height window-left
          window-list
          ;; `WINDOW_XFRAME (w)': the frame a window is on, which is what
@@ -2094,7 +2096,7 @@
       ;; its text over the top of the one above: a split window's lower
       ;; half painted at y 0, on top of the upper half's first rows.
       ;;--------------------------------------------------------------
-      (+ y (row->pixel-y (window-top window))))
+      (+ y (row->pixel-y (window-body-top window))))
 
     (define (rows-above-in-window window line-start)
       ;; How many rows of WINDOW are above the line beginning at
@@ -2180,7 +2182,7 @@
         ;; in position 1 (expecting pair)". The docstring above has
         ;; always said `#f' here.
         (if (and (>= screen-row 0) (< screen-row vheight))
-          (cons (+ screen-row (window-top window))
+          (cons (+ screen-row (window-body-top window))
                 (+ (window-left window)
                    (if (window-wraps? window)
                        ;; the column within its *row*: a continuation row
@@ -2765,7 +2767,7 @@
                                            0 -1))))
              (desired (window-desired-matrix window)))
         (let loop ((row 0)
-                   (y (row->pixel-y (window-top window)))
+                   (y (row->pixel-y (window-body-top window)))
                    (line-start (window-start window)))
           (if (or (>= row vheight) (>= y y-limit) (not desired))
               #t
@@ -2956,7 +2958,7 @@
       ;; - every row past the end of the buffer - still carries the y its
       ;; record was made with (0), so blanking from the record wiped the
       ;; window's first line once for every empty row.
-      (let ((y (row->pixel-y (+ (window-top window) index))))
+      (let ((y (row->pixel-y (+ (window-body-top window) index))))
         (fill-line-end-row! (current-display) window index y
                             (window-left window)
                             (window-body-width window)
@@ -3424,6 +3426,50 @@
                           border (face->attribute 'vertical-border))
               (loop (+ 1 row) end))))))
 
+    (define (render-window-tab-line! window)
+      ;; Draw WINDOW's tab line: the row above its text.
+      ;;
+      ;; GNU Emacs's `display_mode_line` with `TAB_LINE_ACTIVE_FACE_ID`
+      ;; (`xdisp.c:28220`), reached from `display_mode_lines` for a
+      ;; window `window_wants_tab_line` says wants one. The format is the
+      ;; window parameter `tab-line-format' when the window names one,
+      ;; and the *buffer's* `tab-line-format' otherwise
+      ;; (`xdisp.c:28182`) - which is the variable `tab-line-mode` sets.
+      ;;
+      ;; **The string is `format-mode-line`'s**, the same evaluator the
+      ;; mode line uses: `tab-line-format`'s default value is
+      ;; `(:eval (tab-line-format))`, whose procedure returns one
+      ;; propertized string with a face run per tab. `draw-mode-line!`
+      ;; already draws runs of `face` properties, `:box` included, so a
+      ;; tab's box and its face come from the string itself.
+      ;;
+      ;; The base face is `tab-line-active`/`tab-line-inactive` by
+      ;; window selection, as the mode line's is (`faces.el:3039`: both
+      ;; inherit `tab-line`, which is what gives the row its background).
+      ;;--------------------------------------------------------------
+      (when (window-wants-tab-line window)
+      (let* ((x0 (window-left window))
+             (width (window-body-width window))
+             (y (row->pixel-y (window-top window)))
+             (format (or (window-parameter window 'tab-line-format)
+                         (buffer-local-value (window-buffer window)
+                                             'tab-line-format #f)))
+             (line (mode-line-pad
+                    (mode-line-truncate
+                     (parameterize ((*mode-line-window* window))
+                       (format-mode-line format window))
+                     width)
+                    width))
+             (face (if (eq? window (selected-window))
+                       'tab-line-active
+                       'tab-line-inactive))
+             (record (list line face y x0)))
+        (unless (and (not (windows-or-buffers-changed?))
+                     (not (frame-garbaged-p (window-frame window)))
+                     (equal? (window-last-tab-line window) record))
+          (draw-mode-line! line face y x0)
+          (set!window-last-tab-line window record)))))
+
     (define (force-mode-line-update . args)
       ;; GNU Emacs's `force-mode-line-update' (`xdisp.c`): mark the mode
       ;; line, or every mode line with ALL, for redrawing.
@@ -3884,6 +3930,13 @@
         ;; **No mode line for the minibuffer window**, which is Emacs's
         ;; `MINI_WINDOW_P` test in `display_mode_lines`: a minibuffer
         ;; window is one row and that row is its text.
+        ;; The tab line first: it is the row above the text, and
+        ;; `display_mode_lines` draws mode line, tab line, header line in
+        ;; that order (`xdisp.c:28166`) because each `display_mode_line`
+        ;; claims the next free row from the bottom - here the rows are
+        ;; fixed, so the order does not matter and the tab line is drawn
+        ;; where it is read.
+        (for-each render-window-tab-line! body)
         (for-each render-window-mode-line! body)
         ;; Place the terminal cursor: in the minibuffer while one is
         ;; active (Emacs's `cursor-in-echo-area'), else at the selected
@@ -3934,7 +3987,7 @@
                     selected
                     (window-pixel-y
                      selected
-                     (- (car at) (window-top selected))))
+                     (- (car at) (window-body-top selected))))
                    (cdr at)
                    (cursor-cells buffer (window-point selected))
                    (car glyph) (cdr glyph))
@@ -3958,7 +4011,7 @@
                                         selected
                                         (window-pixel-y
                                          selected
-                                         (- (car at) (window-top selected))))
+                                         (- (car at) (window-body-top selected))))
                                        (cdr at)
                                        (cursor-cells buffer
                                                      (window-point selected))

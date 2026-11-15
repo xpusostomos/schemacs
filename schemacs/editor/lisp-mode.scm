@@ -75,7 +75,7 @@
     (only (schemacs editor search) looking-at re-search-forward
           match-beginning match-end save-match-data syntax-propertize-rules)
     (only (scheme read) read)
-    (only (guile) open-input-string last-pair)
+    (only (guile) module-ref open-input-string last-pair resolve-module)
     (only (schemacs editor subr) make-syntax-table)
     ;; the mode's parents, and the variables it copies
     (only (schemacs editor simple) fundamental-mode)
@@ -110,6 +110,12 @@
           calculate-lisp-indent lisp-indent-function lisp-indent-specform
           lisp--local-defform-body-p
           lisp-indent-defform lisp-body-indent lisp-indent-offset
+          ;; `lisp-indent-local-overrides' (`lisp-mode.el:1270'): "An
+          ;; alist of file-local or directory-local indent
+          ;; specifications." Read by `lisp-indent-function' and by
+          ;; `cl-indent.scm''s `lisp-indent-find-method'; nothing here
+          ;; fills it, and a file can.
+          lisp-indent-local-overrides
           lisp-comment-indent indent-sexp
           ;; the state `calculate-lisp-indent' leaves for the
           ;; `lisp-indent-function' variable's value to read
@@ -1898,15 +1904,37 @@ ENDPOS is encountered."
       ((syntax-propertize-rules lisp-mode-syntax-propertize-rules)
        start end))
 
+    (define %common-lisp-indent-function #f)
+    ;; ^ `(schemacs editor cl-indent)`'s `common-lisp-indent-function`,
+    ;; once that library has loaded. Emacs's is `;;;###autoload`ed
+    ;; (`cl-indent.el:208`), so the symbol is `fboundp` before the file
+    ;; is; the name is fetched here on first use for the same reason.
+
+    (define (%cl-indent-function)
+      ;; Emacs's autoload, spelled the way `files.sld`'s `%autoload-mode`
+      ;; is: `resolve-module` loads a library that is not loaded yet.
+      ;;
+      ;; **It is a resolve and not an import**, because `cl-indent.scm`
+      ;; imports *this* library (it needs `lisp-body-indent` and
+      ;; `lisp-indent-local-overrides`), so an import back would be a
+      ;; cycle. By the time `lisp-mode` runs, cl-indent's own import of
+      ;; this library resolves to the copy already loaded.
+      ;;--------------------------------------------------------------
+      (unless %common-lisp-indent-function
+        (let ((module (resolve-module '(schemacs editor cl-indent) #t)))
+          (set! %common-lisp-indent-function
+                (module-ref module 'common-lisp-indent-function))))
+      %common-lisp-indent-function)
+
     (define-derived-mode (lisp-mode lisp-data-mode "Lisp" lisp-mode-map
                                     lisp-mode-hook lisp-mode-syntax-table)
       "Major mode for editing programs in Common Lisp and other similar
 Lisps."
       ;; `(setq-local lisp-indent-function #'common-lisp-indent-function)'
-      ;; is not carried: `cl-indent.el`'s table is ~900 lines and is a
-      ;; departure this library's header names. The symbol cannot be
-      ;; stored as a stand-in - a symbol is not callable here - so the
-      ;; variable keeps its default.
+      ;; - Emacs sets the *symbol*, which its autoload machinery turns
+      ;; into the loaded function; a Scheme symbol is not callable, so
+      ;; the procedure is fetched first. See `%cl-indent-function`.
+      (setq-local 'lisp-indent-function (%cl-indent-function))
       (setq-local 'comment-start-skip
                   "\\(\\(^\\|[^\\\n]\\)\\(\\\\\\\\\\)*\\)\\(;+\\|#|\\) *")
       (setq-local 'comment-end-skip "[ \t]*\\(\\s>\\||#\\)")

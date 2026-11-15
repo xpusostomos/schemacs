@@ -70,7 +70,11 @@
           fetch-char set-point buffer-beg buffer-pt
           ;; `window_outdated` (`window.c:231`) asks the buffer's two
           ;; modification ticks.
-          buffer-modified-tick buffer-overlay-modified-tick)
+          buffer-modified-tick buffer-overlay-modified-tick
+          ;; `window_wants_tab_line` reads the *buffer's* `tab-line-format`
+          ;; (`BVAR (XBUFFER (WINDOW_BUFFER (w)), tab_line_format)`), which
+          ;; is one of the buffer-local slots this library's table holds.
+          buffer-local-value)
     ;; The seam `insdel.scm` declares for `adjust_suspend_auto_hscroll` -
     ;; it reads the selected window, which is this library's, so it is
     ;; installed here.
@@ -288,6 +292,13 @@
    ;; changed is not written again - `update_window`'s diff for the row
    ;; the mode line occupies.
    window-last-mode-line set!window-last-mode-line
+   ;; `w->window_parameters` (`window.c'): the alist a window keeps for
+   ;; whatever names it - the tab line's scroll offset and tab order, and
+   ;; `quit-restore`.
+   window-parameter set-window-parameter
+   window-parameters set!window-parameters
+   window-wants-tab-line window-tab-line-height window-body-top
+   window-last-tab-line set!window-last-tab-line
    ;; `window_outdated` (`window.c:231`), which the redisplay asks before
    ;; it trusts a window's glyph matrix.
    window-outdated?
@@ -351,7 +362,9 @@
        prev-buffers next-buffers
        last-buffer last-modified last-overlay-modified last-start
        last-width last-height last-hscroll last-point last-mark
-       last-mode-line)
+       last-mode-line
+       parameters
+       last-tab-line)
       window-type?
       (frame     window-frame       set!window-frame)
       ;; ^ The frame this window is on: GNU Emacs's `w->frame', the first
@@ -485,6 +498,23 @@
       ;; (w->pointm)` otherwise.
       (last-mark window-last-mark set!window-last-mark)
       (last-mode-line window-last-mode-line set!window-last-mode-line)
+      (last-tab-line window-last-tab-line set!window-last-tab-line)
+      (parameters window-parameters set!window-parameters)
+      ;; ^ ... and `last-tab-line`, the record of what the tab line row
+      ;; last had written to it - the same compare-and-skip that
+      ;; `last-mode-line` is for, one row above.
+      ;; ^ GNU Emacs's `w->window_parameters` (`window.h`), the alist
+      ;; `window-parameter` reads and `set-window-parameter` writes. It is
+      ;; how a *window* - rather than a buffer or a frame - remembers
+      ;; something: the tab line's own scroll offset and tab order live
+      ;; here (`tab-line.el`), and so does `quit-restore`. The C keeps it
+      ;; in the struct and saves it across a `set-window-buffer`; so does
+      ;; this. Last in the record because it is the newest field, as
+      ;; `last-mode-line` was before it.
+      ;;
+      ;; `last-tab-line` is this tree's own - the C has no field for it,
+      ;; because the tab line is a row of the glyph matrix it compares -
+      ;; and it is what lets an unchanged tab line cost nothing.
       ;; ^ `(STRING FACE Y X)` as the mode line row was last drawn, or
       ;; `#f` when nothing of ours is on that row. GNU Emacs needs no such
       ;; field: the mode line is a row of the window's glyph matrix
@@ -643,11 +673,71 @@
             (cons frame position)
             (cons frame (cons #f #f)))))
 
+    (define (window-wants-tab-line window)
+      ;; GNU Emacs's `window_wants_tab_line` (`window.c:6101`): whether
+      ;; WINDOW's redisplay draws a tab line above its text.
+      ;;
+      ;; The C's four tests, in its order:
+      ;;
+      ;;   * a leaf window, not the mini window and not a pseudo window -
+      ;;     a window that shows no buffer has no tab line;
+      ;;   * the window parameter `tab-line-format' is not the symbol
+      ;;     `none' (which is how a window opts out even when its buffer
+      ;;     has the mode on);
+      ;;   * the parameter, if it names anything, decides; otherwise the
+      ;;     *buffer's* `tab-line-format' does - which is the variable
+      ;;     `tab-line-mode' sets;
+      ;;   * the window has room: the C asks for more than its mode line
+      ;;     (and header line) plus one text line. There is no header line
+      ;;     here, so that is a height of more than two rows - the tab
+      ;;     line must not leave a window with no text at all.
+      ;;
+      ;; **The variable is read from the window's buffer, not the current
+      ;; one**, as `BVAR (XBUFFER (WINDOW_BUFFER (w)), tab_line_format)`
+      ;; is: the redisplay of one window while another is current is the
+      ;; whole point of a per-window tab line.
+      ;;
+      ;; The pixel test of the C is a row test here, for the reason every
+      ;; height in this tree is in rows - see `window-body-height`.
+      ;;--------------------------------------------------------------
+      (let* ((buffer (window-buffer window))
+             (parameter (window-parameter window 'tab-line-format))
+             (format (if parameter
+                         parameter
+                         (and buffer
+                              (buffer-local-value buffer 'tab-line-format #f)))))
+        (and (not (window-internal? window))
+             (not (window-minibuffer-p window))
+             buffer
+             (not (eq? parameter 'none))
+             format
+             (> (window-height window) 2))))
+
+    (define (window-tab-line-height window)
+      ;; GNU Emacs's `window-tab-line-height` (`window.c:1233`): "Return
+      ;; the height in pixels of WINDOW's tab-line."
+      ;;
+      ;; **Rows here, as every height in this tree is**: the tab line is
+      ;; one row when it is shown and none when it is not, and the C's
+      ;; pixel height on a text terminal is one line height.
+      ;;--------------------------------------------------------------
+      (if (window-wants-tab-line window) 1 0))
+
     (define (window-body-height window)
       ;; The rows of the window available to text: everything above its
-      ;; mode line. GNU Emacs's `window-body-height'.
+      ;; mode line, and below its tab line. GNU Emacs's
+      ;; `window-body-height'.
       ;;--------------------------------------------------------------
-      (max 1 (- (window-height window) 1)))
+      (max 1 (- (window-height window) 1 (window-tab-line-height window))))
+
+    (define (window-body-top window)
+      ;; The frame row WINDOW's text starts on - `window-top` plus the
+      ;; tab line, which is the row above the text. The C's
+      ;; `WINDOW_TOP_EDGE_Y` plus `WINDOW_TAB_LINE_HEIGHT`
+      ;; (`xdisp.c:3849`, where `first_vpos` is the tab line and the
+      ;; header line).
+      ;;--------------------------------------------------------------
+      (+ (window-top window) (window-tab-line-height window)))
 
     (define (window-right-border? window)
       ;; Whether the last column of WINDOW is the vertical border that
@@ -731,6 +821,40 @@
              (let ((before (fetch-char buffer (- position 1))))
                (and (char? before) (char=? #\newline before)))))
         position))
+
+    (define (window-parameter window parameter)
+      ;; GNU Emacs's `window-parameter' (`window.c:2392'): "Return
+      ;; WINDOW's value for PARAMETER. WINDOW can be any window and
+      ;; defaults to the selected one."
+      ;;
+      ;; WINDOW is required here where the C makes it optional: this
+      ;; tree's callers all pass it, and a nil WINDOW would have to mean
+      ;; "the selected window" through `selected-window`, which this
+      ;; library owns - so the default is one `(or window (selected-window))`
+      ;; away if a caller needs it.
+      ;;--------------------------------------------------------------
+      (let ((cell (assq parameter (window-parameters window))))
+        (and cell (cdr cell))))
+
+    (define (set-window-parameter window parameter value)
+      ;; GNU Emacs's `set-window-parameter' (`window.c:2403'): "Set
+      ;; WINDOW's value of PARAMETER to VALUE. Return VALUE."
+      ;;
+      ;; **The value is stored even when it is nil**, as the C's
+      ;; `Fassq`/`Fsetcdr` pair does - a parameter set to nil is not the
+      ;; same as one never set, and `window-parameter` answers nil for
+      ;; both, so only a `window-parameters` listing sees the difference.
+      ;; The C's face-remapping invalidation for a changed window
+      ;; parameter is not carried: this tree has no face remapping that
+      ;; filters on one.
+      ;;--------------------------------------------------------------
+      (let ((cell (assq parameter (window-parameters window))))
+        (if cell
+            (set-cdr! cell value)
+            (set!window-parameters window
+                                   (cons (cons parameter value)
+                                         (window-parameters window)))))
+      value)
 
     (define (set-window-start! window position)
       ;; Make WINDOW's display begin at buffer position POSITION - GNU
@@ -907,12 +1031,12 @@
                         top height left width #f '()
                         0 0 #f 0 '() '()
                         ;; nothing built yet: `window_outdated?` says so
-                        #f 0 0 0 0 0 0 0 -1 #f)
+                        #f 0 0 0 0 0 0 0 -1 #f '() #f)
           (make<window> frame #f #f #f #f
                         0 0 #f 0 0
                         top height left width #f '()
                         0 0 #f 0 '() '()
-                        #f 0 0 0 0 0 0 0 -1 #f)))
+                        #f 0 0 0 0 0 0 0 -1 #f '() #f)))
 
     ;;----------------------------------------------------------------
     ;; Editor state

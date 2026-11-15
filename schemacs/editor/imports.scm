@@ -68,10 +68,12 @@
     (schemacs editor startup)
     (except (schemacs editor command)  quit-char *quit-flag* *inhibit-quit* signal-quit maybe-quit)
     (schemacs editor newcomment)
+    (schemacs editor cl-indent)
     (except (schemacs editor fns)  compare-strings line-number-at-pos)
     (schemacs editor timefns)
     (schemacs editor custom)
     (schemacs editor derived)
+    (schemacs editor icons)
     (schemacs editor easy-mmode)
     (except (schemacs editor window)  *cursor-in-echo-area*)
     (schemacs editor warnings)
@@ -335,6 +337,7 @@
     *history-add-new-input*
     *history-delete-duplicates*
     *history-length*
+    *icon-preference*
     *indent-tabs-mode*
     *inhibit-field-text-motion*
     *inhibit-file-name-handlers*
@@ -376,6 +379,18 @@
     *line-move-visual*
     *line-number-display-limit*
     *line-number-display-limit-width*
+    *lisp-backquote-indentation*
+    *lisp-indent-backquote-substitution-mode*
+    *lisp-indent-error-function*
+    *lisp-indent-maximum-backtracking*
+    *lisp-lambda-list-keyword-alignment*
+    *lisp-lambda-list-keyword-parameter-alignment*
+    *lisp-lambda-list-keyword-parameter-indentation*
+    *lisp-loop-forms-indentation*
+    *lisp-loop-keyword-indentation*
+    *lisp-simple-loop-indentation*
+    *lisp-tag-body-indentation*
+    *lisp-tag-indentation*
     *lispy-function-keys*
     *local-enable-local-variables*
     *ls-lisp-block-width*
@@ -841,6 +856,10 @@
     comment-string-strip
     comment-use-global-state
     comment-use-syntax
+    common-lisp-indent-call-method
+    common-lisp-indent-function
+    common-lisp-indent-function-1
+    common-lisp-loop-part-indentation
     common-prefix
     compare-strings
     complete-with-action
@@ -951,6 +970,7 @@
     define-command
     define-custom
     define-derived-mode
+    define-icon
     define-key
     define-key-after
     define-minor-mode
@@ -982,9 +1002,14 @@
     delete-trailing-space
     delete-window
     delq
+    derived-mode--flush
     derived-mode-abbrev-table-name
+    derived-mode-add-parents
+    derived-mode-all-parents
     derived-mode-hook-name
     derived-mode-map-name
+    derived-mode-p
+    derived-mode-set-parent
     derived-mode-syntax-table-name
     detach-marker
     detect-coding-bytes
@@ -1433,6 +1458,18 @@
     history-entries
     history?
     hscroll-line-slice
+    icon-complete-spec
+    icon-documentation
+    icon-elements
+    icon-spec-keywords
+    icon-spec-values
+    icon-string
+    iconp
+    icons--copy-spec
+    icons--create
+    icons--merge-spec
+    icons--register
+    icons--spec
     ignore
     imports-path
     indent-according-to-mode
@@ -1472,6 +1509,7 @@
     install-intervals-set-text-properties!
     install-ls-lisp-files!
     intern
+    intern-soft
     internal-complete-buffer
     internal-complete-buffer-except
     internal-get-lisp-face-attribute
@@ -1598,6 +1636,7 @@
     keymap-prompt
     keymap-type?
     keyword?
+    keywordp
     kill-all-local-variables
     kill-append
     kill-buffer
@@ -1651,16 +1690,28 @@
     lisp-el-font-lock-keywords
     lisp-el-font-lock-keywords-1
     lisp-el-font-lock-keywords-2
+    lisp-extended-loop-p
     lisp-font-lock-syntactic-face-function
+    lisp-indent-259
     lisp-indent-calc-next
     lisp-indent-defform
+    lisp-indent-defmethod
+    lisp-indent-defun-method
+    lisp-indent-do
+    lisp-indent-find-method
     lisp-indent-function
+    lisp-indent-function-lambda-hack
     lisp-indent-initial-state
+    lisp-indent-lambda-list
+    lisp-indent-lambda-list-keywords-regexp
     lisp-indent-line
+    lisp-indent-local-overrides
     lisp-indent-offset
     lisp-indent-region
+    lisp-indent-report-bad-format
     lisp-indent-specform
     lisp-indent-state?
+    lisp-indent-tagbody
     lisp-interaction-mode
     lisp-interaction-mode-hook
     lisp-interaction-mode-map
@@ -1808,6 +1859,7 @@
     merge-face-vectors
     merge-interval-left
     merge-interval-right
+    merge-ordered-lists
     merge-properties
     merge-properties-sticky
     message
@@ -1988,6 +2040,7 @@
     prog-mode-map
     propertize
     provide-theme
+    provided-mode-derived-p
     push-left-right-boundary
     push-mark
     push-mark-command
@@ -2289,8 +2342,10 @@
     set!window-last-overlay-modified
     set!window-last-point
     set!window-last-start
+    set!window-last-tab-line
     set!window-last-width
     set!window-left
+    set!window-parameters
     set!window-parent
     set!window-top
     set!window-width
@@ -2368,6 +2423,7 @@
     set-window-desired-matrix!
     set-window-hscroll!
     set-window-next-buffers
+    set-window-parameter
     set-window-point!
     set-window-prev-buffers
     set-window-start!
@@ -2634,6 +2690,7 @@
     window-base-line-number
     window-base-line-pos
     window-body-height
+    window-body-top
     window-body-width
     window-buffer
     window-children
@@ -2656,6 +2713,7 @@
     window-last-overlay-modified
     window-last-point
     window-last-start
+    window-last-tab-line
     window-last-width
     window-left
     window-line-rows
@@ -2672,6 +2730,8 @@
     window-next-buffers
     window-normalize-buffer-to-switch-to
     window-outdated?
+    window-parameter
+    window-parameters
     window-parent
     window-point
     window-position
@@ -2681,9 +2741,11 @@
     window-start
     window-start-at-line-beg
     window-system-display?
+    window-tab-line-height
     window-top
     window-truncates-lines?
     window-type?
+    window-wants-tab-line
     window-width
     window-wraps?
     windows-or-buffers-changed?

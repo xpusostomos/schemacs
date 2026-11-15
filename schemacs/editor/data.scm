@@ -19,9 +19,25 @@
 
   (export
    make-local-variable
+   keywordp
    )
 
   (begin
+
+    (define (keywordp object)
+      ;; GNU Emacs's `keywordp' (`data.c:207'): "Return t if OBJECT is a
+      ;; keyword. Keywords are symbols whose names start with `:' and do
+      ;; not start with `::'."
+      ;;
+      ;; **This is how the tree spells `:version', `:type' and the other
+      ;; keywords `define-icon' and `define-custom' read as data** - a
+      ;; Scheme symbol whose name starts with a colon.
+      ;;--------------------------------------------------------------
+      (and (symbol? object)
+           (let ((name (symbol->string object)))
+             (and (> (string-length name) 1)
+                  (char=? #\: (string-ref name 0))
+                  (not (char=? #\: (string-ref name 1)))))))
 
     (define (make-local-variable key . args)
       ;; GNU Emacs's `make-local-variable' (`data.c':2245): "Make

@@ -143,4 +143,50 @@
                (and (eq? 'child-mode (major-mode))
                     (string=? "Child" (mode-name))))))
 
+;; ------------------------------------------------------------------
+;; `derived-mode-p' and the parentage (`subr.el:2984-3160')
+;;
+;; Every expectation is Emacs 31.1's: the same two modes defined with
+;; `define-derived-mode', then `(derived-mode-p ...)' and
+;; `(derived-mode-all-parents ...)' asked there.
+
+(test-equal "the parent chain starts with the mode itself"
+  '(child-mode special-mode)
+  (derived-mode-all-parents 'child-mode))
+(test-equal "a mode with no parent is its own only parent"
+  '(special-mode)
+  (derived-mode-all-parents 'special-mode))
+(test-equal "`provided-mode-derived-p' answers the mode it matched"
+  'special-mode
+  (provided-mode-derived-p 'child-mode '(text-mode special-mode)))
+(test-assert "and #f when nothing matches"
+  (not (provided-mode-derived-p 'child-mode 'text-mode)))
+(test-assert "the current mode is derived from its parent"
+  (in-buffer (lambda () (child-mode) (derived-mode-p 'special-mode))))
+(test-assert "and from itself"
+  (in-buffer (lambda () (child-mode) (derived-mode-p 'child-mode))))
+(test-assert "but not from an unrelated mode"
+  (in-buffer (lambda () (child-mode) (not (derived-mode-p 'text-mode)))))
+(test-assert "the deprecated list form is still a list"
+  (in-buffer (lambda () (child-mode) (derived-mode-p 'text-mode 'special-mode))))
+
+(test-assert "`derived-mode-set-parent' replaces a parent and flushes the cache"
+  (begin
+    (derived-mode-set-parent 'child-mode2 'special-mode)
+    (let ((before (derived-mode-all-parents 'child-mode2)))
+      (derived-mode-set-parent 'child-mode2 'text-mode)
+      (and (equal? before '(child-mode2 special-mode))
+           (equal? (derived-mode-all-parents 'child-mode2)
+                   '(child-mode2 text-mode))))))
+
+(test-assert "`derived-mode-add-parents' keeps the parent and adds one"
+  (begin
+    (derived-mode-set-parent 'child-mode3 'special-mode)
+    (derived-mode-add-parents 'child-mode3 '(text-mode))
+    ;; Emacs: `(derived-mode-add-parents 'xx '(text-mode))' then
+    ;; `(derived-mode-all-parents 'xx)' is `(xx special-mode text-mode)' -
+    ;; the main parent's chain first, the extra one's after it.
+    (equal? (derived-mode-all-parents 'child-mode3)
+            '(child-mode3 special-mode text-mode))))
+
 (test-end "derived")

@@ -18,7 +18,7 @@
     ;; `logior' and `lognot' are the event model's bit arithmetic, beside
     ;; the `logand' `key-parse' already folds control characters with, and
     ;; `filter' orders a symbol event's modifiers.
-    (only (guile) delete string-contains format catch string-index hashv-ref
+    (only (guile) delete filter string-contains format catch string-index hashv-ref
           caddr cdddr)
     ;; a condition that is not an error object is read through these
     (only (ice-9 exceptions) exception-message)
@@ -96,7 +96,8 @@
    ;; anything else written in Emacs's idiom
    split-string replace-regexp-in-string shell-quote-argument
    string-trim string-trim-left string-trim-right
-   intern error-message-string
+   intern intern-soft error-message-string
+   merge-ordered-lists
    with-temp-buffer
    ;; `subr.el`'s keymap half: `define-key-after' places a binding in a
    ;; map's order, and `keymap-canonicalize' resolves inheritance for the
@@ -482,6 +483,117 @@
       ;; answer is `string->symbol` - the same symbol for the same name.
       ;;--------------------------------------------------------------
       (string->symbol name))
+
+    (define (intern-soft name . args)
+      ;; GNU Emacs's `intern-soft` (`lread.c:2874`): "Return the canonical
+      ;; symbol whose name is STRING, or nil if none exists. If OBJ is
+      ;; already a symbol, return it, provided it is interned in OBARRAY."
+      ;;
+      ;; **Every symbol is interned here.** Emacs answers nil for a name
+      ;; that has never been read as a symbol, which is how
+      ;; `lisp-indent-find-method` recognises a package-prefixed name
+      ;; (`foo:bar`) that no obarray entry matches; a Scheme symbol made
+      ;; by `string->symbol` *is* interned, so this answers the symbol and
+      ;; that branch is never taken. Named in `cl-indent.scm`, which is
+      ;; the only caller, rather than faked here.
+      ;;--------------------------------------------------------------
+      (cond ((symbol? name) name)
+            ((string? name) (string->symbol name))
+            (else (string->symbol (format #f "~a" name)))))
+
+    (define (merge-ordered-lists lists . args)
+      ;; GNU Emacs's `merge-ordered-lists` (`subr.el:2984`): "Merge LISTS
+      ;; in a consistent order. LISTS is a list of lists of elements.
+      ;; Merge them into a single list containing the same elements
+      ;; (removing duplicates), obeying their relative positions in each
+      ;; list."
+      ;;
+      ;; The algorithm is C3 linearization, and its one caller is
+      ;; `derived-mode-all-parents` (`derived.scm`) merging a mode's
+      ;; parents. Equality is `eql`, which is `eqv?` here.
+      ;;
+      ;; **The "Inconsistent hierarchy" message is not printed.** The C's
+      ;; default ERROR-FUNCTION calls `message`, which lives above this
+      ;; library; the answer it returns - the head of the first remaining
+      ;; list - is the same, so a cycle produces the C's answer without
+      ;; the C's note.
+      ;;--------------------------------------------------------------
+      (let ((error-function (%subr-opt args 0 #f))
+            (result '()))
+        ;; "(setq lists (remq nil lists))" - in Elisp nil is the empty
+        ;; list, which a list of lists holds as a *list*; here the empty
+        ;; thing may be `'()` or `#f`, so a list is kept whatever it is
+        ;; made of and everything else goes.
+        (set! lists (filter pair? lists))
+        (let loop ()
+          ;; "(while (cdr lists))" - `(cdr nil)` is nil in Elisp.
+          (when (and (pair? lists) (pair? (cdr lists)))
+            ;; "Try to find the next element of the result. This is
+            ;; achieved by considering the first element of each input
+            ;; list and accepting a candidate if it is consistent with the
+            ;; rest of the input lists."
+            (let* ((find-next
+                   (lambda (lists)
+                     (let walk ((tail lists) (next #f))
+                       (cond ((null? tail) next)
+                             (else
+                              ;; "Ensure CANDIDATE is not in any position
+                              ;; but the first in any of the element lists
+                              ;; of LISTS."
+                              (let ((candidate
+                                     (let check ((other lists))
+                                       (cond ((null? other)
+                                              (car (car tail)))
+                                             ((memv (car (car tail))
+                                                    (cdr (car other)))
+                                              #f)
+                                             (else (check (cdr other)))))))
+                                (if (not candidate)
+                                    (walk (cdr tail) next)
+                                    candidate)))))))
+                  (next (find-next lists)))
+              (if (not next)
+                  ;; "The graph is inconsistent."
+                  (let ((tail lists))
+                    ;; "Try and reduce the \"remaining-list\" such that
+                    ;; its `caar` participates in the inconsistency."
+                    (let reduce ()
+                      (when (and (pair? (cdr tail))
+                                 (not (find-next (cdr tail))))
+                        (set! tail (cdr tail))
+                        (reduce)))
+                    (set! next
+                          (if error-function
+                              (error-function tail)
+                              (car (car tail))))
+                    (unless (assoc next lists eqv?)
+                      (error "Invalid candidate returned by error-function: ~s"
+                             next))
+                    ;; "Break the cycle, while keeping other dependencies."
+                    (set! lists
+                          (map (lambda (list)
+                                 (cons (car list)
+                                       (filter (lambda (x) (not (eq? x next)))
+                                               (cdr list))))
+                               lists)))
+                  #f)
+              ;; "The graph is consistent so far, add NEXT to result and
+              ;; merge input lists, dropping NEXT from their heads where
+              ;; applicable."
+              (set! result (cons next result))
+              (set! lists
+                    (filter pair?
+                          (map (lambda (list)
+                                 (if (eqv? (car list) next)
+                                     (cdr list)
+                                     list))
+                               lists)))
+              (loop))))
+        (if (null? result)
+            ;; "Common case." - Emacs's `(car nil)` is nil, an empty LISTS
+            ;; being the nil it started from.
+            (if (pair? lists) (car lists) '())
+            (append (reverse result) (car lists)))))
 
     (define (user-error fmt . args)
       ;; GNU Emacs's `user-error' (`subr.el'): "Signal an error of type

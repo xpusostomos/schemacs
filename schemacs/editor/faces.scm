@@ -905,6 +905,61 @@ This inherits from the `mode-line` face.")
           '((default :inherit mode-line) (((type tty)) :inverse-video #f :underline #t) (((class color grayscale) (background light)) :background "grey90" :foreground "grey20" :box #f) (((class color grayscale) (background dark)) :background "grey20" :foreground "grey90" :box #f) (((class mono) (background light)) :background "white" :foreground "black" :inverse-video #f :box #f :underline #t) (((class mono) (background dark)) :background "black" :foreground "white" :inverse-video #f :box #f :underline #t))
           "Basic header-line face.")
 
+    ;;--------------------------------------------------------------
+    ;; The tab line's faces. `tab-line' and its two selection variants
+    ;; are `faces.el:3018-3050'; the nine `tab-line-tab-*' and
+    ;; `tab-line-highlight' faces are `tab-line.el:67-154'. A tab's own
+    ;; face is a text property on the string `tab-line-format' builds,
+    ;; and `draw-mode-line!` draws runs of them.
+    ;;--------------------------------------------------------------
+    (defface 'tab-line
+          '((((class color) (min-colors 88) (background light)) :inherit variable-pitch :height 0.9 :background "grey85" :foreground "black") (((class color) (min-colors 88) (background dark)) :inherit variable-pitch :height 0.9 :background "grey20" :foreground "white") (((class mono)) :background "grey") (#t :inverse-video #t))
+          "Basic tab line face.")
+
+    (defface 'tab-line-active
+          '((#t :inherit tab-line))
+          "Face for the selected tab line.")
+
+    (defface 'tab-line-inactive
+          '((#t :inherit tab-line))
+          "Basic tab line face for non-selected windows.")
+
+    (defface 'tab-line-tab
+          '((default :inherit tab-line) (((class color) (min-colors 88) (background light)) :box (:line-width 1 :style released-button)) (((class color) (min-colors 88) (background dark)) :box (:line-width 1 :style released-button) :background "grey40" :foreground "white") (t :inverse-video nil))
+          "Tab line face for selected tab.")
+
+    (defface 'tab-line-tab-inactive
+          '((default :inherit tab-line-tab) (((class color) (min-colors 88) (background light)) :background "grey75") (((class color) (min-colors 88) (background dark)) :background "grey20") (t :inverse-video t))
+          "Tab line face for non-selected tab.")
+
+    (defface 'tab-line-tab-inactive-alternate
+          '((#t :inherit tab-line-tab-inactive :background "grey65"))
+          "Alternate face for inactive tab-line tabs.")
+
+    (defface 'tab-line-tab-special
+          '((default :weight bold) (((supports :slant italic)) :slant italic :weight normal))
+          "Face for special (i.e. non-file-backed) tabs.")
+
+    (defface 'tab-line-tab-modified
+          '((#t :inherit font-lock-doc-face))
+          "Face for modified tabs.")
+
+    (defface 'tab-line-tab-group
+          '((#t :inherit tab-line :box #f))
+          "Face for group tabs.")
+
+    (defface 'tab-line-tab-current
+          '((default :inherit tab-line-tab) (((class color) (min-colors 88) (background light)) :background "grey85") (((class color) (min-colors 88) (background dark)) :background "grey40"))
+          "Tab line face for tab with current buffer in selected window.")
+
+    (defface 'tab-line-highlight
+          '((((class color) (min-colors 88) (background light)) :box (:line-width 1 :style released-button) :background "grey85" :foreground "black") (((class color) (min-colors 88) (background dark)) :box (:line-width 1 :style released-button) :background "grey40" :foreground "white") (t :inverse-video nil))
+          "Tab line face for highlighting.")
+
+    (defface 'tab-line-close-highlight
+          '((#t :foreground "red"))
+          "Tab line face for highlighting of the close button.")
+
     (defface 'region
           '((((class color) (min-colors 88) (background dark)) :background "blue3" :extend #t) (((class color) (min-colors 88) (background light)) :background "lightgoldenrod2" :extend #t) (((class color) (min-colors 16) (background dark)) :background "blue3" :extend #t) (((class color) (min-colors 16) (background light)) :background "lightgoldenrod2" :extend #t) (((class color) (min-colors 8)) :background "blue" :foreground "white" :extend #t) (((type tty) (class mono)) :inverse-video #t) (#t :background "gray" :extend #t))
           "Basic face for highlighting the region.")

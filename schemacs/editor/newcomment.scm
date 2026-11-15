@@ -294,38 +294,46 @@
     ;;----------------------------------------------------------------
     (define (comment-choose-indent . rest)
       ;; "Choose the indentation to use for a right-hand-side comment."
+      ;;
+      ;; **`min' and `max' are `min-col' and `max-col' here.** Elisp is a
+      ;; Lisp-2: `(let ((min ...)) ... (max min (min max indent)))' binds
+      ;; a *variable* called `min' and calls the *function* `min' from the
+      ;; same form. A Scheme binding shadows the procedure, so the C's
+      ;; names cannot be kept: `(max min (min max indent))' applied the
+      ;; integer `min'. Found by `indent-region' over a file with
+      ;; right-hand-side comments; nothing had ever reached this function.
       ;;--------------------------------------------------------------
       (let* ((indent (if (and (pair? rest) (car rest)) (car rest)
                          (comment-column)))
              (fill-column-value (or (comment-fill-column)
                                     (buffer-fill-column (current-buffer))))
-             (min #f) (max #f))
+             (min-col #f) (max-col #f))
         (if (pair? indent)
-            (begin (set! min (car indent)) (set! max (cdr indent))
+            (begin (set! min-col (car indent)) (set! max-col (cdr indent))
                    (set! indent (comment-column)))
             (begin
               ;; "Avoid moving comments past the fill-column."
-              (set! max (+ (current-column)
+              (set! max-col (+ (current-column)
                            (- fill-column-value
                               (save-excursion (end-of-line) (current-column)))))
-              (set! min (save-excursion
+              (set! min-col (save-excursion
                           (skip-chars-backward " \t")
                           ;; "Leave at least `comment-inline-offset' space
                           ;; after other nonwhite text on the line."
                           (if (bolp) 0 (+ (comment-inline-offset)
                                           (current-column)))))))
         ;; "Fix up the range."
-        (if (< max min) (set! max min))
+        (if (< max-col min-col) (set! max-col min-col))
         ;; "Don't move past the fill column."
-        (if (<= max indent) (set! indent max))
-        ;; "We can choose anywhere between min..max. Let's try to align to
+        (if (<= max-col indent) (set! indent max-col))
+        ;; "We can choose anywhere between min-col..max-col. Let's try to align to
         ;; a comment on the previous line."
         (let ((other (save-excursion
                        (and (= 0 (forward-line -1))
                             (comment-search-forward (line-end-position) #t)))))
           (if other
               (set! other (save-excursion (goto-char other) (current-column))))
-          (if (and other (<= other max) (>= other min))
+          (if (and other (<= other max-col) (>= other min-col))
               ;; "There is a comment and it's in the range: bingo!"
               other
               ;; "Can't align to a previous comment: let's try to align to
@@ -349,15 +357,15 @@
                                                       (current-column)))))
                           (omin (save-excursion (skip-chars-backward " \t")
                                                 (+ 1 (current-column)))))
-                      (if (and (>= omax min) (<= omin max))
-                          (begin (set! min (max omin min))
-                                 (set! max (min omax max))
+                      (if (and (>= omax min-col) (<= omin max-col))
+                          (begin (set! min-col (max omin min-col))
+                                 (set! max-col (min omax max-col))
                                  (loop))
                           ;; "Can't align with this anyway, so exit the
                           ;; loop."
                           (goto-char (point-max)))))))
-              ;; "Return the closest point to indent within min..max."
-              (max min (min max indent)))))))
+              ;; "Return the closest point to indent within min-col..max-col."
+              (max min-col (min max-col indent)))))))
 
     ;;----------------------------------------------------------------
     ;; `comment-indent' (`newcomment.el:728'), and `indent-for-comment',

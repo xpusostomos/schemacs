@@ -237,7 +237,7 @@
                             top height left width
                             (window-parent window) (list window new)
                             0 0 #f 0 '() '()
-                            #f 0 0 0 0 0 0 0 -1 #f))
+                            #f 0 0 0 0 0 0 0 -1 #f '() #f))
 
     (define (install-window-parent! frame window parent)
       ;; Put PARENT where WINDOW was in the tree, in WINDOW's own place in
@@ -334,7 +334,7 @@
                           right
                           #f '()
                           0 0 #f 0 '() '()
-                          #f 0 0 0 0 0 0 0 -1 #f)))
+                          #f 0 0 0 0 0 0 0 -1 #f '() #f)))
                 (install-window-parent!
                  frame window
                  (make-window-parent window new top height start width))
@@ -373,7 +373,7 @@
                           width
                           #f '()
                           0 0 #f 0 '() '()
-                          #f 0 0 0 0 0 0 0 -1 #f)))
+                          #f 0 0 0 0 0 0 0 -1 #f '() #f)))
                 (install-window-parent!
                  frame window
                  (make-window-parent window new top height left width))
@@ -411,7 +411,7 @@
                     width
                     #f '()
                     0 0 #f 0 '() '()
-                    #f 0 0 0 0 0 0 0 -1 #f)))
+                    #f 0 0 0 0 0 0 0 -1 #f '() #f)))
           (install-window-parent!
            frame main
            (make-window-parent main new top total left width))

@@ -8560,3 +8560,198 @@ afternoon.
   algorithm and ~600 of `put` data.
 - `elisp-fontify-symbols` / `elisp-scope.el`: **2,868 lines**; off by
   default (`elisp-fontify-semantically` = nil).
+
+# The Common Lisp indentation engine, and the parse-state cache that was
+# never flushed (2026-11-16)
+
+Chris: *"fix those departures"* - the last four named at the end of the
+colouring pass. Two were done in the previous commit (`syntax-propertize-rules`,
+`scheme-indent-function`); this is the other two, plus the two primitive
+bugs that porting them uncovered.
+
+## What landed
+
+- **`schemacs/editor/cl-indent.scm`** (NEW) - a port of
+  `lisp/emacs-lisp/cl-indent.el`: `common-lisp-indent-function` and the
+  loop special case, `common-lisp-indent-function-1`'s walk up the
+  containing forms, the `lisp-indent-259` specform engine, the
+  lambda-list aligner, `lisp-indent-tagbody`, `lisp-indent-do`,
+  `lisp-indent-defmethod`, `lisp-indent-function-lambda-hack`, the 11
+  defcustoms, and the whole method table (`defun`, `case`, `cond`,
+  `flet`, `tagbody`, `defstruct`, ...; `loop` is not in the table - it
+  has its own special case in `common-lisp-indent-function`, as in the
+  C). `lisp-mode` installs it as
+  `lisp-indent-function`, which is `lisp-mode.el:866`.
+- **`derived-mode-p` and the parentage it reads** (`subr.el:2984-3160`):
+  `derived-mode-all-parents` (with its cache and the follower flush),
+  `provided-mode-derived-p`, `derived-mode-p`, `derived-mode-set-parent`,
+  `derived-mode-add-parents`, `derived-mode--flush` - in `derived.scm`,
+  because `subr` cannot see a buffer and `major-mode` is `buffer.c`'s.
+  `merge-ordered-lists` (C3 linearization, `subr.el:2984`) and
+  `intern-soft` went into `subr.scm` beside `intern`.
+  `define-derived-mode` now `put`s `derived-mode-parent` and normalises a
+  `fundamental-mode` parent to nil (`derived.el:186`), so
+  `(derived-mode-all-parents 'prog-mode)` is `(prog-mode)` as in Emacs.
+- `lisp-indent-local-overrides` is exported from `lisp-mode.scm`; the
+  library list, `imports.scm` and `tools/run-suites.py` carry the new
+  library.
+
+## The two primitive bugs this uncovered
+
+**1. `syntax-ppss`'s cache was never flushed on a buffer change.** Emacs
+installs `syntax-ppss-flush-cache` on `before-change-functions` the first
+time a buffer is parsed (`syntax.el:677`) - *and* `syntax-propertize`
+installs it again, because that path does not always go through
+`syntax-ppss` (`bug#29767`). Neither was here, so a cached parse state
+outlived the edit that moved the positions it describes.
+
+Found by `indent-region` over `cl-indent.el`, which has commented-out
+blocks: a line that plainly starts with `;` had `comment-search-forward`
+answer nil, so `indent-for-comment` *inserted* a second `;` at the end of
+the line. The signature that gave it away: **the indentation of that line
+depended on where the region started** (start at 1 → column 0, start at
+20000 → column 40, start at 6000 → 40 again). A stale cache is the only
+thing that behaves that way.
+
+Two things to remember from fixing it:
+
+- the test is `(unless (or (pair? ppss-cache) ppss-last) ...)`; the C's
+  `(unless (or ppss-cache ppss-last) ...)` written directly is **always
+  false**, because `'()` is true in Scheme. The hook was not installed
+  and nothing said so.
+- `syntax.scm` could not call `add-hook` (no import, and `subr` is above
+  it), so the list is appended to the parameter directly, with the
+  `memq` guard `add-hook` would have done.
+
+**2. `comment-choose-indent` bound `min` and `max` as variables and then
+called the procedures of the same name** - legal in Elisp's Lisp-2,
+fatal in Scheme's Lisp-1 ("Wrong type to apply: 57"). The locals are
+`min-col`/`max-col` now, and the departure is in DEPARTURES.md. Nothing
+had ever reached that function: it is only called for a comment *after*
+code on the line, and no earlier corpus had one.
+
+## Verified
+
+- `cl-indent-tests.scm` (28): the table's entries (`defun`, `ccase` is
+  `case`, the second `if` entry winning, `-for-elisp`), `lisp-indent-find-method`'s
+  three arms, `lisp-mode` installing a procedure, and nine
+  `calculate-lisp-indent` columns from a fixture that `emacs -Q --batch`
+  indents first - `defun` body, `let` binding, `let` body, `defmethod`
+  body, `case` clause, `tagbody` tag and form, `let*` binding, `while`
+  body - plus a `destructuring-bind` pattern and its body, a backquoted
+  list's second element and a `defstruct` slot on a second fixture.
+- `lisp-mode-tests.scm` +1 (42): a `.lisp` file opens in `lisp-mode`
+  (`auto-mode-alist`'s `("\\.li?sp\\'" . lisp-mode)`), which runs the
+  engine's autoload seam for real.
+- `derived-tests.scm` +10 (26): the parent chain, `provided-mode-derived-p`,
+  the current-mode forms, `derived-mode-set-parent` replacing a parent and
+  flushing the cache, and `derived-mode-add-parents`' order - each
+  expectation measured on `emacs -Q --batch` first.
+- **The differential**: the first forty `lisp/emacs-lisp/*.el` files,
+  `lisp-mode` + `indent-region` on both sides, `cmp` the two outputs.
+  Against an Emacs with `function-get`'s autoloads forced - which is what
+  `emacs-lisp-mode` reads through - **32 identical, 8 different**, and
+  every difference is a macro whose property Emacs has only after the
+  library defining it is loaded (`ad-do-advised-functions`,
+  `iter-defun`, ...). Proven, not assumed: supplying
+  `(put 'ad-do-advised-functions 'lisp-indent-function 1)` to this tree
+  makes `advice.el` **byte-identical**, so the engine is not the
+  difference. Against a *plain* `emacs -Q --batch` the same forty give
+  **13 identical, 27 different**, because `common-lisp-indent-function`
+  reads the property with a plain `get` and so sees only what is loaded.
+  The engine is right; the static table is right for `emacs-lisp-mode`
+  and "too complete" for `lisp-mode`, and DEPARTURES.md says why.
+
+- **All 56 suites pass** (`cl-indent-tests` 28, `derived-tests` 26,
+  `lisp-mode-tests` 42, `tty-editor-tests` 309, `pgtk-tests` 110).
+
+**A trap in the compile recipe**: `for f in schemacs/**/*.scm` in a
+non-interactive bash expands `**` as a *single* `*` unless `shopt -s
+globstar` is on - so it compiles `schemacs/editor/*.scm` and silently
+skips `schemacs/ui/tty/` and `schemacs/external/`, which are two levels
+deep. Found by checking the cache for `.go` files older than their
+sources: 39 were missing. Use `find schemacs -name '*.scm'` (or set
+globstar) before a battery run.
+
+**Method note that cost an hour**: four probes "proved" `looking-at` was
+broken at a position where it was fine, because `(goto-char (- p 1))`
+after `search-forward` lands at the *end of the match*, not its start.
+Every conclusion drawn from those probes was about a `;` that was not
+there. `(goto-char (match-beginning 0))` is the fix, and the lesson is
+the file's oldest one: read the shape of the evidence before believing
+the conclusion.
+
+# The tab line, part 1: the display primitive (2026-11-16)
+
+Chris asked for `tab-line-mode` and chose the full port of `tab-line.el`.
+The blocker turned out to be that **this tree had no header line and no tab
+line at all** - `matrix.scm`'s own note said the `tab_line_p`/
+`header_line_p` flags were never carried - so the redisplay half had to
+come first. This is that half, plus the icon library `tab-line.el` builds
+its buttons with. The Lisp half (`tab-line.scm`) is **not written yet**.
+
+## What landed
+
+- **Window parameters** (`window.c`): `window-parameter`,
+  `set-window-parameter`, and the `parameters` field on `<window>`
+  (`w->window_parameters`). A parameter set to nil is stored, as the C's
+  `Fassq`/`Fsetcdr` does.
+- **`window_wants_tab_line`** (`window.c:6101`), `window-tab-line-height`
+  (`window.c:1233`), and `window-body-top` - the frame row a window's text
+  starts on. `window-body-height` now subtracts the tab line.
+- **The row is reserved in the redisplay**: `display-window!` starts its
+  row walk at `window-body-top`, `blank-glyph-row!`, `cursor-screen-position`
+  and `window-to-frame-pixel-y` follow it, and the cursor's pixel walk
+  subtracts `window-body-top` rather than `window-top`.
+- **`render-window-tab-line!`**: `format-mode-line` on the window's
+  `tab-line-format` (the window parameter first, the buffer's variable
+  second - `xdisp.c:28182`), drawn with `draw-mode-line!` under
+  `tab-line-active`/`tab-line-inactive`. **`draw-mode-line!` was already
+  the whole of it** - it draws runs of `face` text properties, `:box`
+  included - so a tab's face and box come from the string
+  `tab-line-format` builds. It has the mode line's compare-and-skip, on a
+  new `last-tab-line` field.
+- **The faces**: `tab-line`, `tab-line-active`, `tab-line-inactive`
+  (`faces.el:3018`) and the nine `tab-line-tab-*`/`tab-line-highlight`
+  faces (`tab-line.el:67-154`).
+- **`schemacs/editor/icons.scm`** (`lisp/emacs-lisp/icons.el`):
+  `define-icon` (a macro that evaluates its specification once, as the
+  C's `,specification` does), `icons--register`, the spec merge,
+  `icon-string`, `icon-elements`. **Images are not carried** - this tree
+  has no image display - so `icons--create` answers #f for `image` and
+  `emoji` and the preference falls to `symbol`/`text`, which is what
+  Emacs does on a text terminal. `keywordp` moved into `data.scm`, where
+  `data.c` has it.
+
+Verified by a geometry probe: a window with no `tab-line-format` has body
+height 21 and body top 1; setting the buffer's `tab-line-format` makes
+`window-wants-tab-line` true, the height 1, the body 20 and the body top 2.
+
+## What is left, in the order it has to be done
+
+1. **`schemacs/editor/tab-line.scm`**, the Lisp half of `tab-line.el`
+   (1,461 lines): the tab-list functions (`tab-line-tabs-fixed-window-buffers`
+   is the default, and `window-prev-buffers` is already here), the format
+   template with its cache, the auto-hscroll (needs `vertical-motion`,
+   `get-pos-property` and `next-single-property-change`, all present),
+   the commands, `tab-line-mode` and `global-tab-line-mode`.
+2. **`define-globalized-minor-mode`** (`easy-mmode.el`), which
+   `global-tab-line-mode` is built with - `font-core.scm` already records
+   its absence.
+3. **`buffer-match-p`** (`subr.el`), for `tab-line-exclude-buffers`.
+4. **`mode-line-window-selected-p`** (`xdisp.c`), the face picker.
+5. **The mouse path**: a `tab-line` area in `posn-at-x-y`, and the
+   `keymap` text property on the string at the click - which is how a tab
+   is clicked at all (`make_lispy_event`). Neither exists yet: the posn
+   area list is `'mode-line` and nothing consults a string's `keymap`
+   property.
+6. **Named, not carried**: `touch-screen-track-tap` (no touch input),
+   `popup-menu` context menus (the Gtk front end has a popup; the terminal
+   has a menu), `project-current`/`project-name` for
+   `tab-line-tabs-buffer-group-by-project`, and `mouse-buffer-menu-mode-groups`
+   (`menu-bar.el`) which is only the *default* group table.
+
+**The pty battery run on 2026-11-16 00:32 was against a half-changed tree**
+(the record changed under it) and gave 69/86 with `(tab-line-active)`
+irritants; it says nothing about either state and must be re-run on a
+settled tree.

@@ -3613,10 +3613,136 @@ Two residual differences, both measured and both on the record:
   other in Emacs itself** (the `icons.el` finding from the indentation
   pass). Ours answers what `calculate-lisp-indent` answers.
 
+## The Common Lisp indentation engine (`cl-indent.el`)
+
+`(schemacs editor cl-indent)` is a port of `lisp/emacs-lisp/cl-indent.el`:
+`common-lisp-indent-function`, its specform walk (`lisp-indent-259`), the
+lambda-list aligner, the tagbody/do/defmethod helpers, and the whole
+method table. `lisp-mode` installs it as `lisp-indent-function`, as
+`lisp-mode.el:866` does. What follows is what the port reads differently.
+
+### A function in a method is a procedure, not a symbol
+
+- **Emacs**: a method entry may be a *symbol* -
+  `(defmethod lisp-indent-defmethod)`, `(lambda (&lambda &rest
+  lisp-indent-function-lambda-hack))` - and `(funcall tem ...)` calls it.
+  Elisp is a Lisp-2.
+- **Here**: a Scheme symbol is not callable, so an entry that names a
+  function holds the *procedure* (`(defmethod ,lisp-indent-defmethod)`,
+  quasiquoted). `lisp-indent-259`'s validation and dispatch test
+  `procedure?` where the C tests `symbolp`, and `common-lisp-indent-call-method`
+  does the same. Everything else - integers, `defun`, `&lambda`, `&body`,
+  `&rest`, `&whole`, the specform lists - is the C's data verbatim.
+
+### `lisp-mode` reaches the engine through a `resolve-module` seam
+
+- **Emacs**: `common-lisp-indent-function` carries `;;;###autoload`, so
+  `(setq-local lisp-indent-function #'common-lisp-indent-function)` names
+  a symbol that loads `cl-indent.el` when it is first called.
+- **Here**: `cl-indent.scm` imports `lisp-mode.scm` (it needs
+  `lisp-body-indent` and `lisp-indent-local-overrides`), so an import back
+  would be a cycle. `lisp-mode`'s body calls `%cl-indent-function`, which
+  does `(resolve-module '(schemacs editor cl-indent) #t)` and
+  `module-ref`s the procedure - the same seam `files.scm`'s
+  `%mode-autoloads` uses for a mode. The extent is Emacs's; the spelling is
+  the tree's.
+
+### The property table is static data, and Emacs's is not
+
+- **Emacs**: a macro's `lisp-indent-function` property exists only after
+  the library defining it has been loaded (`defmacro` reads the macro's
+  `(declare (indent N))` at definition time). `lisp-indent-function` uses
+  `(function-get SYMBOL 'lisp-indent-function 'macro)`, which *loads* an
+  autoloaded macro's file; `common-lisp-indent-function` - the one
+  `lisp-mode` installs - uses a plain `get` and so sees only what is
+  already loaded.
+- **Here**: `lisp-mode.scm` holds the properties as data, transcribed from
+  a running Emacs that had been asked about every interned symbol and had
+  `function-get`'s autoloads forced. So a symbol whose defining library is
+  *not* autoloadable (`ad-do-advised-functions`, `iter-defun`) has no
+  entry, and Emacs would have one after loading that library.
+- **Consequences, measured** - a differential over the first forty
+  `lisp/emacs-lisp/*.el` files, `lisp-mode` + `indent-region` on both
+  sides:
+  - against an Emacs with `function-get`'s autoloads forced (which is
+    what `emacs-lisp-mode`'s `lisp-indent-function` consults), **32
+    identical, 8 different**, and every difference is one of these
+    symbols (`ad-do-advised-functions` in `advice.el`, `iter-defun` in
+    `avl-tree.el`, ...). Supplying
+    `(put 'ad-do-advised-functions 'lisp-indent-function 1)` to this
+    tree makes `advice.el` byte-identical, so the engine is not the
+    difference.
+  - against a plain `emacs -Q --batch`, **13 identical, 27 different** -
+    because `common-lisp-indent-function` uses a plain `get`, so there
+    Emacs sees only the properties whose libraries happen to be loaded,
+    and this tree's data always answers with the autoload-forced value.
+- So the table is the right answer for `emacs-lisp-mode` (where Emacs's
+  own answer comes through `function-get`) and the "too complete" answer
+  for `lisp-mode`. Closing it fully needs a notion of which Emacs
+  libraries are loaded, which this tree has not got; closing it by
+  dropping entries would make `emacs-lisp-mode` wrong instead. The
+  table's own comment records why the transcription is not simply
+  extended either: loading one library perturbs the answer for symbols
+  asked about later.
+
+### `derived-mode-p` lives in `derived.scm`, not `subr.scm`
+
+- **Emacs**: `derived-mode-p`, `provided-mode-derived-p`,
+  `derived-mode-all-parents`, `derived-mode-set-parent`,
+  `derived-mode-add-parents` and `derived-mode--flush` are `subr.el`'s
+  (`:2984-3160`), and `merge-ordered-lists` with them.
+- **Here**: they are in `(schemacs editor derived)`, because `subr` cannot
+  see a buffer and `major-mode` is `buffer.c`'s. `merge-ordered-lists` is
+  in `subr.scm` (it needs nothing from a buffer) and `intern-soft` beside
+  `intern`. The same seam `locate-file-internal` took into `fileio.sld`.
+- **Also**: `derived-mode-all-parents`'s alias branch -
+  `(let ((alias (symbol-function mode))) (and (symbolp alias) alias))` -
+  is not carried; there are no function cells here, so a mode is never an
+  alias. `define-derived-mode` now `put`s `derived-mode-parent` and
+  normalises a `fundamental-mode` parent to nil, as `derived.el:186` does -
+  which is what makes `(derived-mode-all-parents 'prog-mode)` answer
+  `(prog-mode)` and not `(prog-mode fundamental-mode)`.
+
+### `intern-soft` always answers a symbol
+
+`intern-soft` is `string->symbol` for a string and identity for a symbol;
+every Scheme symbol is interned. `common-lisp-indent-function-1`'s
+"pleblisp package feature" branch - `(when (and (null tem)
+(string-match ":[^:]+" function)) ...)`, which strips a `package:` prefix
+from a name no obarray entry matches - is carried as the C has it and can
+never fire here.
+
+## `min' and `max' are `min-col' and `max-col' in `comment-choose-indent'
+
+- **Emacs**: `(let ((min ...) (max ...)) ... (max min (min max indent)))`
+  binds two *variables* called `min`/`max` and calls the two *functions*
+  of the same name from the same form. Elisp is a Lisp-2, so that is legal
+  and clear.
+- **Here**: a Scheme binding shadows the procedure of the same name, so
+  the C's names cannot be kept - `(max min (min max indent))` applied the
+  integer `min` ("Wrong type to apply: 57"). The locals are `min-col` and
+  `max-col`, and the procedure calls keep the core names.
+- Found by `indent-region` over a file with right-hand-side comments;
+  nothing had ever reached `comment-choose-indent` before.
+
+## The tab line: `icon-preference`, `icons--create` and touch
+
+- **Emacs**: an icon's specification lists forms in the user's preference
+  order (`icon-preference`: image, emoji, symbol, text) and
+  `icons--create` answers one only if the display can show it - an image
+  needs `display-images-p`, an emoji needs a colour font.
+- **Here**: `icons--create` answers #f for `image` and `emoji` (this tree
+  has no image display and no `internal-char-font`), so the preference
+  falls to `symbol`/`text`. That is Emacs's own answer on a text
+  terminal; it differs only on a graphical frame, where this tree draws
+  no images either. Closing it means image support in the Gtk front end
+  first.
+- `tab-line-track-tap` and `touch-screen-track-tap` have nothing to run
+  on - this tree has no touch input - and are named rather than carried
+  when `tab-line.scm` lands.
+
 ## Still not ported
 
-- `common-lisp-indent-function` and `cl-indent.el`'s property table
-  (~880 lines: ~300 of algorithm, 11 defcustoms, ~600 of `put` data).
 - `elisp-fontify-symbols` and the semantic-highlighting engine it
   drives (`elisp-scope.el`, **2,868 lines**). Both are off by default
   (`elisp-fontify-semantically` is `nil`), so no default session sees

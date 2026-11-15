@@ -216,6 +216,9 @@
 (test-equal "a `.sld' file opens in scheme-mode too"
   'scheme-mode (visit "/tmp/auto-mode-test.sld" "(define-library (x))\n"))
 
+(test-equal "a `.lisp' file opens in lisp-mode"
+  'lisp-mode (visit "/tmp/auto-mode-test.lisp" "(defun x ())\n"))
+
 (test-equal "a `-*- mode: lisp -*-' tag beats the file name"
   'lisp-mode (visit "/tmp/auto-mode-test.scm.txt"
                     ";; -*- mode: lisp -*-\n(defun x ())\n"))

@@ -73,6 +73,9 @@
           char-table-parent set-char-table-parent char-table-default
           char-table-subtype copy-char-table char-table-ref-and-range)
     (only (schemacs editor command) maybe-quit rarely-quit)
+    ;; `*before-change-functions*' - `insdel.c''s hook list, which is
+    ;; what this library flushes its parse-state cache from.
+    (only (schemacs editor insdel) *before-change-functions*)
     (only (schemacs editor intervals)
           interval-position interval-length interval-last-pos interval-plist
           update-interval next-interval previous-interval textget)
@@ -2414,6 +2417,29 @@
                 ;; "End position is smaller than start position".
                 (let ((cache-pred #f) (cache ppss-cache) (pt-min 1)
                       (pt-best 1) (ppss-best #f))
+                  ;; "Setup the before-change function if necessary."
+                  ;; `(add-hook 'before-change-functions
+                  ;;            #'syntax-ppss-flush-cache 99 t)'
+                  ;; (`syntax.el:677'). Emacs installs it buffer-locally the
+                  ;; first time a buffer is parsed; a hook here is a
+                  ;; parameter, so it is one list and the `memq' keeps it
+                  ;; to one entry. **Without it a cached state outlives the
+                  ;; edit that moved the positions it describes** -
+                  ;; `syntax-ppss' then answers a state from the wrong
+                  ;; place, and `comment-search-forward' on a line that
+                  ;; plainly starts with `;' finds no comment. Found by
+                  ;; `indent-region' over a file with a commented-out
+                  ;; block; the answer depended on where the region
+                  ;; started, which is the signature of a stale cache.
+                  ;; "`(unless (or ppss-cache ppss-last) ...)'" - and
+                  ;; **an empty cache list is TRUE in Scheme**, so the
+                  ;; test is `pair?' and not the list itself.
+                  (unless (or (pair? ppss-cache) ppss-last)
+                    (unless (memq syntax-ppss-flush-cache
+                                  (*before-change-functions*))
+                      (*before-change-functions*
+                       (append (*before-change-functions*)
+                               (list syntax-ppss-flush-cache)))))
                   (let loop ((c cache) (pred #f))
                     (cond ((and (pair? c) (< pos (caar c)))
                            (loop (cdr c) c))
