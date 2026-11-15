@@ -48,7 +48,12 @@
           frame-editor frame-list frame-quit-cont
           set!frame-message)
     ;; The commands here install their own keys, as files.el does.
-    (only (schemacs editor command) current-prefix-arg define-command)
+    (only (schemacs editor command)
+          current-prefix-arg define-command
+          ;; a mode named in an alist is a *symbol*, and the command table
+          ;; is where a name resolves to the procedure Emacs's function
+          ;; cell would hold
+          command-record-named command-value-of)
     ;; `switch-to-buffer' is `window.el''s, and not this file's: it shows a
     ;; buffer in the selected window, which is a window operation.
     ;; `find-file-other-window' shows one in the OTHER window.
@@ -64,7 +69,8 @@
     ;; `prepare_to_modify_buffer_1` is its main caller and `insdel.scm`
     ;; is below `editfns.scm`.
     (only (schemacs editor editfns)
-          goto-char insert message point point-min point-max save-excursion)
+          goto-char insert message point point-min point-max save-excursion
+          line-end-position buffer-substring)
     (only (schemacs editor buffer) barf-if-buffer-read-only
           ;; `FETCH_CHAR` (`buffer.h`) - the raw read of a named
           ;; buffer. It has no Lisp name, and it was the engine's
@@ -77,6 +83,8 @@
     ;; `(schemacs editor subr)', which is below this library.
     (only (schemacs editor subr)
           kbd run-hook-with-args-until-success
+          run-hooks string-suffix-p assoc-default *delay-mode-hooks*
+          *change-major-mode-after-body-hook* *after-change-major-mode-hook*
           ;; `with-temp-file` below is built on the temp-buffer macro.
           with-temp-buffer
           string-prefix-p split-string ctl-x-4-map
@@ -89,6 +97,14 @@
     ;; `insert-from-string` (`insdel.c:981`) is what takes one - the
     ;; same function `insert` reaches from the string side.
     (only (schemacs editor insdel) insert-from-string)
+    ;; `skip-chars-forward'/`-backward' are `syntax.c''s, and the -*- tag
+    ;; scan walks with them.
+    (only (schemacs editor syntax) skip-chars-forward skip-chars-backward)
+    ;; `forward-char' is `cmds.c''s MOVE_POINT command, which `set-auto-mode-1'
+    ;; steps back three characters with.
+    (only (schemacs editor cmds) forward-char)
+    ;; `downcase' is casefiddle.c''s string case function
+    (only (schemacs editor casefiddle) downcase)
     (only (schemacs editor buffer)
           *case-fold-search*
           current-buffer default-directory erase-buffer
@@ -133,12 +149,13 @@
     (only (schemacs editor diredc) directory-files file-attributes)
     ;; the truename walk, the home directory, and the last-dot search
     ;; `file-name-sans-extension' does
-    (only (guile) canonicalize-path getenv string-rindex)
+    (only (guile) canonicalize-path getenv resolve-module string-rindex)
     ;; `file-name-sans-versions' matches a regexp, as the C's does
     ;; `regexp-quote' and the match-data accessors are what
     ;; `abbreviate-file-name`'s regexp and its `match-beginning 1' need.
     (only (schemacs editor search)
-          match-beginning match-end match-string regexp-quote string-match)
+          match-beginning match-end match-string regexp-quote string-match
+          string-match-p search-forward re-search-forward looking-at)
     ;; `get' and `put' are `fns.c`'s - symbol properties, which is where
     ;; `abbreviate-file-name`'s cache records the home directory it was
     ;; built for. They live in `intervals.sld` for now (see the note
@@ -170,6 +187,8 @@
                   set-buffer-modified-p
                   buffer-local-value
                   current-buffer
+                  kill-all-local-variables
+                  major-mode
                   generate-new-buffer
                   get-buffer-create
                   %kill-buffer
@@ -231,6 +250,8 @@
    delete-directory
    delete-file
    *require-final-newline*
+   *mode-require-final-newline*
+   require-final-newline
    buffer-ends-with-newline?
    default-directory
    default-buffer-file-coding-system
@@ -274,6 +295,19 @@
    directory-path?
    ensure-final-newline-on-save!
    ensure-final-newline-on-visit
+   ;; Choosing the major mode (files.el:3040-3910)
+   set-auto-mode set-auto-mode-0 set-auto-mode-1
+   set-auto-mode--apply-alist set-auto-mode--from-matching-alist-entry
+   normal-mode set-buffer-major-mode
+   *auto-mode-alist* *magic-mode-alist* *magic-fallback-mode-alist*
+   *interpreter-mode-alist* *auto-mode-case-fold*
+   *auto-mode-interpreter-regexp* *file-auto-mode-skip*
+   *magic-mode-regexp-match-limit*
+   *enable-local-variables* *local-enable-local-variables*
+   *inhibit-local-variables-regexps* *inhibit-local-variables-suffixes*
+   *inhibit-local-variables-ignore-case* inhibit-local-variables-p
+   *major-mode-remap-alist* *major-mode-remap-defaults* major-mode-remap
+   *initial-major-mode*
    expand-file-name
 directory-name-p
    file-exists-p
@@ -1661,7 +1695,28 @@ save-buffer
                         mustmatch initial)))
 
     (define *require-final-newline*
+      (make-parameter #f))
+
+    (define *mode-require-final-newline*
       (make-parameter #t))
+    ;; ^ GNU Emacs's `mode-require-final-newline' (files.el:3468): "Whether
+    ;; to add a final newline when saving files, distinguished from
+    ;; `require-final-newline'. The value is the same as for
+    ;; `require-final-newline', except that t also means to check for the
+    ;; final newline when visiting a file. ... The major mode of a buffer
+    ;; sets `require-final-newline' from this." It lived in this
+    ;; library's header note as a departure until the major modes landed:
+    ;; `*require-final-newline*' was t here so that every buffer got the
+    ;; final newline Emacs gives a *file-visiting* buffer, where Emacs's
+    ;; own global value is nil and the mode copies this in.
+
+    (define (require-final-newline)
+      ;; GNU Emacs's `require-final-newline': a buffer-local variable, so
+      ;; a mode that sets it affects its own buffers. Read the way
+      ;; dired.sld reads its own.
+      ;;--------------------------------------------------------------
+      (buffer-local-value (current-buffer) 'require-final-newline
+                          (*require-final-newline*)))
 
     (define (buffer-ends-with-newline? ed)
       ;; Whether the last character of the buffer is a line break. False
@@ -1709,7 +1764,7 @@ save-buffer
       (when (and (not (buffer-read-only? ed))
                  (< 0 (- (buffer-z ed) (buffer-beg ed)))
                  (not (buffer-ends-with-newline? ed)))
-        (let ((value (*require-final-newline*)))
+        (let ((value (require-final-newline)))
           (when (cond
                  ((eq? value #t) #t)
                  ((eq? value 'visit-save) #t)
@@ -1721,27 +1776,33 @@ save-buffer
                                            " does not end in newline.  Add one? "))))
             (add-line-break-at-end! ed)))))
 
-    (define (ensure-final-newline-on-visit points write-protected?)
-      ;; Emacs's visit-time rule (`after-find-file'): the text being
-      ;; visited, with a line break added when the variable says to add
-      ;; one at visit time. A file that cannot be written is visited
-      ;; read-only, and Emacs does not add anything to a read-only
-      ;; buffer.
+    (define (ensure-final-newline-on-visit write-protected?)
+      ;; Emacs's visit-time rule, from the end of `after-find-file'
+      ;; (files.el:2947):
       ;;
-      ;; POINTS is a list of code points and not a string, because what
-      ;; is being visited may contain a byte character, which a string
-      ;; cannot hold. Emacs's own version works on the buffer - it is
-      ;; `(goto-char (point-max)) (insert "\n")' after the file is in -
-      ;; and answers a list for the same reason: the text has to exist
-      ;; somewhere before it is inserted here, and a list is the only
-      ;; place it can be.
+      ;;   (and (memq require-final-newline '(visit visit-save))
+      ;;        (> (point-max) (point-min))
+      ;;        (/= (char-after (1- (point-max))) ?\n)
+      ;;        (not (and (eq selective-display t)
+      ;;                  (= (char-after (1- (point-max))) ?\r)))
+      ;;        (not buffer-read-only)
+      ;;        (save-excursion (goto-char (point-max))
+      ;;                        (ignore-errors (insert "\n"))))
+      ;;
+      ;; **It runs after the major mode**, in the buffer, because the
+      ;; mode is what sets `require-final-newline' from
+      ;; `mode-require-final-newline'. It used to answer a *list of code
+      ;; points* for `find-file-noselect' to insert, before the mode was
+      ;; set - which read the global value before any mode had spoken.
+      ;;
+      ;; A file that cannot be written is visited read-only, and Emacs
+      ;; does not add anything to a read-only buffer.
       ;;--------------------------------------------------------------
-      (if (and (memq (*require-final-newline*) '(visit visit-save))
-               (pair? points)
-               (not (= 10 (car (reverse points))))
-               (not write-protected?))
-          (append points (list 10))
-          points))
+      (when (and (memq (require-final-newline) '(visit visit-save))
+                 (not (buffer-ends-with-newline? (current-buffer)))
+                 (< (buffer-beg (current-buffer)) (buffer-z (current-buffer)))
+                 (not write-protected?))
+        (save-excursion (add-line-break-at-end! (current-buffer)))))
 
     (define (note-file-read-only! frame)
       ;; Say so when the buffer's *file* cannot be written, in GNU Emacs's
@@ -1888,10 +1949,7 @@ save-buffer
         (text-editor-undo-disable! ed)
         (unless new?
           (with-current-buffer ed
-            (insert-from-string
-             (ensure-final-newline-on-visit
-              (decode-file-bytes bytes coding)
-              (file-write-protected? path)))))
+            (insert-from-string (decode-file-bytes bytes coding))))
         (text-editor-undo-enable! ed)
         ;; The echo area says what Emacs's `after-find-file' says about a
         ;; file that was not there.
@@ -1947,6 +2005,15 @@ save-buffer
         ;; invented line-and-column form; line 1 column 0 *is*
         ;; `point-min', so the plain position says it without the detour.
         (set-point ed (buffer-beg ed))
+        ;; **GNU Emacs's `after-find-file' runs `normal-mode' and then
+        ;; the visit-time final newline, in that order** - the mode is
+        ;; what sets `require-final-newline' - and then the buffer is
+        ;; marked unmodified. `normal-mode' is safe here because
+        ;; `kill-all-local-variables' keeps the file name, the
+        ;; directory and the coding system.
+        (with-current-buffer ed (normal-mode #t))
+        (with-current-buffer ed
+          (ensure-final-newline-on-visit (file-write-protected? path)))
         ed)))))
 
     (define *save-silently* (make-parameter #f))
@@ -2929,5 +2996,807 @@ The path separator is colon in GNU and GNU-like systems."
                               "No such directory found via CDPATH environment variable: ~a"
                               dir))
                (error (format #f "No such directory: ~a" dir))))))
+
+    
+    ;;----------------------------------------------------------------
+    ;; Choosing the major mode: `normal-mode', `set-auto-mode' and the
+    ;; four alists they read (files.el:3040-3910)
+    ;;
+    ;; The alists are Emacs 31.1's own values, emitted from a running
+    ;; Emacs - the method `xterm.sld''s decode map and the charset
+    ;; registry were transcribed by. Three departures are named here
+    ;; rather than left to be found:
+    ;;
+    ;;   * an entry whose mode this tree has not ported is kept, and
+    ;;     `set-auto-mode-0' says "Ignoring unknown mode" for it exactly
+    ;;     as Emacs says it for a mode that is not a function. Emacs
+    ;;     would have autoloaded it; there is no autoload here.
+    ;;   * the entries whose value is a *file-name handler* list -
+    ;;     `(nil jka-compr)' and its kin, which Emacs's
+    ;;     `file-name-handler-alist' intercepts before `set-auto-mode' is
+    ;;     reached - are not in the data: this tree has no handlers.
+    ;;   * the `doc-view' entry of `magic-fallback-mode-alist' carries a
+    ;;     raw-byte PDF signature that no Scheme source file can hold
+    ;;     without an escape this tree's two readers disagree about.
+    ;;------------------------------------------------------------------
+
+    (define *auto-mode-case-fold* (make-parameter #t))
+    ;; ^ GNU Emacs's `auto-mode-case-fold' (files.el:3084): "Non-nil
+    ;; means to try second pass through `auto-mode-alist'."
+
+    ;; The four alists `set-auto-mode' reads, Emacs 31.1's own values.
+    ;; `magic-mode-alist' is empty in Emacs's default too.
+
+    (define *auto-mode-alist*
+      (make-parameter (quote (
+        ("\\.elc\\'" . elisp-byte-code-mode)
+        ("\\.ya?ml\\'" . yaml-ts-mode-maybe)
+        ("\\.vr[hi]?\\'" . vera-mode)
+        ("\\.tsx\\'" . tsx-ts-mode-maybe)
+        ("\\.ts\\'" . typescript-ts-mode-maybe)
+        ("\\.rs\\'" . rust-ts-mode-maybe)
+        ("\\(?:\\.\\(?:rbw?\\|ru\\|rake\\|thor\\|axlsx\\|jbuilder\\|rabl\\|gemspec\\|podspec\\)\\|/\\(?:Gem\\|Rake\\|Cap\\|Thor\\|Puppet\\|Berks\\|Brew\\|Fast\\|Vagrant\\|Guard\\|Pod\\)file\\)\\'" . ruby-mode)
+        ("\\.re?st\\'" . rst-mode)
+        ("/\\(?:Pipfile\\|\\.?flake8\\)\\'" . conf-mode)
+        ("\\(?:\\.\\(?:p\\(?:th\\|y[iw]?\\)\\)\\|/\\(?:SCons\\(?:\\(?:crip\\|truc\\)t\\)\\)\\)\\'" . python-mode)
+        ("/\\.php_cs\\(?:\\.dist\\)?\\'" . php-ts-mode-maybe)
+        ("\\.\\(?:php\\|inc\\|stub\\)\\'" . php-ts-mode-maybe)
+        ("\\.\\(?:php[s345]?\\|phtml\\)\\'" . php-ts-mode-maybe)
+        ("\\.m\\'" . octave-maybe-mode)
+        ("\\.lua\\'" . lua-mode)
+        ("\\.less\\'" . less-css-mode)
+        ("\\.[hl]?eex\\'" . heex-ts-mode-maybe)
+        ("/go\\.work\\'" . go-work-ts-mode-maybe)
+        ("/go\\.mod\\'" . go-mod-ts-mode-maybe)
+        ("\\.go\\'" . go-ts-mode-maybe)
+        ("mix\\.lock" . elixir-ts-mode-maybe)
+        ("\\.exs\\'" . elixir-ts-mode-maybe)
+        ("\\.ex\\'" . elixir-ts-mode-maybe)
+        ("\\.elixir\\'" . elixir-ts-mode-maybe)
+        ("\\.editorconfig\\'" . editorconfig-conf-mode)
+        ("\\(?:\\(?:\\(?:Contain\\|Dock\\)erfile\\)\\(?:\\..*\\)?\\|\\.[Dd]ockerfile\\)\\'" . dockerfile-ts-mode-maybe)
+        ("\\.scss\\'" . scss-mode)
+        ("\\.cs\\'" . csharp-mode)
+        ("\\(?:CMakeLists\\.txt\\|\\.cmake\\)\\'" . cmake-ts-mode-maybe)
+        ("\\.awk\\'" . awk-mode)
+        ("\\.\\(u?lpc\\|pike\\|pmod\\(\\.in\\)?\\)\\'" . pike-mode)
+        ("\\.idl\\'" . idl-mode)
+        ("\\.java\\'" . java-mode)
+        ("\\.m\\'" . objc-mode)
+        ("\\.ii\\'" . c++-mode)
+        ("\\.i\\'" . c-mode)
+        ("\\.lex\\'" . c-mode)
+        ("\\.y\\(acc\\)?\\'" . c-mode)
+        ("\\.h\\'" . c-or-c++-mode)
+        ("\\.c\\'" . c-mode)
+        ("\\.\\(CC?\\|HH?\\)\\'" . c++-mode)
+        ("\\.[ch]\\(pp\\|xx\\|\\+\\+\\)\\'" . c++-mode)
+        ("\\.\\(cc\\|hh\\)\\'" . c++-mode)
+        ("\\.\\(bat\\|cmd\\)\\'" . bat-mode)
+        ("\\.[sx]?html?\\(\\.[a-zA-Z_]+\\)?\\'" . mhtml-mode)
+        ("\\.svgz?\\'" . image-mode)
+        ("\\.svgz?\\'" . xml-mode)
+        ("\\.x[bp]m\\'" . image-mode)
+        ("\\.x[bp]m\\'" . c-mode)
+        ("\\.p[bpgn]m\\'" . image-mode)
+        ("\\.tiff?\\'" . image-mode)
+        ("\\.gif\\'" . image-mode)
+        ("\\.png\\'" . image-mode)
+        ("\\.jpe?g\\'" . image-mode)
+        ("\\.webp\\'" . image-mode)
+        ("\\.te?xt\\'" . text-mode)
+        ("\\.[tT]e[xX]\\'" . tex-mode)
+        ("\\.ins\\'" . tex-mode)
+        ("\\.ltx\\'" . latex-mode)
+        ("\\.dtx\\'" . doctex-mode)
+        ("\\.org\\'" . org-mode)
+        ("\\.dir-locals\\(?:-2\\)?\\.el\\'" . lisp-data-mode)
+        ("\\.eld\\'" . lisp-data-mode)
+        ("eww-bookmarks\\'" . lisp-data-mode)
+        ("tramp\\'" . lisp-data-mode)
+        ("/archive-contents\\'" . lisp-data-mode)
+        ("places\\'" . lisp-data-mode)
+        ("\\.emacs-places\\'" . lisp-data-mode)
+        ("\\.el\\'" . emacs-lisp-mode)
+        ("Project\\.ede\\'" . emacs-lisp-mode)
+        ("\\(?:\\.\\(?:scm\\|sls\\|sld\\|stk\\|ss\\|sch\\)\\|/\\.guile\\)\\'" . scheme-mode)
+        ("\\.l\\'" . lisp-mode)
+        ("\\.li?sp\\'" . lisp-mode)
+        ("\\.[fF]\\'" . fortran-mode)
+        ("\\.for\\'" . fortran-mode)
+        ("\\.p\\'" . pascal-mode)
+        ("\\.pas\\'" . pascal-mode)
+        ("\\.\\(dpr\\|DPR\\)\\'" . opascal-mode)
+        ("\\.\\([pP]\\([Llm]\\|erl\\|od\\)\\|al\\)\\'" . perl-mode)
+        ("Imakefile\\'" . makefile-imake-mode)
+        ("Makeppfile\\(?:\\.mk\\)?\\'" . makefile-makepp-mode)
+        ("\\.makepp\\'" . makefile-makepp-mode)
+        ("\\.mk\\'" . makefile-gmake-mode)
+        ("\\.make\\'" . makefile-gmake-mode)
+        ("[Mm]akefile\\'" . makefile-gmake-mode)
+        ("\\.am\\'" . makefile-automake-mode)
+        ("\\.texinfo\\'" . texinfo-mode)
+        ("\\.te?xi\\'" . texinfo-mode)
+        ("\\.[sS]\\'" . asm-mode)
+        ("\\.asm\\'" . asm-mode)
+        ("\\.css\\'" . css-mode)
+        ("\\.mixal\\'" . mixal-mode)
+        ("\\.gcov\\'" . compilation-mode)
+        ("/[._]?[A-Za-z0-9-]*\\(?:gdbinit\\(?:\\.\\(?:ini?\\|loader\\)\\)?\\|gdb\\.ini\\)\\'" . gdb-script-mode)
+        ("-gdb\\.gdb" . gdb-script-mode)
+        ("[cC]hange\\.?[lL]og?\\'" . change-log-mode)
+        ("[cC]hange[lL]og[-.][0-9]+\\'" . change-log-mode)
+        ("\\$CHANGE_LOG\\$\\.TXT" . change-log-mode)
+        ("\\.scm\\.[0-9]*\\'" . scheme-mode)
+        ("\\.[ckz]?sh\\'\\|\\.shar\\'\\|/\\.z?profile\\'" . sh-mode)
+        ("\\.bash\\'" . sh-mode)
+        ("/bash-fc\\.[0-9A-Za-z]\\{6\\}\\'" . sh-mode)
+        ("\\`/etc/profile\\'" . sh-mode)
+        ("/PKGBUILD\\'" . sh-mode)
+        ("\\(/\\|\\`\\)\\.\\(bash_\\(profile\\|history\\|log\\(in\\|out\\)\\)\\|z?log\\(in\\|out\\)\\)\\'" . sh-mode)
+        ("\\(/\\|\\`\\)\\.\\(shrc\\|zshrc\\|m?kshrc\\|bashrc\\|t?cshrc\\|esrc\\)\\'" . sh-mode)
+        ("\\(/\\|\\`\\)\\.\\([kz]shenv\\|xinitrc\\|startxrc\\|xsession\\)\\'" . sh-mode)
+        ("\\.m?spec\\'" . sh-mode)
+        ("\\.m[mes]\\'" . nroff-mode)
+        ("\\.man\\'" . nroff-mode)
+        ("\\.sty\\'" . latex-mode)
+        ("\\.cl[so]\\'" . latex-mode)
+        ("\\.bbl\\'" . latex-mode)
+        ("\\.bib\\'" . bibtex-mode)
+        ("\\.bst\\'" . bibtex-style-mode)
+        ("\\.sql\\'" . sql-mode)
+        ("\\(acinclude\\|aclocal\\|acsite\\)\\.m4\\'" . autoconf-mode)
+        ("\\.m[4c]\\'" . m4-mode)
+        ("\\.mf\\'" . metafont-mode)
+        ("\\.mp\\'" . metapost-mode)
+        ("\\.vhdl?\\'" . vhdl-mode)
+        ("\\.article\\'" . text-mode)
+        ("\\.letter\\'" . text-mode)
+        ("\\.i?tcl\\'" . tcl-mode)
+        ("\\.exp\\'" . tcl-mode)
+        ("\\.itk\\'" . tcl-mode)
+        ("\\.icn\\'" . icon-mode)
+        ("\\.sim\\'" . simula-mode)
+        ("\\.mss\\'" . scribe-mode)
+        ("\\.f9[05]\\'" . f90-mode)
+        ("\\.f0[38]\\'" . f90-mode)
+        ("\\.srt\\'" . srecode-template-mode)
+        ("\\.prolog\\'" . prolog-mode)
+        ("\\.tar\\'" . tar-mode)
+        ("\\.\\(arc\\|zip\\|lzh\\|lha\\|zoo\\|[jew]ar\\|xpi\\|rar\\|cbr\\|7z\\|squashfs\\|ARC\\|ZIP\\|LZH\\|LHA\\|ZOO\\|[JEW]AR\\|XPI\\|RAR\\|CBR\\|7Z\\|SQUASHFS\\)\\'" . archive-mode)
+        ("\\.oxt\\'" . archive-mode)
+        ("\\.\\(deb\\|[oi]pk\\)\\'" . archive-mode)
+        ("\\`/tmp/Re" . text-mode)
+        ("/Message[0-9]*\\'" . text-mode)
+        ("\\`/tmp/fol/" . text-mode)
+        ("\\.oak\\'" . scheme-mode)
+        ("\\.sgml?\\'" . sgml-mode)
+        ("\\.x[ms]l\\'" . xml-mode)
+        ("\\.slnx\\'" . xml-mode)
+        ("\\.dbk\\'" . xml-mode)
+        ("\\.dtd\\'" . sgml-mode)
+        ("\\.ds\\(ss\\)?l\\'" . dsssl-mode)
+        ("\\.js[mx]?\\'" . javascript-mode)
+        ("\\.har\\'" . javascript-mode)
+        ("\\.json\\'" . js-json-mode)
+        ("\\.[ds]?va?h?\\'" . verilog-mode)
+        ("\\.by\\'" . bovine-grammar-mode)
+        ("\\.wy\\'" . wisent-grammar-mode)
+        ("\\.erts\\'" . erts-mode)
+        ("[:/\\]\\..*\\(emacs\\|gnus\\|viper\\)\\'" . emacs-lisp-mode)
+        ("\\`\\..*emacs\\'" . emacs-lisp-mode)
+        ("[:/]_emacs\\'" . emacs-lisp-mode)
+        ("/crontab\\.X*[0-9]+\\'" . shell-script-mode)
+        ("\\.ml\\'" . lisp-mode)
+        ("\\.ld[si]?\\'" . ld-script-mode)
+        ("ld\\.?script\\'" . ld-script-mode)
+        ("\\.xs\\'" . c-mode)
+        ("\\.x[abdsru]?[cnw]?\\'" . ld-script-mode)
+        ("\\.zone\\'" . dns-mode)
+        ("\\.soa\\'" . dns-mode)
+        ("\\.asd\\'" . lisp-mode)
+        ("\\.\\(asn\\|mib\\|smi\\)\\'" . snmp-mode)
+        ("\\.\\(as\\|mi\\|sm\\)2\\'" . snmpv2-mode)
+        ("\\.\\(diffs?\\|patch\\|rej\\)\\'" . diff-mode)
+        ("\\.\\(dif\\|pat\\)\\'" . diff-mode)
+        ("\\.[eE]?[pP][sS]\\'" . ps-mode)
+        ("\\.\\(?:PDF\\|EPUB\\|CBZ\\|FB2\\|O?XPS\\|DVI\\|OD[FGPST]\\|DOCX\\|XLSX?\\|PPTX?\\|pdf\\|epub\\|cbz\\|fb2\\|o?xps\\|djvu\\|dvi\\|od[fgpst]\\|docx\\|xlsx?\\|pptx?\\)\\'" . doc-view-mode-maybe)
+        ("configure\\.\\(ac\\|in\\)\\'" . autoconf-mode)
+        ("\\.s\\(v\\|iv\\|ieve\\)\\'" . sieve-mode)
+        ("BROWSE\\'" . ebrowse-tree-mode)
+        ("\\.ebrowse\\'" . ebrowse-tree-mode)
+        ("#\\*mail\\*" . mail-mode)
+        ("\\.g\\'" . antlr-mode)
+        ("\\.g4\\'" . antlr-v4-mode)
+        ("\\.mod\\'" . m2-mode)
+        ("\\.ses\\'" . ses-mode)
+        ("\\.docbook\\'" . sgml-mode)
+        ("\\.com\\'" . dcl-mode)
+        ("/config\\.\\(?:bat\\|log\\)\\'" . fundamental-mode)
+        ("/\\.?\\(authinfo\\|netrc\\)\\'" . authinfo-mode)
+        ("\\.\\(?:[iI][nN][iI]\\|[lL][sS][tT]\\|[rR][eE][gG]\\|[sS][yY][sS]\\)\\'" . conf-mode)
+        ("\\.la\\'" . conf-unix-mode)
+        ("\\.ppd\\'" . conf-ppd-mode)
+        ("java.+\\.conf\\'" . conf-javaprop-mode)
+        ("\\.properties\\(?:\\.[a-zA-Z0-9._-]+\\)?\\'" . conf-javaprop-mode)
+        ("\\.toml\\'" . conf-toml-mode)
+        ("\\.desktop\\'" . conf-desktop-mode)
+        ("npmrc\\'" . conf-npmrc-mode)
+        ("/\\.redshift\\.conf\\'" . conf-windows-mode)
+        ("\\`/etc/\\(?:DIR_COLORS\\|ethers\\|.?fstab\\|.*hosts\\|lesskey\\|login\\.?de\\(?:fs\\|vperm\\)\\|magic\\|mtab\\|pam\\.d/.*\\|permissions\\(?:\\.d/.+\\)?\\|protocols\\|rpc\\|services\\)\\'" . conf-space-mode)
+        ("\\`/etc/\\(?:acpid?/.+\\|aliases\\(?:\\.d/.+\\)?\\|default/.+\\|group-?\\|hosts\\..+\\|inittab\\|ksysguarddrc\\|opera6rc\\|passwd-?\\|shadow-?\\|sysconfig/.+\\)\\'" . conf-mode)
+        ("[cC]hange[lL]og[-.][-0-9a-z]+\\'" . change-log-mode)
+        ("/\\.?\\(?:gitconfig\\|gnokiirc\\|hgrc\\|kde.*rc\\|mime\\.types\\|wgetrc\\)\\'" . conf-mode)
+        ("/\\.mailmap\\'" . conf-unix-mode)
+        ("/\\.\\(?:asound\\|enigma\\|fetchmail\\|gltron\\|gtk\\|hxplayer\\|mairix\\|mbsync\\|msmtp\\|net\\|neverball\\|nvidia-settings-\\|offlineimap\\|qt/.+\\|realplayer\\|reportbug\\|rtorrent\\.\\|screen\\|scummvm\\|sversion\\|sylpheed/.+\\|xmp\\)rc\\'" . conf-mode)
+        ("/\\.\\(?:gdbtkinit\\|grip\\|mpdconf\\|notmuch-config\\|orbital/.+txt\\|rhosts\\|tuxracer/options\\)\\'" . conf-mode)
+        ("/\\.?X\\(?:default\\|resource\\|re\\)s\\>" . conf-xdefaults-mode)
+        ("/X11.+app-defaults/\\|\\.ad\\'" . conf-xdefaults-mode)
+        ("/X11.+locale/.+/Compose\\'" . conf-colon-mode)
+        ("/X11.+locale/compose\\.dir\\'" . conf-javaprop-mode)
+        ("[/.]c\\(?:on\\)?f\\(?:i?g\\)?\\(?:\\.[a-zA-Z0-9._-]+\\)?\\'" . conf-mode-maybe)
+        ("\\.[1-9]\\'" . nroff-mode)
+        ("\\.avif\\'" . image-mode)
+        ("\\.art\\'" . image-mode)
+        ("\\.avs\\'" . image-mode)
+        ("\\.bmp\\'" . image-mode)
+        ("\\.cmyk\\'" . image-mode)
+        ("\\.cmyka\\'" . image-mode)
+        ("\\.crw\\'" . image-mode)
+        ("\\.dcm\\'" . image-mode)
+        ("\\.dcr\\'" . image-mode)
+        ("\\.dcx\\'" . image-mode)
+        ("\\.dng\\'" . image-mode)
+        ("\\.dpx\\'" . image-mode)
+        ("\\.fax\\'" . image-mode)
+        ("\\.heic\\'" . image-mode)
+        ("\\.hrz\\'" . image-mode)
+        ("\\.icb\\'" . image-mode)
+        ("\\.icc\\'" . image-mode)
+        ("\\.icm\\'" . image-mode)
+        ("\\.ico\\'" . image-mode)
+        ("\\.icon\\'" . image-mode)
+        ("\\.jbg\\'" . image-mode)
+        ("\\.jbig\\'" . image-mode)
+        ("\\.jng\\'" . image-mode)
+        ("\\.jnx\\'" . image-mode)
+        ("\\.miff\\'" . image-mode)
+        ("\\.mng\\'" . image-mode)
+        ("\\.mvg\\'" . image-mode)
+        ("\\.otb\\'" . image-mode)
+        ("\\.p7\\'" . image-mode)
+        ("\\.pcx\\'" . image-mode)
+        ("\\.pdb\\'" . image-mode)
+        ("\\.pfa\\'" . image-mode)
+        ("\\.pfb\\'" . image-mode)
+        ("\\.picon\\'" . image-mode)
+        ("\\.pict\\'" . image-mode)
+        ("\\.rgb\\'" . image-mode)
+        ("\\.rgba\\'" . image-mode)
+        ("\\.six\\'" . image-mode)
+        ("\\.tga\\'" . image-mode)
+        ("\\.wbmp\\'" . image-mode)
+        ("\\.wmf\\'" . image-mode)
+        ("\\.wpg\\'" . image-mode)
+        ("\\.xcf\\'" . image-mode)
+        ("\\.xmp\\'" . image-mode)
+        ("\\.xwd\\'" . image-mode)
+        ("\\.yuv\\'" . image-mode)
+        ("\\.tgz\\'" . tar-mode)
+        ("\\.tbz2?\\'" . tar-mode)
+        ("\\.txz\\'" . tar-mode)
+        ("\\.tzst\\'" . tar-mode)
+        ))))
+
+    (define *magic-fallback-mode-alist*
+      (make-parameter (quote (
+        (image-type-auto-detected-p . image-mode)
+        ("\\(PK00\\)?[P]K" . archive-mode)
+        ("\\(?:<\\?xml[ 	
+]+[^>]*>\\)?[ 	
+]*<\\(?:!--\\(?:[^-]\\|-[^-]\\)*-->[ 	
+]*<\\)*\\(?:!DOCTYPE[ 	
+]+[^>]*>[ 	
+]*<[ 	
+]*\\(?:!--\\(?:[^-]\\|-[^-]\\)*-->[ 	
+]*<\\)*\\)?[Hh][Tt][Mm][Ll]" . mhtml-mode)
+        ("<![Dd][Oo][Cc][Tt][Yy][Pp][Ee][ 	
+]+[Hh][Tt][Mm][Ll]" . mhtml-mode)
+        ("<\\?xml " . xml-mode)
+        ("[ 	
+]*<\\(?:!--\\(?:[^-]\\|-[^-]\\)*-->[ 	
+]*<\\)*!DOCTYPE " . sgml-mode)
+        ("%!PS" . ps-mode)
+        ("# xmcd " . conf-unix-mode)
+        ))))
+
+    (define *interpreter-mode-alist*
+      (make-parameter (quote (
+        ("j?ruby\\(?:[0-9.]+\\)" . ruby-mode)
+        ("jruby" . ruby-mode)
+        ("rbx" . ruby-mode)
+        ("ruby" . ruby-mode)
+        ("python[0-9.]*" . python-mode)
+        ("php\\(?:-?[34578]\\(?:\\.[0-9]+\\)*\\)?" . php-ts-mode-maybe)
+        ("lua" . lua-mode)
+        ("rhino" . js-mode)
+        ("gjs" . js-mode)
+        ("nodejs" . js-mode)
+        ("node" . js-mode)
+        ("gawk" . awk-mode)
+        ("nawk" . awk-mode)
+        ("mawk" . awk-mode)
+        ("awk" . awk-mode)
+        ("pike" . pike-mode)
+        ("\\(mini\\)?perl5?" . perl-mode)
+        ("wishx?" . tcl-mode)
+        ("tcl\\(sh\\)?" . tcl-mode)
+        ("expect" . tcl-mode)
+        ("octave" . octave-mode)
+        ("scm" . scheme-mode)
+        ("[acjkwz]sh" . sh-mode)
+        ("r?bash2?" . sh-mode)
+        ("dash" . sh-mode)
+        ("mksh" . sh-mode)
+        ("\\(dt\\|pd\\|w\\)ksh" . sh-mode)
+        ("es" . sh-mode)
+        ("i?tcsh" . sh-mode)
+        ("oash" . sh-mode)
+        ("rc" . sh-mode)
+        ("rpm" . sh-mode)
+        ("sh5?" . sh-mode)
+        ("tail" . text-mode)
+        ("more" . text-mode)
+        ("less" . text-mode)
+        ("pg" . text-mode)
+        ("make" . makefile-gmake-mode)
+        ("guile" . scheme-mode)
+        ("clisp" . lisp-mode)
+        ("emacs" . emacs-lisp-mode)
+        ))))
+
+
+    (define *magic-mode-alist* (make-parameter '()))
+    ;; ^ GNU Emacs's `magic-mode-alist' (files.el:3959): "Alist of regexp
+    ;; or function versus major modes for `set-auto-mode' to match against
+    ;; buffer contents at the start." It is empty in Emacs 31's default.
+
+    (define *magic-mode-regexp-match-limit* (make-parameter 4000))
+    ;; ^ GNU Emacs's `magic-mode-regexp-match-limit': "Limit on number of
+    ;; characters scanned by `magic-mode-alist'."
+
+    (define *auto-mode-interpreter-regexp*
+      (make-parameter
+      ;; GNU Emacs's `auto-mode-interpreter-regexp' (files.el:3936), the
+      ;; C's `concat` written out - "Regexp matching interpreters, for
+      ;; file mode determination."
+      (string-append
+       "#![ \t]*"
+       "\\("
+       "[^ \t\n]*/bin/env[ \t]*"
+       "\\(?:"
+       "\\(?:-[0a-z]*S[ \t]*\\|--split-string=\\)"
+       "\\(?:-[^ \t\n]+[ \t]+\\)*"
+       "\\(?:[^ \t\n]+=[^ \t\n]*[ \t]+\\)*"
+       "\\)?"
+       "\\)?"
+       "\\([^ \t\n]+\\)")))
+
+    (define *inhibit-local-variables-regexps*
+      (make-parameter
+      ;; GNU Emacs's `inhibit-local-variables-regexps' (files.el:3908).
+      '("\\.tar\\'" "\\.t[bg]z\\'"
+        "\\.arc\\'" "\\.zip\\'" "\\.lzh\\'" "\\.lha\\'"
+        "\\.zoo\\'" "\\.[jew]ar\\'" "\\.xpi\\'" "\\.rar\\'"
+        "\\.7z\\'"
+        "\\.sx[dmicw]\\'" "\\.odt\\'"
+        "\\.diff\\'" "\\.patch\\'"
+        "\\.tiff?\\'" "\\.gif\\'" "\\.png\\'" "\\.jpe?g\\'")))
+
+    (define *inhibit-local-variables-suffixes* (make-parameter '(".~" ".swp" ".swo" ".orig" ".rej")))
+    (define *inhibit-local-variables-ignore-case* (make-parameter #f))
+    (define *enable-local-variables* (make-parameter #t))
+    (define *local-enable-local-variables* (make-parameter #t))
+    ;; ^ GNU Emacs's `inhibit-local-variables-suffixes' (`compile.el'? no:
+    ;; files.el:3920), `inhibit-local-variables-ignore-case',
+    ;; `enable-local-variables' (files.el:3990) and
+    ;; `local-enable-local-variables' (files.el:4020). They are read by
+    ;; `inhibit-local-variables-p' and by `set-auto-mode'.
+
+    (define (inhibit-local-variables-p)
+      ;; GNU Emacs's `inhibit-local-variables-p': "Return non-nil if file
+      ;; local variables should be ignored."
+      ;;--------------------------------------------------------------
+      (let ((name (if (buffer-file-name)
+                      (file-name-sans-versions (buffer-file-name))
+                      (buffer-name)))
+            (case-fold (*inhibit-local-variables-ignore-case*)))
+        (parameterize ((*case-fold-search* case-fold))
+          (let loop ((sufs (*inhibit-local-variables-suffixes*)))
+            (cond ((null? sufs) #f)
+                  ((string-match (car sufs) name)
+                   (loop '()))
+                  (else (loop (cdr sufs)))))
+          (let loop ((temp (*inhibit-local-variables-regexps*)))
+            (cond ((null? temp) #f)
+                  ((string-match (car temp) name) temp)
+                  (else (loop (cdr temp))))))))
+
+    (define *major-mode-remap-alist* (make-parameter '()))
+    (define *major-mode-remap-defaults* (make-parameter '()))
+    ;; ^ GNU Emacs's `major-mode-remap-alist' and
+    ;; `major-mode-remap-defaults' (files.el:3786, :3800): "Alist mapping
+    ;; file-specified modes to alternative modes."
+
+    (define (major-mode-remap mode)
+      ;; GNU Emacs's `major-mode-remap' (files.el:3805): "Return the
+      ;; function to use to enable MODE."
+      ;;--------------------------------------------------------------
+      ;; Elisp's `(cdr nil)' is nil; `(cdr #f)' here is an error, so the
+      ;; cell is tested before it is taken apart.
+      (let ((cell (or (assq mode (*major-mode-remap-alist*))
+                      (assq mode (*major-mode-remap-defaults*)))))
+        (if cell (cdr cell) mode)))
+
+    (define %mode-autoloads
+      ;; **This tree's stand-in for an autoload cookie.** In Emacs every
+      ;; mode `auto-mode-alist' can name is autoloadable: the mode file
+      ;; carries `;;;###autoload', `loaddefs.el' turns it into an
+      ;; `autoload' form, and `(functionp mode)' is true before the mode
+      ;; is loaded. A library here is only reachable by importing it, so
+      ;; the modes this tree has are named with the library their Emacs
+      ;; file became, and `%mode-function' loads one on first use - the
+      ;; same moment Emacs's autoload fires.
+      ;;--------------------------------------------------------------
+      '((scheme-mode . (schemacs editor scheme))
+        (emacs-lisp-mode . (schemacs editor elisp-mode))
+        (lisp-interaction-mode . (schemacs editor elisp-mode))
+        (lisp-mode . (schemacs editor lisp-mode))
+        (lisp-data-mode . (schemacs editor lisp-mode))
+        (text-mode . (schemacs editor text-mode))))
+
+    (define (%autoload-mode mode)
+      ;; Load the library MODE's autoload entry names, if there is one.
+      ;; `resolve-module' loads a library that is not loaded yet - which
+      ;; is what makes its `define-derived-mode' register the command.
+      ;;--------------------------------------------------------------
+      (let ((entry (assq mode %mode-autoloads)))
+        (when entry
+          (resolve-module (cdr entry)))
+        entry))
+
+    (define (%mode-function mode)
+      ;; The procedure MODE names, or #f. Emacs's `(functionp mode)':
+      ;; a mode is a symbol whose function cell is the command, and this
+      ;; tree's command table is where a name resolves to one - after
+      ;; its library has been loaded, if it is one this tree has.
+      ;;--------------------------------------------------------------
+      (cond ((procedure? mode) mode)
+            ((symbol? mode)
+             (or (let ((record (command-record-named mode)))
+                   (and record (command-value-of record)))
+                 (begin
+                   (%autoload-mode mode)
+                   (let ((record (command-record-named mode)))
+                     (and record (command-value-of record))))))
+            (else #f)))
+
+    (define (%set-auto-mode-last)
+      (buffer-local-value (current-buffer) 'set-auto-mode--last #f))
+    (define (%set!set-auto-mode-last! value)
+      (set-buffer-local-value! (current-buffer) 'set-auto-mode--last value))
+
+    (define (set-auto-mode-0 mode keep-mode-if-same)
+      ;; GNU Emacs's `set-auto-mode-0' (files.el:3815): "Apply MODE and
+      ;; return it. If optional arg KEEP-MODE-IF-SAME is non-nil, MODE is
+      ;; chased of any aliases and compared to current major mode. If they
+      ;; are the same, do nothing and return `:keep'. Return nil if MODE
+      ;; could not be applied."
+      ;;
+      ;; The C's alias chase is `(indirect-function mode)': two names for
+      ;; one command compare equal. Here it is the two procedures, which
+      ;; is what the command table resolved them to.
+      ;;
+      ;; **A name with no function gets Emacs's message**, "Ignoring
+      ;; unknown mode" - with `%mode-autoloads` in place this fires only
+      ;; for a mode this tree has not ported, since every name in Emacs's
+      ;; own alist is autoloadable there.
+      ;;--------------------------------------------------------------
+      (if (not mode)
+          #f
+        (let ((last (%set-auto-mode-last)))
+          (if (and keep-mode-if-same
+                   (or (eq? (%mode-function mode) (%mode-function (major-mode)))
+                       (and last
+                            (eq? mode (car last))
+                            (eq? (major-mode) (cdr last)))))
+              'keep
+              (let ((modefun (major-mode-remap mode)))
+                (if (not (%mode-function modefun))
+                    (begin
+                      (message "Ignoring unknown mode `%s'%s"
+                               mode
+                               (if (eq? mode modefun)
+                                   ""
+                                   (format #f " (remapped to `~S')" modefun)))
+                      #f)
+                    (begin
+                      ((%mode-function modefun))
+                      (unless (or (eq? mode (major-mode))
+                                  (buffer-local-value (current-buffer)
+                                                      'set-auto-mode--last #f))
+                        (%set!set-auto-mode-last! (cons mode (major-mode))))
+                      mode)))))))
+
+    (define *file-auto-mode-skip* "^\\\\(#!\\\\|'\\\\\\\\\"\\\\)")
+    ;; ^ GNU Emacs's `file-auto-mode-skip' (files.el:3843): "Regexp of
+    ;; lines to skip when looking for file-local settings."
+
+    (define (set-auto-mode-1)
+      ;; GNU Emacs's `set-auto-mode-1' (files.el:3848): "Find the -*-
+      ;; spec in the buffer. Call with point at the place to start
+      ;; searching from. If one is found, set point to the beginning and
+      ;; return the position of the end. Otherwise, return nil."
+      ;;--------------------------------------------------------------
+      (let ((beg #f) (end #f))
+        (and
+         (not (inhibit-local-variables-p))
+         (search-forward "-*-" (line-end-position
+                                (if (looking-at *file-auto-mode-skip*) 2 1))
+                         #t)
+         (begin
+           (skip-chars-forward " \t")
+           (set! beg (point))
+           (search-forward "-*-" (line-end-position) #t))
+         (begin
+           (forward-char -3)
+           (skip-chars-backward " \t")
+           (set! end (point))
+           (set! beg (min beg end))
+           (goto-char beg)
+           end))))
+
+    (define (set-auto-mode--from-matching-alist-entry alist name
+                                                      case-insensitive
+                                                      keep-mode-if-same
+                                                      dir-local)
+      ;; GNU Emacs's `set-auto-mode--from-matching-alist-entry'
+      ;; (files.el:3568): "Find first matching entry in ALIST for file
+      ;; NAME."
+      ;;
+      ;; The C's `(REGEXP MODE t)' third element is kept: such an entry
+      ;; shortens NAME to the text before the match and goes round again,
+      ;; which is what makes the entry *incremental*.
+      ;;--------------------------------------------------------------
+      (let ((was-set #f)
+            (name name))
+        (let loop ()
+          (let* ((newmode
+                  (if case-insensitive
+                      (parameterize ((*case-fold-search* #t))
+                        (assoc-default name alist string-match))
+                      (or (parameterize ((*case-fold-search* #f))
+                            (assoc-default name alist string-match))
+                          (and (*auto-mode-case-fold*)
+                               (parameterize ((*case-fold-search* #t))
+                                 (assoc-default name alist string-match))))))
+                 ;; **`and`, not `when`**: a `when` whose test fails
+                 ;; answers the unspecified value, which is *true* in
+                 ;; Scheme - so `(if mode-t (loop) ...)` below looped for
+                 ;; ever on the first plain `(REGEXP . MODE)` entry.
+                 (mode-t (and newmode
+                              (not (procedure? newmode))
+                              (pair? newmode)
+                              (cadr newmode)
+                              (begin
+                                (set! name (substring name 0
+                                                      (match-beginning 0)))
+                                (car newmode))))
+                 (mode (or mode-t newmode)))
+            (when newmode
+              (if (and dir-local (not (set-auto-mode--dir-local-valid-p mode)))
+                  (message "Ignoring invalid mode `%S'" mode)
+                  (begin
+                    (set-auto-mode-0 mode keep-mode-if-same)
+                    (set! was-set #t))))
+            (if mode-t (loop) was-set)))))
+
+    (define (set-auto-mode--dir-local-valid-p mode)
+      ;; GNU Emacs's `set-auto-mode--dir-local-valid-p' (files.el:3628):
+      ;; "Say whether MODE can be used in a .dir-local.el
+      ;; `auto-mode-alist'." `provided-mode-derived-p' is not carried - a
+      ;; mode's parent is not recorded here - so the `special-mode' half
+      ;; answers false, which is the same answer for every mode that is a
+      ;; command.
+      ;;--------------------------------------------------------------
+      (and (symbol? mode)
+           (string-suffix-p "-mode" (symbol->string mode))
+           (command-record-named mode)
+           #t))
+
+    (define (set-auto-mode--apply-alist alist keep-mode-if-same dir-local)
+      ;; GNU Emacs's `set-auto-mode--apply-alist' (files.el:3605).
+      ;;--------------------------------------------------------------
+      (if (buffer-file-name)
+          (let ((name (file-name-sans-versions (buffer-file-name))))
+            (set-auto-mode--from-matching-alist-entry
+             alist name
+             (file-name-case-insensitive-p (buffer-file-name))
+             keep-mode-if-same dir-local))
+          #f))
+
+    (define (set-auto-mode . rest)
+      ;; GNU Emacs's `set-auto-mode' (files.el:3635): "Select major mode
+      ;; appropriate for current buffer."
+      ;;
+      ;; The steps are the C's, in the C's order, with three named gaps:
+      ;; the `auto-mode-alist' entry of a `.dir-locals.el', the
+      ;; `Local Variables:` block (`hack-local-variables`, which needs a
+      ;; Lisp value reader this tree has not got), and the
+      ;; `narrow-to-region` around the magic alists' scan (there is no
+      ;; narrowing here; `looking-at` would read past the limit, and the
+      ;; default alists match a first line).
+      ;;--------------------------------------------------------------
+      (let ((keep-mode-if-same (if (pair? rest) (car rest) #f))
+            (try-locals (not (inhibit-local-variables-p))))
+        (let ((modes '()))
+          ;; Look for -*-MODENAME-*- or -*- ... mode: MODENAME; ... -*-
+          (save-excursion
+            (goto-char (point-min))
+            (skip-chars-forward " \t\n")
+            (and (*enable-local-variables*)
+                 try-locals
+                 (let ((end (set-auto-mode-1)))
+                   (when end
+                     (if (save-excursion (search-forward ":" end #t))
+                         (let loop ()
+                           (when (parameterize ((*case-fold-search* #t))
+                                   (or (and (looking-at "mode:")
+                                            (goto-char (match-end 0)))
+                                       (re-search-forward "[ \t;]mode:" end #t)))
+                             (skip-chars-forward " \t")
+                             (let ((beg (point)))
+                               (if (search-forward ";" end #t)
+                                   (forward-char -1)
+                                   (goto-char end))
+                               (skip-chars-backward " \t")
+                               (set! modes
+                                     (cons (string->symbol
+                                            (string-append
+                                             (downcase (buffer-substring beg (point)))
+                                             "-mode"))
+                                           modes)))
+                             (loop)))
+                         (if (< (point) end)
+                             (set! modes
+                                   (cons (string->symbol
+                                          (string-append
+                                           (downcase (buffer-substring (point) end))
+                                           "-mode"))
+                                         modes))))))))
+          (or
+           ;; If we found modes to use, invoke them now.
+           (let ((done #f)
+                 (modes (reverse modes)))
+             (let loop ((rest modes))
+               (unless (null? rest)
+                 (unless (eq? done 'keep)
+                   (let ((res (set-auto-mode-0 (car rest) keep-mode-if-same)))
+                     (set! done (or res done))))
+                 (loop (cdr rest))))
+             done)
+           ;; "Check for an `auto-mode-alist' entry in dir-locals" - not
+           ;; carried: there are no directory-local variables.
+           #f
+           ;; The interpreter on the first line.
+           (let* ((interp (save-excursion
+                            (goto-char (point-min))
+                            (if (looking-at (*auto-mode-interpreter-regexp*))
+                                (match-string 2)
+                                #f)))
+                  (mode (and interp
+                             (assoc-default
+                              (file-name-nondirectory-part interp)
+                              (map (lambda (e)
+                                     (cons (format #f "\\`~a\\'" (car e)) (cdr e)))
+                                   (*interpreter-mode-alist*))
+                              string-match-p))))
+             (set-auto-mode-0 mode keep-mode-if-same))
+           ;; The buffer beginning against `magic-mode-alist'.
+           (let ((mode (save-excursion
+                         (goto-char (point-min))
+                         (assoc-default
+                          #f (*magic-mode-alist*)
+                          (lambda (re dummy)
+                            (cond ((procedure? re) (re))
+                                  ((string? re)
+                                   (parameterize ((*case-fold-search* #f))
+                                     (looking-at re)))
+                                  ;; "an element can also be a function to
+                                  ;; call": a *symbol* names it in Elisp,
+                                  ;; and the command table is this tree's
+                                  ;; only name-to-procedure path. An
+                                  ;; unported matcher (`image-type-auto-
+                                  ;; detected-p', in the default
+                                  ;; `magic-fallback-mode-alist') matches
+                                  ;; nothing rather than erroring.
+                                  ((symbol? re)
+                                   (let ((f (%mode-function re)))
+                                     (and f (f))))
+                                  (else
+                                   (error "Problem in magic-mode-alist with element %s" re))))))))
+             (set-auto-mode-0 mode keep-mode-if-same))
+           ;; The file name against `auto-mode-alist`.
+           (set-auto-mode--apply-alist (*auto-mode-alist*) keep-mode-if-same #f)
+           ;; The buffer beginning against `magic-fallback-mode-alist`.
+           (let ((mode (save-excursion
+                         (goto-char (point-min))
+                         (assoc-default
+                          #f (*magic-fallback-mode-alist*)
+                          (lambda (re dummy)
+                            (cond ((procedure? re) (re))
+                                  ((string? re)
+                                   (parameterize ((*case-fold-search* #f))
+                                     (looking-at re)))
+                                  ;; see the note on the same arm above
+                                  ((symbol? re)
+                                   (let ((f (%mode-function re)))
+                                     (and f (f))))
+                                  (else
+                                   (error "Problem with magic-fallback-mode-alist element: %s" re))))))))
+             (set-auto-mode-0 mode keep-mode-if-same))))))
+
+    (define (normal-mode . rest)
+      ;; GNU Emacs's `normal-mode' (files.el:3040): "Choose the major mode
+      ;; for this buffer automatically. Also sets up any specified local
+      ;; variables of the file or its directory."
+      ;;
+      ;; "`delay-mode-hooks' being non-nil will have prevented the major
+      ;; mode's call to `run-mode-hooks' from calling
+      ;; `hack-local-variables'" - which is not ported; the step that
+      ;; would call it is named here.
+      ;;--------------------------------------------------------------
+      (let ((find-file (if (pair? rest) (car rest) #f)))
+        (kill-all-local-variables)
+        (unless (*delay-mode-hooks*)
+          (run-hooks (*change-major-mode-after-body-hook*)
+                     (*after-change-major-mode-hook*)))
+        (let ((enable-local-variables (or (not find-file)
+                                          (*enable-local-variables*))))
+          (parameterize ((*enable-local-variables* enable-local-variables))
+            (set-auto-mode)))
+        ;; "Turn font lock off and on, to make sure it takes account of
+        ;; whatever file local variables are relevant to it" - the mode
+        ;; has just been set, and `font-lock-mode' is re-turned-on by the
+        ;; global mode's `after-change-major-mode-hook' entry.
+        #t))
+
+    (define *initial-major-mode*
+      (make-parameter 'fundamental-mode))
+    ;; ^ GNU Emacs's `initial-major-mode' (`startup.el'): "Major mode
+    ;; command to use for the `*scratch*' buffer."
+
+    (define (set-buffer-major-mode buffer)
+      ;; GNU Emacs's `set-buffer-major-mode' (`buffer.c:2283'): "Set an
+      ;; appropriate major mode for BUFFER."
+      ;;
+      ;; **A placement departure**: the C function is `buffer.c`'s, but
+      ;; it calls a mode *command* by name, and a name resolves through
+      ;; this tree's command table - which is `(schemacs editor
+      ;; command)`'s, above the buffer library. It lives here beside its
+      ;; one caller instead, as `locate-file-internal' does in
+      ;; `fileio.sld'.
+      ;;--------------------------------------------------------------
+      (let ((function
+             (cond ((string=? (buffer-name buffer) "*scratch*")
+                    (*initial-major-mode*))
+                   (else
+                    (let ((default (buffer-local-value buffer 'major-mode #f)))
+                      (if default default (major-mode)))))))
+        (if (not function)
+            #f
+            (with-current-buffer buffer
+              ((%mode-function function))
+              #t))))
 
     ))

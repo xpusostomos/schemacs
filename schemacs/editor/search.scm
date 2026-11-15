@@ -55,7 +55,7 @@
           match:start match:end match:count)
     ;; the cxr accessors are Guile's, as `(schemacs editor editfns)'s
     ;; import of them is
-    (only (guile) cadr caddr cddr cdddr cadddr logior
+    (only (guile) cadr caddr cddr cdddr cadddr logand logior
           make-regexp regexp-exec
           regexp/icase regexp/newline regexp/notbol
           string-index)
@@ -90,6 +90,12 @@
     ;; `(rnrs bytevectors)' on this Guile - `(guile)' is where the
     ;; typed-vector accessors live, as `buffer-text.scm' found.
     (only (guile) u32vector-ref)
+    ;; `\w', `\W', `\sC' and `\SC' are the syntax table's classes in an
+    ;; Emacs pattern (`regex-emacs.c' reads `SYNTAX (c)'), so the
+    ;; translation reads the table too.
+    (only (schemacs editor syntax)
+          syntax-table standard-syntax-table with-syntax-table char-syntax
+          string-to-syntax syntax-class-to-char)
     ;; The line-break cache: `region-cache.c`, which is the buffer's
     ;; `newline_cache` there. It is what makes searching a buffer with
     ;; very long lines affordable - a stretch already searched and found
@@ -429,8 +435,14 @@
       ;; backslash `default:' takes the character itself, and an ERE
       ;; escape of a special character makes that character literal,
       ;; so `\.' `\. is the same in both.
+      ;;
+      ;; **`\w' and `\W' are NOT here.** Emacs's `\w' is the syntax
+      ;; table's word class, and glibc's is `[[:alnum:]_]' of the
+      ;; locale - which keeps the underscore that Emacs's standard
+      ;; table calls *symbol* syntax. `%syntax-class-ere' translates
+      ;; them from the table instead, as `regex-emacs.c' reads it.
       ;;--------------------------------------------------------------
-      (memv c (list #\w #\W #\b #\B #\< #\>
+      (memv c (list #\b #\B #\< #\>
                     #\1 #\2 #\3 #\4 #\5 #\6 #\7 #\8 #\9
                     ;; the string beginning and end: glibc's too, as `\<'
                     ;; is, and they keep that meaning when `^' and `$'
@@ -567,7 +579,151 @@
       ;;--------------------------------------------------------------
       (and (%named-class-end text i) #t))
 
-    (define (%translate-emacs-regexp pattern)
+    ;;----------------------------------------------------------------
+    ;; `\w', `\W', `\sC' and `\SC': the syntax table's classes
+    ;;
+    ;; In Emacs these are not character classes at all - `regex-emacs.c'
+    ;; asks `SYNTAX (c)' of every character it looks at - and glibc's
+    ;; `\w' is the locale's `[[:alnum:]_]', which is a different set: the
+    ;; standard syntax table gives `_' *symbol* syntax, so Emacs's `\w'
+    ;; does not match it. The translation is therefore the set of
+    ;; characters whose syntax class is the one asked for, spelled as an
+    ;; ERE bracket expression.
+    ;;
+    ;; The set is enumerated over ASCII only, and the departure is named:
+    ;; a class that a table gives to a character above 127 is not
+    ;; expressible in a glibc bracket expression here (a range over
+    ;; characters in the locale is refused - `[À-ÿ]' is "Invalid range
+    ;; end"), and the classes the Lisp modes use have no such member:
+    ;; every character above 127 has word syntax in their tables, and
+    ;; glibc's own `\w' matches the letters among them.
+    ;;------------------------------------------------------------------
+
+    (define %syntax-class-cache '())
+    ;; ^ ((TABLE . CLASS-CHAR) . ERE-CLASS), most recent first
+
+    (define (%syntax-designator-class class-char)
+      ;; The class number the designator CLASS-CHAR names, as
+      ;; `string-to-syntax' reads it - `\s-' is whitespace, whose
+      ;; `char-syntax' is a *space*; both designators name class 0.
+      ;;--------------------------------------------------------------
+      (let ((desc (string-to-syntax (string class-char))))
+        (cond ((not desc) #f)
+              ((pair? desc) (car desc))
+              (else (logand desc #xFF)))))
+
+    (define (%syntax-class-members table class-char)
+      ;; The ASCII code points, ascending, whose syntax class in TABLE is
+      ;; the one CLASS-CHAR designates.
+      ;;--------------------------------------------------------------
+      (let ((class (if (%syntax-designator-class class-char)
+                       (syntax-class-to-char
+                        (%syntax-designator-class class-char))
+                       class-char)))
+        (with-syntax-table table
+          (lambda ()
+            (let loop ((c 0) (acc '()))
+              (cond ((>= c 128) (reverse acc))
+                    ((char=? (char-syntax (integer->char c)) class)
+                     ;; **A NUL is left out**: glibc hands the pattern to
+                     ;; `regcomp' as a C string, so a NUL in it truncates
+                     ;; the expression - the same wall `%without-nul'
+                     ;; meets. A syntax class that contains NUL therefore
+                     ;; does not match it through this translation.
+                     (loop (+ c 1) (if (zero? c) acc (cons c acc))))
+                    (else (loop (+ c 1) acc))))))))
+
+    (define (%ere-class-escape c)
+      ;; The code point C as one member of a bracket expression, escaped
+      ;; where glibc reads it as something else.
+      ;;
+      ;; `]' and `-' are not handled here: `]' anywhere but first closes
+      ;; the class, and a `-' that is not last is a range operator (and
+      ;; `\-' is not an escape glibc honours - `[a\-c]' is the range
+      ;; `\'..`c', measured). `%ere-class-body' puts both where POSIX
+      ;; makes them literal.
+      ;;--------------------------------------------------------------
+      (cond ((= c 92) "\\\\")
+            ((= c 94) "\\^")
+            (else (string (integer->char c)))))
+
+    (define (%ere-class-text members)
+      ;; MEMBERS, ascending code points, as the body of a bracket
+      ;; expression.
+      ;;
+      ;; **One member at a time, not ranges.** A range in a glibc bracket
+      ;; expression is read in the *locale's collation*, not in code-point
+      ;; order: `[<-_]' is "Invalid range end" in the en_US.UTF-8 locale,
+      ;; where `_' collates before `<'. Emacs's own matcher compares
+      ;; characters, so the only class that means the same in both is an
+      ;; enumeration.
+      ;;--------------------------------------------------------------
+      (let loop ((rest members) (acc '()))
+        (if (null? rest)
+            (apply string-append (reverse acc))
+            (loop (cdr rest) (cons (%ere-class-escape (car rest)) acc)))))
+
+    (define (%ere-class-body members)
+      ;; MEMBERS as a bracket expression's body, in the positions POSIX
+      ;; gives each character a literal meaning in: "`]' as the first
+      ;; character stands for itself", and a `-' last is not a range.
+      ;;--------------------------------------------------------------
+      (let loop ((rest members) (close? #f) (dash? #f) (rest2 '()))
+        (cond ((null? rest)
+               (string-append (if close? "]" "")
+                              (%ere-class-text (reverse rest2))
+                              (if dash? "-" "")))
+              ((= (car rest) 93) (loop (cdr rest) #t dash? rest2))
+              ((= (car rest) 45) (loop (cdr rest) close? #t rest2))
+              (else (loop (cdr rest) close? dash? (cons (car rest) rest2))))))
+
+    (define (%syntax-class-ere table class-char negated?)
+      ;; TABLE's CLASS-CHAR as an ERE bracket expression, or its
+      ;; complement when NEGATED?.
+      ;;--------------------------------------------------------------
+      (let* ((key (cons table class-char))
+             (hit (assoc key %syntax-class-cache))
+             (body (if hit
+                       (cdr hit)
+                       (let ((text (%ere-class-body
+                                    (%syntax-class-members table class-char))))
+                         (set! %syntax-class-cache
+                               (cons (cons key text) %syntax-class-cache))
+                         text))))
+        (cond
+         ;; A class no ASCII character has. Negated, that is every
+         ;; character, and `[[:print:][:cntrl:]]' is the locale's every
+         ;; character; plain, `[^[:print:][:cntrl:]]' is the empty one -
+         ;; a bracket expression rather than `regexp-unmatchable', so it
+         ;; can be quantified (`\s-+' has to compile).
+         ((string=? body "")
+          (if negated? "[[:print:][:cntrl:]]" "[^[:print:][:cntrl:]]"))
+         (else (string-append "[" (if negated? "^" "") body "]")))))
+
+    (define (%numbered-group-end pattern j)
+      ;; The index just past the `:' of a `(?N:' beginning at J, where J
+      ;; points at the first digit.
+      ;;--------------------------------------------------------------
+      (let loop ((k j))
+        (if (char=? (string-ref pattern k) #\:) (+ k 1) (loop (+ k 1)))))
+
+    (define (%numbered-group-colon pattern j)
+      ;; Whether the text at J in PATTERN is `<digits>:' - the inside of a
+      ;; `\(?N:...\)' group.
+      ;;--------------------------------------------------------------
+      (let loop ((k j))
+        (cond ((>= k (string-length pattern)) #f)
+              ((char=? (string-ref pattern k) #\:) (> k j))
+              ((char-numeric? (string-ref pattern k)) (loop (+ k 1)))
+              (else #f))))
+
+    (define (%numbered-group-number pattern j)
+      ;; The N of a `(?N:' whose digits begin at J.
+      ;;--------------------------------------------------------------
+      (string->number (substring pattern j
+                                 (- (%numbered-group-end pattern j) 1))))
+
+    (define (%translate-emacs-regexp pattern table)
       ;; An Emacs regexp spelled as the Emacs regexp dialect spells
       ;; it, into the ERE that matches the same: the group, alternation
       ;; and interval syntax swaps the escaped and unescaped forms -
@@ -576,9 +732,25 @@
       ;; Emacs pattern, so it is escaped. Bracket expressions are
       ;; copied verbatim, the way both dialects read them.
       ;;--------------------------------------------------------------
+      ;; The group numbers are the second answer. Emacs's match data is
+      ;; numbered by *its* groups, and glibc's by the `('s this
+      ;; translation emits - which are not the same set, because a shy
+      ;; group `\(?:...\)' has no number in Emacs and needs a group
+      ;; here. `mapping' records which glibc group holds which Emacs
+      ;; group, and `%string-match-into-regs' renumbers through it.
+      (let ((next-group 1)
+            (glibc-groups 0)
+            (mapping '()))
+        (define (group-mapping)
+          ;; Entry I is the glibc group that holds Emacs group I.
+          ;;----------------------------------------------------------
+          (let ((v (make-vector next-group 0)))
+            (vector-set! v 0 0)
+            (for-each (lambda (p) (vector-set! v (car p) (cdr p))) mapping)
+            v))
       (let loop ((i 0) (acc '()))
         (if (>= i (string-length pattern))
-            (list->string (reverse acc))
+            (values (list->string (reverse acc)) (group-mapping))
             (let ((c (string-ref pattern i)))
               (cond
                ;; a bracket expression: copied to its `]', with one
@@ -661,10 +833,70 @@
                              (< (+ i 3) (string-length pattern))
                              (char=? (string-ref pattern (+ i 2)) #\?)
                              (char=? (string-ref pattern (+ i 3)) #\:))
+                        (set! glibc-groups (+ glibc-groups 1))
                         (loop (+ i 4) (cons #\( acc)))
+                       ;; `\(?N:...\)' - a group with a *chosen* number.
+                       ;; `rx''s `(group-n N ...)' is the spelling, and
+                       ;; the Lisp keyword tables use it.
+                       ((and (char=? c2 #\()
+                             (< (+ i 3) (string-length pattern))
+                             (char=? (string-ref pattern (+ i 2)) #\?)
+                             (%numbered-group-colon pattern (+ i 3)))
+                        (let ((n (%numbered-group-number pattern (+ i 3))))
+                          (set! glibc-groups (+ glibc-groups 1))
+                          (set! mapping (cons (cons n glibc-groups) mapping))
+                          (set! next-group (max next-group (+ n 1)))
+                          (loop (%numbered-group-end pattern (+ i 3))
+                                (cons #\( acc))))
+                       ;; a plain `\(' - a capturing group, and the next
+                       ;; number Emacs would give it
+                       ((char=? c2 #\()
+                        (set! glibc-groups (+ glibc-groups 1))
+                        (set! mapping (cons (cons next-group glibc-groups)
+                                            mapping))
+                        (set! next-group (+ next-group 1))
+                        (loop (+ i 2) (cons #\( acc)))
                        ;; the escaped-and-special-to-ERE swaps
-                       ((memv c2 '(#\( #\) #\| #\{ #\}))
+                       ((memv c2 '(#\) #\| #\{ #\}))
                         (loop (+ i 2) (cons c2 acc)))
+                       ;; `\w' and `\W': the syntax table's word class,
+                       ;; which is not glibc's `\w' - see
+                       ;; `%syntax-class-ere'.
+                       ((memv c2 '(#\w #\W))
+                        (loop (+ i 2)
+                              (append (reverse
+                                       (string->list
+                                        (%syntax-class-ere
+                                         table #\w (char=? c2 #\W))))
+                                      acc)))
+                       ;; `\sC' and `\SC': the syntax class C.
+                       ((memv c2 '(#\s #\S))
+                        (if (>= (+ i 2) (string-length pattern))
+                            (error "Invalid syntax class" pattern)
+                            (loop (+ i 3)
+                                  (append (reverse
+                                           (string->list
+                                            (%syntax-class-ere
+                                             table
+                                             (string-ref pattern (+ i 2))
+                                             (char=? c2 #\S))))
+                                          acc))))
+                       ;; `\_<' and `\_>': the *symbol* boundary.
+                       ;; **A named departure**: glibc has the *word*
+                       ;; boundary `\<'/`\>' and no zero-width test of
+                       ;; the syntax table's symbol class, so the word
+                       ;; one stands in. The two agree wherever the
+                       ;; symbol's own edge is a word constituent, which
+                       ;; is every def keyword the Lisp keyword tables
+                       ;; test (`defun\_>', `define\_>'); they differ for
+                       ;; a symbol whose last character is a symbol
+                       ;; -syntax punctuation (`foo?\_>').
+                       ((and (char=? c2 #\_)
+                             (< (+ i 2) (string-length pattern))
+                             (memv (string-ref pattern (+ i 2)) '(#\< #\>)))
+                        (loop (+ i 3)
+                              (cons (string-ref pattern (+ i 2))
+                                    (cons #\\ acc))))
                        ((%pass-through-escape c2)
                         (loop (+ i 2) (cons c2 (cons #\\ acc))))
                        ((%untranslated-escape c2)
@@ -679,15 +911,42 @@
                ;; ERE specials that are literal in an Emacs pattern
                ((memv c '(#\( #\) #\| #\{))
                 (loop (+ i 1) (cons c (cons #\\ acc))))
-               (else (loop (+ i 1) (cons c acc))))))))
+               (else (loop (+ i 1) (cons c acc)))))))))
+
+    (define (%regexp-cache-lookup key)
+      ;; The cache entry for KEY - `(KEY REGEXP GROUP-MAP)' - or #f. KEY is
+      ;; `(PATTERN ICASE TABLE)', and `assoc' would compare it with
+      ;; `equal?' - which walks the whole char-table - so the parts are
+      ;; compared here.
+      ;;--------------------------------------------------------------
+      (let loop ((l %regexp-cache))
+        (cond ((null? l) #f)
+              ((and (string=? (car key) (car (car (car l))))
+                    (eq? (list-ref key 1) (list-ref (car (car l)) 1))
+                    (eq? (list-ref key 2) (list-ref (car (car l)) 2)))
+               (car l))
+              (else (loop (cdr l))))))
+
+    (define %current-group-map #f)
+    ;; ^ The group mapping of the pattern compiled last, which is the one
+    ;; the match about to be read belongs to - see
+    ;; `%string-match-into-regs'.
 
     (define (%compile-emacs-regexp pattern icase?)
       ;; Compile PATTERN as an Emacs pattern: through `%emacs-ere',
     ;; with a cache standing for `regexp_cache'.
+      ;;
+      ;; The syntax table is part of the key because `\w' and `\sC' are
+      ;; read from it - see `%syntax-class-ere'. The buffer's own, or the
+      ;; standard table when a match is asked for outside any buffer.
       ;;--------------------------------------------------------------
-      (let ((key (cons pattern icase?)))
+      (let* ((table (if (current-buffer) (syntax-table) (standard-syntax-table)))
+             (key (list pattern icase? table)))
         (cond
-         ((assoc key %regexp-cache) (cadr (assoc key %regexp-cache)))
+         ((let ((hit (%regexp-cache-lookup key)))
+            (and hit
+                 (begin (set! %current-group-map (car (cddr hit)))
+                        (cadr hit)))))
          (else
           ;; `regexp/newline' is what makes `^' and `$' mean what they
           ;; mean to Emacs: the start and end of a *line*, not of the
@@ -714,17 +973,19 @@
           ;; `abbreviate-file-name', which binds `case-fold-search' to
           ;; `file-name-case-insensitive-p' (nil here) and whose own
           ;; pattern is `\\(/\\|\\'\\)'.
-          (let ((rx (make-regexp (%translate-emacs-regexp pattern)
+          (let-values (((translated map) (%translate-emacs-regexp pattern table)))
+          (let ((rx (make-regexp translated
                                  (logior (if icase? regexp/icase 0)
                                          regexp/newline))))
+            (set! %current-group-map map)
             (set! %regexp-cache
-                  (cons (list key rx)
+                  (cons (list key rx map)
                         (let trim ((l %regexp-cache) (n 0))
                           (cond ((>= n 16) '())
                                 ((null? l) '())
                                 (else (cons (car l)
                                             (trim (cdr l) (+ n 1))))))))
-            rx)))))
+            rx))))))
 
     ;;----------------------------------------------------------------
     ;; The searches
@@ -737,14 +998,23 @@
       ;; match. The register count only grows, as the file header says
       ;; - the C's `set_search_regs' and `re_match' both clear, neither
       ;; shrinks.
+      ;;
+      ;; **The group numbers are renumbered through the pattern's
+      ;; mapping**: a register is an *Emacs* group, and glibc numbered
+      ;; its groups differently wherever a shy or numbered group was in
+      ;; the pattern. `%current-group-map' is the mapping of the pattern
+      ;; compiled last, which is this match's.
       ;;--------------------------------------------------------------
-      (let* ((n (max (match:count match)
-                     (length (or (*search-regs*) '()))))
+      (let* ((map %current-group-map)
+             (glibc-groups (match:count match))
+             (ours (if map (vector-length map) glibc-groups))
+             (n (max ours (length (or (*search-regs*) '()))))
              (regs (make-list n #f)))
         (let loop ((i 0))
-          (when (< i (match:count match))
-            (let ((s (match:start match i))
-                  (e (match:end match i)))
+          (when (< i ours)
+            (let* ((g (if map (vector-ref map i) i))
+                   (s (and (< g glibc-groups) (match:start match g)))
+                   (e (and s (match:end match g))))
               ;; a subexpression that did not match answers #f for
               ;; both (`(-1 . -1)' in ice-9/regex.scm)
               (if s

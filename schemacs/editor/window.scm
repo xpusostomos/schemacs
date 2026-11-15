@@ -52,6 +52,7 @@
           set!%window-hscroll set!%window-min-hscroll
           set!%window-suspend-auto-hscroll?
           *current-frame* frame-height frame-width frame-top-margin
+          frame-minibuffer-window
           window-type?
           make<window>
           frame-selected-window frame-windows select-window
@@ -1194,6 +1195,13 @@ windows it was combined with."
         ;; inside anything and holds nothing: the tree is one leaf.
         (set!window-parent window #f)
         (set!window-children window '())
+        ;; **The minibuffer window is not in the window tree and is not
+        ;; deleted by this.** GNU Emacs's frame has a root window holding
+        ;; the ordinary windows and a *separate* `f->minibuffer_window`
+        ;; (`frame.h`); deleting the other windows rebuilds the *root*
+        ;; tree and never touches the minibuffer window. This tree keeps
+        ;; the same two facts in `frame-windows` (the body) and
+        ;; `frame-minibuffer-window`, and `window-list` composes them.
         (set!frame-windows frame (list window))
         window))
 

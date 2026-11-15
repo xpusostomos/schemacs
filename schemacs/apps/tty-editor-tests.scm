@@ -105,7 +105,7 @@
        current-buffer set-buffer
        buffer-local-keymap set!buffer-local-keymap set!buffer-default-directory
        set!buffer-cursor-in-non-selected-windows set!buffer-cursor-type
-       set!buffer-truncate-lines set!buffer-word-wrap)
+       set!buffer-truncate-lines set!buffer-word-wrap erase-buffer)
  
  (only (schemacs editor intervals) set!buffer-intervals)
  (prefix (schemacs editor intervals) iv:)
@@ -156,7 +156,7 @@
        buffer-substring-no-properties delete-region goto-char point point-max point-min
        message
        region-beginning region-end
-       text-editor-cursor-column insert
+       text-editor-cursor-column insert buffer-string
 )
  ;; `paragraphs.el': imported for the *bindings* its load installs (M-h,
  ;; M-k, M-C-k), which is why the M-h test below presses a key at all.
@@ -2344,20 +2344,33 @@
   (let ((result (visit* "/tmp/fe-nl4.txt" "ab" (list C-x C-q C-x save-key))))
     (list (cadddr result) (caddr result))))
 
-;; The variable's other values, as Emacs defines them.
+;; The variable's other values, as Emacs defines them. **The files are
+;; `.bin', so they open in fundamental-mode**: a text file's mode sets
+;; the buffer's `require-final-newline' from
+;; `mode-require-final-newline' - which is Emacs's rule, and the test
+;; below is the one that shows it - and the global value these three set
+;; would not be read.
 (test-equal '("ab" "ab")
   (parameterize ((*require-final-newline* #f))
-    (let ((result (visit* "/tmp/fe-nl5.txt" "ab" (list C-x save-key))))
+    (let ((result (visit* "/tmp/fe-nl5.bin" "ab" (list C-x save-key))))
       (list (cadddr result) (caddr result)))))
 
 (test-equal '("ab\n" "ab")
   (parameterize ((*require-final-newline* 'visit))
-    (let ((result (visit* "/tmp/fe-nl6.txt" "ab" (list))))
+    (let ((result (visit* "/tmp/fe-nl6.bin" "ab" (list))))
       (list (cadddr result) (caddr result)))))
 
 (test-equal '("ab\n" "ab\n")
   (parameterize ((*require-final-newline* 'visit-save))
-    (let ((result (visit* "/tmp/fe-nl7.txt" "ab" (list C-x save-key))))
+    (let ((result (visit* "/tmp/fe-nl7.bin" "ab" (list C-x save-key))))
+      (list (cadddr result) (caddr result)))))
+
+;; ... and a text file's mode is what speaks there, so the *global* value
+;; is not consulted at all. Measured on Emacs 31.1: visiting a `.txt'
+;; holding "ab" with `require-final-newline' nil and saving gives "ab\n".
+(test-equal '("ab\n" "ab\n")
+  (parameterize ((*require-final-newline* #f))
+    (let ((result (visit* "/tmp/fe-nl9.txt" "ab" (list C-x save-key))))
       (list (cadddr result) (caddr result)))))
 
 ;; A file whose line breaks are CRLF keeps them: the buffer holds the
@@ -2367,21 +2380,27 @@
   (let ((result (visit* "/tmp/fe-nl8.txt" "ab\r\ncd" (list C-x save-key))))
     (list (cadddr result) (caddr result))))
 
-;; The visit-time rule is a function of the text and whether the file can
-;; be written, which is how Emacs's `after-find-file' asks it. The text is
-;; a *list of code points* rather than a string: what is being visited may
-;; hold a byte character, which no string can.
-(test-equal (list (list 97 98 10) (list 97 98 10) (list 97 98))
-  (parameterize ((*require-final-newline* 'visit))
-    (list (ensure-final-newline-on-visit (list 97 98) #f)
-          (ensure-final-newline-on-visit (list 97 98 10) #f)
-          (ensure-final-newline-on-visit (list 97 98) #t))))
+;; The visit-time rule is `after-find-file''s, and it works on the
+;; buffer: the mode has already been set, and it is the mode that gives
+;; `require-final-newline' its buffer-local value. The rule is asked of
+;; three texts and of a file that cannot be written.
+(define (nl-visit text local read-only?)
+  (let ((b (get-buffer-create "*final-newline-test*")))
+    (with-current-buffer b
+      (erase-buffer)
+      (insert text)
+      (set-buffer-local-value! b 'require-final-newline local)
+      (ensure-final-newline-on-visit read-only?)
+      (buffer-string))))
 
-;; ... and with the default, which adds at saving rather than visiting,
-;; it leaves the text alone.
-(test-equal '("ab" "ab\n")
-  (list (ensure-final-newline-on-visit "ab" #f)
-        (ensure-final-newline-on-visit "ab\n" #f)))
+(test-equal (list "ab\n" "ab\n" "ab" "ab")
+  (parameterize ((*require-final-newline* #f))
+    (list (nl-visit "ab" 'visit #f)
+          (nl-visit "ab" 'visit-save #f)
+          (nl-visit "ab" 'visit #t)
+          ;; ... and with a value that adds at saving rather than
+          ;; visiting, the text is left alone
+          (nl-visit "ab" #t #f))))
 
 
 ;;--------------------------------------------------------------------

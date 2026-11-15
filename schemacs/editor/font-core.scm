@@ -42,7 +42,11 @@
     (scheme base)
     (scheme char)
     (only (schemacs editor command) current-prefix-arg define-command)
-    (only (schemacs editor buffer) buffer-name)
+    (only (schemacs editor buffer) buffer-name current-buffer buffer-list
+          buffer-local-value set-buffer-local-value! with-current-buffer major-mode)
+    (only (schemacs editor subr) add-hook remove-hook
+          *after-change-major-mode-hook*)
+    (only (schemacs editor custom) define-custom)
     (only (schemacs editor frame) *current-frame* set!frame-message)
     ;; `font-lock-mode` is a `define-minor-mode`, which is `easy-mmode.el`'s.
     (only (schemacs editor easy-mmode) define-minor-mode)
@@ -54,7 +58,9 @@
           set!font-lock-mode!))
 
   (export *font-lock-function* font-lock-change-mode
-          font-lock-default-function font-lock-mode turn-on-font-lock)
+          font-lock-default-function font-lock-mode turn-on-font-lock
+          global-font-lock-mode *font-lock-global-modes*
+          turn-on-font-lock-if-desired font-lock-mode-enable-in-buffer)
 
   (begin
 
@@ -130,5 +136,90 @@ When Font Lock mode is enabled, text is fontified as you type it."
     ;; `font-lock-function`'s default, which the C's `defvar` reaches
     ;; back for after `font-lock-default-function` is defined.
     (*font-lock-function* font-lock-default-function)
+
+    ;;----------------------------------------------------------------
+    ;; Global Font Lock mode
+    ;;------------------------------------------------------------------
+
+    (define-custom *font-lock-global-modes* #t
+      "Modes for which Font Lock mode is automagically turned on.
+Global Font Lock mode is controlled by the command
+`global-font-lock-mode'."
+      :type 'sexp
+      :group 'font-lock)
+
+    (define (turn-on-font-lock-if-desired)
+      ;; GNU Emacs's `turn-on-font-lock-if-desired' (font-core.el:262).
+      ;; `font-lock-global-modes` is t, `(not ...)` or a list of modes.
+      ;;--------------------------------------------------------------
+      (when (cond ((eq? (*font-lock-global-modes*) #t) #t)
+                  ((and (pair? (*font-lock-global-modes*))
+                        (eq? (car (*font-lock-global-modes*)) 'not))
+                   (not (memq (major-mode) (cdr (*font-lock-global-modes*)))))
+                  (else (memq (major-mode) (*font-lock-global-modes*))))
+        (let ((*inhibit-quit* #t))
+          (turn-on-font-lock))))
+
+    (define *font-lock-mode--suppress-set-explicitly* (make-parameter #f))
+    ;; ^ The macro's `MODE-suppress-set-explicitly`.
+
+    (define (font-lock-mode--set-explicitly)
+      ;; What `define-globalized-minor-mode` puts on `font-lock-mode-hook`:
+      ;; a buffer whose mode hook turned the mode on or off by hand is
+      ;; marked, and the global mode then leaves it alone.
+      ;;--------------------------------------------------------------
+      (unless (*font-lock-mode--suppress-set-explicitly*)
+        (set-buffer-local-value! (current-buffer)
+                                 'font-lock-mode--set-explicitly #t)))
+
+    (define (font-lock-mode-enable-in-buffer)
+      ;; GNU Emacs's `font-lock-mode-enable-in-buffer`, from the macro's
+      ;; expansion (easy-mmode.el:624): "The function that calls TURN-ON
+      ;; in the current buffer."
+      ;;--------------------------------------------------------------
+      (unless (buffer-local-value (current-buffer)
+                                  'font-lock-mode--set-explicitly #f)
+        (parameterize ((*font-lock-mode--suppress-set-explicitly* #t))
+          (turn-on-font-lock-if-desired))))
+
+    (define *global-font-lock-mode* (make-parameter #f))
+
+    (define-command (global-font-lock-mode arg)
+      "Toggle Font Lock mode in many buffers (Global Font Lock mode).
+
+With a prefix argument ARG, enable Global Font Lock mode if ARG is
+positive, and disable it otherwise."
+      ;; **A plain command, where the C is a `define-globalized-minor-mode`.**
+      ;; That macro is not ported (it builds five names from one symbol
+      ;; and hangs its turn-on on `after-change-major-mode-hook`); what is
+      ;; here is its expansion's body, and the interactive rule is
+      ;; `define-minor-mode`'s - see `menu-bar-mode` for the same spelling.
+      ;;--------------------------------------------------------------
+      (interactive (list (or (current-prefix-arg) 'toggle)))
+      (let ((value (if (eq? arg 'toggle)
+                       (not (*global-font-lock-mode*))
+                       (not (and (number? arg) (< arg 1))))))
+        (*global-font-lock-mode* value)
+        ;; "Setup hook to handle future mode changes and new buffers."
+        (if value
+            (add-hook *after-change-major-mode-hook*
+                      font-lock-mode-enable-in-buffer)
+            (remove-hook *after-change-major-mode-hook*
+                         font-lock-mode-enable-in-buffer))
+        ;; "Go through existing buffers."
+        (for-each
+         (lambda (buf)
+           (with-current-buffer buf
+             (if value
+                 (turn-on-font-lock-if-desired)
+                 (when (font-lock-mode-on?) (font-lock-mode -1)))))
+         (buffer-list))
+        #t))
+
+    ;; The mode hook's marker: a buffer whose `font-lock-mode-hook` sets
+    ;; the mode is not overridden by the global mode. The hook is the
+    ;; parameter `define-minor-mode` made, so it is set by calling it.
+    (font-lock-mode-hook
+     (cons font-lock-mode--set-explicitly (font-lock-mode-hook)))
 
     ))

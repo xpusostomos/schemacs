@@ -83,6 +83,7 @@
     ;; `font-lock-mode''s buffer, and the `defvar-local' variables it
     ;; keeps on it
     (only (schemacs editor buffer)
+          *case-fold-search*
           buffer-local-value current-buffer
           major-mode set-buffer-local-value!)
     ;; `with-silent-modifications` is `subr.el`'s, and font-lock wraps its
@@ -98,7 +99,7 @@
     ;; `syntax.c' and `syntax.el' and live in `(schemacs editor syntax)'
     (only (schemacs editor syntax)
           parse-partial-sexp syntax-ppss syntax-table syntax-propertize
-          with-syntax-table)
+          with-syntax-table copy-syntax-table modify-syntax-entry)
     ;; the faces above are `defface''d here, as font-lock.el deffaces them
     (only (schemacs editor faces) defface))
 
@@ -119,6 +120,7 @@
    *font-lock-mode*
    *font-lock-multiline*
    *font-lock-set-defaults*
+   *font-lock-major-mode*
    *font-lock-support-mode*
    *font-lock-unfontify-region-function*
    font-lock-add-keywords
@@ -130,6 +132,7 @@
    font-lock-compile-keywords
    font-lock-default-fontify-buffer
    font-lock-defaults
+   font-lock-register-keyword-variable!
    font-lock-default-fontify-region
    font-lock-default-unfontify-buffer
    font-lock-default-unfontify-region
@@ -419,6 +422,8 @@
     ;; `font-lock-comment-delimiter-face' is not used until a mode sets
     ;; these.
 
+    (define *font-lock-major-mode* (make-parameter #f))
+
     (define *font-lock-set-defaults* (make-parameter #f))
     ;; ^ GNU Emacs's `font-lock-set-defaults', a `defvar-local' as well:
     ;; "Whether we have set up defaults." Read through
@@ -498,6 +503,22 @@
     ;; mode sets it for its own buffers, which is exactly what
     ;; `dired-mode' does.
 
+    (define (font-lock-keywords-only)
+      (font-lock-buffer-local *font-lock-keywords-only*))
+    (define (font-lock-keywords-case-fold-search)
+      (font-lock-buffer-local *font-lock-keywords-case-fold-search*))
+    (define (font-lock-syntax-table)
+      (font-lock-buffer-local *font-lock-syntax-table*))
+    (define (font-lock-syntactic-face-function)
+      (font-lock-buffer-local *font-lock-syntactic-face-function*))
+    ;; ^ The four are `defvar-local' in Emacs (`font-lock-keywords-only',
+    ;; `font-lock-keywords-case-fold-search', `font-lock-syntax-table' and
+    ;; `font-lock-syntactic-face-function'): `font-lock-set-defaults' sets
+    ;; them with `setq-local' for the mode it is setting up. Read through
+    ;; the buffer, they follow the mode of the buffer being fontified;
+    ;; read through the parameter, the last buffer's mode leaked into the
+    ;; next one's fontification.
+
     (define (font-lock-keywords) (font-lock-buffer-local *font-lock-keywords*))
     (define (set!font-lock-keywords! value)
       (set!font-lock-buffer-local! *font-lock-keywords* value))
@@ -519,6 +540,14 @@
       (font-lock-buffer-local *font-lock-fontified*))
     (define (set!font-lock-fontified! value)
       (set!font-lock-buffer-local! *font-lock-fontified* value))
+
+    (define (font-lock-major-mode)
+      (font-lock-buffer-local *font-lock-major-mode*))
+    (define (set!font-lock-major-mode! value)
+      (set!font-lock-buffer-local! *font-lock-major-mode* value))
+    ;; ^ GNU Emacs's `font-lock-major-mode' (`font-lock.el:1914'), a
+    ;; `defvar-local': "Major mode for which the font-lock settings have
+    ;; been setup."
 
     (define (font-lock-set-defaults-done?)
       (font-lock-buffer-local *font-lock-set-defaults*))
@@ -763,15 +792,18 @@
         ;; plain position is not enough and this port used one.
         (let ((pos (point-marker)))
           (set-marker pos #f)          ; `(make-marker)': nowhere yet
+          ;; "`case-fold-search' is bound by the C from
+          ;; `font-lock-keywords-case-fold-search'"; the regexp engine
+          ;; here takes its folding from `*case-fold-search*', so that is
+          ;; the variable bound around the whole walk. Scheme's
+          ;; `lisp-data-mode' asks for folding, `emacs-lisp-mode' does
+          ;; not, and the two now differ.
+          (parameterize ((*case-fold-search*
+                          (font-lock-keywords-case-fold-search)))
           (for-each
          (lambda (keyword)
            (let ((matcher (car keyword)))
              (goto-char start)
-             ;; `case-fold-search' is bound by the C from
-             ;; `font-lock-keywords-case-fold-search'; the regexp engine
-             ;; here takes its folding from `*case-fold-search*', so that
-             ;; variable would have to be the one bound - and no mode
-             ;; here sets it yet. Named.
              (let loop ()
                (when (and (< (point) end)
                           (if (string? matcher)
@@ -824,7 +856,7 @@
                             (goto-char (marker-position pos))))))
                   (if (pair? (cdr keyword)) (cdr keyword) '()))
                  (loop)))))
-         (if (pair? (cddr keywords)) (cddr keywords) '()))
+         (if (pair? (cddr keywords)) (cddr keywords) '())))
           ;; `(set-marker pos nil)'
           (set-marker pos #f)
           #f)))
@@ -883,9 +915,11 @@
 
     (define (%compile-each keywords)
       ;; the `mapcar' the C compiles the user-level list with, kept apart
-      ;; only so that `font-lock-compile-keywords' reads as the C does
+      ;; only so that `font-lock-compile-keywords' reads as the C does.
+      ;; "`mapcar' on nil is nil": the list may be the tree's `#f', which
+      ;; is Elisp's nil (`(map ...)' is an error on it).
       ;;--------------------------------------------------------------
-      (map font-lock-compile-keyword keywords))
+      (map font-lock-compile-keyword (if (pair? keywords) keywords '())))
 
     ;;----------------------------------------------------------------
     ;; Fontifying a region
@@ -992,12 +1026,12 @@
       ;; reads are false; see their definition.
       ;;--------------------------------------------------------------
       (syntax-propertize end)
-      (with-syntax-table (or (*font-lock-syntax-table*) (syntax-table))
+      (with-syntax-table (or (font-lock-syntax-table) (syntax-table))
         (lambda ()
           (let ((state (syntax-ppss start)))
             (let loop ((state state))
               (if (or (list-ref state 3) (list-ref state 4))
-                  (let* ((face ((*font-lock-syntactic-face-function*) state))
+                  (let* ((face ((font-lock-syntactic-face-function) state))
                          (beg (max (list-ref state 8) start))
                          (state (parse-partial-sexp (point) end #f #f state
                                                     'syntax-table)))
@@ -1030,7 +1064,7 @@
             (loudly (if (pair? args) (car args) #f)))
         (with-silent-modifications
          ;; "Use the fontification syntax table, if any." (`:1202')
-         (with-syntax-table (or (*font-lock-syntax-table*) (syntax-table))
+         (with-syntax-table (or (font-lock-syntax-table) (syntax-table))
           (lambda ()
             (parameterize ((*font-lock-beg* beg)
                            (*font-lock-end* end))
@@ -1046,7 +1080,7 @@
                     (end (*font-lock-end*)))
                 (font-lock-unfontify-region beg end)
                 ;; "unless font-lock-keywords-only" (`:1228')
-                (unless (*font-lock-keywords-only*)
+                (unless (font-lock-keywords-only)
                   (font-lock-fontify-syntactically-region beg end loudly))
                 (font-lock-fontify-keywords-region beg end loudly))))))
         #f))
@@ -1136,58 +1170,118 @@
     ;; The keywords a mode adds
     ;;------------------------------------------------------------------
 
-    (define (font-lock-add-keywords mode keywords . args)
-      ;; GNU Emacs's `font-lock-add-keywords' (font-lock.el:715): "Add
+    (define (font-lock-add-keywords mode keywords . rest)
+      ;; GNU Emacs's `font-lock-add-keywords' (font-lock.el:720): "Add
       ;; highlighting KEYWORDS for MODE. ... If optional argument HOW is
       ;; `set', they are used to replace the current highlighting list.
       ;; If HOW is any other non-nil value, they are added at the end of
       ;; the current highlighting list."
       ;;
-      ;; The C's MODE argument indexes `font-lock-keywords-alist', for
-      ;; keywords that belong to a major mode rather than to one buffer;
-      ;; that machinery is not here (nothing needs it yet), so MODE must
-      ;; be false - which the C also allows, and calls "added for the
-      ;; current buffer".
+      ;; **The C calls `font-lock-set-defaults' first**, and that is what
+      ;; keeps a keyword list added before the mode comes on: the setup
+      ;; is marked done, so turning the mode on does not derive the list
+      ;; again and throw the addition away. This port used to skip that
+      ;; step, and a keyword added before `font-lock-mode' was lost.
+      ;;
+      ;; MODE is not carried: it indexes `font-lock-keywords-alist', and
+      ;; nothing here needs that yet, so it must be false - "added for
+      ;; the current buffer", which the C also allows.
       ;;--------------------------------------------------------------
-      (if mode
-          (error "font-lock-add-keywords for a mode is not ported")
-          (let* ((how (if (pair? args) (car args) #f))
-                 (current (let ((c (font-lock-keywords)))
-                            (if (eq? (car-safe c) #t) (cadr c) c)))
-                 (new (cond ((eq? how 'set) keywords)
-                            (how (append current keywords))
-                            (else (append keywords current)))))
-            (set!font-lock-keywords! (font-lock-compile-keywords new))
-            (when (font-lock-mode-on?) (font-lock-fontify-buffer)))))
+      (let ((how (if (pair? rest) (car rest) #f)))
+        (if mode
+            (error "font-lock-add-keywords for a mode is not ported")
+            (begin
+              ;; "(when (and font-lock-mode
+              ;;            (not (or font-lock-keywords font-lock-defaults)))
+              ;;    (font-lock-mode -1)
+              ;;    (setq-local font-lock-defaults '(nil t))
+              ;;    (font-lock-mode 1))"
+              (when (and (font-lock-mode-on?)
+                         (not (or (font-lock-keywords)
+                                  (font-lock-defaults))))
+                (set!font-lock-mode! #f)
+                (font-lock-mode-internal #f)
+                (set!font-lock-defaults! (list #f #t))
+                (set!font-lock-mode! #t)
+                (font-lock-mode-internal #t))
+              (font-lock-set-defaults)
+              (let ((was-compiled (eq? (car-safe (font-lock-keywords)) #t)))
+                ;; "Bring back the user-level (uncompiled) keywords."
+                (when was-compiled
+                  (set!font-lock-keywords!
+                   (cadr (font-lock-keywords))))
+                (if (eq? how 'set)
+                    (set!font-lock-keywords! keywords)
+                    (begin
+                      (font-lock-remove-keywords #f keywords)
+                      (let ((old (if (eq? (car-safe (font-lock-keywords)) #t)
+                                     (cdr (font-lock-keywords))
+                                     (font-lock-keywords))))
+                        (set!font-lock-keywords!
+                         (if how
+                             (append old keywords)
+                             (append keywords old))))))
+                (when was-compiled
+                  (set!font-lock-keywords!
+                   (font-lock-compile-keywords (font-lock-keywords))))
+                #t)))))
 
     (define (font-lock-remove-keywords mode keywords)
       ;; GNU Emacs's `font-lock-remove-keywords' (font-lock.el:841):
       ;; "Remove highlighting KEYWORDS from the current buffer."
+      ;;
+      ;; Like `font-lock-add-keywords', it sets the defaults up first and
+      ;; puts the list back in its uncompiled form before editing it.
       ;;--------------------------------------------------------------
       (if mode
           (error "font-lock-remove-keywords for a mode is not ported")
-          (let* ((current (font-lock-keywords))
-                 (user (if (eq? (car-safe current) #t) (cadr current) current))
-                 (kept (let loop ((rest user) (acc '()))
-                         (cond ((null? rest) (reverse acc))
-                               ((member (car rest) keywords) (loop (cdr rest) acc))
-                               (else (loop (cdr rest)
-                                           (cons (car rest) acc)))))))
-            (set!font-lock-keywords! (font-lock-compile-keywords kept)))))
+          (begin
+            (font-lock-set-defaults)
+            (let ((was-compiled (eq? (car-safe (font-lock-keywords)) #t)))
+              (when was-compiled
+                (set!font-lock-keywords! (cadr (font-lock-keywords))))
+              (let ((kept (let loop ((rest (font-lock-keywords)) (acc '()))
+                            (cond ((null? rest) (reverse acc))
+                                  ((member (car rest) keywords)
+                                   (loop (cdr rest) acc))
+                                  (else (loop (cdr rest)
+                                              (cons (car rest) acc)))))))
+                (set!font-lock-keywords! kept)
+                (when was-compiled
+                  (set!font-lock-keywords!
+                   (font-lock-compile-keywords kept))))
+              #t))))
 
     ;;----------------------------------------------------------------
     ;; Setting up from the mode's defaults
     ;;------------------------------------------------------------------
 
+    (define *font-lock-keyword-variables* (make-parameter '()))
+    ;; ^ The keyword variables, by name, because **a symbol has no value
+    ;; here**: Emacs's `font-lock-defaults' names its three levels with
+    ;; symbols and `symbol-value' resolves them. This tree's names are
+    ;; library bindings, and the library that defines a keyword variable
+    ;; registers its value here with `font-lock-register-keyword-variable!'
+    ;; - the same seam, one table.
+
+    (define (font-lock-register-keyword-variable! name value)
+      ;; Put NAME's VALUE in the table `font-lock-eval-keywords' reads.
+      ;;--------------------------------------------------------------
+      (*font-lock-keyword-variables*
+       (cons (cons name value) (*font-lock-keyword-variables*))))
+
     (define (font-lock-eval-keywords keywords)
       ;; GNU Emacs's `font-lock-eval-keywords' (font-lock.el:1822):
       ;; "Evaluate KEYWORDS if a function (funcall) or variable (eval)
-      ;; name." A procedure is called and its answer looked at again,
-      ;; which is the C's recursion.
+      ;; name." A symbol is looked up in the keyword-variable table, and
+      ;; a procedure is called; the C's recursion is the walk here.
       ;;--------------------------------------------------------------
-      (if (procedure? keywords)
-          (font-lock-eval-keywords (keywords))
-          keywords))
+      (cond ((procedure? keywords)
+             (font-lock-eval-keywords (keywords)))
+            ((symbol? keywords)
+             (let ((entry (assq keywords (*font-lock-keyword-variables*))))
+               (if entry (cdr entry) #f)))
+            (else keywords)))
 
     (define (font-lock-value-in-major-mode values)
       ;; GNU Emacs's `font-lock-value-in-major-mode' (font-lock.el:1830):
@@ -1225,9 +1319,11 @@
       ;; fontification variables from `font-lock-defaults'."
       ;;
       ;; `font-lock-defaults' is `(KEYWORDS [KEYWORDS-ONLY [CASE-FOLD
-      ;; [SYNTAX-ALIST ...]]])'; the first three are read here. The
-      ;; fourth, SYNTAX-ALIST, modifies the syntax table's entries, and
-      ;; is not carried - no mode in this tree sets it.
+      ;; [SYNTAX-ALIST [SYNTAX-TABLE [LOCAL ...]]]])' followed by an
+      ;; alist of variables to set. **Every one of them is buffer-local
+      ;; in Emacs** (`setq-local'), and each is stored that way here -
+      ;; the parameters are the *global* value the rest of the tree
+      ;; reads, and the buffer's own value wins.
       ;;
       ;; What the C does that is *not* here is named in the library
       ;; comment; the largest piece is the
@@ -1235,32 +1331,93 @@
       ;; needs `font-lock-add-keywords' with a MODE to have anything to
       ;; walk.
       ;;--------------------------------------------------------------
+      ;; "(when (or (not font-lock-set-defaults)
+      ;;            (not font-lock-major-mode)
+      ;;            (not (derived-mode-p font-lock-major-mode)))
+      ;;    (setq font-lock-major-mode major-mode)
+      ;;    (setq font-lock-set-defaults t) ...)"
+      ;;
+      ;; **The guard is what keeps a keyword list added before the mode
+      ;; came on**: `font-lock-add-keywords' runs this setup, marks it
+      ;; done, and a later turn-on then leaves the list alone. A derived
+      ;; mode is not told from its parent here - a mode's parent is not
+      ;; recorded in this tree - so the test is the mode being the same.
+      (unless (and (font-lock-set-defaults-done?)
+                   (eq? (font-lock-major-mode) (major-mode)))
+      (set!font-lock-major-mode! (major-mode))
+      (set!font-lock-set-defaults-done! #t)
       (let* ((defaults (font-lock-defaults))
-             (keywords (if (pair? defaults) (car defaults) #f))
-             (keywords-only (if (and (pair? defaults) (pair? (cdr defaults)))
-                                (list-ref defaults 1)
-                                #f))
-             (case-fold (if (and (pair? defaults)
-                                 (pair? (cdr defaults))
-                                 (pair? (cddr defaults)))
-                            (car (cddr defaults))
-                            #f)))
-        (when keywords
+             (nth (lambda (i)
+                    (let loop ((l defaults) (n i))
+                      (cond ((not (pair? l)) #f)
+                            ((= n 0) (car l))
+                            (else (loop (cdr l) (- n 1)))))))
+             ;; "`font-lock-choose-keywords' ... (nth 0 defaults)" - the
+             ;; C chooses the level from the *names* first and evaluates
+             ;; the chosen one after; doing it the other way round
+             ;; handed the chooser a keyword list and the compiler a
+             ;; symbol.
+             (keywords (font-lock-choose-keywords
+                        (and (pair? defaults) (car defaults))
+                        (font-lock-value-in-major-mode
+                         (*font-lock-maximum-decoration*))))
+             (keywords-only (nth 1))
+             (case-fold (nth 2))
+             (syntax-alist (nth 3)))
+        ;; "Syntactic fontification?"
+        (set-buffer-local-value! (current-buffer) *font-lock-keywords-only*
+                                 (and keywords-only #t))
+        ;; "Case fold during regexp fontification?"
+        (set-buffer-local-value! (current-buffer)
+                                 *font-lock-keywords-case-fold-search*
+                                 case-fold)
+        ;; "Syntax table for regexp and syntactic fontification?" - the
+        ;; alist's entries are (CHAR-OR-STRING . SYNTAX-DESCRIPTOR), and
+        ;; the copy keeps the mode's own table untouched.
+        (if (not syntax-alist)
+            (set-buffer-local-value! (current-buffer)
+                                     *font-lock-syntax-table* #f)
+            (let ((table (copy-syntax-table (syntax-table))))
+              (for-each
+               (lambda (selem)
+                 (let ((chars (car selem))
+                       (syntax (cdr selem)))
+                   (for-each
+                    (lambda (ch) (modify-syntax-entry ch syntax table))
+                    ;; Emacs's `(if (numberp (car selem)) (list ...)
+                    ;; (mapcar #'identity ...))': a single character or
+                    ;; a string of them. A character is a character here,
+                    ;; not a number.
+                    (if (string? chars) (string->list chars) (list chars)))))
+               syntax-alist)
+              (set-buffer-local-value! (current-buffer)
+                                       *font-lock-syntax-table* table)))
+        ;; "Variable alist?" - each `(VARIABLE . VALUE)' is made local.
+        ;; `(nth 4 defaults)' used to hold
+        ;; `font-lock-beginning-of-syntax-function'; if it is a cons it
+        ;; is part of the alist, which is Emacs's own test.
+        (let loop ((vars (let skip ((l defaults) (n (if (pair? (nth 4))
+                                                        4 5)))
+                           (cond ((not (pair? l)) '())
+                                 ((= n 0) l)
+                                 (else (skip (cdr l) (- n 1)))))))
+          (when (pair? vars)
+            (set-buffer-local-value! (current-buffer)
+                                     (car (car vars)) (cdr (car vars)))
+            (loop (cdr vars))))
+        ;; "Set up `font-lock-keywords' last because its value might
+        ;; depend on other settings."
+        (set!font-lock-keywords! (font-lock-eval-keywords keywords))
+        (unless (eq? (car-safe (font-lock-keywords)) #t)
           (set!font-lock-keywords!
-           (font-lock-compile-keywords
-            (font-lock-choose-keywords
-             (font-lock-eval-keywords keywords)
-             (font-lock-value-in-major-mode (*font-lock-maximum-decoration*)))))
-          (*font-lock-keywords-case-fold-search* case-fold)
-          (*font-lock-keywords-only* (and keywords-only #t))
-          (*font-lock-fontify-syntactically-function*
-           font-lock-default-fontify-syntactically)
-          (*font-lock-fontify-region-function* font-lock-default-fontify-region)
-          (*font-lock-unfontify-region-function* font-lock-default-unfontify-region)
-          (*font-lock-extend-region-functions*
-           (list font-lock-extend-region-multiline))
-          (set!font-lock-set-defaults-done! #t)
-          #t)))
+           (font-lock-compile-keywords (font-lock-keywords))))
+        (*font-lock-fontify-syntactically-function*
+         font-lock-default-fontify-syntactically)
+        (*font-lock-fontify-region-function* font-lock-default-fontify-region)
+        (*font-lock-unfontify-region-function* font-lock-default-unfontify-region)
+        (*font-lock-extend-region-functions*
+         (list font-lock-extend-region-multiline))
+        #t)))
 
     ;;----------------------------------------------------------------
     ;; The mode

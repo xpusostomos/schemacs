@@ -551,16 +551,16 @@
         (let ((mini (and frame (frame-minibuffer-window frame))))
           (cond
            ((not mini) all)
-           ;; t: include it whether or not it is active
-           ((eq? minibuf #t) all)
+           ;; t: include it whether or not it is active - and last,
+           ;; which is the row it stands on
+           ((eq? minibuf #t) (append all (list mini)))
            ;; nil or omitted: include it only while it is active
            ((or (null? minibuf) (eq? minibuf #f))
             (if (minibuffer-window-active-p mini)
-                all
-                (delq mini all)))
+                (append all (list mini))
+                all))
            ;; any other value: never include it
-           (else (delq mini all))
-           ))))
+           (else all)))))
 
     (define (window-minibuffer-p window)
       ;; GNU Emacs's `window-minibuffer-p' (`window.c`): "Return t if
@@ -2277,7 +2277,17 @@
              (mini (make-frame-window frame (*minibuf-0*)
                                       (max 0 (- height 1)) 1 0 width)))
         (set!frame-minibuffer-window frame mini)
-        (set!frame-windows frame (list window mini))
+        ;; **The frame's window list holds the *body* windows only.** GNU
+        ;; Emacs's `struct frame` has two window fields - `root_window`,
+        ;; the tree of ordinary windows, and `minibuffer_window`, which is
+        ;; not in that tree (`frame.h`) - and `window-list`'s MINIBUF
+        ;; argument is what puts the second in the answer
+        ;; (`candidate_window_p`, `window.c:3024`). This tree keeps the
+        ;; same two facts in the same two fields; the flat list that used
+        ;; to hold both was what let `delete-other-windows` drop the
+        ;; minibuffer window and leave a frame with nowhere to draw a
+        ;; prompt.
+        (set!frame-windows frame (list window))
         (set!frame-selected-window frame window)
         ;; Every frame joins the list as it is made, exactly as
         ;; `make_frame' and `make_terminal_frame' push it.

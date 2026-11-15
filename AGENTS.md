@@ -83,6 +83,11 @@ If you either make, or find a departure from real emacs when working
 on this project, put as much information as possible in the
 DEPARTURES.md file so that we can return to this work later.
 
+When it comes to regexps, the aim here is to port the regexp itself
+to guile regexps rather than port emacs regexps or try and hack
+emacs regexps into guile regexps. Instead understand the intention
+of the regexp and convert the regexp to guile regexp format.
+
 **The convention, settled 2026-11-07: dynamic variables are parameters,
 and their names are `*...*`.**
 
@@ -7931,3 +7936,139 @@ The mode pass, bottom up: `prog-mode` (prog-mode.el), then
 `lisp-mode.el`/`elisp-mode.el` and `scheme.el`'s keyword tables, then
 `auto-mode-alist` with `set-auto-mode` so `C-x C-f x.scm` picks the mode
 and the colours appear. `c-mode` (cc-mode) remains its own project.
+
+# The modes, and the first colours (2026-11-15)
+
+Chris chose "engine only first", and this is the pass the engine was for:
+`prog-mode`, `lisp-data-mode`, `lisp-mode`, `emacs-lisp-mode`,
+`lisp-interaction-mode` and `scheme-mode` are in, `auto-mode-alist` with
+`set-auto-mode` picks a mode from a file's name (or its `-*-` tag), and
+`global-font-lock-mode` is the switch - so opening a `.scm` or `.el` file
+now colours keywords, function names, comments and strings.
+
+## What landed, and where
+
+| Emacs | here |
+|---|---|
+| `lisp/progmodes/prog-mode.el` | `prog-mode.sld` |
+| `lisp/emacs-lisp/lisp-mode.el` | `lisp-mode.sld` |
+| `lisp/progmodes/elisp-mode.el` | `elisp-mode.sld` |
+| `lisp/progmodes/scheme.el` | `scheme.sld` |
+| `files.el` 3040-3910: `normal-mode`, `set-auto-mode` and the four alists | `files.sld` |
+| `font-core.el`'s global half | `font-core.sld` |
+| `subr.el`'s `make-syntax-table`, `add-hook`, `remove-hook`, `assoc-default`, `string-suffix-p` | `subr.sld` |
+
+Tests: `lisp-mode-tests.scm` (33) - the syntax tables against Emacs's own
+`char-syntax` answers, the faces at named positions, the mode-local
+variables, and five `set-auto-mode` cases through `find-file-noselect`.
+`font-lock-tests.scm` grew the setup-flag reset that a reused test buffer
+needs now that `font-lock-set-defaults` has Emacs's "already done" guard.
+
+## The three engine fixes that had to come first
+
+Read DEPARTURES.md's 2026-11-15 section; in one line each:
+
+1. **`\w`, `\W`, `\sC`, `\SC` are the syntax table's classes now**, built
+   by enumerating the table into a glibc bracket expression. Before, `\w`
+   was glibc's `[[:alnum:]_]` (which matches `_`, which Emacs's standard
+   table says is *symbol* syntax) and `\s` was rejected outright - so no
+   Lisp keyword regexp could match.
+2. **Match-data groups are renumbered through a mapping** recorded at
+   compile time, so a shy `\(?:` or numbered `\(?1:` group no longer
+   shifts every `(SUBPEXP FACE)` entry in a keyword table.
+3. **`\_<`/`\_>` are approximated by `\<`/`\>`** - named, with the exact
+   case where they differ.
+
+## Wiring a mode now
+
+`define-derived-mode` takes the child's syntax table as its *sixth*
+element, because Emacs's macro invents `CHILD-syntax-table` and a
+`syntax-rules` template cannot:
+
+    (define-derived-mode (scheme-mode prog-mode "Scheme" scheme-mode-map
+                                      scheme-mode-hook
+                                      scheme-mode-syntax-table)
+      "doc" (scheme-mode-variables))
+
+The mode installs it before the body, as `derived.el` does.
+
+## What is not there, and what each needs
+
+* `forward-sexp`/`scan-sexps`, `beginning-of-defun`, `fill-paragraph`,
+  `syntax-propertize-rules`: the four things the mode *bodies* still
+  name - indentation, filling, `C-M-x`, and `#;`/`#|` propertizing.
+* `rx`: the Lisp keyword tables are transcribed from Emacs's expansion
+  rather than rebuilt; a mode that wants `rx` needs the macro.
+* `text-mode`: `.txt` files say "Ignoring unknown mode `text-mode'" and
+  stay in fundamental-mode. `text-mode.el` is small and is the next
+  cheap mode.
+* `syntax-propertize` for `#(...)`/`|...|`: without it those parse as
+  several expressions.
+* `c-mode` (cc-mode): unchanged, its own project.
+
+## The method notes worth keeping, again
+
+* A `when` whose test fails answers the *unspecified* value, which is
+  true in Scheme: `(if (when TEST BODY) (loop) ...)` is an infinite loop.
+  The C's `when` answers nil. This cost the auto-mode walk.
+* `(cdr #f)` is an error; Elisp's `(cdr nil)` is nil. `major-mode-remap`
+  had to test the cell.
+* **Editing a big `syntax-rules` macro by string replacement ends in the
+  paren swamp.** The way out that worked here: extract the macro's line
+  range, write the replacement whole, and verify with
+  `guile --r7rs -c '(read ...)'` that the library body has the expected
+  number of top-level forms before compiling.
+* `tools/run-suites.py` takes ~10 minutes; its output is buffered to the
+  end, so run it in the background and keep working on non-`.scm` files.
+
+# The prompt after `C-x 1`, and modes that load themselves (2026-11-15)
+
+Chris reported, from a two-window start (a file on the command line and
+the splash below it): *"C-x 1, then C-x f ... the 'Theme set to
+osaka-jade' remains there and the cursor jumps to after that message,
+and if I type into it the characters seem invisible."*
+
+**The cause was `delete-other-windows` rebuilding `frame-windows` as
+`(list window)`.** The minibuffer window lives in that flat list (the
+echo area has been an ordinary window since 2026-11-15), so the frame
+was left with no window at the bottom: `render!` walks
+`(window-list frame #t)`, the row kept whatever was painted there last,
+and the cursor came from that window's stale matrix. Fixed by keeping
+the minibuffer window in the list. `tools/pty-check.py`'s
+`prompt-after-delete-other-windows` is the regression check - it fails on
+the old code with the mode line on the last row.
+
+**Any command that rebuilds the frame's window list has to keep the
+minibuffer window in it.** `delete-window` and `split-window` already
+did; `delete-other-windows` did not. A window operation that touches
+`frame-windows` should be checked against `new-frame-on`'s shape
+(`(list window mini)`).
+
+The same pass found that **`auto-mode-alist` needs autoloads**:
+Emacs's names are all autoloadable, this tree's are not. `files.sld` has
+a six-entry `%mode-autoloads` table and `%mode-function` loads a mode's
+library with `resolve-module` on first use - without it, opening a `.txt`
+in a real editor stayed in fundamental-mode, because nothing had
+imported `text-mode`. Add an entry there when a new mode lands.
+
+**Two things I first did wrong here, both called by Chris.**
+
+`delete-other-windows` was fixed the first time by keeping the
+minibuffer window in a flat `frame-windows` list - a hack over the
+representation. The C has `f->root_window` (the body tree) and
+`f->minibuffer_window` separate; the frame record already had both
+fields, and the departure was `new-frame-on` putting the window in
+*both*. Now `frame-windows` is the body only and `window-list` composes
+the minibuffer window in by `window_list_1`'s MINIBUF rule.
+
+And "Ignoring unknown mode" was briefly *suppressed* for
+`auto-mode-alist` entries because the message created `*Messages*` -
+which reordered the buffer list under a tty test and made a Buffer Menu
+test loop. That silenced the symptom of the real gap: nothing
+autoloaded a mode, so a `.txt` stayed in fundamental-mode. With the
+autoload table in place Emacs's message is back, and the suites are
+green with it.
+
+`text-mode` is in (`.txt` files), and `global-font-lock-mode` is turned
+on in `startup.sld`'s boot, where Emacs's `:init-value` would have put
+it.

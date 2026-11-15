@@ -5,7 +5,8 @@
  (only (srfi 64) test-assert test-equal test-begin test-end)
  
  (only (schemacs editor frame) *current-frame* new-frame)
- (only (schemacs editor buffer) current-buffer erase-buffer allocate-buffer)
+ (only (schemacs editor buffer) current-buffer erase-buffer allocate-buffer
+       set-buffer-local-value!)
  (only (schemacs editor editfns)
        buffer-string goto-char insert point point-max point-min)
  (only (schemacs editor textprop)
@@ -47,6 +48,12 @@
   ;; reuses one buffer without turning the mode off between uses.
   (let ((ed (current-buffer)))
     (when (font-lock-mode-on?) (font-lock-mode -1))
+    ;; `font-lock-set-defaults' is guarded by "have I set this buffer up
+    ;; for this mode", which a fresh buffer has not - and this buffer is
+    ;; reused by every test, so the setup is undone as a new buffer's
+    ;; would be (`font-lock.el:1914').
+    (set-buffer-local-value! ed *font-lock-set-defaults* #f)
+    (set-buffer-local-value! ed *font-lock-major-mode* #f)
     (erase-buffer)
     (insert text)
     (goto-char (point-min))

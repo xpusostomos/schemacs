@@ -379,8 +379,11 @@
     ;; gives for the same directory
     (list (major-mode) (dired-directory))))
 
-;; and the file case still reads a file
-(test-equal (list 'fundamental-mode "a.txt")
+;; and the file case still reads a file - in the mode `auto-mode-alist`
+;; gives a `.txt', which is text-mode (`text-mode.sld'); this expected
+;; fundamental-mode while the tree had no text mode, and Emacs 31.1
+;; answers `text-mode' for the same file
+(test-equal (list 'text-mode "a.txt")
   (let ((buffer (find-file-noselect (string-append root "/a.txt"))))
     (set-buffer buffer)
     (list (major-mode) (buffer-name))))

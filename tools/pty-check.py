@@ -884,6 +884,70 @@ def check_isearch_highlight():
     return []
 
 
+def check_prompt_after_delete_other_windows():
+    """C-x 1 then C-x C-f: the prompt is drawn and typing shows.
+
+    Reported by Chris, from a two-window start (a file on the command
+    line and the splash below it): after `C-x 1` a `C-x C-f` put the
+    prompt somewhere that was never drawn - the row kept the last message
+    ("Theme set to osha-jade" in his run) with the cursor after it, and
+    typed characters were invisible.
+
+    The cause was `delete-other-windows`: it rebuilt the frame's window
+    list as `(list window)`, dropping the *minibuffer window*, which this
+    tree keeps in the same flat list (`new-frame-on` makes its windows
+    deliberately, as `make_frame` does). The redisplay walks that list,
+    so nothing drew the prompt's row afterwards - and the cursor, placed
+    from the window's stale matrix, sat at the end of the message that
+    was last painted there.
+
+    Asserted: the prompt is on the last row *with the typed characters in
+    it*, after the C-x 1, from a two-window start.
+    """
+    path = "/tmp/pty-check-dow.txt"
+    open(path, "w").write("hello world\n")
+    # no init: the splash makes the second window this is about
+    config = tempfile.mkdtemp()
+    out = pc_drive = drive([C_x, b"1", C_x, C_f, b"abc"], path, config=config)
+    echo = screen_of(out).split("\n")[-1]
+    if "Find file: " not in echo:
+        return ["after C-x 1, C-x C-f did not put the prompt on the last "
+                "row: %r" % echo]
+    if "/tmp/abc" not in echo and "abc" not in echo:
+        return ["the prompt did not show what was typed into it: %r" % echo]
+    return []
+
+
+def check_font_lock_scheme():
+    """A .scm file is coloured, and a .txt file is not.
+
+    The whole chain this pass built: `find-file' -> `normal-mode' ->
+    `set-auto-mode' -> `auto-mode-alist' -> `scheme-mode' ->
+    `font-lock-defaults' -> the syntactic pass and the keyword regexps ->
+    a face -> an SGR sequence on the terminal.  The same text in two
+    files is the control: if the `.scm' row draws the same attributes as
+    the `.txt' row, nothing in that chain ran.
+
+    Which attributes is deliberately not asserted, for the reason
+    `check_isearch_highlight` gives: they come from the face specs, the
+    terminal's colour count and the nearest-colour approximation.
+    """
+    text = "(define (foo x) ; hi\n  \"s\" (+ x 1))\n"
+    scm = "/tmp/pty-check-font-lock.scm"
+    txt = "/tmp/pty-check-font-lock.txt"
+    open(scm, "w").write(text)
+    open(txt, "w").write(text)
+    coloured = row_attrs(drive([], scm), 0)
+    plain = row_attrs(drive([], txt), 0)
+    if coloured == plain:
+        return ["a .scm file draws the same text attributes as a .txt file: "
+                "the mode was not chosen or nothing was fontified (row %r)"
+                % (sorted(coloured),)]
+    if not coloured:
+        return ["a .scm file draws no text attributes at all"]
+    return []
+
+
 def check_isearch_ring():
     """C-s C-s searches for the last search's string.
 
@@ -3461,7 +3525,11 @@ def check_resize():
         wide = [r for r in screen.split("\n") if "resize.txt" in r]
         if not wide:
             problems.append("at %d columns there is no mode line" % cols)
-        elif max(r.count("(Fundamental)") for r in wide) != 2:
+        # **`(Text)`, not `(Fundamental)`: a `.txt` file's mode is
+        # `text-mode` now (`text-mode.sld`), which is Emacs 31's answer
+        # for the same file. The assertion is that *both* windows drew
+        # their whole mode line.
+        elif max(r.count("(Text)") for r in wide) != 2:
             problems.append(
                 "at %d columns the mode line row is %r - the right-hand "
                 "window's mode line is clipped"
@@ -4761,6 +4829,8 @@ CHECKS = {
     "cd": check_cd,
     "isearch-highlight": check_isearch_highlight,
     "isearch-ring": check_isearch_ring,
+    "font-lock-scheme": check_font_lock_scheme,
+    "prompt-after-delete-other-windows": check_prompt_after_delete_other_windows,
     "isearch-line-end": check_isearch_line_end,
     "isearch-multiline": check_isearch_multiline,
     "isearch-scroll": check_isearch_scroll,

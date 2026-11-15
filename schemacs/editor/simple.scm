@@ -92,6 +92,7 @@
           buffer-local-value buffer-truncate-lines current-buffer mark-active
           set!buffer-truncate-lines set!mark-active
           set-buffer-local-value! transient-mark-mode kill-local-variable
+          kill-all-local-variables
           ;; the *global* value, which is what `kill-local-variable'
           ;; falls back to
           *transient-mark-mode*
@@ -144,7 +145,7 @@
     ;; `overwrite-mode' and `binary-overwrite-mode' below.
     (only (schemacs editor easy-mmode) define-minor-mode)
     ;; what the code it generates calls
-    (only (schemacs editor subr) add-minor-mode run-hooks)
+    (only (schemacs editor subr) add-minor-mode run-hooks run-mode-hooks)
     ;; `kbd' is how the bindings below name their keys, as
     ;; `(define-key global-map (kbd "C-/") ...)' would in Emacs.
     (only (schemacs editor subr)
@@ -164,6 +165,7 @@
   (export
    messages-buffer messages-buffer-mode
    string-empty-p
+   fundamental-mode
    special-mode special-mode-hook special-mode-map
    ;; `casefiddle.c`'s two region commands, defined here because they
    ;; read the region - see the note at their definitions.
@@ -235,6 +237,17 @@ just-one-space delete-horizontal-space delete-blank-lines
    )
 
   (begin
+
+    ;;----------------------------------------------------------------
+    ;; `fundamental-mode'
+    ;;------------------------------------------------------------------
+
+    (define-command (fundamental-mode)
+      "Major mode not specialized for anything in particular.
+Other major modes are defined by comparison with this one."
+      (interactive)
+      (kill-all-local-variables)
+      (run-mode-hooks))
 
     ;;----------------------------------------------------------------
     ;; `special-mode'

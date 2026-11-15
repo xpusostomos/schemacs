@@ -56,6 +56,8 @@
     (only (schemacs editor fileio)
           expand-file-name file-exists-p locate-file-internal)
     (only (schemacs editor files) find-file-noselect insert-file-contents)
+    ;; the switch that colours a source buffer as its mode is set
+    (only (schemacs editor font-core) global-font-lock-mode)
     ;; an init file that failed is *said* in the echo area as well as on
     ;; stdout - see `load-init'
     (only (schemacs editor frame) *current-frame* set!frame-message)
@@ -611,6 +613,14 @@
       ;; have run is here.
       (open-user-environment!)
       (load-init)
+      ;; **Global Font Lock mode is on from the start.** GNU Emacs's
+      ;; `global-font-lock-mode` is `:init-value (not (or noninteractive
+      ;; emacs-basic-display))` (`font-core.el:274`), and the dumped
+      ;; Emacs has it before the init file is read. There is no dump
+      ;; here, so the boot turns it on: the hook it puts on
+      ;; `after-change-major-mode-hook` is what colours each buffer as
+      ;; its mode is set, including the files visited just below.
+      (global-font-lock-mode 1)
       (let ((displayable-buffers '()))
         (for-each
          (lambda (name)

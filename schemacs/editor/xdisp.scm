@@ -3910,7 +3910,16 @@
         (let ((selected (or (and (*cursor-in-echo-area*)
                                  (frame-minibuffer-window frame))
                             (frame-selected-window frame))))
-          (when selected
+          ;; **A window with no buffer has no cursor to draw.** GNU
+          ;; Emacs's frame is made with `make_minibuffer_window`, whose
+          ;; `w->contents` is nil until `read_minibuf`'s
+          ;; `set_window_buffer` (`minibuf.c:840`), and `redisplay_window`
+          ;; has nothing to walk for one. This block used to call
+          ;; `(cursor-glyph BUFFER (window-point WINDOW))' with both #f in
+          ;; that state - `window-point` of a bufferless window is its
+          ;; unset marker - and the line scan raised "Wrong type argument
+          ;; in position 2: #f".
+          (when (and selected (window-buffer selected))
             (let ((at (cursor-screen-position selected)))
               (when at
                 (let* ((buffer (window-buffer selected))

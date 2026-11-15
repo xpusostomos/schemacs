@@ -75,6 +75,7 @@
     (except (schemacs editor window)  *cursor-in-echo-area*)
     (schemacs editor warnings)
     (schemacs editor loadup)
+    (schemacs editor elisp-mode)
     (schemacs editor env)
     (except (schemacs editor fileio)  directory-name-p expand-file-name file-exists-p file-name-directory-part file-name-nondirectory-part file-writable-p *buffer-visited-file-modtime-function*)
     (schemacs editor font)
@@ -84,6 +85,7 @@
     (schemacs editor indent)
     (schemacs editor cmds)
     (schemacs editor keymap)
+    (schemacs editor lisp-mode)
     (schemacs editor theme)
     (schemacs editor chartab)
     (schemacs editor data)
@@ -93,12 +95,15 @@
     (schemacs editor buffer-text)
     (schemacs editor region-cache)
     (except (schemacs editor mouse)  mark)
+    (schemacs editor prog-mode)
     (schemacs editor rmc)
     (except (schemacs editor undo)  text-editor-undo-list set!text-editor-undo-list)
+    (schemacs editor scheme)
     (schemacs editor select)
     (schemacs editor seq)
     (except (schemacs editor syntax)  word-char? forward-word-position backward-word-position word-run-end word-run-start)
     (schemacs editor tabulated-list)
+    (schemacs editor text-mode)
     (schemacs editor tty-colors)
     )
   (export
@@ -151,6 +156,9 @@
     *amalgamating-undo-limit*
     *auto-coding-alist*
     *auto-coding-regexp-alist*
+    *auto-mode-alist*
+    *auto-mode-case-fold*
+    *auto-mode-interpreter-regexp*
     *before-change-functions*
     *before-make-frame-hook*
     *blink-cursor-blinks*
@@ -254,6 +262,7 @@
     *echo-area-buffer*
     *echo-buffers*
     *enable-disabled-menus-and-buttons*
+    *enable-local-variables*
     *enable-multibyte-characters*
     *eval-expression-debug-on-error*
     *eval-expression-print-maximum-character*
@@ -263,6 +272,7 @@
     *face-attribute-name-alist*
     *face-attribute-names*
     *face-attributes*
+    *file-auto-mode-skip*
     *file-coding-system-alist*
     *file-name-handler-alist*
     *find-directory-functions*
@@ -275,9 +285,11 @@
     *font-lock-fontify-region-function*
     *font-lock-fontify-syntactically-function*
     *font-lock-function*
+    *font-lock-global-modes*
     *font-lock-keywords*
     *font-lock-keywords-case-fold-search*
     *font-lock-keywords-only*
+    *font-lock-major-mode*
     *font-lock-maximum-decoration*
     *font-lock-mode*
     *font-lock-multiline*
@@ -310,6 +322,9 @@
     *inhibit-field-text-motion*
     *inhibit-file-name-handlers*
     *inhibit-file-name-operation*
+    *inhibit-local-variables-ignore-case*
+    *inhibit-local-variables-regexps*
+    *inhibit-local-variables-suffixes*
     *inhibit-menubar-update*
     *inhibit-message*
     *inhibit-quit*
@@ -317,8 +332,10 @@
     *inhibit-redisplay*
     *init-file-user*
     *initial-frame-alist*
+    *initial-major-mode*
     *insert-default-directory*
     *insert-directory-program*
+    *interpreter-mode-alist*
     *interprogram-cut-function*
     *interprogram-paste-function*
     *isearch-lazy-highlight*
@@ -342,6 +359,7 @@
     *line-number-display-limit*
     *line-number-display-limit-width*
     *lispy-function-keys*
+    *local-enable-local-variables*
     *ls-lisp-block-width*
     *ls-lisp-dirs-first*
     *ls-lisp-format-time-list*
@@ -354,6 +372,11 @@
     *ls-lisp-use-localized-time-format*
     *ls-lisp-use-string-collate*
     *ls-lisp-verbosity*
+    *magic-fallback-mode-alist*
+    *magic-mode-alist*
+    *magic-mode-regexp-match-limit*
+    *major-mode-remap-alist*
+    *major-mode-remap-defaults*
     *make-marker-function*
     *mark-even-if-inactive*
     *mark-ring-max*
@@ -391,6 +414,7 @@
     *minor-mode-list*
     *minor-mode-map-alist*
     *mode-line-format*
+    *mode-require-final-newline*
     *mouse-event-keys*
     *mouse-scroll-delay*
     *mouse-scroll-min-lines*
@@ -410,6 +434,7 @@
     *prefix-cu*
     *prefix-digits*
     *prefix-negative*
+    *prog-indentation-context*
     *ptrdiff-max*
     *ptrdiff-min*
     *query-replace-defaults*
@@ -532,6 +557,7 @@
     access-keymap
     accessible-keymaps
     activate-mark
+    add-hook
     add-minor-mode
     add-text-properties
     add-text-properties-from-list
@@ -556,6 +582,7 @@
     apply-modifiers
     apply-partially
     assign-row
+    assoc-default
     assoc-delete-all
     assq-delete-all
     attribute-value
@@ -1036,6 +1063,10 @@
     echo-area-message-buffer
     editor-excluded-libraries
     editor-libraries
+    emacs-lisp-mode
+    emacs-lisp-mode-hook
+    emacs-lisp-mode-map
+    emacs-lisp-mode-syntax-table
     enable-theme
     encode-coding-string
     encode-eol
@@ -1197,9 +1228,11 @@
     font-lock-initial-fontify
     font-lock-keywords
     font-lock-mode
+    font-lock-mode-enable-in-buffer
     font-lock-mode-internal
     font-lock-mode-on?
     font-lock-prepend-text-property
+    font-lock-register-keyword-variable!
     font-lock-remove-keywords
     font-lock-set-defaults
     font-lock-set-defaults-done?
@@ -1254,6 +1287,7 @@
     function-key-name
     function-key-offset
     function-key-translate
+    fundamental-mode
     generate-new-buffer
     generate-new-buffer-name
     get
@@ -1269,6 +1303,7 @@
     get-text-property
     get-window-cursor-type
     global-buffers-menu-map
+    global-font-lock-mode
     global-text-scale-adjust
     global-text-scale-adjust--default-height
     global-text-scale-adjust--increment-factor
@@ -1336,6 +1371,7 @@
     imports-path
     indent-rigidly
     indent-to
+    inhibit-local-variables-p
     inhibit-startup-screen
     init-menu-items
     init-path
@@ -1517,6 +1553,26 @@
     line-texts-rows
     line-texts-slice-width
     line-texts-width
+    lisp--define-face
+    lisp-cl-font-lock-keywords
+    lisp-cl-font-lock-keywords-1
+    lisp-cl-font-lock-keywords-2
+    lisp-data-mode
+    lisp-data-mode-syntax-table
+    lisp-el-font-lock-keywords
+    lisp-el-font-lock-keywords-1
+    lisp-el-font-lock-keywords-2
+    lisp-interaction-mode
+    lisp-interaction-mode-hook
+    lisp-interaction-mode-map
+    lisp-mode
+    lisp-mode-autoload-regexp
+    lisp-mode-hook
+    lisp-mode-map
+    lisp-mode-shared-map
+    lisp-mode-symbol-regexp
+    lisp-mode-syntax-table
+    lisp-mode-variables
     lisp-time-arguments
     list-buffers
     list-buffers--refresh
@@ -1552,6 +1608,7 @@
     ls-lisp-time-index
     ls-lisp-version-lessp
     major-mode
+    major-mode-remap
     make-buffer-string
     make-char-table
     make-coding-system
@@ -1571,6 +1628,7 @@
     make-menu-state
     make-overlay
     make-sparse-keymap
+    make-syntax-table
     make-widget-value
     make<command>
     make<frame>
@@ -1731,6 +1789,7 @@
     next-property-change
     next-single-char-property-change
     next-single-property-change
+    normal-mode
     normal-splash-screen
     not-modified
     note-file-read-only!
@@ -1815,6 +1874,10 @@
     previous-single-char-property-change
     previous-single-property-change
     primitive-undo
+    prog-first-column
+    prog-mode
+    prog-mode-hook
+    prog-mode-map
     propertize
     provide-theme
     push-left-right-boundary
@@ -1885,6 +1948,7 @@
     region-limit
     register-command!
     remember-mouse-glyph
+    remove-hook
     remove-list-of-text-properties
     remove-text-properties
     rename-buffer
@@ -1901,6 +1965,7 @@
     reproduce-tree
     reproduce-tree-object
     request-prefix-echo!
+    require-final-newline
     reset-terminal-modes!
     resize-frame-windows!
     restore-buffer-modified-p
@@ -1934,6 +1999,14 @@
     scan-for-column
     scan-newline-from-point
     scharquote
+    scheme-font-lock-keywords
+    scheme-font-lock-keywords-1
+    scheme-font-lock-keywords-2
+    scheme-mode
+    scheme-mode-hook
+    scheme-mode-map
+    scheme-mode-syntax-table
+    scheme-mode-variables
     sclose
     scomment
     scomment-fence
@@ -2100,9 +2173,15 @@
     set!window-top
     set!window-width
     set-auto-coding
+    set-auto-mode
+    set-auto-mode--apply-alist
+    set-auto-mode--from-matching-alist-entry
+    set-auto-mode-0
+    set-auto-mode-1
     set-buffer
     set-buffer-file-coding-system
     set-buffer-local-value!
+    set-buffer-major-mode
     set-buffer-modified-p
     set-char-table-extra-slot
     set-char-table-parent
@@ -2220,6 +2299,7 @@
     string-prefix-p
     string-replace
     string-search-forward
+    string-suffix-p
     string-to-syntax
     string-trim
     string-trim-left
@@ -2291,6 +2371,12 @@
     text-editor-undo-enable!
     text-editor-undo-list
     text-editor-undo-recording?
+    text-mode
+    text-mode-hook
+    text-mode-hook-identify
+    text-mode-map
+    text-mode-syntax-table
+    text-mode-variant
     text-properties-at
     text-property-any
     text-property-list
@@ -2355,6 +2441,7 @@
     tty-standard-colors
     tty-weight-number
     turn-on-font-lock
+    turn-on-font-lock-if-desired
     turn-on-visual-line-mode
     uarg->integer
     unchain-marker

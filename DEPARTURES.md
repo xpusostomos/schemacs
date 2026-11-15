@@ -2654,3 +2654,252 @@ fixed.
    `syntax-propertize` and `syntax-table` properties only.
 10. **`font-lock-defaults`' SYNTAX-ALIST** (fourth element) is not read.
     No mode in this tree sets it; *port with the first that does.*
+
+# The modes, and the regexp engine's syntax classes (2026-11-15)
+
+The pass that made the syntax engine do something: `prog-mode`,
+`emacs-lisp-mode`, `lisp-mode` and `scheme-mode`, `auto-mode-alist` with
+`set-auto-mode`, and `global-font-lock-mode`. It found four things in the
+layers below the modes, and three of them were departures that had to be
+fixed before a single keyword could be matched.
+
+## 1. `\w`, `\W`, `\sC` and `\SC` were glibc's, not the syntax table's
+
+GNU Emacs's `\w` is `SYNTAX (c) == Sword` - `regex-emacs.c` asks the table
+for every character. glibc's `\w` is the locale's `[[:alnum:]_]`, and the
+difference is not academic: the standard syntax table gives `_` *symbol*
+syntax, so Emacs's `\w` does **not** match `_` and glibc's does. Every
+Lisp keyword regexp is built from `\(\w\|\s_\|\\\\.\)`, so the port could
+not match a symbol at all.
+
+`\sC` and `\SC` were *rejected* outright ("this engine does not implement
+it"), which is why no Lisp mode could use its own keyword table.
+
+Now `%syntax-class-ere` (`search.sld`) enumerates the current syntax
+table's ASCII characters and spells the class as a glibc bracket
+expression, cached per `(table . class)`:
+
+* **ASCII only.** A class a table gives to a character above 127 cannot be
+  spelled: glibc reads a bracket range in the *locale's collation*, and
+  `[À-ÿ]` is "Invalid range end" here. The classes the Lisp modes use have
+  no such member - every character above 127 has word syntax in their
+  tables, and glibc's own `\w` matches the letters among them. *Fix with a
+  regexp substrate that takes characters, not locales.*
+* **NUL is dropped from a class**, because the pattern goes to `regcomp`
+  as a C string - the same wall `%without-nul` meets.
+* **One member per character, never a range**: a range is the locale's
+  collation again, and `[<-_]` is "Invalid range end" in en_US.UTF-8.
+* `]` is written first and `-` last, where POSIX makes them literal;
+  `\-` is *not* an escape glibc honours (`[a\-c]` is the range `\`..`c`,
+  measured).
+
+## 2. `\_<` and `\_>` are approximated by `\<` and `\>`
+
+glibc has no zero-width test of the syntax table's symbol class, and ERE
+has no lookahead to build one from. The **word** boundary stands in, and
+the two agree wherever the symbol's own edge is a word constituent -
+every `def...\_>` and `define\_>` the Lisp tables test. They differ for a
+symbol ending in symbol-syntax punctuation (`foo?\_>`). *Fix only with a
+different regexp engine.*
+
+## 3. Match-data groups are renumbered through a mapping
+
+Emacs's `\(?:...\)` takes no match-data slot and `\(?N:...\)` chooses its
+number; glibc has neither, so the translator emits a capturing group for
+both. Every keyword entry that names a subexpression would then point at
+the wrong group. `%translate-emacs-regexp` now answers the ERE **and a
+mapping** from Emacs group number to glibc group, and
+`%string-match-into-regs` renumbers through it. Verified against Emacs:
+`a\(?:b\|c\)d\(e\)` gives group 1 = "e", `\(a\)\(?:b\)\(c\)` gives 1="a"
+and 2="c", and `\(?1:\(?:x\)ab\|cd\)` gives 1="cd" - all three Emacs's own
+answers. This *removes* a departure the library's header used to name.
+
+## 4. `make-syntax-table` was missing, and `define-derived-mode` never
+## installed a syntax table
+
+`make-syntax-table` is `subr.el`'s in Emacs 31 (five lines: a syntax
+char-table whose parent is the argument or the standard table), and this
+tree had no such function - modes made tables with `copy-syntax-table`.
+Ported to `subr.sld`.
+
+`define-derived-mode` in Emacs also installs `CHILD-syntax-table`, before
+the mode's body. Ours did not, which is why `emacs-lisp-mode` came up with
+the *standard* table (`[` as a paren is Emacs's answer there too, by luck,
+but `#` was punctuation instead of a quote). The macro now takes the
+table as a sixth element, because it cannot invent the name - see the
+library comment.
+
+## The modes themselves: what is not carried
+
+Each library's header names these; the list here is for the next session:
+
+* **`prog-mode`**: keymap empty (`C-M-q`/`M-q` need `forward-sexp`,
+  `beginning-of-defun` and `fill-paragraph`), no context menu, no
+  prettify-symbols, `text-conversion-style`/`bidi-paragraph-direction` not
+  stored (nothing reads them).
+* **`lisp-mode`/`elisp-mode`**: keyword regexps are **transcribed** from a
+  running Emacs 31.1 rather than rebuilt with `rx` (rx is a macro DSL this
+  tree has not got); the four level-2 *function* matchers are absent; no
+  `syntax-propertize` (needs `syntax-propertize-rules`); no
+  `lisp-font-lock-syntactic-face-function` (needs `forward-sexp`), so a
+  docstring gets `font-lock-string-face` where Emacs names
+  `font-lock-doc-face` - the same colour, since doc-face inherits
+  string-face; no indentation or filling.
+* **`scheme.el`**: same list, plus `scheme-indent-function` and the imenu
+  variables.
+* **`font-lock-set-defaults`** now sets its four variables *buffer-locally*
+  (they are `defvar-local` in Emacs), honours **SYNTAX-ALIST** (the
+  fourth element; scheme's `+-*/.<>=!?$%_&~^:` become word syntax for
+  fontification) and the **variable alist** after it, and is guarded by
+  "already set up for this mode", which is what keeps a
+  `font-lock-add-keywords` made before the mode came on. That guard is
+  Emacs's; the *test* in this tree had been written without it and now
+  resets the flag, as a fresh buffer would.
+* **`font-lock-register-keyword-variable!`** is this tree's one new seam:
+  Emacs's defaults name their keyword levels with *symbols* and
+  `symbol-value` resolves them; a symbol has no value here, so the mode
+  library registers its keyword lists in a table `font-lock-eval-keywords`
+  reads. The `font-lock-defaults` list keeps Emacs's exact shape.
+* **`global-font-lock-mode`** is a plain command, not a
+  `define-globalized-minor-mode` (that macro is not ported); its body is
+  the macro's expansion for this mode, and `font-lock-mode-hook` carries
+  the `--set-explicitly` marker as the macro's expansion does.
+
+## `auto-mode-alist` and `set-auto-mode`
+
+* The four alists (`auto-mode-alist`, `magic-mode-alist`,
+  `magic-fallback-mode-alist`, `interpreter-mode-alist`) are **Emacs
+  31.1's runtime values**, emitted from a running Emacs - the method the
+  charset registry and xterm's decode map were transcribed by. Entries
+  naming modes this tree has not ported are kept, and `set-auto-mode-0`
+  says "Ignoring unknown mode" for them, which is Emacs's own message for
+  a binding that is not a function.
+* **Dropped from the data**: the entries whose value is a file-name
+  *handler* list (`(nil jka-compr)` and its kin - there are no handlers
+  here), and `magic-fallback-mode-alist`'s `doc-view` entry, whose PDF
+  signature is raw bytes no Scheme source file can hold.
+* **Not carried from `set-auto-mode`**: the `.dir-locals.el` entry (no
+  directory-local variables), the `Local Variables:` block (needs a Lisp
+  value reader; a `-*- mode: ... -*-` tag *is* carried), and the
+  `narrow-to-region` around the magic alists' scan (there is no
+  narrowing; `looking-at` would read past the limit).
+* **`set-buffer-major-mode`** is placed in `files.sld` rather than
+  `buffer.sld`, because it calls a mode *command* by name and the command
+  table is above the buffer library. Same placement note as
+  `locate-file-internal`.
+* **`normal-mode`'s `hack-local-variables` step** is named and absent -
+  the same value-reader wall.
+
+## The two bugs the work found, both the tree's oldest kind
+
+1. **`(when TEST BODY)` as an expression answers the *unspecified* value,
+   which is true in Scheme.** `set-auto-mode--from-matching-alist-entry`
+   computes `mode-t` with a `when`; on the first plain `(REGEXP . MODE)`
+   entry the test failed, `mode-t` was unspecified, and
+   `(if mode-t (loop) ...)` looped for ever. The C's `when` answers nil.
+   Rewritten as `and`.
+2. **`(cdr #f)` is an error** where Elisp's `(cdr nil)` is nil.
+   `major-mode-remap`'s `(or (cdr (or (assq ...) (assq ...))) mode)` had to
+   test the cell first.
+
+And one in the passing-under-its-own-test class: the port's
+`font-lock-add-keywords` had no `font-lock-set-defaults` call, so a
+keyword list added before `font-lock-mode` was thrown away by the mode's
+own setup. Emacs's does the call first and marks the setup done - the
+tests that had been written around the departure now exercise the C's
+order.
+
+## Two bugs found the moment it was used (2026-11-15)
+
+### 1. `C-x 1` deleted the minibuffer window (Chris's report)
+
+"if I start schemacs ... C-x 1, then C-x C-f ... the 'Theme set to
+osaka-jade' remains there and the cursor jumps to after that message,
+and if I type into it the characters seem invisible."
+
+`delete-other-windows` rebuilt the frame's window list as
+
+```scheme
+(set!frame-windows frame (list window))
+```
+
+**and this tree keeps the minibuffer window in that list** -
+`new-frame-on` makes the frame's windows deliberately, the echo area
+being an ordinary window showing an ordinary buffer since 2026-11-15.
+GNU Emacs's frame has a root window holding the ordinary windows and a
+*separate* `f->minibuffer_window` (`frame.h`), which `window-list`'s
+MINIBUF argument is what includes; deleting the other windows leaves it
+alone. So after a `C-x 1` this frame had no window to draw the echo area
+or a prompt in: `render!` walks `(window-list frame #t)`, the row kept
+whatever was last painted there (his theme message), and the cursor -
+placed from that window's stale matrix - sat at the end of it. Typing
+went into the minibuffer buffer, which nothing drew.
+
+**The first fix was a hack** - `delete-other-windows` rebuilding the
+list as `(list window mini)` - and Chris called it: it papered over the
+representation instead of following the C. The frame record already has
+Emacs's two fields (`windows` and `minibuffer-window`); the departure
+was that `new-frame-on` put the minibuffer window in *both*. Now
+`frame-windows` holds the body tree only and `window-list` composes the
+minibuffer window in, by `window_list_1`'s MINIBUF rule
+(`candidate_window_p`, `window.c:3024`); `delete-other-windows` is
+Emacs's body with no special case. `tools/pty-check.py` has
+`prompt-after-delete-other-windows`, which starts on a file with the
+splash below it, does `C-x 1`, `C-x C-f`, types `abc`, and requires the
+last row to show the prompt *and* the typed letters - seen failing on
+the old code with the mode line on the last row.
+
+### 2. `auto-mode-alist`, autoloads, and two messages too many
+
+Emacs's `auto-mode-alist` is a list of names, and every one of them is
+autoloadable: the mode file carries `;;;###autoload`, `loaddefs.el`
+turns it into an `autoload` form, and `(functionp mode)` is true before
+the mode is loaded. This tree has no autoloads - a library is reachable
+only by importing it - so:
+
+* **`%mode-autoloads`** (`files.sld`) names the six modes this tree has
+  with the library their Emacs file became, and `%mode-function` loads
+  one with `resolve-module` on first use, which is the moment Emacs's
+  autoload fires. *This is a stand-in for `loaddefs.el`, not a port of
+  it; an `autoload` cookie mechanism is the real fix when there are
+  enough modes to matter.*
+* **"Ignoring unknown mode" is Emacs's message and is said exactly
+  where Emacs says it** - for a name with no function. With the autoload
+  table in place it fires only for a mode this tree has not ported
+  (`.c`, `.py`, ...), which is the truth about this tree rather than
+  about Emacs. It was briefly suppressed while the autoloads were
+  missing; that hid a real gap (a `.txt` staying in fundamental-mode)
+  behind silence, and it is back.
+* **A magic-alist entry whose matcher is a symbol** (`(image-type-auto-
+  detected-p . image-mode)` is in Emacs 31's default fallback list)
+  resolves through the same name-to-procedure path; an unported matcher
+  matches nothing instead of erroring. This crashed `find-file` on every
+  `.bin` file.
+
+### 3. `text-mode` landed, so `.txt` is a text buffer
+
+`text-mode.sld` (`lisp/textmodes/text-mode.el`): the syntax table
+(`'` is a word constituent, so `M-c` on `'hello'` gives `'Hello'`), the
+mode, `text-mode-hook-identify` and `text-mode-variant`. Its one
+behavioural point here is `(setq-local require-final-newline
+mode-require-final-newline)` - a `.txt` buffer gets the final newline on
+saving whatever the global says, which is Emacs's rule and is now tested
+both ways (`tty-editor-tests`' final-newline group uses `.bin` files for
+the global's values and a `.txt` file for the mode's).
+
+## Small seams this pass added, named
+
+* **`add-hook`/`remove-hook` take the hook's *parameter*, not a symbol.**
+  Emacs names a hook with a symbol and reads its value; a symbol has no
+  value here, and every hook in this tree is an SRFI-39 parameter
+  (`run-hooks` already took the value). DEPTH is the C's rule; LOCAL is
+  not carried, because a hook's buffer-local half needs a hook to be a
+  buffer-local *variable* and a parameter cannot be. Nothing in the tree
+  passes LOCAL.
+* **`%mode-autoloads`** stands in for `loaddefs.el`'s autoload forms -
+  six names, one library each.
+* **`font-lock-register-keyword-variable!`** stands in for
+  `symbol-value` when `font-lock-defaults` names its keyword levels with
+  symbols.
+* **`setq-local`** is a procedure taking `(NAME VALUE)`, not a macro -
+  the buffer-local store is keyed by a plain symbol either way.

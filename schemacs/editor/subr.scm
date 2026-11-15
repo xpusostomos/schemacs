@@ -64,6 +64,9 @@
     ;; are built on `search.c`'s primitives, which are above this
     ;; library - nothing `search` imports reaches back here, so the edge
     ;; is not a cycle.
+    (only (schemacs editor chartab)
+          make-char-table set-char-table-parent)
+    (only (schemacs editor syntax) standard-syntax-table)
     (only (schemacs editor search)
           string-match string-match-p match-beginning match-end match-string
           replace-match match-data--translate save-match-data)
@@ -110,6 +113,9 @@
    *minor-mode-alist* *minor-mode-list* *minor-mode-map-alist* add-minor-mode
    regexp-unmatchable
    string-prefix-p
+   make-syntax-table
+   string-suffix-p
+   assoc-default
    string-replace
    ctl-x-4-map
    ;; The key event model. `char-alt' and the five beside it are the C's
@@ -131,6 +137,8 @@
    ignore
    run-hooks
    run-mode-hooks
+   add-hook
+   remove-hook
    apply-partially
    kbd
    with-silent-modifications
@@ -146,6 +154,21 @@
     ;; ^ GNU Emacs's `regexp-unmatchable' (subr.el:7794): "Standard regexp
     ;; guaranteed not to match any string at all." Two beginning-of-buffer
     ;; anchors, which cannot both hold.
+
+    (define (make-syntax-table . rest)
+      ;; GNU Emacs's `make-syntax-table' (subr.el:6555): "Return a new
+      ;; syntax table. Create a syntax table that inherits from OLDTABLE
+      ;; (if non-nil) or from `standard-syntax-table' otherwise."
+      ;;
+      ;; It is `subr.el`'s in Emacs 31 and not `syntax.c`'s, which is why
+      ;; it is here - and it needs a char-table and the standard table,
+      ;; both of which it imports.
+      ;;--------------------------------------------------------------
+      (let ((table (make-char-table 'syntax-table #f)))
+        (set-char-table-parent table
+                               (or (and (pair? rest) (car rest))
+                                   (standard-syntax-table)))
+        table))
 
     (define (string-prefix-p prefix string . rest)
       ;; GNU Emacs's `string-prefix-p' (subr.el:6246): "Return non-nil if
@@ -170,6 +193,42 @@
             (eq? #t (compare-strings prefix 0 prefix-length
                                      string 0 prefix-length
                                      ignore-case)))))
+
+    (define (string-suffix-p suffix string . rest)
+      ;; GNU Emacs's `string-suffix-p' (subr.el:6262): "Return non-nil if
+      ;; STRING ends with SUFFIX." The C is `string-prefix-p` the other
+      ;; way round, and compares the same way - see it above.
+      ;;--------------------------------------------------------------
+      (let ((ignore-case (and (pair? rest) (car rest)))
+            (start-pos (- (string-length string) (string-length suffix))))
+        (and (>= start-pos 0)
+             (eq? #t (compare-strings suffix 0 (string-length suffix)
+                                      string start-pos (string-length string)
+                                      ignore-case)))))
+
+    (define (assoc-default key alist . rest)
+      ;; GNU Emacs's `assoc-default' (subr.el): "Find object KEY in a
+      ;; pseudo-alist ALIST. ALIST is a list of conses or objects. Each
+      ;; element (or the element's car, if it is a cons) is compared with
+      ;; KEY by calling TEST ... If that is non-nil, the element matches;
+      ;; then `assoc-default' returns the element's cdr, if it is a cons,
+      ;; or DEFAULT if the element is not a cons."
+      ;;
+      ;; This is the walk `set-auto-mode' makes through every mode alist,
+      ;; and the reason its TEST is `string-match' rather than `equal'.
+      ;;--------------------------------------------------------------
+      (let ((test (if (and (pair? rest) (car rest)) (car rest) equal?))
+            (default (if (and (pair? rest) (pair? (cdr rest)))
+                         (cadr rest)
+                         #f)))
+        (let loop ((tail alist))
+          (cond
+           ((null? tail) #f)
+           (else
+            (let ((elt (car tail)))
+              (if (test (if (pair? elt) (car elt) elt) key)
+                  (if (pair? elt) (cdr elt) default)
+                  (loop (cdr tail)))))))))
 
     (define (string-replace from-string to-string in-string)
       ;; GNU Emacs's `string-replace' (subr.el:6157): "Replace FROM-STRING
@@ -592,6 +651,56 @@
                         ((procedure? hook) (hook))
                         (else (for-each (lambda (f) (f)) hook))))
                 hooks))
+
+    (define (add-hook hook function . rest)
+      ;; GNU Emacs's `add-hook' (subr.el:2295): "Add to the value of HOOK
+      ;; the function FUNCTION. FUNCTION is not added if already
+      ;; present."
+      ;;
+      ;; **HOOK is the parameter**, because that is what a hook is in
+      ;; this tree (see `run-hooks'). Emacs names it with a symbol and
+      ;; reads the symbol's value; there is nothing here that turns a
+      ;; symbol back into a binding, so the parameter is passed.
+      ;;
+      ;; DEPTH is the C's `(unless (numberp depth) (setq depth (if depth
+      ;; 90 0)))' and the two positions it chooses: a function is added
+      ;; at the end for a positive depth and at the front otherwise. The
+      ;; `hook--depth-alist' that orders functions *among themselves* by
+      ;; depth is not carried - nothing here sets a depth but 0.
+      ;;
+      ;; LOCAL is not carried, and is named rather than taken: a hook's
+      ;; buffer-local half needs a hook to be a buffer-local *variable*,
+      ;; and a parameter cannot be. Every caller here wants the global
+      ;; hook, which is what `font-lock-mode` puts on
+      ;; `change-major-mode-hook'.
+      ;;--------------------------------------------------------------
+      (let* ((depth (if (pair? rest) (car rest) #f))
+             (depth (if (number? depth) depth (if depth 90 0)))
+             (current (hook))
+             (current (cond ((not current) '())
+                            ((procedure? current) (list current))
+                            (else current))))
+        (if (member function current)
+            (hook current)
+            (hook (if (> depth 0)
+                      (append current (list function))
+                      (cons function current))))))
+
+    (define (remove-hook hook function . rest)
+      ;; GNU Emacs's `remove-hook' (subr.el:2385): "Remove FUNCTION from
+      ;; HOOK's functions. ... Do nothing if HOOK does not currently
+      ;; contain FUNCTION." HOOK and LOCAL as in `add-hook' above.
+      ;;--------------------------------------------------------------
+      (let ((current (hook)))
+        (hook (cond ((not current) '())
+                    ((procedure? current)
+                     (if (equal? current function) '() current))
+                    (else (let loop ((rest current) (acc '()))
+                            (cond ((null? rest) (reverse acc))
+                                  ((equal? (car rest) function)
+                                   (append (reverse acc) (cdr rest)))
+                                  (else (loop (cdr rest)
+                                              (cons (car rest) acc))))))))))
 
     (define (run-hook-with-args hook . args)
       ;; GNU Emacs's `run-hook-with-args' (`eval.c:2908'): "Run HOOK with
