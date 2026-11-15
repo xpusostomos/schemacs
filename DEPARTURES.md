@@ -3977,3 +3977,37 @@ keeps the item; `display_tab_bar` draws every item it is given, enabled or
 not. This port stores the value the same way and draws every item, so an
 `:enable` in a tab's item has no visible effect - which is also what
 Emacs's terminal tab bar does, since `display_tab_bar` never asks.
+
+# `tab-bar-history-mode`'s change detection (2026-11-16)
+
+GNU Emacs notices that a command changed the window configuration through
+the frame's `change_stamp`, which four functions bump -
+
+```c
+  FRAME_WINDOW_CHANGE (f) = true;   /* window.c:3715, Fset_window_buffer */
+                                    /* :5681, Fdelete_window            */
+                                    /* :5828, Fsplit_window_internal     */
+                                    /* :8082, Fset_window_configuration  */
+```
+
+- and `run_window_change_functions` (`window.c:4200`) runs
+`window-configuration-change-hook` when that flag, the selected window or
+the selected frame moved since the last redisplay. `tab-bar--history-change`
+is on that hook, so the configuration recorded before a command is pushed
+onto the back history only when the command changed the window layout.
+
+This tree has neither `f->change_stamp` nor `window-configuration-change-hook`,
+and bumping a stamp at four sites would mean teaching every window
+primitive a field that nothing else reads. Instead `tab-bar--window-fingerprint`
+captures what those four events change - the selected window and each
+window with its buffer and rectangle - and `tab-bar--history-pre-change`
+compares it at the next command's `pre-command-hook`, pushing the previous
+command's configuration when it moved.
+
+The same four events move the fingerprint and nothing else does: point,
+scrolling and text edits are not in it, and window buffer changes, splits,
+deletions, configurations and resizes are. The only observable
+difference is *when* the push happens - one command later, at the next
+pre-command rather than at the previous command's redisplay - and no
+reader can see that, because `tab-bar-history-back` itself runs its
+pre-command first.

@@ -9111,3 +9111,60 @@ accounting this file asks for rather than a "faithful subset":
   row.
 - `tools/pty-check.py` gained **`tab-bar`**, which drives `C-x t 2` and
   `C-x b` on a terminal and reads the bar's row.
+
+## Tab history and tab groups (2026-11-16, second pass)
+
+The two remaining `tab-bar.el` subsystems, ported after the first one
+landed.
+
+### `tab-bar-history-mode`
+
+The whole of `tab-bar.el:2566`: `tab-bar-history-limit` (a `defvar`, not a
+defcustom - so a plain variable, as in Emacs), the three hash tables, the
+pre-change and change functions, `tab-bar-history-back`/`-forward`, and
+the mode with its `pre-command-hook`. `C-c <left>` and `C-c <right>` bind
+the two commands, and `tab-bar-format-history` now produces its back and
+forward buttons - it returned `'()` while the mode was unported.
+
+**One departure, and it is the interesting part.** Emacs notices that a
+command changed the window configuration through the frame's
+`change_stamp`, which exactly four functions bump - `Fset_window_buffer`,
+`Fdelete_window`, `Fsplit_window_internal`, `Fset_window_configuration`
+(`window.c:3715`, `:5681`, `:5828`, `:8082`) - and
+`run_window_change_functions` runs `window-configuration-change-hook`
+when that flag, the selected window or the selected frame moved. This tree
+has neither the stamp nor the hook, so
+`tab-bar--window-fingerprint` captures what those four events change -
+the selected window and each window with its buffer and rectangle - and
+the comparison happens at the next command's `pre-command-hook`. The same
+events move it and nothing else does; only the moment of the push
+differs, and no reader can see that, because `tab-bar-history-back` runs
+its own pre-command first. DEPARTURES.md has the C.
+
+Measured: `(current-window-configuration)` is **3 µs** on a two-window
+frame, so the per-command snapshot costs nothing beside a keystroke. It
+runs only while the mode is on.
+
+### Tab groups
+
+`tab-bar-tab-group-default`, the group format and face functions,
+`tab-bar--format-tab-group`, `tab-bar-format-tabs-groups`,
+`tab-bar-change-tab-group` (`C-x t G`) and `tab-bar-close-group-tabs`.
+The grouped format shows one label per group and only the current group's
+tabs; `tab-bar-show-inactive-group-tabs` shows the rest, which was
+defaulting to nil in both Emacsen.
+
+Two bugs of the port, both the same shape as ones this file already has:
+
+- **The loop must thread `previous-group`.** Emacs's `(prog1 ... (setq
+  previous-group tab-group))` is easy to write as a loop that forgets to
+  - and then *every* tab of a group gets a label, which is what the test
+  caught on its first run.
+- **`tab-bar-history-back` is a variable *and* a command**, like
+  `tab-bar-separator` before it; the command definition overwrote the
+  hash table and the first `hashq-ref` applied a procedure. The tables
+  are `tab-bar-history-back-table`/`-forward-table`.
+
+Tests: `tab-bar-tests.scm` 15 -> 22 (history mode adds the hook, a split
+is recorded and undone, forward redoes it, the buttons appear only with
+the mode on; group assignment, clearing, and the grouped format).

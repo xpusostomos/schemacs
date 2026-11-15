@@ -545,12 +545,17 @@
     *tab-bar-post-undo-close-tab-functions*
     *tab-bar-select-tab-modifiers*
     *tab-bar-show*
+    *tab-bar-show-inactive-group-tabs*
     *tab-bar-tab-format-functions*
+    *tab-bar-tab-group-face-function*
+    *tab-bar-tab-group-format-function*
+    *tab-bar-tab-group-function*
     *tab-bar-tab-hints*
     *tab-bar-tab-name-ellipsis*
     *tab-bar-tab-name-format-function*
     *tab-bar-tab-name-function*
     *tab-bar-tab-name-truncated-max*
+    *tab-bar-tab-post-change-group-functions*
     *tab-bar-tab-pre-close-functions*
     *tab-bar-tab-prevent-close-functions*
     *tab-bar-tabs-function*
@@ -2613,6 +2618,9 @@
     tab-bar--current-tab-make
     tab-bar--event-to-item
     tab-bar--format-tab
+    tab-bar--format-tab-group
+    tab-bar--history-change
+    tab-bar--history-pre-change
     tab-bar--key-to-number
     tab-bar--tab
     tab-bar--tab-bar-lines-for-frame
@@ -2621,7 +2629,9 @@
     tab-bar--tabs-recent
     tab-bar--update-tab-bar-lines
     tab-bar-back-button
+    tab-bar-change-tab-group
     tab-bar-close-button
+    tab-bar-close-group-tabs
     tab-bar-close-other-tabs
     tab-bar-close-tab
     tab-bar-closed-tabs
@@ -2629,7 +2639,13 @@
     tab-bar-format-history
     tab-bar-format-list
     tab-bar-format-tabs
+    tab-bar-format-tabs-groups
     tab-bar-forward-button
+    tab-bar-history-back
+    tab-bar-history-forward
+    tab-bar-history-limit
+    tab-bar-history-mode
+    tab-bar-history-mode-variable
     tab-bar-items
     tab-bar-make-keymap
     tab-bar-make-keymap-1
@@ -2653,6 +2669,9 @@
     tab-bar-switch-to-prev-tab
     tab-bar-switch-to-recent-tab
     tab-bar-tab-face-default
+    tab-bar-tab-group-default
+    tab-bar-tab-group-face-default
+    tab-bar-tab-group-format-default
     tab-bar-tab-name-all
     tab-bar-tab-name-current
     tab-bar-tab-name-current-with-count

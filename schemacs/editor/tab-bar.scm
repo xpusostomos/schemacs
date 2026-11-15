@@ -52,9 +52,13 @@
   ;;   * **tab groups** (`tab-bar-tab-group-*`, `tab-bar-format-tabs-groups`):
   ;;     the display they need is a group label with its own face and a
   ;;     `tab-bar-auto-width` measurement between groups.
-  ;;   * **`tab-bar-history-mode`** and its back/forward buttons: it
-  ;;     saves a window configuration before every command, which needs
-  ;;     `pre-command-hook` bookkeeping the tab line does not have.
+  ;;   * **`tab-bar-history-mode`** is ported, with one departure: Emacs
+  ;;     notices a window change through `f->change_stamp` and
+  ;;     `window-configuration-change-hook`, which this tree has
+  ;;     neither of, so a *fingerprint* of the frame's window tree is
+  ;;     compared at the next command's `pre-command-hook` instead. The
+  ;;     same four events move it and nothing else does; only the moment
+  ;;     of the push differs, and the history a reader sees is the same.
   ;;   * **`tab-bar-auto-width`**: it lays tabs out with a `display`
   ;;     space specification measured in pixels, and this renderer draws
   ;;     character cells. The variable is carried so a user setting it
@@ -86,8 +90,9 @@
           select-frame frame-live-p frame-width
           frame-selected-window selected-window window-list window-buffer
           window-minibuffer-p window-parameter set-window-parameter
-          window-internal? window-parent window-height
-          resize-frame-windows! frame-height frame-width)
+          window-internal? window-parent window-height window-top
+          window-left window-width resize-frame-windows!
+          frame-height frame-width *pre-command-hook*)
     (only (schemacs editor window)
           current-window-configuration set-window-configuration
           window-configuration-p window-configuration-frame
@@ -100,20 +105,23 @@
     (only (schemacs editor subr) run-hook-with-args
           run-hook-with-args-until-success add-hook remove-hook
           assq-delete-all delq posn-string posn-x-y event-start)
-    (only (schemacs editor editfns) goto-char point propertize message)
+    (only (schemacs editor editfns) goto-char point point-marker propertize
+          message)
     (only (schemacs editor marker) copy-marker markerp marker-buffer
           marker-position)
     (only (schemacs editor mule-util) truncate-string-to-width
           truncate-string-ellipsis)
     (only (schemacs editor textprop) get-text-property add-face-text-property
           put-text-property)
-    (only (schemacs editor seq) seq-position seq-filter seq-remove seq-sort-by)
+    (only (schemacs editor seq) seq-position seq-filter seq-remove seq-sort-by
+          seq-take)
     (only (schemacs editor xdisp) force-mode-line-update
           *tab-bar-keymap-function*)
     (only (schemacs editor faces) *window-system*)
     (only (schemacs editor menu-bar) popup-menu)
-    (only (schemacs editor minibuffer) read-from-minibuffer format-prompt)
-    (only (schemacs editor simple) *last-command*)
+    (only (schemacs editor minibuffer) read-from-minibuffer format-prompt
+          minibufferp)
+    (only (schemacs editor simple) *last-command* *this-command*)
     (only (schemacs editor keyboard) *last-read-event*)
     (only (schemacs editor dispnew) current-display column-width))
 
@@ -142,11 +150,23 @@
    tab-bar-tab-face-default
    ;; the format and the keymap it becomes
    tab-bar-format-list tab-bar-make-keymap tab-bar-make-keymap-1
-   tab-bar-format-tabs tab-bar-format-add-tab tab-bar-format-history
+   tab-bar-format-tabs tab-bar-format-tabs-groups tab-bar-format-add-tab
+   tab-bar-format-history
+   ;; tab groups - `tab-bar.el:1084`
+   tab-bar-change-tab-group tab-bar-close-group-tabs
+   tab-bar-tab-group-default tab-bar-tab-group-format-default
+   tab-bar-tab-group-face-default tab-bar--format-tab-group
+   *tab-bar-tab-group-function* *tab-bar-tab-group-format-function*
+   *tab-bar-tab-group-face-function* *tab-bar-show-inactive-group-tabs*
+   *tab-bar-tab-post-change-group-functions*
    tab-bar--format-tab
    ;; the mouse
    tab-bar-mouse-down-1 tab-bar-mouse-1 tab-bar-mouse-close-tab
    tab-bar--event-to-item tab-bar--key-to-number
+   ;; tab history - `tab-bar.el:2566`
+   tab-bar-history-mode tab-bar-history-mode-variable
+   tab-bar-history-back tab-bar-history-forward tab-bar-history-limit
+   tab-bar--history-pre-change tab-bar--history-change
    ;; the options and the keymaps
    *tab-bar-show* *tab-bar-new-tab-choice* *tab-bar-new-tab-group*
    *tab-bar-new-tab-to* *tab-bar-close-tab-select*
@@ -385,7 +405,7 @@ buffer was killed. If nil, `set-window-configuration' decides."
       ;; write it (`tab-bar-rename-tab` does).
       ;;--------------------------------------------------------------
       (let loop ((rest alist))
-        (cond ((null? rest) #f)
+        (cond ((or (null? rest) (not (pair? rest))) #f)
               ((not (pair? (car rest))) (loop (cdr rest)))
               ((eq? (car (car rest)) key) (car rest))
               (else (loop (cdr rest))))))
@@ -890,11 +910,23 @@ Function gets two arguments, the tab and its number."
 
     (define (tab-bar-format-history)
       ;; "Produce back and forward buttons for the tab bar. These buttons
-      ;; will be shown when `tab-bar-history-mode' is enabled." Not
-      ;; carried, so nothing is produced - which is what the C produces
-      ;; with the mode off.
+      ;; will be shown when `tab-bar-history-mode' is enabled. You can
+      ;; hide these buttons by customizing `tab-bar-format' and removing
+      ;; `tab-bar-format-history' from it."
       ;;--------------------------------------------------------------
-      '())
+      ;; `(when ...)` answers the *unspecified* value when the test fails,
+      ;; which is what this tree's `append` would splice into a format -
+      ;; Emacs's nil is the empty list.
+      (if (tab-bar-history-mode-variable)
+          (list (list 'sep-history-back 'menu-item (tab-bar-separator) 'ignore)
+              (list 'history-back 'menu-item tab-bar-back-button
+                    tab-bar-history-back
+                    ':help "Click to go back in tab history")
+              (list 'sep-history-forward 'menu-item (tab-bar-separator) 'ignore)
+                (list 'history-forward 'menu-item tab-bar-forward-button
+                      tab-bar-history-forward
+                      ':help "Click to go forward in tab history"))
+          '()))
 
     (define (tab-bar-format-add-tab)
       ;; "Button to add a new tab."
@@ -1469,6 +1501,388 @@ Negative TO-NUMBER counts tabs from the end of the tab bar."
           (tab-bar-close-tab tab-number #f))))
 
     ;;--------------------------------------------------------------
+    ;; Tab groups - `tab-bar.el:1084`
+    ;;--------------------------------------------------------------
+
+    (define (tab-bar-tab-group-default tab)
+      ;; "Function to get a tab group name."
+      ;;--------------------------------------------------------------
+      (tab-bar--alist-get 'group tab))
+
+    (define-custom *tab-bar-tab-group-function* tab-bar-tab-group-default
+      "Function to get a tab group name.
+Function gets one argument: a tab."
+      :type 'function
+      :initialize custom-initialize-default
+      :group 'tab-bar)
+
+    (define (tab-bar-tab-group-format-default tab i . rest)
+      ;; "Function to format a tab group name. Function gets three
+      ;; arguments, a tab with a group name, its number, and an optional
+      ;; value that is non-nil when the tab is from the current group."
+      ;;--------------------------------------------------------------
+      (let ((current-p (and (pair? rest) (car rest))))
+        (propertize
+         (string-append
+          (if (and (*tab-bar-tab-hints*)
+                   (not current-p)
+                   (not (*tab-bar-show-inactive-group-tabs*)))
+              (string-append (number->string i) " ")
+              "")
+          (let ((group ((*tab-bar-tab-group-function*) tab)))
+            (or group "")))
+         'face (if current-p
+                   'tab-bar-tab-group-current
+                   'tab-bar-tab-group-inactive))))
+
+    (define-custom *tab-bar-tab-group-format-function*
+      tab-bar-tab-group-format-default
+      "Function to format a tab group name.
+Function gets three arguments, a tab with a group name, its number, and
+an optional value that is non-nil when the tab is from the current group."
+      :type 'function
+      :initialize custom-initialize-default
+      :group 'tab-bar)
+
+    (define (tab-bar-tab-group-face-default tab)
+      ;; "Function to define a tab group face."
+      ;;--------------------------------------------------------------
+      (if (not (or (eq? (car tab) 'current-tab)
+                   ((*tab-bar-tab-group-function*) tab)))
+          'tab-bar-tab-ungrouped
+          (tab-bar-tab-face-default tab)))
+
+    (define-custom *tab-bar-tab-group-face-function*
+      tab-bar-tab-group-face-default
+      "Function to define a tab group face.
+Function gets one argument: a tab."
+      :type 'function
+      :group 'tab-bar)
+
+    (define (tab-bar--format-tab-group tab i . rest)
+      ;; "Format TAB as a tab that represents a group of tabs. The
+      ;; argument I is the tab index, and CURRENT-P is non-nil when the
+      ;; tab is current. Return the result as a keymap."
+      ;;
+      ;; The non-current group's binding is `(tab-bar-select-tab I)` as a
+      ;; closure - "Click to visit group".
+      ;;--------------------------------------------------------------
+      (let ((current-p (and (pair? rest) (car rest))))
+        (append
+         (list (list (string->symbol (string-append "sep-" (number->string i)))
+                     'menu-item (tab-bar-separator) 'ignore))
+         (list
+          (list (string->symbol
+                 (if current-p
+                     "current-group"
+                     (string-append "group-" (number->string i))))
+                'menu-item
+                (if current-p
+                    ((*tab-bar-tab-group-format-function*) tab i current-p)
+                    ((*tab-bar-tab-group-format-function*) tab i))
+                (if current-p
+                    'ignore
+                    (or (tab-bar--alist-get 'binding tab)
+                        ;; A closure: `(lambda () (interactive)
+                        ;; (tab-bar-select-tab i))'.
+                        (let ((n i))
+                          (lambda () (tab-bar-select-tab-internal n)))))
+                ':help "Click to visit group")))))
+
+    (define-custom *tab-bar-show-inactive-group-tabs* #f
+      "Show tabs even if they are in inactive groups."
+      :type 'boolean
+      :initialize custom-initialize-default
+      :group 'tab-bar)
+
+    (define (tab-bar-format-tabs-groups)
+      ;; "Produce tabs for the tab bar grouped according to their
+      ;; groups."
+      ;;
+      ;; The C's `mapcan` with a `prog1` is a loop that appends and
+      ;; records the group it has just emitted.
+      ;;--------------------------------------------------------------
+      (let* ((tabs ((*tab-bar-tabs-function*)))
+             (current-group ((*tab-bar-tab-group-function*)
+                             (tab-bar--current-tab-find tabs))))
+        (let loop ((rest tabs) (i 0) (acc '()) (previous-group #f))
+          (cond ((null? rest) acc)
+                (else
+                 (let* ((tab (car rest))
+                        (tab-group ((*tab-bar-tab-group-function*) tab))
+                        (i (+ i 1))
+                        (out
+                         (cond
+                          ;; "Show current group tabs and ungrouped tabs"
+                          ((or (equal? tab-group current-group) (not tab-group))
+                           (append
+                            ;; "Prepend current group name before first tab"
+                            (if (and (not (equal? previous-group tab-group))
+                                     tab-group)
+                                (tab-bar--format-tab-group tab i #t)
+                                '())
+                            ;; "Override default tab faces to use group faces"
+                            (parameterize ((*tab-bar-tab-face-function*
+                                            (*tab-bar-tab-group-face-function*)))
+                              (tab-bar--format-tab tab i))))
+                          ;; "Show first tab of other groups with a group name"
+                          ((not (equal? previous-group tab-group))
+                           (append
+                            (tab-bar--format-tab-group tab i)
+                            (if (*tab-bar-show-inactive-group-tabs*)
+                                (parameterize
+                                    ((*tab-bar-tab-face-function*
+                                      (*tab-bar-tab-group-face-function*)))
+                                  (tab-bar--format-tab tab i))
+                                '())))
+                          ;; "Hide other group tabs"
+                          (else
+                           (if (*tab-bar-show-inactive-group-tabs*)
+                               (parameterize
+                                   ((*tab-bar-tab-face-function*
+                                     (*tab-bar-tab-group-face-function*)))
+                                 (tab-bar--format-tab tab i))
+                               '())))))
+                   (loop (cdr rest) i (append acc out) tab-group)))))))
+
+    (define *tab-bar-tab-post-change-group-functions* (make-parameter '()))
+    ;; ^ `tab-bar-tab-post-change-group-functions`, a `defvar` read as a
+    ;; hook list.
+
+    (define-command (tab-bar-change-tab-group group-name tab-number)
+      "Add the tab specified by its absolute position TAB-NUMBER to GROUP-NAME.
+If no TAB-NUMBER is specified, then set the GROUP-NAME for the current tab.
+If GROUP-NAME is the empty string, then remove the tab from any group."
+      (interactive
+       (let* ((tabs ((*tab-bar-tabs-function*)))
+              (tab-number (or (current-prefix-arg)
+                              (1+ (tab-bar--current-tab-index tabs))))
+              (group-name ((*tab-bar-tab-group-function*)
+                           (list-ref tabs (1- tab-number)))))
+         (list (read-from-minibuffer
+                "Group name for tab (leave blank to remove group): "
+                #f #f #f (or group-name ""))
+               (current-prefix-arg))))
+      (let* ((tabs ((*tab-bar-tabs-function*)))
+             (tab-index (if tab-number
+                            (1- (max 0 (min tab-number (length tabs))))
+                            (tab-bar--current-tab-index tabs)))
+             (tab (list-ref tabs tab-index))
+             (group (tab-bar--assq 'group tab))
+             (group-new-name (and (> (string-length group-name) 0)
+                                  group-name)))
+        (if group
+            (set-cdr! group group-new-name)
+            (set-cdr! (last-pair tab) (list (cons 'group group-new-name))))
+        (run-hook-with-args (*tab-bar-tab-post-change-group-functions*) tab)
+        (force-mode-line-update)
+        (unless (tab-bar-mode-variable)
+          (message "Set tab group to '%s'" group-new-name))))
+
+    (define-command (tab-bar-close-group-tabs group-name)
+      "Close all tabs that belong to GROUP-NAME on the selected frame."
+      (interactive
+       (let* ((current ((*tab-bar-tab-group-function*)
+                        (tab-bar--current-tab-find)))
+              (names (map (lambda (tab) ((*tab-bar-tab-group-function*) tab))
+                          ((*tab-bar-tabs-function*))))
+              (names (delete-duplicates (cons current names))))
+         (list (read-from-minibuffer "Close all tabs with group name: "
+                                     #f #f #f (or current "")))))
+      (let* ((close-group (and (> (string-length group-name) 0) group-name)))
+        (parameterize
+            ((*tab-bar-tab-prevent-close-functions*
+              (cons (lambda (tab last-tab-p)
+                      (not (equal? ((*tab-bar-tab-group-function*) tab)
+                                   close-group)))
+                    (*tab-bar-tab-prevent-close-functions*))))
+          (tab-bar-close-other-tabs #f))
+        (when (equal? ((*tab-bar-tab-group-function*)
+                       (tab-bar--current-tab-find))
+                      close-group)
+          (tab-bar-close-tab #f #f))))
+
+    (define (delete-duplicates lst)
+      ;; `delete-dups`: one copy of each element, first occurrences kept.
+      ;; `member` compares with `equal?`; the names are strings.
+      (let loop ((rest lst) (acc '()))
+        (cond ((null? rest) (reverse acc))
+              ((member (car rest) acc) (loop (cdr rest) acc))
+              (else (loop (cdr rest) (cons (car rest) acc))))))
+
+    ;;--------------------------------------------------------------
+    ;; Tab history mode - `tab-bar.el:2566`
+    ;;
+    ;; **The one departure of this section is how a change is noticed.**
+    ;; Emacs bumps `f->change_stamp` in `Fset_window_buffer`,
+    ;; `Fdelete_window`, `Fsplit_window_internal` and
+    ;; `Fset_window_configuration` (`window.c:3715`, `:5681`, `:5828`,
+    ;; `:8082`) and `run_window_change_functions` runs
+    ;; `window-configuration-change-hook` when the stamp moved or the
+    ;; selected window or frame did. This tree has neither the stamp nor
+    ;; that hook, so the same facts are captured as a *fingerprint* of
+    ;; the frame's window tree - the selected window, and each window
+    ;; with its buffer and rectangle - and compared at the next
+    ;; command's `pre-command-hook`. The same four causes move it and
+    ;; nothing else does; what differs is only *when* the push happens
+    ;; (one command later), and the history a reader sees is the same.
+    ;;--------------------------------------------------------------
+
+    (define tab-bar-history-limit 10)
+    ;; ^ "The number of history elements to keep." A `defvar` in Emacs,
+    ;; not a defcustom, so a plain variable here too.
+
+    (define tab-bar-history-omit #f)
+    ;; ^ "When non-nil, omit window-configuration changes from the
+    ;; current command." A plain `defvar`: read and `setq`-ed here only.
+    (define tab-bar-history-back-table (make-hash-table))
+    ;; ^ "History of back changes in every tab per frame."
+    (define tab-bar-history-forward-table (make-hash-table))
+    ;; ^ "History of forward changes in every tab per frame."
+    (define tab-bar-history-old #f)
+    ;; ^ "Window configuration before the current command."
+    (define tab-bar-history-pre-command #f)
+    ;; ^ "Command set to `this-command' by `pre-command-hook'."
+    (define tab-bar-history-done-command #f)
+    ;; ^ "Command handled by `window-configuration-change-hook'."
+    (define tab-bar-history-fingerprint #f)
+    ;; ^ This tree's stand-in for `f->change_stamp`, see the note above.
+
+    (define (tab-bar--window-fingerprint frame)
+      ;; What `FRAME_WINDOW_CHANGE` reports: the selected window, and the
+      ;; window tree with each window's buffer and rectangle. A list of
+      ;; records and numbers, compared by `tab-bar--same-fingerprint?` -
+      ;; `equal?` would walk a window's frame and a frame's windows for
+      ;; ever.
+      ;;--------------------------------------------------------------
+      (list (frame-selected-window frame)
+            (map (lambda (w)
+                   (list w (window-buffer w) (window-top w)
+                         (window-height w) (window-left w) (window-width w)))
+                 (window-list frame #t))))
+
+    (define (tab-bar--same-fingerprint? a b)
+      (define (same-row? x y)
+        (and (eq? (list-ref x 0) (list-ref y 0))
+             (eq? (list-ref x 1) (list-ref y 1))
+             (equal? (cddr x) (cddr y))))
+      (and (eq? (car a) (car b))
+           (let loop ((x (cadr a)) (y (cadr b)))
+             (cond ((and (null? x) (null? y)) #t)
+                   ((or (null? x) (null? y)) #f)
+                   ((not (same-row? (car x) (car y))) #f)
+                   (else (loop (cdr x) (cdr y)))))))
+
+    (define (tab-bar--minibuffer-depth-zero?)
+      ;; `(zerop (minibuffer-depth))` - no prompt is being read. This
+      ;; tree's answer is `minibufferp`, which is "a minibuffer buffer is
+      ;; active".
+      ;;--------------------------------------------------------------
+      (not (minibufferp)))
+
+    (define (tab-bar--history-change)
+      ;; GNU Emacs's `tab-bar--history-change` (`tab-bar.el:2596`),
+      ;; called from `window-configuration-change-hook` there and from
+      ;; the pre-change below here.
+      ;;--------------------------------------------------------------
+      (when (and (not tab-bar-history-omit) tab-bar-history-old
+                 ;; "Don't register changes performed by the same command
+                 ;; repeated in sequence, such as incremental window
+                 ;; resizing."
+                 (not (eq? tab-bar-history-done-command
+                           tab-bar-history-pre-command))
+                 (tab-bar--minibuffer-depth-zero?)
+                 (not (tab-bar--same-fingerprint?
+                       tab-bar-history-fingerprint
+                       (tab-bar--window-fingerprint (*current-frame*)))))
+        (hashq-set! tab-bar-history-back-table (selected-frame)
+                    (seq-take (cons tab-bar-history-old
+                                    (or (hashq-ref tab-bar-history-back-table
+                                                   (selected-frame))
+                                        '()))
+                              tab-bar-history-limit))
+        (set! tab-bar-history-old #f))
+      (set! tab-bar-history-done-command tab-bar-history-pre-command))
+
+    (define (tab-bar--history-pre-change)
+      ;; GNU Emacs's `tab-bar--history-pre-change` (`:2590`), plus the
+      ;; `window-configuration-change-hook` call this tree has no hook
+      ;; for - see this section's note.
+      ;;--------------------------------------------------------------
+      (tab-bar--history-change)
+      ;; "Reset before the command could set it"
+      (set! tab-bar-history-omit #f)
+      (set! tab-bar-history-pre-command (*this-command*))
+      (when (tab-bar--minibuffer-depth-zero?)
+        (set! tab-bar-history-old
+              (list (cons 'wc (current-window-configuration))
+                    (cons 'wc-point (point-marker))))
+        (set! tab-bar-history-fingerprint
+              (tab-bar--window-fingerprint (*current-frame*)))))
+
+    (define-command (tab-bar-history-back)
+      "Restore a previous window configuration used in the current tab.
+This navigates back in the history of window configurations."
+      (interactive '())
+      (set! tab-bar-history-omit #t)
+      (let* ((history (let ((h (hashq-ref tab-bar-history-back-table
+                                          (selected-frame))))
+                        (hashq-set! tab-bar-history-back-table (selected-frame)
+                                    (and (pair? h) (cdr h)))
+                        (and (pair? h) (car h))))
+             (wc (tab-bar--alist-get 'wc history))
+             (wc-point (tab-bar--alist-get 'wc-point history)))
+        (if (window-configuration-p wc)
+            (begin
+              (hashq-set! tab-bar-history-forward-table (selected-frame)
+                          (cons tab-bar-history-old
+                                (or (hashq-ref tab-bar-history-forward-table
+                                               (selected-frame))
+                                    '())))
+              (set-window-configuration wc #f #t)
+              (when (and (markerp wc-point) (marker-buffer wc-point))
+                (goto-char (marker-position wc-point))))
+            (message "No more tab back history"))))
+
+    (define-command (tab-bar-history-forward)
+      "Cancel restoration of the previous window configuration.
+This navigates forward in the history of window configurations."
+      (interactive '())
+      (set! tab-bar-history-omit #t)
+      (let* ((history (let ((h (hashq-ref tab-bar-history-forward-table
+                                          (selected-frame))))
+                        (hashq-set! tab-bar-history-forward-table (selected-frame)
+                                    (and (pair? h) (cdr h)))
+                        (and (pair? h) (car h))))
+             (wc (tab-bar--alist-get 'wc history))
+             (wc-point (tab-bar--alist-get 'wc-point history)))
+        (if (window-configuration-p wc)
+            (begin
+              (hashq-set! tab-bar-history-back-table (selected-frame)
+                          (cons tab-bar-history-old
+                                (or (hashq-ref tab-bar-history-back-table
+                                               (selected-frame))
+                                    '())))
+              (set-window-configuration wc #f #t)
+              (when (and (markerp wc-point) (marker-buffer wc-point))
+                (goto-char (marker-position wc-point))))
+            (message "No more tab forward history"))))
+
+    (define-key *default-keymap* (kbd "C-c <left>") tab-bar-history-back)
+    (define-key *default-keymap* (kbd "C-c <right>") tab-bar-history-forward)
+
+    (define-minor-mode tab-bar-history-mode
+      "Toggle tab history mode for the tab bar.
+Tab history mode remembers window configurations used in every tab,
+and can restore them."
+      :global #t
+      (if tab-bar-history-mode-variable
+          (begin
+            (add-hook *pre-command-hook* tab-bar--history-pre-change)
+            (force-mode-line-update))
+          (remove-hook *pre-command-hook* tab-bar--history-pre-change)))
+
+    ;;--------------------------------------------------------------
     ;; The keymaps - after the commands, because a keymap holds them
     ;;--------------------------------------------------------------
 
@@ -1515,6 +1929,8 @@ Negative TO-NUMBER counts tabs from the end of the tab bar."
     (define tab-move tab-bar-move-tab)
     (define tab-move-to tab-bar-move-tab-to)
     (define tab-rename tab-bar-rename-tab)
+    (define tab-group tab-bar-change-tab-group)
+    (define tab-close-group tab-bar-close-group-tabs)
     (define tab-new tab-bar-new-tab)
     (define tab-new-to tab-bar-new-tab-to)
 
@@ -1527,6 +1943,7 @@ Negative TO-NUMBER counts tabs from the end of the tab bar."
     (define-key *default-keymap* (kbd "C-x t m") tab-move)
     (define-key *default-keymap* (kbd "C-x t M") tab-move-to)
     (define-key *default-keymap* (kbd "C-x t r") tab-rename)
+    (define-key *default-keymap* (kbd "C-x t G") tab-group)
 
     ;; `global-set-key [tab-bar] ...` - the filter is applied by
     ;; `update-tab-bar`, not by the lookup; see this file's header.

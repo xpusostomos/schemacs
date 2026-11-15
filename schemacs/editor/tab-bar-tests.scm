@@ -10,19 +10,26 @@
  (only (schemacs editor frame)
        *current-frame* *current-buffer* *default-frame-alist*
        new-frame frame-parameter frame-selected-window window-top
-       window-height %frame-tab-bar-lines)
+       window-height window-list %frame-tab-bar-lines)
  (only (schemacs editor window) switch-to-buffer)
  (only (schemacs editor tab-bar)
        tab-bar-mode tab-bar-mode-variable tab-bar-tabs tab-bar-new-tab
        tab-bar-select-tab tab-bar-close-tab tab-bar-rename-tab
        tab-bar-format-tabs *tab-bar-format* tab-bar-format-list
        tab-bar--key-to-number tab-bar-mouse-down-1 tab-bar-tabs-set
-       tab-bar-close-other-tabs *tab-bar-close-last-tab-choice*)
+       tab-bar-close-other-tabs *tab-bar-close-last-tab-choice*
+       tab-bar-history-mode tab-bar-history-mode-variable
+       tab-bar-history-back tab-bar-history-forward
+       tab-bar--history-pre-change tab-bar-format-history
+       tab-bar-change-tab-group tab-bar-format-tabs-groups
+       tab-bar-tab-group-default *tab-bar-show-inactive-group-tabs*)
  (only (schemacs editor buffer)
        get-buffer-create buffer-name current-buffer)
  (only (schemacs editor keyboard) tab-bar-items *last-read-event*)
  (only (schemacs editor xdisp) render! posn-at-x-y)
- (only (schemacs editor editfns) point))
+ (only (schemacs editor editfns) point)
+ (only (schemacs editor simple) *this-command*)
+ (only (schemacs editor window) split-window))
 
 ;; Regression tests for `(schemacs editor tab-bar)` - `tab-bar.el`.
 ;; Each one drives the commands the way a user does, and the expectations
@@ -186,5 +193,101 @@
       (tab-bar-new-tab #f #f)
       (tab-bar-close-other-tabs #f)
       (length (tab-bar-tabs)))))
+
+;; **Tab history** - `tab-bar-history-mode` - remembers the window
+;; configuration before each command that changes it. The command loop
+;; runs `tab-bar--history-pre-change` before every command; these tests
+;; call it the same way, with `this-command` set, and then run the
+;; command.
+(define (run-command-history! cmd thunk)
+  (parameterize ((*this-command* cmd))
+    (tab-bar--history-pre-change)
+    (thunk)))
+
+(test-equal '(#f #t)
+  (let ((frame (fresh-frame)))
+    (parameterize ((*current-frame* frame) (*current-buffer* #f))
+      (let ((before (tab-bar-history-mode-variable)))
+        (tab-bar-history-mode 1)
+        (list before (tab-bar-history-mode-variable))))))
+
+(test-equal '(3 2)
+  (let ((frame (fresh-frame)))
+    (parameterize ((*current-frame* frame) (*current-buffer* #f))
+      (tab-bar-mode 1)
+      (tab-bar-history-mode 1)
+      (run-command-history! 'start (lambda () #f))
+      (run-command-history! 'split
+                            (lambda ()
+                              (split-window (frame-selected-window frame) -12 #f)))
+      ;; one more command so the split's change is noticed
+      (run-command-history! 'other (lambda () #f))
+      (let ((after-split (length (window-list frame #t))))
+        (tab-bar-history-back)
+        (list after-split (length (window-list frame #t)))))))
+
+;; ...and forward puts the split back.
+(test-equal '(2 3)
+  (let ((frame (fresh-frame)))
+    (parameterize ((*current-frame* frame) (*current-buffer* #f))
+      (tab-bar-mode 1)
+      (tab-bar-history-mode 1)
+      (run-command-history! 'start (lambda () #f))
+      (run-command-history! 'split
+                            (lambda ()
+                              (split-window (frame-selected-window frame) -12 #f)))
+      (run-command-history! 'other (lambda () #f))
+      (tab-bar-history-back)
+      (let ((after-back (length (window-list frame #t))))
+        (tab-bar-history-forward)
+        (list after-back (length (window-list frame #t)))))))
+
+;; The format shows the two buttons only while the mode is on - and with
+;; it off the answer is the empty list, Emacs's nil.
+(test-equal '(() 4)
+  (let ((frame (fresh-frame)))
+    (parameterize ((*current-frame* frame) (*current-buffer* #f))
+      (tab-bar-mode 1)
+      ;; The mode is `:global`, so a previous test may have left it on.
+      (tab-bar-history-mode -1)
+      (let ((off (tab-bar-format-history)))
+        (tab-bar-history-mode 1)
+        (list off (length (tab-bar-format-history)))))))
+
+;; **Tab groups** - `C-x t G` puts a tab in a named group, and
+;; `tab-bar-format-tabs-groups` shows one label per group with only the
+;; current group's tabs beside it.
+(test-equal '("work" "work" #f)
+  (let ((frame (fresh-frame)))
+    (parameterize ((*current-frame* frame) (*current-buffer* #f))
+      (tab-bar-new-tab #f #f)
+      (tab-bar-new-tab #f #f)
+      (tab-bar-change-tab-group "work" 1)
+      (tab-bar-change-tab-group "work" 2)
+      (map tab-bar-tab-group-default (tab-bar-tabs)))))
+
+;; An empty name takes the tab out of its group.
+(test-equal '("work" #f #f)
+  (let ((frame (fresh-frame)))
+    (parameterize ((*current-frame* frame) (*current-buffer* #f))
+      (tab-bar-new-tab #f #f)
+      (tab-bar-new-tab #f #f)
+      (tab-bar-change-tab-group "work" 1)
+      (tab-bar-change-tab-group "work" 2)
+      (tab-bar-change-tab-group "" 2)
+      (map tab-bar-tab-group-default (tab-bar-tabs)))))
+
+;; The grouped format: the current tab, which has no group, and the first
+;; tab of the "work" group behind a label - the second "work" tab is
+;; hidden while `tab-bar-show-inactive-group-tabs` is nil.
+(test-equal '(sep-1 group-1 sep-3 current-tab)
+  (let ((frame (fresh-frame)))
+    (parameterize ((*current-frame* frame) (*current-buffer* #f))
+      (tab-bar-new-tab #f #f)
+      (tab-bar-new-tab #f #f)
+      (tab-bar-change-tab-group "work" 1)
+      (tab-bar-change-tab-group "work" 2)
+      (*tab-bar-show-inactive-group-tabs* #f)
+      (map (lambda (item) (car item)) (tab-bar-format-tabs-groups)))))
 
 (test-end "schemacs_editor_tab_bar")
