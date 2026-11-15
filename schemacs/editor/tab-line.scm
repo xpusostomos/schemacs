@@ -394,11 +394,11 @@ When a function, it is called with the tab as its argument."
       ;; list of tabs that should be displayed in the tab line. By
       ;; default return a list of buffers grouped by major mode."
       ;;
-      ;; The tabs are association lists here as they are in Emacs, with
-      ;; a `select` that is a *closure* - which is the point of the
-      ;; `tab`/`name`/`selected`/`buffer` keys: `tab-line-select-tab`
-      ;; calls `select` for a group tab and switches to `buffer` for a
-      ;; buffer's.
+      ;; The tabs are association lists here as they are in Emacs (less
+      ;; the head symbol - see the header), with a `select` that is a
+      ;; *closure* - which is the point of the `name`/`selected`/`buffer`
+      ;; keys: `tab-line-select-tab` calls `select` for a group tab and
+      ;; switches to `buffer` for a buffer's.
       ;;--------------------------------------------------------------
       (if (window-parameter (selected-window) 'tab-line-groups)
           (let* ((buffers (tab-line-tabs-buffer-list-function))
@@ -700,11 +700,16 @@ When a function, it is called with the tab as its argument."
                   '())))
          (if hscroll (list-tail strings (truncate hscroll)) strings)
          (list separator)
-         (when (and (memq (*tab-line-tabs-function*)
-                          tab-line-new-button-functions)
-                    (*tab-line-new-button-show*)
-                    tab-line-new-button)
-           (list tab-line-new-button)))))
+         ;; Emacs's `(when ... (list tab-line-new-button))', whose nil
+         ;; `append` drops - here a `when` that fails answers the
+         ;; unspecified value, which `append` would splice in as a
+         ;; dotted tail.
+         (if (and (memq (*tab-line-tabs-function*)
+                        tab-line-new-button-functions)
+                  (*tab-line-new-button-show*)
+                  tab-line-new-button)
+             (list tab-line-new-button)
+             '()))))
 
     (define (tab-line-force-update all)
       ;; GNU Emacs's `tab-line-force-update` (`:798`): "Force redisplay
