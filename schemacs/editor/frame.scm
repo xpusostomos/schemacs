@@ -138,7 +138,8 @@
    select-frame with-selected-frame new-frame-on
    next-frame previous-frame other-frame delete-frame
    delete-other-frames make-frame make-frame-command
-   display-graphic-p frame-name
+   display-graphic-p display-popup-menus-p *tty-menu-open-use-tmm*
+   frame-name
    ;; frame.c's pixel geometry, which `text-scale-min-amount' and
    ;; `text-scale-max-amount' (`face-remap.el') are bounded by.
    frame-char-height frame-char-width
@@ -2731,6 +2732,29 @@
       ;; GNU Emacs's `display-graphic-p' (`frame.c'): "Return non-nil if
       ;; DISPLAY is a graphic display." The window system the frame is on
       ;; is what the face machinery records, and it is #f on a terminal.
+      ;;--------------------------------------------------------------
+      (and (memq (*window-system*) '(x w32 ns pgtk)) #t))
+
+    (define *tty-menu-open-use-tmm* #f)
+    ;; ^ GNU Emacs's `tty-menu-open-use-tmm` (`menu-bar.el:2798'): "If
+    ;; non-nil, \\[menu-bar-open] on a TTY will invoke `tmm-menubar'."
+    ;; A *variable* in `menu-bar.el`'s file, placed here because
+    ;; `display-popup-menus-p` below is what has to see it and
+    ;; `menu-bar.scm` imports this library rather than the other way
+    ;; round; `menu-bar.scm` re-exports it.
+
+    (define (display-popup-menus-p . args)
+      ;; GNU Emacs's `display-popup-menus-p` (`frame.el:2696`): "Return
+      ;; non-nil if popup menus are supported on DISPLAY." The Lisp's
+      ;; body is `(display-mouse-p display)` - menus need a pointer - and
+      ;; `display-mouse-p` asks the terminal for its
+      ;; `mouse_position_hook`. The one display here that answers that
+      ;; hook is the Gtk one (`display-mouse-position`), so that is the
+      ;; question asked.
+      ;;
+      ;; `tab-line.el` pairs it with `(not tty-menu-open-use-tmm)`, so a
+      ;; terminal - which has menus but no mouse - takes the `tmm` path
+      ;; there.
       ;;--------------------------------------------------------------
       (and (memq (*window-system*) '(x w32 ns pgtk)) #t))
 

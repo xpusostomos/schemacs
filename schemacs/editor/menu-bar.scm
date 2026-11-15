@@ -103,7 +103,11 @@
     (only (schemacs editor buff-menu) list-buffers)
     (only (schemacs editor fileio) file-name-directory-part)
     (only (schemacs editor frame) make-frame-command delete-frame
-          *echo-area-buffer*)
+          *echo-area-buffer*
+          ;; `tty-menu-open-use-tmm` is this file's in Emacs; it lives in
+          ;; `frame.scm` so that `display-popup-menus-p` can read it, and
+          ;; is re-exported below.
+          *tty-menu-open-use-tmm*)
     ;; `popup-menu`'s "we were given a map for the menu-bar item" lookup
     ;; reads the buffer's own map too.
     (only (schemacs editor buffer) buffer-local-keymap)
@@ -157,6 +161,7 @@
    *tty-menu-open-use-tmm* *tty-menu--initial-menu-x*
    tty-menu-navigation-map *tty-menu-navigation-map*
    menu-bar-menu-at-x-y popup-menu popup-menu-normalize-position
+   *tty-menu-open-use-tmm*
    menu-bar-open menu-bar-define-mouse-key)
 
   (begin

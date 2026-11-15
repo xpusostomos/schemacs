@@ -92,7 +92,7 @@
     (schemacs editor theme)
     (schemacs editor chartab)
     (schemacs editor data)
-    (schemacs editor menu-bar)
+    (except (schemacs editor menu-bar)  *tty-menu-open-use-tmm* *tty-menu-open-use-tmm*)
     (except (schemacs editor simple)  backward-char beginning-of-line delete-char end-of-line forward-char self-insert-command self-insert-tab)
     (schemacs editor mule-cmds)
     (schemacs editor buffer-text)
@@ -451,7 +451,9 @@
     *mode-line-format*
     *mode-line-window*
     *mode-require-final-newline*
+    *mouse-buffer-menu-maxlen*
     *mouse-buffer-menu-mode-groups*
+    *mouse-buffer-menu-mode-mult*
     *mouse-event-keys*
     *mouse-scroll-delay*
     *mouse-scroll-min-lines*
@@ -542,6 +544,7 @@
     *tab-line-tab-name-truncated-max*
     *tab-line-tabs-buffer-group-function*
     *tab-line-tabs-buffer-group-sort-function*
+    *tab-line-tabs-buffer-groups*
     *tab-line-tabs-buffer-groups-sort-function*
     *tab-line-tabs-function*
     *tab-line-tabs-window-buffers-filter-function*
@@ -564,7 +567,6 @@
     *transient-mark-mode*
     *transpose-sexps-function*
     *truncate-partial-width-windows*
-    *truncate-string-ellipsis*
     *tty-colors*
     *tty-menu--initial-menu-x*
     *tty-menu-navigation-map*
@@ -1153,6 +1155,7 @@
     display-mouse-position
     display-pixel-height
     display-pixel-width
+    display-popup-menus-p
     display-selections-p
     display-selections-supported?
     display-set-size!
@@ -1949,6 +1952,10 @@
     modify-text
     modify-text-properties
     mouse--drag-set-mark-and-point
+    mouse-buffer-menu
+    mouse-buffer-menu-alist
+    mouse-buffer-menu-map
+    mouse-buffer-menu-split
     mouse-drag-region
     mouse-drag-track
     mouse-key?
@@ -2580,6 +2587,7 @@
     tab-line-close-modified-button
     tab-line-close-other-tabs
     tab-line-close-tab
+    tab-line-context-menu
     tab-line-event-start
     tab-line-exclude
     tab-line-force-update
@@ -2609,6 +2617,7 @@
     tab-line-switch-to-next-tab
     tab-line-switch-to-prev-tab
     tab-line-tab-close-map
+    tab-line-tab-context-menu
     tab-line-tab-face-group
     tab-line-tab-face-inactive-alternating
     tab-line-tab-face-modified
@@ -2622,7 +2631,6 @@
     tab-line-tabs-buffer-group-name
     tab-line-tabs-buffer-group-sort-by-name
     tab-line-tabs-buffer-groups
-    tab-line-tabs-buffer-groups-alist
     tab-line-tabs-buffer-list
     tab-line-tabs-buffer-list-function
     tab-line-tabs-fixed-window-buffers
@@ -2724,6 +2732,7 @@
     transpose-words
     truncate-line
     truncate-string-ellipsis
+    truncate-string-ellipsis-string
     truncate-string-to-width
     try-completion
     tty-capable-p

@@ -43,7 +43,7 @@
     ;; `inexact->exact` is Guile's, not `(scheme base)`'s - the echo-row
     ;; test in `mouse-minibuffer-check` needs it to compare a cell row
     ;; that arrived as an inexact number.
-    (only (guile) inexact->exact)
+    (only (guile) format inexact->exact string<)
     ;; `posn-set-point' is `subr.el''s and lives here because it needs
     ;; the two below, and `(schemacs editor subr)' is beneath both of
     ;; them and cannot reach either - see the note on the posn cluster
@@ -106,7 +106,21 @@
           ;; event's *position* is - `read-key-event' answers only the key
           *last-read-event*)
     (only (schemacs editor command)
-          *last-command-event* current-prefix-arg define-command))
+          *last-command-event* current-prefix-arg define-command)
+    ;; The buffer menu: the buffers, their mode names, and the popup that
+    ;; shows them (`menu.c`'s `x_popup_menu`).
+    (only (schemacs editor buffer)
+          buffer-file-name buffer-list buffer-modified-p buffer-name
+          buffer-read-only? with-current-buffer)
+    (only (schemacs editor files) expand-file-name)
+    (only (schemacs editor window) switch-to-buffer)
+    (only (schemacs editor xdisp) format-mode-line)
+    (only (schemacs editor buffer) buffer-local-value major-mode mode-name)
+    (only (schemacs editor menu) x-popup-menu)
+    ;; `string-match` is `search.c`'s.
+    (only (schemacs editor search) string-match)
+    (only (guile) sort)
+    (only (schemacs editor subr) nthcdr))
 
   (export posn-set-point mouse-set-point mouse-drag-region mouse-drag-track
           mouse-minibuffer-check
@@ -114,6 +128,9 @@
           mouse-scroll-subr mouse-set-region-1
           *mouse-scroll-delay* *mouse-scroll-min-lines*
           *mouse-buffer-menu-mode-groups*
+          mouse-buffer-menu mouse-buffer-menu-map mouse-buffer-menu-alist
+          mouse-buffer-menu-split
+          *mouse-buffer-menu-mode-mult* *mouse-buffer-menu-maxlen*
           mark mouse-key?)
 
   (begin
@@ -706,6 +723,216 @@ is dragged over to."
     ;; The third is what puts the region back after the drag's own
     ;; cleanup has taken it down, so without it a drag highlights the
     ;; text and then loses it the moment the button comes up.
+    ;;----------------------------------------------------------------
+    ;; The mouse buffer menu (`mouse.el:2848`)
+    ;;----------------------------------------------------------------
+    ;;
+    ;; A menu of every buffer, grouped by major mode when that makes it
+    ;; shorter. `tab-line.el`'s "+" button is the caller that matters
+    ;; here; M-` and C-Down-mouse-1 use the same three functions.
+
+    (define *mouse-buffer-menu-mode-mult* 4)
+    ;; ^ `(defvar mouse-buffer-menu-mode-mult 4 ...)' - "Group the menu
+    ;; by major mode if the sum of squares of the number of buffers in
+    ;; each mode, multiplied by this, is less than the square of the
+    ;; total number of buffers."
+
+    (define *mouse-buffer-menu-maxlen* 20)
+    ;; ^ `(defvar mouse-buffer-menu-maxlen 20 ...)': "Number of buffers
+    ;; in each pane. If there are more than this many buffers, they are
+    ;; split into panes of this size."
+
+    (define (mouse-buffer-menu-map)
+      ;; GNU Emacs's `mouse-buffer-menu-map` (`mouse.el:2862`): "Make an
+      ;; alist of elements that look like (MENU-ITEM . BUFFER)."
+      ;;
+      ;; `(length elt1)` in the sort comparator is the C's - it counts
+      ;; the mode and the name as elements too, which is why the "more
+      ;; than one buffer" test below is `(> (length ...) 3)`.
+      ;;--------------------------------------------------------------
+      (let ((buffers (buffer-list))
+            (split-by-major-mode '()))
+        (for-each
+         (lambda (buf)
+           (with-current-buffer
+               buf
+             (let* ((adjusted-major-mode (major-mode))
+                    (elt #f))
+               (for-each
+                (lambda (group)
+                  (when (string-match (car group) (format-mode-line mode-name))
+                    (set! adjusted-major-mode (cdr group))))
+                *mouse-buffer-menu-mode-groups*)
+               (set! elt (assq adjusted-major-mode split-by-major-mode))
+               (unless elt
+                 (set! elt (list adjusted-major-mode
+                                 (if (string? adjusted-major-mode)
+                                     adjusted-major-mode
+                                     (format-mode-line mode-name))))
+                 (set! split-by-major-mode (cons elt split-by-major-mode)))
+               (unless (memq buf (cddr elt))
+                 (set-cdr! (cdr elt) (cons buf (cddr elt)))))))
+         buffers)
+        ;; "Compute the sum of squares of sizes of the major-mode buckets."
+        (let ((sum-of-squares
+               (let loop ((tail split-by-major-mode) (sum 0))
+                 (if (null? tail)
+                     sum
+                     (let ((len (length (cddr (car tail)))))
+                       (loop (cdr tail) (+ sum (* len len))))))))
+          (if (< (* sum-of-squares *mouse-buffer-menu-mode-mult*)
+                 (* (length buffers) (length buffers)))
+              ;; "Subdividing by major modes really helps, so let's do it."
+              (let ((buffers-left (length buffers))
+                    (subdivided-menus '()))
+                ;; "Sort the list to put the most popular major modes first."
+                (set! split-by-major-mode
+                      (sort split-by-major-mode
+                            (lambda (elt1 elt2)
+                              (> (length elt1) (length elt2)))))
+                (let loop ()
+                  (when (and (pair? split-by-major-mode)
+                             (> (length (car split-by-major-mode)) 3)
+                             (> (* buffers-left 10) (length buffers)))
+                    (let ((this-mode-list
+                           (mouse-buffer-menu-alist
+                            (cddr (car split-by-major-mode)))))
+                      (when this-mode-list
+                        (set! subdivided-menus
+                              (cons (cons (cadr (car split-by-major-mode))
+                                          this-mode-list)
+                                    subdivided-menus))))
+                    (set! buffers-left
+                          (- buffers-left (length (car split-by-major-mode))))
+                    (set! split-by-major-mode (cdr split-by-major-mode))
+                    (loop)))
+                ;; "If any major modes are left over, make a single
+                ;; submenu for them."
+                (unless (null? split-by-major-mode)
+                  (let ((others-list
+                         (mouse-buffer-menu-alist
+                          (apply append
+                                 (map cddr split-by-major-mode)))))
+                    (when others-list
+                      (set! subdivided-menus
+                            (cons (cons "Others" others-list)
+                                  subdivided-menus)))))
+                (cons "Buffer Menu" (reverse subdivided-menus)))
+              (cons "Buffer Menu"
+                    (mouse-buffer-menu-split
+                     "Select Buffer"
+                     (mouse-buffer-menu-alist buffers)))))))
+
+    (define (mouse-buffer-menu-alist buffers)
+      ;; GNU Emacs's `mouse-buffer-menu-alist` (`mouse.el:2933`): the
+      ;; menu's entries, name-padded, sorted by name, with the modified
+      ;; and read-only flags and the file each buffer visits.
+      ;;
+      ;; `(format (format "%%-%ds  %%s%%s  %%s" maxlen) ...)` in the C is
+      ;; the width built into the format string; here the width is a
+      ;; field in Guile's own `~v'.
+      ;;--------------------------------------------------------------
+      (let* ((sorted (sort buffers
+                           (lambda (elt1 elt2)
+                             (string< (buffer-name elt1)
+                                      (buffer-name elt2)))))
+             (maxlen
+              (let loop ((tail sorted) (maxlen 0))
+                (cond ((null? tail) maxlen)
+                      ((char=? (string-ref (buffer-name (car tail)) 0) #\space)
+                       (loop (cdr tail) maxlen))
+                      (else
+                       (loop (cdr tail)
+                             (max maxlen
+                                  (string-length (buffer-name (car tail))))))))))
+        (let loop ((tail sorted) (head '()))
+          (if (null? tail)
+              (reverse head)
+              (let ((elt (car tail)))
+                (if (char=? (string-ref (buffer-name elt) 0) #\space)
+                    (loop (cdr tail) head)
+                    (loop (cdr tail)
+                          (cons (cons (string-append
+                                               ;; "`%-Ns'" pads on the right
+                                               ;; to a width taken from the
+                                               ;; buffer names.
+                                               (let ((name (buffer-name elt)))
+                                                 (string-append
+                                                  name
+                                                  (make-string
+                                                   (max 0 (- maxlen (string-length name)))
+                                                   #\space)))
+                                               "  "
+                                              (if (buffer-modified-p elt) "*" " ")
+                                              (with-current-buffer
+                                                  elt
+                                                (if (buffer-read-only?
+                                                     (current-buffer))
+                                                    "%" " "))
+                                              (or (buffer-file-name elt)
+                                                  (with-current-buffer
+                                                      elt
+                                                    (let ((dir (buffer-local-value
+                                                                (current-buffer)
+                                                                'list-buffers-directory
+                                                                #f)))
+                                                      (and dir
+                                                           (expand-file-name dir))))
+                                                  ""))
+                                      elt)
+                                head))))))))
+
+    (define (mouse-buffer-menu-split title alist)
+      ;; GNU Emacs's `mouse-buffer-menu-split` (`mouse.el:2973`): "If we
+      ;; have lots of buffers, divide them into groups of 20 and make a
+      ;; pane (or submenu) for each one."
+      ;;--------------------------------------------------------------
+      (if (> (length alist) (quotient (* *mouse-buffer-menu-maxlen* 3) 2))
+          (let loop ((rest alist) (sublists '()) (i 1))
+            (if (null? rest)
+                (reverse sublists)
+                (let ((next (list-tail-or rest *mouse-buffer-menu-maxlen*)))
+                  (loop (if next next '())
+                        (cons (cons (format #f "Buffers ~a" i)
+                                    (if next
+                                        (list-head rest *mouse-buffer-menu-maxlen*)
+                                        rest))
+                              sublists)
+                        (+ i 1)))))
+          (list (cons title alist))))
+
+    (define (list-tail-or lst n)
+      ;; The NTH cdr of LST, or #f when it is shorter. R7RS's
+      ;; `list-tail` raises instead, which is not what the splitting walk
+      ;; wants.
+      ;;--------------------------------------------------------------
+      (let loop ((rest lst) (n n))
+        (cond ((= n 0) rest)
+              ((null? rest) #f)
+              (else (loop (cdr rest) (- n 1))))))
+
+    (define (list-head lst n)
+      ;; The first N elements of LST.
+      ;;--------------------------------------------------------------
+      (if (or (= n 0) (null? lst))
+          '()
+          (cons (car lst) (list-head (cdr lst) (- n 1)))))
+
+    (define-command (mouse-buffer-menu event)
+      "Pop up a menu of buffers for selection with the mouse.
+This switches buffers in the window that you clicked on,
+and selects that window."
+      (interactive (list (*last-read-event*)))
+      ;; GNU Emacs's `mouse-buffer-menu` (`mouse.el:2848`).
+      ;;--------------------------------------------------------------
+      (mouse-minibuffer-check event)
+      (let ((buf (x-popup-menu event (mouse-buffer-menu-map)))
+            (window (posn-window (event-start event))))
+        (when buf
+          (select-window (if (frame? window) (frame-selected-window window)
+                             window))
+          (switch-to-buffer buf))))
+
     (define-key *default-keymap* (kbd "<down-mouse-1>") mouse-drag-region)
     (define-key *default-keymap* (kbd "<mouse-1>") mouse-set-point)
     (define-key *default-keymap* (kbd "<drag-mouse-1>") mouse-set-region)

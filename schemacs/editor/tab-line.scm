@@ -93,6 +93,10 @@
     (only (schemacs editor icons) define-icon icon-string)
     (only (schemacs editor keymap)
           define-key keymap-lookup *default-keymap* make-sparse-keymap)
+    (only (schemacs editor subr) define-key-after)
+    ;; `popup-menu` is `menu-bar.el`'s, and it is where a click on a menu
+    ;; item becomes a command.
+    (only (schemacs editor menu-bar) popup-menu)
     (only (schemacs editor subr)
           assq-delete-all delq kbd nth posn-window posn-string event-start
           event-end string-replace)
@@ -114,7 +118,12 @@
     ;; `truncate-string-to-width` is `international/mule-util.el`'s.
     (only (schemacs editor mule-util) truncate-string-to-width)
     ;; The default group table, `mouse.el`'s.
-    (only (schemacs editor mouse) *mouse-buffer-menu-mode-groups*)
+    (only (schemacs editor mouse) *mouse-buffer-menu-mode-groups*
+          mouse-buffer-menu)
+    ;; `display-popup-menus-p` is `frame.el`'s; `tty-menu-open-use-tmm`
+    ;; is `menu-bar.el`'s.
+    (only (schemacs editor frame) display-popup-menus-p)
+    (only (schemacs editor menu-bar) *tty-menu-open-use-tmm*)
     ;; `add-to-list` and the variable it extends.
     (only (schemacs editor subr) add-to-list)
     (only (schemacs editor frame) *window-persistent-parameters*)
@@ -150,6 +159,7 @@
    tab-line-switch-to-prev-tab tab-line-switch-to-next-tab
    tab-line-move-tab-backward tab-line-move-tab-forward
    tab-line-mouse-move-tab tab-line-select-tab-buffer
+   tab-line-tab-context-menu tab-line-context-menu
    ;; the format the redisplay reads
    tab-line-format tab-line-format-template tab-line-force-update
    tab-line-cache-key-default tab-line-cache-key-function
@@ -176,7 +186,7 @@
    ;; the buttons
    tab-line-new-button tab-line-close-button tab-line-close-modified-button
    tab-line-left-button tab-line-right-button tab-line-separator
-   tab-line-new-button-functions tab-line-tabs-buffer-groups-alist
+   tab-line-new-button-functions *tab-line-tabs-buffer-groups*
    tab-line-exclude tab-line-tab-name-ellipsis tab-line-auto-hscroll-buffer
    ;; the options
    *tab-line-tab-face-functions* *tab-line-new-tab-choice*
@@ -349,19 +359,12 @@ When a function, it is called with the tab as its argument."
       ;;--------------------------------------------------------------
       (string< (buffer-name a) (buffer-name b)))
 
-    (define tab-line-tabs-buffer-groups-alist '())
-    ;; ^ `(defvar tab-line-tabs-buffer-groups mouse-buffer-menu-mode-groups
-    ;; ...)' - `menu-bar.el`'s group table, which this tree has not got.
-    ;; Nil is Emacs's own fallback: `tab-line-tabs-buffer-group-by-mode`
-    ;; then finds no entry and names the group after the mode, which is
-    ;; what its docstring says the default does.
-    ;;
-    ;; **The name carries `-alist` because Scheme is a Lisp-1.** Emacs has
-    ;; a *variable* and a *function* both called
-    ;; `tab-line-tabs-buffer-groups`; here the two would be one binding and
-    ;; the second definition would silently replace the first - which is
-    ;; what happened until a probe asked. The function keeps the name,
-    ;; because a defcustom's choice list names it by symbol.
+    ;; **The group table is `*tab-line-tabs-buffer-groups*`**, a
+    ;; parameter at the top of this section: Emacs's variable of the same
+    ;; name is `let`-bound by `tab-line-new-tab`, which in this tree means
+    ;; a parameter, and the asterisks are what tell it from the *function*
+    ;; of the same name - the collision that a Lisp-2 has and a Lisp-1
+    ;; does not.
 
     (define (tab-line-tabs-buffer-group-by-mode . args)
       ;; GNU Emacs's `tab-line-tabs-buffer-group-by-mode` (`:487`):
@@ -382,7 +385,7 @@ When a function, it is called with the tab as its argument."
           ;; raise.
           (or (let ((group (seq-find (lambda (entry)
                                        (string-match-p (car entry) mode))
-                                     tab-line-tabs-buffer-groups-alist)))
+                                     (*tab-line-tabs-buffer-groups*))))
                 (and group (cdr group)))
               mode))))
 
@@ -999,10 +1002,18 @@ corresponding to the new buffer shown in the window."
       (when (tab-line-track-tap event)
         (if (procedure? (*tab-line-new-tab-choice*))
             ((*tab-line-new-tab-choice*))
-            ;; Emacs opens `mouse-buffer-menu' or `tmm-prompt' here; this
-            ;; editor has neither (the header names it), so the default
-            ;; choice says so instead of doing nothing.
-            (error "tab-line-new-tab: no buffer menu; set tab-line-new-tab-choice"))))
+            ;; "`(let ((tab-line-tabs-buffer-groups
+            ;; mouse-buffer-menu-mode-groups)) ...)'" - the buffers menu
+            ;; groups by the same table the tab line does.
+            (parameterize ((*tab-line-tabs-buffer-groups*
+                            *mouse-buffer-menu-mode-groups*))
+              (if (and (pair? event)
+                       (display-popup-menus-p)
+                       (not *tty-menu-open-use-tmm*))
+                  (mouse-buffer-menu event) ; "like (buffer-menu-open)"
+                  ;; "tty menu doesn't support mouse clicks, so use tmm" -
+                  ;; and `tmm-prompt` is not ported; see the header.
+                  (error "tab-line-new-tab: tmm-prompt is not ported"))))))
 
     (define-command (tab-line-select-tab event)
       "Switch to the buffer specified by the tab on which you click.
@@ -1256,6 +1267,32 @@ sight of the tab line."
     ;;--------------------------------------------------------------
     ;; The keys the mode adds to C-x
     ;;--------------------------------------------------------------
+
+    (define-command (tab-line-tab-context-menu event)
+      "Pop up the context menu for a tab-line tab."
+      (interactive (list (*last-read-event*)))
+      ;; GNU Emacs's `tab-line-tab-context-menu` (`tab-line.el:1231`):
+      ;; two items, "Close" and "Close other tabs". `'(propertize
+      ;; "Context Menu" 'hide t)' is the menu's name, which `hide` keeps
+      ;; off a tty menu's title row.
+      ;;--------------------------------------------------------------
+      (let ((menu (make-sparse-keymap (propertize "Context Menu" 'hide #t))))
+        (define-key-after menu (vector 'close)
+          '(menu-item "Close" tab-line-close-tab :help "Close the tab"))
+        (define-key-after menu (vector 'close-other)
+          '(menu-item "Close other tabs" tab-line-close-other-tabs
+                      :help "Close all other tabs"))
+        (popup-menu menu event #f #f)))
+
+    (define-command (tab-line-context-menu event)
+      "Pop up the context menu for the tab line."
+      (interactive (list (*last-read-event*)))
+      ;; GNU Emacs's `tab-line-context-menu` (`tab-line.el:1241`).
+      ;;--------------------------------------------------------------
+      (let ((menu (make-sparse-keymap (propertize "Context Menu" 'hide #t))))
+        (define-key-after menu (vector 'close)
+          '(menu-item "New tab" tab-line-new-tab :help "Create a new tab"))
+        (popup-menu menu event #f #f)))
 
     (define (tab-line--define-keys)
       ;; GNU Emacs's `tab-line--define-keys` (`:1322`): "Install key
@@ -1540,6 +1577,8 @@ are defined.  If nil, do not define any key mappings."
       tab-line-select-tab)
     (define-key tab-line-tab-map (kbd "<tab-line> <mouse-2>")
       tab-line-close-tab)
+    (define-key tab-line-tab-map (kbd "<tab-line> <down-mouse-3>")
+      tab-line-tab-context-menu)
     (define-key tab-line-tab-map (kbd "<tab-line> <touchscreen-begin>")
       tab-line-select-tab)
     (define-key tab-line-tab-map (kbd "RET") tab-line-select-tab)
@@ -1628,6 +1667,39 @@ button, so you could have one more buffer shown on the tab line."
                   (get (major-mode) 'tab-line-exclude)
                   (buffer-local-value (current-buffer) 'tab-line-exclude #f))
         (tab-line-mode 1)))
+
+    ;; `tab-line.el:1447`'s own `global-set-key`s - the line's context
+    ;; menu, dragging a tab to move it, and the wheel. The wheel events
+    ;; are bound for fidelity: no front end here produces one yet
+    ;; (`keyboard.scm` names them the same gap `mouse-movement` had).
+    (define-key *default-keymap* (kbd "<tab-line> <down-mouse-3>")
+      tab-line-context-menu)
+    (define-key *default-keymap* (kbd "<tab-line> <drag-mouse-1>")
+      tab-line-mouse-move-tab)
+    (define-key *default-keymap* (kbd "<tab-line> <mouse-4>")
+      tab-line-hscroll-left)
+    (define-key *default-keymap* (kbd "<tab-line> <mouse-5>")
+      tab-line-hscroll-right)
+    (define-key *default-keymap* (kbd "<tab-line> <wheel-up>")
+      tab-line-hscroll-left)
+    (define-key *default-keymap* (kbd "<tab-line> <wheel-down>")
+      tab-line-hscroll-right)
+    (define-key *default-keymap* (kbd "<tab-line> <wheel-left>")
+      tab-line-hscroll-left)
+    (define-key *default-keymap* (kbd "<tab-line> <wheel-right>")
+      tab-line-hscroll-right)
+    (define-key *default-keymap* (kbd "<tab-line> <S-mouse-4>")
+      tab-line-switch-to-prev-tab)
+    (define-key *default-keymap* (kbd "<tab-line> <S-mouse-5>")
+      tab-line-switch-to-next-tab)
+    (define-key *default-keymap* (kbd "<tab-line> <S-wheel-up>")
+      tab-line-switch-to-prev-tab)
+    (define-key *default-keymap* (kbd "<tab-line> <S-wheel-down>")
+      tab-line-switch-to-next-tab)
+    (define-key *default-keymap* (kbd "<tab-line> <S-wheel-left>")
+      tab-line-switch-to-prev-tab)
+    (define-key *default-keymap* (kbd "<tab-line> <S-wheel-right>")
+      tab-line-switch-to-next-tab)
 
     (define-globalized-minor-mode global-tab-line-mode
       tab-line-mode tab-line-mode--turn-on
