@@ -8859,6 +8859,28 @@ datum))`, which is what `define-minor-mode` already did and what
   `string-append`), which is what makes the tab string's `keymap` and
   `tab` properties survive the separator being prepended.
 
+## The region under a theme: it is drawn, and Vantablack's is subtle on purpose
+
+Chasing "marking an area for copy seems broken in the gtk messages
+buffer": the region *is* drawn. `C-SPC C-f C-f` in `*Messages*` leaves
+`(region-active-p)` true and the highlight on screen - checked with
+`pgtk-write-screenshot!` on a live editor under broadway, both with no
+theme and with Vantablack loaded.
+
+With Vantablack the highlight is `#1a1a1a` on `#000000`, which is
+almost invisible - and it is **the theme's own choice**, not this
+tree's: `omarchy.el/themes/vantablack-theme.el` maps
+`(bg-region bg-active)` with `bg-active` `#1a1a1a`, and its header
+explains that the palette is "pure #000000 canvas" with `selection` as
+the only step up. Real Emacs with the same theme shows the same.
+
+So a region that cannot be seen is one of three things, in this order:
+the theme's palette (above), a theme load that *failed* part-way and
+left the face reset (`face-spec-recalc` runs per face, so a spec that
+raises leaves the faces before it themed and the rest not - the
+`(tab-line-tab (#f))` bug, fixed), or `transient-mark-mode` off, which
+is off only if something turned it off.
+
 ## Still to do on the tab line
 
 1. **The mouse path, half done.** `posn-at-x-y` now answers the
