@@ -15,7 +15,9 @@
  (only (schemacs editor easy-mmode)
        define-minor-mode define-globalized-minor-mode
        easy-mmode-pretty-mode-name)
- (only (schemacs editor xdisp) *mode-line-window* mode-line-window-selected-p))
+ (only (schemacs editor xdisp) mode-line-window-selected-p)
+ (only (schemacs editor frame) *old-selected-window*
+                             *selected-window-override*))
 
 ;; Unbuffered output, so a run that hangs shows where it got to.
 (setvbuf (current-output-port) 'none)
@@ -228,19 +230,20 @@
 
 (test-begin "schemacs_editor_easy_mmode_mode_line")
 
-;; The renderer binds `*mode-line-window*' to the window it is formatting,
-;; which is the C's rebinding of `selected-window' around
-;; `display_mode_lines'.
-(test-assert "the selected window's mode line is the selected one"
-             (parameterize ((*mode-line-window* (selected-window)))
+;; "`(eq window (old-selected-window))'" - the renderer rebinds
+;; `selected-window` to the window whose line it is formatting and keeps
+;; the real one in `*old-selected-window*', as `display_mode_lines` does.
+(test-assert "the window being formatted, when it is the selected one"
+             (parameterize ((*old-selected-window* (selected-window)))
                (mode-line-window-selected-p)))
 
-(test-assert "an unknown window is not"
-             (parameterize ((*mode-line-window* 'some-window))
+(test-assert "another window is not"
+             (parameterize ((*old-selected-window* (selected-window))
+                            (*selected-window-override* 'some-window))
                (not (mode-line-window-selected-p))))
 
-(test-assert "and neither is no window at all"
-             (parameterize ((*mode-line-window* #f))
+(test-assert "and neither is a format with no real selection behind it"
+             (parameterize ((*old-selected-window* #f))
                (not (mode-line-window-selected-p))))
 
 (test-end "schemacs_editor_easy_mmode_mode_line")

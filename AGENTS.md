@@ -8881,25 +8881,80 @@ raises leaves the faces before it themed and the rest not - the
 `(tab-line-tab (#f))` bug, fixed), or `transient-mark-mode` off, which
 is off only if something turned it off.
 
+## The click dispatch: a tab is a button now (2026-11-16)
+
+Chris chose this as the next step after the tab line landed. Two pieces
+of GNU Emacs were missing and are now ported.
+
+### 1. The fake prefix (`keyboard.c:11947`)
+
+"Clicks in non-text areas get prefixed by the symbol in their
+CHAR-ADDRESS field." `read_key_sequence` turns one event into two -
+`keybuf[t] = posn; keybuf[t+1] = key` - and looks the *pair* up, which
+is how `[tab-line down-mouse-1]` is a key at all. `dispatch-key-event`
+does the same: when a mouse event's position has a symbol area, it
+dispatches the area symbol first and the click second. The area symbol's
+own step is *silent* - an unbound area is the ordinary case, and Emacs's
+"last event alone" rule then runs the click by itself, which is what the
+fail arm already did.
+
+### 2. The position's keymap (`keymap.c:1649`)
+
+`current_active_maps (Qt, position)` takes the `keymap` *text property*
+of the string a click landed on and conses it in front of the buffer's
+map and the minor modes'. `lookup-keymaps` takes an optional position
+now and does the same, reading the property through
+`*get-text-property-function*` - `textprop.scm` is *above* `keyboard.scm`
+(`buffer.scm` imports keyboard), so the seam is the only way in.
+
+## Three bugs the click turned up, each of which had to be fixed first
+
+1. **`format-mode-line` dropped every text property.** `expand-mode-line-string`
+   expanded `%`-constructs by `display`ing character by character into a
+   string port. The mode line never noticed, because its own strings are
+   plain - but the tab line's strings carry `keymap`, `face` and `tab`,
+   so the renderer rebuilt them bare and `(get-text-property 3 'keymap
+   drawn-string)` was #f even though the string it was built *from* had
+   it. The literal runs are `mode-line-substring`s now (properties
+   copied, as the C's `substring` does) and only the *constructed* text
+   arrives without them. A `%%` keeps the property of the `%` it came
+   from, so a tab named `50%` is still clickable.
+2. **`draw-mode-line!` could not draw an anonymous face.** `tab-line.el`
+   builds its face modifiers as `(:inherit (tab-line-tab-special FACE))`
+   - a plist, which Emacs's `face-attribute` accepts. Ours went to
+   `internal-get-lisp-face-attribute` and said "Invalid face". The run's
+   attributes are merged with `merge-face-ref` now (which knows a name, a
+   plist and a list of either), `face->attribute` uses it for anything
+   that is not a symbol, and the `:box` test reads the merged vector.
+3. **Every window showed the selected window's tab line.**
+   `display_mode_lines` (`xdisp.c:29099`) *rebinds* `selected_window` to
+   the window whose line it is about to format, and `old_selected_window`
+   keeps the real one. This tree did not, so `tab-line-format` - which is
+   written in terms of `(selected-window)` throughout - described the
+   wrong window in every split. `frame.scm` has
+   `*selected-window-override*` and `*old-selected-window*` now,
+   `(selected-window)` answers the override when it is bound, and both
+   the mode line and the tab line are formatted inside that binding.
+   `mode-line-window-selected-p` is therefore the C's own comparison,
+   `(eq? (selected-window) (*old-selected-window*))`, rather than the
+   stand-in it had to be before.
+
 ## Still to do on the tab line
 
-1. **The mouse path, half done.** `posn-at-x-y` now answers the
-   `tab-line` area with the string drawn there in the object slot -
-   `(WINDOW tab-line (X . Y) TIME (STRING . POS))`, which is the shape
-   `posn-string` reads - so a click's position says which tab it landed
-   on. `tab-line-tests.scm`'s `posn` group pins it, three tests on a
-   stub display.
+1. **The mouse path is done** - see "The click dispatch" above.
+   `posn-at-x-y` answers the `tab-line` area with the string drawn
+   there, `dispatch-key-event` makes Emacs's two events of it, and
+   `lookup-keymaps` takes the string's `keymap` property. Verified on a
+   live gtk editor under broadway: clicking a tab ran
+   `tab-line-select-tab` and the window switched.
 
-   **What is still missing is the dispatch**: GNU Emacs's
-   `make_lispy_event` prefixes a click whose position has a *symbol*
-   area with that symbol, so the key looked up is
-   `[tab-line down-mouse-1]` and not `[down-mouse-1]`; and
-   `current_active_maps` (`keymap.c:1649`) then takes the `keymap` text
-   property of the posn's string as one of the active maps. Neither is
-   in this tree: `dispatch-key` sees `(down-mouse-1 POSN)` and
-   `lookup-keymaps` never looks at `*last-read-event*`. Without them a
-   click on a tab runs `mouse-drag-region` and moves point, exactly as
-   the tree did before the tab line existed.
+   Not carried: a tab string's `local-map` property (`current_active_maps`
+   reads both; nothing here writes one), and the `read-key-sequence`
+   buffer switch to the clicked window's buffer before a click's lookup -
+   `lookup-keymaps` reads the *current* buffer's map, so a click in a
+   window showing another buffer looks that buffer's keys up in the
+   current buffer's map. A tab click does not care (its map comes from
+   the string), and a mode-line click only reaches `mouse-drag-region`.
 2. **`tools/pty-check.py`** has not been run on this tree.
 3. Named, not carried (all in `tab-line.scm`'s header): the buffer menu
    behind `tab-line-new-tab-choice`'s `t`, the two context menus,

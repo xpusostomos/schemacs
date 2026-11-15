@@ -143,7 +143,8 @@
          ;; the drawing of a window asks when the frame being drawn is
          ;; not the selected one
          window-frame
-         selected-window window-point window-right-border?
+         selected-window *selected-window-override* *old-selected-window*
+         window-point window-right-border?
          window-top
          window-width
          ;; `w->start' and everything stored beside it: where the window's
@@ -772,7 +773,7 @@
       ;; has no counterpart: the prompt is drawn on the selected frame
       ;; alone and `with-selected-window' is not ported.
       ;;--------------------------------------------------------------
-      (eq? (*mode-line-window*) (selected-window)))
+      (eq? (selected-window) (*old-selected-window*)))
 
     (define (mode-line-eol-desc)
       ;; The mode-line mnemonic for the EOL convention of WINDOW's buffer:
@@ -1341,34 +1342,67 @@
       ;; string in a mode line. A `%' followed by digits is a field width, as
       ;; in `%12b'; a `%' followed by anything else is a construct. A `%' at
       ;; the very end is a literal `%'.
+      ;;
+      ;; **The properties travel with the literal characters.** This used
+      ;; to `display` character by character into a string port, which
+      ;; drops every text property - and the tab line's strings are
+      ;; propertized (`keymap`, `face`, `tab`), so `format-mode-line`
+      ;; rebuilt them bare and a tab could not be clicked even though the
+      ;; string it was drawn from carried its keymap. The literal runs are
+      ;; `mode-line-substring`s now, which copies the properties the way
+      ;; the C's `substring` does, and only the *constructed* text (a
+      ;; buffer name, a line number) arrives without them - which is what
+      ;; Emacs gives it too.
       ;;--------------------------------------------------------------
-      (call-with-port (open-output-string)
-        (lambda (port)
-          (let loop ((i 0) (width #f))
-            (when (< i (string-length str))
+      (let ((n (string-length str)))
+        (let loop ((i 0) (pct #f) (width #f) (start 0) (acc '()))
+          (if (>= i n)
+              (let* ((pieces (reverse
+                              (if (< start n)
+                                  (cons (mode-line-substring str start n) acc)
+                                  acc))))
+                (if (null? pieces) "" (apply concat pieces)))
               (let ((c (string-ref str i)))
                 (cond
                  ((and (char=? c #\%) (not width))
-                  (loop (+ 1 i) 'pending))
+                  (loop (+ i 1) i 'pending start acc))
                  ((eq? width 'pending)
-                  (if (char-numeric? c)
-                      (loop (+ 1 i) (- (char->integer c) (char->integer #\0)))
-                      (let ((text (mode-line-construct c window)))
-                        (display (if width text text) port)
-                        (loop (+ 1 i) #f))))
+                  (cond
+                   ((char-numeric? c)
+                    (loop (+ i 1) pct (- (char->integer c) (char->integer #\0))
+                          start acc))
+                   ;; "`%%` is a literal `%`": one `%`, carrying the
+                   ;; property of the `%` it came from.
+                   ((char=? c #\%)
+                    (loop (+ i 1) #f #f (+ i 1)
+                          (let ((acc (if (< start pct)
+                                         (cons (mode-line-substring str start pct)
+                                               acc)
+                                         acc)))
+                            (cons (mode-line-substring str (- i 1) i) acc))))
+                   (else
+                    (let ((text (mode-line-construct c window)))
+                      (loop (+ i 1) #f #f (+ i 1)
+                            (let ((acc (if (< start pct)
+                                           (cons (mode-line-substring str start pct)
+                                                 acc)
+                                           acc)))
+                              (cons text acc)))))))
                  ((integer? width)
                   (if (char-numeric? c)
-                      (loop (+ 1 i) (+ (* 10 width)
-                                       (- (char->integer c) (char->integer #\0))))
-                      (begin
-                        (display (pad-mode-line-field
-                                  (mode-line-construct c window) width)
-                                 port)
-                        (loop (+ 1 i) #f))))
+                      (loop (+ i 1) pct (+ (* 10 width)
+                                           (- (char->integer c) (char->integer #\0)))
+                            start acc)
+                      (let ((text (pad-mode-line-field
+                                   (mode-line-construct c window) width)))
+                        (loop (+ i 1) #f #f (+ i 1)
+                              (let ((acc (if (< start pct)
+                                             (cons (mode-line-substring str start pct)
+                                                   acc)
+                                             acc)))
+                                (cons text acc))))))
                  (else
-                  (write-char c port)
-                  (loop (+ 1 i) #f))))))
-          (get-output-string port))))
+                  (loop (+ i 1) pct width start acc))))))))
 
     (define (format-mode-line format . args)
       ;; GNU Emacs's `format-mode-line': the mode line FORMAT produces for a
@@ -1536,8 +1570,17 @@
              ;; the Gtk backend and the terminal default on a tty.
              (base-attrs (merge-face-ref base (merge-face-ref 'default '()))))
         (lookup-face (current-display)
-                      (merge-face-vectors (face-realized-attributes face-name)
-                                          base-attrs))))
+                      (merge-face-vectors
+                       ;; **A named face is the table's**, and anything
+                       ;; else - a list of faces, an anonymous plist,
+                       ;; `(:inherit (tab-line-tab-special tab-line-tab))'
+                       ;; as `tab-line.el` writes it - is a face *reference*
+                       ;; and goes through `merge_face_ref`, which is the
+                       ;; function that knows all three forms.
+                       (if (symbol? face-name)
+                           (face-realized-attributes face-name)
+                           (merge-face-ref face-name '()))
+                       base-attrs))))
 
     (define (face-change-limit ed position limit)
       ;; The next position at or after POSITION where the face can differ,
@@ -3257,8 +3300,12 @@
                                                   face)))
                                     k
                                     (find (+ k 1)))))
-                           (box (face-attribute (or face base)
-                                                ':box #f base)))
+                           (attrs (merge-face-vectors
+                                   (if face (merge-face-ref face '()) '())
+                                   (merge-face-ref base '())))
+                           (box (let ((v (attribute-value attrs ':box)))
+                                  (and (not (eq? v *undefined-face-attribute*))
+                                       v))))
                       (loop j (cons (list i j face box) acc)))))))
         (let loop ((rest runs) (prev-boxed? #f))
           (when (pair? rest)
@@ -3443,7 +3490,14 @@
              (y (row->pixel-y
                  (+ (window-top window) (window-height window) -1)))
              (line (mode-line-pad
-                    (mode-line-truncate (mode-line-string window) width)
+                    (mode-line-truncate
+                     ;; `display_mode_lines` (`xdisp.c:29099`) rebinds
+                     ;; `selected_window` to WINDOW for the format and
+                     ;; keeps the real one in `old_selected_window`.
+                     (parameterize ((*old-selected-window* (selected-window))
+                                    (*selected-window-override* window))
+                       (mode-line-string window))
+                     width)
                     width))
              (face (if (eq? window (selected-window))
                        'mode-line-active
@@ -3492,7 +3546,9 @@
                                              'tab-line-format #f)))
              (line (mode-line-pad
                     (mode-line-truncate
-                     (parameterize ((*mode-line-window* window))
+                     (parameterize ((*old-selected-window* (selected-window))
+                                    (*selected-window-override* window)
+                                    (*mode-line-window* window))
                        (format-mode-line format window))
                      width)
                     width))

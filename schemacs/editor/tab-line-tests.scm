@@ -11,13 +11,15 @@
        window-parameter)
  (only (schemacs editor buffer)
        allocate-buffer buffer-local-value buffer-name current-buffer
-       get-buffer-create set-buffer set-buffer-local-value!
+       get-buffer get-buffer-create set-buffer set-buffer-local-value!
        with-current-buffer)
  (only (schemacs editor window) switch-to-buffer)
  (only (schemacs editor editfns) insert)
  (only (schemacs editor textprop) get-text-property)
  (only (schemacs editor subr) *after-change-major-mode-hook* run-hooks
        posn-area posn-point posn-string)
+ (only (schemacs editor keyboard) *last-read-event* dispatch-key)
+ (only (schemacs editor frame) frame-message set!frame-keymap-state)
  (only (schemacs editor xdisp) posn-at-x-y render!)
  (only (schemacs editor tab-line)
        tab-line-mode tab-line-mode-variable global-tab-line-mode
@@ -307,3 +309,66 @@
             (posn-point (posn-at-x-y 0 1 tab-posn-frame)))
 
 (test-end "schemacs_editor_tab_line_posn")
+
+;;----------------------------------------------------------------
+;; Clicking a tab: the keymap property, and Emacs's fake prefix
+;;----------------------------------------------------------------
+;;
+;; GNU Emacs makes two events out of a click in a named area - the area
+;; symbol and the click - and looks the pair up in the active maps, one
+;; of which is the `keymap` *text property* of the string the click
+;; landed on (`keyboard.c:11947`, `keymap.c:1649`). These tests drive
+;; that path: `dispatch-key` with the position a mouse event carries.
+
+(test-begin "schemacs_editor_tab_line_click")
+
+(define click-frame
+  (new-frame (get-buffer-create "click-one") 24 80))
+
+(parameterize ((*current-frame* click-frame))
+  (switch-to-buffer (get-buffer-create "click-one"))
+  (tab-line-mode 1)
+  (let ((two (get-buffer-create "click-two")))
+    (switch-to-buffer two)
+    (tab-line-mode 1)
+    (switch-to-buffer (get-buffer-create "click-one"))))
+
+(render! click-frame)
+
+(define (click-tab! buffer)
+  ;; A click at the start of BUFFER's tab, as the display would report
+  ;; it: `(down-mouse-1 (WINDOW tab-line (X . Y) TIME (STRING . POS)))'.
+  ;; The position is built rather than measured - `posn-at-x-y`'s own
+  ;; half is pinned by the `posn` group - so what this drives is the
+  ;; dispatch.
+  (parameterize ((*current-frame* click-frame))
+    (let* ((string (tab-string-for buffer))
+           (event (list 'down-mouse-1
+                        (list (selected-window) 'tab-line (cons 1 0) 0
+                              (cons string 1) 0))))
+      (*last-read-event* event)
+      (set!frame-keymap-state click-frame #f)
+      (dispatch-key click-frame 'down-mouse-1))))
+
+(click-tab! (get-buffer "click-two"))
+
+(test-equal "a click on a tab runs tab-line-select-tab through its keymap"
+            "click-two"
+            (buffer-name (current-buffer)))
+
+;; A click in an area with no binding is the click alone - Emacs's "last
+;; event alone" rule - so the click still reaches `mouse-drag-region` and
+;; no "tab-line is undefined" is said about it.
+(parameterize ((*current-frame* click-frame))
+  (set!frame-keymap-state click-frame #f)
+  (*last-read-event*
+   (list 'down-mouse-1
+         (list (selected-window) 'mode-line (cons 1 0) 0)))
+  (dispatch-key click-frame 'down-mouse-1))
+
+(test-assert "an unbound area does not report itself undefined"
+             (let ((message (frame-message click-frame)))
+               (or (not message)
+                   (not (string-contains message "mode-line is undefined")))))
+
+(test-end "schemacs_editor_tab_line_click")

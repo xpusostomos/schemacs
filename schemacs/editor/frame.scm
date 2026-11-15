@@ -208,7 +208,7 @@
    window-type?
    new-frame
    select-window
-   selected-window
+   selected-window *selected-window-override* *old-selected-window*
    set!%window-point
    set!frame-height
    set!frame-width
@@ -3252,10 +3252,28 @@
     ;; libraries state theirs.
     (define-key *default-keymap* (kbd "C-z") suspend-frame)
 
+    (define *selected-window-override* (make-parameter #f))
+    ;; ^ The C's `selected_window` *rebound*, which is what the redisplay
+    ;; does around a window's mode line: `display_mode_lines`
+    ;; (`xdisp.c:29099`) saves `selected_window`, sets it to the window
+    ;; whose line it is about to format, and puts it back afterwards. The
+    ;; mode line and the tab line are evaluated with that binding in
+    ;; place, which is why a tab line describes the window it is drawn on
+    ;; and not the selected one - and why `(window-parameter nil ...)`
+    ;; inside a tab format is that window's.
+
+    (define *old-selected-window* (make-parameter #f))
+    ;; ^ The C's `old_selected_window` - the window that was really
+    ;; selected while the rebinding above is in place. It is what
+    ;; `mode-line-window-selected-p` compares against (`bindings.el:872').
+
     (define (selected-window)
-      ;; The window commands act on: GNU Emacs's `(selected-window)'.
+      ;; The window commands act on: GNU Emacs's `(selected-window)' -
+      ;; and, during a mode line's formatting, the window that line
+      ;; belongs to.
       ;;--------------------------------------------------------------
-      (frame-selected-window (*current-frame*)))
+      (or (*selected-window-override*)
+          (frame-selected-window (*current-frame*))))
 
     (define (select-window window)
       ;; Make WINDOW the selected window, the way GNU Emacs's

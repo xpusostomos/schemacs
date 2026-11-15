@@ -104,7 +104,12 @@
           ;; (`keyboard.c:14030'), not a slot of the buffer record: the
           ;; command loop clears it before every command and applies it
           ;; after, reading and writing it by name.
-          buffer-local-value set-buffer-local-value! allocate-buffer buffer-pt)
+          buffer-local-value set-buffer-local-value! allocate-buffer buffer-pt
+          ;; `get-text-property` is `textprop.c`'s, and `textprop.scm` is
+          ;; *above* this library (`buffer.scm` imports this one), so the
+          ;; read arrives through the seam `buffer.scm` holds for it -
+          ;; the same one `barf-if-buffer-read-only` asks through.
+          *get-text-property-function*)
     (only (schemacs editor simple)
           *last-change-was-undo* *last-command* *this-command*
           *select-active-regions*
@@ -165,7 +170,12 @@
     ;; `ignore' is what the special-event-map binds a key that the loop
     ;; must receive but not act on to - the frame's resize.
     (only (schemacs editor subr)
-          kbd ignore *minor-mode-map-alist* keymap-canonicalize)
+          kbd ignore *minor-mode-map-alist* keymap-canonicalize
+          ;; A click's position list: its area and, when it landed on a
+          ;; *string* - a tab, a mode line - the string and offset, which
+          ;; is where a `keymap` text property is found. `keyboard.c`'s
+          ;; `POSN_POSN`/`POSN_STRING`, used below.
+          posn-area posn-string event-start)
     (only (schemacs editor character)
           char-meta char-alt char-super char-hyper char-shift char-ctl
           parse-modifiers-uncached event-convert-list)
@@ -655,7 +665,7 @@
              (mapped (and name (command-remapping name))))
         (or mapped action)))
 
-    (define (lookup-keymaps)
+    (define (lookup-keymaps . args)
       ;; What a key sequence is looked up in, in precedence order. GNU
       ;; Emacs's `read_key_sequence' searches, in order: the current
       ;; buffer's own map (`current-local-map', the keymap a buffer has of
@@ -675,8 +685,26 @@
       ;; That is why a buffer's map needs no copy of the global one - the
       ;; precedence is settled per lookup rather than once at load.
       ;;--------------------------------------------------------------
-      (let ((buffer-keys (buffer-local-keymap (current-buffer)))
-            (mode-keys (*current-keymap*)))
+      ;; **A click adds the map its position carries**, which is GNU
+      ;; Emacs's `current_active_maps (Qt, position)` (`keymap.c:1649`):
+      ;; for a cons POSITION it takes the `local-map` and `keymap` *text
+      ;; properties* of the string the click landed on - a tab, a mode
+      ;; line, an overlay string - and conses the `keymap` one in front of
+      ;; the buffer's and the minor modes'. That, and only that, is what
+      ;; makes a tab a button: the string `tab-line-format` builds
+      ;; carries `keymap tab-line-tab-map`, and the command lives there.
+      (let* ((position (and (pair? args) (car args)))
+             (string (and position (posn-string position)))
+             (position-map
+              (and string
+                   (let ((s (car string)) (pos (cdr string)))
+                     (and (integer? pos)
+                          (>= pos 0)
+                          (< pos (string-length s))
+                          (let ((lookup (*get-text-property-function*)))
+                            (and lookup (lookup pos 'keymap s))))))))
+        (let ((buffer-keys (buffer-local-keymap (current-buffer)))
+              (mode-keys (*current-keymap*)))
         ;; **`overriding-terminal-local-map' first**, which is where
         ;; `keyboard.c:8704' puts it: ahead of the buffer's own map, the
         ;; mode maps and `global-map'. That is the whole of what makes a
@@ -691,6 +719,7 @@
         ;; command loop's head.
         (append
          (or *overriding-terminal-local-map* '())
+         (if position-map (list position-map) '())
          ;; **The enabled minor modes' maps come before the buffer's own**,
          ;; where `current_active_maps' (`keymap.c') puts them: a minor
          ;; mode's key shadows the buffer's, and the buffer's shadows
@@ -698,7 +727,7 @@
          (minor-mode-keymaps)
          (if buffer-keys (%keymap-and-parents buffer-keys) '())
          (if mode-keys (%keymap-and-parents mode-keys) '())
-         (%keymap-and-parents *default-keymap*))))
+         (%keymap-and-parents *default-keymap*)))))
 
     ;;----------------------------------------------------------------
     ;; The modal lookup state - `read_key_sequence''s feel for a chord
@@ -874,6 +903,37 @@
                #t))))
 
     (define (dispatch-key-event frame key)
+      ;; Dispatch one key *event* - and, for a click in a named area,
+      ;; the two events Emacs makes of it.
+      ;;
+      ;; **GNU Emacs's fake prefix** (`keyboard.c:11947`): "Clicks in
+      ;; non-text areas get prefixed by the symbol in their CHAR-ADDRESS
+      ;; field. For example, a click on the mode line is prefixed by the
+      ;; symbol `mode-line'." `read_key_sequence` turns one event into
+      ;; two - `keybuf[t] = posn; keybuf[t+1] = key` - and looks the pair
+      ;; up, which is how `[tab-line down-mouse-1]` is a key at all.
+      ;;
+      ;; The prefix is a *lookup* prefix, not a command: the sequence only
+      ;; continues if the area symbol opened a keymap. When it did not -
+      ;; every area but a tab's, today - the pair is not a key, and Emacs's
+      ;; "last event alone" rule runs the click by itself, which is what
+      ;; `dispatch-key-1`'s fail arm does. `silent?` is what tells the
+      ;; area symbol's own step not to report it undefined: an unbound
+      ;; area is the *ordinary* case.
+      ;;--------------------------------------------------------------
+      (let* ((mouse-posn (and (symbol? key)
+                              (memq key *mouse-event-keys*)
+                              (let ((raw (*last-read-event*)))
+                                (and (pair? raw) (event-start raw)))))
+             (area (and mouse-posn (posn-area mouse-posn))))
+        (if (and area (not (frame-keymap-state frame)))
+            (begin
+              (dispatch-key-1 frame area mouse-posn #t)
+              ;; The click itself, whether the area was a prefix or not.
+              (dispatch-key-1 frame key mouse-posn #f))
+            (dispatch-key-1 frame key mouse-posn #f))))
+
+    (define (dispatch-key-1 frame key position silent?)
       ;; Dispatch one key *event* through the modal keymap lookup. The
       ;; modal lookup state persists across events while a chord
       ;; (such as C-x C-c) is being entered. C-u and digits are
@@ -925,7 +985,7 @@
             (let* ((continuing? (and (frame-keymap-state frame) #t))
                    (state
                     (or (frame-keymap-state frame)
-                        (new-modal-lookup-state (lookup-keymaps)))))
+                        (new-modal-lookup-state (lookup-keymaps position)))))
               ;; NOTE: the state is stored on the frame BEFORE the lookup
               ;; step, because the step's callbacks read it - `do-action'
               ;; reads the completed chord off it for `*this-command-keys*'
@@ -991,7 +1051,7 @@
                         ;; `C-x C-g` printed a backtrace and killed the
                         ;; editor.
                         (let* ((alone (new-modal-lookup-state
-                                       (lookup-keymaps)))
+                                       (lookup-keymaps position)))
                                ;; **A step answers #f both for "the chord
                                ;; ended with a command" and for "nothing
                                ;; was bound"**, so the answer cannot say
@@ -1012,7 +1072,7 @@
                           ;; a binding, use it"; a last event that is a
                           ;; prefix map by itself is not used, which is
                           ;; the one corner this does not take.
-                          (unless found?
+                          (unless (or found? silent?)
                             (report-undefined full-path)))))
                      (result
                       (modal-lookup-state-step!

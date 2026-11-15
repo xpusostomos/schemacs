@@ -3848,7 +3848,7 @@ and `seq-copy`, and each is written over lists. `cl-position` and
   `force-mode-line-update`'s ALL argument already marks one flag, so
   nothing else about the walk matters.
 
-### The click on a tab does not reach `tab-line-select-tab`
+### The click on a tab reaches `tab-line-select-tab` now
 
 - **Emacs**: `make_lispy_event` prefixes a click whose position has a
   *symbol* area with that symbol, so the key looked up is
@@ -3856,13 +3856,21 @@ and `seq-copy`, and each is written over lists. `cl-position` and
   (`keymap.c:1649`) adds the `keymap` text property of the posn's
   *string* to the active maps. That pair is the whole of "a tab is a
   button".
-- **Here**: `posn-at-x-y` now answers the `tab-line` area with the
-  string in the object slot, so the *position* says which tab was hit -
-  but `dispatch-key` still reads `(down-mouse-1 POSN)` as one event and
-  `lookup-keymaps` never consults `*last-read-event*`. A click on a tab
-  therefore runs `mouse-drag-region` and moves point. The commands, the
-  five keymaps and the `keymap` property on the string are all in
-  place; closing this is the prefixing and the position map.
+- **Here**: both are ported (`dispatch-key-event`'s fake prefix and
+  `lookup-keymaps`' position argument) and a click on a tab runs
+  `tab-line-select-tab`. Three things had to come with them, and each
+  is Emacs's own rule rather than a workaround:
+  `format-mode-line` keeps text properties now (its `%`-expansion used
+  to rebuild the string in a port, which threw away the `keymap` the
+  tab carries); `draw-mode-line!` resolves an anonymous face
+  (`(:inherit (FACES))`) through `merge_face_ref`; and the redisplay
+  rebinds `selected_window` around a window's mode/tab line
+  (`display_mode_lines`), which is what makes each window's tab line
+  describe its own window.
+- **Still not carried**: the string's `local-map` property, and
+  `read_key_sequence`'s switch to the clicked window's buffer before the
+  lookup - `lookup-keymaps` reads the current buffer's map. Neither is
+  reachable from a tab click.
 
 ### Named, not carried, in `tab-line.scm`'s header
 
