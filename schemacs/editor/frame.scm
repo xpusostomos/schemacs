@@ -296,7 +296,7 @@
    ;; whatever names it - the tab line's scroll offset and tab order, and
    ;; `quit-restore`.
    window-parameter set-window-parameter
-   window-parameters set!window-parameters
+   window-parameters set!window-parameters *window-persistent-parameters*
    window-wants-tab-line window-tab-line-height window-body-top
    window-last-tab-line set!window-last-tab-line
    ;; `window_outdated` (`window.c:231`), which the redisplay asks before
@@ -821,6 +821,22 @@
              (let ((before (fetch-char buffer (- position 1))))
                (and (char? before) (char=? #\newline before)))))
         position))
+
+    (define *window-persistent-parameters* (make-parameter '()))
+    ;; ^ GNU Emacs's `window-persistent-parameters` (`window.c`): "Alist
+    ;; of window parameters that `window-state-get' preserves"; each
+    ;; element is `(PARAMETER . SAVE)`. `tab-line.el` adds
+    ;; `(tab-line-buffers . t)` to it at load time.
+    ;;
+    ;; A *parameter*, so that `add-to-list` - which takes the variable -
+    ;; can extend it, as `tab-line.el` does.
+    ;;
+    ;; **It has no reader here yet**: the only thing that consults it is
+    ;; `window-state-get`, and window-state save/restore is not ported
+    ;; (`window.el`'s `window-state-get`/`window-state-put`, whose whole
+    ;; job is a frame's window tree as data). The variable is what
+    ;; `add-to-list` needs, and the day window-state lands it is the
+    ;; answer it reads.
 
     (define (window-parameter window parameter)
       ;; GNU Emacs's `window-parameter' (`window.c:2392'): "Return

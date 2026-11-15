@@ -49,6 +49,9 @@ SUITES = [
     'schemacs/editor/coding-tests.scm',
     'schemacs/editor/charset-tests.scm',
     'schemacs/editor/mule-cmds-tests.scm',
+    # `mule-util.el`'s `truncate-string-to-width`, which the tab line's
+    # truncated tab name stands on.
+    'schemacs/editor/mule-util-tests.scm',
     'schemacs/editor/cmds-tests.scm',
     'schemacs/editor/custom-tests.scm',
     # `easy-mmode.el`'s two macros: `define-minor-mode` with `:global`, and

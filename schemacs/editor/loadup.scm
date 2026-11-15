@@ -179,6 +179,7 @@
         (schemacs editor minibuffer)
         (schemacs editor mouse)
         (schemacs editor mule)
+        (schemacs editor mule-util)
         (schemacs editor mule-cmds)
         (schemacs editor pages)
         (schemacs editor paragraphs)

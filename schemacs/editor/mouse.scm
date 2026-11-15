@@ -113,9 +113,33 @@
           mouse-set-region mouse-start-end mouse--drag-set-mark-and-point
           mouse-scroll-subr mouse-set-region-1
           *mouse-scroll-delay* *mouse-scroll-min-lines*
+          *mouse-buffer-menu-mode-groups*
           mark mouse-key?)
 
   (begin
+
+    (define *mouse-buffer-menu-mode-groups*
+      '(("Info\|Help\|Apropos\|Man" . "Help")
+        ("\\bVM\\b\\|\\bMH\\b\\|Message\\b\\|Mail\\|Group\\|Score\\|Summary\\|Article"
+         . "Mail/News")
+        ("\\<C\\>" . "C")
+        ("ObjC" . "C")
+        ("Text" . "Text")
+        ("Outline" . "Text")
+        ("\\(HT\\|SG\\|X\\|XHT\\)ML" . "SGML")
+        ("\\blog\\b\\|diff\\|\\bvc\\b\\|cvs\\|Git\\|Annotate" . "Version Control")
+        ("Threads\\|Memory\\|Disassembly\\|Breakpoints\\|Frames\\|Locals\\|Registers\\|Inferior I/O\\|Debugger"
+         . "GDB")
+        ("Lisp" . "Lisp")))
+    ;; ^ GNU Emacs's `mouse-buffer-menu-mode-groups` (`mouse.el:2831`):
+    ;; "How to group various major modes together in
+    ;; \\[mouse-buffer-menu]. Each element has the form (REGEXP .
+    ;; GROUPNAME). If the major mode's name string matches REGEXP, use
+    ;; GROUPNAME instead."
+    ;;
+    ;; `tab-line.el` binds this as the default of
+    ;; `tab-line-tabs-buffer-groups`, which is why it lives here ahead of
+    ;; the menu that reads it.
 
     ;;----------------------------------------------------------------
     ;; Where a mouse event happened

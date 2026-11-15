@@ -108,6 +108,7 @@
     (schemacs editor tab-line)
     (schemacs editor tabulated-list)
     (schemacs editor text-mode)
+    (schemacs editor mule-util)
     (schemacs editor tty-colors)
     (except (schemacs editor subr)  char-alt char-super char-hyper char-shift char-ctl char-meta parse-solitary-modifier make-ctrl-char parse-modifiers-uncached event-symbol-elements event-modifiers event-basic-type apply-modifiers event-convert-list kbd)
     )
@@ -450,10 +451,12 @@
     *mode-line-format*
     *mode-line-window*
     *mode-require-final-newline*
+    *mouse-buffer-menu-mode-groups*
     *mouse-event-keys*
     *mouse-scroll-delay*
     *mouse-scroll-min-lines*
     *next-selection-coding-system*
+    *old-selected-window*
     *open-paren-in-column-0-is-defun-start*
     *overriding-local-map-menu-flag*
     *overriding-terminal-local-map*
@@ -504,6 +507,7 @@
     *select-active-regions*
     *select-enable-clipboard*
     *select-enable-primary*
+    *selected-window-override*
     *selection-coding-system*
     *selection-converter-alist*
     *set-marker-function*
@@ -560,6 +564,7 @@
     *transient-mark-mode*
     *transpose-sexps-function*
     *truncate-partial-width-windows*
+    *truncate-string-ellipsis*
     *tty-colors*
     *tty-menu--initial-menu-x*
     *tty-menu-navigation-map*
@@ -574,6 +579,7 @@
     *update-search-regs-function*
     *use-empty-active-region*
     *visual-line-fringe-indicators*
+    *window-persistent-parameters*
     *window-scroll-function*
     *window-system*
     *words-include-escapes*
@@ -2717,6 +2723,8 @@
     transpose-sexps-default-function
     transpose-words
     truncate-line
+    truncate-string-ellipsis
+    truncate-string-to-width
     try-completion
     tty-capable-p
     tty-color-24bit

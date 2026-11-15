@@ -68,17 +68,15 @@
   ;;   * **`tab-line-tabs-buffer-group-by-project`**: `project.el` is not
   ;;     ported. The group *function* is a defcustom, so a user's own
   ;;     grouping works.
-  ;;   * **`mouse-buffer-menu-mode-groups`** (`menu-bar.el`'s default
-  ;;     group table): the variable is nil here, which is the documented
-  ;;     fallback - every major mode is its own group, named after the
-  ;;     mode.
-  ;;   * **`tab-line-tab-name-truncated-buffer`**: needs
-  ;;     `truncate-string-to-width` (`mule-util.el`), which is not
-  ;;     ported. `tab-line-tab-name-buffer` is the default.
-  ;;   * `window-persistent-parameters` (frame parameters that survive a
-  ;;     window-buffer change), `switch-to-buffer-obey-display-actions`
-  ;;     (there are no display actions), and `repeat-mode`
-  ;;     (`tab-line-switch-repeat-map` is defined but nothing reads it).
+  ;;   * `switch-to-buffer-obey-display-actions` (there are no display
+  ;;     actions) and `repeat-mode` (`tab-line-switch-repeat-map` is
+  ;;     defined but nothing reads it).
+  ;;
+  ;; **Carried since the first draft**: `tab-line-tab-name-truncated-buffer`
+  ;; over `truncate-string-to-width` (`mule-util.scm`),
+  ;; `mouse-buffer-menu-mode-groups` as the default group table
+  ;; (`mouse.scm`), and `window-persistent-parameters` (`frame.scm`),
+  ;; which is what `add-to-list` in this file extends.
 
   (import
     (scheme base)
@@ -113,6 +111,13 @@
     (only (schemacs editor editfns)
           goto-char insert message point point-min point-max propertize
           get-pos-property)
+    ;; `truncate-string-to-width` is `international/mule-util.el`'s.
+    (only (schemacs editor mule-util) truncate-string-to-width)
+    ;; The default group table, `mouse.el`'s.
+    (only (schemacs editor mouse) *mouse-buffer-menu-mode-groups*)
+    ;; `add-to-list` and the variable it extends.
+    (only (schemacs editor subr) add-to-list)
+    (only (schemacs editor frame) *window-persistent-parameters*)
     (only (schemacs editor fns) concat copy-sequence)
     (only (schemacs editor frame)
           *frame-list* set-window-parameter window-buffer window-list
@@ -542,6 +547,26 @@ When a function, it is called with the tab as its argument."
       ;; name from BUFFER."
       ;;--------------------------------------------------------------
       (buffer-name buffer))
+
+    (define (tab-line-tab-name-truncated-buffer buffer . args)
+      ;; GNU Emacs's `tab-line-tab-name-truncated-buffer` (`tab-line.el:363`):
+      ;; "Generate tab name from BUFFER, truncating as needed. Truncate it
+      ;; to the length specified by `tab-line-tab-name-truncated-max`. If
+      ;; truncated, append ellipsis per `tab-line-tab-name-ellipsis`."
+      ;;
+      ;; `(length tab-name)` over a string is its character count, as
+      ;; Elisp's is; `truncate-string-to-width` is what cuts it, the
+      ;; ellipsis is `truncate-string-ellipsis`'s (U+2026 here, which
+      ;; every display draws), and the full name goes into `help-echo` so
+      ;; a hovered tab still says what it is.
+      ;;--------------------------------------------------------------
+      (let ((tab-name (buffer-name buffer)))
+        (if (< (string-length tab-name) (*tab-line-tab-name-truncated-max*))
+            tab-name
+            (propertize (truncate-string-to-width
+                         tab-name (*tab-line-tab-name-truncated-max*) #f #f
+                         tab-line-tab-name-ellipsis)
+                        'help-echo tab-name))))
 
     (define (tab-line-tab-name-format-default tab tabs)
       ;; GNU Emacs's `tab-line-tab-name-format-default` (`:679`): "Default
@@ -1403,6 +1428,10 @@ are defined.  If nil, do not define any key mappings."
 
     ;; The maps are made before the buttons, because a button carries its
     ;; map in a text property and a keymap is a value here, not a symbol.
+    ;; "`(add-to-list 'window-persistent-parameters '(tab-line-buffers . t))'"
+    ;; - `window-state-get` keeps the tab order when it saves a window.
+    (add-to-list *window-persistent-parameters* '(tab-line-buffers . t))
+
     (define tab-line-tab-map (make-sparse-keymap))
     (define tab-line-add-map (make-sparse-keymap))
     (define tab-line-tab-close-map (make-sparse-keymap))
