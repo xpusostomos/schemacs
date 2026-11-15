@@ -1,20 +1,22 @@
 (import
   (scheme base)
   (scheme char)
+  (scheme time)
   (only (srfi 64) test-assert test-equal test-begin test-end)
+  (only (schemacs editor command) *quit-flag* quit-condition?)
   (only (schemacs editor buffer)
         *current-buffer* allocate-buffer get-buffer-create set-buffer
         erase-buffer buffer-z set-point buffer-pt)
-  (only (schemacs editor editfns) insert)
+  (only (schemacs editor editfns) insert point-max)
   (only (schemacs editor frame) *current-frame* new-frame)
   (only (schemacs editor syntax)
         char-syntax string-to-syntax matching-paren modify-syntax-entry
         parse-partial-sexp syntax-ppss syntax-table standard-syntax-table
         copy-syntax-table set-syntax-table with-syntax-table
-        forward-word-position backward-word-position)
+        forward-word-position backward-word-position scan-sexps)
   (only (schemacs editor font-lock)
         font-lock-set-defaults font-lock-fontify-buffer set!font-lock-defaults!)
-  (only (schemacs editor textprop) get-text-property))
+  (only (schemacs editor textprop) get-text-property put-text-property))
 
 ;; Regression tests for `(schemacs editor syntax)', which mirrors GNU
 ;; Emacs's `src/syntax.c' and the `syntax.el' half. **Every expectation
@@ -262,5 +264,69 @@
            #\w (char-syntax #\a))))
      (test-equal "... and restores the buffer's on the way out"
        #\. (char-syntax #\a)))))
+
+;; ------------------------------------------------------------------
+;; `gl_state', the syntax-table cache (`syntax.h:66', `syntax.c:336').
+;;
+;; Two regressions from the same report (2026-11-15): `C-M-b' from the
+;; end of a 257 KB Scheme file with font-lock on took 144 s and looked
+;; like a hang. The cache that stood here was a forward-only run cache
+;; built with `next-single-property-change', which reads every interval
+;; between the position asked about and the next *syntax-table* change -
+;; on a font-locked buffer that is the end of the buffer, for every
+;; character of a backward scan.
+
+;; measured on Emacs 31.1 with `parse-sexp-lookup-properties' on: the
+;; plain answers are 4 and, with `(' and `)' made punctuation by the
+;; property, 3 forward and 2 backward.
+(with-buffer
+ (lambda (b)
+   (fresh-syntax-table!)
+   (insert "(a)")
+   (let ((plain (scan-sexps 1 1)))
+     (put-text-property 1 2 'syntax-table (string-to-syntax "."))
+     (put-text-property 3 4 'syntax-table (string-to-syntax "."))
+     (test-equal "the scan reads a `syntax-table' text property"
+       (list 4 3 2)
+       (list plain (scan-sexps 1 1) (scan-sexps 4 -1))))))
+
+;; This buffer is a shape the cache has to get right and the old one got
+;; wrong: 40 000 characters carrying 4 000 `face' intervals and no
+;; `syntax-table' property at all. Measured with the C's cache: 21 ms
+;; backward, 12 ms forward; with the forward-only one the same backward
+;; scan took 11 900 ms, and the cost grows with the square of the
+;; buffer. The bound is a hundred times the measured time and six times
+;; under the old one.
+(with-buffer
+ (lambda (b)
+   (fresh-syntax-table!)
+   (insert "(" (make-string 40000 #\a) ")")
+   (let loop ((p 2))
+     (when (< p 40000)
+       (put-text-property p (+ p 10) 'face 'bold)
+       (loop (+ p 10))))
+   (let* ((t0 (current-jiffy))
+          (where (scan-sexps (point-max) -1))
+          (ms (* 1000 (/ (- (current-jiffy) t0) (jiffies-per-second)))))
+     (test-equal "a backward scan lands where the forward one started"
+       1 where)
+     (test-assert "and it crosses the intervals once, not once per character"
+       (< ms 2000)))))
+
+;; `C-g' during a long command. The C's scan loops call `rarely_quit'
+;; (`lisp.h:3914') once every 65536 characters, which looks at
+;; `quit-flag' and signals `quit'. Nothing outside the read looked at
+;; the flag before, so a C-g pressed during a scan was never seen - a
+;; long scan was uninterruptible.
+(with-buffer
+ (lambda (b)
+   (fresh-syntax-table!)
+   (insert "(" (make-string 70000 #\a) ")")
+   (*quit-flag* #t)
+   (test-equal "a long scan answers C-g"
+     (list 'quit #f)
+     (list (guard (e (#t (if (quit-condition? e) 'quit 'other)))
+             (scan-sexps 1 1))
+           (*quit-flag*)))))
 
 (test-end "schemacs_editor_syntax")

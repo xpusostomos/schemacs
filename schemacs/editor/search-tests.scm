@@ -5,6 +5,7 @@
  (only (schemacs editor fns) count-lines)
  (scheme base)
  (scheme char)
+ (scheme time)
  
  (schemacs editor buffer)
  (schemacs editor frame)
@@ -436,5 +437,76 @@
 
 (test-equal "case-on: case does not matter"
   0 (parameterize ((*case-fold-search* #t)) (string-match "A" "abc")))
+
+;; ------------------------------------------------------------------
+;; The search window, and `$' at its edges.
+;;
+;; `re_search_2' is handed the buffer and a `stop', so `$' is judged
+;; against the text the buffer really has. This tree hands Guile's
+;; `regexp-exec' a copy, and a copy ending at the bound makes the engine
+;; see an end of string there - every expectation below is Emacs 31.1's,
+;; and the first two were answered as matches before the window grew one
+;; character past the bound.
+;;
+;; The window is also what keeps a search cheap: `regexp-exec' is
+;; O(length of the string) and not O(distance to the match), so handing
+;; it the buffer - or the whole range a font-lock keyword may search,
+;; which is the file - is what made opening a 257 KB Scheme file burn
+;; 13.5 s in the keyword pass. It doubles only when the answer could
+;; depend on its edge.
+
+(define (search-in text from thunk)
+  (with-buffer
+   (lambda ()
+     (let ((b (get-buffer-create "*search-boundary*")))
+       (set-buffer b)
+       (erase-buffer)
+       (insert text)
+       (goto-char from)
+       (thunk)))))
+
+;; `looking-at' answers from the whole buffer in the C - `re_match_2''s
+;; `p1' - and copying it made every call O(buffer) twice over: 300 calls
+;; on a 257 KB buffer were 7.7 s. It reads a window now, and this is the
+;; same shape as the syntax-table cache's test: a hundred calls on a
+;; 200 000-character buffer take 6 ms, and the bound is a hundred times
+;; that.
+(test-equal "looking-at does not copy the buffer for every call"
+  (list #t #t)
+  (search-in (make-string 200000 #\a) 100000
+             (lambda ()
+               (let ((t0 (current-jiffy)))
+                 (let loop ((i 0))
+                   (when (< i 100) (looking-at "aaa") (loop (+ i 1))))
+                 (list (looking-at "aaa")
+                       (< (* 1000 (/ (- (current-jiffy) t0) (jiffies-per-second)))
+                          1000))))))
+
+(test-equal "a `$' at the bound is not an end of line"
+  (list #f 1) (search-in "abcdef" 1
+                         (lambda () (list (re-search-forward "$" 4 #t) (point)))))
+
+(test-equal "... and a match that needs one does not count"
+  (list #f 1) (search-in "abc def " 1
+                         (lambda () (list (re-search-forward "b$" 6 #t) (point)))))
+
+(test-equal "a backward `$' from mid-line does not match at point"
+  (list 3 3) (search-in "ab\ncd" 4
+                        (lambda () (list (re-search-backward "$" 1 #t) (point)))))
+
+(test-equal "... and one that really is a line end does"
+  (list 3 3) (search-in "ab\ncd" 5
+                        (lambda () (list (re-search-backward "$" 1 #t) (point)))))
+
+;; The C's engine matches against `stop', so a pattern whose longest
+;; match runs past point still matches shorter: `c*' at point 3 of "abc"
+;; is the empty match at 3, not the earlier one.
+(test-equal "a match longer than the point is taken shorter"
+  (list 3 3) (search-in "abc" 3
+                        (lambda () (list (re-search-backward "c*" 1 #t) (point)))))
+
+(test-equal "... and the same for a repeated character"
+  (list 3 3) (search-in "aaa" 4
+                        (lambda () (list (re-search-backward "a+" 1 #t) (point)))))
 
 (test-end)

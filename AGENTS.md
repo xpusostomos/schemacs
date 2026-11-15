@@ -8150,3 +8150,135 @@ engine: `parse-partial-sexp` (ported) plus `lisp-indent-function`, the
 `common-lisp-indent-function` specform table (cl-indent.el), and
 indent.el's `indent-line-to`/`indent-according-to-mode`. That is a pass
 of its own and was not started.
+
+# The syntax-table cache, and C-g inside a long command (2026-11-15)
+
+Chris: *"I tried a big file, schemacs/editor/xdisp.scm and did a C-M-f to
+go to the end... works, that's good. Then I did a C-M-b which should go
+back to the beginning.. it gets stuck, at that point nothing can recover,
+not even C-g"*, then *"Even given a problem with the scanner, I'm curious
+why C-g can't recover"*. Both halves are fixed; DEPARTURES.md has the C
+each was measured against.
+
+## What was wrong
+
+1. **`gl_state` was not ported.** `syntax.c` reads the `syntax-table`
+   text property through the interval cache in `syntax.h`'s
+   `struct gl_state_s`: the interval the last lookup landed in, and the
+   run `b_property'..`e_property` over which its table applies, walked
+   one interval at a time. What stood here was a forward-only run cache
+   built on `next-single-property-change`, which (a) walks every interval
+   forward to the end of the buffer when the property it asks about never
+   changes - which is what a font-locked buffer is - and (b) is never hit
+   by a backward scan at all. `C-M-b` on `xdisp.scm`: **144 s -> 0.92 s**
+   headless, 1.17 s in the live editor. The fix is `%update-syntax-table`
+   and friends in `syntax.scm`, a direct port of `update_syntax_table`
+   (`syntax.c:336`).
+
+2. **Nothing outside the read ever looked at `quit-flag`.** `maybe-quit`
+   lived in `keyboard.scm` and its only caller was `read-key-event`, so a
+   C-g pressed *during* a command set the flag and no one noticed. That
+   is why the slow scan was also unrecoverable. `maybe-quit` and
+   `rarely-quit` are `command.scm`'s now (`keyboard.scm` re-exports
+   them), and the scan loops call `rarely-quit` where the C calls it.
+
+## Before touching the scanner again
+
+* **`%setup-syntax-table` is `SETUP_SYNTAX_TABLE`, and every entry point
+  that reads syntax must call it.** `scan_words` never did - the C does
+  (`syntax.c:1473`) - and that only showed once the cache became
+  long-lived: four word-motion tests failed. A scan function that starts
+  reading syntax without it will read the previous buffer's table.
+* **`%syntax-entry-in` is the only place `SYNTAX(c)` is read**, and it
+  applies `UPDATE_SYNTAX_TABLE` itself. If you add a scan, read characters
+  through `%class-in`/`%code-in` and the cache comes with it; if you add a
+  loop that could run long, add `rarely-quit` to it.
+* **A timing regression test is in `syntax-tests.scm`**: 40 000 chars in
+  4 000 `face` intervals, scanned backward, must land right and take under
+  2 s (it takes 21 ms; it took 11.9 s before). If that test starts
+  failing on time, the cache is being missed again.
+
+## Method notes worth keeping
+
+* **`internal-time-units-per-second` is 1 000 000 000 here.** A first
+  measurement divided `get-internal-real-time` by 1000 and read 1.4 s as
+  1 379 343 855 ms, i.e. as a hang. Print the unit before trusting a
+  duration.
+* **A pty check that presses C-g must write `\x07`, not `\x03`.** The
+  tree sets `VINTR` to C-g; `\x03` is an ordinary C-c byte. Measured both
+  ways: `\x03` during a 74-second REPL loop was consumed as a keystroke
+  and the loop ran to completion; `\x07` raised `quit` in 25 ms.
+* **`os.kill (pid, SIGINT)` is a fast way to test the quit path without
+  a terminal** - it proved the handler/flag/`maybe-quit` chain while the
+  pty byte was still being written to the wrong character.
+* **A C-g sent to an idle editor is eaten by the read.** A test that
+  wants to interrupt a *command* has to wait until the command is
+  running, or the key becomes the next command's quit.
+
+## Still open
+
+The remaining cost is per character, not structural: a backward scan of
+`xdisp.scm` is 1.17 s where Emacs is milliseconds. Each character costs a
+`%syntax-entry-in` (cache hit + `char-table-ref`), a `fetch-char`, and -
+in `%scan-lists` - **two** lookups, because `b-top` reads `%code-in` and
+then `%syntax-multibyte` re-reads the same entry. That is a constant
+factor to attack in a performance pass, not a departure.
+
+## Opening a big file: the font-lock searches (same day)
+
+Chris: *"do you realise just opening xdisp.scm hangs the editor? and makes
+the CPU go into overload"*. 23 s at ~140 % CPU, and 13.5 s of it was
+`font-lock-fontify-keywords-region`.
+
+**Guile's `regexp-exec` costs time proportional to the length of the
+string it is handed** - 0.9 µs on 257 characters, 920 µs on 257 000, and
+6.4 ms for a match at offset 0 of a 257 000-character string. So a search
+must not be handed the buffer, and it must not be handed the whole range
+it may search either. `%re-search` now searches a window of 512
+characters that doubles until the answer cannot depend on where it ends
+(a match ending at the window's edge is re-asked on a wider window,
+because `$` and `\b` at a copied edge are not the buffer's). Measured:
+keyword pass 13 455 -> 227 ms, opening the file 23 s -> under 1 s.
+
+Two things to remember before touching searches:
+
+* **`%re-search-forward-1` and `%re-search-backward-1` are the two
+  directions** (they were one block of `%re-search` and the parens were
+  not worth it). Both answer `(MATCH START END BASE)`, and BASE is what
+  `match-data--translate` adds - the window's first position, not zero.
+* **The window's start is one character before the search start** so that
+  `^` is judged against the real character in front of it; `\=` and `\'`
+  (which could tell a window from the buffer) are refused by
+  `%emacs-ere`, and that is what makes the window sound.
+
+A `%search-text` cache of the whole buffer, keyed on
+`buffer-chars-modified-tick`, was tried first and is *wrong* for this
+engine - it is in this file's history and in DEPARTURES.md with the
+numbers.
+
+**The window is a copy the C does not make, so it is checked against
+Emacs rather than reasoned about.** `tools/` does not carry the harness
+yet, but the recipe is: generate ~500 random (text, point, bound,
+pattern, direction) cases, emit them both as a file this tree's
+`re-search-forward`/`-backward` reads and as an elisp file for
+`emacs -Q --batch`, and diff the answers. That found 13 wrong answers in
+`HEAD`'s search, all of them `$`/`\b` judged against the edge of the
+copied text, and it is how the "one character past the bound" rule and
+the backward "ask again with the text ending at point" rule were
+justified. The current code matches Emacs on all 500.
+
+**Before touching the window, know what the three edges are for:**
+* the window starts one character before the search start, so `^` is
+  judged against the real character in front of it (`%bol-flags`);
+* it ends one character past the bound, so `$` and `\b` are judged
+  against the real character after it;
+* a backward search whose longest match runs past point asks again with
+  the text ending at point, because the C's engine matches against
+  `stop`.
+
+**`looking-at` is the same shape and had the same cost** - it copied the
+whole buffer per call (300 calls on a 257 KB buffer: 7.7 s). It reads a
+window now, and `search-tests.scm` pins it with a time bound.
+`looking-back` still copies a substring per start position it tries; it
+is walked from point backward and is not on a hot path, but it is the
+next one to look at if a search ever shows up in a profile.

@@ -2942,3 +2942,201 @@ the global's values and a `.txt` file for the mode's).
   no `standard-output`, and the buffer is where they would have gone.
 * **`eval-last-sexp`'s `last-sexp-setup-props`** (the text properties that
   make the echoed value clickable) is not carried.
+
+## The syntax-table cache, and C-g inside a long command (2026-11-15)
+
+Chris: *"I tried a big file, schemacs/editor/xdisp.scm and did a C-M-f to
+go to the end... works, that's good. Then I did a C-M-b which should go
+back to the beginning.. it gets stuck, at that point nothing can recover,
+not even C-g"* - and then *"Even given a problem with the scanner, I'm
+curious why C-g can't recover"*.
+
+Two independent faults, and the second is why the first was
+unrecoverable.
+
+### 1. `gl_state` was not ported, and the cache beside it was forward-only
+
+`syntax.h`'s `struct gl_state_s` (`:66`) is where `syntax.c` keeps the
+`syntax-table` text-property lookup. `SYNTAX(c)` reads a property, the
+property belongs to an *interval*, and `update_syntax_table`
+(`syntax.c:336`) caches the interval and the run `b_property'..
+`e_property` over which its table applies, walking one interval per
+boundary crossed. A scan is therefore linear in the text.
+
+What stood here was a one-run cache built on `next-single-property-change`,
+and it is wrong in both directions:
+
+* `next-single-property-change` walks intervals forward until the property
+  *it was asked about* changes. On a buffer that font-lock has given
+  `face` runs to and whose text carries no `syntax-table` property, that
+  walk goes to the end of the buffer - once per lookup;
+* a backward scan never hits a forward run cache at all: the cached run
+  always began at the position just asked about, so the next character
+  back was always a miss.
+
+Measured: `C-M-b` from the end of `xdisp.scm` (257 KB, and the whole file
+is one `define-library`, so one sexp) took **144 s** in the editor and
+11.9 s on a 40 000-character synthetic buffer - the cost grows with the
+square of the buffer. With `gl_state` ported the same key is **0.92 s**
+headless and **1.17 s** in the live editor, and the synthetic case is
+21 ms. What is left is the constant cost of a Scheme syntax lookup per
+character, not a blow-up.
+
+The departures inside the port:
+* `gl_state` is a vector of the C's fields in the C's order rather than a
+  struct, and its object slot is always the current buffer: Emacs's Qnil
+  object means exactly that, and nothing scans a string through this.
+* the `UPDATE_SYNTAX_TABLE_FORWARD`/`_BACKWARD` pair is applied inside
+  `%syntax-entry-in` - the one place a character is read - rather than at
+  every move in every loop. The state it maintains, the interval walk, the
+  `old_prop` invalidation rule and the INTERVALS_AT_ONCE lookahead are
+  the C's.
+* `update_syntax_table_forward`'s `e_property_truncated` /
+  `parse_sexp_propertize` bookkeeping is not carried: this tree's
+  `syntax-propertize` is not called from the scanner.
+* **`scan_words` gained the `SETUP_SYNTAX_TABLE` the C has at
+  `syntax.c:1473`** and this tree never had. Four word-motion tests failed
+  the moment the cache became long-lived, which is what an absent setup
+  looks like once there is something to invalidate.
+
+### 2. C-g was only ever looked at by the read
+
+`maybe_quit` (`lisp.h:3897`) is the function every long loop calls;
+Emacs's `syntax.c` calls `rarely_quit` (`lisp.h:3914`, once every 65 536
+characters) from `scan_lists`, `back_comment`, `scan_sexps_forward`,
+`forw_comment`, `scan_words` and both `skip_*` loops. Here `maybe-quit`
+lived in `keyboard.scm` and **its only caller was the read** - so a C-g
+pressed while a command was running set `quit-flag` and nothing ever
+looked at it. A slow scan was therefore also an unrecoverable one, which
+is the half of the report that was not about speed at all.
+
+`maybe-quit` and `rarely-quit` are `command.scm`'s now (it already owns
+`quit-flag`, `inhibit-quit` and `signal-quit`; `keyboard.scm` imports and
+re-exports them, so every existing caller is unchanged), and the scans
+call `rarely-quit` where the C does. Verified in a live editor: a C-g
+during a 3 000 000-character scan draws "Quit" and the next key is
+answered in 0.25 s.
+
+### Tests
+
+`syntax-tests.scm` grew four cases, each of which fails on the code that
+shipped:
+* a `syntax-table` text property is what the scan reads (Emacs 31.1's
+  answers: 4 plain, 3 forward and 2 backward once `(` and `)` are made
+  punctuation by the property);
+* a backward scan over 40 000 characters carrying 4 000 `face` intervals
+  lands where the forward one started **and takes under 2 s** - it took
+  11.9 s before, and the bound is a hundred times the measured 21 ms;
+* a scan of 70 000 characters with `quit-flag` set signals `quit` and
+  clears the flag.
+
+`tools/gen-imports.scm` was re-run: `rarely-quit` is reachable from the
+back door and from `M-:` (`maybe-quit` is already, through `keyboard`).
+
+## Opening a big file burned 23 s of CPU, and `regexp-exec` was why
+## (2026-11-15)
+
+Chris, while the above was being tested: *"do you realise just opening
+xdisp.scm hangs the editor? and makes the CPU go into overload"*. It did:
+23 s at ~140 % CPU before it settled, and the scanner was not the cause.
+`font-lock-fontify-keywords-region` alone was 13.5 s of it.
+
+The keyword pass is one search per match per keyword, and the search text
+was a copy of the stretch from point to the *bound* - a bound that, for a
+font-lock keyword, is the end of the file. O(buffer) per match.
+
+**The first fix made it look better and was still wrong**, and the reason
+is a Guile fact worth writing down: **`regexp-exec` costs time
+proportional to the length of the string it is handed, not to how far it
+scans.** Measured:
+
+| string | one `regexp-exec` |
+|---|---|
+| 257 chars | 0.9 µs |
+| 2 570 | 10 µs |
+| 25 700 | 93 µs |
+| 257 000 | 920 µs |
+| 257 000, with the match at offset 0 | **6.4 ms** |
+
+So handing the engine the whole buffer (cached by
+`buffer-chars-modified-tick`, so that a fontification builds it once) is
+5.7 s for 6 200 searches. There is no C equivalent of this cost to copy:
+`re_search_2` is handed *pointers into the buffer* and copies nothing.
+
+What is there now is a **window that doubles**: 512 characters to begin
+with, doubled when the match is not found inside it, or when it ends
+exactly at the window's edge (a `$` or a `\b` judged against a copied edge
+is not the one the buffer has), or when the answer depends on a bound
+beyond it. Measured on `xdisp.scm`:
+
+| | before | whole-buffer string | windowed |
+|---|---|---|---|
+| keyword pass | 13 455 ms | 5 753 ms | **227 ms** |
+| opening the file, live editor | 23 s at 140 % CPU | ~7 s | **under 1 s** |
+
+Departures, both named in the source:
+* the window is not the C's shape - the C scans the buffer directly and
+  this cannot, because the engine wants a string;
+* the edge rule is what makes a windowed answer the same as the whole
+  text's. `\=` and `\'` - the two constructs that *could* tell a window
+  from the buffer - are already refused by `%emacs-ere`, which is what
+  makes the window sound rather than a guess.
+
+`search-tests.scm` is 66/66 through all of this, and the font-lock,
+replace, lisp and dired suites are unchanged.
+
+## The windowed search, checked against Emacs on 500 random searches
+
+The window above is a copy the C does not make, so it was checked rather
+than reasoned about: **500 random buffers** (2 to 60 characters of
+`a b c d ( ) space newline`), a random point, a random bound, one of 20
+patterns including `^`, `$`, `\b`, `[abc]`, `a\{1,2\}`, `\(a\|b\)c?`, and
+a random direction, run through this `re-search-forward`/
+`re-search-backward` and through `emacs -Q --batch` on the same inputs.
+
+| | mismatches of 500 |
+|---|---|
+| this tree, before the window work (`HEAD`) | **13** |
+| the windowed search, before the two fixes below | 3 |
+| the windowed search, now | **0** |
+
+All 13 were one bug, and it was not the window's: **a `$` (or a `\b`)
+judged against the edge of the copied text is not the buffer's.**
+`(re-search-forward "$" 4 t)` on `"abcdef"` answered `4`; Emacs answers
+nil, because position 4 is not a line end. `(re-search-backward "$" 2 t)`
+from the middle of a line answered *point* for the same reason. The window
+now runs one character past the bound in both directions, so `$` and `\b`
+see the character the buffer really has, and a match is still refused when
+it ends past the bound. Three of the six new `search-tests.scm` cases fail
+on `HEAD`.
+
+The other three mismatches were the opposite corner: the C's engine
+matches *against* `stop`, so a pattern whose longest match would run past
+point still matches shorter - `(re-search-backward "c*" 1 t)` at point 3
+of `"abc"` is the empty match at 3, not the earlier one. Guile's
+`regexp-exec` returns the longest match and takes no `stop`, so when the
+match runs past point the backward search now **asks again with the text
+ending at point**.
+
+**The one departure that is left, named where it is:** the same retry is
+*not* done for a forward search whose match runs past the bound. Doing it
+needs the text truncated at the bound, and a truncated copy makes `$`
+match an end of string the buffer has not got - measured, it fabricated
+two `$` matches in the same 500-case corpus, so the forward path answers
+nil there where Emacs would find a shorter match at the same start. None
+of the 500 cases reaches it.
+
+### `looking-at` was the same cost, and took the same fix
+
+`looking-at` is `re_match_2` handed the whole accessible portion, and the
+port copied the whole buffer on every call. Measured: **300 calls on a
+257 KB buffer were 7.7 s** (26 ms each), which is what every dired line
+and every `looking-at`-based scanner pays. It reads the same kind of
+window now - one character before point, doubling until the match ends
+inside it - and the same 300 calls are 19 ms. Checked the same way:
+**500 random (text, point, pattern) cases against `emacs -Q --batch`,
+0 mismatches.**
+
+`search-tests.scm` pins the cost: a hundred `looking-at`s on a
+200 000-character buffer must take under a second (they take 6 ms; they
+took 2 s before), and the test fails on the old code.

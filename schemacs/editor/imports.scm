@@ -66,7 +66,7 @@
     (schemacs editor faces)
     (schemacs editor coding)
     (schemacs editor startup)
-    (except (schemacs editor command)  quit-char *quit-flag* *inhibit-quit* signal-quit)
+    (except (schemacs editor command)  quit-char *quit-flag* *inhibit-quit* signal-quit maybe-quit)
     (except (schemacs editor fns)  compare-strings line-number-at-pos)
     (schemacs editor timefns)
     (schemacs editor custom)
@@ -1946,6 +1946,7 @@
     quit-restore-window
     quit-window
     quoted-insert
+    rarely-quit
     raw-cursor-to!
     re-search-backward
     re-search-forward

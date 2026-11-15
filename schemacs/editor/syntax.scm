@@ -34,21 +34,20 @@
   ;;   * There are no byte positions. `from_byte' and the `*_byte'
   ;;     parameters of the C collapse into the character position, which
   ;;     is what the rest of the tree uses.
-  ;;   * `SYNTAX' at a position reads the `syntax-table' text property
-  ;;     through `get-text-property' rather than through `gl_state''s
-  ;;     interval walk. A one-interval cache (`%prop-at') stands in for
-  ;;     `gl_state''s b_property/e_property, so a scan over property-free
-  ;;     text reads one property per region rather than one per
-  ;;     character, which is what the C's cache buys too.
+  ;;   * `gl_state' is a vector rather than a C struct and its object
+  ;;     slot is always the current buffer - nothing here scans a string
+  ;;     through it. The interval walk, the `b_property'..`e_property'
+  ;;     run, the `old_prop' invalidation rule and the
+  ;;     INTERVALS_AT_ONCE lookahead are the C's, and `%syntax-entry-in'
+  ;;     applies the `UPDATE_SYNTAX_TABLE' pair where the C's loops do it
+  ;;     by hand, so that a lookup can never be made without it.
   ;;   * `word_boundary_p' (`syntax.c:1425') answers false always: it
   ;;     compares `char-script-table' entries, and this tree has no
   ;;     Unicode script table. Two characters of different scripts are
   ;;     therefore one word here where Emacs splits them.
-  ;;   * `find_defun_start''s cache and its `comment-use-syntax-ppss'
-  ;;     shortcut are not carried: `back_comment' - which is what needs a
-  ;;     defun start - is not ported. It belongs to `forward-comment' and
-  ;;     `scan-lists', which this pass does not carry either; nor is
-  ;;     `forward-comment' itself.
+  ;;   * `find_defun_start''s one-thousand-character cache
+  ;;     (`search.c:585') is not carried; its `comment-use-syntax-ppss'
+  ;;     shortcut is.
   ;;   * `syntax-propertize-rules' (the macro) is not carried; a mode
   ;;     can set `syntax-propertize-function' to its own function.
   ;;   * `syntax-ppss''s near-the-last-position heuristic uses a fixed
@@ -70,8 +69,12 @@
           char-table-set-range char-table-range set-char-table-range
           char-table-parent set-char-table-parent char-table-default
           char-table-subtype copy-char-table char-table-ref-and-range)
+    (only (schemacs editor command) maybe-quit rarely-quit)
+    (only (schemacs editor intervals)
+          interval-position interval-length interval-last-pos interval-plist
+          update-interval next-interval previous-interval textget)
     (only (schemacs editor textprop)
-          get-text-property next-single-property-change put-text-property)
+          get-text-property put-text-property interval-of)
     )
 
   (export
@@ -392,49 +395,222 @@
     (define *comment-use-syntax-ppss* (make-parameter #t))
 
     ;; ---------------------------------------------------------------
-    ;; The `syntax-table' text property's reader, `gl_state''s stand-in.
-    ;; ---------------------------------------------------------------
-    (define %prop-cache (vector #f #f #f))   ; start, end, value
+    ;; `gl_state' (`syntax.h:66'), `SETUP_SYNTAX_TABLE' (`syntax.c:250')
+    ;; and `update_syntax_table' (`syntax.c:336').
+    ;;
+    ;; **This is the syntax-table cache, and it is what makes a scan
+    ;; linear.** `SYNTAX(c)' reads the `syntax-table' text property,
+    ;; which belongs to an *interval* and not to a character: the C keeps
+    ;; the interval the last lookup landed in and the run
+    ;; `b_property'..`e_property' over which its table applies, answers
+    ;; every character inside the run from that cache, and walks to the
+    ;; neighbouring interval (`update_interval') when the scan crosses a
+    ;; boundary. A scan of a whole buffer therefore costs one `textget'
+    ;; per interval rather than one property walk per character.
+    ;;
+    ;; What stood here before was a forward-only run cache built with
+    ;; `next-single-property-change', and it was wrong in both
+    ;; directions. `next-single-property-change' walks intervals forward
+    ;; until the *named* property changes - so once font-lock had put
+    ;; `face' runs on a buffer whose text carried no `syntax-table'
+    ;; property, every lookup walked to the end of the buffer. And a
+    ;; backward scan never hit the cache at all, because the cached run
+    ;; began at the position just asked about, so the next character
+    ;; back was always a miss. `C-M-b' from the end of a 257 KB Scheme
+    ;; file cost 144 s with font-lock on; with Emacs's cache below it is
+    ;; what Emacs's is.
+    ;;--------------------------------------------------------------
+    (define %uninitialized-interval (list 'uninitialized-interval))
+    (define %intervals-at-once 30)          ; INTERVALS_AT_ONCE
+
+    ;; The fields of `struct gl_state_s' (`syntax.h:66'), in its order.
+    ;; Slot 0 is the object being scanned, which is the current buffer
+    ;; here: Emacs's Qnil object means exactly that, and nothing scans a
+    ;; string through this.
+    (define %gl-start 1)                    ; where the object begins
+    (define %gl-stop 2)                     ; one past its end
+    (define %gl-use-global 3)               ; global_code, or the table?
+    (define %gl-global-code 4)
+    (define %gl-current-table 5)
+    (define %gl-old-prop 6)
+    (define %gl-b-property 7)               ; first position the table is
+    (define %gl-e-property 8)               ;   valid at, and one past
+    (define %gl-forward-i 9)                ; where to look on the way
+    (define %gl-backward-i 10)              ;   forward, and backward
+
+    (define %gl-state
+      (vector #f 1 1 #f #f *standard-syntax-table* #f 1 1
+              %uninitialized-interval %uninitialized-interval))
 
     (define (%point-max) (buffer-z (current-buffer)))
 
-    (define (%prop-at pos)
-      ;; The `syntax-table' property at POS, cached for the run it
-      ;; covers.  `next-single-property-change' is the interval's end -
-      ;; `INTERVAL_LAST_POS' in the C's walk.
-      ;;--------------------------------------------------------------
-      (let ((start (vector-ref %prop-cache 0))
-            (end (vector-ref %prop-cache 1)))
-        (if (and start (>= pos start) (< pos end))
-            (vector-ref %prop-cache 2)
-            (let* ((v (get-text-property pos 'syntax-table))
-                   (next (or (next-single-property-change pos 'syntax-table
-                                                          (current-buffer)
-                                                          (%point-max))
-                             (%point-max))))
-              (vector-set! %prop-cache 0 pos)
-              (vector-set! %prop-cache 1 next)
-              (vector-set! %prop-cache 2 v)
-              v))))
-
     (define (%setup-syntax-table)
-      ;; `SETUP_SYNTAX_TABLE' (`syntax.c:249') drops the cached interval
-      ;; so the first lookup rebuilds it.
+      ;; `SETUP_SYNTAX_TABLE' (`syntax.c:250'): "This should be called
+      ;; with FROM at the start of forward search, or after the last
+      ;; position of the backward search." The C then primes the cache for
+      ;; FROM in the direction COUNT; here the first lookup primes it (see
+      ;; `%syntax-entry-in'), which is why this takes no arguments.
       ;;--------------------------------------------------------------
-      (vector-set! %prop-cache 0 #f))
+      (let ((ed (current-buffer)))
+        (vector-set! %gl-state 0 ed)
+        (vector-set! %gl-state %gl-start (buffer-beg ed))
+        (vector-set! %gl-state %gl-stop (+ (buffer-z ed) 1))
+        (vector-set! %gl-state %gl-use-global #f)
+        (vector-set! %gl-state %gl-current-table (%buffer-syntax-table ed))
+        (vector-set! %gl-state %gl-old-prop #f)
+        (vector-set! %gl-state %gl-forward-i %uninitialized-interval)
+        (vector-set! %gl-state %gl-backward-i %uninitialized-interval))
+      #f)
+
+    (define (%update-syntax-table pos count)
+      ;; `update_syntax_table' (`syntax.c:336'): "Update gl_state to an
+      ;; appropriate interval which contains CHARPOS. The sign of COUNT
+      ;; gives the relative position of CHARPOS wrt the previously valid
+      ;; interval." The interval walk is `update_interval''s: one step
+      ;; per interval crossed, so a scan of a whole buffer costs one
+      ;; `textget' per interval rather than one per character.
+      ;;--------------------------------------------------------------
+      (let ((invalidate #t)
+            (i #f))
+        ;; The C's opening `if': first time, find the interval POS is in;
+        ;; otherwise walk from the interval the last lookup cached.
+        (if (eq? (vector-ref %gl-state %gl-backward-i) %uninitialized-interval)
+            (begin
+              (vector-set! %gl-state %gl-old-prop #f)
+              (set! i (interval-of (current-buffer) pos))
+              (vector-set! %gl-state %gl-forward-i i)
+              (vector-set! %gl-state %gl-backward-i i)
+              (set! invalidate #f)
+              (if i
+                  (begin
+                    (vector-set! %gl-state %gl-b-property (interval-position i))
+                    (vector-set! %gl-state %gl-e-property (interval-last-pos i)))
+                  (begin
+                    (vector-set! %gl-state %gl-b-property
+                                 (vector-ref %gl-state %gl-start))
+                    (vector-set! %gl-state %gl-e-property
+                                 (vector-ref %gl-state %gl-stop)))))
+            (begin
+              ;; "We are guaranteed to be called with CHARPOS either in i,
+              ;; or further off."
+              (set! i (if (> count 0)
+                          (vector-ref %gl-state %gl-forward-i)
+                          (vector-ref %gl-state %gl-backward-i)))
+              (when (not i)
+                (error "Error in syntax_table logic for to-the-end intervals"))
+              (when (< pos (interval-position i))          ; move left
+                (when (> count 0)
+                  (error "Error in syntax_table logic for intervals <-"))
+                (set! i (update-interval i pos))
+                (when (not (= (interval-last-pos i)
+                              (vector-ref %gl-state %gl-b-property)))
+                  (set! invalidate #f)
+                  (vector-set! %gl-state %gl-forward-i i)
+                  (vector-set! %gl-state %gl-e-property (interval-last-pos i))))
+              (when (and i (>= pos (interval-last-pos i)))  ; move right
+                (when (< count 0)
+                  (error "Error in syntax_table logic for intervals ->"))
+                (set! i (update-interval i pos))
+                (when (not (= (interval-position i)
+                              (vector-ref %gl-state %gl-e-property)))
+                  (set! invalidate #f)
+                  (vector-set! %gl-state %gl-backward-i i)
+                  (vector-set! %gl-state %gl-b-property (interval-position i))))))
+        (when i
+          (let ((tmp-table (textget (interval-plist i) 'syntax-table)))
+            ;; "Need to invalidate?" - only when the interval we landed in
+            ;; is not adjacent to the cached run with the same table.
+            (when invalidate
+              (set! invalidate
+                    (not (eq? tmp-table (vector-ref %gl-state %gl-old-prop)))))
+            ;; "Did not get to adjacent interval with the same table =>
+            ;; invalidate the old range."
+            (when invalidate
+              (if (> count 0)
+                  (begin
+                    (vector-set! %gl-state %gl-backward-i i)
+                    (vector-set! %gl-state %gl-b-property (interval-position i)))
+                  (begin
+                    (vector-set! %gl-state %gl-forward-i i)
+                    (vector-set! %gl-state %gl-e-property (interval-last-pos i)))))
+            (when (not (eq? tmp-table (vector-ref %gl-state %gl-old-prop)))
+              (vector-set! %gl-state %gl-current-table tmp-table)
+              (vector-set! %gl-state %gl-old-prop tmp-table)
+              (cond
+               ((syntax-table-p tmp-table)
+                (vector-set! %gl-state %gl-use-global #f))
+               ((pair? tmp-table)
+                (vector-set! %gl-state %gl-use-global #t)
+                (vector-set! %gl-state %gl-global-code tmp-table))
+               (else
+                (vector-set! %gl-state %gl-use-global #f)
+                (vector-set! %gl-state %gl-current-table
+                             (%buffer-syntax-table (current-buffer))))))
+            ;; The C's walk over the adjacent intervals the same table
+            ;; covers, INTERVALS_AT_ONCE at a time; a NULL answer means
+            ;; "this property goes to the end of the object".
+            (let loop ((j i) (cnt 0))
+              (cond
+               ((not j)
+                (if (> count 0)
+                    (begin
+                      (vector-set! %gl-state %gl-e-property
+                                   (vector-ref %gl-state %gl-stop))
+                      (vector-set! %gl-state %gl-forward-i #f))
+                    (vector-set! %gl-state %gl-b-property
+                                 (vector-ref %gl-state %gl-start))))
+               ((and (> cnt 0)
+                     (not (eq? tmp-table
+                               (textget (interval-plist j) 'syntax-table))))
+                (if (> count 0)
+                    (begin
+                      (vector-set! %gl-state %gl-e-property (interval-position j))
+                      (vector-set! %gl-state %gl-forward-i j))
+                    (begin
+                      (vector-set! %gl-state %gl-b-property
+                                   (+ (interval-position j) (interval-length j)))
+                      (vector-set! %gl-state %gl-backward-i j))))
+               ((= cnt %intervals-at-once)
+                (if (> count 0)
+                    (begin
+                      ;; "e_property at EOB is not set to ZV but to ZV+1,
+                      ;; so that we can do INC(from);
+                      ;; UPDATE_SYNTAX_TABLE_FORWARD without having to
+                      ;; check eob between the two."
+                      (vector-set! %gl-state %gl-e-property
+                                   (+ (interval-position j) (interval-length j)
+                                      (if (next-interval j) 0 1)))
+                      (vector-set! %gl-state %gl-forward-i j))
+                    (begin
+                      (vector-set! %gl-state %gl-b-property (interval-position j))
+                      (vector-set! %gl-state %gl-backward-i j))))
+               (else
+                (loop (if (> count 0) (next-interval j) (previous-interval j))
+                      (+ cnt 1))))))))
+      #f)
 
     (define (%syntax-entry-in ed pos c)
-      ;; `SYNTAX(c)' at POS: the buffer's table, or the `syntax-table'
-      ;; text property when there is one. The property may be a table or
-      ;; a raw descriptor (the `global_code' case, `syntax.c:418').
+      ;; `SYNTAX(c)' at POS - the C's `syntax_property_entry (c, 1)'
+      ;; (`syntax.h:97'), which answers `gl_state.global_code' when the
+      ;; property is a raw descriptor and the table's entry otherwise.
+      ;; The `UPDATE_SYNTAX_TABLE' pair (`syntax.h:210') happens here, at
+      ;; the one place every character read goes through, rather than at
+      ;; every move in every loop.
       ;;--------------------------------------------------------------
-      (let ((table (%buffer-syntax-table ed)))
-        (if (and (*parse-sexp-lookup-properties*) (eq? ed (current-buffer)))
-            (let ((prop (%prop-at pos)))
-              (cond ((char-table? prop) (char-table-ref prop c))
-                    ((pair? prop) (car prop))
-                    (else (char-table-ref table c))))
-            (char-table-ref table c))))
+      (if (and (*parse-sexp-lookup-properties*) (eq? ed (current-buffer)))
+          (begin
+            (if (eq? (vector-ref %gl-state %gl-backward-i)
+                     %uninitialized-interval)
+                (%update-syntax-table pos 1)
+                (begin
+                  (when (< pos (vector-ref %gl-state %gl-b-property))
+                    (%update-syntax-table pos -1))
+                  (when (>= pos (vector-ref %gl-state %gl-e-property))
+                    (%update-syntax-table pos 1))))
+            (if (vector-ref %gl-state %gl-use-global)
+                (vector-ref %gl-state %gl-global-code)
+                (char-table-ref (vector-ref %gl-state %gl-current-table) c)))
+          (char-table-ref (%buffer-syntax-table ed) c)))
 
     (define (%code-in ed pos c)
       (%entry-code (%syntax-entry-in ed pos c)))
@@ -453,6 +629,10 @@
     (define (%scan-words ed from count)
       ;; Move point of ED and answer the position it stopped at.
       ;;--------------------------------------------------------------
+      ;; `SETUP_SYNTAX_TABLE (from, ...)' (`syntax.c:1473') - the word
+      ;; motion is a `SYNTAX (c)' reader like every other scan, so it
+      ;; primes the syntax-table cache before it starts.
+      (%setup-syntax-table)
       (let ((beg (buffer-beg ed))
             (end (buffer-z ed))
             (escapes (*words-include-escapes*)))
@@ -477,8 +657,8 @@
                                            (and (word-class? dc)
                                                 (not (%word-boundary? (char-at (- p 1)) d))))))
                                 (loop p (- count 1))
-                                (run (+ p 1))))
-                          (scan (+ i 1))))))))
+                                (begin (rarely-quit p) (run (+ p 1)))))
+                          (begin (rarely-quit i) (scan (+ i 1)))))))))
          ((< count 0)
           (let loop ((from from) (count count))
             (if (or (>= count 0) (= from beg))
@@ -494,8 +674,8 @@
                                            (and (word-class? dc)
                                                 (not (%word-boundary? (char-at (+ p 1)) d))))))
                                 (loop (+ p 1) (+ count 1))
-                                (run (- p 1))))
-                          (scan (- i 1))))))))
+                                (begin (rarely-quit p) (run (- p 1)))))
+                          (begin (rarely-quit i) (scan (- i 1)))))))))
          (else from))))
 
     (define (word-char? c)
@@ -658,6 +838,7 @@
                                    (char->integer (fetch-char ed p)) items)))
                     (if (if negate (not inside?) inside?)
                         (let ((next (if forwardp (+ pos 1) (- pos 1))))
+                          (rarely-quit next)
                           (if (if forwardp (>= next limit) (<= next limit))
                               (begin (set-point ed next) (- next start))
                               (loop next)))
@@ -759,12 +940,18 @@
              (escape? (*comment-end-can-be-escaped*))
              (from start)
              (syntax 0)
+             (quit-count 0)
              (outcome #f))
         (define (cp p) (char->integer (fetch-char ed p)))
         (define (post at) (cons (not (= at comment-end)) at))
 
         ;; The C's backward walk.
         (let walk ()
+          ;; `rarely_quit (++quit_count)' (`syntax.c:738'): counted in an
+          ;; `unsigned short', so the quit is looked at once every 65536
+          ;; characters.
+          (set! quit-count (+ quit-count 1))
+          (rarely-quit quit-count)
           (cond
            (outcome #f)
            ((= from stop)
@@ -910,9 +1097,13 @@
       ;; Answers four values: found?, charpos, incomment, last-syntax.
       ;;--------------------------------------------------------------
       (let ((nesting (if (<= nesting 0) -1 nesting))
-            (escape (*comment-end-can-be-escaped*)))
+            (escape (*comment-end-can-be-escaped*))
+            (quit-count 0))
         (let loop ((from from) (syntax prev-syntax) (prev 0) (nesting nesting)
                    (entered #f))
+          ;; `rarely_quit (++quit_count)' (`syntax.c:2504').
+          (set! quit-count (+ quit-count 1))
+          (rarely-quit quit-count)
           (define (failure at)
             (values #f at nesting
                     (if (or (memv (logand syntax #xff) (list sescape scharquote))
@@ -1051,8 +1242,12 @@
         (define (cp p) (char->integer (fetch-char ed p)))
         (define (class-at p) (%syntax-multibyte ed p (cp p) multibyte-symbol))
 
+        ;; `maybe_quit ()' (`syntax.c:2689'): "Every loop that might run
+        ;; for a long time ... ought to call maybe_quit at least once."
+        (maybe-quit)
         (%setup-syntax-table)
         (let ((from (max beg (min from0 zv)))
+              (quit-count 0)
               (mathexit #f)
               (comstyle 0)
               (comnested #f)
@@ -1066,6 +1261,11 @@
           (if (= count 0)
               from
               (let loop ((mode (if (> count 0) 'f-top 'b-top)))
+                ;; `rarely_quit (++quit_count)' (`syntax.c:2695' and
+                ;; `:2863'): once every 65536 characters, so that a long
+                ;; scan answers C-g.
+                (set! quit-count (+ quit-count 1))
+                (rarely-quit quit-count)
                 (case mode
 
                   ;; -------------------------------------------------
@@ -1445,6 +1645,7 @@
                                                            (- pos 1)))))))
                   (if (if negate (not (memv code codes)) (memv code codes))
                       (let ((next (if forwardp (+ pos 1) (- pos 1))))
+                        (rarely-quit next)
                         (if (if forwardp (>= next limit) (<= next limit))
                             (begin (set-point ed next) (- next start))
                             (loop next)))
@@ -1679,6 +1880,7 @@
              (boundary-stop (= commentstop -1))
              (start-quoted (state-quoted state))
              (nofence #f)
+             (quit-count 0)
              (from (state-location state))
              (prev-from from)
              (prev-syntax (state-prev-syntax state))
@@ -1743,6 +1945,10 @@
         (%setup-syntax-table)
 
         (define (step mode)
+          ;; `rarely_quit (++quit_count)' (`syntax.c:2504' and `:2590'):
+          ;; the parse loop answers C-g once every 65536 characters.
+          (set! quit-count (+ quit-count 1))
+          (rarely-quit quit-count)
           (cond
            ;; ---- the main loop -------------------------------------
            ((eq? mode 'normal)

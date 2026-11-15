@@ -65,7 +65,7 @@
           ;; The quit condition and its flag, which `keyboard-quit`
           ;; (`simple.scm`) has to reach and this library is above it.
           quit-char *quit-flag* *inhibit-quit* quit-condition?
-          signal-quit
+          signal-quit maybe-quit rarely-quit
           *last-command-event*
           command-interactive-spec command-name command-record-of
           command-type? define-command
@@ -1171,20 +1171,9 @@
       (sigaction SIGINT handle-interrupt)
       (sigaction SIGQUIT handle-interrupt))
 
-    (define (maybe-quit)
-      ;; GNU Emacs's `maybe_quit` (`lisp.h:3897`) over `probably_quit`
-      ;; (`eval.c:1887`): "Every loop that might run for a long time or
-      ;; might not exit ought to call maybe_quit at least once, at a safe
-      ;; place."
-      ;;
-      ;; The C also drains `pending_signals` here - the sigusr1/sigusr2
-      ;; events and the window-change flag. There are no user-signal events
-      ;; in this tree and a resize is applied by the wait, so what is left
-      ;; is the quit.
-      ;;--------------------------------------------------------------
-      (when (and (*quit-flag*) (not (*inhibit-quit*)))
-        (*quit-flag* #f)
-        (signal-quit)))
+    ;; `maybe-quit` and `rarely-quit` are `(schemacs editor command)`'s -
+    ;; see the note there. They sat here until 2026-11-15, and the scans
+    ;; in `syntax.scm` that need them could not reach them.
 
     (define *recursive-edit-exit* (make-parameter #f))
 

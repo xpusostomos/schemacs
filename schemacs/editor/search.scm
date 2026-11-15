@@ -1124,35 +1124,41 @@
       ;; `looking-at-p' guard read t on an unindented listing and the
       ;; function concluded someone else had indented it already.
       ;;
-      ;; The whole buffer text goes in with point as the offset, as the
-      ;; C hands `re_match_2' the whole accessible portion, so the
-      ;; positions that come back are the buffer's own and `^' is
-      ;; judged against the real character before point.
+      ;; The text searched is a window of the buffer that begins one
+      ;; character before point, so `^' is judged against the real
+      ;; character in front of it, and doubles until the match ends
+      ;; inside it. It used to be the whole buffer - `re_match_2''s
+      ;; `p1', which costs nothing in C and costs this tree the buffer
+      ;; twice, once to copy it and once inside `regexp-exec', whose cost
+      ;; is proportional to the string's length. Measured: 300 calls on a
+      ;; 257 KB buffer were 7.7 s; a match at point needs a line.
       ;;--------------------------------------------------------------
       (with-current-buffer (current-buffer)
         (let* ((ed (current-buffer))
-               ;; The whole buffer, from `point-min' - so a buffer
-               ;; position is one more than its offset in TEXT, which is
-               ;; what `(%bol-flags ...)' and the match data's
-               ;; translation below both assume. Point is a position;
-               ;; the regexp engine is handed an offset.
-               (text (make-buffer-string ed (buffer-beg ed)
-                                                 (buffer-z ed)))
-               (from (- (buffer-pt ed) 1)))
-          (let ((m (regexp-exec (%compile-emacs-regexp regexp (*case-fold-search*))
-                                text from (%bol-flags text from))))
-            (cond
-             ;; "right at the start of a match": a match further along
-             ;; is not one at point, and answers the C's `-1' / nil.
-             ((or (not m) (not (= (match:start m 0) from))) #f)
-             (else
-              (%string-match-into-regs m)
-              ;; zero-based offsets to one-based buffer positions; the
-              ;; match was made against the buffer itself, so nothing
-              ;; else is added
-              (match-data--translate 1)
-              (*last-thing-searched* (current-buffer))
-              #t))))))
+               (from (buffer-pt ed))
+               (base (max (buffer-beg ed) (- from 1)))
+               (z (buffer-z ed))
+               (compiled (%compile-emacs-regexp regexp (*case-fold-search*))))
+          (let try ((wend (min z (+ from %search-chunk))) (span %search-chunk))
+            (let* ((text (make-buffer-string ed base wend))
+                   (here (- from base))
+                   (m (regexp-exec compiled text here (%bol-flags text here))))
+              (cond
+               ;; "right at the start of a match": a match further along
+               ;; is not one at point, and answers the C's `-1' / nil.
+               ((or (not m) (not (= (match:start m 0) here))) #f)
+               ;; A match ending at the window's edge may have matched
+               ;; `$' or `\b' against the edge rather than the buffer;
+               ;; widen and ask again.
+               ((and (= (match:end m 0) (- wend base)) (< wend z))
+                (try (min z (+ wend span)) (* 2 span)))
+               (else
+                (%string-match-into-regs m)
+                ;; the window's first position is what the offsets are
+                ;; relative to
+                (match-data--translate base)
+                (*last-thing-searched* (current-buffer))
+                #t)))))))
 
     (define (looking-back regexp . args)
       ;; GNU Emacs's `looking-back' (subr.el): "Return non-nil if text
@@ -1707,51 +1713,121 @@
               (%set-search-regs found (string-length string))
               found)))))))
 
-    (define (%search-window-text ed at limit backward)
-      ;; The stretch of the buffer the search from AT can reach, and AT's
-      ;; offset within it.
-      ;;
-      ;; The C hands `re_search_2' *pointers into the buffer* -
-      ;; "re_search_2 (bufp, (char *) p1, s1, (char *) p2, s2, ...)"
-      ;; (search.c:1207) - with `stop' limiting how far it scans, so it
-      ;; never materialises the text at all. Guile's `regexp-exec' wants a
-      ;; string, so one has to be made; but only of the stretch the search
-      ;; can reach, which is what keeps this from being O(buffer) per
-      ;; search.
-      ;;
-      ;; It used to copy the WHOLE buffer on every call, and since every
-      ;; font-lock keyword is a search, that made fontification
-      ;; quadratic. Measured on a 5815-character buffer, 1000 calls:
-      ;; `(re-search-forward "^[^ \n]" 47 t)' took 5.52s and the same
-      ;; search bounded to the whole buffer took 5.70s - a bound that
-      ;; costs nothing is a bound that is not being used.
-      ;;
-      ;; The window begins one character *before* the search's start
-      ;; because `^' is judged by `%bol-flags', which reads the character
-      ;; before it; without that character every window's first position
-      ;; would look like a line beginning.
-      ;;
-      ;; Windowing is sound rather than a guess because the two
-      ;; constructs that could tell a window from the whole buffer are
-      ;; already refused: `%emacs-ere' rejects `\=' (buffer start) and
-      ;; `\'' (buffer end) with an error.
-      ;;
-      ;; Forward reaches [AT, LIMIT); backward walks the start position
-      ;; down from AT to LIMIT and takes only a match that *ends* by AT,
-      ;; so it reaches [LIMIT, AT).
+    (define %search-chunk 512)
+    ;; ^ The smallest stretch of text a search copies for Guile's regexp
+    ;; engine to run on.
+    ;;
+    ;; **`regexp-exec' costs time proportional to the length of the
+    ;; string it is handed, not to how far it scans.** Measured on this
+    ;; machine: 0.9 µs on a 257-character string and 870 µs on a
+    ;; 257 000-character one, and 6.4 ms against 3.4 µs for a match at
+    ;; the very start. So a search may not be handed the buffer, and it
+    ;; may not be handed the whole range it is allowed to search either
+    ;; - a font-lock keyword's range is the file. It is handed a window,
+    ;; which doubles until the answer cannot depend on where the window
+    ;; ends.
+
+    (define (%search-window ed start end)
+      ;; The buffer's text from START (inclusive) to END (exclusive) -
+      ;; `make_buffer_string' between two positions.
       ;;--------------------------------------------------------------
-      (let* ((lo (buffer-beg ed))
-             ;; The window starts one character *before* the search
-             ;; start, so that `^' is judged against the real character
-             ;; in front of it - which is what the C's `re_search_2'
-             ;; gets by being handed the buffer itself.
-             (wstart (min (if backward (max lo (- limit 1)) (max lo (- at 1)))
-                          (if backward at limit)))
-             (wend (if backward at limit)))
-        ;; WSTART is a position and is answered as the base the match
-        ;; offsets are added to: the character at offset O of the window
-        ;; is at position `(+ wstart O)'.
-        (cons (make-buffer-string ed wstart wend) wstart)))
+      (make-buffer-string ed start end))
+
+    (define (%re-search-forward-1 regexp at limit)
+      ;; One match of REGEXP at or after AT and ending by LIMIT, as
+      ;; `re_search_2' with a positive `range' finds it. Answers
+      ;; `(MATCH START END BASE)', where BASE is the first position of
+      ;; the window the match was found in, or #f.
+      ;;
+      ;; The window begins one character before AT so that `^' is judged
+      ;; against the character really in front of it (`%bol-flags'); that
+      ;; is the only lookbehind the engine can need, because `\=' and
+      ;; `\'' are refused by `%emacs-ere'.
+      ;;--------------------------------------------------------------
+      ;; The window may run one character PAST the bound, so that `$'
+      ;; and `\b' are judged against the real character there and not
+      ;; against an end of string the buffer has not got; a match is
+      ;; still refused when it ends past the bound (`(> e limit)'), which
+      ;; is Emacs's `stop'.
+      (let* ((cap (min (buffer-z (current-buffer)) (+ limit 1))))
+        (let find ((wend (min cap (+ (min at limit) %search-chunk)))
+                   (span %search-chunk))
+          (let* ((base (max (buffer-beg (current-buffer)) (- (min at limit) 1)))
+                 (whole (%search-window (current-buffer) base wend))
+                 (here (- (min at limit) base))
+                 (m (regexp-exec regexp whole here (%bol-flags whole here))))
+            (cond
+             ((not m)
+              (if (>= wend cap)
+                  #f
+                  (find (min cap (+ wend span)) (* 2 span))))
+             (else
+              (let ((s (+ (match:start m 0) base))
+                    (e (+ (match:end m 0) base)))
+                (cond
+                 ;; **A match that runs past the bound is refused, and the
+                 ;; search answers nil** - Emacs would take a shorter
+                 ;; match at the same start if the pattern has one, and
+                 ;; this cannot ask for it without truncating the text at
+                 ;; the bound, which would make `$' and `\b' match an end
+                 ;; of string the buffer has not got (measured: it
+                 ;; fabricated two `$' matches in a 500-case corpus).
+                 ;; Left as it is, and named in DEPARTURES.md.
+                 ((> e limit) #f)
+                 ;; A match ending at the window's own edge may have
+                 ;; matched `$' (or a `\b') against the edge rather than
+                 ;; against the buffer; widen and ask again.
+                 ((and (= e wend) (< wend cap))
+                  (find (min cap (+ wend span)) (* 2 span)))
+                 (else (list m s e base))))))))))
+
+    (define (%re-search-backward-1 regexp at limit)
+      ;; `re_search_2' with a negative `range': walk the start position
+      ;; down from AT to LIMIT and take the first one the pattern matches
+      ;; at, with the match ending by AT - "Don't allow match past
+      ;; current point", which is what steps the walk back on a repeated
+      ;; search. The walk begins *at* point; beginning it at the bound
+      ;; instead is what made every `re-search-backward' answer nil.
+      ;;--------------------------------------------------------------
+      (let find ((low (max limit (- at %search-chunk)))
+                 (span %search-chunk))
+        ;; The window runs one character PAST `at` as well as one before
+        ;; the lowest position tried: `$` and `\b` are judged against the
+        ;; character after the match, and a window that ends at `at`
+        ;; makes the engine see an end of string there - `(re-search-
+        ;; backward "$" BOUND t)' from a point in the middle of a line
+        ;; then reports a match at point. The extra character is never
+        ;; allowed to be part of a match: the test below is `(<= end at)'.
+        (let* ((base (max (buffer-beg (current-buffer)) (- low 1)))
+               (wend (min (buffer-z (current-buffer)) (+ at 1)))
+               (whole (%search-window (current-buffer) base wend)))
+          (let try ((s at))
+            (cond
+             ((< s low)
+              (if (<= low limit)
+                  #f
+                  (find (max limit (- low span)) (* 2 span))))
+             (else
+              (let* ((here (- s base))
+                     (m (regexp-exec regexp whole here (%bol-flags whole here))))
+                (cond
+                 ((and m
+                       (= (+ (match:start m 0) base) s)
+                       (<= (+ (match:end m 0) base) at))
+                  (list m s (+ (match:end m 0) base) base))
+                 ((and m (= (+ (match:start m 0) base) s))
+                  ;; The longest match here runs past point; the C
+                  ;; engine's `stop' is point, so ask again with the text
+                  ;; ending there.
+                  (let* ((tshort (%search-window (current-buffer) base at))
+                         (tm (regexp-exec regexp tshort here
+                                          (%bol-flags tshort here))))
+                    (if (and tm
+                             (= (+ (match:start tm 0) base) s)
+                             (<= (+ (match:end tm 0) base) at))
+                        (list tm s (+ (match:end tm 0) base) base)
+                        (try (- s 1)))))
+                 (else (try (- s 1)))))))))))
 
     (define (%re-search regexp bound noerror count backward)
       ;; `search_command' (search.c) and `search_buffer' for the regexp
@@ -1760,9 +1836,9 @@
       ;; point at the match's far end (forward) or start (backward),
       ;; answering the point value, as the C's DEFUNs do.
       ;;
-      ;; The text searched is `%search-window-text''s window rather than
-      ;; the whole buffer; positions are the buffer's, and the window's
-      ;; offsets are added and subtracted at the two ends of the search.
+      ;; The text searched is a window of the buffer (`%search-window');
+      ;; positions are the buffer's, and the window's first position is
+      ;; added to the offsets the engine answers.
       ;;--------------------------------------------------------------
       ;; `search_command' (`search.c:1033'): "n = direction; if (!NILP
       ;; (count)) n *= XFIXNUM (count);" - **a negative COUNT flips the
@@ -1776,51 +1852,14 @@
              (limit (or bound
                         (if backward (buffer-beg ed)
                                      (buffer-z ed))))
-             (from (buffer-pt ed)))
+             (from (buffer-pt ed))
+             (regexp (%compile-emacs-regexp regexp (*case-fold-search*))))
         (when (and bound (if (> n 0) (< bound from) (> bound from)))
           (error "Invalid search bound (wrong side of point)"))
         (let loop ((left (max 1 count)) (at from))
-          (let* ((window (%search-window-text ed at limit backward))
-                 (whole (car window))
-                 (base (cdr window))
-                 (found
-                  (cond
-                   ((not backward)
-                    ;; Forward: `re_search_2' with `start' at point,
-                    ;; `range' up to the bound, and the `stop' argument
-                    ;; the bound as well - so a match running past the
-                    ;; bound is not one, and the next position is tried.
-                    (let* ((here (- (min at limit) base))
-                           (m (regexp-exec
-                               (%compile-emacs-regexp regexp (*case-fold-search*))
-                               whole here (%bol-flags whole here))))
-                      (and m
-                           (let ((s (+ (match:start m 0) base))
-                                 (e (+ (match:end m 0) base)))
-                             (if (<= e limit) (list m s e) #f)))))
-                   (else
-                    ;; Backward: `re_search_2' with a negative `range'
-                    ;; walks the start position down from point to the
-                    ;; bound and takes the first one the pattern matches
-                    ;; at; its `stop' is point - "Don't allow match past
-                    ;; current point" - which is what steps the walk back
-                    ;; on a repeated search, and why the end test is
-                    ;; against `at' and not the bound. The walk begins
-                    ;; *at* point; beginning it at the bound instead is
-                    ;; what made every `re-search-backward' answer nil.
-                    (let try ((s at))
-                      (cond
-                       ((< s limit) #f)
-                       (else
-                        (let* ((here (- s base))
-                               (m (regexp-exec
-                                   (%compile-emacs-regexp regexp (*case-fold-search*))
-                                   whole here (%bol-flags whole here))))
-                          (if (and m
-                                   (= (+ (match:start m 0) base) s)
-                                   (<= (+ (match:end m 0) base) at))
-                              (list m s (+ (match:end m 0) base))
-                              (try (- s 1)))))))))))
+          (let ((found (if backward
+                           (%re-search-backward-1 regexp at limit)
+                           (%re-search-forward-1 regexp at limit))))
             (cond
              ((not found)
               ;; `search_command' (`search.c'): "If NOERROR is neither
@@ -1843,28 +1882,15 @@
               ;; the copy made `^' and the subexpression offsets answers
               ;; about the copy, not about the buffer.
               ;;
-              ;; The window's own offset goes on here as well as the
-              ;; 0-to-1: the match object's positions are relative to the
-              ;; text that was searched, and that text used to be the
-              ;; whole buffer (so its offset was 0 and this line was
-              ;; right); with the search windowed to what it can reach,
-              ;; leaving the offset out reports every register `base'
-              ;; characters too low. Font-lock is where that shows, since
-              ;; it searches from the middle of a buffer rather than from
-              ;; the beginning.
+              ;; The window's own first position goes on here as well as
+              ;; the 0-to-1: the match object's positions are relative to
+              ;; the text that was searched, so the register for offset O
+              ;; is at position `(+ base O)'.
               (%string-match-into-regs (car found))
-              ;; BASE is the window's first *position*, so the register
-              ;; for offset O is at position `(+ base O)' - and the
-              ;; offsets are already positions' worth, so what goes on
-              ;; is BASE and not `(+ base 1)'. The window begins at
-              ;; `point-min' only when point does.
-              (match-data--translate base)
+              (match-data--translate (cadddr found))
               (*last-thing-searched* (current-buffer))
-              ;; ... and the answer is that same position. It used to be
-              ;; `(+ 1 ...)', which was right while the engine's
-              ;; positions were zero-based and is one too far now.
-              (if backward (cadr found) (caddr found)))))))
-)
+              ;; ... and the answer is that same position.
+              (if backward (cadr found) (caddr found))))))))
 
     (define (re-search-forward regexp . args)
       ;; GNU Emacs's `re-search-forward' (search.c:2264): "Search

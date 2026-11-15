@@ -12,7 +12,8 @@
     ;; A `define-command' name keeps its name and docstring in Guile's own
     ;; copy, which `,describe' shows: `procedure-name' and
     ;; `procedure-documentation' read them back for the obarray record.
-    (only (guile) current-module procedure-name procedure-documentation))
+    (only (guile) current-module procedure-name procedure-documentation
+          logand))
 
   (export
    command-type? make<command> new-command new-count-command
@@ -36,6 +37,7 @@
    ;; `current-prefix-arg` is here.
    quit-char *quit-flag* *inhibit-quit*
    <quit-condition> quit-condition? signal-quit
+   maybe-quit rarely-quit
    )
 
   (begin
@@ -78,6 +80,39 @@
       ;; (`keyboard.scm`'s `report-command-error!`, which is `cmd_error`).
       ;;--------------------------------------------------------------
       (raise (make-quit-condition)))
+
+    (define (maybe-quit)
+      ;; GNU Emacs's `maybe_quit` (`lisp.h:3897') over `probably_quit`
+      ;; (`eval.c:1887`): "Every loop that might run for a long time or
+      ;; might not exit ought to call maybe_quit at least once, at a safe
+      ;; place."
+      ;;
+      ;; The C also drains `pending_signals` here - the sigusr1/sigusr2
+      ;; events and the window-change flag. There are no user-signal events
+      ;; in this tree and a resize is applied by the wait, so what is left
+      ;; is the quit.
+      ;;
+      ;; **It lives here, not in `keyboard.c`'s library** (`keyboard.scm`
+      ;; re-exports it), because the loops that must call it are C's
+      ;; `syntax.c` and `search.c`, which are below `keyboard.scm`. The
+      ;; wall is the one `quit-flag` itself was moved down for: with the
+      ;; function only in `keyboard.scm`, a C-g could be pressed during a
+      ;; long command and nothing would ever look at the flag - the read
+      ;; was the only caller, and the read is exactly what a long command
+      ;; is not doing.
+      ;;--------------------------------------------------------------
+      (when (and (*quit-flag*) (not (*inhibit-quit*)))
+        (*quit-flag* #f)
+        (signal-quit)))
+
+    (define (rarely-quit count)
+      ;; GNU Emacs's `rarely_quit` (`lisp.h:3914'): COUNT is an
+      ;; `unsigned short' that a long loop increments on every character,
+      ;; and the quit is looked at when it wraps - once every 65536
+      ;; characters.
+      ;;--------------------------------------------------------------
+      (when (= 0 (logand count #xffff))
+        (maybe-quit)))
 
     (define-record-type <command-type>
       ;; A command is a structure containing a function that responds to
