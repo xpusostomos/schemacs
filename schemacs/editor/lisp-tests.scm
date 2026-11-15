@@ -14,7 +14,8 @@
   (only (schemacs editor lisp)
         forward-sexp backward-sexp forward-list backward-list down-list
         backward-up-list beginning-of-defun end-of-defun mark-defun
-        kill-sexp transpose-sexps insert-parentheses)
+        kill-sexp transpose-sexps insert-parentheses
+        move-past-close-and-reindent)
   (only (schemacs editor simple) mark deactivate-mark)
   (only (schemacs editor subr) error-message-string)
   (only (schemacs editor loadup) open-user-environment!)
@@ -232,5 +233,30 @@
   (in-buffer "(define lisp-tests-zz 99)"
     (lambda (b) (set-point b 1) (eval-defun)
       (eval 'lisp-tests-zz (open-user-environment!)))))
+
+;; ------------------------------------------------------------------
+;; `move-past-close-and-reindent' (`lisp.el:969'), bound to M-).
+;;
+;; Both expectations are Emacs 31.1's own, measured with
+;; `emacs -Q --batch' on the same text and the same starting point.
+(test-begin "schemacs_editor_lisp_move_past_close_and_reindent")
+
+(in-buffer "(defun foo ()\n  (a b\n       )\n  (c))\n"
+  (lambda (b)
+    (set-point b 20)
+    (move-past-close-and-reindent)
+    (test-equal "M-) pulls the lone `)' up and reindents what follows"
+      "(defun foo ()\n  (a b)\n  \n  (c))\n" (buffer-string))
+    (test-equal "...and point ends past the new line" 25 (point))))
+
+(in-buffer "(defun foo ()\n  (a b\n       )\n  (c))\n"
+  (lambda (b)
+    (set-point b 16)
+    (move-past-close-and-reindent)
+    (test-equal "from inside the inner list nothing is joined"
+      "(defun foo ()\n  (a b\n       )\n  (c))\n\n" (buffer-string))
+    (test-equal "...and point is at the end of the buffer" 38 (point))))
+
+(test-end "schemacs_editor_lisp_move_past_close_and_reindent")
 
 (test-end "schemacs_editor_lisp")

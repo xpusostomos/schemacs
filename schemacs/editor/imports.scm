@@ -67,6 +67,7 @@
     (schemacs editor coding)
     (schemacs editor startup)
     (except (schemacs editor command)  quit-char *quit-flag* *inhibit-quit* signal-quit maybe-quit)
+    (schemacs editor newcomment)
     (except (schemacs editor fns)  compare-strings line-number-at-pos)
     (schemacs editor timefns)
     (schemacs editor custom)
@@ -178,6 +179,7 @@
     *buffers-menu-show-status*
     *build-marker-function*
     *byte-count-to-string-function*
+    *calculate-lisp-indent-function*
     *called-interactively*
     *case-fold-search*
     *case-replace*
@@ -233,6 +235,7 @@
     *delayed-after-hook-functions*
     *delayed-mode-hooks*
     *delete-by-moving-to-trash*
+    *delete-horizontal-space-function*
     *directory-abbrev-alist*
     *directory-files-no-dot-files-regexp*
     *dired-actual-switches*
@@ -495,7 +498,6 @@
     *syntax-ppss-table*
     *syntax-propertize-chunk-size*
     *syntax-propertize-extend-region-functions*
-    *syntax-propertize-function*
     *system-time-locale*
     *tab-width*
     *tabulated-list-entries*
@@ -603,6 +605,7 @@
     attributes-set
     auto-coding-alist-lookup
     auto-coding-regexp-alist-lookup
+    back-to-indentation
     backward-char
     backward-delete-char
     backward-kill-paragraph
@@ -710,6 +713,7 @@
     byte8-to-char
     bytes-have-null?
     cache-long-scans
+    calculate-lisp-indent
     call-process
     called-interactively?
     cancel-timer
@@ -813,6 +817,23 @@
     command-type?
     command-value-of
     command?
+    comment-add
+    comment-choose-indent
+    comment-column
+    comment-end
+    comment-end-skip
+    comment-fill-column
+    comment-indent
+    comment-indent-default
+    comment-inline-offset
+    comment-insert-comment-function
+    comment-normalize-vars
+    comment-search-forward
+    comment-start
+    comment-start-skip
+    comment-string-strip
+    comment-use-global-state
+    comment-use-syntax
     common-prefix
     compare-strings
     complete-with-action
@@ -1090,6 +1111,7 @@
     editor-excluded-libraries
     editor-libraries
     elisp--preceding-sexp
+    elisp-mode-syntax-propertize
     emacs-lisp-mode
     emacs-lisp-mode-hook
     emacs-lisp-mode-map
@@ -1406,7 +1428,20 @@
     hscroll-line-slice
     ignore
     imports-path
+    indent-according-to-mode
+    indent-for-comment
+    indent-line-function
+    indent-line-ignored-functions
+    indent-line-to
+    indent-next-tab-stop
+    indent-region
+    indent-region-function
+    indent-region-line-by-line
+    indent-relative
+    indent-relative-first-indent-point
+    indent-relative-maybe
     indent-rigidly
+    indent-sexp
     indent-to
     inhibit-local-variables-p
     inhibit-startup-screen
@@ -1595,14 +1630,26 @@
     line-texts-slice-width
     line-texts-width
     lisp--define-face
+    lisp--local-defform-body-p
+    lisp-body-indent
     lisp-cl-font-lock-keywords
     lisp-cl-font-lock-keywords-1
     lisp-cl-font-lock-keywords-2
+    lisp-comment-indent
     lisp-data-mode
     lisp-data-mode-syntax-table
     lisp-el-font-lock-keywords
     lisp-el-font-lock-keywords-1
     lisp-el-font-lock-keywords-2
+    lisp-indent-calc-next
+    lisp-indent-defform
+    lisp-indent-function
+    lisp-indent-initial-state
+    lisp-indent-line
+    lisp-indent-offset
+    lisp-indent-region
+    lisp-indent-specform
+    lisp-indent-state?
     lisp-interaction-mode
     lisp-interaction-mode-hook
     lisp-interaction-mode-map
@@ -1614,6 +1661,7 @@
     lisp-mode-symbol-regexp
     lisp-mode-syntax-table
     lisp-mode-variables
+    lisp-ppss
     lisp-time-arguments
     list-buffers
     list-buffers--refresh
@@ -1811,6 +1859,7 @@
     mouse-set-region-1
     mouse-start-end
     move-overlay
+    move-past-close-and-reindent
     move-to-column
     mule-keymap
     negative-argument
@@ -1821,6 +1870,7 @@
     new-frame-on
     new-modal-lookup-state
     new-region-cache
+    newline-and-indent
     next-buffer
     next-char-property-change
     next-frame
@@ -2386,6 +2436,8 @@
     syntax-table
     syntax-table-p
     system-type
+    tab-stop-list
+    tab-to-tab-stop
     tabulated-list-delete-entry
     tabulated-list-entries
     tabulated-list-format

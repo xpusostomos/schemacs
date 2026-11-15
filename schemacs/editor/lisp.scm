@@ -35,7 +35,8 @@
     (only (schemacs editor character) event-basic-type)
     (only (schemacs editor simple)
           push-mark mark set-mark kill-region use-region-p
-          %transpose-subr
+          %transpose-subr back-to-indentation newline-and-indent
+          delete-indentation-command
           *this-command* *last-command*)
     (only (schemacs editor editfns)
           point point-min point-max goto-char insert insert-char forward-line
@@ -43,7 +44,8 @@
           point-marker preceding-char following-char save-excursion
           region-beginning region-end)
     (only (schemacs editor cmds) beginning-of-line end-of-line forward-char)
-    (only (schemacs editor syntax) skip-chars-forward skip-chars-backward)
+    (only (schemacs editor syntax) skip-chars-forward skip-chars-backward
+          parse-partial-sexp)
     (only (schemacs editor syntax)
           scan-sexps scan-lists backward-prefix-chars skip-syntax-forward
           skip-syntax-backward forward-comment syntax-ppss
@@ -71,6 +73,7 @@
    mark-defun
    *transpose-sexps-function* transpose-sexps-default-function
    transpose-sexps
+   move-past-close-and-reindent *calculate-lisp-indent-function*
    insert-pair-alist insert-pair insert-parentheses)
 
   (begin
@@ -739,6 +742,54 @@ in the middle of a sexp to be transposed."
     (define-key km:*default-keymap* (kbd "C-M-e") end-of-defun)
     (define-key km:*default-keymap* (kbd "C-M-a") beginning-of-defun)
     (define-key km:*default-keymap* (kbd "C-M-h") mark-defun)
+    ;; ---------------------------------------------------------------
+    ;; `move-past-close-and-reindent' (`lisp.el:969').
+    ;; ---------------------------------------------------------------
+    (define *calculate-lisp-indent-function* (make-parameter #f))
+    ;; ^ The seam for `calculate-lisp-indent', which is `lisp-mode.el''s
+    ;; and lives in `(schemacs editor lisp-mode)' - a library that
+    ;; imports *this* one, so the call has to come the other way. The
+    ;; Lisp mode fills it at load time, as `simple.scm' fills
+    ;; `*delete-horizontal-space-function*'.
+
+    (define-command (move-past-close-and-reindent)
+      "Move past next `)', delete indentation before it, then indent after it."
+      (interactive '())
+      (up-list 1)
+      (forward-char -1)
+      (let loop ()
+        (when (save-excursion
+                (let ((before-paren (point)))
+                  (back-to-indentation)
+                  (and (= (point) before-paren)
+                       (begin
+                         ;; "Move to end of previous line."
+                         (beginning-of-line)
+                         (forward-char -1)
+                         ;; "Verify it doesn't end within a string or
+                         ;; comment."
+                         (let ((end (point))
+                               (state #f))
+                           (beginning-of-line)
+                           ;; "Get state at start of line."
+                           (set! state
+                                 (list 0 #f #f
+                                       (not ((*calculate-lisp-indent-function*)))
+                                       #f #f #f #f #f))
+                           ;; "Parse state across the line to get state at
+                           ;; end."
+                           (set! state (parse-partial-sexp
+                                        (point) end #f #f state))
+                           ;; "Check not in string or comment."
+                           (and (not (list-ref state 3))
+                                (not (list-ref state 4))))))))
+          (delete-indentation-command #f #f #f)
+          (loop)))
+      (forward-char 1)
+      (newline-and-indent))
+
+    (define-key km:*default-keymap* (kbd "M-)") move-past-close-and-reindent)
+
     (define-key km:*default-keymap* (kbd "M-(") insert-parentheses)
     (define-key km:*default-keymap* (kbd "C-M-t") transpose-sexps)
 

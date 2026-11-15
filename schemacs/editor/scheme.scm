@@ -34,7 +34,8 @@
     (only (schemacs editor font-lock) set!font-lock-defaults!
           font-lock-register-keyword-variable!)
     (only (schemacs regexp-opt) regexp-opt)
-    (only (schemacs editor search) match-beginning))
+    (only (schemacs editor search) match-beginning)
+    (only (schemacs editor lisp-mode) lisp-indent-line))
 
   (export scheme-mode scheme-mode-map scheme-mode-hook scheme-mode-hook
           scheme-mode-syntax-table scheme-mode-variables
@@ -198,7 +199,9 @@
       (setq-local 'fill-paragraph-function 'lisp-fill-paragraph)
       ;; "Adaptive fill mode gets in the way of auto-fill"
       (setq-local 'adaptive-fill-mode #f)
-      (setq-local 'indent-line-function 'lisp-indent-line)
+      ;; The C stores the *symbol*; a symbol is not callable here, so
+      ;; the procedure goes in (lisp-mode-variables does the same).
+      (setq-local 'indent-line-function lisp-indent-line)
       (setq-local 'parse-sexp-ignore-comments #t)
       (setq-local 'outline-regexp ";;; \\|(....")
       (setq-local 'add-log-current-defun-function 'lisp-current-defun-name)
@@ -207,7 +210,13 @@
       (setq-local 'comment-start-skip ";+[ \t]*")
       (setq-local 'comment-use-syntax #t)
       (setq-local 'comment-column 40)
-      (setq-local 'lisp-indent-function 'scheme-indent-function)
+      ;; `(setq-local lisp-indent-function #'scheme-indent-function)'
+      ;; (`scheme.el:...') is not carried - `scheme-indent-function'
+      ;; and its `lisp-indent-function' properties are this library's
+      ;; named departure - so the variable keeps its default and Scheme
+      ;; forms indent as ordinary function calls. Storing the symbol
+      ;; (which is what a literal port does) would raise "Wrong type to
+      ;; apply" on the first indent instead.
       (setq-local 'imenu-case-fold-search #t)
       (set!font-lock-defaults!
        (list

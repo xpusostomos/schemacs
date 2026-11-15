@@ -74,7 +74,8 @@
           interval-position interval-length interval-last-pos interval-plist
           update-interval next-interval previous-interval textget)
     (only (schemacs editor textprop)
-          get-text-property put-text-property interval-of)
+          get-text-property put-text-property remove-text-properties
+          interval-of)
     )
 
   (export
@@ -113,7 +114,7 @@
    *words-include-escapes* *comment-end-can-be-escaped*
    *open-paren-in-column-0-is-defun-start* *comment-use-syntax-ppss*
    *syntax-ppss-table* *syntax-begin-function*
-   *syntax-propertize-function* *syntax-propertize-chunk-size*
+   *syntax-propertize-chunk-size*
    *syntax-propertize-extend-region-functions*
    *syntax-ppss-max-span*
    )
@@ -437,12 +438,44 @@
     (define %gl-e-property 8)               ;   valid at, and one past
     (define %gl-forward-i 9)                ; where to look on the way
     (define %gl-backward-i 10)              ;   forward, and backward
+    (define %gl-truncated 11)               ; e_property_truncated
 
     (define %gl-state
       (vector #f 1 1 #f #f *standard-syntax-table* #f 1 1
-              %uninitialized-interval %uninitialized-interval))
+              %uninitialized-interval %uninitialized-interval #f))
 
     (define (%point-max) (buffer-z (current-buffer)))
+
+    (define %syntax-propertize-done 0)
+    ;; ^ `syntax-propertize--done` cached for the scan loops: the C reads
+    ;; its own global on every `UPDATE_SYNTAX_TABLE_FORWARD`
+    ;; (`syntax.c:516`), and a `buffer-local-value` per character would
+    ;; be the same check at ten times the cost. `%setup-syntax-table`
+    ;; re-reads it from the buffer, and `syntax-propertize` keeps it.
+
+    (define (%parse-sexp-propertize charpos)
+      ;; `parse_sexp_propertize' (`syntax.c:480'): "Ensure that the
+      ;; `syntax-table' properties are applied up to CHARPOS, then set
+      ;; the syntax table up again for it." A scan that crosses into
+      ;; unpropertized text has to stop and let the mode's function run,
+      ;; because the properties it sets change what the rest of the scan
+      ;; sees.
+      ;;--------------------------------------------------------------
+      (let ((zv (%point-max)))
+        (if (and (<= %syntax-propertize-done charpos)
+                 (< %syntax-propertize-done zv))
+            (begin
+              (syntax-propertize (min zv (+ 1 charpos)))
+              (%setup-syntax-table))
+            (when (> (vector-ref %gl-state %gl-e-property)
+                     %syntax-propertize-done)
+              ;; "e_property_truncated" - the run the cache believes in
+              ;; extends past what has been propertized, so it is a
+              ;; belief no longer: the interval cache has to be reset
+              ;; before it is trusted again (`syntax.c:497').
+              (vector-set! %gl-state %gl-e-property %syntax-propertize-done)
+              (vector-set! %gl-state %gl-truncated #t))))
+      #f)
 
     (define (%setup-syntax-table)
       ;; `SETUP_SYNTAX_TABLE' (`syntax.c:250'): "This should be called
@@ -459,7 +492,10 @@
         (vector-set! %gl-state %gl-current-table (%buffer-syntax-table ed))
         (vector-set! %gl-state %gl-old-prop #f)
         (vector-set! %gl-state %gl-forward-i %uninitialized-interval)
-        (vector-set! %gl-state %gl-backward-i %uninitialized-interval))
+        (vector-set! %gl-state %gl-backward-i %uninitialized-interval)
+        (set! %syntax-propertize-done
+              (buffer-local-value ed 'syntax-propertize--done 0))
+        (vector-set! %gl-state %gl-truncated #f))
       #f)
 
     (define (%update-syntax-table pos count)
@@ -606,7 +642,27 @@
                   (when (< pos (vector-ref %gl-state %gl-b-property))
                     (%update-syntax-table pos -1))
                   (when (>= pos (vector-ref %gl-state %gl-e-property))
-                    (%update-syntax-table pos 1))))
+                    (if (vector-ref %gl-state %gl-truncated)
+                        ;; The cached run was truncated to
+                        ;; `syntax-propertize--done', so the intervals it
+                        ;; names may not be the ones the buffer has any
+                        ;; more - and a walk off the last one says "Error
+                        ;; in syntax_table logic for to-the-end
+                        ;; intervals". Start the cache again.
+                        (begin (%setup-syntax-table)
+                               (%update-syntax-table pos 1))
+                        (%update-syntax-table pos 1)))))
+            ;; `update_syntax_table_forward`'s tail (`syntax.c:516'): a
+            ;; run that reaches past what has been propertized has to be
+            ;; propertized now. **Checked on every character**, as the
+            ;; C's `UPDATE_SYNTAX_TABLE_FORWARD' does - checking it only
+            ;; when the run changes left a buffer half propertized, since
+            ;; the last run reaches to ZV and no change is ever seen
+            ;; again (`vtable.el' line 208 indented 8 where Emacs says
+            ;; 6).
+            (when (> (vector-ref %gl-state %gl-e-property)
+                     %syntax-propertize-done)
+              (%parse-sexp-propertize pos))
             (if (vector-ref %gl-state %gl-use-global)
                 (vector-ref %gl-state %gl-global-code)
                 (char-table-ref (vector-ref %gl-state %gl-current-table) c)))
@@ -1837,32 +1893,45 @@
       (levelstarts state-levelstarts set!state-levelstarts!)
       (prev-syntax state-prev-syntax set!state-prev-syntax!))
 
+    (define (%oldstate-ref s i)
+      ;; `(car (nthcdr I S))' - Elisp's `Fcar'/`Fcdr' walk answers nil
+      ;; past the end of the list, and `parse-partial-sexp' accepts a
+      ;; state that carries only the elements its caller filled in:
+      ;; `move-past-close-and-reindent' passes a **nine**-element one
+      ;; (`lisp.el:985'), which the C reads happily. `list-ref' raised
+      ;; "Argument 2 out of range: 9" instead.
+      ;;--------------------------------------------------------------
+      (let loop ((n i) (l s))
+        (cond ((not (pair? l)) #f)
+              ((= n 0) (car l))
+              (else (loop (- n 1) (cdr l))))))
+
     (define (%internalize-parse-state external)
       ;; `internalize_parse_state' (`syntax.c:3502').
       ;;--------------------------------------------------------------
       (if (not external)
           (%make-parse-state 0 -1 0 0 #f 0 -1 -1 0 -1 '() smax)
           (let* ((s external)
-                 (depth (let ((d (list-ref s 0))) (if (integer? d) d 0)))
-                 (ins (list-ref s 3))
+                 (depth (let ((d (%oldstate-ref s 0))) (if (integer? d) d 0)))
+                 (ins (%oldstate-ref s 3))
                  (instring (cond ((not ins) -1)
                                  ((eq? ins #t) %st-string-style)
                                  ((integer? ins) ins)
                                  (else %st-string-style)))
-                 (inc (list-ref s 4))
+                 (inc (%oldstate-ref s 4))
                  (incomment (cond ((not inc) 0)
                                   ((eq? inc #t) -1)
                                   ((integer? inc) inc)
                                   (else -1)))
-                 (quoted (and (list-ref s 5) #t))
-                 (cs (list-ref s 7))
+                 (quoted (and (%oldstate-ref s 5) #t))
+                 (cs (%oldstate-ref s 7))
                  (comstyle (cond ((not cs) 0)
                                  ((and (integer? cs) (<= 0 cs %st-comment-style)) cs)
                                  (else %st-comment-style)))
-                 (cstart (list-ref s 8))
+                 (cstart (%oldstate-ref s 8))
                  (comstr-start (if (integer? cstart) cstart -1))
-                 (levelstarts (list-ref s 9))
-                 (prev (list-ref s 10))
+                 (levelstarts (%oldstate-ref s 9))
+                 (prev (%oldstate-ref s 10))
                  (prev-syntax (if (integer? prev) prev smax)))
             (%make-parse-state depth instring incomment comstyle quoted 0
                                -1 -1 -1 comstr-start levelstarts prev-syntax))))
@@ -1969,7 +2038,15 @@
                             'stop
                             (begin
                               (vector-set! level-last curlevel prev-from)
-                              (if (= from end) 'endquoted 'symstarted))))
+                              ;; `goto startquoted' - **the quoted
+                              ;; character itself is consumed**, and
+                              ;; that is what stops `\"' from opening a
+                              ;; string. Answering `symstarted' here
+                              ;; left the `"' to the main loop, which
+                              ;; read it as a string opener: measured,
+                              ;; `(a \" b)' was "in string" from the
+                              ;; quote onwards.
+                              'startquoted)))
                        ((memv code (list sword ssymbol))
                         (if stopbefore
                             'stop
@@ -2190,7 +2267,9 @@
     (define *syntax-ppss-table* (make-parameter #f))
     (define *syntax-begin-function* (make-parameter #f))
     (define *syntax-ppss-max-span* (make-parameter 20000))
-    (define *syntax-propertize-function* (make-parameter #f))
+    ;; `syntax-propertize-function` (`syntax.el:391`) is a
+    ;; `defvar-local`; it is read with `buffer-local-value` above, and
+    ;; no parameter of that name exists.
     (define *syntax-propertize-chunk-size* (make-parameter 500))
     (define *syntax-propertize-extend-region-functions* (make-parameter '()))
 
@@ -2245,13 +2324,19 @@
                 (parse-partial-sexp old-pos pos #f #f old-ppss #f))
                ;; "Use OLD-PPSS if possible and close enough."
                ((and (not old-pos) old-ppss
-                     (set! pt-min (or (syntax-ppss-toplevel-pos old-ppss)
-                                      (%nth 2 old-ppss)))
-                     (<= pt-min pos)
-                     (< (- pos pt-min) (*syntax-ppss-max-span*)))
+                     (let ((m (or (syntax-ppss-toplevel-pos old-ppss)
+                                  (%nth 2 old-ppss))))
+                       (set! pt-min m)
+                       (and (<= m pos)
+                            (< (- pos m) (*syntax-ppss-max-span*)))))
                 (parse-partial-sexp pt-min pos #f #f #f #f))
                (else
-                (let ((cache-pred #f) (cache ppss-cache)
+                ;; **`pt-min` is rebound here.** Emacs's `else` binds
+                ;; `(pt-min (point-min))`; without it the failed
+                ;; OLD-PPSS branch above leaves `pt-min` at a position
+                ;; *after* POS, and the parse below gets FROM > TO -
+                ;; "End position is smaller than start position".
+                (let ((cache-pred #f) (cache ppss-cache) (pt-min 1)
                       (pt-best 1) (ppss-best #f))
                   (let loop ((c cache) (pred #f))
                     (cond ((and (pair? c) (< pos (caar c)))
@@ -2276,9 +2361,25 @@
                                              (cons (cons mid mid-ppss) ppss-cache))))
                                    (let ((result (parse-partial-sexp
                                                   pt-min pos #f #f ppss-best #f)))
-                                     (set-cdr! cell (cons (cons pos result) ppss-cache))
                                      result))))))
+                    ;; "Store it in the cache." Emacs keeps the list in
+                    ;; **decreasing position order**, which the scan above
+                    ;; relies on; a blind push breaks it and then `pt-min'
+                    ;; can come back *after* POS.
+                    (let ((pair (cons pos ppss)))
+                      (if cache-pred
+                          (if (> (- (caar cache-pred) pos)
+                                 (*syntax-ppss-max-span*))
+                              (set-cdr! cache-pred
+                                        (cons pair (cdr cache-pred)))
+                              (set-car! cache-pred pair))
+                          (if (or (null? ppss-cache)
+                                  (> (- (caar ppss-cache) pos)
+                                     (*syntax-ppss-max-span*)))
+                              (set! ppss-cache (cons pair ppss-cache))
+                              (set-car! ppss-cache pair))))
                     (set-car! cell (cons pos ppss))
+                    (set-cdr! cell ppss-cache)
                     ppss)))))))))
 
     (define (ppss-comment-or-string-start ppss)
@@ -2296,14 +2397,18 @@
     (define (syntax-ppss-toplevel-pos ppss)
       ;; `syntax-ppss-toplevel-pos' (`syntax.el:490').
       ;;--------------------------------------------------------------
-      (let ((depth (car ppss))
-            (levels (%nth 9 ppss)))
-        (cond ((> depth 0)
-               (if (pair? levels) (car levels) 1))
-              ((%nth 3 ppss) (%nth 8 ppss))
-              ((> (%nth 4 ppss) 0) (%nth 8 ppss))
-              ((%nth 4 ppss) (%nth 8 ppss))
-              (else (%nth 2 ppss)))))
+      ;; The C is two lines:
+      ;;
+      ;;   (or (car (nth 9 ppss))
+      ;;       (nth 8 ppss))
+      ;;
+      ;; **This had drifted into a `cond' on the depth** that also asked
+      ;; `(> (nth 4 ppss) 0)' - and element 4 is `t' for a non-nestable
+      ;; comment, so `>' raised "Wrong type argument" the first time a
+      ;; scan asked this about a state outside a comment. Found by
+      ;; `beginning-of-defun' on a buffer holding `?\"'.
+      (or (let ((levels (%nth 9 ppss))) (and (pair? levels) (car levels)))
+          (%nth 8 ppss)))
 
     (define (syntax-ppss-context ppss)
       ;; `syntax-ppss-context' (`syntax.el:500').
@@ -2385,33 +2490,59 @@
           (cons start end))))
 
     (define (syntax-propertize pos)
-      ;; GNU Emacs's `syntax-propertize' (`syntax.el:395'): "Apply
-      ;; `syntax-table' properties on the region around POS."
+      ;; GNU Emacs's `syntax-propertize' (`syntax.el:395'): "Ensure that
+      ;; syntax-table properties are set until POS (a buffer point)."
       ;;
-      ;; `syntax-propertize--done' is a buffer-local variable in Emacs,
-      ;; and is kept as one here.
+      ;; `syntax-propertize--done' is buffer-local, as it is in Emacs
+      ;; (`syntax.c:3778' makes it so), and it is moved to END *before*
+      ;; the mode's function runs: the function calls `syntax-ppss',
+      ;; which calls back here, and that is what makes the recursion
+      ;; terminate.
       ;;--------------------------------------------------------------
-      (let ((fun (*syntax-propertize-function*)))
-        (when fun
-          (let* ((size (*syntax-propertize-chunk-size*))
-                 (end (min (%point-max) (+ pos size))))
-            (unless (= end pos)
-              (let* ((start (if (<= pos 1) 1 (max 1 (- pos size))))
-                     (done (buffer-local-value (current-buffer)
-                                               'syntax-propertize--done 0))
-                     (start (max start (min done end))))
+      (let ((done (buffer-local-value (current-buffer)
+                                      'syntax-propertize--done 0)))
+        (when (< done pos)
+          (let ((fun (buffer-local-value (current-buffer)
+                                         'syntax-propertize-function #f)))
+            (cond
+             ((not fun)
+              ;; Nothing to do, and nothing will ever need doing.
+              (set-buffer-local-value! (current-buffer)
+                                       'syntax-propertize--done
+                                       (max (%point-max) pos))
+              (set! %syntax-propertize-done (max (%point-max) pos)))
+             (else
+              (let* ((start (max (min done (%point-max)) 1))
+                     (end (max pos (min (%point-max)
+                                        (+ start
+                                           (*syntax-propertize-chunk-size*))))))
                 (when (< start end)
-                  (let extend ((funs (*syntax-propertize-extend-region-functions*))
-                               (b start) (e end))
-                    (if (null? funs)
-                        (begin
-                          (fun b e)
-                          (set-buffer-local-value! (current-buffer)
-                                                   'syntax-propertize--done e))
-                        (let ((new ((car funs) b e)))
-                          (if new
-                              (extend (cdr funs) (car new) (cdr new))
-                              (extend (cdr funs) b e)))))))))))
+                  ;; `(save-excursion (with-silent-modifications ...))'
+                  ;; (`syntax.el:430') - the mode's function is free to
+                  ;; move point and usually does (`(goto-char start)'),
+                  ;; and that must not be visible to its caller. This
+                  ;; library's `save-excursion' takes a thunk.
+                  (save-excursion
+                   (lambda ()
+                     (let extend ((funs (*syntax-propertize-extend-region-functions*))
+                                  (b start) (e end))
+                       (cond
+                        ((null? funs)
+                         ;; "Move the limit before calling the function,
+                         ;; so it's done in case of errors."
+                         (set-buffer-local-value! (current-buffer)
+                                                  'syntax-propertize--done e)
+                         (set! %syntax-propertize-done e)
+                         (syntax-ppss-flush-cache b)
+                         ;; "Remove the properties we are about to
+                         ;; recompute."
+                         (remove-text-properties b e '(syntax-table nil))
+                         (fun b e))
+                        (else
+                         (let ((new ((car funs) b e)))
+                           (if new
+                               (extend (cdr funs) (car new) (cdr new))
+                               (extend (cdr funs) b e)))))))))))))))
       #f)
 
     ))

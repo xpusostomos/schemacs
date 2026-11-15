@@ -9,8 +9,9 @@
   ;;
   ;; Not carried, each named against what it waits for:
   ;;
-  ;;   * `elisp-mode-syntax-propertize' and its rules - `syntax-
-  ;;     propertize-rules', the macro, is not ported.
+  ;;   * `syntax-propertize-rules', the macro, is not ported (see
+  ;;     `syntax.scm`'s header); `elisp-mode-syntax-propertize' is here,
+  ;;     written out as the four scans the macro would build.
   ;;   * the eldoc, xref, flymake, completion-at-point, electric-pair and
   ;;     context-menu entries the mode adds to their hooks: none of those
   ;;     subsystems exists here.
@@ -28,8 +29,12 @@
     (only (guile) caddr)
     (prefix (schemacs editor keymap) km:)
     (only (schemacs editor derived) define-derived-mode)
-    (only (schemacs editor buffer) current-buffer)
-    (only (schemacs editor syntax) modify-syntax-entry)
+    (only (schemacs editor buffer) current-buffer set-buffer-local-value!)
+    (only (schemacs editor syntax) modify-syntax-entry string-to-syntax
+          syntax-ppss)
+    (only (schemacs editor search) re-search-forward match-beginning match-end)
+    (only (schemacs editor buffer) *case-fold-search*)
+    (only (schemacs editor textprop) put-text-property)
     (only (schemacs editor subr) make-syntax-table)
     (only (schemacs editor lisp-mode) lisp-data-mode lisp-data-mode-syntax-table
           lisp-mode-shared-map lisp-mode-variables)
@@ -51,7 +56,7 @@
     (only (scheme write) write))
 
   (export emacs-lisp-mode emacs-lisp-mode-map emacs-lisp-mode-hook
-          emacs-lisp-mode-syntax-table
+          emacs-lisp-mode-syntax-table elisp-mode-syntax-propertize
           eval-last-sexp eval-print-last-sexp eval-defun
           elisp--preceding-sexp
           lisp-interaction-mode lisp-interaction-mode-map
@@ -62,9 +67,8 @@
     (define emacs-lisp-mode-syntax-table
       ;; GNU Emacs's `emacs-lisp-mode-syntax-table' (elisp-mode.el:41):
       ;; `lisp-data-mode-syntax-table' with the "p" flag taken off `@',
-      ;; because `,@' is handled precisely by `syntax-propertize' there.
-      ;; (That function is not ported here; the flag is still off, which
-      ;; is the table Emacs's mode has.)
+      ;; because `,@' is handled precisely by `syntax-propertize' there
+      ;; (`elisp-mode-syntax-propertize', below).
       ;;--------------------------------------------------------------
       (let ((table (make-syntax-table lisp-data-mode-syntax-table)))
         (modify-syntax-entry #\@ "_" table)
@@ -76,6 +80,70 @@
       ;; library's header.
       ;;--------------------------------------------------------------
       (km:keymap '*emacs-lisp-mode-map*))
+
+    ;; ":parent lisp-mode-shared-map" (`elisp-mode.el:53`), which is
+    ;; where `C-M-q' (`indent-sexp') lives.
+    (km:set-keymap-parent emacs-lisp-mode-map lisp-mode-shared-map)
+
+    (define (elisp-mode-syntax-propertize start end)
+      ;; GNU Emacs's `elisp-mode-syntax-propertize' (`elisp-mode.el:259'):
+      ;; "Add syntax-table properties to Emacs Lisp code between START
+      ;; and END. Used as the value of `syntax-propertize-function' in
+      ;; `emacs-lisp-mode'."
+      ;;
+      ;; The C is one call to `(syntax-propertize-rules ...)', the macro
+      ;; that compiles its rules into a **single scan**. **The macro is
+      ;; not ported** (`syntax.scm`'s header says why: it needs
+      ;; `regexp-opt-depth`, `subregexp-context-p` and match-data
+      ;; shifting), so the four rules are written out here as one
+      ;; alternation - one scan, which is what the macro produces and
+      ;; what the rules need. Four separate scans were tried first and
+      ;; cost 35 s on a 170 KB file: each restart jumped `syntax-ppss`
+      ;; backwards, throwing away the parse cache the rules read on
+      ;; every match.
+      ;;
+      ;; The groups are the rules, in the C's order: 1 `##', 2 `,@',
+      ;; 3 `?\N{...}', and 4/5/6 the three reader forms after a `#'.
+      ;; Each action refuses to fire inside a string or comment, which
+      ;; is what `(nth 8 (syntax-ppss))` answers - at point for the
+      ;; first three (the C's `(unless (nth 8 (syntax-ppss)) ...)`,
+      ;; where point is the match end) and at the match start for the
+      ;; last (`(save-excursion (nth 8 (syntax-ppss (match-beginning
+      ;; 0))))`).
+      ;;--------------------------------------------------------------
+      (goto-char start)
+      (parameterize ((*case-fold-search* #f))
+        (let loop ()
+          (when (re-search-forward
+                 "\\(##\\)\\|\\(,@\\)\\|\\(\\\\?\\\\\\\\N{[-A-Za-z0-9 ]\\\\{,100\\\\}}\\)\\|#\\(?:\\(&[0-9]+\\)\"\\|\\(s\\)(\\|\\(\\^+\\)\\[\\)"
+                 end #t)
+            (cond
+             ((match-beginning 1)               ; "Empty symbol."
+              (unless (list-ref (syntax-ppss) 8)
+                (put-text-property (match-beginning 1) (match-end 1)
+                                   'syntax-table (string-to-syntax "_"))))
+             ((match-beginning 2)               ; ",@" - "Prevent the @
+                                                ; from becoming part of a
+                                                ; following symbol."
+              (unless (list-ref (syntax-ppss) 8)
+                (put-text-property (match-beginning 2) (match-end 2)
+                                   'syntax-table (string-to-syntax "'"))))
+             ((match-beginning 3)               ; "Unicode character names."
+              (unless (list-ref (syntax-ppss) 8)
+                (put-text-property (match-beginning 3) (match-end 3)
+                                   'syntax-table (string-to-syntax "_"))))
+             (else
+              ;; Bool-vector (`#&N"'), record (`#s(') and char-table
+              ;; (`#^^['): the part after the `#' gets quote syntax.
+              (let ((g (cond ((match-beginning 4) 4)
+                             ((match-beginning 5) 5)
+                             (else 6))))
+                (unless (save-excursion
+                          (list-ref (syntax-ppss (match-beginning 0)) 8))
+                  (put-text-property (match-beginning g) (match-end g)
+                                     'syntax-table (string-to-syntax "'"))))))
+            (loop))))
+      #f)
 
     (define emacs-lisp-mode-hook '())
 
@@ -92,12 +160,18 @@
       ;; "(lisp-mode-variables nil nil t)" - LISP-SYNTAX nil keeps the
       ;; table the parent mode set, KEYWORDS-CASE-INSENSITIVE nil (Elisp
       ;; keywords are case sensitive), ELISP t.
-      (lisp-mode-variables #f #f #t))
+      (lisp-mode-variables #f #f #t)
+      ;; "(setq-local syntax-propertize-function
+      ;;   #'elisp-mode-syntax-propertize)" (`elisp-mode.el:763').
+      (set-buffer-local-value! (current-buffer) 'syntax-propertize-function
+                               elisp-mode-syntax-propertize))
 
     (define lisp-interaction-mode-map
       ;; GNU Emacs's `lisp-interaction-mode-map' (elisp-mode.el:1756).
       ;;--------------------------------------------------------------
       (km:keymap '*lisp-interaction-mode-map*))
+    ;; ":parent lisp-mode-shared-map" (`elisp-mode.el:1759').
+    (km:set-keymap-parent lisp-interaction-mode-map lisp-mode-shared-map)
 
     (define lisp-interaction-mode-hook '())
 

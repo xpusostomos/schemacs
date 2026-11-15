@@ -3140,3 +3140,227 @@ inside it - and the same 300 calls are 19 ms. Checked the same way:
 `search-tests.scm` pins the cost: a hundred `looking-at`s on a
 200 000-character buffer must take under a second (they take 6 ms; they
 took 2 s before), and the test fails on the old code.
+
+# The Lisp indentation engine, and the primitives under it (2026-11-15)
+
+The three commands that were waiting on `calculate-lisp-indent` -
+`indent-sexp` (`lisp-mode.el:1449`), `indent-region` (`indent.el:559`)
+and `move-past-close-and-reindent` (`lisp.el:969`) - are in, with the
+engine they sit on: `lisp-ppss`, the `lisp-indent-state` record,
+`lisp-indent-calc-next`, `lisp-indent-region`, `lisp-indent-line`,
+`calculate-lisp-indent`, `lisp-indent-function`, `lisp-indent-specform`,
+`lisp-indent-defform`, `lisp-comment-indent` and the `lisp-indent-function`
+property table.
+
+**The measure of it is a differential against Emacs's own
+`indent-region`**: take an `.el` file, indent it with `emacs -Q --batch`
+and with this tree, diff. Before the work below, `lisp.el` differed by
+1 048 lines and `pp.el` by 396; the remaining differences are the
+departures named at the end.
+
+## Four departures in the engine itself, all found by that diff
+
+1. **The final `cond` is not inside `(if retry ...)`.** Emacs's C is a
+   *statement* followed by the `let`/`cond` that always runs; the port
+   had the `let` as the else branch, so a line whose state had no
+   containing sexp answered `#f` where Emacs answers `0`. Every
+   top-level line was affected.
+2. **`lisp-indent-function` (the variable) defaults to the procedure.**
+   It is a `defcustom` whose initial value is `#'lisp-indent-function`
+   (`lisp-mode.el:904`); the port read the buffer-local with a `#f`
+   default, so the hook was never called and every form fell back to
+   "align under the first element" - a `defun` body indented to 7 instead
+   of 2.
+3. **`(set! x v)` answers the OLD value in this Guile**, so the C's
+   `(and (looking-at ":") (setq indent (current-column)))` cannot be an
+   `and` over a `set!`: it answers `#f` on the first match and the
+   alignment is lost. Written as an `if`.
+4. **`(elt nil 3)` is nil in Elisp and an error for `list-ref`**, so
+   every state read is `(and state (list-ref state N))`.
+
+## The property table is data, transcribed
+
+Emacs has no table of `lisp-indent-function` properties: `defmacro` reads
+each macro's `(declare (indent N))` and `function-put`s it onto the
+symbol (`byte-run.el`), and `lisp-indent-function` reads it back with
+`(function-get SYMBOL 'lisp-indent-function 'macro)`. This tree has no
+`defmacro`, so the properties of 303 symbols are written out in
+`lisp-mode.scm`, transcribed from a running Emacs 31.1 **with that exact
+call** - `function-get`'s `'macro` argument is what loads an autoloaded
+macro's library, and it is why `pcase`, `cl-callf2`, `dolist` and
+`with-temp-buffer` are in the list.
+
+**The transcription has to ask one symbol at a time.** A first attempt
+loaded every library under `lisp/` and took the properties afterwards:
+that also gives `inline--letlisteval`, a macro defined *in* `inline.el`,
+and a fresh Emacs indenting `inline.el` itself has no such property
+(measured: the continuation line goes to 24; with the property, 27).
+`emacs -Q` answers 160 properties; the autoload-walking dump answers 303;
+the load-everything dump answered 386, of which some are wrong.
+
+## `newcomment.scm` - and the three `when`s that answer true
+
+`indent-for-comment` is `(defalias 'indent-for-comment 'comment-indent)`
+(`newcomment.el:75`), so `lisp-indent-line`'s single-`;` branch needs the
+comment engine. Ported as far as that needs: the variables,
+`comment-normalize-vars`, `comment-search-forward`,
+`comment-indent-default`, `comment-choose-indent`, `comment-indent`.
+
+**Elisp's `when` answers nil when its test fails; Scheme's answers the
+unspecified value, which is true.** Three sites read the answer as a
+value - `comment-indent-default`'s return, `comment-search-forward`'s
+NOERROR path, and the `and` inside `comment-choose-indent`'s forward
+scan - and each turned "no" into "yes". The first surfaced as
+`In procedure =: Wrong type argument in position 1: #<unspecified>`
+three functions later. `comment-indent-function`'s default is
+`comment-indent-default` (the C's `(defvar comment-indent-function
+#'comment-indent-default)`), not `#f`.
+
+## `fixup-whitespace` had lost its parenthesis classes
+
+`simple.el:1123`'s `(or (looking-at "^\\|$\\|\\s)") (save-excursion
+(forward-char -1) (looking-at "$\\|\\s(\\|\\s'")))` was ported as
+bolp/eolp alone, with a note saying a syntax class was not expressible
+in a regexp here. It is now (2026-11-15), and the difference shows the
+moment `M-)` joins a line to a closing paren: `(a b )` where Emacs gives
+`(a b)`.
+
+**The escapes matter**: `"^\|$\|\s)"` (single backslashes) is a
+different regexp from `"^\\|$\\|\\s)"`. Guile reads `\|` as a literal
+`|`, and `%emacs-ere` then escapes that literal, so the alternation
+disappears. Measured both ways.
+
+## The scanner: `Sescape` has to consume the quoted character
+
+`scan_sexps_forward`'s `case Sescape: ... goto startquoted` does
+**`INC_FROM`** and then goes to `symstarted` - the quoted character is
+consumed. The port went straight to `symstarted`, leaving the character
+to the main loop, which read a `"` as a **string opener**. The symptom
+was `pp.el`'s lines 216-238 answering `nil` ("inside a string") where
+Emacs answers 22: line 218 holds `\"` - an escaped quote in a character
+literal - and everything after it was scanned as string.
+
+## `syntax-ppss-toplevel-pos` had drifted into a `cond`
+
+The C is two lines: `(or (car (nth 9 ppss)) (nth 8 ppss))`. The port had
+a `cond` over the depth that also asked `(> (nth 4 ppss) 0)` - and
+element 4 is `t` for a non-nestable comment, so `>` raised
+"Wrong type argument" the first time a scan asked it about a state
+outside a comment.
+
+## `syntax-propertize`: three things it was missing
+
+1. **`save-excursion`.** The mode's function is free to move point and
+   does (`(goto-char start)`); the port called it bare, so every reparse
+   left point at 1. Found as "newline-and-indent ends at point 1".
+2. **`syntax-propertize--done` is set BEFORE the function runs**
+   (`syntax.el:452`), which is what makes the `syntax-ppss` call inside
+   the rules terminate instead of recursing.
+3. **`syntax-propertize-function` is buffer-local**
+   (`setq-local` in every mode). It was a parameter here, so one mode's
+   function applied to every buffer in the editor.
+
+And `parse-partial-sexp` propertizes as it scans: the C's
+`update_syntax_table_forward` calls `parse_sexp_propertize` whenever the
+known run reaches past `syntax-propertize--done` (`syntax.c:516`). That
+is ported, with `%syntax-propertize-done` cached because the C reads a
+global on every character.
+
+**Two details that only showed once a whole file was indented.** The
+check has to run on **every character**, as `UPDATE_SYNTAX_TABLE_FORWARD`
+does; checking it only when the interval run changes left the buffer
+half propertized, because the last run reaches to `ZV` and no change is
+ever seen again - `vtable.el` line 208 indented to 8 where Emacs says 6,
+and `syntax-propertize--done` stuck 300 characters behind the scan. And
+the truncation branch needs its `e_property_truncated` flag: when
+`e_property` is cut back to `--done` the cached interval is a belief no
+longer, and the next walk off it says "Error in syntax_table logic for
+to-the-end intervals". Both fixed, and the whole-file indent is then
+~350 ms per 170 KB (it was 5 s while half-propertized).
+
+## `syntax-ppss`'s cache had lost its ordering, and `pt-min`
+
+Found by running `calculate-lisp-indent` line by line over `subr-x.el`,
+where it raised "End position is smaller than start position". Three
+things, all in `syntax.el`'s cache:
+
+1. **The cache list is kept in decreasing position order**, and the
+   scan's `(while (and cache (< pos (caar cache))) ...)` depends on it.
+   The port pushed every new entry at the front regardless; Emacs
+   replaces or inserts by gap (`(if (> (- (caar cache-pred) pos)
+   syntax-ppss-max-span) (push ...) (setcar ...))`) and writes the list
+   back with `(setcdr cell ppss-cache)`.
+2. **`(setq pt-min (or ...))` inside the `and`** - `set!` answers the old
+   value here, so the `(<= pt-min pos)` test used the *previous* value.
+3. **The `else` branch rebinds `pt-min` to `(point-min)`.** Without it,
+   the OLD-PPSS branch's `set!` (which runs even when its test then
+   fails) left `pt-min` at a position after POS, and the parse got
+   FROM > TO.
+
+## `parse-partial-sexp` accepts a short OLDSTATE
+
+`move-past-close-and-reindent` passes a **nine**-element state
+(`lisp.el:985`) and the C reads it with `Fcar`/`Fcdr`, which answer nil
+past the end. `list-ref` raised "Argument 2 out of range: 9" instead;
+`%oldstate-ref` walks the list.
+
+## `move-past-close-and-reindent`, and the seam it needed
+
+`lisp.el`'s function calls `calculate-lisp-indent`, which is
+`lisp-mode.el`s - and `lisp-mode.scm` imports `lisp.scm`, so the call
+comes back through `*calculate-lisp-indent-function*`, filled by
+`lisp-mode.scm` at load, the way `simple.scm` fills
+`*delete-horizontal-space-function*`. Bound to `M-)` (`bindings.el:1671`);
+`C-M-q` is `indent-sexp` in `lisp-mode-shared-map` (`lisp-mode.el:818`)
+and `C-M-\` is `indent-region` (`indent.el:811`).
+
+## Still departures, and what each waits for
+
+* **`syntax-propertize-rules`, the macro.** `elisp-mode-syntax-propertize`
+  is written out as one scan over the four rules' alternation - the
+  shape the macro produces - because the macro itself needs
+  `regexp-opt-depth`, `subregexp-context-p` and match-data shifting. The
+  `?\N{...}` rule is included. `lisp-mode-syntax-propertize` (the `|...|`
+  multi-escape and `#` dispatch rules, `lisp-mode.el:106`) is *not*
+  carried: it belongs to Common Lisp mode, whose indentation table is
+  missing anyway.
+* **`cl-indent.el`'s `common-lisp-indent-function`** (~900 lines of
+  table) and **`scheme.el`'s `scheme-indent-function`**: not ported. A
+  CL or Scheme buffer therefore indents with the default
+  `lisp-indent-function`, and `lisp-mode-variables`/`scheme-mode-variables`
+  do not store the symbol - a symbol is not callable here, so storing it
+  would raise "Wrong type to apply" on the first indent.
+* **`lisp--local-defform-body-p`** (`lisp-mode.el:1197`) **is** carried
+  now - it was the difference between matching and not on `cl-extra.el`,
+  `ert.el`, `eldoc.el`, `generator.el` and `comp.el`, all of which indent
+  their `cl-flet`/`cl-labels` bodies as definitions. Two things had to be
+  right: its `when`s must answer `#f` (Scheme's answer the unspecified
+  value, which the caller reads as true), and Emacs's
+  `(read (current-buffer))` leaves point **past the symbol**, which a
+  string-port read does not - so the port does `(forward-sexp 1)` after
+  reading the head.
+* **`indent-pp-sexp`** (Emacs's `C-M-q` in `emacs-lisp-mode`) is
+  `indent-sexp` plus `pp-buffer`, and `pp` is not ported; the mode keeps
+  the shared map's `indent-sexp`.
+* **`function-get`'s alias-following** is not carried - ours is `get`.
+* The `function-get ... 'macro` table cannot see a macro from a library
+  that neither is dumped nor autoloaded, which in practice means a
+  *user's* library.
+
+## The one remaining corpus difference: `icons.el`'s `define-icon`
+
+Of the 110 files under `lisp/emacs-lisp/`, five still differ:
+`cl-macs.el` (71 lines), `ewoc.el` (157), `icons.el` (6), `lisp-mode.el`
+(2) and `warnings.el` (10). `icons.el`'s is understood and measured -
+Emacs's `indent-region` gives column 13 where its own
+`calculate-lisp-indent` gives 2 - and it is the same `define-icon`
+shape in `warnings.el`. Its `(define-icon button nil '(...) ...)` form is
+indented to column 13 by Emacs's `indent-region` - aligned under the
+first argument, i.e. as if `define-icon` had no `lisp-indent-function`
+property - while **Emacs's own `calculate-lisp-indent` at that line
+answers 2** in the same session (measured directly, and `(get
+'define-icon 'lisp-indent-function)` is 2 there too; `icons` is
+preloaded). Emacs's `indent-region-line-by-line` gives 13 as well, so it
+is not the fast path's cache. Ours answers what `calculate-lisp-indent`
+answers, which is the function the engine is defined by. Emacs's two
+paths disagree here and the port follows the documented one.

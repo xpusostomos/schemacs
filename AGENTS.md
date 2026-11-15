@@ -8282,3 +8282,144 @@ window now, and `search-tests.scm` pins it with a time bound.
 `looking-back` still copies a substring per start position it tries; it
 is walked from point backward and is not on a hot path, but it is the
 next one to look at if a search ever shows up in a profile.
+
+# The Lisp indentation engine, and the five primitives it broke open
+# (2026-11-15)
+
+Chris: *"keep porting those sexp functions, you didn't finish yet"* -
+`indent-sexp`, `indent-region` and `move-past-close-and-reindent`, the
+three that rest on `calculate-lisp-indent` and `lisp-indent-line`. They
+are in, with the whole engine under them (`lisp-mode.el:880-1500`),
+`indent.el`'s layer and `newcomment.el`'s `comment-indent`. DEPARTURES.md
+has the four engine departures and every scanner fix; this is the shape
+of the work and what it taught.
+
+## The method that found everything: indent a file both ways and diff
+
+`emacs -Q --batch` with `(indent-region (point-min) (point-max))` on a
+copy, this tree's `indent-region` on the same text, `diff`. That is the
+whole harness - no unit test, no invented expectation - and it turned a
+"probably right" engine into a list of named failures and then into **105
+of the 110 files** under `lisp/emacs-lisp/` exact. The five that remain
+are places where Emacs's `indent-region` disagrees with its own
+`calculate-lisp-indent` (measured on two of them); DEPARTURES.md names
+them. Use it before believing
+any indentation result: an engine can be plausible line by line and
+wrong in aggregate.
+
+The corpus runner is three lines and worth rebuilding when needed:
+
+    for f in /path/*.el; do
+      guile --no-auto-compile -L . -L "$SITE" -s /tmp/ind-file.scm "$f"
+      cp "$f" /tmp/em-x.el
+      emacs -Q --batch --eval '(progn (find-file "/tmp/em-x.el")
+        (emacs-lisp-mode) (indent-region (point-min) (point-max))
+        (save-buffer) (kill-emacs))'
+      cmp -s /tmp/em-x.el /tmp/ours-out.el || echo "DIFF $f"
+    done
+
+## What the diff found, in the order it found it
+
+1. **The engine's final `cond` was inside `(if retry ...)`.** Every
+   top-level line answered `#f` instead of `0`.
+2. **The `lisp-indent-function` *variable* defaulted to `#f`.** The hook
+   never ran, so every `(defun ...)` body aligned to column 7 rather than
+   2. Its `defcustom` initial value is the procedure itself.
+3. **The properties the hook reads are data Emacs builds at macro
+   definition time.** 303 of them are transcribed now; the transcription
+   must ask `(function-get SYMBOL 'lisp-indent-function 'macro)` **one
+   symbol at a time**, or it picks up macros from libraries a real Emacs
+   has not loaded - which reads as a *regression* on the very file that
+   defines them (`inline--letlisteval`).
+4. **`fixup-whitespace` had lost its `\s(`/`\s)` classes** (they became
+   expressible on 2026-11-15). `M-)` showed it: `(a b )` for `(a b)`.
+5. **The scanner did not consume the character after `\`.** `(a \" b)`
+   was "inside a string" from the quote onwards, which is why `pp.el`'s
+   lines 216-238 all answered `nil`. The C's `case Sescape:` ends
+   `goto startquoted`, and `startquoted` does `INC_FROM` before
+   `symstarted`.
+6. **`syntax-ppss-toplevel-pos` was a `cond` over the depth** where the C
+   is `(or (car (nth 9 ppss)) (nth 8 ppss))`; its `(> (nth 4 ppss) 0)`
+   raised on a `t`.
+7. **`syntax-propertize` needed `save-excursion`** (the mode's function
+   does `(goto-char start)`), needed `--done` set *before* the function
+   runs (recursion guard), and `syntax-propertize-function` is
+   **buffer-local**, not a parameter.
+8. **`parse-partial-sexp` propertizes as it scans**
+   (`update_syntax_table_forward` -> `parse_sexp_propertize`), and
+   accepts a *short* OLDSTATE - `lisp.el` passes a nine-element one.
+
+Every one of those is a primitive, and every one was invisible until
+something was built on top of it. This is the "port the primitives
+first" rule paying out: the same session that ported the engine also had
+to fix the scanner twice, `syntax-ppss`, `syntax-propertize` and
+`parse-partial-sexp`'s OLDSTATE.
+
+## `,@` is why `syntax-propertize` had to be wired at all
+
+`emacs-lisp-mode`'s syntax table gives `@` plain symbol syntax and the
+mode propertizes `,@` as a quote (`elisp-mode.el:259`). Without it, every
+backquote splice in a file indents two columns out - `cl-macs.el` alone
+was 15 lines. `syntax-propertize-rules` (the macro) is not ported, so
+`elisp-mode-syntax-propertize` writes the four rules out as **one**
+alternation. Four separate scans cost 35 s on a 170 KB file: each restart
+threw `syntax-ppss`'s cache backwards. The single scan costs 5 s, and
+the whole-file indent is now ~5 s per 170 KB.
+
+## The harness trap that cost the most
+
+`grep -v "note: source"` on a run hides **"source file X newer than
+compiled"** - which is Guile telling you it is about to load *source*
+rather than the `.go`. Several A/B measurements in this pass compared
+compiled against interpreted and a "fix" looked like it did nothing.
+Compile the tree (`guile -L . -L "$SITE" -c '(compile-file "f")'`) and
+do not filter that note away while measuring.
+
+## What to do next on this file
+
+* `cl-indent.el`'s `common-lisp-indent-function` and `scheme.el`'s
+  `scheme-indent-function` are the two tables modes still want, and both
+  are pure data transcribed the way the property table was.
+* `syntax-propertize-rules` wants `regexp-opt-depth` and
+  `subregexp-context-p`; until then `lisp-mode-syntax-propertize`'s
+  `|...|` rule is missing.
+* `indent-pp-sexp` needs `pp`.
+
+## The scanner and `syntax-ppss` were where the remaining bugs were
+## (2026-11-15, second pass)
+
+After the engine matched Emacs line by line, three more failures came out
+of the *same* differential, and all three were in primitives:
+
+1. **`syntax-propertize` propertizes on every character** as a scan runs
+   (`update_syntax_table_forward` -> `parse_sexp_propertize`), not only
+   when the interval run changes. Checking only on a run change left a
+   file half propertized - `syntax-propertize--done` stuck 300
+   characters behind the scan, `vtable.el` off by two columns - and the
+   half-propertized state was 12x slower than the correct one. The
+   truncation branch needs `e_property_truncated` or the next walk off
+   the cache says "Error in syntax_table logic for to-the-end
+   intervals".
+2. **`syntax-ppss`'s cache is in decreasing position order**, replaced or
+   inserted by gap; the port pushed every entry at the front. With that,
+   plus `(setq pt-min ...)` written as a `set!` inside an `and` (it
+   answers the *old* value here), plus the missing `pt-min` rebinding in
+   the `else` branch, running `calculate-lisp-indent` line by line over
+   `subr-x.el` raised "End position is smaller than start position".
+3. **`scan_sexps_forward`'s `Sescape` path goes to `startquoted`**, which
+   consumes the quoted character; going straight to `symstarted` made a
+   `\"` in a character literal open a string, and `pp.el`'s lines
+   216-238 all answered nil.
+
+`lisp--local-defform-body-p` is carried after all (it was dropped in the
+first pass): it is what makes a `cl-flet`/`cl-labels` body indent as a
+definition, and `cl-extra.el`, `ert.el`, `eldoc.el`, `generator.el` and
+`comp.el` all depend on it. Two traps in porting it: its `when`s must
+answer `#f` (the caller is an `if`), and Emacs's `(read (current-buffer))`
+leaves point past the symbol - a string-port read does not, so the port
+follows it with `(forward-sexp 1)`.
+
+**A pty check written for `C-M-q`/`M-)` was wrong twice before the
+editor was**: it sent the literal text `C-s` instead of control-S, and it
+pressed `M-)` from point 1, where Emacs signals "Unbalanced parentheses"
+too. Both are cheap mistakes to make when the harness speaks bytes.

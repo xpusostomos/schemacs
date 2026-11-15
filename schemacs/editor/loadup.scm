@@ -146,6 +146,7 @@
         (schemacs editor easy-mmode)
         (schemacs editor editfns)
         (schemacs editor elisp-mode)
+        (schemacs editor newcomment)
         (schemacs editor face-remap)
         
         (schemacs editor env)

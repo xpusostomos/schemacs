@@ -5,7 +5,12 @@
   (only (schemacs editor buffer)
         *current-buffer* allocate-buffer get-buffer-create set-buffer
         erase-buffer buffer-z set-point major-mode buffer-local-value)
-  (only (schemacs editor editfns) insert)
+  (only (schemacs editor editfns)
+        insert buffer-string point point-max goto-char forward-line
+        line-beginning-position)
+  (only (schemacs editor indent) indent-region)
+  (only (schemacs editor newcomment) indent-for-comment)
+  (only (schemacs editor indentc) current-column)
   (only (schemacs editor frame) *current-frame* new-frame)
   (only (schemacs editor syntax)
         char-syntax set-syntax-table syntax-table standard-syntax-table
@@ -16,7 +21,8 @@
   (only (schemacs editor textprop) get-text-property)
   (only (schemacs editor scheme) scheme-mode)
   (only (schemacs editor elisp-mode) emacs-lisp-mode lisp-interaction-mode)
-  (only (schemacs editor lisp-mode) lisp-mode lisp-data-mode)
+  (only (schemacs editor lisp-mode) lisp-mode lisp-data-mode
+        calculate-lisp-indent indent-sexp)
   (only (schemacs editor text-mode) text-mode)
   (only (schemacs editor files) find-file-noselect kill-buffer)
   (only (schemacs editor buffer) set!text-editor-file-name with-current-buffer))
@@ -213,5 +219,94 @@
 
 (test-equal "a file whose mode this tree has not got keeps the default"
   'fundamental-mode (visit "/tmp/auto-mode-test.c" "int main(void) {}\n"))
+
+;; ------------------------------------------------------------------
+;; The Lisp indentation engine (`lisp-mode.el:880-1500'): `calculate-
+;; lisp-indent', `lisp-indent-line' through `indent-region', `indent-sexp'
+;; and the comment path.
+;;
+;; **Every expectation here is Emacs 31.1's own answer**, measured with
+;; `emacs -Q --batch' on the same text in the same mode - including the
+;; per-line `calculate-lisp-indent' table, which is what the engine is
+;; judged on.
+
+(test-begin "schemacs_editor_lisp_indent")
+
+(define *indent-sample*
+  "(defun foo (a b)\n\"doc\"\n(let ((x 1))\n(+ x a)))\n\n(if a\nb\nc)\n\n(when x\n(y)\n(z))\n\n(defvar v\n1)\n\n(save-excursion\n(setq x 1)\n(y))\n")
+
+(with-buffer
+ (lambda (b)
+   (insert *indent-sample*)
+   (emacs-lisp-mode)
+   (goto-char 1)
+   (let loop ((n 1) (out '()))
+     (if (= (point) (point-max))
+         (test-equal "`calculate-lisp-indent' answers Emacs's column on every line"
+           '((1 0) (2 2) (3 0) (4 2) (5 0) (6 0) (7 (4 48)) (8 0) (9 0) (10 0)
+             (11 2) (12 0) (13 0) (14 0) (15 2) (16 0) (17 0) (18 2) (19 0))
+           (reverse out))
+         (let ((v (calculate-lisp-indent)))
+           (forward-line 1)
+           (loop (+ n 1) (cons (list n v) out)))))))
+
+(with-buffer
+ (lambda (b)
+   (insert *indent-sample*)
+   (emacs-lisp-mode)
+   (indent-region 1 (point-max))
+   (test-equal "`indent-region' reindents the sample as Emacs does"
+     "(defun foo (a b)\n  \"doc\"\n  (let ((x 1))\n    (+ x a)))\n\n(if a\n    b\n  c)\n\n(when x\n  (y)\n  (z))\n\n(defvar v\n  1)\n\n(save-excursion\n  (setq x 1)\n  (y))\n"
+     (buffer-string))))
+
+(with-buffer
+ (lambda (b)
+   (insert "(foo\n(a b)\n   (c\n d))\n")
+   (emacs-lisp-mode)
+   (goto-char 1)
+   (indent-sexp)
+   (test-equal "`indent-sexp' indents the whole list after point"
+     "(foo\n (a b)\n (c\n  d))\n" (buffer-string))))
+
+;; A backquote splice: `,@' is not a string quote and not a symbol - the
+;; mode propertizes it as `' (`elisp-mode-syntax-propertize'), and the
+;; line under it aligns with the sexp it follows.
+(with-buffer
+ (lambda (b)
+   (insert "(a\n `(,@(nreverse x)\n,@body))\n")
+   (emacs-lisp-mode)
+   (goto-char 1)
+   (forward-line 2)
+   (test-equal "`calculate-lisp-indent' after a `,@' splice"
+     3 (calculate-lisp-indent))))
+
+;; An escaped quote in a character literal - `?\"' - must not open a
+;; string. Every line after it was reported "inside a string" until the
+;; scanner's escape path was fixed.
+(with-buffer
+ (lambda (b)
+   (insert "(x (y ?\\\") z)\n(a ?\\\" b)\n")
+   (emacs-lisp-mode)
+   (goto-char 1)
+   (let ((one (calculate-lisp-indent)))
+     (forward-line 1)
+     (test-equal "`?\\\"' is a character, not a string opener"
+       (list 0 0) (list one (calculate-lisp-indent))))))
+
+;; A single-semicolon comment line is indented as a comment
+;; (`indent-for-comment'), to `comment-column' - 40 in a Lisp mode.
+(with-buffer
+ (lambda (b)
+   (insert "(foo\n; hello\n(bar))\n")
+   (emacs-lisp-mode)
+   (goto-char 1)
+   (forward-line 1)
+   (indent-for-comment)
+   (test-equal "a lone `;' comment goes to `comment-column'"
+     42 (current-column))
+   (test-equal "...and the text is Emacs's"
+     "(foo\n\t\t\t\t\t; hello\n(bar))\n" (buffer-string))))
+
+(test-end "schemacs_editor_lisp_indent")
 
 (test-end "schemacs_editor_lisp_modes")

@@ -292,11 +292,13 @@
 
 ;; This buffer is a shape the cache has to get right and the old one got
 ;; wrong: 40 000 characters carrying 4 000 `face' intervals and no
-;; `syntax-table' property at all. Measured with the C's cache: 21 ms
-;; backward, 12 ms forward; with the forward-only one the same backward
-;; scan took 11 900 ms, and the cost grows with the square of the
-;; buffer. The bound is a hundred times the measured time and six times
-;; under the old one.
+;; `syntax-table' property at all. Measured with the C's cache: 450 ms
+;; backward (21 ms before the per-character propertize check of
+;; 2026-11-15, which is a vector-ref and a compare); with the
+;; forward-only cache the same backward scan took 11 900 ms, and the
+;; cost grows with the square of the buffer. The bound sits well under
+;; the old number and far above the measured one so a loaded machine
+;; does not fail it.
 (with-buffer
  (lambda (b)
    (fresh-syntax-table!)
@@ -311,7 +313,7 @@
      (test-equal "a backward scan lands where the forward one started"
        1 where)
      (test-assert "and it crosses the intervals once, not once per character"
-       (< ms 2000)))))
+       (< ms 5000)))))
 
 ;; `C-g' during a long command. The C's scan loops call `rarely_quit'
 ;; (`lisp.h:3914') once every 65536 characters, which looks at

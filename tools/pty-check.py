@@ -2373,6 +2373,48 @@ def check_switch_buffer():
     return problems
 
 
+
+def check_indent():
+    """`C-M-q' indents the sexp, and `M-)' closes and reindents.
+
+    GNU Emacs's `indent-sexp' is `lisp-mode.el:1449' and is on `C-M-q' in
+    `lisp-mode-shared-map' (`:818'); `move-past-close-and-reindent' is
+    `lisp.el:969' and is on `M-)' (`bindings.el:1671'). Both are looked at
+    on the file after `C-x C-s', so what is compared is the bytes Emacs
+    31.1 writes for the same keys - measured with `emacs -Q --batch' on
+    the same text.
+
+    The engine under them is `calculate-lisp-indent'; the second half of
+    this check is the case that made the scanner fix: an escaped quote in
+    a character literal (`?\\"') must not open a string, or every line
+    after it indents as "inside a string".
+    """
+    path = "/tmp/pty-check-indent.el"
+    open(path, "w").write("(defun foo (a b)\n(let ((x 1))\n(+ x a)))\n")
+    problems = []
+    # C-M-q is ESC then C-q, as a terminal sends a control key with the
+    # meta prefix. (`C-x C-q' is `read-only-mode', a different key.)
+    drive([ESC + b"\x11", C_x + C_s], path)
+    got = open(path).read()
+    want = "(defun foo (a b)\n  (let ((x 1))\n    (+ x a)))\n"
+    if got != want:
+        problems.append("C-M-q indented to %r, Emacs gives %r" % (got, want))
+
+    # M-) on a list whose close paren sits on its own line: the line is
+    # joined up and what follows is reindented.
+    path2 = "/tmp/pty-check-mpcr.el"
+    open(path2, "w").write("(defun foo ()\n  (a b\n       )\n  (c))\n")
+    # Point must be *inside* the list for `up-list' to find its close:
+    # from the top of the file Emacs signals "Unbalanced parentheses" too.
+    # Line 3 is the one holding the lone `)'.
+    drive([DOWN, DOWN, ESC + b")", C_x + C_s], path2)
+    got2 = open(path2).read()
+    want2 = "(defun foo ()\n  (a b)\n  \n  (c))\n"
+    if got2 != want2:
+        problems.append("M-) left %r, Emacs gives %r" % (got2, want2))
+
+    return problems
+
 def check_kill_buffer():
     """`C-x k' prompts for the buffer, and says nothing when it kills.
 
@@ -4854,6 +4896,7 @@ CHECKS = {
     "back-door": check_back_door,
     "splash": check_splash,
     "switch-buffer": check_switch_buffer,
+    "indent": check_indent,
     "abbreviate": check_abbreviate,
     "kill-buffer": check_kill_buffer,
     "delete-frame": check_delete_frame,

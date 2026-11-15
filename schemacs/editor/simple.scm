@@ -120,9 +120,17 @@
     ;; The line options are `defcustom's in Emacs, so a user can set them
     ;; through Customize as well as by name.
     (only (schemacs editor custom) define-custom)
+    (only (schemacs editor search) looking-at)
     (only (schemacs editor syntax) skip-chars-forward skip-chars-backward
+          skip-syntax-forward backward-prefix-chars
           word-char? forward-word-position backward-word-position
           word-run-end word-run-start)
+    ;; `newline-and-indent` calls `indent-according-to-mode`, `indent.el`'s;
+    ;; `simple.scm` is above `indent.scm`, and the one call the other way -
+    ;; `tab-to-tab-stop`'s `delete-horizontal-space` - goes through a seam,
+    ;; which this library fills at load (the end of the file).
+    (only (schemacs editor indent)
+          indent-according-to-mode *delete-horizontal-space-function*)
     ;; `transpose-chars' reads the `read-only' property of the character
     ;; before point, which is `textprop.c`'s - Emacs's own test, added
     ;; with the `text-editor-move-cursor' removal 2026-10-13.
@@ -188,6 +196,8 @@
    ;; Emacs's `newline' clashes with `(scheme base)'s output procedure,
    ;; so the command is named `insert-newline' here; see below.
    insert-newline
+   newline-and-indent
+   back-to-indentation
    place-undo-boundary! previous-line read-only-mode
    ;; `bindings.el`'s arrow-key commands (there is no `bindings.sld`
    ;; here; the arrows are bound in this file).
@@ -709,6 +719,30 @@ This has no effect when the variable `line-move-visual' is non-nil."
     ;; `keyboard-quit', `read-only-mode' and
     ;; `exchange-point-and-mark' are simple.el's; they were
     ;; misfiled under the Windows and isearch banners.
+    (define-command (newline-and-indent . rest)
+      "Insert a newline, then indent according to major mode.
+Indentation is done using the value of `indent-line-function'.
+In programming language modes, this is the same as TAB.
+In some text modes, where TAB inserts a tab, this command indents to the
+column specified by the function `current-left-margin'.
+
+With ARG, perform this action that many times.
+
+Also see `open-line' (bound to \\[open-line]) for a command that
+just inserts a newline without doing any indentation."
+      (interactive (list (current-prefix-arg)))
+      (delete-horizontal-space #t)
+      (let ((arg (if (pair? rest) (car rest) #f)))
+        (let ((arg (if arg (uarg->integer 1 arg) 1)))
+          ;; The C binds `electric-indent-mode' to nil around the loop;
+          ;; this tree's `newline` does not consult it, so there is
+          ;; nothing to bind.
+          (let loop ((n arg))
+            (when (> n 0)
+              (insert-newline 1)
+              (indent-according-to-mode)
+              (loop (- n 1)))))))
+
     (define-command (keyboard-quit)
       ;; GNU Emacs's `keyboard-quit` (`simple.el:9785`): "Signal a `quit'
       ;; condition. During execution of Lisp code, this character causes a
@@ -2628,16 +2662,20 @@ If N is omitted or nil, move point 1 character to the left."
 (define (fixup-whitespace)
       ;; GNU Emacs's `fixup-whitespace' (simple.el:1123): "Fixup white
       ;; space between objects around point. Leave one space or none,
-      ;; according to the context." Point is kept where it was, which
-      ;; is the C's `save-excursion' around the whole body. The context
-      ;; without the parenthesis *syntax classes* (`\s)' and `\s(',
-      ;; which need a syntax table) is a line's ends: no space at
-      ;; either, one space otherwise - and the `looking-at' question at
-      ;; the point deletion left is bolp/eolp here.
+      ;; according to the context."
+      ;;
+      ;; The parenthesis classes are Emacs's `\s)' and `\s'', which the
+      ;; regexp engine translates from the buffer's syntax table. Until
+      ;; 2026-11-15 this was bolp/eolp alone, because a syntax class was
+      ;; not expressible in a regexp here - and the difference shows the
+      ;; moment a line is joined to a closing paren: `(a b )' where Emacs
+      ;; gives `(a b)'.
       ;;--------------------------------------------------------------
       (save-excursion
         (delete-horizontal-space #f)
-        (if (or (bolp) (eolp))
+        (if (or (looking-at "^\\|$\\|\\s)")
+                (save-excursion (forward-char -1)
+                                (looking-at "$\\|\\s(\\|\\s'")))
             #f
             (insert " "))))
 
@@ -3404,5 +3442,18 @@ a buffer-local setting."
             (message "Goal column ~a (use \\[set-goal-column] with an arg to unset it)"
                      column)))
       #f)
+
+    (define-command (back-to-indentation)
+      "Move point to the first non-whitespace character on this line."
+      (interactive '())
+      (beginning-of-line 1)
+      (skip-syntax-forward " " (line-end-position))
+      ;; "Move back over chars that have whitespace syntax but have the p
+      ;; flag."
+      (backward-prefix-chars))
+
+    ;; The seam `indent.scm` reaches `delete-horizontal-space` through -
+    ;; see the note at the top of this file's imports.
+    (*delete-horizontal-space-function* delete-horizontal-space)
 
     ))
