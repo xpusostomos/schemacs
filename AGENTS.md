@@ -8941,6 +8941,18 @@ now and does the same, reading the property through
 
 ## Still to do on the tab line
 
+0. **The scroll arrows do not appear.** `tab-line-auto-hscroll` decides
+   whether the tabs fit by `(> (vertical-motion 1) 0)` in a scratch
+   buffer - Emacs's own test - and our `vertical-motion` answers 0 for a
+   single long line, because it counts *buffer* lines and Emacs counts
+   *screen* lines (`indent.c`'s `move_it_vertically`). Measured
+   headlessly: `(tab-line-auto-hscroll (list (make-string 200 #a)) #f)`
+   answers `(#f #f)` where Emacs answers show-arrows. So a tab line wider
+   than its window is truncated by `mode-line-truncate` with no `<`/`>`
+   buttons, and `tab-line-hscroll` is reachable only from Lisp. Closing
+   it is `vertical-motion`'s screen-line counting, which is
+   `indent.c`'s and a piece of work on its own.
+
 1. **The mouse path is done** - see "The click dispatch" above.
    `posn-at-x-y` answers the `tab-line` area with the string drawn
    there, `dispatch-key-event` makes Emacs's two events of it, and
