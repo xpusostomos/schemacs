@@ -42,6 +42,12 @@
   ;;     here, so the per-window walk `walk-windows` would make is not
   ;;     needed and `walk-windows` itself is not carried: the ALL branch
   ;;     walks each frame's `window-list` instead.
+  ;;   * **a tab is an alist with no head symbol.** Emacs writes
+  ;;     `(tab (name . G) (select . F))`; `assq` there tolerates the
+  ;;     leading symbol because `Fassq` compares a non-cons element with
+  ;;     the key and moves on, and Guile's `assq` raises instead. The head
+  ;;     is decorative - every reader is an `assq` or an `alist-get` - so
+  ;;     it is dropped rather than teaching `assq` Emacs's tolerance.
   ;;   * a tab's `keymap` text property holds the *keymap value* here, as
   ;;     it does in Emacs - a map is an object in this tree, not a symbol.
   ;;   * `(:eval (tab-line-format))` is `(:eval tab-line-format)`: this
@@ -165,7 +171,7 @@
    ;; the buttons
    tab-line-new-button tab-line-close-button tab-line-close-modified-button
    tab-line-left-button tab-line-right-button tab-line-separator
-   tab-line-new-button-functions tab-line-tabs-buffer-groups
+   tab-line-new-button-functions tab-line-tabs-buffer-groups-alist
    tab-line-exclude tab-line-tab-name-ellipsis tab-line-auto-hscroll-buffer
    ;; the options
    *tab-line-tab-face-functions* *tab-line-new-tab-choice*
@@ -338,12 +344,19 @@ When a function, it is called with the tab as its argument."
       ;;--------------------------------------------------------------
       (string< (buffer-name a) (buffer-name b)))
 
-    (define tab-line-tabs-buffer-groups '())
+    (define tab-line-tabs-buffer-groups-alist '())
     ;; ^ `(defvar tab-line-tabs-buffer-groups mouse-buffer-menu-mode-groups
     ;; ...)' - `menu-bar.el`'s group table, which this tree has not got.
     ;; Nil is Emacs's own fallback: `tab-line-tabs-buffer-group-by-mode`
     ;; then finds no entry and names the group after the mode, which is
     ;; what its docstring says the default does.
+    ;;
+    ;; **The name carries `-alist` because Scheme is a Lisp-1.** Emacs has
+    ;; a *variable* and a *function* both called
+    ;; `tab-line-tabs-buffer-groups`; here the two would be one binding and
+    ;; the second definition would silently replace the first - which is
+    ;; what happened until a probe asked. The function keeps the name,
+    ;; because a defcustom's choice list names it by symbol.
 
     (define (tab-line-tabs-buffer-group-by-mode . args)
       ;; GNU Emacs's `tab-line-tabs-buffer-group-by-mode` (`:487`):
@@ -359,9 +372,13 @@ When a function, it is called with the tab as its argument."
                             buffer
                           (format-mode-line mode-name))
                         (format-mode-line mode-name))))
-          (or (cdr (seq-find (lambda (group)
-                               (string-match-p (car group) mode))
-                             tab-line-tabs-buffer-groups))
+          ;; `(cdr nil)` is nil in Elisp, so a group table with no match
+          ;; answers MODE; here `seq-find` answers #f and `cdr` would
+          ;; raise.
+          (or (let ((group (seq-find (lambda (entry)
+                                       (string-match-p (car entry) mode))
+                                     tab-line-tabs-buffer-groups-alist)))
+                (and group (cdr group)))
               mode))))
 
     (define (tab-line-tabs-buffer-group-name . args)
@@ -396,8 +413,7 @@ When a function, it is called with the tab as its argument."
                  (selected-group (window-parameter (selected-window)
                                                    'tab-line-group)))
             (map (lambda (group)
-                   (list 'tab
-                         (cons 'name group)
+                   (list (cons 'name group)
                          (cons 'selected (equal? group selected-group))
                          (cons 'select
                                (lambda ()
@@ -418,8 +434,7 @@ When a function, it is called with the tab as its argument."
                                                   'tab-line-group #f))
                           g))
                  (group-tab
-                  (list 'tab
-                        (cons 'name group)
+                  (list (cons 'name group)
                         (cons 'group-tab #t)
                         (cons 'select
                               (lambda ()
@@ -439,8 +454,7 @@ When a function, it is called with the tab as its argument."
                                 buffers)
                       buffers))
                  (tabs (map (lambda (buffer)
-                              (list 'tab
-                                    (cons 'name
+                              (list (cons 'name
                                           ((*tab-line-tab-name-function*)
                                            buffer))
                                     (cons 'selected

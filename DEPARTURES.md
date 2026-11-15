@@ -3848,6 +3848,22 @@ and `seq-copy`, and each is written over lists. `cl-position` and
   `force-mode-line-update`'s ALL argument already marks one flag, so
   nothing else about the walk matters.
 
+### The click on a tab does not reach `tab-line-select-tab`
+
+- **Emacs**: `make_lispy_event` prefixes a click whose position has a
+  *symbol* area with that symbol, so the key looked up is
+  `[tab-line down-mouse-1]`; and `current_active_maps`
+  (`keymap.c:1649`) adds the `keymap` text property of the posn's
+  *string* to the active maps. That pair is the whole of "a tab is a
+  button".
+- **Here**: `posn-at-x-y` now answers the `tab-line` area with the
+  string in the object slot, so the *position* says which tab was hit -
+  but `dispatch-key` still reads `(down-mouse-1 POSN)` as one event and
+  `lookup-keymaps` never consults `*last-read-event*`. A click on a tab
+  therefore runs `mouse-drag-region` and moves point. The commands, the
+  five keymaps and the `keymap` property on the string are all in
+  place; closing this is the prefixing and the position map.
+
 ### Named, not carried, in `tab-line.scm`'s header
 
 The buffer menu behind `tab-line-new-tab-choice`'s `t` (`mouse-buffer-menu`
