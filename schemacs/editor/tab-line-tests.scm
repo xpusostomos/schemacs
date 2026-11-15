@@ -19,6 +19,7 @@
  (only (schemacs editor subr) *after-change-major-mode-hook* run-hooks
        posn-area posn-point posn-string)
  (only (schemacs editor keyboard) *last-read-event* dispatch-key)
+ (only (schemacs editor simple) *last-command*)
  (only (schemacs editor frame) frame-message set!frame-keymap-state)
  (only (schemacs editor xdisp) posn-at-x-y render!)
  (only (schemacs editor tab-line)
@@ -26,7 +27,8 @@
        global-tab-line-mode-variable tab-line-format
        tab-line-tabs-window-buffers tab-line-tabs-fixed-window-buffers
        tab-line-select-tab tab-line-hscroll tab-line--get-tab-property
-       tab-line-tab-map tab-line-mode--turn-on tab-line-tabs-non-excluded
+       tab-line-tab-map tab-line-tab-close-map tab-line-close-tab
+       tab-line-mode--turn-on tab-line-tabs-non-excluded
        tab-line-force-update))
 
 ;; Unbuffered output, so a run that hangs shows where it got to.
@@ -370,5 +372,36 @@
              (let ((message (frame-message click-frame)))
                (or (not message)
                    (not (string-contains message "mode-line is undefined")))))
+
+;; The `x` on a tab carries its *own* keymap, so a click there closes the
+;; tab where a click on the name selects it - two bindings in one string.
+(define (close-position string)
+  (let loop ((i 0))
+    (cond ((>= i (string-length string)) #f)
+          ((eq? (get-text-property i 'keymap string) tab-line-tab-close-map) i)
+          (else (loop (+ i 1))))))
+
+(test-assert "the close button carries the close map"
+             (parameterize ((*current-frame* click-frame))
+               (let ((string (tab-string-for (get-buffer "click-two"))))
+                 (and string (close-position string) #t))))
+
+;; **A release, not a press.** `tab-line-tab-close-map` binds
+;; `[tab-line mouse-1]` and the tab map binds `[tab-line down-mouse-1]`:
+;; the press selects and the *release* closes, which is Emacs's own split
+;; and the reason a drag off a tab does not close it.
+(parameterize ((*current-frame* click-frame))
+  (let* ((string (tab-string-for (get-buffer "click-two")))
+         (pos (close-position string))
+         (event (list 'mouse-1
+                      (list (selected-window) 'tab-line (cons 1 0) 0
+                            (cons string pos) 0))))
+    (*last-read-event* event)
+    (set!frame-keymap-state click-frame #f)
+    (dispatch-key click-frame 'mouse-1)))
+
+(test-equal "a click on the close button runs tab-line-close-tab"
+            tab-line-close-tab
+            (*last-command*))
 
 (test-end "schemacs_editor_tab_line_click")
