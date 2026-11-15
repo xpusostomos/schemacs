@@ -564,6 +564,13 @@ point-marker
       ;; it is another field.
       ;;--------------------------------------------------------------
       (let ((object (if (pair? args) (car args) (current-buffer))))
+        ;; "pos-property only makes sense in buffers right now, since
+        ;; strings have no overlays and no notion of insertion for which
+        ;; stickiness could be obeyed" - so a string is
+        ;; `get-text-property` and nothing else, which is the C's early
+        ;; return.
+        (if (not (bufferp object))
+            (get-text-property position prop object)
         (let ((overlay-value
                (and (bufferp object)
                     (let loop ((ovs (overlays-at position #t)))
@@ -591,7 +598,7 @@ point-marker
                       ((and (< stickiness 0)
                             (> position (buffer-beg (current-buffer))))
                        (get-text-property (- position 1) prop object))
-                      (else #f)))))))
+                      (else #f))))))))
 
     (define (find-field pos merge-at-boundary beg-limit end-limit)
       ;; GNU Emacs's `find_field' (`editfns.c:374'): "Find the field

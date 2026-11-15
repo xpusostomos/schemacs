@@ -148,7 +148,7 @@
    nthcdr
    ;; `nth' and the `posn-' cluster - see the note on them below.
    nth event-start event-end
-   posn-window posn-area posn-point posn-x-y
+   posn-window posn-area posn-point posn-x-y posn-string
    )
 
   (begin
@@ -1530,6 +1530,19 @@
       ;; GNU Emacs's `posn-x-y': the pixel coordinates, as a pair.
       ;;--------------------------------------------------------------
       (nth 2 position))
+
+    (define (posn-string position)
+      ;; GNU Emacs's `posn-string' (`subr.el:2015'): "Return the string
+      ;; object that POSITION refers to, or nil. POSITION should be a
+      ;; list of the form returned by the `event-start' and `event-end'
+      ;; functions."
+      ;;
+      ;; The object slot - `(nth 4 position)` - holds `(STRING . POS)`
+      ;; when the click was on a display string and nil (or a buffer,
+      ;; per bug#13979) when it was on text. A cons is a string.
+      ;;--------------------------------------------------------------
+      (let ((object (nth 4 position)))
+        (and (pair? object) object)))
 
     (define ctl-x-4-map (keymap '*ctl-x-4-map*))
     ;; ^ GNU Emacs's `ctl-x-4-map' (`subr.el:1808'): "Keymap for

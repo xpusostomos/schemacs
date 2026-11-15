@@ -27,10 +27,17 @@
   ;;
   ;; Not ported from easy-mmode.el, each with what it would need:
   ;;
-  ;;   - `:global', `:set', `:initialize', `:type', the `:group' and
-  ;;     `:version' keywords and `customize-mark-as-set': all of that is
-  ;;     `defcustom', and there is no customize in this tree. A global
-  ;;     mode would also need a variable registry to set and read.
+  ;;   - `:set', `:initialize', `:type', the `:group' and `:version'
+  ;;     keywords and `customize-mark-as-set': all of that is
+  ;;     `defcustom`, and a minor mode's variable is a buffer-local slot
+  ;;     here, which `define-custom` - a parameter - cannot be. The
+  ;;     keywords are *accepted and dropped* rather than refused, because
+  ;;     `define-globalized-minor-mode` passes `:group` and `:version`
+  ;;     through.
+  ;;
+  ;; `:global` **is** carried: it is the difference between a value in
+  ;; each buffer's slot table and one shared default, which is
+  ;; `default-value`/`set-default` (`data.scm`).
   ;;   - `:keymap' and `minor-mode-map-alist': per-mode keymaps are not
   ;;     ported, so a mode's map has nowhere to be consulted from.
   ;;   - `easy-mmode--mode-docstring', which invents a docstring when
@@ -48,12 +55,20 @@
     ;; and `syntax->datum' how a clause's keyword is read.
     ;; `quasisyntax' and `unsyntax' are what the templates below are
     ;; written with - `#`' and `#,' - and `(scheme base)' has neither.
-    (only (guile) datum->syntax identifier? quasisyntax syntax syntax->datum
-          syntax-case unsyntax unsyntax-splicing)
+    (only (guile) datum->syntax format identifier? quasisyntax syntax
+          syntax->datum syntax-case unsyntax unsyntax-splicing)
     (only (schemacs editor subr)
-          add-minor-mode run-hooks string-replace)
+          add-hook add-minor-mode remove-hook run-hooks string-replace
+          *after-change-major-mode-hook*)
     (only (schemacs editor buffer)
-          buffer-local-value current-buffer set-buffer-local-value!)
+          buffer-list buffer-local-value current-buffer
+          set-buffer-local-value! with-current-buffer)
+    ;; `put` records `globalized-minor-mode` on the mode's symbol, which
+    ;; is `fns.c`'s symbol plist.
+    (only (schemacs editor intervals) put)
+    ;; `default-value` and `set-default` are what a `:global` mode's state
+    ;; is stored in - `data.c`'s, as `buffer-local-value` is `buffer.c`'s.
+    (only (schemacs editor data) default-value set-default)
     (only (schemacs editor editfns) current-message message)
     (only (schemacs editor command)
           called-interactively? current-prefix-arg define-command
@@ -62,6 +77,7 @@
 
   (export
    define-minor-mode
+   define-globalized-minor-mode
    easy-mmode-pretty-mode-name
    )
 
@@ -166,7 +182,11 @@
           (and (identifier? x)
                (memq (syntax->datum x)
                      '(:lighter :variable :global :init-value :keymap
-                       :interactive :after-hook))))
+                       :interactive :after-hook
+                       ;; Accepted and dropped - `defcustom`'s, see the
+                       ;; library comment.
+                       :group :version :set :initialize :type
+                       :extra-args))))
         ;; Parse the clauses into a list of (KEYWORD . VALUE-LIST) plus
         ;; the body, in one walk. The docstring is the first clause when
         ;; it is a string, which is Emacs's own reading.
@@ -228,6 +248,17 @@
                         ;; values, so it is the one read as a list.
                         (variable (let ((e (assq ':variable opts)))
                                     (and e (cdr e))))
+                        ;; "`:global GLOBAL' If non-nil specifies that the
+                        ;; minor mode is not meant to be buffer-local, so
+                        ;; don't make the variable MODE buffer-local."
+                        ;; The clause is an *expression* in the C and only
+                        ;; its non-nil-ness is read, at macro time; here
+                        ;; the datum is what is read, which is the same
+                        ;; question for every literal a caller writes.
+                        (globalp (let ((e (assq ':global opts)))
+                                   (and e
+                                        (not (eq? (syntax->datum (cadr e))
+                                                  #f)))))
                         (init (opt opts ':init-value))
                         ;; Emacs's `:interactive' defaults to making the
                         ;; mode a command; only an explicit nil stops it.
@@ -246,18 +277,31 @@
                         ;; "If :variable is specified, then the var will
                         ;; be declared elsewhere" - Emacs declares the
                         ;; buffer-local only when it is not.
+                        ;;
+                        ;; A `:global` mode's PLACE is the variable's
+                        ;; *default*, which is `(setq-default ,mode)` and
+                        ;; `(default-value ',mode)` in the C: one value
+                        ;; shared by every buffer instead of a slot in
+                        ;; each buffer's own table.
                         (accessors
-                         (if variable
-                             #f
-                             #`(begin
-                                 (define (#,getter-id)
-                                   (buffer-local-value (current-buffer)
-                                                       #,quoted-mode
-                                                       #,init))
-                                 (define (#,setter-id value)
-                                   (set-buffer-local-value! (current-buffer)
-                                                            #,quoted-mode
-                                                            value)))))
+                         (cond
+                          (variable #f)
+                          (globalp
+                           #`(begin
+                               (define (#,getter-id)
+                                 (default-value #,quoted-mode #,(or init #'#f)))
+                               (define (#,setter-id value)
+                                 (set-default #,quoted-mode value))))
+                          (else
+                           #`(begin
+                               (define (#,getter-id)
+                                 (buffer-local-value (current-buffer)
+                                                     #,quoted-mode
+                                                     #,init))
+                               (define (#,setter-id value)
+                                 (set-buffer-local-value! (current-buffer)
+                                                          #,quoted-mode
+                                                          value))))))
                         ;; The `interactive' declaration, built rather
                         ;; than written in the template. It is a
                         ;; *literal* of `define-command`'s `syntax-rules'
@@ -334,12 +378,18 @@
                                      (unless (and (current-message)
                                                   (not (equal? last-message
                                                                (current-message))))
-                                       (message "%s %sabled in current buffer"
+                                       ;; "`(let ((local ,(if globalp ""
+                                       ;; " in current buffer"))) (message
+                                       ;; "%s %sabled%s" ...))'" - a global
+                                       ;; mode is not in *this* buffer.
+                                       (message "%s %sabled%s"
                                                 #,(easy-mmode-pretty-mode-name
                                                    mode-datum
                                                    (and lighter
                                                         (syntax->datum lighter)))
-                                                (if (#,get) "en" "dis"))))
+                                                (if (#,get) "en" "dis")
+                                                #,(if globalp #'""
+                                                      #'" in current buffer"))))
                                    #,@(if after (list after) '())
                                    ;; "Return the new setting."
                                    (#,get)))
@@ -366,4 +416,187 @@
                        (add-minor-mode #,quoted-mode #,quoted-lighter
                                        #,(or keymap #'#f) #f #,quoted-mode)
                        #,hook-id)))))))))
+
+    (define-syntax define-globalized-minor-mode
+      ;; GNU Emacs's `define-globalized-minor-mode' (`easy-mmode.el:447'):
+      ;; "Make a global mode GLOBAL-MODE corresponding to buffer-local
+      ;; minor MODE. TURN-ON is a function that will be called with no
+      ;; args in every buffer and that should try to turn MODE on if
+      ;; applicable for that buffer."
+      ;;
+      ;; It is `define-minor-mode` with `:global t` - one shared variable
+      ;; instead of a slot per buffer - plus the three pieces that make
+      ;; the shared switch reach buffers that do not exist yet: an
+      ;; `after-change-major-mode-hook` entry, a pass over `buffer-list`
+      ;; when the switch is thrown, and the `MODE--set-explicitly` flag
+      ;; that lets a major mode's hook have the last word.
+      ;;
+      ;; **What is generated, and where each name resolves.** Four names
+      ;; are built from the two mode symbols - `GLOBAL-MODE-variable`,
+      ;; `GLOBAL-MODE-enable-in-buffer`, `MODE--set-explicitly`,
+      ;; `MODE--suppress-set-explicitly` - and they are spliced into the
+      ;; template with the *call site's* lexical context
+      ;; (`datum->syntax #'global-mode`), because they are definitions in
+      ;; the library the macro is used from, as `ghook-id` is for
+      ;; `define-minor-mode`. Everything else written literally in the
+      ;; template resolves here, in easy-mmode, which is what keeps a
+      ;; caller from importing `add-hook`, `buffer-list` and the rest.
+      ;;
+      ;; `MODE--suppress-set-explicitly` is a parameter without the
+      ;; asterisks, like `MODE-hook`: it is a name the macro generates
+      ;; from Emacs's own, not one a user reads.
+      ;;
+      ;; Not carried, named rather than faked:
+      ;;
+      ;;   - `:predicate` and the `MODE-modes` defcustom it makes. It
+      ;;     needs `defcustom`, and its turn-on is a closure over
+      ;;     `easy-mmode--globalized-predicate-p`; a mode that wants one
+      ;;     can test `derived-mode-p` in its own TURN-ON.
+      ;;   - `custom-initialize-after-file-load` and the
+      ;;     `customize-mark-as-set` in the generated command - no
+      ;;     customize for a variable that is not a parameter.
+      ;;   - `:variable` as a `(GET . SET)` place; a symbol is taken.
+      ;;   - `bound-and-true-p`, which needs a variable registry: the
+      ;;     test is `buffer-local-value`'s, which is this tree's
+      ;;     spelling of "is the mode's variable true in this buffer".
+      ;;--------------------------------------------------------------
+      (lambda (stx)
+        (define (keyword-datum? datum)
+          (and (symbol? datum)
+               (> (string-length (symbol->string datum)) 0)
+               (char=? #\: (string-ref (symbol->string datum) 0))))
+        (define (named base suffix)
+          ;; The generated name, with BASE's lexical context.
+          (datum->syntax base
+                         (string->symbol
+                          (string-append (symbol->string (syntax->datum base))
+                                         suffix))))
+        (define (quoted id)
+          (datum->syntax id (list 'quote (syntax->datum id))))
+        (syntax-case stx ()
+          ((_ global-mode mode turn-on clause ...)
+           (let* ((global-id #'global-mode)
+                  (mode-id #'mode)
+                  (turn-on-id #'turn-on)
+                  (global-name (symbol->string (syntax->datum global-id)))
+                  (mode-name (symbol->string (syntax->datum mode-id)))
+                  (global-getter (named global-id "-variable"))
+                  (enable-in-buffer (named global-id "-enable-in-buffer"))
+                  (set-explicitly (named mode-id "--set-explicitly"))
+                  (suppress (named mode-id "--suppress-set-explicitly"))
+                  (minor-mode-hook (named mode-id "-hook"))
+                  (quoted-global (quoted global-id))
+                  (quoted-set-explicitly (quoted set-explicitly))
+                  (quoted-enable-in-buffer (quoted enable-in-buffer))
+                  ;; "`:variable'" may name the place the minor mode's
+                  ;; state lives in; the default is the mode's own symbol.
+                  (mode-variable (quoted mode-id))
+                  (extra '()))
+             ;; Read the keyword clauses. `:global' is implied, the
+             ;; defcustom keywords are passed through, and everything
+             ;; else becomes body.
+             (define mode-body '())
+             (let loop ((rest (%syntax->list #'(clause ...))))
+               (cond
+                ((null? rest) #t)
+                ((and (identifier? (car rest))
+                      (keyword-datum? (syntax->datum (car rest))))
+                 (let ((k (syntax->datum (car rest)))
+                       (value (and (pair? (cdr rest)) (cadr rest))))
+                   (case k
+                     ((:global) (loop (cddr rest)))
+                     ((:group :version)
+                      (set! extra (append extra (list (car rest) value)))
+                      (loop (cddr rest)))
+                     ((:variable)
+                      (set! mode-variable (quoted value))
+                      (loop (cddr rest)))
+                     ((:predicate)
+                      (error "define-globalized-minor-mode: :predicate is not carried"))
+                     (else (loop (cddr rest))))))
+                (else
+                 (set! mode-body (cons (car rest) mode-body))
+                 (loop (cdr rest)))))
+             (set! mode-body (reverse mode-body))
+             (let* ((pretty-name
+                     (easy-mmode-pretty-mode-name (syntax->datum mode-id)))
+                    (pretty-global
+                     (easy-mmode-pretty-mode-name (syntax->datum global-id)))
+                    (doc
+                     (string-append
+                      (format #f "Toggle ~a in many buffers.~%" pretty-name)
+                      (format #f "Specifically, ~a is enabled in all buffers where `~a' would do it."
+                              pretty-name mode-name)
+                      "\n\n"
+                      (format #f "With prefix ARG, enable ~a if ARG is positive; otherwise, disable it."
+                              pretty-global)
+                      "\n\n"
+                      "If called from Lisp, toggle the mode if ARG is `toggle'.
+Enable the mode if ARG is nil, omitted, or is a positive number.
+Disable the mode if ARG is a negative number.\n\n"
+                      (format #f "See `~a' for more information on ~a."
+                              mode-name pretty-name))))
+               #`(begin
+                   ;; "Don't bother the user with a hook for this."
+                   (put #,quoted-global 'globalized-minor-mode #t)
+                   ;; "The actual global minor-mode."
+                   (define-minor-mode #,global-id
+                     #,doc
+                     :global #t
+                     #,@extra
+                     ;; "Setup hook to handle future mode changes and new
+                     ;; buffers."
+                     (if (#,global-getter)
+                         (add-hook *after-change-major-mode-hook*
+                                   #,enable-in-buffer)
+                         (remove-hook *after-change-major-mode-hook*
+                                      #,enable-in-buffer))
+                     ;; "Go through existing buffers."
+                     (for-each
+                      (lambda (buf)
+                        (with-current-buffer
+                            buf
+                          (if (#,global-getter)
+                              (#,turn-on-id)
+                              (when (buffer-local-value (current-buffer)
+                                                        #,mode-variable
+                                                        #f)
+                                (#,mode-id -1)))))
+                      (buffer-list))
+                     #,@mode-body)
+                   ;; "MODE-set-explicitly is set in MODE-set-explicitly
+                   ;; and cleared by kill-all-local-variables." The
+                   ;; clearing is the buffer slot's: a slot that is not
+                   ;; there reads the default, which is nil.
+                   (define #,suppress (make-parameter #f))
+                   (define (#,set-explicitly)
+                     (unless (#,suppress)
+                       (set-buffer-local-value! (current-buffer)
+                                                #,quoted-set-explicitly
+                                                #t)))
+                   (put #,quoted-set-explicitly
+                        'definition-name
+                        #,quoted-global)
+                   ;; "A function which checks whether MODE has been
+                   ;; disabled in the major mode hook which has just been
+                   ;; run."
+                   (add-hook #,minor-mode-hook #,set-explicitly)
+                   ;; "The function that calls TURN-ON in the current
+                   ;; buffer."
+                   (define (#,enable-in-buffer)
+                     (unless (buffer-local-value
+                              (current-buffer)
+                              #,quoted-set-explicitly
+                              #f)
+                       ;; "We are not part of the major mode hook so we
+                       ;; don't want to set MODE-set-explicitly to t. In
+                       ;; particular this is necessary when there are
+                       ;; multiple globalized versions of a single minor
+                       ;; mode. If one of them declines to turn the minor
+                       ;; mode on, that should not mean the others can't."
+                       (parameterize ((#,suppress #t))
+                         (#,turn-on-id))))
+                   (put #,quoted-enable-in-buffer
+                        'definition-name
+                        #,quoted-global))))))))
     ))

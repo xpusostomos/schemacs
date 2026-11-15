@@ -8681,6 +8681,7 @@ there. `(goto-char (match-beginning 0))` is the fix, and the lesson is
 the file's oldest one: read the shape of the evidence before believing
 the conclusion.
 
+
 # The tab line, part 1: the display primitive (2026-11-16)
 
 Chris asked for `tab-line-mode` and chose the full port of `tab-line.el`.
@@ -8755,3 +8756,125 @@ height 21 and body top 1; setting the buffer's `tab-line-format` makes
 (the record changed under it) and gave 69/86 with `(tab-line-active)`
 irritants; it says nothing about either state and must be re-run on a
 settled tree.
+
+# The tab line, part 2: the Lisp half, and the primitives under it
+# (2026-11-16)
+
+Chris chose the full port of `tab-line.el`. Part 1 was the display
+primitive (the reserved row and the drawing); this is `tab-line.scm`
+itself - the format the redisplay reads, the tab list, the commands,
+`tab-line-mode` and `global-tab-line-mode` - plus the five primitives
+each of them needed. **Everything below compiles warning-free, and all
+of the tree's suites pass.**
+
+## What landed
+
+| Emacs | here |
+|---|---|
+| `easy-mmode.el:148` `define-minor-mode`'s `:global` | `easy-mmode.scm` - the PLACE is `default-value`/`set-default` |
+| `easy-mmode.el:447` `define-globalized-minor-mode` | `easy-mmode.scm`, new |
+| `data.c:2198` `default-value`, `:2213` `set-default`, `:2232` `default-boundp` | `data.scm`, new |
+| `bindings.el:872` `mode-line-window-selected-p` | `xdisp.scm`, new |
+| `textprop.c:1345` `add-face-text-property` | `textprop.scm`, new |
+| `subr.el:2015` `posn-string` | `subr.scm`, new |
+| `seq.el` - uniq, difference, sort, sort-by, position, keep, subseq, take, drop, group-by, do-indexed, copy | `seq.scm` (lists only) |
+| `fns.c` `copy-sequence`'s list and vector arms | `fns.scm` |
+| `tab-line.el` (1,461 lines) | `tab-line.scm`, new |
+
+Tests: `easy-mmode-tests.scm` (29, five groups) and
+`tab-line-tests.scm` (23, five groups), both in `tools/run-suites.py`.
+`tools/gen-imports.scm` regenerated (85 libraries, 2776 names).
+
+## The five primitives that had never had a caller
+
+All five were written in earlier passes and never exercised; the tab
+line is the first thing that calls any of them. Each failed in a
+different way, and DEPARTURES.md has the C for each:
+
+1. **`define-icon`'s keyword plist was unquoted** - `(list (quote
+   keyword) value ...)` put `:help-echo` in expression position, so any
+   icon with two keywords was "Unbound variable: :help-echo". A single
+   *string* value worked because strings self-evaluate.
+2. **`copy-sequence` had only the string arm** and refused a list, so
+   `icons--copy-spec` - `(map #'copy-sequence spec)` - failed for every
+   icon before `icon-string` could choose a form.
+3. **`icon-string` tested `(null? (and type-spec ...))`** - Elisp's nil
+   is `'()` and #f both; `(and ...)` here is #f and `(null? #f)` is
+   false, so an absent `symbol`/`text` section fell into `(car #f)`.
+4. **`get-pos-property` had no string arm** - the C returns
+   `Fget_text_property` for a non-buffer object; ours fell through to
+   `buffer-beg` and died. `tab-line--get-tab-property` asks it about the
+   tab string.
+5. **`posn-string` did not exist**, and it is how a click on a display
+   string names its string.
+
+## Two shapes to remember when porting more of `easy-mmode.el`
+
+- **A `:global` mode's variable is `default-value`'s**, not a buffer
+  slot. The three data.c functions are in `data.scm`, keyed by symbol in
+  a hash table, and `default-value` takes an optional default where
+  Emacs signals `void-variable`.
+- **A macro that generates a `defcustom` cannot**: a minor mode's
+  variable is a buffer-local slot here and a `define-custom` variable is
+  a parameter. `:group`, `:version`, `:set`, `:initialize` and `:type`
+  are accepted and dropped - see the library comment.
+
+## A macro that emits another macro
+
+`define-globalized-minor-mode` expands to a `define-minor-mode` form.
+Two things make that work in this tree and both are worth copying:
+
+- **The nested form's head is spliced from this library's binding** -
+  a quasisyntax template's literal `define-minor-mode` resolves here,
+  not at the call site, so the caller does not have to import it.
+- **The generated names are spliced with the call site's lexical
+  context** (`datum->syntax #'global-mode ...`), because they are
+  definitions in the caller's library. Everything else written
+  literally resolves in `easy-mmode`, which is what keeps a caller from
+  importing `add-hook` and `buffer-list`.
+
+**A quoted form in a template cannot hold an unsyntax** - `'#,x` is
+`(quote (unsyntax x))`. Build it as `(datum->syntax id (list 'quote
+datum))`, which is what `define-minor-mode` already did and what
+`tab-line.scm`'s `quoted` helper does.
+
+## Things the tab line taught that outlive it
+
+- **`run-hooks` takes the *list*, not the parameter**: `(run-hooks
+  (*hook*))`. Passing the parameter passes a *procedure*, and
+  `run-hooks` calls a procedure it is handed - so the hook silently
+  returns its list and nothing runs. This cost a probe.
+- **`(when TEST BODY)` as a value is not Elisp's nil** - it is the
+  unspecified value, which is true and which `append` splices in. Any
+  place a `when`'s or an `if`'s result is a list needs `'()`.
+- **`(null? #f)` is false.** `(if (null? (and a b)) ...)` is not
+  `(if (null x) ...)` over Elisp's nil.
+- **A parameter is a procedure**, so `(procedure? *tab-line-tabs-function*)`
+  is true for the parameter itself. A defcustom *holding* a procedure is
+  read `(*name*)` and then called.
+- **A keymap here holds procedures**, so a `defvar-keymap` goes *after*
+  the commands it binds. `tab-line.scm`'s order is functions first,
+  tables second, and the header says why.
+- **`concat` preserves text properties** (it is `fns.c`'s, not
+  `string-append`), which is what makes the tab string's `keymap` and
+  `tab` properties survive the separator being prepended.
+
+## Still to do on the tab line
+
+1. **The mouse path.** A tab cannot be clicked yet: `posn-at-x-y` knows
+   `'mode-line` but not `'tab-line`, and nothing looks up a *string's*
+   `keymap` property when an event is dispatched. The commands, the
+   keymaps and the `keymap` property on the string are all in place -
+   the missing piece is `make_lispy_position`'s tab-line area and
+   `read_key_sequence`'s "the click landed on a string with a keymap"
+   branch.
+2. **`tools/pty-check.py`** has not been run on this tree.
+3. Named, not carried (all in `tab-line.scm`'s header): the buffer menu
+   behind `tab-line-new-tab-choice`'s `t`, the two context menus,
+   touch, `project.el` grouping, `mouse-buffer-menu-mode-groups`,
+   `tab-line-tab-name-truncated-buffer` (`truncate-string-to-width`),
+   `window-persistent-parameters` and `repeat-mode`.
+4. **`global-font-lock-mode` is onto the macro now**, which was the
+   hand-written copy this file complained about; `font-core.scm`'s
+   `(let ((*inhibit-quit* #t)) ...)` was a `let` over a parameter's name
+   and rebound nothing - it is `parameterize` with Emacs's nil.

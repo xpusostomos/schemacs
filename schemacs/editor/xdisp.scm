@@ -70,6 +70,8 @@
     ;; `intervals.scm`'s - it must live below `search.scm`, which
     ;; calls it and cannot import `editfns.scm` (2026-10-13).
     (only (schemacs editor intervals) make-buffer-string)
+    ;; `symbol-value`'s fallback for a minor mode's variable.
+    (only (schemacs editor data) default-value)
     
     ;; The line arithmetic is `editfns.c`'s, and it lives there now.
     (only (schemacs editor editfns)
@@ -344,6 +346,10 @@
    ;; same way `line-end-fill-attribute` is.
    extend-fill-token
    *mode-line-format*
+   ;; The window whose mode line is being formatted - the C's rebinding
+   ;; of `selected-window' around `display_mode_lines' - and the face
+   ;; picker that reads it (`bindings.el:872').
+   *mode-line-window* mode-line-window-selected-p
    ;; `bindings.el''s other mode-line variable, and the construct that
    ;; reads it. A minor mode with a lighter adds itself to the alist.
    mode-line-minor-modes
@@ -746,6 +752,28 @@
 
     (define *mode-line-window* (make-parameter #f))
 
+    (define (mode-line-window-selected-p)
+      ;; GNU Emacs's `mode-line-window-selected-p' (`bindings.el:872'):
+      ;; "Return non-nil if we're updating the mode line for the selected
+      ;; window. This function is meant to be called in `:eval' mode line
+      ;; constructs to allow altering the look of the mode line depending
+      ;; on whether the mode line belongs to the currently selected window
+      ;; or not."
+      ;;
+      ;; The C compares `(selected-window)' against `old-selected-window',
+      ;; because `display_mode_lines' *rebinds* `selected-window' to the
+      ;; window whose mode line it is drawing and keeps the real one in
+      ;; `old-selected-window' (`xdisp.c:29099'). This renderer does not
+      ;; rebind `selected-window' - it binds `*mode-line-window*' around
+      ;; the `format-mode-line' call - so the two sides are the same
+      ;; comparison with the names the other way round.
+      ;;
+      ;; The C's second arm, a minibuffer active on some other window,
+      ;; has no counterpart: the prompt is drawn on the selected frame
+      ;; alone and `with-selected-window' is not ported.
+      ;;--------------------------------------------------------------
+      (eq? (*mode-line-window*) (selected-window)))
+
     (define (mode-line-eol-desc)
       ;; The mode-line mnemonic for the EOL convention of WINDOW's buffer:
       ;; GNU Emacs's `mode-line-eol-desc' (`bindings.el:101'), which reads
@@ -822,7 +850,11 @@
                                (if (string? value) value "")))
                             (else "")))
                     indicator)))
-       ((symbol? indicator) (buffer-local-value buffer indicator #f))
+       ;; `symbol-value`'s rule: a buffer's own value if it has one,
+       ;; otherwise the variable's *default* - which is where a `:global`
+       ;; minor mode keeps its state (`default-value`, `data.scm`).
+       ((symbol? indicator)
+        (buffer-local-value buffer indicator (default-value indicator #f)))
        (else #f)))
 
     (define (minor-mode-lighter value)
@@ -848,8 +880,12 @@
       ;; overwrite, `overwrite-mode-textual` or `-binary`, which is a
       ;; symbol and so true - the same answer the slot read gives, and
       ;; the one Emacs's `symbol-value` gives.
+      ;;
+      ;; The fallback is `symbol-value`'s: a variable with no local
+      ;; value reads its *default*, which is where a `:global` minor
+      ;; mode's state lives.
       ;;--------------------------------------------------------------
-      (buffer-local-value buffer variable #f))
+      (buffer-local-value buffer variable (default-value variable #f)))
 
     (define (mode-line-minor-modes)
       ;; GNU Emacs's `mode-line-minor-modes` (`bindings.el:468`), which

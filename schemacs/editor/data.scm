@@ -13,12 +13,17 @@
 
   (import
     (scheme base)
+    ;; The global value table is a Guile hash table, as the coding system
+    ;; registry is - `hashq-get-handle` is the one that tells a stored
+    ;; nil from an absent entry, which `hashq-ref` cannot.
+    (only (guile) hashq-get-handle hashq-set! make-hash-table)
     (only (schemacs editor buffer)
           buffer-local-value set-buffer-local-value! current-buffer)
     )
 
   (export
    make-local-variable
+   default-value set-default default-boundp
    keywordp
    )
 
@@ -58,5 +63,54 @@
         (set-buffer-local-value! buffer key
                                  (buffer-local-value buffer key default))
         key))
+
+    (define *default-values* (make-hash-table 64))
+    ;; ^ The global value of every variable a ported Elisp gives one - GNU
+    ;; Emacs's symbol value cell, as much of it as a tree with no obarray
+    ;; can have. A *symbol* keys it, because that is what Emacs's `setq`
+    ;; on an undeclared variable keys the same cell by, and the
+    ;; process-global table is a plain define by the convention (a
+    ;; registry, not a dynamically bound value).
+    ;;
+    ;; It exists because a *global* minor mode's variable is not
+    ;; per-buffer: `define-minor-mode`'s `:global` sets the default and
+    ;; reads `default-value`, which is what tells one shared value from
+    ;; a slot in each buffer's own table (`buffer-local-value`).
+
+    (define (default-value symbol . args)
+      ;; GNU Emacs's `default-value` (`data.c:2198`): "Return the default
+      ;; value of SYMBOL. This is the value that is seen in buffers that
+      ;; do not have their own values for this variable."
+      ;;
+      ;; **The optional argument is this tree's**, and it is the same one
+      ;; `buffer-local-value` takes: the answer for a symbol that has no
+      ;; default yet. Emacs signals `void-variable` there, which needs a
+      ;; variable registry to name the symbol in the message; a caller
+      ;; that has a default to offer - which is every caller here - gets
+      ;; it, and the difference is named rather than faked.
+      ;;--------------------------------------------------------------
+      (let ((entry (hashq-get-handle *default-values* symbol)))
+        (cond (entry (cdr entry))
+              ((pair? args) (car args))
+              (else #f))))
+
+    (define (set-default symbol value)
+      ;; GNU Emacs's `set-default` (`data.c:2213`): "Set the default
+      ;; value of SYMBOL to be VALUE. ... This is the value seen in
+      ;; buffers that do not have their own values for this variable."
+      ;; It answers VALUE.
+      ;;
+      ;; A buffer's own value is left alone, as the C leaves it - the
+      ;; default is what a buffer without a local value reads
+      ;; (`buffer-local-value`'s third argument, at every call site).
+      ;;--------------------------------------------------------------
+      (hashq-set! *default-values* symbol value))
+
+    (define (default-boundp symbol)
+      ;; GNU Emacs's `default-boundp` (`data.c:2232`): "Return t if
+      ;; SYMBOL has a non-void default value. ... A variable may have a
+      ;; buffer-local value in a buffer, and a different default value."
+      ;;--------------------------------------------------------------
+      (and (hashq-get-handle *default-values* symbol) #t))
 
     ))

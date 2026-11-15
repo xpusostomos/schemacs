@@ -51,6 +51,13 @@ SUITES = [
     'schemacs/editor/mule-cmds-tests.scm',
     'schemacs/editor/cmds-tests.scm',
     'schemacs/editor/custom-tests.scm',
+    # `easy-mmode.el`'s two macros: `define-minor-mode` with `:global`, and
+    # `define-globalized-minor-mode` under it - plus the `default-value`
+    # primitive a global mode's variable lives in.
+    'schemacs/editor/easy-mmode-tests.scm',
+    # `tab-line.el`'s Lisp half: the format the redisplay reads, the
+    # commands that act on it, and the globalized mode that installs it.
+    'schemacs/editor/tab-line-tests.scm',
     'schemacs/editor/casefiddle-tests.scm',
     'schemacs/editor/mouse-tests.scm',
     'schemacs/repl-client-tests.scm',

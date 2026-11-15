@@ -34,6 +34,9 @@
 
   (import
     (scheme base)
+    ;; `list-copy` is `(srfi srfi-1)`'s, and `copy-sequence`'s list arm is
+    ;; it - as Emacs's list arm is `Fcopy_sequence`'s cons walk.
+    (only (srfi srfi-1) list-copy)
     (scheme char)
     ;; the same `strcoll' glibc gives Emacs's `str_collate'.
     ;; The three procedures are `(ice-9 i18n)'s; the two LC_ constants
@@ -293,24 +296,30 @@
       ;; list, vector or record are not copied; they are shared with the
       ;; original."
       ;;
-      ;; Only the *string* arm is here, which is the one that carries
-      ;; text properties: "the elements are shared" is the C's note for
-      ;; the others, and Scheme's `string-copy' and `list-copy' already
-      ;; are those arms. A string's properties are copied because the C
-      ;; copies them - `copy_intervals' over the whole of it - and
-      ;; because a copy that quietly lost them would make `substring' and
-      ;; `concat' the only ways to keep them.
+      ;; **The list and vector arms are the Scheme calls Emacs's C
+      ;; makes**, and they are not optional: `icons.el`'s `icons--copy-spec`
+      ;; is `(map #'copy-sequence spec)` over each entry of an icon's
+      ;; specification, which is a *list*, and this function answered
+      ;; "Wrong type argument: sequencep" for it until a caller arrived.
+      ;;
+      ;; A string's properties are copied because the C copies them -
+      ;; `copy_intervals' over the whole of it - and because a copy that
+      ;; quietly lost them would make `substring' and `concat' the only
+      ;; ways to keep them.
       ;;--------------------------------------------------------------
       (cond
-       ((not (string? arg)) (error "Wrong type argument: sequencep" arg))
-       (else
+       ((pair? arg) (list-copy arg))
+       ((null? arg) '())
+       ((string? arg)
         (let ((val (string-copy arg))
               (ivs (string-intervals arg)))
           (if ivs
               (let ((copy (copy-intervals ivs 0 (string-length val))))
                 (set-interval-object! copy val)
                 (set!string-intervals val copy)))
-          val))))
+          val))
+       ((vector? arg) (vector-copy arg))
+       (else (error "Wrong type argument: sequencep" arg))))
 
     (define (string-lessp s1 s2)
       ;; GNU Emacs's `string-lessp' (fns.c): "Return t if first arg

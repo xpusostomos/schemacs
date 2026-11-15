@@ -3739,7 +3739,135 @@ never fire here.
   first.
 - `tab-line-track-tap` and `touch-screen-track-tap` have nothing to run
   on - this tree has no touch input - and are named rather than carried
-  when `tab-line.scm` lands.
+  in `tab-line.scm`.
+
+## The tab line, part 2: the Lisp half, and the five primitives under it
+
+`tab-line.scm` is in. The display half landed in `afddbbf`; this pass is
+the format, the tab list, the commands, `tab-line-mode` and
+`global-tab-line-mode`, and the primitives each of them needed. The
+departures are the tree's, and the bugs worth naming were all
+Elisp-nil-versus-Scheme-`'()` or a function that had never had a caller.
+
+### `:global` in `define-minor-mode`, and where a global value lives
+
+- **Emacs**: a `:global` minor mode's variable is not buffer-local; the
+  command does `(setq-default ,mode)` and the getter is
+  `(default-value ',mode)`, i.e. the symbol's own value cell.
+- **Here**: the value cell is `(schemacs editor data)`'s
+  `*default-values*`, keyed by symbol, with `default-value`,
+  `set-default` and `default-boundp` - `data.c`'s three, since the tree
+  has no obarray. `default-value` takes an optional default where Emacs
+  signals `void-variable`, because naming the symbol in that error needs
+  the registry this tree deliberately does not have; every caller here
+  has a default to offer.
+- `minor-mode-variable-true?` and `minor-mode-indicator-value`
+  (`xdisp.scm`) now read `(buffer-local-value buf var (default-value var
+  #f))`, which is `symbol-value`'s rule - a buffer's own value if it has
+  one, the default otherwise. Without that a global mode's lighter would
+  never show.
+- The *variable* is not a `defcustom`, so the customize keywords
+  (`:group`, `:version`, `:set`, `:initialize`, `:type`) are accepted and
+  dropped by `define-minor-mode`. That is the same wall a buffer-local
+  minor mode's variable has always been behind.
+
+### `define-globalized-minor-mode`: `:predicate`, and the places it can't take
+
+- **Emacs**: `:predicate` makes a `MODE-modes` defcustom and a turn-on
+  that consults `easy-mmode--globalized-predicate-p`; `:variable` may be
+  any `(GET . SET)` place; the generated command's `bound-and-true-p`
+  reads a symbol's value.
+- **Here**: `:predicate` is refused at expansion with a message (a mode
+  that wants one can test `derived-mode-p` in its own TURN-ON);
+  `:variable` is a symbol only; and "is the mode's variable true in this
+  buffer" is `buffer-local-value` with a #f default, which is this
+  tree's spelling of `bound-and-true-p` for a variable the mode's own
+  accessors set. The macro's five generated names keep Emacs's spelling
+  without asterisks, like `MODE-hook`, because they are generated from
+  Emacs's own names rather than read by a user.
+
+### `:eval` holds a procedure, not a form
+
+- **Emacs**: `(:eval FORM)` in `mode-line-format` is `(eval FORM)`, which
+  is why `tab-line-format` is `(:eval (tab-line-format))`.
+- **Here**: `format-mode-line`'s `:eval` construct holds a *procedure and
+  calls it* (`xdisp.scm`), so `tab-line-mode` installs
+  `(:eval tab-line-format)`. This is a pre-existing departure of the
+  mode-line formatter, found by `tab-line-mode` being the first caller
+  that writes the Emacs shape. Closing it means giving `format-mode-line`
+  an evaluator and an environment, and converting the three constructs
+  `bindings.el`'s variables already use.
+
+### Five primitives that had never had a caller, and what each was hiding
+
+Each of these was written and never exercised; the tab line is the first
+caller of all five.
+
+1. **`define-icon`'s keyword plist was unquoted.**
+   `(list (quote keyword) value ...)` put each value in *expression*
+   position, so a two-pair list - `:version "30.1" :help-echo "New tab"` -
+   evaluated `:help-echo` and reported it unbound. A single string value
+   worked by being self-evaluating, which is why nothing had noticed. The
+   expansion is `(quote (keyword value ...))`, which is Emacs's
+   `',keywords`.
+2. **`copy-sequence` had only its string arm.** It refused a list with
+   "Wrong type argument: sequencep", and `icons--copy-spec` is
+   `(map #'copy-sequence spec)` over lists - so *every* icon failed
+   before `icon-string` could pick a form. The list, empty-list and
+   vector arms are Scheme calls (`list-copy`, `vector-copy`) and are now
+   there.
+3. **`icon-string` tested `(null? (and type-spec ...))`.** Elisp's nil is
+   both #f and `'()`; here `(and ...)` answers #f and `(null? #f)` is
+   false, so an absent `symbol` or `text` section fell into `(car #f)`.
+4. **`get-pos-property` had no string arm.** The C's first act for a
+   non-buffer object is `return Fget_text_property (...)` - strings have
+   no overlays and no notion of insertion - and ours fell through to
+   `buffer-beg`, i.e. "Wrong type argument: struct" on a string.
+   `tab-line--get-tab-property` asks it about the tab string, which is
+   how a click finds its tab.
+5. **`posn-string` was missing** and is `subr.el`'s: the object slot,
+   `(nth 4 position)`, when it is a cons. It is what a click on a display
+   string reports, and it is how the tab commands learn which tab was
+   clicked.
+
+### `seq.el` is lists only
+
+`seq.scm`'s own departure, extended: the tab line needed `seq-uniq`,
+`seq-difference`, `seq-sort`, `seq-sort-by`, `seq-position`, `seq-keep`,
+`seq-subseq`, `seq-take`, `seq-drop`, `seq-group-by`, `seq-do-indexed`
+and `seq-copy`, and each is written over lists. `cl-position` and
+`evenp` are `seq-position` and `even?`.
+
+### `walk-windows`, and the tab line's cache flush
+
+- **Emacs**: `tab-line-force-update`'s ALL branch is
+  `(walk-windows (lambda (w) ...) 'no-mini t)`.
+- **Here**: `walk-windows` is `window.el`'s and needs `next-window`,
+  which is not ported; the ALL branch walks each frame's `window-list`
+  with `'nomini`, which is the same set for those two arguments.
+  `force-mode-line-update`'s ALL argument already marks one flag, so
+  nothing else about the walk matters.
+
+### Named, not carried, in `tab-line.scm`'s header
+
+The buffer menu behind `tab-line-new-tab-choice`'s `t` (`mouse-buffer-menu`
+and `tmm-prompt` do not exist); the two context menus (`popup-menu` is
+`menu-bar.el`'s; `x-popup-menu` is ported); touch; `project.el`'s
+group-by-project; `mouse-buffer-menu-mode-groups` (nil here, which is
+Emacs's documented fallback - one group per major mode);
+`tab-line-tab-name-truncated-buffer` (`truncate-string-to-width`,
+`mule-util.el`); `window-persistent-parameters`;
+`switch-to-buffer-obey-display-actions`; and `repeat-mode`.
+
+### `font-core.scm` onto the macro, and a `let` that bound nothing
+
+`global-font-lock-mode` was the hand-written copy of
+`define-globalized-minor-mode` this file's own header apologised for; it
+is the macro call now, which is the proof that the macro works and
+removes the duplicate. Its `turn-on-font-lock-if-desired` bound
+`(let ((*inhibit-quit* #t)) ...)` - a `let` over a *parameter's name*,
+which creates a new local variable and rebinds nothing - so the C's
+`(let (inhibit-quit) ...)` is now `parameterize`, with Emacs's nil.
 
 ## Still not ported
 

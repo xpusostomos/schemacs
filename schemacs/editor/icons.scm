@@ -72,7 +72,11 @@ type that's available."
       ;;
       ;; The keywords are 2n arguments - `:version' and its value, and
       ;; so on - and they are read as *data*, the way `define-custom'
-      ;; reads `:type'.
+      ;; reads `:type'. **Quoting the whole list is what makes that
+      ;; work**: written as `(list (quote keyword) value ...)' each
+      ;; value is an *expression*, so a keyword value that is itself a
+      ;; symbol - `:help-echo' in a two-pair list - was evaluated and
+      ;; reported unbound.
       ;;--------------------------------------------------------------
       (syntax-rules ()
         ((_ name parent specification documentation keyword value ...)
@@ -81,7 +85,7 @@ type that's available."
                (error "NAME must be a symbol: ~a" (quote name)))
            (icons--register (quote name) (quote parent)
                             specification documentation
-                            (list (quote keyword) value ...))))))
+                            (quote (keyword value ...)))))))
 
     (define (icons--register name parent spec doc keywords)
       ;; GNU Emacs's `icons--register' (`icons.el:84').
@@ -248,8 +252,14 @@ type that's available."
                               (type-spec (assq type spec))
                               (type-keywords (and type-spec
                                                   (icon-spec-keywords type-spec))))
-                         (or (let try ((icons (and type-spec
-                                                   (icon-spec-values type-spec))))
+                         ;; `(and type-spec ...)' is nil in Elisp and
+                         ;; #f here, and `(null? #f)' is false - so the
+                         ;; absent-spec case has to be the empty list,
+                         ;; which is what Emacs's nil reads as in the
+                         ;; `null' test below.
+                         (or (let try ((icons (or (and type-spec
+                                                       (icon-spec-values type-spec))
+                                                   '())))
                                (if (null? icons)
                                    #f
                                    (let ((result (icons--create

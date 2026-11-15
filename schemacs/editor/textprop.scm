@@ -28,16 +28,16 @@
   ;;    in the display will need the same shape, so the function is here
   ;;    with the seam ready rather than left out.
   ;;
-  ;; Not ported, with what each would need: `propertize' (a string type
-  ;; that carries properties - Emacs keeps intervals on strings, and the
-  ;; elisp layer's string type is where that would live; the C is in
-  ;; `editfns.c', not `textprop.c'), `remove-list-of-text-properties'
+  ;; Not ported, with what each would need: `remove-list-of-text-properties'
   ;; (a list rather than a plist of property names, which is a second
-  ;; walk of the same code), `text-property-any' and `-not-all' (a scan
-  ;; for a value, used by `read-only' checks in modes), and
-  ;; `add-face-text-property' (it needs `add_text_properties_1''s
-  ;; prepend/append set-type, which is here as an argument but unused
-  ;; until something calls it).
+  ;; walk of the same code), and `text-property-any' and `-not-all' (a
+  ;; scan for a value, used by `read-only' checks in modes).
+  ;;
+  ;; `propertize' is `editfns.c`'s and lives there, and strings do carry
+  ;; properties now (`string-intervals-property`), so `add-face-text-property`
+  ;; - which needs `add_text_properties_1`'s prepend/append set-type -
+  ;; is here beside `add-text-properties' and is what the tab line stacks
+  ;; a face onto a close button's icon with.
   ;;
   ;; See FACES-PLAN.txt for the plan this library is a step of.
 
@@ -80,6 +80,7 @@
     (prefix (schemacs editor intervals) iv:))
 
   (export
+   add-face-text-property
    add-text-properties
    add-text-properties-from-list
    modify-text-properties
@@ -493,6 +494,37 @@
       (let ((object (object-or-current args)))
         (add-text-properties-1 start end properties object
                                *text-property-replace*)))
+
+    (define (add-face-text-property start end face . args)
+      ;; GNU Emacs's `add-face-text-property' (`textprop.c:1345'): "Add
+      ;; the face property to the text from START to END. ... If any text
+      ;; in the region already has a non-nil `face' property, those
+      ;; face(s) are retained. This is done by setting the `face' property
+      ;; to a list of faces, with FACE as the first element (by default)
+      ;; and the pre-existing faces as the remaining elements. If optional
+      ;; fourth argument APPEND is non-nil, append FACE to the end of the
+      ;; face list instead."
+      ;;
+      ;; The C is three lines: `AUTO_LIST2 (properties, Qface, face)'
+      ;; then `add_text_properties_1' with `TEXT_PROPERTY_PREPEND' or
+      ;; `TEXT_PROPERTY_APPEND'. Both halves are already here - the merge
+      ;; rule is `add-text-properties-1`'s set-type argument - so this is
+      ;; the same three lines.
+      ;;
+      ;; OBJECT is the fifth argument, as it is in Emacs; it may be a
+      ;; buffer or a string. `propertize' and the tab line both pass a
+      ;; string.
+      ;;--------------------------------------------------------------
+      (let* ((append (if (pair? args) (car args) #f))
+             (object (object-or-current
+                      (if (and (pair? args) (pair? (cdr args)))
+                          (cdr args)
+                          '()))))
+        (add-text-properties-1 start end (list 'face face) object
+                               (if append
+                                   *text-property-append*
+                                   *text-property-prepend*))
+        #f))
 
     (define (put-text-property start end property value . args)
       ;; GNU Emacs's `put-text-property': set one property, which is

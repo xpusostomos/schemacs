@@ -195,6 +195,7 @@
         (schemacs editor startup)
         (schemacs editor subr)
         (schemacs editor syntax)
+        (schemacs editor tab-line)
         (schemacs editor tabulated-list)
         (schemacs editor text-mode)
         (schemacs editor textprop)

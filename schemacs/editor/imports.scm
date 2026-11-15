@@ -105,6 +105,7 @@
     (schemacs editor select)
     (schemacs editor seq)
     (except (schemacs editor syntax)  word-char? forward-word-position backward-word-position word-run-end word-run-start)
+    (schemacs editor tab-line)
     (schemacs editor tabulated-list)
     (schemacs editor text-mode)
     (schemacs editor tty-colors)
@@ -447,6 +448,7 @@
     *minor-mode-list*
     *minor-mode-map-alist*
     *mode-line-format*
+    *mode-line-window*
     *mode-require-final-newline*
     *mouse-event-keys*
     *mouse-scroll-delay*
@@ -520,6 +522,25 @@
     *syntax-propertize-chunk-size*
     *syntax-propertize-extend-region-functions*
     *system-time-locale*
+    *tab-line-auto-hscroll*
+    *tab-line-close-button-show*
+    *tab-line-close-modified-button-show*
+    *tab-line-close-tab-function*
+    *tab-line-define-keys*
+    *tab-line-exclude-buffers*
+    *tab-line-exclude-modes*
+    *tab-line-new-button-show*
+    *tab-line-new-tab-choice*
+    *tab-line-switch-cycling*
+    *tab-line-tab-face-functions*
+    *tab-line-tab-name-format-function*
+    *tab-line-tab-name-function*
+    *tab-line-tab-name-truncated-max*
+    *tab-line-tabs-buffer-group-function*
+    *tab-line-tabs-buffer-group-sort-function*
+    *tab-line-tabs-buffer-groups-sort-function*
+    *tab-line-tabs-function*
+    *tab-line-tabs-window-buffers-filter-function*
     *tab-width*
     *tabulated-list-entries*
     *tabulated-list-format*
@@ -594,6 +615,7 @@
     access-keymap
     accessible-keymaps
     activate-mark
+    add-face-text-property
     add-hook
     add-minor-mode
     add-text-properties
@@ -963,14 +985,17 @@
     decode-coding-string
     decode-eol
     decode-file-bytes
+    default-boundp
     default-buffer-file-coding-system
     default-directory
     default-to-grave-quoting-style
+    default-value
     defface
     define-charset
     define-command
     define-custom
     define-derived-mode
+    define-globalized-minor-mode
     define-icon
     define-key
     define-key-after
@@ -1396,6 +1421,7 @@
     get-window-cursor-type
     global-buffers-menu-map
     global-font-lock-mode
+    global-tab-line-mode
     global-text-scale-adjust
     global-text-scale-adjust--default-height
     global-text-scale-adjust--increment-factor
@@ -1909,6 +1935,7 @@
     modal-lookup-state-type?
     mode-line-minor-modes
     mode-line-string
+    mode-line-window-selected-p
     mode-name
     modify-frame-parameters
     modify-syntax-entry
@@ -2015,6 +2042,7 @@
     posn-at-x-y
     posn-point
     posn-set-point
+    posn-string
     posn-window
     posn-x-y
     ppss-comment-or-string-start
@@ -2210,9 +2238,22 @@
     self-insert-layer
     self-insert-tab
     sendcomment
+    seq-copy
+    seq-difference
+    seq-do-indexed
+    seq-drop
     seq-filter
     seq-find
+    seq-group-by
+    seq-keep
+    seq-length
+    seq-position
     seq-remove
+    seq-sort
+    seq-sort-by
+    seq-subseq
+    seq-take
+    seq-uniq
     sescape
     set!%buffer-modtime
     set!%buffer-modtime-size
@@ -2365,6 +2406,7 @@
     set-char-table-extra-slot
     set-char-table-parent
     set-char-table-range
+    set-default
     set-face-attribute
     set-file-modes
     set-fill-column
@@ -2518,6 +2560,67 @@
     syntax-table
     syntax-table-p
     system-type
+    tab-line--current-tab
+    tab-line--define-keys
+    tab-line--get-tab-property
+    tab-line--undefine-keys
+    tab-line-add-map
+    tab-line-auto-hscroll
+    tab-line-auto-hscroll-buffer
+    tab-line-cache-key-default
+    tab-line-cache-key-function
+    tab-line-close-button
+    tab-line-close-modified-button
+    tab-line-close-other-tabs
+    tab-line-close-tab
+    tab-line-event-start
+    tab-line-exclude
+    tab-line-force-update
+    tab-line-format
+    tab-line-format-template
+    tab-line-hscroll
+    tab-line-hscroll-left
+    tab-line-hscroll-right
+    tab-line-left-button
+    tab-line-left-map
+    tab-line-mode
+    tab-line-mode--turn-on
+    tab-line-mode-map
+    tab-line-mouse-move-tab
+    tab-line-move-tab-backward
+    tab-line-move-tab-forward
+    tab-line-new-button
+    tab-line-new-button-functions
+    tab-line-new-tab
+    tab-line-right-button
+    tab-line-right-map
+    tab-line-select-tab
+    tab-line-select-tab-buffer
+    tab-line-separator
+    tab-line-switch-repeat-map
+    tab-line-switch-to-next-tab
+    tab-line-switch-to-prev-tab
+    tab-line-tab-close-map
+    tab-line-tab-face-group
+    tab-line-tab-face-inactive-alternating
+    tab-line-tab-face-modified
+    tab-line-tab-face-special
+    tab-line-tab-map
+    tab-line-tab-modified-p
+    tab-line-tab-name-buffer
+    tab-line-tab-name-ellipsis
+    tab-line-tab-name-format-default
+    tab-line-tabs-buffer-group-by-mode
+    tab-line-tabs-buffer-group-name
+    tab-line-tabs-buffer-group-sort-by-name
+    tab-line-tabs-buffer-groups
+    tab-line-tabs-buffer-list
+    tab-line-tabs-buffer-list-function
+    tab-line-tabs-fixed-window-buffers
+    tab-line-tabs-mode-buffers
+    tab-line-tabs-non-excluded
+    tab-line-tabs-window-buffers
+    tab-line-track-tap
     tab-stop-list
     tab-to-tab-stop
     tabulated-list-delete-entry
