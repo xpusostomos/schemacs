@@ -30,7 +30,8 @@
     (prefix (schemacs editor keymap) km:)
     (only (schemacs editor buffer)
           current-local-map kill-all-local-variables major-mode set!major-mode
-          set!mode-name use-local-map)
+          set!mode-name use-local-map get-buffer buffer-name buffer-list
+          buffer-local-value)
     (only (schemacs editor command) register-command!)
     ;; `get` and `put` - the symbol properties a mode's parentage and its
     ;; cached parent list live in. `fns.c`'s, and exported from
@@ -39,6 +40,7 @@
     (only (schemacs editor keymap) keymap-parent set-keymap-parent)
     (only (schemacs editor subr) delay-mode-hooks merge-ordered-lists
           run-mode-hooks)
+    (only (schemacs editor search) string-match)
     (only (schemacs editor syntax) set-syntax-table)
     )
 
@@ -51,6 +53,7 @@
    ;; `subr.el`'s, placed here because they read a buffer's `major-mode` -
    ;; see the note on them below.
    derived-mode-p provided-mode-derived-p derived-mode-all-parents
+   buffer-match-p match-buffers
    derived-mode-set-parent derived-mode-add-parents derived-mode--flush
    )
 
@@ -193,6 +196,84 @@
           (cond ((null? ms) #f)
                 ((memq (car ms) ps) (car ms))
                 (else (loop (cdr ms)))))))
+
+    (define (buffer-match-p condition buffer-or-name . args)
+      ;; GNU Emacs's `buffer-match-p' (`subr.el:7976'): "Return non-nil if
+      ;; BUFFER-OR-NAME matches CONDITION."
+      ;;
+      ;; **Placement departure**: `subr.el`'s, and it cannot live in
+      ;; `subr.scm` - it needs `get-buffer` and `buffer-name`
+      ;; (`buffer.c`'s, which `subr` cannot import) and
+      ;; `provided-mode-derived-p`, which is above it. This library has
+      ;; all three, so it lives here, the same seam `locate-file-internal`
+      ;; took into `fileio.sld`.
+      ;;
+      ;; The conditions are the C's: `t', a regexp string, a predicate, or
+      ;; a cons whose car is `category', `this-command', `major-mode',
+      ;; `derived-mode', `not', `or' or `and'. The predicate arm's
+      ;; `wrong-number-of-arguments' retry (the C's compatibility hack for
+      ;; predicates of one argument) is not carried - every predicate here
+      ;; is called with the buffer and ARGS, and a wrong arity is a bug -
+      ;; and with it `buffer-match-p--past-warnings'.
+      ;;--------------------------------------------------------------
+      (let ((buffer (get-buffer buffer-or-name)))
+        (define (match conditions)
+          (let loop ((rest conditions))
+            (cond
+             ((null? rest) #f)
+             ((match-1 (car rest)) #t)
+             (else (loop (cdr rest))))))
+
+        (define (match-1 condition)
+          (cond
+           ((eq? condition #t) #t)
+           ((eq? condition 't) #t)
+           ((string? condition)
+            (and (string-match condition (buffer-name buffer)) #t))
+           ((procedure? condition)
+            (apply condition buffer-or-name args))
+           ((pair? condition)
+            (case (car condition)
+              ((category)
+               (eq? (let ((a (and (pair? args) (car args))))
+                      (and (pair? a) (cdr (assq 'category (car a)))))
+                    (cdr condition)))
+              ((this-command) #f)          ; nothing here sets `this-command'
+                                             ; for a display action
+              ((major-mode)
+               (eq? (buffer-local-value buffer 'major-mode 'fundamental-mode)
+                    (cdr condition)))
+              ((derived-mode)
+               (provided-mode-derived-p
+                (buffer-local-value buffer 'major-mode 'fundamental-mode)
+                (cdr condition)))
+              ((not) (not (match-1 (cdr condition))))
+              ((or) (match (cdr condition)))
+              ((and)
+               (let loop ((cs (cdr condition)))
+                 (cond ((null? cs) #t)
+                       ((match-1 (car cs)) (loop (cdr cs)))
+                       (else #f))))
+              (else #f)))
+           (else #f)))
+
+        (match-1 condition)))
+
+    (define (match-buffers condition . args)
+      ;; GNU Emacs's `match-buffers' (`subr.el:8047'): "Return a list of
+      ;; buffers that match CONDITION, or nil if none match."
+      ;;--------------------------------------------------------------
+      (let ((buffers (if (pair? args) (car args) #f))
+            (args (if (pair? args) (cdr args) '())))
+        (let loop ((rest (or buffers (buffer-list))) (acc '()))
+          (cond ((null? rest) (reverse acc))
+                (else
+                 (loop (cdr rest)
+                       (if (apply buffer-match-p condition
+                                  (get-buffer (car rest))
+                                  args)
+                           (cons (car rest) acc)
+                           acc)))))))
 
     (define (derived-mode-p modes . old-modes)
       ;; GNU Emacs's `derived-mode-p' (`subr.el:3123'): "Return non-nil if

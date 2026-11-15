@@ -686,6 +686,7 @@
     buffer-local-keymap
     buffer-local-value
     buffer-markers
+    buffer-match-p
     buffer-menu
     buffer-menu-mode-map
     buffer-modified-p
@@ -1812,6 +1813,7 @@
     markerp
     markers-in
     match-beginning
+    match-buffers
     match-data
     match-data--translate
     match-end
