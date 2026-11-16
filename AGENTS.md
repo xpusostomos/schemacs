@@ -9853,11 +9853,43 @@ That was found by an assertion placed in the wrong suite
 (`tty-editor-tests` is not a front end and never imports `mule-cmds`); it
 is in `mule-cmds-tests.scm` now.
 
-### What is left of `callint.c`: 9 codes
+### The `C` `v` `x` `X` codes, and the obarray problem (2026-11-16)
 
-(`callint.c` has 30 letters plus `+`; 21 are carried - `p` `P` `i` `d`
-`m` `e` `r` `R` `s` `M` `S` `n` `N` `f` `F` `G` `D` `b` `B` `z` `Z` - so
-9 are left.)
+Four more, and each needed its `minibuf.c`/`simple.el` function ported
+first: `read-command`, `read-variable`, `read-minibuffer`,
+`eval-minibuffer`, all in `minibuffer.scm` because all four prompt.
+
+**`C` had no obarray problem after all**: `command-completion-table` is
+the command table asked the completion-table way, and every name in it is
+already a command, so the C's `Qcommandp` predicate has nothing left to
+reject.
+
+**`v` did.** `read-variable` completes over `Vobarray` with
+`custom-variable-p`, and that predicate only answers *about a symbol you
+already have* - it cannot enumerate. So `custom.scm` gained a registry,
+`custom-variable-names`, which `custom-declare-variable` pushes onto; that
+list is the collection. Same answers as the C's, from a list instead of a
+hash table.
+
+`x`/`X` answer the *form* where the C's visible form is the typed string,
+so a later prompt's `%s` after an `x` shows nil. Recorded.
+
+`command-tests.scm` 60 -> 66; the installation group covers all four.
+
+### What is left of `callint.c`: 5 codes, and all five are blocked
+
+`callint.c` has 30 letters plus `+`; **25 are carried**. The five left are
+not seams onto existing readers:
+
+| codes | blocked on |
+|---|---|
+| `c` | `read-char` (`keyboard.c:11240`) over `read_filtered_event`: modifiers resolved into a character code, non-character events an error, switch-frame events deferred. **242 uses in Emacs's `lisp/`** - the most valuable of the five |
+| `k` `K` `U` | `read-key-sequence` and its vector form - `read_key_sequence` proper: prefix keymaps, echoes, the up-event discard |
+| `a` | an **obarray of functions**. `C` got by on the command table; `a` completes over *every* `fboundp` symbol, and Guile has neither an obarray nor a function table to enumerate |
+
+Porting those means doing `read_char`'s filtered-event path and an obarray
+first - `keyboard.c` machinery, not seams. That is the honest remaining
+edge of `callint.c` in this tree.
 
 | codes | reader | lives in | blocker |
 |---|---|---|---|

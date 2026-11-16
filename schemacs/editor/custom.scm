@@ -95,7 +95,8 @@
    custom-add-version custom-add-package-version custom-add-load
    custom-add-link custom-add-dependencies
    custom-handle-keyword
-   custom-variable-p custom--standard-value custom--standard-value-p
+   custom-variable-p custom-variable-names
+   custom--standard-value custom--standard-value-p
    custom--getter custom--setter custom--bound?
    ;; `custom-set-variables' is the theme module's - it records into the
    ;; `user' theme, which is the theme machinery's; the defcustom half
@@ -459,6 +460,13 @@
     ;; `custom-declare-variable'
     ;;--------------------------------------------------------------
 
+    (define custom-variable-names '())
+    ;; ^ The custom variables declared so far, newest first. **This is a
+    ;; stand-in for the obarray**, which Guile does not have: Emacs's
+    ;; `read-variable' (`minibuf.c:1496') completes over `Vobarray' with
+    ;; `custom-variable-p' as the predicate, and there is nothing here to
+    ;; complete over without a list. A process-global registry, so a plain
+    ;; variable and no stars.
     (define (custom-declare-variable symbol standard doc reader writer . clauses)
       ;; GNU Emacs's `custom-declare-variable' (`custom.el:169'): "Like
       ;; `defcustom', but SYMBOL and DEFAULT are evaluated as normal
@@ -477,6 +485,8 @@
       ;; expression into one list without turning the datum into raw
       ;; syntax. Same contents, grouped.
       ;;--------------------------------------------------------------
+      (unless (memq symbol custom-variable-names)
+        (set! custom-variable-names (cons symbol custom-variable-names)))
       (put symbol 'standard-value (list standard))
       ;; "Maybe this option was rogue in an earlier version. It no longer
       ;; is."

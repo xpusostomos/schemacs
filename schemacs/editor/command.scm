@@ -29,6 +29,8 @@
    *use-region-p-function*
    *point-marker-function* *mark-marker-function*
    *format-message-function* *read-string-function* *read-number-function*
+   *read-command-function* *read-variable-function*
+   *read-minibuffer-function* *eval-minibuffer-function*
    *read-coding-system-function* *read-non-nil-coding-system-function*
    *interactive-read-existing-buffer-function*
    *interactive-read-buffer-function*
@@ -449,6 +451,14 @@
 
     (define *interactive-read-file-name-function* (make-parameter #f))
     (define *interactive-read-directory-name-function* (make-parameter #f))
+    (define *read-command-function* (make-parameter #f))
+    (define *read-variable-function* (make-parameter #f))
+    (define *read-minibuffer-function* (make-parameter #f))
+    (define *eval-minibuffer-function* (make-parameter #f))
+    ;; ^ The `C', `x' and `X' readers. All three names are free as Emacs
+    ;; variables, so they keep the plain spelling. `read-command' is
+    ;; `minibuf.c'`s and the other two are `simple.el`'s; all three
+    ;; prompt, so all three live in `minibuffer.scm'.
     (define *read-coding-system-function* (make-parameter #f))
     (define *read-non-nil-coding-system-function* (make-parameter #f))
     ;; ^ The `z' and `Z' readers. Both names are free as Emacs variables,
@@ -644,6 +654,48 @@
                 (let ((read (%interactive-seam
                              *interactive-read-directory-name-function*
                              'read-file-name)))
+                  (loop (cdr rest)
+                        (cons (read (%interactive-message prompt (reverse visible)))
+                              args)
+                        (cons #f visible))))
+               ;; "Command: symbol with interactive function"
+               ;; (`callint.c:495'): `Fcompleting_read (prompt, Vobarray,
+               ;; Qcommandp, Qt, ...)' and then interned, which is
+               ;; `read-command' whole. The visible form is the name
+               ;; string, as the C's `visargs[i]' is.
+               ((char=? code #\C)
+                (let* ((read (%interactive-seam *read-command-function*
+                                                'read-command))
+                       (answer (read (%interactive-message prompt (reverse visible)))))
+                  (loop (cdr rest) (cons answer args)
+                        (cons (and answer (symbol->string answer)) visible))))
+               ;; "Variable name: symbol that is custom-variable-p"
+               ;; (`callint.c:693'): `Fread_variable (prompt, Qnil)', which
+               ;; is `minibuf.c'`s `read-variable'. The C's `visargs[i]` is
+               ;; `last_minibuf_string`, so the visible form is the name.
+               ((char=? code #\v)
+                (let* ((read (%interactive-seam *read-variable-function*
+                                                'read-variable))
+                       (answer (read (%interactive-message prompt (reverse visible)))))
+                  (loop (cdr rest) (cons answer args)
+                        (cons (and answer (symbol->string answer)) visible))))
+               ;; "Lisp expression read but not evaluated" (`:699').
+               ;;
+               ;; **Departure**: the C's `visargs[i]` is
+               ;; `last_minibuf_string` - the text typed. The reader here
+               ;; answers the *form*, so a later prompt's `%s` shows nil
+               ;; where Emacs would show the expression.
+               ((char=? code #\x)
+                (let ((read (%interactive-seam *read-minibuffer-function*
+                                               'read-minibuffer)))
+                  (loop (cdr rest)
+                        (cons (read (%interactive-message prompt (reverse visible)))
+                              args)
+                        (cons #f visible))))
+               ;; "Lisp expression read and evaluated" (`:704').
+               ((char=? code #\X)
+                (let ((read (%interactive-seam *eval-minibuffer-function*
+                                               'eval-minibuffer)))
                   (loop (cdr rest)
                         (cons (read (%interactive-message prompt (reverse visible)))
                               args)

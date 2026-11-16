@@ -14,7 +14,9 @@
        *interactive-read-directory-name-function*
        *interactive-read-existing-buffer-function*
        *interactive-read-buffer-function*
-       *read-coding-system-function* *read-non-nil-coding-system-function*)
+       *read-coding-system-function* *read-non-nil-coding-system-function*
+       *read-command-function* *read-minibuffer-function*
+       *eval-minibuffer-function* *read-variable-function*)
  (only (schemacs editor buffer)
        allocate-buffer with-current-buffer current-buffer
        set!buffer-read-only)
@@ -168,6 +170,26 @@ read-only check."
   "A command whose specification is `Z': a coding system, if a prefix."
   (interactive "ZCoding: ")
   (*got* cs))
+
+(define-command (command-name-command cmd)
+  "A command whose specification is `C': a command, by name."
+  (interactive "CCommand: ")
+  (*got* cmd))
+
+(define-command (form-command form)
+  "A command whose specification is `x': a form, unevaluated."
+  (interactive "xForm: ")
+  (*got* form))
+
+(define-command (eval-form-command value)
+  "A command whose specification is `X': a form, evaluated."
+  (interactive "XForm: ")
+  (*got* value))
+
+(define-command (variable-command var)
+  "A command whose specification is `v': a custom variable's name."
+  (interactive "vVariable: ")
+  (*got* var))
 
 (define-command (dash-marker-command arg)
   "A command whose specification begins with `-', Lucid's no-op."
@@ -526,7 +548,32 @@ read-only check."
     (test-equal "so the reader was never called" '() (*calls*))
     (test-equal "Z with a prefix does read" 'utf-8
                 (begin ((entry non-nil-coding-command) '(4)) (*got*)))
-    (test-equal "and it was called once" (list (list "Coding: ")) (*calls*))))
+    (test-equal "and it was called once" (list (list "Coding: ")) (*calls*)))
+
+  ;; `C', `x' and `X'. The `C' reader answers a symbol like
+  ;; `read-command'; `x' and `X` answer the *form*, and `X`'s is already
+  ;; evaluated when the code receives it - the difference between the two
+  ;; codes is the reader, not anything `%interactive-args` does.
+  (parameterize ((*read-command-function* (stub-symbol-reader))
+                 (*read-variable-function* (stub-symbol-reader))
+                 (*read-minibuffer-function* (stub-file-reader))
+                 (*eval-minibuffer-function*
+                  (lambda (prompt)
+                    (*calls* (append (*calls*) (list (list prompt))))
+                    42))
+                 (*calls* '()))
+    (test-equal "C reads a command name, as a symbol" 'utf-8
+                (begin ((entry command-name-command) #f) (*got*)))
+    (test-equal "from its prompt" (list (list "Command: ")) (*calls*))
+    (*calls* '())
+    (test-equal "x hands the command the form the reader answered" "ANSWER"
+                (begin ((entry form-command) #f) (*got*)))
+    (test-equal "X hands it the evaluated value" 42
+                (begin ((entry eval-form-command) #f) (*got*)))
+    (*calls* '())
+    (test-equal "v reads a custom variable's name" 'utf-8
+                (begin ((entry variable-command) #f) (*got*)))
+    (test-equal "from its prompt" (list (list "Variable: ")) (*calls*))))
 (test-end "read-codes")
 ;;--------------------------------------------------------------
 (test-begin "plain-specs")

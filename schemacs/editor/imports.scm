@@ -290,6 +290,7 @@
     *end-of-defun-moves-to-eol*
     *eval-expression-debug-on-error*
     *eval-expression-print-maximum-character*
+    *eval-minibuffer-function*
     *exchange-point-and-mark-highlight-region*
     *exec-suffixes*
     *extended-command-history*
@@ -504,9 +505,12 @@
     *read-buffer-function*
     *read-buffer-to-switch*
     *read-coding-system-function*
+    *read-command-function*
+    *read-minibuffer-function*
     *read-non-nil-coding-system-function*
     *read-number-function*
     *read-string-function*
+    *read-variable-function*
     *record-window-buffer-function*
     *recursive-edit-exit*
     *redisplay-in-progress*
@@ -1041,6 +1045,8 @@
     custom-theme-reset-variables
     custom-theme-set-faces
     custom-theme-set-variables
+    custom-variable-history
+    custom-variable-names
     custom-variable-p
     daemonp
     deactivate-mark
@@ -1264,6 +1270,7 @@
     eval-expression-get-print-arguments
     eval-expression-print-format
     eval-last-sexp
+    eval-minibuffer
     eval-print-last-sexp
     eval-region
     event-basic-type
@@ -2186,6 +2193,7 @@
     read-buffer-to-switch
     read-char-from-minibuffer
     read-coding-system
+    read-command
     read-directory-name
     read-expression-history
     read-file-name
@@ -2193,6 +2201,7 @@
     read-input-event
     read-key-event
     read-menu-command
+    read-minibuffer
     read-multiple-choice
     read-multiple-choice--long-answers
     read-non-nil-coding-system
@@ -2201,6 +2210,7 @@
     read-only-mode
     read-quoted-char
     read-string
+    read-variable
     read-wait-ms
     realize-face
     realize-tty-face

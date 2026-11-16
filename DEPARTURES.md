@@ -4791,3 +4791,60 @@ tests is the machinery.
 
 `command-tests.scm` 54 -> 60: `z` reads, `Z` answers nil and calls no
 reader without a prefix, and both read with a prefix.
+
+## The command, variable and expression codes; and where the obarray went
+
+`C` (a command, by name), `v` (a custom variable's name), `x` (a form,
+unevaluated) and `X` (a form, evaluated). The first two are `minibuf.c`
+DEFUNs that had no counterpart here, so each needed its function ported
+first.
+
+**`C` -> `read-command`** (`minibuf.c:1457`). The C completes over
+`Vobarray` with `Qcommandp` as the predicate and `Qt` as MUSTMATCH, then
+interns. **This tree has no obarray, but it has something better for this
+one case**: `command-completion-table` is the command table asked the
+completion-table way, and every name in it *is* a command - so the
+predicate the C passes has nothing left to reject. `read-command` lives
+in `minibuffer.scm` because it prompts.
+
+**`v` -> `read-variable`** (`minibuf.c:1496`), and this one is the
+honest obarray problem. It completes over `Vobarray` with
+`Qcustom_variable_p`. There is no obarray here to filter, and
+`custom-variable-p` (`custom.scm`) only answers *about a symbol you
+already have* - it cannot enumerate. So `custom.scm` gained a
+**registry**:
+
+```scheme
+(define custom-variable-names '())
+```
+
+which `custom-declare-variable` pushes onto as it runs (a plain variable
+with no stars: it is a process-global registry, not something anything
+`let`-binds). That list is what `read-variable` completes over, with
+`custom-variable-p` still the predicate - so the answers are the same as
+the C's, arrived at from a list rather than a hash table.
+`custom-variable-history` came with it.
+
+**`x` -> `read-minibuffer`** (`simple.el`) is
+`read-from-minibuffer (prompt, initial, minibuffer-local-map, t,
+minibuffer-history)` - where that fourth argument means "read it for
+me". **`read-from-minibuffer`'s READ argument is not carried here**, so
+the string is read afterwards on a string port. The reader is Scheme's,
+which is the departure `eval-expression` already carries.
+
+**`X` -> `eval-minibuffer`** (`simple.el:1999`), whose body is
+`(eval (read--expression prompt initial-contents))`. The environment is
+`%eval-expression-environment` - the user environment, where the names a
+user types are bound, which is `eval-expression`'s for the same reason.
+
+**One departure they share**: `x` and `X` answer the *form*, where the
+C's `visargs[i]` is `last_minibuf_string` - the text that was typed. So a
+later prompt's `%s` shows nil where Emacs would show the expression. It
+would be reachable only from a spec like `"x\nsValue of %s: "`.
+
+All four seams are installed by `minibuffer.scm` as it loads, beside the
+functions - which is the library every front end has loaded before a key
+is read.
+
+`command-tests.scm` 60 -> 66 and `tty-editor-tests.scm`'s installation
+group covers all four.

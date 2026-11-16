@@ -46,10 +46,17 @@
     ;; `format' fills in a message's arguments, as GNU Emacs's
     ;; `format-message' does for `minibuffer-message'.
     (only (guile) format)
+    ;; The registry and the predicate `read-variable' completes with -
+    ;; `custom.scm' imports nothing that could come back here, so this is
+    ;; a safe edge. Emacs needs no import: `read-variable' is
+    ;; `minibuf.c'`s and reads `Vobarray' directly.
+    (only (schemacs editor custom) custom-variable-names custom-variable-p)
     (only (schemacs editor command)
           current-prefix-arg define-command run-command uarg->integer
           *command-table* command-value-of command-interactive-spec
           *read-string-function* *read-number-function*
+          *read-command-function* *read-minibuffer-function*
+          *eval-minibuffer-function* *read-variable-function*
           *interactive-read-existing-buffer-function*
           *interactive-read-buffer-function*)
     ;; `make-buffer-string` is `editfns.c:1561`'s and is
@@ -328,6 +335,8 @@ read-number-history
    read-char-from-minibuffer
    read-from-minibuffer
    read-string
+   read-command read-variable read-minibuffer eval-minibuffer
+   custom-variable-history
    ;; the history record itself, for the libraries that hold their own
    ;; histories - `replace.el''s `query-replace-history' - the way
    ;; `read-number-history' would have wanted its accessors exported
@@ -385,6 +394,7 @@ read-number-history
 
     (define minibuffer-history (make<history> '()))
     (define file-name-history (make<history> '()))
+    (define custom-variable-history (make<history> '()))
     (define read-number-history (make<history> '()))
     ;; ^ GNU Emacs's `read-number-history' (`subr.el'), the history the
     ;; number prompts share. It is here beside `file-name-history' -
@@ -4025,6 +4035,75 @@ Exit the minibuffer if successful, else report the error to the user."
        (cons (cons (kbd "RET") read--expression-try-read)
              (minibuffer-local-bindings))))
 
+    (define (read-command prompt . args)
+      ;; GNU Emacs's `read-command' (`minibuf.c:1457'): "Read the name of
+      ;; a command and return it as a symbol. Prompt with PROMPT. By
+      ;; default, return DEFAULT-VALUE or its first element if it is a
+      ;; list."
+      ;;
+      ;; The C is `Fcompleting_read (prompt, Vobarray, Qcommandp, Qt,
+      ;; ...)' and then `Fintern'. The command obarray here is
+      ;; `command-completion-table', whose entries are all commands
+      ;; already - so the `commandp' predicate has nothing left to
+      ;; reject.
+      ;;--------------------------------------------------------------
+      (let* ((default (if (pair? args) (car args) #f))
+             (default-string (cond ((not default) #f)
+                                   ((symbol? default) (symbol->string default))
+                                   (else default)))
+             (name (completing-read prompt command-completion-table
+                                    #f #t #f #f default-string)))
+        (and name (not (string=? name "")) (string->symbol name))))
+
+    (define (read-variable prompt . args)
+      ;; GNU Emacs's `read-variable' (`minibuf.c:1496'): "Read the name
+      ;; of a user option and return it as a symbol."
+      ;;
+      ;; The C completes over `Vobarray' with `custom-variable-p' as the
+      ;; predicate. **There is no obarray here**, so the collection is
+      ;; `custom-variable-names` - the list `custom-declare-variable`
+      ;; records as it runs - and the predicate filters it the way the C's
+      ;; does.
+      ;;--------------------------------------------------------------
+      (let* ((default (if (pair? args) (car args) #f))
+             (default-string (cond ((not default) #f)
+                                   ((symbol? default) (symbol->string default))
+                                   (else default)))
+             (name (completing-read prompt custom-variable-names
+                                    custom-variable-p #t #f
+                                    custom-variable-history default-string)))
+        (and name (not (string=? name "")) (string->symbol name))))
+
+    (define (read-minibuffer prompt . args)
+      ;; GNU Emacs's `read-minibuffer' (`simple.el`): "Return a Lisp
+      ;; object read using the minibuffer, unevaluated. Prompt with
+      ;; PROMPT."
+      ;;
+      ;; The C is `read-from-minibuffer (prompt, initial-contents,
+      ;; minibuffer-local-map, t, minibuffer-history)' where the fourth
+      ;; argument says "read it for me". **That READ argument is not
+      ;; carried here**, so the string is read afterwards on a string
+      ;; port - with Scheme's reader, which is the departure
+      ;; `eval-expression' already carries.
+      ;;--------------------------------------------------------------
+      (let* ((text (read-from-minibuffer
+                    prompt (if (pair? args) (car args) #f)
+                    minibuffer-local-map #f 'minibuffer-history))
+             (port (open-input-string text)))
+        (let ((form (read port)))
+          (unless (eof-object? (read port))
+            (error "Trailing garbage following expression"))
+          form)))
+
+    (define (eval-minibuffer prompt . args)
+      ;; GNU Emacs's `eval-minibuffer' (`simple.el:1999'): "Return value
+      ;; of Lisp expression read using the minibuffer." The C's body is
+      ;; `(eval (read--expression prompt initial-contents))', and the
+      ;; environment is `eval-expression`'s - the user environment, which
+      ;; is where the names a user types are bound.
+      ;;--------------------------------------------------------------
+      (eval (read--expression prompt) (%eval-expression-environment)))
+
     (define (read--expression prompt)
       ;; GNU Emacs's `read--expression' (`simple.el:2063'): "Read an Emacs
       ;; Lisp expression from the minibuffer."
@@ -4074,6 +4153,15 @@ else is Emacs's - the `Eval: ' prompt, the result echoed, and a
 
     (*read-string-function* read-string)
     (*read-number-function* read-number)
+    (*read-command-function* read-command)
+    (*read-minibuffer-function* read-minibuffer)
+    (*eval-minibuffer-function* eval-minibuffer)
+    (*read-variable-function* read-variable)
+    ;; ^ The `C', `x' and `X' interactive codes' readers (`callint.c:495',
+    ;; `:699', `:704'). All three are this library's, defined above, and
+    ;; all three prompt - which is why they are here rather than in
+    ;; `simple.scm`, where `read-minibuffer' and `eval-minibuffer` live in
+    ;; Emacs.
     (*interactive-read-existing-buffer-function*
      (lambda (prompt)
        ;; `b' (`callint.c:468'): `Fcurrent_buffer ()', replaced by
