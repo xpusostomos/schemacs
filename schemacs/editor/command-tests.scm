@@ -18,7 +18,8 @@
        *read-command-function* *read-minibuffer-function*
        *eval-minibuffer-function* *read-variable-function*
        *read-char-event-function* *message-clear-function*
-       *read-key-sequence-function* *read-key-sequence-vector-function*)
+       *read-key-sequence-function* *read-key-sequence-vector-function*
+       *interactive-read-function-name-function*)
  (only (schemacs editor buffer)
        allocate-buffer with-current-buffer current-buffer
        set!buffer-read-only)
@@ -212,6 +213,11 @@ read-only check."
   "A command whose specification is `U': the discarded up-event."
   (interactive "UUp: ")
   (*got* ev))
+
+(define-command (function-name-command fn)
+  "A command whose specification is `a': a function, by name."
+  (interactive "aFunction: ")
+  (*got* fn))
 
 (define-command (dash-marker-command arg)
   "A command whose specification begins with `-', Lucid's no-op."
@@ -631,7 +637,17 @@ read-only check."
     (test-equal "K reads one as a vector" (vector 24 3)
                 (begin ((entry key-vector-command) #f) (*got*)))
     (test-equal "U reads nothing and answers nil" #f
-                (begin ((entry up-event-command) #f) (*got*)))))
+                (begin ((entry up-event-command) #f) (*got*)))
+    (*calls* '())
+    ;; `a' - the one code that wants a *function* rather than a command.
+    ;; The reader answers the symbol; the visible form is its name.
+    (parameterize ((*interactive-read-function-name-function*
+                    (lambda (prompt)
+                      (*calls* (append (*calls*) (list (list prompt))))
+                      'string-append)))
+      (test-equal "a reads a function name, as a symbol" 'string-append
+                  (begin ((entry function-name-command) #f) (*got*)))
+      (test-equal "from its prompt" (list (list "Function: ")) (*calls*)))))
 (test-end "read-codes")
 ;;--------------------------------------------------------------
 (test-begin "plain-specs")

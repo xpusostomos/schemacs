@@ -31,6 +31,7 @@
    *format-message-function* *read-string-function* *read-number-function*
    *read-char-event-function* *message-clear-function*
    *read-key-sequence-function* *read-key-sequence-vector-function*
+   *interactive-read-function-name-function*
    *read-command-function* *read-variable-function*
    *read-minibuffer-function* *eval-minibuffer-function*
    *read-coding-system-function* *read-non-nil-coding-system-function*
@@ -453,6 +454,14 @@
 
     (define *interactive-read-file-name-function* (make-parameter #f))
     (define *interactive-read-directory-name-function* (make-parameter #f))
+    (define *interactive-read-function-name-function* (make-parameter #f))
+    ;; ^ The `a' code's reader. The C inlines it - `completing-read`
+    ;; over `Vobarray` with `Qfboundp`, then intern - and two of those
+    ;; three are this tree's to supply: there is **no obarray**, and
+    ;; "does this name have a function definition" is a *resolution*
+    ;; question here, not a cell test (`symbol-function` on a name that
+    ;; is not bound is an error, not nil). Both are the installing
+    ;; library's, so as with `b` and `D` the whole call is the seam.
     (define *read-key-sequence-function* (make-parameter #f))
     (define *read-key-sequence-vector-function* (make-parameter #f))
     ;; ^ The `k' and `K' readers (`keyboard.c:12501', `:12562'), both
@@ -671,6 +680,20 @@
                         (cons (read (%interactive-message prompt (reverse visible)))
                               args)
                         (cons #f visible))))
+               ;; "Symbol defined as a function" (`callint.c:461'): the
+               ;; one code that wants a *function* rather than a command
+               ;; - what you instrument, trace or advise is rarely a
+               ;; command. **No completion**, because enumerating
+               ;; function names needs the obarray this tree does not
+               ;; keep; `eval` does the direction that matters, name to
+               ;; procedure, and that is what the seam does.
+               ((char=? code #\a)
+                (let* ((read (%interactive-seam
+                              *interactive-read-function-name-function*
+                              'read-function-name))
+                       (answer (read (%interactive-message prompt (reverse visible)))))
+                  (loop (cdr rest) (cons answer args)
+                        (cons (symbol->string answer) visible))))
                ;; "Key sequence" (`callint.c:531'). The C reads it with
                ;; `cursor-in-echo-area` bound and the prompt face set,
                ;; then shows it through `key-description`.

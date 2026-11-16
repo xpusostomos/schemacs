@@ -161,7 +161,8 @@
        *read-command-function* *read-variable-function*
        *read-minibuffer-function* *eval-minibuffer-function*
        *read-char-event-function* *message-clear-function*
-       *read-key-sequence-function* *read-key-sequence-vector-function*)
+       *read-key-sequence-function* *read-key-sequence-vector-function*
+       *interactive-read-function-name-function*)
  (only (schemacs editor editfns)
        buffer-substring-no-properties delete-region goto-char point point-max point-min
        message
@@ -4963,6 +4964,10 @@
 (test-equal "keyboard.scm installs the k and K readers" '(#t #t)
             (list (procedure? (*read-key-sequence-function*))
                   (procedure? (*read-key-sequence-vector-function*))))
+
+;; ...and the one the a code reads a function name with.
+(test-equal "minibuffer.scm installs the a reader" #t
+            (procedure? (*interactive-read-function-name-function*)))
 
 ;; ...and `minibuffer.scm` the two the buffer codes read with.
 (test-equal "minibuffer.scm installs the b and B readers" '(#t #t)

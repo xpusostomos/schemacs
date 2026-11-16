@@ -370,6 +370,7 @@
     *interactive-read-directory-name-function*
     *interactive-read-existing-buffer-function*
     *interactive-read-file-name-function*
+    *interactive-read-function-name-function*
     *internal-syntax-propertize-function*
     *interpreter-mode-alist*
     *interprogram-cut-function*

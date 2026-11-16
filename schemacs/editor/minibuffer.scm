@@ -57,6 +57,7 @@
           *read-string-function* *read-number-function*
           *read-command-function* *read-minibuffer-function*
           *eval-minibuffer-function* *read-variable-function*
+          *interactive-read-function-name-function*
           *interactive-read-existing-buffer-function*
           *interactive-read-buffer-function*)
     ;; `make-buffer-string` is `editfns.c:1561`'s and is
@@ -4157,6 +4158,29 @@ else is Emacs's - the `Eval: ' prompt, the result echoed, and a
     (*read-minibuffer-function* read-minibuffer)
     (*eval-minibuffer-function* eval-minibuffer)
     (*read-variable-function* read-variable)
+    (*interactive-read-function-name-function*
+     (lambda (prompt)
+       ;; `a' (`callint.c:461'): "Symbol defined as a function". The C
+       ;; completes over `Vobarray` with `Qfboundp`; **there is no
+       ;; obarray here**, so the name is typed rather than completed, and
+       ;; the predicate becomes a *resolution* - the name must exist in
+       ;; the user environment and be a procedure. `symbol-function` on an
+       ;; unbound name is an error in Emacs, so a guard is the right
+       ;; shape, not a nil test.
+       ;;
+       ;; Two departures, both reachable only from an `a' spec - of which
+       ;; Emacs has 5 in all of `lisp/`: no completion, and a name that
+       ;; resolves to a non-procedure is an error rather than simply not
+       ;; offered.
+       (let* ((name (read-string prompt))
+              (symbol (and name (not (string=? name ""))
+                           (string->symbol name))))
+         (unless symbol
+           (error "No function name given"))
+         (let ((value (eval symbol (%eval-expression-environment))))
+           (unless (procedure? value)
+             (error "%s is not a function" name))
+           symbol))))
     ;; ^ The `C', `x' and `X' interactive codes' readers (`callint.c:495',
     ;; `:699', `:704'). All three are this library's, defined above, and
     ;; all three prompt - which is why they are here rather than in

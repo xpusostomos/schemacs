@@ -4964,3 +4964,53 @@ commands do.
 
 `command-tests.scm` 69 -> 72: `k` reads a sequence, `K` one as a vector,
 `U` answers nil and reads nothing.
+
+## The `a` code, and the obarray this tree never needed
+
+`a` ("Symbol defined as a function", `callint.c:461`):
+
+```c
+visargs[i] = Fcompleting_read (callint_message, Vobarray, Qfboundp, Qt, ...);
+args[i] = Fintern (visargs[i], Qnil);
+```
+
+Three things in one line, and this tree has none of them the same way.
+`Vobarray` is one global collection filtered per reader; here there is no
+such collection, and Chris pressed on whether one is needed at all. It is
+not:
+
+* **Completion over the obarray** is what enumeration exists for, and
+  enumeration exists for **TAB**. A universal registry buys a keystroke
+  saving, not a functionality.
+* **Name to procedure** is `eval` (`(eval sym (%eval-expression-environment))`)
+  - the direction that actually *does* anything.
+
+So `a` is carried **without completion**: the name is typed, and the
+C's `Qfboundp` predicate becomes a **resolution** - the name must exist
+in the user environment and be a procedure. `symbol-function` on an
+unbound name is an error in Emacs, so the check is a guard, not a nil
+test.
+
+The whole call is the seam (`*interactive-read-function-name-function*`),
+installed by `minibuffer.scm` - the library that has both the reader and
+the environment - for the reason `b` and `D` are whole-call seams.
+
+**Two departures, and both are only reachable from an `a` spec:**
+
+1. **No completion.** Emacs offers every `fboundp` symbol; here the name
+   is typed in full.
+2. **A name that resolves to a non-procedure is an error** ("X is not a
+   function") rather than simply not being offered.
+
+Both are cheap because **almost nothing uses `a`**: measured, it appears
+in **5** interactive specs in all of `lisp/` - `elp` twice, `edebug`,
+`timer`, `5x5` - and the first three are the host's job in a Scheme
+editor (Guile's `statprof` profiles; Guile's traps and `,trace` step).
+The code is carried because `callint.c` has it and a spec quoted from
+Emacs now reads as written.
+
+`command-tests.scm` 72 -> 74: `a` reads a function name as a symbol, from
+its prompt.
+
+**With this, all 30 letters of `callint.c`'s switch and its `+` are
+carried.**

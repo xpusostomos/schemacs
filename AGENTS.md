@@ -9967,7 +9967,21 @@ answers nil** - and no `"U` spec exists in all of `lisp/`), the partial
 sequence is not echoed, and `k`'s visible form is nil because
 `key-description` lives above `command.scm`.
 
-### The `a` code needs no list after all
+### The `a` code, carried without completion (2026-11-16)
+
+`a` asks for the name of *any* function, not a command - the ones worth
+instrumenting are rarely commands. Emacs gets that from the obarray with
+`fboundp`. Here it is **carried without completion**: the name is typed,
+and the C's predicate becomes a resolution (`eval` in the user
+environment, then `procedure?`), which is the direction that does
+anything. Two departures, both reachable only from an `a` spec: no TAB,
+and a name that resolves to a non-procedure errors rather than simply not
+being offered. The whole call is the seam, installed by
+`minibuffer.scm`, as with `b` and `D`.
+
+**All 30 letters and the `+` are now carried.**
+
+### The argument that settled it: why `a` needs no list at all
 
 It reads "the name of a symbol with a function definition" and completes
 over `Vobarray` with `fboundp` - *all functions*, since the ones you would
@@ -9990,5 +10004,4 @@ procedure.)
 
 **So the remaining `callint.c` work was `k` `K` `U`, and its cost turned
 out to be sequence assembly rather than a registry - see above. With those
-in, **29 of 30 are carried and only `a` is left**, which needs a string
-reader rather than a list.**
+in, and `a` follows it with **no list either** - see below.**
