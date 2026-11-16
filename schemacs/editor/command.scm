@@ -29,6 +29,8 @@
    *use-region-p-function*
    *point-marker-function* *mark-marker-function*
    *format-message-function* *read-string-function* *read-number-function*
+   *interactive-read-existing-buffer-function*
+   *interactive-read-buffer-function*
    *interactive-read-file-name-function*
    *interactive-read-directory-name-function*
    called-interactively? funcall-interactively
@@ -432,22 +434,6 @@
     (define *format-message-function* (make-parameter #f))
     (define *read-string-function* (make-parameter #f))
     (define *read-number-function* (make-parameter #f))
-    (define *interactive-read-file-name-function* (make-parameter #f))
-    (define *interactive-read-directory-name-function* (make-parameter #f))
-    ;; ^ The file codes' readers, and the rule their names follow: a seam
-    ;; takes the plain `<function>-function` name unless Emacs has a
-    ;; *variable* of that name, in which case it is `interactive-`-
-    ;; prefixed. `read-file-name-function` is such a variable (a
-    ;; defcustom that replaces `read-file-name`), so
-    ;; `*read-file-name-function*` is not available here;
-    ;; `read-string` and `read-number` are nothing in Emacs, which is why
-    ;; those two keep the plain spelling.
-    ;;
-    ;; Two seams and not one, because the `D' code's DEFAULT and
-    ;; PREDICATE are `BVAR (current_buffer, directory)` and
-    ;; `Qfile_directory_p` - state and a function, neither of which this
-    ;; library can name. So `D' reads with its prompt alone and the
-    ;; installer supplies the rest.
     ;; ^ The readers the minibuffer codes need. `format-message` is
     ;; `editfns.c`'s and the other two are `minibuf.c`'s and `subr.el`'s;
     ;; all three are above this library, so they arrive as seams -
@@ -459,6 +445,31 @@
     ;; (`callint_message = Fformat_message (i - 1, visargs + 1)'), which
     ;; is how `"sQuery replace %s with: "' shows what the `s' before it
     ;; read.
+
+    (define *interactive-read-file-name-function* (make-parameter #f))
+    (define *interactive-read-directory-name-function* (make-parameter #f))
+    (define *interactive-read-existing-buffer-function* (make-parameter #f))
+    (define *interactive-read-buffer-function* (make-parameter #f))
+    ;; ^ The file and buffer codes' readers, and the rule their names
+    ;; follow: a seam takes the plain `<function>-function` name unless
+    ;; Emacs has a *variable* of that name, in which case it is
+    ;; `interactive-`-prefixed. `read-file-name-function` (a defcustom
+    ;; that replaces `read-file-name`) and `read-buffer-function`
+    ;; (`minibuf.c:2544`, `*read-buffer-function*` in `minibuf.scm`) are
+    ;; such variables; `read-string` and `read-number` are nothing in
+    ;; Emacs, which is why those two keep the plain spelling.
+    ;;
+    ;; Where a code's *arguments* are state this library cannot see, the
+    ;; whole call is the seam and it takes the prompt alone:
+    ;;
+    ;;   `D' - DEFAULT is `BVAR (current_buffer, directory)` and
+    ;;         PREDICATE is `Qfile_directory_p`;
+    ;;   `b' - DEFAULT is the current buffer unless the minibuffer
+    ;;         window is selected, and MUSTMATCH is `Qt';
+    ;;   `B' - DEFAULT is `(other-buffer (current-buffer))`.
+    ;;
+    ;; `f', `F' and `G' differ only in constants this library *can* name,
+    ;; so they share one seam and the constants are at the call sites.
 
     (define (%interactive-segments codes)
       ;; The specification split into codes and their prompts, in order,
@@ -626,6 +637,27 @@
                 (let ((read (%interactive-seam
                              *interactive-read-directory-name-function*
                              'read-file-name)))
+                  (loop (cdr rest)
+                        (cons (read (%interactive-message prompt (reverse visible)))
+                              args)
+                        (cons #f visible))))
+               ;; "Name of existing buffer" (`callint.c:468'): the C's
+               ;; default - the current buffer, or `other-buffer' when
+               ;; the selected window is the minibuffer window - and
+               ;; MUSTMATCH `Qt'. Both are the installing library's.
+               ((char=? code #\b)
+                (let ((read (%interactive-seam
+                             *interactive-read-existing-buffer-function*
+                             'read-buffer)))
+                  (loop (cdr rest)
+                        (cons (read (%interactive-message prompt (reverse visible)))
+                              args)
+                        (cons #f visible))))
+               ;; "Name of buffer, possibly nonexistent" (`:475'): the
+               ;; `other-buffer' default, and MUSTMATCH nil.
+               ((char=? code #\B)
+                (let ((read (%interactive-seam *interactive-read-buffer-function*
+                                               'read-buffer)))
                   (loop (cdr rest)
                         (cons (read (%interactive-message prompt (reverse visible)))
                               args)

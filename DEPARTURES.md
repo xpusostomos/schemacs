@@ -4665,3 +4665,60 @@ Both seams are installed by `files.scm` as it loads, beside
 graph: the stubs record the whole call, which is what pins the six
 constants per code. `tty-editor-tests.scm` asserts that a real editor
 has the real two.
+
+## The buffer codes, and MUSTMATCH the third way
+
+`b` ("Name of existing buffer", `callint.c:468`) and `B` ("Name of
+buffer, possibly nonexistent", `:475`). Both reach `Fread_buffer`
+(`minibuf.c:1522`), which is already here as `read-buffer`; what is not
+nameable from a leaf library is the **default**.
+
+```c
+/* b */
+args[i] = Fcurrent_buffer ();
+if (BASE_EQ (selected_window, minibuf_window))
+    args[i] = Fother_buffer (args[i], Qnil, Qnil);
+args[i] = Fread_buffer (callint_message, args[i], Qt, Qnil);
+
+/* B */
+args[i] = Fread_buffer (callint_message,
+                        Fother_buffer (Fcurrent_buffer (), Qnil, Qnil),
+                        Qnil, Qnil);
+```
+
+`b`'s default is the current buffer *unless the selected window is the
+minibuffer window*, in which case it is `other-buffer` of it - and that
+condition is what makes prompting from the minibuffer default to the
+buffer you came from. `B`'s is `other-buffer` unconditionally, which is
+why `C-x b` starts on the buffer you were in before.
+
+Both are buffer state, so, as with `D`, **the whole call is the seam**
+and it takes the prompt alone:
+
+| seam | installed as |
+|---|---|
+| `*interactive-read-existing-buffer-function*` | `b`: the conditional default, MUSTMATCH `t` |
+| `*interactive-read-buffer-function*` | `B`: `other-buffer`, MUSTMATCH `#f` |
+
+Both are installed by `minibuffer.scm`, beside `read-buffer`, and they
+take the `interactive-` prefix under the rule the file codes set -
+`read-buffer-function` is `minibuf.c:2544` and is *already* in this
+tree, as `*read-buffer-function*` in `minibuf.scm`, so the plain name
+was not free.
+
+**MUSTMATCH now has three spellings in these codes, and all three are
+the C's**:
+
+| code | MUSTMATCH | what it means here |
+|---|---|---|
+| `f` | `Qlambda` | the *symbol*, which `completing-read` passes into `minibuffer-completion-confirm` |
+| `b` | `Qt` | `t` - must match, no confirmation question |
+| `F`, `G`, `B` | `Qnil` | a name that exists nowhere yet is accepted |
+
+They are not interchangeable and the difference is reachable: `C-x b` is
+`B` (nil), `b` refuses a name with no buffer behind it, and `f` is the
+one that reaches the confirm machinery.
+
+`command-tests.scm` 51 -> 54 (`b` and `B` read with the prompt alone, and
+the command receives what was read), and `tty-editor-tests.scm` asserts
+that a real editor has both seams installed.

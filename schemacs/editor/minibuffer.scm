@@ -49,7 +49,9 @@
     (only (schemacs editor command)
           current-prefix-arg define-command run-command uarg->integer
           *command-table* command-value-of command-interactive-spec
-          *read-string-function* *read-number-function*)
+          *read-string-function* *read-number-function*
+          *interactive-read-existing-buffer-function*
+          *interactive-read-buffer-function*)
     ;; `make-buffer-string` is `editfns.c:1561`'s and is
     ;; `intervals.scm`'s - it must live below `search.scm`, which
     ;; calls it and cannot import `editfns.scm` (2026-10-13).
@@ -4072,6 +4074,24 @@ else is Emacs's - the `Eval: ' prompt, the result echoed, and a
 
     (*read-string-function* read-string)
     (*read-number-function* read-number)
+    (*interactive-read-existing-buffer-function*
+     (lambda (prompt)
+       ;; `b' (`callint.c:468'): `Fcurrent_buffer ()', replaced by
+       ;; `Fother_buffer' when `BASE_EQ (selected_window,
+       ;; minibuf_window)' - and then `Fread_buffer (prompt, DEFAULT,
+       ;; Qt, Qnil)', so MUSTMATCH is `t' and a name that is not a
+       ;; buffer is refused.
+       (let ((default (if (eq? (selected-window)
+                               (frame-minibuffer-window (*current-frame*)))
+                          (other-buffer (current-buffer))
+                          (current-buffer))))
+         (read-buffer prompt default #t))))
+    (*interactive-read-buffer-function*
+     (lambda (prompt)
+       ;; `B' (`callint.c:475'): `Fread_buffer (prompt, Fother_buffer
+       ;; (Fcurrent_buffer (), Qnil, Qnil), Qnil, Qnil)' - MUSTMATCH
+       ;; nil, so a name that names nothing yet is accepted.
+       (read-buffer prompt (other-buffer (current-buffer)) #f)))
     ;; ^ The `s'/`S'/`M' and `n'/`N' interactive codes' readers
     ;; (`callint.c:681', `:687', `:630', `:640'). `command.scm` is below
     ;; this library - everything here defines commands - so the two

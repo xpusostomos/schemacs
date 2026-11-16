@@ -11,7 +11,9 @@
        *read-string-function* *read-number-function*
        *format-message-function*
        *interactive-read-file-name-function*
-       *interactive-read-directory-name-function*)
+       *interactive-read-directory-name-function*
+       *interactive-read-existing-buffer-function*
+       *interactive-read-buffer-function*)
  (only (schemacs editor buffer)
        allocate-buffer with-current-buffer current-buffer
        set!buffer-read-only)
@@ -144,6 +146,16 @@ read-only check."
 (define-command (directory-command name)
   "A command whose specification is `D': a directory name."
   (interactive "DDir: ")
+  (*got* name))
+
+(define-command (existing-buffer-command name)
+  "A command whose specification is `b': an existing buffer."
+  (interactive "bBuffer: ")
+  (*got* name))
+
+(define-command (any-buffer-command name)
+  "A command whose specification is `B': a possibly nonexistent buffer."
+  (interactive "BBuffer: ")
   (*got* name))
 
 (define-command (dash-marker-command arg)
@@ -465,7 +477,22 @@ read-only check."
     (test-equal "D reads with the prompt alone, the rest being files.scm's"
                 (list (list "Dir: "))
                 (begin ((entry directory-command) #f) (*calls*)))
-    (test-equal "and the command still gets its name" "ANSWER" (*got*))))
+    (test-equal "and the command still gets its name" "ANSWER" (*got*)))
+
+  ;; The buffer codes, on the same two recorders. `minibuffer.scm` is not
+  ;; in this suite's graph either, and `b` and `B` differ in the DEFAULT
+  ;; and the MUSTMATCH the C passes, both of which the installer supplies.
+  (parameterize ((*interactive-read-existing-buffer-function*
+                  (stub-file-reader))
+                 (*interactive-read-buffer-function* (stub-file-reader))
+                 (*calls* '()))
+    (test-equal "b reads with the prompt alone" (list (list "Buffer: "))
+                (begin ((entry existing-buffer-command) #f) (*calls*)))
+    (test-equal "and the command gets what was read" "ANSWER" (*got*))
+    ;; a fresh recorder, or B's assertion would see b's call too
+    (*calls* '())
+    (test-equal "B reads with the prompt alone too" (list (list "Buffer: "))
+                (begin ((entry any-buffer-command) #f) (*calls*)))))
 (test-end "read-codes")
 ;;--------------------------------------------------------------
 (test-begin "plain-specs")

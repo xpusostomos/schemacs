@@ -9825,14 +9825,24 @@ files as well as directories: a named departure.
 `command-tests.scm` 45 -> 51 (stubs record the *whole call*, which is
 what pins the constants); `tty-editor-tests` asserts the real two.
 
-### What is left of `callint.c`: 13 codes
+### The `b` `B` codes (2026-11-16, same day)
 
-(`callint.c` has 30 letters plus `+`; 17 are carried - `p` `P` `i` `d`
-`m` `e` `r` `R` `s` `M` `S` `n` `N` `f` `F` `G` `D` - so 13 are left.)
+`b` (existing buffer) and `B` (possibly nonexistent) - and both are
+"the whole call is the seam", because the C's DEFAULT is buffer state:
+`b`'s is the current buffer *unless the selected window is the minibuffer
+window*, in which case `other-buffer`; `B`'s is `other-buffer` always.
+MUSTMATCH is `Qt` for `b` and `Qnil` for `B` - a **third** spelling
+beside `f`'s `Qlambda`, and all three are the C's, with different
+observable behaviour.
+
+### What is left of `callint.c`: 11 codes
+
+(`callint.c` has 30 letters plus `+`; 19 are carried - `p` `P` `i` `d`
+`m` `e` `r` `R` `s` `M` `S` `n` `N` `f` `F` `G` `D` `b` `B` - so 11 are
+left.)
 
 | codes | reader | lives in | blocker |
 |---|---|---|---|
-| `b` `B` | `read-buffer` | `minibuffer.scm` | the name (`interactive-`), and `b`'s default is buffer state |
 | `a` `C` | `completing-read` over the obarray | `minibuffer.scm` | needs a predicate over `fboundp`/`commandp` |
 | `c` | `read-char` | `keyboard.scm` | |
 | `k` `K` (`U` after them) | `read-key-sequence` | `keyboard.scm` | |
