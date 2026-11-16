@@ -4311,11 +4311,18 @@ key dispatch finds a command by its *procedure* (`command-record-of`),
 not its name. But `M-x` resolves a name through `*command-table*`, an
 alist of name string to command record that only `define-command` writes
 to, so `M-x tab-new` answered "No match" while `M-x tab-bar-new-tab`
-worked. `define-alias` (`command.scm`) does both: the `define` and a
-`register-command-alias!` that pushes the alias name on the table
-against the target's **own** record - which is what keeps
-`this-command`, `called-interactively-p` and the docstring identical
-through either name.
+worked. `define-alias` (`command.scm`) does both: the `define`, and the filing
+of the second *name* against the target's **own** record - which is what
+keeps `this-command`, `called-interactively-p` and the docstring
+identical through either name.
+
+**That filing is not a separate mechanism.** It was `register-command-
+alias!`, which named an object the table does not have: the table is one
+thing, name to record, so a command and a second name for that command
+are the same operation. There is one way in - `%file-command-name!
+(name record)` - called by `register-command!` and by `define-alias`, and
+a nil record files nothing, which is `defalias` of a non-command being a
+non-command.
 
 **Not carried**: `defalias`'s third argument, a DOCSTRING for the alias
 name. Nothing here reads a docstring off a name -

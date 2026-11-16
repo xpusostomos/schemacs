@@ -9922,3 +9922,54 @@ That is the honest remaining edge of `callint.c` in this tree.
 | `x` `X` | `read-minibuffer`, `eval-minibuffer` | `minibuffer.scm` | `x` must read *without* evaluating |
 | `z` `Z` | `read-coding-system` | `coding.scm` | |
 | `v` | `read-variable` | `custom.scm` | |
+
+## No obarray, and the one code that looked like it needed one (2026-11-16)
+
+Chris pushed on this until it was settled, so it is written down:
+
+**There is no universal registry here, and none is wanted.** GNU Emacs has
+one obarray and *no* command list - `M-x` is `completing-read` over
+`obarray` with `(commandp sym)` as the predicate (`simple.el:2400`), and
+`read-variable` is the same call with `custom-variable-p`. Emacs derives
+each set by filtering everything. This tree inverts it and keeps the
+answers: `*command-table*` for commands, `custom-variable-names` for
+custom variables, `coding-system-alist` for coding systems, the buffer
+list for buffers, the filesystem for files.
+
+**The price of keeping an index, and the one rule it imposes**: a command
+is found *by name* only if something filed it. `define-command` files it;
+`define-alias` files the second name; a bare `define` of a procedure files
+nothing - so a key bound to that procedure works (dispatch finds a command
+by its procedure) while `M-x` cannot see it. That asymmetry is exactly
+what made `define-alias` necessary.
+
+**`%file-command-name! (name record)` is the one way into the table.**
+It was `register-command-alias!` for the alias half, which named an object
+the table does not have - filing a command and filing a second name for it
+are the same operation, and the table has no notion of "alias" in it any
+more than the obarray does. A nil record files nothing, which is
+`defalias` of a non-command being a non-command.
+
+### The `a` code needs no list after all
+
+It reads "the name of a symbol with a function definition" and completes
+over `Vobarray` with `fboundp` - *all functions*, since the ones you would
+want to instrument or debug are precisely the ones no key is bound to, so
+the command list cannot stand in.
+
+But **completion is the only thing that needs enumeration**, and `eval`
+(`(eval sym (current-module))`, or `module-ref`) already does the
+direction that matters: name to procedure. So if `a` is ever wanted it is
+`read-string` -> intern -> `procedure?`, with "no completion collection"
+recorded against Emacs's obarray sweep. No registry.
+
+And nothing wants it: Emacs uses `"a"` in **5** interactive specs in all of
+`lisp/` - `elp` twice, `edebug`, `timer`, `5x5` - and the first three are
+the host's job here (Guile's `statprof` for profiling, Guile's traps and
+`,trace` for stepping), `5x5` is a game, and `timer.scm` has no commands
+yet. (`cancel-function-timers` would need adapting anyway: Emacs compares
+`(timer--function timer)` with the *symbol*, and a timer here holds a
+procedure.)
+
+**So the remaining `callint.c` work is `k` `K` `U`, and its cost is
+`read_key_sequence`, not a registry.**

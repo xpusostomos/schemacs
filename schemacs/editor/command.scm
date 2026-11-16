@@ -920,34 +920,35 @@
                                   command
                                   (procedure-documentation command)
                                   (and spec 'uarg))))
-        (*command-table* (cons (cons name record) (*command-table*)))
-        record))
+        (%file-command-name! name record)))
 
-    (define (register-command-alias! name command)
-      ;; File NAME in the obarray against COMMAND's *own* record - the
-      ;; step that makes `M-x NAME` find a command that has a second
-      ;; name. GNU Emacs needs no such function: `defalias` writes the
-      ;; one function object into the second symbol's function cell, and
-      ;; `M-x` looks a symbol up in the obarray like anything else. This
-      ;; tree's obarray is a table of *name to record*, so the second
-      ;; name needs its own entry, and the record is shared - which is
-      ;; what keeps `this-command`, `called-interactively-p` and the
-      ;; docstring the same for both names.
+    (define (%file-command-name! name record)
+      ;; Put NAME against RECORD in the command table, and answer
+      ;; RECORD. **There is one way into the table, and this is it.**
+      ;; `*command-table*` is a single thing - name to record - so a
+      ;; command and a second name for that same command are not two
+      ;; mechanisms: both are a name filed against a record.
       ;;
-      ;; A target that is not a command registers nothing and answers
-      ;; #f, as `defalias` of a non-command is not a command either.
+      ;; That is also why there is no `defalias` step here. GNU Emacs
+      ;; needs none, because the obarray already holds the alias's symbol
+      ;; and `M-x` asks `commandp` of it; this tree's table is keyed by
+      ;; *name*, so a second name needs its own entry - and the RECORD is
+      ;; shared, which is what keeps `this-command`,
+      ;; `called-interactively-p` and the docstring identical through
+      ;; either name.
+      ;;
+      ;; A nil RECORD files nothing: `defalias` of a non-command is not a
+      ;; command either.
       ;;--------------------------------------------------------------
-      (let ((record (command-record-of command)))
-        (when record
-          (*command-table* (cons (cons (symbol->string name) record)
-                                 (*command-table*))))
-        record))
+      (when record
+        (*command-table* (cons (cons name record) (*command-table*))))
+      record)
 
     (define (command-record-of thing)
       ;; The command record whose API is THING, or #f: how a key bound
       ;; to a `define-command' procedure is dispatched like one bound to a
       ;; record. GNU Emacs keeps `commandp' the same question - "is this
-      ;; a command?" - and the answer here is "is there an obarray entry
+      ;; a command?" - and the answer here is "is there a table entry
       ;; whose procedure this is".
       ;;--------------------------------------------------------------
       (and (procedure? thing)
@@ -1020,7 +1021,11 @@
         ((define-alias alias target)
          (begin
            (define alias target)
-           (register-command-alias! 'alias alias)))))
+           ;; the second half of `defalias`: the *name*, filed against
+           ;; the target's own record. A target that is not a command
+           ;; files nothing and the alias is not a command either.
+           (%file-command-name! (symbol->string 'alias)
+                                (command-record-of alias))))))
 
     (define-syntax define-command
       ;; Define a command: a procedure definition, spelled as Scheme
