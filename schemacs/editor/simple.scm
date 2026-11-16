@@ -73,6 +73,7 @@
     ;; showing the buffer, which is `set-window-hscroll''s
     ;; `quit-window' is what `special-mode-map''s `q' is.
     (only (schemacs editor window) quit-window set-window-hscroll!)
+    (only (schemacs editor subr) suppress-keymap)
     (only (schemacs editor command)
          current-prefix-arg uarg->integer
          define-command *last-command-event*
@@ -279,6 +280,15 @@ Other major modes are defined by comparison with this one."
       ;; yet at this point.
       ;;--------------------------------------------------------------
       (km:keymap '*special-mode-map*))
+
+    (suppress-keymap special-mode-map)
+    ;; ^ "`:suppress t'", which `defvar-keymap` runs when the map is
+    ;; made: one `[remap self-insert-command]` binding, plus the digits
+    ;; and `-` for prefix arguments (`subr.el:1316`). This is what makes
+    ;; a letter typed in `*Tabs*`, in dired, in the Buffer Menu or in
+    ;; `*Backtrace*` say "x is undefined" - and why the backtrace pty
+    ;; check must not expect the read-only error, since the letter never
+    ;; reaches the buffer.
 
     (define special-mode-hook '())
     ;; ^ GNU Emacs's `special-mode-hook', made by `define-derived-mode'.

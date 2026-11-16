@@ -238,6 +238,7 @@
    modal-lookup-state-keymaps
    internal-pop-keymap
    internal-push-keymap
+   undefined
    read-key-event read-char-event read-key-sequence read-key-sequence-vector
    read-menu-command
    key-binding
@@ -657,15 +658,22 @@
       ;; for it in the active maps. A key here is already an event or a
       ;; vector, so that binding is an ordinary one and this is the same
       ;; lookup the command loop makes.
-      ;; "if (!SYMBOLP (command)) return Qnil" - the C's first line. A
-      ;; command name here is a string, so the test is the guard that keeps
-      ;; a string from being taken for a key event.
+      ;; "if (!SYMBOLP (command)) return Qnil" - the C's first line.
+      ;;
+      ;; **A command name HERE is a string**, because `new-command` takes
+      ;; it from `symbol->string`, and a `[remap ...]` binding is keyed by
+      ;; the *symbol*. So a string is interned first: without that, the
+      ;; guard rejected every name this tree has and **every `[remap ...]`
+      ;; binding in the tree was dead** - `remapped-command` always passed
+      ;; a string. Found while porting `suppress-keymap`, which is
+      ;; Emacs's one essential use of `remap`.
       ;;--------------------------------------------------------------
-      (and (symbol? command)
-           (let loop ((maps (lookup-keymaps)))
-             (and (pair? maps)
-                  (or (km:keymap-lookup (car maps) (vector 'remap command))
-                      (loop (cdr maps)))))))
+      (let ((command (if (string? command) (string->symbol command) command)))
+        (and (symbol? command)
+             (let loop ((maps (lookup-keymaps)))
+               (and (pair? maps)
+                    (or (km:keymap-lookup (car maps) (vector 'remap command))
+                        (loop (cdr maps))))))))
 
     (define (remapped-command action)
       ;; ACTION, or the command a keymap remaps it to. Emacs applies this
@@ -1274,6 +1282,29 @@
       ;;--------------------------------------------------------------
       (quotient (* 1000 (get-internal-real-time))
                 internal-time-units-per-second))
+
+    (define-command (undefined)
+      ;; GNU Emacs's `undefined` (`subr.el:1297`): "Beep once and tell
+      ;; user that nothing is bound to this key sequence."
+      ;;
+      ;; **It is `subr.el`'s in Emacs and lives here**, because its
+      ;; message is built from `this-single-command-keys` - this
+      ;; library's `*this-command-keys*`, bound around `dispatch-action`
+      ;; and above every library that could otherwise define it.
+      ;;
+      ;; It exists because **`suppress-keymap` binds `[remap
+      ;; self-insert-command]` to it** (`subr.el:1320`): a special-mode
+      ;; buffer's printing characters do not fall through to
+      ;; self-insert, they arrive here and say "x is undefined". That is
+      ;; why the `*Backtrace*` pty check expects "undefined" rather than
+      ;; the read-only error - a letter never reaches the buffer.
+      ;;
+      ;; Not carried: the `ding` (no bell here) and the `prefix-arg`
+      ;; reset for a non-mouse event.
+      "Beep once and tell user that nothing is bound to this key sequence."
+      (interactive)
+      (message "%s is undefined"
+               (km:key-description (*this-command-keys*))))
 
     (define (%all-integers? events)
       ;; `every` is SRFI 1's and this library does not import it.

@@ -175,6 +175,7 @@
        get-text-property put-text-property)
  (only (schemacs editor paragraphs) mark-paragraph)
  (only (schemacs editor simple)
+       special-mode-map
        *kill-do-not-save-duplicates* *kill-ring* *kill-ring-max*
        *kill-ring-yank-pointer*
        *last-change-was-undo* *last-command* *pending-undo-list*
@@ -4968,6 +4969,26 @@
 ;; ...and the one the a code reads a function name with.
 (test-equal "minibuffer.scm installs the a reader" #t
             (procedure? (*interactive-read-function-name-function*)))
+
+;; `special-mode-map` carries `:suppress t`: one `[remap
+;; self-insert-command]` binding, plus the digits and `-` kept for prefix
+;; arguments (`subr.el:1316`). Measured on Emacs 31.1 in a `special-mode`
+;; buffer: `?a` resolves to `undefined`, `?5` to `digit-argument`, `?-` to
+;; `negative-argument`.
+(test-equal "special-mode-map remaps self-insert to undefined" 'undefined
+            (km:keymap-lookup special-mode-map
+                              (vector 'remap 'self-insert-command)))
+(test-equal "...and keeps the digits and minus for prefix arguments"
+            (list 'digit-argument 'negative-argument)
+            (list (km:keymap-lookup special-mode-map (vector (char->integer #\5)))
+                  (km:keymap-lookup special-mode-map (vector (char->integer #\-)))))
+;; ...and the reverse path that made every `[remap ...]` dead: the
+;; lookup is handed a *name*, which is a string here.
+(test-equal "command-remapping resolves a command name" 'undefined
+            (let ((ed (allocate-buffer)))
+              (with-current-buffer ed
+                (set!buffer-local-keymap ed special-mode-map)
+                (command-remapping "self-insert-command"))))
 
 ;; ...and `minibuffer.scm` the two the buffer codes read with.
 (test-equal "minibuffer.scm installs the b and B readers" '(#t #t)

@@ -5015,51 +5015,60 @@ its prompt.
 **With this, all 30 letters of `callint.c`'s switch and its `+` are
 carried.**
 
-## `:suppress t` is a *remap*, and this tree's remap path is dead
+## `suppress-keymap`, and the dead `[remap ...]` path under it
 
-`special-mode-map` is declared `:suppress t` (`simple.el:580`), and this
-tree has no `suppress-keymap`, so **the printing characters fall through
-to the global self-insert in every special mode** - dired, the Buffer
-Menu, the backtrace buffer and `*Tabs*`. Typing `x` in `*Tabs*` inserts
-an `x`.
+`special-mode-map` is declared `:suppress t` (`simple.el:580`). Without
+`suppress-keymap` the printing characters fell through to the global
+self-insert in **every** special mode - dired, the Buffer Menu, the
+backtrace buffer, `*Tabs*` - so typing `x` in `*Tabs*` inserted an `x`.
 
-An attempt at it was made and **reverted**, because the battery caught it
-being the wrong thing. What it should be:
+`suppress-keymap` is `subr.el:1316`'s, not `keymap.c`'s, and its body is
+three statements:
 
 ```elisp
-(defun suppress-keymap (map &optional nodigits)          ; subr.el:1316
-  (define-key map [remap self-insert-command] #'undefined)
-  (or nodigits
-      (let (loop)
-	(define-key map "-" #'negative-argument)
-	(setq loop ?0)
-	(while (<= loop ?9)
-	  (define-key map (char-to-string loop) #'digit-argument)
-	  (setq loop (1+ loop))))))
+(define-key map [remap self-insert-command] #'undefined)
+(or nodigits
+    (progn (define-key map "-" #'negative-argument)
+           ...digits -> #'digit-argument...))
 ```
 
-Three corrections against what was written:
+**It is one remap, not ninety-five bindings.** Every key that would have
+run `self-insert` runs `undefined` instead. Measured on Emacs 31.1 in a
+`special-mode` buffer: `(key-binding (vector ?a))` is `undefined`, `?5` is
+`digit-argument` and `?-` is `negative-argument` - the digits keep their
+prefix-argument meaning, which the direct-binding version got wrong.
 
-1. **It is `subr.el`'s, not `keymap.c`'s**, and it is a **remap** of
-   `self-insert-command` - one binding - not ninety-five direct bindings
-   of the printing characters. Measured on Emacs 31.1, in a
-   `special-mode` buffer: `(key-binding (vector ?a))` is `undefined`,
-   `?5` is `digit-argument` and `?-` is `negative-argument`. The direct
-   version also got the digits wrong: they must stay prefix arguments,
-   not become "5 is undefined".
-2. **The pty check was pinning a departure.** `eval-expression`'s check
-   asserted that typing in `*Backtrace*` says "Buffer is read-only". With
-   the remap in place the letter never reaches `self-insert`, so Emacs
-   says "%s is undefined" - the read-only error is what a *pre-suppress*
-   tree says. The check needs correcting with the fix, not around it.
-3. **`[remap ...]` does not work in this tree at all**, which is why the
-   remap could not simply be written: `command-remapping`
-   (`keyboard.c:1216`) guards `(symbol? command)` and builds
-   `[remap COMMAND]` from it, while `remapped-command` hands it
-   `(command-name record)` - a **string**, because `new-command` takes
-   the name from `symbol->string`. So the guard always fails and every
-   `[remap ...]` binding in the tree is dead.
+### The bug underneath: every `[remap ...]` binding was dead
 
-**So the order is**: make `command-remapping` accept the name this tree
-keeps (a symbol, or a string compared against the symbol), then
-`suppress-keymap` as the C's - and then the pty expectation.
+The first attempt at this bound characters 32..126 directly and **the
+battery failed one check**, which is what sent me back to the C. Doing it
+properly needed `[remap ...]`, and that did not work:
+
+```scheme
+(define (command-remapping command)
+  (and (symbol? command) ...))          ; the C's `if (!SYMBOLP (command))`
+```
+
+`remapped-command` passes `(command-name record)`, and `new-command` takes
+that name from **`symbol->string`** - so it is a *string*, the guard
+always failed, and **no `[remap ...]` binding in this tree had ever been
+reachable**. `command-remapping` now interns a string first. That is the
+`keyboard.h`-level fix; the visible one is `special-mode-map`.
+
+### `undefined` is a command, and it lives in `keyboard.scm`
+
+Emacs's `undefined` (`subr.el:1297`) says "%s is undefined" from
+`this-single-command-keys`. That is this tree's `*this-command-keys*`, a
+`keyboard.scm` variable, so the command lives there rather than in
+`subr.scm` - the same accommodation `abort-recursive-edit` already has.
+Not carried: the `ding` (no bell anywhere in the tree) and the
+`prefix-arg` reset for a non-mouse event.
+
+### The pty check was pinning the old behaviour, and is corrected
+
+`eval-expression`'s check asserted that typing in `*Backtrace*` says
+"Buffer is read-only" - which is what a tree *without* `suppress-keymap`
+says, because the letter reaches `self-insert` and the buffer refuses it.
+With the remap the letter never reaches the buffer: Emacs says
+"z is undefined". The check now asserts that, with the measurement from
+Emacs 31.1 in its comment.

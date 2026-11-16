@@ -3447,15 +3447,23 @@ def check_eval_expression():
     if "Debugger entered--Scheme error:" not in out:
         problems.append("M-: on an error did not fill *Backtrace* with "
                         "the header (screen %r)" % screen_of(out)[:300])
-    # ...and the buffer it fills is `special-mode''s: read-only, and with
-    # the keyboard, because `pop-to-buffer' selects the window where
-    # `display-buffer' would not have.
+    # ...and the buffer it fills is `special-mode''s, with the keyboard
+    # (`pop-to-buffer' selects the window where `display-buffer' would
+    # not have).
+    #
+    # **"z is undefined", not "Buffer is read-only"**: `special-mode-map`
+    # carries `:suppress t`, so a printing character is remapped from
+    # `self-insert-command` to `undefined` and never reaches the buffer.
+    # Measured on Emacs 31.1, in a `special-mode` buffer,
+    # `(key-binding (vector ?a))` is `undefined` - so the read-only error
+    # is what a tree *without* `suppress-keymap` says, and this check used
+    # to pin that departure.
     out = drive([C_x + C_f, path.encode(), RET,
                  M_COLON, b"(car (quote ()))", RET, b"z"], path)
-    if "Buffer is read-only" not in out:
-        problems.append("typing in *Backtrace* did not say it was read-only "
-                        "- the window does not have the focus, or the buffer "
-                        "is writable (screen %r)" % screen_of(out)[:300])
+    if "z is undefined" not in out:
+        problems.append("typing in *Backtrace* did not say it was undefined "
+                        "- the window does not have the focus, or the map "
+                        "is not suppressed (screen %r)" % screen_of(out)[:300])
     if "(Debugger)" not in out:
         problems.append("*Backtrace* mode line does not say (Debugger) "
                         "(screen %r)" % screen_of(out)[:300])

@@ -102,7 +102,7 @@
    ;; `subr.el`'s keymap half: `define-key-after' places a binding in a
    ;; map's order, and `keymap-canonicalize' resolves inheritance for the
    ;; menu walk (`keyboard.c`'s `map_keymap_canonical' calls it).
-   define-key-after keymap-canonicalize
+   define-key-after keymap-canonicalize suppress-keymap
    ;; `subr.el`'s substitution walk, which `tty-menu-navigation-map`
    ;; (`menu-bar.el`) is built with: it copies a command's bindings from
    ;; the global map under new names.
@@ -1031,6 +1031,37 @@
                      (append (reverse (cons (car tail) out))
                              (cons event (cdr tail))))
                     (else (loop (cdr tail) (cons (car tail) out))))))))
+
+    (define (suppress-keymap map . optional)
+      ;; GNU Emacs's `suppress-keymap' (`subr.el:1316`): "Make MAP
+      ;; override all normally self-inserting keys to be undefined.
+      ;; Normally, as an exception, digits and minus-sign are set to make
+      ;; prefix args, but optional second arg NODIGITS non-nil treats them
+      ;; like other chars."
+      ;;
+      ;; The C's body is three statements, and the first is the whole
+      ;; idea: **a single `[remap self-insert-command]`**, not a binding
+      ;; for every printing character. Every key that would have run
+      ;; self-insert runs `undefined` instead, which is why a letter
+      ;; typed in a special-mode buffer says "x is undefined" and never
+      ;; reaches the buffer's read-only check.
+      ;;
+      ;; The digitis are *not* suppressed by default: they keep their
+      ;; prefix-argument meaning (`digit-argument`), and `-` keeps
+      ;; `negative-argument`, so `M-x`-style numeric prefixes still work
+      ;; in a special-mode buffer.
+      ;;
+      ;; This is `:suppress t` in `defvar-keymap`, which is how
+      ;; `special-mode-map` asks for it (`simple.el:580`).
+      ;;--------------------------------------------------------------
+      (define-key map (vector 'remap 'self-insert-command) 'undefined)
+      (unless (and (pair? optional) (car optional))
+        (define-key map (vector (char->integer #\-)) 'negative-argument)
+        (let loop ((c (char->integer #\0)))
+          (when (<= c (char->integer #\9))
+            (define-key map (vector c) 'digit-argument)
+            (loop (+ c 1)))))
+      #f)
 
     (define (define-key-after keymap key definition . optional)
       ;; GNU Emacs's `define-key-after' (`subr.el:1345'): "Add binding

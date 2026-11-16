@@ -2652,6 +2652,7 @@
     substitute-in-file-name
     substitute-key-definition
     substitute-key-definition-key
+    suppress-keymap
     suspend-display!
     suspend-frame
     swhitespace
@@ -2983,6 +2984,7 @@
     turn-on-visual-line-mode
     uarg->integer
     unchain-marker
+    undefined
     undo
     undo-deletion-entry?
     undo-insertion-entry?
