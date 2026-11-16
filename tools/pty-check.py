@@ -2252,9 +2252,17 @@ open(os.path.join(TAB_LINE_CONFIG_HOME, 'schemacs', 'init.scm'), 'w').write(
 
 TAB_BAR_CONFIG_HOME = tempfile.mkdtemp(prefix='schemacs-tabbar-config-')
 os.makedirs(os.path.join(TAB_BAR_CONFIG_HOME, 'schemacs'), exist_ok=True)
+# A fixed "clock" so the right-aligned item can be read off the row, and
+# the format that puts it there - `tab-bar-format-align-right` then
+# `tab-bar-format-global`, as Emacs's documentation describes.
 open(os.path.join(TAB_BAR_CONFIG_HOME, 'schemacs', 'init.scm'), 'w').write(
     '(import (schemacs editor startup))\n'
+    '(import (schemacs editor xdisp))\n'
+    '(import (schemacs editor tab-bar))\n'
     '(set! inhibit-startup-screen #t)\n'
+    '(*global-mode-string* (list "CLOCK"))\n'
+    '(*tab-bar-format* (list tab-bar-format-tabs tab-bar-format-add-tab\n'
+    '                        tab-bar-format-align-right tab-bar-format-global))\n'
     '(tab-bar-mode 1)\n')
 
 # And one that leaves the menu bar *on*, for the check that is about it.
@@ -4798,6 +4806,9 @@ def check_tab_bar():
                             % (rows[at:at + 2],))
         if "+" not in row:
             problems.append("the tab bar has no \"+\" button: %r" % (row,))
+        if not row.rstrip().endswith("CLOCK"):
+            problems.append("the right-aligned item is not at the right edge: "
+                            "%r" % (row,))
 
     # C-x t 2 makes a second tab; C-x b *scratch* renames the current one.
     screen = screen_of(drive([b"\x18t2", b"\x18b", b"*scratch*\r", b"C-x"],

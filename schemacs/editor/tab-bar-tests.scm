@@ -10,7 +10,7 @@
  (only (schemacs editor frame)
        *current-frame* *current-buffer* *default-frame-alist*
        new-frame frame-parameter frame-selected-window window-top
-       window-height window-list %frame-tab-bar-lines)
+       window-height window-list frame-inner-width %frame-tab-bar-lines)
  (only (schemacs editor window) switch-to-buffer)
  (only (schemacs editor tab-bar)
        tab-bar-mode tab-bar-mode-variable tab-bar-tabs tab-bar-new-tab
@@ -23,13 +23,20 @@
        tab-bar--history-pre-change tab-bar-format-history
        tab-bar-change-tab-group tab-bar-format-tabs-groups
        tab-bar-duplicate-tab tab-bar-switch-to-tab tab-bar-close-tab-by-name
-       tab-bar-rename-tab-by-name
+       tab-bar-rename-tab-by-name tab-bar-format-align-right tab-bar-format-global
+       tab-bar-format-list tab-bar-format-tabs *tab-bar-format*
+       tab-switcher tab-switcher-noselect tab-switcher-select tab-switcher-mode
        tab-bar-tab-group-default *tab-bar-show-inactive-group-tabs*)
  (only (schemacs editor buffer)
-       get-buffer-create buffer-name current-buffer)
+       get-buffer-create buffer-name current-buffer with-current-buffer
+       buffer-read-only?)
  (only (schemacs editor keyboard) tab-bar-items *last-read-event*)
  (only (schemacs editor xdisp) render! posn-at-x-y)
- (only (schemacs editor editfns) point)
+ (only (schemacs editor editfns) point buffer-string)
+ (only (schemacs editor textprop) get-text-property)
+ (only (schemacs editor xdisp) *global-mode-string*)
+ (only (schemacs editor editfns) buffer-string)
+ (only (schemacs editor textprop) get-text-property)
  (only (schemacs editor simple) *this-command*)
  (only (schemacs editor window) split-window))
 
@@ -319,5 +326,62 @@
       (tab-bar-rename-tab-by-name "tab-one" "gone")
       (tab-bar-close-tab-by-name "gone")
       (length (tab-bar-tabs)))))
+
+;; **`tab-bar-format-align-right`** leaves a marker that
+;; `tab-bar-format-list` replaces with one item whose caption is a space
+;; carrying a `(space :align-to N)` display property - N being the frame's
+;; width less the items after it. With nothing after it, N is the width.
+(test-equal (list 'align-right 80)
+  (let ((frame (fresh-frame)))
+    (parameterize ((*current-frame* frame) (*current-buffer* #f))
+      (*tab-bar-format* (list tab-bar-format-tabs
+                              tab-bar-format-align-right))
+      (let* ((items (tab-bar-format-list (*tab-bar-format*)))
+             (last (car (reverse items)))
+             (spec (get-text-property 0 'display (list-ref last 2))))
+        (list (car last)
+              (if (and (pair? spec) (eq? (cadr spec) ':align-to))
+                  (car (cddr spec))
+                  #f))))))
+
+;; `tab-bar-format-global` maps `global-mode-string` to `global` items -
+;; empty until a mode puts something there, as Emacs's is.
+(test-equal '(() 0)
+  (let ((frame (fresh-frame)))
+    (parameterize ((*current-frame* frame) (*current-buffer* #f))
+      (list (tab-bar-format-global)
+            (length (*global-mode-string*))))))
+
+(define (buffer-string-of b)
+  (with-current-buffer b (buffer-string)))
+
+;; **`tab-switcher`** - the `*Tabs*` list. `tab-switcher-noselect`
+;; writes the *other* tabs into it, most recently used first, and the
+;; buffer is read-only. The command makes a new tab for the list, so the
+;; list it writes describes the tabs before it.
+(test-equal '(#t #t #f)
+  (let ((frame (fresh-frame)))
+    (parameterize ((*current-frame* frame) (*current-buffer* #f))
+      (tab-bar-new-tab #f #f)
+      (switch-to-buffer (get-buffer-create "s2"))
+      ;; The list holds the tabs that are *not* current: here the frame's
+      ;; first tab, "tab-one" - the current one was renamed "s2" by the
+      ;; buffer switch.
+      (let ((b (tab-switcher-noselect)))
+        (list (with-current-buffer b (buffer-read-only? (current-buffer)))
+              (if (string-contains (buffer-string-of b) "tab-one") #t #f)
+              (if (string-contains (buffer-string-of b) "s2") #t #f))))))
+
+;; Selecting a line of the list switches to that tab and kills the list.
+;; The line selected on entry is the second one, which is the most
+;; recently used of the other tabs.
+(test-equal '("tab-one" 2)
+  (let ((frame (fresh-frame)))
+    (parameterize ((*current-frame* frame) (*current-buffer* #f))
+      (tab-bar-new-tab #f #f)
+      (switch-to-buffer (get-buffer-create "s2"))
+      (tab-switcher)
+      (tab-switcher-select)
+      (list (buffer-name (current-buffer)) (length (tab-bar-tabs))))))
 
 (test-end "schemacs_editor_tab_bar")

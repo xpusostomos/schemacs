@@ -178,7 +178,7 @@
    make<frame>
    ;; `FRAME_TOP_MARGIN (f)` - the rows above the text area - and
    ;; `FRAME_MENU_BAR_LINES (f)` / `FRAME_TAB_BAR_LINES (f)`.
-   frame-top-margin %frame-menu-bar-lines %frame-tab-bar-lines
+   frame-top-margin frame-inner-width %frame-menu-bar-lines %frame-tab-bar-lines
    ;; `f->menu_bar_vector` and `f->menu_bar_items_used`.
    frame-menu-bar-items set!frame-menu-bar-items
    frame-menu-bar-items-used set!frame-menu-bar-items-used
@@ -1284,6 +1284,21 @@
       ;;--------------------------------------------------------------
       (let ((pair (assq 'tab-bar-lines (frame-parameters-alist frame))))
         (or (and pair (cdr pair)) 0)))
+
+    (define (frame-inner-width . args)
+      ;; GNU Emacs's `frame-inner-width` (`frame.c:...`): "Return the
+      ;; width in pixels of FRAME's inner area" - the text area, without
+      ;; fringes, scroll bars, margins or borders.
+      ;;
+      ;; **In this tree a cell is the unit**, as it is everywhere the
+      ;; display is asked about the frame: `frame-width` is the columns.
+      ;; On a terminal that is Emacs's own answer too - `FRAME_PIXEL_WIDTH`
+      ;; is columns times a character width of 1 - and on a toolkit frame
+      ;; the toolkit's cell size never enters the editor's arithmetic.
+      ;; `tab-bar-format-align-right` is its one reader.
+      ;;--------------------------------------------------------------
+      (let ((frame (or (and (pair? args) (car args)) (*current-frame*))))
+        (frame-width frame)))
 
     (define (frame-top-margin frame)
       ;; GNU Emacs's `FRAME_TOP_MARGIN` (`frame.h:1132`): the rows of the

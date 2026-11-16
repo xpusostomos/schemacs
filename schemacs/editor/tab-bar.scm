@@ -67,9 +67,12 @@
   ;;     `tab-bar-detach-tab`): no touch events, and detaching needs a
   ;;     new frame built *from* a window configuration, which
   ;;     `new-frame` does not take.
-  ;;   * `tab-bar-format-align-right`/`-global` (a `display` space
-  ;;     specification and `string-pixel-width`) and `tab-bar-menu-bar`
-  ;;     (the menu bar is a row, not a popup).
+  ;;   * `tab-bar-menu-bar` (the menu bar is a row, not a popup).
+  ;;   * **`tab-switcher-mode`'s `:suppress t`** and its `?` binding:
+  ;;     a letter typed in the `*Tabs*` list inserts itself, and `?`
+  ;;     does nothing, because `describe-mode` is not ported and a
+  ;;     buffer's own map cannot suppress the self-insert fallback (the
+  ;;     same gap `special-mode-map` names).
   ;;   * **The Gtk tab bar is a row of the drawing area, not a widget.**
   ;;     GNU Emacs's Gtk build builds one with `xg_create_frame_widgets`;
   ;;     this tree draws the same `display-tab-bar` row there, so the bar
@@ -82,7 +85,7 @@
   (import
     (scheme base)
     (scheme char)
-    (only (guile) make-hash-table hashq-set! hashq-ref
+    (only (guile) sort make-hash-table hashq-set! hashq-ref
            get-internal-real-time internal-time-units-per-second
            exact->inexact 1+ 1-)
     (only (schemacs editor command) define-command uarg->integer
@@ -100,31 +103,42 @@
           window-minibuffer-p window-parameter set-window-parameter
           window-internal? window-parent window-height window-top
           window-left window-width resize-frame-windows!
-          frame-height frame-width *pre-command-hook*)
+          frame-height frame-width frame-inner-width *pre-command-hook*)
     (only (schemacs editor window)
           current-window-configuration set-window-configuration
           window-configuration-p window-configuration-frame
           *window-restore-killed-buffer-windows*
           delete-other-windows split-window delete-window
-          switch-to-buffer other-window)
+          switch-to-buffer other-window quit-window)
     (only (schemacs editor buffer)
           buffer-name buffer-live-p current-buffer get-buffer
-          set-buffer-local-value! buffer-local-value)
+          set-buffer-local-value! buffer-local-value
+          *inhibit-read-only* erase-buffer set!buffer-read-only
+          set-buffer-modified-p set-buffer with-current-buffer
+          default-directory get-buffer-create)
     (only (schemacs editor subr) run-hook-with-args
           run-hook-with-args-until-success add-hook remove-hook
-          assq-delete-all delq posn-string posn-x-y event-start)
+          assq-delete-all delq posn-string posn-x-y event-start event-end
+          posn-window posn-point)
     (only (schemacs editor editfns) goto-char point point-marker propertize
-          message)
+          message insert insert-char *inhibit-message* save-excursion
+          delete-region point-min eobp forward-line)
+    (only (schemacs editor cmds) beginning-of-line delete-char forward-char)
+    (only (schemacs editor indentc) move-to-column)
+    (only (schemacs editor search) re-search-forward)
+    (only (schemacs editor derived) define-derived-mode)
+    (only (schemacs editor files) kill-buffer)
     (only (schemacs editor marker) copy-marker markerp marker-buffer
           marker-position)
     (only (schemacs editor mule-util) truncate-string-to-width
           truncate-string-ellipsis)
+    (only (schemacs editor character) string-width)
     (only (schemacs editor textprop) get-text-property add-face-text-property
-          put-text-property)
+          put-text-property next-single-property-change)
     (only (schemacs editor seq) seq-position seq-filter seq-remove seq-sort-by
           seq-take)
-    (only (schemacs editor xdisp) force-mode-line-update
-          *tab-bar-keymap-function*)
+    (only (schemacs editor xdisp) force-mode-line-update format-mode-line
+          *tab-bar-keymap-function* *global-mode-string*)
     (only (schemacs editor faces) *window-system*)
     (only (schemacs editor menu-bar) popup-menu)
     (only (schemacs editor minibuffer) read-from-minibuffer format-prompt
@@ -159,12 +173,20 @@
    ;; the format and the keymap it becomes
    tab-bar-format-list tab-bar-make-keymap tab-bar-make-keymap-1
    tab-bar-format-tabs tab-bar-format-tabs-groups tab-bar-format-add-tab
-   tab-bar-format-history
+   tab-bar-format-history tab-bar-format-align-right tab-bar-format-global
    ;; tab groups - `tab-bar.el:1084`
    tab-bar-change-tab-group tab-bar-close-group-tabs
    tab-bar-duplicate-tab tab-bar-move-tab-backward tab-bar-switch-to-tab
    tab-bar-close-tab-by-name tab-bar-rename-tab-by-name
    tab-bar-move-tab-to-group
+   ;; the tab list - `tab-switcher`
+   tab-switcher tab-switcher-noselect tab-switcher-mode
+   tab-switcher-mode-map tab-switcher-column
+   tab-switcher-select tab-switcher-delete tab-switcher-delete-backwards
+   tab-switcher-execute tab-switcher-unmark tab-switcher-backup-unmark
+   tab-switcher-next-line tab-switcher-prev-line
+   tab-switcher-mouse-select tab-switcher-current-tab
+   *tab-switcher-mode-hook*
    tab-bar-tab-group-default tab-bar-tab-group-format-default
    tab-bar-tab-group-face-default tab-bar--format-tab-group
    *tab-bar-tab-group-function* *tab-bar-tab-group-format-function*
@@ -378,7 +400,10 @@ is the only tab in the frame are supplied as arguments."
 
     ;; `tab-bar-closed-tabs`: "A list of closed tabs to be able to undo
     ;; their closing." `push` is a `set!` here.
-    (define tab-bar-closed-tabs '())
+    (define tab-bar-closed-tabs (make-parameter '()))
+    ;; ^ A parameter because a ported caller `let`-binds it -
+    ;; `tab-switcher-select` binds it to nil around the close so the tab
+    ;; does not go onto the undo list.
 
     ;; The hooks the commands run - `defvar`s in the C, plain (nothing
     ;; `let`-binds them) and read as lists.
@@ -946,34 +971,94 @@ Function gets two arguments, the tab and its number."
         (list (list 'add-tab 'menu-item tab-bar-new-button 'tab-bar-new-tab
                     ':help "New tab"))))
 
-    (define (tab-bar-format-list format-list)
-      ;; "Return a list of items formatted from `format-list'." The C's
-      ;; `align-right` arm is not carried (it needs a `display` space
-      ;; specification), so a string a function returns becomes an
-      ;; `str-N` item and nothing else is special-cased.
+    (define (tab-bar-format-align-right . args)
+      ;; "Align the rest of tab bar items to the right. The argument
+      ;; `rest' is used for special handling of this item by
+      ;; `tab-bar-format-list` that collects the rest of formatted items.
+      ;; This prevents calling other non-idempotent items like
+      ;; `tab-bar-format-global` twice."
+      ;;
+      ;; The C measures the rest in pixels and pads with a `display`
+      ;; `(space :align-to ...)`; here the unit is a cell, so `hpos` is
+      ;; `string-width` and the target is `frame-inner-width` (which is
+      ;; columns in this tree - see `frame.scm`).
       ;;--------------------------------------------------------------
-      (let ((i 0))
-        (let loop ((rest format-list) (acc '()))
-          (if (null? rest)
-              acc
-              (let ((format (car rest)))
-                (set! i (+ i 1))
-                (cond
-                 ((eq? format 'tab-bar-format-align-right)
-                  ;; named in the header: laid out as an empty item
-                  (loop (cdr rest) acc))
-                 ((procedure? format)
-                  (let ((ret (format)))
-                    (cond ((string? ret)
-                           (loop (cdr rest)
-                                 (append acc
-                                         (list (list (string->symbol
-                                                      (string-append
-                                                       "str-" (number->string i)))
-                                                     'menu-item ret 'ignore)))))
-                          ((pair? ret) (loop (cdr rest) (append acc ret)))
-                          (else (loop (cdr rest) acc)))))
-                 (else (loop (cdr rest) acc))))))))
+      (let* ((rest (if (pair? args)
+                       (car args)
+                       (tab-bar-format-list
+                        (cdr (memq tab-bar-format-align-right
+                                    (*tab-bar-format*))))))
+             ;; `(string-append)` with no arguments is an error in this
+             ;; Guile, where Elisp's `mapconcat` over nil answers "".
+             (joined (if (null? rest)
+                         ""
+                         (apply string-append
+                                (map (lambda (item) (or (list-ref item 2) ""))
+                                     rest))))
+             (hpos (string-width joined)))
+        (list (list 'align-right 'menu-item
+                    (propertize " " 'display
+                                (list 'space ':align-to
+                                      (- (frame-inner-width (*current-frame*))
+                                         hpos)))
+                    'ignore))))
+
+    (define (tab-bar-format-global)
+      ;; "Produce display of `global-mode-string' in the tab bar. When
+      ;; `tab-bar-format-global' is added to `tab-bar-format' (possibly
+      ;; appended after `tab-bar-format-align-right'), then modes that
+      ;; display information on the mode line using `global-mode-string'
+      ;; will display the same text on the tab bar instead."
+      ;;--------------------------------------------------------------
+      (map (lambda (string)
+             (list 'global 'menu-item (format-mode-line string) 'ignore))
+           (*global-mode-string*)))
+
+    (define (tab-bar-format-list format-list)
+      ;; "Return a list of items formatted from `format-list'." The item
+      ;; `tab-bar-format-align-right` "has special formatting": it stays
+      ;; in the result as a marker, everything after it is collected into
+      ;; REST, and at the end the marker is replaced by
+      ;; `(tab-bar-format-align-right REST)` - the C's `align-right-p`
+      ;; and `rest` variables, exactly.
+      ;;
+      ;; A function's answer is normalised to a list: this tree's
+      ;; formatters answer `'()` or a list of items, but a `when` in one
+      ;; of them can answer the *unspecified* value, which `append` would
+      ;; choke on.
+      ;;--------------------------------------------------------------
+      (let ((i 0) (align-right-p #f) (rest-items '()))
+        (let* ((res (let loop ((rest format-list) (acc '()))
+                      (if (null? rest)
+                          acc
+                          (let ((format (car rest)))
+                            (set! i (+ i 1))
+                            (cond
+                             ((eq? format tab-bar-format-align-right)
+                              (set! align-right-p #t)
+                              (loop (cdr rest) (append acc (list format))))
+                             ((procedure? format)
+                              (let ((ret (format)))
+                                (let ((ret (if (string? ret)
+                                               (list (list (string->symbol
+                                                            (string-append
+                                                             "str-"
+                                                             (number->string i)))
+                                                           'menu-item ret 'ignore))
+                                               (if (pair? ret) ret '()))))
+                                  (when align-right-p
+                                    (set! rest-items (append rest-items ret)))
+                                  (loop (cdr rest) (append acc ret)))))
+                             (else (loop (cdr rest) acc))))))))
+          (if align-right-p
+              (let loop ((rest res) (acc '()))
+                (if (null? rest)
+                    acc
+                    (loop (cdr rest)
+                          (if (eq? (car rest) tab-bar-format-align-right)
+                              (append acc (tab-bar-format-align-right rest-items))
+                              (append acc (list (car rest)))))))
+              res))))
 
     (define (tab-bar-make-keymap . args)
       ;; "Generate an actual keymap from `tab-bar-map'. Its main job is
@@ -1268,13 +1353,13 @@ to the tab specified by `tab-bar-close-tab-select'."
                   ;; "Re-read tabs after selecting another tab"
                   (set! tabs ((*tab-bar-tabs-function*)))))
               (let ((close-tab (list-ref tabs close-index)))
-                (set! tab-bar-closed-tabs
+                (tab-bar-closed-tabs
                       (cons (list (cons 'frame (selected-frame))
                                   (cons 'index close-index)
                                   (cons 'tab (if (eq? (car close-tab) 'current-tab)
                                                  (tab-bar--tab)
                                                  close-tab)))
-                            tab-bar-closed-tabs))
+                            (tab-bar-closed-tabs)))
                 (tab-bar-tabs-set (delq close-tab tabs)))
               (tab-bar--update-tab-bar-lines)
               (force-mode-line-update)
@@ -1301,11 +1386,11 @@ to the tab specified by `tab-bar-close-tab-select'."
                 (unless (or (eq? i keep-index)
                             (run-hook-with-args-until-success
                              (*tab-bar-tab-prevent-close-functions*) tab #f))
-                  (set! tab-bar-closed-tabs
+                  (tab-bar-closed-tabs
                         (cons (list (cons 'frame (selected-frame))
                                     (cons 'index i)
                                     (cons 'tab tab))
-                              tab-bar-closed-tabs))
+                              (tab-bar-closed-tabs)))
                   (run-hook-with-args (*tab-bar-tab-pre-close-functions*) tab #f)
                   (set! tabs (delq tab tabs))))
               (loop (cdr rest) (+ i 1))))
@@ -1320,17 +1405,17 @@ to the tab specified by `tab-bar-close-tab-select'."
       (interactive '())
       ;; "Pop out closed tabs that were on already deleted frames"
       (let loop ()
-        (when (and (pair? tab-bar-closed-tabs)
+        (when (and (pair? (tab-bar-closed-tabs))
                    (not (frame-live-p (tab-bar--alist-get
-                                       'frame (car tab-bar-closed-tabs)))))
-          (set! tab-bar-closed-tabs (cdr tab-bar-closed-tabs))
+                                       'frame (car (tab-bar-closed-tabs))))))
+          (tab-bar-closed-tabs (cdr (tab-bar-closed-tabs)))
           (loop)))
-      (if (pair? tab-bar-closed-tabs)
-          (let* ((closed (car tab-bar-closed-tabs))
+      (if (pair? (tab-bar-closed-tabs))
+          (let* ((closed (car (tab-bar-closed-tabs)))
                  (frame (tab-bar--alist-get 'frame closed))
                  (index (tab-bar--alist-get 'index closed))
                  (tab (tab-bar--alist-get 'tab closed)))
-            (set! tab-bar-closed-tabs (cdr tab-bar-closed-tabs))
+            (tab-bar-closed-tabs (cdr (tab-bar-closed-tabs)))
             (unless (eq? frame (selected-frame))
               (select-frame frame))
             (let* ((tabs ((*tab-bar-tabs-function*)))
@@ -1999,6 +2084,244 @@ and can restore them."
             (add-hook *pre-command-hook* tab-bar--history-pre-change)
             (force-mode-line-update))
           (remove-hook *pre-command-hook* tab-bar--history-pre-change)))
+
+    ;;--------------------------------------------------------------
+    ;; The tab list - `tab-switcher` (`tab-bar.el:2700`)
+    ;;--------------------------------------------------------------
+
+    (define tab-switcher-column 3)
+    ;; ^ "`tab-switcher-column`" - a `defvar-local` in Emacs, and a plain
+    ;; variable here: the buffer's own value is this one until the list
+    ;; buffer sets it, which is the same answer while there is one list.
+
+    (define tab-switcher-mode-map (make-sparse-keymap))
+
+    (define (tab-switcher-current-tab error-if-non-existent-p)
+      ;; "Return window configuration described by this line of the
+      ;; list."
+      ;;--------------------------------------------------------------
+      (let* ((where (save-excursion
+                      (beginning-of-line)
+                      (+ 2 (point) tab-switcher-column)))
+             (tab (and (not (eobp)) (get-text-property where 'tab))))
+        (or tab
+            (if error-if-non-existent-p
+                (error "No window configuration on this line")
+                #f))))
+
+    (define-command (tab-switcher-next-line arg)
+      "Move to ARGth next line in the list of tabs."
+      (interactive (list (uarg->integer 1 (current-prefix-arg))))
+      (forward-line arg)
+      (beginning-of-line)
+      (move-to-column tab-switcher-column))
+
+    (define-command (tab-switcher-prev-line arg)
+      "Move to ARGth previous line in the list of tabs."
+      (interactive (list (uarg->integer 1 (current-prefix-arg))))
+      (forward-line (- arg))
+      (beginning-of-line)
+      (move-to-column tab-switcher-column))
+
+    (define-command (tab-switcher-unmark backup)
+      "Cancel operations on window configuration on this line and move down.
+With prefix arg BACKUP, move up instead."
+      (interactive (list (current-prefix-arg)))
+      (beginning-of-line)
+      (move-to-column tab-switcher-column)
+      (parameterize ((*inhibit-read-only* #t))
+        (delete-char 1)
+        (insert " "))
+      (forward-line (if backup -1 1))
+      (move-to-column tab-switcher-column))
+
+    (define-command (tab-switcher-backup-unmark)
+      "Move up a line and cancel operations on the window configuration."
+      (interactive '())
+      (forward-line -1)
+      (tab-switcher-unmark #f))
+
+    (define-command (tab-switcher-delete arg)
+      "Mark window configuration on this line to be deleted.
+Prefix arg says how many window configurations to delete.
+Negative arg means delete backwards.
+The deletion will be done by the \\<tab-switcher-mode-map>\\[tab-switcher-execute] command."
+      (interactive (list (uarg->integer 1 (current-prefix-arg))))
+      (parameterize ((*inhibit-read-only* #t))
+        (let ((arg (if (or (not arg) (= arg 0)) 1 arg)))
+          (let loop ()
+            (when (> arg 0)
+              (delete-char 1)
+              (insert "D")
+              (forward-line 1)
+              (set! arg (- arg 1))
+              (loop)))
+          (let loop ()
+            (when (< arg 0)
+              (delete-char 1)
+              (insert "D")
+              (forward-line -1)
+              (set! arg (+ arg 1))
+              (loop))))
+        (move-to-column tab-switcher-column)))
+
+    (define-command (tab-switcher-delete-backwards arg)
+      "Mark window configuration on this line to be deleted.
+Then move up one line.  Prefix arg means move that many lines."
+      (interactive (list (uarg->integer 1 (current-prefix-arg))))
+      (tab-switcher-delete (- (or arg 1))))
+
+    (define (tab-switcher-delete-from-list tab)
+      ;; "Delete the window configuration from the list of tabs."
+      ;;--------------------------------------------------------------
+      (tab-bar-closed-tabs
+            (cons (list (cons 'frame (selected-frame))
+                        (cons 'index (tab-bar--tab-index tab))
+                        (cons 'tab tab))
+                  tab-bar-closed-tabs))
+      (tab-bar-tabs-set (delq tab ((*tab-bar-tabs-function*)))))
+
+    (define-command (tab-switcher-execute)
+      "Delete the marked window configurations.
+Use the \\<tab-switcher-mode-map>\\[tab-switcher-delete] commands
+to set those marks."
+      (interactive '())
+      (save-excursion
+        (goto-char (point-min))
+        (parameterize ((*inhibit-read-only* #t))
+          (let loop ()
+            (when (re-search-forward
+                   (string-append "^" (make-string tab-switcher-column #\space)
+                                  "D")
+                   #f 'noerror)
+              (forward-char -1)
+              (let ((tab (tab-switcher-current-tab #f)))
+                (when tab
+                  (tab-switcher-delete-from-list tab)
+                  (beginning-of-line)
+                  (delete-region (point) (begin (forward-line 1) (point)))))
+              (loop)))))
+      (beginning-of-line)
+      (move-to-column tab-switcher-column)
+      (force-mode-line-update))
+
+    (define-command (tab-switcher-select)
+      "Select this line's window configuration.
+This command replaces all the existing windows in the selected frame
+with those specified by the selected window configuration."
+      (interactive '())
+      (let* ((to-tab (tab-switcher-current-tab #t)))
+        (kill-buffer (current-buffer))
+        ;; "Delete the current window configuration of tab list without
+        ;; storing it in the undo list of closed tabs"
+        (parameterize ((*inhibit-message* #t)
+                       (tab-bar-closed-tabs '()))
+          (tab-bar-close-tab #f (+ 1 (tab-bar--tab-index to-tab))))))
+
+    (define-command (tab-switcher-mouse-select event)
+      "Select the window configuration whose line you click on."
+      (interactive "e")
+      (set-buffer (window-buffer (posn-window (event-end event))))
+      (goto-char (posn-point (event-end event)))
+      (tab-switcher-select))
+
+    (define *tab-switcher-mode-hook* (make-parameter '()))
+
+    (define-derived-mode
+      (tab-switcher-mode #f "Window Configurations" tab-switcher-mode-map
+                         *tab-switcher-mode-hook*)
+      "Major mode for selecting a window configuration.
+Each line describes one window configuration in Emacs."
+      (set-buffer-local-value! (current-buffer) 'truncate-lines #t))
+
+    (define (tab-switcher-noselect)
+      ;; "Create and return a buffer with a list of window
+      ;; configurations. The list is displayed in a buffer named
+      ;; `*Tabs*'."
+      ;;--------------------------------------------------------------
+      (let* ((tabs (seq-remove (lambda (tab) (eq? (car tab) 'current-tab))
+                               ((*tab-bar-tabs-function*))))
+             ;; "Sort by recency"
+             (tabs (sort tabs (lambda (a b)
+                                (< (tab-bar--alist-get 'time b)
+                                   (tab-bar--alist-get 'time a)))))
+             (name (string-append
+                    " *Tabs*<"
+                    (let ((id (frame-parameter (selected-frame) 'window-id)))
+                      (if id
+                          (if (string? id) id (number->string id))
+                          (or (frame-parameter (selected-frame) 'name) "F")))))
+             (buffer (get-buffer-create name)))
+        (with-current-buffer buffer
+          (set!buffer-read-only buffer #f)
+          (erase-buffer)
+          (tab-switcher-mode)
+          ;; "Vertical alignment to the center of the frame"
+          (insert-char #\newline
+                       (max 0 (quotient (- (frame-height (selected-frame))
+                                           (length tabs) 1)
+                                        2)))
+          ;; "Horizontal alignment to the center of the frame"
+          (set! tab-switcher-column
+                (- (quotient (frame-width (selected-frame)) 2) 15))
+          (for-each
+           (lambda (tab)
+             (insert (propertize
+                      (string-append
+                       (make-string tab-switcher-column #\space)
+                       (propertize (or (tab-bar--alist-get 'name tab) "")
+                                   'mouse-face 'highlight
+                                   'help-echo
+                                   "mouse-2: select this window configuration")
+                       "\n")
+                      'tab tab)))
+           tabs)
+          (goto-char (point-min))
+          (goto-char (or (next-single-property-change (point) 'tab)
+                         (point-min)))
+          (when (> (length tabs) 1)
+            (tab-switcher-next-line 1))
+          (move-to-column tab-switcher-column)
+          (set-buffer-modified-p #f)
+          (set!buffer-read-only buffer #t)
+          buffer)))
+
+    (define-command (tab-switcher)
+      "Display a list of named window configurations.
+The list is displayed in the buffer `*Tabs*'.
+It's placed in the center of the frame to resemble a window list
+displayed by a window switcher in some window managers on Alt+Tab.
+
+In this list of window configurations you can delete or select them.
+Type ? after invocation to get help on commands available.
+Type q to remove the list of window configurations from the display.
+
+The first column shows `D' for a window configuration you have
+marked for deletion."
+      (interactive '())
+      (let ((dir (default-directory)))
+        (parameterize ((*tab-bar-new-tab-choice* #t)
+                       ;; "Don't enable tab-bar-mode if it's disabled"
+                       (*tab-bar-show* #f))
+          (tab-bar-new-tab #f #f))
+        (switch-to-buffer (tab-switcher-noselect))
+        (set-buffer-local-value! (current-buffer) 'default-directory dir))
+      (message "Commands: d, x; RET; q to quit; ? for help."))
+
+    (define-key tab-switcher-mode-map (kbd "q") quit-window)
+    (define-key tab-switcher-mode-map (kbd "RET") tab-switcher-select)
+    (define-key tab-switcher-mode-map (kbd "d") tab-switcher-delete)
+    (define-key tab-switcher-mode-map (kbd "k") tab-switcher-delete)
+    (define-key tab-switcher-mode-map (kbd "C-d") tab-switcher-delete-backwards)
+    (define-key tab-switcher-mode-map (kbd "C-k") tab-switcher-delete)
+    (define-key tab-switcher-mode-map (kbd "x") tab-switcher-execute)
+    (define-key tab-switcher-mode-map (kbd "SPC") tab-switcher-next-line)
+    (define-key tab-switcher-mode-map (kbd "n") tab-switcher-next-line)
+    (define-key tab-switcher-mode-map (kbd "p") tab-switcher-prev-line)
+    (define-key tab-switcher-mode-map (kbd "DEL") tab-switcher-backup-unmark)
+    (define-key tab-switcher-mode-map (kbd "u") tab-switcher-unmark)
+    (define-key tab-switcher-mode-map (kbd "<mouse-2>")
+      tab-switcher-mouse-select)
 
     ;;--------------------------------------------------------------
     ;; The keymaps - after the commands, because a keymap holds them

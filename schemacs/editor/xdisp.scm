@@ -332,6 +332,7 @@
    ;; the items and `display_menu_bar` draws the row.
    *menu-bar-items-function* *inhibit-menubar-update*
    *tab-bar-items-function* *tab-bar-keymap-function*
+   *global-mode-string*
    ;; `Vinhibit_redisplay`, bound while a menu is up.
    *inhibit-redisplay*
    update-menu-bar display-menu-bar menu-item-width
@@ -940,6 +941,23 @@
       ;; resolves to nothing (see `*mode-line-format*').
       ;;--------------------------------------------------------------
       (list "%z" (list ':eval mode-line-eol-desc)))
+
+    (define *global-mode-string*
+      ;; GNU Emacs's `global-mode-string` (`bindings.el`): "String that
+      ;; appears in mode line of each buffer. Variable `mode-line-format'
+      ;; refers to it; modes that want to display something in the mode
+      ;; line append to it (`display-time-mode` puts the clock there)."
+      ;;
+      ;; **Nothing here appends to it yet** - there is no
+      ;; `display-time-mode` - so it is the empty list, and
+      ;; `tab-bar-format-global` draws nothing from it, which is what
+      ;; Emacs does before the clock is turned on.
+      ;;
+      ;; A parameter, as `*mode-line-format*` beside it is: a mode
+      ;; `setq`s it and the redisplay reads it, and a plain variable read
+      ;; by a compiled library is folded to its load-time value.
+      ;;--------------------------------------------------------------
+      (make-parameter '()))
 
     (define *mode-line-format*
       ;; GNU Emacs's `mode-line-format': the template a window's mode line is
@@ -4550,9 +4568,36 @@
               (let loop ((i 0) (x 0) (acc ""))
                 (if (>= i used)
                     acc
-                    (let ((name (vector-ref items (+ i 3))))
-                      (loop (+ i 6) (+ x (menu-item-width name))
-                            (string-append acc name)))))))
+                    (let* ((name (vector-ref items (+ i 3)))
+                           ;; **`(space :align-to N)`**: a caption whose
+                           ;; `display` property says where it starts is
+                           ;; padded to that column - what
+                           ;; `tab-bar-format-align-right` builds, and
+                           ;; what the C's renderer honours through
+                           ;; `display_string`'s `:align-to`. The unit is
+                           ;; this renderer's, a cell.
+                           (spec (get-text-property 0 'display name))
+                           (target (and (pair? spec) (eq? (car spec) 'space)
+                                        (pair? (cdr spec))
+                                        (eq? (cadr spec) ':align-to)
+                                        (caddr spec)))
+                           (pad (if (and target (number? target))
+                                    (max 0 (- target x))
+                                    0)))
+                      ;; **The spec replaces the character it is on**, as
+                      ;; `(space :align-to N)` does in the C's
+                      ;; `display_string`: the caption *is* the padding
+                      ;; and nothing else, so the next item starts at
+                      ;; column N. Drawing the space as well put the next
+                      ;; item one column past the frame's edge.
+                      (if target
+                          (loop (+ i 6) (+ x pad)
+                                (string-append acc
+                                               (if (> pad 0)
+                                                   (make-string pad #\space)
+                                                   "")))
+                          (loop (+ i 6) (+ x (menu-item-width name))
+                                (string-append acc name))))))))
         (draw-mode-line! (string-append
                           text (make-string (max 0 (- width (string-length text)))
                                             #\space))

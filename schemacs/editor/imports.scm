@@ -332,6 +332,7 @@
     *gap-bytes-dfl*
     *gap-bytes-min*
     *get-text-property-function*
+    *global-mode-string*
     *goal-column*
     *graft-intervals-function*
     *gui--last-selected-text-clipboard*
@@ -579,6 +580,7 @@
     *tab-line-tabs-buffer-groups-sort-function*
     *tab-line-tabs-function*
     *tab-line-tabs-window-buffers-filter-function*
+    *tab-switcher-mode-hook*
     *tab-width*
     *tabulated-list-entries*
     *tabulated-list-format*
@@ -1418,6 +1420,7 @@
     frame-garbaged-p
     frame-height
     frame-inhibit-resize?
+    frame-inner-width
     frame-keymap-state
     frame-list
     frame-live-p
@@ -2638,6 +2641,8 @@
     tab-bar-closed-tabs
     tab-bar-duplicate-tab
     tab-bar-format-add-tab
+    tab-bar-format-align-right
+    tab-bar-format-global
     tab-bar-format-history
     tab-bar-format-list
     tab-bar-format-tabs
@@ -2756,6 +2761,21 @@
     tab-line-tabs-window-buffers
     tab-line-track-tap
     tab-stop-list
+    tab-switcher
+    tab-switcher-backup-unmark
+    tab-switcher-column
+    tab-switcher-current-tab
+    tab-switcher-delete
+    tab-switcher-delete-backwards
+    tab-switcher-execute
+    tab-switcher-mode
+    tab-switcher-mode-map
+    tab-switcher-mouse-select
+    tab-switcher-next-line
+    tab-switcher-noselect
+    tab-switcher-prev-line
+    tab-switcher-select
+    tab-switcher-unmark
     tab-to-tab-stop
     tabulated-list-delete-entry
     tabulated-list-entries

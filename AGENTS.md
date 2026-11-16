@@ -9216,3 +9216,40 @@ text, and `(tab-bar-mouse-down-1 ...)` with a `posn-at-x-y` position
 switches tabs. **A running editor keeps the old code** - the first
 screenshot after the fix still showed the old layout because the editor
 had not been restarted.
+
+### The right-aligned item, and the tab list (2026-11-16, fifth pass)
+
+**`tab-bar-format-align-right` and `tab-bar-format-global`** are ports at
+last, with the piece of redisplay they stand on: a `display` property of
+`(space :align-to N)` on a caption is honoured by `display-tab-bar` -
+`tab-bar-format-align-right` leaves a marker that `tab-bar-format-list`
+replaces with one such item, exactly the C's `align-right-p`/`rest`
+variables. `frame-inner-width` is the target (`frame.c`'s function, and in
+this tree a column count, which is what `FRAME_PIXEL_WIDTH` is on a
+terminal), and `*global-mode-string*` is new in `xdisp.scm` beside
+`*mode-line-format*` - a parameter, empty until a mode fills it, which is
+Emacs before `display-time-mode` is on.
+
+**Two bugs of the port, both about the space spec.** `(string-append)`
+with no arguments is an error in this Guile (Elisp's `mapconcat` over nil
+answers ""), and the spec **replaces the character it sits on** - drawing
+the space *and* the padding put the next item one column past the frame
+edge, which the screenshot showed as a clock with its last digit cut off.
+
+**`tab-switcher`** (`M-x tab-switcher`, the `*Tabs*` list) is the whole of
+`tab-bar.el:2700`: the centred read-only list of the *other* tabs sorted
+by recency, `d`/`x`/`RET`/`u`/`DEL`/`SPC`/`n`/`p`/`q`, and the delete and
+select commands. Not carried: `:suppress t` (typing a letter in the list
+inserts it) and `?` (`describe-mode` does not exist) - the same gap
+`special-mode-map` names.
+
+`tab-bar-closed-tabs` became **a parameter** here: `tab-switcher-select`
+`let`-binds it to nil around the close, and that is the test the
+convention gives.
+
+Tests: `tab-bar-tests.scm` 24 -> 28 (the align-right item and its target,
+the empty global string, the list's contents and read-only flag, and
+selecting from it); `tools/pty-check.py`'s `tab-bar` config now sets a
+fixed clock through `*global-mode-string*` and asserts it sits at the
+right edge of the bar's row. Verified live on Gtk under broadway:
+`12:34` flush with the right edge of the drawing area.
