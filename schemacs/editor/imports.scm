@@ -421,6 +421,7 @@
     *major-mode-remap-defaults*
     *make-marker-function*
     *mark-even-if-inactive*
+    *mark-marker-function*
     *mark-ring-max*
     *marker-position-function*
     *max-5-byte-char*
@@ -478,6 +479,7 @@
     *pending-coding-system*
     *pending-undo-list*
     *point-before-last-command-or-undo*
+    *point-marker-function*
     *pre-command-hook*
     *prefix-cu*
     *prefix-digits*

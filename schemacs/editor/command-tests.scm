@@ -6,11 +6,14 @@
  (only (ice-9 exceptions) exception-message)
  (only (schemacs editor command)
        define-command define-alias command-record-of command-procedure
-       command-record-named *barf-if-buffer-read-only-function*)
+       command-record-named *barf-if-buffer-read-only-function*
+       *point-marker-function* *mark-marker-function*)
  (only (schemacs editor buffer)
        allocate-buffer with-current-buffer current-buffer
        set!buffer-read-only)
- (only (schemacs editor editfns) goto-char insert buffer-string)
+ (only (schemacs editor editfns) goto-char insert buffer-string
+       mark-marker)
+ (only (schemacs editor marker) marker-position marker-buffer)
  (only (schemacs editor simple) set-mark deactivate-mark region-active-p)
  ;; Loaded for its effect: the command loop installs the `*' check's
  ;; seam as it loads (`*barf-if-buffer-read-only-function*').
@@ -69,6 +72,21 @@ read-only check."
   (interactive "r\nP")
   (*got* (list beg end uarg)))
 
+(define-command (point-arg-command mark)
+  "A command whose specification is `d': point, as a marker."
+  (interactive "d")
+  (*got* mark))
+
+(define-command (mark-arg-command mark)
+  "A command whose specification is `m': the mark, as a marker."
+  (interactive "m")
+  (*got* mark))
+
+(define-command (bad-code-command)
+  "A command with a code that is not one."
+  (interactive "q")
+  (*got* 'ran))
+
 (define-command (dash-marker-command arg)
   "A command whose specification begins with `-', Lucid's no-op."
   (interactive "-P")
@@ -114,6 +132,10 @@ read-only check."
 ;; `*' specification silently checks nothing.
 (test-equal "the command loop installs the * check" #t
             (procedure? (*barf-if-buffer-read-only-function*)))
+;; `d' and `m' reach `editfns.c`'s two marker functions the same way.
+(test-equal "and editfns installs the d and m readers" '(#t #t)
+            (list (procedure? (*point-marker-function*))
+                  (procedure? (*mark-marker-function*))))
 (test-end "star-seam")
 
 (test-begin "star-marker")
@@ -207,8 +229,51 @@ read-only check."
               (message-of (lambda () ((entry plus-marker-command) #f)))))
 (test-end "multi-code-specs")
 
-(test-begin "plain-specs")
+(test-begin "no-io-codes")
 ;;--------------------------------------------------------------
+;; "d" - "Value of point. Does not do I/O" (`callint.c:502') - is a
+;; *marker* at point, which the command may keep, not a position.
+(with-current-buffer ed
+  (goto-char 4)
+  (test-equal "d gives a marker at point" 4
+              (begin ((entry point-arg-command) #f) (marker-position (*got*))))
+  (test-equal "and it is attached to the buffer" (current-buffer)
+              (marker-buffer (*got*)))
+  (goto-char 7)
+  (test-equal "the marker is a point in time, so it does not follow point" 4
+              (marker-position (*got*)))
+
+  ;; "m" - "Value of mark. Does not do I/O" (`:623') - is the buffer's
+  ;; *own* mark marker, so moving the returned marker moves the mark.
+  (set-mark 6)
+  (test-equal "m gives the mark as a marker" 6
+              (begin ((entry mark-arg-command) #f) (marker-position (*got*))))
+  (test-equal "and it is the buffer's own mark marker" #t
+              (eq? (*got*) (mark-marker)))
+
+  ;; The mark check is `check_mark (false)': the no-region message is
+  ;; "so there is no region" and this one is not.
+  (set-mark #f)
+  (*got* 'none)
+  (test-equal "m with no mark set says only that the mark is not set"
+              "The mark is not set now"
+              (message-of (lambda () ((entry mark-arg-command) #f))))
+  (test-equal "and the body never ran" 'none (*got*)))
+(test-end "no-io-codes")
+
+(test-begin "bad-code")
+;;--------------------------------------------------------------
+;; An unread code is Emacs's error, naming the letter and its two
+;; numbers - "Invalid control letter `%c' (#o%03o, #x%04x) in
+;; interactive calling string" (`callint.c:744'), measured on Emacs
+;; 31.1 (which renders the quotes as `‘q’' on a terminal).
+(with-current-buffer ed
+  (test-equal "an unread code names the letter, its octal and its hex"
+              "Invalid control letter `q' (#o161, #x0071) in interactive calling string"
+              (message-of (lambda () ((entry bad-code-command) #f)))))
+(test-end "bad-code")
+;;--------------------------------------------------------------
+(test-begin "plain-specs")
 ;; `(interactive)` - the empty specification - is a thunk, which is why
 ;; the `*' marker had to decide its call shape from what remains of the
 ;; string rather than from the marker itself.

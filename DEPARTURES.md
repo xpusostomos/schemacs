@@ -4399,12 +4399,14 @@ code that is not read is an error naming the *character*, where the old
 code named the whole string.
 
 **Codes not carried, and why**: `b`/`B` (buffer name), `f`/`F`/`G`
-(file), `d`/`D` (directory), `n`/`N` (number), `s`/`S`/`M` (string),
-`c` (character), `k`/`K`/`U` (key sequence), `m` (the mark - it needs the
-mark primitive rather than the region ones), `x`/`X` (a Lisp
-expression), `z`/`Z` (a coding system), `a`/`C`/`v` (function or
-variable name) and `l` (a list). Every one of them reads the minibuffer,
-which `command.scm` is below.
+(file), `D` (directory), `n`/`N` (number), `s`/`S`/`M` (string), `c`
+(character), `k`/`K`/`U` (key sequence), `x`/`X` (a Lisp expression),
+`z`/`Z` (a coding system) and `a`/`C`/`v` (a function, command or
+variable name). Every one of them reads the minibuffer, which
+`command.scm` is below. **There are 30 letters and no `l`** - an earlier
+version of this paragraph listed one, which is an Emacs 30 memory and
+not in the C: `callint.c`'s switch has those 30 `case` labels and one
+`+` beside them, and nothing else.
 
 **The seams the region codes need** are `*check-mark-function*`,
 `*region-beginning-function*`, `*region-end-function*` and
@@ -4437,3 +4439,70 @@ so a repeated `e` answers the same one.
 `downcase-region` (`"r"`), `eval-region` (`"r"`, with a rest parameter
 for the PRINTFLAG the C's two-argument interactive form leaves nil), and
 `indent-region` (`"r\nP"`).
+
+## The `d` and `m` interactive codes, and the marker `d` hands you
+
+`callint.c:502`'s `d` - "Value of point. Does not do I/O" - and `:623`'s
+`m` - "Value of mark" - are the last two codes that read nothing, so
+they were the two that could be ported without a minibuffer seam. Both
+hand the command a **marker**, not a position, and that is the part
+worth getting right: a command may keep it.
+
+`m` is exact. The C is `check_mark (false)` and then
+`BVAR (current_buffer, mark)` - the buffer's **own** mark marker, not a
+copy - so moving the argument moves the mark. `command-tests` pins the
+identity with `eq?` against `mark-marker`. The check is
+`check_mark`'s `false` arm, so the message is "The mark is not set now",
+*not* the region's "...so there is no region" - the same two-question
+order the `r` code's note is about.
+
+**`d` departs in one field, and it is `marker-buffer`.** The C's is
+
+```c
+set_marker_both (point_marker, Qnil, PT, PT_BYTE);
+args[i] = point_marker;
+```
+
+and `point_marker` is `callint.c`'s **static**, made once with
+`Fmake_marker` and repositioned on the next call. `Fmake_marker` makes a
+marker with no buffer, and `set_marker_both` with `Qnil` does not give
+it one - so the C's `d` argument is a *bufferless* marker, shared
+between every `d` in every specification, and it would be **frozen**:
+a bufferless marker does not move with edits. `point-marker`
+(`editfns.c:198`) is `build_marker (current_buffer, PT, PT_BYTE)`.
+
+So the argument here answers the same number at the same moment, is
+attached to the buffer, and moves with the buffer's text. Three
+answers differ: `marker-buffer` (a buffer rather than nil), whether a
+later edit moves it, and whether two `d` codes in one specification
+give the same object. The first is the one a command could read;
+`callint.c`'s static is a convenience for the C, not a rule - no Emacs
+command in `lisp/` asks `marker-buffer` of a `d` argument.
+
+**The seam shape, again.** `command.scm` is a leaf: `editfns.c`'s
+`point-marker` and `mark-marker` are both in `(schemacs editor
+editfns)`, which imports this library. They arrive as
+`*point-marker-function*` and `*mark-marker-function*`, installed at the
+bottom of `editfns.scm` beside the functions, which is `simple.scm`'s
+arrangement for the region seams.
+
+**A missing install is an error here, not a silent `#f`.**
+`%interactive-seam` reports "Interactive specification needs `point-marker',
+which is not installed". The four region seams skip a missing install
+because `#f` is a value they can mean; `d` has no such value, and a
+silent nil would fail inside the command several frames away.
+
+**The invalid-code message is the C's now**, with the C's padding:
+
+```
+Invalid control letter `q' (#o161, #x0071) in interactive calling string
+```
+
+where the tree said "Unsupported interactive specification character".
+Measured on Emacs 31.1, which renders the two quotes as `‘’` on a
+terminal (`text-quoting-style`); the C's format string, and this, have
+`` ` `` and `'`. The two numbers are zero-padded by a local helper
+rather than a `~3,'0o` directive because an error in this tree carries a
+*template and irritants* and the receiver does the formatting - which is
+what makes the message readable at the echo area and in `command-tests`
+alike.

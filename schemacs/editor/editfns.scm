@@ -98,7 +98,8 @@
     ;; `make_buffer_string_both`'s body and moved into `engine.scm` with
     ;; the PROPS argument (2026-10-12).
     (only (schemacs editor command)
-          *mark-even-if-inactive*)
+          *mark-even-if-inactive*
+          *point-marker-function* *mark-marker-function*)
     ;; **This library no longer imports `frame.scm'.**
     ;;
     ;; `message' puts its text in the echo area, which is the frame's -
@@ -1534,5 +1535,12 @@ moved."
       ;;--------------------------------------------------------------
       ((*current-message-function*)))
 
+
+    (*point-marker-function* point-marker)
+    (*mark-marker-function* mark-marker)
+    ;; ^ The `d' and `m' interactive codes' readers (`callint.c:502',
+    ;; `:623'). `command.scm` is below this library, so they arrive as
+    ;; seams - the way `*barf-if-buffer-read-only-function*` arrives from
+    ;; `keyboard.scm`. Both functions are the C's own, defined above.
 
     ))

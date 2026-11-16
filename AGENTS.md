@@ -9651,3 +9651,85 @@ as `(region-beginning)` + `(region-end)` gets every ordinary case right
 and one message wrong. That is exactly the class of departure that
 reading the C catches and testing does not, so `check_mark` is ported
 whole and the test pins the corner (no mark set, transient mode on).
+
+## The `d` and `m` codes, and the invalid-code message (2026-11-16)
+
+The two interactive codes that read nothing and were still missing:
+`d` ("Value of point. Does not do I/O", `callint.c:502`) and `m`
+("Value of mark", `:623`). Both hand the command a **marker**.
+
+- `m` is exact: `check_mark (false)` - the message is "The mark is not
+  set now", not the region's - and then the buffer's *own* mark marker,
+  so moving the argument moves the mark. `command-tests` pins the
+  identity with `eq?`.
+- `d` is `(point-marker)`, where the C repositions a **static,
+  bufferless** marker (`Fmake_marker` + `set_marker_both (…, Qnil, …)`).
+  Same position; `marker-buffer` differs, and a bufferless marker would
+  not move with edits. DEPARTURES.md has the three answers that differ.
+- Two new seams, `*point-marker-function*` and `*mark-marker-function*`,
+  installed at the bottom of `editfns.scm` - the library that has both.
+  **A missing install is an error naming the function** here
+  (`%interactive-seam`), not a silent `#f`, because `d` has no value
+  that `#f` could mean.
+- The **invalid-code message is the C's**: ``Invalid control letter `q'
+  (#o161, #x0071) in interactive calling string``, with the C's
+  zero-padding done by a local helper rather than a format directive
+  (this tree's errors carry a template *and* irritants).
+
+`command-tests.scm` 21 -> 30: the two seams installed, `d`'s marker at
+point and not following point afterwards, `m` returning the buffer's
+own mark marker, `m`'s no-mark message, and the invalid-letter text.
+
+**Correction to the previous handoff's list**: there is no `l` code.
+`callint.c`'s switch has 30 letters and a `+`; the earlier list here
+carried an `l` that does not exist in Emacs 31.
+
+All 63 suites pass and `tools/pty-check.py` is 89/89.
+
+**A warning about that battery, because it cost an hour here.** The
+first full run on this tree failed `quit-after-prefix` and then died in
+`back-door` with a `subprocess.TimeoutExpired` - and the obvious reading
+was a regression. It was not: `back-door` alone then passed 5/5, and the
+*baseline* (`e139a83`, stashed and recompiled to test it) passed too.
+`back-door` is the check whose own note already says the client "may
+connect before the editor has torn that session down"; it is a
+one-session-at-a-time race, and the two failures were it. **Stash,
+recompile, run the check on the baseline before believing a red
+battery** - and note that `git stash` rewrites every source's mtime, so
+the cache has to be warmed again or the baseline is compiled against
+the wrong code and lies.
+
+### What is left of `callint.c`
+
+Eighteen codes, and **every one of them reads the minibuffer** - so each
+needs a seam in `command.scm` plus an installer in the library that has
+the reader, the way the region four need `simple.scm`:
+
+| codes | reader | lives in |
+|---|---|---|
+| `s` `S` `M` | `read-string` (`minibuf.c:1420`) | `minibuffer.scm` |
+| `n` `N` | `read-number` (`subr.el`) | `minibuffer.scm` |
+| `b` `B` | `read-buffer` (`minibuf.c:1522`) | `minibuffer.scm` |
+| `a` `C` | `completing-read` over the obarray | `minibuffer.scm` |
+| `f` `F` `G` `D` | `read-file-name` (`minibuf.c`) | `files.scm` |
+| `c` | `read-char` (`keyboard.c`) | `keyboard.scm` |
+| `k` `K` (`U` after them) | `read-key-sequence` (`keyboard.c`) | `keyboard.scm` |
+| `z` `Z` | `read-coding-system` | `coding.scm`/`mule-cmds.scm` |
+| `x` `X` | `read-minibuffer`, `eval-minibuffer` | `minibuffer.scm` |
+| `v` | `read-variable` (`cus-edit.c`) | `custom.scm` |
+
+**The two names that collide** and need a decision before they are done:
+`*read-buffer-function*` and `*read-file-name-function*` are **Emacs's
+own variables** (`read-buffer-function`, `minibuf.c:2544`;
+`read-file-name-function`), and both are already in this tree under
+those exact names (`minibuf.scm` holds the first). So a seam cannot be
+spelled the way `*barf-if-buffer-read-only-function*` is; the `%`
+prefix that `%kill-buffer` took, or a different word, is the choice
+waiting there.
+
+Worth knowing before doing any of them: **`d`/`m` (`245` and `215` in
+`lisp/`) and `n` (`545`) are the most-used codes in Emacs's own
+`lisp/`**, and `a` (`347`), `s` (`375`), `f` (`246`) follow - but this
+tree's commands mostly use interactive *expressions* for those (Emacs
+itself does for `find-file`, `switch-to-buffer` and `kill-buffer`), so
+the immediate gain is in ports that quote a `"…"` spec verbatim.

@@ -27,6 +27,7 @@
    *barf-if-buffer-read-only-function*
    *check-mark-function* *region-beginning-function* *region-end-function*
    *use-region-p-function*
+   *point-marker-function* *mark-marker-function*
    called-interactively? funcall-interactively
    uarg->integer
    run-command apply-command show-command
@@ -389,6 +390,27 @@
     ;; ^ `editfns.c`'s `region-beginning` and `region-end`.
     (define *use-region-p-function* (make-parameter #f))
     ;; ^ `simple.el`'s `use-region-p`, which the `R` code asks.
+    (define *point-marker-function* (make-parameter #f))
+    (define *mark-marker-function* (make-parameter #f))
+    ;; ^ `editfns.c`'s `point-marker` and `mark-marker`, for the `d` and
+    ;; `m` codes. A *marker* is what the C hands the command, not a
+    ;; position - `d` is `set_marker_both (point_marker, ...)` and `m` is
+    ;; `BVAR (current_buffer, mark)`, which is the buffer's own mark
+    ;; marker.
+    ;;
+    ;; Not in the C: `d`'s marker is a *bufferless* static that is
+    ;; repositioned on the next call, where `point-marker` builds one
+    ;; attached to the buffer. Same position, and a marker a command may
+    ;; keep; `(marker-buffer ARG)` is the one answer that differs.
+    (define (%interactive-seam seam name)
+      ;; Read SEAM, which an interactive code cannot work without. `#f'
+      ;; here is a *missing install*, not a value - so it is an error
+      ;; naming the function, where a silently skipped check would make
+      ;; the code answer nil and then fail inside the command.
+      ;;--------------------------------------------------------------
+      (or (seam)
+          (error "Interactive specification needs `~a', which is not installed"
+                 name)))
 
     (define (%interactive-markers spec)
       ;; The leading markers of a specification, in order, and the rest of
@@ -403,6 +425,14 @@
               (if (memv ch '(#\* #\@ #\- #\+ #\^))
                   (loop (+ i 1) (cons ch markers))
                   (cons (reverse markers) (substring spec i)))))))
+
+    (define (%zero-pad string width)
+      ;; STRING padded on the left with zeroes to WIDTH - the C's `%03o'
+      ;; and `%04x' for the invalid-code message. A number too wide for
+      ;; the field is left alone, as `printf' leaves it.
+      ;;--------------------------------------------------------------
+      (string-append (make-string (max 0 (- width (string-length string))) #\0)
+                     string))
 
     (define (%interactive-args codes uarg)
       ;; The argument list a specification's CODES build, in the C's
@@ -453,12 +483,39 @@
                             (end (let ((f (*region-end-function*))) (and f (f)))))
                         (loop (+ i 1) (cons end (cons beg args))))
                       (loop (+ i 1) (cons #f (cons #f args))))))
+               ;; "Value of point. Does not do I/O" (`callint.c:502'):
+               ;; a marker at point, which the command may keep.
+               ((char=? code #\d)
+                (let ((mark-at-point (%interactive-seam *point-marker-function*
+                                                        'point-marker)))
+                  (loop (+ i 1) (cons (mark-at-point) args))))
+               ;; "Value of mark. Does not do I/O" (`:623'): the mark
+               ;; *checked* first - "The mark is not set now", not the
+               ;; region's message - and then the buffer's own mark
+               ;; marker.
+               ((char=? code #\m)
+                (let ((check (*check-mark-function*)))
+                  (when check (check #f)))
+                (let ((mark (%interactive-seam *mark-marker-function*
+                                               'mark-marker)))
+                  (loop (+ i 1) (cons (mark) args))))
                ;; "A newline in the string is a separator" and `-'s
                ;; Lucid semi-compatibility (`callint.c:385').
                ((memv code '(#\newline #\-))
                 (loop (+ i 1) args))
                (else
-                (error "Unsupported interactive specification character" code)))))))
+                ;; "Invalid control letter `%c' (#o%03o, #x%04x) in
+                ;; interactive calling string" (`callint.c:744'). The
+                ;; two numbers are zero-padded to the field widths the
+                ;; C's `%03o' and `%04x' give - done here rather than by
+                ;; a format directive because an error in this tree
+                ;; carries a template and irritants, and it is the
+                ;; *receiver* that formats them.
+                (let ((n (char->integer code)))
+                  (error "Invalid control letter `~a' (#o~a, #x~a) in interactive calling string"
+                         code
+                         (%zero-pad (number->string n 8) 3)
+                         (%zero-pad (number->string n 16) 4)))))))))
 
     (define (interactive-proc spec command module)
       ;; The command's interactive entry: a procedure that reads what a
