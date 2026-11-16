@@ -200,6 +200,7 @@
     *change-major-mode-hook*
     *char-property-alias-alist*
     *charset-table*
+    *check-mark-function*
     *clear-message-function*
     *coding-categories-bound*
     *coding-category-priority*
@@ -498,6 +499,8 @@
     *record-window-buffer-function*
     *recursive-edit-exit*
     *redisplay-in-progress*
+    *region-beginning-function*
+    *region-end-function*
     *replace-buffer-in-windows-function*
     *require-final-newline*
     *resize-mini-windows*
@@ -616,6 +619,7 @@
     *up-list-function*
     *update-search-regs-function*
     *use-empty-active-region*
+    *use-region-p-function*
     *visual-line-fringe-indicators*
     *window-combination-limit*
     *window-combination-resize*

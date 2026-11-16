@@ -100,7 +100,13 @@
           ;; buffer. It has no Lisp name, and it was the engine's
           ;; until 2026-10-13.
           fetch-char set-point buffer-pt buffer-beg buffer-z buffer-read-only? set!buffer-read-only set!text-editor-undo-list text-editor-undo-list)
-    (only (schemacs editor command) *mark-even-if-inactive*)
+    (only (schemacs editor command)
+          *mark-even-if-inactive*
+          ;; The seams the interactive argument codes read; installed at
+          ;; the end of the region section below, where the functions
+          ;; they carry are defined.
+          *check-mark-function* *region-beginning-function*
+          *region-end-function* *use-region-p-function*)
     (only (schemacs editor editfns)
           bobp bolp buffer-size buffer-substring delete-and-extract-region delete-region eobp
           eolp following-char forward-line insert insert-and-inherit
@@ -1372,7 +1378,7 @@ non-nil."
       ;; can be used to *copy* out of a read-only buffer - and
       ;; `kill-read-only-ok' turns the signal into a message.
       "Kill (cut) the text between point and mark."
-      (interactive (list (region-beginning) (region-end)))
+      (interactive "r")
       ;; BEG and END are Emacs positions and the engine's are too, so
       ;; there is nothing to convert: this used to subtract one from
       ;; each, which is what the engine's old zero-based positions
@@ -2101,6 +2107,46 @@ non-nil."
       (and (region-active-p)
            (or (< (region-beginning) (region-end))
                (*use-empty-active-region*))))
+
+    (define (check-mark for-region)
+      ;; `callint.c:156`'s `check_mark`: the static its `r' and `m' codes
+      ;; call before reading the mark. Signals when the mark is not set -
+      ;; "The mark is not set now, so there is no region" for a region,
+      ;; "The mark is not set now" otherwise - and when Transient Mark
+      ;; mode is on, the mark is not active and `mark-even-if-inactive`
+      ;; is nil. Answers the mark's position.
+      ;;
+      ;; **It is `callint.c`'s and it is here** because the state it
+      ;; reads is: `mark-marker` is `editfns.c`'s, `transient-mark-mode`
+      ;; and `mark-active` are `buffer.c`'s, and `command.scm` is a leaf
+      ;; below all of them. It reaches this through the seam installed
+      ;; just below, as it reaches `barf-if-buffer-read-only`.
+      ;;
+      ;; **The order is `check_mark`'s and not `region_limit`'s.** The
+      ;; mark being *set* is asked first here and second in
+      ;; `region-limit` (`editfns.c:232`), so `M-x kill-region` with
+      ;; Transient Mark mode on and no mark set says "The mark is not set
+      ;; now, so there is no region", not "The mark is not active now".
+      ;;--------------------------------------------------------------
+      (let ((mark (marker-position (mark-marker))))
+        (unless mark
+          (error (if for-region
+                     "The mark is not set now, so there is no region"
+                     "The mark is not set now")))
+        (when (and (transient-mark-mode)
+                   (not (*mark-even-if-inactive*))
+                   (not (mark-active)))
+          ;; `xsignal0 (Qmark_inactive)` - there are no condition symbols
+          ;; here, so it is the message alone.
+          (error "The mark is not active now"))
+        mark))
+
+    ;; The interactive codes' seams - `command.scm` declares them, this
+    ;; library has all four, and the editor loads this one always.
+    (*check-mark-function* check-mark)
+    (*region-beginning-function* region-beginning)
+    (*region-end-function* region-end)
+    (*use-region-p-function* use-region-p)
 
     (define *activate-mark-hook* (make-parameter '()))
     (define *deactivate-mark-hook* (make-parameter '()))
@@ -3129,7 +3175,7 @@ If N is omitted or nil, move point 1 character to the left."
       (call-with-port (open-output-string)
         (lambda (port) (write value port) (get-output-string port))))
 
-    (define-command (eval-region start end printflag)
+    (define-command (eval-region start end . rest)
       "Execute the region as Scheme code.
 When called from programs, expects two arguments,
 giving starting and ending indices in the current buffer
@@ -3138,11 +3184,11 @@ Programs can pass third argument PRINTFLAG which controls output:
  a value of nil means discard it; anything else is stream for printing it.
 
 This function does not move point."
-      ;; `(interactive "r")' in Emacs, and PRINTFLAG nil - which is what
-      ;; Emacs's own interactive form passes, its spec taking two
-      ;; arguments where the function takes three. The tree spells a
-      ;; region spec as the two calls.
-      (interactive (list (region-beginning) (region-end) #f))
+      ;; `(interactive "r")' in Emacs - two arguments where the function
+      ;; takes four, so every interactive call passes a nil PRINTFLAG.
+      ;; Here that is a rest parameter whose absence is nil.
+      (interactive "r")
+      (let ((printflag (if (pair? rest) (car rest) #f)))
       ;; "This function does not move point" - and none is moved here,
       ;; because the region's text is read from a *string*; Emacs narrows
       ;; the buffer and reads from point, which is why it has to say so.
@@ -3172,7 +3218,7 @@ This function does not move point."
                       (if (eq? printflag #t)
                           (message "%s" (%eval-region-value->string value))
                           (write value printflag))))
-                  (loop))))))))
+                  (loop)))))))))
 
 
     ;;------------------------------------------------------------------
@@ -3206,7 +3252,7 @@ specify the starting and ending character numbers of the region to
 operate on.  When used as a command, the text between point and the
 mark is operated on.
 See also `capitalize-region'."
-      (interactive (list (region-beginning) (region-end)))
+      (interactive "r")
       (casify-region 'upcase beg end)
       #f)
 
@@ -3218,7 +3264,7 @@ In programs, wants two arguments.  These arguments
 specify the starting and ending character numbers of the region to
 operate on.  When used as a command, the text between point and the
 mark is operated on."
-      (interactive (list (region-beginning) (region-end)))
+      (interactive "r")
       (casify-region 'downcase beg end)
       #f)
 

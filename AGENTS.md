@@ -9612,3 +9612,42 @@ specification's thunk, and `define-alias`'s shared record.
   unset** and reports the check missing when it is the probe that is
   incomplete. `(procedure? (*barf-if-buffer-read-only-function*))` in
   the suite is the guard against that.
+
+# The interactive codes are a loop now, and the region codes are in (2026-11-16)
+
+The follow-on to the `*` marker. `interactive-proc` compared the whole
+specification with `string=?` against one code at a time, so
+`"r\nP"` - `indent-region`'s own spec - could not be written, and every
+region command spelled its spec as an expression.
+
+## What landed
+
+- **`%interactive-args`**: `callint.c`'s loop over the code characters.
+  `p`, `P`, `e`, `i`, `r`, `R`; `\n` and `-` separate codes and
+  contribute nothing; an unread code errors naming the character.
+- **`%interactive-markers`**: the leading markers (`*`, `^`, `-`, `+`,
+  `@`) peeled before any code is read (`callint.c:362`). `*` is the
+  read-only check from the previous pass, now one of a family rather
+  than a special case; `+` errors; `^` and `@` are recognised and do
+  nothing (no shift-select, no mouse-event window).
+- **Four seams** - `*check-mark-function*`, `*region-beginning-function*`,
+  `*region-end-function*`, `*use-region-p-function*` - installed by
+  `simple.scm`, which is the library that has all four.
+- **`check-mark`** (`callint.c:156`) lives in `simple.scm` for want of
+  its state, and answers the mark's position.
+- Commands back on their Emacs specs: `kill-region`, `upcase-region`,
+  `downcase-region` (`"r"`), `eval-region` (`"r"`, rest parameter for
+  the nil PRINTFLAG), `indent-region` (`"r\nP"`).
+- `command-tests.scm` 10 -> 21: `r` both ways round and sorted, `R`
+  nil when the region is inactive, both mark errors *in `check_mark`'s
+  order*, `i`, `-`, `+`, and `"r\nP"`'s three arguments in order.
+
+## The thing to know about this pass
+
+**`check_mark` and `region_limit` ask the same two questions in the
+opposite order** - `callint.c:156` tests "is the mark set" first,
+`editfns.c:232` tests "is it active" first. A tree that implemented `r`
+as `(region-beginning)` + `(region-end)` gets every ordinary case right
+and one message wrong. That is exactly the class of departure that
+reading the C catches and testing does not, so `check_mark` is ported
+whole and the test pins the corner (no mark set, transient mode on).

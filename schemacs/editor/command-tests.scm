@@ -10,6 +10,8 @@
  (only (schemacs editor buffer)
        allocate-buffer with-current-buffer current-buffer
        set!buffer-read-only)
+ (only (schemacs editor editfns) goto-char insert buffer-string)
+ (only (schemacs editor simple) set-mark deactivate-mark region-active-p)
  ;; Loaded for its effect: the command loop installs the `*' check's
  ;; seam as it loads (`*barf-if-buffer-read-only-function*').
  (only (schemacs editor keyboard) dispatch-key-event))
@@ -46,6 +48,36 @@ read-only check."
   "A command whose specification stacks both leading markers, `*^P'."
   (interactive "*^P")
   (*got* uarg))
+
+(define-command (region-args-command beg end)
+  "A command whose specification is `r': the region's two positions."
+  (interactive "r")
+  (*got* (list beg end)))
+
+(define-command (active-region-args-command beg end)
+  "A command whose specification is `R': the region, or two nils."
+  (interactive "R")
+  (*got* (list beg end)))
+
+(define-command (nil-arg-command arg)
+  "A command whose specification is `i': always nil."
+  (interactive "i")
+  (*got* arg))
+
+(define-command (region-and-prefix-command beg end uarg)
+  "A command whose specification is `r\nP': region, then raw prefix."
+  (interactive "r\nP")
+  (*got* (list beg end uarg)))
+
+(define-command (dash-marker-command arg)
+  "A command whose specification begins with `-', Lucid's no-op."
+  (interactive "-P")
+  (*got* arg))
+
+(define-command (plus-marker-command)
+  "A command whose specification begins with `+', which is an error."
+  (interactive "+")
+  (*got* 'ran))
 
 (define-command (plain-command)
   "A command with no interactive arguments at all."
@@ -120,6 +152,60 @@ read-only check."
   (test-equal "*^P reads the check, then the marker, then the code" '(4)
               (begin ((entry star-shift-command) '(4)) (*got*))))
 (test-end "star-marker")
+
+(test-begin "region-codes")
+;;--------------------------------------------------------------
+;; "r": the two positions, smaller first, whichever way round point
+;; and mark are.
+(with-current-buffer ed
+  (insert "hello world\n")
+  (goto-char 1)
+  (set-mark 6)
+  (test-equal "r gives the region's two positions" '(1 6)
+              (begin ((entry region-args-command) #f) (*got*)))
+  (goto-char 12)
+  (test-equal "r sorts them, point above mark" '(6 12)
+              (begin ((entry region-args-command) #f) (*got*)))
+  ;; "R" is the same while the region is active...
+  (goto-char 1)
+  (test-equal "R gives the region while it is active" '(1 6)
+              (begin ((entry active-region-args-command) #f) (*got*)))
+  ;; ...and two nils once it is not, where "r" signals.
+  (deactivate-mark)
+  (test-equal "R gives two nils for an inactive region" '(#f #f)
+              (begin ((entry active-region-args-command) #f) (*got*)))
+  (test-equal "and r signals for one" "The mark is not active now"
+              (message-of (lambda () ((entry region-args-command) #f))))
+  ;; The mark being unset is the other error, and `check_mark`'s order
+  ;; asks it first - which is why it is `callint.c`'s and not
+  ;; `region_limit`'s.
+  (set-mark #f)
+  (test-equal "r with no mark set says there is no region"
+              "The mark is not set now, so there is no region"
+              (message-of (lambda () ((entry region-args-command) #f))))
+  (test-equal "and R does not signal at all" '(#f #f)
+              (begin ((entry active-region-args-command) #f) (*got*))))
+(test-end "region-codes")
+
+(test-begin "multi-code-specs")
+;;--------------------------------------------------------------
+;; "r\nP": the newline separates codes and contributes nothing, so the
+;; three arguments arrive in the order the codes are written.
+(with-current-buffer ed
+  (goto-char 1)
+  (set-mark 6)
+  (test-equal "a newline separates codes" '(1 6 (4))
+              (begin ((entry region-and-prefix-command) '(4)) (*got*)))
+  ;; "i" ignores the prefix and supplies nil.
+  (test-equal "i supplies nil" #f
+              (begin ((entry nil-arg-command) '(4)) (*got*)))
+  ;; "-" is Lucid's no-op marker, peeled with the others.
+  (test-equal "- is ignored and the rest is read" '(4)
+              (begin ((entry dash-marker-command) '(4)) (*got*)))
+  ;; "+" is "not used in `interactive' for ordinary commands".
+  (test-equal "+ is an error" "`+' is not used in `interactive' for ordinary commands"
+              (message-of (lambda () ((entry plus-marker-command) #f)))))
+(test-end "multi-code-specs")
 
 (test-begin "plain-specs")
 ;;--------------------------------------------------------------

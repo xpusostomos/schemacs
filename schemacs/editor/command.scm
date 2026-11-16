@@ -25,6 +25,8 @@
    *pending-coding-system*
    *called-interactively*
    *barf-if-buffer-read-only-function*
+   *check-mark-function* *region-beginning-function* *region-end-function*
+   *use-region-p-function*
    called-interactively? funcall-interactively
    uarg->integer
    run-command apply-command show-command
@@ -372,15 +374,100 @@
     ;; what a caller that never loads a command loop gets - the same
     ;; shape as `*record-window-buffer-function*`.
 
+    ;; The seams the argument codes need. `callint.c` is a leaf here -
+    ;; everything above it defines commands - while the functions its
+    ;; codes call are `editfns.c`'s and `simple.el`'s. So each arrives the
+    ;; way `barf-if-buffer-read-only` does, installed by the library that
+    ;; has it (`simple.scm` installs all four as it loads).
+    (define *check-mark-function* (make-parameter #f))
+    ;; ^ `callint.c:156`'s `check_mark`: signals when the mark is not set
+    ;; ("The mark is not set now, so there is no region" for a region),
+    ;; and when Transient Mark mode is on, the mark is not active and
+    ;; `mark-even-if-inactive` is nil. Answers the mark's position.
+    (define *region-beginning-function* (make-parameter #f))
+    (define *region-end-function* (make-parameter #f))
+    ;; ^ `editfns.c`'s `region-beginning` and `region-end`.
+    (define *use-region-p-function* (make-parameter #f))
+    ;; ^ `simple.el`'s `use-region-p`, which the `R` code asks.
+
+    (define (%interactive-markers spec)
+      ;; The leading markers of a specification, in order, and the rest of
+      ;; the string: `callint.c:362`'s "Handle special starting chars
+      ;; `*' and `@'. Also `-'" loop, which peels them before any code is
+      ;; read. Answers a pair (MARKERS . CODES).
+      ;;--------------------------------------------------------------
+      (let loop ((i 0) (markers '()))
+        (if (= i (string-length spec))
+            (cons (reverse markers) "")
+            (let ((ch (string-ref spec i)))
+              (if (memv ch '(#\* #\@ #\- #\+ #\^))
+                  (loop (+ i 1) (cons ch markers))
+                  (cons (reverse markers) (substring spec i)))))))
+
+    (define (%interactive-args codes uarg)
+      ;; The argument list a specification's CODES build, in the C's
+      ;; order: each code contributes no argument, one, or (for `r' and
+      ;; `R') two. `\n' and `-' separate codes for readability and
+      ;; contribute nothing - `string' is "You can use a newline to
+      ;; separate multiple codes" - and a code this tree does not read is
+      ;; an error, which is what `define-command` gave before it read any.
+      ;;--------------------------------------------------------------
+      (let loop ((i 0) (args '()))
+        (if (= i (string-length codes))
+            (reverse args)
+            (let ((code (string-ref codes i)))
+              (cond
+               ;; "Prefix arg converted to number" (`callint.c:668').
+               ((char=? code #\p)
+                (loop (+ i 1) (cons (uarg->integer 1 uarg) args)))
+               ;; "Prefix arg in raw form."
+               ((char=? code #\P)
+                (loop (+ i 1) (cons uarg args)))
+               ;; "The invoking event" (`:600'): the event the command
+               ;; loop bound for this command. The C walks to the next
+               ;; *parameterized* event for a repeated `e'; this tree's
+               ;; events are already one value, so it repeats that one.
+               ((char=? code #\e)
+                (loop (+ i 1) (cons (*last-command-event*) args)))
+               ;; "Ignore an argument" (`:525'): nil, and no I/O.
+               ((char=? code #\i)
+                (loop (+ i 1) (cons #f args)))
+               ;; "Region, point and mark as 2 args" (`:681'): the C's
+               ;; `check_mark (true)` and then the two positions, smaller
+               ;; first - which is what `region-beginning'/`region-end'
+               ;; answer once the mark has been checked.
+               ((char=? code #\r)
+                (let ((check (*check-mark-function*)))
+                  (when check (check #t)))
+                (let ((beg (let ((f (*region-beginning-function*))) (and f (f))))
+                      (end (let ((f (*region-end-function*))) (and f (f)))))
+                  (loop (+ i 1) (cons end (cons beg args)))))
+               ;; "Active region, point and mark as 2 args" (`:676'):
+               ;; the same, but *both* nil unless `use-region-p` - and
+               ;; no mark check, because the C returns before the
+               ;; fall-through to `r`.
+               ((char=? code #\R)
+                (let ((use? (let ((f (*use-region-p-function*))) (and f (f)))))
+                  (if use?
+                      (let ((beg (let ((f (*region-beginning-function*))) (and f (f))))
+                            (end (let ((f (*region-end-function*))) (and f (f)))))
+                        (loop (+ i 1) (cons end (cons beg args))))
+                      (loop (+ i 1) (cons #f (cons #f args))))))
+               ;; "A newline in the string is a separator" and `-'s
+               ;; Lucid semi-compatibility (`callint.c:385').
+               ((memv code '(#\newline #\-))
+                (loop (+ i 1) args))
+               (else
+                (error "Unsupported interactive specification character" code)))))))
+
     (define (interactive-proc spec command module)
       ;; The command's interactive entry: a procedure that reads what a
       ;; keyfinger supplies and calls COMMAND with it - GNU Emacs's
-      ;; `call-interactively' reading the arguments once, for the
-      ;; specifications `define-command' knows. SPEC is `#f' (no arguments),
-      ;; `"p"' (the numeric prefix), `"P"' (the raw prefix), or an
+      ;; `call-interactively' reading the arguments once. SPEC is `#f'
+      ;; (no arguments), a *string* of `callint.c`'s codes, or an
       ;; *expression* - a list, not a string - evaluated at the keypress
       ;; to produce the argument list, which is Emacs's
-      ;; `(interactive (list ...))`: `(interactive (list
+      ;; `(interactive (list ...))': `(interactive (list
       ;; (selected-window)))' hands COMMAND the window it is to delete.
       ;; The expression is evaluated in COMMAND's own module - the one
       ;; `register-command!' caught (MODULE) when the command was
@@ -388,6 +475,18 @@
       ;; it where the keypress found `interactive-proc' would be wrong:
       ;; that is the command loop's module, and the command's helpers
       ;; are not all in it.
+      ;;
+      ;; The codes read are `p', `P', `e', `i', `r' and `R'. The rest of
+      ;; `callint.c`'s alphabet is not carried, each because what it
+      ;; needs is not here: `b'/`B' (a buffer name), `f'/`F'/`G' (a file),
+      ;; `d'/`D' (a directory), `n'/`N' (a number), `s'/`S'/`M' (a
+      ;; string), `c' (a character), `k'/`K'/`U' (a key sequence), `m'
+      ;; (the mark, which needs the mark primitive rather than the region
+      ;; ones), `x'/`X' (a Lisp expression), `z'/`Z' (a coding system),
+      ;; `a'/`C'/`v' (a function or variable name) and `l' (a list) - all
+      ;; of them minibuffer reads this library is below. A specification
+      ;; with one of them answers "Unsupported interactive specification
+      ;; character" when the command runs.
       ;;--------------------------------------------------------------
       (cond
        ((not spec) (lambda ()
@@ -405,54 +504,33 @@
           (parameterize ((current-prefix-arg uarg)
                          (*called-interactively* command))
             (funcall-interactively command (eval spec module)))))
-       ;; The invoking event, which the command loop has bound - Emacs's
-       ;; `args[i] = AREF (keys, next_event)' (`callint.c:608').
-       ((string=? spec "e") (lambda (uarg)
-                              (parameterize ((*called-interactively* command))
-                                (funcall-interactively
-                                 command (list (*last-command-event*))))))
-       ((string=? spec "p") (lambda (uarg)
-                              (parameterize ((*called-interactively* command))
-                                (funcall-interactively
-                                 command (list (uarg->integer 1 uarg))))))
-       ((string=? spec "P") (lambda (uarg)
-                              (parameterize ((*called-interactively* command))
-                                (funcall-interactively command (list uarg)))))
-       ;; **`*' is a check, not an argument code**: "an error is signaled
-       ;; if the buffer is read-only" (`callint.c:98`). The C peels it off
-       ;; with `@', `-', `+' and `^' before reading any code
-       ;; (`callint.c:362`), so it is stripped from the front and the rest
-       ;; is read as it would have been - and what remains of `"*"` alone
-       ;; is the empty specification, which takes no arguments.
-       ((and (string? spec)
-             (> (string-length spec) 0)
-             (char=? (string-ref spec 0) #\*))
-        ;; One marker per call, and the rest read by the recursion - the
-        ;; C's loop over the leading characters. **What remains of the
-        ;; specification decides how the entry is called**, not the
-        ;; marker: `"*"` alone leaves the empty specification, whose
-        ;; entry is a thunk, while `"*p"` leaves one that takes the
-        ;; prefix - and the command loop calls either by the record's
-        ;; `uarg` flag, which any non-#f specification sets. The check
-        ;; itself is read at *call* time, because the seam is installed
-        ;; when the command loop loads and these entries are built when
-        ;; the library does.
-        (let* ((rest (substring spec 1))
-               (empty? (string=? rest ""))
-               (base (interactive-proc (if empty? #f rest) command module)))
+       ((string? spec)
+        (let* ((peeled (%interactive-markers spec))
+               (markers (car peeled))
+               (codes (cdr peeled)))
           (lambda (uarg)
-            (let ((check (*barf-if-buffer-read-only-function*)))
-              (when check (check)))
-            (if empty? (base) (base uarg)))))
-       ;; **`^' is a marker, not an argument code.** `callint.c` reads it
-       ;; as "this command shifts the mark" (`shift-select-mode`) and then
-       ;; goes on with the rest of the string - `"^p"` is `"p"` with that
-       ;; flag. This tree has no shift-select, so the marker is recognised
-       ;; and dropped, and what follows is read as it would have been.
-       ((and (string? spec)
-             (> (string-length spec) 1)
-             (char=? (string-ref spec 0) #\^))
-        (interactive-proc (substring spec 1) command module))
+            (parameterize ((current-prefix-arg uarg)
+                           (*called-interactively* command))
+              ;; The markers are processed in the order they appear,
+              ;; before any argument is read (`callint.c:362`).
+              (for-each
+               (lambda (marker)
+                 (case marker
+                   ;; "an error is signaled if the buffer is read-only".
+                   ((#\*) (let ((check (*barf-if-buffer-read-only-function*)))
+                             (when check (check))))
+                   ;; "`+' is not used in `interactive' for ordinary
+                   ;; commands" (`:367').
+                   ((#\+) (error "`+' is not used in `interactive' for ordinary commands"))
+                   ;; `^' asks `handle-shift-selection' when
+                   ;; `shift-select-mode' is on, and this tree has no
+                   ;; shift-select; `@' selects the window of the first
+                   ;; mouse event, and this tree's events are not lists
+                   ;; of window events. Both are recognised and do
+                   ;; nothing, which is what `-' asks for anyway.
+                   (else #f)))
+               markers)
+              (funcall-interactively command (%interactive-args codes uarg))))))
        (else (error "Unsupported interactive specification" spec))))
 
     (define (register-command! command spec)

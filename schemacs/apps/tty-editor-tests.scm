@@ -3678,7 +3678,17 @@
   (run-keys "hello" (list C-SPC C-w)))
 
 ;; A region that is not there at all is the error, in Emacs's words.
-(test-equal "The mark is not active now"
+;;
+;; **It is "not set", not "not active"**, and this test used to expect
+;; the other one: `C-w` on a fresh buffer runs `kill-region`, whose
+;; `(interactive "r")` goes through `callint.c`'s `check_mark`, which
+;; asks whether the mark is *set* before whether it is active
+;; (`callint.c:160`) - the opposite order from `region-beginning`'s
+;; `region_limit` (`editfns.c:236`). Measured: both
+;; `(call-interactively 'kill-region)` and the same with
+;; `transient-mark-mode` on answer "The mark is not set now, so there is
+;; no region".
+(test-equal "The mark is not set now, so there is no region"
   (cadddr (run-keys* "hello" (list C-w))))
 
 ;; C-y then M-y replaces what the yank inserted with the kill before it.

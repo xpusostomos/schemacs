@@ -214,7 +214,9 @@ indents all the lines with it:
 Called from a program, START and END specify the region to indent.
 If the third argument COLUMN is an integer, it specifies the
 column to indent to; if it is nil, use one of the three methods above."
-      (interactive (list (region-beginning) (region-end) (current-prefix-arg)))
+      ;; `(interactive "r\nP")' (`indent.el:567') - the region, then the
+      ;; raw prefix, with the newline separating the two codes.
+      (interactive "r\nP")
       (let ((column (if (pair? rest) (car rest) #f)))
         (cond
          ;; If a numeric prefix is given, indent to that column.

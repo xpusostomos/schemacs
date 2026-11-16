@@ -4379,3 +4379,61 @@ command with a required parameter could not be. The body reads
 `(and (pair? rest) (car rest))`, which is the C's nil CONTINUE.
 `indent-for-comment` is `(define-alias indent-for-comment
 comment-indent)`, which is `defalias` in this tree.
+
+## `interactive-proc` is a code loop now, and the region codes are in
+
+`callint.c`'s `Fcall_interactively` reads a specification as a *sequence*
+of code characters, each contributing no argument, one, or two (`r`).
+This tree read the string as a *single* code - `string=? spec "p"` and
+friends - so `"r\nP"` (`indent-region`, `indent.el:567`) could not be
+written at all and every region command spelled its spec as an
+expression: `(interactive (list (region-beginning) (region-end)))` in
+five places.
+
+It is the C's loop now (`%interactive-args`): `p`, `P`, `e`, `i`, `r`,
+`R`, with `\n` and `-` as separators that contribute nothing, and the
+leading markers (`*`, `^`, `-`, `+`, `@`) peeled before any code is read
+(`:362`) - `*` runs the read-only check, `+` errors, `^` and `@` are
+recognised and do nothing (no shift-select, no mouse-event window). A
+code that is not read is an error naming the *character*, where the old
+code named the whole string.
+
+**Codes not carried, and why**: `b`/`B` (buffer name), `f`/`F`/`G`
+(file), `d`/`D` (directory), `n`/`N` (number), `s`/`S`/`M` (string),
+`c` (character), `k`/`K`/`U` (key sequence), `m` (the mark - it needs the
+mark primitive rather than the region ones), `x`/`X` (a Lisp
+expression), `z`/`Z` (a coding system), `a`/`C`/`v` (function or
+variable name) and `l` (a list). Every one of them reads the minibuffer,
+which `command.scm` is below.
+
+**The seams the region codes need** are `*check-mark-function*`,
+`*region-beginning-function*`, `*region-end-function*` and
+`*use-region-p-function*`, installed by `simple.scm` - it is the library
+that has all four, and the editor always loads it.
+
+**`check_mark`'s body is in `simple.scm`**, not `command.scm`, though it
+is `callint.c:156`'s: the state it reads (`mark-marker`,
+`transient-mark-mode`, `mark-active`) is there and above. **Its order is
+the C's and not `region_limit`'s**: it asks whether the mark is *set*
+before whether it is *active*, the other way round from
+`region-beginning` (`editfns.c:232`), so `M-x kill-region` in Transient
+Mark mode with no mark set says "The mark is not set now, so there is no
+region" rather than "The mark is not active now". `command-tests` pins
+both orders.
+
+**A test was pinning the old message.** `tty-editor-tests.scm` expected
+`C-w` on a fresh buffer to answer "The mark is not active now" - which
+was what the expression spec produced, and not what Emacs says. Measured
+with `emacs -Q --batch`, both with and without `transient-mark-mode`:
+"The mark is not set now, so there is no region". The expectation is
+corrected. This is the file's own warning about a passing test pinning a
+departure, caught by porting the primitive rather than the symptom.
+
+**The `e` code does not repeat.** The C walks to the next *parameterized*
+event for a second `e`; this tree's `last-command-event` is one value,
+so a repeated `e` answers the same one.
+
+**Converted to their Emacs specs**: `kill-region`, `upcase-region`,
+`downcase-region` (`"r"`), `eval-region` (`"r"`, with a rest parameter
+for the PRINTFLAG the C's two-argument interactive form leaves nil), and
+`indent-region` (`"r\nP"`).
