@@ -9554,3 +9554,61 @@ Two method notes on the way out:
   pass died in their own printing code with the backtrace pointing at
   the editor because that was the frame underneath. Read the top frames
   first: if they are `(guile-user)` procedures, the bug is in the probe.
+
+# The `*` interactive code, and `comment-indent` as a command (2026-11-16)
+
+Chris: *"if emacs calls it defalias, maybe we should call it
+define-alias?"* - the alias work landed in `7fdaff6`, and this is the
+follow-up it opened: `newcomment.scm` ports
+`(defalias 'indent-for-comment #'comment-indent)` but neither was a
+command, because `comment-indent`'s `(interactive "*")` uses a code this
+tree did not read.
+
+## What landed
+
+- **`interactive-proc` reads `*`** (`callint.c:98`, peeled with the other
+  leading markers at `:362`): the check runs, then the rest of the
+  specification is read as it would have been. `"*"` alone leaves the
+  empty specification, so the entry is a thunk; `"*P"` leaves the
+  prefix-taking one. `^` was already read this way; the other three
+  markers (`+`, `-`, `@`) are Emacs's own special cases and are not
+  carried.
+- **`*barf-if-buffer-read-only-function*`** in `command.scm` - a seam,
+  because `barf-if-buffer-read-only` is `buffer.c`'s and `buffer.scm`
+  cannot import `command.scm`. **`keyboard.scm` installs it** as it
+  loads, beside its own use of the same function. Read at call time, not
+  at definition time.
+- **`comment-indent` is a `define-command`** with `(interactive "*")`
+  and a **rest parameter** for the C's `&optional continue` - the
+  procedure is called with no argument from `indent-for-comment` and
+  from Lisp modes, and a required parameter would have made every one of
+  those calls an arity error.
+- **`indent-for-comment` is `(define-alias indent-for-comment
+  comment-indent)`**, which is `newcomment.el:75`'s `defalias` - so
+  `M-x` finds both names.
+
+`command-tests.scm` (new, 10 tests) drives the *interactive entry* on the
+command's record - exactly what the command loop calls for a keypress -
+because that is the only way to test the check: a direct call to the
+command bypasses the specification entirely. It pins the seam being
+installed, `"*"` running on a writable buffer and signalling `"Buffer is
+read-only"` on a read-only one *before the body runs*, `"*P"` still
+getting the prefix, `"*^P"` stacking both markers, the empty
+specification's thunk, and `define-alias`'s shared record.
+
+## The traps in this one
+
+- **The record's `spec` field is not the interactive entry.** `new-command`
+  files the entry in `procedure` and the `uarg` flag in `spec`; a test
+  that asks `command-interactive-spec` for the entry gets `'uarg` and
+  wonders why it is not a procedure. Use `command-procedure`.
+- **The entry for the empty specification takes zero arguments**, while
+  every other entry takes `uarg` - and the record's flag says "takes
+  one" for any non-#f specification. So a marker wrapper has to decide
+  its call shape from *what remains of the string*, not from the marker.
+  The first version called `(base uarg)` unconditionally and a `"*"`
+  command died with "Wrong number of arguments".
+- **A probe that imports `command` but not `keyboard` sees the seam
+  unset** and reports the check missing when it is the probe that is
+  incomplete. `(procedure? (*barf-if-buffer-read-only-function*))` in
+  the suite is the guard against that.

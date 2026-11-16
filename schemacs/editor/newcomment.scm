@@ -33,6 +33,9 @@
     (only (schemacs editor buffer)
           current-buffer buffer-local-value set-buffer-local-value!
           buffer-fill-column)
+    ;; `comment-indent' is a command - `(interactive "*")' in the C - and
+    ;; `indent-for-comment' is its `defalias', which is `define-alias'.
+    (only (schemacs editor command) define-command define-alias)
     (only (schemacs editor cmds)
           beginning-of-line backward-char end-of-line forward-char)
     (only (schemacs editor editfns)
@@ -372,14 +375,21 @@
     ;; which is `(defalias 'indent-for-comment 'comment-indent)'
     ;; (`:75').
     ;;----------------------------------------------------------------
-    (define (comment-indent . rest)
-      ;; "Indent this line's comment to `comment-column', or insert an
-      ;; empty comment."
-      ;;
+    (define-command (comment-indent . rest)
       ;; The `comment-normalize-vars' call and the "no comment on this
       ;; line" branches are the C's; `comment-insert-comment-function'
       ;; is carried because a mode can set it (a Lisp mode does not).
-      ;;--------------------------------------------------------------
+      ;;
+      ;; **`(interactive "*")'** (`newcomment.el:731`): no arguments, and
+      ;; an error if the buffer is read-only - the `*' marker
+      ;; `command.scm`'s `interactive-proc` reads. The body keeps the C's
+      ;; `&optional continue` shape as a rest list, because it is called
+      ;; with no argument from `indent-for-comment` and from Lisp modes,
+      ;; and because a Scheme procedure that took a required one could
+      ;; not be called that way.
+      "Indent this line's comment to `comment-column', or insert an empty comment.
+If CONTINUE is non-nil, use the `comment-continue' markers if any."
+      (interactive "*")
       (let ((continue (and (pair? rest) (car rest)))
             (begpos #f)
             (cpos #f)
@@ -467,9 +477,9 @@
             (goto-char (marker-position cpos))
             (set-marker cpos #f))))))
 
-    (define (indent-for-comment . rest)
-      ;; `(defalias 'indent-for-comment 'comment-indent)' (`newcomment.el:75').
-      ;;--------------------------------------------------------------
-      (apply comment-indent rest))
+    (define-alias indent-for-comment comment-indent)
+    ;; ^ `(defalias 'indent-for-comment 'comment-indent)'
+    ;; (`newcomment.el:75') - one procedure, two names, and `M-x'
+    ;; reaches both.
 
     ))

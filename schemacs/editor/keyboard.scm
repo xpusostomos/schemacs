@@ -127,7 +127,8 @@
     ;; `uarg->integer' is `callint.c''s, in the command library the
     ;; commands' interactive specs come from.
     (only (schemacs editor command) uarg->integer current-prefix-arg
-          *pending-coding-system* command-record-named command-value-of)
+          *pending-coding-system* command-record-named command-value-of
+          *barf-if-buffer-read-only-function*)
     ;; The two variables C-x RET c names for the next command. They are
     ;; `coding.c`'s, and they are bound here because the command loop is
     ;; what has the extent Emacs binds them for.
@@ -257,6 +258,19 @@
    )
 
   (begin
+
+    ;; **The `*' interactive code's check** - `callint.c`'s
+    ;; `barf_if_buffer_read_only` (`:370`). `interactive-proc` is
+    ;; `callint.c`'s and lives in `(schemacs editor command)`, which is a
+    ;; leaf below this library; `barf-if-buffer-read-only` is
+    ;; `buffer.c`'s and lives below it too, in
+    ;; `(schemacs editor buffer)`. So the two meet here, where the
+    ;; command loop is, through the seam `command.scm` declares - the
+    ;; same shape `*record-window-buffer-function*` and
+    ;; `*frame-creation-function*` take. Without this line a command
+    ;; whose specification begins with `*' (`comment-indent' is one)
+    ;; reads its arguments and runs without the check.
+    (*barf-if-buffer-read-only-function* barf-if-buffer-read-only)
 
     ;;----------------------------------------------------------------
     ;; Key events

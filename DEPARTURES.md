@@ -4330,3 +4330,52 @@ are Emacs's, their short aliases are not), it was missing `tab-list`
 (`:3197`, aliasing `tab-switcher`), and none of the names were in the
 obarray or exported from the library. The block is now Emacs's list in
 Emacs's order, `define-alias`'d, and exported.
+
+## The `*` interactive code, and the seam it needs
+
+`callint.c` peels five leading markers off an interactive specification
+before it reads any code - `+`, `*`, `-`, `@`, `^` (`:362`) - and `*`
+is "an error is signaled if the buffer is read-only" (`:98`). It is a
+*check*, not an argument code, so it contributes nothing to the
+argument list. `interactive-proc` in `command.scm` reads `*` and `^`
+(the other three are `+`'s user extension error, `-`'s
+semi-compatibility no-op and `@`'s window selection, none carried) and
+strips one marker per recursion, which is the C's loop.
+
+**What remains of the string decides the entry's call shape**, not the
+marker: `"*"` alone leaves the empty specification, whose entry is a
+thunk, while `"*P"` leaves one that takes the prefix - and the command
+loop calls either by the record's `uarg` flag, which any non-#f
+specification sets.
+
+**The check arrives through a seam.** `barf-if-buffer-read-only` is
+`buffer.c`'s and lives in `(schemacs editor buffer)`, which cannot
+import `(schemacs editor command)` (the command library is a leaf
+everything above it uses). `command.scm` therefore declares
+`*barf-if-buffer-read-only-function*` and `(schemacs editor keyboard)`
+installs it as it loads - the same pattern
+`*record-window-buffer-function*` and `*frame-creation-function*` take.
+The check is read at *call* time, because the seam is installed when the
+command loop's library loads and command entries are built when their
+own library does.
+
+Consequence to know: a library that defines a `*`-marked command and is
+loaded **without** a command loop never checks. Nothing in the editor
+runs that way, and the `command-tests` suite loads `keyboard` for
+exactly that reason.
+
+## `comment-indent` is a command, and `indent-for-comment` is its alias
+
+`newcomment.el` has `(defun comment-indent (&optional continue) ...
+(interactive "*"))` and `(defalias 'indent-for-comment #'comment-indent)`
+(`:75`). Ported as neither was a command, so `M-x comment-indent` and
+`M-x indent-for-comment` both answered "No match", and any key binding
+worked only because dispatch finds a command by its procedure.
+
+The C's `&optional` is a **rest parameter** here - `(define-command
+(comment-indent . rest) ...)` - because the procedure is called with no
+argument from `indent-for-comment` and from Lisp modes, and a Scheme
+command with a required parameter could not be. The body reads
+`(and (pair? rest) (car rest))`, which is the C's nil CONTINUE.
+`indent-for-comment` is `(define-alias indent-for-comment
+comment-indent)`, which is `defalias` in this tree.

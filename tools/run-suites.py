@@ -59,6 +59,9 @@ SUITES = [
     'schemacs/editor/window-state-tests.scm',
     # `tab-bar.el` - the frame's tabs, each a window configuration.
     'schemacs/editor/tab-bar-tests.scm',
+    # `callint.c`'s interactive specifications as this tree reads them:
+    # the `*' marker and the read-only check it makes, `define-alias`.
+    'schemacs/editor/command-tests.scm',
     'schemacs/editor/custom-tests.scm',
     # `easy-mmode.el`'s two macros: `define-minor-mode` with `:global`, and
     # `define-globalized-minor-mode` under it - plus the `default-value`

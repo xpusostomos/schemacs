@@ -24,6 +24,7 @@
    current-prefix-arg
    *pending-coding-system*
    *called-interactively*
+   *barf-if-buffer-read-only-function*
    called-interactively? funcall-interactively
    uarg->integer
    run-command apply-command show-command
@@ -360,6 +361,17 @@
       ;;--------------------------------------------------------------
       (apply command args))
 
+    (define *barf-if-buffer-read-only-function* (make-parameter #f))
+    ;; ^ The check the `*' interactive code makes - `barf_if_buffer_read_only'
+    ;; (`callint.c:370'). `barf-if-buffer-read-only' is `buffer.c`'s and
+    ;; lives in `(schemacs editor buffer)', which cannot import this
+    ;; library (this is the leaf everything above it uses), so the check
+    ;; arrives through a seam: `(schemacs editor keyboard)' installs it as
+    ;; it loads, which is where the command loop that reads an
+    ;; interactive specification lives. `#f` means "no check", which is
+    ;; what a caller that never loads a command loop gets - the same
+    ;; shape as `*record-window-buffer-function*`.
+
     (define (interactive-proc spec command module)
       ;; The command's interactive entry: a procedure that reads what a
       ;; keyfinger supplies and calls COMMAND with it - GNU Emacs's
@@ -406,6 +418,32 @@
        ((string=? spec "P") (lambda (uarg)
                               (parameterize ((*called-interactively* command))
                                 (funcall-interactively command (list uarg)))))
+       ;; **`*' is a check, not an argument code**: "an error is signaled
+       ;; if the buffer is read-only" (`callint.c:98`). The C peels it off
+       ;; with `@', `-', `+' and `^' before reading any code
+       ;; (`callint.c:362`), so it is stripped from the front and the rest
+       ;; is read as it would have been - and what remains of `"*"` alone
+       ;; is the empty specification, which takes no arguments.
+       ((and (string? spec)
+             (> (string-length spec) 0)
+             (char=? (string-ref spec 0) #\*))
+        ;; One marker per call, and the rest read by the recursion - the
+        ;; C's loop over the leading characters. **What remains of the
+        ;; specification decides how the entry is called**, not the
+        ;; marker: `"*"` alone leaves the empty specification, whose
+        ;; entry is a thunk, while `"*p"` leaves one that takes the
+        ;; prefix - and the command loop calls either by the record's
+        ;; `uarg` flag, which any non-#f specification sets. The check
+        ;; itself is read at *call* time, because the seam is installed
+        ;; when the command loop loads and these entries are built when
+        ;; the library does.
+        (let* ((rest (substring spec 1))
+               (empty? (string=? rest ""))
+               (base (interactive-proc (if empty? #f rest) command module)))
+          (lambda (uarg)
+            (let ((check (*barf-if-buffer-read-only-function*)))
+              (when check (check)))
+            (if empty? (base) (base uarg)))))
        ;; **`^' is a marker, not an argument code.** `callint.c` reads it
        ;; as "this command shifts the mark" (`shift-select-mode`) and then
        ;; goes on with the rest of the string - `"^p"` is `"p"` with that

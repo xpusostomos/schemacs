@@ -173,6 +173,7 @@
     *auto-mode-alist*
     *auto-mode-case-fold*
     *auto-mode-interpreter-regexp*
+    *barf-if-buffer-read-only-function*
     *before-change-functions*
     *before-make-frame-hook*
     *beginning-of-defun-function*

@@ -4406,6 +4406,32 @@ def check_not_modified():
     return problems
 
 
+def check_star_interactive():
+    """The `*' interactive code: `comment-indent' refuses a read-only buffer.
+
+    `comment-indent`'s specification is `"*"` (`newcomment.el:731`), and
+    `callint.c:362` peels that marker off before reading any code -
+    "an error is signaled if the buffer is read-only" (`:98`). The check
+    runs *before* the body, which is why the message here is the
+    read-only one and not "No comment syntax defined" (a fundamental
+    buffer has none); the second run pins that contrast.
+    """
+    path = "/tmp/pty-check-star.txt"
+    open(path, "w").write("x\n")
+    problems = []
+    out = drive([b"\x1b", b"x", b"read-only-mode", b"\r",
+                 b"\x1b", b"x", b"comment-indent", b"\r"], path,
+                settle=2.0, gap=0.4)
+    if "Buffer is read-only" not in out:
+        problems.append("M-x comment-indent on a read-only buffer did not "
+                        "signal `Buffer is read-only'")
+    out = drive([b"\x1b", b"x", b"comment-indent", b"\r"], path, gap=0.4)
+    if "No comment syntax defined" not in out:
+        problems.append("M-x comment-indent on a writable buffer did not "
+                        "reach its body (no `No comment syntax defined')")
+    return problems
+
+
 def check_find_file_substitution():
     """`//' in a name typed at `C-x C-f' goes back to the root.
 
@@ -4996,6 +5022,7 @@ CHECKS = {
     "completion-columns": check_completion_columns,
     "completion-window": check_completion_window,
     "completion-width": check_completion_width,
+    "star-interactive": check_star_interactive,
     "completion-resize": check_completion_resize,
     "quit-completions": check_quit_after_completion,
     "default-directory": check_default_directory,
