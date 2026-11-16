@@ -27,7 +27,8 @@
        tab-bar-format-list tab-bar-format-tabs *tab-bar-format*
        tab-bar-format-menu-bar tab-bar-menu-bar-button
        tab-switcher tab-switcher-noselect tab-switcher-select tab-switcher-mode
-       tab-bar-tab-group-default *tab-bar-show-inactive-group-tabs*)
+       tab-bar-tab-group-default *tab-bar-show-inactive-group-tabs*
+       *tab-bar-new-tab-choice*)
  (only (schemacs editor buffer)
        get-buffer-create buffer-name current-buffer with-current-buffer
        buffer-read-only?)
@@ -41,7 +42,7 @@
  (only (schemacs editor editfns) buffer-string)
  (only (schemacs editor textprop) get-text-property)
  (only (schemacs editor simple) *this-command*)
- (only (schemacs editor window) split-window))
+ (only (schemacs editor window) split-window window-state-put window-state-buffers))
 
 ;; Regression tests for `(schemacs editor tab-bar)` - `tab-bar.el`.
 ;; Each one drives the commands the way a user does, and the expectations
@@ -321,6 +322,30 @@
         (list after-dup
               (length (tab-bar-tabs))
               (cdr (assq 'name (cdr (car (last-pair (tab-bar-tabs)))))))))))
+
+;; **A tab records the frame's window state** - `tab-bar.el:1690`'s
+;; `(cons 'ws (window-state-get))` - and `tab-bar-new-tab-choice` `clone`
+;; rebuilds the split from one: two windows before, two after.
+(test-equal '(2 2)
+  (let ((frame (fresh-frame)))
+    (parameterize ((*current-frame* frame) (*current-buffer* #f))
+      (split-window (car (window-list frame)) 10 #f)
+      (let ((before (length (window-list frame))))
+        (parameterize ((*tab-bar-new-tab-choice* 'clone))
+          (tab-bar-new-tab #f #f))
+        (list before (length (window-list frame)))))))
+
+;; The recorded `ws` is a window state, not just a placeholder: it names
+;; both windows' buffers and can be put back.
+(test-equal '(2 2)
+  (let ((frame (fresh-frame)))
+    (parameterize ((*current-frame* frame) (*current-buffer* #f))
+      (split-window (car (window-list frame)) 10 #f)
+      (tab-bar-new-tab #f #f)
+      (let* ((ws (cdr (assq 'ws (cdr (car (tab-bar-tabs))))))
+             (buffers (length (window-state-buffers ws))))
+        (window-state-put ws #f 'safe)
+        (list buffers (length (window-list frame)))))))
 
 (test-equal 1
   (let ((frame (fresh-frame)))

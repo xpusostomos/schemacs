@@ -110,6 +110,8 @@
     ;; `WINDOW-CURSOR-TABLE'. Guile's own weak table, a key held weakly.
     (only (guile)
           delq kill getpid SIGTSTP caddr
+          ;; `exact->inexact` is Guile's; `w->normal_lines` is a float.
+          exact->inexact
           make-weak-key-hash-table hashq-ref hashq-set!)
     ;; `w->cursor_off_p' and the blink's timers are kept beside the
     ;; window and the frame rather than in the window, for the reason
@@ -258,7 +260,7 @@
    ;; the redisplay's own scrolling writes (see its definition).
    %window-start-set!
    set-window-buffer!
-   window-start-at-line-beg
+   window-start window-start-at-line-beg
    window-base-line-number
    window-base-line-pos
    resize-frame-windows!
@@ -320,6 +322,36 @@
    window-right-border?
    window-top
    window-width
+   ;; The window tree's algebra - `window.c`'s `window-child`,
+   ;; `window-parent`, the siblings, and the two ways a combination is
+   ;; arranged - with the size queries (`window-total-*`, `window-pixel-*`,
+   ;; `window-size`, `window-normal-size`) and the registers the resize
+   ;; engine computes into (`window-new-*`).
+   frame-root-window frame-root-window-p
+   window-live-p
+   window-child window-next-sibling window-prev-sibling window-last-child
+   window-top-child window-left-child window-combination-p window-combined-p
+   window-total-height window-total-width window-pixel-height window-pixel-width
+   window-left-column window-top-line window-pixel-left window-pixel-top
+   window-size window-normal-size
+   window-combination-limit set-window-combination-limit
+   window-dedicated-p set-window-dedicated-p
+   ;; A terminal's answers to the window-system decorations: no fringes
+   ;; and no scroll bars, margins that are kept, and a zero vscroll.
+   window-fringes set-window-fringes
+   window-margins set-window-margins
+   window-scroll-bars set-window-scroll-bars
+   window-vscroll set-window-vscroll
+   ;; The heights `window-min-size` adds up, in rows.
+   window-mode-line-height window-wants-mode-line window-header-line-height
+   window-scroll-bar-width window-scroll-bar-height
+   window-right-divider-width window-bottom-divider-width
+   ;; The size registers, and the two walks that install them -
+   ;; `window-resize-apply` and `window-resize-apply-total`.
+   window-new-pixel set-window-new-pixel
+   window-new-total set-window-new-total
+   window-new-normal set-window-new-normal
+   window-resize-apply window-resize-apply-total
    )
 
   (begin
@@ -556,6 +588,17 @@
       ;; buffer: it has children. Emacs's `window-combination-p'.
       ;;--------------------------------------------------------------
       (pair? (window-children window)))
+
+    (define (window-live-p window)
+      ;; GNU Emacs's `window-live-p` (`window.c`): "Return t if OBJECT is
+      ;; a window that is displaying a buffer. A live window is one that
+      ;; can be deleted." The C's test is `WINDOW_LIVE_P (w)` =
+      ;; `BUFFERP (w->contents)` - a window with a buffer - which is what
+      ;; this asks. It used to ask whether the window was on the frame's
+      ;; window list, which answers false for the minibuffer window
+      ;; while no prompt is up, and the C says that window is live.
+      ;;--------------------------------------------------------------
+      (and (window-type? window) (window-buffer window) #t))
 
     (define (window-list . args)
       ;; The frame's windows that show a buffer, in the order they are
@@ -997,6 +1040,15 @@
         ;; `C-x b` show the new buffer's menus).
         (set-update-mode-lines! #t)
         window))
+
+    (define (window-start window)
+      ;; GNU Emacs's `window-start` (`window.c`): "Return the position of
+      ;; the start of the text displayed in WINDOW." The answer is the
+      ;; marker the redisplay left behind - `w->start`, which is a marker
+      ;; for the reason given beside the field: the text can change under
+      ;; it and the window must still begin at the same character.
+      ;;--------------------------------------------------------------
+      (marker-position (%window-start window)))
 
     (define (window-start-at-line-beg window)
       ;; Whether WINDOW's display begins at the beginning of a line.
@@ -3569,4 +3621,559 @@
                     (<= (%window-old-point window) to))
            (set!%window-suspend-auto-hscroll? window #f)))))
 
+        ;;------------------------------------------------------------------
+    ;; The window tree's algebra, and the size registers
+    ;;
+    ;; `window.c`'s half of Emacs's window-size chapter: which window is
+    ;; whose child, how big a window is, and the "new size" registers a
+    ;; resize computes into before anything moves. The `window.el` half -
+    ;; `window-min-size`, `window-resize`, the state functions - is in
+    ;; `(schemacs editor window)', above this library, because those read
+    ;; buffer-local variables and this one cannot (it is below
+    ;; `buffer.scm', which owns them).
+    ;;
+    ;; **The registers are kept beside the window rather than in it**, as
+    ;; `w->cursor_off_p` and the blink timers already are: `<window>` is
+    ;; constructed in five places, and a field added to it is a change to
+    ;; every library that makes a window - the failure the tree has
+    ;; recorded twice, when a stale `.go` read the wrong slots. So
+    ;; `w->dedicated`, `w->combination_limit`, `w->new_pixel`,
+    ;; `w->new_total`, `w->new_normal` and `w->left_margin_cols` /
+    ;; `w->right_margin_cols` live in one entry per window in
+    ;; `*window-slots*`, keyed weakly so a window nobody holds takes its
+    ;; entry with it.
+    ;;
+    ;; **Every size here is in canonical units** - rows and columns, not
+    ;; pixels - because every rectangle in this tree is. The C stores a
+    ;; pixel size *and* a character size and keeps them in step; here the
+    ;; pixel size is `(* cells (frame-char-size frame))`, computed at the
+    ;; edge where the C's pixel arithmetic needs it, and `frame-char-size`
+    ;; is 1 on a terminal. `window-pixel-height` is therefore exact on
+    ;; both front ends and the state format carries the same numbers
+    ;; Emacs's would.
+    ;;------------------------------------------------------------------
+
+    (define *window-slots* (make-weak-key-hash-table))
+    ;; ^ The per-window fields kept beside the record - see the note
+    ;; above. `#(dedicated combination-limit new-pixel new-total
+    ;; new-normal margins)`.
+
+    (define (%window-slots window)
+      ;; This window's slot vector, made on first use.
+      ;;--------------------------------------------------------------
+      (or (hashq-ref *window-slots* window)
+          (let ((slots (vector #f #f 0 #f #f (cons #f #f))))
+            (hashq-set! *window-slots* window slots)
+            slots)))
+
+    (define (%opt args i)
+      ;; The Ith element of an optional-argument list, or #f. The tree's
+      ;; spelling of `&optional` where a `case-lambda` cannot express it:
+      ;; a zero-argument clause does not compile (see the AGENTS note on
+      ;; `(case-lambda (() ...))`).
+      ;;--------------------------------------------------------------
+      (let loop ((rest args) (n i))
+        (cond ((null? rest) #f)
+              ((= n 0) (car rest))
+              (else (loop (cdr rest) (- n 1))))))
+
+    (define (%decode-valid-window window)
+      ;; `decode_valid_window` (`window.c`): nil stands for the selected
+      ;; window, and anything else must be a window.
+      ;;--------------------------------------------------------------
+      (cond ((not window) (selected-window))
+            ((window-type? window) window)
+            (else (error "Not a window: ~a" window))))
+
+    (define (%decode-live-window window)
+      ;; `decode_live_window` (`window.c`): as above, and the window must
+      ;; be showing a buffer.
+      ;;--------------------------------------------------------------
+      (let ((window (%decode-valid-window window)))
+        (if (window-live-p window)
+            window
+            (error "Not a live window: ~a" window))))
+
+    (define (frame-root-window . args)
+      ;; GNU Emacs's `frame-root-window` (`frame.c`): "Return the root
+      ;; window of FRAME. FRAME defaults to the selected frame." The
+      ;; root is the body tree's first entry - `frame-windows` always
+      ;; holds exactly one, because a split replaces the window it split
+      ;; with the internal window that now holds both halves.
+      ;;--------------------------------------------------------------
+      (let ((frame (or (%opt args 0) (*current-frame*))))
+        (and frame (car (frame-windows frame)))))
+
+    (define (frame-root-window-p window)
+      ;; GNU Emacs's `frame-root-window-p`: "Return non-nil if WINDOW is
+      ;; the root window of its frame."
+      ;;--------------------------------------------------------------
+      (and (window-type? window)
+           (eq? window (frame-root-window (window-frame window)))))
+
+    (define (window-child window)
+      ;; GNU Emacs's `window-child` (`window.el:320`): "Return WINDOW's
+      ;; first child window", whichever way the children are arranged.
+      ;;--------------------------------------------------------------
+      (let ((children (window-children window)))
+        (and (pair? children) (car children))))
+
+    (define (window-next-sibling window)
+      ;; GNU Emacs's `window-next-sibling` (`window.c:713`): "Return the
+      ;; next sibling window of window WINDOW." The C has `w->next`; the
+      ;; siblings here are a list, so it is the one after WINDOW in it.
+      ;;--------------------------------------------------------------
+      (let* ((parent (window-parent window))
+             (children (if parent (window-children parent) '())))
+        (let loop ((rest children))
+          (cond ((or (null? rest) (null? (cdr rest))) #f)
+                ((eq? (car rest) window) (cadr rest))
+                (else (loop (cdr rest)))))))
+
+    (define (window-prev-sibling window)
+      ;; GNU Emacs's `window-prev-sibling` (`window.c:722`). `w->prev`
+      ;; there; the element before WINDOW here.
+      ;;--------------------------------------------------------------
+      (let* ((parent (window-parent window))
+             (children (if parent (window-children parent) '())))
+        (let loop ((rest children) (prev #f))
+          (cond ((null? rest) #f)
+                ((eq? (car rest) window) prev)
+                (else (loop (cdr rest) (car rest)))))))
+
+    (define (window-last-child window)
+      ;; GNU Emacs's `window-last-child` (`window.el:335`).
+      ;;--------------------------------------------------------------
+      (let ((children (window-children window)))
+        (and (pair? children) (car (reverse children)))))
+
+    (define (window-top-child window)
+      ;; GNU Emacs's `window-top-child` (`window.c:689`): the first child
+      ;; when the children are stacked, nil otherwise.
+      ;;--------------------------------------------------------------
+      (let ((children (window-children window)))
+        (and (windows-stacked? children) (car children))))
+
+    (define (window-left-child window)
+      ;; GNU Emacs's `window-left-child` (`window.c:701`): the first
+      ;; child when the children are side by side.
+      ;;--------------------------------------------------------------
+      (let ((children (window-children window)))
+        (and (pair? children)
+             (not (windows-stacked? children))
+             (car children))))
+
+    (define (window-combination-p . args)
+      ;; GNU Emacs's `window-combination-p` (`window.el:527`): "Return
+      ;; WINDOW's first child if WINDOW is a vertical combination" - or
+      ;; its leftmost if HORIZONTAL.
+      ;;--------------------------------------------------------------
+      (let ((window (%decode-valid-window (%opt args 0))))
+        (if (%opt args 1)
+            (window-left-child window)
+            (window-top-child window))))
+
+    (define (window-combined-p window horizontal)
+      ;; GNU Emacs's `window-combined-p` (`window.el:520`): "Return
+      ;; non-nil if WINDOW has siblings in a given direction." Which
+      ;; direction a parent divided is read from the rectangles - the
+      ;; tree has no `w->contents` to say vertical from horizontal.
+      ;;--------------------------------------------------------------
+      (let ((parent (window-parent window)))
+        (and parent
+             (if horizontal
+                 (not (windows-stacked? (window-children parent)))
+                 (windows-stacked? (window-children parent)))
+             #t)))
+
+    (define (window-total-height . args)
+      ;; GNU Emacs's `window-total-height` (`window.c:861`): the height
+      ;; of WINDOW in canonical lines, including its mode line. ROUND
+      ;; `ceiling` and `floor` re-derive it from the pixel height; this
+      ;; tree's rectangles are exact multiples of a character, so all
+      ;; three answers are the same number and the argument only has to
+      ;; be accepted.
+      ;;--------------------------------------------------------------
+      (window-height (%decode-valid-window (%opt args 0))))
+
+    (define (window-total-width . args)
+      ;; GNU Emacs's `window-total-width` (`window.c:897`).
+      ;;--------------------------------------------------------------
+      (window-width (%decode-valid-window (%opt args 0))))
+
+    (define (window-pixel-height . args)
+      ;; GNU Emacs's `window-pixel-height` (`window.c:821`): "Return the
+      ;; height of window WINDOW in pixels" - `w->pixel_height`, which
+      ;; this tree does not store, because it is exactly the row count
+      ;; times the frame's character height.
+      ;;--------------------------------------------------------------
+      (let ((window (%decode-valid-window (%opt args 0))))
+        (* (window-height window) (frame-char-height (window-frame window)))))
+
+    (define (window-pixel-width . args)
+      ;; GNU Emacs's `window-pixel-width` (`window.c:808`).
+      ;;--------------------------------------------------------------
+      (let ((window (%decode-valid-window (%opt args 0))))
+        (* (window-width window) (frame-char-width (window-frame window)))))
+
+    (define (window-pixel-left . args)
+      ;; GNU Emacs's `window-pixel-left` (`window.c:1001`): the pixel
+      ;; column of the window's left edge.
+      ;;--------------------------------------------------------------
+      (let ((window (%decode-valid-window (%opt args 0))))
+        (* (window-left window) (frame-char-width (window-frame window)))))
+
+    (define (window-pixel-top . args)
+      ;; GNU Emacs's `window-pixel-top` (`window.c:1009`).
+      ;;--------------------------------------------------------------
+      (let ((window (%decode-valid-window (%opt args 0))))
+        (* (window-top window) (frame-char-height (window-frame window)))))
+
+    (define (window-left-column . args)
+      ;; GNU Emacs's `window-left-column` (`window.c`): the column of the
+      ;; window's left edge. The tree's `window-left` is this.
+      ;;--------------------------------------------------------------
+      (window-left (%decode-valid-window (%opt args 0))))
+
+    (define (window-top-line . args)
+      ;; GNU Emacs's `window-top-line` (`window.c`): the row of the
+      ;; window's top edge. The tree's `window-top` is this.
+      ;;--------------------------------------------------------------
+      (window-top (%decode-valid-window (%opt args 0))))
+
+    (define (window-size . args)
+      ;; GNU Emacs's `window-size` (`window.el:1506`): "Return the height
+      ;; or width of WINDOW" - in pixels when PIXELWISE, in rows or
+      ;; columns otherwise.
+      ;;--------------------------------------------------------------
+      (let ((window (%decode-valid-window (%opt args 0)))
+            (horizontal (%opt args 1))
+            (pixelwise (%opt args 2)))
+        (if horizontal
+            (if pixelwise (window-pixel-width window) (window-total-width window))
+            (if pixelwise (window-pixel-height window) (window-total-height window)))))
+
+    (define (window-normal-size window horizontal)
+      ;; GNU Emacs's `window-normal-size` (`window.c:947`): WINDOW's
+      ;; share of its parent, 0 < N <= 1, along HORIZONTAL's axis. The C
+      ;; stores the fraction in `w->normal_lines`/`w->normal_cols` so a
+      ;; window shrunk to its minimum remembers its share; those are
+      ;; derived here from the current geometry, which is the same
+      ;; number whenever the window is at its normal size - the only
+      ;; state a state is saved or restored in.
+      ;;
+      ;; "The normal height of a frame's root window or a window that is
+      ;; horizontally combined ... is 1.0": a window not part of a
+      ;; combination along this axis spans its parent wholly.
+      ;;--------------------------------------------------------------
+      (let ((parent (window-parent window)))
+        (if (or (not parent) (not (window-combined-p window horizontal)))
+            1.0
+            (/ (exact->inexact (if horizontal (window-width window) (window-height window)))
+               (if horizontal (window-width parent) (window-height parent))))))
+
+    (define (window-combination-limit window)
+      ;; GNU Emacs's `window-combination-limit` (`window.c:731`): "Return
+      ;; combination limit of window WINDOW." Only an internal window has
+      ;; one.
+      ;;--------------------------------------------------------------
+      (vector-ref (%window-slots (%decode-valid-window window)) 1))
+
+    (define (set-window-combination-limit window limit)
+      ;; GNU Emacs's `set-window-combination-limit` (`window.c:748`).
+      ;;--------------------------------------------------------------
+      (vector-set! (%window-slots (%decode-valid-window window)) 1 limit)
+      limit)
+
+    (define (window-dedicated-p . args)
+      ;; GNU Emacs's `window-dedicated-p` (`window.c:2274`): what
+      ;; `set-window-dedicated-p` last stored, or nil.
+      ;;--------------------------------------------------------------
+      (vector-ref (%window-slots (%decode-live-window (%opt args 0))) 0))
+
+    (define (set-window-dedicated-p window flag)
+      ;; GNU Emacs's `set-window-dedicated-p` (`window.c:2297`).
+      ;;
+      ;; The C's docstring: "If and when `set-window-buffer' displays
+      ;; another buffer in a window, it also makes sure that the window
+      ;; is no more dedicated" - `set-window-buffer!` below clears the
+      ;; flag for that reason.
+      ;;--------------------------------------------------------------
+      (vector-set! (%window-slots (%decode-live-window window)) 0 flag)
+      flag)
+
+    (define (window-fringes . args)
+      ;; GNU Emacs's `window-fringes` (`window.c:8639`): "(LEFT-WIDTH
+      ;; RIGHT-WIDTH OUTSIDE-MARGINS PERSISTENT)". Emacs on a terminal
+      ;; answers `(0 0 nil nil)` - there are no fringes to draw - and so
+      ;; does this tree on both front ends, which have no fringes.
+      ;;--------------------------------------------------------------
+      (%decode-live-window (%opt args 0))
+      (list 0 0 #f #f))
+
+    (define (set-window-fringes window left-width . args)
+      ;; GNU Emacs's `set-window-fringes` (`window.c`). `set_window_fringes`
+      ;; is a no-op on a frame that is not a window system ("Do nothing
+      ;; on a tty"); this tree has no fringes on either front end, so it
+      ;; is a no-op everywhere.
+      ;;--------------------------------------------------------------
+      (%decode-live-window window)
+      #f)
+
+    (define (window-margins . args)
+      ;; GNU Emacs's `window-margins` (`window.c:8520`): "(LEFT-WIDTH .
+      ;; RIGHT-WIDTH)", nil where a margin does not exist. A terminal
+      ;; does keep margins.
+      ;;--------------------------------------------------------------
+      (vector-ref (%window-slots (%decode-live-window (%opt args 0))) 5))
+
+    (define (set-window-margins window left-width . args)
+      ;; GNU Emacs's `set-window-margins` (`window.c`): "Set width of
+      ;; marginal areas of window WINDOW." A nil width removes the
+      ;; margin.
+      ;;--------------------------------------------------------------
+      (let ((widths (cons left-width (%opt args 1))))
+        (vector-set! (%window-slots (%decode-live-window window)) 5 widths)
+        widths))
+
+    (define (window-scroll-bars . args)
+      ;; GNU Emacs's `window-scroll-bars` (`window.c:8898`): "(WIDTH
+      ;; COLUMNS VERTICAL-TYPE HEIGHT LINES HORIZONTAL-TYPE PERSISTENT)".
+      ;; Emacs on a terminal answers `(nil 0 t nil 0 t nil)` - no scroll
+      ;; bar, both types left to the frame's default - and so does this.
+      ;;--------------------------------------------------------------
+      (%decode-live-window (%opt args 0))
+      (list #f 0 #t #f 0 #t #f))
+
+    (define (set-window-scroll-bars window width . args)
+      ;; GNU Emacs's `set-window-scroll-bars` (`window.c`). A terminal
+      ;; draws no scroll bars and stores nothing, so neither does this.
+      ;;--------------------------------------------------------------
+      (%decode-live-window window)
+      #f)
+
+    (define (window-vscroll . args)
+      ;; GNU Emacs's `window-vscroll` (`window.c:8937`): "On a terminal,
+      ;; the value is zero" (`FRAME_WINDOW_P` is false), which is what
+      ;; this answers on both front ends - the renderer scrolls by rows.
+      ;;--------------------------------------------------------------
+      (%decode-live-window (%opt args 0))
+      0)
+
+    (define (set-window-vscroll window vscroll . args)
+      ;; GNU Emacs's `set-window-vscroll` (`window.c:8960`): a no-op on a
+      ;; terminal, answering zero.
+      ;;--------------------------------------------------------------
+      (%decode-live-window window)
+      0)
+
+    (define (window-mode-line-height window)
+      ;; Rows of WINDOW's mode line. The C's
+      ;; `window-mode-line-height` (`window.c:1215`) answers *pixels*;
+      ;; every height in this tree is a row, and `window--min-size-1`
+      ;; multiplies by the character height once where the C does its
+      ;; arithmetic in pixels.
+      ;;
+      ;; `WINDOW_MODE_LINE_HEIGHT (w)` is `window_wants_mode_line (w) ?
+      ;; CURRENT_MODE_LINE_HEIGHT (w) : 0` (`window.h`), and the test is
+      ;; `window_wants_mode_line` (`window.c:5980`): a leaf, not the
+      ;; minibuffer window, with a format that is not `none` and not nil.
+      ;;--------------------------------------------------------------
+      (if (window-wants-mode-line window) 1 0))
+
+    (define (window-wants-mode-line window)
+      ;; GNU Emacs's `window_wants_mode_line` (`window.c:5980`).
+      ;;--------------------------------------------------------------
+      ;; The C also asks the buffer's `mode-line-format` (and the window
+      ;; parameter that overrides it) whether a line is wanted at all.
+      ;; The variables are `buffer.scm`'s and this library is below it,
+      ;; so the question asked here is the one the renderer answers:
+      ;; every live window except the minibuffer window draws one.
+      (and (window-live-p window)
+           (not (window-minibuffer-p window))
+           (> (window-height window) 1)))
+
+    (define (window-header-line-height window)
+      ;; Rows of WINDOW's header line. There is no header line in this
+      ;; tree - `window_wants_header_line` is never true - so this is
+      ;; zero, as the C's is for a window that does not want one.
+      ;;--------------------------------------------------------------
+      0)
+
+    (define (window-bottom-divider-width window)
+      ;; The C's `window-bottom-divider-width` in pixels; this tree draws
+      ;; no dividers between stacked windows.
+      ;;--------------------------------------------------------------
+      0)
+
+    (define (window-right-divider-width window)
+      ;; Likewise for the vertical divider.
+      ;;--------------------------------------------------------------
+      0)
+
+    (define (window-scroll-bar-width window)
+      ;; Rows of WINDOW's vertical scroll bar; none are drawn.
+      ;;--------------------------------------------------------------
+      0)
+
+    (define (window-scroll-bar-height window)
+      ;; The horizontal scroll bar's rows; none are drawn.
+      ;;--------------------------------------------------------------
+      0)
+
+    (define (window-new-pixel . args)
+      ;; GNU Emacs's `window-new-pixel` (`window.c:988`): the size the
+      ;; resize engine last computed for WINDOW.
+      ;;--------------------------------------------------------------
+      (vector-ref (%window-slots (%decode-valid-window (%opt args 0))) 2))
+
+    (define (set-window-new-pixel window size . args)
+      ;; GNU Emacs's `set-window-new-pixel` (`window.c:4639`); ADD means
+      ;; add SIZE to what is there instead of replacing it.
+      ;;--------------------------------------------------------------
+      (let* ((slots (%window-slots (%decode-valid-window window)))
+             (value (if (%opt args 0) (+ (vector-ref slots 2) size) size)))
+        (vector-set! slots 2 value)
+        value))
+
+    (define (window-new-total . args)
+      ;; GNU Emacs's `window-new-total` (`window.c:934`).
+      ;;--------------------------------------------------------------
+      (vector-ref (%window-slots (%decode-valid-window (%opt args 0))) 3))
+
+    (define (set-window-new-total window size . args)
+      ;; GNU Emacs's `set-window-new-total` (`window.c:4667`).
+      ;;--------------------------------------------------------------
+      (let* ((slots (%window-slots (%decode-valid-window window)))
+             (value (if (%opt args 0) (+ (vector-ref slots 3) size) size)))
+        (vector-set! slots 3 value)
+        value))
+
+    (define (window-new-normal . args)
+      ;; GNU Emacs's `window-new-normal` (`window.c`).
+      ;;--------------------------------------------------------------
+      (vector-ref (%window-slots (%decode-valid-window (%opt args 0))) 4))
+
+    (define (set-window-new-normal window . args)
+      ;; GNU Emacs's `set-window-new-normal` (`window.c`): nil clears it.
+      ;;--------------------------------------------------------------
+      (vector-set! (%window-slots (%decode-valid-window window)) 4
+                   (%opt args 0))
+      (%opt args 0))
+
+    (define (%window-resize-check window horizontal)
+      ;; `window_resize_check` (`window.c:4716`): whether the sizes the
+      ;; engine computed add up to a layout that can be applied - a
+      ;; combination's children summing to it along its own axis, and
+      ;; matching it across.
+      ;;--------------------------------------------------------------
+      (let ((children (window-children window)))
+        (if (null? children)
+            ;; A leaf. The C hardcodes `window-safe-min-width` (2) and
+            ;; `window-safe-min-height` (1) here.
+            (>= (window-new-pixel window)
+                (if horizontal
+                    (* 2 (frame-char-width (window-frame window)))
+                    (frame-char-height (window-frame window))))
+            (let ((stacked (windows-stacked? children)))
+              (if (eq? stacked (not horizontal))
+                  ;; The combination's own axis: the children must sum
+                  ;; to it.
+                  (let loop ((rest children) (remaining (window-new-pixel window)))
+                    (cond ((null? rest) (= remaining 0))
+                          ((not (%window-resize-check (car rest) horizontal)) #f)
+                          (else
+                           (let ((left (- remaining (window-new-pixel (car rest)))))
+                             (and (>= left 0) (loop (cdr rest) left))))))
+                  ;; The other axis: every child must match it.
+                  (let loop ((rest children))
+                    (cond ((null? rest) #t)
+                          ((not (= (window-new-pixel (car rest))
+                                   (window-new-pixel window))) #f)
+                          (else (loop (cdr rest))))))))))
+
+    (define (%window-resize-apply-1 window horizontal)
+      ;; `window_resize_apply` (`window.c:4815`): give WINDOW the size
+      ;; the engine computed, and walk the tree assigning each child its
+      ;; start position along the axis being applied and its own size.
+      ;;--------------------------------------------------------------
+      (let* ((frame (window-frame window))
+             (unit (if horizontal (frame-char-width frame) (frame-char-height frame)))
+             (children (window-children window)))
+        (if horizontal
+            (set!window-width window (quotient (window-new-pixel window) unit))
+            (set!window-height window (quotient (window-new-pixel window) unit)))
+        (let ((stacked (and (pair? children) (windows-stacked? children)))
+              (edge (if horizontal (window-left window) (window-top window))))
+          (let loop ((rest children))
+            (when (pair? rest)
+              (let ((child (car rest)))
+                (if horizontal
+                    (set!window-left child edge)
+                    (set!window-top child edge))
+                (%window-resize-apply-1 child horizontal)
+                ;; "Edge" advances only along the combination's own axis.
+                (when (if stacked (not horizontal) horizontal)
+                  (set! edge (+ edge (if horizontal
+                                         (window-width child)
+                                         (window-height child)))))
+                (loop (cdr rest))))))))
+
+    (define (%window-resize-apply-total-1 window horizontal)
+      ;; `window_resize_apply_total` (`window.c:4905`): the same walk as
+      ;; above, but from the total sizes rather than the pixel ones.
+      ;;--------------------------------------------------------------
+      (let* ((children (window-children window))
+             (stacked (and (pair? children) (windows-stacked? children)))
+             (edge (if horizontal (window-left window) (window-top window))))
+        (if horizontal
+            (set!window-width window (window-new-total window))
+            (set!window-height window (window-new-total window)))
+        (let loop ((rest children))
+          (when (pair? rest)
+            (let ((child (car rest)))
+              (if horizontal
+                  (set!window-left child edge)
+                  (set!window-top child edge))
+              (%window-resize-apply-total-1 child horizontal)
+              (when (if stacked (not horizontal) horizontal)
+                (set! edge (+ edge (if horizontal
+                                       (window-width child)
+                                       (window-height child)))))
+              (loop (cdr rest)))))))
+
+    (define (window-resize-apply . args)
+      ;; GNU Emacs's `window-resize-apply` (`window.c:4961`): "Apply
+      ;; requested size values for window-tree of FRAME." Answers t when
+      ;; the computed sizes form a layout that could be applied.
+      ;;--------------------------------------------------------------
+      (let* ((frame (or (%opt args 0) (*current-frame*)))
+             (horizontal (%opt args 1))
+             (root (frame-root-window frame)))
+        (if (and root
+                 (%window-resize-check root horizontal)
+                 (= (window-new-pixel root)
+                    (window-size root horizontal #t)))
+            (begin
+              (%window-resize-apply-1 root horizontal)
+              (set-frame-garbaged! frame #t)
+              #t)
+            #f)))
+
+    (define (window-resize-apply-total . args)
+      ;; GNU Emacs's `window-resize-apply-total` (`window.c:5003`).
+      ;;--------------------------------------------------------------
+      (let* ((frame (or (%opt args 0) (*current-frame*)))
+             (horizontal (%opt args 1))
+             (root (frame-root-window frame)))
+        (when root
+          (%window-resize-apply-total-1 root horizontal)
+          (let ((mini (frame-minibuffer-window frame)))
+            (when (and mini (not (eq? mini root)))
+              (if horizontal
+                  (set!window-width mini (window-new-total mini))
+                  (begin
+                    (set!window-top mini (+ (window-top root) (window-height root)))
+                    (set!window-height mini (window-new-total mini)))))))
+        #t))
     ))

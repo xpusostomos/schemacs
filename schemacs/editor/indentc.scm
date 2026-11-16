@@ -45,7 +45,11 @@
     ;; `xdisp.c`'s `init_iterator' reads the same fields.
     (only (schemacs editor frame)
           %window-hscroll %window-start frame-width selected-window
-          window-body-width window-buffer window-frame window-width)
+          window-body-width window-buffer window-frame window-width
+          ;; `window-start` answers the redisplay's marker (`w->start`).
+          ;; It was defined in this library until the window-state pass;
+          ;; `w->start` is `window.c`'s and it is in `frame.scm` now.
+          window-start)
     ;; The character's on-screen width and the `display' string's, which
     ;; are what a row is measured in.
     (only (schemacs editor disp-table)
@@ -53,8 +57,6 @@
     ;; `count-lines' is `xdisp.c:29892`'s and is `fns.c`'s here; the row
     ;; walk uses it for the `%l` cache's arithmetic.
     (only (schemacs editor fns) count-lines)
-    ;; `window-start` answers the redisplay's marker (`w->start`).
-    (only (schemacs editor marker) marker-position)
     (only (schemacs editor textprop)
           get-text-property next-single-property-change)
     (only (schemacs editor syntax) skip-chars-forward)
@@ -939,15 +941,5 @@
       ;;--------------------------------------------------------------
       (let ((end (text-editor-get-end-of-line ed line-start)))
         (if (< end (buffer-z ed)) (+ end 1) #f)))
-
-    (define (window-start window)
-      ;; GNU Emacs's `window-start': "Return the position of the start of
-      ;; the text displayed in WINDOW." The answer is the marker the
-      ;; redisplay left behind - `w->start' (`window.c'), which is a
-      ;; marker for the reason given beside the field: the text can
-      ;; change under it and the window must still begin at the same
-      ;; character.
-      ;;--------------------------------------------------------------
-      (marker-position (%window-start window)))
 
     ))

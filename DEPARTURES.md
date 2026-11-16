@@ -4011,3 +4011,143 @@ difference is *when* the push happens - one command later, at the next
 pre-command rather than at the previous command's redisplay - and no
 reader can see that, because `tab-bar-history-back` itself runs its
 pre-command first.
+
+# Window states: the size registers, and the pixel/total split
+(2026-11-16)
+
+`schemacs/editor/window.scm` now carries the whole of Emacs's window-size
+chapter - `window-min-size`, `window-sizable`, `window-resizable`,
+`window-resize` and the `window--resize-*` engine that applies it - and
+with it the state format `window-state-get`/`window-state-put`, which a
+tab now stores (`tab-bar--tab`'s `ws`). The C each was taken from is
+named at the function. What follows is what was done differently, and
+why.
+
+## The registers are kept beside the window, not in it
+
+`struct window` has `new_pixel`, `new_total`, `new_normal`,
+`normal_lines`, `normal_cols`, `dedicated`, `combination_limit` and the
+two margin widths. None of them is a field of `<window>` here; they live
+in one vector per window in `*window-slots*` (`frame.scm`), a weak-key
+hash table, exactly as `w->cursor_off_p` and the blink timers already do.
+
+The reason is the one `frame.scm`'s own note gives: `<window>` is built
+in five places and read by forty libraries, and a field added to it is a
+change to every one of them - the AGENTS note about a stale `.go` reading
+the wrong slots is what happens when that goes wrong. The registers are
+also transient: `window-resize` sets them, `window-resize-apply` installs
+them, and nothing else reads them.
+
+`combination_limit` and `dedicated` are the exception in principle -
+they are persistent, user-visible state - but they are here for the same
+reason, and `window-dedicated-p`/`set-window-dedicated-p` are their only
+readers.
+
+## Pixel sizes are derived, not stored
+
+The C stores `w->pixel_width` *and* `w->total_cols` and keeps them in
+step by dividing by the frame's character size. Every rectangle in this
+tree is already in canonical units (rows and columns), so:
+
+    (window-pixel-height w)  = (* (window-height w) (frame-char-height f))
+    (window-pixel-width w)   = (* (window-width w)  (frame-char-width f))
+    (window-pixel-left w)    = (* (window-left w)   (frame-char-width f))
+    (window-pixel-top w)     = (* (window-top w)    (frame-char-height f))
+
+which is exact on a terminal (character size 1) and exact on Gtk, where
+a cell is a whole number of pixels because that is the unit the renderer
+draws in. `window-resize-apply` divides back, as `window_resize_apply`
+does.
+
+The one place the difference shows is a `window-state-get` from a Gtk
+frame put back into a frame whose font size changed: Emacs's state
+carries the pixel size and restores it exactly, and this tree's does too
+- the state's `pixel-width` is the same number Emacs would record.
+
+## `window-normal-size` is derived from the geometry
+
+`w->normal_lines` and `w->normal_cols` exist so that a window shrunk to
+its minimum remembers its share of the parent when the frame grows
+again. This tree computes the share from the current rectangles
+(`window-normal-size`), which is the same number whenever the window is
+at its normal size - and a state is recorded and restored at a normal
+size. The difference appears only after a shrink-then-grow cycle within
+one session, where Emacs would restore the pre-shrink proportions and
+this tree the shrunken ones. `resize-frame-windows!` scales rectangles
+proportionally, so in practice they agree.
+
+## `window-wants-mode-line` does not read `mode-line-format`
+
+The C's test is a leaf, not the mini window, with a `mode-line-format`
+that is neither nil nor `none` - the buffer's, unless the window
+parameter overrides it. The buffer's variables are `buffer.scm`'s and
+`frame.scm` is below it, so the test here is "a live window that is not
+the minibuffer window", which is what the renderer draws. A window whose
+`mode-line-format` a user set to nil still gets a mode line here.
+
+## No fringes, margins or scroll bars are drawn
+
+`window-fringes` and `window-scroll-bars` answer what Emacs answers on a
+*terminal* (`(0 0 nil nil)` and `(nil 0 t nil 0 t nil)`) on both front
+ends, and their setters are no-ops - which is what `set_window_fringes`
+does on a tty ("Do nothing on a tty"). `window-margins` and
+`set-window-margins` *do* store the widths, as Emacs on a tty does
+(measured: `(set-window-margins nil 5 3)` reads back `(5 . 3)`), but
+nothing draws them. `window-vscroll` is 0 and its setter answers 0, as on
+a tty.
+
+`window-mode-line-height`, `window-tab-line-height` and the rest answer
+**rows** where the C answers pixels; `window--min-size-1` multiplies by
+the character height once, where the C's arithmetic is already in pixels.
+
+## `window-combination-limit` is not a variable here
+
+`window--state-put-1` binds `window-combination-limit` around its splits
+so that a combination nested in one of the same type gets a parent of
+its own (Bug#50867). This tree's `split-window` always makes a new
+parent, so the shape the state describes is the shape restored and the
+variable would be dead; the `set-window-combination-limit` *field* is
+ported and round-trips.
+
+## `window-deletable-p` is reduced
+
+The tab branch (`'tab`), the atomic-window branch and
+`window-deletable-functions` are not carried - there are no atomic
+windows here, this tree's tab bar does not close windows a tab at a
+time, and nothing runs that hook. What is left is Emacs's own shape: a
+leaf is deletable, the root is `frame` only while another frame exists,
+and a minibuffer window is never deletable.
+
+`frame-deletable-p` is reduced to "more than one frame is live", which is
+Emacs's first condition; the minibuffer-ownership and child-frame
+conditions have no counterpart here.
+
+## `window--check` does nothing
+
+It checks side and atomic windows on the frame; this tree has neither, so
+it answers `#t`. It is ported as the end of `window-state-put` because
+that is where Emacs calls it.
+
+## `get-buffer` took a name and answered nil for a buffer
+
+`(get-buffer BUFFER-OR-NAME)`'s docstring has two sentences, and the
+port implemented the first: "If BUFFER-OR-NAME is a string and a live
+buffer with that name exists, return that buffer. **If BUFFER-OR-NAME is
+a buffer instead of a string, return it as is, even if it has been
+killed.**" The second is the C's `(BUFFERP (buffer-or-name) ?
+buffer-or-name : ...)` arm (`buffer.c:5043`), and its absence was
+invisible until a window state named its buffers as *objects* -
+`window-state-get` does that whenever WRITABLE is nil, which is every
+state a tab records - and `window-state-put` found nothing, took its
+"the buffer was killed" branch for every window, and restored the
+layout with the wrong buffer in it. Fixed in `buffer.scm`.
+
+## The side windows and the minibuffer in `window-state-put`
+
+`window-state-put`'s "not live" path finds the first live window of the
+subtree and makes a fresh window beside it, as the C does. Its first
+step in Emacs is `delete-other-windows-internal (window root)`; the tree
+calls `delete-other-windows`, which does the same thing for a frame with
+no side windows. `tab-bar-select-tab-internal`'s "select the mru window
+if the minibuffer is selected" is not carried: there is no separate
+minibuffer window to be selected here.

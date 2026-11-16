@@ -36,7 +36,7 @@
     (schemacs editor font-lock)
     (schemacs editor font-core)
     (schemacs editor minibuf)
-    (schemacs editor indentc)
+    (except (schemacs editor indentc)  window-start)
     (schemacs editor search)
     (schemacs editor ls-lisp)
     (schemacs editor menu)
@@ -75,7 +75,7 @@
     (schemacs editor derived)
     (schemacs editor icons)
     (schemacs editor easy-mmode)
-    (except (schemacs editor window)  *cursor-in-echo-area*)
+    (except (schemacs editor window)  *cursor-in-echo-area* window-live-p window-normal-size window-size)
     (schemacs editor warnings)
     (schemacs editor loadup)
     (schemacs editor elisp-mode)
@@ -1415,7 +1415,9 @@
     forward-word
     forward-word-position
     frame-char-height
+    frame-char-size
     frame-char-width
+    frame-deletable-p
     frame-editor
     frame-garbaged-p
     frame-height
@@ -1437,6 +1439,8 @@
     frame-parameters
     frame-parameters-alist
     frame-quit-cont
+    frame-root-window
+    frame-root-window-p
     frame-selected-window
     frame-set-background-mode
     frame-tab-bar-items
@@ -2519,15 +2523,24 @@
     set-visited-file-name
     set-window-buffer!
     set-window-buffer-start-and-point
+    set-window-combination-limit
     set-window-configuration
     set-window-current-matrix!
+    set-window-dedicated-p
     set-window-desired-matrix!
+    set-window-fringes
     set-window-hscroll!
+    set-window-margins
+    set-window-new-normal
+    set-window-new-pixel
+    set-window-new-total
     set-window-next-buffers
     set-window-parameter
     set-window-point!
     set-window-prev-buffers
+    set-window-scroll-bars
     set-window-start!
+    set-window-vscroll
     set-windows-or-buffers-changed!
     shell-quote-argument
     show-command
@@ -2560,6 +2573,7 @@
     split-string
     split-window
     split-window-below
+    split-window-no-error
     split-window-right
     spunct
     squote
@@ -2938,6 +2952,7 @@
     visited-file-modtime
     visual-line-mode
     visual-line-mode-map
+    walk-window-subtree
     what-cursor-position
     where-is-internal
     widget-value-button-type
@@ -2954,27 +2969,66 @@
     widget-value-value
     widget-value?
     wildcard-to-regexp
+    window--check
+    window--max-delta-1
+    window--min-delta-1
+    window--min-size-1
+    window--min-size-ignore-p
+    window--pixel-to-total
+    window--preserve-size
+    window--resizable
+    window--resizable-p
+    window--resize-apply-p
+    window--resize-child-windows
+    window--resize-child-windows-normal
+    window--resize-child-windows-skip-p
+    window--resize-mini-window
+    window--resize-reset
+    window--resize-reset-1
+    window--resize-siblings
+    window--resize-this-window
+    window--size-fixed-1
+    window--size-to-pixel
+    window--state-assq
+    window--state-get-1
+    window--state-normalize-buffer-name
+    window--state-put-1
+    window--state-put-2
+    window--state-ref
     window-absorb!
     window-base-line-number
     window-base-line-pos
     window-body-height
+    window-body-size
     window-body-top
     window-body-width
+    window-bottom-divider-width
     window-buffer
+    window-child
     window-children
+    window-combination-limit
+    window-combination-p
+    window-combination-resize
+    window-combined-p
     window-configuration-frame
     window-configuration-p
     window-current-matrix
     window-cursor-off?
+    window-dedicated-p
+    window-deletable-p
     window-desired-matrix
     window-edges
     window-end
     window-frame
+    window-fringes
+    window-full-height-p
     window-full-width?
+    window-header-line-height
     window-height
     window-hscroll
     window-internal?
     window-last-buffer
+    window-last-child
     window-last-height
     window-last-hscroll
     window-last-mark
@@ -2986,6 +3040,9 @@
     window-last-tab-line
     window-last-width
     window-left
+    window-left-child
+    window-left-column
+    window-left-sibling
     window-line-rows
     window-line-rows-at
     window-line-slices
@@ -2993,28 +3050,82 @@
     window-line-start
     window-list
     window-live-p
+    window-margins
+    window-max-delta
+    window-min-delta
     window-min-height
+    window-min-pixel-height
+    window-min-pixel-width
+    window-min-size
     window-min-width
     window-minibuffer-p
+    window-mode-line-height
     window-move-screen-lines
+    window-new-normal
+    window-new-pixel
+    window-new-total
     window-next-buffers
+    window-next-sibling
+    window-normal-size
     window-normalize-buffer-to-switch-to
+    window-normalize-window
     window-outdated?
     window-parameter
     window-parameters
     window-parent
+    window-pixel-height
+    window-pixel-left
+    window-pixel-top
+    window-pixel-width
     window-point
     window-position
+    window-preserved-size
     window-prev-buffers
+    window-prev-sibling
+    window-resizable
+    window-resizable-p
+    window-resize
+    window-resize-apply
+    window-resize-apply-total
+    window-resize-no-error
+    window-resize-pixelwise
     window-right-border?
+    window-right-divider-width
+    window-right-sibling
+    window-safe-min-height
+    window-safe-min-pixel-height
+    window-safe-min-pixel-width
+    window-safe-min-size
+    window-safe-min-width
     window-scroll
+    window-scroll-bar-height
+    window-scroll-bar-width
+    window-scroll-bars
+    window-sizable
+    window-sizable-p
+    window-size
+    window-size-fixed-p
     window-start
     window-start-at-line-beg
+    window-state-buffers
+    window-state-get
+    window-state-put
+    window-state-put-kept-windows
+    window-state-put-list
+    window-state-put-selected-window
+    window-state-put-stale-windows
     window-system-display?
     window-tab-line-height
     window-top
+    window-top-child
+    window-top-line
+    window-total-height
+    window-total-width
     window-truncates-lines?
     window-type?
+    window-valid-p
+    window-vscroll
+    window-wants-mode-line
     window-wants-tab-line
     window-width
     window-wraps?

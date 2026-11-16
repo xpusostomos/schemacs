@@ -33,7 +33,7 @@
     ;; redisplay that reads it is above this library, not below.
     (only (schemacs editor dispnew) *cursor-in-echo-area*)
     (only (schemacs editor marker) build-marker copy-marker marker-position
-          set-marker)
+          set-marker make-marker markerp marker-last-position)
     ;; `catch`/`throw` is the C's `throw 'found`; Guile's escape
     ;; continuation is `let/ec`.
     (only (ice-9 control) let/ec)
@@ -41,7 +41,10 @@
     ;; table of window to index, as the C's `temslot` is a number in the
     ;; window and the lookup there is free. Guile's hash tables are not
     ;; `(scheme base)`'s.
-    (only (guile) make-hash-table hashq-ref hashq-set!)
+    ;; `exact->inexact`/`inexact->exact` are Guile's: the resize engine
+    ;; keeps the normal sizes as floats, as the C's `w->normal_lines` and
+    ;; `w->normal_cols` are.
+    (only (guile) make-hash-table hashq-ref hashq-set! exact->inexact inexact->exact)
     (only (ice-9 control) let/ec)
     ;; `switch-to-prev-buffer-skip-regexp` is matched against a buffer
     ;; name: `search.c`'s `string-match`.
@@ -70,7 +73,7 @@
           window-buffer window-children
           window-edges window-frame window-height window-left window-list
           window-parent
-          window-body-width window-top window-width
+          window-body-width window-body-height window-top window-width
           window-internal?
           %window-start set!%window-start
           %window-start-at-line-beg set!%window-start-at-line-beg
@@ -90,7 +93,40 @@
           frame-list frame-live-p select-frame
           ;; `window-persistent-parameters` - which is window.c's
           ;; variable, and what `current-window-configuration` saves.
-          *window-persistent-parameters*)
+          *window-persistent-parameters*
+          ;; The window tree's algebra and the size registers - the
+          ;; `window.c` half of the size chapter, which the resize
+          ;; engine and the state functions below are built on.
+          frame-root-window frame-root-window-p
+          window-live-p window-child window-next-sibling window-prev-sibling
+          window-last-child window-top-child window-left-child
+          window-combination-p window-combined-p
+          window-total-height window-total-width
+          window-pixel-height window-pixel-width
+          window-pixel-left window-pixel-top window-size
+          window-normal-size
+          window-combination-limit set-window-combination-limit
+          window-dedicated-p set-window-dedicated-p
+          window-fringes set-window-fringes
+          window-margins set-window-margins
+          window-scroll-bars set-window-scroll-bars
+          window-vscroll set-window-vscroll
+          window-mode-line-height window-header-line-height
+          window-scroll-bar-width window-scroll-bar-height
+          window-right-divider-width window-bottom-divider-width
+          window-new-pixel set-window-new-pixel
+          window-new-total set-window-new-total
+          window-new-normal set-window-new-normal
+          window-resize-apply window-resize-apply-total
+          ;; `window-start` is `window.c`'s; the redisplay's marker,
+          ;; answered as a position.
+          window-start
+          ;; The frame's character size, and what the minibuffer
+          ;; window's own resizing is called.
+          frame-char-height frame-char-width frame-type? selected-frame
+          *resize-mini-windows* grow-mini-window shrink-mini-window
+          minibuffer-window-active-p window-tab-line-height
+          window-parameter)
     ;; `display-buffer' puts what it shows in the buffer list's
     ;; most-recently-used order, which is Emacs's `record_buffer';
     ;; `pop-to-buffer' makes a buffer current by name when a string is
@@ -105,13 +141,15 @@
           set-buffer-modified-p
           with-current-buffer *inhibit-read-only* buffer-pt bufferp
           buffer-list buffer-live-p buffer-name current-buffer
+          buffer-local-value get-buffer
           *buffer-list-update-hook*)
     ;; `run-hooks' is `subr.el''s, and the two temp-buffer hooks below
     ;; are run through it.
     ;; `assq-delete-all` and `delq` are `subr.el`'s - `record-window-buffer`
     ;; drops an older entry with the first, and the history lists with the
     ;; second.
-    (only (schemacs editor subr) assq-delete-all delq kbd run-hooks)
+    (only (schemacs editor subr) assq-delete-all delq kbd run-hooks
+          with-temp-buffer)
     ;; `temp-buffer-window-show' puts point at the beginning of the
     ;; buffer it is about to show, which `goto-char' is.
     (only (schemacs editor editfns) goto-char point-min)
@@ -166,6 +204,35 @@
    set-window-hscroll!
    scroll-left
    scroll-right
+   ;; The size arithmetic - `window.el`'s half of the size chapter.
+   window-safe-min-height window-safe-min-width window-resize-pixelwise
+   window-combination-resize
+   window-normalize-window window-valid-p frame-char-size
+   window-safe-min-pixel-height window-min-pixel-height
+   window-safe-min-pixel-width window-min-pixel-width
+   window-safe-min-size window-min-size window--min-size-ignore-p
+   window-normal-size window-size
+   window--min-size-1 window-sizable window-sizable-p
+   window-preserved-size window--preserve-size window-body-size
+   window--size-fixed-1 window-size-fixed-p
+   window--min-delta-1 window-min-delta window--max-delta-1 window-max-delta
+   window--resizable window--resizable-p window-resizable window-resizable-p
+   window--size-to-pixel window--pixel-to-total
+   window--resize-reset window--resize-reset-1 window--resize-apply-p
+   window--resize-child-windows window--resize-child-windows-normal
+   window--resize-child-windows-skip-p
+   window--resize-siblings window--resize-this-window
+   window--resize-mini-window window-resize window-resize-no-error
+   window-full-height-p window-right-sibling window-left-sibling
+   split-window-no-error window-deletable-p frame-deletable-p
+   walk-window-subtree window--check
+   ;; Window states - `window.el:6370`.
+   window--state-assq window--state-ref window--state-normalize-buffer-name
+   window--state-get-1 window-state-get
+   window-state-put-list window-state-put-stale-windows
+   window-state-put-kept-windows window-state-put-selected-window
+   window--state-put-1 window--state-put-2 window-state-put
+   window-state-buffers
    )
 
   (begin
@@ -1871,18 +1938,6 @@ by this function.  This happens in an interactive call."
     ;; extension points `temp-buffer-window-setup' and
     ;; `temp-buffer-window-show' run in Emacs.
 
-    (define (window-live-p window)
-      ;; GNU Emacs's `window-live-p' (window.c): "Return t if OBJECT is a
-      ;; window that is displaying a buffer. A live window is one that
-      ;; can be deleted." A window here is live while it is one of the
-      ;; frame's windows - a deleted window is no longer on that list.
-      ;;--------------------------------------------------------------
-      (and (window-type? window)
-           (let loop ((rest (window-list)))
-             (cond ((null? rest) #f)
-                   ((eq? (car rest) window) #t)
-                   (else (loop (cdr rest)))))))
-
     (define-syntax with-selected-window
       ;; GNU Emacs's `with-selected-window': "Execute the forms in BODY
       ;; with WINDOW as the selected window." It selects WINDOW, which
@@ -2003,4 +2058,1709 @@ by this function.  This happens in an interactive call."
                value)))))
 
 
+        ;;------------------------------------------------------------------
+    ;; Window sizes - `window.el`'s half
+    ;;
+    ;; The tree's algebra is `frame.scm`'s (it is `window.c`'s); the
+    ;; arithmetic that decides *whether* a window may change size, and
+    ;; the state format that records and restores a layout, are
+    ;; `window.el`'s and are here. They are here rather than in
+    ;; `frame.scm` for one reason: they read `window-size-fixed` from the
+    ;; buffer a window shows, and `buffer.scm` is above `frame.scm`.
+    ;;
+    ;; **Sizes are canonical units** - rows and columns - until the C's
+    ;; own pixel arithmetic needs pixels, where the code multiplies by
+    ;; `frame-char-size` exactly as the C divides by it. On a terminal
+    ;; the two are the same numbers.
+    ;;------------------------------------------------------------------
+
+    (define window-safe-min-height 1)
+    (define window-safe-min-width 2)
+    (define window-resize-pixelwise #f)
+    (define window-combination-resize #f)
+    ;; ^ Emacs 31's `defcustom`s and their defaults: the absolute minimum
+    ;; a window may be in any circumstances (`window.el:437`), whether a
+    ;; resize is rounded to whole characters (`:490`), and whether
+    ;; resizing one window in a combination resizes the others
+    ;; proportionally (`:245`). Plain variables, as the tree spells a
+    ;; `defcustom` the editor never `let`-binds.
+
+    ;; `window-size-fixed` is a `defvar-local` (`window.el:1517`) and has
+    ;; no definition here: this tree's buffer-local values are a
+    ;; per-buffer table keyed by symbol, so a buffer that never set it
+    ;; reads the default `nil` - which is what the one consult in
+    ;; `window--size-fixed-1` asks the table for.
+
+    (define (window--opt args i)
+      ;; The Ith element of an optional-argument list, or #f. The tree's
+      ;; spelling of `&optional` where a `case-lambda` cannot express it.
+      ;;--------------------------------------------------------------
+      (let loop ((rest args) (n i))
+        (cond ((null? rest) #f)
+              ((= n 0) (car rest))
+              (else (loop (cdr rest) (- n 1))))))
+
+    (define (window-normalize-window window . args)
+      ;; GNU Emacs's `window-normalize-window` (`window.el:379`): "If
+      ;; WINDOW is nil, return the selected window. Otherwise, if WINDOW
+      ;; is a live or an internal window, return WINDOW; if LIVE-ONLY is
+      ;; non-nil, return WINDOW for a live window only."
+      ;;--------------------------------------------------------------
+      (let ((live-only (window--opt args 0)))
+        (cond
+         ((not window) (selected-window))
+         (live-only
+          (if (window-live-p window)
+              window
+              (error "~a is not a live window" window)))
+         ((or (window-live-p window) (window-internal? window)) window)
+         (else (error "~a is not a valid window" window)))))
+
+    (define (window-valid-p thing)
+      ;; GNU Emacs's `window-valid-p` (`window.c`): "Return t if OBJECT
+      ;; is a valid window." A valid window is either a live window or an
+      ;; internal window; a deleted one is neither.
+      ;;--------------------------------------------------------------
+      (and (window-type? thing)
+           (or (window-live-p thing) (window-internal? thing))
+           #t))
+
+    (define (frame-char-size window-or-frame . args)
+      ;; GNU Emacs's `frame-char-size` (`window.el:405`): the frame's
+      ;; character height, or its width when HORIZONTAL.
+      ;;--------------------------------------------------------------
+      (let* ((horizontal (window--opt args 0))
+             (frame (cond ((window-valid-p window-or-frame)
+                           (window-frame window-or-frame))
+                          ((frame-type? window-or-frame) window-or-frame)
+                          (else (selected-frame)))))
+        (if horizontal (frame-char-width frame) (frame-char-height frame))))
+
+    (define (window-safe-min-pixel-height . args)
+      ;; GNU Emacs's `window-safe-min-pixel-height` (`window.el:446`).
+      ;;--------------------------------------------------------------
+      (* window-safe-min-height
+         (frame-char-size (window-normalize-window (window--opt args 0)))))
+
+    (define (window-min-pixel-height . args)
+      ;; GNU Emacs's `window-min-pixel-height` (`window.el:467`).
+      ;;--------------------------------------------------------------
+      (let ((window (window--opt args 0)))
+        (* (max (if (window-minibuffer-p window) 1 window-min-height)
+                window-safe-min-height)
+           (frame-char-size window))))
+
+    (define (window-safe-min-pixel-width . args)
+      ;; GNU Emacs's `window-safe-min-pixel-width` (`window.el:478`).
+      ;;--------------------------------------------------------------
+      (* window-safe-min-width
+         (frame-char-size (window-normalize-window (window--opt args 0)) #t)))
+
+    (define (window-min-pixel-width . args)
+      ;; GNU Emacs's `window-min-pixel-width` (`window.el:499`).
+      ;;--------------------------------------------------------------
+      (let ((window (window--opt args 0)))
+        (* (max window-min-width window-safe-min-width)
+           (frame-char-size window #t))))
+
+    (define (window-safe-min-size . args)
+      ;; GNU Emacs's `window-safe-min-size` (`window.el:1587`).
+      ;;--------------------------------------------------------------
+      (let ((window (window-normalize-window (window--opt args 0)))
+            (horizontal (window--opt args 1))
+            (pixelwise (window--opt args 2)))
+        (if pixelwise
+            (if horizontal
+                (* window-safe-min-width (frame-char-width (window-frame window)))
+                (* window-safe-min-height (frame-char-height (window-frame window))))
+            (if horizontal window-safe-min-width window-safe-min-height))))
+
+    (define (window-min-size . args)
+      ;; GNU Emacs's `window-min-size` (`window.el:1605`): "Return the
+      ;; minimum size of WINDOW."
+      ;;--------------------------------------------------------------
+      (window--min-size-1 (window-normalize-window (window--opt args 0))
+                          (window--opt args 1)
+                          (window--opt args 2)
+                          (window--opt args 3)))
+
+    (define (window--min-size-ignore-p window ignore)
+      ;; GNU Emacs's `window--min-size-ignore-p` (`window.el:1615`).
+      ;;--------------------------------------------------------------
+      (if (window-valid-p ignore)
+          (eq? window ignore)
+          (not (memq ignore '(#f preserved)))))
+
+    (define (window--min-size-1 window horizontal ignore pixelwise)
+      ;; GNU Emacs's `window--min-size-1` (`window.el:1621`).
+      ;;
+      ;; The C's vertical branch adds pixel heights; this tree's
+      ;; `window-*-height` queries answer rows, so the sum is taken in
+      ;; rows and multiplied by the character height once.
+      ;;--------------------------------------------------------------
+      (let ((sub (window-child window)))
+        (if sub
+            (let ((value 0))
+              (if (window-combined-p sub horizontal)
+                  ;; "The minimum size of an iso-combination is the sum
+                  ;; of the minimum sizes of its child windows."
+                  (let loop ((sub sub))
+                    (when sub
+                      (set! value (+ value (window--min-size-1 sub horizontal ignore pixelwise)))
+                      (loop (window-next-sibling sub))))
+                  ;; "The minimum size of an ortho-combination is the
+                  ;; maximum of the minimum sizes of its child windows."
+                  (let loop ((sub sub))
+                    (when sub
+                      (set! value (max value (window--min-size-1 sub horizontal ignore pixelwise)))
+                      (loop (window-next-sibling sub)))))
+              value)
+            (let ((buffer (window-buffer window)))
+              (cond
+               ((not buffer) 0)
+               ((window-size-fixed-p window horizontal ignore)
+                ;; "The minimum size of a fixed size window is its size."
+                (window-size window horizontal pixelwise))
+               ((eq? ignore 'safe)
+                ;; "If IGNORE equals `safe' return the safe value."
+                (window-safe-min-size window horizontal pixelwise))
+               (horizontal
+                (let* ((char-size (frame-char-size window #t))
+                       (fringes (window-fringes window))
+                       (margins (window-margins window))
+                       (min-margins (window-parameter window 'min-margins))
+                       (left-min-margin (and min-margins
+                                             (number? (car min-margins))
+                                             (car min-margins)))
+                       (right-min-margin (and min-margins
+                                              (number? (cdr min-margins))
+                                              (cdr min-margins)))
+                       (pixel-width
+                        (+ (window-safe-min-size window #t #t)
+                           (* (or left-min-margin (car margins) 0) char-size)
+                           (* (or right-min-margin (cdr margins) 0) char-size)
+                           (car fringes) (cadr fringes)
+                           (window-scroll-bar-width window)
+                           (window-right-divider-width window))))
+                  (if pixelwise
+                      (max (if window-resize-pixelwise
+                               pixel-width
+                               (* (ceiling (/ pixel-width char-size)) char-size))
+                           (if (window--min-size-ignore-p window ignore)
+                               0
+                               (window-min-pixel-width window)))
+                      (max (ceiling (/ pixel-width char-size))
+                           (if (window--min-size-ignore-p window ignore)
+                               0
+                               window-min-width)))))
+               (else
+                (let* ((char-size (frame-char-size window))
+                       (rows (+ (window-safe-min-size window)
+                                (window-tab-line-height window)
+                                (window-header-line-height window)
+                                (window-scroll-bar-height window)
+                                (window-mode-line-height window)
+                                (window-bottom-divider-width window)))
+                       (pixel-height (* rows char-size)))
+                  (if pixelwise
+                      (max (if window-resize-pixelwise
+                               pixel-height
+                               (* (ceiling (/ pixel-height char-size)) char-size))
+                           (if (window--min-size-ignore-p window ignore)
+                               0
+                               (window-min-pixel-height window)))
+                      (max (ceiling (/ pixel-height char-size))
+                           (if (window--min-size-ignore-p window ignore)
+                               0
+                               window-min-height))))))))))
+
+    (define (window-sizable window delta . args)
+      ;; GNU Emacs's `window-sizable` (`window.el:1718`).
+      ;;--------------------------------------------------------------
+      (let ((horizontal (window--opt args 0))
+            (ignore (window--opt args 1))
+            (pixelwise (window--opt args 2)))
+        (set! window (window-normalize-window window))
+        (cond
+         ((< delta 0)
+          (let ((min-size (window-min-size window horizontal ignore pixelwise))
+                (size (window-size window horizontal pixelwise)))
+            (if (<= size min-size)
+                0
+                (max (- min-size size) delta))))
+         ((> delta 0)
+          (if (window-size-fixed-p window horizontal ignore) 0 delta))
+         (else 0))))
+
+    (define (window-sizable-p window delta . args)
+      ;; GNU Emacs's `window-sizable-p` (`window.el:1756`).
+      ;;--------------------------------------------------------------
+      (set! window (window-normalize-window window))
+      (if (> delta 0)
+          (>= (window-sizable window delta (window--opt args 0)
+                              (window--opt args 1) (window--opt args 2))
+              delta)
+          (<= (window-sizable window delta (window--opt args 0)
+                              (window--opt args 1) (window--opt args 2))
+              delta)))
+
+    (define (window-preserved-size . args)
+      ;; GNU Emacs's `window-preserved-size` (`window.el:1545`).
+      ;;--------------------------------------------------------------
+      (let ((window (window-normalize-window (window--opt args 0) #t))
+            (horizontal (window--opt args 1)))
+        (let ((parameter (window-parameter window 'window-preserved-size)))
+          ;; An `if` and not a `when`: a `when` whose test fails answers
+          ;; the *unspecified* value, which is true, and the one caller
+          ;; reads this in an `or`.
+          (if (and (pair? parameter) (eq? (car parameter) (window-buffer window)))
+              (list-ref parameter (if horizontal 1 2))
+              #f))))
+
+    (define (window--preserve-size window horizontal)
+      ;; GNU Emacs's `window--preserve-size` (`window.el:1556`).
+      ;;--------------------------------------------------------------
+      (let ((size (window-preserved-size window horizontal)))
+        (and (number? size)
+             (= size (window-body-size window horizontal #t))
+             #t)))
+
+    (define (window-body-size . args)
+      ;; GNU Emacs's `window-body-size` (`window.el:2120`).
+      ;;--------------------------------------------------------------
+      (let ((window (window--opt args 0))
+            (horizontal (window--opt args 1))
+            (pixelwise (window--opt args 2)))
+        (if horizontal
+            (if pixelwise
+                (* (window-body-width window) (frame-char-width (window-frame window)))
+                (window-body-width window))
+            (if pixelwise
+                (* (window-body-height window) (frame-char-height (window-frame window)))
+                (window-body-height window)))))
+
+    (define (window--size-fixed-1 window horizontal ignore)
+      ;; GNU Emacs's `window--size-fixed-1` (`window.el:1766`).
+      ;;--------------------------------------------------------------
+      (let ((sub (window-child window)))
+        (if sub
+            (if (window-combined-p sub horizontal)
+                ;; "An iso-combination is fixed size if all its child
+                ;; windows are fixed-size."
+                (let loop ((sub sub))
+                  (cond ((not sub) #t)
+                        ((not (window--size-fixed-1 sub horizontal ignore)) #f)
+                        (else (loop (window-next-sibling sub)))))
+                ;; "An ortho-combination is fixed-size if at least one of
+                ;; its child windows is fixed-size."
+                (let loop ((sub sub))
+                  (cond ((not sub) #f)
+                        ((window--size-fixed-1 sub horizontal ignore) #t)
+                        (else (loop (window-next-sibling sub))))))
+            ;; "WINDOW is a live window."
+            (let ((fixed (and (window-buffer window)
+                              (buffer-local-value (window-buffer window)
+                                                  'window-size-fixed #f))))
+              (and (or (not (window-valid-p ignore)) (not (eq? window ignore)))
+                   (or (and (not (eq? ignore 'preserved))
+                            (window--preserve-size window horizontal))
+                       (if horizontal
+                           (and (memq fixed '(width t)) #t)
+                           (and (memq fixed '(height t)) #t))))))))
+
+    (define (window-size-fixed-p . args)
+      ;; GNU Emacs's `window-size-fixed-p` (`window.el:1804`).
+      ;;--------------------------------------------------------------
+      (let ((window (window-normalize-window (window--opt args 0)))
+            (horizontal (window--opt args 1))
+            (ignore (window--opt args 2)))
+        (if (or (window-valid-p ignore) (memq ignore '(#f preserved)))
+            (window--size-fixed-1 window horizontal ignore)
+            #f)))
+
+    (define (window--min-delta-1 window delta horizontal ignore trail noup pixelwise)
+      ;; GNU Emacs's `window--min-delta-1` (`window.el:1814`).
+      ;;--------------------------------------------------------------
+      (if (not (window-parent window))
+          ;; "If we can't go up, return zero."
+          0
+          (let* ((parent (window-parent window))
+                 (sub (window-child parent)))
+            (let ((done
+                   (if (window-combined-p sub horizontal)
+                       ;; "In an iso-combination throw DELTA if we find at
+                       ;; least one child window and that window is either
+                       ;; not fixed-size or we can ignore fixed-sizeness."
+                       (let ((skip (eq? trail 'after)))
+                         (let loop ((sub sub))
+                           (cond
+                            ((not sub) #f)
+                            ((eq? sub window)
+                             (set! skip (eq? trail 'before))
+                             (loop (window-next-sibling sub)))
+                            (skip (loop (window-next-sibling sub)))
+                            ((window-size-fixed-p sub horizontal ignore)
+                             (loop (window-next-sibling sub)))
+                            (else 'done))))
+                       ;; "In an ortho-combination set DELTA to the minimum
+                       ;; value by which other child windows can shrink."
+                       (let loop ((sub sub))
+                         (cond
+                          ((not sub) #f)
+                          (else
+                           (unless (eq? sub window)
+                             (set! delta
+                                   (min delta
+                                        (max (- (window-size sub horizontal pixelwise 'ceiling)
+                                                (window-min-size sub horizontal ignore pixelwise))
+                                             0))))
+                           (loop (window-next-sibling sub))))))))
+              (cond ((eq? done 'done) delta)
+                    (noup delta)
+                    (else (window--min-delta-1 parent delta horizontal ignore
+                                               trail #f pixelwise)))))))
+
+    (define (window-min-delta . args)
+      ;; GNU Emacs's `window-min-delta` (`window.el:1857`).
+      ;;--------------------------------------------------------------
+      (let* ((window (window-normalize-window (window--opt args 0)))
+             (horizontal (window--opt args 1))
+             (ignore (window--opt args 2))
+             (trail (window--opt args 3))
+             (noup (window--opt args 4))
+             (nodown (window--opt args 5))
+             (pixelwise (window--opt args 6))
+             (size (window-size window horizontal pixelwise 'floor))
+             (minimum (window-min-size window horizontal ignore pixelwise)))
+        (cond
+         (nodown
+          ;; "If NODOWN is t, try to recover the entire size of WINDOW."
+          (window--min-delta-1 window size horizontal ignore trail noup pixelwise))
+         ((<= size minimum)
+          ;; "If NODOWN is nil and WINDOW's size is already at its
+          ;; minimum, there's nothing to recover."
+          0)
+         (else
+          (window--min-delta-1 window (- size minimum) horizontal ignore
+                               trail noup pixelwise)))))
+
+    (define (window--max-delta-1 window delta horizontal ignore trail noup pixelwise)
+      ;; GNU Emacs's `window--max-delta-1` (`window.el:1914`).
+      ;;--------------------------------------------------------------
+      (if (not (window-parent window))
+          ;; "Can't go up. Return DELTA."
+          delta
+          (let* ((parent (window-parent window))
+                 (sub (window-child parent))
+                 (fixed #f))
+            (if (window-combined-p sub horizontal)
+                ;; "For an iso-combination calculate how much we can get
+                ;; from other child windows."
+                (let ((skip (eq? trail 'after)))
+                  (let loop ((sub sub))
+                    (when sub
+                      (cond
+                       ((eq? sub window) (set! skip (eq? trail 'before)))
+                       (skip #f)
+                       (else
+                        (set! delta
+                              (+ delta
+                                 (max (- (window-size sub horizontal pixelwise 'floor)
+                                         (window-min-size sub horizontal ignore pixelwise))
+                                      0)))))
+                      (loop (window-next-sibling sub)))))
+                ;; "For an ortho-combination throw DELTA when at least one
+                ;; child window is fixed-size." The throw's value is DELTA
+                ;; either way, so a fixed sibling and NOUP mean the same
+                ;; thing: stop here.
+                (let loop ((sub sub))
+                  (when sub
+                    (when (and (not (eq? sub window))
+                               (window-size-fixed-p sub horizontal ignore))
+                      (set! fixed #t))
+                    (loop (window-next-sibling sub)))))
+            (if (or fixed noup)
+                ;; "When NOUP is nil, DELTA is all we can get."
+                delta
+                ;; "Else try with parent of WINDOW, passing the DELTA we
+                ;; recovered so far."
+                (window--max-delta-1 parent delta horizontal ignore trail #f pixelwise)))))
+
+    (define (window-max-delta . args)
+      ;; GNU Emacs's `window-max-delta` (`window.el:1953`).
+      ;;--------------------------------------------------------------
+      (let ((window (window-normalize-window (window--opt args 0)))
+            (horizontal (window--opt args 1))
+            (ignore (window--opt args 2))
+            (trail (window--opt args 3))
+            (noup (window--opt args 4))
+            (nodown (window--opt args 5))
+            (pixelwise (window--opt args 6)))
+        (if (and (not nodown) (window-size-fixed-p window horizontal ignore))
+            ;; "With IGNORE and NODOWN nil return zero if WINDOW has fixed
+            ;; size."
+            0
+            (window--max-delta-1 window 0 horizontal ignore trail noup pixelwise))))
+
+    (define (window--resizable window delta . args)
+      ;; GNU Emacs's `window--resizable` (`window.el:1987`).
+      ;;--------------------------------------------------------------
+      (let ((horizontal (window--opt args 0))
+            (ignore (window--opt args 1))
+            (trail (window--opt args 2))
+            (noup (window--opt args 3))
+            (nodown (window--opt args 4))
+            (pixelwise (window--opt args 5)))
+        (set! window (window-normalize-window window))
+        (cond
+         ((< delta 0)
+          (max (- (window-min-delta window horizontal ignore trail noup nodown pixelwise))
+               delta))
+         ((> delta 0)
+          (min (window-max-delta window horizontal ignore trail noup nodown pixelwise)
+               delta))
+         (else 0))))
+
+    (define (window--resizable-p window delta . args)
+      ;; GNU Emacs's `window--resizable-p` (`window.el:2031`).
+      ;;--------------------------------------------------------------
+      (set! window (window-normalize-window window))
+      (if (> delta 0)
+          (>= (apply window--resizable window delta args) delta)
+          (<= (apply window--resizable window delta args) delta)))
+
+    (define (window-resizable window delta . args)
+      ;; GNU Emacs's `window-resizable` (`window.el:2048`).
+      ;;--------------------------------------------------------------
+      (apply window--resizable (window-normalize-window window) delta args))
+
+    (define (window-resizable-p window delta . args)
+      ;; GNU Emacs's `window-resizable-p` (`window.el:2079`).
+      ;;--------------------------------------------------------------
+      (apply window--resizable-p (window-normalize-window window) delta args))
+
+    (define (window--size-to-pixel window size . args)
+      ;; GNU Emacs's `window--size-to-pixel` (`window.el:2721`).
+      ;;--------------------------------------------------------------
+      (let ((horizontal (window--opt args 0))
+            (pixelwise (window--opt args 1))
+            (round-maybe (window--opt args 2)))
+        (set! window (window-normalize-window window))
+        (let ((char-size (frame-char-size window horizontal)))
+          (if pixelwise
+              (if (and round-maybe (not window-resize-pixelwise))
+                  (* (round (/ size char-size)) char-size)
+                  size)
+              (* size char-size)))))
+
+    (define (window--pixel-to-total-1 window horizontal char-size)
+      ;; GNU Emacs's `window--pixel-to-total-1` (`window.el:2743`).
+      ;;--------------------------------------------------------------
+      (let ((child (window-child window)))
+        (if (window-combination-p window horizontal)
+            ;; "In an iso-combination distribute sizes proportionally."
+            (let ((remainder (window-new-total window)))
+              ;; "Initialize total sizes to each child's floor."
+              (let loop ((child child))
+                (when child
+                  (let ((size (max (quotient (window-size child horizontal #t) char-size) 1)))
+                    (set-window-new-total child size)
+                    (set! remainder (- remainder size))
+                    (loop (window-next-sibling child)))))
+              ;; "Distribute remainder."
+              (let loop ((remainder remainder))
+                (when (> remainder 0)
+                  (let inner ((child (window-last-child window))
+                              (best-child #f)
+                              (best-rem 0))
+                    (cond
+                     ((not child)
+                      ;; "We MUST have a best-child here."
+                      (set-window-new-total best-child 1 #t)
+                      (loop (- remainder 1)))
+                     (else
+                      (when (and (<= (window-new-total child)
+                                     (quotient (window-size child horizontal #t) char-size))
+                                 (> (modulo (window-size child horizontal #t) char-size)
+                                    best-rem))
+                        (set! best-child child)
+                        (set! best-rem (modulo (window-size child horizontal #t) char-size)))
+                      (inner (window-prev-sibling child) best-child best-rem))))))
+              ;; "Recurse."
+              (let loop ((child child))
+                (when child
+                  (window--pixel-to-total-1 child horizontal char-size)
+                  (loop (window-next-sibling child)))))
+            ;; "In an ortho-combination assign new sizes directly."
+            (let ((size (window-new-total window)))
+              (let loop ((child child))
+                (when child
+                  (set-window-new-total child size)
+                  (window--pixel-to-total-1 child horizontal char-size)
+                  (loop (window-next-sibling child))))))))
+
+    (define (window--pixel-to-total . args)
+      ;; GNU Emacs's `window--pixel-to-total` (`window.el:2785`).
+      ;;--------------------------------------------------------------
+      (let* ((frame (or (window--opt args 0) (selected-frame)))
+             (horizontal (window--opt args 1))
+             (char-size (frame-char-size frame horizontal))
+             (root (frame-root-window frame))
+             (root-size (window-size root horizontal #t))
+             (mini (let ((mini (frame-minibuffer-window frame)))
+                     (and mini (eq? (window-frame mini) frame)
+                          (not (eq? mini root))
+                          mini)))
+             (mini-size (and mini (window-size mini horizontal #t))))
+        ;; "We round the line/column sizes of windows here to the nearest
+        ;; integer."
+        (if (and mini (not horizontal))
+            (begin
+              (set-window-new-total root (max (quotient root-size char-size) 1))
+              (set-window-new-total mini (max (quotient mini-size char-size) 1))
+              (let loop ((lines (- (round (/ (+ root-size mini-size) char-size))
+                                   (+ (window-new-total root) (window-new-total mini)))))
+                (when (> lines 0)
+                  (if (>= (modulo root-size (window-new-total root))
+                          (modulo mini-size (window-new-total mini)))
+                      (set-window-new-total root 1 #t)
+                      (set-window-new-total mini 1 #t))
+                  (loop (- lines 1)))))
+            (begin
+              (set-window-new-total root (round (/ root-size char-size)))
+              (when mini
+                ;; "This is taken in the horizontal case only."
+                (set-window-new-total mini (round (/ mini-size char-size))))))
+        (unless (window-buffer root)
+          (window--pixel-to-total-1 root horizontal char-size))
+        ;; "Apply the new sizes."
+        (window-resize-apply-total frame horizontal)))
+
+    (define (window--resize-reset . args)
+      ;; GNU Emacs's `window--resize-reset` (`window.el:2826`).
+      ;;--------------------------------------------------------------
+      (window--resize-reset-1
+       (frame-root-window (or (window--opt args 0) (selected-frame)))
+       (window--opt args 1)))
+
+    (define (window--resize-reset-1 window horizontal)
+      ;; GNU Emacs's `window--resize-reset-1` (`window.el:2837`).
+      ;;--------------------------------------------------------------
+      ;; "Register old size in the new total size."
+      (set-window-new-pixel window (window-size window horizontal #t))
+      (set-window-new-total window (window-size window horizontal))
+      ;; "Reset new normal size."
+      (set-window-new-normal window)
+      (when (window-child window)
+        (window--resize-reset-1 (window-child window) horizontal))
+      (when (window-next-sibling window)
+        (window--resize-reset-1 (window-next-sibling window) horizontal)))
+
+    (define (window--resize-apply-p frame . args)
+      ;; GNU Emacs's `window--resize-apply-p` (`window.el:2888`): whether
+      ;; any window on FRAME has a new size that differs from its own.
+      ;; `walk-window-tree` visits internal windows too, so this does.
+      ;;--------------------------------------------------------------
+      (let ((horizontal (window--opt args 0)))
+        (let walk ((window (frame-root-window frame)))
+          (and window
+               (or (not (= (window-new-pixel window)
+                           (window-size window horizontal #t)))
+                   (let loop ((kids (window-children window)))
+                     (cond ((null? kids) #f)
+                           ((walk (car kids)) #t)
+                           (else (loop (cdr kids))))))))))
+
+    (define (window--resize-child-windows-skip-p window)
+      ;; GNU Emacs's `window--resize-child-windows-skip-p`
+      ;; (`window.el:3049`).
+      ;;--------------------------------------------------------------
+      (memq (window-new-normal window) '(ignore stuck skip)))
+
+    (define (window--resize-child-windows-normal parent horizontal window this-delta . args)
+      ;; GNU Emacs's `window--resize-child-windows-normal`
+      ;; (`window.el:3053`): set the children's shares from what they
+      ;; should have contributed for THIS-DELTA.
+      ;;--------------------------------------------------------------
+      (let ((trail (window--opt args 0))
+            (other-delta (window--opt args 1)))
+        (let* ((parent-total (window-size parent horizontal #t))
+               (delta-normal
+                (if (and (= (- this-delta) (window-size window horizontal #t))
+                         (or (not other-delta) (= other-delta 0)))
+                    ;; "When WINDOW gets deleted and we can return its
+                    ;; entire space to its siblings, use WINDOW's normal
+                    ;; size as the normal delta."
+                    (- (window-normal-size window horizontal))
+                    ;; "In any other case calculate the normal delta from
+                    ;; the relation of THIS-DELTA to the total size of
+                    ;; PARENT."
+                    (/ (exact->inexact this-delta) parent-total)))
+               (skip (eq? trail 'after)))
+          ;; "Set parent-normal to the sum of the normal sizes of all
+          ;; child windows of PARENT that shall be resized."
+          (let ((parent-normal
+                 (let loop ((sub (window-child parent)) (sum 0.0) (skip skip))
+                   (cond ((not sub) sum)
+                         ((eq? sub window) (loop (window-next-sibling sub) sum (eq? trail 'before)))
+                         (skip (loop (window-next-sibling sub) sum skip))
+                         (else (loop (window-next-sibling sub)
+                                     (+ sum (window-normal-size sub horizontal))
+                                     skip))))))
+            ;; "Set the new normal size of all child windows of PARENT
+            ;; from what they should have contributed for recovering
+            ;; THIS-DELTA lines."
+            (let loop ((sub (window-child parent)) (skip (eq? trail 'after)))
+              (when sub
+                (cond ((eq? sub window) (loop (window-next-sibling sub) (eq? trail 'before)))
+                      (skip (loop (window-next-sibling sub) skip))
+                      (else
+                       (let ((old-normal (window-normal-size sub horizontal)))
+                         (set-window-new-normal
+                          sub (min 1.0
+                                   (max (- old-normal
+                                           (* (/ old-normal parent-normal) delta-normal))
+                                        0.0))))
+                       (loop (window-next-sibling sub) skip)))))
+            (when (number? other-delta)
+              ;; "Set the new normal size of windows from what they should
+              ;; have contributed for recovering OTHER-DELTA lines."
+              (let ((delta-normal (/ (exact->inexact parent-total)
+                                     (+ parent-total other-delta))))
+                (let loop ((sub (window-child parent)) (skip (eq? trail 'after)))
+                  (when sub
+                    (cond ((eq? sub window) (loop (window-next-sibling sub) (eq? trail 'before)))
+                          (skip (loop (window-next-sibling sub) skip))
+                          (else
+                           (set-window-new-normal
+                            sub (min 1.0
+                                     (max (* (window-new-normal sub) delta-normal)
+                                          0.0)))
+                           (loop (window-next-sibling sub) skip)))))))
+            ;; "Set the new normal size of WINDOW to what is left by the
+            ;; sum of the normal sizes of its siblings."
+            (set-window-new-normal
+             window
+             (let loop ((sub (window-child parent)) (sum 0.0))
+               (cond ((not sub) (min 1.0 (max (- 1.0 sum) 0.0)))
+                     ((eq? sub window) (loop (window-next-sibling sub) sum))
+                     ((not (number? (window-new-normal sub)))
+                      (loop (window-next-sibling sub)
+                            (+ sum (window-normal-size sub horizontal))))
+                     (else (loop (window-next-sibling sub)
+                                 (+ sum (window-new-normal sub)))))))))))
+
+    (define (window--resize-child-windows parent delta . args)
+      ;; GNU Emacs's `window--resize-child-windows` (`window.el:3108`).
+      ;;--------------------------------------------------------------
+      (let ((horizontal (window--opt args 0))
+            (window (window--opt args 1))
+            (ignore (window--opt args 2))
+            (trail (window--opt args 3))
+            (edge (window--opt args 4))
+            (char-size (window--opt args 5)))
+        (let* ((first (window-child parent))
+               (last (window-last-child parent))
+               (parent-total (+ (window-size parent horizontal #t) delta))
+               (char-size (or char-size
+                              (and window-resize-pixelwise 1)
+                              (frame-char-size window horizontal)))
+               (best-window #f))
+          (let* ((sub (let loop ((w first))
+                        (if (and (window-next-sibling w)
+                                 (or (and (eq? trail 'before)
+                                          (not (window--resize-child-windows-skip-p
+                                                (window-next-sibling w))))
+                                     (and (eq? trail 'after)
+                                          (window--resize-child-windows-skip-p w))))
+                            (loop (window-next-sibling w))
+                            w)))
+                 (adjacent
+                  (and edge (memq trail '(before after))
+                       (if horizontal
+                           (if (eq? trail 'before)
+                               (= (+ (window-pixel-left sub) (window-pixel-width sub)) edge)
+                               (= (window-pixel-left sub) edge))
+                           (if (eq? trail 'before)
+                               (= (+ (window-pixel-top sub) (window-pixel-height sub)) edge)
+                               (= (window-pixel-top sub) edge)))
+                       (window-sizable-p sub delta horizontal ignore #t))))
+            (if adjacent
+              ;; "Resize only windows adjacent to EDGE."
+              (begin
+                (window--resize-this-window sub delta horizontal ignore #t trail edge)
+                (if (and window (eq? (window-parent sub) parent))
+                    (begin
+                      ;; "Assign new normal sizes."
+                      (set-window-new-normal
+                       sub (/ (exact->inexact (window-new-pixel sub)) parent-total))
+                      (set-window-new-normal
+                       window (- (window-normal-size window horizontal)
+                                 (- (window-new-normal sub)
+                                    (window-normal-size sub horizontal)))))
+                    (window--resize-child-windows-normal parent horizontal sub 0 trail delta))
+                ;; "Return 'normalized to notify `window--resize-siblings'
+                ;; that normal sizes have been already set."
+                'normalized)
+              ;; "Resize all windows proportionally."
+              (begin
+                (let loop ((sub last))
+                  (when sub
+                    (cond
+                     ((or (window--resize-child-windows-skip-p sub)
+                          ;; "Ignore windows to skip and fixed-size child
+                          ;; windows - in the latter case make it a window
+                          ;; to skip."
+                          (and (not ignore)
+                               (window-size-fixed-p sub horizontal ignore)
+                               (set-window-new-normal sub 'ignore)))
+                      #f)
+                     ((< delta 0)
+                      ;; "When shrinking store the number of lines/cols we
+                      ;; can get from this window here together with the
+                      ;; total/normal size factor."
+                      (set-window-new-normal
+                       sub
+                       (cons (window-min-delta sub horizontal ignore trail #t #f #t)
+                             (- (/ (exact->inexact (window-size sub horizontal #t))
+                                   parent-total)
+                                (window-normal-size sub horizontal)))))
+                     ((> delta 0)
+                      ;; "When enlarging store the total/normal size factor
+                      ;; only."
+                      (set-window-new-normal
+                       sub
+                       (- (/ (exact->inexact (window-size sub horizontal #t))
+                             parent-total)
+                          (window-normal-size sub horizontal)))))
+                    (loop (window-prev-sibling sub))))
+
+                (cond
+                 ((< delta 0)
+                  ;; "Shrink windows by delta."
+                  (let loop ((best-window #t) (delta delta))
+                    (if (and best-window (not (= delta 0)))
+                        (let inner ((sub last) (bw #f) (bv #f))
+                          (cond
+                           ((not sub)
+                            (set! best-window bw)
+                            (if bw
+                                (begin
+                                  (let ((best-delta (min (car (window-new-normal bw))
+                                                         char-size (- delta))))
+                                    (set! delta (+ delta best-delta))
+                                    (set-window-new-pixel bw (- best-delta) #t)
+                                    (set-window-new-normal
+                                     bw
+                                     (if (= (car (window-new-normal bw)) best-delta)
+                                         'skip
+                                         (cons (- (car (window-new-normal bw)) best-delta)
+                                               (- (/ (exact->inexact (window-new-pixel bw))
+                                                     parent-total)
+                                                  (window-normal-size bw horizontal))))))
+                                  (loop bw delta))
+                                #f))
+                           (else
+                            (let ((nbw bw) (nbv bv))
+                              (when (and (pair? (window-new-normal sub))
+                                         (not (<= (car (window-new-normal sub)) 0))
+                                         (or (not bv)
+                                             (> (cdr (window-new-normal sub)) bv)))
+                                (set! nbw sub)
+                                (set! nbv (cdr (window-new-normal sub))))
+                              (inner (window-prev-sibling sub) nbw nbv)))))
+                        #f)))
+                 ((> delta 0)
+                  ;; "Enlarge windows by delta."
+                  (let loop ((best-window #t) (delta delta))
+                    (if (and best-window (not (= delta 0)))
+                        (let inner ((sub last) (bw #f) (bv #f))
+                          (cond
+                           ((not sub)
+                            (set! best-window bw)
+                            (if bw
+                                (begin
+                                  (let ((best-delta (min delta char-size)))
+                                    (set! delta (- delta best-delta))
+                                    (set-window-new-pixel bw best-delta #t)
+                                    (set-window-new-normal
+                                     bw
+                                     (- (/ (exact->inexact (window-new-pixel bw))
+                                           parent-total)
+                                        (window-normal-size bw horizontal))))
+                                  (loop bw delta))
+                                #f))
+                           (else
+                            (let ((nbw bw) (nbv bv))
+                              (when (and (number? (window-new-normal sub))
+                                         (or (not bv)
+                                             (< (window-new-normal sub) bv)))
+                                (set! nbw sub)
+                                (set! nbv (window-new-normal sub)))
+                              (inner (window-prev-sibling sub) nbw nbv)))))
+                        #f))))
+
+                (when best-window
+                  (let loop ((sub last))
+                    (when sub
+                      (when (or (pair? (window-new-normal sub))
+                                (number? (window-new-normal sub)))
+                        ;; "Reset new normal size fields so
+                        ;; `window-resize-apply' won't use them to apply
+                        ;; new sizes."
+                        (set-window-new-normal sub))
+                      (unless (eq? (window-new-normal sub) 'ignore)
+                        ;; "Resize this window's child windows
+                        ;; (back-engineering delta from sub's old and new
+                        ;; total sizes)."
+                        (let ((delta (- (window-new-pixel sub)
+                                        (window-size sub horizontal #t))))
+                          (unless (and (= delta 0) (not trail))
+                            (window--resize-this-window sub delta horizontal
+                                                        ignore #f trail edge))))
+                      (loop (window-prev-sibling sub)))))))))))
+
+    (define (window--resize-siblings window delta . args)
+      ;; GNU Emacs's `window--resize-siblings` (`window.el:3286`).
+      ;;--------------------------------------------------------------
+      (let ((horizontal (window--opt args 0))
+            (ignore (window--opt args 1))
+            (trail (window--opt args 2))
+            (edge (window--opt args 3))
+            (char-size (window--opt args 4)))
+        (when (window-parent window)
+          (let ((parent (window-parent window))
+                (delta delta))
+            (if (window-combined-p (window-child parent) horizontal)
+                ;; "In an iso-combination try to extract DELTA from
+                ;; WINDOW's siblings."
+                (let ((this-delta #f))
+                  ;; "Decide which windows shall be left alone."
+                  (let loop ((sub (window-child parent)) (skip (eq? trail 'after)))
+                    (when sub
+                      (cond
+                       ((eq? sub window)
+                        ;; "Make sure WINDOW is left alone when resizing
+                        ;; its siblings."
+                        (set-window-new-normal sub 'ignore)
+                        (loop (window-next-sibling sub) (eq? trail 'before)))
+                       (skip
+                        ;; "Make sure this sibling is left alone when
+                        ;; resizing its siblings."
+                        (set-window-new-normal sub 'ignore)
+                        (loop (window-next-sibling sub) skip))
+                       (else
+                        ;; "Set this-delta to t to signal that we found a
+                        ;; sibling of WINDOW whose size is not fixed."
+                        (unless (window-size-fixed-p sub horizontal ignore)
+                          (set! this-delta #t))
+                        (loop (window-next-sibling sub) skip)))))
+                  ;; "Set this-delta to what we can get from WINDOW's
+                  ;; siblings."
+                  (set! this-delta
+                        (if (= (- delta) (window-size window horizontal #t))
+                            ;; "A deletion, presumably."
+                            (if this-delta delta 0)
+                            ;; "Any other form of resizing."
+                            (window--resizable window delta horizontal ignore
+                                               trail #t #f #t)))
+                  ;; "Set other-delta to what we still have to get from
+                  ;; ancestor windows of parent."
+                  (let ((other-delta (- delta this-delta)))
+                    (unless (= other-delta 0)
+                      ;; "Unless we got everything from WINDOW's siblings,
+                      ;; PARENT must be resized by other-delta lines or
+                      ;; columns."
+                      (set-window-new-pixel parent other-delta #t))
+                    (if (= this-delta 0)
+                        ;; "We haven't got anything from WINDOW's siblings
+                        ;; but we must update the normal sizes to respect
+                        ;; other-delta."
+                        (window--resize-child-windows-normal
+                         parent horizontal window this-delta trail other-delta)
+                        (begin
+                          ;; "We did get something from WINDOW's siblings
+                          ;; which means we have to resize their child
+                          ;; windows."
+                          (unless (eq? (window--resize-child-windows
+                                        parent (- this-delta) horizontal
+                                        window ignore trail edge char-size)
+                                       'normalized)
+                            ;; "Set the normal sizes."
+                            (window--resize-child-windows-normal
+                             parent horizontal window this-delta trail other-delta))
+                          ;; "Set DELTA to what we still have to get from
+                          ;; ancestor windows."
+                          (set! delta other-delta)))))
+                ;; "In an ortho-combination all siblings of WINDOW must be
+                ;; resized by DELTA."
+                (begin
+                  (set-window-new-pixel parent delta #t)
+                  (let loop ((sub (window-child parent)))
+                    (when sub
+                      (unless (eq? sub window)
+                        (window--resize-this-window sub delta horizontal ignore #t))
+                      (loop (window-next-sibling sub))))))
+            (unless (= delta 0)
+              ;; "Go up."
+              (window--resize-siblings parent delta horizontal ignore trail edge char-size))))))
+
+    (define (window--resize-this-window window delta . args)
+      ;; GNU Emacs's `window--resize-this-window` (`window.el:3385`).
+      ;;--------------------------------------------------------------
+      (let ((horizontal (window--opt args 0))
+            (ignore (window--opt args 1))
+            (add (window--opt args 2))
+            (trail (window--opt args 3))
+            (edge (window--opt args 4))
+            (char-size (window--opt args 5)))
+        (when add
+          ;; "Add DELTA to the new total size of WINDOW."
+          (set-window-new-pixel window delta #t))
+        (let ((sub (window-child window)))
+          (cond
+           ((not sub) #f)
+           ((window-combined-p sub horizontal)
+            ;; "In an iso-combination resize child windows according to
+            ;; their normal sizes."
+            (window--resize-child-windows window delta horizontal #f ignore
+                                          trail edge char-size))
+           (else
+            ;; "In an ortho-combination resize each child window by
+            ;; DELTA."
+            (let loop ((sub sub))
+              (when sub
+                (window--resize-this-window sub delta horizontal ignore #t trail edge char-size)
+                (loop (window-next-sibling sub)))))))))
+
+    (define (window--resize-mini-window window delta)
+      ;; GNU Emacs's `window--resize-mini-window` (`window.el:2853`), over
+      ;; this tree's `grow-mini-window` - which is
+      ;; `resize_mini_window`'s answer to the same question: the mini
+      ;; window grows into the root window's rows, and a negative DELTA
+      ;; shrinks it ("If DELTA is negative, this may shrink the
+      ;; minibuffer window", `window.c:5901`). The C clamps DELTA to the
+      ;; minimum the mini window needs and the maximum the root can give
+      ;; before applying it; `grow-mini-window` clamps to the frame
+      ;; itself, so the same clamp is spelled once, there.
+      ;;--------------------------------------------------------------
+      (when (and (window-minibuffer-p window) (not (= delta 0)))
+        (grow-mini-window window
+                          (inexact->exact
+                           (round (/ delta (frame-char-height (window-frame window))))))))
+
+    (define (window-resize window delta . args)
+      ;; GNU Emacs's `window-resize` (`window.el:2901`): "Resize WINDOW
+      ;; vertically by DELTA lines." Positive grows, negative shrinks,
+      ;; and other windows in the combination take up or give the space.
+      ;;--------------------------------------------------------------
+      (let ((horizontal (window--opt args 0))
+            (ignore (window--opt args 1))
+            (pixelwise (window--opt args 2)))
+        (set! window (window-normalize-window window))
+        (let* ((frame (window-frame window))
+               (delta (window--size-to-pixel window delta horizontal pixelwise #t)))
+          (cond
+           ((eq? window (frame-root-window frame))
+            (error "Cannot resize the root window of a frame"))
+           ((window-minibuffer-p window)
+            (if horizontal
+                (error "Cannot resize minibuffer window horizontally")
+                (window--resize-mini-window window delta)))
+           ((and (not horizontal)
+                 (window-full-height-p window)
+                 (or (not *resize-mini-windows*)
+                     (minibuffer-window-active-p (frame-minibuffer-window frame))))
+            ;; "If WINDOW is full height and either `resize-mini-windows'
+            ;; is nil or the minibuffer window is active, resize the
+            ;; minibuffer window."
+            (window--resize-mini-window (frame-minibuffer-window frame) (- delta)))
+           ((or (window--resizable-p window delta horizontal ignore #f #f #f #t)
+                (and (not ignore)
+                     (set! ignore 'preserved)
+                     (window--resizable-p window delta horizontal ignore #f #f #f #t)))
+            (window--resize-reset frame horizontal)
+            (window--resize-this-window window delta horizontal ignore #t)
+            (let ((sibling (and (not (eq? window-combination-resize #t))
+                                (window-combined-p window horizontal)
+                                (or (window-right-sibling window)
+                                    (window-left-sibling window)))))
+              (if (and sibling
+                       (window-sizable-p sibling (- delta) horizontal ignore #t))
+                  ;; "If window-combination-resize is nil, WINDOW is part
+                  ;; of an iso-combination, and WINDOW's neighboring right
+                  ;; or left sibling can be resized as requested, resize
+                  ;; that sibling."
+                  (let ((normal-delta (/ (exact->inexact delta)
+                                         (window-size (window-parent window) horizontal #t))))
+                    (window--resize-this-window sibling (- delta) horizontal #f #t)
+                    (set-window-new-normal
+                     window (+ (window-normal-size window horizontal) normal-delta))
+                    (set-window-new-normal
+                     sibling (- (window-normal-size sibling horizontal) normal-delta)))
+                  ;; "Otherwise, resize all other windows in the same
+                  ;; combination."
+                  (window--resize-siblings window delta horizontal ignore)))
+            (when (window--resize-apply-p frame horizontal)
+              (if (window-resize-apply frame horizontal)
+                  (window--pixel-to-total frame horizontal)
+                  (error "Failed to apply resizing ~a" window))))
+           (else
+            (error "Cannot resize window ~a" window))))))
+
+    (define (window-resize-no-error window delta . args)
+      ;; GNU Emacs's `window-resize-no-error` (`window.el:2995`).
+      ;;--------------------------------------------------------------
+      (let ((horizontal (window--opt args 0))
+            (ignore (window--opt args 1))
+            (pixelwise (window--opt args 2)))
+        (if (window--resizable-p window delta horizontal ignore #f #f #f pixelwise)
+            (window-resize window delta horizontal ignore pixelwise)
+            #f)))
+
+    (define (window-full-height-p . args)
+      ;; GNU Emacs's `window-full-height-p` (`window.el:2104`).
+      ;;--------------------------------------------------------------
+      (let ((window (window-normalize-window (window--opt args 0))))
+        (if (window-minibuffer-p window)
+            (eq? window (frame-root-window (window-frame window)))
+            (= (window-pixel-height window)
+               (window-pixel-height (frame-root-window (window-frame window)))))))
+
+    (define (window-right-sibling window)
+      ;; GNU Emacs's `window-right` (`window.el:308`): "Return WINDOW's
+      ;; right sibling. Return nil if WINDOW is the root window of its
+      ;; frame." Emacs calls this `window-right`; this tree already
+      ;; spells `window-left` for the *column* of a window's left edge
+      ;; (Emacs's `window-left-column`), so the pair cannot take Emacs's
+      ;; names here.
+      ;;--------------------------------------------------------------
+      (and window (window-parent window) (window-next-sibling window)))
+
+    (define (window-left-sibling window)
+      ;; GNU Emacs's `window-left` (`window.el:314`) - see the note above.
+      ;;--------------------------------------------------------------
+      (and window (window-parent window) (window-prev-sibling window)))
+
+    (define (split-window-no-error window size side . args)
+      ;; GNU Emacs's `split-window-no-error` (`window.el:5992`): "This
+      ;; function is like `split-window' but does not signal an error when
+      ;; WINDOW cannot be split." SIDE is Emacs's `below`/`right`; the
+      ;; tree's `split-window` takes the boolean HORIZONTAL instead.
+      ;;--------------------------------------------------------------
+      (let ((horizontal (if (memq side '(right left)) #t (and side #t))))
+        (guard (e (#t #f))
+          (split-window (window-normalize-window window) size horizontal))))
+
+    (define (window-deletable-p . args)
+      ;; GNU Emacs's `window-deletable-p` (`window.el:4199`): "Return t if
+      ;; WINDOW can be safely deleted from its frame."
+      ;;
+      ;; Not carried: the tab branch (`'tab` - closing the window's tab
+      ;; instead of the window; this tree's tab bar closes windows the
+      ;; other way round), the atomic-window branch (`window-atom` -
+      ;; there are no atomic windows here), and `window-deletable-functions`
+      ;; - nothing in this tree runs that hook.
+      ;;--------------------------------------------------------------
+      (let ((window (window-normalize-window (window--opt args 0))))
+        (cond
+         ((frame-root-window-p window)
+          ;; "WINDOW's frame can be deleted only if there are other
+          ;; frames on the same terminal."
+          (if (frame-deletable-p (window-frame window)) 'frame #f))
+         ((window-minibuffer-p window)
+          ;; "If WINDOW is the minibuffer window of a non-minibuffer-only
+          ;; frame, it cannot be deleted separately."
+          #f)
+         (else #t))))
+
+    (define (frame-deletable-p . args)
+      ;; GNU Emacs's `frame-deletable-p` (`frame.el:195`), reduced: a
+      ;; frame here can be deleted when it is not the last one. Emacs
+      ;; also refuses a frame that hosts the active minibuffer and one
+      ;; whose terminal has no other frame; there is one minibuffer per
+      ;; frame here and no terminal objects.
+      ;;--------------------------------------------------------------
+      (or (window--opt args 0) (selected-frame))
+      (> (length (frame-list)) 1))
+
+    (define (walk-window-subtree fun . args)
+      ;; GNU Emacs's `walk-window-subtree` (`window.el:632`): "Run
+      ;; function FUN on the subtree of windows rooted at WINDOW", live
+      ;; windows only unless ANY.
+      ;;--------------------------------------------------------------
+      (let ((window (window-normalize-window (window--opt args 0)))
+            (any (window--opt args 1)))
+        (let walk ((window window))
+          (cond ((window-live-p window) (fun window))
+                (else
+                 (when any (fun window))
+                 (let loop ((kids (window-children window)))
+                   (when (pair? kids)
+                     (walk (car kids))
+                     (loop (cdr kids)))))))))
+
+    (define (window--check . args)
+      ;; GNU Emacs's `window--check` (`window.el:1390`) checks side and
+      ;; atomic windows; this tree has neither, so there is nothing to
+      ;; check. It is here because `window-state-put` ends with it.
+      ;;--------------------------------------------------------------
+      #t)
+
+    ;;------------------------------------------------------------------
+    ;; Window states - `window.el:6370`
+    ;;
+    ;; A window state is the layout of a frame's windows as plain data:
+    ;; the tree's shape, each window's size in pixels and as a fraction
+    ;; of its parent, and the buffer, point and start it was showing.
+    ;; `window-state-get` records one and `window-state-put` restores it
+    ;; - into the same frame or into another - which is what a tab in
+    ;; `tab-bar.el` stores and what a desktop file would.
+    ;;------------------------------------------------------------------
+
+    (define (window--state-ref key list)
+      ;; `(cdr (assq KEY LIST))` with Elisp's nil: `#f` when the entry is
+      ;; missing, where `(cdr #f)` would raise.
+      ;;--------------------------------------------------------------
+      (let ((entry (window--state-assq key list)))
+        (and entry (cdr entry))))
+
+    (define (window--state-assq key list)
+      ;; Emacs's `(assq KEY LIST)` as it behaves on a window state or a
+      ;; node of one. A node is its type symbol consed onto its alist, so
+      ;; the entries sit one cons deeper than a plain alist's and the C's
+      ;; `Fassq` - which compares `XCAR (XCAR (tail))` - reaches them;
+      ;; Scheme's `assq` would instead try `(car 'leaf)`. The pair test
+      ;; here is what the C's `XCAR` of a non-cons silently answers nil
+      ;; for.
+      ;;--------------------------------------------------------------
+      (let loop ((tail list))
+        (cond ((not (pair? tail)) #f)
+              ((and (pair? (car tail)) (eq? (car (car tail)) key)) (car tail))
+              (else (loop (cdr tail))))))
+
+    (define (window--state-normalize-buffer-name buffer)
+      ;; GNU Emacs's `window--state-normalize-buffer-name`
+      ;; (`window.el:6370`): a buffer's name, which is what a state
+      ;; written to a file can record - a buffer object does not survive
+      ;; the write.
+      ;;--------------------------------------------------------------
+      (if (string? buffer) buffer (buffer-name buffer)))
+
+    (define (window--state-get-1 window writable)
+      ;; GNU Emacs's `window--state-get-1` (`window.el:6381`): the
+      ;; subtree at WINDOW as the type symbol followed by the alist of
+      ;; what is recorded, and then the states of the children when
+      ;; WINDOW is internal.
+      ;;
+      ;; WRITABLE non-nil means the state must survive a round trip
+      ;; through a file: point and start are recorded as positions rather
+      ;; than markers, and only the parameters declared `writable` are
+      ;; kept.
+      ;;--------------------------------------------------------------
+      (let* ((type (cond ((window-top-child window) 'vc)
+                         ((window-left-child window) 'hc)
+                         (else 'leaf)))
+             (buffer (window-buffer window))
+             (selected (eq? window (selected-window)))
+             (next-buffers
+              (if (window-live-p window)
+                  (delq #f (map (lambda (buffer)
+                                  (and (buffer-live-p buffer) buffer))
+                                (window-next-buffers window)))
+                  '()))
+             (prev-buffers
+              (if (window-live-p window)
+                  (delq #f (map (lambda (entry)
+                                  (and (buffer-live-p (car entry)) entry))
+                                (window-prev-buffers window)))
+                  '()))
+             (head
+              (append
+               (list type)
+               (if (window-next-sibling window) '() (list (cons 'last #t)))
+               (list (cons 'pixel-width (window-pixel-width window))
+                     (cons 'pixel-height (window-pixel-height window))
+                     (cons 'total-width (window-total-width window))
+                     (cons 'total-height (window-total-height window))
+                     (cons 'normal-height (window-normal-size window #f))
+                     (cons 'normal-width (window-normal-size window #t)))
+               (if (window-live-p window)
+                   '()
+                   (list (cons 'combination-limit (window-combination-limit window))))
+               ;; **The accumulator is `acc`, not `list`**: Emacs's
+               ;; `let` binds a variable named `list` and builds its
+               ;; answer with a backquote, but here `list` is the
+               ;; procedure, and a variable of that name shadows it -
+               ;; `(list (cons 'parameters list))` would then apply the
+               ;; accumulator. (It did, as soon as a window carried any
+               ;; parameter at all.)
+               (let ((parameters (window-parameters window))
+                     (acc '()))
+                 ;; "Make copies of those window parameters whose
+                 ;; persistence property is `writable' if WRITABLE is
+                 ;; non-nil and non-nil if WRITABLE is nil."
+                 (for-each
+                  (lambda (par)
+                    ;; `(cdr (assq ...))` on a miss is nil in Elisp; the
+                    ;; empty list here has to be spelled out.
+                    (let ((entry (assq (car par) (*window-persistent-parameters*))))
+                      (let ((pers (and entry (cdr entry))))
+                        (when (and pers (or (not writable) (eq? pers 'writable)))
+                          (set! acc (cons (cons (car par) (cdr par)) acc))))))
+                  parameters)
+                 ;; "Add `clone-of` parameter if necessary."
+                 (let ((entry (assq 'clone-of (*window-persistent-parameters*))))
+                   (let ((pers (and entry (cdr entry))))
+                     (when (and pers (or (not writable) (eq? pers 'writable))
+                                (not (assq 'clone-of acc)))
+                       (set! acc (cons (cons 'clone-of window) acc)))))
+                 (if (pair? acc) (list (cons 'parameters acc)) '()))
+               (if buffer
+                   ;; "All buffer related things go in here."
+                   (let ((point (window-point window))
+                         (start (window-start window)))
+                     (list
+                      (cons 'buffer
+                            (cons (if writable
+                                      (window--state-normalize-buffer-name buffer)
+                                      buffer)
+                                  (list
+                                   (cons 'selected selected)
+                                   (cons 'hscroll (window-hscroll window))
+                                   (cons 'fringes (window-fringes window))
+                                   (cons 'margins (window-margins window))
+                                   (cons 'scroll-bars (window-scroll-bars window))
+                                   (cons 'vscroll (window-vscroll window))
+                                   (cons 'dedicated (window-dedicated-p window))
+                                   (cons 'point
+                                         (if writable
+                                             point
+                                             (with-current-buffer buffer
+                                               (copy-marker point))))
+                                   (cons 'start
+                                         (if writable
+                                             start
+                                             (with-current-buffer buffer
+                                               (copy-marker start)))))))))
+                   '())
+               (if (pair? next-buffers)
+                   (list (cons 'next-buffers
+                               (if writable
+                                   (map window--state-normalize-buffer-name next-buffers)
+                                   next-buffers)))
+                   '())
+               (if (pair? prev-buffers)
+                   (list (cons 'prev-buffers
+                               (if writable
+                                   (map (lambda (entry)
+                                          (list (window--state-normalize-buffer-name (car entry))
+                                                (marker-position (cadr entry))
+                                                (marker-position (list-ref entry 2))))
+                                        prev-buffers)
+                                   prev-buffers)))
+                   '())))
+             (tail
+              (if (memq type '(vc hc))
+                  (let loop ((window (window-child window)) (list '()))
+                    (cond ((not window) (reverse list))
+                          (else (loop (window-next-sibling window)
+                                      (cons (window--state-get-1 window writable) list)))))
+                  '())))
+        (append head tail)))
+
+    (define (window-state-get . args)
+      ;; GNU Emacs's `window-state-get` (`window.el:6461`): "Return state
+      ;; of WINDOW as a Lisp object." The car is the constraints on the
+      ;; size of WINDOW - the minimum sizes the state can be restored at
+      ;; under each IGNORE - and the cdr is the subtree.
+      ;;
+      ;; **Markers and buffers, not positions and names**: WRITABLE is
+      ;; nil by default, and a state that stays in memory can name the
+      ;; buffer object itself and mark its point with markers, so an edit
+      ;; between the save and the restore moves the point with the text.
+      ;;--------------------------------------------------------------
+      (let ((window (or (window--opt args 0) (frame-root-window)))
+            (writable (window--opt args 1)))
+        (unless (window-valid-p window)
+          (error "~a is not a live or internal window" window))
+        (cons
+         (list (cons 'min-height (window-min-size window))
+               (cons 'min-width (window-min-size window #t))
+               (cons 'min-height-ignore (window-min-size window #f #t))
+               (cons 'min-width-ignore (window-min-size window #t #t))
+               (cons 'min-height-safe (window-min-size window #f 'safe))
+               (cons 'min-width-safe (window-min-size window #t 'safe))
+               (cons 'min-pixel-height (window-min-size window #f #f #t))
+               (cons 'min-pixel-width (window-min-size window #t #f #t))
+               (cons 'min-pixel-height-ignore (window-min-size window #f #t #t))
+               (cons 'min-pixel-width-ignore (window-min-size window #t #t #t))
+               (cons 'min-pixel-height-safe (window-min-size window #f 'safe #t))
+               (cons 'min-pixel-width-safe (window-min-size window #t 'safe #t)))
+         (window--state-get-1 window writable))))
+
+    (define window-state-put-list '())
+    (define window-state-put-stale-windows '())
+    (define window-state-put-kept-windows '())
+    (define window-state-put-selected-window #f)
+    ;; ^ GNU Emacs's four `defvar`s (`window.el:6449`), which
+    ;; `window-state-put` and its two helpers pass state through. Read
+    ;; and `set!`-ed, never `let`-bound, so plain variables.
+
+    (define (window--state-put-1 state window ignore totals pixelwise)
+      ;; GNU Emacs's `window--state-put-1` (`window.el:6534`): rebuild
+      ;; the tree under WINDOW from STATE, splitting for every child but
+      ;; the last.
+      ;;
+      ;; **`window-combination-limit` is not consulted**: Emacs binds it
+      ;; around these splits so that a combination nested in one of the
+      ;; same type gets a parent of its own. This tree's `split-window`
+      ;; always makes a new parent, so the shape the state describes is
+      ;; the shape restored and the variable would be dead.
+      ;;--------------------------------------------------------------
+      (let ((type (car state)))
+        (set! state (cdr state))
+        (cond
+         ((eq? type 'leaf)
+          ;; "For a leaf window just add unprocessed entries to
+          ;; `window-state-put-list'."
+          (set! window-state-put-list (cons (cons window state) window-state-put-list)))
+         ((memq type '(vc hc))
+          (let* ((horizontal (eq? type 'hc))
+                 (total (window-size window horizontal pixelwise))
+                 (first #t)
+                 (new #f))
+            (for-each
+             (lambda (item)
+               ;; "Find the next child window. WINDOW always points to the
+               ;; real window that we want to fill with what we find here."
+               (when (memq (car item) '(leaf vc hc))
+                 (if (window--state-assq 'last item)
+                     ;; "The last child window."
+                     (set! new #f)
+                     ;; "Not the last child window, prepare for splitting
+                     ;; WINDOW. SIZE is the new (and final) size of the old
+                     ;; window."
+                     (let ((size
+                            (if totals
+                                ;; "Use total size."
+                                (cdr (window--state-assq
+                                      (if horizontal 'pixel-width 'pixel-height)
+                                      item))
+                                ;; "Use normalized size and round."
+                                (inexact->exact
+                                 (round (* total
+                                           (cdr (window--state-assq
+                                                 (if horizontal 'normal-width 'normal-height)
+                                                 item))))))))
+                       ;; "Use safe sizes, we try to resize later."
+                       (set! size
+                             (max size
+                                  (if horizontal
+                                      (* window-safe-min-width
+                                         (if pixelwise
+                                             (frame-char-width (window-frame window))
+                                             1))
+                                      (* window-safe-min-height
+                                         (if pixelwise
+                                             (frame-char-height (window-frame window))
+                                             1)))))
+                       (if (window-sizable-p window (- size) horizontal 'safe pixelwise)
+                           (begin
+                             (set! new (split-window-no-error window size horizontal pixelwise)))
+                           ;; "Give up if we can't resize window down to
+                           ;; safe sizes."
+                           (error "Cannot resize window ~a" window))
+                       (when first
+                         (set! first #f)
+                         ;; "When creating the first child window add for
+                         ;; parent unprocessed entries to
+                         ;; `window-state-put-list'."
+                         (set! window-state-put-list
+                               (cons (cons (window-parent window) state)
+                                     window-state-put-list)))))
+                 ;; "Now process the current window (either the one we've
+                 ;; just split or the last child of its parent)."
+                 (window--state-put-1 item window ignore totals pixelwise)
+                 ;; "Continue with the last window split off."
+                 (set! window new)))
+             state))))))
+
+    (define (window--state-put-2 ignore pixelwise)
+      ;; GNU Emacs's `window--state-put-2` (`window.el:6591`): give every
+      ;; window its parameters, its buffer and its sizes.
+      ;;--------------------------------------------------------------
+      (for-each
+       (lambda (item)
+         (let* ((window (car item))
+                (combination-limit (window--state-ref 'combination-limit item))
+                (parameters (window--state-ref 'parameters item))
+                (state (window--state-ref 'buffer item))
+                (next-buffers (window--state-ref 'next-buffers item))
+                (prev-buffers (window--state-ref 'prev-buffers item)))
+           (when combination-limit
+             (set-window-combination-limit window combination-limit))
+           ;; "Reset window's parameters and assign saved ones."
+           (for-each
+            (lambda (parameter)
+              (set-window-parameter window (car parameter) #f))
+            (window-parameters window))
+           (when parameters
+             (for-each
+              (lambda (parameter)
+                (set-window-parameter window (car parameter) (cdr parameter)))
+              parameters))
+           ;; "Process buffer related state."
+           (when state
+             (let* ((old-buffer-or-name (car state))
+                    (buffer (get-buffer old-buffer-or-name))
+                    (state (cdr state))
+                    (dedicated (window--state-ref 'dedicated state)))
+               (if (buffer-live-p buffer)
+                   (with-current-buffer buffer
+                     (set-window-buffer! window buffer)
+                     (set-window-hscroll! window (window--state-ref 'hscroll state))
+                     (let ((fringes (window--state-ref 'fringes state)))
+                       (set-window-fringes window (car fringes) (cadr fringes)))
+                     (let ((margins (window--state-ref 'margins state)))
+                       (set-window-margins window (car margins) (cdr margins)))
+                     (let ((scroll-bars (window--state-ref 'scroll-bars state)))
+                       (set-window-scroll-bars
+                        window (car scroll-bars) (list-ref scroll-bars 2)
+                        (list-ref scroll-bars 3) (list-ref scroll-bars 5)
+                        (list-ref scroll-bars 6)))
+                     (set-window-vscroll window (window--state-ref 'vscroll state))
+                     ;; "Adjust vertically."
+                     (if (or (memq (buffer-local-value buffer 'window-size-fixed #f)
+                                   '(t height))
+                             (window-preserved-size window))
+                         ;; "A fixed height window, try to restore the
+                         ;; original size."
+                         (let ((delta (- (cdr (window--state-assq
+                                               (if pixelwise 'pixel-height 'total-height)
+                                               item))
+                                         (window-size window #f pixelwise))))
+                           (when (window--resizable-p window delta #f #f #f #f #f pixelwise)
+                             (window-resize window delta #f #f pixelwise)))
+                         ;; "Else check whether the window is not high enough."
+                         (let* ((min-size (window-min-size window #f ignore pixelwise))
+                                (delta (- min-size (window-size window #f pixelwise))))
+                           (when (and (> delta 0)
+                                      (window--resizable-p window delta #f ignore #f #f #f pixelwise))
+                             (window-resize window delta #f ignore pixelwise))))
+                     ;; "Adjust horizontally."
+                     (if (or (memq (buffer-local-value buffer 'window-size-fixed #f)
+                                   '(t width))
+                             (window-preserved-size window #t))
+                         (let ((delta (- (cdr (window--state-assq
+                                               (if pixelwise 'pixel-width 'total-width)
+                                               item))
+                                         (window-size window #t pixelwise))))
+                           (when (window--resizable-p window delta #t #f #f #f #f pixelwise)
+                             (window-resize window delta #t #f pixelwise)))
+                         (let* ((min-size (window-min-size window #t ignore pixelwise))
+                                (delta (- min-size (window-size window #t pixelwise))))
+                           (when (and (> delta 0)
+                                      (window--resizable-p window delta #t ignore #f #f #f pixelwise))
+                             (window-resize window delta #t ignore pixelwise))))
+                     ;; "Set dedicated status."
+                     (set-window-dedicated-p window dedicated)
+                     ;; "Install positions (maybe we should do this after
+                     ;; all windows have been created and sized)."
+                     (guard (e (#t #f))
+                       (set-window-start! window
+                                          (let ((start (window--state-ref 'start state)))
+                                            (if (markerp start) (marker-position start) start)))
+                       (set-window-point! window
+                                          (let ((point (window--state-ref 'point state)))
+                                            (if (markerp point) (marker-position point) point))))
+                     ;; "Select window if it's the selected one.")
+                     (when (window--state-ref 'selected state)
+                       (select-window window)
+                       (set! window-state-put-selected-window window))
+                     (set-window-next-buffers
+                      window
+                      (delq #f (map (lambda (buffer)
+                                      (set! buffer (get-buffer buffer))
+                                      (and (buffer-live-p buffer) buffer))
+                                    (or next-buffers '()))))
+                     (set-window-prev-buffers
+                      window
+                      (delq #f (map (lambda (entry)
+                                      (let ((buffer (get-buffer (list-ref entry 0)))
+                                            (m1 (list-ref entry 1))
+                                            (m2 (list-ref entry 2)))
+                                        (and (buffer-live-p buffer)
+                                             (list buffer
+                                                   (if (markerp m1) m1
+                                                       (set-marker (make-marker) m1 buffer))
+                                                   (if (markerp m2) m2
+                                                       (set-marker (make-marker) m2 buffer))))))
+                                    (or prev-buffers '())))))
+                   (unless (window-minibuffer-p window)
+                     ;; "Preferably show a buffer previously shown in this
+                     ;; window."
+                     (switch-to-prev-buffer window)
+                     (cond
+                      ((procedure? (*window-restore-killed-buffer-windows*))
+                       (let* ((start (window--state-ref 'start state))
+                              (start-pos (if (markerp start) (marker-last-position start) start))
+                              (point (window--state-ref 'point state))
+                              (point-pos (if (markerp point) (marker-last-position point) point)))
+                         (set! window-state-put-kept-windows
+                               (cons (list window old-buffer-or-name
+                                           start-pos point-pos dedicated #f)
+                                     window-state-put-kept-windows))))
+                      ((or (and dedicated
+                                (eq? (*window-restore-killed-buffer-windows*) 'dedicated))
+                           (memq (*window-restore-killed-buffer-windows*) '(#f delete)))
+                       ;; "Try to delete the window."
+                       (set! window-state-put-stale-windows
+                             (cons window window-state-put-stale-windows)))
+                      (else #f))
+                     (set-window-dedicated-p window #f)))))))
+       window-state-put-list))
+
+    (define (window-state-put state . args)
+      ;; GNU Emacs's `window-state-put` (`window.el:6769`): "Put window
+      ;; state STATE into WINDOW."
+      ;;
+      ;; IGNORE non-nil means ignore minimum window sizes and fixed size
+      ;; restrictions; IGNORE `safe` means windows may go as small as
+      ;; `window-safe-min-*`. `window-restore-killed-buffer-windows`
+      ;; decides what happens to a window whose saved buffer was killed.
+      ;;--------------------------------------------------------------
+      (set! window-state-put-stale-windows '())
+      (set! window-state-put-kept-windows '())
+      (let ((window (window--opt args 0))
+            (ignore (window--opt args 1)))
+        ;; "When WINDOW is internal or nil, reduce it to a live one, then
+        ;; create a new window on the same frame to put STATE into."
+        (unless (window-live-p window)
+          (let ((root window))
+            (set! window
+                  (if root
+                      (let walk ((w root))
+                        (cond ((not w) (selected-window))
+                              ((and (window-live-p w)
+                                    (not (window-parameter w 'window-side)))
+                               w)
+                              (else
+                               (or (and (pair? (window-children w)) (walk (window-child w)))
+                                   (walk (window-next-sibling w))))))
+                      (selected-window)))
+            ;; `delete-other-windows-internal`: make WINDOW the frame's
+            ;; only window before the new one is made beside it.
+            (when (window-live-p window)
+              (delete-other-windows window))
+            ;; "Create a new window to replace the existing one."
+            ;; `(prog1 (split-window window window-safe-min-width t)
+            ;;        (delete-window window))`: the OLD window is the one
+            ;; deleted, so that the new one is what the state is put
+            ;; into.
+            (let ((new (guard (e (#t #f))
+                         (split-window window window-safe-min-width #t))))
+              (when new
+                (let ((old window))
+                  (set! window new)
+                  (delete-window old))))))
+        (set-window-dedicated-p window #f)
+        (let* ((frame (window-frame window))
+               (head (car state))
+               ;; "We check here (1) whether the total sizes of root window
+               ;; of STATE and that of WINDOW are equal so we can avoid
+               ;; calculating new sizes, and (2) if we do have to resize
+               ;; whether we can do so without violating size
+               ;; restrictions."
+               (pixelwise (and (window--state-ref 'pixel-width state)
+                               (window--state-ref 'pixel-height state)))
+               (totals (or (and pixelwise
+                                (= (window-pixel-width window)
+                                   (window--state-ref 'pixel-width state))
+                                (= (window-pixel-height window)
+                                   (window--state-ref 'pixel-height state)))
+                           (and (= (window-total-width window)
+                                   (window--state-ref 'total-width state))
+                                (= (window-total-height window)
+                                   (window--state-ref 'total-height state)))))
+               (min-height (cdr (assq (if pixelwise 'min-pixel-height 'min-height) head)))
+               (min-width (cdr (assq (if pixelwise 'min-pixel-width 'min-width) head))))
+          (when (and (not totals)
+                     (or (> min-height (window-size window #f pixelwise))
+                         (> min-width (window-size window #t pixelwise)))
+                     (or (not ignore)
+                         (begin
+                           (set! min-height
+                                 (cdr (assq (if pixelwise
+                                                'min-pixel-height-ignore
+                                                'min-height-ignore)
+                                            head)))
+                           (set! min-width
+                                 (cdr (assq (if pixelwise
+                                                'min-pixel-width-ignore
+                                                'min-width-ignore)
+                                            head)))
+                           (or (> min-height (window-size window #f pixelwise))
+                               (> min-width (window-size window #t pixelwise)))
+                           (or (not (eq? ignore 'safe))
+                               (begin
+                                 (set! min-height
+                                       (cdr (assq (if pixelwise
+                                                      'min-pixel-height-safe
+                                                      'min-height-safe)
+                                                  head)))
+                                 (set! min-width
+                                       (cdr (assq (if pixelwise
+                                                      'min-pixel-width-safe
+                                                      'min-width-safe)
+                                                  head)))
+                                 (or (> min-height (window-size window #f pixelwise))
+                                     (> min-width (window-size window #t pixelwise))))))))
+            (error "Window ~a too small to accommodate state" window))
+          (set! state (cdr state))
+          (set! window-state-put-list '())
+          (set! window-state-put-selected-window #f)
+          ;; "Work on the windows of a temporary buffer to make sure that
+          ;; splitting proceeds regardless of any buffer local values of
+          ;; `window-size-fixed`."
+          (with-temp-buffer
+            (set-window-buffer! window (current-buffer))
+            (window--state-put-1 state window #f totals pixelwise)
+            (window--state-put-2 ignore pixelwise))
+
+          (when (window-live-p window-state-put-selected-window)
+            (select-window window-state-put-selected-window))
+          (let loop ((stale window-state-put-stale-windows))
+            (when (pair? stale)
+              (let ((window (car stale)))
+                ;; "Avoid that `window-deletable-p' throws an error if
+                ;; window was already deleted when exiting
+                ;; `with-temp-buffer' above."
+                (when (and (window-valid-p window)
+                           (eq? (window-deletable-p window) #t))
+                  (delete-window window)))
+              (loop (cdr stale))))
+          (when (procedure? (*window-restore-killed-buffer-windows*))
+            ((*window-restore-killed-buffer-windows*)
+             frame window-state-put-kept-windows 'state)
+            (set! window-state-put-kept-windows '()))
+          (window--check frame))))
+
+    (define (window-state-buffers state)
+      ;; GNU Emacs's `window-state-buffers` (`window.el:6900`): "Return
+      ;; all buffers saved to the given window state STATE."
+      ;;--------------------------------------------------------------
+      (let ((buffer (let ((entry (window--state-assq 'buffer state)))
+                      (and entry (cadr entry))))
+            (buffers (let loop ((items (if (pair? (car state))
+                                           (list (cdr state))
+                                           (cdr state)))
+                                (acc '()))
+                       (cond ((null? items) (reverse acc))
+                             ((memq (car (car items)) '(leaf vc hc))
+                              (loop (cdr items)
+                                    (append (reverse (window-state-buffers (car items)))
+                                            acc)))
+                             (else (loop (cdr items) acc))))))
+        (if buffer (cons buffer buffers) buffers)))
     ))

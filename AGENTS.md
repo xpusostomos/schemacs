@@ -9275,3 +9275,135 @@ applied the list - "Wrong type to apply: (help-menu)".
 The button pops the bar through `popup-menu`, which the menu-bar work
 already exercises; the *popup itself* is not driven by any test, and the
 terminal's is only reachable through a real click on the bar's Menu item.
+
+# Window states, and the size engine under them (2026-11-16)
+
+`tab-bar.el`'s last named gap is closed: a tab carries the frame's window
+state, `'clone`/`'window` new-tab choices rebuild a layout from one, and a
+tab from a saved session can be restored with `window-state-put`.
+
+## What landed
+
+| Emacs | here |
+|---|---|
+| `window.c`: `window-pixel-*`, `window-total-*`, `window-size`, `window-normal-size`, `window-new-*`, `window-resize-apply(-total)`, `window-combination-limit`, `window-dedicated-p`, `window-fringes`, `window-margins`, `window-scroll-bars`, `window-vscroll`, `window-child`/`-right`/`-left`/`-last-child` | `frame.scm` - a new "window tree's algebra" section at the end of the file |
+| `window.el:379-2100`: `window-normalize-window`, `window-min-size`, `window-sizable`, `window-size-fixed-p`, `window-min-delta`/`max-delta`, `window--resizable`, `window-resizable` | `window.scm` |
+| `window.el:2721-3400`: `window--size-to-pixel`, `window--pixel-to-total`, `window--resize-reset`, `window--resize-this-window`, `window--resize-siblings`, `window--resize-child-windows`, `window-resize`, `window-resize-no-error` | `window.scm` |
+| `window.el:6370-6920`: `window-state-get`, `window--state-get-1`, `window--state-put-1/2`, `window-state-put`, `window-state-buffers` | `window.scm` |
+| `window.el` `window-deletable-p`, `split-window-no-error`, `walk-window-subtree`, `window--check` | `window.scm` |
+| `tab-bar.el:1690` `(cons 'ws (window-state-get))`; `:1771` the `ws` restore branch; `:2077` `'clone`/`'window` | `tab-bar.scm` |
+
+`window-start` moved from `indentc.scm` to `frame.scm`, where `w->start`
+lives; `indentc.scm` imports it. `window-live-p` moved from `window.scm`
+to `frame.scm` and is now the C's test (`WINDOW_LIVE_P` = a window with a
+buffer) rather than "is on the frame's window list", which answered false
+for the minibuffer window while no prompt was up.
+
+DEPARTURES.md has the representation choices: the size registers live in
+`*window-slots*` beside the window (as `w->cursor_off_p` already does),
+pixel sizes are derived from the row/column rectangles, normal sizes are
+derived rather than stored, and the decoration queries answer a
+terminal's answers on both front ends.
+
+## The four bugs the tests found, all of the same shape
+
+1. **A `(when ...)` whose body had been swallowed by its own condition.**
+   `window-state-put`'s size check closed one paren too early, so the
+   whole rest of the function was inside the `when`, and with `totals`
+   true (the ordinary case) the function returned the *unspecified*
+   value and did nothing. Symptom: `window-state-put` returned
+   `#<unspecified>` and the layout was untouched. The tell was a
+   depth-profile of the form (a Python scanner that skips strings and
+   comments): the body sat one level deeper than the `let` that should
+   have contained it. **A compensating close elsewhere keeps the file
+   balanced**, so the reader, the compiler and the suite's other tests
+   all pass - only this function misbehaves.
+2. **`(prog1 (split-window ...) (delete-window window))` written the
+   other way round**: `(set! window new) (delete-window window)` deletes
+   the *new* window and leaves the state being put into a window that is
+   no longer on the frame. The restore then silently did nothing.
+3. **`*window-restore-killed-buffer-windows*` applied as a procedure.**
+   `(procedure? *parameter*)` is true - the parameter itself is a
+   procedure - so the branch ran and then applied the *parameter* object
+   with three arguments: "Wrong number of arguments ... () | (x)". The
+   same class as `run-hooks` taking the list: a parameter must be called.
+4. **`(cdr #f)` where Elisp's `(cdr nil)` is nil** - a state with no
+   `combination-limit`, `next-buffers` or `prev-buffers` entry. Every
+   lookup now goes through `window--state-ref`, which answers `#f`.
+5. **A local variable named `list` shadowed the procedure.** Emacs's
+   `window--state-get-1` binds `(let ((parameters ...) list) ...)` and
+   builds its answer with a backquote; the port wrote
+   `(list (cons 'parameters list))`, which applied the accumulator as
+   soon as a window carried any parameter at all. The accumulator is
+   `acc` here and the source says why.
+6. **`get-buffer` answered nil for a buffer.** The docstring's second
+   sentence - "If BUFFER-OR-NAME is a buffer instead of a string, return
+   it as is" - is the C's `BUFFERP` arm, and it was missing, so a
+   window state (which names its buffers *as buffers* when it is not
+   writable) found nothing and `window-state-put` restored every window
+   with the wrong buffer. Fixed at the primitive (`buffer.scm`), which
+   is where the rule lives.
+
+## The state's shape, and the `assq` it needs
+
+A state is `(HEAD . SUBTREE)`, where HEAD is the twelve `min-*` pairs and
+SUBTREE is the root node: the type symbol consed onto the alist, then the
+children. Emacs's `assq` finds the *root's* entries because the C
+compares `XCAR (XCAR (tail))` and the root's entries are elements of the
+top-level spine - but it does **not** find anything inside a
+`(buffer ...)` sublist, and `(assq 'dedicated STATE)` is nil in Emacs
+too. `window--state-assq` reproduces that exactly (with the pair test
+the C's `XCAR` gives a non-cons silently). Two consequences worth
+knowing before writing a test:
+
+* an entry of a *node* is found by `(window--state-ref KEY NODE)`;
+* an entry of the *buffer section* needs
+  `(window--state-ref 'dedicated (window--state-ref 'buffer NODE))`;
+* `window-state-buffers` answers the same buffer **twice** for a
+  one-window state in Emacs - the root's entry and the node's are the
+  same one - and this port matches.
+
+## The numbers, measured
+
+Every expectation in `window-state-tests.scm` (35 assertions) came from
+`emacs -Q --batch` on the same tree: a leaf's `window-min-size` is 4/2/1
+tall and 10/2/2 wide for IGNORE nil/t/safe; a vertical combination's is
+the sum (8) and an ortho-combination's the maximum; `10/14 +3 -> 13/11`,
+then `-5 -> 8/16`; `(window-resizable r 100)` is the sibling's room above
+its minimum; `window-resize-no-error` past that answers nil.
+
+The tree's text area is 23 rows where Emacs's batch frame is 24 (its echo
+area is a window and takes the last row), so the tests assert the *rule*
+where the number depends on the frame, as the recentring tests do.
+
+## Still not carried
+
+* `tab-bar-split-tab`/`tab-bar-merge-tabs` (they need
+  `window-get-split-combination`), `tab-bar-move-tab-to-frame`, the
+  touch/drag tab commands - all `window-state-*` clients that were named
+  before this pass.
+* `window--sides-check`/`window--atom-check` (no side or atomic windows).
+* `window-preserve-size` (the parameter is read by `window--preserve-size`
+  and written by nothing here).
+* `get-mru-window`, and so the "minibuffer was selected" step of
+  `tab-bar-select-tab-internal`.
+* `window-state-put`'s `window-state-put-kept-windows` callback is called
+  with Emacs's four arguments when `window-restore-killed-buffer-windows`
+  is a procedure; nothing in this tree sets one.
+
+## A suite with several groups needs a `test-end` for each
+
+`srfi 64` prints its summary - "Test suite finished" and "# of expected
+passes" - only when the group stack empties. `window-state-tests.scm` has
+six `test-begin`s and was written with a single `test-end` at the end: the
+tests all passed and the runner still said **DID NOT RUN**, because it
+counts the summary line and there was none. Every `test-begin` now has
+its `test-end`. (The runner's own note explains the other half of this
+check: a suite that dies inside its *second* group also used to read
+green.)
+
+## Verified
+
+All 62 suites pass (window-state-tests 43, tab-bar-tests 32 - the two
+new ones are the `clone` layout and the recorded `ws`), the tree compiles
+with no new warnings, and the tab bar still restores a tab's layout.

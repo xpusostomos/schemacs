@@ -109,6 +109,9 @@
           current-window-configuration set-window-configuration
           window-configuration-p window-configuration-frame
           *window-restore-killed-buffer-windows*
+          ;; A tab carries the frame's window state and is restored from
+          ;; it - `window-state-get`/`window-state-put`.
+          window-state-get window-state-put
           delete-other-windows split-window delete-window
           switch-to-buffer other-window quit-window)
     (only (schemacs editor buffer)
@@ -596,10 +599,11 @@ buffer was killed. If nil, `set-window-configuration' decides."
       ;; "Make a new tab data structure that can be added to tabs on the
       ;; FRAME."
       ;;
-      ;; **`ws` is nil here**: `window-state-get` is not ported, and a
-      ;; window state no reader could restore is worse than a field that
-      ;; says so. `wc` is the branch `tab-bar-select-tab` takes for a
-      ;; tab of this session, which is every tab this build makes.
+      ;; **`ws` is the frame's window state** - `(window-state-get)`,
+      ;; `tab-bar.el:1690`'s own line. A tab of this session is restored
+      ;; from `wc` (`tab-bar-select-tab-internal` prefers a
+      ;; window-configuration), and `ws` is what a tab written to a file
+      ;; would carry; `window-state-put` can restore either.
       ;;--------------------------------------------------------------
       (let* ((frame (or (and (pair? args) (car args)) (selected-frame)))
              (tab (tab-bar--current-tab-find #f frame))
@@ -616,7 +620,7 @@ buffer was killed. If nil, `set-window-configuration' decides."
                (cons 'explicit-name tab-explicit-name))
          (if tab-group (list (cons 'group tab-group)) '())
          (list (cons 'time (current-time-float))
-               (cons 'ws #f)
+               (cons 'ws (window-state-get))
                (cons 'wc (current-window-configuration))
                (cons 'wc-point (copy-marker (point)))
                (cons 'wc-bl (seq-filter buffer-live-p
@@ -1173,10 +1177,17 @@ list of menu-item elements, or nil."
                                        (seq-filter buffer-live-p
                                                    (tab-bar--alist-get
                                                     'wc-bbl to-tab)))))
-               ;; `ws` is nil for every tab this build makes; a tab from
-               ;; a saved session would take this branch, which the
-               ;; header names as not carried.
-               (ws #f)))
+               ;; A tab restored from a window state - `tab-bar.el:1771`.
+               ;; "`window-state-put' fails when called in the minibuffer"
+               ;; is not carried: there is no minibuffer *window* to be
+               ;; selected here (the echo area is an ordinary window whose
+               ;; buffer is the prompt), so `window-state-put` always has
+               ;; a usable window.
+               (ws
+                (window-state-put ws #f 'safe)
+                (when tab-bar-history-mode-variable
+                  (hashq-set! tab-bar-history-back (selected-frame) '())
+                  (hashq-set! tab-bar-history-forward (selected-frame) '())))))
             (let ((tabs ((*tab-bar-tabs-function*))))
               (when from-index
                 (set-car! (list-tail tabs from-index) from-tab))
@@ -1252,22 +1263,37 @@ last one."
              (from-tab (tab-bar--tab)))
         (when (*tab-bar-new-tab-choice*)
           (let ((choice (*tab-bar-new-tab-choice*)))
-            (cond
-             ((eq? choice 'clone) #f)
-             ((string? choice)
-              (let ((buffer (or (get-buffer choice) #f)))
-                (when (and buffer (buffer-live-p buffer))
-                  (switch-to-buffer buffer))))
-             ((procedure? choice)
-              (let ((buffer (choice)))
-                (when (and buffer (buffer-live-p buffer))
-                  (switch-to-buffer buffer))))
-             (else
-              ;; "Create a new window to get rid of old window parameters
-              ;; (e.g. prev/next buffers) of old window."
-              (delete-other-windows (selected-window))
-              (split-window (selected-window) #f #t)
-              (delete-window (selected-window))))))
+            ;; `tab-bar.el:2085`'s shape: `clone` first, then - for
+            ;; every other choice - the old layout is cleared, and then
+            ;; `window` re-puts a one-window state where the rest split a
+            ;; fresh window. A string or a function is a *buffer* to
+            ;; show, after that same clearing.
+            (if (eq? choice 'clone)
+                ;; "Create new unique windows with the same layout"
+                (window-state-put (window-state-get))
+                (begin
+                  ;; "Remove window parameters that can cause problems
+                  ;; with `delete-other-windows' and `split-window'."
+                  (set-window-parameter (selected-window) 'window-atom #f)
+                  (delete-other-windows (selected-window))
+                  (if (eq? choice 'window)
+                      ;; "Create new unique window from remaining window"
+                      (begin
+                        (set-window-parameter (selected-window) 'window-side #f)
+                        (window-state-put (window-state-get)))
+                      ;; "Create a new window to get rid of old window
+                      ;; parameters (e.g. prev/next buffers) of old
+                      ;; window."
+                      (begin
+                        (split-window (selected-window) #f #t)
+                        (delete-window (selected-window))))))
+            (let ((buffer (cond ((and (procedure? choice)
+                                      (not (memq choice '(clone window))))
+                                 (choice))
+                                ((string? choice) (get-buffer choice))
+                                (else #f))))
+              (when (and buffer (buffer-live-p buffer))
+                (switch-to-buffer buffer)))))
         (when from-index
           (let ((tabs ((*tab-bar-tabs-function*))))
             (set-car! (list-tail tabs from-index) from-tab)))

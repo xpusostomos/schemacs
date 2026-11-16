@@ -814,10 +814,20 @@
       ;;--------------------------------------------------------------
       (set!text-editor-buffer-name buffer name))
     (define (get-buffer name)
-      ;; The buffer called NAME, or false: GNU Emacs's `get-buffer'.
+      ;; The buffer called NAME, or false: GNU Emacs's `get-buffer`.
+      ;;
+      ;; **"If BUFFER-OR-NAME is a buffer instead of a string, return it
+      ;; as is, even if it has been killed"** - the docstring's second
+      ;; sentence, and the `BUFFERP (buffer-or-name)` arm of the C
+      ;; (`buffer.c:5043`). Without it a window state, which names its
+      ;; buffers *as buffers* when it is not writable
+      ;; (`window-state-get`), found nothing and `window-state-put`
+      ;; restored the layout with the wrong buffer in every window.
       ;;--------------------------------------------------------------
-      (let ((entry (assoc name (*buffer-list*))))
-        (and entry (cdr entry))))
+      (if (bufferp name)
+          name
+          (let ((entry (assoc name (*buffer-list*))))
+            (and entry (cdr entry)))))
     (define (generate-new-buffer-name name . args)
       ;; A name no buffer has, based on NAME: GNU Emacs's
       ;; `generate-new-buffer-name'. If NAME is free it is returned;
