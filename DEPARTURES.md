@@ -4100,14 +4100,21 @@ a tty.
 **rows** where the C answers pixels; `window--min-size-1` multiplies by
 the character height once, where the C's arithmetic is already in pixels.
 
-## `window-combination-limit` is not a variable here
+## `window-combination-limit` and `window-combination-resize` are parameters
 
-`window--state-put-1` binds `window-combination-limit` around its splits
-so that a combination nested in one of the same type gets a parent of
-its own (Bug#50867). This tree's `split-window` always makes a new
-parent, so the shape the state describes is the shape restored and the
-variable would be dead; the `set-window-combination-limit` *field* is
-ported and round-trips.
+**Superseded 2026-11-16.** This section used to say that
+`window-combination-limit` was a variable this tree did not have,
+because `split-window` always made a new parent and the variable would
+have been dead. That was true of the old `split-window`; both are
+ported now (see "Splitting a window into an existing combination"
+below), and both variables are here - as parameters, because Emacs
+`let`-binds them around code that reads them several frames down
+(`window--state-put-1` binds `window-combination-limit`,
+`delete-window` binds `window-combination-resize`), and a Scheme `let`
+would be invisible to those callees. `window-combination-resize` was a
+plain variable here until this change; its name carries the asterisks
+now, and `window-absorb!` - the function the old `delete-window` used -
+is gone with it.
 
 ## `window-deletable-p` is reduced
 
@@ -4151,3 +4158,143 @@ calls `delete-other-windows`, which does the same thing for a frame with
 no side windows. `tab-bar-select-tab-internal`'s "select the mru window
 if the minibuffer is selected" is not carried: there is no separate
 minibuffer window to be selected here.
+
+## Splitting a window into an existing combination
+
+**Fixed 2026-11-16.** `split-window` used to make a new internal window
+on *every* split, whatever the window's parent was. That is not what the
+C does: `Fsplit_window_internal` (`window.c:5427`) computes
+
+```c
+  bool combination_limit
+    = (EQ (Vwindow_combination_limit, Qt)
+       || NILP (o->parent)
+       || (horflag ? WINDOW_VERTICAL_COMBINATION_P (XWINDOW (o->parent))
+                   : WINDOW_HORIZONTAL_COMBINATION_P (XWINDOW (o->parent))));
+```
+
+and when it is false the new window becomes OLD's **next sibling** in
+the combination OLD is already in. So three `C-x 2`s on the same window
+make *one* combination of three in Emacs, and a chain of three nested
+pairs here - the same picture on the screen, a different tree. It
+mattered as soon as anything read the tree: `window-child-count`,
+`other-window`'s ordering, `window-state-get`'s shape, and
+`tab-bar-split-tab`'s ARG, which counts children.
+
+The port keeps the rule and its two escape hatches: `t` in
+`*window-combination-limit*`, a window with no parent, and an
+ortho-combined split (splitting a window vertically inside a horizontal
+combination) each still make a new parent. The C tests only for `Qt`;
+`nil` and the default `window-size` behave the same way there, and they
+do here.
+
+`window--state-put-1`'s binding of `window-combination-limit` is ported
+with it (`window.el:6552`, Bug#50867/Bug#64405): without it a restored
+state's nested combinations would be flattened into their parent by the
+sibling rule, and the shape read back would not be the shape saved.
+
+**An internal window's children give up the new window's share in
+proportion**, as `split-window-internal`'s closing
+`window_resize_apply (p, horflag)` and the wrapper's
+`window--resize-this-window window (- new-pixel-size)` do in the C. They
+did not until 2026-11-16, and it went unseen while the only internal
+splits were `window-state-put`'s (which resizes everything immediately
+after). The completion list splits the frame's *root*, and with the
+delete on the resize engine the two rules disagreed: a 12/11 frame came
+back 18/5 after the list was closed (`pty-check.py`'s
+`completion-resize`).
+
+**`split-main-window-below` is a thin `split-window` call now**, with
+the size negated: Emacs's positive SIZE is the rows the *upper* window
+keeps, and this helper's SIZE is the new window's. It exists because
+this tree's `display-buffer` has no `display-buffer-at-bottom` to call;
+its old body, which shrank only the child touching the bottom edge,
+went with the flat-list model.
+
+**Departure**: `split-window` here takes the new window's buffer, point
+and start from a *reference window* - OLD when OLD is live, the frame's
+selected window when OLD is internal, which is the C's own rule
+(`window.c:5443`). The C's `set_window_buffer` would put the new
+window's start at `b->last_window_start`, which this tree does not
+store (see the window-start section above), so the new window starts
+where the reference window starts.
+
+## `delete-window` gives the space to one sibling
+
+**Fixed 2026-11-16.** The old `delete-window` gave the deleted window's
+space to *every* sibling in turn - right while every combination had two
+children, wrong the moment a combination of three can exist (which the
+split rule above makes possible): two siblings would each grow by the
+deleted window's size and the frame would grow with them.
+
+It is `window.el:4318`'s body now, over the resize engine that was
+already ported: `window--resize-reset`, `window--resize-this-window`
+on the previous sibling (or the next when there is none), and
+`window--pixel-to-total`. The C's `delete-window-internal`
+(`window.c:5691`) is ported under its own name, with `recombine_windows`
+(`window.c:2612`) under it: a delete that leaves a combination of one
+kind nested in another of the same kind collapses it.
+
+**Read the combination's axis before unlinking it**: a combination left
+with one child has no axis to read off the rectangles -
+`windows-stacked?` needs two children - and `window-left-child` calls a
+one-child list horizontal. The C reads
+`WINDOW_HORIZONTAL_COMBINATION_P (p)` before it touches the tree
+(`window.c:5717`) for the same reason.
+
+**Not carried**, each for want of what it reads: the `delete-window`
+window parameter and `ignore-window-parameters` (no side windows), the
+atomic-window handling, the "Attempt to delete main window of frame"
+check (with no side windows the main window *is* the root, which the
+parentless test already refuses), and `delete-window-choose-selected`
+(there is no MRU list here; the frame's first window is chosen, as
+`delete-window-internal`'s own fallback does).
+
+## `combine-windows`, and the normal sizes it does not write
+
+`combine-windows` (`window.c:5213`) is ported in full, including the
+two-direction search for FIRST..LAST and "Cannot combine a window with
+itself". Two departures of the representation: the C splices with four
+`w->next`/`w->prev` pointer writes where a combination here is a list,
+so the splice is one list rebuild; and the C ends with
+`window_set_parent_and_normal_sizes` on the new parent and on its
+parent, which this tree does not need - normal sizes are derived from
+the rectangles (`window-normal-size`), and the rectangles are what the
+function sets.
+
+## `window-get-split-combination` is `window-x.el`'s, and only it
+
+`schemacs/editor/window-x.scm` is new and mirrors
+`lisp/window-x.el`. Only `window-get-split-combination` is carried: it
+is what `tab-bar-split-tab` needs. Not carried from that file, with
+what each waits for: `split-frame` and `merge-frames` (a `make-frame`
+that can be handed a window configuration), `window-make-frame`, the
+side-window placement functions and the atomic-window ones.
+
+**It really does combine**: `window-get-split-combination` calls
+`combine-windows`, which rewrites the frame's tree, so calling it twice
+on one frame gives the second call the tree the first one made. That is
+Emacs's behaviour too - the function exists to be followed by
+`delete-window` - and it is why the test gives each call a frame of its
+own.
+
+## `tab-bar-split-tab`, `tab-bar-merge-tabs` and ARG
+
+`tab-bar-split-tab` (`tab-bar.el:1978`) is ported as it stands,
+including its three refusals and the `_` binding that selects the tab
+being split. **ARG counts the main window's children**, so with the old
+nested-pair trees "ARG 3 exceeds number of windows 1" was the answer for
+a three-window tab; with the split rule fixed the count is Emacs's. The
+part that moves is "the part which does not include TAB's selected
+window" - `window-get-split-combination`'s rule - whichever side of the
+pivot that is.
+
+`tab-bar-merge-tabs` (`:2014`) binds `tab-bar-close-tab-select` to
+`recent` and `tab-bar-closed-tabs` to nil around the close, so the tab
+being merged is not recorded for `tab-bar-undo-close-tab` - the merge is
+one operation, not a close followed by an insert.
+
+`tab-bar-move-window-to-tab` is ported too; Emacs binds
+`ignore-window-parameters` around its `delete-window`, which has nothing
+to bind here (no window parameter stops a delete in this tree, there
+being no side windows).

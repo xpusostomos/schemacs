@@ -11,7 +11,7 @@
        *current-frame* *current-buffer* *default-frame-alist*
        new-frame frame-parameter frame-selected-window window-top
        window-height window-list frame-inner-width %frame-tab-bar-lines)
- (only (schemacs editor window) switch-to-buffer)
+ (only (schemacs editor window) switch-to-buffer split-window)
  (only (schemacs editor tab-bar)
        tab-bar-mode tab-bar-mode-variable tab-bar-tabs tab-bar-new-tab
        tab-bar-select-tab tab-bar-close-tab tab-bar-rename-tab
@@ -28,7 +28,8 @@
        tab-bar-format-menu-bar tab-bar-menu-bar-button
        tab-switcher tab-switcher-noselect tab-switcher-select tab-switcher-mode
        tab-bar-tab-group-default *tab-bar-show-inactive-group-tabs*
-       *tab-bar-new-tab-choice*)
+       *tab-bar-new-tab-choice* tab-bar-split-tab tab-bar-merge-tabs
+       tab-bar-move-window-to-tab)
  (only (schemacs editor buffer)
        get-buffer-create buffer-name current-buffer with-current-buffer
        buffer-read-only?)
@@ -70,7 +71,16 @@
 (test-begin "schemacs_editor_tab_bar")
 
 (define (condition/report-string ex)
-  (or (exception-message ex) ""))
+  ;; What the echo area shows: a condition's message is a `format'
+  ;; template and its arguments ride in the irritants, exactly as
+  ;; `keyboard.scm`'s `report-command-error!` puts them back together.
+  (if (error-object? ex)
+      (let ((message (error-object-message ex))
+            (irritants (error-object-irritants ex)))
+        (if (and (list? irritants) (pair? irritants))
+            (apply format #f (or message "") irritants)
+            (or message "")))
+      (or (exception-message ex) "")))
 
 
 ;; The mode puts `tab-bar-lines` on the frame - the parameter
@@ -429,5 +439,77 @@
         (list (keymap-type? map)
               (keymap-type? (keymap-lookup map 'file))
               (keymap-type? (keymap-lookup map 'edit)))))))
+
+;; **`tab-bar-split-tab`** - `tab-bar.el:1978`. Three windows in one tab,
+;; ARG 1, the selected window the top one: the pivot is the first child
+;; and the selected window is on its side, so the *other* side - the
+;; last two windows, combined - moves to a new tab. The old tab keeps
+;; the one window, the new one gets the other two.
+(test-equal '(2 2 3 1)
+  (let ((frame (fresh-frame)))
+    (parameterize ((*current-frame* frame) (*current-buffer* #f))
+      (split-window (split-window (car (window-list)) 8 #f) 6 #f)
+      (let ((before (length (window-list))))
+        (tab-bar-split-tab #f 1)
+        (let ((tabs (length (tab-bar-tabs)))
+              (new-windows (length (window-list))))
+          (tab-bar-select-tab 1)
+          (list tabs new-windows before (length (window-list))))))))
+
+;; `tab-bar-split-tab` with ARG -1 counts the pivot from the *end*: the
+;; pivot is the second child, the selected window (the first) is to its
+;; left, so the part split off is the one on the right - the last window
+;; alone. Emacs's own rule is "the part which does not include TAB's
+;; selected window".
+(test-equal '(2 2 1)
+  (let ((frame (fresh-frame)))
+    (parameterize ((*current-frame* frame) (*current-buffer* #f))
+      (split-window (split-window (car (window-list)) 8 #f) 6 #f)
+      (tab-bar-split-tab #f -1)
+      (let ((new-windows (length (window-list))))
+        (tab-bar-select-tab 1)
+        (list (length (tab-bar-tabs)) (length (window-list)) new-windows)))))
+
+;; Its three refusals, with Emacs's own messages.
+(test-equal '("Cannot split tab with only one window"
+              "Invalid ARG 0 for splitting tab"
+              "ARG 3 exceeds number of windows 1 that can be split off")
+  (let ((frame (fresh-frame)))
+    (parameterize ((*current-frame* frame) (*current-buffer* #f))
+      (let ((one (guard (e (#t (condition/report-string e))) (tab-bar-split-tab #f 1))))
+        (split-window (car (window-list)) 8 #f)
+        (list one
+              (guard (e (#t (condition/report-string e))) (tab-bar-split-tab #f 0))
+              (guard (e (#t (condition/report-string e))) (tab-bar-split-tab #f 3)))))))
+
+;; **`tab-bar-merge-tabs`** - `tab-bar.el:2014`: the main window of TAB2
+;; becomes a window of TAB1, and TAB2 closes. Splitting then merging
+;; gets the two tabs back to one, with the merged-in window beside the
+;; others.
+(test-equal '(1 3)
+  (let ((frame (fresh-frame)))
+    (parameterize ((*current-frame* frame) (*current-buffer* #f))
+      (split-window (split-window (car (window-list)) 8 #f) 6 #f)
+      (tab-bar-split-tab #f 1)
+      (tab-bar-merge-tabs 2 1 #f)
+      (list (length (tab-bar-tabs)) (length (window-list))))))
+
+;; Merging a tab with itself is refused, and with only one tab there is
+;; nothing to merge.
+(test-equal "Cannot find tab to merge"
+  (let ((frame (fresh-frame)))
+    (parameterize ((*current-frame* frame) (*current-buffer* #f))
+      (guard (e (#t (condition/report-string e))) (tab-bar-merge-tabs 1 1 #f)))))
+
+;; **`tab-bar-move-window-to-tab`**: the selected window leaves the
+;; current tab for a tab of its own, and the tab it left closes up.
+(test-equal '(2 1 1)
+  (let ((frame (fresh-frame)))
+    (parameterize ((*current-frame* frame) (*current-buffer* #f))
+      (split-window (car (window-list)) 8 #f)
+      (tab-bar-move-window-to-tab)
+      (let ((new-windows (length (window-list))))
+        (tab-bar-select-tab 1)
+        (list (length (tab-bar-tabs)) new-windows (length (window-list)))))))
 
 (test-end "schemacs_editor_tab_bar")

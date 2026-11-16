@@ -9407,3 +9407,143 @@ green.)
 All 62 suites pass (window-state-tests 43, tab-bar-tests 32 - the two
 new ones are the `clone` layout and the recorded `ws`), the tree compiles
 with no new warnings, and the tab bar still restores a tab's layout.
+
+# Splitting a tab, and the window-tree rule under it (2026-11-16)
+
+`tab-bar-split-tab` and `tab-bar-merge-tabs` were the last named gap in
+the tab bar, and they needed what `window-x.el` builds on. Doing it
+bottom-up turned up **a departure in `split-window` that everything
+above it had been shaped around**: this tree made a new parent on every
+split, where the C reuses the parent whenever the window is already in a
+combination of the same direction. The picture on the screen was the
+same; the *tree* was not, and the tree is what `window-child-count`,
+`window-state-get`, `other-window`'s order and `tab-bar-split-tab`'s ARG
+read.
+
+## What landed
+
+| Emacs | here |
+|---|---|
+| `window.c:5427` `Fsplit_window_internal`'s `combination_limit` | `%split-window-install!` in `window.scm` |
+| `window.c:5443` the reference window | `split-window`'s `refer`: the frame's selected window when OLD is internal |
+| `window.c:5213` `combine-windows` | `combine-windows`, beside `split-window` |
+| `window.c:5691` `delete-window-internal` | `delete-window-internal` |
+| `window.c:2612` `recombine_windows` | `recombine-windows` |
+| `window.el:4318` `delete-window` | `delete-window`, over the resize engine that was already here |
+| `window.el:586`/`:614` `walk-window-tree-1`/`walk-window-tree` | same names in `window.scm`; `walk-window-subtree` is now the sub-only call Emacs makes it |
+| `window.el:325` `window-child-count`, `:914` `window-main-window` | same names |
+| `window-x.el:417` `window-get-split-combination` | **new library** `(schemacs editor window-x)` |
+| `tab-bar.el:1965`/`:1978`/`:2014` | `tab-bar-move-window-to-tab`, `tab-bar-split-tab`, `tab-bar-merge-tabs`, plus the `split-tab`/`merge-tabs` aliases |
+
+Two variables changed kind: `*window-combination-limit*` (new, default
+`window-size`, a `window.c` DEFVAR) and `*window-combination-resize*`
+(was a plain `window-combination-resize`). Both are parameters because
+Emacs `let`-binds them around code that reads them several frames down -
+a Scheme `let` would be invisible there. `window-combined-p` grew its
+optional arguments for `window--state-put-1`'s call. `window-absorb!`
+is gone with the old `delete-window`.
+
+## Splitting an internal window: the completion list went 12/11 -> 18/5
+
+`split-window` on an *internal* window is what `display-buffer-at-bottom`
+does - `(split-window-no-error (window-main-window))` - and this tree's
+completion list splits the frame's root every time it opens. The
+rectangle arithmetic alone is wrong for one: the C's
+`split-window-internal` ends with `window_resize_apply (p, horflag)`, and
+the Elisp wrapper shrinks the old window's children through
+`window--resize-this-window` *before* the split, so an internal window's
+children give up the new window's share **in proportion**. Ours set only
+the old window's own rectangle, leaving its children at their old sizes -
+and the delete, which is Emacs's now, handed the rows back in
+proportion, so a frame that was 12/11 before `C-x 2` then `TAB`
+collapsed to 18/5 when the list was closed. `pty-check.py`'s
+`completion-resize` is the check that caught it.
+
+`%split-window-install!` now does the redistribution when the split
+window is internal (reset, `set-window-new-pixel`, `window--resize-this-window`,
+`%window-resize-apply-1` - the C's *static* apply, which frame.scm
+exports for this). `split-main-window-below` is a thin call to
+`split-window` with a **negative** size: `split-window`'s positive SIZE
+is the *upper* window's rows, and the helper's SIZE is the new window's.
+
+The lesson generalises to the whole pass: **the tree's two size models
+have to agree at a seam**. `absorb-into!` (used by the old
+`split-main-window-below`) shrinks only the child touching the edge,
+which stays consistent only if every neighbour does the same; the
+resize engine distributes by normal size. Once `delete-window` was on
+the engine, the two disagreed and the frame changed shape under the user.
+
+## The four bugs, all in the new code, all the same shape as before
+
+1. **`(frame-selected-window window)`** where the frame was meant: a
+   record accessor on the wrong record, which surfaced as a `struct-vtable`
+   error from a printer three frames away.
+2. **The combination's axis read after the unlink.** `delete-window-internal`
+   asks `window-left-child parent` to decide vertical from horizontal;
+   with one child left, `windows-stacked?` needs two and the answer
+   flips to horizontal, so `window-resize-apply` applied the wrong axis
+   and returned `#f` - the window kept its old rectangle and the frame
+   never filled. The C reads it before unlinking (`window.c:5717`); so
+   does this now.
+3. **`split-window` on an internal window copied `(window-buffer window)`**,
+   which is `#f`, into the new leaf - and `set_frame_buffer`-less code
+   died later. `tab-bar-merge-tabs` splits `(window-main-window)`, which
+   *is* internal whenever the tab has more than one window. The C's
+   reference-window rule is the fix.
+4. **A test that called `window-get-split-combination` twice on one
+   frame.** It combines - it rewrites the tree - so the second call saw
+   two children instead of three and answered the wrong side. Emacs is
+   the same; the test now gives each call its own frame.
+
+## Method notes
+
+- **A compiled procedure's source line is where to look, not the frame
+  name.** `(frame-procedure-name)` was `#f` for every interesting frame
+  and `(frame-source)` pointed into `ice-9/eval.scm`; what named the
+  culprit was printing the *arguments* the condition carried and seeing
+  a symbol where a record should be. Guile's record printers and
+  accessors make "expecting struct: X" mean "an accessor got X".
+- **`(car 'leaf)` is an error, `(cdr #f)` is an error.** Two of the
+  probes in this pass died in their own printing code, not in the
+  editor, and each time the backtrace pointed at the editor because
+  that was where the frame beneath it was. Read the top frames first:
+  if they are `(guile-user)` procedures, the bug is in the probe.
+- **`window--opt` is the tree's `&optional`**, and `window-combined-p`
+  had been written with two required arguments where Emacs's has one
+  optional; the compiler's "possibly wrong number of arguments" warning
+  is what caught the call site that needed it.
+
+## Still not carried
+
+- `split-frame`, `merge-frames`, `window-make-frame` - they need a
+  `make-frame` that can be handed a window configuration; `window-state-put`
+  into a new frame's root is the shape, and nothing asks for it yet.
+- `tab-bar-detach-tab` and `tab-bar-move-tab-to-frame` (a frame per tab),
+  `tab-bar-split-tab`'s cousins in `window-x.el`.
+- The side-window and atomic-window handling in `split-window`,
+  `delete-window` and `window-get-split-combination`: the parameters are
+  read, and nothing here sets `window-side`, so the branches are dead
+  but harmless.
+- `delete-window-choose-selected`, `get-mru-window`, and
+  `window-parameter`'s `delete-window` function.
+
+## Verified
+
+All 62 suites pass (`window-state-tests` 65, `tab-bar-tests` 38,
+`tty-editor-tests` 309), the tree compiles with no new warnings, and
+`tools/pty-check.py` is **88/88** on the tree as committed. (An earlier
+run of the same tree gave 87/88, the one failure being `completion-ui` -
+on the battery's documented flake list, C-g straight after TAB being a
+between-key race - and it passes **3/3 when run alone**. The check this
+pass *did* break, `completion-resize`, is described above and passes.)
+
+Two method notes on the way out:
+
+- **A check that fails only in the battery, and passes alone, may still
+  be yours.** `completion-resize` failed alone as well, which is what
+  separated it from the flake; run a suspect alone *twice* before
+  filing it under "load".
+- **`(car 'leaf)` and `(cdr #f)` are errors**, and two probes in this
+  pass died in their own printing code with the backtrace pointing at
+  the editor because that was the frame underneath. Read the top frames
+  first: if they are `(guile-user)` procedures, the bug is in the probe.

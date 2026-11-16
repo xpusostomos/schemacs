@@ -13,7 +13,14 @@
   ;; **A tab is a window configuration**, and `(schemacs editor window)`
   ;; ports `current-window-configuration`/`set-window-configuration` for
   ;; exactly this. Switching tabs restores the configuration; the
-  ;; keyboard and mouse commands make, close and reorder them.
+  ;; keyboard and mouse commands make, close and reorder them. A tab
+  ;; also carries the frame's **window state** (`ws`, `window-state-get`,
+  ;; `tab-bar.el:1690`), which is what restores a tab that has no live
+  ;; configuration (`:1771`); live tabs keep the `wc`, which is the
+  ;; branch Emacs takes for tabs of the same session - "During the same
+  ;; session, use window-configuration to switch tabs, because
+  ;; window-configurations are more reliable (they keep references to
+  ;; live buffers) than window-states".
   ;;
   ;; **The departures, all of them the tree's rather than this file's:**
   ;;
@@ -40,13 +47,6 @@
   ;;
   ;; **Not carried, with what each waits for:**
   ;;
-  ;;   * the tab's **window state** (`ws`, `window-state-get`): window
-  ;;     states are not ported, so a tab saved by one session and read
-  ;;     by another cannot be restored. Live tabs use `wc` (a window
-  ;;     configuration), which is the branch Emacs takes for tabs of the
-  ;;     same session - "During the same session, use window-configuration
-  ;;     to switch tabs, because window-configurations are more reliable
-  ;;     (they keep references to live buffers) than window-states".
   ;;   * `frameset-*` persistence (`tab-bar--tab`'s `ws` source) and
   ;;     `tab-bar-select-restore-context` (`window-point-context-*`).
   ;;   * **tab groups** (`tab-bar-tab-group-*`, `tab-bar-format-tabs-groups`):
@@ -113,7 +113,13 @@
           ;; it - `window-state-get`/`window-state-put`.
           window-state-get window-state-put
           delete-other-windows split-window delete-window
-          switch-to-buffer other-window quit-window)
+          switch-to-buffer other-window quit-window
+          ;; `tab-bar-split-tab` derives the combination it moves from
+          ;; the frame's main window, which is `window.el`'s walk.
+          window-main-window window-child-count window-live-p)
+    ;; "Return window combination suitable for `split-frame`" -
+    ;; `window-x.el`'s, the one function of that file the tab bar needs.
+    (only (schemacs editor window-x) window-get-split-combination)
     (only (schemacs editor buffer)
           buffer-name buffer-live-p current-buffer get-buffer
           set-buffer-local-value! buffer-local-value
@@ -168,6 +174,8 @@
    tab-bar-switch-to-prev-tab tab-bar-switch-to-last-tab
    tab-bar-switch-to-recent-tab tab-bar-rename-tab
    tab-bar-move-tab tab-bar-move-tab-to
+   tab-bar-split-tab tab-bar-merge-tabs tab-bar-move-window-to-tab
+   split-tab merge-tabs tab-window-detach
    ;; the name and face of one tab
    tab-bar-tab-name-current tab-bar-tab-name-current-with-count
    tab-bar-tab-name-all tab-bar-tab-name-truncated
@@ -2409,6 +2417,95 @@ marked for deletion."
       (define-key tab-bar-mode-map (kbd "C-<tab>") #f)
       (define-key tab-bar-mode-map (kbd "C-S-<tab>") #f))
 
+    (define-command (tab-bar-move-window-to-tab)
+      "Move the selected window to a new tab.
+This command removes the selected window from the configuration stored
+on the current tab, and makes a new tab with that window in its
+configuration."
+      (interactive '())
+      (parameterize ((*tab-bar-new-tab-choice* 'window))
+        (tab-bar-new-tab #f #f))
+      (tab-bar-switch-to-recent-tab #f)
+      ;; Emacs binds `ignore-window-parameters' around the delete so that
+      ;; a window's own parameters cannot stop `delete-window'. Nothing
+      ;; in this tree's `delete-window` consults a window parameter - it
+      ;; has no side windows to be told about - so there is nothing to
+      ;; bind.
+      (delete-window (selected-window))
+      (tab-bar-switch-to-recent-tab #f))
+
+    (define-command (tab-bar-split-tab tab arg)
+      "Split windows of specified TAB into two separate tabs.
+TAB defaults to the selected tab.  ARG specifies the number
+of windows to consider for splitting and defaults to 1.
+Interactively, ARG is the prefix argument.
+
+First divide the child windows of TAB's main window into two parts.
+The first part includes the first ARG child windows if ARG is positive,
+or -ARG last windows if it's negative.  The second part includes the
+remaining child windows of TAB's main window.  Then clone into a
+newly-created tab each of the windows of the part which does not
+include TAB's selected window and delete those windows from TAB."
+      (interactive (list #f (current-prefix-arg)))
+      (let* ((tab (or tab (1+ (tab-bar--current-tab-index))))
+             ;; "Make sure the tab we are splitting is selected", which
+             ;; is what its `_` binding does.
+             (_ (unless (eq? tab (1+ (tab-bar--current-tab-index)))
+                  (tab-bar-select-tab tab)))
+             (main (window-main-window))
+             (total-window-count (window-child-count main))
+             (arg (or arg 1)))
+        (cond
+         ((window-live-p main)
+          (error "Cannot split tab with only one window"))
+         ((or (not (number? arg)) (= arg 0))
+          (error "Invalid ARG ~a for splitting tab" arg))
+         ((>= (abs arg) total-window-count)
+          (error "ARG ~a exceeds number of windows ~a that can be split off"
+                 (abs arg) (1- total-window-count)))
+         (else
+          (let* ((comb (window-get-split-combination main arg))
+                 (ws (window-state-get comb)))
+            (delete-window comb)
+            (tab-bar-new-tab #f #f)
+            (window-state-put ws (window-main-window)))))))
+
+    (define split-tab tab-bar-split-tab)
+
+    (define-command (tab-bar-merge-tabs tab1 tab2 vertical)
+      "Merge the main window of TAB2 into TAB1.
+Split the main window of TAB1 and make the new window display
+the main window of TAB2.  Both TAB1 and TAB2 must be tab numbers.
+If VERTICAL is non-nil, make the new window below the old main window
+of TAB1.  Otherwise, make the new window on the right of TAB1's main
+window.  Interactively, VERTICAL is the prefix argument, TAB1 is the
+selected tab and TAB2 is the recent tab.  Close TAB2 if the merge
+completed successfully and return TAB1."
+      (interactive (list #f #f (current-prefix-arg)))
+      (let ((tab1 (or tab1 (1+ (tab-bar--current-tab-index))))
+            (tab2 (or tab2 (1+ (or (tab-bar--tab-index-recent 1) 0))))
+            (ws2 #f))
+        (when (eq? tab1 tab2)
+          (error "Cannot find tab to merge"))
+        (tab-bar-select-tab tab2)
+        (set! ws2 (window-state-get (window-main-window)))
+        ;; The C's dynamic binding of the two variables around the close:
+        ;; the tab closed is the one just read, and it must not be
+        ;; recorded for `tab-bar-undo-close-tab` - the merge is one
+        ;; operation, not a close followed by an insert.
+        (parameterize ((*tab-bar-close-tab-select* 'recent)
+                       (tab-bar-closed-tabs '()))
+          (tab-bar-close-tab #f #f))
+        (unless (eq? tab1 (1+ (tab-bar--current-tab-index)))
+          (tab-bar-select-tab tab1))
+        (window-state-put
+         ws2
+         ;; "Make new window on tab1."
+         (split-window (window-main-window) #f (not vertical)))
+        tab1))
+
+    (define merge-tabs tab-bar-merge-tabs)
+
     ;; `C-x t` - `tab-prefix-map` in `bindings.el`, which `tab-bar.el`
     ;; fills at its end. Every binding is a whole key sequence here, as
     ;; the tab line's own keys are. The aliases are the C's `defalias`
@@ -2434,6 +2531,7 @@ marked for deletion."
     (define tab-close-by-name tab-bar-close-tab-by-name)
     (define tab-rename-by-name tab-bar-rename-tab-by-name)
     (define tab-move-backward tab-bar-move-tab-backward)
+    (define tab-window-detach tab-bar-move-window-to-tab)
 
     (define-key *default-keymap* (kbd "C-x t 2") tab-new)
     (define-key *default-keymap* (kbd "C-x t 0") tab-close)

@@ -352,6 +352,12 @@
    window-new-total set-window-new-total
    window-new-normal set-window-new-normal
    window-resize-apply window-resize-apply-total
+   ;; `window_resize_apply` itself - the C's *static* function
+   ;; (`window.c:4815`), which applies a window's subtree from the
+   ;; `new-*` registers without the DEFUN's frame-level check. The C's
+   ;; `split-window-internal` ends with it, so `split-window` here needs
+   ;; it (`window.scm`).
+   %window-resize-apply-1
    )
 
   (begin
@@ -3773,13 +3779,17 @@
             (window-left-child window)
             (window-top-child window))))
 
-    (define (window-combined-p window horizontal)
+    (define (window-combined-p . args)
       ;; GNU Emacs's `window-combined-p` (`window.el:520`): "Return
-      ;; non-nil if WINDOW has siblings in a given direction." Which
-      ;; direction a parent divided is read from the rectangles - the
-      ;; tree has no `w->contents` to say vertical from horizontal.
+      ;; non-nil if WINDOW has siblings in a given direction. WINDOW
+      ;; must be a valid window and defaults to the selected one.
+      ;; HORIZONTAL determines a direction for the window combination.
+      ;; If HORIZONTAL is omitted or nil, return non-nil if WINDOW is
+      ;; part of a vertical window combination."
       ;;--------------------------------------------------------------
-      (let ((parent (window-parent window)))
+      (let* ((window (%decode-valid-window (%opt args 0)))
+             (horizontal (%opt args 1))
+             (parent (window-parent window)))
         (and parent
              (if horizontal
                  (not (windows-stacked? (window-children parent)))

@@ -12,19 +12,23 @@
        new-frame frame-root-window frame-list frame-live-p
        window-list window-buffer window-point window-top window-height
        window-width window-left window-dedicated-p set-window-dedicated-p
-       window-parameter set-window-parameter window-live-p)
+       window-parameter set-window-parameter window-live-p
+       window-parent window-children window-frame)
  (only (schemacs editor window)
        split-window delete-window delete-other-windows
        window-min-size window-normal-size window-size
        window-resize window-resizable window-resize-no-error
        window-state-get window-state-put window-state-buffers
        window--state-assq window--state-ref
-       window-deletable-p)
+       window-deletable-p window-child-count combine-windows
+       window-main-window)
  (only (schemacs editor buffer)
        allocate-buffer buffer-name buffer-pt buffer-beg get-buffer
        with-current-buffer set-point buffer-live-p)
  (only (schemacs editor editfns) insert goto-char)
- (only (schemacs editor marker) marker-position markerp))
+ (only (schemacs editor marker) marker-position markerp)
+ (only (schemacs editor window-x) window-get-split-combination)
+ (only (ice-9 exceptions) exception-message))
 
 ;; Regression tests for window states - `window.el`'s `window-state-get`,
 ;; `window-state-put` and the size arithmetic they are built on.
@@ -333,3 +337,133 @@
                  'frame (window-deletable-p (frame-root-window frame))))))
 
 (test-end "window-deletable-p")
+
+;;--------------------------------------------------------------
+(test-begin "window-combinations")
+;;--------------------------------------------------------------
+;; `split-window`'s parent rule (`window.c:5427`): "Set combination_limit
+;; if we have to make a new parent window. We do that if either
+;; `window-combination-limit` is t, or OLD has no parent, or OLD is
+;; ortho-combined." Otherwise the new window joins OLD's combination -
+;; which is what makes three splits of one window one combination of
+;; three rather than a chain of nested pairs. Emacs's own answers for
+;; the same three splits.
+(with-frame ""
+ (lambda (frame)
+   (let* ((a (car (window-list frame))))
+     (split-window a 6 #f)
+     (let* ((b (cadr (window-list frame)))
+            (c (split-window b 6 #f))
+            (root (frame-root-window frame)))
+       (test-equal "three splits of one window make one combination of three"
+                   3 (window-child-count root))
+       (test-equal "all three are children of the root"
+                   '(#t #t #t)
+                   (map (lambda (w) (eq? (window-parent w) root))
+                        (window-list frame)))
+       (test-equal "the first keeps the top of the frame"
+                   '(0 6) (list (window-top a) (window-height a)))
+       (test-equal "the middle sits below it"
+                   '(6 6) (list (window-top b) (window-height b)))
+       (test-equal "and the last below that"
+                   '(12 11) (list (window-top c) (window-height c)))
+       ;; A horizontal split of the bottom window is ortho-combined with
+       ;; its parent, so it gets a combination of its own.
+       (let ((d (split-window c 20 #t)))
+         (test-equal "an ortho split makes a new parent"
+                     #t (eq? (window-parent c) (window-parent d)))
+         (test-equal "... which is not the root"
+                     #f (eq? (window-parent c) root))
+         (test-equal "... and the root still has three children"
+                     3 (window-child-count root)))))))
+
+;; `window-main-window` (`window.el:914`): with no side windows on the
+;; frame it is the root window.
+(with-frame ""
+ (lambda (frame)
+   (test-equal "the main window of a frame with no side windows is its root"
+               #t (eq? (window-main-window) (frame-root-window frame)))
+   (test-equal "a leaf has no children"
+               0 (window-child-count (car (window-list frame))))))
+
+;; `combine-windows` (`window.c:5213`): the run from FIRST to LAST
+;; becomes one internal window in their place.
+(with-frame ""
+ (lambda (frame)
+   (let ((a (car (window-list frame))))
+     (split-window a 6 #f)
+     (split-window (cadr (window-list frame)) 6 #f)
+     (let* ((root (frame-root-window frame))
+            (kids (window-children root))
+            (b (cadr kids))
+            (c (caddr kids))
+            (p (combine-windows b c)))
+       (test-equal "combining the last two children leaves two children"
+                   2 (window-child-count root))
+       (test-equal "the new parent spans both"
+                   17 (window-height p))
+       (test-equal "and starts where the first of them did"
+                   6 (window-top p))
+       (test-equal "its children are the two that were combined"
+                   '(#t #t)
+                   (map (lambda (w) (eq? (window-parent w) p)) (list b c)))
+       (test-equal "the first child is left alone"
+                   #t (eq? (car kids) (car (window-children root))))
+       (test-equal "combining a window with itself is refused"
+                   "Cannot combine a window with itself"
+                   (guard (e (#t (exception-message e)))
+                     (combine-windows b b)))
+       (test-equal "the whole combination is already a combination"
+                   #f (combine-windows (car (window-children root))
+                                       (car (reverse (window-children root)))))))))
+
+;; `delete-window` gives the deleted window's space to ONE sibling - its
+;; previous one when it has one (`window.el:4372`).
+(with-frame ""
+ (lambda (frame)
+   (let ((a (car (window-list frame))))
+     (split-window a 6 #f)
+     (split-window (cadr (window-list frame)) 6 #f)
+     (let ((b (cadr (window-list frame))))
+       (delete-window b)
+       (test-equal "deleting the middle window gives its rows to the one above"
+                   '((0 12) (12 11))
+                   (map (lambda (w) (list (window-top w) (window-height w)))
+                        (window-list frame)))
+       (test-equal "and leaves the combination at two children"
+                   2 (window-child-count (frame-root-window frame)))))))
+
+;; `window-get-split-combination` (`window-x.el:417`): "the part which
+;; does not include TAB's selected window".
+;;
+;; **It really does combine** - `combine-windows` rewrites the tree - so
+;; each call needs a frame of its own; a second call on the same frame
+;; sees the combination the first one made.
+(with-frame ""
+ (lambda (frame)
+   (let ((a (car (window-list frame))))
+     (split-window a 6 #f)
+     (split-window (cadr (window-list frame)) 6 #f)
+     ;; The selected window is the first one, and with ARG 1 the pivot
+     ;; is the first child: the selected window is on the pivot's side,
+     ;; so the combination split off is the other two.
+     (let ((comb (window-get-split-combination (frame-root-window frame) 1)))
+       (test-equal "the combination is the other side of the pivot"
+                   2 (window-child-count comb))
+       (test-equal "and it begins below the first window"
+                   6 (window-top comb))))))
+
+(with-frame ""
+ (lambda (frame)
+   (let ((a (car (window-list frame))))
+     (split-window a 6 #f)
+     (split-window (cadr (window-list frame)) 6 #f)
+     ;; With ARG -1 the pivot is the second child, the selected window
+     ;; is to its left, and the part split off is the last window. The
+     ;; last child is read first: the call rewrites the tree.
+     (let* ((root (frame-root-window frame))
+            (last (caddr (window-children root))))
+       (test-equal "counting from the end takes the right-hand part"
+                   #t (eq? (window-get-split-combination root -1) last))))))
+
+(test-end "window-combinations")

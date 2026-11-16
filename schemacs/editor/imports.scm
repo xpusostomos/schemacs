@@ -112,6 +112,7 @@
     (schemacs editor mule-util)
     (schemacs editor tty-colors)
     (except (schemacs editor subr)  char-alt char-super char-hyper char-shift char-ctl char-meta parse-solitary-modifier make-ctrl-char parse-modifiers-uncached event-symbol-elements event-modifiers event-basic-type apply-modifiers event-convert-list kbd)
+    (schemacs editor window-x)
     )
   (export
     %blank-line?
@@ -147,6 +148,7 @@
     %window-old-point
     %window-point
     %window-prev-buffers
+    %window-resize-apply-1
     %window-start
     %window-start-at-line-beg
     %window-start-set!
@@ -614,6 +616,8 @@
     *update-search-regs-function*
     *use-empty-active-region*
     *visual-line-fringe-indicators*
+    *window-combination-limit*
+    *window-combination-resize*
     *window-persistent-parameters*
     *window-restore-killed-buffer-windows*
     *window-scroll-function*
@@ -888,6 +892,7 @@
     color-dark-p
     color-values-from-color-spec
     column-width
+    combine-windows
     command-doc-string
     command-interactive-spec
     command-line-1
@@ -1070,6 +1075,7 @@
     delete-region
     delete-trailing-space
     delete-window
+    delete-window-internal
     delq
     derived-mode--flush
     derived-mode-abbrev-table-name
@@ -1944,6 +1950,7 @@
     merge-ordered-lists
     merge-properties
     merge-properties-sticky
+    merge-tabs
     message
     message-clear
     messages-buffer
@@ -2180,6 +2187,7 @@
     realize-face
     realize-tty-face
     recenter
+    recombine-windows
     record-buffer!
     record-delete
     record-first-change
@@ -2571,6 +2579,7 @@
     split-interval-right
     split-main-window-below
     split-string
+    split-tab
     split-window
     split-window-below
     split-window-no-error
@@ -2676,6 +2685,7 @@
     tab-bar-map
     tab-bar-menu-bar
     tab-bar-menu-bar-button
+    tab-bar-merge-tabs
     tab-bar-mode
     tab-bar-mode-map
     tab-bar-mode-variable
@@ -2686,6 +2696,7 @@
     tab-bar-move-tab-backward
     tab-bar-move-tab-to
     tab-bar-move-tab-to-group
+    tab-bar-move-window-to-tab
     tab-bar-new-button
     tab-bar-new-tab
     tab-bar-new-tab-to
@@ -2693,6 +2704,7 @@
     tab-bar-rename-tab-by-name
     tab-bar-select-tab
     tab-bar-separator
+    tab-bar-split-tab
     tab-bar-switch-to-last-tab
     tab-bar-switch-to-next-tab
     tab-bar-switch-to-prev-tab
@@ -2796,6 +2808,7 @@
     tab-switcher-select
     tab-switcher-unmark
     tab-to-tab-stop
+    tab-window-detach
     tabulated-list-delete-entry
     tabulated-list-entries
     tabulated-list-format
@@ -2953,6 +2966,8 @@
     visual-line-mode
     visual-line-mode-map
     walk-window-subtree
+    walk-window-tree
+    walk-window-tree-1
     what-cursor-position
     where-is-internal
     widget-value-button-type
@@ -2995,7 +3010,6 @@
     window--state-put-1
     window--state-put-2
     window--state-ref
-    window-absorb!
     window-base-line-number
     window-base-line-pos
     window-body-height
@@ -3005,10 +3019,10 @@
     window-bottom-divider-width
     window-buffer
     window-child
+    window-child-count
     window-children
     window-combination-limit
     window-combination-p
-    window-combination-resize
     window-combined-p
     window-configuration-frame
     window-configuration-p
@@ -3023,6 +3037,7 @@
     window-fringes
     window-full-height-p
     window-full-width?
+    window-get-split-combination
     window-header-line-height
     window-height
     window-hscroll
@@ -3050,6 +3065,7 @@
     window-line-start
     window-list
     window-live-p
+    window-main-window
     window-margins
     window-max-delta
     window-min-delta

@@ -9,15 +9,17 @@
   ;; `window-body-height', `window-right-border?'); what is here is the
   ;; half that makes and removes windows.
   ;;
-  ;; One thing here is a knowing deviation, and the tree below it is what
-  ;; it stands in for. GNU Emacs keeps its windows in a tree, and
-  ;; `delete-window' asks the window's parent combination which of its
-  ;; siblings take over the space. This project keeps a flat list, so
-  ;; which windows take over is inferred from the rectangles - the
-  ;; row-band/column-band/adjacency search in `DELETE-WINDOW' - and the
-  ;; inference is only right while the layout can be read back off the
-  ;; rectangles. It is documented as a deviation in NCURSES-PLAN.txt and
-  ;; goes when the window tree does.
+  ;; **The window tree is Emacs's**: a window's `parent` is an internal
+  ;; window holding a list of children, `split-window` puts a new window
+  ;; in the combination it belongs to when the C's `combination_limit`
+  ;; rule says so, and `delete-window` asks that parent which sibling
+  ;; takes the space over. What is left of the old flat-list model is
+  ;; the *direction* of a combination: it is read off the children's
+  ;; rectangles, because this record has no `w->horizontal`
+  ;; (`windows-stacked?`, `frame.scm`). Everything that would be
+  ;; ambiguous with one child - the axis of a combination about to lose
+  ;; its second-to-last window - is read before the tree is changed, as
+  ;; the C reads `WINDOW_HORIZONTAL_COMBINATION_P (p)` before unlinking.
   ;;
   ;; See LAYOUT-PLAN.txt for the rule this library is a step of.
 
@@ -118,6 +120,7 @@
           window-new-total set-window-new-total
           window-new-normal set-window-new-normal
           window-resize-apply window-resize-apply-total
+          %window-resize-apply-1
           ;; `window-start` is `window.c`'s; the redisplay's marker,
           ;; answered as a position.
           window-start
@@ -188,7 +191,6 @@
    *switch-to-visible-buffer* *switch-to-prev-buffer-skip*
    *switch-to-prev-buffer-skip-regexp*
    *read-buffer-to-switch*
-   window-absorb!
    window-min-height
    *cursor-in-echo-area*
    window-min-width
@@ -206,7 +208,7 @@
    scroll-right
    ;; The size arithmetic - `window.el`'s half of the size chapter.
    window-safe-min-height window-safe-min-width window-resize-pixelwise
-   window-combination-resize
+   *window-combination-resize* *window-combination-limit*
    window-normalize-window window-valid-p frame-char-size
    window-safe-min-pixel-height window-min-pixel-height
    window-safe-min-pixel-width window-min-pixel-width
@@ -225,7 +227,12 @@
    window--resize-mini-window window-resize window-resize-no-error
    window-full-height-p window-right-sibling window-left-sibling
    split-window-no-error window-deletable-p frame-deletable-p
+   delete-window-internal recombine-windows
    walk-window-subtree window--check
+   ;; The tree walks, and the two ways of asking about a combination -
+   ;; `window.el`'s - plus `window.c`'s `combine-windows`.
+   walk-window-tree-1 walk-window-tree window-child-count window-main-window
+   combine-windows
    ;; Window states - `window.el:6370`.
    window--state-assq window--state-ref window--state-normalize-buffer-name
    window--state-get-1 window-state-get
@@ -347,6 +354,115 @@
                                     (frame-windows frame))))
         parent))
 
+    (define (%children-through children stop)
+      ;; CHILDREN from its first element through STOP, inclusive: the run
+      ;; `combine-windows` takes out of its parent's sibling list. A leaf
+      ;; of this tree's representation - Emacs keeps siblings as a chain
+      ;; of `w->next` pointers and has nothing to name the run with.
+      ;;--------------------------------------------------------------
+      (let loop ((rest children) (acc '()))
+        (cond ((null? rest) (reverse acc))
+              ((eq? (car rest) stop) (reverse (cons stop acc)))
+              (else (loop (cdr rest) (cons (car rest) acc))))))
+
+    (define (%children-before children first)
+      ;; CHILDREN up to but not including FIRST.
+      ;;--------------------------------------------------------------
+      (let loop ((rest children) (acc '()))
+        (cond ((null? rest) (reverse acc))
+              ((eq? (car rest) first) (reverse acc))
+              (else (loop (cdr rest) (cons (car rest) acc))))))
+
+    (define (combine-windows first last)
+      ;; GNU Emacs's `combine-windows` (`window.c:5213`): "Combine
+      ;; windows from FIRST to LAST inclusive. FIRST and LAST must be
+      ;; different, valid windows in the same combination, that is,
+      ;; windows with the same parent window. If LAST is not reachable
+      ;; from FIRST by applying `window-next-sibling` repeatedly, invert
+      ;; FIRST and LAST. If FIRST has no previous and LAST has no next
+      ;; sibling, return nil. Otherwise, make a new parent window whose
+      ;; first child window becomes FIRST and whose last child window
+      ;; becomes LAST, insert that parent window in the window tree in
+      ;; lieu of the windows starting with FIRST and ending with LAST and
+      ;; return the new parent window."
+      ;;
+      ;; **It is `window.c`'s and stands beside `split-window`** for the
+      ;; reason that one does: the machinery that makes an internal
+      ;; window and puts it in the tree is in this library, not in
+      ;; `(schemacs editor frame)`.
+      ;;
+      ;; Two departures, both of the representation. The C writes
+      ;; `w->prev`/`w->next` and `XWINDOW (p->parent)->contents`; here a
+      ;; combination is a list, so the splice is one list rebuild. And
+      ;; the C ends by calling `window_set_parent_and_normal_sizes` on
+      ;; the new parent and on its parent to record fractional normal
+      ;; sizes; normal sizes here are derived from the rectangles
+      ;; (`window-normal-size`), so setting PARENT's rectangle is the
+      ;; whole of it.
+      ;;--------------------------------------------------------------
+      (let ((f first) (l last))
+        (when (eq? f l)
+          ;; The C's "Don't make a matryoshka window."
+          (error "Cannot combine a window with itself"))
+        ;; "If LAST is not reachable from FIRST by applying
+        ;; `window-next-sibling` repeatedly, invert FIRST and LAST."
+        (let ((w (let walk ((w f))
+                   (if (or (eq? w l) (not (window-next-sibling w)))
+                       w
+                       (walk (window-next-sibling w))))))
+          (unless (eq? w l)
+            (let ((w2 (let walk ((w l))
+                        (if (or (eq? w f) (not (window-next-sibling w)))
+                            w
+                            (walk (window-next-sibling w))))))
+              (if (eq? w2 f)
+                  (let ((tmp f)) (set! f l) (set! l tmp))
+                  (error "Windows to combine must be children of same parent")))))
+        (if (and (not (window-prev-sibling f)) (not (window-next-sibling l)))
+            ;; "FIRST and LAST are already the first and last child of
+            ;; their parent."
+            #f
+            (let* ((parent (window-parent f))
+                   ;; The direction the parent divided its children. The
+                   ;; C reads `XWINDOW (f->parent)->horizontal`
+                   ;; (`window.c:5267`); `window-left-child` is the
+                   ;; public spelling of that field here.
+                   (horflag (and (window-left-child parent) #t))
+                   (kids (window-children parent))
+                   (inside (%children-through (memq f kids) l))
+                   (p (make<window> (window-frame f) #f #f #f #f 0 0 #f 0 0
+                                    (window-top f) (window-height f)
+                                    (window-left f) (window-width f)
+                                    parent inside
+                                    0 0 #f 0 '() '()
+                                    #f 0 0 0 0 0 0 0 -1 #f '() #f)))
+              ;; "Set up PARENT's positions and sizes": the union of the
+              ;; run's rectangles.
+              (if horflag
+                  (begin
+                    (set!window-width p (+ (window-left l) (window-width l)
+                                           (- (window-left f))))
+                    (set!window-height p (window-height f)))
+                  (begin
+                    (set!window-height p (+ (window-top l) (window-height l)
+                                            (- (window-top f))))
+                    (set!window-width p (window-width f))))
+              ;; "Fix parent slots for PARENT's children" - they are
+              ;; PARENT's now. Their normal sizes follow from these
+              ;; rectangles, which is what `window_set_parent_and_normal_sizes`
+              ;; computes in the C, and PARENT's own share of its
+              ;; siblings follows from its own rectangle the same way.
+              (for-each (lambda (child) (set!window-parent child p)) inside)
+              ;; "Splice in PARENT into the window tree" - the C's four
+              ;; pointer writes, here one list rebuild.
+              (let ((new-kids (append (%children-before kids f)
+                                      (list p)
+                                      (cdr (memq l kids)))))
+                (if parent
+                    (set!window-children parent new-kids)
+                    (set!frame-windows (window-frame f) new-kids)))
+              p))))
+
     (define (force-window-update . args)
       ;; GNU Emacs's `force-window-update' (`window.c`): "Force
       ;; re-display of all windows of OBJECT" - mark them so the next
@@ -358,6 +474,68 @@
       ;; same no-op for the same reason.
       ;;--------------------------------------------------------------
       #f)
+
+    (define (list-insert-after item new lst)
+      ;; LST with NEW inserted directly after ITEM. The list spelling of
+      ;; the C's `wset_next (o, new)' / `wset_prev (o->next, new)' pair -
+      ;; which is how `split-window` puts the new window *after* the one
+      ;; it split, and how `delete-window` takes it out again.
+      ;;--------------------------------------------------------------
+      (cond ((null? lst) (list new))
+            ((eq? (car lst) item) (cons item (cons new (cdr lst))))
+            (else (cons (car lst) (list-insert-after item new (cdr lst))))))
+
+    (define (%split-window-install! frame window new horizontal top height left width)
+      ;; Where `split-window` puts the new window, which is the C's
+      ;; `combination_limit` decision (`window.c:5427`): "Set
+      ;; combination_limit if we have to make a new parent window. We do
+      ;; that if either `window-combination-limit` is t, or OLD has no
+      ;; parent, or OLD is ortho-combined."
+      ;;
+      ;; Otherwise the new window becomes OLD's next sibling in the
+      ;; combination OLD is already in - which is what makes splitting
+      ;; the bottom window of a three-window frame a combination of
+      ;; three rather than a combination of two nested in another two.
+      ;; OLD keeps its rectangle's start and gives up SIZE along the
+      ;; split axis; the other siblings are untouched, which is what the
+      ;; C's `window_resize_apply` computes when
+      ;; `window-combination-resize` is nil.
+      ;;--------------------------------------------------------------
+      (let* ((parent (window-parent window))
+             ;; "OLD is ortho-combined": the parent divided its children
+             ;; along the other axis, so the two cannot be siblings.
+             (ortho (and parent
+                         (if horizontal
+                             (window-top-child parent)
+                             (window-left-child parent))))
+             (combination-limit (or (eq? (*window-combination-limit*) #t)
+                                    (not parent)
+                                    ortho)))
+        (if combination-limit
+            (let ((p (install-window-parent!
+                      frame window
+                      (make-window-parent window new top height left width))))
+              (when (window-internal? window)
+                ;; **"Get entire space from WINDOW"** (`window.el:5945`):
+                ;; an internal window's children give up the new window's
+                ;; share in the proportion the resize engine uses, which
+                ;; is the same rule the delete that takes the new window
+                ;; away hands it back by. `split-window-internal` does
+                ;; this too - the C's `window_resize_apply (p, horflag)`
+                ;; at its end - and a leaf has nothing to redistribute,
+                ;; which is why the ordinary split never noticed.
+                (let ((size-pixels (window-size new horizontal #t)))
+                  (window--resize-reset frame horizontal)
+                  (set-window-new-pixel new size-pixels)
+                  (window--resize-this-window window (- size-pixels) horizontal #f)
+                  (%window-resize-apply-1 p horizontal)))
+              p)
+            (begin
+              (set!window-parent new parent)
+              (set!window-children
+               parent
+               (list-insert-after window new (window-children parent)))
+              new))))
 
     (define (split-window window size horizontal)
       ;; GNU Emacs's `split-window' - `Fsplit_window' in window.c - the
@@ -375,7 +553,15 @@
       ;; `(split-window)' does.
       ;;--------------------------------------------------------------
       (if horizontal
-          (let* ((frame (*current-frame*))
+          (let* ((frame (window-frame window))
+                 ;; The C's reference window (`window.c:5443`): "if
+                 ;; OLD is live, use it as reference window. Use the
+                 ;; frame's selected window as reference window"
+                 ;; otherwise - an internal window can be split, and the
+                 ;; new window then shows what the selected window shows.
+                 (refer (if (window-live-p window)
+                            window
+                            (frame-selected-window frame)))
                  (width (window-width window))
                  (left (cond ((not size) (floor-quotient (+ width 1) 2))
                              ((< 0 size) size)
@@ -396,7 +582,7 @@
                           ;; (`window.c:5412'), `wset_frame (n, frame)'
                           ;; (`:5583')
                           (window-frame window)
-                          (window-buffer window)
+                          (window-buffer refer)
                           ;; **`build-marker` and not `copy-marker`**: it
                           ;; is the C's way to make a marker when it has
                           ;; the buffer in hand (`alloc.c:3801`), which is
@@ -409,14 +595,14 @@
                           ;; window takes its buffer as a constructor
                           ;; argument, which is a window.c shape left for
                           ;; when that file is next opened.
-                          (build-marker (window-buffer window)
-                                        (buffer-pt (window-buffer window)))
+                          (build-marker (window-buffer refer)
+                                        (buffer-pt (window-buffer refer)))
                           ;; the start and whether it is a line beginning
                           ;; are copied together, as the C copies them
                           ;; (`save_window_save', `window.c:8374`)
-                          (build-marker (window-buffer window)
-                                        (marker-position (%window-start window)))
-                          (%window-start-at-line-beg window)
+                          (build-marker (window-buffer refer)
+                                        (marker-position (%window-start refer)))
+                          (%window-start-at-line-beg refer)
                           0 0 #f 0 0
                           top
                           height
@@ -425,11 +611,13 @@
                           #f '()
                           0 0 #f 0 '() '()
                           #f 0 0 0 0 0 0 0 -1 #f '() #f)))
-                (install-window-parent!
-                 frame window
-                 (make-window-parent window new top height start width))
+                (%split-window-install! frame window new #t
+                                        top height start width)
                 new)))
-          (let* ((frame (*current-frame*))
+          (let* ((frame (window-frame window))
+                 (refer (if (window-live-p window)
+                            window
+                            (frame-selected-window frame)))
                  (height (window-height window))
                  (upper (cond ((not size) (floor-quotient (+ height 1) 2))
                               ((< 0 size) size)
@@ -450,12 +638,12 @@
                           ;; (`window.c:5412'), `wset_frame (n, frame)'
                           ;; (`:5583')
                           (window-frame window)
-                          (window-buffer window)
-                          (build-marker (window-buffer window)
-                                       (buffer-pt (window-buffer window)))
-                          (build-marker (window-buffer window)
-                                       (marker-position (%window-start window)))
-                          (%window-start-at-line-beg window)
+                          (window-buffer refer)
+                          (build-marker (window-buffer refer)
+                                       (buffer-pt (window-buffer refer)))
+                          (build-marker (window-buffer refer)
+                                       (marker-position (%window-start refer)))
+                          (%window-start-at-line-beg refer)
                           0 0 #f 0 0
                           (+ top upper)
                           lower
@@ -464,9 +652,8 @@
                           #f '()
                           0 0 #f 0 '() '()
                           #f 0 0 0 0 0 0 0 -1 #f '() #f)))
-                (install-window-parent!
-                 frame window
-                 (make-window-parent window new top height left width))
+                (%split-window-install! frame window new #f
+                                        top height left width)
                 new)))))
     (define (split-main-window-below buffer size)
       ;; Show BUFFER in a new window at the bottom of the frame, SIZE rows
@@ -479,59 +666,35 @@
       ;; left and right: the window above keeps its own arrangement and
       ;; gives up SIZE rows at the bottom.
       ;;--------------------------------------------------------------
-      (let* ((frame (*current-frame*))
-             (main (car (frame-windows frame)))
-             (top (window-top main))
-             (left (window-left main))
-             (width (window-width main))
-             (total (window-height main)))
-        (when (>= size total)
-          (error "Size of new window too small" size))
-        ;; the frame's windows give up SIZE rows at the bottom
-        (absorb-into! main 'bottom (- size))
-        (let ((new (make<window>
-                    (window-frame main)
-                    buffer
-                    (build-marker buffer (buffer-pt buffer))
-                    (build-marker buffer 1) #t
-                    0 0 #f 0 0
-                    (+ top (- total size))
-                    size
-                    left
-                    width
-                    #f '()
-                    0 0 #f 0 '() '()
-                    #f 0 0 0 0 0 0 0 -1 #f '() #f)))
-          (install-window-parent!
-           frame main
-           (make-window-parent main new top total left width))
-          new)))
-
-        (define (absorb-into! window edge delta)
-      ;; WINDOW gains DELTA at EDGE ('left, 'right, 'top or 'bottom), and so
-      ;; does each of its children that reached that edge - a child that did
-      ;; not is not beside what was removed, so there is no room for it there.
-      ;; Only leaves show a buffer, so the growth has to arrive at them: an
-      ;; internal window's rectangle is the union of its children's.
+      ;;
+      ;; **It is `split-window` now** - "Splitting the *root* is what
+      ;; makes a completion list a full-width window at the bottom even
+      ;; in a frame that is divided left and right" - because
+      ;; `split-window` can split an internal window and takes its
+      ;; children's share through the resize engine, which is the rule
+      ;; the delete gives them back by. The hand-rolled version this
+      ;; replaces shrank only the child touching the bottom edge, so the
+      ;; list closing again left the two file windows at 18/5 rather
+      ;; than the 12/11 they started at.
       ;;--------------------------------------------------------------
-      (let ((before (window-edges window)))
-        (case edge
-          ((right) (set!window-width window (+ (window-width window) delta)))
-          ((left) (set!window-left window (- (window-left window) delta))
-                  (set!window-width window (+ (window-width window) delta)))
-          ((bottom) (set!window-height window (+ (window-height window) delta)))
-          ((top) (set!window-top window (- (window-top window) delta))
-                 (set!window-height window (+ (window-height window) delta))))
-        (for-each
-         (lambda (child)
-           (let ((ce (window-edges child)))
-             (when (case edge
-                     ((right) (= (list-ref ce 2) (list-ref before 2)))
-                     ((left) (= (car ce) (car before)))
-                     ((bottom) (= (list-ref ce 3) (list-ref before 3)))
-                     ((top) (= (list-ref ce 1) (list-ref before 1))))
-               (absorb-into! child edge delta))))
-         (window-children window))))
+      ;;
+      ;; **SIZE is the new window's**, which is `split-window`'s negative
+      ;; SIZE: "SIZE specifies the new number of lines for WINDOW (or the
+      ;; new window if SIZE is negative)" (`window.el:5669`). A positive
+      ;; SIZE would make the *upper* window SIZE rows and hand the list
+      ;; everything else.
+      (let ((window (split-window (window-main-window) (- size) #f)))
+        (set-window-buffer! window buffer)
+        window))
+
+    ;; `absorb-into!` lived here: it grew a window and every child that
+    ;; touched the same edge, and it was how this tree shrank and grew a
+    ;; frame's windows by rectangles. Its last caller was the
+    ;; hand-written `split-main-window-below`, which `split-window` now
+    ;; does properly; with the delete on the resize engine the two size
+    ;; models disagreed (`DEPARTURES.md`, "Splitting a window into an
+    ;; existing combination"), so it is gone rather than left to be
+    ;; picked up again.
 
     (define (get-buffer-window buffer)
       ;; The window showing BUFFER, or false when none does: GNU Emacs's
@@ -1636,74 +1799,151 @@ minibuffer window or is dedicated to its buffer."
       (pop-to-buffer buffer-or-name #t (if (pair? args) (car args) #f)))
 
 
-    (define (window-absorb! taker gone)
-      ;; Give TAKER the space that GONE occupied, TAKER being the sibling the
-      ;; parent combined it with: whichever edge of TAKER touched GONE gains
-      ;; GONE's width or height there.
-      ;;
-      ;; Which edge that is comes from the two rectangles, and the *parent* is
-      ;; what says GONE and TAKER are combined at all - which is the window
-      ;; tree's answer, and what the old row-band/column-band search had to
-      ;; guess.
+    (define (recombine-windows window)
+      ;; GNU Emacs's `recombine_windows` (`window.c:2612`): "If WINDOW can
+      ;; be deleted, delete it" is the neighbouring function; this one
+      ;; splices WINDOW's children into its parent when WINDOW and its
+      ;; parent are combinations of the same direction and WINDOW has no
+      ;; `combination-limit` set - which is what stops a delete leaving a
+      ;; combination of one kind nested in another of the same kind.
       ;;--------------------------------------------------------------
-      (let ((t (window-edges taker))
-            (g (window-edges gone)))
-        (cond
-         ((= (list-ref t 2) (car g))
-          (absorb-into! taker 'right (window-width gone)))
-         ((= (car t) (list-ref g 2))
-          (absorb-into! taker 'left (window-width gone)))
-         ((= (list-ref t 3) (list-ref g 1))
-          (absorb-into! taker 'bottom (window-height gone)))
-         (else
-          (absorb-into! taker 'top (window-height gone))))
-        taker))
+      (let* ((parent (window-parent window))
+             (kids (window-children window)))
+        (when (and parent
+                   (not (window-combination-limit window))
+                   (pair? kids)
+                   ;; "WINDOW and PARENT are both either a vertical or a
+                   ;; horizontal combination."
+                   (eq? (and (window-left-child parent) #t)
+                        (and (window-left-child window) #t)))
+          (for-each (lambda (child) (set!window-parent child parent)) kids)
+          (set!window-children
+           parent (list-substitute window kids (window-children parent)))
+          (set!window-children window '())
+          (set!window-parent window #f))))
 
-    (define-command (delete-window window)
-      "Remove the selected window, leaving its rows or columns to the
-windows it was combined with."
-      (interactive (list (selected-window)))
-      (let* ((frame (*current-frame*))
-             (parent (window-parent window))
-             (siblings (and parent (list-without window (window-children parent))))
-             (selected (frame-selected-window frame)))
-        (cond
-         ;; GNU Emacs's `delete_window` (`window.c:5706`): "Never delete a
-         ;; minibuffer or frame root window" - the test is `NILP (w->parent)`
-         ;; and nothing else. Counting the frame's windows was the same
-         ;; answer while the minibuffer was not a window; now that it is,
-         ;; a frame holding one ordinary window and the minibuffer has two,
-         ;; and the count let the last ordinary window be deleted.
-         ((not parent)
-          (error "Attempt to delete minibuffer or sole ordinary window"))
-         (else
-          (for-each (lambda (taker) (window-absorb! taker window)) siblings)
-          (if parent
-              (let ((rest (list-without window (window-children parent))))
+    (define (delete-window-internal window)
+      ;; GNU Emacs's `delete-window-internal` (`window.c:5691`): "Remove
+      ;; WINDOW from its frame. WINDOW defaults to the selected window.
+      ;; Return nil. Signal an error when WINDOW is the only window on
+      ;; its frame."
+      ;;
+      ;; **The sizes have already been handed out** by `delete-window`
+      ;; before this runs: the resize engine wrote the new sizes into the
+      ;; `new-*` registers and this applies them with the C's
+      ;; `window_resize_apply (p, horflag)`. A window whose buffer and
+      ;; children are both gone has been deleted already and is a no-op,
+      ;; as the C's `NILP (w->contents)` test says.
+      ;;--------------------------------------------------------------
+      (if (and (not (window-buffer window)) (null? (window-children window)))
+          #f
+          (let ((parent (window-parent window)))
+            (cond
+             ((not parent)
+              ;; "Never delete a minibuffer or frame root window."
+              (error "Attempt to delete minibuffer or sole ordinary window"))
+             ((and (not (window-prev-sibling window))
+                   (not (window-next-sibling window)))
+              ;; "Rather bow out here, this case should be handled on the
+              ;; Elisp level."
+              (error "Attempt to delete sole window of parent"))
+             (else
+              (let* ((frame (window-frame window))
+                     (selected (frame-selected-window frame))
+                     (sibling (or (window-prev-sibling window)
+                                  (window-next-sibling window)))
+                     ;; **Read before the unlink**: a combination left
+                     ;; with one child has no axis to read off the
+                     ;; rectangles, and `window-left-child` calls a
+                     ;; one-child list horizontal. The C reads
+                     ;; `WINDOW_HORIZONTAL_COMBINATION_P (p)` before it
+                     ;; touches the tree too (`window.c:5717`).
+                     (horizontal (and (window-left-child parent) #t))
+                     (rest (list-without window (window-children parent))))
+                ;; "Unlink WINDOW from window tree."
                 (set!window-children parent rest)
-                (when (<= (length rest) 1)
-                  (let ((child (car rest)))
-                    (set!window-parent child (window-parent parent))
-                    (if (window-parent parent)
+                ;; "We can delete WINDOW now": the sizes the engine
+                ;; computed go in, and every window's rectangle follows.
+                (window-resize-apply frame horizontal)
+                (when (= (length rest) 1)
+                  ;; "A matryoshka where SIBLING has become the only
+                  ;; child of PARENT": put SIBLING into PARENT's place.
+                  (let ((child (car rest))
+                        (grandparent (window-parent parent)))
+                    (set!window-parent child grandparent)
+                    (if grandparent
                         (set!window-children
-                         (window-parent parent)
+                         grandparent
                          (list-substitute parent
                                           (list child)
-                                          (window-children (window-parent parent))))
+                                          (window-children grandparent)))
                         (set!frame-windows
                          frame
-                         (list-substitute parent
-                                          (list child)
-                                          (frame-windows frame)))))))
-              (set!frame-windows
-               frame (list-without window (frame-windows frame))))
-          (when (eq? window selected)
-            (begin (select-window (car (window-list frame)))
-                   (record-buffer!
-                    (window-buffer (car (window-list frame))))))
-          (set!window-parent window #f)
-          (set!window-children window '())
-          window))))
+                         (list-substitute parent (list child)
+                                          (frame-windows frame))))
+                    ;; "Try to merge SIBLING into its new parent."
+                    (recombine-windows child)))
+                ;; "It's a no-op to delete an already deleted window" is
+                ;; not true of an internal one: its children go with it.
+                (set!window-children window '())
+                (set!window-parent window #f)
+                (when (eq? window selected)
+                  (let ((first (car (window-list frame))))
+                    (select-window first)
+                    (record-buffer! (window-buffer first))))
+                #f))))))
+
+    (define-command (delete-window window)
+      ;; GNU Emacs's `delete-window` (`window.el:4318`): "Delete
+      ;; specified WINDOW... Return nil."
+      ;;
+      ;; **The space goes to ONE sibling**: "Emacs 23 preferably gives
+      ;; WINDOW's space to its left sibling" - the resize engine grows
+      ;; the previous sibling, or the next one when there is no previous,
+      ;; by the deleted window's whole size. Giving every sibling a
+      ;; share, which this did while every combination had two children,
+      ;; would grow the frame by one window's worth per sibling.
+      ;;
+      ;; Not carried, each for want of what it reads: the
+      ;; `delete-window` window parameter and `ignore-window-parameters`
+      ;; (no side windows, no such parameter), `window--check`'s atomic
+      ;; window handling, the "Attempt to delete main window of frame"
+      ;; check (no side windows means the main window is the root, which
+      ;; the parentless test already refuses) and
+      ;; `delete-window-choose-selected` (this tree has no MRU list).
+      "Delete WINDOW, giving its space to a sibling.
+WINDOW defaults to the selected one. Return nil."
+      (interactive (list (selected-window)))
+      (let* ((frame (window-frame window))
+             (parent (window-parent window)))
+        (when (not parent)
+          (error "Attempt to delete minibuffer or sole ordinary window"))
+        (let* ((horizontal (and (window-left-child parent) #t))
+               (size (window-size window horizontal #t))
+               (sibling (or (window-prev-sibling window)
+                            (window-next-sibling window))))
+          (parameterize ((*window-combination-resize*
+                          (or (*window-combination-resize*)
+                              (window-parameter parent 'window-side))))
+            (window--resize-reset frame horizontal)
+            (cond
+             ((and (not (eq? (*window-combination-resize*) #t))
+                   sibling
+                   (window-sizable-p sibling size horizontal #f #t))
+              ;; "Resize WINDOW's sibling."
+              (window--resize-this-window sibling size horizontal #f #t)
+              (set-window-new-normal
+               sibling (+ (window-normal-size sibling horizontal)
+                          (window-normal-size window horizontal))))
+             ((window--resizable-p window (- size) horizontal #f #f #f #t #t)
+              ;; "Can do without resizing fixed-size windows."
+              (window--resize-siblings window (- size) horizontal))
+             (else
+              ;; "Can't do without resizing fixed-size windows."
+              (window--resize-siblings window (- size) horizontal #t))))
+          (delete-window-internal window)
+          (window--pixel-to-total frame horizontal))
+        #f))
 
     (define-command (delete-other-windows window)
       "Make the selected window the only window on the frame."
@@ -2077,13 +2317,34 @@ by this function.  This happens in an interactive call."
     (define window-safe-min-height 1)
     (define window-safe-min-width 2)
     (define window-resize-pixelwise #f)
-    (define window-combination-resize #f)
     ;; ^ Emacs 31's `defcustom`s and their defaults: the absolute minimum
-    ;; a window may be in any circumstances (`window.el:437`), whether a
-    ;; resize is rounded to whole characters (`:490`), and whether
-    ;; resizing one window in a combination resizes the others
-    ;; proportionally (`:245`). Plain variables, as the tree spells a
-    ;; `defcustom` the editor never `let`-binds.
+    ;; a window may be in any circumstances (`window.el:437`), and whether
+    ;; a resize is rounded to whole characters (`:490`). Plain variables,
+    ;; as the tree spells a `defcustom` the editor never `let`-binds.
+    ;;
+    ;; `window-combination-resize` (`:245`) *is* `let`-bound - by
+    ;; `delete-window` (`:4372`), around the resize engine - so it is a
+    ;; parameter, and `*...*` because that is what a dynamically bound
+    ;; name looks like here.
+    (define *window-combination-resize* (make-parameter #f))
+    ;; ^ "If non-nil, `split-window' will try to resize the sibling
+    ;; windows of the window it splits to preserve their sizes. If nil,
+    ;; it will try to preserve their normal sizes." The parameter exists
+    ;; for the same reason `delete-window` binds it: the resize engine
+    ;; reads it several frames down.
+    ;;
+    ;; `window-combination-limit` is `window.c`'s DEFVAR_LISP
+    ;; (`:9512`), default `window-size`, and `window--state-put-1` binds
+    ;; it (`window.el:6554`), so it is a parameter too.
+    (define *window-combination-limit* (make-parameter 'window-size))
+    ;; ^ "If non-nil, `split-window' makes a new parent window. If the
+    ;; value is t, a combination is always created... If it is
+    ;; `window-size', a new combination is created if the resulting size
+    ;; of the parent window would be too small... A value of nil means
+    ;; always reuse the parent window." Only `t` changes what
+    ;; `split-window` does here: the C tests `EQ (... Qt)` and treats
+    ;; everything else - nil and `window-size` alike - as "reuse the
+    ;; parent when the direction allows it".
 
     ;; `window-size-fixed` is a `defvar-local` (`window.el:1517`) and has
     ;; no definition here: this tree's buffer-local values are a
@@ -3081,7 +3342,7 @@ by this function.  This happens in an interactive call."
                      (window--resizable-p window delta horizontal ignore #f #f #f #t)))
             (window--resize-reset frame horizontal)
             (window--resize-this-window window delta horizontal ignore #t)
-            (let ((sibling (and (not (eq? window-combination-resize #t))
+            (let ((sibling (and (not (eq? (*window-combination-resize*) #t))
                                 (window-combined-p window horizontal)
                                 (or (window-right-sibling window)
                                     (window-left-sibling window)))))
@@ -3184,21 +3445,98 @@ by this function.  This happens in an interactive call."
       (or (window--opt args 0) (selected-frame))
       (> (length (frame-list)) 1))
 
+    (define (walk-window-tree-1 fun window any . args)
+      ;; GNU Emacs's `walk-window-tree-1` (`window.el:586`): "Helper
+      ;; function for `walk-window-tree` and `walk-window-subtree`" - a
+      ;; pre-order, depth-first walk of the siblings starting at WINDOW,
+      ;; descending into the children of an internal window. SUB-ONLY
+      ;; walks only the subtree rooted at WINDOW, not its siblings.
+      ;;--------------------------------------------------------------
+      (let ((sub-only (window--opt args 0)))
+        (let loop ((w window))
+          (when w
+            (let ((buffer (window-buffer w)))
+              (when (or buffer any) (fun w))
+              (unless buffer
+                (walk-window-tree-1 fun (window-left-child w) any)
+                (walk-window-tree-1 fun (window-top-child w) any))
+              (unless sub-only
+                (loop (window-next-sibling w))))))))
+
+    (define (walk-window-tree fun . args)
+      ;; GNU Emacs's `walk-window-tree` (`window.el:614`): "Run function
+      ;; FUN on each live window of FRAME" - with ANY, on all live and
+      ;; internal windows - and with MINIBUF deciding about the
+      ;; minibuffer window exactly as `window-list`'s argument does: t
+      ;; means always, nil means only while it is active, and neither
+      ;; means never.
+      ;;--------------------------------------------------------------
+      (let* ((frame (or (window--opt args 0) (selected-frame)))
+             (any (window--opt args 1))
+             (minibuf (window--opt args 2))
+             (root (frame-root-window frame))
+             (mini (frame-minibuffer-window frame)))
+        (unless (eq? root mini)
+          (walk-window-tree-1 fun root any))
+        (when (and (window-live-p mini)
+                   (eq? (window-frame mini) frame)
+                   (or (eq? minibuf #t)
+                       (and (not minibuf) (minibuffer-window-active-p mini))))
+          (fun mini))))
+
+    (define (window-child-count window)
+      ;; GNU Emacs's `window-child-count` (`window.el:325`): "Return
+      ;; number of WINDOW's child windows."
+      ;;--------------------------------------------------------------
+      (let ((count 0)
+            (w (and (window-type? window) (window-child window))))
+        (let loop ((w w))
+          (when w
+            (set! count (+ count 1))
+            (loop (window-next-sibling w))))
+        count))
+
+    (define (window-main-window . args)
+      ;; GNU Emacs's `window-main-window` (`window.el:914`): "Return the
+      ;; main window of specified FRAME. If FRAME has no side windows,
+      ;; return FRAME's root window. Otherwise, return either an internal
+      ;; non-side window such that all other non-side windows on FRAME
+      ;; descend from it, or the single live non-side window of FRAME."
+      ;;
+      ;; There are no side windows in this tree - `window-side` is a
+      ;; window parameter nothing sets - so the walk never finds a main
+      ;; window and the answer is the root. The walk is ported as it
+      ;; stands because the parameter machinery is here and a side
+      ;; window, if one ever comes, is what would make it matter.
+      ;;--------------------------------------------------------------
+      (let ((frame (or (window--opt args 0) (selected-frame)))
+            (main #f))
+        (walk-window-tree
+         (lambda (window)
+           (when (and (not (window-parameter window 'window-side))
+                      (or (let ((sibling (window-prev-sibling window)))
+                            (and sibling
+                                 (window-parameter sibling 'window-side)))
+                          (let ((sibling (window-next-sibling window)))
+                            (and sibling
+                                 (window-parameter sibling 'window-side)))))
+             (set! main window)))
+         frame #t 'nomini)
+        (or main (frame-root-window frame))))
+
     (define (walk-window-subtree fun . args)
       ;; GNU Emacs's `walk-window-subtree` (`window.el:632`): "Run
       ;; function FUN on the subtree of windows rooted at WINDOW", live
       ;; windows only unless ANY.
+      ;;
+      ;; It is `walk-window-tree-1` with SUB-ONLY, which is how Emacs
+      ;; spells it too - the sub-only walk also applies FUN to the root
+      ;; when it is internal and ANY is set, which is what the C's
+      ;; `(when (or buffer any) ...)` does.
       ;;--------------------------------------------------------------
       (let ((window (window-normalize-window (window--opt args 0)))
             (any (window--opt args 1)))
-        (let walk ((window window))
-          (cond ((window-live-p window) (fun window))
-                (else
-                 (when any (fun window))
-                 (let loop ((kids (window-children window)))
-                   (when (pair? kids)
-                     (walk (car kids))
-                     (loop (cdr kids)))))))))
+        (walk-window-tree-1 fun window any #t)))
 
     (define (window--check . args)
       ;; GNU Emacs's `window--check` (`window.el:1390`) checks side and
@@ -3412,11 +3750,12 @@ by this function.  This happens in an interactive call."
       ;; the tree under WINDOW from STATE, splitting for every child but
       ;; the last.
       ;;
-      ;; **`window-combination-limit` is not consulted**: Emacs binds it
-      ;; around these splits so that a combination nested in one of the
-      ;; same type gets a parent of its own. This tree's `split-window`
-      ;; always makes a new parent, so the shape the state describes is
-      ;; the shape restored and the variable would be dead.
+      ;; **"Make sure to make a new parent window for a horizontal or
+      ;; vertical combination embedded in one of the same type"**
+      ;; (`window.el:6552`, Bug#50867 and Bug#64405): the state records
+      ;; the combination the node belongs to, and a node whose children
+      ;; would otherwise be flattened into its own parent by
+      ;; `split-window`'s sibling rule gets a parent of its own.
       ;;--------------------------------------------------------------
       (let ((type (car state)))
         (set! state (cdr state))
@@ -3429,7 +3768,13 @@ by this function.  This happens in an interactive call."
           (let* ((horizontal (eq? type 'hc))
                  (total (window-size window horizontal pixelwise))
                  (first #t)
+                 (window-combination-limit
+                  (and (or (eq? (window--state-ref 'combination-limit state) #t)
+                           (and horizontal (window-combined-p window #t))
+                           (and (not horizontal) (window-combined-p window)))
+                       #t))
                  (new #f))
+            (parameterize ((*window-combination-limit* window-combination-limit))
             (for-each
              (lambda (item)
                ;; "Find the next child window. WINDOW always points to the
@@ -3484,7 +3829,7 @@ by this function.  This happens in an interactive call."
                  (window--state-put-1 item window ignore totals pixelwise)
                  ;; "Continue with the last window split off."
                  (set! window new)))
-             state))))))
+             state)))))))
 
     (define (window--state-put-2 ignore pixelwise)
       ;; GNU Emacs's `window--state-put-2` (`window.el:6591`): give every

@@ -208,6 +208,7 @@
         (schemacs editor undo)
         (schemacs editor warnings)
         (schemacs editor window)
+        (schemacs editor window-x)
         (schemacs editor xdisp)
         (schemacs editor xfaces)))
 
