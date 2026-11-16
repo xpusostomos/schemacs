@@ -1989,9 +1989,30 @@ function `tab-bar-tab-name-function'."
     ;; that hook, so the same facts are captured as a *fingerprint* of
     ;; the frame's window tree - the selected window, and each window
     ;; with its buffer and rectangle - and compared at the next
-    ;; command's `pre-command-hook`. The same four causes move it and
-    ;; nothing else does; what differs is only *when* the push happens
-    ;; (one command later), and the history a reader sees is the same.
+    ;; command's `pre-command-hook`.
+    ;;
+    ;; **Two differences, and an earlier version of this note said there
+    ;; were none** ("only *when* the push happens... the history a reader
+    ;; sees is the same"). That was too strong:
+    ;;
+    ;;   1. **When.** The push is one command later. Any *command* still
+    ;;      sees the right history, because every command's
+    ;;      `pre-command-hook' pushes the pending change before its body
+    ;;      runs - which is why `tab-bar-history-back` works. What sees
+    ;;      the lag is a reader that is not a command: a timer, a process
+    ;;      filter, or the REPL back door, between the change and the
+    ;;      next keypress. The tab bar's own buttons do not, because
+    ;;      `tab-bar-format-history` draws them whenever the mode is on
+    ;;      rather than per history state.
+    ;;
+    ;;   2. **Which events count.** `Fset_window_configuration`
+    ;;      (`window.c:5681`) sets `FRAME_WINDOW_CHANGE` unconditionally,
+    ;;      so restoring a configuration identical to the current one
+    ;;      pushes a history entry in Emacs and not here - a fingerprint
+    ;;      cannot see a no-op. (`Fset_window_buffer` is *not* such a
+    ;;      case: it sets the flag only when the buffer differs,
+    ;;      `:4427`.) After such a no-op restore, Emacs's "back" is a
+    ;;      no-op too, while this tree's goes to the layout before it.
     ;;--------------------------------------------------------------
 
     (define tab-bar-history-limit 10)
