@@ -30,6 +30,7 @@
    *point-marker-function* *mark-marker-function*
    *format-message-function* *read-string-function* *read-number-function*
    *read-char-event-function* *message-clear-function*
+   *read-key-sequence-function* *read-key-sequence-vector-function*
    *read-command-function* *read-variable-function*
    *read-minibuffer-function* *eval-minibuffer-function*
    *read-coding-system-function* *read-non-nil-coding-system-function*
@@ -452,6 +453,10 @@
 
     (define *interactive-read-file-name-function* (make-parameter #f))
     (define *interactive-read-directory-name-function* (make-parameter #f))
+    (define *read-key-sequence-function* (make-parameter #f))
+    (define *read-key-sequence-vector-function* (make-parameter #f))
+    ;; ^ The `k' and `K' readers (`keyboard.c:12501', `:12562'), both
+    ;; `keyboard.scm`'s.
     (define *read-char-event-function* (make-parameter #f))
     (define *message-clear-function* (make-parameter #f))
     ;; ^ The `c' code's reader (`keyboard.c:11240`, spelled
@@ -666,6 +671,40 @@
                         (cons (read (%interactive-message prompt (reverse visible)))
                               args)
                         (cons #f visible))))
+               ;; "Key sequence" (`callint.c:531'). The C reads it with
+               ;; `cursor-in-echo-area` bound and the prompt face set,
+               ;; then shows it through `key-description`.
+               ;;
+               ;; **The visible form is nil**: `key-description` is
+               ;; `keymap.scm`'s and this library is below it, so the
+               ;; string the C puts in `visargs[i]` is not available. It
+               ;; is reachable only from a spec with a `%s` in a *later*
+               ;; prompt, and none of the 15 `k` specs in `lisp/` has one.
+               ((char=? code #\k)
+                (let ((read (%interactive-seam *read-key-sequence-function*
+                                               'read-key-sequence)))
+                  (loop (cdr rest)
+                        (cons (read (%interactive-message prompt (reverse visible)))
+                              args)
+                        (cons #f visible))))
+               ;; "Key sequence to be defined" (`:562'): the same read,
+               ;; answered as a vector.
+               ((char=? code #\K)
+                (let ((read (%interactive-seam
+                             *read-key-sequence-vector-function*
+                             'read-key-sequence-vector)))
+                  (loop (cdr rest)
+                        (cons (read (%interactive-message prompt (reverse visible)))
+                              args)
+                        (cons #f visible))))
+               ;; "Up event from last k or K" (`:593'): the event the
+               ;; reader *discarded*, which is nil because this tree does
+               ;; not carry the down-event discard (see
+               ;; `%read-key-sequence`). Emacs's own answer is nil unless a
+               ;; `k` read a sequence ending in a `down-` event, and no
+               ;; spec in `lisp/` uses `U` at all - measured, zero.
+               ((char=? code #\U)
+                (loop (cdr rest) (cons #f args) (cons #f visible)))
                ;; "Character" (`callint.c:482'). The prompt is shown as
                ;; a message (`message_with_string'), the event is read,
                ;; the echo area is cleared, and a read that is not a

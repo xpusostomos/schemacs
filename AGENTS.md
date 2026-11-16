@@ -9950,6 +9950,23 @@ are the same operation, and the table has no notion of "alias" in it any
 more than the obarray does. A nil record files nothing, which is
 `defalias` of a non-command being a non-command.
 
+### The `k` `K` `U` codes, and a thousand lines that were not needed
+
+`read_key_sequence` (`keyboard.c:11441`-`:12444`) is one function of about
+a thousand lines - but they are **the whole input pipeline**, not sequence
+assembly: decode/translation maps, the echo of the partial sequence, mouse
+prefixes, discarded input. This tree has that pipeline already
+(`read-key-event`, `function-key-translate`, and the modal lookup the
+command loop runs for a chord), so the port is the assembly only: read an
+event, `modal-lookup-state-step!`, loop while the binding is a prefix.
+
+**Sizing a C function before porting it is what made this one cheap.**
+
+Three departures: the down/up discard is not carried (so **`U` always
+answers nil** - and no `"U` spec exists in all of `lisp/`), the partial
+sequence is not echoed, and `k`'s visible form is nil because
+`key-description` lives above `command.scm`.
+
 ### The `a` code needs no list after all
 
 It reads "the name of a symbol with a function definition" and completes
@@ -9971,5 +9988,7 @@ yet. (`cancel-function-timers` would need adapting anyway: Emacs compares
 `(timer--function timer)` with the *symbol*, and a timer here holds a
 procedure.)
 
-**So the remaining `callint.c` work is `k` `K` `U`, and its cost is
-`read_key_sequence`, not a registry.**
+**So the remaining `callint.c` work was `k` `K` `U`, and its cost turned
+out to be sequence assembly rather than a registry - see above. With those
+in, **29 of 30 are carried and only `a` is left**, which needs a string
+reader rather than a list.**

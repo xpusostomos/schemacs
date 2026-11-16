@@ -17,7 +17,8 @@
        *read-coding-system-function* *read-non-nil-coding-system-function*
        *read-command-function* *read-minibuffer-function*
        *eval-minibuffer-function* *read-variable-function*
-       *read-char-event-function* *message-clear-function*)
+       *read-char-event-function* *message-clear-function*
+       *read-key-sequence-function* *read-key-sequence-vector-function*)
  (only (schemacs editor buffer)
        allocate-buffer with-current-buffer current-buffer
        set!buffer-read-only)
@@ -196,6 +197,21 @@ read-only check."
   "A command whose specification is `c': one character."
   (interactive "cChar: ")
   (*got* ch))
+
+(define-command (key-command keys)
+  "A command whose specification is `k': a key sequence."
+  (interactive "kKey: ")
+  (*got* keys))
+
+(define-command (key-vector-command keys)
+  "A command whose specification is `K': a key sequence as a vector."
+  (interactive "KKey: ")
+  (*got* keys))
+
+(define-command (up-event-command ev)
+  "A command whose specification is `U': the discarded up-event."
+  (interactive "UUp: ")
+  (*got* ev))
 
 (define-command (dash-marker-command arg)
   "A command whose specification begins with `-', Lucid's no-op."
@@ -599,7 +615,23 @@ read-only check."
     (parameterize ((*read-char-event-function* (lambda (prompt) #f)))
       (test-equal "a reader that answers no character is an error"
                   "Non-character input-event"
-                  (message-of (lambda () ((entry char-command) #f)))))))
+                  (message-of (lambda () ((entry char-command) #f))))))
+
+  ;; `k', `K' and `U'. The readers answer the sequence; `K' is the same
+  ;; read asked for a vector, and `U' reads nothing at all - its answer
+  ;; is nil because the down-event discard that would fill it is not
+  ;; carried.
+  (parameterize ((*read-key-sequence-function* (lambda (prompt) "C-x C-c"))
+                 (*read-key-sequence-vector-function*
+                  (lambda (prompt) (vector 24 3)))
+                 (*calls* '())
+                 (*got* 'none))
+    (test-equal "k reads a key sequence" "C-x C-c"
+                (begin ((entry key-command) #f) (*got*)))
+    (test-equal "K reads one as a vector" (vector 24 3)
+                (begin ((entry key-vector-command) #f) (*got*)))
+    (test-equal "U reads nothing and answers nil" #f
+                (begin ((entry up-event-command) #f) (*got*)))))
 (test-end "read-codes")
 ;;--------------------------------------------------------------
 (test-begin "plain-specs")

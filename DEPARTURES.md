@@ -4910,3 +4910,57 @@ for the same reason.
 
 `command-tests.scm` 66 -> 69: `c` reads a character code with its prompt,
 and a reader that answers no character is the C's error.
+
+## The key-sequence codes, and the thousand lines that were not needed
+
+`k` ("Key sequence", `callint.c:531`), `K` ("Key sequence to be
+defined", `:562`) and `U` ("Up event from last k or K", `:593`).
+
+`k` and `K` reach `Fread_key_sequence` / `Fread_key_sequence_vector`
+(`keyboard.c:12501`, `:12562`), and the real work is
+**`read_key_sequence` (`keyboard.c:11441`-`:12444`)** - one function of
+about a thousand lines. Sizing it before starting was the point: those
+lines are *not* sequence assembly in the abstract, they are **the whole
+input pipeline** - `input-decode-map` and `function-key-map` chains,
+`key-translation-map`, the echo of the partial sequence, mouse prefixes,
+switch-frame deferral, discarded input.
+
+**This tree already has that pipeline**, spread across `read-key-event`
+(which normalises the two displays' events and applies the decode maps),
+`function-key-translate`, and the *modal lookup* the command loop runs
+for a chord (`new-modal-lookup-state` / `modal-lookup-state-step!`). So
+the port is the assembly only - read an event, step the lookup, go round
+again while what was found is a prefix keymap:
+
+```scheme
+(modal-lookup-state-step!
+ state event
+ (lambda (full-path action) (%read-key-sequence-answer events vector?))   ; a command
+ (lambda (full-path action) (loop))                                       ; a prefix
+ (lambda (full-path) (%read-key-sequence-answer events vector?)))         ; nothing bound
+```
+
+`%read-key-sequence-answer` is the C's answer rule: a **string when every
+event is a character, a vector otherwise**, and `K` forces the vector.
+"Nothing bound" answers the sequence too, because an unbound key is still
+a key sequence and it is the *caller* that reports it - Emacs's `k`
+commands do.
+
+**Three departures, and one of them is why `U` is empty:**
+
+1. **The down-event/up-event discard is not carried.** Emacs reads the
+   `mouse-1` that follows a `down-mouse-1` and throws it away, and saves
+   it for `U`. Nothing here does, so **`U` answers nil always** - which is
+   what Emacs answers unless a `k` read a sequence ending in a `down-`
+   event. Measured: **no `"U` spec exists in all of `lisp/`**; the code
+   exists for `k`/`K`'s own use.
+2. **The partial sequence is not echoed** as it is typed (`C-x-` in the
+   echo area).
+3. **`k`'s visible form is nil.** The C puts
+   `Fkey_description (args[i], Qnil)` in `visargs[i]`; `key-description`
+   is `keymap.scm`'s and `command.scm` is below it. Reachable only from a
+   `%s` in a *later* prompt, and none of the 15 `k` specs in `lisp/` has
+   one.
+
+`command-tests.scm` 69 -> 72: `k` reads a sequence, `K` one as a vector,
+`U` answers nil and reads nothing.

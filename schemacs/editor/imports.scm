@@ -508,6 +508,8 @@
     *read-char-event-function*
     *read-coding-system-function*
     *read-command-function*
+    *read-key-sequence-function*
+    *read-key-sequence-vector-function*
     *read-minibuffer-function*
     *read-non-nil-coding-system-function*
     *read-number-function*
@@ -2203,6 +2205,8 @@
     read-from-minibuffer
     read-input-event
     read-key-event
+    read-key-sequence
+    read-key-sequence-vector
     read-menu-command
     read-minibuffer
     read-multiple-choice

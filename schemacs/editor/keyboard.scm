@@ -128,7 +128,8 @@
     ;; commands' interactive specs come from.
     (only (schemacs editor command) uarg->integer current-prefix-arg
           *pending-coding-system* command-record-named command-value-of
-          *barf-if-buffer-read-only-function* *read-char-event-function*)
+          *barf-if-buffer-read-only-function* *read-char-event-function*
+          *read-key-sequence-function* *read-key-sequence-vector-function*)
     ;; The two variables C-x RET c names for the next command. They are
     ;; `coding.c`'s, and they are bound here because the command loop is
     ;; what has the extent Emacs binds them for.
@@ -237,7 +238,7 @@
    modal-lookup-state-keymaps
    internal-pop-keymap
    internal-push-keymap
-   read-key-event read-char-event
+   read-key-event read-char-event read-key-sequence read-key-sequence-vector
    read-menu-command
    key-binding
    read-wait-ms
@@ -1273,6 +1274,75 @@
       ;;--------------------------------------------------------------
       (quotient (* 1000 (get-internal-real-time))
                 internal-time-units-per-second))
+
+    (define (%all-integers? events)
+      ;; `every` is SRFI 1's and this library does not import it.
+      ;;--------------------------------------------------------------
+      (let loop ((rest events))
+        (or (null? rest)
+            (and (integer? (car rest)) (loop (cdr rest))))))
+
+    (define (%read-key-sequence-answer events vector?)
+      ;; GNU Emacs's `Fread_key_sequence` -> `read-key-sequence`: "Return
+      ;; the sequence as a string if all events are characters, else a
+      ;; vector" - and `Fread_key_sequence_vector` always a vector.
+      ;;--------------------------------------------------------------
+      (if (or vector? (not (%all-integers? events)))
+          (list->vector events)
+          (list->string (map integer->char events))))
+
+    (define (%read-key-sequence prompt vector?)
+      ;; The shared body of `read-key-sequence` and
+      ;; `read-key-sequence-vector`.
+      ;;
+      ;; GNU Emacs's `read_key_sequence` (`keyboard.c:11441') is a
+      ;; thousand lines because it *is* the whole input pipeline:
+      ;; translation maps, the echo of the partial sequence, mouse
+      ;; prefixes, discarded input. This tree's pipeline is
+      ;; `read-key-event` (which normalises the two displays' events and
+      ;; applies `input-decode-map`) plus the modal lookup the command
+      ;; loop already runs - so what is left is the assembly: read an
+      ;; event, step the lookup, and go round again while what it found
+      ;; is a prefix keymap.
+      ;;
+      ;; **Not carried, each because nothing here makes the event**: the
+      ;; down-event/up-event *discard* (Emacs reads and throws away the
+      ;; `mouse-1` that follows a `down-mouse-1`, so a `k` prompt on a
+      ;; click cannot leave the release queued), which also means
+      ;; `callint.c`'s `U` code has no up-event to answer; and the echo
+      ;; of the partial sequence as it is typed.
+      ;;--------------------------------------------------------------
+      (when prompt (message "%s" prompt))
+      (let ((state (new-modal-lookup-state (lookup-keymaps)))
+            (events '()))
+        (let loop ()
+          (let ((event (function-key-translate (read-key-event -1))))
+            (set! events (append events (list event)))
+            (modal-lookup-state-step!
+             state event
+             ;; a binding that is not a prefix: the sequence is complete
+             (lambda (full-path action)
+               (%read-key-sequence-answer events vector?))
+             ;; a prefix keymap: keep reading
+             (lambda (full-path action) (loop))
+             ;; nothing bound: Emacs still answers the sequence it read,
+             ;; and the *caller* reports it - `k`'s command does
+             (lambda (full-path)
+               (%read-key-sequence-answer events vector?)))))))
+
+    (define (read-key-sequence prompt)
+      ;; GNU Emacs's `read-key-sequence` (`keyboard.c:12501`): "Read a
+      ;; sequence of keystrokes, ignoring clicks and other discarded
+      ;; input. Return the sequence as a string if all events are
+      ;; characters, else a vector."
+      ;;--------------------------------------------------------------
+      (%read-key-sequence prompt #f))
+
+    (define (read-key-sequence-vector prompt)
+      ;; GNU Emacs's `read-key-sequence-vector` (`keyboard.c:12562`):
+      ;; the same, always a vector.
+      ;;--------------------------------------------------------------
+      (%read-key-sequence prompt #t))
 
     (define (read-char-event . args)
       ;; GNU Emacs's `read-char' (`keyboard.c:11240'): "Read a character
@@ -2979,6 +3049,11 @@ With argument, insert ARG copies of the character."
 
     
     (*read-char-event-function* read-char-event)
+    (*read-key-sequence-function* read-key-sequence)
+    (*read-key-sequence-vector-function* read-key-sequence-vector)
+    ;; ^ The `k' and `K' interactive codes' readers. Beside
+    ;; `read-char-event` above, for the same reason: this library defines
+    ;; them, so the install has to come after the definitions.
     ;; ^ The `c' interactive code's reader (`keyboard.c`'s `read-char`,
     ;; spelled `read-char-event` here). **It is installed at the end of
     ;; the file, not beside `*barf-if-buffer-read-only-function*` above**,

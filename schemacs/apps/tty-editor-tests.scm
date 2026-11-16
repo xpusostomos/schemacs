@@ -160,7 +160,8 @@
        *interactive-read-buffer-function*
        *read-command-function* *read-variable-function*
        *read-minibuffer-function* *eval-minibuffer-function*
-       *read-char-event-function* *message-clear-function*)
+       *read-char-event-function* *message-clear-function*
+       *read-key-sequence-function* *read-key-sequence-vector-function*)
  (only (schemacs editor editfns)
        buffer-substring-no-properties delete-region goto-char point point-max point-min
        message
@@ -4957,6 +4958,11 @@
 (test-equal "keyboard and editfns install the c code's two" '(#t #t)
             (list (procedure? (*read-char-event-function*))
                   (procedure? (*message-clear-function*))))
+
+;; ...and the two the k and K codes read with.
+(test-equal "keyboard.scm installs the k and K readers" '(#t #t)
+            (list (procedure? (*read-key-sequence-function*))
+                  (procedure? (*read-key-sequence-vector-function*))))
 
 ;; ...and `minibuffer.scm` the two the buffer codes read with.
 (test-equal "minibuffer.scm installs the b and B readers" '(#t #t)
