@@ -45,20 +45,18 @@
   ;;     (`xdisp.scm`) rather than by `get_keyelt`, whose evaluating
   ;;     half is `keyboard.c`'s and `keymap.scm` is below it.
   ;;
+  ;; **Carried, though earlier versions of this header said otherwise**
+  ;; (a stale gap note is worse than none - it sends the next reader off
+  ;; to build what exists): **tab groups** (`tab-bar-tab-group-default`,
+  ;; the group format and its face, `tab-bar-change-tab-group`,
+  ;; `tab-bar-close-group-tabs`, `tab-bar-move-tab-to-group`),
+  ;; **`tab-bar-history-mode`** (with the fingerprint departure noted
+  ;; below) and **`tab-bar-menu-bar`** with `menu-bar-keymap` under it.
+  ;;
   ;; **Not carried, with what each waits for:**
   ;;
   ;;   * `frameset-*` persistence (`tab-bar--tab`'s `ws` source) and
   ;;     `tab-bar-select-restore-context` (`window-point-context-*`).
-  ;;   * **tab groups** (`tab-bar-tab-group-*`, `tab-bar-format-tabs-groups`):
-  ;;     the display they need is a group label with its own face and a
-  ;;     `tab-bar-auto-width` measurement between groups.
-  ;;   * **`tab-bar-history-mode`** is ported, with one departure: Emacs
-  ;;     notices a window change through `f->change_stamp` and
-  ;;     `window-configuration-change-hook`, which this tree has
-  ;;     neither of, so a *fingerprint* of the frame's window tree is
-  ;;     compared at the next command's `pre-command-hook` instead. The
-  ;;     same four events move it and nothing else does; only the moment
-  ;;     of the push differs, and the history a reader sees is the same.
   ;;   * **`tab-bar-auto-width`**: it lays tabs out with a `display`
   ;;     space specification measured in pixels, and this renderer draws
   ;;     character cells. The variable is carried so a user setting it
@@ -67,7 +65,6 @@
   ;;     `tab-bar-detach-tab`): no touch events, and detaching needs a
   ;;     new frame built *from* a window configuration, which
   ;;     `new-frame` does not take.
-  ;;   * `tab-bar-menu-bar` (the menu bar is a row, not a popup).
   ;;   * **`tab-switcher-mode`'s `:suppress t`** and its `?` binding:
   ;;     a letter typed in the `*Tabs*` list inserts itself, and `?`
   ;;     does nothing, because `describe-mode` is not ported and a

@@ -57,12 +57,10 @@
   ;;
   ;; **Not carried, with what each waits for:**
   ;;
-  ;;   * the **buffer menu** behind `tab-line-new-tab-choice`'s t:
-  ;;     `mouse-buffer-menu` and `tmm-prompt` do not exist here, so the
-  ;;     `t` branch says so and a function choice works.
-  ;;   * the **context menus** (`tab-line-tab-context-menu`,
-  ;;     `tab-line-context-menu`): `popup-menu` is `menu-bar.el`'s and is
-  ;;     not ported; `x-popup-menu` is.
+  ;;   * **`tmm-prompt`**, the tty half of `tab-line-new-tab-choice`'s
+  ;;     `t` branch. `mouse-buffer-menu` *is* here (`mouse.scm`), so the
+  ;;     window-system arm works and opens the buffer menu; the terminal
+  ;;     arm says `tmm-prompt` is not ported.
   ;;   * **touch input**: there is none, so `tab-line-track-tap` answers
   ;;     t for every event and the `touchscreen-begin` arms are dead.
   ;;   * **`tab-line-tabs-buffer-group-by-project`**: `project.el` is not
@@ -77,6 +75,11 @@
   ;; `mouse-buffer-menu-mode-groups` as the default group table
   ;; (`mouse.scm`), and `window-persistent-parameters` (`frame.scm`),
   ;; which is what `add-to-list` in this file extends.
+  ;;
+  ;; **And the context menus**, which an earlier version of this header
+  ;; called not carried: `tab-line-tab-context-menu` and
+  ;; `tab-line-context-menu` are implemented below over `popup-menu`,
+  ;; which lives in `menu-bar.scm`.
 
   (import
     (scheme base)

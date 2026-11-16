@@ -9967,6 +9967,43 @@ answers nil** - and no `"U` spec exists in all of `lisp/`), the partial
 sequence is not echoed, and `k`'s visible form is nil because
 `key-description` lives above `command.scm`.
 
+### The stale tab gap notes, and why `:suppress t` is still open (2026-11-17)
+
+Chris's "fix all those departures", first two items.
+
+**The tab headers were lying, in the costly direction.** `tab-bar.scm`
+listed tab groups, `tab-bar-history-mode` and `tab-bar-menu-bar` as not
+carried when all three are in the file; `tab-line.scm` listed the context
+menus when they are implemented over `popup-menu` (which lives in
+`menu-bar.scm`). Both headers are corrected and both now say that earlier
+versions were wrong - a gap note that overstates is as bad as one that
+understates, because the next reader rebuilds what exists.
+
+**`:suppress t` was attempted and reverted, and the battery is what caught
+it.** `suppress-keymap` is **`subr.el:1316`'s and is a remap** -
+`[remap self-insert-command] -> undefined`, plus `-` -> `negative-argument`
+and the digits -> `digit-argument` - not ninety-five direct bindings of
+the printing characters. Measured on Emacs 31.1 in a `special-mode`
+buffer: `?a` -> `undefined`, `?5` -> `digit-argument`, `?-` ->
+`negative-argument`.
+
+Two things fell out of that, and both matter more than the fix:
+
+* **A pty check was pinning a departure.** `eval-expression` asserted
+  that typing in `*Backtrace*` says "Buffer is read-only". With the remap
+  in place the letter never reaches `self-insert`, so Emacs says "%s is
+  undefined". The check must change *with* the fix.
+* **`[remap ...]` is dead in this tree.** `command-remapping`
+  (`keyboard.c:1216`) guards `(symbol? command)` and builds
+  `[remap COMMAND]`; `remapped-command` passes `(command-name record)`,
+  which is a **string** (`new-command` takes it from `symbol->string`).
+  The guard always fails, so no `[remap ...]` binding has ever been
+  reachable.
+
+So `:suppress t` waits on making the remap path work, which is a real
+piece of its own - and a `[remap ...]` in any future ported mode would
+have been silently ineffective.
+
 ### The `a` code, carried without completion (2026-11-16)
 
 `a` asks for the name of *any* function, not a command - the ones worth

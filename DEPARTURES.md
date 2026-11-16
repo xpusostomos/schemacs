@@ -5014,3 +5014,52 @@ its prompt.
 
 **With this, all 30 letters of `callint.c`'s switch and its `+` are
 carried.**
+
+## `:suppress t` is a *remap*, and this tree's remap path is dead
+
+`special-mode-map` is declared `:suppress t` (`simple.el:580`), and this
+tree has no `suppress-keymap`, so **the printing characters fall through
+to the global self-insert in every special mode** - dired, the Buffer
+Menu, the backtrace buffer and `*Tabs*`. Typing `x` in `*Tabs*` inserts
+an `x`.
+
+An attempt at it was made and **reverted**, because the battery caught it
+being the wrong thing. What it should be:
+
+```elisp
+(defun suppress-keymap (map &optional nodigits)          ; subr.el:1316
+  (define-key map [remap self-insert-command] #'undefined)
+  (or nodigits
+      (let (loop)
+	(define-key map "-" #'negative-argument)
+	(setq loop ?0)
+	(while (<= loop ?9)
+	  (define-key map (char-to-string loop) #'digit-argument)
+	  (setq loop (1+ loop))))))
+```
+
+Three corrections against what was written:
+
+1. **It is `subr.el`'s, not `keymap.c`'s**, and it is a **remap** of
+   `self-insert-command` - one binding - not ninety-five direct bindings
+   of the printing characters. Measured on Emacs 31.1, in a
+   `special-mode` buffer: `(key-binding (vector ?a))` is `undefined`,
+   `?5` is `digit-argument` and `?-` is `negative-argument`. The direct
+   version also got the digits wrong: they must stay prefix arguments,
+   not become "5 is undefined".
+2. **The pty check was pinning a departure.** `eval-expression`'s check
+   asserted that typing in `*Backtrace*` says "Buffer is read-only". With
+   the remap in place the letter never reaches `self-insert`, so Emacs
+   says "%s is undefined" - the read-only error is what a *pre-suppress*
+   tree says. The check needs correcting with the fix, not around it.
+3. **`[remap ...]` does not work in this tree at all**, which is why the
+   remap could not simply be written: `command-remapping`
+   (`keyboard.c:1216`) guards `(symbol? command)` and builds
+   `[remap COMMAND]` from it, while `remapped-command` hands it
+   `(command-name record)` - a **string**, because `new-command` takes
+   the name from `symbol->string`. So the guard always fails and every
+   `[remap ...]` binding in the tree is dead.
+
+**So the order is**: make `command-remapping` accept the name this tree
+keeps (a symbol, or a string compared against the symbol), then
+`suppress-keymap` as the C's - and then the pty expectation.
