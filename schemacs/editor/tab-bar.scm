@@ -68,8 +68,16 @@
   ;;     new frame built *from* a window configuration, which
   ;;     `new-frame` does not take.
   ;;   * `tab-bar-format-align-right`/`-global` (a `display` space
-  ;;     specification and `string-pixel-width`), `tab-bar-menu-bar`
-  ;;     (the menu bar is a row, not a popup) and `tab-bar-rename-tab-by-name`.
+  ;;     specification and `string-pixel-width`) and `tab-bar-menu-bar`
+  ;;     (the menu bar is a row, not a popup).
+  ;;   * **The Gtk tab bar is a row of the drawing area, not a widget.**
+  ;;     GNU Emacs's Gtk build builds one with `xg_create_frame_widgets`;
+  ;;     this tree draws the same `display-tab-bar` row there, so the bar
+  ;;     is one row of the frame's text area and the windows start below
+  ;;     it (`frame-top-margin` counts `tab-bar-lines` on both kinds of
+  ;;     display). It looks like the terminal's bar rather than like a
+  ;;     toolkit's, and a click reaches it through the same
+  ;;     `posn-at-x-y` path.
 
   (import
     (scheme base)

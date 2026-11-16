@@ -3915,12 +3915,13 @@
         (update-tab-bar frame)
         (unless (window-system-display? (current-display))
           (when (> (%frame-menu-bar-lines frame) 0)
-            (display-menu-bar frame))
-          ;; The tab bar is drawn *below* the menu bar - the C's
-          ;; `display_tab_bar` starts its iterator one row down when the
-          ;; menu bar has a row (`xdisp.c:14717`).
-          (when (> (%frame-tab-bar-lines frame) 0)
-            (display-tab-bar frame)))
+            (display-menu-bar frame)))
+        ;; The tab bar is drawn *below* the menu bar - the C's
+        ;; `display_tab_bar` starts its iterator one row down when the
+        ;; menu bar has a row (`xdisp.c:14717`) - and on a toolkit frame
+        ;; too, where it is the first row of the text area.
+        (when (> (%frame-tab-bar-lines frame) 0)
+          (display-tab-bar frame))
         ;; Only the selected window is scrolled to show its point here:
         ;; it is the one point moves in, and its buffer is the one
         ;; commands act on. A window that is not selected keeps the view
@@ -4324,7 +4325,8 @@
             ;; below the menu bar's** - `display_tab_bar` starts its
             ;; iterator at `FRAME_MENU_BAR_LINES` (`xdisp.c:14717`).
             (list frame
-                  (if (< row (%frame-menu-bar-lines frame))
+                  (if (< row (- (frame-top-margin frame)
+                                (%frame-tab-bar-lines frame)))
                       'menu-bar
                       'tab-bar)
                   (cons x y) 0))
@@ -4492,8 +4494,12 @@
       ;; other binding. A named departure, and the observable result is
       ;; the C's.
       ;;--------------------------------------------------------------
-      (when (and (not (window-system-display? (current-display)))
-                 (> (%frame-tab-bar-lines frame) 0)
+      ;; **Drawn on a toolkit frame too.** Emacs's Gtk build gives the
+      ;; tab bar a widget of its own; this tree draws it as the first row
+      ;; of the text area on both kinds of display (see
+      ;; `frame-top-margin`), so there is no window-system guard here -
+      ;; unlike `update-menu-bar`, whose bar *is* a widget there.
+      (when (and (> (%frame-tab-bar-lines frame) 0)
                  (*tab-bar-items-function*)
                  (or (windows-or-buffers-changed?)
                      (update-mode-lines?)
@@ -4534,7 +4540,12 @@
              (items (frame-tab-bar-items frame))
              (used (frame-tab-bar-items-used frame))
              (width (frame-width frame))
-             (y (row->pixel-y (%frame-menu-bar-lines frame)))
+             ;; **The tab bar sits below the menu bar's rows** - and on a
+             ;; toolkit frame those are *zero* rows (the bar is a widget),
+             ;; so the offset is the top margin minus the tab bar's own
+             ;; lines, not `%frame-menu-bar-lines` (whose default is 1).
+             (y (row->pixel-y (- (frame-top-margin frame)
+                                 (%frame-tab-bar-lines frame))))
              (text
               (let loop ((i 0) (x 0) (acc ""))
                 (if (>= i used)

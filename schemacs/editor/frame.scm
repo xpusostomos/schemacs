@@ -1300,10 +1300,18 @@
       ;; whether the widget is showing. A terminal's bar *is* a row of
       ;; the text area, which is why this is the one place the two
       ;; differ.
+      ;;
+      ;; **The tab bar has no widget here, so it is a row on both.** GNU
+      ;; Emacs's Gtk build gives the tab bar its own widget above the
+      ;; drawing area (`xg_create_frame_widgets`); this tree draws it as
+      ;; the first row of the text area, the way the terminal does, and
+      ;; that is a named departure - `tab-bar.scm`'s header says so. It
+      ;; is why the window-system branch counts `tab-bar-lines` and not
+      ;; `menu-bar-lines`.
       ;;--------------------------------------------------------------
       (let ((display (frame-output frame)))
         (if (and display (window-system-display? display))
-            0
+            (%frame-tab-bar-lines frame)
             (+ (%frame-menu-bar-lines frame)
                (%frame-tab-bar-lines frame)))))
 

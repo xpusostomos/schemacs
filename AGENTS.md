@@ -9183,3 +9183,36 @@ duplicate.
 left as `'()` - so grouping a tab now *moves* it next to its group, as
 Emacs's does. That changes the order the tests see, and three of them
 were written for the old order; they now say why.
+
+### The tab bar on a Gtk frame (2026-11-16, fourth pass)
+
+The tab bar now draws on **both** front ends. GNU Emacs's Gtk build gives
+it a widget above the drawing area (`xg_create_frame_widgets`, the same
+place its menu bar comes from); this tree has no such widget, so the bar
+is the **first row of the text area** on a toolkit frame too - the row
+`display-tab-bar` already drew for the terminal. That is a named
+departure (in `tab-bar.scm`'s header): it reads like the terminal's bar
+rather than like a toolkit's, and clicking a tab goes through the same
+`posn-at-x-y` path.
+
+Three small changes made it work, and each was a bug on its own:
+
+- `frame-top-margin` returned 0 for a window-system frame (the menu bar
+  is a widget there, so *its* rows are 0) - it now counts
+  `tab-bar-lines` on both, since the tab bar has no widget.
+- `update-tab-bar`/`display-tab-bar` had a `window-system` guard left
+  over from the menu bar's shape; it is gone.
+- **`display-tab-bar` placed the row at `%frame-menu-bar-lines`**, whose
+  default is 1 - so on Gtk the bar drew at row 1, *on top of the first
+  text row*, and the cursor landed on the tab bar. The row is now
+  `(- (frame-top-margin frame) (%frame-tab-bar-lines frame))`, which is
+  the menu bar's rows on a terminal and 0 on a toolkit frame. The same
+  expression is now what `posn-at-x-y` uses to tell a `menu-bar` area
+  from a `tab-bar` one.
+
+Verified live under broadway: the bar draws `bar-test.txt x  +` on the
+first row, the buffer's text starts on the next, the cursor is in the
+text, and `(tab-bar-mouse-down-1 ...)` with a `posn-at-x-y` position
+switches tabs. **A running editor keeps the old code** - the first
+screenshot after the fix still showed the old layout because the editor
+had not been restarted.
