@@ -503,6 +503,8 @@
     *read-buffer-completion-ignore-case*
     *read-buffer-function*
     *read-buffer-to-switch*
+    *read-coding-system-function*
+    *read-non-nil-coding-system-function*
     *read-number-function*
     *read-string-function*
     *record-window-buffer-function*
@@ -2193,6 +2195,7 @@
     read-menu-command
     read-multiple-choice
     read-multiple-choice--long-answers
+    read-non-nil-coding-system
     read-number
     read-number-history
     read-only-mode

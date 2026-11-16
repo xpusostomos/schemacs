@@ -13,7 +13,8 @@
        *interactive-read-file-name-function*
        *interactive-read-directory-name-function*
        *interactive-read-existing-buffer-function*
-       *interactive-read-buffer-function*)
+       *interactive-read-buffer-function*
+       *read-coding-system-function* *read-non-nil-coding-system-function*)
  (only (schemacs editor buffer)
        allocate-buffer with-current-buffer current-buffer
        set!buffer-read-only)
@@ -157,6 +158,16 @@ read-only check."
   "A command whose specification is `B': a possibly nonexistent buffer."
   (interactive "BBuffer: ")
   (*got* name))
+
+(define-command (coding-system-command cs)
+  "A command whose specification is `z': a coding system or nil."
+  (interactive "zCoding: ")
+  (*got* cs))
+
+(define-command (non-nil-coding-command cs)
+  "A command whose specification is `Z': a coding system, if a prefix."
+  (interactive "ZCoding: ")
+  (*got* cs))
 
 (define-command (dash-marker-command arg)
   "A command whose specification begins with `-', Lucid's no-op."
@@ -492,7 +503,30 @@ read-only check."
     ;; a fresh recorder, or B's assertion would see b's call too
     (*calls* '())
     (test-equal "B reads with the prompt alone too" (list (list "Buffer: "))
-                (begin ((entry any-buffer-command) #f) (*calls*)))))
+                (begin ((entry any-buffer-command) #f) (*calls*))))
+
+  ;; `z' always reads; `Z' reads only when there is a prefix, and
+  ;; answers nil without one - the C's `varies[i] = -1' branch, which
+  ;; touches the minibuffer not at all.
+  ;; `read-coding-system` answers a *symbol* (or nil), which is what the
+  ;; visible form converts back to a string.
+  (define (stub-symbol-reader)
+    (lambda args
+      (*calls* (append (*calls*) (list args)))
+      'utf-8))
+  (parameterize ((*read-coding-system-function* (stub-symbol-reader))
+                 (*read-non-nil-coding-system-function* (stub-symbol-reader))
+                 (*calls* '()))
+    (test-equal "z reads a coding system" 'utf-8
+                (begin ((entry coding-system-command) #f) (*got*)))
+    (test-equal "from its prompt" (list (list "Coding: ")) (*calls*))
+    (*calls* '())
+    (test-equal "Z with no prefix answers nil and reads nothing" #f
+                (begin ((entry non-nil-coding-command) #f) (*got*)))
+    (test-equal "so the reader was never called" '() (*calls*))
+    (test-equal "Z with a prefix does read" 'utf-8
+                (begin ((entry non-nil-coding-command) '(4)) (*got*)))
+    (test-equal "and it was called once" (list (list "Coding: ")) (*calls*))))
 (test-end "read-codes")
 ;;--------------------------------------------------------------
 (test-begin "plain-specs")

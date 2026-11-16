@@ -9835,11 +9835,29 @@ MUSTMATCH is `Qt` for `b` and `Qnil` for `B` - a **third** spelling
 beside `f`'s `Qlambda`, and all three are the C's, with different
 observable behaviour.
 
-### What is left of `callint.c`: 11 codes
+### The `z` and `Z` codes (2026-11-16, same day)
 
-(`callint.c` has 30 letters plus `+`; 19 are carried - `p` `P` `i` `d`
-`m` `e` `r` `R` `s` `M` `S` `n` `N` `f` `F` `G` `D` `b` `B` - so 11 are
-left.)
+`z` (a coding system, or nil) always reads; `Z` **reads only with a
+prefix** and answers nil without one, touching the minibuffer not at all.
+`Z` needed `read-non-nil-coding-system` (`coding.c:8646`) ported - a
+`completing-read` loop, RET on empty asks again - into `mule-cmds.scm`
+beside `read-coding-system`.
+
+**Worth knowing: a seam is only installed when its library loads.** These
+two live in `mule-cmds.scm`, which the editor core does *not* load - the
+two front ends do (`ui/tty/tty-main.scm`, `ui/gtk/gtk-main.scm`). Every
+other seam is in a library the core always loads. A `z` spec in a session
+with neither errors by name, which is the honest report.
+
+That was found by an assertion placed in the wrong suite
+(`tty-editor-tests` is not a front end and never imports `mule-cmds`); it
+is in `mule-cmds-tests.scm` now.
+
+### What is left of `callint.c`: 9 codes
+
+(`callint.c` has 30 letters plus `+`; 21 are carried - `p` `P` `i` `d`
+`m` `e` `r` `R` `s` `M` `S` `n` `N` `f` `F` `G` `D` `b` `B` `z` `Z` - so
+9 are left.)
 
 | codes | reader | lives in | blocker |
 |---|---|---|---|

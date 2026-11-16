@@ -9,7 +9,9 @@
         coding-system-name coding-system-base)
   (only (schemacs editor mule) merge-coding-systems)
   (only (schemacs editor mule-cmds)
-        mule-keymap coding-system-alist *coding-system-history*))
+        mule-keymap coding-system-alist *coding-system-history*)
+  (only (schemacs editor command)
+        *read-coding-system-function* *read-non-nil-coding-system-function*))
 
 ;; Regression tests for `(schemacs editor mule-cmds)', which mirrors GNU
 ;; Emacs's `lisp/international/mule-cmds.el'. The commands themselves
@@ -87,5 +89,14 @@
   '()
   (let ((h (list *coding-system-history*)))
     (and (= 1 (length h)) '())))
+
+;; The `z' and `Z' interactive codes read through this library - it is
+;; where `read-coding-system' and `read-non-nil-coding-system' live, for
+;; the reason the library header gives - so this is the suite that can
+;; say the two seams are installed. `command-tests.scm' stubs them,
+;; because what it tests is the machinery.
+(test-equal "the z and Z interactive readers are installed" '(#t #t)
+            (list (procedure? (*read-coding-system-function*))
+                  (procedure? (*read-non-nil-coding-system-function*))))
 
 (test-end "schemacs_editor_mule_cmds")

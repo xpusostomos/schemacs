@@ -29,6 +29,7 @@
    *use-region-p-function*
    *point-marker-function* *mark-marker-function*
    *format-message-function* *read-string-function* *read-number-function*
+   *read-coding-system-function* *read-non-nil-coding-system-function*
    *interactive-read-existing-buffer-function*
    *interactive-read-buffer-function*
    *interactive-read-file-name-function*
@@ -448,6 +449,12 @@
 
     (define *interactive-read-file-name-function* (make-parameter #f))
     (define *interactive-read-directory-name-function* (make-parameter #f))
+    (define *read-coding-system-function* (make-parameter #f))
+    (define *read-non-nil-coding-system-function* (make-parameter #f))
+    ;; ^ The `z' and `Z' readers. Both names are free as Emacs variables,
+    ;; so they keep the plain spelling. `read-coding-system' is
+    ;; `coding.c:8625' and `read-non-nil-coding-system' is `:8646'; both
+    ;; prompt, so both live in `mule-cmds.scm'.
     (define *interactive-read-existing-buffer-function* (make-parameter #f))
     (define *interactive-read-buffer-function* (make-parameter #f))
     ;; ^ The file and buffer codes' readers, and the rule their names
@@ -641,6 +648,27 @@
                         (cons (read (%interactive-message prompt (reverse visible)))
                               args)
                         (cons #f visible))))
+               ;; "Coding-system symbol or nil" (`callint.c:724'): the
+               ;; read answers a symbol, and the C's `visargs[i]' is the
+               ;; string that was read (`last_minibuf_string').
+               ((char=? code #\z)
+                (let* ((read (%interactive-seam *read-coding-system-function*
+                                                'read-coding-system))
+                       (answer (read (%interactive-message prompt (reverse visible)))))
+                  (loop (cdr rest) (cons answer args)
+                        (cons (and answer (symbol->string answer)) visible))))
+               ;; "Coding-system symbol, or ignore the argument if no
+               ;; prefix" (`:709'): with no prefix there is no read at
+               ;; all, and the argument is nil.
+               ((char=? code #\Z)
+                (if (and uarg (not (null? uarg)))
+                    (let* ((read (%interactive-seam
+                                  *read-non-nil-coding-system-function*
+                                  'read-non-nil-coding-system))
+                           (answer (read (%interactive-message prompt (reverse visible)))))
+                      (loop (cdr rest) (cons answer args)
+                            (cons (and answer (symbol->string answer)) visible)))
+                    (loop (cdr rest) (cons #f args) (cons #f visible))))
                ;; "Name of existing buffer" (`callint.c:468'): the C's
                ;; default - the current buffer, or `other-buffer' when
                ;; the selected window is the minibuffer window - and

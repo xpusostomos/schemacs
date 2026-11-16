@@ -48,7 +48,9 @@
     (only (schemacs editor minibuffer)
           completing-read make<history>)
     (only (schemacs editor command) define-command current-prefix-arg
-          *pending-coding-system*)
+          *pending-coding-system*
+          *read-coding-system-function*
+          *read-non-nil-coding-system-function*)
     ;; `delq' is Guile's list `delete' - R7RS has no destructive one -
     ;; and `hash-map->list' is how the registry is walked now that it is a
     ;; hash table rather than a list.
@@ -64,7 +66,8 @@
   (export
    mule-keymap
    *coding-system-history* coding-system-alist
-   read-coding-system read-buffer-file-coding-system
+   read-coding-system read-non-nil-coding-system
+   read-buffer-file-coding-system
    set-buffer-file-coding-system
    revert-buffer-with-coding-system
    universal-coding-system-argument
@@ -118,6 +121,24 @@
                      (if (symbol? default) (symbol->string default) default))))
           (if (or (not name) (string=? name ""))
               (if (symbol? default) default #f)
+              (string->symbol name)))))
+
+    (define (read-non-nil-coding-system prompt)
+      ;; GNU Emacs's `read-non-nil-coding-system' (`coding.c:8646'):
+      ;; "Read a coding system from the minibuffer, prompting with string
+      ;; PROMPT. Return the symbol of the coding-system."
+      ;;
+      ;; The C is a `do ... while (SCHARS (val) == 0)', so RET on an
+      ;; empty minibuffer asks again rather than answering nil - which is
+      ;; the whole difference between this and `read-coding-system'. Like
+      ;; that one it is here rather than in `coding.scm`, because it
+      ;; prompts and `coding.scm` is below the minibuffer.
+      ;;--------------------------------------------------------------
+      (let loop ()
+        (let ((name (completing-read prompt (coding-system-alist) #f #t #f
+                                     *coding-system-history*)))
+          (if (or (not name) (string=? name ""))
+              (loop)
               (string->symbol name)))))
 
     (define (read-buffer-file-coding-system)
@@ -259,5 +280,16 @@ For a list of possible values of CODING-SYSTEM, use \\[list-coding-systems]."
     ;; `files.sld'; that one is retired too, into `ctl-x-4-map' - the
     ;; submap `subr.el' makes for the `C-x 4' prefix.
     (define-key *default-keymap* (kbd "C-x RET") mule-keymap)
+
+    (*read-coding-system-function*
+     (lambda (prompt)
+       ;; `z' (`callint.c:724'): `Fread_coding_system (prompt, Qnil)' -
+       ;; the nil DEFAULT is the "or nil if both the input and the
+       ;; default are empty" of its docstring.
+       (read-coding-system prompt)))
+    (*read-non-nil-coding-system-function*
+     (lambda (prompt)
+       ;; `Z' (`:709'), for the branch that has a prefix.
+       (read-non-nil-coding-system prompt)))
 
     ))

@@ -4722,3 +4722,72 @@ one that reaches the confirm machinery.
 `command-tests.scm` 51 -> 54 (`b` and `B` read with the prompt alone, and
 the command receives what was read), and `tty-editor-tests.scm` asserts
 that a real editor has both seams installed.
+
+## The coding-system codes, and a seam whose library is not always loaded
+
+`z` ("Coding-system symbol or nil", `callint.c:724`) and `Z`
+("Coding-system symbol, or ignore the argument if no prefix", `:709`).
+
+`z` always reads: `Fread_coding_system (callint_message, Qnil)`, which is
+already here as `read-coding-system` in `mule-cmds.scm`.
+
+`Z` **reads only when there is a prefix** - the C's
+
+```c
+      if (NILP (prefix_arg))
+	{
+	  /* args[i] = Qnil; */
+	  varies[i] = -1;
+	}
+      else
+	args[i] = Fread_non_nil_coding_system (callint_message);
+```
+
+so with no prefix the minibuffer is not touched at all and the argument
+is nil. That needed **`read-non-nil-coding-system`** (`coding.c:8646`),
+which did not exist here:
+
+```c
+  do
+    {
+      val = Fcompleting_read (prompt, Vcoding_system_alist, Qnil,
+                              Qt, Qnil, Qcoding_system_history, Qnil, Qnil);
+    }
+  while (SCHARS (val) == 0);
+  return (Fintern (val, Qnil));
+```
+
+The loop is the whole difference from `read-coding-system`: RET on an
+empty minibuffer asks again rather than answering nil. It is ported into
+`mule-cmds.scm` beside `read-coding-system`, for that one's reason - it
+prompts, and `coding.scm` is below the minibuffer.
+
+**The visible form is the string read.** The C sets `visargs[i] =
+last_minibuf_string`; here the reader answers a *symbol*, so the visible
+form is `(symbol->string answer)`, and nil stays nil.
+
+### A seam is only installed when its library loads
+
+`read-coding-system` is `mule-cmds.scm`'s, so that is where the two seams
+are installed - and `mule-cmds` is **not** a library the editor core
+loads: it is imported by the two front ends (`ui/tty/tty-main.scm`,
+`ui/gtk/gtk-main.scm`), which is what a running editor is.
+
+That is a departure the other seams do not have. `*barf-if-buffer-read-
+only-function*` (keyboard), the four region seams (simple) and the two
+marker seams (editfns) are installed by libraries every editor loads, so
+they are always there; these two are there once the front end has loaded,
+which it does before any key is read. A `z` specification evaluated in a
+session that has loaded neither errors "Interactive specification needs
+`read-coding-system', which is not installed" - which is the honest
+report, and better than silently answering nil.
+
+**This was found by an assertion, and the assertion was in the wrong
+suite.** The first version added it to `tty-editor-tests.scm`, which
+fails - because that suite is not a front end and never imports
+`mule-cmds`. It is in `mule-cmds-tests.scm` now, which is the suite that
+loads this library; `command-tests.scm` stubs both seams, because what it
+tests is the machinery.
+
+`command-tests.scm` 54 -> 60: `z` reads, `Z` answers nil and calls no
+reader without a prefix, and both read with a prefix.
