@@ -4506,3 +4506,95 @@ rather than a `~3,'0o` directive because an error in this tree carries a
 *template and irritants* and the receiver does the formatting - which is
 what makes the message readable at the echo area and in `command-tests`
 alike.
+
+## A specification's prompts, and the five codes that read one
+
+Every remaining interactive code is a minibuffer read, and all of them
+are prompted. The prompt is not a separate argument: **each code owns
+the text after it up to the next newline**, and that text *is* the
+prompt -
+
+```c
+    char const *pnl = memchr (tem + 1, '\n', string_len - (tem + 1 - string));
+    ptrdiff_t sz = pnl ? pnl - (tem + 1) : string_end - (tem + 1);
+    visargs[1] = make_string (tem + 1, sz);
+    callint_message = Fformat_message (i - 1, visargs + 1);
+```
+
+(`callint.c:441`) - so `"sSearch: \nrRegion: "` gives `s` the prompt
+"Search: " and `r` the prompt "Region: ". This tree had no such
+splitting: `interactive-proc` walked single characters and treated `\n`
+as a separator that contributed nothing, so the text of a specification
+was unreachable and every prompted command spelled its spec as an
+expression.
+
+`%interactive-segments` is that walk now, and it answers a list of
+(CODE . PROMPT). `\n` stops being a code of its own - the segment walk
+consumes it - which is the same behaviour seen from the other side.
+
+**`-` in the middle of a specification is an error, and always was.**
+The peel loop at `:362` handles the *starting* characters only - "Ignore
+this for semi-compatibility with Lucid" is `else if (*string == '-')`
+with no `continue` past the next character - and the switch has no
+`case '-'`, so `"p-s"` is "Invalid control letter `-' ...". The loop
+this port had skipped `-` anywhere in the string; it no longer does.
+
+### The prompt is formatted with the arguments so far
+
+`Fformat_message (i - 1, visargs + 1)`: the prompt goes through `format`
+with the arguments already read, which is how `"sQuery replace %s with:
+"` shows what the `s` before it read. That needs `format-message`, which
+is `editfns.c`'s and above this library, so it is the seam
+`*format-message-function*` - a third seam for the codes, installed by
+`editfns.scm` beside `point-marker`.
+
+`visargs` is the C's second array: the *visible* form of each argument,
+which is what a later prompt can see. The port carries it as a second
+accumulator, with the C's closing "if visargs[i] is nil and args[i] is
+a string, use it" applied as each argument is pushed. `n` sets it
+explicitly with `Fnumber_to_string`; everything else either is a string
+already or contributes nothing.
+
+**Measured, not assumed**: a `%` in the *first* code's prompt is
+"Not enough arguments for format string" in Emacs 31.1 - the C formats
+unconditionally, not only when there are arguments - so this formats
+unconditionally too.
+
+### The five codes
+
+| code | what it reads | note |
+|---|---|---|
+| `s` | `read-string` | |
+| `M` | `read-string` | `INHERIT-INPUT-METHOD` is not carried; `read-string`'s own docstring already says so - there is no input method here |
+| `S` | `read-string`, then interned | the *string* is the visible form, not the symbol |
+| `n` | `read-number` | visible form is `number->string`, the C's `Fnumber_to_string` |
+| `N` | the prefix when there is one, else `read-number` | the C's `goto have_prefix_arg`, so with a prefix it is exactly `p` |
+
+**Two departures, both small and both named rather than hidden:**
+
+1. **`%s` of an argument that is not a string.** `visargs` holds Elisp
+   nil for the codes that contribute no string, and `(format "%s" nil)`
+   is `"nil"` in Emacs. This tree has no nil object here, so the entry
+   is `#f` and `%s` prints `"#f"`. Reachable only from a spec like
+   `"p\nsWidth (%s): "` with no prefix, and nothing in `lisp/` has one.
+2. **`read-number`'s `read` of the typed string** is `string->number`,
+   already recorded on that function.
+
+**`*read-string-function*` and `*read-number-function*`** are installed
+by `minibuffer.scm` as it loads. **A seam no library installs is an
+error naming it**, so a specification that reads without a minibuffer
+says "Interactive specification needs `read-string', which is not
+installed" rather than answering nil.
+
+**`command-tests.scm` stubs both readers**, because what it tests is the
+machinery - the prompt a code is given, the order the arguments arrive
+in, and the formatting of a later prompt by an earlier answer - and
+`tty-editor-tests.scm` asserts that a *real* editor has the *real* two,
+which a stub cannot show.
+
+**Nothing in the tree uses these codes yet.** Every prompted command
+here spells its spec as an expression, and so does Emacs for the ones
+this tree has (`find-file`, `switch-to-buffer`, `kill-buffer`,
+`query-replace`). They are carried because `callint.c` has them and
+because a spec quoted from Emacs's own source - `(interactive "sSearch:
+")` - is now readable as written.

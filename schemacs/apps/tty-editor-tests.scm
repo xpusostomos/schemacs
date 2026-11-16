@@ -152,6 +152,8 @@
        minibuffer-set-contents! minibufferp)
  (only (schemacs editor buffer) mark-active)
  (only (schemacs editor command) *mark-even-if-inactive*)
+ (only (schemacs editor command)
+       *read-string-function* *read-number-function*)
  (only (schemacs editor editfns)
        buffer-substring-no-properties delete-region goto-char point point-max point-min
        message
@@ -4917,3 +4919,18 @@
         (buffer-substring-no-properties (point-min) (point-max))))))
 
 (test-end "schemacs_tty_editor_error_loop")
+
+(test-begin "schemacs_tty_editor_interactive_readers")
+
+;; The `s'/`S'/`M' and `n'/`N' interactive codes read the minibuffer, and
+;; `command.scm` is below `minibuffer.scm` - so the readers arrive as
+;; seams, and a seam that nobody installs fails *at the keypress* with
+;; "Interactive specification needs `read-string', which is not
+;; installed". `command-tests.scm` stubs both to test the machinery; this
+;; is the assertion that a real editor has the real ones, which is the
+;; half a stub cannot show.
+(test-equal "minibuffer.scm installs the s and n readers" '(#t #t)
+            (list (procedure? (*read-string-function*))
+                  (procedure? (*read-number-function*))))
+
+(test-end "schemacs_tty_editor_interactive_readers")

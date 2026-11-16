@@ -48,7 +48,8 @@
     (only (guile) format)
     (only (schemacs editor command)
           current-prefix-arg define-command run-command uarg->integer
-          *command-table* command-value-of command-interactive-spec)
+          *command-table* command-value-of command-interactive-spec
+          *read-string-function* *read-number-function*)
     ;; `make-buffer-string` is `editfns.c:1561`'s and is
     ;; `intervals.scm`'s - it must live below `search.scm`, which
     ;; calls it and cannot import `editfns.scm` (2026-10-13).
@@ -4068,5 +4069,15 @@ else is Emacs's - the `Eval: ' prompt, the result echoed, and a
     ;; (`simple.el:2198' region; `(where-is-internal 'eval-expression)'
     ;; answers `M-:').
     (define-key *default-keymap* (kbd "M-:") eval-expression)
+
+    (*read-string-function* read-string)
+    (*read-number-function* read-number)
+    ;; ^ The `s'/`S'/`M' and `n'/`N' interactive codes' readers
+    ;; (`callint.c:681', `:687', `:630', `:640'). `command.scm` is below
+    ;; this library - everything here defines commands - so the two
+    ;; arrive as seams, as `*barf-if-buffer-read-only-function*` does
+    ;; from `keyboard.scm`. `read-string` is `minibuf.c`'s and
+    ;; `read-number` is `subr.el`'s; both are the library's own,
+    ;; defined above.
 
     ))

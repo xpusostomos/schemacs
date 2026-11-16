@@ -9684,7 +9684,7 @@ own mark marker, `m`'s no-mark message, and the invalid-letter text.
 `callint.c`'s switch has 30 letters and a `+`; the earlier list here
 carried an `l` that does not exist in Emacs 31.
 
-All 63 suites pass and `tools/pty-check.py` is 89/89.
+All 63 suites pass and `tools/pty-check.py` is 89/89 on this tree.
 
 **A warning about that battery, because it cost an hour here.** The
 first full run on this tree failed `quit-after-prefix` and then died in
@@ -9733,3 +9733,90 @@ Worth knowing before doing any of them: **`d`/`m` (`245` and `215` in
 tree's commands mostly use interactive *expressions* for those (Emacs
 itself does for `find-file`, `switch-to-buffer` and `kill-buffer`), so
 the immediate gain is in ports that quote a `"…"` spec verbatim.
+
+## A specification's prompts, and `s`/`S`/`M`/`n`/`N` (2026-11-16)
+
+Every interactive code that was left is a minibuffer read, and all of
+them are **prompted** - so the prompt machinery came first, because it
+is what they stand on.
+
+**The prompt is part of the specification string.** `callint.c:441`:
+each code owns the text after it up to the next newline, and that text
+is the prompt (`visargs[1] = make_string (tem + 1, sz)`). So
+`"sSearch: \nrRegion: "` is two codes with two prompts. This tree walked
+single characters and treated `\n` as a nothing-separator, so that text
+was unreachable. `%interactive-segments` is the C's walk now and answers
+(CODE . PROMPT) pairs.
+
+**And the prompt is `format`ted with the arguments already read**
+(`callint_message = Fformat_message (i - 1, visargs + 1)`), which is how
+`"sQuery replace %s with: "` shows what the earlier `s` read. That
+needs `format-message` - `editfns.c`'s, above this library - so
+`*format-message-function*` is a third seam, installed by `editfns.scm`.
+The C's parallel `visargs` array is a second accumulator, with its
+"if visargs[i] is nil and args[i] is a string, use it" applied as each
+argument is pushed.
+
+Five codes on top of it: `s`, `M` (both `read-string`; `M`'s
+inherit-input-method is not carried - no input method here), `S`
+(`read-string` then interned, the *string* being the visible form), `n`
+(`read-number`, visible as `number->string`), and `N` (the prefix when
+there is one - the C's `goto have_prefix_arg` - else `read-number`).
+Two more seams, `*read-string-function*` and `*read-number-function*`,
+installed by `minibuffer.scm`.
+
+Measured rather than assumed: **a `%` in the first code's prompt is
+"Not enough arguments for format string"** in Emacs 31.1, so the
+formatting is unconditional. And **`-` in the middle of a specification
+is an error** - the peel loop handles only the *starting* characters and
+the switch has no `case '-'` - where the old loop skipped `-` anywhere.
+
+`command-tests.scm` 30 -> 44 with both readers **stubbed**: what is
+tested is the machinery (the prompt a code is given, the argument
+order, a later prompt formatted by an earlier answer), and
+`tty-editor-tests.scm` gains the assertion that a real editor has the
+real two - which a stub cannot show.
+
+**Nothing in the tree uses these codes yet.** Every prompted command
+here spells its spec as an expression, and so does Emacs for the ones
+this tree has. They are carried because a spec quoted from Emacs's own
+source is now readable as written.
+
+### `back-door` was aborting the battery, and now it reports
+
+The check's client calls raised `subprocess.TimeoutExpired` out of
+`during()`, out of `drive()` and out of `main()` - so **one stuck client
+took the whole run down and the checks after it never ran**, reporting
+nothing about themselves. That is worse than a red check, and it is what
+two of this pass's three battery runs did.
+
+Both halves are fixed in `tools/pty-check.py`:
+
+* a timeout is now a `CompletedProcess` with returncode 124 and no
+  output, so a caller decides what it means;
+* the first client after the greeting socket gets a **fifteen-second
+  first attempt and two retries**, because the door serves one session
+  at a time and the greeting's close may not have been noticed yet - the
+  race this file has recorded twice. Losing it now costs fifteen seconds
+  instead of hanging, and a client that loses it three times is a named
+  problem ("the door accepted a client and never greeted it").
+
+Three runs of `back-door` alone: 3/3.
+
+### What is left of `callint.c`: 13 codes
+
+| codes | reader | lives in | blocker |
+|---|---|---|---|
+| `b` `B` | `read-buffer` | `minibuffer.scm` | **the name**: `*read-buffer-function*` is Emacs's own variable and is already here |
+| `f` `F` `G` `D` | `read-file-name` | `files.scm` | **the name**: `read-file-name-function` is Emacs's own variable |
+| `a` `C` | `completing-read` over the obarray | `minibuffer.scm` | needs a predicate over `fboundp`/`commandp` |
+| `c` | `read-char` | `keyboard.scm` | |
+| `k` `K` (`U` after them) | `read-key-sequence` | `keyboard.scm` | |
+| `x` `X` | `read-minibuffer`, `eval-minibuffer` | `minibuffer.scm` | `x` must read *without* evaluating |
+| `z` `Z` | `read-coding-system` | `coding.scm` | |
+| `v` | `read-variable` | `custom.scm` | |
+
+**The naming decision has to be made before `b`/`B`**: a seam spelled
+`*read-buffer-function*` would collide with Emacs's variable of that
+name, which `minibuf.scm` already holds. The `%` prefix that
+`%kill-buffer` took is the precedent.

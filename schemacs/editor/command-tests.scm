@@ -7,7 +7,9 @@
  (only (schemacs editor command)
        define-command define-alias command-record-of command-procedure
        command-record-named *barf-if-buffer-read-only-function*
-       *point-marker-function* *mark-marker-function*)
+       *point-marker-function* *mark-marker-function*
+       *read-string-function* *read-number-function*
+       *format-message-function*)
  (only (schemacs editor buffer)
        allocate-buffer with-current-buffer current-buffer
        set!buffer-read-only)
@@ -87,6 +89,41 @@ read-only check."
   (interactive "q")
   (*got* 'ran))
 
+(define-command (string-arg-command text)
+  "A command whose specification is `s': a string, prompted."
+  (interactive "sYour name: ")
+  (*got* text))
+
+(define-command (symbol-arg-command sym)
+  "A command whose specification is `S': the string read, interned."
+  (interactive "SSymbol: ")
+  (*got* sym))
+
+(define-command (inherit-arg-command text)
+  "A command whose specification is `M'."
+  (interactive "MText: ")
+  (*got* text))
+
+(define-command (number-arg-command n)
+  "A command whose specification is `n'."
+  (interactive "nHow many: ")
+  (*got* n))
+
+(define-command (number-or-prefix-command n)
+  "A command whose specification is `N': the prefix, else a read."
+  (interactive "NHow many: ")
+  (*got* n))
+
+(define-command (two-reads-command first second)
+  "A specification whose *second* prompt shows what the first read."
+  (interactive "sFirst: \nsSecond %s: ")
+  (*got* (list first second)))
+
+(define-command (number-then-prompt-command n unit)
+  "`n' then a prompt that shows the number read."
+  (interactive "nWidth: \nsUnit %s: ")
+  (*got* (list n unit)))
+
 (define-command (dash-marker-command arg)
   "A command whose specification begins with `-', Lucid's no-op."
   (interactive "-P")
@@ -136,6 +173,10 @@ read-only check."
 (test-equal "and editfns installs the d and m readers" '(#t #t)
             (list (procedure? (*point-marker-function*))
                   (procedure? (*mark-marker-function*))))
+;; ...and the prompt formatter, which the read-codes group below relies
+;; on: a specification's prompt is formatted with the arguments so far.
+(test-equal "and format-message for the prompts" #t
+            (procedure? (*format-message-function*)))
 (test-end "star-seam")
 
 (test-begin "star-marker")
@@ -272,6 +313,88 @@ read-only check."
               "Invalid control letter `q' (#o161, #x0071) in interactive calling string"
               (message-of (lambda () ((entry bad-code-command) #f)))))
 (test-end "bad-code")
+;;--------------------------------------------------------------
+(test-begin "read-codes")
+;;--------------------------------------------------------------
+;; `s', `S', `M', `n' and `N' read the minibuffer, which this suite does
+;; not load - so the *readers* are stubs and what is under test is the
+;; machinery around them: the prompt a code is given (the text after the
+;; code up to the next newline, `callint.c:441`), the order the
+;; arguments arrive in, and what a *later* prompt shows of an earlier
+;; answer (`Fformat_message (i - 1, visargs + 1)`).
+(define *prompts* (make-parameter '()))
+(define *answers* (make-parameter '()))
+
+(define (stub-reader)
+  ;; Answers the next scripted value and records the prompt it was
+  ;; asked with.
+  (lambda (prompt)
+    (*prompts* (append (*prompts*) (list prompt)))
+    (let ((rest (*answers*)))
+      (if (pair? rest)
+          (begin (*answers* (cdr rest)) (car rest))
+          #f))))
+
+(define-syntax with-readers
+  ;; Bind both readers to stubs, with a fresh script of ANSWERS. The
+  ;; format-message seam is left alone: `editfns.scm` is in this suite's
+  ;; import graph, so the *real* one formats the prompts - which is the
+  ;; point of the two formatting tests below.
+  (syntax-rules ()
+    ((_ answers body ...)
+     (parameterize ((*read-string-function* (stub-reader))
+                    (*read-number-function* (stub-reader))
+                    (*prompts* '())
+                    (*answers* answers))
+       body ...))))
+
+(with-current-buffer ed
+  (with-readers '("Alice")
+    (test-equal "s reads a string" "Alice"
+                (begin ((entry string-arg-command) #f) (*got*)))
+    (test-equal "and its prompt is the text after the code"
+                '("Your name: ") (*prompts*)))
+
+  (with-readers '("alice")
+    (test-equal "S interns what it read" 'alice
+                (begin ((entry symbol-arg-command) #f) (*got*)))
+    (test-equal "with the same prompt rule" '("Symbol: ") (*prompts*)))
+
+  (with-readers '("some text")
+    (test-equal "M reads a string too" "some text"
+                (begin ((entry inherit-arg-command) #f) (*got*))))
+
+  (with-readers '(42)
+    (test-equal "n reads a number" 42
+                (begin ((entry number-arg-command) #f) (*got*)))
+    (test-equal "from its prompt" '("How many: ") (*prompts*)))
+
+  ;; `N' is `p' when there is a prefix - "goto have_prefix_arg" - and a
+  ;; read only when there is none.
+  (with-readers '(7)
+    (test-equal "N takes the prefix when there is one" 4
+                (begin ((entry number-or-prefix-command) '(4)) (*got*)))
+    (test-equal "and reads nothing" '() (*prompts*))
+    (test-equal "N reads a number when there is no prefix" 7
+                (begin ((entry number-or-prefix-command) #f) (*got*))))
+
+  ;; The prompt of a later code is formatted with the arguments so far -
+  ;; which is why a specification can say `"sQuery replace %s with: "'.
+  (with-readers '("one" "two")
+    (test-equal "the two reads, in order" '("one" "two")
+                (begin ((entry two-reads-command) #f) (*got*)))
+    (test-equal "and the second prompt shows the first answer"
+                '("First: " "Second one: ") (*prompts*)))
+
+  ;; `n`'s visible form is the number as a string (`Fnumber_to_string`),
+  ;; not the number.
+  (with-readers '(42 "px")
+    (test-equal "a number read is shown as its string in a prompt"
+                '(42 "px")
+                (begin ((entry number-then-prompt-command) #f) (*got*)))
+    (test-equal "so the unit prompt reads Unit 42:" '("Width: " "Unit 42: ")
+                (*prompts*))))
+(test-end "read-codes")
 ;;--------------------------------------------------------------
 (test-begin "plain-specs")
 ;; `(interactive)` - the empty specification - is a thunk, which is why

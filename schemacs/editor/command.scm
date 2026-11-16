@@ -28,6 +28,7 @@
    *check-mark-function* *region-beginning-function* *region-end-function*
    *use-region-p-function*
    *point-marker-function* *mark-marker-function*
+   *format-message-function* *read-string-function* *read-number-function*
    called-interactively? funcall-interactively
    uarg->integer
    run-command apply-command show-command
@@ -426,6 +427,58 @@
                   (loop (+ i 1) (cons ch markers))
                   (cons (reverse markers) (substring spec i)))))))
 
+    (define *format-message-function* (make-parameter #f))
+    (define *read-string-function* (make-parameter #f))
+    (define *read-number-function* (make-parameter #f))
+    ;; ^ The readers the minibuffer codes need. `format-message` is
+    ;; `editfns.c`'s and the other two are `minibuf.c`'s and `subr.el`'s;
+    ;; all three are above this library, so they arrive as seams -
+    ;; `editfns.scm` installs the first and `minibuffer.scm` the other
+    ;; two.
+    ;;
+    ;; `format-message` is here because a specification's *prompt* is
+    ;; formatted with the arguments read so far
+    ;; (`callint_message = Fformat_message (i - 1, visargs + 1)'), which
+    ;; is how `"sQuery replace %s with: "' shows what the `s' before it
+    ;; read.
+
+    (define (%interactive-segments codes)
+      ;; The specification split into codes and their prompts, in order,
+      ;; the way `Fcall_interactively`'s loop walks it (`callint.c:441'):
+      ;; the code is one character, and `visargs[1] = make_string (tem +
+      ;; 1, sz)' is everything after it up to the next newline (`pnl') -
+      ;; so `"sSearch: \nrRegion: "' gives `s' the prompt "Search: " and
+      ;; `r' the prompt "Region: ". Answers a list of (CODE . PROMPT).
+      ;;
+      ;; The newline is the *separator* and also where the prompt ends,
+      ;; which is why the C searches from `tem + 1' and not from `tem'.
+      ;; A trailing newline simply ends the walk: the next code would be
+      ;; at `pnl + 1', which is the end of the string.
+      ;;--------------------------------------------------------------
+      (let ((end (string-length codes)))
+        (let loop ((i 0) (segments '()))
+          (if (>= i end)
+              (reverse segments)
+              (let* ((code (string-ref codes i))
+                     (pnl (let scan ((j (+ i 1)))
+                            (cond ((>= j end) end)
+                                  ((char=? (string-ref codes j) #\newline) j)
+                                  (else (scan (+ j 1)))))))
+                (loop (+ pnl 1)
+                      (cons (cons code (substring codes (+ i 1) pnl))
+                            segments)))))))
+
+    (define (%interactive-message prompt visible)
+      ;; The prompt the code at this position reads with: the C's
+      ;; `Fformat_message (i - 1, visargs + 1)`, which formats PROMPT with
+      ;; the arguments read so far. With none, it is
+      ;; `(format-message PROMPT)' - and a `%' in the *first* code's
+      ;; prompt is therefore "Not enough arguments for format string",
+      ;; measured on Emacs 31.1 rather than assumed.
+      ;;--------------------------------------------------------------
+      (apply (%interactive-seam *format-message-function* 'format-message)
+             prompt visible))
+
     (define (%zero-pad string width)
       ;; STRING padded on the left with zeroes to WIDTH - the C's `%03o'
       ;; and `%04x' for the invalid-code message. A number too wide for
@@ -434,34 +487,43 @@
       (string-append (make-string (max 0 (- width (string-length string))) #\0)
                      string))
 
-    (define (%interactive-args codes uarg)
-      ;; The argument list a specification's CODES build, in the C's
-      ;; order: each code contributes no argument, one, or (for `r' and
-      ;; `R') two. `\n' and `-' separate codes for readability and
-      ;; contribute nothing - `string' is "You can use a newline to
-      ;; separate multiple codes" - and a code this tree does not read is
-      ;; an error, which is what `define-command` gave before it read any.
+    (define (%interactive-args segments uarg)
+      ;; The argument list SEGMENTS build, in the C's order: each code
+      ;; contributes no argument, one, or (for `r' and `R') two. A code
+      ;; this tree does not read is an error naming the character.
+      ;;
+      ;; Two accumulators, the C's `args' and `visargs': ARGS is the
+      ;; command's arguments as `funcall-interactively' will receive
+      ;; them, and VISIBLE is the same arguments *as a prompt shows
+      ;; them*, one entry per argument - a string for the codes that
+      ;; read one, nil for the rest, which is the C's closing
+      ;; "if visargs[i] is nil and args[i] is a string, use it" applied
+      ;; as each argument is pushed. Only a later code's prompt can see
+      ;; it.
       ;;--------------------------------------------------------------
-      (let loop ((i 0) (args '()))
-        (if (= i (string-length codes))
+      (let loop ((rest segments) (args '()) (visible '()))
+        (if (null? rest)
             (reverse args)
-            (let ((code (string-ref codes i)))
+            (let ((code (car (car rest)))
+                  (prompt (cdr (car rest))))
               (cond
                ;; "Prefix arg converted to number" (`callint.c:668').
                ((char=? code #\p)
-                (loop (+ i 1) (cons (uarg->integer 1 uarg) args)))
+                (loop (cdr rest) (cons (uarg->integer 1 uarg) args)
+                      (cons #f visible)))
                ;; "Prefix arg in raw form."
                ((char=? code #\P)
-                (loop (+ i 1) (cons uarg args)))
+                (loop (cdr rest) (cons uarg args) (cons #f visible)))
                ;; "The invoking event" (`:600'): the event the command
                ;; loop bound for this command. The C walks to the next
                ;; *parameterized* event for a repeated `e'; this tree's
                ;; events are already one value, so it repeats that one.
                ((char=? code #\e)
-                (loop (+ i 1) (cons (*last-command-event*) args)))
+                (loop (cdr rest) (cons (*last-command-event*) args)
+                      (cons #f visible)))
                ;; "Ignore an argument" (`:525'): nil, and no I/O.
                ((char=? code #\i)
-                (loop (+ i 1) (cons #f args)))
+                (loop (cdr rest) (cons #f args) (cons #f visible)))
                ;; "Region, point and mark as 2 args" (`:681'): the C's
                ;; `check_mark (true)` and then the two positions, smaller
                ;; first - which is what `region-beginning'/`region-end'
@@ -471,7 +533,8 @@
                   (when check (check #t)))
                 (let ((beg (let ((f (*region-beginning-function*))) (and f (f))))
                       (end (let ((f (*region-end-function*))) (and f (f)))))
-                  (loop (+ i 1) (cons end (cons beg args)))))
+                  (loop (cdr rest) (cons end (cons beg args))
+                        (cons #f (cons #f visible)))))
                ;; "Active region, point and mark as 2 args" (`:676'):
                ;; the same, but *both* nil unless `use-region-p` - and
                ;; no mark check, because the C returns before the
@@ -481,14 +544,17 @@
                   (if use?
                       (let ((beg (let ((f (*region-beginning-function*))) (and f (f))))
                             (end (let ((f (*region-end-function*))) (and f (f)))))
-                        (loop (+ i 1) (cons end (cons beg args))))
-                      (loop (+ i 1) (cons #f (cons #f args))))))
+                        (loop (cdr rest) (cons end (cons beg args))
+                              (cons #f (cons #f visible))))
+                      (loop (cdr rest) (cons #f (cons #f args))
+                            (cons #f (cons #f visible))))))
                ;; "Value of point. Does not do I/O" (`callint.c:502'):
                ;; a marker at point, which the command may keep.
                ((char=? code #\d)
                 (let ((mark-at-point (%interactive-seam *point-marker-function*
                                                         'point-marker)))
-                  (loop (+ i 1) (cons (mark-at-point) args))))
+                  (loop (cdr rest) (cons (mark-at-point) args)
+                        (cons #f visible))))
                ;; "Value of mark. Does not do I/O" (`:623'): the mark
                ;; *checked* first - "The mark is not set now", not the
                ;; region's message - and then the buffer's own mark
@@ -498,11 +564,55 @@
                   (when check (check #f)))
                 (let ((mark (%interactive-seam *mark-marker-function*
                                                'mark-marker)))
-                  (loop (+ i 1) (cons (mark) args))))
-               ;; "A newline in the string is a separator" and `-'s
-               ;; Lucid semi-compatibility (`callint.c:385').
-               ((memv code '(#\newline #\-))
-                (loop (+ i 1) args))
+                  (loop (cdr rest) (cons (mark) args) (cons #f visible))))
+               ;; "String read via minibuffer without inheriting the
+               ;; current input method" (`callint.c:681').
+               ((char=? code #\s)
+                (let ((answer ((%interactive-seam *read-string-function*
+                                                  'read-string)
+                               (%interactive-message prompt (reverse visible)))))
+                  (loop (cdr rest) (cons answer args) (cons answer visible))))
+               ;; "String read via minibuffer with inheriting the current
+               ;; input method" (`:630'): the same read here, because
+               ;; `read-string`'s fifth argument is not carried - there is
+               ;; no input method.
+               ((char=? code #\M)
+                (let ((answer ((%interactive-seam *read-string-function*
+                                                  'read-string)
+                               (%interactive-message prompt (reverse visible)))))
+                  (loop (cdr rest) (cons answer args) (cons answer visible))))
+               ;; "Any symbol" (`:687'): the string read, then interned -
+               ;; and the *string* is what a later prompt shows.
+               ((char=? code #\S)
+                (let ((answer ((%interactive-seam *read-string-function*
+                                                  'read-string)
+                               (%interactive-message prompt (reverse visible)))))
+                  (loop (cdr rest) (cons (string->symbol answer) args)
+                        (cons answer visible))))
+               ;; "Read number from minibuffer" (`:640').
+               ((char=? code #\n)
+                (let ((answer ((%interactive-seam *read-number-function*
+                                                  'read-number)
+                               (%interactive-message prompt (reverse visible)))))
+                  (loop (cdr rest) (cons answer args)
+                        (cons (number->string answer) visible))))
+               ;; "Prefix arg as number, else number from minibuffer"
+               ;; (`:636'): the prefix is the *whole* answer when there
+               ;; is one, and the `p' code's value when there is - so
+               ;; "goto have_prefix_arg" is this branch, and it answers
+               ;; nothing visible, as `p' does not.
+               ((char=? code #\N)
+                ;; The C's `!NILP (prefix_arg)' - and Elisp's nil is the
+                ;; empty list as well as #f, so the *pair* has to be
+                ;; tested: `()' is true in Scheme.
+                (if (and uarg (not (null? uarg)))
+                    (loop (cdr rest) (cons (uarg->integer 1 uarg) args)
+                          (cons #f visible))
+                    (let ((answer ((%interactive-seam *read-number-function*
+                                                      'read-number)
+                                   (%interactive-message prompt (reverse visible)))))
+                      (loop (cdr rest) (cons answer args)
+                            (cons (number->string answer) visible)))))
                (else
                 ;; "Invalid control letter `%c' (#o%03o, #x%04x) in
                 ;; interactive calling string" (`callint.c:744'). The
@@ -533,17 +643,17 @@
       ;; that is the command loop's module, and the command's helpers
       ;; are not all in it.
       ;;
-      ;; The codes read are `p', `P', `e', `i', `r' and `R'. The rest of
+      ;; The codes read are `p', `P', `e', `i', `r', `R', `d', `m', `s',
+      ;; `S', `M', `n' and `N'. Each code owns the text after it up to
+      ;; the next newline, which is its *prompt*. The rest of
       ;; `callint.c`'s alphabet is not carried, each because what it
-      ;; needs is not here: `b'/`B' (a buffer name), `f'/`F'/`G' (a file),
-      ;; `d'/`D' (a directory), `n'/`N' (a number), `s'/`S'/`M' (a
-      ;; string), `c' (a character), `k'/`K'/`U' (a key sequence), `m'
-      ;; (the mark, which needs the mark primitive rather than the region
-      ;; ones), `x'/`X' (a Lisp expression), `z'/`Z' (a coding system),
-      ;; `a'/`C'/`v' (a function or variable name) and `l' (a list) - all
-      ;; of them minibuffer reads this library is below. A specification
-      ;; with one of them answers "Unsupported interactive specification
-      ;; character" when the command runs.
+      ;; needs is not here: `b'/`B' (a buffer name), `f'/`F'/`G'/`D' (a
+      ;; file or directory), `c' (a character), `k'/`K'/`U' (a key
+      ;; sequence), `x'/`X' (a Lisp expression), `z'/`Z' (a coding
+      ;; system) and `a'/`C'/`v' (a function, command or variable name).
+      ;; A specification with one of them answers "Invalid control
+      ;; letter ... in interactive calling string" when the command
+      ;; runs, which is Emacs's own message.
       ;;--------------------------------------------------------------
       (cond
        ((not spec) (lambda ()
@@ -564,7 +674,7 @@
        ((string? spec)
         (let* ((peeled (%interactive-markers spec))
                (markers (car peeled))
-               (codes (cdr peeled)))
+               (segments (%interactive-segments (cdr peeled))))
           (lambda (uarg)
             (parameterize ((current-prefix-arg uarg)
                            (*called-interactively* command))
@@ -587,7 +697,7 @@
                    ;; nothing, which is what `-' asks for anyway.
                    (else #f)))
                markers)
-              (funcall-interactively command (%interactive-args codes uarg))))))
+              (funcall-interactively command (%interactive-args segments uarg))))))
        (else (error "Unsupported interactive specification" spec))))
 
     (define (register-command! command spec)

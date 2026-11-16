@@ -2133,13 +2133,41 @@ def check_back_door():
             s.close()
         return buf.decode("utf-8", "replace")
 
+    def run(argv, timeout):
+        # **A timeout is a value here, not an exception.** It used to
+        # raise, out of `during()`, out of `drive()`, and out of `main()` -
+        # so one stuck client took the *whole battery* down with it and
+        # the forty checks after it never ran or reported anything. A
+        # check must report, not abort the run.
+        try:
+            return subprocess.run(argv, capture_output=True, text=True,
+                                  cwd=REPO, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return subprocess.CompletedProcess(argv, 124, "", "")
+
+    def client(expr):
+        # The door serves ONE session at a time, and `greeting()` has only
+        # just closed its socket: a client that connects into that window
+        # is accepted and never greeted, and then waits for ever - `repl`
+        # has no timeout of its own. A short first attempt and a retry, so
+        # losing that race costs fifteen seconds instead of a hundred and
+        # twenty. (`AGENTS.md` has this check hanging twice in one battery
+        # for exactly this reason.)
+        out = None
+        for attempt in range(3):
+            out = run(["repl", "-e", expr, instance],
+                      15 if attempt == 0 else 60)
+            if out.returncode != 124:
+                return out
+        problems.append("the door accepted a client and never greeted it: "
+                        "three attempts timed out")
+        return out
+
     def run_se(*args):
         # `bin/se' and not `guile -s ...': the launcher is what parses
         # `--remote', and this is the one check that drives it. It has to
         # run from the tree, which is how it finds the tree.
-        return subprocess.run([os.path.join(REPO, "bin", "se")] + list(args),
-                              capture_output=True, text=True, cwd=REPO,
-                              timeout=120)
+        return run([os.path.join(REPO, "bin", "se")] + list(args), 60)
 
     def poke():
         # `buffer-file-name' and `current-buffer' are both the editor's
@@ -2150,9 +2178,7 @@ def check_back_door():
         # expression, its answer, and out. It is a *tool the user has*, not
         # something this tree installs, so a missing one is reported as
         # itself rather than as a back-door failure.
-        answer["run"] = subprocess.run(
-            ["repl", "-e", "(buffer-file-name (current-buffer))", instance],
-            capture_output=True, text=True, cwd=REPO, timeout=120)
+        answer["run"] = client("(buffer-file-name (current-buffer))")
         # ...and the launcher's `--remote', which is `emacsclient' from the
         # other side: it opens a file in the running editor and starts none
         # itself. Two things have to be true afterwards - the editor is
@@ -2160,9 +2186,7 @@ def check_back_door():
         # back-door change did not do until `poll-repl!' was made to
         # redisplay.
         answer["remote"] = run_se("--remote=" + instance, remote)
-        answer["after"] = subprocess.run(
-            ["repl", "-e", "(buffer-file-name (current-buffer))", instance],
-            capture_output=True, text=True, cwd=REPO, timeout=120)
+        answer["after"] = client("(buffer-file-name (current-buffer))")
         answer["no-files"] = run_se("--remote=" + instance)
 
     try:

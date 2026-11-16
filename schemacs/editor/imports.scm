@@ -322,6 +322,7 @@
     *font-lock-syntactic-face-function*
     *font-lock-syntax-table*
     *font-lock-unfontify-region-function*
+    *format-message-function*
     *forward-comment-function*
     *forward-list-function*
     *forward-sexp-function*
@@ -498,6 +499,8 @@
     *read-buffer-completion-ignore-case*
     *read-buffer-function*
     *read-buffer-to-switch*
+    *read-number-function*
+    *read-string-function*
     *record-window-buffer-function*
     *recursive-edit-exit*
     *redisplay-in-progress*

@@ -99,7 +99,8 @@
     ;; the PROPS argument (2026-10-12).
     (only (schemacs editor command)
           *mark-even-if-inactive*
-          *point-marker-function* *mark-marker-function*)
+          *point-marker-function* *mark-marker-function*
+          *format-message-function*)
     ;; **This library no longer imports `frame.scm'.**
     ;;
     ;; `message' puts its text in the echo area, which is the frame's -
@@ -1542,5 +1543,9 @@ moved."
     ;; `:623'). `command.scm` is below this library, so they arrive as
     ;; seams - the way `*barf-if-buffer-read-only-function*` arrives from
     ;; `keyboard.scm`. Both functions are the C's own, defined above.
+    (*format-message-function* format-message)
+    ;; ^ `callint.c:448`'s `Fformat_message`, which turns a
+    ;; specification's prompt into the string a code reads with - "the
+    ;; arguments read so far" substituted into it.
 
     ))
