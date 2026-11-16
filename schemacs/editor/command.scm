@@ -29,6 +29,8 @@
    *use-region-p-function*
    *point-marker-function* *mark-marker-function*
    *format-message-function* *read-string-function* *read-number-function*
+   *interactive-read-file-name-function*
+   *interactive-read-directory-name-function*
    called-interactively? funcall-interactively
    uarg->integer
    run-command apply-command show-command
@@ -430,6 +432,22 @@
     (define *format-message-function* (make-parameter #f))
     (define *read-string-function* (make-parameter #f))
     (define *read-number-function* (make-parameter #f))
+    (define *interactive-read-file-name-function* (make-parameter #f))
+    (define *interactive-read-directory-name-function* (make-parameter #f))
+    ;; ^ The file codes' readers, and the rule their names follow: a seam
+    ;; takes the plain `<function>-function` name unless Emacs has a
+    ;; *variable* of that name, in which case it is `interactive-`-
+    ;; prefixed. `read-file-name-function` is such a variable (a
+    ;; defcustom that replaces `read-file-name`), so
+    ;; `*read-file-name-function*` is not available here;
+    ;; `read-string` and `read-number` are nothing in Emacs, which is why
+    ;; those two keep the plain spelling.
+    ;;
+    ;; Two seams and not one, because the `D' code's DEFAULT and
+    ;; PREDICATE are `BVAR (current_buffer, directory)` and
+    ;; `Qfile_directory_p` - state and a function, neither of which this
+    ;; library can name. So `D' reads with its prompt alone and the
+    ;; installer supplies the rest.
     ;; ^ The readers the minibuffer codes need. `format-message` is
     ;; `editfns.c`'s and the other two are `minibuf.c`'s and `subr.el`'s;
     ;; all three are above this library, so they arrive as seams -
@@ -565,6 +583,53 @@
                 (let ((mark (%interactive-seam *mark-marker-function*
                                                'mark-marker)))
                   (loop (cdr rest) (cons (mark) args) (cons #f visible))))
+               ;; "Existing file name" (`callint.c:514'): `read_file_name
+               ;; (Qnil, Qlambda, Qnil, Qnil)'. `Qlambda' is what the C
+               ;; passes for MUSTMATCH, not `t', and the two differ:
+               ;; `completing-read' binds `minibuffer-completion-confirm'
+               ;; to anything that is not `t', so `lambda' is the C's.
+               ((char=? code #\f)
+                (let ((read (%interactive-seam
+                             *interactive-read-file-name-function*
+                             'read-file-name)))
+                  (loop (cdr rest)
+                        (cons (read (%interactive-message prompt (reverse visible))
+                                    'lambda #f)
+                              args)
+                        (cons #f visible))))
+               ;; "Possibly nonexistent file name" (`:518'): MUSTMATCH nil.
+               ((char=? code #\F)
+                (let ((read (%interactive-seam
+                             *interactive-read-file-name-function*
+                             'read-file-name)))
+                  (loop (cdr rest)
+                        (cons (read (%interactive-message prompt (reverse visible))
+                                    #f #f)
+                              args)
+                        (cons #f visible))))
+               ;; "Possibly nonexistent file name, default to directory
+               ;; alone" (`:522'): the same read with INITIAL "", which is
+               ;; what makes the minibuffer hold just the directory.
+               ((char=? code #\G)
+                (let ((read (%interactive-seam
+                             *interactive-read-file-name-function*
+                             'read-file-name)))
+                  (loop (cdr rest)
+                        (cons (read (%interactive-message prompt (reverse visible))
+                                    #f "")
+                              args)
+                        (cons #f visible))))
+               ;; "Directory name" (`:509'): the buffer's directory as
+               ;; DEFAULT and `file-directory-p' as the predicate - both
+               ;; the installing library's, so the whole call is its.
+               ((char=? code #\D)
+                (let ((read (%interactive-seam
+                             *interactive-read-directory-name-function*
+                             'read-file-name)))
+                  (loop (cdr rest)
+                        (cons (read (%interactive-message prompt (reverse visible)))
+                              args)
+                        (cons #f visible))))
                ;; "String read via minibuffer without inheriting the
                ;; current input method" (`callint.c:681').
                ((char=? code #\s)

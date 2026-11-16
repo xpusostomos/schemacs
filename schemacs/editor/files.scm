@@ -50,6 +50,8 @@
     ;; The commands here install their own keys, as files.el does.
     (only (schemacs editor command)
           current-prefix-arg define-command
+          *interactive-read-file-name-function*
+          *interactive-read-directory-name-function*
           ;; a mode named in an alist is a *symbol*, and the command table
           ;; is where a name resolves to the procedure Emacs's function
           ;; cell would hold
@@ -3798,5 +3800,27 @@ The path separator is colon in GNU and GNU-like systems."
             (with-current-buffer buffer
               ((%mode-function function))
               #t))))
+
+    (*interactive-read-file-name-function*
+     (lambda (prompt must-match initial)
+       ;; `f', `F' and `G' (`callint.c:514', `:518', `:522'): the C's
+       ;; `read_file_name (callint_message, Qnil, DEFAULT, MUSTMATCH,
+       ;; INITIAL, nil)' with this tree's DIR left to `default-directory'
+       ;; - which is what the C's `Qnil' DIR means too.
+       (read-file-name prompt #f #f must-match initial)))
+
+    (*interactive-read-directory-name-function*
+     (lambda (prompt)
+       ;; `D' (`callint.c:509'): `read_file_name (BVAR (current_buffer,
+       ;; directory), Qlambda, Qnil, Qfile_directory_p)'. Both the DEFAULT
+       ;; and the PREDICATE are this library's, which is why the whole
+       ;; call is the seam.
+       ;;
+       ;; **Departure**: PREDICATE is not carried - `read-file-name` here
+       ;; does not take one ("the completion table here has the one
+       ;; predicate, `file-name-completion-table'"), so a `D' prompt will
+       ;; complete files as well as directories and RET on a file name is
+       ;; accepted where Emacs refuses it.
+       (read-file-name prompt #f (default-directory) 'lambda #f)))
 
     ))

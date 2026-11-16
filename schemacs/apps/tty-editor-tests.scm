@@ -153,7 +153,9 @@
  (only (schemacs editor buffer) mark-active)
  (only (schemacs editor command) *mark-even-if-inactive*)
  (only (schemacs editor command)
-       *read-string-function* *read-number-function*)
+       *read-string-function* *read-number-function*
+       *interactive-read-file-name-function*
+       *interactive-read-directory-name-function*)
  (only (schemacs editor editfns)
        buffer-substring-no-properties delete-region goto-char point point-max point-min
        message
@@ -4932,5 +4934,10 @@
 (test-equal "minibuffer.scm installs the s and n readers" '(#t #t)
             (list (procedure? (*read-string-function*))
                   (procedure? (*read-number-function*))))
+
+;; ...and `files.scm` the two the file codes read with.
+(test-equal "files.scm installs the f/F/G and D readers" '(#t #t)
+            (list (procedure? (*interactive-read-file-name-function*))
+                  (procedure? (*interactive-read-directory-name-function*))))
 
 (test-end "schemacs_tty_editor_interactive_readers")

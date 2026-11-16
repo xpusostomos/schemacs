@@ -365,6 +365,8 @@
     *initial-major-mode*
     *insert-default-directory*
     *insert-directory-program*
+    *interactive-read-directory-name-function*
+    *interactive-read-file-name-function*
     *internal-syntax-propertize-function*
     *interpreter-mode-alist*
     *interprogram-cut-function*

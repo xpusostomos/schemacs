@@ -9,7 +9,9 @@
        command-record-named *barf-if-buffer-read-only-function*
        *point-marker-function* *mark-marker-function*
        *read-string-function* *read-number-function*
-       *format-message-function*)
+       *format-message-function*
+       *interactive-read-file-name-function*
+       *interactive-read-directory-name-function*)
  (only (schemacs editor buffer)
        allocate-buffer with-current-buffer current-buffer
        set!buffer-read-only)
@@ -123,6 +125,26 @@ read-only check."
   "`n' then a prompt that shows the number read."
   (interactive "nWidth: \nsUnit %s: ")
   (*got* (list n unit)))
+
+(define-command (existing-file-command name)
+  "A command whose specification is `f': an existing file name."
+  (interactive "fFile: ")
+  (*got* name))
+
+(define-command (new-file-command name)
+  "A command whose specification is `F': a possibly nonexistent file."
+  (interactive "FFile: ")
+  (*got* name))
+
+(define-command (initial-file-command name)
+  "A command whose specification is `G'."
+  (interactive "GDir: ")
+  (*got* name))
+
+(define-command (directory-command name)
+  "A command whose specification is `D': a directory name."
+  (interactive "DDir: ")
+  (*got* name))
 
 (define-command (dash-marker-command arg)
   "A command whose specification begins with `-', Lucid's no-op."
@@ -394,6 +416,56 @@ read-only check."
                 (begin ((entry number-then-prompt-command) #f) (*got*)))
     (test-equal "so the unit prompt reads Unit 42:" '("Width: " "Unit 42: ")
                 (*prompts*))))
+
+;;--------------------------------------------------------------
+;; The file codes. `files.scm` is *not* in this suite's import graph, so
+;; both seams are stubs - and the stub records the whole call, which is
+;; what pins the constants the C passes:
+;;
+;;   f -> read_file_name (prompt, Qnil, Qnil,       Qlambda, Qnil, Qnil)
+;;   F -> read_file_name (prompt, Qnil, Qnil,       Qnil,    Qnil, Qnil)
+;;   G -> read_file_name (prompt, Qnil, Qnil,       Qnil,    "",   Qnil)
+;;   D -> read_file_name (prompt, Qnil, DIRECTORY,  Qlambda, Qnil, Qfile_directory_p)
+;;
+;; MUSTMATCH is the *symbol* `lambda', not t: `completing-read' binds
+;; `minibuffer-completion-confirm' to anything that is not t, so the two
+;; are not interchangeable.
+(define *calls* (make-parameter '()))
+
+(define (stub-file-reader)
+  (lambda args
+    (*calls* (append (*calls*) (list args)))
+    "ANSWER"))
+
+(define-syntax with-file-readers
+  (syntax-rules ()
+    ((_ body ...)
+     (parameterize ((*interactive-read-file-name-function* (stub-file-reader))
+                    (*interactive-read-directory-name-function* (stub-file-reader))
+                    (*calls* '()))
+       body ...))))
+
+(with-current-buffer ed
+  (with-file-readers
+    (test-equal "f reads with MUSTMATCH the symbol lambda"
+                (list (list "File: " 'lambda #f))
+                (begin ((entry existing-file-command) #f) (*calls*)))
+    (test-equal "and the command gets what it read" "ANSWER" (*got*)))
+
+  (with-file-readers
+    (test-equal "F reads with MUSTMATCH nil" (list (list "File: " #f #f))
+                (begin ((entry new-file-command) #f) (*calls*))))
+
+  (with-file-readers
+    (test-equal "G reads with INITIAL the empty string"
+                (list (list "Dir: " #f ""))
+                (begin ((entry initial-file-command) #f) (*calls*))))
+
+  (with-file-readers
+    (test-equal "D reads with the prompt alone, the rest being files.scm's"
+                (list (list "Dir: "))
+                (begin ((entry directory-command) #f) (*calls*)))
+    (test-equal "and the command still gets its name" "ANSWER" (*got*))))
 (test-end "read-codes")
 ;;--------------------------------------------------------------
 (test-begin "plain-specs")

@@ -9803,20 +9803,39 @@ Both halves are fixed in `tools/pty-check.py`:
 
 Three runs of `back-door` alone: 3/3.
 
+### The `f` `F` `G` `D` codes, and the naming rule for seams
+
+Four more: `f`, `F`, `G` and `D`. **The naming rule is settled**: a seam
+takes the plain `<function>-function` name *unless Emacs has a variable
+of that name*, in which case it is `interactive-`-prefixed. That is why
+`*read-string-function*` and `*read-number-function*` keep the plain
+spelling and these two are `*interactive-read-file-name-function*` and
+`*interactive-read-directory-name-function*` -
+`read-file-name-function` is Emacs's own defcustom.
+
+Three codes are one seam (`f`, `F`, `G` differ only in the constants
+`Qlambda`, `Qnil`, `""`, written at the call sites in `command.scm`);
+`D` is its own because its DEFAULT and PREDICATE are buffer state and a
+function in `files.scm`. **MUSTMATCH is the symbol `lambda`, not `t`** -
+`completing-read` binds `minibuffer-completion-confirm` to anything that
+is not `t`, so the two are not interchangeable. **`D`'s PREDICATE is not
+carried** (`read-file-name` takes none here), so a `D` prompt completes
+files as well as directories: a named departure.
+
+`command-tests.scm` 45 -> 51 (stubs record the *whole call*, which is
+what pins the constants); `tty-editor-tests` asserts the real two.
+
 ### What is left of `callint.c`: 13 codes
+
+(`callint.c` has 30 letters plus `+`; 17 are carried - `p` `P` `i` `d`
+`m` `e` `r` `R` `s` `M` `S` `n` `N` `f` `F` `G` `D` - so 13 are left.)
 
 | codes | reader | lives in | blocker |
 |---|---|---|---|
-| `b` `B` | `read-buffer` | `minibuffer.scm` | **the name**: `*read-buffer-function*` is Emacs's own variable and is already here |
-| `f` `F` `G` `D` | `read-file-name` | `files.scm` | **the name**: `read-file-name-function` is Emacs's own variable |
+| `b` `B` | `read-buffer` | `minibuffer.scm` | the name (`interactive-`), and `b`'s default is buffer state |
 | `a` `C` | `completing-read` over the obarray | `minibuffer.scm` | needs a predicate over `fboundp`/`commandp` |
 | `c` | `read-char` | `keyboard.scm` | |
 | `k` `K` (`U` after them) | `read-key-sequence` | `keyboard.scm` | |
 | `x` `X` | `read-minibuffer`, `eval-minibuffer` | `minibuffer.scm` | `x` must read *without* evaluating |
 | `z` `Z` | `read-coding-system` | `coding.scm` | |
 | `v` | `read-variable` | `custom.scm` | |
-
-**The naming decision has to be made before `b`/`B`**: a seam spelled
-`*read-buffer-function*` would collide with Emacs's variable of that
-name, which `minibuf.scm` already holds. The `%` prefix that
-`%kill-buffer` took is the precedent.

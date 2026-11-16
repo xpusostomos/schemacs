@@ -4598,3 +4598,70 @@ this tree has (`find-file`, `switch-to-buffer`, `kill-buffer`,
 `query-replace`). They are carried because `callint.c` has them and
 because a spec quoted from Emacs's own source - `(interactive "sSearch:
 ")` - is now readable as written.
+
+## The file codes, and the rule a seam's name follows
+
+`f` (existing file), `F` (possibly nonexistent), `G` (the same, initial
+"") and `D` (a directory) - `callint.c:509`, `:514`, `:518`, `:522`.
+All four are the one C helper:
+
+```c
+static Lisp_Object
+read_file_name (Lisp_Object default_filename, Lisp_Object mustmatch,
+                Lisp_Object initial, Lisp_Object predicate)
+{
+  return calln (Qread_file_name,
+                callint_message, Qnil, default_filename,
+                mustmatch, initial, predicate);
+}
+```
+
+### The naming rule, settled here
+
+A seam takes the plain `<function>-function` name **unless Emacs has a
+*variable* of that name** - then it is `interactive-`-prefixed. So
+`*read-string-function*` and `*read-number-function*` keep the plain
+spelling (nothing in Emacs is called either), while these two are
+`*interactive-read-file-name-function*` and
+`*interactive-read-directory-name-function*`, because
+`read-file-name-function` is a defcustom in `minibuffer.el` and a seam
+that squatted on the name would collide with the day it is ported.
+`*read-buffer-function*` is the other case waiting: `read-buffer-function`
+is `minibuf.c:2544` and is *already* in this tree, in `minibuf.scm`.
+
+### Three codes are one seam, and the fourth is not
+
+`f`, `F` and `G` differ only in the *constants* they pass - `Qlambda`,
+`Qnil` and `""` - so one seam `(prompt must-match initial)` serves all
+three and the C's constants are written at the call sites in
+`command.scm`, where the switch is.
+
+`D` passes `BVAR (current_buffer, directory)` as DEFAULT and
+`Qfile_directory_p` as PREDICATE. Neither is nameable from
+`command.scm` - one is buffer state, the other is a function in
+`files.scm` - so the *whole call* is the seam and it takes the prompt
+alone.
+
+**MUSTMATCH is the symbol `lambda`, not `t`.** The C passes `Qlambda`,
+and the difference is observable: `completing-read` binds
+`minibuffer-completion-confirm` to anything that is not `t`
+(`minibuffer.el:5243`), so `t` means "must match, no question" and
+`lambda` means "must match, and the confirm machinery sees `lambda`".
+The seam is handed `'lambda` for `f` and `D`, and `#f` for `F` and `G`.
+
+**Departure, and it is a real one: `D`'s PREDICATE is not carried.**
+`read-file-name` here takes no predicate - its own docstring says so, and
+names the reason (the completion table has the one predicate,
+`file-name-completion-table`). So a `D` prompt completes *files* as well
+as directories and RET on a file name is accepted, where Emacs's `f`
+prompt offers only the directories and refuses anything else. Nothing in
+the tree uses `D` yet; closing it means giving `read-file-name` a
+PREDICATE argument, which is the `read-file-name` work, not this.
+
+Both seams are installed by `files.scm` as it loads, beside
+`read-file-name` itself.
+
+`command-tests.scm` 45 -> 51, with `files.scm` **not** in that suite's
+graph: the stubs record the whole call, which is what pins the six
+constants per code. `tty-editor-tests.scm` asserts that a real editor
+has the real two.
