@@ -49,7 +49,7 @@
     ;; written into.
     (only (schemacs editor keymap)
           make-sparse-keymap define-key keymap-lookup *default-keymap*
-          keymap-bindings %set!keymap-order! keymap-type?)
+          keymap-bindings %set!keymap-order! keymap-type? map-keymap)
     ;; `substitute-key-definition` builds `tty-menu-navigation-map`, and
     ;; `event-end` is `popup-menu-normalize-position`'s.
     (only (schemacs editor subr)
@@ -64,14 +64,16 @@
     ;; The Buffers menu rebuilds its keymap in place, so the clearing is
     ;; here: `hash-clear!` is Guile's, and the order list is the keymap's
     ;; own export.
-    (only (guile) format filter hash-clear!)
+    (only (guile) format filter hash-clear! sort)
     ;; the debug guard's report, and `display` (not `(scheme base)`'s)
     (only (scheme write) display)
     (only (schemacs editor character) kbd)
     ;; `menu-bar-final-items` is `keyboard.c`'s variable, which
     ;; `menu-bar.el` sets (`:46`).
     (only (schemacs editor keyboard)
-          *menu-bar-final-items* abort-recursive-edit key-binding)
+          *menu-bar-final-items* abort-recursive-edit key-binding
+          lookup-keymaps)
+    (only (schemacs editor seq) seq-position)
     ;; `last-command-event` is `keyboard.c`'s variable by the C's file
     ;; list, and `command.scm`'s by this tree's import graph (the command
     ;; loop sets it, and the loop's library is above both).
@@ -161,6 +163,7 @@
    *tty-menu-open-use-tmm* *tty-menu--initial-menu-x*
    tty-menu-navigation-map *tty-menu-navigation-map*
    menu-bar-menu-at-x-y popup-menu popup-menu-normalize-position
+   menu-bar-keymap
    menu-bar-open menu-bar-define-mouse-key)
 
   (begin
@@ -997,6 +1000,48 @@ created in the future."
                                                 (menu-item-width name))))
                                   (vector-ref items i)
                                   (loop (+ i 4))))))))))))
+
+    (define (menu-bar-keymap . args)
+      ;; GNU Emacs's `menu-bar-keymap` (`menu-bar.el:2899`): "Return the
+      ;; current menu-bar keymap. The ordering of the return value
+      ;; respects `menu-bar-final-items'."
+      ;;
+      ;; The C's `(lookup-key (menu-bar-current-active-maps) [menu-bar])`
+      ;; is the first active map whose `[menu-bar]' is a keymap - Emacs's
+      ;; `lookup-key` over a list of maps - and `lookup-keymaps` is this
+      ;; tree's `menu-bar-current-active-maps`.
+      ;;
+      ;; **The map is built with `define-key` rather than written as a
+      ;; `(keymap ...)` list**, because a keymap here is a record.
+      ;; `define-key` prepends, so the items are defined back to front:
+      ;; the final items first, in their reverse order, then the rest
+      ;; reversed - which puts the list Emacs builds in the same order.
+      ;;--------------------------------------------------------------
+      (let ((menu-bar '())
+            (menu-end '())
+            (source (and (pair? args) (car args))))
+        (let loop ((maps (if source (list source) (lookup-keymaps))))
+          (unless (null? maps)
+            (let ((def (keymap-lookup (car maps) 'menu-bar)))
+              (cond ((keymap-type? def)
+                     (map-keymap
+                      (lambda (key binding)
+                        (let ((pos (seq-position *menu-bar-final-items* key)))
+                          (if pos
+                              (set! menu-end (cons (cons pos (cons key binding))
+                                                   menu-end))
+                              (set! menu-bar (cons (cons key binding)
+                                                   menu-bar)))))
+                      def))
+                    (else (loop (cdr maps)))))))
+        (let ((map (make-sparse-keymap)))
+          (for-each (lambda (entry)
+                      (define-key map (vector (cdr entry)) (cddr entry)))
+                    (sort menu-end (lambda (a b) (> (car a) (car b)))))
+          (for-each (lambda (entry)
+                      (define-key map (vector (car entry)) (cdr entry)))
+                    menu-bar)
+          map)))
 
     (define (popup-menu-normalize-position position)
       ;; GNU Emacs's `popup-menu-normalize-position` (`menu-bar.el:2788`).

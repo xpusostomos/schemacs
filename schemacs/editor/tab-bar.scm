@@ -95,6 +95,7 @@
     (only (schemacs editor easy-mmode) define-minor-mode)
     (only (schemacs editor keymap) define-key make-sparse-keymap
           *default-keymap* keymap-type? keymap-lookup map-keymap)
+    (only (schemacs editor subr) define-key-after)
     (only (schemacs editor frame)
           *current-frame* *frame-list* *default-frame-alist* delete-frame
           frame-parameter set-frame-parameter frame-list selected-frame
@@ -117,7 +118,7 @@
           set-buffer-modified-p set-buffer with-current-buffer
           default-directory get-buffer-create)
     (only (schemacs editor subr) run-hook-with-args
-          run-hook-with-args-until-success add-hook remove-hook
+          run-hook-with-args-until-success run-hooks add-hook remove-hook
           assq-delete-all delq posn-string posn-x-y event-start event-end
           posn-window posn-point)
     (only (schemacs editor editfns) goto-char point point-marker propertize
@@ -138,9 +139,10 @@
     (only (schemacs editor seq) seq-position seq-filter seq-remove seq-sort-by
           seq-take)
     (only (schemacs editor xdisp) force-mode-line-update format-mode-line
-          *tab-bar-keymap-function* *global-mode-string*)
+          *tab-bar-keymap-function* *global-mode-string*
+          *activate-menubar-hook* *menu-bar-update-hook*)
     (only (schemacs editor faces) *window-system*)
-    (only (schemacs editor menu-bar) popup-menu)
+    (only (schemacs editor menu-bar) popup-menu menu-bar-keymap)
     (only (schemacs editor minibuffer) read-from-minibuffer format-prompt
           minibufferp)
     (only (schemacs editor simple) *last-command* *this-command*)
@@ -174,6 +176,7 @@
    tab-bar-format-list tab-bar-make-keymap tab-bar-make-keymap-1
    tab-bar-format-tabs tab-bar-format-tabs-groups tab-bar-format-add-tab
    tab-bar-format-history tab-bar-format-align-right tab-bar-format-global
+   tab-bar-format-menu-bar tab-bar-menu-bar-button tab-bar-menu-bar
    ;; tab groups - `tab-bar.el:1084`
    tab-bar-change-tab-group tab-bar-close-group-tabs
    tab-bar-duplicate-tab tab-bar-move-tab-backward tab-bar-switch-to-tab
@@ -964,6 +967,18 @@ Function gets two arguments, the tab and its number."
                       ':help "Click to go forward in tab history"))
           '()))
 
+    (define tab-bar-menu-bar-button
+      ;; "Button for the menu bar."
+      (propertize "Menu" 'face 'tab-bar-tab-inactive))
+
+    (define (tab-bar-format-menu-bar)
+      ;; "Produce the Menu button for the tab bar that shows the menu
+      ;; bar."
+      ;;--------------------------------------------------------------
+      (list (list 'menu-bar 'menu-item tab-bar-menu-bar-button
+                  tab-bar-menu-bar
+                  ':help "Menu bar")))
+
     (define (tab-bar-format-add-tab)
       ;; "Button to add a new tab."
       ;;--------------------------------------------------------------
@@ -1587,6 +1602,19 @@ Negative TO-NUMBER counts tabs from the end of the tab bar."
           ((list-ref-or-false item 1)))
          ((and item (list-ref-or-false item 2) (not (eq? tab-number #t)))
           (tab-bar-close-tab tab-number #f)))))
+
+    (define-command (tab-bar-menu-bar event)
+      "Pop up the same menu as displayed by the menu bar.
+Used by `tab-bar-format-menu-bar'."
+      (interactive "e")
+      (let ((menu (make-sparse-keymap)))
+        (run-hooks (*activate-menubar-hook*))
+        (run-hooks (*menu-bar-update-hook*))
+        (map-keymap (lambda (key binding)
+                      (when (pair? binding)
+                        (define-key-after menu (vector key) binding)))
+                    (menu-bar-keymap))
+        (popup-menu menu event #f #f)))
 
     (define-command (tab-bar-mouse-close-tab event)
       "Close the tab you click on."

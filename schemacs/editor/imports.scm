@@ -1819,6 +1819,7 @@
     looking-back
     lookup-char-property
     lookup-face
+    lookup-keymaps
     ls-lisp--insert-directory
     ls-lisp--sanitize-switches
     ls-lisp-classify
@@ -1903,6 +1904,7 @@
     menu-bar-file-menu
     menu-bar-i-search-menu
     menu-bar-items
+    menu-bar-keymap
     menu-bar-menu-at-x-y
     menu-bar-mode
     menu-bar-open
@@ -2645,6 +2647,7 @@
     tab-bar-format-global
     tab-bar-format-history
     tab-bar-format-list
+    tab-bar-format-menu-bar
     tab-bar-format-tabs
     tab-bar-format-tabs-groups
     tab-bar-forward-button
@@ -2657,6 +2660,8 @@
     tab-bar-make-keymap
     tab-bar-make-keymap-1
     tab-bar-map
+    tab-bar-menu-bar
+    tab-bar-menu-bar-button
     tab-bar-mode
     tab-bar-mode-map
     tab-bar-mode-variable

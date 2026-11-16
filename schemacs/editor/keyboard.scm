@@ -218,7 +218,7 @@
    ;; exported with them.
    *menu-bar-final-items* *overriding-local-map-menu-flag*
    menu-bar-items parse-menu-item menu-separator-name?
-   tab-bar-items
+   tab-bar-items lookup-keymaps
    ;; `keymap.c`'s, in this library for the reason its header gives:
    ;; its default argument is `current-active-maps`, which is this
    ;; file's `lookup-keymaps`.

@@ -9253,3 +9253,25 @@ selecting from it); `tools/pty-check.py`'s `tab-bar` config now sets a
 fixed clock through `*global-mode-string*` and asserts it sits at the
 right edge of the bar's row. Verified live on Gtk under broadway:
 `12:34` flush with the right edge of the drawing area.
+
+### The Menu button (2026-11-16, sixth pass)
+
+`tab-bar-format-menu-bar` and its `tab-bar-menu-bar` command, with
+`menu-bar-keymap` underneath in `menu-bar.scm` - `menu-bar.el:2899`, the
+bar's own items as a keymap with `menu-bar-final-items` sorted last.
+That one had to be written for a *record*-based keymap: Emacs builds
+`(keymap ITEM...)` as a list, and here the map is a record filled with
+`define-key`, which prepends - so the items go in back to front (final
+items first in reverse order, then the rest reversed) to come out in the
+C's order. Its `(lookup-key (menu-bar-current-active-maps) [menu-bar])`
+is this tree's `lookup-keymaps` walked for the first map whose
+`[menu-bar]` is a keymap, which is now exported from `keyboard.scm`.
+
+Also a variable-read trap: `*menu-bar-final-items*` is a **plain
+variable** in this tree (it carries the `(set! *x* *x*)` self-assignment
+against the compiler's constant folding), so `(*menu-bar-final-items*)`
+applied the list - "Wrong type to apply: (help-menu)".
+
+The button pops the bar through `popup-menu`, which the menu-bar work
+already exercises; the *popup itself* is not driven by any test, and the
+terminal's is only reachable through a real click on the bar's Menu item.

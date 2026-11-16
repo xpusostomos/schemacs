@@ -25,12 +25,15 @@
        tab-bar-duplicate-tab tab-bar-switch-to-tab tab-bar-close-tab-by-name
        tab-bar-rename-tab-by-name tab-bar-format-align-right tab-bar-format-global
        tab-bar-format-list tab-bar-format-tabs *tab-bar-format*
+       tab-bar-format-menu-bar tab-bar-menu-bar-button
        tab-switcher tab-switcher-noselect tab-switcher-select tab-switcher-mode
        tab-bar-tab-group-default *tab-bar-show-inactive-group-tabs*)
  (only (schemacs editor buffer)
        get-buffer-create buffer-name current-buffer with-current-buffer
        buffer-read-only?)
  (only (schemacs editor keyboard) tab-bar-items *last-read-event*)
+ (only (schemacs editor menu-bar) menu-bar-keymap)
+ (only (schemacs editor keymap) keymap-type? keymap-lookup)
  (only (schemacs editor xdisp) render! posn-at-x-y)
  (only (schemacs editor editfns) point buffer-string)
  (only (schemacs editor textprop) get-text-property)
@@ -383,5 +386,23 @@
       (tab-switcher)
       (tab-switcher-select)
       (list (buffer-name (current-buffer)) (length (tab-bar-tabs))))))
+
+;; **The Menu button** - `tab-bar-format-menu-bar` - and the keymap it
+;; pops: `menu-bar-keymap` is the bar's own items, with the final items
+;; last.
+(test-equal '(menu-bar "Menu" #t)
+  (let ((frame (fresh-frame)))
+    (parameterize ((*current-frame* frame) (*current-buffer* #f))
+      (let ((item (car (tab-bar-format-menu-bar))))
+        (list (car item) (list-ref item 2)
+              (procedure? (list-ref item 3)))))))
+
+(test-equal '(#t #t #t)
+  (let ((frame (fresh-frame)))
+    (parameterize ((*current-frame* frame) (*current-buffer* #f))
+      (let ((map (menu-bar-keymap)))
+        (list (keymap-type? map)
+              (keymap-type? (keymap-lookup map 'file))
+              (keymap-type? (keymap-lookup map 'edit)))))))
 
 (test-end "schemacs_editor_tab_bar")
