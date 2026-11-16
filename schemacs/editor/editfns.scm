@@ -100,7 +100,7 @@
     (only (schemacs editor command)
           *mark-even-if-inactive*
           *point-marker-function* *mark-marker-function*
-          *format-message-function*)
+          *format-message-function* *message-clear-function*)
     ;; **This library no longer imports `frame.scm'.**
     ;;
     ;; `message' puts its text in the echo area, which is the frame's -
@@ -1544,6 +1544,10 @@ moved."
     ;; seams - the way `*barf-if-buffer-read-only-function*` arrives from
     ;; `keyboard.scm`. Both functions are the C's own, defined above.
     (*format-message-function* format-message)
+    (*message-clear-function* message-clear)
+    ;; ^ `callint.c:492`'s `message1_nolog (0)`, the echo clear the `c'
+    ;; code does straight after reading its character. `message-clear` is
+    ;; this file's; it does not log, as `message1_nolog` does not.
     ;; ^ `callint.c:448`'s `Fformat_message`, which turns a
     ;; specification's prompt into the string a code reads with - "the
     ;; arguments read so far" substituted into it.

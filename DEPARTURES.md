@@ -4848,3 +4848,58 @@ is read.
 
 `command-tests.scm` 60 -> 66 and `tty-editor-tests.scm`'s installation
 group covers all four.
+
+## The `c` code, and a name Guile already had
+
+`c` ("Character", `callint.c:482`) needed `read-char` (`keyboard.c:11240`),
+which did not exist.
+
+The C is
+
+```c
+args[i] = Fread_char (callint_message, Qnil, Qnil);
+message1_nolog (0);
+if (! CHARACTERP (args[i]))
+    error ("Non-character input-event");
+visargs[i] = Fchar_to_string (args[i]);
+```
+
+and `Fread_char` is `read_filtered_event (1, 1, 1, INHERIT, SECONDS)`
+then `!FIXNUMP (val) ? Qnil : char_resolve_modifier_mask (XFIXNUM (val))`.
+
+**`read-char` is named `read-char-event` here, and the compiler is why:**
+
+```
+warning: non-idempotent binding for `read-char`.  When first loaded,
+value for `read-char` comes from imported binding, but later module-local
+definition overrides it; any module reload would capture module-local
+binding rather than import.
+```
+
+`read-char` is **Guile's**: it reads a character from a *port*, and
+`coding.scm`, `theme.scm` and two test files all use it that way.
+Defining Emacs's would shadow that inside `keyboard.scm` and, exporting
+it, over the core binding for every importer. This is the same collision
+that took `insert-newline`'s name from Emacs's `newline`. The seam is
+`*read-char-event-function*` to match.
+
+**`char_resolve_modifier_mask` is not carried, because this tree's events
+never hold a modifier mask.** `read-key-event` folds them - its own
+docstring says so, and calls it the one thing a reader must do so nothing
+above it asks where a key came from - so `C-s` arrives as 19, not as `s`
+with a control bit. What is left of `read_filtered_event`'s three flags
+is the type test: there are no switch-frame events to defer, and
+`ascii_required`/`error_nonascii` are about the same folding.
+
+**`message1_nolog (0)`** is the echo-area clear straight after the read,
+which the C does so that the prompt does not stay up while the command
+runs. It is `*message-clear-function*`, installed by `editfns.scm` beside
+`message-clear` - which does not log, as `message1_nolog` does not.
+
+**"Non-character input-event"** is `callint.c`'s own error and is raised
+in `command.scm`, not in the reader: the C's `Fread_char` answers nil for
+a function key and the *caller* complains. The reader here answers `#f`
+for the same reason.
+
+`command-tests.scm` 66 -> 69: `c` reads a character code with its prompt,
+and a reader that answers no character is the C's error.

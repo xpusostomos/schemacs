@@ -441,6 +441,7 @@
     *menu-bar-open-function*
     *menu-bar-update-hook*
     *menu-state*
+    *message-clear-function*
     *message-function*
     *message-log-function*
     *message-log-max*
@@ -504,6 +505,7 @@
     *read-buffer-completion-ignore-case*
     *read-buffer-function*
     *read-buffer-to-switch*
+    *read-char-event-function*
     *read-coding-system-function*
     *read-command-function*
     *read-minibuffer-function*
@@ -2191,6 +2193,7 @@
     read-buffer
     read-buffer-file-coding-system
     read-buffer-to-switch
+    read-char-event
     read-char-from-minibuffer
     read-coding-system
     read-command

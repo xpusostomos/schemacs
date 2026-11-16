@@ -9876,20 +9876,43 @@ so a later prompt's `%s` after an `x` shows nil. Recorded.
 
 `command-tests.scm` 60 -> 66; the installation group covers all four.
 
-### What is left of `callint.c`: 5 codes, and all five are blocked
+### The `c` code, and `read-char` vs Guile's `read-char` (2026-11-16)
 
-`callint.c` has 30 letters plus `+`; **25 are carried**. The five left are
+`c` needed `read-char` (`keyboard.c:11240`), ported into `keyboard.scm` as
+**`read-char-event`** - not `read-char`, which is Guile's (a character
+from a *port*, used by `coding.scm`, `theme.scm` and the tests). The
+compiler's "non-idempotent binding for `read-char`" is what said so, and
+it is the `insert-newline` collision again.
+
+**A seam whose installer names a function *in the same library* must be
+installed after that definition.** The first version of this install sat
+beside `*barf-if-buffer-read-only-function*` at the top of
+`keyboard.scm`, where `read-char-event` does not exist yet - thirty suites
+died at load with "Unbound variable: read-char-event", and the suite
+runner named them (`DID NOT RUN` plus the backtrace). It is the same rule
+`define-key` follows: a binding resolves when the *form* runs, not when
+the file is read. Installs of a library's own functions go at the end.
+
+`char_resolve_modifier_mask` is **not carried**: `read-key-event` has
+already folded the modifiers, so there is no mask to resolve. What is
+left of `read_filtered_event`'s flags is the type test. The echo clear
+(`message1_nolog (0)`) is `*message-clear-function*` from `editfns.scm`,
+and "Non-character input-event" is raised in `command.scm`, as the C's
+caller does.
+
+### What is left of `callint.c`: 4 codes, and all four are blocked
+
+`callint.c` has 30 letters plus `+`; **26 are carried**. The four left are
 not seams onto existing readers:
 
 | codes | blocked on |
 |---|---|
-| `c` | `read-char` (`keyboard.c:11240`) over `read_filtered_event`: modifiers resolved into a character code, non-character events an error, switch-frame events deferred. **242 uses in Emacs's `lisp/`** - the most valuable of the five |
 | `k` `K` `U` | `read-key-sequence` and its vector form - `read_key_sequence` proper: prefix keymaps, echoes, the up-event discard |
 | `a` | an **obarray of functions**. `C` got by on the command table; `a` completes over *every* `fboundp` symbol, and Guile has neither an obarray nor a function table to enumerate |
 
-Porting those means doing `read_char`'s filtered-event path and an obarray
-first - `keyboard.c` machinery, not seams. That is the honest remaining
-edge of `callint.c` in this tree.
+`read-char` is done, which was the gateway the other three key codes
+stood behind - `read_key_sequence` is the larger machine on top of it.
+That is the honest remaining edge of `callint.c` in this tree.
 
 | codes | reader | lives in | blocker |
 |---|---|---|---|

@@ -16,7 +16,8 @@
        *interactive-read-buffer-function*
        *read-coding-system-function* *read-non-nil-coding-system-function*
        *read-command-function* *read-minibuffer-function*
-       *eval-minibuffer-function* *read-variable-function*)
+       *eval-minibuffer-function* *read-variable-function*
+       *read-char-event-function* *message-clear-function*)
  (only (schemacs editor buffer)
        allocate-buffer with-current-buffer current-buffer
        set!buffer-read-only)
@@ -190,6 +191,11 @@ read-only check."
   "A command whose specification is `v': a custom variable's name."
   (interactive "vVariable: ")
   (*got* var))
+
+(define-command (char-command ch)
+  "A command whose specification is `c': one character."
+  (interactive "cChar: ")
+  (*got* ch))
 
 (define-command (dash-marker-command arg)
   "A command whose specification begins with `-', Lucid's no-op."
@@ -573,7 +579,27 @@ read-only check."
     (*calls* '())
     (test-equal "v reads a custom variable's name" 'utf-8
                 (begin ((entry variable-command) #f) (*got*)))
-    (test-equal "from its prompt" (list (list "Variable: ")) (*calls*))))
+    (test-equal "from its prompt" (list (list "Variable: ")) (*calls*)))
+
+  ;; `c'. The reader answers a *character code* (the C's
+  ;; `char_resolve_modifier_mask` result), the echo area is cleared
+  ;; after it, and anything that is not a character is the C's
+  ;; "Non-character input-event".
+  (parameterize ((*read-char-event-function* (lambda (prompt)
+                                               (*calls* (append (*calls*)
+                                                                (list (list prompt))))
+                                               113))
+                 (*message-clear-function* (lambda ()
+                                             (*got* 'cleared)))
+                 (*calls* '())
+                 (*got* 'none))
+    (test-equal "c reads a character" 113
+                (begin ((entry char-command) #f) (*got*)))
+    (test-equal "from its prompt" (list (list "Char: ")) (*calls*))
+    (parameterize ((*read-char-event-function* (lambda (prompt) #f)))
+      (test-equal "a reader that answers no character is an error"
+                  "Non-character input-event"
+                  (message-of (lambda () ((entry char-command) #f)))))))
 (test-end "read-codes")
 ;;--------------------------------------------------------------
 (test-begin "plain-specs")

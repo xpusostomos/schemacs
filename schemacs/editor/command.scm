@@ -29,6 +29,7 @@
    *use-region-p-function*
    *point-marker-function* *mark-marker-function*
    *format-message-function* *read-string-function* *read-number-function*
+   *read-char-event-function* *message-clear-function*
    *read-command-function* *read-variable-function*
    *read-minibuffer-function* *eval-minibuffer-function*
    *read-coding-system-function* *read-non-nil-coding-system-function*
@@ -451,6 +452,13 @@
 
     (define *interactive-read-file-name-function* (make-parameter #f))
     (define *interactive-read-directory-name-function* (make-parameter #f))
+    (define *read-char-event-function* (make-parameter #f))
+    (define *message-clear-function* (make-parameter #f))
+    ;; ^ The `c' code's reader (`keyboard.c:11240`, spelled
+    ;; `read-char-event` here because Guile's `read-char` reads a port)
+    ;; and the echo-area
+    ;; clear the C does straight after it (`message1_nolog (0)',
+    ;; `callint.c:492'). Both names are free as Emacs variables.
     (define *read-command-function* (make-parameter #f))
     (define *read-variable-function* (make-parameter #f))
     (define *read-minibuffer-function* (make-parameter #f))
@@ -658,6 +666,20 @@
                         (cons (read (%interactive-message prompt (reverse visible)))
                               args)
                         (cons #f visible))))
+               ;; "Character" (`callint.c:482'). The prompt is shown as
+               ;; a message (`message_with_string'), the event is read,
+               ;; the echo area is cleared, and a read that is not a
+               ;; character is an error - all four are the C's.
+               ((char=? code #\c)
+                (let* ((read (%interactive-seam *read-char-event-function*
+                                                'read-char-event))
+                       (answer (read (%interactive-message prompt (reverse visible)))))
+                  (let ((clear (*message-clear-function*)))
+                    (when clear (clear)))
+                  (unless (and answer (integer? answer))
+                    (error "Non-character input-event"))
+                  (loop (cdr rest) (cons answer args)
+                        (cons (string (integer->char answer)) visible))))
                ;; "Command: symbol with interactive function"
                ;; (`callint.c:495'): `Fcompleting_read (prompt, Vobarray,
                ;; Qcommandp, Qt, ...)' and then interned, which is

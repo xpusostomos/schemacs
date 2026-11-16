@@ -128,7 +128,7 @@
     ;; commands' interactive specs come from.
     (only (schemacs editor command) uarg->integer current-prefix-arg
           *pending-coding-system* command-record-named command-value-of
-          *barf-if-buffer-read-only-function*)
+          *barf-if-buffer-read-only-function* *read-char-event-function*)
     ;; The two variables C-x RET c names for the next command. They are
     ;; `coding.c`'s, and they are bound here because the command loop is
     ;; what has the extent Emacs binds them for.
@@ -237,7 +237,7 @@
    modal-lookup-state-keymaps
    internal-pop-keymap
    internal-push-keymap
-   read-key-event
+   read-key-event read-char-event
    read-menu-command
    key-binding
    read-wait-ms
@@ -1273,6 +1273,46 @@
       ;;--------------------------------------------------------------
       (quotient (* 1000 (get-internal-real-time))
                 internal-time-units-per-second))
+
+    (define (read-char-event . args)
+      ;; GNU Emacs's `read-char' (`keyboard.c:11240'): "Read a character
+      ;; event from the command input (keyboard or macro). Return the
+      ;; character as a number. ... If the user generates an event which
+      ;; is not a character ... `read-char' signals an error" - which the
+      ;; *caller* does: the C returns nil and `callint.c:490' raises
+      ;; "Non-character input-event".
+      ;;
+      ;; **Named `read-char-event` and not `read-char`**, which is the
+      ;; Emacs name, because `read-char` is Guile's: it reads a
+      ;; character from a *port*, and `coding.scm`, `theme.scm` and the
+      ;; test files all use it that way. Defining Emacs's here would
+      ;; shadow that binding inside this library and, worse, export it
+      ;; over the core one for anything importing this library - the
+      ;; compiler says so: "non-idempotent binding for `read-char` ...
+      ;; any module reload would capture module-local binding rather
+      ;; than import". The same collision took `insert-newline`'s name
+      ;; from Emacs's `newline`.
+      ;;
+      ;; The C is
+      ;;
+      ;;   read_filtered_event (1, 1, 1, INHERIT_INPUT_METHOD, SECONDS)
+      ;;   ... !FIXNUMP (val) ? Qnil : char_resolve_modifier_mask (...)
+      ;;
+      ;; **`char_resolve_modifier_mask` is not carried, because this
+      ;; tree's events never hold a modifier mask.** `read-key-event`
+      ;; folds them - `C-s` arrives as 19, not as `s` with a control bit
+      ;; - which its own docstring calls the one thing a reader must do
+      ;; so that nothing above it asks where a key came from. So what is
+      ;; left of the C is the type test.
+      ;;
+      ;; INHERIT-INPUT-METHOD and SECONDS are not taken: there is no
+      ;; input method here, and a caller that wants a deadline wants
+      ;; `read-key-event` itself.
+      ;;--------------------------------------------------------------
+      (let ((prompt (if (pair? args) (car args) #f)))
+        (when prompt (message "%s" prompt))
+        (let ((event (read-key-event -1)))
+          (if (integer? event) event #f))))
 
     (define (read-key-event timeout)
       ;; Read one key for the command loop, TIMEOUT milliseconds allowed -
@@ -2936,5 +2976,17 @@ With argument, insert ARG copies of the character."
     ;; *below* here - so the redisplay asks for the items through this.
     (*menu-bar-items-function* menu-bar-items)
     (*tab-bar-items-function* tab-bar-items)
+
+    
+    (*read-char-event-function* read-char-event)
+    ;; ^ The `c' interactive code's reader (`keyboard.c`'s `read-char`,
+    ;; spelled `read-char-event` here). **It is installed at the end of
+    ;; the file, not beside `*barf-if-buffer-read-only-function*` above**,
+    ;; because `read-char-event` is *this library's* and a `define` at
+    ;; the top of the file has not run when a form above it is
+    ;; evaluated - measured, the install raised "Unbound variable:
+    ;; read-char-event" and thirty suites died at load. The same rule as
+    ;; `define-key` after the command it binds: a binding resolves when
+    ;; the form runs.
 
     ))

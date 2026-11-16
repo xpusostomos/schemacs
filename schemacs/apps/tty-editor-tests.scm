@@ -159,7 +159,8 @@
        *interactive-read-existing-buffer-function*
        *interactive-read-buffer-function*
        *read-command-function* *read-variable-function*
-       *read-minibuffer-function* *eval-minibuffer-function*)
+       *read-minibuffer-function* *eval-minibuffer-function*
+       *read-char-event-function* *message-clear-function*)
  (only (schemacs editor editfns)
        buffer-substring-no-properties delete-region goto-char point point-max point-min
        message
@@ -4950,6 +4951,12 @@
 (test-equal "files.scm installs the f/F/G and D readers" '(#t #t)
             (list (procedure? (*interactive-read-file-name-function*))
                   (procedure? (*interactive-read-directory-name-function*))))
+
+;; ...and the `c' code's reader (keyboard) and the echo clear that goes
+;; with it (editfns).
+(test-equal "keyboard and editfns install the c code's two" '(#t #t)
+            (list (procedure? (*read-char-event-function*))
+                  (procedure? (*message-clear-function*))))
 
 ;; ...and `minibuffer.scm` the two the buffer codes read with.
 (test-equal "minibuffer.scm installs the b and B readers" '(#t #t)
