@@ -1039,6 +1039,7 @@
     default-to-grave-quoting-style
     default-value
     defface
+    define-alias
     define-charset
     define-command
     define-custom
@@ -2727,6 +2728,12 @@
     tab-bar-tabs
     tab-bar-tabs-set
     tab-bar-undo-close-tab
+    tab-close
+    tab-close-group
+    tab-close-other
+    tab-duplicate
+    tab-group
+    tab-last
     tab-line--current-tab
     tab-line--define-keys
     tab-line--get-tab-property
@@ -2791,7 +2798,18 @@
     tab-line-tabs-non-excluded
     tab-line-tabs-window-buffers
     tab-line-track-tap
+    tab-list
+    tab-move
+    tab-move-to
+    tab-new
+    tab-new-to
+    tab-next
+    tab-previous
+    tab-recent
+    tab-rename
+    tab-select
     tab-stop-list
+    tab-switch
     tab-switcher
     tab-switcher-backup-unmark
     tab-switcher-column
@@ -2808,6 +2826,7 @@
     tab-switcher-select
     tab-switcher-unmark
     tab-to-tab-stop
+    tab-undo
     tab-window-detach
     tabulated-list-delete-entry
     tabulated-list-entries

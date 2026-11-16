@@ -27,7 +27,8 @@
    called-interactively? funcall-interactively
    uarg->integer
    run-command apply-command show-command
-   define-command *command-table* command? command-record-of command-value-of
+   define-command define-alias *command-table* command? command-record-of
+   command-value-of
    command-record-named
    register-command!
    ;; The quit condition and the flag the SIGINT handler sets. They are
@@ -440,6 +441,26 @@
         (*command-table* (cons (cons name record) (*command-table*)))
         record))
 
+    (define (register-command-alias! name command)
+      ;; File NAME in the obarray against COMMAND's *own* record - the
+      ;; step that makes `M-x NAME` find a command that has a second
+      ;; name. GNU Emacs needs no such function: `defalias` writes the
+      ;; one function object into the second symbol's function cell, and
+      ;; `M-x` looks a symbol up in the obarray like anything else. This
+      ;; tree's obarray is a table of *name to record*, so the second
+      ;; name needs its own entry, and the record is shared - which is
+      ;; what keeps `this-command`, `called-interactively-p` and the
+      ;; docstring the same for both names.
+      ;;
+      ;; A target that is not a command registers nothing and answers
+      ;; #f, as `defalias` of a non-command is not a command either.
+      ;;--------------------------------------------------------------
+      (let ((record (command-record-of command)))
+        (when record
+          (*command-table* (cons (cons (symbol->string name) record)
+                                 (*command-table*))))
+        record))
+
     (define (command-record-of thing)
       ;; The command record whose API is THING, or #f: how a key bound
       ;; to a `define-command' procedure is dispatched like one bound to a
@@ -493,6 +514,31 @@
         (if (and name (equal? (symbol->string name) (command-name record)))
             (command-api record)
             record)))
+
+    (define-syntax define-alias
+      ;; GNU Emacs's `defalias` (`eval.c`): "Set SYMBOL's function
+      ;; definition to DEFINITION" - a second *name* for the same
+      ;; function. `tab-bar.el` uses it to give every tab command a short
+      ;; name for M-x (`(defalias 'tab-new #'tab-bar-new-tab)`,
+      ;; `:3179`), and `lisp/` is full of the same.
+      ;;
+      ;; **A `define` alone would be only half of it here.** The Scheme
+      ;; binding makes the name callable, and a key bound to it works
+      ;; (dispatch finds a command by its *procedure*, not its name) -
+      ;; but `M-x` resolves a name through `*command-table*`, which only
+      ;; `define-command` writes to. So the alias is registered too, and
+      ;; both names complete in `M-x`, as they do in Emacs.
+      ;;
+      ;; Emacs's third argument, the DOCSTRING for the alias, is not
+      ;; carried: nothing here reads a docstring from a name rather than
+      ;; from the procedure (`procedure-documentation` is the one
+      ;; reader), and an alias's documentation is the target's.
+      ;;--------------------------------------------------------------
+      (syntax-rules ()
+        ((define-alias alias target)
+         (begin
+           (define alias target)
+           (register-command-alias! 'alias alias)))))
 
     (define-syntax define-command
       ;; Define a command: a procedure definition, spelled as Scheme

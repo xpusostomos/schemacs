@@ -88,7 +88,7 @@
     (only (guile) sort make-hash-table hashq-set! hashq-ref
            get-internal-real-time internal-time-units-per-second
            exact->inexact 1+ 1-)
-    (only (schemacs editor command) define-command uarg->integer
+    (only (schemacs editor command) define-command define-alias uarg->integer
           current-prefix-arg)
     (only (schemacs editor subr) kbd)
     (only (schemacs editor custom) define-custom custom-initialize-default)
@@ -175,7 +175,11 @@
    tab-bar-switch-to-recent-tab tab-bar-rename-tab
    tab-bar-move-tab tab-bar-move-tab-to
    tab-bar-split-tab tab-bar-merge-tabs tab-bar-move-window-to-tab
-   split-tab merge-tabs tab-window-detach
+   ;; `tab-bar.el:3179`'s aliases, `define-alias`'d so M-x finds them.
+   tab-new tab-new-to tab-duplicate tab-window-detach tab-close
+   tab-close-other tab-close-group tab-undo tab-select tab-switch tab-next
+   tab-previous tab-last tab-recent tab-move tab-move-to tab-rename
+   tab-group tab-list split-tab merge-tabs
    ;; the name and face of one tab
    tab-bar-tab-name-current tab-bar-tab-name-current-with-count
    tab-bar-tab-name-all tab-bar-tab-name-truncated
@@ -2470,7 +2474,7 @@ include TAB's selected window and delete those windows from TAB."
             (tab-bar-new-tab #f #f)
             (window-state-put ws (window-main-window)))))))
 
-    (define split-tab tab-bar-split-tab)
+    (define-alias split-tab tab-bar-split-tab)
 
     (define-command (tab-bar-merge-tabs tab1 tab2 vertical)
       "Merge the main window of TAB2 into TAB1.
@@ -2504,34 +2508,38 @@ completed successfully and return TAB1."
          (split-window (window-main-window) #f (not vertical)))
         tab1))
 
-    (define merge-tabs tab-bar-merge-tabs)
+    (define-alias merge-tabs tab-bar-merge-tabs)
 
     ;; `C-x t` - `tab-prefix-map` in `bindings.el`, which `tab-bar.el`
     ;; fills at its end. Every binding is a whole key sequence here, as
-    ;; the tab line's own keys are. The aliases are the C's `defalias`
-    ;; lines (`:3180`): one command, two names.
-    (define tab-next tab-bar-switch-to-next-tab)
-    (define tab-previous tab-bar-switch-to-prev-tab)
-    (define tab-last tab-bar-switch-to-last-tab)
-    (define tab-recent tab-bar-switch-to-recent-tab)
-    (define tab-close tab-bar-close-tab)
-    (define tab-close-other tab-bar-close-other-tabs)
-    (define tab-undo tab-bar-undo-close-tab)
-    (define tab-select tab-bar-select-tab)
-    (define tab-move tab-bar-move-tab)
-    (define tab-move-to tab-bar-move-tab-to)
-    (define tab-rename tab-bar-rename-tab)
-    (define tab-group tab-bar-change-tab-group)
-    (define tab-close-group tab-bar-close-group-tabs)
-    (define tab-new tab-bar-new-tab)
-    (define tab-new-to tab-bar-new-tab-to)
-    (define tab-duplicate tab-bar-duplicate-tab)
-    (define tab-switch tab-bar-switch-to-tab)
-    (define tab-select-tab-by-name tab-bar-switch-to-tab)
-    (define tab-close-by-name tab-bar-close-tab-by-name)
-    (define tab-rename-by-name tab-bar-rename-tab-by-name)
-    (define tab-move-backward tab-bar-move-tab-backward)
-    (define tab-window-detach tab-bar-move-window-to-tab)
+    ;; the tab line's own keys are.
+    ;;
+    ;; **The aliases are the C's `defalias` lines** (`:3179`), in the C's
+    ;; order and with `define-alias` - so each short name is in the
+    ;; obarray and `M-x tab-new` works, not only
+    ;; `M-x tab-bar-new-tab`. `tab-detach`
+    ;; (`tab-bar-detach-tab`) is not ported - a detached tab needs a
+    ;; frame of its own - and is the one name of the C's list missing
+    ;; here.
+    (define-alias tab-new             tab-bar-new-tab)
+    (define-alias tab-new-to          tab-bar-new-tab-to)
+    (define-alias tab-duplicate       tab-bar-duplicate-tab)
+    (define-alias tab-window-detach   tab-bar-move-window-to-tab)
+    (define-alias tab-close           tab-bar-close-tab)
+    (define-alias tab-close-other     tab-bar-close-other-tabs)
+    (define-alias tab-close-group     tab-bar-close-group-tabs)
+    (define-alias tab-undo            tab-bar-undo-close-tab)
+    (define-alias tab-select          tab-bar-select-tab)
+    (define-alias tab-switch          tab-bar-switch-to-tab)
+    (define-alias tab-next            tab-bar-switch-to-next-tab)
+    (define-alias tab-previous        tab-bar-switch-to-prev-tab)
+    (define-alias tab-last            tab-bar-switch-to-last-tab)
+    (define-alias tab-recent          tab-bar-switch-to-recent-tab)
+    (define-alias tab-move            tab-bar-move-tab)
+    (define-alias tab-move-to         tab-bar-move-tab-to)
+    (define-alias tab-rename          tab-bar-rename-tab)
+    (define-alias tab-group           tab-bar-change-tab-group)
+    (define-alias tab-list            tab-switcher)
 
     (define-key *default-keymap* (kbd "C-x t 2") tab-new)
     (define-key *default-keymap* (kbd "C-x t 0") tab-close)

@@ -9174,9 +9174,16 @@ the mode on; group assignment, clearing, and the grouped format).
 `tab-bar-duplicate-tab`, `tab-bar-move-tab-backward`,
 `tab-bar-switch-to-tab` (`C-x t RET`), `tab-bar-close-tab-by-name`,
 `tab-bar-rename-tab-by-name` and `tab-bar-move-tab-to-group`, with the
-aliases `tab-duplicate`, `tab-switch`, `tab-close-by-name`,
-`tab-rename-by-name` and `tab-move-backward`, and `C-x t n` bound to
+aliases `tab-duplicate` and `tab-switch`, and `C-x t n` bound to
 duplicate.
+
+**Correction (2026-11-16).** This paragraph used to list
+`tab-close-by-name`, `tab-rename-by-name` and `tab-move-backward` among
+the aliases. They are not Emacs's - `tab-bar.el`'s alias list
+(`:3179`) has neither them nor `tab-select-tab-by-name`, and the whole
+`lisp/` tree has no such names - so they were this tree's inventions,
+and they are gone. Emacs's list is now `define-alias`'d in full, and
+`tab-list` (which the list *did* have, aliasing `tab-switcher`) with it.
 
 **`tab-bar-move-tab-to-group` is the default value of
 `tab-bar-tab-post-change-group-functions`**, which the group pass had

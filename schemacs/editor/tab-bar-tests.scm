@@ -12,6 +12,7 @@
        new-frame frame-parameter frame-selected-window window-top
        window-height window-list frame-inner-width %frame-tab-bar-lines)
  (only (schemacs editor window) switch-to-buffer split-window)
+ (only (schemacs editor command) command-record-named)
  (only (schemacs editor tab-bar)
        tab-bar-mode tab-bar-mode-variable tab-bar-tabs tab-bar-new-tab
        tab-bar-select-tab tab-bar-close-tab tab-bar-rename-tab
@@ -29,7 +30,7 @@
        tab-switcher tab-switcher-noselect tab-switcher-select tab-switcher-mode
        tab-bar-tab-group-default *tab-bar-show-inactive-group-tabs*
        *tab-bar-new-tab-choice* tab-bar-split-tab tab-bar-merge-tabs
-       tab-bar-move-window-to-tab)
+       tab-bar-move-window-to-tab split-tab merge-tabs tab-new tab-list)
  (only (schemacs editor buffer)
        get-buffer-create buffer-name current-buffer with-current-buffer
        buffer-read-only?)
@@ -511,5 +512,20 @@
       (let ((new-windows (length (window-list))))
         (tab-bar-select-tab 1)
         (list (length (tab-bar-tabs)) new-windows (length (window-list)))))))
+
+;; **The `defalias` lines are `define-alias` here**, so the short name is
+;; in the obarray `M-x` reads as well as the long one - Emacs gives one
+;; function object two symbols and `M-x` finds either. Both names share
+;; the *same* record, which is what keeps `this-command` and
+;; `called-interactively-p` identical through either.
+(test-equal '(#t #t #t #t #t)
+  (let ((frame (fresh-frame)))
+    (parameterize ((*current-frame* frame) (*current-buffer* #f))
+      (list (eq? (command-record-named "tab-new")
+                 (command-record-named "tab-bar-new-tab"))
+            (if (command-record-named "split-tab") #t #f)
+            (if (command-record-named "merge-tabs") #t #f)
+            (eq? split-tab tab-bar-split-tab)
+            (eq? tab-list tab-switcher)))))
 
 (test-end "schemacs_editor_tab_bar")

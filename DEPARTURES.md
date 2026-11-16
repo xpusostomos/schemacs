@@ -4298,3 +4298,35 @@ one operation, not a close followed by an insert.
 `ignore-window-parameters` around its `delete-window`, which has nothing
 to bind here (no window parameter stops a delete in this tree, there
 being no side windows).
+
+## `defalias` is `define-alias`, and it had to do more than `defalias`
+
+**GNU Emacs's `defalias`** (`eval.c`) writes a function object into a
+second symbol's function cell. One object, two names, and `M-x` finds
+either because `M-x` looks a symbol up in the one obarray.
+
+**A `define` is only half of that here.** `(define tab-new
+tab-bar-new-tab)` makes the name callable and a key bound to it works -
+key dispatch finds a command by its *procedure* (`command-record-of`),
+not its name. But `M-x` resolves a name through `*command-table*`, an
+alist of name string to command record that only `define-command` writes
+to, so `M-x tab-new` answered "No match" while `M-x tab-bar-new-tab`
+worked. `define-alias` (`command.scm`) does both: the `define` and a
+`register-command-alias!` that pushes the alias name on the table
+against the target's **own** record - which is what keeps
+`this-command`, `called-interactively-p` and the docstring identical
+through either name.
+
+**Not carried**: `defalias`'s third argument, a DOCSTRING for the alias
+name. Nothing here reads a docstring off a name -
+`procedure-documentation` is the only reader - and an alias's
+documentation is the target's.
+
+**The alias block had three defects, all fixed 2026-11-16**: it invented
+four names Emacs does not have (`tab-select-tab-by-name`,
+`tab-close-by-name`, `tab-rename-by-name`, `tab-move-backward` - the
+*commands* `tab-bar-close-tab-by-name` and `tab-bar-rename-tab-by-name`
+are Emacs's, their short aliases are not), it was missing `tab-list`
+(`:3197`, aliasing `tab-switcher`), and none of the names were in the
+obarray or exported from the library. The block is now Emacs's list in
+Emacs's order, `define-alias`'d, and exported.
